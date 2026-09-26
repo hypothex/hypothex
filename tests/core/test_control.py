@@ -286,6 +286,24 @@ def test_rerun_after_repo_moved_without_history_uses_repo_root(
 SLEEPER = cmd("import time; print('ready', flush=True); time.sleep(60)")
 
 
+def _launch_running(ctx: Context, toy_repo: Path) -> tuple[str, int]:
+    """Launch SLEEPER in a supervisor; return the run id and the supervisor pid."""
+    rec = launch_run(ctx, RunRequest(repo=toy_repo, command=SLEEPER))
+    running = wait_for_run(ctx, rec.run_id, timeout=30, statuses=frozenset({RunStatus.RUNNING}))
+    info = json.loads((ctx.run_dir(running) / "supervisor.pid").read_text())
+    assert running.executor.pid == info["pid"] and running.executor.child_pid is not None
+    return rec.run_id, info["pid"]
+
+
+def test_sigterm_to_supervisor_ends_run_killed(ctx: Context, toy_repo: Path) -> None:
+    run_id, supervisor = _launch_running(ctx, toy_repo)
+    child = ctx.find_record(run_id).executor.child_pid
+    os.kill(supervisor, signal.SIGTERM)
+    done = wait_for_run(ctx, run_id, timeout=20)
+    assert done.status == RunStatus.KILLED
+    assert not process_alive(child, None)
+
+
 def test_sigterm_before_child_starts_is_forwarded(
     ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -310,3 +328,33 @@ def test_sigterm_before_child_starts_is_forwarded(
     assert done.status == RunStatus.KILLED
     assert time.monotonic() - start < 15
     assert not process_alive(done.executor.child_pid, None)
+
+
+def test_sigkill_of_supervisor_then_repair_marks_lost_and_kills_orphan(
+    ctx: Context, toy_repo: Path
+) -> None:
+    run_id, supervisor = _launch_running(ctx, toy_repo)
+    child = ctx.find_record(run_id).executor.child_pid
+    os.kill(supervisor, signal.SIGKILL)
+    deadline = time.monotonic() + 10
+    while process_alive(supervisor, None) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert process_alive(child, None)  # the orphan keeps running until repaired
+    assert [r.run_id for r in repair_runs(ctx)] == [run_id]
+    lost = ctx.find_record(run_id)
+    assert lost.status == RunStatus.LOST
+    assert not process_alive(child, None)
+    reasons = [e.payload.get("reason", "") for e in ctx.events.since(0) if e.type == "run.lost"]
+    assert reasons and "orphaned process terminated" in reasons[-1]
+
+
+def test_stop_marker_before_start_ends_killed_without_starting(
+    ctx: Context, toy_repo: Path
+) -> None:
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=SLEEPER))
+    (ctx.run_dir(rec) / STOP_MARKER).write_text("now")
+    done = execute_run(ctx, rec.run_id)
+    assert done.status == RunStatus.KILLED
+    assert done.started_at is None and done.executor.child_pid is None
+    killed = [e for e in ctx.events.since(0) if e.type == "run.killed"]
+    assert killed[-1].payload.get("reason") == "stopped before start"

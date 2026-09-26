@@ -9,6 +9,9 @@ disposable, rebuildable cache. Each run lives at
 ``<store>/<project>/runs/<run_id>/`` and holds ``run.yaml`` (all facts about the
 run), ``config.yaml``, append-only ``metrics.jsonl`` and ``scores.jsonl``,
 ``predictions/``, ``logs/``, a captured ``env/``, ``git.diff``, and ``notes.md``.
+``git.diff`` holds the raw bytes of ``git diff HEAD --binary``, so files in any
+encoding reproduce exactly. The recorded ``origin`` URL has any user name,
+password, or token removed.
 Every ``run.yaml`` write is atomic (write to a temp file, then ``os.replace``) and
 happens under a per-run lock. Old scores are never overwritten or deleted;
 re-evaluation only appends.

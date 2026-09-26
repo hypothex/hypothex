@@ -11,8 +11,9 @@ from typing import Any
 
 import yaml
 
+from hypothex.core.context import Context
 from hypothex.core.ids import utcnow
-from hypothex.core.records import RunRecord, RunStatus
+from hypothex.core.records import GitInfo, RunRecord, RunStatus
 
 
 def make_record(run_id: str = "r1", project: str = "toy", **overrides: Any) -> RunRecord:
@@ -130,3 +131,34 @@ def write_toy_project(repo: Path, *, accuracy_version: str = "v1", use_git: bool
     if use_git and not (repo / ".git").exists():
         init_git_repo(repo)
     return repo
+
+
+def seed_finished_run(
+    ctx: Context,
+    repo: Path,
+    run_id: str,
+    *,
+    task: str = "toy-acc",
+    predictions: list[dict] | None = None,
+    config_hash: str = "sha256:aaaa",
+    commit: str | None = "c1",
+    seed: int | None = None,
+) -> RunRecord:
+    """Register the project and create a finished run, optionally with predictions."""
+    entry = ctx.register_project(repo)
+    record = make_record(
+        run_id,
+        project=entry.project,
+        task=task,
+        status=RunStatus.FINISHED,
+        config_hash=config_hash,
+        git=GitInfo(commit=commit),
+        seed=seed,
+        cwd=str(repo),
+        environment_id=ctx.descriptor.environment_id,
+    )
+    ctx.create_run(record)
+    if predictions is not None:
+        path = ctx.run_dir(record) / "predictions" / "predictions.jsonl"
+        path.write_text("".join(json.dumps(p) + "\n" for p in predictions))
+    return record

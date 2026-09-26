@@ -37,6 +37,7 @@ from hypothex.core.records import (
 
 QUEUED_GRACE_SECONDS = 60.0
 SUPERVISOR_PID_FILE = "supervisor.pid"
+WAIT_REPAIR_SECONDS = 5.0
 
 
 def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
@@ -101,7 +102,9 @@ def wait_for_run(
     Returns
     -------
     RunRecord
-        The run's record once it reached one of ``statuses``.
+        The run's record once it reached one of ``statuses``, or once it was
+        marked ``lost`` because its supervisor died (checked every
+        ``WAIT_REPAIR_SECONDS``).
 
     Raises
     ------
@@ -109,23 +112,31 @@ def wait_for_run(
         On timeout.
     """
     deadline = time.monotonic() + timeout
+    next_repair = time.monotonic() + WAIT_REPAIR_SECONDS
     while True:
         record = ctx.find_record(run_id)
         if record.status in statuses or record.status in TERMINAL_STATUSES:
             return record
+        if time.monotonic() >= next_repair:
+            next_repair = time.monotonic() + WAIT_REPAIR_SECONDS
+            lost = _repair_one(ctx, record)
+            if lost is not None:
+                return lost
         if time.monotonic() > deadline:
             raise RunError(f"run {run_id} still {record.status.value} after {timeout}s")
         time.sleep(0.1)
 
 
 def _supervisor_alive(run_dir: Path, record: RunRecord) -> bool:
-    if process_alive(record.executor.pid, record.executor.pid_create_time):
-        return True
+    # A queued run's executor.pid is the launching process (API/MCP server,
+    # ``hx launch --wait``), which outlives a crashed supervisor. When a
+    # detached supervisor was started, only its pid file tells the truth.
+    # Without a pid file (foreground ``hx run``) the launcher is the executor.
     pid_file = run_dir / SUPERVISOR_PID_FILE
     if record.status == RunStatus.QUEUED and pid_file.is_file():
         info = json.loads(pid_file.read_text(encoding="utf-8"))
         return process_alive(info["pid"], info.get("create_time"))
-    return False
+    return process_alive(record.executor.pid, record.executor.pid_create_time)
 
 
 def _mark(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
@@ -364,17 +375,24 @@ def repair_runs(ctx: Context) -> list[RunRecord]:
         if current.status not in ACTIVE_STATUSES:
             ctx.index.upsert_run(current)
             continue
-        if _supervisor_alive(ctx.run_dir(current), current):
-            continue
-        age = (utcnow() - current.created_at).total_seconds()
-        if current.status == RunStatus.QUEUED and age < QUEUED_GRACE_SECONDS:
-            continue
-        reason = "supervisor exited without recording a result"
-        child = current.executor.child_pid
-        if child is not None and process_alive(child, None):
-            terminate_group(child)
-            reason += "; orphaned process terminated"
-        lost.append(
-            ctx.update_run(current.run_id, "run.lost", _mark(RunStatus.LOST), {"reason": reason})
-        )
+        marked = _repair_one(ctx, current)
+        if marked is not None:
+            lost.append(marked)
     return sorted(lost, key=lambda r: r.run_id)
+
+
+def _repair_one(ctx: Context, current: RunRecord) -> RunRecord | None:
+    """Mark one active run of this environment lost if its supervisor is gone."""
+    if current.environment_id != ctx.descriptor.environment_id:
+        return None
+    if _supervisor_alive(ctx.run_dir(current), current):
+        return None
+    age = (utcnow() - current.created_at).total_seconds()
+    if current.status == RunStatus.QUEUED and age < QUEUED_GRACE_SECONDS:
+        return None
+    reason = "supervisor exited without recording a result"
+    child = current.executor.child_pid
+    if child is not None and process_alive(child, None):
+        terminate_group(child)
+        reason += "; orphaned process terminated"
+    return ctx.update_run(current.run_id, "run.lost", _mark(RunStatus.LOST), {"reason": reason})

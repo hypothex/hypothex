@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
 from hypothex.core.errors import RunError
@@ -127,6 +129,37 @@ def test_repair_queued_uses_grace_period(ctx: Context) -> None:
     _active(ctx, "old", RunStatus.QUEUED, dead_pid(), created_at=utcnow() - timedelta(minutes=5))
     _active(ctx, "new", RunStatus.QUEUED, dead_pid())
     assert [r.run_id for r in repair_runs(ctx)] == ["old"]
+
+
+def _write_supervisor_pid(ctx: Context, rid: str, pid: int) -> None:
+    run_dir = ctx.run_dir(ctx.find_record(rid))
+    info = {"pid": pid, "create_time": process_create_time(pid)}
+    (run_dir / "supervisor.pid").write_text(json.dumps(info))
+
+
+def test_repair_queued_uses_supervisor_pid_not_live_launcher(ctx: Context) -> None:
+    # Launched from a long-lived process (API/MCP server): executor.pid is alive,
+    # but the detached supervisor died before starting the child.
+    old = utcnow() - timedelta(minutes=5)
+    _active(ctx, "crashed", RunStatus.QUEUED, os.getpid(), created_at=old)
+    _write_supervisor_pid(ctx, "crashed", dead_pid())
+    _active(ctx, "starting", RunStatus.QUEUED, dead_pid(), created_at=old)
+    _write_supervisor_pid(ctx, "starting", os.getpid())
+    _active(ctx, "foreground", RunStatus.QUEUED, os.getpid(), created_at=old)
+    assert [r.run_id for r in repair_runs(ctx)] == ["crashed"]
+    assert ctx.find_record("crashed").status == RunStatus.LOST
+    assert ctx.find_record("starting").status == RunStatus.QUEUED
+    assert ctx.find_record("foreground").status == RunStatus.QUEUED
+
+
+def test_wait_for_run_returns_when_supervisor_dies(
+    ctx: Context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(control, "WAIT_REPAIR_SECONDS", 0.0)
+    old = utcnow() - timedelta(minutes=5)
+    _active(ctx, "crashed", RunStatus.QUEUED, os.getpid(), created_at=old)
+    _write_supervisor_pid(ctx, "crashed", dead_pid())
+    assert wait_for_run(ctx, "crashed", timeout=10).status == RunStatus.LOST
 
 
 def test_repair_ignores_other_environments(ctx: Context) -> None:

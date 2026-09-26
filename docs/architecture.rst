@@ -52,7 +52,28 @@ Each run is started under a supervisor process that tracks its exit and writes
 the final status. On startup, an environment reconciles any run it last recorded
 as ``running``: if the process is still alive, it is left running; if it exited
 with a recorded exit code, it is finished or failed; otherwise it is marked
-``lost``. ``hx repair`` triggers this reconciliation on demand.
+``lost``. ``hx repair`` triggers this reconciliation on demand, ``hx serve``
+repeats it every 30 seconds, and ``hx launch --wait`` checks its own run every
+5 seconds. A queued run is judged by its detached supervisor's pid
+(``supervisor.pid``), not by the process that launched it, so a supervisor that
+dies before starting the command is marked ``lost`` after a 60 second grace
+period even while the launching server is still up.
+
+Local-only API
+--------------
+
+Phase 1a has no authentication, so ``hx serve`` only answers local requests.
+The ``Host`` header must be ``127.0.0.1``, ``localhost``, ``[::1]`` (any port),
+or the ``--host`` address when it is not a wildcard such as ``0.0.0.0``;
+anything else gets ``400``. This blocks DNS-rebinding attacks, where a web page
+makes its own host name resolve to ``127.0.0.1``. A ``POST`` or WebSocket
+handshake whose ``Origin`` is not one of those hosts gets ``403``, so a web page
+cannot start runs through the user's browser. Clients that send no ``Origin``
+(the CLI, MCP clients, ``curl``) are not affected.
+
+.. code-block:: bash
+
+   curl -H 'Host: attacker.example' http://127.0.0.1:7777/api/v1/runs   # 400
 
 Phase 2
 -------

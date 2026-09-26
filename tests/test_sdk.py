@@ -77,3 +77,11 @@ def test_log_predictions_after_partial_line_keeps_rows(run_env: Path) -> None:
     lines = path.read_text().splitlines()
     assert json.loads(lines[-1]) == {"id": "c", "prediction": 3}
     assert json.loads(lines[0])["id"] == "a"
+
+
+def test_seed_rejects_non_integer_env_with_clear_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPOTHEX_SEED", "abc")
+    with pytest.raises(ValueError, match="HYPOTHEX_SEED must be an integer, got 'abc'"):
+        hx.seed()
+    monkeypatch.setenv("HYPOTHEX_SEED", " 42 ")
+    assert hx.seed() == 42

@@ -163,6 +163,33 @@ def current() -> Run | NoopRun:
 
 
 def seed(default: int | None = None) -> int | None:
-    """Return ``--seed`` passed to ``hx run`` (``$HYPOTHEX_SEED``), else ``default``."""
-    raw = os.environ.get("HYPOTHEX_SEED")
-    return int(raw) if raw else default
+    """
+    Return ``--seed`` passed to ``hx run`` (``$HYPOTHEX_SEED``), else ``default``.
+
+    Parameters
+    ----------
+    default : int, optional
+        Value returned when ``$HYPOTHEX_SEED`` is unset or empty.
+
+    Returns
+    -------
+    int or None
+        The seed.
+
+    Raises
+    ------
+    ValueError
+        If ``$HYPOTHEX_SEED`` is set but is not an integer.
+
+    Examples
+    --------
+    >>> seed(default=0)  # outside a Hypothex run
+    0
+    """
+    raw = os.environ.get("HYPOTHEX_SEED", "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"HYPOTHEX_SEED must be an integer, got {raw!r}") from None

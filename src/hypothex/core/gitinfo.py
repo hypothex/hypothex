@@ -1,0 +1,173 @@
+"""Read git state and build worktrees for exact reruns."""
+
+from __future__ import annotations
+
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+from hypothex.core.errors import GitError
+from hypothex.core.records import GitInfo
+
+DIFF_LIMIT_BYTES = 5 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class DiffCapture:
+    """
+    Uncommitted changes at launch time.
+
+    Parameters
+    ----------
+    diff : str or None
+        ``git diff HEAD`` output, or None when clean, not a repo, or too large.
+    stat : str
+        ``git diff HEAD --stat`` output.
+    too_large : bool
+        True when the diff exceeded the size limit and was dropped.
+    """
+
+    diff: str | None
+    stat: str
+    too_large: bool
+
+
+def _git(path: Path, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(path), *args],
+            capture_output=True,
+            text=True,
+            input=input_text,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise GitError("git is not installed") from exc
+
+
+def head_commit(path: Path) -> str | None:
+    """
+    Return the HEAD commit sha of the repo containing ``path``.
+
+    Parameters
+    ----------
+    path : Path
+        Directory inside (or outside) a git repo.
+
+    Returns
+    -------
+    str or None
+        The commit sha, or None when ``path`` is not inside a git repo.
+    """
+    out = _git(path, "rev-parse", "HEAD")
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def git_info(path: Path) -> GitInfo:
+    """
+    Describe the git state of ``path``.
+
+    Parameters
+    ----------
+    path : Path
+        Directory inside (or outside) a git repo.
+
+    Returns
+    -------
+    GitInfo
+        Empty (all None) when ``path`` is not inside a git repo.
+    """
+    commit = head_commit(path)
+    if commit is None:
+        return GitInfo()
+    branch = _git(path, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or None
+    remote = _git(path, "remote", "get-url", "origin")
+    dirty = bool(_git(path, "status", "--porcelain").stdout.strip())
+    return GitInfo(
+        repo=remote.stdout.strip() if remote.returncode == 0 else None,
+        commit=commit,
+        branch=branch,
+        dirty=dirty,
+    )
+
+
+def capture_diff(path: Path, limit: int = DIFF_LIMIT_BYTES) -> DiffCapture:
+    """
+    Capture ``git diff HEAD`` (tracked files only).
+
+    Parameters
+    ----------
+    path : Path
+        Directory inside the repo.
+    limit : int
+        Maximum diff size in bytes; larger diffs are not stored.
+
+    Returns
+    -------
+    DiffCapture
+        ``diff`` is None when clean, not a repo, or too large.
+    """
+    out = _git(path, "diff", "HEAD", "--binary")
+    if out.returncode != 0:
+        return DiffCapture(diff=None, stat="", too_large=False)
+    stat = _git(path, "diff", "HEAD", "--stat").stdout
+    if len(out.stdout.encode("utf-8")) > limit:
+        return DiffCapture(diff=None, stat=stat, too_large=True)
+    return DiffCapture(diff=out.stdout or None, stat=stat, too_large=False)
+
+
+def commit_exists(repo: Path, commit: str) -> bool:
+    """
+    Check whether ``commit`` exists in ``repo``.
+
+    Parameters
+    ----------
+    repo : Path
+        A git repository.
+    commit : str
+        A commit sha.
+
+    Returns
+    -------
+    bool
+        True if the commit object exists in ``repo``.
+    """
+    return _git(repo, "cat-file", "-e", f"{commit}^{{commit}}").returncode == 0
+
+
+def create_worktree(repo: Path, commit: str, dest: Path, diff: str | None) -> Path:
+    """
+    Check out ``commit`` into a new detached worktree and apply ``diff``.
+
+    Parameters
+    ----------
+    repo : Path
+        The source git repository.
+    commit : str
+        The commit sha to check out.
+    dest : Path
+        Destination directory for the new worktree.
+    diff : str or None
+        A unified diff to apply on top of the checkout, or None.
+
+    Returns
+    -------
+    Path
+        ``dest``, once the worktree is ready.
+
+    Raises
+    ------
+    GitError
+        If the commit is missing or the diff does not apply.
+    """
+    if not commit_exists(repo, commit):
+        raise GitError(f"commit {commit} not found in {repo}; it may have been rebased away")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    added = _git(repo, "worktree", "add", "--detach", str(dest), commit)
+    if added.returncode != 0:
+        raise GitError(f"git worktree add failed: {added.stderr.strip()}")
+    if diff:
+        applied = _git(dest, "apply", "--whitespace=nowarn", "-", input_text=diff)
+        if applied.returncode != 0:
+            raise GitError(f"could not apply the saved diff: {applied.stderr.strip()}")
+    return dest

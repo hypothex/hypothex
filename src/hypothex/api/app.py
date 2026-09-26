@@ -24,6 +24,7 @@ from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.records import RunStatus
+from hypothex.mcp.server import build_server
 
 log = logging.getLogger(__name__)
 
@@ -114,18 +115,21 @@ def create_app(home: Path | None = None, *, background_repair: bool = True) -> F
         The application; consumers use only this API.
     """
     ctx = Context.open(home)
+    mcp_server = build_server(home)
+    mcp_http = mcp_server.streamable_http_app(streamable_http_path="/")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(control.repair_runs, ctx)
         task = asyncio.create_task(_repair_loop(ctx)) if background_repair else None
-        try:
-            yield
-        finally:
-            if task is not None:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+        async with mcp_server.session_manager.run():
+            try:
+                yield
+            finally:
+                if task is not None:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
 
     app = FastAPI(
         title="Hypothex",
@@ -343,6 +347,8 @@ def create_app(home: Path | None = None, *, background_repair: bool = True) -> F
                     await asyncio.sleep(WS_POLL_SECONDS)
         except WebSocketDisconnect:
             return
+
+    app.mount("/mcp", mcp_http)
 
     if (UI_DIST / "index.html").is_file():
         app.mount("/", StaticFiles(directory=UI_DIST, html=True), name="ui")

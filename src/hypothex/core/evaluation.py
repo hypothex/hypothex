@@ -151,18 +151,22 @@ def evaluate_run(
     }
     result = run_worker("evaluate", request, default_python_cmd(repo, config), cwd=repo)
     now = utcnow()
-    known = ctx.store.metric_hashes(record.project)
-    scores: list[ScoreRecord] = []
     warnings: list[str] = []
+    with ctx.store.project_lock(record.project):  # concurrent evaluations share this file
+        known = ctx.store.metric_hashes(record.project)
+        for r in result["results"]:
+            ref = f"{r['name']}@{r['version']}"
+            digest = r["source_hash"]
+            if digest and ref in known and known[ref] != digest:
+                warnings.append(
+                    f"metric {r['name']} code changed without a version bump (still {r['version']})"
+                )
+            elif digest and ref not in known:
+                known[ref] = digest
+        ctx.store.save_metric_hashes(record.project, known)
+    scores: list[ScoreRecord] = []
     for r in result["results"]:
-        ref = f"{r['name']}@{r['version']}"
         digest = r["source_hash"]
-        if digest and ref in known and known[ref] != digest:
-            warnings.append(
-                f"metric {r['name']} code changed without a version bump (still {r['version']})"
-            )
-        elif digest and ref not in known:
-            known[ref] = digest
         values, error = _numeric_values(r["values"]), r["error"]
         if values is None:
             values = {}
@@ -189,7 +193,6 @@ def evaluate_run(
             )
             for k, v in values.items()
         )
-    ctx.store.save_metric_hashes(record.project, known)
     for score in scores:
         ctx.add_score(record, score)
     return scores, warnings

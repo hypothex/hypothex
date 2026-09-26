@@ -50,6 +50,25 @@ class ProjectEntry(BaseModel):
 
 
 @contextmanager
+def dir_lock(directory: Path) -> Iterator[None]:
+    """
+    Hold an exclusive, cross-process lock on one folder.
+
+    Parameters
+    ----------
+    directory : Path
+        The folder to lock; ``.lock`` is created inside it.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / ".lock").open("a") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
 def run_lock(run_dir: Path) -> Iterator[None]:
     """
     Hold an exclusive, cross-process lock on one run folder.
@@ -59,13 +78,8 @@ def run_lock(run_dir: Path) -> Iterator[None]:
     run_dir : Path
         The run folder; ``.lock`` is created inside it.
     """
-    run_dir.mkdir(parents=True, exist_ok=True)
-    with (run_dir / ".lock").open("a") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    with dir_lock(run_dir):
+        yield
 
 
 class RunStore:
@@ -423,6 +437,22 @@ class RunStore:
         return path.read_text(encoding="utf-8") if path.is_file() else ""
 
     # metric source hashes ----------------------------------------------------
+    @contextmanager
+    def project_lock(self, project: str) -> Iterator[None]:
+        """
+        Hold an exclusive, cross-process lock on a project's folder.
+
+        Hold it around read-modify-write updates of project files such as
+        ``metric_hashes.json``.
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+        """
+        with dir_lock(self.layout.project_dir(project)):
+            yield
+
     def metric_hashes(self, project: str) -> dict[str, str]:
         """
         Return first-seen source hashes for a project's metrics.

@@ -1,3 +1,4 @@
+import fcntl
 from pathlib import Path
 
 import pytest
@@ -144,3 +145,39 @@ def test_validate_project(ctx: Context, toy_repo: Path) -> None:
     assert not bad.ok
     assert any("nomodule" in e for e in bad.errors)
     assert any("beam" in w for w in bad.warnings)
+
+
+def _project_lock_is_held(ctx: Context) -> bool:
+    lock_file = ctx.layout.project_dir("toy") / ".lock"
+    if not lock_file.exists():
+        return False
+    with lock_file.open("a") as fh:  # a second open file description conflicts with flock
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return False
+
+
+def test_metric_hashes_update_holds_project_lock(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    seen: list[tuple[str, bool]] = []
+    real_read, real_save = ctx.store.metric_hashes, ctx.store.save_metric_hashes
+
+    def read(project: str) -> dict[str, str]:
+        seen.append(("read", _project_lock_is_held(ctx)))
+        return real_read(project)
+
+    def save(project: str, hashes: dict[str, str]) -> None:
+        seen.append(("save", _project_lock_is_held(ctx)))
+        real_save(project, hashes)
+
+    monkeypatch.setattr(ctx.store, "metric_hashes", read)
+    monkeypatch.setattr(ctx.store, "save_metric_hashes", save)
+    evaluate_run(ctx, "r1")
+    assert seen == [("read", True), ("save", True)]
+    assert not _project_lock_is_held(ctx)
+    assert list(real_read("toy")) == ["accuracy@v1"]

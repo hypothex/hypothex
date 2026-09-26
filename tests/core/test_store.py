@@ -1,3 +1,4 @@
+import fcntl
 from pathlib import Path
 
 import pytest
@@ -100,3 +101,12 @@ def test_corrupt_files_raise_store_error_with_path(store: RunStore, tmp_path: Pa
     run_yaml.write_bytes(b"\xff\xfe: [")
     with pytest.raises(StoreError, match="run.yaml"):
         store.read_record("toy", "r1")
+
+
+def test_project_lock_excludes_other_holders(store: RunStore) -> None:
+    with store.project_lock("toy"):
+        lock_file = store.layout.project_dir("toy") / ".lock"
+        with lock_file.open("a") as fh, pytest.raises(BlockingIOError):
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with lock_file.open("a") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # released on exit

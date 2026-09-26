@@ -12,7 +12,6 @@ from typing import Annotated, Any
 
 import typer
 import yaml
-from pydantic import BaseModel
 
 from hypothex._version import __version__
 from hypothex.core import queries as q
@@ -28,6 +27,7 @@ from hypothex.core.errors import HypothexError, RunError
 from hypothex.core.evaluation import reeval, validate_project
 from hypothex.core.execution import RunRequest, execute_run, prepare_run
 from hypothex.core.index import rebuild_index
+from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
 
 app = typer.Typer(
@@ -79,18 +79,8 @@ def _ctx() -> Context:
     return Context.open(_state.home)
 
 
-def _dump(obj: Any) -> Any:
-    if isinstance(obj, BaseModel):
-        return obj.model_dump(mode="json")
-    if isinstance(obj, dict):
-        return {k: _dump(v) for k, v in obj.items()}
-    if isinstance(obj, list | tuple):
-        return [_dump(v) for v in obj]
-    return obj
-
-
 def _print_json(obj: Any) -> None:
-    typer.echo(json.dumps(_dump(obj), indent=2, default=str))
+    typer.echo(json.dumps(to_jsonable(obj), indent=2, default=str))
 
 
 def _table(headers: list[str], rows: list[list[Any]]) -> None:

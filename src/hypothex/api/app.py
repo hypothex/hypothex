@@ -22,6 +22,7 @@ from hypothex.core.context import Context
 from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
+from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.records import RunStatus
 
 log = logging.getLogger(__name__)
@@ -86,17 +87,6 @@ class NoteBody(ActionBody):
     author: str = "api"
 
 
-def _dump(obj: Any) -> Any:
-    """Recursively convert pydantic models to JSON-ready values."""
-    if isinstance(obj, BaseModel):
-        return obj.model_dump(mode="json")
-    if isinstance(obj, dict):
-        return {k: _dump(v) for k, v in obj.items()}
-    if isinstance(obj, list | tuple):
-        return [_dump(v) for v in obj]
-    return obj
-
-
 async def _repair_loop(ctx: Context) -> None:
     """Mark orphaned runs lost every ``REPAIR_INTERVAL_SECONDS``."""
     while True:
@@ -154,7 +144,7 @@ def create_app(home: Path | None = None, *, background_repair: bool = True) -> F
         )
 
     def once(body: ActionBody, fn: Callable[[], Any]) -> dict[str, Any]:
-        return ctx.events.run_once(body.command_id, lambda: _dump(fn()))
+        return ctx.events.run_once(body.command_id, lambda: to_jsonable(fn()))
 
     # environment -----------------------------------------------------------------
     @app.get("/.well-known/hypothex/environment")
@@ -176,7 +166,7 @@ def create_app(home: Path | None = None, *, background_repair: bool = True) -> F
 
     @app.get("/api/v1/tasks")
     def tasks(project: str | None = None) -> list[dict[str, Any]]:
-        return _dump(q.list_tasks(ctx, project))
+        return to_jsonable(q.list_tasks(ctx, project))
 
     @app.get("/api/v1/tasks/{project}/{task}")
     def task_detail(project: str, task: str) -> dict[str, Any]:
@@ -191,7 +181,7 @@ def create_app(home: Path | None = None, *, background_repair: bool = True) -> F
             name, _, version = item.partition("@")
             if version:
                 versions[name] = version
-        return _dump(q.get_leaderboard(ctx, task, project, versions or None))
+        return to_jsonable(q.get_leaderboard(ctx, task, project, versions or None))
 
     @app.post("/api/v1/tasks/{project}/{task}/reeval")
     def task_reeval(project: str, task: str, body: ReevalBody) -> dict[str, Any]:
@@ -210,7 +200,7 @@ def create_app(home: Path | None = None, *, background_repair: bool = True) -> F
         archived: bool = False,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
-        return _dump(
+        return to_jsonable(
             ctx.index.list_runs(
                 project=project,
                 task=task,
@@ -239,15 +229,15 @@ def create_app(home: Path | None = None, *, background_repair: bool = True) -> F
 
     @app.get("/api/v1/runs/{run_id}")
     def run_detail(run_id: str) -> dict[str, Any]:
-        return _dump(q.show_run(ctx, run_id))
+        return to_jsonable(q.show_run(ctx, run_id))
 
     @app.get("/api/v1/runs/{run_id}/metrics")
     def run_metrics(run_id: str) -> list[dict[str, Any]]:
-        return _dump(q.metric_history(ctx, run_id))
+        return to_jsonable(q.metric_history(ctx, run_id))
 
     @app.get("/api/v1/runs/{run_id}/logs")
     def run_logs(run_id: str, stream: str = "stdout", offset: int | None = None) -> dict[str, Any]:
-        return _dump(q.read_log(ctx, run_id, stream, offset))
+        return to_jsonable(q.read_log(ctx, run_id, stream, offset))
 
     @app.get("/api/v1/runs/{run_id}/predictions")
     def run_predictions(
@@ -258,7 +248,7 @@ def create_app(home: Path | None = None, *, background_repair: bool = True) -> F
         failures_only: bool = False,
         field: str = "correct",
     ) -> dict[str, Any]:
-        return _dump(
+        return to_jsonable(
             q.get_predictions(
                 ctx,
                 run_id,
@@ -314,15 +304,15 @@ def create_app(home: Path | None = None, *, background_repair: bool = True) -> F
     # compare & datasets ----------------------------------------------------------------
     @app.get("/api/v1/compare")
     def compare(ids: str) -> dict[str, Any]:
-        return _dump(q.compare_runs(ctx, [i for i in ids.split(",") if i]))
+        return to_jsonable(q.compare_runs(ctx, [i for i in ids.split(",") if i]))
 
     @app.get("/api/v1/compare/examples")
     def compare_examples(a: str, b: str, metric: str, field: str = "correct") -> dict[str, Any]:
-        return _dump(q.compare_examples(ctx, a, b, metric, field))
+        return to_jsonable(q.compare_examples(ctx, a, b, metric, field))
 
     @app.get("/api/v1/datasets/check")
     def datasets_check(project: str | None = None) -> list[dict[str, Any]]:
-        return _dump(q.check_datasets(ctx, project))
+        return to_jsonable(q.check_datasets(ctx, project))
 
     # live events -------------------------------------------------------------------------
     @app.websocket("/api/v1/ws")

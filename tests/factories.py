@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from hypothex.core.ids import utcnow
 from hypothex.core.records import RunRecord, RunStatus
@@ -47,3 +52,81 @@ def init_git_repo(repo: Path) -> str:
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "--allow-empty", "-m", "init")
     return git(repo, "rev-parse", "HEAD")
+
+
+TOY_METRICS = """\
+from hypothex.metrics import MetricResult
+
+
+def accuracy(examples):
+    per = {e.id: {"correct": e.prediction == e.reference} for e in examples}
+    value = sum(v["correct"] for v in per.values()) / max(len(per), 1)
+    return MetricResult(values={"value": value}, per_example=per)
+
+
+def broken(examples):
+    raise RuntimeError("boom")
+"""
+
+TOY_INFER = """\
+import json
+import os
+import sys
+from pathlib import Path
+
+run_dir = Path(os.environ["HYPOTHEX_RUN_DIR"])
+ckpt = sys.argv[sys.argv.index("--ckpt") + 1]
+with (run_dir / "predictions" / "predictions.jsonl").open("w") as fh:
+    for i in range(4):
+        fh.write(json.dumps({"id": f"ex-{i}", "prediction": i % 2}) + "\\n")
+print("inferred with", ckpt)
+"""
+
+# references are [0, 1, 0, 0]; these predictions are [0, 1, 0, 1] -> accuracy 0.75
+PREDS_075 = [{"id": f"ex-{i}", "prediction": i % 2} for i in range(4)]
+
+
+def write_toy_project(repo: Path, *, accuracy_version: str = "v1", use_git: bool = True) -> Path:
+    """Write a tiny Hypothex project (data, metrics, infer stage) and optionally git-init it."""
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "data").mkdir(exist_ok=True)
+    refs = [0, 1, 0, 0]
+    (repo / "data" / "test.jsonl").write_text(
+        "".join(json.dumps({"id": f"ex-{i}", "reference": r}) + "\n" for i, r in enumerate(refs))
+    )
+    config = {
+        "project": "toy",
+        "datasets": {
+            "toyset": {
+                "version": "v1",
+                "path": "data/test.jsonl",
+                "splits": {"test": "data/test.jsonl"},
+            },
+        },
+        "metrics": {
+            "accuracy": {"version": accuracy_version, "fn": "toymetrics:accuracy"},
+            "broken": {"version": "v1", "fn": "toymetrics:broken"},
+        },
+        "tasks": {
+            "toy-acc": {
+                "dataset": "toyset",
+                "split": "test",
+                "metrics": ["accuracy"],
+                "primary": "accuracy",
+            },
+            "toy-broken": {
+                "dataset": "toyset",
+                "split": "test",
+                "metrics": ["accuracy", "broken"],
+                "primary": "accuracy",
+            },
+        },
+        "stages": {"infer": f"{shlex.quote(sys.executable)} infer.py --ckpt {{checkpoint}}"},
+        "env": {"python": [sys.executable]},
+    }
+    (repo / "hypothex.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    (repo / "toymetrics.py").write_text(TOY_METRICS)
+    (repo / "infer.py").write_text(TOY_INFER)
+    if use_git and not (repo / ".git").exists():
+        init_git_repo(repo)
+    return repo

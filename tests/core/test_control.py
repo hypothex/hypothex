@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -280,3 +281,32 @@ def test_rerun_after_repo_moved_without_history_uses_repo_root(
     child = rerun(ctx, parent_id, background=False)
     assert child.status == RunStatus.FINISHED
     assert Path(child.cwd) == moved.resolve()
+
+
+SLEEPER = cmd("import time; print('ready', flush=True); time.sleep(60)")
+
+
+def test_sigterm_before_child_starts_is_forwarded(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SIGTERM arriving while the child is being started must still end the run
+    # as killed. A stand-in handler keeps the test process alive if it leaks.
+    leaked: list[int] = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, frame: leaked.append(signum))
+    try:
+        rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=SLEEPER))
+        real_popen = subprocess.Popen
+
+        def popen_after_sigterm(*args: object, **kwargs: object) -> subprocess.Popen:
+            os.kill(os.getpid(), signal.SIGTERM)
+            return real_popen(*args, **kwargs)  # type: ignore[call-overload]
+
+        monkeypatch.setattr(subprocess, "Popen", popen_after_sigterm)
+        start = time.monotonic()
+        done = execute_run(ctx, rec.run_id)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert leaked == []
+    assert done.status == RunStatus.KILLED
+    assert time.monotonic() - start < 15
+    assert not process_alive(done.executor.child_pid, None)

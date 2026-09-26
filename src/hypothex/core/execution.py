@@ -266,14 +266,34 @@ def _pump(src: IO[bytes] | None, log_path: Path, sink: BinaryIO | None) -> threa
     return thread
 
 
+def _forward(pid: int) -> None:
+    """SIGTERM the child group now and SIGKILL it after the grace period."""
+    _signal_group(pid, signal.SIGTERM)
+    timer = threading.Timer(TERM_GRACE_SECONDS, _signal_group, args=(pid, signal.SIGKILL))
+    timer.daemon = True
+    timer.start()
+
+
 @dataclass
 class _TermState:
     signalled: bool = False
+    pid: int | None = None
+
+    def attach(self, pid: int) -> None:
+        """Record the child's pid; forward a signal that arrived before it started."""
+        self.pid = pid
+        if self.signalled:
+            _forward(pid)
 
 
 @contextmanager
-def _forward_termination(pid: int) -> Iterator[_TermState]:
-    """Forward SIGTERM/SIGHUP to the child group (main thread only)."""
+def _forward_termination() -> Iterator[_TermState]:
+    """
+    Forward SIGTERM/SIGHUP to the child group (main thread only).
+
+    Enter before starting the child so a signal is never missed; call
+    ``attach`` with the child's pid once it exists.
+    """
     state = _TermState()
     if threading.current_thread() is not threading.main_thread():
         yield state
@@ -281,10 +301,8 @@ def _forward_termination(pid: int) -> Iterator[_TermState]:
 
     def handler(signum: int, frame: object) -> None:
         state.signalled = True
-        _signal_group(pid, signal.SIGTERM)
-        timer = threading.Timer(TERM_GRACE_SECONDS, _signal_group, args=(pid, signal.SIGKILL))
-        timer.daemon = True
-        timer.start()
+        if state.pid is not None:
+            _forward(state.pid)
 
     previous = {sig: signal.signal(sig, handler) for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
@@ -346,48 +364,51 @@ def execute_run(
     }
     if record.seed is not None:
         env["HYPOTHEX_SEED"] = str(record.seed)
-    try:
-        proc = subprocess.Popen(
-            record.command,
-            cwd=record.cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-    except OSError as exc:
-        (run_dir / "logs" / "stderr.log").write_text(f"hypothex: could not start command: {exc}\n")
-        now = utcnow()
-        return ctx.update_run(
-            run_id,
-            "run.failed",
-            lambda r: r.model_copy(
-                update={
-                    "status": RunStatus.FAILED,
-                    "started_at": now,
-                    "ended_at": now,
-                    "exit_code": 127,
-                    "executor": me,
-                }
-            ),
-            {"reason": str(exc)},
-        )
+    with _forward_termination() as term:
+        try:
+            proc = subprocess.Popen(
+                record.command,
+                cwd=record.cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            (run_dir / "logs" / "stderr.log").write_text(
+                f"hypothex: could not start command: {exc}\n"
+            )
+            now = utcnow()
+            return ctx.update_run(
+                run_id,
+                "run.failed",
+                lambda r: r.model_copy(
+                    update={
+                        "status": RunStatus.FAILED,
+                        "started_at": now,
+                        "ended_at": now,
+                        "exit_code": 127,
+                        "executor": me,
+                    }
+                ),
+                {"reason": str(exc)},
+            )
+        term.attach(proc.pid)
 
-    started = me.model_copy(update={"child_pid": proc.pid})
-    ctx.update_run(
-        run_id,
-        "run.started",
-        lambda r: r.model_copy(
-            update={"status": RunStatus.RUNNING, "started_at": utcnow(), "executor": started}
-        ),
-    )
-    pumps = [
-        _pump(proc.stdout, run_dir / "logs" / "stdout.log", stdout_sink),
-        _pump(proc.stderr, run_dir / "logs" / "stderr.log", stderr_sink),
-    ]
-    interrupted = False
-    with _forward_termination(proc.pid) as term:
+        started = me.model_copy(update={"child_pid": proc.pid})
+        ctx.update_run(
+            run_id,
+            "run.started",
+            lambda r: r.model_copy(
+                update={"status": RunStatus.RUNNING, "started_at": utcnow(), "executor": started}
+            ),
+        )
+        pumps = [
+            _pump(proc.stdout, run_dir / "logs" / "stdout.log", stdout_sink),
+            _pump(proc.stderr, run_dir / "logs" / "stderr.log", stderr_sink),
+        ]
+        interrupted = False
         # stop_run may have written the marker after the pre-start check but
         # before the child pid was recorded, so it could not signal the child.
         if (run_dir / STOP_MARKER).exists():

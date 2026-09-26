@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TypeVar
 
+import yaml
 from pydantic import BaseModel, Field, ValidationError
 
 from hypothex.core.config import ProjectConfig
@@ -139,12 +140,15 @@ class RunStore:
         Raises
         ------
         StoreError
-            If no such project is registered.
+            If no such project is registered, or its file cannot be parsed.
         """
         path = self._project_file(project)
         if not path.is_file():
             raise StoreError(f"unknown project {project!r}")
-        return ProjectEntry.model_validate_json(path.read_text(encoding="utf-8"))
+        try:
+            return ProjectEntry.model_validate_json(path.read_text(encoding="utf-8"))
+        except ValueError as exc:  # includes pydantic ValidationError and bad UTF-8
+            raise StoreError(f"unreadable project file {path}: {_brief(exc)}") from exc
 
     def list_projects(self) -> list[ProjectEntry]:
         """
@@ -161,7 +165,7 @@ class RunStore:
         for path in sorted(self.layout.store.glob("*/project.json")):
             try:
                 entries.append(ProjectEntry.model_validate_json(path.read_text(encoding="utf-8")))
-            except ValidationError:
+            except ValueError:  # includes pydantic ValidationError and bad UTF-8
                 log.warning("skipping unreadable project file %s", path)
         return entries
 
@@ -227,11 +231,16 @@ class RunStore:
         ------
         RunNotFoundError
             If no such run exists.
+        StoreError
+            If ``run.yaml`` cannot be parsed.
         """
         path = self.layout.run_dir(project, run_id) / "run.yaml"
         if not path.is_file():
             raise RunNotFoundError(f"no run {run_id!r} in project {project!r}")
-        return RunRecord.model_validate(read_yaml(path))
+        try:
+            return RunRecord.model_validate(read_yaml(path))
+        except (ValueError, yaml.YAMLError) as exc:
+            raise StoreError(f"unreadable run file {path}: {_brief(exc)}") from exc
 
     def iter_records(self, project: str | None = None) -> Iterator[RunRecord]:
         """
@@ -446,6 +455,24 @@ class RunStore:
             self.layout.project_dir(project) / "metric_hashes.json",
             json.dumps(hashes, indent=2, sort_keys=True),
         )
+
+
+def _brief(exc: Exception) -> str:
+    """
+    Summarize a parse error in one short line.
+
+    Parameters
+    ----------
+    exc : Exception
+        The parse or validation error.
+
+    Returns
+    -------
+    str
+        The first line of the message, at most 200 characters.
+    """
+    lines = str(exc).strip().splitlines()
+    return (lines[0] if lines else type(exc).__name__)[:200]
 
 
 def _parse_rows(model: type[_M], path: Path) -> list[_M]:

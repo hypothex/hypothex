@@ -54,6 +54,29 @@ def test_run_detail_logs_predictions_and_errors(
     assert bad.status_code == 400 and "unknown task" in bad.json()["error"]
 
 
+@pytest.mark.parametrize("content", ["status: [unclosed\n", "run_id: r1\n", "- a list\n"])
+def test_corrupt_run_file_is_json_error_not_500(
+    client: TestClient, ctx: Context, toy_repo: Path, content: str
+) -> None:
+    rec = seed_finished_run(ctx, toy_repo, "r1")
+    run_yaml = ctx.run_dir(rec) / "run.yaml"
+    run_yaml.write_text(content)
+    resp = client.get("/api/v1/runs/r1")
+    assert resp.status_code == 404
+    assert resp.json()["type"] == "StoreError" and str(run_yaml) in resp.json()["error"]
+
+
+def test_corrupt_project_file_is_json_error_not_500(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    project_file = ctx.layout.project_dir("toy") / "project.json"
+    project_file.write_text("{not json")
+    resp = client.post("/api/v1/runs/r1/reeval", json={"force": True})
+    assert resp.status_code == 404
+    assert resp.json()["type"] == "StoreError" and str(project_file) in resp.json()["error"]
+
+
 def test_reeval_is_idempotent(client: TestClient, ctx: Context, toy_repo: Path) -> None:
     seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
     body = {"command_id": "cmd-123", "force": True}

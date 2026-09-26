@@ -85,3 +85,18 @@ def test_metric_hashes_roundtrip(store: RunStore) -> None:
     assert store.metric_hashes("toy") == {}
     store.save_metric_hashes("toy", {"acc@v1": "sha256:1"})
     assert store.metric_hashes("toy") == {"acc@v1": "sha256:1"}
+
+
+def test_corrupt_files_raise_store_error_with_path(store: RunStore, tmp_path: Path) -> None:
+    store.register_project(ProjectConfig(project="toy"), tmp_path)
+    project_file = store.layout.project_dir("toy") / "project.json"
+    project_file.write_text('{"project": "toy"}')
+    with pytest.raises(StoreError, match="project.json"):
+        store.load_project("toy")
+    store.register_project(ProjectConfig(project="toy"), tmp_path)  # repairs the file
+    assert store.load_project("toy").project == "toy"
+    store.create_run(make_record("r1"))
+    run_yaml = store.layout.run_dir("toy", "r1") / "run.yaml"
+    run_yaml.write_bytes(b"\xff\xfe: [")
+    with pytest.raises(StoreError, match="run.yaml"):
+        store.read_record("toy", "r1")

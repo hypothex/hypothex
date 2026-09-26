@@ -177,7 +177,7 @@ change; `metrics.jsonl` and `scores.jsonl` are append-only.
 - Default store: `~/.hypothex/store/`. Override with `HYPOTHEX_HOME`.
 - Local runs write straight into the store.
 - Remote runs write into `<host.workdir>/.hypothex/runs/<run_id>/` and are pulled
-  into the store (section 5.3).
+  into the hub store (section 5.5).
 
 ### 3.4 Index
 
@@ -231,9 +231,70 @@ branch, remote, and `git diff HEAD` (capped at 5 MB, else stored as "too large" 
   appends new scores to the **same** run (does not create a new run). Default: all runs of
   the task that lack a score for the current metric version.
 
-### 5.2 Runners
+### 5.2 Environments (adapted from T3 Code)
 
-One interface, three implementations:
+An **environment** is one running `hx serve` process plus the machine, files, and
+processes it owns. Execution always happens inside an environment, never in a client
+(UI, CLI on another machine, agent). Adapted from T3 Code (MIT, © 2026 T3 Tools Inc.;
+`docs/internals/remote.md`, `packages/contracts/src/environment.ts`).
+
+- **Kinds:** the Mac (the **hub**, holds the cross-project index and serves the UI), each
+  SSH box (an **env server**), and each SLURM cluster (an env server on the login node,
+  which submits to SLURM).
+- **Identity is not the route.** Each environment has a stable `environment_id` created once
+  and stored in `~/.hypothex/environment.json`. How the hub reaches it (local, SSH tunnel,
+  Tailscale, direct URL) can change without changing identity.
+- **Descriptor:** `GET /.well-known/hypothex/environment` returns
+  `{environment_id, label, os, arch, hostname, hx_version, protocol_version, kind:
+  local|ssh|slurm, gpus, capabilities: [...]}`. The hub refuses to talk to an env with an
+  incompatible `protocol_version` and shows "upgrade hx on <host>".
+- **Env servers own their runs.** They start processes, supervise them, write the run
+  folder, and keep their own event log. So a run keeps going and keeps being recorded
+  even if the Mac sleeps or the network drops. No tmux-polling from the Mac.
+- **Bootstrap over SSH** (from T3 Code `packages/ssh/src/tunnel.ts`): `hx hosts add gpu-box-1
+  --ssh gpu1` runs a POSIX script over SSH that installs `hx` into `~/.hypothex/runtime`
+  (under a lock dir), reuses an already-healthy env server if its pid/port file in
+  `~/.hypothex/serve/` says so, else starts `nohup hx serve --host 127.0.0.1 --port 0`,
+  probes readiness, and on failure returns the last 80 log lines. The hub then opens
+  `ssh -N -L <local>:127.0.0.1:<remote> -o ExitOnForwardFailure=yes -o ServerAliveInterval=15`.
+  The hub only stops env servers it started (`managed` vs `external`).
+- **Long-lived env servers:** `hx service install` writes a systemd user unit (Linux) or
+  launchd agent (macOS) so an env server survives reboots/logouts.
+- **Kicking off runs from anywhere:** any client connected to the hub (UI in a browser,
+  `hx` CLI on another laptop, an agent via MCP) can launch a run on any environment. A
+  user or agent working directly on a remote machine uses `hx run` there; the local env
+  server records it, and the hub picks it up on next sync. Offline work is never lost.
+
+### 5.3 Event log, streaming, and reconnect (adapted from T3 Code)
+
+- **Event log is the truth for run state.** Each env server has an append-only event log
+  (SQLite, per environment) with a monotonically increasing `sequence`:
+  `run.created, run.started, run.log_chunk, run.metric, run.score_added, run.finished,
+  run.failed, run.killed, run.lost, ...`. Run folders are written by a reactor from these
+  events (file layout in 3.2 is unchanged).
+- **Commands are idempotent.** Every mutating call (`launch`, `rerun`, `stop`, ...) carries a
+  client-generated `command_id`. The env server stores a receipt in the same transaction
+  as the resulting events; a repeated `command_id` returns the first result. A
+  double-clicked "Rerun" starts one run.
+- **Resumable streams.** The hub subscribes to each env with `after_sequence=<last seen>`.
+  The env replays missed events, then streams live ones. The hub drops duplicates by
+  sequence. The UI subscribes to the hub the same way.
+- **Transport:** WebSocket carrying typed JSON messages (Pydantic models, one schema module
+  shared by server and a generated TS client) for commands + subscriptions; plain HTTP for
+  snapshots, files, and auth.
+- **Reconnect:** one connection supervisor per environment in the hub (not per UI
+  component). Backoff 3/4/8/16 s, reset after 30 s stable. "Connected" is separate from
+  "ready" (ready = descriptor fetched and replay done). Auth failures stop retrying until
+  the user re-pairs.
+- **Startup repair:** on start, an env server reconciles runs it recorded as `running`:
+  process still alive → keep; SLURM job still in `squeue` → keep; exited with an exit record
+  → finish/fail; otherwise → `lost`.
+- **Bounded log tails:** the live log stream keeps the last 5,000 lines / 8 MiB in memory
+  and on disk for fast attach; full logs stay in `logs/`.
+
+### 5.4 Runners (inside an env server)
+
+One interface, used by each env server for its own machine:
 
 ```python
 class Runner(Protocol):
@@ -243,38 +304,41 @@ class Runner(Protocol):
     def pull(self, ref: ExecutorRef, dest: Path) -> None: ...
 ```
 
-- **Local:** detached subprocess with its own process group; PID file in run dir.
-- **SSH (phase 2):** uses `~/.ssh/config` via `asyncssh`. Starts inside a named `tmux`
-  session (`hx-<run_id>`) so it survives disconnects. Remote side runs
-  `hx run --remote-child ...` (Hypothex must be installed in the project env on the host;
-  `hx hosts setup <host>` does this).
+- **Local process:** detached subprocess in its own process group; PID in run dir. Used
+  by the Mac and by SSH-box env servers. Survives env-server restarts (startup repair
+  re-attaches by PID).
 - **SLURM (phase 2):** renders an `sbatch` script (resources from `--gpus`, `--time`,
-  `--partition` or host defaults), submits over SSH, polls `squeue`/`sacct`.
+  `--partition` or env defaults), submits locally on the login node, tracks with
+  `squeue`/`sacct`. The job itself runs `hx run --child <run_id>` on the compute node,
+  which writes to the shared filesystem run folder; the env server tails it.
 
-Hosts file `~/.hypothex/hosts.yaml`:
+Environments file on the hub, `~/.hypothex/environments.yaml`:
 
 ```yaml
-hosts:
-  mac: {type: local}
-  gpu-box-1: {type: ssh, ssh_alias: gpu1, workdir: /home/sv/hx, gpus: 4}
-  cluster: {type: slurm, ssh_alias: login-node, workdir: /scratch/sv/hx,
+environments:
+  mac: {route: local}
+  gpu-box-1: {route: ssh, ssh_alias: gpu1, workdir: /home/sv/hx, gpus: 4}
+  cluster: {route: ssh, ssh_alias: login-node, workdir: /scratch/sv/hx, kind: slurm,
             defaults: {partition: gpu, time: "12:00:00", gpus: 1}}
+  lab-server: {route: url, url: https://lab.tail1234.ts.net:7777}   # phase 3
 ```
 
-### 5.3 Pull (sync)
+### 5.5 Sync of results to the hub
 
-On status change to a terminal state (and every 60 s while running, for logs and
-metrics), `rsync` copies the run folder **excluding** `artifacts/` and any file > 200 MB
-(configurable). Big files are recorded as `{host, path, size}` artifacts.
+Event replay (5.3) keeps run state, metrics, and scores in sync. Files are synced by the
+hub over the same route: small files in the run folder are fetched over HTTP from the env
+server (`GET /runs/{id}/files/...`), excluding `artifacts/` and any file > 200 MB
+(configurable). Big files stay remote and are recorded as `{environment, path, size}`.
 
-### 5.4 Status and lost runs
+### 5.6 Status and lost runs
 
-The daemon (`hx serve`) polls running runs every 30 s. If a host is unreachable for
-> 10 min (configurable), or SLURM reports the job gone without an exit record, the run is
-marked `lost`. A `lost` run becomes `finished`/`failed` again only if a later pull finds
-a real exit record.
+Env servers know their own run status exactly. The hub marks an environment
+`unreachable` when its supervisor cannot reconnect; runs on it show `status (stale)`, not
+`lost`. A run is `lost` only when the env server itself decides so (startup repair or
+SLURM job vanished without exit record). If an env server is unreachable for > 24 h
+(configurable), the hub shows a banner, still not `lost`.
 
-### 5.5 Queue and sweeps (phase 2)
+### 5.7 Queue and sweeps (phase 2)
 
 - `hx launch --queue` puts the run in `queue`. The daemon starts it when the target host
   (or any host in `--hosts a,b`) has free GPUs (from `nvidia-smi` for SSH hosts;
@@ -365,9 +429,13 @@ Every command supports `--json` (stable schema, documented) for agents.
 
 FastAPI under `/api/v1`, OpenAPI docs at `/api/docs`. The UI uses only this API.
 Resources mirror the CLI: projects, tasks, leaderboards, runs, scores, metric points,
-predictions (paged), datasets, hosts, queue, sweeps, notes. Actions: `POST
-/runs/{id}/rerun|reinfer|reeval|stop`, `POST /tasks/{t}/reeval`. Log streaming via SSE.
-Phase 1–2: bound to `127.0.0.1`, no auth. Phase 3: token auth + users.
+predictions (paged), datasets, environments, queue, sweeps, notes. Actions: `POST
+/runs/{id}/rerun|reinfer|reeval|stop`, `POST /tasks/{t}/reeval`; all actions accept a
+`command_id` for idempotency (5.3). Live updates (run events, logs, metrics) go over the
+WebSocket with `after_sequence` replay (5.3), not SSE. The same API is served by the hub
+and by env servers; the hub proxies env-specific calls to the owning environment.
+Phase 1–2: bound to `127.0.0.1` (remote envs reached through SSH tunnels), no auth.
+Phase 3: auth (section 9).
 
 ### 7.4 MCP server
 
@@ -429,8 +497,16 @@ Screens:
   archived, unstarred runs; always dry-run first in UI.
 - **Cost (phase 2):** GPU-hours = wall time × GPUs; optional `$/GPU-hour` per host;
   API spend via `run.log_cost(usd=..., tokens=...)` in the SDK.
-- **Team/server mode:** Postgres, token auth, users; runs record `created_by`
-  (human user or agent name).
+- **Team/server mode:** the hub can run on an always-on server with Postgres. Runs record
+  `created_by` (human user or agent name).
+- **Auth and devices (adapted from T3 Code `apps/server/src/auth/`):** `hx pair` prints a
+  one-time pairing URL + QR code (secret in the URL `#fragment`, valid 5 min). A client
+  exchanges it for a revocable session (cookie for browsers, bearer token for CLI/agents).
+  WebSockets authenticate with a short-lived ticket fetched over HTTP, so long-lived
+  tokens never appear in socket URLs. Every API/WebSocket method declares a scope
+  (`read`, `launch`, `admin`); a method without a scope fails a unit test. Pairing can
+  never grant wider scopes than the issuer holds. Remote access from phones/other laptops
+  goes through Tailscale (HTTPS via `tailscale serve`); no custom relay.
 
 ## 10. Error handling
 
@@ -449,7 +525,10 @@ Screens:
   equivalence (index built live == index rebuilt from files), dataset hashing (both
   modes), seed grouping + interval math, metric versioning + source-hash warning,
   re-eval appends and never overwrites.
-- **Runners:** local runner real subprocess tests; SSH tested against a fake runner and one
+- **Environments:** event replay with gaps/duplicates, idempotent command receipts,
+  startup repair cases, reconnect supervisor state machine (fake clock); two env servers
+  in one test process talking to a hub.
+- **Runners:** local runner real subprocess tests; SSH bootstrap tested against one
   optional Docker `sshd` integration test; SLURM tested with fake `sbatch/squeue/sacct`
   scripts on PATH.
 - **Interfaces:** CLI `--json` snapshot tests; API tests via FastAPI TestClient; MCP tool
@@ -470,7 +549,9 @@ hypothex/
   pyproject.toml
   src/hypothex/
     core/        # models, store (files), index (SQLAlchemy), datasets, metrics, seeds
-    runners/     # local.py, ssh.py, slurm.py, base.py
+    runners/     # local.py, slurm.py, base.py
+    env/         # descriptor, event log, command receipts, startup repair
+    remote/      # ssh bootstrap + tunnel, hub connection supervisors, file sync
     sdk/         # hx.current(), log, log_predictions, ...
     cli/         # Typer app
     api/         # FastAPI app
@@ -489,9 +570,9 @@ hypothex/
 
 | Phase | Scope | Done when |
 |---|---|---|
-| **1. Core** | Sections 2–4, 5.1 (local), 5.2 local runner, 6, 7 (all interfaces, local actions), 8 (screens 1–6, no host status), 10, 11 for these parts. | Toy E2E green in CI; DeepRetro onboarded with one task and ≥ 3 runs; an agent completes the section 7.5 loop using only the skill file. |
-| **2. Scale** | SSH + SLURM runners, pull, lost detection, `hx hosts`, queue, sweeps, host/GPU status, cost. | A DeepRetro run launched from the UI on SLURM and on an SSH box, pulled, scored, and shown on the leaderboard. |
-| **3. Team + output** | Notebook, paper baselines, Slack + email alerts, weekly summary, export, storage cleanup, auth + Postgres server mode. | A collaborator logs into a server instance and sees the same projects. |
+| **1. Core** | Sections 2–4, 5.1 (local), 5.2–5.3 for the Mac environment only (descriptor, event log, idempotent commands, resumable WebSocket streams, startup repair), 5.4 local runner, 6, 7 (all interfaces, local actions), 8 (screens 1–6, no host status), 10, 11 for these parts. | Toy E2E green in CI; DeepRetro onboarded with one task and ≥ 3 runs; an agent completes the section 7.5 loop using only the skill file. |
+| **2. Scale** | Remote env servers: SSH bootstrap + tunnel, `hx hosts add`, `hx service install`, hub supervisors + replay from many envs, file sync (5.5), SLURM runner, stale/lost rules (5.6), queue, sweeps, host/GPU status, cost. | A DeepRetro run launched from the UI on SLURM and on an SSH box, pulled, scored, and shown on the leaderboard. |
+| **3. Team + output** | Notebook, paper baselines, Slack + email alerts, weekly summary, export, storage cleanup, pairing + scoped auth, Tailscale access, Postgres server mode. | A collaborator pairs a laptop with a server hub, sees the same projects, and launches a run on a shared environment. |
 
 Each phase gets its own implementation plan.
 
@@ -502,6 +583,8 @@ Each phase gets its own implementation plan.
 | Base | Custom, borrow ideas from MLflow/DVC/Inspect | No tool covers all needs; want own UI and agent-first design |
 | Truth | Files; SQLite index rebuildable | Stability; agents read plain files |
 | Rerun | Really launches (local/SSH/SLURM) | User choice |
+| Remote model | One `hx serve` env server per machine; Mac is the hub (from T3 Code) | Runs survive Mac sleep/network loss; exact status; same code for local and server mode |
+| Live sync | Event log + `after_sequence` replay + idempotent `command_id` (from T3 Code) | No gaps after reconnect; no double launches |
 | Hosting | Mac first, server-ready | User choice |
 | Integration | Wrapper (`hx run`) + optional SDK | Works with any project, richer with SDK |
 | Metrics | Versioned; re-score on click | Keeps history honest |

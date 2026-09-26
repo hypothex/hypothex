@@ -108,7 +108,7 @@ tasks:
     dataset: uspto50k
     split: test
     metrics: [topk]
-    primary: topk@k=1           # the number the leaderboard sorts by
+    primary: topk/k=1           # metric/key the leaderboard sorts by (`@` is reserved for versions)
 
 stages:                         # command templates; {vars} are filled by hx
   train: python -m deepretro.train --config {config} --out {run_dir}/artifacts
@@ -119,8 +119,11 @@ env:
   setup: uv sync                # optional, run before stages on a fresh host
 ```
 
-Validation: `hx validate` checks schema, that every `fn` imports, that every task's
-dataset/metric exists, and that templates only use known variables.
+Validation: `hx validate` checks schema, that every `fn` imports, and that every task's
+dataset/metric exists. Built-in template variables are `run_id, run_dir, repo, task, seed,
+config, checkpoint, dataset.name, dataset.version, dataset.path`; any other `{name}` must be
+passed with `--var name=value` (validate warns; launch fails before creating a run if a
+value is missing).
 
 ### 3.2 Run folder
 
@@ -181,7 +184,9 @@ change; `metrics.jsonl` and `scores.jsonl` are append-only.
 
 ### 3.4 Index
 
-SQLite (WAL mode) at `~/.hypothex/index.db`, schema managed with Alembic.
+SQLite (WAL mode) at `~/.hypothex/index.db`. Because the index is disposable, phase 1 stores
+a schema version and rebuilds the index from files when it changes; Alembic arrives with
+Postgres in phase 3.
 Tables: `projects, datasets, metrics, tasks, runs, scores, metric_points, tags, hosts,
 queue, sweeps, notes`. `metric_points` stores downsampled history for fast charts; full
 history stays in `metrics.jsonl`.
@@ -272,6 +277,10 @@ processes it owns. Execution always happens inside an environment, never in a cl
   `run.created, run.started, run.log_chunk, run.metric, run.score_added, run.finished,
   run.failed, run.killed, run.lost, ...`. Run folders are written by a reactor from these
   events (file layout in 3.2 is unchanged).
+  Phase 1a simplification: every state change is written synchronously under a per-run
+  file lock in the order run folder → event → index; the event log is the ordered change
+  feed that streams and replay use. A reactor model can replace this later without
+  changing the file layout or the event schema.
 - **Commands are idempotent.** Every mutating call (`launch`, `rerun`, `stop`, ...) carries a
   client-generated `command_id`. The env server stores a receipt in the same transaction
   as the resulting events; a repeated `command_id` returns the first result. A
@@ -570,7 +579,8 @@ hypothex/
 
 | Phase | Scope | Done when |
 |---|---|---|
-| **1. Core** | Sections 2–4, 5.1 (local), 5.2–5.3 for the Mac environment only (descriptor, event log, idempotent commands, resumable WebSocket streams, startup repair), 5.4 local runner, 6, 7 (all interfaces, local actions), 8 (screens 1–6, no host status), 10, 11 for these parts. | Toy E2E green in CI; DeepRetro onboarded with one task and ≥ 3 runs; an agent completes the section 7.5 loop using only the skill file. |
+| **1a. Core backend** | Sections 2–4, 5.1 (local), 5.2–5.3 for the Mac environment only (descriptor, event log, idempotent commands, resumable WebSocket streams, startup repair), 5.4 local runner, 6, 7 (all interfaces, local actions), 10, 11 for these parts. | Toy E2E green in CI; DeepRetro onboarded with one task and ≥ 3 runs; an agent completes the section 7.5 loop using only the skill file. |
+| **1b. UI** | Section 8 screens 1–6 (no host status), after mockups are approved. | All six screens work against the toy store; Playwright smoke test green. |
 | **2. Scale** | Remote env servers: SSH bootstrap + tunnel, `hx hosts add`, `hx service install`, hub supervisors + replay from many envs, file sync (5.5), SLURM runner, stale/lost rules (5.6), queue, sweeps, host/GPU status, cost. | A DeepRetro run launched from the UI on SLURM and on an SSH box, pulled, scored, and shown on the leaderboard. |
 | **3. Team + output** | Notebook, paper baselines, Slack + email alerts, weekly summary, export, storage cleanup, pairing + scoped auth, Tailscale access, Postgres server mode. | A collaborator pairs a laptop with a server hub, sees the same projects, and launches a run on a shared environment. |
 

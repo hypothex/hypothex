@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from hypothex.core.errors import GitError
 from hypothex.core.records import GitInfo
@@ -19,30 +20,72 @@ class DiffCapture:
 
     Parameters
     ----------
-    diff : str or None
-        ``git diff HEAD`` output, or None when clean, not a repo, or too large.
+    diff : bytes or None
+        Raw ``git diff HEAD --binary`` output (bytes, since tracked files need
+        not be UTF-8), or None when clean, not a repo, or too large.
     stat : str
-        ``git diff HEAD --stat`` output.
+        ``git diff HEAD --stat`` output (undecodable bytes replaced).
     too_large : bool
         True when the diff exceeded the size limit and was dropped.
     """
 
-    diff: str | None
+    diff: bytes | None
     stat: str
     too_large: bool
 
 
-def _git(path: Path, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+def _git_bytes(
+    path: Path, *args: str, input_bytes: bytes | None = None
+) -> subprocess.CompletedProcess[bytes]:
     try:
         return subprocess.run(
             ["git", "-C", str(path), *args],
             capture_output=True,
-            text=True,
-            input=input_text,
+            input=input_bytes,
             check=False,
         )
     except FileNotFoundError as exc:
         raise GitError("git is not installed") from exc
+
+
+def _git(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    raw = _git_bytes(path, *args)
+    return subprocess.CompletedProcess(
+        raw.args,
+        raw.returncode,
+        raw.stdout.decode("utf-8", errors="replace"),
+        raw.stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def strip_credentials(url: str) -> str:
+    """
+    Remove userinfo (user name, password, or token) from a remote URL.
+
+    scp-style remotes such as ``git@github.com:org/repo.git`` carry no
+    secret and are returned unchanged.
+
+    Parameters
+    ----------
+    url : str
+        A git remote URL.
+
+    Returns
+    -------
+    str
+        The URL without any ``user[:password]@`` part.
+
+    Examples
+    --------
+    >>> strip_credentials("https://user:token@example.com/org/repo.git")
+    'https://example.com/org/repo.git'
+    >>> strip_credentials("git@github.com:org/repo.git")
+    'git@github.com:org/repo.git'
+    """
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    return urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2]))
 
 
 def head_commit(path: Path) -> str | None:
@@ -84,7 +127,7 @@ def git_info(path: Path) -> GitInfo:
     remote = _git(path, "remote", "get-url", "origin")
     dirty = bool(_git(path, "status", "--porcelain").stdout.strip())
     return GitInfo(
-        repo=remote.stdout.strip() if remote.returncode == 0 else None,
+        repo=strip_credentials(remote.stdout.strip()) if remote.returncode == 0 else None,
         commit=commit,
         branch=branch,
         dirty=dirty,
@@ -107,11 +150,11 @@ def capture_diff(path: Path, limit: int = DIFF_LIMIT_BYTES) -> DiffCapture:
     DiffCapture
         ``diff`` is None when clean, not a repo, or too large.
     """
-    out = _git(path, "diff", "HEAD", "--binary")
+    out = _git_bytes(path, "diff", "HEAD", "--binary")
     if out.returncode != 0:
         return DiffCapture(diff=None, stat="", too_large=False)
     stat = _git(path, "diff", "HEAD", "--stat").stdout
-    if len(out.stdout.encode("utf-8")) > limit:
+    if len(out.stdout) > limit:
         return DiffCapture(diff=None, stat=stat, too_large=True)
     return DiffCapture(diff=out.stdout or None, stat=stat, too_large=False)
 
@@ -135,7 +178,7 @@ def commit_exists(repo: Path, commit: str) -> bool:
     return _git(repo, "cat-file", "-e", f"{commit}^{{commit}}").returncode == 0
 
 
-def create_worktree(repo: Path, commit: str, dest: Path, diff: str | None) -> Path:
+def create_worktree(repo: Path, commit: str, dest: Path, diff: bytes | None) -> Path:
     """
     Check out ``commit`` into a new detached worktree and apply ``diff``.
 
@@ -147,8 +190,9 @@ def create_worktree(repo: Path, commit: str, dest: Path, diff: str | None) -> Pa
         The commit sha to check out.
     dest : Path
         Destination directory for the new worktree.
-    diff : str or None
-        A unified diff to apply on top of the checkout, or None.
+    diff : bytes or None
+        A raw diff (as captured by ``capture_diff``) to apply on top of the
+        checkout, or None.
 
     Returns
     -------
@@ -167,7 +211,8 @@ def create_worktree(repo: Path, commit: str, dest: Path, diff: str | None) -> Pa
     if added.returncode != 0:
         raise GitError(f"git worktree add failed: {added.stderr.strip()}")
     if diff:
-        applied = _git(dest, "apply", "--whitespace=nowarn", "-", input_text=diff)
+        applied = _git_bytes(dest, "apply", "--whitespace=nowarn", "-", input_bytes=diff)
         if applied.returncode != 0:
-            raise GitError(f"could not apply the saved diff: {applied.stderr.strip()}")
+            stderr = applied.stderr.decode("utf-8", errors="replace").strip()
+            raise GitError(f"could not apply the saved diff: {stderr}")
     return dest

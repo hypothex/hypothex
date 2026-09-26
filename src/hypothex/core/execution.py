@@ -25,7 +25,7 @@ from hypothex.core.envcapture import capture_env
 from hypothex.core.errors import HypothexError, RunError, TemplateError
 from hypothex.core.evalrunner import default_python_cmd
 from hypothex.core.evaluation import evaluate_run
-from hypothex.core.fsutil import atomic_write_text, read_yaml, write_yaml
+from hypothex.core.fsutil import atomic_write_bytes, atomic_write_text, read_yaml, write_yaml
 from hypothex.core.gitinfo import capture_diff, git_info
 from hypothex.core.ids import new_run_id, utcnow
 from hypothex.core.records import ExecutorInfo, RunKind, RunRecord, RunStatus
@@ -235,7 +235,7 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         write_yaml(run_dir / "config.yaml", user_config)
     diff = capture_diff(cwd)
     if diff.diff:
-        atomic_write_text(run_dir / "git.diff", diff.diff)
+        atomic_write_bytes(run_dir / "git.diff", diff.diff)
     if diff.stat:
         atomic_write_text(run_dir / "git.stat", diff.stat)
     if diff.too_large:

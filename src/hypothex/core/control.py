@@ -250,7 +250,7 @@ def rerun(
             "it cannot be reproduced exactly"
         )
     diff_file = parent_dir / "git.diff"
-    saved_diff = diff_file.read_text(encoding="utf-8") if diff_file.is_file() else None
+    saved_diff = diff_file.read_bytes() if diff_file.is_file() else None
     cwd = Path(parent.cwd)
     if parent.git.commit is not None:
         same_tree = head_commit(repo) == parent.git.commit and capture_diff(repo).diff == saved_diff

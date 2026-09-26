@@ -6,6 +6,7 @@ import pytest
 from hypothex.core.fsutil import (
     append_jsonl,
     append_note_file,
+    atomic_write_bytes,
     atomic_write_text,
     open_jsonl_append,
     read_jsonl,
@@ -71,3 +72,10 @@ def test_append_note_file(tmp_path: Path) -> None:
     text = path.read_text()
     assert "## 2026-09-26T12:00:00+00:00 — alice" in text
     assert text.index("first") < text.index("second")
+
+
+def test_atomic_write_bytes_keeps_raw_bytes(tmp_path: Path) -> None:
+    target = tmp_path / "b" / "blob.bin"
+    atomic_write_bytes(target, b"caf\xe9\xff\n")
+    assert target.read_bytes() == b"caf\xe9\xff\n"
+    assert [p.name for p in target.parent.iterdir()] == ["blob.bin"]

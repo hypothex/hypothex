@@ -172,3 +172,33 @@ def test_repair_ignores_other_environments(ctx: Context) -> None:
         )
     )
     assert repair_runs(ctx) == []
+
+
+def test_non_utf8_dirty_tree_is_captured_and_rerun_in_place(ctx: Context, toy_repo: Path) -> None:
+    latin = toy_repo / "latin.txt"
+    latin.write_bytes("caf\xe9 old\n".encode("latin-1"))
+    git(toy_repo, "add", "latin.txt")
+    git(toy_repo, "commit", "-qm", "latin")
+    latin.write_bytes("caf\xe9 new\n".encode("latin-1"))
+    parent = execute_run(
+        ctx, prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"))).run_id
+    )
+    assert parent.status == RunStatus.FINISHED
+    assert b"+caf\xe9 new" in (ctx.run_dir(parent) / "git.diff").read_bytes()
+    child = rerun(ctx, parent.run_id, background=False)
+    assert child.status == RunStatus.FINISHED and child.cwd == parent.cwd
+
+
+def test_rerun_applies_non_utf8_diff_in_worktree(ctx: Context, toy_repo: Path) -> None:
+    latin = toy_repo / "latin.txt"
+    latin.write_bytes("caf\xe9 old\n".encode("latin-1"))
+    git(toy_repo, "add", "latin.txt")
+    git(toy_repo, "commit", "-qm", "latin")
+    latin.write_bytes("caf\xe9 dirty\n".encode("latin-1"))
+    read = cmd("import sys; sys.stdout.write(open('latin.txt', 'rb').read().hex())")
+    parent = execute_run(ctx, prepare_run(ctx, RunRequest(repo=toy_repo, command=read)).run_id)
+    git(toy_repo, "checkout", "--", "latin.txt")
+    child = rerun(ctx, parent.run_id, background=False)
+    assert "worktrees" in child.cwd and child.status == RunStatus.FINISHED
+    out = (ctx.run_dir(child) / "logs" / "stdout.log").read_text()
+    assert bytes.fromhex(out) == "caf\xe9 dirty\n".encode("latin-1")

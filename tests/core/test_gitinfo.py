@@ -33,7 +33,7 @@ def test_capture_diff_and_size_limit(tmp_path: Path) -> None:
     assert capture_diff(repo).diff is None
     (repo / "a.txt").write_text("two\n")
     cap = capture_diff(repo)
-    assert cap.diff is not None and "+two" in cap.diff and "a.txt" in cap.stat
+    assert cap.diff is not None and b"+two" in cap.diff and "a.txt" in cap.stat
     big = capture_diff(repo, limit=10)
     assert big.diff is None and big.too_large
 
@@ -59,3 +59,35 @@ def test_create_worktree_missing_commit(tmp_path: Path) -> None:
     init_git_repo(repo)
     with pytest.raises(GitError, match="not found"):
         create_worktree(repo, "0" * 40, tmp_path / "wt", None)
+
+
+def test_git_info_strips_credentials_from_remote(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    init_git_repo(repo)
+    git(repo, "remote", "add", "origin", "https://user:s3cret-token@example.com:8443/org/r.git")
+    assert git_info(repo).repo == "https://example.com:8443/org/r.git"
+    git(repo, "remote", "set-url", "origin", "https://ghp_tokenonly@github.com/org/r.git")
+    assert git_info(repo).repo == "https://github.com/org/r.git"
+
+
+def test_git_info_keeps_credential_free_remotes(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    init_git_repo(repo)
+    git(repo, "remote", "add", "origin", "git@github.com:org/r.git")
+    assert git_info(repo).repo == "git@github.com:org/r.git"
+    git(repo, "remote", "set-url", "origin", "https://github.com/org/r.git")
+    assert git_info(repo).repo == "https://github.com/org/r.git"
+
+
+def test_capture_diff_of_non_utf8_file_round_trips(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "latin.txt").write_bytes("caf\xe9 old\n".encode("latin-1"))
+    sha = init_git_repo(repo)
+    (repo / "latin.txt").write_bytes("caf\xe9 new \xff\n".encode("latin-1"))
+    cap = capture_diff(repo)
+    assert isinstance(cap.diff, bytes) and b"caf\xe9 new \xff" in cap.diff
+    assert "latin.txt" in cap.stat
+    git(repo, "checkout", "--", "latin.txt")
+    wt = create_worktree(repo, sha, tmp_path / "wt", cap.diff)
+    assert (wt / "latin.txt").read_bytes() == "caf\xe9 new \xff\n".encode("latin-1")

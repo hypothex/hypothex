@@ -25,13 +25,35 @@ def atomic_write_text(path: Path, text: str) -> None:
     path : Path
         Destination file. Parent directories are created.
     text : str
+        Full file content, written as UTF-8.
+    """
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """
+    Write bytes so readers never see a partial file.
+
+    Parameters
+    ----------
+    path : Path
+        Destination file. Parent directories are created.
+    data : bytes
         Full file content.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> target = Path(tempfile.mkdtemp()) / "blob.bin"
+    >>> atomic_write_bytes(target, b"caf\xe9")
+    >>> target.read_bytes()
+    b'caf\xe9'
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)

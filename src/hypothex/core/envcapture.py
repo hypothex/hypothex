@@ -24,12 +24,31 @@ ENV_ALLOWLIST = (
 )
 
 
-def _run(cmd: list[str], timeout: float = 30) -> str | None:
+def _run(cmd: list[str], timeout: float = 30, merge_stderr: bool = False) -> str | None:
+    """
+    Run ``cmd`` and return its output, or ``None`` on failure.
+
+    Parameters
+    ----------
+    cmd : list of str
+        Command and arguments to execute.
+    timeout : float
+        Seconds to wait before giving up.
+    merge_stderr : bool
+        When ``True``, stdout and stderr are concatenated for output meant to
+        be read by a human (e.g. ``--version`` banners that some tools print
+        to stderr). Machine-consumed output (package lists, CSV, etc.) must
+        use the default of ``False`` so stray stderr text (deprecation
+        warnings and the like) never contaminates the captured artifact.
+    """
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return (out.stdout + out.stderr).strip() if out.returncode == 0 else None
+    if out.returncode != 0:
+        return None
+    text = out.stdout + out.stderr if merge_stderr else out.stdout
+    return text.strip()
 
 
 def capture_env(repo: Path, env_dir: Path, python_cmd: list[str]) -> None:
@@ -50,7 +69,7 @@ def capture_env(repo: Path, env_dir: Path, python_cmd: list[str]) -> None:
     env_dir.mkdir(parents=True, exist_ok=True)
     system = {
         "hx_python": platform.python_version(),
-        "project_python": _run([*python_cmd, "--version"]),
+        "project_python": _run([*python_cmd, "--version"], merge_stderr=True),
         "platform": platform.platform(),
         "machine": platform.machine(),
         "processor": platform.processor(),

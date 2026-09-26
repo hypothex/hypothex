@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hypothex.core import evaluation
 from hypothex.core.context import Context
 from hypothex.core.errors import EvalError
 from hypothex.core.evaluation import evaluate_run, reeval, validate_project
@@ -27,6 +28,54 @@ def test_failing_metric_records_error_and_others_score(ctx: Context, toy_repo: P
     by_metric = {s.metric: s for s in scores}
     assert by_metric["accuracy"].value == 0.75
     assert by_metric["broken"].value is None and "boom" in (by_metric["broken"].error or "")
+
+
+def test_non_numeric_worker_values_become_a_metric_error(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", task="toy-broken", predictions=PREDS_075)
+    fake = {
+        "n_examples": 4,
+        "results": [
+            {
+                "name": "accuracy",
+                "version": "v1",
+                "values": {"value": 0.5},
+                "error": None,
+                "source_hash": None,
+            },
+            {
+                "name": "broken",
+                "version": "v1",
+                "values": {"value": "high"},
+                "error": None,
+                "source_hash": None,
+            },
+        ],
+    }
+    monkeypatch.setattr(evaluation, "run_worker", lambda *a, **k: fake)
+    scores, _ = evaluate_run(ctx, "r1")
+    by_metric = {s.metric: s for s in scores}
+    assert by_metric["accuracy"].value == 0.5
+    assert by_metric["broken"].value is None and "non-numeric" in (by_metric["broken"].error or "")
+
+
+def test_reeval_records_unexpected_error_and_continues(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    seed_finished_run(ctx, toy_repo, "r2", predictions=PREDS_075)
+    real = evaluation.evaluate_run
+
+    def flaky(c: Context, run_id: str, **kw: object) -> object:
+        if run_id == "r1":
+            raise RuntimeError("disk on fire")
+        return real(c, run_id, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(evaluation, "evaluate_run", flaky)
+    report = reeval(ctx, project="toy", task="toy-acc")
+    assert report.evaluated == ["r2"]
+    assert report.skipped == {"r1": "RuntimeError: disk on fire"}
 
 
 def test_reeval_skips_run_without_predictions(ctx: Context, toy_repo: Path) -> None:

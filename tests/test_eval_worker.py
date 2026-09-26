@@ -36,13 +36,37 @@ def _request(repo: Path, run_dir: Path, metrics: list[str]) -> dict:
 
 
 def test_normalize_result_variants() -> None:
-    res = MetricResult(values={"a": 1.0})
-    assert normalize_result(res) is res
+    res = MetricResult(values={"a": 1.0}, per_example={"ex-0": {"ok": True}})
+    assert normalize_result(res) == res
     assert normalize_result(0.5).values == {"value": 0.5}
     assert normalize_result({"k=1": 1}).values == {"k=1": 1.0}
     for bad in ("x", True, {"a": "b"}):
         with pytest.raises(TypeError):
             normalize_result(bad)
+
+
+def test_normalize_result_validates_metric_result_values() -> None:
+    assert normalize_result(MetricResult(values={"a": 1})).values == {"a": 1.0}
+    for bad in ({"a": "0.5x"}, {"a": None}, {"a": True}, {}):
+        with pytest.raises(TypeError, match="MetricResult.values"):
+            normalize_result(MetricResult(values=bad))  # type: ignore[arg-type]
+
+
+def test_evaluate_records_per_metric_error_for_non_numeric_result(tmp_path: Path) -> None:
+    repo = write_toy_project(tmp_path / "repo", use_git=False)
+    (repo / "badmetrics.py").write_text(
+        "from hypothex.metrics import MetricResult\n\n\n"
+        "def stringy(examples):\n"
+        "    return MetricResult(values={'value': 'high'})\n"
+    )
+    run_dir = _run_dir(tmp_path, [{"id": "ex-0", "prediction": 0}])
+    request = _request(repo, run_dir, ["accuracy"])
+    request["metrics"].append(
+        {"name": "stringy", "version": "v1", "fn": "badmetrics:stringy", "params": {}}
+    )
+    acc, stringy = run_worker("evaluate", request, [sys.executable], cwd=repo)["results"]
+    assert acc["values"] == {"value": 1.0} and acc["error"] is None
+    assert stringy["values"] == {} and "MetricResult.values" in stringy["error"]
 
 
 def test_evaluate_scores_and_writes_per_example(tmp_path: Path) -> None:

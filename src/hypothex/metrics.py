@@ -68,7 +68,7 @@ def _is_number(x: object) -> bool:
 
 def normalize_result(raw: object) -> MetricResult:
     """
-    Convert a metric function's return value into a ``MetricResult``.
+    Convert a metric function's return value into a validated ``MetricResult``.
 
     Parameters
     ----------
@@ -77,19 +77,33 @@ def normalize_result(raw: object) -> MetricResult:
     Returns
     -------
     MetricResult
+        A result whose ``values`` is a non-empty dict of str to ``float``.
 
     Raises
     ------
     TypeError
-        For any other type.
+        For any other type, or a ``MetricResult`` whose ``values`` is not a
+        non-empty dict of numbers.
 
     Examples
     --------
     >>> normalize_result(0.5).values
     {'value': 0.5}
+    >>> normalize_result(MetricResult(values={"k=1": 1})).values
+    {'k=1': 1.0}
     """
     if isinstance(raw, MetricResult):
-        return raw
+        values = raw.values
+        if not (
+            isinstance(values, dict) and values and all(_is_number(v) for v in values.values())
+        ):
+            raise TypeError(
+                "MetricResult.values must be a non-empty dict of str to number; got "
+                f"{values!r:.200}"
+            )
+        return MetricResult(
+            values={str(k): float(v) for k, v in values.items()}, per_example=raw.per_example
+        )
     if _is_number(raw):
         return MetricResult(values={"value": float(cast(float, raw))})
     if isinstance(raw, dict) and raw and all(_is_number(v) for v in raw.values()):

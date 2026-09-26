@@ -66,6 +66,27 @@ def _task_setup(ctx: Context, record: RunRecord) -> tuple[Path, ProjectConfig, T
     return repo, config, config.tasks[record.task]
 
 
+def _numeric_values(raw: object) -> dict[str, float] | None:
+    """
+    Return the worker's values as floats, or None if any is not a number.
+
+    Parameters
+    ----------
+    raw : object
+        The ``values`` field of one worker result.
+
+    Returns
+    -------
+    dict of str to float, or None
+        None when ``raw`` is not a dict of real numbers (bools excluded).
+    """
+    if not isinstance(raw, dict):
+        return None
+    if not all(isinstance(v, int | float) and not isinstance(v, bool) for v in raw.values()):
+        return None
+    return {str(k): float(v) for k, v in raw.items()}
+
+
 def evaluate_run(
     ctx: Context, run_id: str, *, metrics: list[str] | None = None
 ) -> tuple[list[ScoreRecord], list[str]]:
@@ -142,13 +163,17 @@ def evaluate_run(
             )
         elif digest and ref not in known:
             known[ref] = digest
-        if r["error"]:
+        values, error = _numeric_values(r["values"]), r["error"]
+        if values is None:
+            values = {}
+            error = error or f"metric returned non-numeric values: {r['values']!r:.200}"
+        if error:
             scores.append(
                 ScoreRecord(
                     metric=r["name"],
                     version=r["version"],
                     key="*",
-                    error=r["error"],
+                    error=error,
                     source_hash=digest,
                     created_at=now,
                 )
@@ -158,11 +183,11 @@ def evaluate_run(
                 metric=r["name"],
                 version=r["version"],
                 key=k,
-                value=float(v),
+                value=v,
                 source_hash=digest,
                 created_at=now,
             )
-            for k, v in r["values"].items()
+            for k, v in values.items()
         )
     ctx.store.save_metric_hashes(record.project, known)
     for score in scores:
@@ -197,6 +222,8 @@ def reeval(
     Returns
     -------
     EvalReport
+        A run that fails to evaluate (for any reason) is listed in
+        ``skipped`` with the reason; the other runs are still scored.
 
     Raises
     ------
@@ -254,6 +281,9 @@ def reeval(
             continue
         except EvalError as exc:
             report.skipped[record.run_id] = str(exc)[:500]
+            continue
+        except Exception as exc:  # noqa: BLE001 - one bad run must not abort the batch
+            report.skipped[record.run_id] = f"{type(exc).__name__}: {exc}"[:500]
             continue
         report.evaluated.append(record.run_id)
         report.warnings.extend(w for w in warnings if w not in report.warnings)

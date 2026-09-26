@@ -38,11 +38,13 @@ Run and inspect experiments
 
 .. code-block:: bash
 
-   hx run -t TASK -H WHY --seed N -- CMD {seed}
+   hx run -t TASK -H WHY --seed N -- CMD '{seed}'
 
 Run ``CMD`` in the foreground, recording the hypothesis, git commit, dataset
 fingerprints, environment, logs, and scores. ``{seed}`` (and other template
-variables) are filled in before the command runs.
+variables) are filled in before the command runs. Quote placeholders
+(``'{seed}'``) so your shell passes them through unchanged; ``--seed={seed}``
+also works.
 
 .. code-block:: bash
 

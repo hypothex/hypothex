@@ -65,6 +65,20 @@ def test_run_json_status_and_exit_code(in_repo: Path) -> None:
     assert json.loads(result.stdout)["status"] == "failed"
 
 
+def test_run_warns_on_stderr_when_seed_is_dropped(in_repo: Path) -> None:
+    result = runner.invoke(app, ["run", "--json", "--seed", "1", "--", PY, "-c", "pass"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["status"] == "finished"
+    assert "warning:" in result.stderr
+    assert "{seed}" in result.stderr
+
+
+def test_run_no_seed_warning_when_seed_is_templated(in_repo: Path) -> None:
+    result = runner.invoke(app, ["run", "--json", "--seed", "1", "--", PY, "-c", "pass", "{seed}"])
+    assert result.exit_code == 0
+    assert "warning:" not in result.stderr
+
+
 def test_read_commands(in_repo: Path) -> None:
     a = _run(1)
     b = _run(2)

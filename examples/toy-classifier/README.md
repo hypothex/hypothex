@@ -10,7 +10,7 @@ git init -q && git add -A && git commit -qm init   # optional, gives exact rerun
 for m in logreg rf knn; do
   for s in 1 2 3; do
     uv run hx run -t toy-test -H "baseline: $m" --seed $s -- \
-      python train_eval.py --model $m --seed {seed}
+      python train_eval.py --model $m --seed '{seed}'
   done
 done
 

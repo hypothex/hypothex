@@ -5,7 +5,7 @@ import pytest
 
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
-from hypothex.core.execution import RunRequest, execute_run, prepare_run
+from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
 from hypothex.core.records import RunStatus
 from tests.factories import write_toy_project
 
@@ -37,6 +37,48 @@ def test_foreground_run_finishes_with_logs(ctx: Context, toy_repo: Path) -> None
     assert (run_dir / "env" / "system.json").is_file()
     types = [e.type for e in ctx.events.since(0) if e.run_id == rec.run_id]
     assert types == ["run.created", "run.started", "run.finished"]
+
+
+def _warning_events(ctx: Context, run_id: str) -> list:
+    return [e for e in ctx.events.since(0) if e.run_id == run_id and e.type == "run.warning"]
+
+
+def test_seed_warning_none_when_field_present() -> None:
+    assert seed_warning(["python", "train.py", "--seed", "{seed}"], 3) is None
+    assert seed_warning(["python", "train.py", "--seed={seed}"], 3) is None
+
+
+def test_seed_warning_none_when_seed_is_none() -> None:
+    assert seed_warning(["python", "train.py", "--seed"], None) is None
+
+
+def test_seed_warning_message_when_seed_dropped() -> None:
+    msg = seed_warning(["python", "train.py", "--seed"], 3)
+    assert msg is not None
+    assert "{seed}" in msg
+    assert "HYPOTHEX_SEED" in msg
+    assert "hx.seed()" in msg
+
+
+def test_prepare_run_emits_seed_warning_when_not_templated(ctx: Context, toy_repo: Path) -> None:
+    rec = prepare_run(
+        ctx, RunRequest(repo=toy_repo, command=cmd("pass", "--seed"), seed=7, hypothesis="x")
+    )
+    warnings = _warning_events(ctx, rec.run_id)
+    assert len(warnings) == 1
+    assert "{seed}" in warnings[0].payload["message"]
+
+
+def test_prepare_run_no_warning_when_seed_templated(ctx: Context, toy_repo: Path) -> None:
+    rec = prepare_run(
+        ctx, RunRequest(repo=toy_repo, command=cmd("pass", "{seed}"), seed=7, hypothesis="x")
+    )
+    assert _warning_events(ctx, rec.run_id) == []
+
+
+def test_prepare_run_no_warning_when_seed_is_none(ctx: Context, toy_repo: Path) -> None:
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), hypothesis="x"))
+    assert _warning_events(ctx, rec.run_id) == []
 
 
 def test_failing_command_is_failed(ctx: Context, toy_repo: Path) -> None:

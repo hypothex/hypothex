@@ -113,6 +113,47 @@ def _executable_exists(argv0: str, cwd: Path) -> bool:
     return shutil.which(argv0) is not None
 
 
+def seed_warning(template: list[str], seed: int | None) -> str | None:
+    """
+    Warn when ``--seed`` is set but the command template never uses it.
+
+    A run started with ``--seed N`` but no ``{seed}`` anywhere in its command
+    template silently drops the seed from the child's argv — a shell that
+    swallows a bare ``{seed}`` word (unquoted, so it looks like an empty
+    match) is a common cause. The child can still read ``$HYPOTHEX_SEED`` or
+    call ``hx.seed()``, so this is a warning, not a blocking error.
+
+    Parameters
+    ----------
+    template : list of str
+        The command template before rendering (``record.command_template``).
+    seed : int or None
+        ``req.seed`` / ``record.seed``.
+
+    Returns
+    -------
+    str or None
+        A warning message, or None if the seed is unset or already wired in.
+
+    Examples
+    --------
+    >>> seed_warning(["python", "train.py", "--seed", "{seed}"], 3) is None
+    True
+    >>> seed_warning(["python", "train.py", "--seed"], 3) is not None
+    True
+    >>> seed_warning(["python", "train.py"], None) is None
+    True
+    """
+    if seed is None:
+        return None
+    if any("{seed}" in part for part in template):
+        return None
+    return (
+        f"--seed {seed} is not passed to the command; put {{seed}} in it "
+        "(quote it: '{seed}') or read hx.seed() / $HYPOTHEX_SEED"
+    )
+
+
 def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     """
     Validate a request, create the run folder, and capture git/env/dataset state.
@@ -241,6 +282,9 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     if diff.too_large:
         atomic_write_text(run_dir / "git.diff.too_large", "diff larger than the capture limit\n")
     capture_env(repo, run_dir / "env", default_python_cmd(repo, config))
+    warning = seed_warning(template, req.seed)
+    if warning is not None:
+        ctx.emit("run.warning", record, {"message": warning})
     return record
 
 

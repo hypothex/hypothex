@@ -25,7 +25,7 @@ from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
 from hypothex.core.errors import HypothexError, RunError
 from hypothex.core.evaluation import reeval, validate_project
-from hypothex.core.execution import RunRequest, execute_run, prepare_run
+from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
 from hypothex.core.index import rebuild_index
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
@@ -166,6 +166,12 @@ def _finish(record: RunRecord, as_json: bool) -> None:
         )
     if record.status in TERMINAL_STATUSES and record.status != RunStatus.FINISHED:
         raise typer.Exit(record.exit_code or 1)
+
+
+def _warn_seed(record: RunRecord) -> None:
+    warning = seed_warning(record.command_template, record.seed)
+    if warning is not None:
+        typer.secho(f"warning: {warning}", fg="yellow", err=True)
 
 
 RUN_SETTINGS = {"allow_extra_args": True, "ignore_unknown_options": True}
@@ -402,6 +408,7 @@ def run(
     c = _ctx()
     record = prepare_run(c, req)
     typer.secho(f"run {record.run_id} -> {c.run_dir(record)}", fg="cyan", err=True)
+    _warn_seed(record)
     final = execute_run(
         c,
         record.run_id,
@@ -442,6 +449,7 @@ def launch(
     )
     c = _ctx()
     record = launch_run(c, req)
+    _warn_seed(record)
     if wait:
         record = wait_for_run(c, record.run_id, timeout=WAIT_FOREVER)
         _finish(record, as_json)

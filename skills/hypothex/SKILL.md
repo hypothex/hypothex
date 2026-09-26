@@ -26,12 +26,14 @@ author, and Hypothex rejects runs that have no hypothesis.
    ```bash
    for s in 1 2 3; do
      hx run --json -t <task> -H "<why this should help>" --seed $s -- \
-       python train.py --model new --seed {seed}
+       python train.py --model new --seed '{seed}'
    done
    ```
 
    `{seed}`, `{run_dir}`, `{dataset.path}`, `{config}` are filled in by Hypothex.
    Use `{seed}` (not a literal number) so runs group into one seed group.
+   Quote placeholders (`'{seed}'`) so your shell passes them through unchanged;
+   `--seed={seed}` also works.
    Long jobs: `hx launch ... --json` returns at once; check with
    `hx logs <run_id> --follow` or `hx show <run_id> --json`.
 5. Compare: `hx compare <new_run> <best_run> --json`, and

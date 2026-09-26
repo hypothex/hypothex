@@ -5,16 +5,20 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
 from hypothex.core.evaluation import evaluate_run
 from tests.factories import PREDS_075, seed_finished_run
 
+WS_URL = "ws://127.0.0.1:7777/api/v1/ws"  # TestClient defaults to Host "testserver"
+
 
 @pytest.fixture
 def client(home: Path) -> Iterator[TestClient]:
-    with TestClient(create_app(home, background_repair=False)) as c:
+    app = create_app(home, background_repair=False)
+    with TestClient(app, base_url="http://127.0.0.1:7777") as c:
         yield c
 
 
@@ -93,7 +97,7 @@ def test_ws_replays_then_signals_ready(client: TestClient, ctx: Context) -> None
     for i in range(3):
         ctx.events.append("test.event", payload={"i": i})
     last = ctx.events.last_sequence()
-    with client.websocket_connect("/api/v1/ws") as ws:
+    with client.websocket_connect(WS_URL) as ws:
         ws.send_json({"type": "subscribe", "after_sequence": 0})
         seen = [ws.receive_json() for _ in range(last)]
         assert [m["event"]["sequence"] for m in seen] == list(range(1, last + 1))
@@ -101,6 +105,39 @@ def test_ws_replays_then_signals_ready(client: TestClient, ctx: Context) -> None
         ctx.events.append("test.live")
         live = ws.receive_json()
         assert live["type"] == "event" and live["event"]["type"] == "test.live"
-    with client.websocket_connect("/api/v1/ws") as ws:
+    with client.websocket_connect(WS_URL) as ws:
         ws.send_json({"type": "subscribe", "after_sequence": last - 1})
         assert ws.receive_json()["event"]["sequence"] == last
+
+
+def test_foreign_host_is_rejected(client: TestClient) -> None:
+    evil = {"Host": "attacker.example:7777", "Origin": "http://attacker.example:7777"}
+    assert client.get("/api/v1/runs", headers={"Host": "attacker.example:7777"}).status_code == 400
+    launch = client.post("/api/v1/runs", headers=evil, json={"repo": "/", "command": ["true"]})
+    assert launch.status_code == 400 and "Invalid host" in launch.text
+    for host in ("127.0.0.1:7777", "localhost:7777", "[::1]:7777"):
+        assert client.get("/api/v1/runs", headers={"Host": host}).status_code == 200
+
+
+def test_bind_host_is_allowed_but_wildcard_is_not(home: Path) -> None:
+    with TestClient(create_app(home, background_repair=False, host="10.1.2.3")) as c:
+        assert c.get("/api/v1/runs", headers={"Host": "10.1.2.3:7777"}).status_code == 200
+    with TestClient(create_app(home, background_repair=False, host="0.0.0.0")) as c:
+        assert c.get("/api/v1/runs", headers={"Host": "0.0.0.0:7777"}).status_code == 400
+
+
+def test_cross_origin_writes_and_ws_are_rejected(client: TestClient) -> None:
+    evil = {"Origin": "http://attacker.example"}
+    body = {"repo": "/", "command": ["true"]}
+    resp = client.post("/api/v1/runs", headers=evil, json=body)
+    assert resp.status_code == 403
+    assert client.post("/api/v1/runs", headers={"Origin": "null"}, json=body).status_code == 403
+    assert client.get("/api/v1/runs", headers=evil).status_code == 200
+    with pytest.raises(WebSocketDisconnect), client.websocket_connect(WS_URL, headers=evil):
+        pass
+    local = {"Origin": "http://localhost:5173"}
+    note = client.post("/api/v1/runs/nope/notes", headers=local, json={"text": "x"})
+    assert note.status_code == 404
+    with client.websocket_connect(WS_URL, headers=local) as ws:
+        ws.send_json({"type": "subscribe", "after_sequence": 0})
+        assert ws.receive_json()["type"] == "ready"

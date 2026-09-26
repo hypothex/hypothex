@@ -732,7 +732,7 @@ def serve(
 
     from hypothex.api.app import create_app
 
-    uvicorn.run(create_app(_state.home), host=host, port=port)
+    uvicorn.run(create_app(_state.home, host=host), host=host, port=port)
 
 
 @app.command()

@@ -14,8 +14,10 @@ from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from hypothex._version import __version__
+from hypothex.api.security import OriginGuard, allowed_hosts
 from hypothex.core import control
 from hypothex.core import queries as q
 from hypothex.core.context import Context
@@ -98,9 +100,16 @@ async def _repair_loop(ctx: Context) -> None:
             log.exception("run repair failed")
 
 
-def create_app(home: Path | None = None, *, background_repair: bool = True) -> FastAPI:
+def create_app(
+    home: Path | None = None, *, background_repair: bool = True, host: str | None = None
+) -> FastAPI:
     """
     Build the FastAPI application.
+
+    Only local requests are served: the ``Host`` header must name a loopback
+    address (or ``host``), else the answer is ``400``; a state-changing request
+    or WebSocket handshake with a foreign ``Origin`` is rejected with ``403``.
+    This blocks DNS-rebinding and cross-site attacks from a browser page.
 
     Parameters
     ----------
@@ -108,6 +117,9 @@ def create_app(home: Path | None = None, *, background_repair: bool = True) -> F
         Hypothex home; defaults to ``$HYPOTHEX_HOME`` or ``~/.hypothex``.
     background_repair : bool
         Mark orphaned runs lost every 30 s (disable in tests).
+    host : str, optional
+        The address the server binds to; also accepted as ``Host`` unless it is
+        a wildcard such as ``0.0.0.0``.
 
     Returns
     -------
@@ -139,6 +151,9 @@ def create_app(home: Path | None = None, *, background_repair: bool = True) -> F
         openapi_url="/api/openapi.json",
     )
     app.state.ctx = ctx
+    hosts = allowed_hosts(host)
+    app.add_middleware(OriginGuard, hosts=hosts)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
 
     @app.exception_handler(HypothexError)
     async def hypothex_error(_: Request, exc: HypothexError) -> JSONResponse:

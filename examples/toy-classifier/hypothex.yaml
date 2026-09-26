@@ -1,0 +1,32 @@
+project: toy-classifier
+description: Three scikit-learn models on a synthetic 3-class problem.
+
+datasets:
+  toyset:
+    version: v1
+    path: data/test.jsonl
+    splits: {train: data/train.jsonl, test: data/test.jsonl}
+
+metrics:
+  accuracy:
+    version: v1
+    fn: toy_metrics:accuracy
+    changelog: {v1: fraction of exact matches}
+  macro_f1:
+    version: v1
+    fn: toy_metrics:macro_f1
+    changelog: {v1: sklearn macro F1}
+
+tasks:
+  toy-test:
+    description: Classify the held-out test split.
+    dataset: toyset
+    split: test
+    metrics: [accuracy, macro_f1]
+    primary: accuracy
+
+stages:
+  train: python train_eval.py --model {model} --seed {seed}
+
+env:
+  python: [python]

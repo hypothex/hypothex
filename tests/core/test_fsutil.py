@@ -7,6 +7,7 @@ from hypothex.core.fsutil import (
     append_jsonl,
     append_note_file,
     atomic_write_text,
+    open_jsonl_append,
     read_jsonl,
     read_yaml,
     write_yaml,
@@ -28,6 +29,23 @@ def test_read_jsonl_skips_partial_last_line(tmp_path: Path) -> None:
     with path.open("a") as fh:
         fh.write('{"a": 3')  # simulated crash mid-write
     assert read_jsonl(path) == [{"a": 1}, {"a": 2}]
+
+
+def test_append_after_partial_line_keeps_new_rows(tmp_path: Path) -> None:
+    path = tmp_path / "scores.jsonl"
+    append_jsonl(path, {"a": 1})
+    with path.open("a") as fh:
+        fh.write('{"a":2,"trunc')  # simulated crash mid-write
+    append_jsonl(path, {"a": 3})
+    append_jsonl(path, {"a": 4})
+    assert read_jsonl(path) == [{"a": 1}, {"a": 3}, {"a": 4}]
+
+
+def test_open_jsonl_append_creates_file_without_leading_newline(tmp_path: Path) -> None:
+    path = tmp_path / "new" / "m.jsonl"
+    with open_jsonl_append(path) as fh:
+        fh.write(b'{"a":1}\n')
+    assert path.read_bytes() == b'{"a":1}\n'
 
 
 def test_read_jsonl_missing_file_is_empty(tmp_path: Path) -> None:

@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import yaml
 
@@ -65,12 +67,56 @@ def read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def append_jsonl(path: Path, obj: dict[str, Any]) -> None:
-    """Append one JSON object as a line."""
+@contextmanager
+def open_jsonl_append(path: Path) -> Iterator[BinaryIO]:
+    """
+    Open a JSONL file for appending whole lines.
+
+    If a crash left a partial last line (no trailing newline), a newline is
+    written first so the next row starts on its own line instead of being
+    glued onto the partial one (which readers would then drop).
+
+    Parameters
+    ----------
+    path : Path
+        JSONL file; it and its parent directory are created if missing.
+
+    Yields
+    ------
+    BinaryIO
+        Binary handle positioned at the end of the file.
+
+    Examples
+    --------
+    >>> with open_jsonl_append(path) as fh:  # doctest: +SKIP
+    ...     fh.write(b'{"a":1}\\n')
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as fh:
+        if fh.seek(0, os.SEEK_END) > 0:
+            fh.seek(-1, os.SEEK_END)
+            if fh.read(1) != b"\n":
+                fh.write(b"\n")
+        yield fh
+
+
+def append_jsonl(path: Path, obj: dict[str, Any]) -> None:
+    """
+    Append one JSON object as a line.
+
+    A partial last line left by a crash is terminated first, so the new row is
+    never lost.
+
+    Parameters
+    ----------
+    path : Path
+        JSONL file; created if missing.
+    obj : dict
+        JSON-serialisable mapping (non-JSON values use ``str``).
+    """
     line = json.dumps(obj, default=str, separators=(",", ":"))
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
+    with open_jsonl_append(path) as fh:
+        fh.write((line + "\n").encode("utf-8"))
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:

@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from hypothex.core.fsutil import append_jsonl, append_note_file
+from hypothex.core.fsutil import append_jsonl, append_note_file, open_jsonl_append
 
 
 class Run:
@@ -80,13 +80,12 @@ class Run:
             If a row lacks ``id`` or ``prediction``.
         """
         path = self.run_dir / "predictions" / "predictions.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
         count = 0
-        with path.open("a", encoding="utf-8") as fh:
+        with open_jsonl_append(path) as fh:
             for row in rows:
                 if "id" not in row or "prediction" not in row:
                     raise ValueError("each prediction row needs 'id' and 'prediction'")
-                fh.write(json.dumps(dict(row), default=str) + "\n")
+                fh.write((json.dumps(dict(row), default=str) + "\n").encode("utf-8"))
                 count += 1
         return count
 

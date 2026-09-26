@@ -68,3 +68,12 @@ def test_log_artifact_and_note(run_env: Path, tmp_path: Path) -> None:
     assert row == {"kind": "checkpoint", "path": str(ckpt.resolve()), "host": "local", "size": 5}
     run.note("loss spikes at 9k")
     assert "loss spikes at 9k" in (run_env / "notes.md").read_text()
+
+
+def test_log_predictions_after_partial_line_keeps_rows(run_env: Path) -> None:
+    path = run_env / "predictions" / "predictions.jsonl"
+    path.write_text('{"id": "a", "prediction": 1}\n{"id": "b", "pred')  # crash mid-write
+    assert hx.current().log_predictions([{"id": "c", "prediction": 3}]) == 1
+    lines = path.read_text().splitlines()
+    assert json.loads(lines[-1]) == {"id": "c", "prediction": 3}
+    assert json.loads(lines[0])["id"] == "a"

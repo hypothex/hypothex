@@ -190,6 +190,31 @@ def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) ->
     return ctx.update_run(run_id, "run.killed", _mark(RunStatus.KILLED), {"reason": "stopped"})
 
 
+def _relative_cwd(cwd: Path, repo: Path, previous_repos: list[Path]) -> Path:
+    """
+    Return a run's working directory relative to the repo it ran in.
+
+    Parameters
+    ----------
+    cwd : Path
+        The run's recorded working directory.
+    repo : Path
+        The project's current repo root.
+    previous_repos : list of Path
+        Earlier repo roots of the project (it was re-registered after a move).
+
+    Returns
+    -------
+    Path
+        ``cwd`` relative to ``repo``, else to the deepest previous repo that
+        contains it, else ``Path()`` (the repo root).
+    """
+    for root in [repo, *sorted(previous_repos, key=lambda p: len(p.parts), reverse=True)]:
+        if cwd.is_relative_to(root):
+            return cwd.relative_to(root)
+    return Path()
+
+
 def _start(
     ctx: Context,
     req: RunRequest,
@@ -217,7 +242,9 @@ def rerun(
 
     If the repo is no longer at the recorded commit (or its uncommitted diff
     differs), the rerun executes in a fresh git worktree at the recorded commit
-    with the saved diff applied.
+    with the saved diff applied. If the repo moved since the parent ran (the
+    project was re-registered at a new path), the working directory is mapped
+    onto the new location.
 
     Parameters
     ----------
@@ -239,10 +266,12 @@ def rerun(
     Raises
     ------
     RunError
-        If the saved diff was too large to reproduce.
+        If the saved diff was too large to reproduce, or the working
+        directory does not exist in the (possibly moved) repo.
     """
     parent = ctx.find_record(run_id)
-    repo = Path(ctx.store.load_project(parent.project).repo)
+    entry = ctx.store.load_project(parent.project)
+    repo = Path(entry.repo)
     parent_dir = ctx.run_dir(parent)
     if (parent_dir / "git.diff.too_large").exists():
         raise RunError(
@@ -251,7 +280,8 @@ def rerun(
         )
     diff_file = parent_dir / "git.diff"
     saved_diff = diff_file.read_bytes() if diff_file.is_file() else None
-    cwd = Path(parent.cwd)
+    relative = _relative_cwd(Path(parent.cwd), repo, [Path(p) for p in entry.previous_repos])
+    cwd = repo / relative
     if parent.git.commit is not None:
         same_tree = head_commit(repo) == parent.git.commit and capture_diff(repo).diff == saved_diff
         if not same_tree:
@@ -259,11 +289,12 @@ def rerun(
                 f"{parent.run_id}-{secrets.token_hex(3)}"
             )
             create_worktree(repo, parent.git.commit, worktree, saved_diff)
-            try:
-                relative = cwd.relative_to(repo)
-            except ValueError:
-                relative = Path()
             cwd = worktree / relative
+    if not cwd.is_dir():
+        raise RunError(
+            f"working directory {cwd} for the rerun of {run_id} does not exist "
+            f"(the run used {parent.cwd}; the project repo is now {repo})"
+        )
     config_file = parent_dir / "config.yaml"
     req = RunRequest(
         repo=repo,

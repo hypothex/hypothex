@@ -29,6 +29,17 @@ def test_register_and_load_project(store: RunStore, tmp_path: Path) -> None:
         store.load_project("nope")
 
 
+def test_register_at_new_path_remembers_previous_repos(store: RunStore, tmp_path: Path) -> None:
+    cfg = ProjectConfig(project="toy")
+    a, b = tmp_path / "a", tmp_path / "b"
+    assert store.register_project(cfg, a).previous_repos == []
+    assert store.register_project(cfg, a).previous_repos == []
+    assert store.register_project(cfg, b).previous_repos == [str(a.resolve())]
+    entry = store.register_project(cfg, a)
+    assert entry.repo == str(a.resolve()) and entry.previous_repos == [str(b.resolve())]
+    assert store.load_project("toy").previous_repos == [str(b.resolve())]
+
+
 def test_create_read_and_duplicate(store: RunStore) -> None:
     record = make_record()
     run_dir = store.create_run(record)

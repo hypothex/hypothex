@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from hypothex.core.config import ProjectConfig
 from hypothex.core.errors import RunNotFoundError, StoreError
@@ -34,12 +34,18 @@ RUN_SUBDIRS = ("logs", "predictions", "env")
 
 
 class ProjectEntry(BaseModel):
-    """A registered project: its repo path and a snapshot of its config."""
+    """
+    A registered project: its repo path and a snapshot of its config.
+
+    ``previous_repos`` lists earlier repo paths (most recent first), so runs
+    recorded before the repo moved can be mapped onto the new location.
+    """
 
     project: str
     repo: str
     config: ProjectConfig
     registered_at: datetime
+    previous_repos: list[str] = Field(default_factory=list)
 
 
 @contextmanager
@@ -92,13 +98,26 @@ class RunStore:
         Returns
         -------
         ProjectEntry
-            The stored entry. The latest registration wins.
+            The stored entry. The latest registration wins; when the repo
+            path changed, the old path is kept in ``previous_repos``.
         """
+        repo_path = str(repo.resolve())
+        previous: list[str] = []
+        try:
+            old = self.load_project(config.project)
+        except StoreError:  # new project, or an unreadable file being replaced
+            old = None
+        if old is not None:
+            history = (
+                [old.repo, *old.previous_repos] if old.repo != repo_path else old.previous_repos
+            )
+            previous = [p for p in dict.fromkeys(history) if p != repo_path]
         entry = ProjectEntry(
             project=config.project,
-            repo=str(repo.resolve()),
+            repo=repo_path,
             config=config,
             registered_at=utcnow(),
+            previous_repos=previous,
         )
         atomic_write_text(self._project_file(config.project), entry.model_dump_json(indent=2))
         return entry

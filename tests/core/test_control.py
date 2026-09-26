@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -230,3 +231,52 @@ def test_stop_requested_while_child_starts_kills_the_child(
     assert done.status == RunStatus.KILLED
     assert time.monotonic() - start < 10
     assert not process_alive(done.executor.child_pid, None)
+
+
+PRINT_CWD = cmd("import os; print(os.getcwd())")
+
+
+def _moved_repo_parent(ctx: Context, toy_repo: Path, tmp_path: Path) -> tuple[str, Path]:
+    """Run PRINT_CWD in an untracked ``sub/`` of the repo, then move the repo."""
+    (toy_repo / "sub").mkdir()
+    (toy_repo / "sub" / "scratch.txt").write_text("untracked\n")
+    req = RunRequest(repo=toy_repo, command=PRINT_CWD, cwd=toy_repo / "sub")
+    parent = execute_run(ctx, prepare_run(ctx, req).run_id)
+    assert parent.status == RunStatus.FINISHED
+    moved = tmp_path / "moved" / "toy-renamed"
+    moved.parent.mkdir()
+    shutil.move(toy_repo, moved)
+    ctx.register_project(moved)
+    return parent.run_id, moved
+
+
+def test_rerun_after_repo_moved_rebases_cwd(ctx: Context, toy_repo: Path, tmp_path: Path) -> None:
+    parent_id, moved = _moved_repo_parent(ctx, toy_repo, tmp_path)
+    child = rerun(ctx, parent_id, background=False)
+    assert child.status == RunStatus.FINISHED
+    assert Path(child.cwd) == (moved / "sub").resolve()
+    out = (ctx.run_dir(child) / "logs" / "stdout.log").read_text().strip()
+    assert Path(out).resolve() == (moved / "sub").resolve()
+
+
+def test_rerun_after_repo_moved_with_missing_cwd_is_clear_error(
+    ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    parent_id, moved = _moved_repo_parent(ctx, toy_repo, tmp_path)
+    shutil.rmtree(moved / "sub")
+    with pytest.raises(RunError, match="working directory .*sub.* does not exist"):
+        rerun(ctx, parent_id, background=False)
+
+
+def test_rerun_after_repo_moved_without_history_uses_repo_root(
+    ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    parent_id, moved = _moved_repo_parent(ctx, toy_repo, tmp_path)
+    # a project.json written before repo history was kept
+    project_file = ctx.layout.project_dir("toy") / "project.json"
+    data = json.loads(project_file.read_text())
+    data.pop("previous_repos", None)
+    project_file.write_text(json.dumps(data))
+    child = rerun(ctx, parent_id, background=False)
+    assert child.status == RunStatus.FINISHED
+    assert Path(child.cwd) == moved.resolve()

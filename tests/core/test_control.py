@@ -12,7 +12,14 @@ from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
 from hypothex.core.errors import RunError
-from hypothex.core.execution import RunRequest, execute_run, prepare_run, process_create_time
+from hypothex.core.execution import (
+    STOP_MARKER,
+    RunRequest,
+    execute_run,
+    prepare_run,
+    process_alive,
+    process_create_time,
+)
 from hypothex.core.ids import utcnow
 from hypothex.core.records import ExecutorInfo, RunKind, RunStatus
 from tests.factories import git, make_record
@@ -202,3 +209,24 @@ def test_rerun_applies_non_utf8_diff_in_worktree(ctx: Context, toy_repo: Path) -
     assert "worktrees" in child.cwd and child.status == RunStatus.FINISHED
     out = (ctx.run_dir(child) / "logs" / "stdout.log").read_text()
     assert bytes.fromhex(out) == "caf\xe9 dirty\n".encode("latin-1")
+
+
+def test_stop_requested_while_child_starts_kills_the_child(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # stop_run writes the marker after the pre-start check but before the run
+    # is recorded as running: the executor must still signal the child.
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("import time; time.sleep(20)")))
+    real_popen = subprocess.Popen
+
+    def popen_then_stop(*args: object, **kwargs: object) -> subprocess.Popen:
+        proc = real_popen(*args, **kwargs)  # type: ignore[call-overload]
+        (ctx.run_dir(rec) / STOP_MARKER).write_text("now")
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", popen_then_stop)
+    start = time.monotonic()
+    done = execute_run(ctx, rec.run_id)
+    assert done.status == RunStatus.KILLED
+    assert time.monotonic() - start < 10
+    assert not process_alive(done.executor.child_pid, None)

@@ -388,6 +388,10 @@ def execute_run(
     ]
     interrupted = False
     with _forward_termination(proc.pid) as term:
+        # stop_run may have written the marker after the pre-start check but
+        # before the child pid was recorded, so it could not signal the child.
+        if (run_dir / STOP_MARKER).exists():
+            terminate_group(proc.pid)
         try:
             exit_code = proc.wait()
         except KeyboardInterrupt:

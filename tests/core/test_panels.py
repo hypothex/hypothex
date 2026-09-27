@@ -845,3 +845,175 @@ def test_scatter_version_x_follows_version_param_then_creation_time(
         (t2, 0.5),
         (t3, 0.4),
     ]
+
+
+# distribution ----------------------------------------------------------------------
+def test_distribution_quantiles_seeds_and_ecdf(ctx: Context, toy_repo: Path) -> None:
+    d1 = _run(ctx, toy_repo, "d1", hypothesis="fast", minute=0)
+    d2 = _run(ctx, toy_repo, "d2", hypothesis="fast", minute=1)
+    e1 = _run(ctx, toy_repo, "e1", "bbbb", hypothesis="slow", minute=2)
+    _jsonl(ctx.run_dir(d1) / "samples" / "latency_ms.jsonl", [{"value": v} for v in range(1, 101)])
+    _jsonl(
+        ctx.run_dir(d2) / "samples" / "latency_ms.jsonl", [{"value": v} for v in range(101, 201)]
+    )
+    _jsonl(ctx.run_dir(e1) / "samples" / "latency_ms.jsonl", [{"value": v} for v in range(1, 1001)])
+    panel = _panel("distribution", data={"metrics": ["latency_ms"]}, scale="log")
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    fast, slow = result.rows
+    # numpy "linear" quantile of 1..200: 1 + q * 199
+    assert (fast["group_id"], fast["label"], fast["n"]) == ("aaaa@c1", "fast", 200)
+    assert fast["p50"] == pytest.approx(100.5)
+    assert fast["p95"] == pytest.approx(190.05)
+    assert fast["p99"] == pytest.approx(198.01)
+    # per seed: 1..100 -> 1 + q * 99; 101..200 -> 101 + q * 99
+    assert fast["seeds"] == [
+        {
+            "run_id": "d1",
+            "p50": pytest.approx(50.5),
+            "p95": pytest.approx(95.05),
+            "p99": pytest.approx(99.01),
+        },
+        {
+            "run_id": "d2",
+            "p50": pytest.approx(150.5),
+            "p95": pytest.approx(195.05),
+            "p99": pytest.approx(199.01),
+        },
+    ]
+    assert slow["n"] == 1000
+    assert len(slow["ecdf"]) <= 200  # downsampled
+    assert slow["ecdf"][-1] == [1000.0, 1.0]
+    xs = [p[0] for p in slow["ecdf"]]
+    assert xs == sorted(xs)
+    assert [r["vs_baseline"] for r in result.rows] == [None, None]  # no baseline configured
+    assert result.meta == {
+        "name": "latency_ms",
+        "scale": "log",
+        "render": "chart",
+        "baseline": None,
+    }
+
+
+def _latency_groups(ctx: Context, repo: Path) -> None:
+    """base: 3 repeats tagged baseline; fast: the same samples halved; one: a single repeat."""
+    runs = [
+        ("b1", "aaaa", "base", ["baseline"], [float(v) for v in range(1, 101)]),
+        ("b2", "aaaa", "base", ["baseline"], [float(v) for v in range(11, 111)]),
+        ("b3", "aaaa", "base", ["baseline"], [float(v) for v in range(21, 121)]),
+        ("f1", "bbbb", "fast", [], [v / 2 for v in range(1, 101)]),
+        ("f2", "bbbb", "fast", [], [v / 2 for v in range(11, 111)]),
+        ("f3", "bbbb", "fast", [], [v / 2 for v in range(21, 121)]),
+        ("c1", "cccc", "one", [], [0.8 * v for v in range(11, 111)]),
+    ]
+    for minute, (rid, group, hyp, tags, values) in enumerate(runs):
+        rec = _run(ctx, repo, rid, group, minute=minute, hypothesis=hyp, tags=tags)
+        _jsonl(ctx.run_dir(rec) / "samples" / "latency_ms.jsonl", [{"value": v} for v in values])
+
+
+def test_distribution_vs_baseline_with_repeat_bootstrap(ctx: Context, toy_repo: Path) -> None:
+    _latency_groups(ctx, toy_repo)
+    _set_task(toy_repo, baseline="tag:baseline")
+    panel = _panel("distribution", data={"metrics": ["latency_ms"]}, render="table")
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert result.meta == {
+        "name": "latency_ms",
+        "scale": "linear",
+        "render": "table",
+        "baseline": "aaaa@c1",
+    }
+    base, fast, one = result.rows
+    assert base["vs_baseline"] is None  # the baseline row itself
+    # pooled: base p50 60.5, p95 108.0, p99 117.01; fast is every sample halved -> -50%
+    # per-seed p50: base [50.5, 60.5, 70.5], fast [25.25, 30.25, 35.25]; 1000 resamples
+    # with random.Random(0) per percentile, 2.5th/97.5th percentile of
+    # (mean(fast draw) - mean(base draw)) / mean(base draw)
+    delta = fast["vs_baseline"]
+    assert list(delta) == ["p50", "p95", "p99"]
+    assert delta["p50"] == pytest.approx([-0.5, -0.5992555831265508, -0.38320140086109644])
+    assert delta["p95"] == pytest.approx([-0.5, -0.5596747724899299, -0.43440294760377146])
+    assert delta["p99"] == pytest.approx([-0.5, -0.5576319050226204, -0.43686312004044475])
+    # one repeat: the change is known, the interval is not
+    # pooled p50 48.4, p95 84.04, p99 87.208 vs 60.5, 108.0, 117.01
+    assert one["vs_baseline"]["p50"][0] == pytest.approx(-0.2)
+    assert one["vs_baseline"]["p95"][0] == pytest.approx(84.04 / 108.0 - 1)
+    assert one["vs_baseline"]["p99"][0] == pytest.approx(87.208 / 117.01 - 1)
+    assert [v[1:] for v in one["vs_baseline"].values()] == [[None, None]] * 3
+
+
+def test_distribution_baseline_selectors(ctx: Context, toy_repo: Path) -> None:
+    _latency_groups(ctx, toy_repo)
+    panel = _panel("distribution", data={"metrics": ["latency_ms"]})
+
+    def rows() -> list[dict[str, Any]]:
+        return query_panel(ctx, "toy", "toy-acc", panel).rows
+
+    assert [r["vs_baseline"] for r in rows()] == [None, None, None]  # no baseline
+    _set_task(toy_repo, baseline="tag:nothing")
+    assert [r["vs_baseline"] for r in rows()] == [None, None, None]  # no group matches
+    _set_task(toy_repo, baseline="bbbb")  # a group_id prefix: fast is the baseline
+    base, fast, one = rows()
+    assert fast["vs_baseline"] is None
+    assert base["vs_baseline"]["p50"][0] == pytest.approx(1.0)  # 60.5 vs 30.25
+    assert one["vs_baseline"]["p99"][0] == pytest.approx(87.208 / 58.505 - 1)
+    assert one["vs_baseline"]["p99"][1:] == [None, None]
+    _set_task(toy_repo, baseline="sha256:cccc")  # a config hash: one is the baseline
+    base, fast, one = rows()
+    assert one["vs_baseline"] is None
+    assert base["vs_baseline"]["p50"] == [pytest.approx(60.5 / 48.4 - 1), None, None]
+
+
+def test_distribution_over_usage_field(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "u1")
+    _jsonl(ctx.run_dir(rec) / "usage.jsonl", [{"seconds": s} for s in (1.0, 2.0, 3.0)])
+    (row,) = query_panel(
+        ctx, "toy", "toy-acc", _panel("distribution", data={"x": "usage.seconds"})
+    ).rows
+    assert (row["n"], row["p50"]) == (3, 2.0)
+
+
+# grid ------------------------------------------------------------------------------
+def test_grid_fraction_solved_and_difficulty_order(ctx: Context, toy_repo: Path) -> None:
+    outcomes = {
+        "a1": ("aaaa", "alpha", [True, False, True]),
+        "a2": ("aaaa", "alpha", [True, False, False]),
+        "b1": ("bbbb", "beta", [True, True, False]),
+    }
+    for minute, (rid, (group, hyp, solved)) in enumerate(outcomes.items()):
+        rec = _run(ctx, toy_repo, rid, group, hypothesis=hyp, minute=minute)
+        pred = ctx.run_dir(rec) / "predictions"
+        _jsonl(pred / "predictions.jsonl", [{"id": f"ex-{i}", "prediction": 0} for i in range(3)])
+        _jsonl(
+            pred / "scores.accuracy@v1.jsonl",
+            [{"id": f"ex-{i}", "correct": ok} for i, ok in enumerate(solved)],
+        )
+    result = query_panel(ctx, "toy", "toy-acc", _panel("grid"))
+    # alpha: ex-0 2/2, ex-1 0/2, ex-2 1/2; beta: ex-0 1, ex-1 1, ex-2 0
+    # item means: ex-0 1.0, ex-1 0.5, ex-2 0.25 -> hardest first
+    assert result.meta["items"] == ["ex-2", "ex-1", "ex-0"]
+    # group means: beta 2/3 > alpha 1/2
+    assert result.meta["groups"] == [
+        {"group_id": "bbbb@c1", "label": "beta"},
+        {"group_id": "aaaa@c1", "label": "alpha"},
+    ]
+    assert result.meta["field"] == "accuracy@v1.correct"
+    assert result.rows == [
+        {"item_id": "ex-2", "group_id": "bbbb@c1", "value": 0.0},
+        {"item_id": "ex-2", "group_id": "aaaa@c1", "value": 0.5},
+        {"item_id": "ex-1", "group_id": "bbbb@c1", "value": 1.0},
+        {"item_id": "ex-1", "group_id": "aaaa@c1", "value": 0.0},
+        {"item_id": "ex-0", "group_id": "bbbb@c1", "value": 1.0},
+        {"item_id": "ex-0", "group_id": "aaaa@c1", "value": 1.0},
+    ]
+
+
+def test_grid_uses_explicit_field_and_rejects_unknown_metric(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "a1")
+    pred = ctx.run_dir(rec) / "predictions"
+    _jsonl(pred / "predictions.jsonl", [{"id": "ex-0", "prediction": 0}])
+    _jsonl(pred / "scores.accuracy@v1.jsonl", [{"id": "ex-0", "correct": True, "partial": 0}])
+    panel = _panel("grid", data={"metrics": ["accuracy@v1"], "y": "partial"})
+    assert query_panel(ctx, "toy", "toy-acc", panel).rows == [
+        {"item_id": "ex-0", "group_id": "aaaa@c1", "value": 0.0}
+    ]
+    with pytest.raises(ConfigError, match="unknown metric 'nope'"):
+        query_panel(ctx, "toy", "toy-acc", _panel("grid", data={"metrics": ["nope"]}))

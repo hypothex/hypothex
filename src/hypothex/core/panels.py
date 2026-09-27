@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import random
 import statistics
 from collections import defaultdict
 from collections.abc import Callable, Mapping
@@ -13,7 +14,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from hypothex.core.config import parse_metric_version
+from hypothex.core.config import parse_metric_key, parse_metric_version
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, HypothexError
 from hypothex.core.fsutil import read_jsonl
@@ -30,7 +31,7 @@ from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
 from hypothex.core.seeds import summarize
 from hypothex.core.sources import iter_rows, select_fields
-from hypothex.core.stats import quantile
+from hypothex.core.stats import ecdf_points, quantile
 from hypothex.core.store import ProjectEntry
 from hypothex.core.views import (
     VERSION_REF,
@@ -45,6 +46,8 @@ MAX_TABLE_ROWS = 5000
 SPIKE_WINDOW = 20
 SPIKE_FACTOR = 5.0
 AGGREGATES = ("mean", "median", "min", "max", "p50", "p90", "p95", "p99")
+PERCENTILES = (("p50", 0.50), ("p95", 0.95), ("p99", 0.99))
+BOOTSTRAP_RESAMPLES = 1000
 
 
 class PanelResult(BaseModel):
@@ -922,11 +925,265 @@ def _mark_regressions(rows: list[dict[str, Any]], higher: bool) -> None:
             best = row
 
 
+def _usage_values(scope: _Scope, run: RunRecord, field_name: str) -> list[float]:
+    """A run's per-example ``usage.jsonl`` values of one numeric field, booleans excluded."""
+    rows = scope.ctx.store.read_usage(run.project, run.run_id)
+    values = [getattr(row, field_name, None) for row in rows]
+    return [float(v) for v in values if isinstance(v, int | float) and not isinstance(v, bool)]
+
+
+def _distribution_values(scope: _Scope, run: RunRecord, name: str) -> list[float]:
+    """A distribution panel's raw values: ``usage.<field>`` rows, else a named samples series."""
+    if name.startswith("usage."):
+        return _usage_values(scope, run, name.removeprefix("usage."))
+    return _samples(scope, run, name)
+
+
+def _baseline_key(
+    selector: str | None, groups: list[tuple[str, str, list[RunRecord]]]
+) -> str | None:
+    """
+    The key of the group ``TaskSpec.baseline`` selects, or ``None``.
+
+    Same rules as the leaderboard's ``_select_group``: ``tag:<t>`` is the first
+    group with a run tagged ``<t>``; anything else is a full or prefix
+    ``group_id`` or a ``config_hash``.
+
+    Parameters
+    ----------
+    selector : str or None
+        The task's ``baseline`` field.
+    groups : list of (str, str, list of RunRecord)
+        The panel's groups, as returned by ``_groups``.
+
+    Returns
+    -------
+    str or None
+        The matching group's key, or ``None`` when nothing matches.
+    """
+    if not selector:
+        return None
+    if selector.startswith("tag:"):
+        tag = selector.removeprefix("tag:")
+        return next((k for k, _, members in groups if any(tag in m.tags for m in members)), None)
+    for key, _, members in groups:
+        if key.startswith(selector) or any(m.config_hash == selector for m in members):
+            return key
+    return None
+
+
+def _rel_change_interval(
+    values: list[float], base: list[float], resamples: int = BOOTSTRAP_RESAMPLES, seed: int = 0
+) -> tuple[float | None, float | None]:
+    """
+    Percentile bootstrap 95% interval of ``mean(values) / mean(base) - 1``.
+
+    Each resample draws ``values`` then ``base`` with replacement from one
+    ``random.Random(seed)``; resamples whose base mean is 0 are skipped.
+
+    Parameters
+    ----------
+    values : list of float
+        Per-seed values of the row being compared.
+    base : list of float
+        Per-seed values of the baseline row.
+    resamples : int
+        Number of bootstrap resamples.
+    seed : int
+        Seed for the resample generator.
+
+    Returns
+    -------
+    tuple of (float or None, float or None)
+        ``(lo, hi)`` of the 95% interval, or ``(None, None)`` when either side
+        has fewer than 2 values.
+    """
+    if len(values) < 2 or len(base) < 2:
+        return None, None
+    rng = random.Random(seed)
+    deltas: list[float] = []
+    for _ in range(resamples):
+        drawn = rng.choices(values, k=len(values))
+        drawn_base = rng.choices(base, k=len(base))
+        base_mean = math.fsum(drawn_base) / len(drawn_base)
+        if base_mean != 0:
+            deltas.append((math.fsum(drawn) / len(drawn) - base_mean) / base_mean)
+    if not deltas:
+        return None, None
+    return quantile(deltas, 0.025), quantile(deltas, 0.975)
+
+
+def _vs_baseline(row: dict[str, Any], base: dict[str, Any]) -> dict[str, list[float | None]] | None:
+    """Relative change of each percentile vs the baseline row, with a repeat-bootstrap CI."""
+    if row is base or any(base[p] == 0 for p, _ in PERCENTILES):
+        return None
+    out: dict[str, list[float | None]] = {}
+    for p, _ in PERCENTILES:
+        lo, hi = _rel_change_interval([s[p] for s in row["seeds"]], [s[p] for s in base["seeds"]])
+        out[p] = [(row[p] - base[p]) / base[p], lo, hi]
+    return out
+
+
+def _distribution(scope: _Scope, panel: PanelSpec) -> PanelResult:
+    """
+    Pooled percentiles and ECDF per group, per-seed percentiles, and the change
+    of each percentile vs the task's baseline group (``vs_baseline``).
+
+    Parameters
+    ----------
+    scope : _Scope
+        The panel's runs and task-level data.
+    panel : PanelSpec
+        The panel spec; ``data.metrics[0]`` or ``data.x`` names the samples
+        series (or ``usage.<field>``).
+
+    Returns
+    -------
+    PanelResult
+        One row per group (see the phase 1b contract, section 1.6).
+
+    Raises
+    ------
+    ConfigError
+        If neither ``data.metrics`` nor ``data.x`` is set.
+    """
+    name = panel.data.metrics[0] if panel.data.metrics else panel.data.x
+    if not name:
+        raise ConfigError("distribution panel needs data.metrics or data.x")
+    groups = _groups(scope, panel)
+    rows: list[dict[str, Any]] = []
+    for key, label, members in groups:
+        pooled: list[float] = []
+        seeds: list[dict[str, Any]] = []
+        for r in members:
+            values = _distribution_values(scope, r, name)
+            if not values:
+                continue
+            pooled.extend(values)
+            seeds.append({"run_id": r.run_id, **{p: quantile(values, q) for p, q in PERCENTILES}})
+        if not pooled:
+            continue
+        rows.append(
+            {
+                "group_id": key,
+                "label": label,
+                "n": len(pooled),
+                **{p: quantile(pooled, q) for p, q in PERCENTILES},
+                "ecdf": [[x, y] for x, y in ecdf_points(pooled, max_points=200)],
+                "seeds": seeds,
+                "vs_baseline": None,
+            }
+        )
+    base_key = _baseline_key(scope.entry.config.tasks[scope.task].baseline, groups)
+    base = next((row for row in rows if row["group_id"] == base_key), None)
+    if base is not None:
+        for row in rows:
+            row["vs_baseline"] = _vs_baseline(row, base)
+    return PanelResult(
+        type="distribution",
+        title=panel.title,
+        rows=rows,
+        meta={
+            "name": name,
+            "scale": panel.scale,
+            "render": panel.render,
+            "baseline": base["group_id"] if base is not None else None,
+        },
+    )
+
+
+def _is_solved(value: Any) -> bool:
+    """Whether one per-example field value counts as solved (not ``False`` and not ``0``)."""
+    return not (value is False or (isinstance(value, int | float) and value == 0))
+
+
+def _grid(scope: _Scope, panel: PanelSpec) -> PanelResult:
+    """
+    Fraction of seeds that solved each example, per group.
+
+    Parameters
+    ----------
+    scope : _Scope
+        The panel's runs and task-level data.
+    panel : PanelSpec
+        The panel spec; ``data.metrics[0]`` names the metric (``name[@version]``,
+        default the task's primary), ``data.y`` an explicit per-example field.
+
+    Returns
+    -------
+    PanelResult
+        One row per ``(item_id, group_id)`` with a scored value (see the
+        phase 1b contract, section 1.6).
+
+    Raises
+    ------
+    ConfigError
+        If the referenced metric is not configured.
+    """
+    config = scope.entry.config
+    if panel.data.metrics:
+        ref = panel.data.metrics[0]
+    else:
+        ref = parse_metric_key(config.tasks[scope.task].primary)[0]
+    name, version = parse_metric_version(ref.partition("/")[0])
+    if name not in config.metrics:
+        raise ConfigError(f"grid panel: unknown metric {name!r}")
+    prefix = f"{name}@{version or config.metrics[name].version}."
+    groups = _groups(scope, panel)
+    group_of = {r.run_id: key for key, _, members in groups for r in members}
+    pred_rows = list(iter_rows(scope.ctx, scope.runs, "predictions"))
+    column = f"{prefix}{panel.data.y}" if panel.data.y else _solved_column(pred_rows, prefix)
+    solved: dict[tuple[str, str], list[bool]] = defaultdict(list)
+    for row in pred_rows:
+        if column is not None and row.get(column) is not None:
+            solved[(row["id"], group_of[row["run_id"]])].append(_is_solved(row[column]))
+    cells = {k: sum(v) / len(v) for k, v in solved.items()}
+    by_item: dict[str, list[float]] = defaultdict(list)
+    by_group: dict[str, list[float]] = defaultdict(list)
+    for (item, gid), value in cells.items():
+        by_item[item].append(value)
+        by_group[gid].append(value)
+    items = sorted(by_item, key=lambda i: (math.fsum(by_item[i]) / len(by_item[i]), i))
+    labels = {key: label for key, label, _ in groups}
+    gids = sorted(by_group, key=lambda g: (-math.fsum(by_group[g]) / len(by_group[g]), g))
+    rows = [
+        {"item_id": item, "group_id": gid, "value": cells[(item, gid)]}
+        for item in items
+        for gid in gids
+        if (item, gid) in cells
+    ]
+    return PanelResult(
+        type="grid",
+        title=panel.title,
+        rows=rows,
+        meta={
+            "items": items,
+            "groups": [{"group_id": g, "label": labels[g]} for g in gids],
+            "field": column,
+        },
+    )
+
+
+def _solved_column(rows: list[dict[str, Any]], prefix: str) -> str | None:
+    """The per-example field to use: ``correct``, else ``solved``, else the first bool column."""
+    columns = {k for row in rows for k in row if k.startswith(prefix)}
+    for preferred in ("correct", "solved"):
+        if f"{prefix}{preferred}" in columns:
+            return f"{prefix}{preferred}"
+    for row in rows:
+        for k, v in row.items():
+            if k.startswith(prefix) and isinstance(v, bool):
+                return k
+    return None
+
+
 _HANDLERS = {
     "stat_strip": _stat_strip,
     "leaderboard": _leaderboard,
     "curves": _curves,
     "scatter": _scatter,
+    "distribution": _distribution,
+    "grid": _grid,
     "table": _table,
     "vega_lite": _vega_lite,
     "trace": _trace,

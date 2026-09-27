@@ -33,3 +33,6 @@
 .vg.best { background: var(--best); transform: rotate(45deg) scale(.8); }
 .vg.band { background: var(--best-wash); outline: 1px solid var(--best-edge); }
 .vg.behind { border: 1.5px solid var(--ink-3); border-radius: 50%; }
+
+/* curves: small multiples, one column per group */
+.curves { display: flex; flex-direction: column; gap: 28px; }

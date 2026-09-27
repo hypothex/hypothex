@@ -6,6 +6,7 @@
  */
 import { Component, createElement, type ComponentType, type ReactElement, type ReactNode } from "react";
 import type { PanelResult as ApiPanelResult, PanelType } from "../api/models";
+import { Curves } from "./Curves";
 import { Leaderboard } from "./Leaderboard";
 import { StatStrip } from "./StatStrip";
 import "./panels.css";
@@ -31,6 +32,7 @@ export interface PanelProps {
 export const PANELS: Partial<Record<PanelType, ComponentType<PanelProps>>> = {
   stat_strip: StatStrip,
   leaderboard: Leaderboard,
+  curves: Curves,
 };
 
 /** Return the component for `type`, or `null` if none is registered. */

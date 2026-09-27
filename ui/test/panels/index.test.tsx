@@ -48,3 +48,10 @@ test("the registry maps leaderboard to Leaderboard", async () => {
   render(<Panel result={{ type: "leaderboard", title: "", rows: [] }} />);
   expect(screen.getByText("No scored runs yet")).toBeTruthy();
 });
+
+test("the registry maps curves to Curves", async () => {
+  const { Curves } = await import("../../src/panels/Curves");
+  expect(panelFor("curves")).toBe(Curves);
+  render(<Panel result={{ type: "curves", title: "", rows: [], meta: {} }} />);
+  expect(screen.getByText("No metric history yet")).toBeTruthy();
+});

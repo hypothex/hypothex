@@ -401,3 +401,135 @@ def ecdf_points(values: Sequence[float], max_points: int = 200) -> list[tuple[fl
             continue
         points.append((x, bisect_right(xs, x) / n))
     return points
+
+
+_BETACF_MAX_ITER = 300
+_BETACF_EPS = 3.0e-16
+_BETACF_FPMIN = 1.0e-300
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction for the incomplete beta function (Numerical Recipes ``betacf``)."""
+    qab = a + b
+    qap = a + 1.0
+    qam = a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < _BETACF_FPMIN:
+        d = _BETACF_FPMIN
+    d = 1.0 / d
+    h = d
+    for m in range(1, _BETACF_MAX_ITER + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < _BETACF_FPMIN:
+            d = _BETACF_FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < _BETACF_FPMIN:
+            c = _BETACF_FPMIN
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < _BETACF_FPMIN:
+            d = _BETACF_FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < _BETACF_FPMIN:
+            c = _BETACF_FPMIN
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < _BETACF_EPS:
+            break
+    return h
+
+
+def _regularized_beta(a: float, b: float, x: float) -> float:
+    """
+    Regularized incomplete beta function ``I_x(a, b)``.
+
+    Parameters
+    ----------
+    a, b : float
+        Positive shape parameters.
+    x : float
+        Point in ``[0, 1]``.
+
+    Returns
+    -------
+    float
+        ``I_x(a, b)`` in ``[0, 1]``.
+    """
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    log_front = (
+        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x)
+    )
+    front = math.exp(log_front)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def _t_two_sided_p(t: float, df: float) -> float:
+    """
+    Two-sided p-value ``P(|T| >= |t|)`` for Student's t with ``df`` degrees of freedom.
+
+    Uses ``P(|T| >= |t|) = I_{df / (df + t^2)}(df / 2, 1 / 2)``.
+
+    Parameters
+    ----------
+    t : float
+        The t statistic.
+    df : float
+        Degrees of freedom (may be fractional), ``> 0``.
+
+    Returns
+    -------
+    float
+        The two-sided p-value.
+    """
+    if math.isinf(t):
+        return 0.0
+    return min(1.0, _regularized_beta(df / 2.0, 0.5, df / (df + t * t)))
+
+
+def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
+    """
+    Two-sided Welch t-test p-value for a difference in means.
+
+    NaN values are ignored. Degrees of freedom follow Welch-Satterthwaite.
+
+    Parameters
+    ----------
+    a, b : sequence of float
+        The two independent samples (for example, one value per seed).
+
+    Returns
+    -------
+    float or None
+        The p-value, or None when either sample has fewer than 2 values or
+        both samples have zero variance.
+
+    Examples
+    --------
+    >>> round(welch_p([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]), 6)
+    0.021312
+    """
+    xs = _clean(a)
+    ys = _clean(b)
+    if len(xs) < 2 or len(ys) < 2:
+        return None
+    na, nb = len(xs), len(ys)
+    ma, mb = sum(xs) / na, sum(ys) / nb
+    va = sum((x - ma) ** 2 for x in xs) / (na - 1)
+    vb = sum((y - mb) ** 2 for y in ys) / (nb - 1)
+    if va == 0.0 and vb == 0.0:
+        return None
+    sa, sb = va / na, vb / nb
+    t = (ma - mb) / math.sqrt(sa + sb)
+    df = (sa + sb) ** 2 / (sa * sa / (na - 1) + sb * sb / (nb - 1))
+    return _t_two_sided_p(t, df)

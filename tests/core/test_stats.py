@@ -13,6 +13,8 @@ import pytest
 
 from hypothex.core.stats import (
     Z95,
+    _regularized_beta,
+    _t_two_sided_p,
     binom_two_sided_p,
     bootstrap_mean_interval,
     ecdf_points,
@@ -20,6 +22,7 @@ from hypothex.core.stats import (
     paired_bootstrap_p,
     quantile,
     sign_test,
+    welch_p,
     wilson_interval,
 )
 
@@ -212,3 +215,72 @@ def test_ecdf_points_downsamples_and_keeps_max() -> None:
     assert all(a[0] < b[0] and a[1] < b[1] for a, b in zip(points, points[1:], strict=False))
     with pytest.raises(ValueError, match="max_points"):
         ecdf_points([1.0], max_points=0)
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "x", "expected"),
+    [
+        (2.0, 3.0, 0.4, 0.5248),  # 6x^2(1-x)^2 + 4x^3(1-x) + x^4 at x = 0.4
+        (0.5, 0.5, 0.3, 0.36901011956554536),  # scipy; also (2/pi) * asin(sqrt(0.3))
+        (5.0, 0.5, 0.9, 0.3166429150200122),  # scipy
+        (1.0, 1.0, 0.3, 0.3),  # uniform CDF
+        (3.0, 3.0, 0.5, 0.5),  # symmetry
+    ],
+)
+def test_regularized_beta_known_values(a: float, b: float, x: float, expected: float) -> None:
+    assert _regularized_beta(a, b, x) == pytest.approx(expected, rel=1e-12)
+
+
+def test_regularized_beta_closed_forms_and_bounds() -> None:
+    assert _regularized_beta(0.5, 0.5, 0.3) == pytest.approx(
+        2 / math.pi * math.asin(math.sqrt(0.3)), rel=1e-12
+    )
+    assert _regularized_beta(4.0, 1.0, 0.7) == pytest.approx(0.7**4, rel=1e-12)
+    assert _regularized_beta(2.0, 2.0, 0.0) == 0.0
+    assert _regularized_beta(2.0, 2.0, 1.0) == 1.0
+
+
+@pytest.mark.parametrize(
+    ("t", "df", "expected"),
+    [
+        (2.228138851986274, 10, 0.05),  # t_{0.975, 10} from standard t tables
+        (12.706204736174707, 1, 0.05),  # t_{0.975, 1}
+        (2.570581835636314, 5, 0.05),  # t_{0.975, 5}
+        (1.0, 1, 0.5),  # Cauchy: 1 - (2/pi) * atan(1)
+        (1.0, 2, 1 - 1 / math.sqrt(3)),  # df=2 closed form: 1 - t / sqrt(2 + t^2)
+        (3.0, 30, 0.005389964065651945),  # scipy
+        (50.0, 3, 1.761715204127197e-05),  # scipy
+        (-2.228138851986274, 10, 0.05),  # sign does not matter
+        (0.0, 7, 1.0),
+    ],
+)
+def test_t_two_sided_p_known_values(t: float, df: float, expected: float) -> None:
+    assert _t_two_sided_p(t, df) == pytest.approx(expected, rel=1e-9)
+
+
+def test_t_two_sided_p_large_df_matches_normal() -> None:
+    assert _t_two_sided_p(Z95, 1e6) == pytest.approx(0.05, abs=1e-6)
+    assert _t_two_sided_p(math.inf, 5) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "expected"),
+    [
+        ([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], 0.021311641128756713),  # scipy; t=-3.674, df=4
+        ([1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 4.0, 6.0, 8.0, 10.0], 0.10753119493062724),  # scipy
+        ([0.81, 0.79, 0.80], [0.78, 0.77, 0.795], 0.12299329488698767),  # scipy
+        ([1.0, 1.0, 1.0], [2.0, 3.0, 4.0], 0.07417990022744854),  # scipy; one zero variance
+        ([0.7, 0.72, 0.71, 0.69], [0.65, 0.66], 0.0046605042659501085),  # scipy; unequal n
+    ],
+)
+def test_welch_p_matches_scipy(a: list[float], b: list[float], expected: float) -> None:
+    assert welch_p(a, b) == pytest.approx(expected, rel=1e-9)
+
+
+def test_welch_p_none_cases_and_nan() -> None:
+    assert welch_p([1.0], [2.0, 3.0]) is None
+    assert welch_p([1.0, 1.0], [2.0, 2.0]) is None  # both variances zero
+    assert welch_p([1.0, 2.0, 3.0, math.nan], [4.0, 5.0, 6.0]) == pytest.approx(
+        0.021311641128756713, rel=1e-9
+    )
+    assert welch_p([1.0, math.nan], [2.0, 3.0]) is None

@@ -38,6 +38,7 @@ from hypothex.core.ids import new_run_id, utcnow
 from hypothex.core.records import DatasetRef, GitInfo, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.seeds import config_hash, run_fingerprint
 from hypothex.core.store import sum_usage
+from hypothex.core.views import save_view
 from hypothex.sdk import Run
 
 KINDS: tuple[TaskKind, ...] = (
@@ -931,10 +932,340 @@ def _seed_training(sd: _Seeder) -> None:
         )
 
 
+# --------------------------------------------------------------------- agent_eval
+@dataclass(frozen=True)
+class _AgentConfig:
+    """One agent config of the ``agent_eval`` mockup."""
+
+    id: str
+    short: str
+    model: str
+    tools: str
+    a: float  # skill
+    pin: float  # $ per 1M input tokens
+    pout: float  # $ per 1M output tokens
+    c0: int  # base context per turn
+    g: int  # context growth per turn
+    out: int  # output tokens per turn
+    lat: float  # model seconds per turn
+    tc: float  # tool calls per turn
+    fw: tuple[float, float, float, float, float]  # failure weights, in _FAILS order
+    turn_k: float
+    commit: str
+    created_by: str
+
+
+_AGENT_CONFIGS = (
+    _AgentConfig("mini", "gpt-5-mini", "gpt-5-mini", "base", -0.75, 0.10, 1.6, 3100, 1150,
+                 360, 1.9, 1.05, (0.10, 0.14, 0.34, 0.12, 0.30), 1.0, "4be19c2", "agent:sweep-7"),
+    _AgentConfig("sonnet", "Sonnet 5", "claude-sonnet-5", "base", 0.25, 1.2, 15, 3300, 1000,
+                 420, 3.4, 1.25, (0.26, 0.30, 0.10, 0.12, 0.22), 1.0, "4be19c2", "agent:sweep-7"),
+    _AgentConfig("scorer", "Sonnet 5 + scorer", "claude-sonnet-5", "base + score_routes", 1.30,
+                 1.2, 15, 3600, 820, 380, 3.3, 1.35, (0.30, 0.14, 0.08, 0.24, 0.24), 0.8,
+                 "91ad07e", "mira"),
+    _AgentConfig("opus", "Opus 5.5", "claude-opus-5-5", "base", 1.30, 2.0, 25, 3300, 1000, 880,
+                 6.6, 1.3, (0.52, 0.12, 0.04, 0.10, 0.22), 1.0, "4be19c2", "agent:sweep-7"),
+)  # fmt: skip
+_FAILS = ("timeout", "loop", "invalid SMILES", "tool error", "gave up")
+_AGENT_COMMAND = ["python", "-m", "retro_agents.bench", "--model"]
+_CLASSES = (
+    "kinase inhibitor", "macrolide", "peptidomimetic", "biaryl amide", "spiro-oxindole",
+    "steroid", "nucleoside", "β-lactam", "sulfonamide", "indole alkaloid", "PROTAC linker",
+    "fluoroquinolone",
+)  # fmt: skip
+# The trajectory of the selected attempt: tool, args, result, tokens in, tokens out, ms.
+_AGENT_TRACE = (
+    ("retro_expand", "target, top_k=8", "8 precursors, amide p .62", 4410, 512, 4820),
+    ("check_stock", "ClC(=O)c1ccc(CN2CCN(C)CC2)cc1", "in stock", 5480, 188, 2710),
+    ("check_stock", "Cc1ccc(N)cc1Nc1nccc(-c2cccnc2)n1", "not in stock", 6320, 204, 2640),
+    ("retro_expand", "Cc1ccc(N)cc1Nc1nccc(…)n1", "6 precursors, nitro red. p .71", 7690, 466,
+     4960),
+    ("retro_expand", "Cc1ccc([N+](=O)[O-])cc1Nc1nccc(…)n1", "5 precursors, SNAr p .48", 9310,
+     431, 5130),
+    ("score_routes", "3 routes, depth 3", "best .71, route B", 10840, 352, 8870),
+    ("check_stock", "Cc1ccc([N+](=O)[O-])cc1N", "in stock", 11720, 176, 2580),
+    ("check_stock", "CN(C)/C=C/C(=O)c1cccnc1", "not in stock", 12460, 198, 2690),
+    ("retro_expand", "CN(C)/C=C/C(=O)c1cccnc1", "4 precursors, DMF-DMA p .80", 13950, 402,
+     4710),
+    ("score_routes", "2 routes, depth 4", "tool error: timeout 8 s", 15210, 318, 11240),
+    ("retro_expand", "Cc1ccc([N+](=O)[O-])cc1Nc1nccc(…)n1", "5 precursors, SNAr p .48", 16930,
+     455, 5080),
+    ("score_routes", "3 routes, depth 3", "best .71, route B", 18380, 341, 8790),
+    ("retro_expand", "Cc1ccc([N+](=O)[O-])cc1Nc1nccc(…)n1", "loop: 3rd identical call", 19970,
+     473, 4210),
+)  # fmt: skip
+
+
+@dataclass
+class _Target:
+    """One benchmark target."""
+
+    id: str
+    b: float  # difficulty
+    depth: int
+    cls: str
+
+
+@dataclass
+class _Attempt:
+    """One attempt of one config and seed on one target."""
+
+    solved: bool
+    fail: str | None
+    turns: int
+    tool_calls: int
+    tok_in: int
+    tok_out: int
+    cost: float
+    wall: float
+
+
+def _agent_eval_data() -> tuple[list[_Target], dict[tuple[str, int], list[_Attempt]], int]:
+    """
+    Port of the ``agent_eval`` mockup generator.
+
+    Returns
+    -------
+    targets : list of _Target
+        200 targets.
+    attempts : dict
+        Attempts keyed by ``(config id, seed)``, one per target.
+    selected : int
+        Index of the attempt whose trajectory is logged (Sonnet 5 + scorer, seed 2).
+    """
+    rnd = _mulberry32(20260927)
+
+    def gauss() -> float:
+        return _gauss(rnd)
+
+    def pick(weights: list[float]) -> int:
+        total = 0.0
+        for w in weights:  # plain left-to-right sum, like Array.reduce
+            total += w
+        left = rnd() * total
+        for i, w in enumerate(weights):
+            left -= w
+            if left <= 0:
+                return i
+        return len(weights) - 1
+
+    targets = []
+    for i in range(200):
+        b = gauss() * 1.55
+        depth = int(_clamp(_js_round(4.2 + b * 1.25 + gauss() * 0.9), 2, 11))
+        cls = _CLASSES[math.floor(rnd() * len(_CLASSES))]
+        targets.append(_Target(f"T-{i + 1:03d}", b, depth, cls))
+    attempts: dict[tuple[str, int], list[_Attempt]] = {}
+    for c in _AGENT_CONFIGS:
+        for seed in (1, 2, 3):
+            e = gauss() * 0.04
+            rows = []
+            for t in targets:
+                p = 1 / (1 + math.exp(-(c.a + e - t.b)))
+                solved = rnd() < p
+                fail = None
+                if solved:
+                    turns = _js_round(
+                        _clamp((3.5 + t.depth * 1.35) * c.turn_k + gauss() * 2.2, 3, 28)
+                    )
+                else:
+                    w = list(c.fw)
+                    if t.b > 1:
+                        w[0] *= 1.6
+                    fail = _FAILS[pick(w)]
+                    if fail == "timeout":
+                        turns = 30
+                    elif fail == "loop":
+                        turns = _js_round(_clamp(11 + gauss() * 3.5, 7, 26))
+                    elif fail == "invalid SMILES":
+                        turns = _js_round(_clamp(7 + gauss() * 2.5, 3, 16))
+                    elif fail == "tool error":
+                        turns = _js_round(_clamp(8 + gauss() * 3, 2, 20))
+                    else:
+                        turns = _js_round(_clamp(9 + gauss() * 3, 4, 20))
+                noise = math.exp(gauss() * 0.12)
+                tok_in = _js_round((turns * c.c0 + c.g * turns * (turns + 1) / 2) * noise)
+                tok_out = _js_round(turns * c.out * math.exp(gauss() * 0.18))
+                tool_calls = max(1, _js_round(turns * c.tc + gauss()))
+                score_calls = _js_round(turns / 3) if c.id == "scorer" else 0
+                wall = turns * c.lat * math.exp(gauss() * 0.15) + tool_calls * 0.55
+                wall += score_calls * 6.8
+                if fail == "timeout":
+                    wall = min(300, max(wall, 150 + rnd() * 150))
+                wall = min(wall, 300)
+                cost = tok_in / 1e6 * c.pin + tok_out / 1e6 * c.pout
+                cost, wall = _fixed(cost, 4), _fixed(wall, 1)
+                rows.append(_Attempt(solved, fail, turns, tool_calls, tok_in, tok_out, cost, wall))
+            attempts[(c.id, seed)] = rows
+    selected = next(
+        (
+            i
+            for i, t in enumerate(targets)
+            if not attempts[("scorer", 2)][i].solved
+            and attempts[("opus", 1)][i].solved
+            and attempts[("opus", 2)][i].solved
+            and 5 <= t.depth <= 7
+        ),
+        136,
+    )
+    scorer = next(c for c in _AGENT_CONFIGS if c.id == "scorer")
+    tok_in = sum(step[3] for step in _AGENT_TRACE)
+    tok_out = sum(step[4] for step in _AGENT_TRACE)
+    attempts[("scorer", 2)][selected] = _Attempt(
+        solved=False,
+        fail="loop",
+        turns=len(_AGENT_TRACE),
+        tool_calls=len(_AGENT_TRACE),
+        tok_in=tok_in,
+        tok_out=tok_out,
+        cost=_fixed((tok_in / 1e6) * scorer.pin + (tok_out / 1e6) * scorer.pout, 4),
+        wall=_fixed(sum(step[5] for step in _AGENT_TRACE) / 1000, 1),
+    )
+    return targets, attempts, selected
+
+
+_AGENT_EVAL_VIEW = """title: cost notes
+from: agent_eval
+panels:
+  - type: markdown
+    title: Note
+    text: |
+      Sonnet 5 + scorer: 0.725 solved@v2 vs 0.742 for Opus 5.5, at a third of the cost.
+    layout: {span: 12}
+"""
+
+
+def _seed_agent_eval(sd: _Seeder) -> None:
+    """
+    Seed ``retro-agents/retro-bench-200`` (kind ``agent_eval``).
+
+    Four configs x three seeds x 200 targets, from ``kinds/agent_eval/data.js``:
+    per-example outcomes with failure categories, per-attempt usage, the
+    trajectory of one failed attempt, and a custom view.
+
+    Parameters
+    ----------
+    sd : _Seeder
+        Target home.
+    """
+    project, task = DEMO_TASKS["agent_eval"]
+    targets, attempts, selected = _agent_eval_data()
+    dataset = {
+        "version": "v2",
+        "path": "data/targets.jsonl",
+        "splits": {"test": "data/targets.jsonl"},
+    }
+    repo = sd.project(
+        _task_config(
+            project,
+            task,
+            kind="agent_eval",
+            dataset=dataset,
+            metrics={
+                "solved": {
+                    "version": "v2",
+                    "fn": "demo_metrics:solved",
+                    "changelog": {"v2": "route must end in purchasable building blocks"},
+                }
+            },
+            primary="solved",
+            description="Valid route to purchasable stock within 30 turns and 300 s.",
+        ),
+        {
+            "data/targets.jsonl": _jsonl(
+                {"id": t.id, "reference": None, "depth": t.depth, "class": t.cls} for t in targets
+            )
+        },
+    )
+    save_view(repo, task, "cost-notes", _AGENT_EVAL_VIEW)
+    ref = DatasetRef(name=task, version="v2", split="test", path=str(repo / dataset["path"]))
+    for index, c in enumerate(_AGENT_CONFIGS):
+        for seed in (1, 2, 3):
+            clock = ("14:02", "14:19", "14:33")[seed - 1]
+            created = sd.at(f"2026-09-26T{clock}:{index * 7 + 11:02d}Z")
+            command = [*_AGENT_COMMAND, c.model, "--tools", c.tools, "--seed", "{seed}"]
+            record, run = sd.start(
+                _RunSpec(
+                    project=project,
+                    task=task,
+                    repo=repo,
+                    hypothesis=f"{c.short}, tools: {c.tools}",
+                    command_template=command,
+                    params={"config": c.id, "model": c.model, "tools": c.tools},
+                    seed=seed,
+                    created_at=created,
+                    created_by=c.created_by,
+                    host="evalbox-2",
+                    commit=c.commit,
+                    key=f"{c.id}-{seed}",
+                    datasets=[ref],
+                )
+            )
+            rows = attempts[(c.id, seed)]
+            run.log_predictions(
+                {
+                    "id": t.id,
+                    "prediction": "route" if a.solved else None,
+                    "meta": {"category": a.fail, "difficulty": t.depth, "class": t.cls},
+                }
+                for t, a in zip(targets, rows, strict=True)
+            )
+            for t, a in zip(targets, rows, strict=True):
+                run.log_usage(
+                    tokens_in=a.tok_in,
+                    tokens_out=a.tok_out,
+                    usd=a.cost,
+                    seconds=a.wall,
+                    example_id=t.id,
+                )
+            if c.id == "scorer" and seed == 2:
+                run.log_trace(
+                    targets[selected].id,
+                    (
+                        {
+                            "turn": turn,
+                            "tool": tool,
+                            "args": args,
+                            "result": result,
+                            "tokens_in": tok_in,
+                            "tokens_out": tok_out,
+                            "seconds": ms / 1000,
+                            "error": result if turn == len(_AGENT_TRACE) else None,
+                        }
+                        for turn, (tool, args, result, tok_in, tok_out, ms) in enumerate(
+                            _AGENT_TRACE, start=1
+                        )
+                    ),
+                )
+            sd.per_example(
+                record,
+                "solved@v2",
+                {
+                    t.id: {
+                        "solved": a.solved,
+                        "turns": a.turns,
+                        "tool_calls": a.tool_calls,
+                        "usd": a.cost,
+                        "seconds": a.wall,
+                    }
+                    for t, a in zip(targets, rows, strict=True)
+                },
+            )
+            wall = math.fsum(a.wall for a in rows)
+            sd.finish(
+                record,
+                status=RunStatus.FINISHED,
+                ended_at=created + timedelta(seconds=wall / 8),  # eight attempts in parallel
+                exit_code=0,
+                scores=[("solved", "v2", "value", sum(a.solved for a in rows) / len(rows))],
+            )
+
+
 # --------------------------------------------------------------------- entry point
 _SEEDERS: dict[str, Callable[[_Seeder], None]] = {
     "generic": _seed_generic,
     "training": _seed_training,
+    "agent_eval": _seed_agent_eval,
 }
 
 

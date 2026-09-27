@@ -7,7 +7,9 @@ from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.control import repair_runs
 from hypothex.core.errors import StoreError
+from hypothex.core.fsutil import read_jsonl
 from hypothex.core.records import RunRecord, RunStatus
+from hypothex.core.views import get_view
 from hypothex.demo import (
     _SEEDERS,
     DEMO_EPOCH,
@@ -184,3 +186,36 @@ def test_running_demo_run_survives_repair(dctx: Context) -> None:
     assert repair_runs(dctx) == []
     live = dctx.index.list_runs(status=RunStatus.RUNNING, limit=None)
     assert len(live) == 1 and live[0].environment_id == "demo:gpu-a04"
+
+
+def test_agent_eval_mirrors_mockup(dctx: Context) -> None:
+    board = q.get_leaderboard(dctx, REFS["agent_eval"])
+    assert board.kind == "agent_eval"
+    runs = _runs(dctx, "retro-agents")
+    # solved targets and summed $ per config and seed, from kinds/agent_eval/data.js
+    solved = {"mini": [84, 80, 80], "sonnet": [108, 120, 111], "scorer": [148, 141, 146]}
+    solved["opus"] = [152, 147, 146]
+    usd = {"mini": [3.0867, 3.0367, 3.6488], "sonnet": [44.257, 49.6265, 47.7672]}
+    usd |= {"scorer": [33.5957, 38.1796, 33.5293], "opus": [108.2754, 106.1396, 117.8305]}
+    loops = {"mini": [14, 16, 15], "sonnet": [30, 22, 34], "scorer": [8, 8, 5], "opus": [2, 7, 8]}
+    for config, counts in solved.items():
+        for seed, count in enumerate(counts, start=1):
+            run = _find(runs, seed, config=config)
+            scores = dctx.store.read_scores("retro-agents", run.run_id)
+            assert [(s.metric, s.version, s.value) for s in scores] == [
+                ("solved", "v2", count / 200)
+            ]
+            assert run.usage is not None
+            assert run.usage.usd == pytest.approx(usd[config][seed - 1], abs=1e-6)
+            assert run.usage.calls == 200
+            rows = read_jsonl(dctx.run_dir(run) / "predictions" / "predictions.jsonl")
+            categories = [r["meta"]["category"] for r in rows]
+            assert categories.count("loop") == loops[config][seed - 1]
+            assert categories.count(None) == count
+    selected = _find(runs, 2, config="scorer")
+    steps = read_jsonl(dctx.run_dir(selected) / "traces" / "T-014.jsonl")
+    assert [s["turn"] for s in steps] == list(range(1, 14))
+    assert steps[-1]["error"] == "loop: 3rd identical call"
+    assert sum(s["tokens_in"] for s in steps) == 152670
+    entry, task = q.resolve_task(dctx, REFS["agent_eval"])
+    assert get_view(Path(entry.repo), entry.config, task, "cost-notes").title == "cost notes"

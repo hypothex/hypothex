@@ -1,0 +1,236 @@
+/**
+ * Vega-Lite panel: renders `meta.spec` with vega-embed, injecting the panel rows as
+ * `data.values` and a Hypothex theme built from the current design tokens. Re-embeds when
+ * the colour mode changes (`useTheme` from the shell).
+ *
+ * A view spec is untrusted input (anyone with repo access writes one), so the panel never
+ * lets Vega reach the network: every resource goes through `DENY_LOADER`, which refuses it.
+ * That covers nested `data.url` in layers and concats, `lookup` sources, image marks and
+ * `href` links, whatever the server-side validation missed.
+ */
+import type { Loader } from "vega";
+import embed, { type EmbedOptions, type Result, type VisualizationSpec } from "vega-embed";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { type Theme, useTheme } from "../shell/ThemeToggle";
+import { SERIES_DARK, SERIES_LIGHT } from "./Distribution";
+import type { PanelResult } from "./index";
+
+type Obj = Record<string, unknown>;
+
+/** Design tokens the theme needs. */
+export type Tokens = {
+  paper: string;
+  paper2: string;
+  ink: string;
+  ink2: string;
+  ink3: string;
+  rule: string;
+  rule2: string;
+  best: string;
+  sans: string;
+};
+
+const SANS = '"Geist", ui-sans-serif, system-ui, sans-serif';
+
+/** Token values from `tokens.css`, used when a CSS variable cannot be read. */
+export const TOKEN_FALLBACK: Record<Theme, Tokens> = {
+  light: {
+    paper: "#F6F7F3",
+    paper2: "#ECEEE8",
+    ink: "#15181E",
+    ink2: "#464C57",
+    ink3: "#767C87",
+    rule: "#D5D8D0",
+    rule2: "#E4E6E0",
+    best: "#00846A",
+    sans: SANS,
+  },
+  dark: {
+    paper: "#12161C",
+    paper2: "#1A1F27",
+    ink: "#E9ECEF",
+    ink2: "#AEB5BF",
+    ink3: "#7C8490",
+    rule: "#2C333D",
+    rule2: "#222830",
+    best: "#1FA282",
+    sans: SANS,
+  },
+};
+
+const TOKEN_VARS: Record<keyof Tokens, string> = {
+  paper: "--paper",
+  paper2: "--paper-2",
+  ink: "--ink",
+  ink2: "--ink-2",
+  ink3: "--ink-3",
+  rule: "--rule",
+  rule2: "--rule-2",
+  best: "--best",
+  sans: "--sans",
+};
+
+const MULTI_VIEW = ["facet", "hconcat", "vconcat", "concat", "repeat"];
+
+/** Message of every refused resource load. */
+export const EXTERNAL_DISABLED = "external resources are disabled";
+
+const refuse = (): Promise<never> => Promise.reject(new Error(EXTERNAL_DISABLED));
+
+/**
+ * A Vega loader that refuses every resource. Vega sends all data URLs (`load`), image and
+ * link URLs (`sanitize`) and raw requests (`http`, `file`) through the view's loader, so
+ * with this loader no spec can make the page fetch anything.
+ */
+export const DENY_LOADER: Loader = { load: refuse, sanitize: refuse, http: refuse, file: refuse };
+
+/** Options for every embed: no action menu, SVG output, no resource loading. */
+export const EMBED_OPTIONS: EmbedOptions = { actions: false, renderer: "svg", loader: DENY_LOADER };
+
+function isPlain(v: unknown): v is Obj {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Read a CSS custom property from `<html>`. */
+export function cssVar(name: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name);
+}
+
+/** Resolve tokens to concrete colours (Vega cannot use `var(...)`). */
+export function readTokens(theme: Theme, getVar: (name: string) => string = cssVar): Tokens {
+  const out = { ...TOKEN_FALLBACK[theme] };
+  for (const key of Object.keys(TOKEN_VARS) as (keyof Tokens)[]) {
+    const v = getVar(TOKEN_VARS[key]).trim();
+    if (v) out[key] = v;
+  }
+  return out;
+}
+
+/** Vega-Lite `config` matching the Hypothex figure style. */
+export function themeConfig(t: Tokens, theme: Theme): Obj {
+  return {
+    background: "transparent",
+    font: t.sans,
+    view: { stroke: null },
+    axis: {
+      domainColor: t.ink3,
+      tickColor: t.ink3,
+      gridColor: t.rule2,
+      labelColor: t.ink3,
+      titleColor: t.ink2,
+      labelFontSize: 11.5,
+      titleFontSize: 12.5,
+      titleFontWeight: 400,
+    },
+    legend: {
+      labelColor: t.ink2,
+      titleColor: t.ink3,
+      labelFontSize: 12.5,
+      titleFontSize: 12.5,
+      titleFontWeight: 400,
+    },
+    header: { labelColor: t.ink2, titleColor: t.ink2 },
+    title: { color: t.ink, fontSize: 14, fontWeight: 600 },
+    mark: { color: t.ink },
+    text: { color: t.ink },
+    range: {
+      category: [...(theme === "dark" ? SERIES_DARK : SERIES_LIGHT)],
+      ramp: [t.paper2, t.best],
+      heatmap: [t.paper2, t.best],
+    },
+  };
+}
+
+/** Recursively merge plain objects; arrays and scalars from `over` replace. */
+export function deepMerge(base: Obj, over: Obj): Obj {
+  const out: Obj = { ...base };
+  for (const [k, v] of Object.entries(over)) {
+    const cur = out[k];
+    out[k] = isPlain(v) && isPlain(cur) ? deepMerge(cur, v) : v;
+  }
+  return out;
+}
+
+/**
+ * Build the spec to embed: copies of `rows` become `data.values` (`url`/`name` are dropped),
+ * the theme is merged under the spec's own `config`, and single views fill the container
+ * width. `usermeta` is dropped, because vega-embed reads `usermeta.embedOptions` as embed
+ * options (it could turn the action menu back on or name config and patch URLs). The input
+ * spec is not modified.
+ */
+export function buildSpec(spec: Obj, rows: Obj[], config: Obj): Obj {
+  const data = isPlain(spec.data) ? spec.data : {};
+  const keep = Object.fromEntries(
+    Object.entries(data).filter(([k]) => k !== "url" && k !== "name" && k !== "values"),
+  );
+  const { usermeta: _usermeta, ...rest } = spec;
+  const out: Obj = {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    ...rest,
+    data: { ...keep, values: rows.map((r) => ({ ...r })) },
+    config: deepMerge(config, isPlain(spec.config) ? spec.config : {}),
+  };
+  if (!("width" in spec) && !MULTI_VIEW.some((k) => k in spec)) out.width = "container";
+  return out;
+}
+
+const S = {
+  err: {
+    fontSize: 13,
+    color: "var(--fail)",
+    border: "1px solid var(--rule)",
+    borderRadius: 6,
+    padding: "8px 10px",
+    margin: "0 0 8px",
+  },
+} satisfies Record<string, CSSProperties>;
+
+/** Vega-Lite panel. Reads `meta.spec`. */
+export function VegaLitePanel({ result }: { result: PanelResult }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const theme = useTheme();
+  const [error, setError] = useState<string | null>(null);
+  const meta = (result.meta ?? {}) as Obj;
+  const spec = isPlain(meta.spec) ? meta.spec : null;
+  const rows = result.rows as Obj[];
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !spec) return;
+    let cancelled = false;
+    let view: Result | null = null;
+    setError(null);
+    const full = buildSpec(spec, rows, themeConfig(readTokens(theme), theme));
+    embed(el, full as VisualizationSpec, EMBED_OPTIONS)
+      .then((r) => {
+        if (cancelled) r.finalize();
+        else view = r;
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+      view?.finalize();
+    };
+  }, [spec, rows, theme]);
+
+  if (!spec)
+    return (
+      <p role="alert" style={S.err}>
+        No Vega-Lite spec
+      </p>
+    );
+  return (
+    <div>
+      {error && (
+        <p role="alert" style={S.err}>
+          Vega-Lite: {error}
+        </p>
+      )}
+      <div ref={ref} data-testid="vega" style={{ width: "100%" }} />
+    </div>
+  );
+}
+
+export default VegaLitePanel;

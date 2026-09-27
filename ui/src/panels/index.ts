@@ -7,8 +7,15 @@
 import { Component, createElement, type ComponentType, type ReactElement, type ReactNode } from "react";
 import type { PanelResult as ApiPanelResult, PanelType } from "../api/models";
 import { Curves } from "./Curves";
+import { DistributionPanel } from "./Distribution";
+import { GridPanel } from "./Grid";
 import { Leaderboard } from "./Leaderboard";
+import { MarkdownPanel } from "./Markdown";
+import { ScatterPanel } from "./Scatter";
 import { StatStrip } from "./StatStrip";
+import { TablePanel } from "./Table";
+import { TracePanel } from "./Trace";
+import { VegaLitePanel } from "./VegaLite";
 import "./panels.css";
 
 /** Panel types (contract 1.4), from the API models. */
@@ -33,6 +40,13 @@ export const PANELS: Partial<Record<PanelType, ComponentType<PanelProps>>> = {
   stat_strip: StatStrip,
   leaderboard: Leaderboard,
   curves: Curves,
+  scatter: ScatterPanel,
+  distribution: DistributionPanel,
+  grid: GridPanel,
+  table: TablePanel,
+  trace: TracePanel,
+  markdown: MarkdownPanel,
+  vega_lite: VegaLitePanel,
 };
 
 /** Return the component for `type`, or `null` if none is registered. */

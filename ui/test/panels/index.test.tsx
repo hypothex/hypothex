@@ -55,3 +55,19 @@ test("the registry maps curves to Curves", async () => {
   render(<Panel result={{ type: "curves", title: "", rows: [], meta: {} }} />);
   expect(screen.getByText("No metric history yet")).toBeTruthy();
 });
+
+test("every contract panel type has a registered component", () => {
+  const types = [
+    "stat_strip",
+    "leaderboard",
+    "curves",
+    "scatter",
+    "distribution",
+    "grid",
+    "table",
+    "trace",
+    "markdown",
+    "vega_lite",
+  ];
+  expect(types.filter((type) => panelFor(type) === null)).toEqual([]);
+});

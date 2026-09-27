@@ -6,7 +6,7 @@ import pytest
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
-from hypothex.core.records import RunStatus
+from hypothex.core.records import RunStatus, UsageTotals
 from tests.factories import write_toy_project
 
 PY = sys.executable
@@ -165,3 +165,45 @@ def test_logged_artifacts_and_metrics_are_ingested(ctx: Context, toy_repo: Path)
     assert [(a.kind, a.path) for a in done.artifacts] == [("checkpoint", "/tmp/m.pt")]
     assert [p.name for p in ctx.index.metric_points(done.run_id)] == ["loss"]
     assert "checkpoint" in (ctx.run_dir(done) / "run.yaml").read_text()
+
+
+USAGE = (
+    "import sys, hypothex as hx; r = hx.current(); "
+    "r.log_usage(tokens_in=100, tokens_out=20, usd=0.25, seconds=1.5, example_id='a'); "
+    "r.log_usage(tokens_in=50, tokens_out=5, usd=0.125, seconds=0.5); "
+    "sys.exit(int(sys.argv[1]))"
+)
+
+
+def test_usage_is_summed_into_the_record(ctx: Context, toy_repo: Path) -> None:
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(USAGE, "0")))
+    # 0.25 + 0.125 and 1.5 + 0.5 are exact in binary floating point.
+    expected = UsageTotals(tokens_in=150, tokens_out=25, usd=0.375, seconds=2.0, calls=2)
+    assert done.status == RunStatus.FINISHED and done.usage == expected
+    assert ctx.store.read_record("toy", done.run_id).usage == expected
+
+
+def test_failed_run_still_records_usage(ctx: Context, toy_repo: Path) -> None:
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(USAGE, "2")))
+    assert done.status == RunStatus.FAILED and done.usage is not None
+    assert (done.usage.calls, done.usage.usd) == (2, 0.375)
+
+
+def test_run_without_usage_has_none(ctx: Context, toy_repo: Path) -> None:
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd("print(1)")))
+    assert done.usage is None
+
+
+def test_checkpoints_keep_step_and_metrics(ctx: Context, toy_repo: Path, tmp_path: Path) -> None:
+    code = (
+        "import sys, hypothex as hx; r = hx.current(); "
+        "r.log_checkpoint(sys.argv[1], step=100, metrics={'val_top1': 0.5}); "
+        "r.log_checkpoint(sys.argv[2], step=100, metrics={'val_top1': 0.5}); "
+        "r.log_checkpoint(sys.argv[2], step=200, metrics={'val_top1': 0.75})"
+    )
+    step_100, last = tmp_path / "step_100.pt", tmp_path / "last.pt"
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(code, str(step_100), str(last))))
+    assert [(a.kind, a.path, a.step, a.metrics) for a in done.artifacts] == [
+        ("checkpoint", str(step_100.resolve()), 100, {"val_top1": 0.5}),
+        ("checkpoint", str(last.resolve()), 200, {"val_top1": 0.75}),  # latest entry wins
+    ]

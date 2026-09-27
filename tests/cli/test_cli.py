@@ -3,10 +3,12 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from hypothex.cli.main import app, cli
-from hypothex.core.errors import RunError
+from hypothex.core.errors import ConfigError, RunError
+from hypothex.core.views import load_preset
 from tests.factories import write_toy_project
 
 runner = CliRunner()
@@ -16,6 +18,16 @@ WRITE_PREDS = (
     "open(d + '/predictions/predictions.jsonl', 'w').write(''.join("
     "json.dumps(dict(id='ex-' + str(i), prediction=i % 2)) + chr(10) for i in range(4)))"
 )
+GOOD_VIEW = """\
+title: acc only
+panels:
+  - type: leaderboard
+    title: board
+    data: {metrics: [accuracy]}
+"""
+# "acuracy" is one letter off; difflib.get_close_matches("acuracy", ["accuracy"]) ->
+# ["accuracy"]. The bad name sits on line 5 (1-based) of the text.
+BAD_VIEW = GOOD_VIEW.replace("[accuracy]", "[acuracy]")
 
 
 def hx(*args: str) -> dict | list:
@@ -144,3 +156,138 @@ def test_cli_errors_are_json(
     assert exc.value.code == 1
     err = json.loads(capsys.readouterr().out)
     assert err["type"] == "RunNotFoundError"
+
+
+def test_view_commands(in_repo: Path) -> None:
+    _run()
+    views_dir = in_repo.resolve() / ".hypothex" / "views" / "toy-acc"
+    assert [(v["name"], v["origin"]) for v in hx("view", "list", "toy-acc")] == [
+        ("overview", "preset")
+    ]
+
+    made = hx("view", "init", "toy-acc", "--from", "generic", "--name", "mine")
+    assert made["info"]["path"] == str(views_dir / "mine.yaml")
+    shown = hx("view", "show", "toy-acc", "mine")
+    assert yaml.safe_load(shown["text"]) == {"title": "mine", "from": "generic", "panels": []}
+    assert [p["type"] for p in shown["view"]["panels"]] == [
+        p.type for p in load_preset("generic").panels
+    ]
+    with pytest.raises(ConfigError, match="exists"):
+        runner.invoke(
+            app,
+            ["view", "init", "toy-acc", "--from", "generic", "--name", "mine"],
+            catch_exceptions=False,
+        )
+
+    good = in_repo / "acc.yaml"
+    good.write_text(GOOD_VIEW)
+    assert hx("view", "validate", "toy-acc", str(good))["ok"] is True
+    added = hx("view", "add", "toy-acc", "--file", str(good))
+    assert (added["info"]["name"], added["info"]["title"]) == ("acc", "acc only")
+    assert (views_dir / "acc.yaml").read_text() == GOOD_VIEW
+    assert hx("view", "add", "toy-acc", "--file", str(good), "--name", "other")["info"][
+        "path"
+    ] == str(views_dir / "other.yaml")
+    assert hx("view", "show", "toy-acc", "acc")["text"] == GOOD_VIEW
+    assert [v["name"] for v in hx("view", "list", "toy-acc")] == [
+        "overview",
+        "acc",
+        "mine",
+        "other",
+    ]
+
+    assert hx("view", "rm", "toy-acc", "acc") == {"ok": True}
+    assert not (views_dir / "acc.yaml").exists()
+    text = runner.invoke(app, ["view", "show", "toy-acc", "other"], catch_exceptions=False)
+    assert text.exit_code == 0 and text.stdout == GOOD_VIEW
+
+
+def test_view_validate_reports_issues_and_exits_1(in_repo: Path) -> None:
+    _run()
+    bad = in_repo / "bad.yaml"
+    bad.write_text(BAD_VIEW)
+    result = runner.invoke(app, ["view", "validate", "toy-acc", str(bad), "--json"])
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert report["ok"] is False
+    assert (report["issues"][0]["line"], report["issues"][0]["suggestion"]) == (5, "accuracy")
+    human = runner.invoke(app, ["view", "validate", "toy-acc", str(bad)])
+    assert (
+        human.exit_code == 1
+        and "line 5" in human.stdout
+        and "did you mean accuracy" in human.stdout
+    )
+
+
+def test_view_show_reports_an_inline_view_with_anchors_cleanly(
+    in_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _run()
+    config_path = in_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(config_path.read_text())
+    spec: dict = {"mark": "point"}
+    spec["layer"] = [spec]  # safe_dump writes the loop as &id001 ... *id001
+    cfg["tasks"]["toy-acc"]["views"] = {
+        "loop": {"title": "loop", "panels": [{"type": "vega_lite", "spec": spec}]}
+    }
+    text = yaml.safe_dump(cfg, sort_keys=False)
+    config_path.write_text(text)
+    line = next(i for i, row in enumerate(text.splitlines(), 1) if "&id001" in row)
+    monkeypatch.setattr(sys, "argv", ["hx", "view", "show", "toy-acc", "loop", "--json"])
+    with pytest.raises(SystemExit) as exc:
+        cli()
+    assert exc.value.code == 1
+    err = json.loads(capsys.readouterr().out)
+    assert err["type"] == "ConfigError"
+    assert f"YAML anchors and aliases are not allowed in views (line {line})" in err["error"]
+
+
+def test_view_add_invalid_is_not_saved_and_reports_issues(
+    in_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _run()
+    bad = in_repo / "bad.yaml"
+    bad.write_text(BAD_VIEW)
+    monkeypatch.setattr(sys, "argv", ["hx", "view", "add", "toy-acc", "--file", str(bad), "--json"])
+    with pytest.raises(SystemExit) as exc:
+        cli()
+    assert exc.value.code == 1
+    err = json.loads(capsys.readouterr().out)
+    assert err["type"] == "ViewValidationError"
+    assert err["issues"][0]["suggestion"] == "accuracy"
+    assert not (in_repo / ".hypothex" / "views" / "toy-acc" / "bad.yaml").exists()
+    with pytest.raises(ConfigError, match="invalid view"):
+        runner.invoke(
+            app,
+            ["view", "init", "toy-acc", "--from", "nope", "--name", "x"],
+            catch_exceptions=False,
+        )
+    assert not (in_repo / ".hypothex" / "views" / "toy-acc" / "x.yaml").exists()
+
+
+def test_demo_is_hidden_and_seeds(home: Path) -> None:
+    assert "demo" not in runner.invoke(app, ["--help"]).stdout
+    out = hx("demo", "--kinds", "generic")
+    assert isinstance(out, dict) and list(out) == ["generic"]
+    refs = {f"{t['project']}/{t['name']}" for t in hx("tasks")}
+    assert out["generic"] in refs
+    with pytest.raises(ConfigError, match="nope"):
+        runner.invoke(app, ["demo", "--kinds", "generic,nope"], catch_exceptions=False)
+
+
+def test_demo_refuses_a_home_with_real_projects(in_repo: Path) -> None:
+    _run()
+    with pytest.raises(ConfigError, match=r"already has projects \(toy\)"):
+        runner.invoke(app, ["demo", "--kinds", "generic"], catch_exceptions=False)
+    assert [p["project"] for p in hx("projects")] == ["toy"]
+
+
+def test_show_says_untracked_files_only(in_repo: Path) -> None:
+    (in_repo / "scratch notes.txt").write_text("x\n")
+    run_id = _run()["run_id"]
+    shown = hx("show", run_id)
+    assert shown["record"]["git"]["dirty"] is False
+    assert shown["record"]["git"]["untracked_count"] >= 1
+    text = runner.invoke(app, ["show", run_id], catch_exceptions=False).stdout
+    git_line = next(line for line in text.splitlines() if line.startswith("git:"))
+    assert "untracked files only (" in git_line and "dirty" not in git_line

@@ -12,7 +12,7 @@ from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError
 from hypothex.core.ids import utcnow
 from hypothex.core.panels import PanelResult, query_panel, query_view
-from hypothex.core.records import GitInfo, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.records import GitInfo, MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import safe_stem
 from hypothex.core.views import PanelData, PanelSpec, RunFilter, ViewSpec
 from tests.factories import make_record
@@ -369,3 +369,122 @@ def test_query_view_applies_run_filter_and_isolates_errors(ctx: Context, toy_rep
     assert (bad.type, bad.title, bad.rows) == ("trace", "bad", [])
     assert "missing" in bad.meta["error"]
     assert _ids(runs) == ["a"]
+
+
+# curves --------------------------------------------------------------------------
+def test_curves_rows_spikes_kills_and_checkpoints(ctx: Context, toy_repo: Path) -> None:
+    c1 = _run(ctx, toy_repo, "c1", seed=1, hypothesis="baseline")
+    c2 = _run(ctx, toy_repo, "c2", seed=2, minute=1, status=RunStatus.KILLED)
+    loss = [{"name": "train/loss", "step": s, "value": 6.0 if s == 22 else 1.0} for s in range(25)]
+    acc = [{"name": "val/acc", "step": s, "value": 100.0 if s == 10 else 0.5} for s in range(25)]
+    _jsonl(ctx.run_dir(c1) / "metrics.jsonl", loss + acc)
+    _jsonl(
+        ctx.run_dir(c2) / "metrics.jsonl",
+        [{"name": "train/loss", "step": s, "value": 1.0} for s in range(5)],
+    )
+    _jsonl(
+        ctx.run_dir(c1) / "artifacts.jsonl",
+        [
+            {"kind": "checkpoint", "path": "/ck/10.pt", "step": 10, "metrics": {"val/acc": 0.5}},
+            {"kind": "checkpoint", "path": "/ck/20.pt", "step": 20, "metrics": {"val/acc": 0.7}},
+            {"kind": "model", "path": "/final.pt"},
+        ],
+    )
+    panel = _panel("curves", data={"metrics": ["train/loss", "val/acc"]})
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+
+    assert len(result.rows) == 55  # c1: 25 + 25 points, c2: 5 points
+    assert result.rows[22] == {
+        "run_id": "c1",
+        "group_id": "aaaa@c1",
+        "seed": 1,
+        "name": "train/loss",
+        "step": 22,
+        "value": 6.0,
+    }
+    # step 22: 6.0 > 5 x median(previous 20 values = 1.0); val/acc jumps are ignored (no "loss")
+    assert result.meta["events"] == [
+        {"run_id": "c1", "step": 22, "kind": "spike"},
+        {"run_id": "c2", "step": 4, "kind": "killed"},
+    ]
+    assert result.meta["checkpoints"] == [
+        {"run_id": "c1", "step": 10, "value": 0.5, "best": False},
+        {"run_id": "c1", "step": 20, "value": 0.7, "best": True},
+    ]
+    assert result.meta["groups"] == [{"group_id": "aaaa@c1", "label": "baseline"}]
+    assert result.meta["metrics"] == ["train/loss", "val/acc"]
+    assert result.meta["x"] == "step"
+
+
+def test_curves_loss_checkpoint_best_is_minimum(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "c1")
+    _jsonl(
+        ctx.run_dir(rec) / "artifacts.jsonl",
+        [
+            {"kind": "checkpoint", "path": "/a", "step": 1, "metrics": {"val/loss": 0.9}},
+            {"kind": "checkpoint", "path": "/b", "step": 2, "metrics": {"val/loss": 0.4}},
+            {"kind": "checkpoint", "path": "/c", "step": 3, "metrics": {"val/loss": 0.6}},
+        ],
+    )
+    result = query_panel(ctx, "toy", "toy-acc", _panel("curves"))
+    assert [c["best"] for c in result.meta["checkpoints"]] == [False, True, False]
+
+
+def test_curves_step_metric_and_group_by_run(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "c1", seed=1)
+    _jsonl(
+        ctx.run_dir(rec) / "metrics.jsonl",
+        [{"name": "epoch", "step": s, "value": s // 2} for s in range(4)]
+        + [{"name": "val/acc", "step": s, "value": 0.1 * s} for s in (0, 2, 3, 9)],
+    )
+    panel = _panel(
+        "curves", data={"metrics": ["val/acc"], "step_metric": "epoch", "group_by": "run"}
+    )
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    # step 9 has no epoch value, so it is dropped
+    assert [(r["step"], r["value"]) for r in result.rows] == [
+        (0, 0.0),
+        (1, pytest.approx(0.2)),
+        (1, pytest.approx(0.30000000000000004)),
+    ]
+    assert {r["group_id"] for r in result.rows} == {"c1"}
+    assert result.meta["x"] == "epoch"
+
+
+def test_checkpoints_use_the_step_metric_x(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "c1")
+    _jsonl(
+        ctx.run_dir(rec) / "metrics.jsonl",
+        [{"name": "epoch", "step": s, "value": s // 100} for s in (0, 100, 200, 300)]
+        + [{"name": "val/acc", "step": s, "value": 0.1 * s / 100} for s in (100, 200, 300)],
+    )
+    _jsonl(
+        ctx.run_dir(rec) / "artifacts.jsonl",
+        [
+            {"kind": "checkpoint", "path": "/a", "step": 100, "metrics": {"val/acc": 0.1}},
+            {"kind": "checkpoint", "path": "/b", "step": 300, "metrics": {"val/acc": 0.3}},
+            {"kind": "checkpoint", "path": "/c", "step": 250, "metrics": {"val/acc": 0.9}},
+        ],
+    )
+    panel = _panel("curves", data={"metrics": ["val/acc"], "step_metric": "epoch"})
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert [r["step"] for r in result.rows] == [1, 2, 3]
+    # training steps 100 and 300 are epochs 1 and 3; step 250 has no epoch value: dropped
+    assert result.meta["checkpoints"] == [
+        {"run_id": "c1", "step": 1, "value": 0.1, "best": False},
+        {"run_id": "c1", "step": 3, "value": 0.3, "best": True},
+    ]
+
+
+def test_spike_detection_rules() -> None:
+    def pts(values: list[float]) -> list[MetricPoint]:
+        return [MetricPoint(name="loss", step=i, value=v) for i, v in enumerate(values)]
+
+    assert panels._spikes(pts([1.0, 5.0, 5.1])) == []  # median(1, 5) = 3 -> 5.1 < 15
+    assert panels._spikes(pts([1.0, 5.1])) == [1]
+    assert panels._spikes(pts([1.0, 5.0])) == []  # not strictly greater than 5x
+    assert panels._spikes(pts([0.0, 3.0])) == [1]  # 3 > 5 x median(0) = 0 (contract rule)
+    assert panels._spikes(pts([0.0, 0.0, 0.0])) == []  # 0 > 0 is false
+    # only the previous 20 values count: median(20 x 3.0) = 3 -> 16 > 15 is a spike,
+    # although the median of the whole history (21 x 10.0, 20 x 3.0) would be 10
+    assert panels._spikes(pts([10.0] * 21 + [3.0] * 20 + [16.0])) == [41]

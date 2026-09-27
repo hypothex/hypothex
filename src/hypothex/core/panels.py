@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import statistics
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
@@ -11,9 +13,9 @@ from pydantic import BaseModel, Field
 
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, HypothexError
-from hypothex.core.leaderboard import Leaderboard, build_leaderboard, group_id_for
+from hypothex.core.leaderboard import Leaderboard, build_leaderboard, group_id_for, group_label
 from hypothex.core.queries import primary_examples, refresh_project
-from hypothex.core.records import RunRecord
+from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
 from hypothex.core.sources import iter_rows, select_fields
 from hypothex.core.store import ProjectEntry
 from hypothex.core.views import (
@@ -26,6 +28,8 @@ from hypothex.core.views import (
 )
 
 MAX_TABLE_ROWS = 5000
+SPIKE_WINDOW = 20
+SPIKE_FACTOR = 5.0
 
 
 class PanelResult(BaseModel):
@@ -395,9 +399,173 @@ def _empty_trace(
     )
 
 
+def _own_label(members: list[RunRecord], key: str) -> str:
+    """``group_label`` of the newest non-empty hypothesis and the group's tags."""
+    hypothesis = next((r.hypothesis for r in reversed(members) if r.hypothesis.strip()), "")
+    return group_label(hypothesis, (t for r in members for t in r.tags), key)
+
+
+def _groups(scope: _Scope, panel: PanelSpec) -> list[tuple[str, str, list[RunRecord]]]:
+    """Return ``(key, label, members)`` per group, in order of first run."""
+    by = panel.data.group_by or "group"
+    members: dict[str, list[RunRecord]] = defaultdict(list)
+    for r in scope.runs:
+        if by == "config":
+            key = r.config_hash.removeprefix("sha256:")[:8]
+        elif by == "run":
+            key = r.run_id
+        elif by == "seed":
+            key = f"seed={r.seed}"
+        else:
+            key = group_id_for(r)
+        members[key].append(r)
+    labels = scope.board_labels() if by == "group" else {}
+    out: list[tuple[str, str, list[RunRecord]]] = []
+    for key, runs in members.items():
+        label = f"seed {runs[0].seed}" if by == "seed" else labels.get(key)
+        out.append((key, label or _own_label(runs, key), runs))
+    return out
+
+
+def _lower_is_better(name: str) -> bool:
+    lowered = name.lower()
+    return "loss" in lowered or "error" in lowered
+
+
+def _spikes(points: list[MetricPoint]) -> list[int]:
+    """
+    Steps whose value exceeds 5x the median of the previous 20 values.
+
+    Exactly the contract rule ``value > 5 × median(previous 20 values)``: a zero
+    median makes any positive value a spike (a loss leaving a flat zero).
+    """
+    steps: list[int] = []
+    values = [p.value for p in points]
+    for i in range(1, len(points)):
+        window = values[max(0, i - SPIKE_WINDOW) : i]
+        if values[i] > SPIKE_FACTOR * statistics.median(window):
+            steps.append(points[i].step)
+    return steps
+
+
+def _checkpoints(scope: _Scope, run: RunRecord) -> list[Artifact]:
+    logged = scope.ctx.store.read_artifacts(run.project, run.run_id)
+    merged = {(a.kind, a.path): a for a in [*run.artifacts, *logged]}
+    return sorted(
+        (a for a in merged.values() if a.kind == "checkpoint" and a.step is not None),
+        key=lambda a: a.step or 0,
+    )
+
+
+def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
+    wanted = panel.data.metrics
+    x_name = panel.data.step_metric or "step"
+    rows: list[dict[str, Any]] = []
+    checkpoints: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
+    groups: list[dict[str, str]] = []
+    group_of: dict[str, str] = {}
+    for key, label, members in _groups(scope, panel):
+        groups.append({"group_id": key, "label": label})
+        for r in members:
+            group_of[r.run_id] = key
+    names_seen: list[str] = []
+    for run in scope.runs:
+        points = scope.ctx.store.read_metric_points(run.project, run.run_id)
+        by_name: dict[str, list[MetricPoint]] = defaultdict(list)
+        for p in points:
+            by_name[p.name].append(p)
+        x_of: dict[int, float] | None = None
+        if x_name != "step":
+            x_of = {p.step: p.value for p in by_name.get(x_name, [])}
+        names = wanted if wanted is not None else sorted(n for n in by_name if n != x_name)
+        run_events: list[dict[str, Any]] = []
+        last_x: float | None = None
+        for name in names:
+            series = sorted(by_name.get(name, []), key=lambda p: p.step)
+            if series and name not in names_seen:
+                names_seen.append(name)
+            for p in series:
+                x = p.step if x_of is None else x_of.get(p.step)
+                if x is None:
+                    continue
+                last_x = x if last_x is None else max(last_x, x)
+                rows.append(
+                    {
+                        "run_id": run.run_id,
+                        "group_id": group_of[run.run_id],
+                        "seed": run.seed,
+                        "name": name,
+                        "step": x,
+                        "value": p.value,
+                    }
+                )
+            if "loss" in name.lower():
+                for step in _spikes(series):
+                    x = step if x_of is None else x_of.get(step)
+                    if x is not None:
+                        run_events.append({"run_id": run.run_id, "step": x, "kind": "spike"})
+        if run.status in (RunStatus.KILLED, RunStatus.FAILED) and last_x is not None:
+            run_events.append({"run_id": run.run_id, "step": last_x, "kind": run.status.value})
+        events.extend(sorted(run_events, key=lambda e: e["step"]))
+        checkpoints.extend(_checkpoint_rows(scope, run, panel, x_of))
+    return PanelResult(
+        type="curves",
+        title=panel.title,
+        rows=rows,
+        meta={
+            "x": x_name,
+            "metrics": names_seen,
+            "checkpoints": checkpoints,
+            "events": events,
+            "groups": groups,
+        },
+    )
+
+
+def _checkpoint_rows(
+    scope: _Scope, run: RunRecord, panel: PanelSpec, x_of: dict[int, float] | None
+) -> list[dict[str, Any]]:
+    """
+    Checkpoint marks of one run, at the curves' x.
+
+    ``x_of`` maps a training step to the ``data.step_metric`` value logged at
+    that step (``None`` when x is the step itself); a checkpoint whose step has
+    no such value is dropped, like a curve point.
+    """
+    arts = [
+        a
+        for a in _checkpoints(scope, run)
+        if x_of is None or (a.step is not None and a.step in x_of)
+    ]
+    if not arts:
+        return []
+    name = panel.data.y
+    if name is None:
+        present = [m for m in (panel.data.metrics or []) if any(m in a.metrics for a in arts)]
+        keys = sorted({k for a in arts for k in a.metrics})
+        name = present[0] if present else (keys[0] if keys else None)
+    out = [
+        {
+            "run_id": run.run_id,
+            "step": a.step if x_of is None or a.step is None else x_of[a.step],
+            "value": a.metrics.get(name) if name else None,
+            "best": False,
+        }
+        for a in arts
+    ]
+    scored = [c for c in out if c["value"] is not None]
+    if scored and name is not None:
+        pick = min if _lower_is_better(name) else max
+        best = pick(scored, key=lambda c: c["value"])
+        best["best"] = True
+    return out
+
+
 _HANDLERS = {
     "stat_strip": _stat_strip,
     "leaderboard": _leaderboard,
+    "curves": _curves,
     "table": _table,
     "vega_lite": _vega_lite,
     "trace": _trace,

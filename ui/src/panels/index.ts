@@ -5,20 +5,21 @@
  * rendering show a small error box instead of breaking the page.
  */
 import { Component, createElement, type ComponentType, type ReactElement, type ReactNode } from "react";
-import type { PanelType } from "../api/models";
+import type { PanelResult as ApiPanelResult, PanelType } from "../api/models";
 import { StatStrip } from "./StatStrip";
 import "./panels.css";
 
 /** Panel types (contract 1.4), from the API models. */
 export type { PanelType };
 
-/** Server-computed panel data, same as `hypothex.core.panels.PanelResult`. */
-export interface PanelResult {
-  type: PanelType;
-  title: string;
-  rows: Array<Record<string, unknown>>;
+/**
+ * Server-computed panel data, derived from `../api/models`'s `PanelResult` (the one
+ * hand-written copy of the contract shape) with `meta` widened to optional, so API
+ * results pass straight in and hand-built results in tests need no `meta`.
+ */
+export type PanelResult = Omit<ApiPanelResult, "meta"> & {
   meta?: Record<string, unknown>;
-}
+};
 
 /** Props every panel component takes. */
 export interface PanelProps {

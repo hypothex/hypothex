@@ -8,7 +8,11 @@ from pydantic import ValidationError
 from hypothex.core import config as core_config
 from hypothex.core import views as core_views
 from hypothex.core.config import ProjectConfig, TaskKind
+from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, StoreError
+from hypothex.core.ids import utcnow
+from hypothex.core.index import index_run
+from hypothex.core.records import ScoreRecord
 from hypothex.core.views import (
     PRESET_DIR,
     PanelData,
@@ -23,8 +27,10 @@ from hypothex.core.views import (
     resolve_view,
     save_view,
     validate_view_text,
+    view_context,
     views_dir,
 )
+from tests.factories import seed_finished_run
 
 PRESET_TYPES = {
     "generic": ["stat_strip", "leaderboard"],
@@ -659,3 +665,42 @@ def test_delete_view(tmp_path: Path) -> None:
     assert not path.exists()
     with pytest.raises(StoreError, match="no view file 'route' for task 'bench'"):
         delete_view(tmp_path, "bench", "route")
+
+
+# ---- view_context ----
+
+
+def test_view_context_collects_metrics_and_fields(ctx: Context, toy_repo: Path) -> None:
+    preds = [{"id": "ex-0", "prediction": 0}, {"id": "ex-1", "prediction": 1}]
+    record = seed_finished_run(ctx, toy_repo, "r1", predictions=preds, seed=1)
+    ctx.add_score(
+        record,
+        ScoreRecord(metric="accuracy", version="v1", key="value", value=0.5, created_at=utcnow()),
+    )
+    run_dir = ctx.run_dir(record)
+    (run_dir / "metrics.jsonl").write_text(
+        "".join(
+            json.dumps({"name": "train_loss", "step": s, "value": 1.0 / s}) + "\n" for s in (1, 2)
+        )
+    )
+    index_run(ctx.index, ctx.store, record)
+    (run_dir / "samples").mkdir()
+    (run_dir / "samples" / "latency_ms.jsonl").write_text('{"value": 12.5}\n')
+
+    metrics, fields = view_context(ctx, "toy", "toy-acc")
+
+    assert metrics == {"accuracy", "train_loss", "latency_ms"}
+    assert set(fields) == {"runs", "scores", "metrics", "predictions", "samples", "usage", "traces"}
+    assert {"run_id", "group_id", "seed", "metric", "version", "key", "value"} <= fields["scores"]
+    assert {"run_id", "group_id", "seed", "name", "step", "value"} <= fields["metrics"]
+    assert {"run_id", "id", "prediction"} <= fields["predictions"]
+    assert {"run_id", "name", "value"} <= fields["samples"]
+    assert {"run_id", "status", "created_by"} <= fields["runs"]
+    assert fields["traces"] == set()
+
+
+def test_view_context_without_runs_has_config_metrics_only(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    metrics, fields = view_context(ctx, "toy", "toy-acc")
+    assert metrics == {"accuracy"}
+    assert all(seen == set() for seen in fields.values())

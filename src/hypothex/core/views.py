@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import re
 from datetime import datetime
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
@@ -28,6 +29,8 @@ from hypothex.core.records import RunStatus
 
 if TYPE_CHECKING:
     from pydantic_core import ErrorDetails
+
+    from hypothex.core.context import Context
 
 PanelType = Literal[
     "stat_strip",
@@ -53,6 +56,9 @@ PRESET_DIR = Path(__file__).resolve().parent.parent / "views" / "presets"
 ROW_KEYS = frozenset({"run_id", "group_id", "seed"})
 FIELD_PREFIXES = ("usage.", "params.", "vars.")
 VEGA_ROOT_KEYS = frozenset({"mark", "layer", "concat", "hconcat", "vconcat", "facet", "repeat"})
+
+CONTEXT_RUNS = 20
+CONTEXT_ROWS_PER_RUN = 500
 VEGA_BLOCKED_KEYS = frozenset({"url", "href", "embedOptions"})
 VERSION_REF = "version"
 VEGA_MAX_DEPTH = 64
@@ -837,3 +843,48 @@ def delete_view(repo: Path, task: str, name: str) -> None:
     if not path.is_file():
         raise StoreError(f"no view file {name!r} for task {task!r}")
     path.unlink()
+
+
+def view_context(ctx: Context, project: str, task: str) -> tuple[set[str], dict[str, set[str]]]:
+    """
+    Collect the metric names and per-source row fields a task's runs have.
+
+    Reads the task's newest ``CONTEXT_RUNS`` runs (archived included). Metric names
+    are the task's configured metrics plus every scored metric, logged step metric,
+    and sample series name (``RunStore.read_samples``). Fields are the keys of the first
+    ``CONTEXT_ROWS_PER_RUN`` rows per run of each source (``sources.iter_rows``).
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    project : str
+        Project name.
+    task : str
+        Task name.
+
+    Returns
+    -------
+    tuple of (set of str, dict of str to set of str)
+        Known metric names, and field names per source (every source is a key).
+    """
+    from hypothex.core.sources import iter_rows  # sources imports this module
+
+    config = ctx.store.load_project(project).config
+    metrics: set[str] = set(config.tasks[task].metrics) if task in config.tasks else set()
+    runs = ctx.index.list_runs(
+        project=project, task=task, include_archived=True, limit=CONTEXT_RUNS
+    )
+    for scores in ctx.index.scores_for(r.run_id for r in runs).values():
+        metrics.update(s.metric for s in scores)
+    for record in runs:
+        metrics.update(p.name for p in ctx.index.metric_points(record.run_id))
+        metrics.update(ctx.store.read_samples(record.project, record.run_id))
+    fields: dict[str, set[str]] = {}
+    for source in get_args(Source):
+        seen: set[str] = set()
+        for record in runs:
+            for row in islice(iter_rows(ctx, [record], source), CONTEXT_ROWS_PER_RUN):
+                seen.update(row)
+        fields[source] = seen
+    return metrics, fields

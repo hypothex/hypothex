@@ -21,8 +21,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import struct
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -37,6 +38,7 @@ from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.ids import new_run_id, utcnow
 from hypothex.core.records import DatasetRef, GitInfo, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.seeds import config_hash, run_fingerprint
+from hypothex.core.stats import quantile
 from hypothex.core.store import sum_usage
 from hypothex.core.views import save_view
 from hypothex.sdk import Run
@@ -1558,12 +1560,361 @@ def _seed_agent_iteration(sd: _Seeder) -> None:
         )
 
 
+# --------------------------------------------------------------------- system_bench
+def _f32(x: float) -> float:
+    """
+    Round to single precision, like storing into a JavaScript ``Float32Array``.
+
+    Parameters
+    ----------
+    x : float
+        Value to round.
+
+    Returns
+    -------
+    float
+    """
+    return struct.unpack("f", struct.pack("f", x))[0]
+
+
+_SB_REQUESTS, _SB_WARMUP, _SB_CONCURRENCY, _SB_TIMEOUT_MS = 5000, 200, 16, 1000
+_SB_VERSIONS = {
+    "baseline": ("baseline", "main", "a1b2c3d9e8f70615", "human", "main@a1b2"),
+    "cache": ("cache-enabled", "feat/route-cache", "c7e41f02b6a95d38", "agent:bench", "LRU 50k"),
+    "async": (
+        "async-worker", "feat/async-worker", "9d03b5e4417ac2f0", "agent:bench",
+        "4 workers, batch 8",
+    ),
+}  # fmt: skip
+_SB_SERVER = {
+    "baseline": "uvicorn app:app --workers 1",
+    "cache": "uvicorn app:app --workers 1 --route-cache 50000",
+    "async": "uvicorn app:app --workers 4 --batch 8",
+}
+_SB_ERR503 = {"baseline": 0.0, "cache": 0.0, "async": 0.0008}
+_SB_GPU_PER_RPS = {"baseline": 0.372, "cache": 0.372, "async": 0.452}
+_SB_CPU_BASE = {"baseline": 23, "cache": 16, "async": 31}
+_SB_CPU_PER_RPS = {"baseline": 0.145, "cache": 0.062, "async": 0.178}
+_SB_XMAX = {"baseline": 196, "cache": 520, "async": 312}
+_SB_CONC = (1, 2, 4, 8, 16, 32, 64, 128)
+_SB_COMMAND: str = (
+    "python bench/load.py --url http://127.0.0.1:8080/v2/route -n 5000 -c 16 --warmup 200 "
+    "--seed {seed}"
+)
+# version, repeat, created_at, drift, noisy neighbour (t0, t1, cpu steal %, slowdown)
+_SB_RUNS: tuple[tuple[str, int, str, float, tuple[float, float, float, float] | None], ...] = (
+    ("baseline", 1, "2026-09-27T09:12:04Z", 1.004, None),
+    ("baseline", 2, "2026-09-27T09:14:12Z", 0.991, None),
+    ("baseline", 3, "2026-09-27T09:16:20Z", 1.009, None),
+    ("cache", 1, "2026-09-27T09:30:45Z", 0.996, None),
+    ("cache", 2, "2026-09-27T09:32:33Z", 1.007, None),
+    ("cache", 3, "2026-09-27T09:34:21Z", 1.002, (5.5, 12.0, 23, 2.1)),
+    ("async", 1, "2026-09-27T09:50:10Z", 0.998, None),
+    ("async", 2, "2026-09-27T09:51:58Z", 1.006, None),
+    ("async", 3, "2026-09-27T09:53:46Z", 0.993, None),
+)
+
+
+@dataclass
+class _Bench:
+    """Raw samples and 1 Hz utilisation of one benchmark run."""
+
+    t: list[float]
+    lat: list[float]
+    err: list[int]
+    hit: list[bool]
+    duration: float
+    cpu: list[float]
+    gpu: list[float]
+    mem: list[float]
+    steal: list[float]
+
+
+def _lognormal(draw: Callable[[], float], median: float, sigma: float) -> float:
+    """
+    Draw a log-normal value with the given median.
+
+    Parameters
+    ----------
+    draw : callable
+        Uniform generator.
+    median, sigma : float
+        Median and log-scale spread.
+
+    Returns
+    -------
+    float
+    """
+    return median * math.exp(sigma * _gauss(draw))
+
+
+def _latency(vid: str, draw: Callable[[], float], t: float) -> tuple[float, bool]:
+    """
+    Draw one request latency (ms) and whether the route cache was hit.
+
+    Parameters
+    ----------
+    vid : str
+        Version id.
+    draw : callable
+        Uniform generator.
+    t : float
+        Seconds since measurement start (the cache warms up).
+
+    Returns
+    -------
+    tuple of (float, bool)
+    """
+    if vid == "cache":
+        if draw() < 0.66 - 0.28 * math.exp(-t / 2.5):
+            return _lognormal(draw, 14, 0.35), True
+        extra = 80 + 140 * draw() if draw() < 0.006 else 0
+        return extra + _lognormal(draw, 124, 0.40), False
+    if vid == "async":
+        extra = 60 + 90 * draw() if draw() < 0.003 else 0
+        return extra + _lognormal(draw, 104, 0.28), False
+    extra = 80 + 140 * draw() if draw() < 0.006 else 0
+    return extra + _lognormal(draw, 118, 0.40), False
+
+
+def _simulate(
+    vid: str, seed: int, drift: float, noisy: tuple[float, float, float, float] | None
+) -> _Bench:
+    """
+    Port of the ``system_bench`` mockup's closed-loop load simulation.
+
+    Parameters
+    ----------
+    vid : str
+        Version id.
+    seed : int
+        RNG seed.
+    drift : float
+        Multiplier on every latency (run-to-run drift).
+    noisy : tuple or None
+        Noisy-neighbour window ``(t0, t1, steal, slowdown)``.
+
+    Returns
+    -------
+    _Bench
+    """
+    r = _mulberry32(seed)
+    free = [0.0] * _SB_CONCURRENCY
+    t: list[float] = []
+    lat: list[float] = []
+    err: list[int] = []
+    hit: list[bool] = []
+    t_start = 0.0
+    for i in range(_SB_REQUESTS + _SB_WARMUP):
+        w = 0
+        for j in range(1, _SB_CONCURRENCY):
+            if free[j] < free[w]:
+                w = j
+        s = free[w]
+        if i == _SB_WARMUP:
+            t_start = s
+        tm = s - t_start if i >= _SB_WARMUP else 0.0
+        ms, h = _latency(vid, r, tm)
+        ms *= drift
+        if noisy is not None and noisy[0] <= tm <= noisy[1]:
+            ms *= 1 + (noisy[3] - 1) * 0.55 if h else noisy[3] * (0.85 + 0.3 * r())
+            if r() < 0.015:
+                ms += 600 + 300 * r()
+        e = 0
+        if ms > _SB_TIMEOUT_MS:
+            ms, e = float(_SB_TIMEOUT_MS), 1
+        elif r() < _SB_ERR503[vid]:
+            ms, e = 2 + 3 * r(), 2
+        free[w] = s + ms / 1000 + 0.0004
+        if i >= _SB_WARMUP:
+            t.append(_f32(free[w] - t_start))
+            lat.append(_f32(ms))
+            err.append(e)
+            hit.append(h)
+    duration = max(t)
+    r = _mulberry32(seed ^ 0x5BD1E995)
+    n = math.ceil(duration)
+    done, gpu_req = [0] * n, [0] * n
+    for ti, h in zip(t, hit, strict=True):
+        b = min(n - 1, math.floor(ti))
+        done[b] += 1
+        if not h:
+            gpu_req[b] += 1
+    cpu, gpu, mem, steal = [], [], [], []
+    cached = 0
+    for s in range(n):
+        frac = max(0.2, duration - s) if s == n - 1 else 1
+        rps, grps = done[s] / frac, gpu_req[s] / frac
+        in_nn = noisy is not None and noisy[0] <= s + 0.5 <= noisy[1]
+        if noisy is not None and in_nn:
+            steal.append(_fixed(noisy[2] + 3 * _gauss(r), 1))
+        else:
+            steal.append(_fixed(0.3 + 0.25 * r(), 1))
+        load = _SB_CPU_BASE[vid] + _SB_CPU_PER_RPS[vid] * rps + 1.6 * _gauss(r)
+        cpu.append(_fixed(min(99, load + (9 if in_nn else 0)), 1))
+        gpu.append(_fixed(min(99, _SB_GPU_PER_RPS[vid] * grps + 1.8 * _gauss(r)), 1))
+        if vid == "cache":
+            cached += gpu_req[s]
+        base = 7.0 if vid == "async" else 6.1
+        grown = cached * 0.00082 if vid == "cache" else 0
+        mem.append(_fixed(base + grown + 0.04 * _gauss(r), 2))
+    return _Bench(t, lat, err, hit, duration, cpu, gpu, mem, steal)
+
+
+def _sweep(vid: str, vi: int, clean: list[_Bench]) -> list[tuple[int, float]]:
+    """
+    Port of the mockup's concurrency sweep: throughput (req/s) per concurrency.
+
+    Parameters
+    ----------
+    vid : str
+        Version id.
+    vi : int
+        Version index (RNG seed offset).
+    clean : list of _Bench
+        The version's repeats without a noisy neighbour; the curve passes
+        through their mean throughput at concurrency 16.
+
+    Returns
+    -------
+    list of (int, float)
+    """
+    r = _mulberry32(777 + vi)
+    k = 3.2
+
+    def throughput(c: int, r0: float) -> float:
+        return 1 / math.pow(math.pow(r0 / c, k) + math.pow(1 / _SB_XMAX[vid], k), 1 / k)
+
+    x16 = 0.0
+    for b in clean:
+        x16 += sum(1 for e in b.err if not e) / _fixed(b.duration, 2)
+    x16 /= len(clean)
+    lo, hi = 0.001, 1.0
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if throughput(16, mid) > x16:
+            lo = mid
+        else:
+            hi = mid
+    r0 = (lo + hi) / 2
+    return [
+        (c, _fixed(x16 if c == 16 else throughput(c, r0) * (1 + 0.012 * _gauss(r)), 1))
+        for c in _SB_CONC
+    ]
+
+
+def _seed_system_bench(sd: _Seeder) -> None:
+    """
+    Seed ``route-search/route-api-latency`` (kind ``system_bench``).
+
+    Three versions x three repeats of 5,000 requests from
+    ``kinds/system_bench/data.js``: raw latency samples, 1 Hz utilisation, a
+    concurrency sweep on each third repeat, and one failed first attempt
+    (server not ready) before cache repeat 3.
+
+    Parameters
+    ----------
+    sd : _Seeder
+        Target home.
+    """
+    project, task = DEMO_TASKS["system_bench"]
+    dataset = {
+        "version": "v1",
+        "path": "bench/requests.jsonl",
+        "splits": {"test": "bench/requests.jsonl"},
+    }
+    lower = {"higher_is_better": False, "fn": "demo_metrics:harness", "version": "v1"}
+    repo = sd.project(
+        _task_config(
+            project,
+            task,
+            kind="system_bench",
+            dataset=dataset,
+            metrics={
+                "latency": lower,
+                "errors": lower,
+                "throughput": {"version": "v1", "fn": "demo_metrics:harness"},
+            },
+            primary="latency/p95",
+            description="POST /v2/route, 5,000 requests after 200 warm-up, concurrency 16.",
+            baseline="tag:baseline",
+        ),
+        {"bench/requests.jsonl": _jsonl({"id": f"q{i}", "reference": None} for i in range(3))},
+    )
+    ref = DatasetRef(name=task, version="v1", split="test", path=str(repo / dataset["path"]))
+    clean: dict[str, list[_Bench]] = {}  # repeats without a noisy neighbour
+    for i, (vid, rep, stamp, drift, noisy) in enumerate(_SB_RUNS):
+        bench = _simulate(vid, 9001 + i * 7919, drift, noisy)
+        if noisy is None:
+            clean.setdefault(vid, []).append(bench)
+        name, branch, commit, by, note = _SB_VERSIONS[vid]
+        created = sd.at(stamp)
+        spec = _RunSpec(
+            project=project,
+            task=task,
+            repo=repo,
+            hypothesis=f"{name}: {note}",
+            command_template=_SB_COMMAND.split(),
+            params={"version": vid, "server": _SB_SERVER[vid], "concurrency": "16"},
+            seed=rep,
+            created_at=created,
+            created_by=by,
+            host="gpu-box-1",
+            commit=commit,
+            branch=branch,
+            key=f"{vid}-{rep}",
+            tags=["baseline"] if vid == "baseline" else [],
+            datasets=[ref],
+        )
+        if noisy is not None:  # the first attempt died before the server came up
+            first_try = replace(
+                spec, created_at=created - timedelta(seconds=10), key=f"{vid}-{rep}-1"
+            )
+            failed, _ = sd.start(first_try)
+            sd.finish(
+                failed,
+                status=RunStatus.FAILED,
+                ended_at=failed.created_at + timedelta(seconds=2.1),
+                exit_code=1,
+                stderr="server not ready: connect :8080 refused\n",
+            )
+        record, run = sd.start(spec)
+        run.log_samples("latency_ms", bench.lat)
+        for s, values in enumerate(zip(bench.cpu, bench.gpu, bench.mem, bench.steal, strict=True)):
+            cpu, gpu, mem, steal = values
+            run.log({"cpu_pct": cpu, "gpu_pct": gpu, "mem_gb": mem, "steal_pct": steal}, step=s)
+        per_second: dict[int, list[float]] = {}
+        for ti, ms in zip(bench.t, bench.lat, strict=True):
+            per_second.setdefault(math.floor(ti), []).append(ms)
+        for s in sorted(per_second):
+            run.log({"latency_p95_ms": quantile(per_second[s], 0.95)}, step=s)
+        if rep == 3:  # the sweep ran after the third repeat
+            for c, rps in _sweep(vid, list(_SB_VERSIONS).index(vid), clean[vid]):
+                run.log({"sweep/rps": rps}, step=c)
+        ok = sum(1 for e in bench.err if not e)
+        duration = _fixed(bench.duration, 2)
+        sd.finish(
+            record,
+            status=RunStatus.FINISHED,
+            ended_at=created + timedelta(seconds=duration + 6.4),
+            exit_code=0,
+            scores=[
+                ("latency", "v1", "p50", quantile(bench.lat, 0.50)),
+                ("latency", "v1", "p95", quantile(bench.lat, 0.95)),
+                ("latency", "v1", "p99", quantile(bench.lat, 0.99)),
+                ("errors", "v1", "rate", (len(bench.err) - ok) / len(bench.err)),
+                ("throughput", "v1", "rps", ok / duration),
+            ],
+        )
+
+
 # --------------------------------------------------------------------- entry point
 _SEEDERS: dict[str, Callable[[_Seeder], None]] = {
     "generic": _seed_generic,
     "training": _seed_training,
     "agent_eval": _seed_agent_eval,
     "agent_iteration": _seed_agent_iteration,
+    "system_bench": _seed_system_bench,
 }
 
 

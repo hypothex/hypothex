@@ -1,3 +1,5 @@
+import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +10,9 @@ from hypothex.core.context import Context
 from hypothex.core.control import repair_runs
 from hypothex.core.errors import StoreError
 from hypothex.core.fsutil import read_jsonl
+from hypothex.core.ids import utcnow
+from hypothex.core.overview import build_overview
+from hypothex.core.panels import query_view
 from hypothex.core.records import RunRecord, RunStatus
 from hypothex.core.views import get_view
 from hypothex.demo import (
@@ -249,3 +254,143 @@ def test_agent_iteration_mirrors_mockup(dctx: Context) -> None:
     assert rows["T-001"]["meta"] == {"category": None, "steps": 15}
     trace = read_jsonl(dctx.run_dir(detail) / "traces" / "T-035.jsonl")
     assert len(trace) == 11 and trace[-1]["tool"] == "submit" and trace[-1]["result"] == "solved"
+
+
+def test_system_bench_mirrors_mockup(dctx: Context) -> None:
+    board = q.get_leaderboard(dctx, REFS["system_bench"])
+    assert board.kind == "system_bench" and not board.higher_is_better
+    runs = [r for r in _runs(dctx, "route-search") if r.status == RunStatus.FINISHED]
+    # p95 (linear interpolation) over each run's Float32 latencies, computed by bun
+    # from kinds/system_bench/data.js
+    p95 = {
+        ("baseline", 1): 234.31702575683593, ("baseline", 2): 230.59684829711915,
+        ("baseline", 3): 234.89067153930665, ("cache", 1): 194.79916763305684,
+        ("cache", 2): 197.24704971313494, ("cache", 3): 239.69444732666022,
+        ("async", 1): 163.21131973266603, ("async", 2): 168.6949531555176,
+        ("async", 3): 164.95999679565435,
+    }  # fmt: skip
+    errors = {("cache", 3): 4, ("async", 1): 3, ("async", 3): 1}
+    for (version, rep), value in p95.items():
+        run = _find(runs, rep, version=version)
+        scores = {s.key: s.value for s in dctx.store.read_scores("route-search", run.run_id)}
+        assert scores["p95"] == pytest.approx(value, abs=1e-9)
+        assert scores["rate"] == errors.get((version, rep), 0) / 5000
+        samples = read_jsonl(dctx.run_dir(run) / "samples" / "latency_ms.jsonl")
+        assert len(samples) == 5000
+        assert run.tags == (["baseline"] if version == "baseline" else [])
+    # concurrency sweep on each third repeat (data.js SWEEP)
+    cache3 = _find(runs, 3, version="cache")
+    sweep = {
+        p.step: p.value
+        for p in dctx.store.read_metric_points("route-search", cache3.run_id)
+        if p.name == "sweep/rps"
+    }
+    assert sweep == {
+        1: 16.8,
+        2: 34.4,
+        4: 69.2,
+        8: 137.2,
+        16: 265.3,
+        32: 429.2,
+        64: 514.8,
+        128: 522.9,
+    }
+    failed = [r for r in _runs(dctx, "route-search") if r.status == RunStatus.FAILED]
+    assert len(failed) == 1 and failed[0].exit_code == 1
+    assert failed[0].config_hash == cache3.config_hash
+    assert cache3.created_at - failed[0].created_at == timedelta(seconds=10)
+
+
+def test_seed_demo_is_fast_and_registers_every_kind(tmp_path: Path) -> None:
+    start = time.perf_counter()
+    refs = seed_demo(tmp_path / "home")
+    assert time.perf_counter() - start < 10.0
+    assert refs == REFS
+    ctx = Context.open(tmp_path / "home")
+    for kind, ref in refs.items():
+        entry, task = q.resolve_task(ctx, ref)
+        assert entry.config.tasks[task].kind == kind
+        assert Path(entry.repo) == (tmp_path / "home" / "demo-repos" / entry.project).resolve()
+    # the newest run (the one still training) starts 40 min before the current hour
+    newest = max(r.created_at for r in ctx.index.list_runs(include_archived=True, limit=None))
+    assert utcnow() - timedelta(minutes=101) <= newest <= utcnow()
+
+
+def test_overview_of_demo(dctx: Context) -> None:
+    summary = build_overview(dctx, since=DEMO_EPOCH - timedelta(hours=24))
+    assert summary.counts == {
+        "total": 45,
+        "queued": 0,
+        "running": 1,
+        "finished": 40,
+        "failed": 4,
+        "killed": 0,
+        "lost": 0,
+        "archived": 7,
+        "agent": 30,
+        "human": 15,
+    }
+    assert [r.params["config"] for r in summary.running] == ["lr2e-4"]
+    assert len(summary.failures) == 4 and all(f.retried_ok for f in summary.failures)
+    assert [(p.project, p.runs, p.kind) for p in summary.projects] == [
+        ("retro-agent", 27, "agent_iteration"),
+        ("retro-agents", 12, "agent_eval"),
+        ("route-search", 9, "system_bench"),
+        ("rxn-forward", 8, "training"),
+        ("toy-classifier", 12, "generic"),
+    ]
+
+
+def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
+    # The preset names must match what the demo writes; the UI tests and screenshots use it.
+    for kind, ref in REFS.items():
+        entry, task = q.resolve_task(dctx, ref)
+        view = get_view(Path(entry.repo), entry.config, task, "overview")
+        results = {r.title: r for r in query_view(dctx, entry.project, task, view)}
+        for title, result in results.items():
+            assert "error" not in result.meta, (kind, title, result.meta.get("error"))
+            if result.type != "markdown":
+                assert result.rows, (kind, title)
+        if kind == "training":
+            assert {row["name"] for row in results["GPU"].rows} == {"sys/gpu_util"}
+            assert results["Checkpoints"].meta["checkpoints"]
+        if kind == "agent_iteration":
+            solved = results["Solved by version"]
+            assert solved.meta["x_type"] == "ordinal"
+            assert [row["x"] for row in solved.rows] == [f"v{i}" for i in range(1, 10)]
+            cost = results["$ per solved"]
+            assert [row["x"] for row in cost.rows] == [f"v{i}" for i in range(1, 10)]
+            # v1 (data.js): $74.28, $79.57, $75.70 for 80 solved targets in each seed
+            assert cost.rows[0]["y"] == pytest.approx((74.28 + 79.57 + 75.70) / 240)
+            # regressions (contract 1.6). Solved: no drop is outside the best earlier
+            # version's CI (the largest, v6 0.558 vs v5 0.607, is inside v5's interval).
+            assert not any(row["regression"] for row in solved.rows)
+            # $ per solved is lower-is-better (usage.*), seed t-intervals over 3 seeds:
+            # v3 is the cheapest (0.918, hi 1.004); v4..v9 all have y_lo above 1.004
+            # (v4 1.127, v9 1.056), so each is flagged
+            assert [row["regression"] for row in cost.rows] == [False] * 3 + [True] * 6
+        if kind == "system_bench":
+            assert results["Latency"].rows[0]["n"] == 15_000  # 3 repeats x 5,000 requests
+            errors = results["Error rate"].rows
+            assert any(row["metric"] == "errors" and row["key"] == "rate" for row in errors)
+            # percentile table: one distribution row per version, Δ vs the tag:baseline group
+            table = results["Percentiles"]
+            assert (table.type, table.meta["render"]) == ("distribution", "table")
+            assert len(table.rows) == 3
+            baseline = {row["group_id"]: row for row in table.rows}[table.meta["baseline"]]
+            assert baseline["vs_baseline"] is None
+            deltas = [row["vs_baseline"] for row in table.rows if row is not baseline]
+            # 3 repeats on each side, so every percentile has a bootstrap interval
+            assert all(lo is not None and lo <= hi for d in deltas for _, lo, hi in d.values())
+            # async: repeat p95s 163-169 ms vs baseline 231-235 ms, about -29%
+            assert min(d["p95"][0] for d in deltas) < -0.25
+            # 9 finished runs: p95 for the spread
+            assert len(results["Repeat spread"].rows) == 9
+
+
+def test_existing_project_blocks_every_kind(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    seed_demo(home, ["generic"])
+    with pytest.raises(StoreError, match="toy-classifier"):
+        seed_demo(home, ["system_bench", "generic"])
+    assert not Context.open(home).layout.project_dir("route-search").exists()

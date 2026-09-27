@@ -56,6 +56,21 @@ author, and Hypothex rejects runs that have no hypothesis.
   Use `run.log({...})`, `run.log_predictions([{"id": ..., "prediction": ...}])`, and
   `run.log_artifact(path, kind="checkpoint")`. It does nothing outside Hypothex.
 
+## Views (task dashboards)
+
+A view is YAML: `title`, optional `from: <kind>` (start from a preset), optional
+`runs:` filter, and `panels` (`stat_strip`, `leaderboard`, `curves`, `scatter`,
+`distribution`, `grid`, `table`, `trace`, `markdown`, `vega_lite`). Files live in
+`.hypothex/views/<task>/<name>.yaml` in the repo; commit them.
+
+- See: `hx view list <task> --json`, `hx view show <task> <name> --json`.
+- Start: `hx view init <task> --from <kind> --name <name> --json`.
+- Check, then save: `hx view validate <task> view.yaml --json`, then
+  `hx view add <task> --file view.yaml --json`. Fix every issue (`line`, `message`,
+  `suggestion`) first; invalid views are never saved.
+- MCP: `list_views`, `get_view`, `add_view` (returns `issues` on failure),
+  `query_view` (panel rows).
+
 ## Where things are
 
 `hx show <run_id> --json` → `paths`: `run_dir`, `repo`, `cwd`, `config`,

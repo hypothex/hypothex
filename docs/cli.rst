@@ -159,6 +159,17 @@ Archive a run (``--off`` to unarchive) to hide a dead end without deleting it.
 
 Add a note to a run.
 
+Views
+-----
+
+.. code-block:: bash
+
+   hx view list TASK --json
+   hx view add TASK --file view.yaml --json
+
+List a task's dashboards, or validate and save one. See :doc:`views` for the YAML
+format and the other ``hx view`` commands.
+
 Datasets
 --------
 

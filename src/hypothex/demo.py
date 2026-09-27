@@ -679,9 +679,262 @@ def _seed_generic(sd: _Seeder) -> None:
             sd.ctx.store.append_note(project, final.run_id, _GEN_NOTE, "agent:acceptance")
 
 
+# --------------------------------------------------------------------- training
+@dataclass(frozen=True)
+class _TrainConfig:
+    """One training config of the ``training`` mockup."""
+
+    id: str
+    name: str
+    hypothesis: str
+    lr: float
+    sec_per_step: float
+    created_by: str
+    v: tuple[float, float, float, float]  # val top-1: inf, v0, tau, overfit
+    vl: tuple[float, float, float, float]  # val loss: inf, l0, tau, overfit
+    tl: tuple[float, float, float]  # train loss: inf, l0, tau
+    util: float
+    mem: float
+    host: str
+    commit: str
+
+
+_TRAIN_CONFIGS = (
+    _TrainConfig(
+        "base", "base", "base recipe", 3e-4, 0.94, "shreyas",
+        (0.8958, 0.62, 2500, 0.0060), (0.140, 0.46, 2300, 0.020), (0.074, 0.58, 2600),
+        95, 61.4, "gpu-a01", "3d9e1a7",
+    ),
+    _TrainConfig(
+        "lr1e-4", "lr 1e-4", "lr 1e-4 converges higher", 1e-4, 0.94, "agent:tuner",
+        (0.8966, 0.62, 4300, 0.0), (0.143, 0.46, 4200, 0.0), (0.101, 0.58, 4600),
+        95, 61.4, "gpu-a02", "b82f04c",
+    ),
+    _TrainConfig(
+        "aug", "+aug", "+aug (SMILES randomisation) lifts top-1", 3e-4, 1.02, "agent:tuner",
+        (0.9098, 0.60, 3100, 0.0), (0.121, 0.47, 3000, 0.0), (0.129, 0.61, 3200),
+        86, 64.2, "gpu-a03", "b82f04c",
+    ),
+)  # fmt: skip
+# Not in the mockup: one run still in progress, so the Overview has something running.
+_TRAIN_RUNNING = _TrainConfig(
+    "lr2e-4", "lr 2e-4", "+aug with lr 2e-4", 2e-4, 1.02, "agent:tuner",
+    (0.9120, 0.60, 2800, 0.0), (0.118, 0.47, 2700, 0.0), (0.125, 0.61, 2900),
+    86, 64.2, "gpu-a04", "b82f04c",
+)  # fmt: skip
+_STEPS, _VAL_EVERY, _CKPT_EVERY, _LOG_EVERY, _SYS_EVERY, _WARMUP = 20000, 500, 2000, 50, 100, 1000
+_N_TEST, _SPIKE = 40000, 9000
+_TRAIN_COMMAND = "python train.py --config configs/{config}.yaml --seed {{seed}}"
+
+
+@dataclass
+class _Curves:
+    """Logged history of one training run."""
+
+    train: list[tuple[int, float]]
+    val: list[tuple[int, float, float]]
+    lr: list[tuple[int, float]]
+    sys: list[tuple[int, int, float]]
+    ckpts: list[tuple[int, float, float]]
+    best_step: int
+    best_test: float
+    final_test: float | None
+
+
+def _lr_at(peak: float, step: int) -> float:
+    """
+    Learning rate with linear warmup, then cosine decay to 10% of peak.
+
+    Parameters
+    ----------
+    peak : float
+        Peak learning rate.
+    step : int
+        Optimiser step.
+
+    Returns
+    -------
+    float
+    """
+    if step < _WARMUP:
+        return peak * step / _WARMUP
+    p = (step - _WARMUP) / (_STEPS - _WARMUP)
+    return peak * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * p)))
+
+
+def _training_curves(ci: int, c: _TrainConfig, seed: int, stop: int, diverged: bool) -> _Curves:
+    """
+    Port of the ``training`` mockup's per-run generator.
+
+    Parameters
+    ----------
+    ci : int
+        Config index (part of the RNG seed).
+    c : _TrainConfig
+        The config.
+    seed : int
+        Run seed (part of the RNG seed).
+    stop : int
+        Last step reached.
+    diverged : bool
+        Add the loss spike at step 9,000 and its lasting penalty.
+
+    Returns
+    -------
+    _Curves
+    """
+    r = _mulberry32(1000 * (ci + 1) + seed * 41)
+    off_v, off_vl, off_tl = _gauss(r) * 0.0014, _gauss(r) * 0.003, _gauss(r) * 0.003
+
+    def pen(s: int) -> float:
+        return math.exp(-(s - _SPIKE) / 520) if diverged and s >= _SPIKE else 0.0
+
+    def pen_long(s: int) -> float:
+        return 1 - math.exp(-(s - _SPIKE) / 900) if diverged and s >= _SPIKE else 0.0
+
+    def r4(x: float) -> float:
+        return _js_round(x * 1e4) / 1e4
+
+    train = []
+    for s in range(_LOG_EVERY, stop + 1, _LOG_EVERY):
+        base = c.tl[0] + off_tl + (c.tl[1] - c.tl[0]) * math.exp(-s / c.tl[2])
+        base += 2.75 * pen(s) + 0.052 * pen_long(s)
+        train.append((s, r4(base * math.exp(_gauss(r) * 0.075))))
+    val = []
+    for s in range(_VAL_EVERY, stop + 1, _VAL_EVERY):
+        x = s / _STEPS
+        top1 = c.v[0] + off_v - (c.v[0] - c.v[1]) * math.exp(-s / c.v[2]) - c.v[3] * x * x * x
+        loss = c.vl[0] + off_vl + (c.vl[1] - c.vl[0]) * math.exp(-s / c.vl[2]) + c.vl[3] * x * x * x
+        top1 -= 0.45 * pen(s) + 0.029 * pen_long(s)
+        loss += 0.95 * pen(s) + 0.058 * pen_long(s)
+        val.append((s, r4(top1 + _gauss(r) * 0.0009), r4(loss * math.exp(_gauss(r) * 0.012))))
+    lr = [(s, float(f"{_lr_at(c.lr, s):.3e}")) for s in range(0, stop + 1, _SYS_EVERY)]
+    sys = []
+    for s in range(_SYS_EVERY, stop + 1, _SYS_EVERY):
+        eval_dip, ckpt_dip = s % _VAL_EVERY == 0, s % _CKPT_EVERY == 0
+        u = c.util + _gauss(r) * 1.6
+        if eval_dip:
+            u = 38 + _gauss(r) * 4
+        if ckpt_dip:
+            u = 22 + _gauss(r) * 3
+        m = c.mem * (s / 300) if s < 300 else c.mem + _gauss(r) * 0.15 + (1.8 if eval_dip else 0)
+        sys.append((s, int(_clamp(_js_round(u), 0, 100)), _js_round(m * 10) / 10))
+    gap = 0.0026 + _gauss(r) * 0.0006
+    by_step = {s: (top1, loss) for s, top1, loss in val}
+    ckpts = [(s, *by_step[s]) for s in range(_CKPT_EVERY, stop + 1, _CKPT_EVERY)]
+    best = ckpts[0]
+    for ck in ckpts[1:]:
+        if ck[1] > best[1]:
+            best = ck
+
+    def test_of(v: float) -> float:
+        return _js_round((v - gap) * _N_TEST) / _N_TEST
+
+    final = test_of(val[-1][1]) if stop == _STEPS else None
+    return _Curves(train, val, lr, sys, ckpts, best[0], test_of(best[1]), final)
+
+
+def _seed_training(sd: _Seeder) -> None:
+    """
+    Seed ``rxn-forward/uspto-forward-top1`` (kind ``training``).
+
+    Nine runs mirror ``kinds/training/data.js``: base seed 2 diverges at step
+    9,000, +aug seed 3 is killed at step 14,000. One extra run is still running.
+
+    Parameters
+    ----------
+    sd : _Seeder
+        Target home.
+    """
+    project, task = DEMO_TASKS["training"]
+    dataset = {
+        "version": "v2",
+        "host": "nfs-01",
+        "path": "/data/uspto-mit/v2",
+        "splits": {"test": "/data/uspto-mit/v2/test.jsonl"},
+    }
+    repo = sd.project(
+        _task_config(
+            project,
+            task,
+            kind="training",
+            dataset=dataset,
+            metrics={
+                "top1": {
+                    "version": "v1",
+                    "fn": "demo_metrics:harness",
+                    "changelog": {"v1": "exact-match top-1 on the 40,000-reaction test split"},
+                }
+            },
+            primary="top1",
+            description="Forward reaction prediction on USPTO-MIT; top-1 exact match.",
+        ),
+        {},
+    )
+    ref = DatasetRef(
+        name=task, version="v2", split="test", host="nfs-01", path=dataset["splits"]["test"]
+    )
+    t0 = sd.at("2026-09-24T23:15:02Z")
+    plan = [(ci, c, seed) for ci, c in enumerate(_TRAIN_CONFIGS) for seed in (1, 2, 3)]
+    for k, (ci, c, seed) in enumerate([*plan, (3, _TRAIN_RUNNING, 1)]):
+        running = c is _TRAIN_RUNNING
+        killed = c.id == "aug" and seed == 3
+        created = sd.at("2026-09-27T11:20:00Z") if running else t0 + timedelta(seconds=2 * k)
+        stop = 2350 if running else 14000 if killed else _STEPS
+        curves = _training_curves(ci, c, seed, stop, diverged=c.id == "base" and seed == 2)
+        record, run = sd.start(
+            _RunSpec(
+                project=project,
+                task=task,
+                repo=repo,
+                hypothesis=c.hypothesis,
+                command_template=_TRAIN_COMMAND.format(config=c.id).split(),
+                params={"config": c.id, "lr": f"{c.lr:g}"},
+                seed=seed,
+                created_at=created,
+                created_by=c.created_by,
+                host=c.host,
+                commit=c.commit,
+                key=f"{c.id}-{seed}",
+                datasets=[ref],
+            )
+        )
+        for s, value in curves.train:
+            run.log({"train/loss": value}, step=s)
+        for s, top1, loss in curves.val:
+            run.log({"val/top1": top1, "val/loss": loss}, step=s)
+        for s, value in curves.lr:
+            run.log({"lr": value}, step=s)
+        for s, util, mem in curves.sys:
+            run.log({"sys/gpu_util": util, "sys/gpu_mem_gb": mem}, step=s)
+        ckpt_dir = f"/scratch/shreyas/hx/{project}/runs/{record.run_id}/ckpt"
+        for s, top1, loss in curves.ckpts:
+            run.log_checkpoint(
+                f"{ckpt_dir}/step_{s:06d}.pt",
+                step=s,
+                metrics={"val/top1": top1, "val/loss": loss},
+                host=c.host,
+            )
+        if running:
+            sd.index_progress(record)
+            continue
+        scores = [("top1", "v1", "value", curves.best_test)]
+        if curves.final_test is not None:
+            scores.append(("top1", "v1", "final", curves.final_test))
+        sd.finish(
+            record,
+            status=RunStatus.KILLED if killed else RunStatus.FINISHED,
+            ended_at=created + timedelta(seconds=stop * c.sec_per_step),
+            exit_code=137 if killed else 0,
+            scores=[] if killed else scores,
+            stderr="preempted, SIGKILL\n" if killed else "",
+        )
+
+
 # --------------------------------------------------------------------- entry point
 _SEEDERS: dict[str, Callable[[_Seeder], None]] = {
     "generic": _seed_generic,
+    "training": _seed_training,
 }
 
 

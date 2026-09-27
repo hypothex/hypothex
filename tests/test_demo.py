@@ -5,6 +5,7 @@ import pytest
 
 from hypothex.core import queries as q
 from hypothex.core.context import Context
+from hypothex.core.control import repair_runs
 from hypothex.core.errors import StoreError
 from hypothex.core.records import RunRecord, RunStatus
 from hypothex.demo import (
@@ -132,3 +133,54 @@ def test_refuses_existing_project_and_unknown_kind(tmp_path: Path) -> None:
     with pytest.raises(StoreError, match="already exists"):
         seed_demo(home, ["generic"])
     assert len(ctx.index.list_runs(include_archived=True, limit=None)) == before
+
+
+def test_training_mirrors_mockup(dctx: Context) -> None:
+    board = q.get_leaderboard(dctx, REFS["training"])
+    assert board.kind == "training"
+    # best-checkpoint test top-1 per run, from kinds/training/data.js (runs[i].best_top1)
+    expected = {
+        "aug": [0.909175, 0.906025],
+        "lr1e-4": [0.893875, 0.8907, 0.889975],
+        "base": [0.887675, 0.880425, 0.894],
+    }
+    runs = _runs(dctx, "rxn-forward")
+    assert [dctx.find_record(row.run_ids[0]).params["config"] for row in board.rows] == [
+        "aug",
+        "lr1e-4",
+        "base",
+    ]
+    for row, values in zip(board.rows, expected.values(), strict=True):
+        assert row.n == len(values)
+        assert row.primary is not None
+        assert row.primary.mean == pytest.approx(sum(values) / len(values))
+    base1 = _find(runs, 1, config="base")
+    assert {(s.key, s.value) for s in dctx.store.read_scores("rxn-forward", base1.run_id)} == {
+        ("value", 0.887675),
+        ("final", 0.884575),
+    }
+    ckpts = [a for a in base1.artifacts if a.kind == "checkpoint"]
+    assert [a.step for a in ckpts] == list(range(2000, 20001, 2000))
+    best = max(ckpts, key=lambda a: a.metrics["val/top1"])
+    assert (best.step, best.metrics["val/top1"]) == (12000, 0.8909)
+    assert best.host == "gpu-a01" and best.path.endswith("/ckpt/step_012000.pt")
+    spiky = _find(runs, 2, config="base")
+    points = dctx.store.read_metric_points("rxn-forward", spiky.run_id)
+    peak = max(p.value for p in points if p.name == "train/loss" and 9000 <= p.step < 9400)
+    assert peak == 2.9667  # mockup event.peak of the diverged run
+    killed = _find(runs, 3, config="aug")
+    assert (killed.status, killed.exit_code) == (RunStatus.KILLED, 137)
+    assert dctx.store.read_scores("rxn-forward", killed.run_id) == []
+    names = {p.name for p in dctx.index.metric_points(base1.run_id)}
+    assert names == {"train/loss", "val/top1", "val/loss", "lr", "sys/gpu_util", "sys/gpu_mem_gb"}
+    live = _find(runs, config="lr2e-4")
+    assert live.status == RunStatus.RUNNING and live.ended_at is None
+    steps = [p.step for p in dctx.index.metric_points(live.run_id) if p.name == "train/loss"]
+    assert max(steps) == 2350
+    assert [a.step for a in dctx.store.read_artifacts("rxn-forward", live.run_id)] == [2000]
+
+
+def test_running_demo_run_survives_repair(dctx: Context) -> None:
+    assert repair_runs(dctx) == []
+    live = dctx.index.list_runs(status=RunStatus.RUNNING, limit=None)
+    assert len(live) == 1 and live[0].environment_id == "demo:gpu-a04"

@@ -219,3 +219,33 @@ def test_agent_eval_mirrors_mockup(dctx: Context) -> None:
     assert sum(s["tokens_in"] for s in steps) == 152670
     entry, task = q.resolve_task(dctx, REFS["agent_eval"])
     assert get_view(Path(entry.repo), entry.config, task, "cost-notes").title == "cost notes"
+
+
+def test_agent_iteration_mirrors_mockup(dctx: Context) -> None:
+    board = q.get_leaderboard(dctx, REFS["agent_iteration"])
+    assert board.kind == "agent_iteration"
+    # solved targets per version (seeds 1-3), counted from the bitstrings in data.js
+    counts = {
+        "v1": [80, 80, 80], "v2": [85, 85, 85], "v3": [107, 107, 102], "v4": [111, 105, 115],
+        "v5": [116, 126, 122], "v6": [110, 115, 110], "v7": [121, 120, 127],
+        "v8": [129, 135, 134], "v9": [128, 136, 129],
+    }  # fmt: skip
+    runs = _runs(dctx, "retro-agent")
+    means = {}
+    for row in board.rows:
+        version = dctx.find_record(row.run_ids[0]).params["version"]
+        assert row.primary is not None
+        means[version] = row.primary.mean
+    assert means == pytest.approx({v: sum(c) / 600 for v, c in counts.items()})
+    assert board.rows[0].label == "v8"  # agent_iteration labels are the version_param value
+    detail = _find(runs, 2, version="v8")
+    assert detail.usage is not None
+    assert (detail.usage.usd, detail.usage.tokens_in) == (177.12, 61_100_000)
+    assert detail.usage.seconds == 3 * 3600 - 2 * 60  # 15:06 to 18:04
+    rows = {
+        r["id"]: r for r in read_jsonl(dctx.run_dir(detail) / "predictions" / "predictions.jsonl")
+    }
+    assert rows["T-003"]["meta"] == {"category": "timeout", "steps": 29}
+    assert rows["T-001"]["meta"] == {"category": None, "steps": 15}
+    trace = read_jsonl(dctx.run_dir(detail) / "traces" / "T-035.jsonl")
+    assert len(trace) == 11 and trace[-1]["tool"] == "submit" and trace[-1]["result"] == "solved"

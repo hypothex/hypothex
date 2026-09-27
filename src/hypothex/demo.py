@@ -1261,11 +1261,309 @@ def _seed_agent_eval(sd: _Seeder) -> None:
             )
 
 
+# --------------------------------------------------------------------- agent_iteration
+@dataclass(frozen=True)
+class _Version:
+    """One agent version of the ``agent_iteration`` mockup."""
+
+    v: str
+    at: str
+    by: str
+    change: str
+    commit: str
+    prompt: str
+    model: str
+    temperature: float
+    depth: int
+    budget: int
+    retries: int
+    tools: str  # comma-separated
+
+
+@dataclass(frozen=True)
+class _IterRun:
+    """One run of the ``agent_iteration`` mockup; ``solved`` is 200 bits as hex."""
+
+    v: str
+    seed: int
+    started_at: str
+    ended_at: str
+    cost_usd: float
+    tokens_m: float
+    tool_calls: int
+    solved: str
+
+
+_ITER_VERSIONS = (
+    _Version("v1", "2026-09-13T10:12:00Z", "human:shreyas", "baseline",
+             "a031a64b9cbd2a8e81ebf150c9ab0804a710a6a6", "react-1", "gpt-4.1-mini", 0, 4, 40, 1,
+             "template_search,route_score,smiles_validate"),
+    _Version("v2", "2026-09-14T16:40:00Z", "human:shreyas", "retries 3",
+             "6fa2cfdf2f93d4bd34398d373139b5abcfc9acc8", "react-1", "gpt-4.1-mini", 0, 4, 40, 3,
+             "template_search,route_score,smiles_validate"),
+    _Version("v3", "2026-09-16T11:05:00Z", "agent:iterate", "+stock_check",
+             "13c824cb0b7b7d816c843bd761ddc1a4f19a7612", "react-1", "gpt-4.1-mini", 0.6, 4, 40, 3,
+             "template_search,route_score,smiles_validate,stock_check"),
+    _Version("v4", "2026-09-17T19:22:00Z", "agent:iterate", "depth 6",
+             "50cc29f312390a273e41162f8591d2d98004702a", "react-1", "gpt-4.1-mini", 0.6, 6, 40, 3,
+             "template_search,route_score,smiles_validate,stock_check"),
+    _Version("v5", "2026-09-19T09:48:00Z", "human:shreyas", "gpt-4.1",
+             "356483f8954521d87436e67efa04c7e31fc6cc58", "react-1", "gpt-4.1", 0.6, 6, 40, 3,
+             "template_search,route_score,smiles_validate,stock_check"),
+    _Version("v6", "2026-09-21T14:15:00Z", "agent:iterate", "prompt rewrite",
+             "e058f3e5a888d5352ee90a3b16e8c5980450b9b9", "concise-2", "gpt-4.1", 0.6, 6, 40, 3,
+             "template_search,route_score,smiles_validate,stock_check"),
+    _Version("v7", "2026-09-22T10:31:00Z", "human:shreyas", "revert prompt",
+             "8c02d161c42ce427c0eeb79c9a3956fae5a037f3", "react-1", "gpt-4.1", 0.6, 6, 40, 3,
+             "template_search,route_score,smiles_validate,stock_check"),
+    _Version("v8", "2026-09-24T15:02:00Z", "agent:iterate", "+conditions",
+             "1d191070a618a3666e85659d92caba648413e751", "react-1", "gpt-4.1", 0.6, 6, 40, 3,
+             "template_search,route_score,smiles_validate,stock_check,condition_predict"),
+    _Version("v9", "2026-09-26T13:37:00Z", "agent:iterate", "budget 25",
+             "bd4d8132a7bf094731e43e59dc7d747f440a8af3", "react-1", "gpt-4.1", 0.6, 6, 25, 3,
+             "template_search,route_score,smiles_validate,stock_check,condition_predict"),
+)  # fmt: skip
+_ITER_RUNS = (
+    _IterRun("v1", 1, "2026-09-13T10:12:00Z", "2026-09-13T12:37:00Z",
+             74.28, 119.8, 2780, "50c977ef1695348448c90d5a48c0c50104245a18f4b9b0404e"),
+    _IterRun("v1", 2, "2026-09-13T10:17:00Z", "2026-09-13T12:48:00Z",
+             79.57, 128.3, 2820, "50c977ef1695348448c90d5a48c0c50104245a18f4b9b0404e"),
+    _IterRun("v1", 3, "2026-09-13T10:22:00Z", "2026-09-13T13:11:00Z",
+             75.7, 122.1, 2660, "50c977ef1695348448c90d5a48c0c50104245a18f4b9b0404e"),
+    _IterRun("v2", 1, "2026-09-14T16:40:00Z", "2026-09-14T19:09:00Z",
+             86.68, 139.8, 2640, "5ae177ee1794a48448690d5a40c0c409c425183854fdb4644e"),
+    _IterRun("v2", 2, "2026-09-14T16:45:00Z", "2026-09-14T19:36:00Z",
+             84.58, 136.4, 2720, "5ae177ee1794a48448690d5a40c0c409c425183854fdb4644e"),
+    _IterRun("v2", 3, "2026-09-14T16:52:00Z", "2026-09-14T19:49:00Z",
+             82.7, 133.4, 2800, "5ae177ee1794a48448690d5a40c0c409c425183854fdb4644e"),
+    _IterRun("v3", 1, "2026-09-16T11:05:00Z", "2026-09-16T13:37:00Z",
+             99.34, 160.2, 2820, "dcad77efc695f4c588d989da5cc0d509c6245a3f34ffb45c4e"),
+    _IterRun("v3", 2, "2026-09-16T11:11:00Z", "2026-09-16T14:13:00Z",
+             94.11, 151.8, 2800, "5cc9f7efc5f5f4c549c9185accc3950bd4241b7d74b7b0761e"),
+    _IterRun("v3", 3, "2026-09-16T11:13:00Z", "2026-09-16T14:03:00Z",
+             96.53, 155.7, 2780, "56c177efc4f5e4c548f9995a58c09209c6245a3c74bfb556ce"),
+    _IterRun("v4", 1, "2026-09-17T19:22:00Z", "2026-09-17T22:09:00Z",
+             126.26, 203.6, 3360, "dce977fdd4fcf1e549d9195a4ccadd0b94251a3d74bfb454ce"),
+    _IterRun("v4", 2, "2026-09-17T19:26:00Z", "2026-09-17T21:33:00Z",
+             119.08, 192.1, 3380, "588f77edc6f4e4e549c99a5a48c0d10b47241b7fb4bbb556ce"),
+    _IterRun("v4", 3, "2026-09-17T19:34:00Z", "2026-09-17T22:38:00Z",
+             130.13, 209.9, 3480, "dcfb77efd6f7f1e549e99b5a5cc8c50997249bbd34e3b4568e"),
+    _IterRun("v5", 1, "2026-09-19T09:48:00Z", "2026-09-19T13:21:00Z",
+             160.31, 55.3, 3380, "dcc377ef74f575e549f11bded8d0c50bd4241b3d34ffb57ece"),
+    _IterRun("v5", 2, "2026-09-19T09:54:00Z", "2026-09-19T13:19:00Z",
+             186.12, 64.2, 3320, "dceff7efc2f5fcc5c9e98d5e5cd6d58bc7249bfff4bf355676"),
+    _IterRun("v5", 3, "2026-09-19T10:00:00Z", "2026-09-19T13:11:00Z",
+             177.98, 61.4, 3420, "5cabffef74f5fcc549fd185a58d3d40bc7259bbe76bfb574fe"),
+    _IterRun("v6", 1, "2026-09-21T14:15:00Z", "2026-09-21T17:35:00Z",
+             178.2, 61.4, 3380, "dced77ef44f4e5c549f98dca48805509d6249a3f74fbb574fe"),
+    _IterRun("v6", 2, "2026-09-21T14:21:00Z", "2026-09-21T18:02:00Z",
+             180.95, 62.4, 3440, "dee9ffefc4d5f5c549d9195a4ccad50b67259a3ef4adb474ee"),
+    _IterRun("v6", 3, "2026-09-21T14:25:00Z", "2026-09-21T17:53:00Z",
+             181.19, 62.5, 3440, "dce9ffefe0d5a7c558fd9f5a4cc0841b46641a3ef4bdb07c4e"),
+    _IterRun("v7", 1, "2026-09-22T10:31:00Z", "2026-09-22T13:11:00Z",
+             168.62, 58.1, 3480, "5de7ffefc6f5f5e549c98b5e4cd8d48be4245b3eb4bfb57ece"),
+    _IterRun("v7", 2, "2026-09-22T10:35:00Z", "2026-09-22T14:08:00Z",
+             178.66, 61.6, 3420, "dcaf77efc6f5f5c5c9f91f5e58c8d58bd4259b3f94ef3176ce"),
+    _IterRun("v7", 3, "2026-09-22T10:39:00Z", "2026-09-22T13:33:00Z",
+             185.94, 64.1, 3300, "dceb7ffff6f5e7c549e91b5e5cd0d61bc620da7cf4ffb17ffe"),
+    _IterRun("v8", 1, "2026-09-24T15:02:00Z", "2026-09-24T18:28:00Z",
+             167.77, 57.9, 3260, "dcc377eff6bff5e549f99b5e58dbd58bf425db7e74bfb576ce"),
+    _IterRun("v8", 2, "2026-09-24T15:06:00Z", "2026-09-24T18:04:00Z",
+             177.12, 61.1, 3300, "dccd7ffff6f5fce549f91f5e58cbd58bd7259afffcffb576ee"),
+    _IterRun("v8", 3, "2026-09-24T15:10:00Z", "2026-09-24T18:29:00Z",
+             188.06, 64.8, 3280, "5efd7feff6f5e7e748e19f5e4c96d72bf5249b7ef4fffd76ee"),
+    _IterRun("v9", 1, "2026-09-26T13:37:00Z", "2026-09-26T16:16:00Z",
+             137.35, 47.4, 2260, "dcef7fefb7f5adc5c8f99fda58c5d58bf4259aff14bfb576ee"),
+    _IterRun("v9", 2, "2026-09-26T13:41:00Z", "2026-09-26T16:51:00Z",
+             148.21, 51.1, 2280, "d8efffefe6bde5e549f99f5a5cdadde9d424dbfff4bfbd76fe"),
+    _IterRun("v9", 3, "2026-09-26T13:47:00Z", "2026-09-26T17:20:00Z",
+             141.58, 48.8, 2320, "58cf7feff69de4e548f99b5e5cdad789d4a5dbfdf4ffb576ee"),
+)  # fmt: skip
+_ITER_DETAIL_FAILS = (
+    "2T 6N 7B 10S 11B 14B 16S 36S 39N 44N 46N 54B 55N 59I 60N 62B 64B 66N 67S 69I 70S "
+    "77S 78I 80N 81N 82S 88N 90S 95N 96N 98N 101N 102N 103N 106B 107N 109S 114N 116B "
+    "118B 121S 122N 123N 125B 130N 132I 136N 137N 139I 140B 142B 145S 146N 149N 151I "
+    "166N 167I 177N 180S 182S 184S 188B 191N 195N 199N"
+)
+_ITER_DETAIL_STEPS = (
+    "15 14 29 8 17 10 19 40 15 14 11 40 10 12 40 12 21 7 7 14 9 19 10 7 7 8 13 14 16 "
+    "19 16 11 7 8 11 15 24 15 10 12 7 10 9 9 23 23 14 14 8 10 12 19 14 16 40 17 22 11 "
+    "15 8 11 23 40 16 40 15 22 13 21 4 12 17 16 17 9 9 8 12 8 17 18 21 17 9 11 8 15 9 "
+    "19 20 10 13 8 16 15 18 15 10 15 18 13 19 18 13 17 12 40 10 9 20 22 16 9 13 10 13 "
+    "40 19 40 11 8 19 19 22 17 40 10 8 15 14 12 9 9 13 18 12 17 15 8 7 40 16 40 17 7 "
+    "22 21 15 10 19 8 5 17 17 16 12 14 10 13 15 14 14 16 15 14 10 14 6 11 14 8 13 14 "
+    "8 14 14 11 15 17 21 17 13 13 11 13 12 18 18 40 11 5 12 10 14 12 14 10 14 14 14"
+)
+_ITER_TRACE: tuple[tuple[str, str, str, float, float], ...] = (
+    ("template_search", "target", "12 templates", 12.4, 1.8),
+    ("route_score", "amide disconnection", "0.81", 14.1, 0.9),
+    ("stock_check", "OC(=O)c1ccc(F)cc1", "in stock", 15, 0.3),
+    ("stock_check", "NC1CCN(Cc2ccc(OC)cc2)CC1", "not in stock", 15.9, 0.3),
+    ("template_search", "NC1CCN(Cc2ccc(OC)cc2)CC1", "9 templates", 17.6, 1.6),
+    ("route_score", "reductive amination", "0.77", 19, 0.8),
+    ("stock_check", "COc1ccc(C=O)cc1", "in stock", 19.9, 0.3),
+    ("stock_check", "CC(C)(C)OC(=O)NC1CCNCC1", "in stock", 20.8, 0.3),
+    ("condition_predict", "reductive amination", "NaBH(OAc)3, DCE", 22.5, 1.2),
+    ("condition_predict", "amide coupling", "HATU, DIPEA, DMF", 24.1, 1.1),
+    ("submit", "route, depth 3", "solved", 25.3, 0.6),
+)
+_ITER_DETAIL = ("v8", 2)  # the run shown on the run page
+_ITER_FAIL_CODES = {
+    "T": "timeout",
+    "N": "no route",
+    "B": "budget hit",
+    "S": "not in stock",
+    "I": "invalid SMILES",
+}
+
+
+def _bits(solved_hex: str) -> list[bool]:
+    """
+    Decode 200 per-target outcomes from hex.
+
+    Parameters
+    ----------
+    solved_hex : str
+        50 hex digits; the most significant bit is target 1.
+
+    Returns
+    -------
+    list of bool
+
+    Examples
+    --------
+    >>> _bits("8" + "0" * 49)[:2]
+    [True, False]
+    """
+    return [bit == "1" for bit in f"{int(solved_hex, 16):0200b}"]
+
+
+def _seed_agent_iteration(sd: _Seeder) -> None:
+    """
+    Seed ``retro-agent/retro-bench-200`` (kind ``agent_iteration``).
+
+    Nine versions x three seeds with the exact per-target outcomes, costs, and
+    tokens of ``kinds/agent_iteration/data.js``; the v8 seed 2 run also has
+    failure categories, step counts, and one trajectory.
+
+    Parameters
+    ----------
+    sd : _Seeder
+        Target home.
+    """
+    project, task = DEMO_TASKS["agent_iteration"]
+    ids = [f"T-{i + 1:03d}" for i in range(200)]
+    dataset = {
+        "version": "v2",
+        "host": "gpu-07",
+        "path": "/data/retro-bench-200/targets.jsonl",
+        "splits": {"test": "/data/retro-bench-200/targets.jsonl"},
+    }
+    repo = sd.project(
+        _task_config(
+            project,
+            task,
+            kind="agent_iteration",
+            dataset=dataset,
+            metrics={"solved": {"version": "v2", "fn": "demo_metrics:solved"}},
+            primary="solved",
+            description="Route found and verified for each of 200 targets.",
+            version_param="version",
+        ),
+        {},
+    )
+    ref = DatasetRef(
+        name=task, version="v2", split="test", host="gpu-07", path=dataset["splits"]["test"]
+    )
+    fails = {
+        ids[int(item[:-1])]: _ITER_FAIL_CODES[item[-1]]
+        for item in "".join(_ITER_DETAIL_FAILS).split()
+    }
+    steps = [int(n) for n in "".join(_ITER_DETAIL_STEPS).split()]
+    versions = {v.v: v for v in _ITER_VERSIONS}
+    for spec in _ITER_RUNS:
+        v = versions[spec.v]
+        created = sd.at(spec.started_at)
+        ended = sd.at(spec.ended_at)
+        record, run = sd.start(
+            _RunSpec(
+                project=project,
+                task=task,
+                repo=repo,
+                hypothesis=v.change,
+                command_template=["python", "-m", "retro_agent.run", "--seed", "{seed}"],
+                params={
+                    "version": v.v,
+                    "model": v.model,
+                    "prompt": v.prompt,
+                    "tools": v.tools,
+                    "temperature": str(v.temperature),
+                    "depth": str(v.depth),
+                    "budget": str(v.budget),
+                    "retries": str(v.retries),
+                },
+                seed=spec.seed,
+                created_at=created,
+                created_by=v.by,
+                host="gpu-07",
+                commit=v.commit,
+                key=f"{v.v}-{spec.seed}",
+                datasets=[ref],
+            )
+        )
+        solved = _bits(spec.solved)
+        detail = (spec.v, spec.seed) == _ITER_DETAIL
+        run.log_predictions(
+            {
+                "id": ex,
+                "prediction": "route" if ok else None,
+                "meta": {"category": fails.get(ex), "steps": steps[i]} if detail else {},
+            }
+            for i, (ex, ok) in enumerate(zip(ids, solved, strict=True))
+        )
+        run.log_usage(
+            tokens_in=round(spec.tokens_m * 1e6),
+            usd=spec.cost_usd,
+            seconds=(ended - created).total_seconds(),
+        )
+        run.log({"tool_calls": spec.tool_calls}, step=0)
+        if detail:
+            run.log_trace(
+                ids[34],
+                (
+                    {
+                        "turn": turn,
+                        "tool": tool,
+                        "args": args,
+                        "result": result,
+                        "tokens_in": round(k_tokens * 1000),
+                        "tokens_out": 0,
+                        "seconds": seconds,
+                        "error": None,
+                    }
+                    for turn, (tool, args, result, k_tokens, seconds) in enumerate(
+                        _ITER_TRACE, start=1
+                    )
+                ),
+            )
+        sd.per_example(
+            record, "solved@v2", {ex: {"solved": ok} for ex, ok in zip(ids, solved, strict=True)}
+        )
+        sd.finish(
+            record,
+            status=RunStatus.FINISHED,
+            ended_at=ended,
+            exit_code=0,
+            scores=[("solved", "v2", "value", sum(solved) / len(solved))],
+        )
+
+
 # --------------------------------------------------------------------- entry point
 _SEEDERS: dict[str, Callable[[_Seeder], None]] = {
     "generic": _seed_generic,
     "training": _seed_training,
     "agent_eval": _seed_agent_eval,
+    "agent_iteration": _seed_agent_iteration,
 }
 
 

@@ -27,11 +27,12 @@
 - Paired comparison vs best: binary → exact two-sided sign test on discordant examples (fixed vs broken); continuous → paired bootstrap of the mean difference; no per-example data → Welch t-test over seed values (`None` when either sample has n < 2 or both variances are 0).
 - Examples needed: the smallest `n` at which the observed discordant rates give `p < 0.05`, search limit `max_n = 100_000`, shown as `≈n`.
 - Quantiles use linear interpolation (numpy `"linear"`). ECDFs have at most 200 points. NaN inputs are dropped by every stats function.
-- Spike rule for curves: `value > 5 × median(previous 20 values)` for metrics whose name contains `loss`.
+- Spike rule for curves: `value > 5 × median(previous 20 values)` for metrics whose name contains `loss` (no zero-median exemption: after a flat 0, any positive value is a spike).
 - Git: `GitInfo.dirty` counts tracked changes only. Untracked files are recorded as `untracked_count` plus the first 20 repo-relative paths. Wording: `untracked files only (N)`.
 - Task kinds are exactly `generic` (default), `training`, `agent_eval`, `agent_iteration`, `system_bench`. A kind picks the preset view and run-detail layout; it never changes storage or evaluation.
 - Views: names match `^[a-z0-9][a-z0-9_-]*$`; `overview` is reserved for the kind preset; files live at `<repo>/.hypothex/views/<task>/<name>.yaml` (atomic write, text stored byte for byte); presets ship at `src/hypothex/views/presets/<kind>.yaml`; an invalid view is never saved.
-- Example-id and sample-name file stems: `[^A-Za-z0-9_.-]` → `_`, through the one helper `store.safe_stem`.
+- Example-id and sample-name file stems: `[^A-Za-z0-9_.-]` → `_`, plus `-<sha1(name)[:8]>` when that changed the name (so distinct names never share a file), through the one helper `store.safe_stem`. Files store the original id or name in every row.
+- Telemetry floats (usage `usd`/`seconds`, trace `seconds`) must be finite: `inf` is rejected like `nan` by the SDK and skipped by the readers.
 - Seed-group id: `<config hash hex[:8]>@<commit[:7]>` (`nogit` without git), through the one helper `leaderboard.group_id_for`. Group labels come from the one helper `leaderboard.group_label`.
 - Headlines are one line generated from data. Metrics in [0, 1] get 3 decimals; p-values read `p = 0.15` (two decimals), `p = 0.004` (three decimals when 0.001 ≤ p < 0.01, so a value never reads `p = 0.00`), or `p < 0.001` when tiny; negatives use U+2212 `−`.
 - Copy is terse: numbers, glyphs, short labels; explanations live only in tooltips (`stat_strip` rows carry `tooltip`). Identical seeds show `◇×N`, never a fake `± 0`.
@@ -294,10 +295,41 @@ def test_examples_needed_none_cases() -> None:
     assert examples_needed(501, 499, 1000) is None  # needs more than max_n
 
 
-def test_examples_needed_large_n_uses_fast_path() -> None:
-    n = examples_needed(51, 49, 1000)
-    assert n == 96677
-    assert sign_test(round(n * 0.051), round(n * 0.049)) < 0.05
+def test_examples_needed_is_the_true_minimum_when_p_is_not_monotone() -> None:
+    # 96,500 examples at rates 0.051 / 0.049: 4922 fixed vs 4728 broken
+    assert examples_needed(51, 49, 1000) == 96500
+    assert examples_needed(49, 51, 1000) == 96500  # symmetric in fixed and broken
+    assert sign_test(4922, 4728) == pytest.approx(0.049444708448976166, rel=1e-9)  # scipy
+    # one example fewer rounds fixed down to 4921: p = 0.0506, not significant
+    assert sign_test(4921, 4728) == pytest.approx(0.05062351738864937, rel=1e-9)  # scipy
+    # one example more rounds broken up to 4729: p = 0.0506 again. p is not monotone in n,
+    # so a binary search can land later (it returned 96,677 here); the scan cannot.
+    assert sign_test(4922, 4729) == pytest.approx(0.050647447534179824, rel=1e-9)  # scipy
+
+
+@pytest.mark.parametrize(
+    ("fixed", "broken", "n_total", "expected"),
+    [
+        (6, 2, 100, 209),
+        (2, 6, 100, 209),
+        (5, 1, 10, 19),
+        (3, 0, 5, 10),
+        (9, 3, 180, 251),
+        (7, 4, 50, 254),
+        (13, 9, 120, 670),
+    ],
+)
+def test_examples_needed_matches_a_full_scan(
+    fixed: int, broken: int, n_total: int, expected: int
+) -> None:
+    fixed_rate, broken_rate = fixed / n_total, broken / n_total
+    scan = next(
+        n
+        for n in range(1, 20_001)
+        if sign_test(round(n * fixed_rate), round(n * broken_rate)) < 0.05
+    )
+    assert scan == expected
+    assert examples_needed(fixed, broken, n_total, max_n=20_000) == expected
 
 
 def test_ecdf_points_small_sample() -> None:
@@ -609,11 +641,6 @@ def paired_bootstrap_p(
     return min(1.0, 2.0 * (min(at_or_below, at_or_above) + 1) / (resamples + 1))
 
 
-def _scaled_sign_p(fixed_rate: float, broken_rate: float, n: int) -> float:
-    """Sign-test p-value at ``n`` examples with the observed discordant rates."""
-    return sign_test(round(n * fixed_rate), round(n * broken_rate))
-
-
 def examples_needed(
     fixed: int, broken: int, n_total: int, alpha: float = 0.05, max_n: int = 100_000
 ) -> int | None:
@@ -622,10 +649,21 @@ def examples_needed(
 
     The fixed and broken rates (``fixed / n_total``, ``broken / n_total``) are
     held constant and scaled to ``n`` examples (counts rounded to the nearest
-    integer). A binary search returns an ``n`` with ``sign_test < alpha`` at
-    ``n`` and not at ``n - 1``. Integer counts make the p-value only roughly
-    monotone in ``n``, so this is the UI's ``≈n``, not a guarantee for every
-    larger ``n``.
+    integer, ``round``). The result is the true minimum ``n <= max_n`` with
+    ``sign_test(round(n * fixed_rate), round(n * broken_rate)) < alpha``.
+    Rounded counts make the p-value non-monotone in ``n`` (a larger ``n`` can
+    round the smaller count up and lose significance), so a binary search could
+    miss the minimum. Instead every ``n`` is scanned: the p-value changes only
+    when a count changes (by one), and the tail ``P(X <= small)`` of
+    ``X ~ Binomial(small + large, 1/2)`` is updated in O(1) per change with
+
+    - larger count + 1: ``F(s; d + 1) = F(s; d) - pmf(s; d) / 2``
+    - smaller count + 1: ``F(s + 1; d + 1) = F(s; d) + pmf(s + 1; d) / 2``
+
+    (``pmf`` from ``lgamma``). A candidate below ``alpha`` is confirmed with the
+    exact ``binom_two_sided_p`` before it is returned, so float drift in the
+    running tail never changes the answer. The scan to ``max_n = 100_000`` takes
+    about 0.1 s in the worst case.
 
     Parameters
     ----------
@@ -653,18 +691,28 @@ def examples_needed(
     """
     if n_total <= 0 or fixed == broken:
         return None
-    fixed_rate = fixed / n_total
-    broken_rate = broken / n_total
-    if _scaled_sign_p(fixed_rate, broken_rate, max_n) >= alpha:
-        return None
-    lo, hi = 1, max_n
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if _scaled_sign_p(fixed_rate, broken_rate, mid) < alpha:
-            hi = mid
-        else:
-            lo = mid + 1
-    return lo
+    small_rate = min(fixed, broken) / n_total
+    large_rate = max(fixed, broken) / n_total
+    small = large = 0
+    cdf = 1.0  # P(X <= small) for X ~ Binomial(small + large, 1/2)
+    for n in range(1, max_n + 1):
+        new_small, new_large = round(n * small_rate), round(n * large_rate)
+        if (new_small, new_large) == (small, large):
+            continue
+        if new_large != large:
+            cdf -= 0.5 * math.exp(_log_binom_pmf_half(small, small + large))
+            large += 1
+        if new_small != small:
+            cdf += 0.5 * math.exp(_log_binom_pmf_half(small + 1, small + large))
+            small += 1
+        total = small + large
+        if 2 * min(small, large) >= total:
+            continue  # p = 1
+        # rounding can briefly put the smaller rate's count above the larger one
+        tail = cdf if small < large else 1.0 - cdf + math.exp(_log_binom_pmf_half(small, total))
+        if 2.0 * tail < alpha + 1e-9 and binom_two_sided_p(small, total) < alpha:
+            return n
+    return None
 
 
 def ecdf_points(values: Sequence[float], max_points: int = 200) -> list[tuple[float, float]]:
@@ -719,7 +767,7 @@ def ecdf_points(values: Sequence[float], max_points: int = 200) -> list[tuple[fl
 - [ ] **Step 4: Run the tests, doctests, lint, and types**
 
 Run: `uv run pytest tests/core/test_stats.py -q`
-Expected: `25 passed`.
+Expected: `32 passed`.
 
 Run: `uv run python -m doctest src/hypothex/core/stats.py && uv run ruff check src/hypothex/core/stats.py tests/core/test_stats.py && uv run ruff format --check src/hypothex/core/stats.py tests/core/test_stats.py && uv run ty check src/hypothex/core/stats.py`
 Expected: no doctest output, then `All checks passed!`, `2 files already formatted`, `All checks passed!`.
@@ -999,7 +1047,7 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
 - [ ] **Step 4: Run the tests, doctests, lint, and types**
 
 Run: `uv run pytest tests/core/test_stats.py -q`
-Expected: `47 passed`.
+Expected: `54 passed`.
 
 Run: `uv run python -m doctest src/hypothex/core/stats.py && uv run ruff check src/hypothex/core/stats.py tests/core/test_stats.py && uv run ruff format --check src/hypothex/core/stats.py tests/core/test_stats.py && uv run ty check src/hypothex/core/stats.py`
 Expected: no doctest output, then `All checks passed!`, `2 files already formatted`, `All checks passed!`.
@@ -1707,22 +1755,22 @@ ends. Contract: section 1.10. Spec: section 8.7.
 - `RunRecord.usage: UsageTotals | None = None`.
 
 **Produces (used by `core.sources`, `core.panels`, `core.leaderboard`, the API, and `hypothex.demo`):**
-- `hypothex.core.store.safe_stem(name: str) -> str` — `[^A-Za-z0-9_.-]` → `_`; `ValueError` on `""`.
-- `hypothex.core.store.UsageRow(BaseModel)`: `example_id: str | None = None`, `tokens_in: int = 0`, `tokens_out: int = 0`, `usd: float = 0.0`, `seconds: float = 0.0` (all `>= 0`).
-- `hypothex.core.store.TraceStep(BaseModel)`: `turn: int`, `tool: str | None = None`, `args: Any = None`, `result: Any = None`, `tokens_in: int = 0`, `tokens_out: int = 0`, `seconds: float = 0.0`, `error: str | None = None`.
+- `hypothex.core.store.safe_stem(name: str) -> str` — `[^A-Za-z0-9_.-]` → `_`; when that changes the name, `-` + the first 8 hex digits of `sha1(name)` are appended, so distinct names never share a file (`a/b` → `a_b-3ec69c85`, `a_b` stays `a_b`); `ValueError` on `""`.
+- `hypothex.core.store.UsageRow(BaseModel)`: `example_id: str | None = None`, `tokens_in: int = 0`, `tokens_out: int = 0`, `usd: float = 0.0`, `seconds: float = 0.0` (all `>= 0`; floats must be finite, so `inf` is rejected like `nan`).
+- `hypothex.core.store.TraceStep(BaseModel)`: `turn: int`, `tool: str | None = None`, `args: Any = None`, `result: Any = None`, `tokens_in: int = 0`, `tokens_out: int = 0`, `seconds: float = 0.0` (finite), `error: str | None = None`.
 - `hypothex.core.store.sum_usage(rows: Iterable[UsageRow]) -> UsageTotals | None` (None when no rows; `calls` = row count).
 - `RunStore.read_usage(project: str, run_id: str) -> list[UsageRow]`.
-- `RunStore.list_traces(project: str, run_id: str) -> list[dict[str, Any]]` — rows `{"example_id": str, "turns": int, "failed": bool}`, sorted by `example_id` (the body of `GET /runs/{id}/traces`, Task 32; also used by `core.sources` and the trace panel).
+- `RunStore.list_traces(project: str, run_id: str) -> list[dict[str, Any]]` — rows `{"example_id": str, "turns": int, "failed": bool}`, sorted by `example_id`; `example_id` is the original id stored in the file, also for an empty trace (the body of `GET /runs/{id}/traces`, Task 32; also used by `core.sources` and the trace panel).
 - `RunStore.read_trace(project: str, run_id: str, example_id: str) -> list[TraceStep]` (`[]` when the example has no trace).
-- `RunStore.read_samples(project: str, run_id: str) -> dict[str, list[float]]` (series name = sanitised file stem).
+- `RunStore.read_samples(project: str, run_id: str) -> dict[str, list[float]]` (series name = the original name stored in the rows; the file stem only for files written without it).
 - `hypothex.sdk.Run` / `NoopRun`: `log_trace`, `log_usage`, `log_samples`, `log_checkpoint` with the exact contract 1.10 signatures.
 - File formats (every line is one JSON object):
-  - `traces/<safe_stem(example_id)>.jsonl`: `{"example_id", "turn", "tool", "args", "result", "tokens_in", "tokens_out", "seconds", "error"}`; replaced on each `log_trace`.
+  - `traces/<safe_stem(example_id)>.jsonl`: `{"example_id", "turn", "tool", "args", "result", "tokens_in", "tokens_out", "seconds", "error"}`; replaced on each `log_trace`. An empty trace is one marker line `{"example_id": <id>}`, so the file exists and keeps the original id; readers skip marker lines.
   - `usage.jsonl`: `{"example_id", "tokens_in", "tokens_out", "usd", "seconds"}`; appended.
-  - `samples/<safe_stem(name)>.jsonl`: `{"value": float}`; appended.
+  - `samples/<safe_stem(name)>.jsonl`: `{"name": str, "value": float}` (the original series name in every row); appended.
   - `artifacts.jsonl` checkpoint row: `{"kind": "checkpoint", "path", "host", "size", "step", "metrics"}`.
 
-Known limit, owned outside this part: a run marked `lost` by `core.control` does not get `usage` totals (only `execute_run` finalises). Two example ids that sanitise to the same stem (`a/b` and `a_b`) share one trace file; the later `log_trace` wins.
+Known limit, owned outside this part: a run marked `lost` by `core.control` does not get `usage` totals (only `execute_run` finalises). File names never collide: `safe_stem` adds a hash of the original name whenever it has to replace a character, and every row stores the original id or name.
 
 ---
 
@@ -1752,15 +1800,43 @@ from hypothex.core.records import ScoreRecord, UsageTotals
 from hypothex.core.store import RunStore, TraceStep, UsageRow, safe_stem, sum_usage
 ```
 
+and replace the first four lines
+
+```python
+import fcntl
+from pathlib import Path
+
+import pytest
+```
+
+with
+
+```python
+import fcntl
+import math
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+```
+
 Then append these tests at the end of the file:
 
 ```python
-def test_safe_stem_replaces_unsafe_characters() -> None:
-    assert safe_stem("route 7/b:ü") == "route_7_b__"
-    assert safe_stem("a-b_c.d") == "a-b_c.d"
-    assert safe_stem("../x") == ".._x"
+def test_safe_stem_replaces_unsafe_characters_and_adds_a_hash() -> None:
+    # sha1("route 7/b:ü")[:8] = b85600fe, sha1("../x")[:8] = 72e4d01d
+    assert safe_stem("route 7/b:ü") == "route_7_b__-b85600fe"
+    assert safe_stem("a-b_c.d") == "a-b_c.d"  # already safe: unchanged, no hash
+    assert safe_stem("../x") == ".._x-72e4d01d"
     with pytest.raises(ValueError, match="must not be empty"):
         safe_stem("")
+
+
+def test_safe_stem_never_merges_distinct_names() -> None:
+    names = ["a/b", "a_b", "a b", "a:b"]
+    stems = [safe_stem(n) for n in names]
+    assert stems[:2] == ["a_b-3ec69c85", "a_b"]
+    assert len(set(stems)) == len(names)
 
 
 def test_read_usage_skips_bad_rows_and_sums(store: RunStore) -> None:
@@ -1771,9 +1847,12 @@ def test_read_usage_skips_bad_rows_and_sums(store: RunStore) -> None:
     )
     append_jsonl(path, {"tokens_in": -1})  # negative: skipped
     append_jsonl(path, {"tokens_in": "many"})  # not a number: skipped
+    append_jsonl(path, {"usd": math.inf})  # json writes Infinity and reads it back: skipped
+    append_jsonl(path, {"seconds": math.nan})  # NaN: skipped
     append_jsonl(
         path, {"example_id": None, "tokens_in": 50, "tokens_out": 5, "usd": 0.125, "seconds": 0.5}
     )
+    assert "Infinity" in path.read_text()
     rows = store.read_usage("toy", "r1")
     assert rows == [
         UsageRow(example_id="a", tokens_in=100, tokens_out=20, usd=0.25, seconds=1.5),
@@ -1787,12 +1866,20 @@ def test_read_usage_skips_bad_rows_and_sums(store: RunStore) -> None:
     assert store.read_usage("toy", "missing") == []
 
 
+def test_usage_and_trace_floats_must_be_finite() -> None:
+    with pytest.raises(ValidationError, match="finite number"):
+        UsageRow(usd=math.inf)
+    with pytest.raises(ValidationError, match="finite number"):
+        TraceStep(turn=1, seconds=math.inf)
+
+
 def test_list_and_read_traces(store: RunStore) -> None:
     store.create_run(make_record())
     traces = store.layout.run_dir("toy", "r1") / "traces"
     assert store.list_traces("toy", "r1") == []
+    ab = traces / f"{safe_stem('a/b')}.jsonl"  # a_b-3ec69c85.jsonl
     append_jsonl(
-        traces / "a_b.jsonl",
+        ab,
         {
             "example_id": "a/b",
             "turn": 1,
@@ -1803,21 +1890,26 @@ def test_list_and_read_traces(store: RunStore) -> None:
         },
     )
     append_jsonl(
-        traces / "a_b.jsonl",
-        {"example_id": "a/b", "turn": 2, "tool": "check_stock", "error": "timeout 8 s"},
+        ab, {"example_id": "a/b", "turn": 2, "tool": "check_stock", "error": "timeout 8 s"}
     )
+    append_jsonl(ab, {"example_id": "a/b", "turn": 3, "seconds": math.inf})  # not finite: skipped
     append_jsonl(traces / "c.jsonl", {"tool": "score_routes"})  # no turn, no example_id
     append_jsonl(traces / "c.jsonl", {"turn": "x"})  # invalid: skipped
+    # an empty trace is one marker line holding the original id
+    append_jsonl(traces / f"{safe_stem('e/0')}.jsonl", {"example_id": "e/0"})
     assert store.list_traces("toy", "r1") == [
         {"example_id": "a/b", "turns": 2, "failed": True},
         {"example_id": "c", "turns": 1, "failed": False},
+        {"example_id": "e/0", "turns": 0, "failed": False},
     ]
     steps = store.read_trace("toy", "r1", "a/b")
     assert steps == [
         TraceStep(turn=1, tool="retro_expand", tokens_in=4410, tokens_out=512, seconds=4.82),
         TraceStep(turn=2, tool="check_stock", error="timeout 8 s"),
     ]
+    assert store.read_trace("toy", "r1", "a_b") == []  # a different id, a different file
     assert store.read_trace("toy", "r1", "c") == [TraceStep(turn=1, tool="score_routes")]
+    assert store.read_trace("toy", "r1", "e/0") == []
     assert store.read_trace("toy", "r1", "nope") == []
 
 
@@ -1828,9 +1920,18 @@ def test_read_samples(store: RunStore) -> None:
     samples.mkdir()
     (samples / "latency_ms.jsonl").write_text(
         '{"value": 12.5}\n{"value": 15}\n{"value": "slow"}\n{"value": true}\n{"value": NaN}\n'
+        '{"value": Infinity}\n'
     )
     (samples / "ttft.jsonl").write_text('{"value": 3.0}\n')
-    assert store.read_samples("toy", "r1") == {"latency_ms": [12.5, 15.0], "ttft": [3.0]}
+    # the SDK stores the original name in every row; the key is that name, not the stem
+    (samples / f"{safe_stem('latency ms')}.jsonl").write_text(
+        '{"name": "latency ms", "value": 1.0}\n{"name": "latency ms", "value": 2.0}\n'
+    )
+    assert store.read_samples("toy", "r1") == {
+        "latency ms": [1.0, 2.0],
+        "latency_ms": [12.5, 15.0],
+        "ttft": [3.0],
+    }
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1844,6 +1945,7 @@ In `src/hypothex/core/store.py`, replace the import block (from `import fcntl` d
 
 ```python
 import fcntl
+import hashlib
 import json
 import logging
 import math
@@ -1884,7 +1986,10 @@ def safe_stem(name: str) -> str:
     Turn an example id or sample name into a file name stem.
 
     Every character outside ``[A-Za-z0-9_.-]`` becomes ``_``, so the name can never
-    contain a path separator and leave its folder.
+    contain a path separator and leave its folder. When that changes the name,
+    ``-`` and the first 8 hex digits of ``sha1(name)`` are appended, so two
+    distinct names (``a/b`` and ``a_b``) never share a file. A name that is
+    already safe is returned unchanged.
 
     Parameters
     ----------
@@ -1894,7 +1999,7 @@ def safe_stem(name: str) -> str:
     Returns
     -------
     str
-        The sanitised stem, same length as ``name``.
+        The file name stem.
 
     Raises
     ------
@@ -1904,13 +2009,16 @@ def safe_stem(name: str) -> str:
     Examples
     --------
     >>> safe_stem("route 7/b")
-    'route_7_b'
-    >>> safe_stem("../x")
-    '.._x'
+    'route_7_b-5db86396'
+    >>> safe_stem("a_b")
+    'a_b'
     """
     if not name:
         raise ValueError("name must not be empty")
-    return _UNSAFE_CHARS.sub("_", name)
+    stem = _UNSAFE_CHARS.sub("_", name)
+    if stem == name:
+        return stem
+    return f"{stem}-{hashlib.sha1(name.encode('utf-8')).hexdigest()[:8]}"
 
 
 class UsageRow(BaseModel):
@@ -1926,8 +2034,10 @@ class UsageRow(BaseModel):
     example_id: str | None = None
     tokens_in: int = Field(0, ge=0)
     tokens_out: int = Field(0, ge=0)
-    usd: float = Field(0.0, ge=0)
-    seconds: float = Field(0.0, ge=0)
+    # allow_inf_nan=False: ge=0 alone lets +inf through, and an inf in the run
+    # totals would break JSON responses later
+    usd: float = Field(0.0, ge=0, allow_inf_nan=False)
+    seconds: float = Field(0.0, ge=0, allow_inf_nan=False)
 
 
 class TraceStep(BaseModel):
@@ -1935,6 +2045,7 @@ class TraceStep(BaseModel):
     One step of an agent trajectory; a line of ``traces/<example_id>.jsonl``.
 
     Unknown keys are dropped. A non-empty ``error`` marks the step as failed.
+    ``seconds`` must be finite.
 
     Examples
     --------
@@ -1948,7 +2059,7 @@ class TraceStep(BaseModel):
     result: Any = None
     tokens_in: int = Field(0, ge=0)
     tokens_out: int = Field(0, ge=0)
-    seconds: float = Field(0.0, ge=0)
+    seconds: float = Field(0.0, ge=0, allow_inf_nan=False)
     error: str | None = None
 
 
@@ -2023,8 +2134,9 @@ Insert these methods in `class RunStore` directly after `read_artifacts` (before
         list of dict
             One ``{"example_id": str, "turns": int, "failed": bool}`` per trace file,
             sorted by example id. ``example_id`` is the original id written by
-            ``log_trace`` (the file name is sanitised); ``failed`` is True when any
-            step has a non-empty ``error``.
+            ``log_trace`` (also for an empty trace, whose file holds one marker line);
+            the file stem only for files written without it. ``failed`` is True when
+            any step has a non-empty ``error``.
         """
         folder = self.layout.run_dir(project, run_id) / "traces"
         if not folder.is_dir():
@@ -2033,7 +2145,7 @@ Insert these methods in `class RunStore` directly after `read_artifacts` (before
         for path in sorted(folder.glob("*.jsonl")):
             raw = read_jsonl(path)
             steps = _parse_steps(raw)
-            original = raw[0].get("example_id") if raw else None
+            original = next((r["example_id"] for r in raw if "example_id" in r), None)
             found.append(
                 {
                     "example_id": original if isinstance(original, str) else path.stem,
@@ -2084,23 +2196,27 @@ Insert these methods in `class RunStore` directly after `read_artifacts` (before
         Returns
         -------
         dict of str to list of float
-            Series name (the sanitised file stem) to values in the order written,
-            sorted by name. Rows whose ``value`` is not a finite number are skipped.
+            Series name to values in the order written, sorted by name. The name is
+            the original one ``log_samples`` stores in each row (the file stem only
+            for files written without it). Rows whose ``value`` is not a finite
+            number are skipped.
         """
         folder = self.layout.run_dir(project, run_id) / "samples"
         if not folder.is_dir():
             return {}
         series: dict[str, list[float]] = {}
         for path in sorted(folder.glob("*.jsonl")):
+            rows = read_jsonl(path)
+            name = next((r["name"] for r in rows if isinstance(r.get("name"), str)), path.stem)
             values: list[float] = []
-            for raw in read_jsonl(path):
+            for raw in rows:
                 value = raw.get("value")
                 if isinstance(value, bool) or not isinstance(value, int | float):
                     continue
                 if math.isfinite(value):
                     values.append(float(value))
-            series[path.stem] = values
-        return series
+            series.setdefault(name, []).extend(values)
+        return dict(sorted(series.items()))
 ```
 
 Append this helper at the very end of the file (after `_parse_rows`):
@@ -2118,10 +2234,13 @@ def _parse_steps(raws: list[dict[str, Any]]) -> list[TraceStep]:
     Returns
     -------
     list of TraceStep
-        Valid steps in file order; invalid rows are skipped.
+        Valid steps in file order; invalid rows and the empty-trace marker line
+        (``{"example_id": ...}`` alone) are skipped.
     """
     steps: list[TraceStep] = []
     for position, raw in enumerate(raws, start=1):
+        if raw.keys() == {"example_id"}:
+            continue
         try:
             steps.append(TraceStep.model_validate({"turn": position, **raw}))
         except ValidationError:
@@ -2132,7 +2251,7 @@ def _parse_steps(raws: list[dict[str, Any]]) -> list[TraceStep]:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_store.py -v`
-Expected: `13 passed`.
+Expected: `15 passed`.
 
 - [ ] **Step 5: Lint, format, type-check**
 
@@ -2199,7 +2318,7 @@ def test_log_trace_writes_sanitised_file_and_overwrites(run_env: Path) -> None:
             {"tool": "check_stock", "args": "CCO", "error": "timeout 8 s"},
         ],
     )
-    path = run_env / "traces" / "route_7_b.jsonl"
+    path = run_env / "traces" / "route_7_b-5db86396.jsonl"  # sha1("route 7/b")[:8]
     assert _lines(path) == [
         {
             "example_id": "route 7/b",
@@ -2228,10 +2347,31 @@ def test_log_trace_writes_sanitised_file_and_overwrites(run_env: Path) -> None:
     assert [(r["turn"], r["tool"]) for r in _lines(path)] == [(5, "score_routes")]
 
 
+def test_log_trace_keeps_similar_ids_apart_and_empty_traces(run_env: Path) -> None:
+    run = hx.current()
+    run.log_trace("a/b", [{"tool": "x"}])
+    run.log_trace("a_b", [{"tool": "y"}])
+    run.log_trace("e/0", [])
+    traces = run_env / "traces"
+    assert sorted(p.name for p in traces.iterdir()) == [
+        "a_b-3ec69c85.jsonl",  # sha1("a/b")[:8]
+        "a_b.jsonl",
+        "e_0-7569d147.jsonl",  # sha1("e/0")[:8]
+    ]
+    assert [r["tool"] for r in _lines(traces / "a_b-3ec69c85.jsonl")] == ["x"]
+    assert [r["tool"] for r in _lines(traces / "a_b.jsonl")] == ["y"]
+    # an empty trace still creates its file, with a marker line that keeps the id
+    assert _lines(traces / "e_0-7569d147.jsonl") == [{"example_id": "e/0"}]
+
+
 def test_log_trace_rejects_bad_steps_without_writing(run_env: Path) -> None:
     run = hx.current()
     with pytest.raises(ValueError, match="trace step 2 of 'e1' is invalid: tokens_in"):
         run.log_trace("e1", [{"tool": "a"}, {"tool": "b", "tokens_in": -1}])
+    with pytest.raises(
+        ValueError, match="trace step 1 of 'e1' is invalid: seconds: Input should be a finite"
+    ):
+        run.log_trace("e1", [{"tool": "a", "seconds": float("inf")}])
     assert not (run_env / "traces" / "e1.jsonl").exists()
     with pytest.raises(ValueError, match="must not be empty"):
         run.log_trace("", [{"tool": "a"}])
@@ -2248,6 +2388,10 @@ def test_log_usage_appends_rows_and_validates(run_env: Path) -> None:
     ]
     with pytest.raises(ValueError, match="invalid usage: usd"):
         run.log_usage(usd=-0.5)
+    with pytest.raises(ValueError, match="invalid usage: usd: Input should be a finite number"):
+        run.log_usage(usd=float("inf"))
+    with pytest.raises(ValueError, match="invalid usage: seconds: Input should be a finite"):
+        run.log_usage(seconds=float("inf"))
     assert len(_lines(path)) == 2
 
 
@@ -2255,8 +2399,16 @@ def test_log_samples_appends_values(run_env: Path) -> None:
     run = hx.current()
     run.log_samples("latency ms", [12.5, 15])
     run.log_samples("latency ms", iter([20.0]))
-    path = run_env / "samples" / "latency_ms.jsonl"
-    assert _lines(path) == [{"value": 12.5}, {"value": 15.0}, {"value": 20.0}]
+    run.log_samples("latency_ms", [1.0])  # a different series, a different file
+    path = run_env / "samples" / "latency_ms-136bd8be.jsonl"  # sha1("latency ms")[:8]
+    assert _lines(path) == [
+        {"name": "latency ms", "value": 12.5},
+        {"name": "latency ms", "value": 15.0},
+        {"name": "latency ms", "value": 20.0},
+    ]
+    assert _lines(run_env / "samples" / "latency_ms.jsonl") == [
+        {"name": "latency_ms", "value": 1.0}
+    ]
     with pytest.raises(ValueError, match="sample of 'latency ms' must be a finite number"):
         run.log_samples("latency ms", [1.0, float("nan")])
     with pytest.raises(ValueError, match="must be a finite number, got 'slow'"):
@@ -2292,7 +2444,7 @@ def test_log_checkpoint_records_step_and_metrics(run_env: Path, tmp_path: Path) 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/test_sdk.py -v`
-Expected: 6 failures, each `AttributeError: 'Run' object has no attribute 'log_trace'` (or `log_usage` / `log_samples` / `log_checkpoint`; `'NoopRun' object has no attribute 'log_checkpoint'` for the no-op test). The 5 older tests pass.
+Expected: 7 failures, each `AttributeError: 'Run' object has no attribute 'log_trace'` (or `log_usage` / `log_samples` / `log_checkpoint`; `'NoopRun' object has no attribute 'log_checkpoint'` for the no-op test). The 5 older tests pass.
 
 - [ ] **Step 3: Implement the SDK calls**
 
@@ -2550,8 +2702,10 @@ class Run:
         trace. A step is ``{turn, tool, args, result, tokens_in, tokens_out, seconds,
         error}``; every key is optional except that ``turn`` defaults to the step's
         1-based position. A non-empty ``error`` marks the step (and the trace) failed.
-        Characters outside ``[A-Za-z0-9_.-]`` in the file name become ``_``; the
-        original id is stored in each line.
+        The file name is ``store.safe_stem(example_id)`` (unsafe characters become
+        ``_`` plus a hash of the id, so ids never collide); the original id is stored
+        in each line. An empty ``steps`` still writes the file, as one marker line
+        ``{"example_id": <id>}``, so the trace list shows it with 0 turns.
 
         Parameters
         ----------
@@ -2564,7 +2718,8 @@ class Run:
         ------
         ValueError
             If ``example_id`` is empty or a step is invalid (for example a negative
-            token count or a non-integer ``turn``); nothing is written then.
+            token count, an infinite ``seconds``, or a non-integer ``turn``); nothing
+            is written then.
 
         Examples
         --------
@@ -2585,6 +2740,8 @@ class Run:
                 ) from None
             row = {"example_id": example_id, **parsed.model_dump()}
             lines.append(json.dumps(row, default=str) + "\n")
+        if not lines:
+            lines.append(json.dumps({"example_id": example_id}) + "\n")
         atomic_write_text(path, "".join(lines))
 
     def log_usage(
@@ -2615,7 +2772,8 @@ class Run:
         Raises
         ------
         ValueError
-            If a value is negative or not a number; nothing is written then.
+            If a value is negative, not a number, or not finite (``nan``, ``inf``);
+            nothing is written then.
 
         Examples
         --------
@@ -2637,9 +2795,10 @@ class Run:
         """
         Append raw sample values (e.g. latencies) to ``samples/<name>.jsonl``.
 
-        Each value becomes one ``{"value": v}`` line. Percentiles are computed from
-        these raw values, so log every sample, not a summary. Characters outside
-        ``[A-Za-z0-9_.-]`` in ``name`` become ``_``.
+        Each value becomes one ``{"name": name, "value": v}`` line. Percentiles are
+        computed from these raw values, so log every sample, not a summary. The file
+        name is ``store.safe_stem(name)`` (unsafe characters become ``_`` plus a hash
+        of the name, so names never collide); readers use the stored ``name``.
 
         Parameters
         ----------
@@ -2660,7 +2819,9 @@ class Run:
         """
         path = self.run_dir / "samples" / f"{safe_stem(name)}.jsonl"
         what = f"sample of {name!r}"
-        lines = [json.dumps({"value": _finite(value, what)}) + "\n" for value in values]
+        lines = [
+            json.dumps({"name": name, "value": _finite(value, what)}) + "\n" for value in values
+        ]
         if not lines:
             return
         with open_jsonl_append(path) as fh:
@@ -2783,7 +2944,7 @@ Notes for the implementer:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/test_sdk.py -v`
-Expected: `11 passed`.
+Expected: `12 passed`.
 
 - [ ] **Step 5: Lint, format, type-check**
 
@@ -4244,7 +4405,8 @@ git commit -m "feat: test-set intervals and paired tests against the best group"
 **Interfaces:**
 - Consumes: `LeaderboardRow`, `Leaderboard`, `NoiseInterval`, `VersusBest` (Task 10). `vs_best` / `test_interval` (Task 11). `stats.Z95`.
 - Produces (in `hypothex.core.headlines`):
-  - `task_headline(board: Leaderboard, *, reference: str | None = None) -> str`. For `generic`/`training`/`agent_eval`: `"SVM +0.037 over rf, p = 0.15"`, or `"SVM 0.922"` with one row. For `agent_iteration`: `"v11 0.700, +0.300 over v9 [0.016, 0.584]"`. For `system_bench`: `"fast p95 −30% vs baseline [−34, −24]"`. With no scored rows: `"No scored runs yet"`.
+  - `task_headline(board: Leaderboard, *, reference: str | None = None, gain_interval: tuple[float, float] | None = None) -> str`. For `generic`/`training`/`agent_eval`: `"SVM +0.037 over rf, p = 0.15"`, or `"SVM 0.922"` with one row. For `agent_iteration`: `"v11 0.700, +0.300 over v9 [0.016, 0.584]"`; the bracket is `gain_interval` when given (the paired interval `build_leaderboard` computes), else a Welch interval over seed values, else nothing.
+  - `paired_gain_interval(gain: float, fixed: int, broken: int, n_shared: int) -> tuple[float, float] | None`: `gain ± Z95 × sqrt(var / n)` with `d = (fixed − broken) / n`, `var = (fixed + broken) / n − d²`, `n = n_shared` = the examples both groups were scored on (not either group's own `n`: with 100 examples per group but 10 shared, the interval is `[0.296, 0.904]`, not `[0.553, 0.647]`); `None` when `n_shared <= 0`. `build_leaderboard` counts the shared examples while it still has the per-example ids. For `system_bench`: `"fast p95 −30% vs baseline [−34, −24]"`. With no scored rows: `"No scored runs yet"`.
   - `task_stat_strip(board: Leaderboard, *, reference: str | None = None) -> list[dict[str, Any]]`. Entries are `{label, value, unit, tooltip}`; `value` is the full display string. Per kind:
     - generic: `Δ <metric>`, `paired p` or `p, seeds`, `fixed / broken`, `<best> 95% CI`, `seed σ`, `n for p < 0.05`
     - training: the generic entries plus `runs`
@@ -4268,6 +4430,7 @@ from hypothex.core.headlines import (
     fmt_p,
     fmt_pct,
     fmt_value,
+    paired_gain_interval,
     percentile_of,
     task_headline,
     task_stat_strip,
@@ -4367,8 +4530,13 @@ def test_task_headline_agent_iteration() -> None:
     best = row("v11", [0.7], ti=ti)
     first = row("v9", [0.4], ti=ti, vs=sign(-0.3, 3, 0, 0.25))
     b = board("agent_iteration", [best, first])
-    # paired CI from discordant counts: 0.3 +/- 1.959964 * sqrt((0.3 - 0.3**2) / 10)
-    assert task_headline(b, reference="v9@c1") == "v11 0.700, +0.300 over v9 [0.016, 0.584]"
+    # paired CI from discordant counts on 10 shared examples:
+    # 0.3 +/- 1.959964 * sqrt((0.3 - 0.3**2) / 10)
+    paired = paired_gain_interval(0.3, 3, 0, 10)
+    text = task_headline(b, reference="v9@c1", gain_interval=paired)
+    assert text == "v11 0.700, +0.300 over v9 [0.016, 0.584]"
+    # no paired interval given: Welch over seed values, and one seed each gives none
+    assert task_headline(b, reference="v9@c1") == "v11 0.700, +0.300 over v9"
     assert task_headline(b) == "v11 0.700"
     assert task_headline(b, reference="v11@c1") == "v11 0.700"
     # no per-example data: Welch interval over seeds (scipy CI 0.0873-0.1327, see above)
@@ -4376,6 +4544,18 @@ def test_task_headline_agent_iteration() -> None:
     first = row("v1", [0.5, 0.51, 0.49], vs=welch(-0.11, 0.001))
     text = task_headline(board("agent_iteration", [best, first]), reference="v1@c1")
     assert text == "v2 0.610, +0.110 over v1 [0.087, 0.133]"
+
+
+def test_paired_gain_interval_uses_the_shared_example_count() -> None:
+    # 6 fixed, 0 broken on 10 shared examples: 0.6 +/- 1.959964 * sqrt((0.6 - 0.36) / 10)
+    assert paired_gain_interval(0.6, 6, 0, 10) == pytest.approx(
+        (0.29636368514840156, 0.9036363148515985)
+    )
+    # the same counts over 100 paired examples: the far narrower interval the old min(n) gave
+    assert paired_gain_interval(0.6, 6, 0, 100) == pytest.approx(
+        (0.553453434338595, 0.646546565661405)
+    )
+    assert paired_gain_interval(0.6, 6, 0, 0) is None
 
 
 def test_task_headline_system_bench() -> None:
@@ -4544,6 +4724,24 @@ def test_agent_iteration_orders_versions_naturally() -> None:
     }
 
 
+def test_agent_iteration_gain_interval_counts_only_shared_examples() -> None:
+    # 100 examples per version, only s0..s9 shared; v2 solves s0..s5, v1 none of them
+    v1 = {f"a{i}": {"correct": i < 20} for i in range(90)}
+    v1 |= {f"s{i}": {"correct": False} for i in range(10)}
+    v2 = {f"b{i}": {"correct": i < 74} for i in range(90)}
+    v2 |= {f"s{i}": {"correct": i < 6} for i in range(10)}
+    runs = [
+        krun(v, v, task="ai", params={"version": v}, minute=i) for i, v in enumerate(["v1", "v2"])
+    ]
+    scores = {"v1": acc(0.2), "v2": acc(0.8)}
+    board = build_leaderboard("toy", "ai", KINDS, runs, scores, per_example={"v1": v1, "v2": v2})
+    vs = board.rows[1].vs_best
+    assert vs is not None and (vs.fixed, vs.broken) == (6, 0)
+    # 0.6 +/- 1.959964 * sqrt((0.6 - 0.36) / 10) = [0.296, 0.904];
+    # min(group n) = 100 would give [0.553, 0.647]
+    assert board.headline == "v2 0.800, +0.600 over v1 [0.296, 0.904]"
+
+
 def test_agent_iteration_without_version_uses_creation_time() -> None:
     runs = [
         krun("y", "y", task="ai", minute=5, hypothesis="second try"),
@@ -4556,7 +4754,7 @@ def test_agent_iteration_without_version_uses_creation_time() -> None:
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/core/test_headlines.py tests/core/test_leaderboard.py -v`
-Expected: `test_headlines.py` fails at collection with `ImportError: cannot import name 'task_headline'`. The four new `test_leaderboard.py` tests fail with `AssertionError` (headline is `''`).
+Expected: `test_headlines.py` fails at collection with `ImportError: cannot import name 'task_headline'`. The five new `test_leaderboard.py` tests fail with `AssertionError` (headline is `''`).
 
 - [ ] **Step 3: Write the implementation**
 
@@ -4581,26 +4779,55 @@ if TYPE_CHECKING:
 Append to the end of `src/hypothex/core/headlines.py`:
 
 ```python
-def _gain_interval(
-    best: LeaderboardRow, first: LeaderboardRow, primary: str
+def paired_gain_interval(
+    gain: float, fixed: int, broken: int, n_shared: int
 ) -> tuple[float, float] | None:
-    assert best.primary is not None and first.primary is not None
-    gain = best.primary.mean - first.primary.mean
-    vs = first.vs_best
-    if (
-        vs is not None
-        and vs.test == "sign"
-        and vs.fixed is not None
-        and vs.broken is not None
-        and first.test_interval is not None
-        and best.test_interval is not None
-    ):
-        n = min(first.test_interval.n, best.test_interval.n)
-        if n > 0:
-            mean_d = (vs.fixed - vs.broken) / n
-            var = max((vs.fixed + vs.broken) / n - mean_d**2, 0.0)
-            half = Z95 * math.sqrt(var / n)
-            return gain - half, gain + half
+    """
+    95% interval of a gain from paired binary outcomes on shared examples.
+
+    With ``d = (fixed - broken) / n`` and ``var = (fixed + broken) / n - d**2``
+    (the variance of the per-example difference in ``{-1, 0, 1}``), the interval
+    is ``gain ± Z95 * sqrt(var / n)``, where ``n`` is the number of examples both
+    groups were scored on. Using either group's own example count instead
+    understates the width whenever the test sets only partly overlap.
+
+    Parameters
+    ----------
+    gain : float
+        Best mean minus reference mean (the headline's number).
+    fixed, broken : int
+        Discordant shared examples in favour of and against the best group.
+    n_shared : int
+        Examples scored for both groups.
+
+    Returns
+    -------
+    tuple of (float, float) or None
+        Lower and upper bound; None when ``n_shared <= 0``.
+
+    Examples
+    --------
+    >>> lo, hi = paired_gain_interval(0.3, 3, 0, 10)
+    >>> round(lo, 3), round(hi, 3)
+    (0.016, 0.584)
+    """
+    if n_shared <= 0:
+        return None
+    mean_d = (fixed - broken) / n_shared
+    var = max((fixed + broken) / n_shared - mean_d**2, 0.0)
+    half = Z95 * math.sqrt(var / n_shared)
+    return gain - half, gain + half
+
+
+def _gain_interval(
+    best: LeaderboardRow,
+    first: LeaderboardRow,
+    primary: str,
+    paired: tuple[float, float] | None,
+) -> tuple[float, float] | None:
+    """The paired interval when given, else a Welch interval over seed values."""
+    if paired is not None:
+        return paired
     w = welch_interval(best.seed_values.get(primary, []), first.seed_values.get(primary, []))
     if w is None or w[1] is None or w[2] is None:
         return None
@@ -4621,7 +4848,12 @@ def _mean(row: LeaderboardRow) -> float:
     return row.primary.mean
 
 
-def task_headline(board: Leaderboard, *, reference: str | None = None) -> str:
+def task_headline(
+    board: Leaderboard,
+    *,
+    reference: str | None = None,
+    gain_interval: tuple[float, float] | None = None,
+) -> str:
     """
     Return a task's one-line finding.
 
@@ -4632,6 +4864,11 @@ def task_headline(board: Leaderboard, *, reference: str | None = None) -> str:
     reference : str, optional
         Group id to compare against: the baseline for ``system_bench``, the
         first version for ``agent_iteration``. ``build_leaderboard`` passes it.
+    gain_interval : tuple of (float, float), optional
+        ``agent_iteration`` only: the paired interval of the gain over the
+        first version (``paired_gain_interval`` on the shared examples, which
+        ``build_leaderboard`` computes). Without it the bracket is a Welch
+        interval over seed values, or absent.
 
     Returns
     -------
@@ -4653,7 +4890,7 @@ def task_headline(board: Leaderboard, *, reference: str | None = None) -> str:
         if ref is None or ref.group_id == best.group_id:
             return head
         text = f"{head}, {fmt_delta(_mean(best) - _mean(ref))} over {ref.label}"
-        ci = _gain_interval(best, ref, board.primary)
+        ci = _gain_interval(best, ref, board.primary, gain_interval)
         if ci is not None:
             text += f" [{fmt_value(ci[0])}, {fmt_value(ci[1])}]"
         return text
@@ -4847,7 +5084,12 @@ from pydantic import BaseModel
 
 from hypothex.core import stats
 from hypothex.core.config import ProjectConfig, TaskKind, TaskSpec, parse_metric_key
-from hypothex.core.headlines import percentile_of, task_headline, task_stat_strip
+from hypothex.core.headlines import (
+    paired_gain_interval,
+    percentile_of,
+    task_headline,
+    task_stat_strip,
+)
 ```
 
 (b) Insert this block directly above `def _higher_is_better(`:
@@ -4870,6 +5112,30 @@ def _first_version(
 
     scored = [r for r in rows if r.primary is not None]
     return min(scored, key=key).group_id if scored else None
+
+
+def _paired_gain(
+    best: LeaderboardRow, first: LeaderboardRow, pooled: dict[str, dict[str, float]]
+) -> tuple[float, float] | None:
+    """
+    Paired 95% interval of ``best - first`` over the examples both were scored on.
+
+    Uses the sign-test counts of ``first.vs_best`` (computed on those same shared
+    examples) and counts the shared ids here, where they are still known.
+    """
+    vs = first.vs_best
+    if (
+        vs is None
+        or vs.test != "sign"
+        or vs.fixed is None
+        or vs.broken is None
+        or best.primary is None
+        or first.primary is None
+    ):
+        return None
+    shared = pooled.get(best.group_id, {}).keys() & pooled.get(first.group_id, {}).keys()
+    gain = best.primary.mean - first.primary.mean
+    return paired_gain_interval(gain, vs.fixed, vs.broken, len(shared))
 
 
 def _select_group(
@@ -4998,10 +5264,14 @@ def build_leaderboard(
     by_id = {r.run_id: r for r in eligible}
     members_of = {row.group_id: [by_id[i] for i in row.run_ids] for row in rows}
     reference = None
+    gain_interval = None
     if spec.kind == "system_bench":
         reference = _select_group(spec.baseline, rows, members_of)
     elif spec.kind == "agent_iteration":
         reference = _first_version(rows, members_of, spec.version_param)
+        first = next((row for row in rows if row.group_id == reference), None)
+        if first is not None and first is not rows[0]:
+            gain_interval = _paired_gain(rows[0], first, pooled)
 
     board = Leaderboard(
         project=project,
@@ -5016,7 +5286,7 @@ def build_leaderboard(
         kind=spec.kind,
         stat_strip=[],
     )
-    board.headline = task_headline(board, reference=reference)
+    board.headline = task_headline(board, reference=reference, gain_interval=gain_interval)
     board.stat_strip = task_stat_strip(board, reference=reference)
     return board
 ```
@@ -5065,6 +5335,7 @@ from hypothex.core.headlines import (
     fmt_pct,
     fmt_value,
     overview_headline,
+    paired_gain_interval,
     percentile_of,
     task_headline,
     task_stat_strip,
@@ -5523,7 +5794,10 @@ Decisions this part makes inside the contract (later parts rely on them):
     system_bench percentile table's Δ and CI vs baseline are the `vs_baseline` values of the
     `Percentiles` distribution rows (Task 23), both contract 1.6.
   - Preset data conventions the panel engine must honour (contract 1.5/1.6 only): scatter `x`
-    may be a `runs` field such as `usage.usd` or `params.version`; `curves` with no `metrics`
+    may be a `runs` field such as `usage.usd` or `params.<p>`, or `version` (the task's version
+    ordering key, spec 8.4: the run param `TaskSpec.version_param` names, else the creation time
+    of the group's first run; Tasks 16, 20, 22), which the agent_iteration preset uses so a task
+    with `version_param: prompt_version` works unchanged; `curves` with no `metrics`
     means every logged step metric; `vega_lite` fields with dots are escaped in the spec
     (`meta\.category`) because rows are flat.
 
@@ -5612,14 +5886,15 @@ def test_presets_cover_the_spec_items() -> None:
     iteration = {p.title: p for p in load_preset("agent_iteration").panels}
     assert "Cost by version" not in iteration
     cost = iteration["$ per solved"]
-    assert (cost.data.x, cost.data.y) == ("params.version", "usage.usd/solved")
+    assert (cost.data.x, cost.data.y) == ("version", "usage.usd/solved")
+    assert iteration["Changes"].data.fields == ["group_id", "version", "created_by", "created_at"]
     bench = {p.title: p for p in load_preset("system_bench").panels}
     percentiles = bench["Percentiles"]
     assert (percentiles.type, percentiles.render) == ("distribution", "table")
     assert percentiles.data.metrics == ["latency_ms"]
     assert bench["Latency"].render == "chart"
     solved = iteration["Solved by version"]
-    assert (solved.type, solved.data.x) == ("scatter", "params.version")  # ordinal: regressions
+    assert (solved.type, solved.data.x) == ("scatter", "version")  # ordinal: regressions
     spread = bench["Repeat spread"]
     assert spread.data.filter == {"metric": "latency", "key": "p95"}
     assert spread.spec is not None
@@ -5815,8 +6090,9 @@ panels:
 
 ```yaml
 # Preset view for task kind "agent_iteration" (spec 8.4, mockup docs/mockups/kinds/agent_iteration).
-# Versions are read from the run param "version" (the TaskSpec.version_param default);
-# if your task uses another param, copy this view and change params.version.
+# `version` is the task's version ordering key: the run param TaskSpec.version_param names
+# ("version" by default, e.g. prompt_version), or, for a group whose runs lack that param, the
+# creation time of the group's first run (spec 8.4). So this view works for any version_param.
 # "$ per solved" is each run's usage.usd divided by the examples it solved on the primary
 # metric (usage.<field>/solved), averaged over seeds. Both scatters have an ordinal x (version
 # text), so each row carries `regression`: worse than the best earlier version by more than
@@ -5828,17 +6104,17 @@ panels:
     layout: {span: 12, row: 1}
   - type: scatter
     title: Solved by version
-    data: {x: params.version, group_by: group}
+    data: {x: version, group_by: group}
     layout: {span: 12, row: 2}
   - type: scatter
     title: $ per solved
-    data: {x: params.version, y: usage.usd/solved, group_by: group}
+    data: {x: version, y: usage.usd/solved, group_by: group}
     layout: {span: 6, row: 3}
   - type: table
     title: Changes
     data:
       source: runs
-      fields: [group_id, params.version, created_by, created_at]
+      fields: [group_id, version, created_by, created_at]
     layout: {span: 6, row: 3}
   - type: grid
     title: Flips
@@ -6209,12 +6485,26 @@ git commit -m "feat: add view models and task-kind preset views"
 - Produces:
   - `validate_view_text(text: str, known_metrics: set[str], known_fields: dict[str, set[str]]) -> tuple[ViewSpec | None, list[ValidationIssue]]`.
   - Constants `ROW_KEYS = frozenset({"run_id", "group_id", "seed"})` (always valid fields),
-    `FIELD_PREFIXES = ("usage.", "params.", "vars.")`, `VEGA_ROOT_KEYS`.
+    `FIELD_PREFIXES = ("usage.", "params.", "vars.")`, `VEGA_ROOT_KEYS`,
+    `VERSION_REF = "version"` (the task's version ordering key, spec 8.4: a valid scatter
+    `data.x` and a valid `runs` table field; the panel engine resolves it, Tasks 20 and 22),
+    `VEGA_BLOCKED_KEYS = frozenset({"url", "href", "embedOptions"})`.
+  - `vega_spec_problems(spec: Any, at: tuple[str | int, ...] = ()) -> list[tuple[tuple[str | int, ...], str]]`
+    (public; the panel engine calls it too, Task 20): every `url`, `href`, or `embedOptions` key
+    at any depth (inline data only: no data URLs, lookup sources, image URLs, links, or embed
+    options that could swap the loader) and every `image` mark.
+  - Metric references: a reference that is exactly a known metric name (history names keep
+    their `/`, e.g. `val/top1`) is valid before it is split into `name[@version][/key]`.
+    A `grid` panel's `data.y` is a per-example field (`partial` in
+    `accuracy@v1.partial`), checked against the `predictions` fields, not the metrics.
   - Issue messages (exact, used by the UI and CLI): `unknown key <k>`, `unknown <field> <value>`
     (plus `; expected one of a, b` when no near match), `missing <field>`,
-    `unknown metric <name>`, `unknown field <f> in <source>`, `<type> needs data.source`,
+    `unknown metric <name>`, `unknown field <f> in <source>`,
+    `unknown per-example field <f>`, `<type> needs data.source`,
     `scatter needs data.x`, `markdown needs text`,
-    `vega_lite spec needs mark, layer, or a composition`, `pareto keys are x and y`,
+    `vega_lite spec needs mark, layer, or a composition`,
+    `vega_lite spec must not load external resources (<key>)`,
+    `vega_lite image marks are not allowed`, `pareto keys are x and y`,
     `duplicate panel title <t>`, `a view is a mapping with title and panels`, `YAML: <problem>`.
   - `ValidationIssue.path` looks like `panels[1].data.y`; `line` is 1-based, from the key's
     `yaml.compose` mark (or the nearest existing parent when the key is missing).
@@ -6475,6 +6765,73 @@ def test_issues_serialise_for_the_api() -> None:
     assert dumped["path"] == "panels[0].type"
     assert dumped["message"].startswith("unknown type pie; expected one of stat_strip")
     assert dumped["suggestion"] is None
+
+
+def test_known_metric_names_with_slashes_are_not_split() -> None:
+    # history metrics keep their "/" (records.MetricPoint.name): val/top1 is not metric "val"
+    metrics = {"accuracy", "val/top1", "sys/gpu_util"}
+    fields = {"runs": {"status", "created_by"}}
+    text = """\
+title: t
+panels:
+  - type: curves
+    data: {metrics: [val/top1, sys/gpu_util], y: val/top1}
+  - type: scatter
+    data: {x: version, y: val/top1}
+  - type: table
+    data: {source: runs, fields: [group_id, version, status]}
+"""
+    view, issues = validate_view_text(text, metrics, fields)
+    assert view is not None and issues == []
+    typo = text.replace("y: val/top1}", "y: val/topp1}", 1)  # the curves panel's y
+    _, issues = validate_view_text(typo, metrics, fields)
+    assert [(i.line, i.path, i.message, i.suggestion) for i in issues] == [
+        (4, "panels[0].data.y", "unknown metric val/topp1", "val/top1")
+    ]
+
+
+def test_grid_y_is_a_per_example_field() -> None:
+    fields = {"predictions": {"id", "accuracy@v1.correct", "accuracy@v1.partial", "meta.category"}}
+    text = "title: t\npanels:\n  - type: grid\n    data: {metrics: [accuracy@v1], y: partial}\n"
+    assert validate_view_text(text, {"accuracy"}, fields)[1] == []
+    typo = text.replace("partial", "partal")
+    _, issues = validate_view_text(typo, {"accuracy"}, fields)
+    assert [(i.line, i.path, i.message, i.suggestion) for i in issues] == [
+        (4, "panels[0].data.y", "unknown per-example field partal", "partial")
+    ]
+    assert validate_view_text(typo, {"accuracy"}, {})[1] == []  # nothing known: skipped
+
+
+def test_vega_lite_external_resources_are_rejected_at_any_depth() -> None:
+    text = """\
+title: t
+panels:
+  - type: vega_lite
+    data: {source: runs}
+    spec:
+      layer:
+        - mark: point
+          data: {url: "https://example.com/x.json"}
+        - mark: {type: image}
+          encoding:
+            url: {field: run_id}
+            href: {field: run_id}
+      transform:
+        - lookup: run_id
+          from: {data: {url: data/other.csv}, key: run_id, fields: [x]}
+      usermeta: {embedOptions: {loader: {baseURL: "https://example.com/"}}}
+"""
+    view, issues = validate_view_text(text, set(), {})
+    assert view is not None  # a semantic problem: the preview may render, Save may not
+    external = "vega_lite spec must not load external resources"
+    assert [(i.line, i.path, i.message) for i in issues] == [
+        (8, "panels[0].spec.layer[0].data.url", f"{external} (url)"),
+        (9, "panels[0].spec.layer[1].mark", "vega_lite image marks are not allowed"),
+        (11, "panels[0].spec.layer[1].encoding.url", f"{external} (url)"),
+        (12, "panels[0].spec.layer[1].encoding.href", f"{external} (href)"),
+        (15, "panels[0].spec.transform[0].from.data.url", f"{external} (url)"),
+        (16, "panels[0].spec.usermeta.embedOptions", f"{external} (embedOptions)"),
+    ]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -6515,6 +6872,8 @@ Insert directly after the line `PRESET_DIR = Path(__file__).resolve().parent.par
 ROW_KEYS = frozenset({"run_id", "group_id", "seed"})
 FIELD_PREFIXES = ("usage.", "params.", "vars.")
 VEGA_ROOT_KEYS = frozenset({"mark", "layer", "concat", "hconcat", "vconcat", "facet", "repeat"})
+VEGA_BLOCKED_KEYS = frozenset({"url", "href", "embedOptions"})
+VERSION_REF = "version"
 
 Loc = tuple[str | int, ...]
 ```
@@ -6613,14 +6972,90 @@ def _schema_issue(root: yaml.Node, err: ErrorDetails) -> ValidationIssue:
 def _metric_problem(
     ref: str, known_metrics: set[str], known_fields: dict[str, set[str]]
 ) -> tuple[str, str | None] | None:
-    """Return ``(message, suggestion)`` if ``ref`` names an unknown metric, else None."""
-    if ref == "step" or ref.startswith(FIELD_PREFIXES) or ref in known_fields.get("runs", set()):
+    """
+    Return ``(message, suggestion)`` if ``ref`` names an unknown metric, else None.
+
+    A reference that is exactly a known name is valid before any split, so history
+    metrics keep their ``/`` (``val/top1`` is not metric ``val`` with key ``top1``).
+    """
+    if ref in ("step", VERSION_REF) or ref.startswith(FIELD_PREFIXES):
+        return None
+    if ref in known_fields.get("runs", set()) or not known_metrics or ref in known_metrics:
         return None
     base = re.split(r"[@/]", ref, maxsplit=1)[0]
-    if not known_metrics or base in known_metrics:
+    if base in known_metrics:
         return None
+    if "/" in ref and "@" not in ref:
+        whole = _closest(ref, {m for m in known_metrics if "/" in m})
+        if whole is not None:
+            return f"unknown metric {ref}", whole
     near = _closest(base, known_metrics)
     return f"unknown metric {base}", (near + ref[len(base) :] if near else None)
+
+
+def _example_field_problem(
+    name: str, known_fields: dict[str, set[str]]
+) -> tuple[str, str | None] | None:
+    """
+    Return ``(message, suggestion)`` if ``name`` is not a known per-example field.
+
+    Per-example fields are the ``<field>`` of ``predictions`` keys
+    ``<metric>@<version>.<field>``. Skipped when no such key is known.
+    """
+    fields = {
+        key.rsplit(".", 1)[1]
+        for key in known_fields.get("predictions", set())
+        if "." in key and "@" in key.rsplit(".", 1)[0]
+    }
+    if not fields or name in fields:
+        return None
+    return f"unknown per-example field {name}", _closest(name, fields)
+
+
+def vega_spec_problems(spec: Any, at: Loc = ()) -> list[tuple[Loc, str]]:
+    """
+    Find what a Vega-Lite spec may not contain: external resources and images.
+
+    Rows reach a ``vega_lite`` panel only inline, so every ``url`` (data, lookup
+    sources, image marks), ``href`` (links), and ``embedOptions`` (vega-embed
+    options, which can swap the loader) key is rejected at any depth, and so is
+    every ``image`` mark.
+
+    Parameters
+    ----------
+    spec : Any
+        The spec, or a part of it.
+    at : tuple of (str or int)
+        Location of ``spec``; prefixed to every returned location.
+
+    Returns
+    -------
+    list of tuple of (tuple, str)
+        ``(location, message)`` per problem, in document order.
+
+    Examples
+    --------
+    >>> vega_spec_problems({"layer": [{"mark": "point", "data": {"url": "x.csv"}}]})
+    [(('layer', 0, 'data', 'url'), 'vega_lite spec must not load external resources (url)')]
+    >>> vega_spec_problems({"mark": {"type": "image"}})
+    [(('mark',), 'vega_lite image marks are not allowed')]
+    """
+    found: list[tuple[Loc, str]] = []
+    if isinstance(spec, dict):
+        for key, value in spec.items():
+            here: Loc = (*at, str(key))
+            if key in VEGA_BLOCKED_KEYS:
+                found.append((here, f"vega_lite spec must not load external resources ({key})"))
+            elif key == "mark" and (
+                value == "image" or (isinstance(value, dict) and value.get("type") == "image")
+            ):
+                found.append((here, "vega_lite image marks are not allowed"))
+            else:
+                found += vega_spec_problems(value, here)
+    elif isinstance(spec, list):
+        for i, item in enumerate(spec):
+            found += vega_spec_problems(item, (*at, i))
+    return found
 
 
 def _panel_issues(
@@ -6635,16 +7070,22 @@ def _panel_issues(
     refs: list[tuple[Loc, str]] = [
         ((*at, "data", "metrics", j), ref) for j, ref in enumerate(data.metrics or [])
     ]
-    refs += [((*at, "data", k), v) for k in ("x", "y", "step_metric") if (v := getattr(data, k))]
+    # a grid's data.y is a per-example field, checked below
+    axes = ("x", "step_metric") if panel.type == "grid" else ("x", "y", "step_metric")
+    refs += [((*at, "data", k), v) for k in axes if (v := getattr(data, k))]
     for loc, ref in refs:
         problem = _metric_problem(ref, known_metrics, known_fields)
         if problem is not None:
             out.append((loc, *problem))
+    if panel.type == "grid" and data.y:
+        problem = _example_field_problem(data.y, known_fields)
+        if problem is not None:
+            out.append(((*at, "data", "y"), *problem))
     if panel.type in ("table", "vega_lite") and data.source is None:
         out.append(((*at, "data"), f"{panel.type} needs data.source", None))
     known = known_fields.get(data.source, set()) if data.source else set()
     if known:
-        allowed = known | ROW_KEYS
+        allowed = known | ROW_KEYS | ({VERSION_REF} if data.source == "runs" else set())
         for j, name in enumerate(data.fields or []):
             if name not in allowed:
                 out.append(
@@ -6660,6 +7101,8 @@ def _panel_issues(
         out.append(((*at, "text"), "markdown needs text", None))
     if panel.type == "vega_lite" and not VEGA_ROOT_KEYS & set(panel.spec or {}):
         out.append(((*at, "spec"), "vega_lite spec needs mark, layer, or a composition", None))
+    if panel.type == "vega_lite" and panel.spec:
+        out += [(loc, msg, None) for loc, msg in vega_spec_problems(panel.spec, (*at, "spec"))]
     if panel.pareto and set(panel.pareto) - {"x", "y"}:
         out.append(((*at, "pareto"), "pareto keys are x and y", None))
     return out
@@ -6740,7 +7183,7 @@ def validate_view_text(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_views.py -q`
-Expected: `37 passed`.
+Expected: `40 passed`.
 
 Run: `uv run ruff format --check src/hypothex/core/views.py tests/core/test_views.py && uv run ruff check src/hypothex/core/views.py tests/core/test_views.py && uv run ty check src/hypothex/core/views.py tests/core/test_views.py`
 Expected: `2 files already formatted`, `All checks passed!`, `All checks passed!`.
@@ -6946,7 +7389,7 @@ def test_overview_is_reserved(tmp_path: Path) -> None:
 def test_reserved_view_name_comes_from_config() -> None:
     # one source of truth: views uses config's set, it does not define its own
     assert core_views.RESERVED_VIEW_NAMES is core_config.RESERVED_VIEW_NAMES
-    assert core_config.RESERVED_VIEW_NAMES == frozenset({core_views.RESERVED_VIEW})
+    assert frozenset({core_views.RESERVED_VIEW}) == core_config.RESERVED_VIEW_NAMES
     assert core_views.RESERVED_VIEW == "overview"
 
 
@@ -7256,7 +7699,7 @@ def delete_view(repo: Path, task: str, name: str) -> None:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_views.py -q`
-Expected: `54 passed`.
+Expected: `57 passed`.
 
 Run: `uv run ruff format --check src/hypothex/core/views.py tests/core/test_views.py && uv run ruff check src/hypothex/core/views.py tests/core/test_views.py && uv run ty check src/hypothex/core/views.py tests/core/test_views.py`
 Expected: `2 files already formatted`, `All checks passed!`, `All checks passed!`.
@@ -7287,7 +7730,8 @@ Implements contract sections 1.5 (`hypothex.core.sources`) and 1.6 (`hypothex.co
 - `data.group_by`: `group` (default, leaderboard seed group, labelled with the leaderboard label when the group is on the board), `config` (config hash only), `run`, `seed`. Fallback label: `leaderboard.group_label` (Task 10) of the newest non-empty hypothesis and the group's tags.
 - `query_view` isolates failures: a panel that raises a `HypothexError` becomes `{rows: [], meta: {error}}`; the other panels still render.
 - `table`/`vega_lite` cap rows at `MAX_TABLE_ROWS = 5000` and report `meta.total` plus a warning.
-- `vega_lite` `meta.spec` replaces `data` with `{"values": []}` (drops any `url`, so the browser never fetches arbitrary data); the stored spec is not mutated.
+- `vega_lite` `meta.spec` replaces the root `data` with `{"values": []}`; any other external resource (`url`/`href`/`embedOptions` at any depth, `image` marks) makes the panel fail with a `ConfigError` (`views.vega_spec_problems`, the same check view validation runs), so the server never hands the browser a spec that fetches. The stored spec is not mutated. The UI also renders with a deny-all loader (frontend plan).
+- `table`/`vega_lite` filter full source rows before projecting to `data.fields`.
 
 Task 19 is the last views task (`view_context`, contract 1.4). It sits here because it reads rows through `sources.iter_rows` (Task 18).
 
@@ -7302,7 +7746,8 @@ Task 19 is the last views task (`view_context`, contract 1.4). It sits here beca
 **Interfaces:**
 - Consumes: `Context` (`ctx.store.read_scores`, `ctx.store.read_metric_points`, `ctx.store.load_project`, `ctx.run_dir`), the run-folder readers `RunStore.read_samples`, `read_usage`, `list_traces`, `read_trace` (Task 6), `leaderboard.group_id_for` (Task 10), `config.load_project_config`, `datasets.resolve_dataset_path`, `fsutil.read_jsonl`, `records.RunRecord` with `usage: UsageTotals | None` (contract 1.2), `views.Source` (type only, contract 1.4).
 - Produces (`hypothex.core.sources`):
-  - `iter_rows(ctx: Context, runs: list[RunRecord], source: Source, fields: list[str] | None = None) -> Iterator[dict[str, Any]]` — contract 1.5. Every row has `run_id`, `group_id`, `seed`. With `fields`, rows hold only those three plus the listed keys (missing keys → `None`). Unknown source → `ConfigError("unknown source ...")`.
+  - `iter_rows(ctx: Context, runs: list[RunRecord], source: Source, fields: list[str] | None = None) -> Iterator[dict[str, Any]]` — contract 1.5. Every row has `run_id`, `group_id`, `seed`. With `fields`, rows hold only those three plus the listed keys (missing keys → `None`); listing `run_id`, `group_id`, or `seed` keeps their real values. Unknown source → `ConfigError("unknown source ...")`.
+  - `select_fields(row: dict[str, Any], fields: list[str] | None) -> dict[str, Any]` — the projection `iter_rows` applies: `run_id`, `group_id`, `seed` from the row, then each listed field (`None` when missing); `fields=None` returns the row unchanged. The panel engine (Task 20) filters full rows first and projects after, with this helper.
   - `SOURCES: tuple[str, ...]` = `("runs", "scores", "metrics", "predictions", "samples", "usage", "traces")`.
   - `group_id_for` is re-exported from `hypothex.core.leaderboard` (defined in Task 10), so `from hypothex.core.sources import group_id_for` works.
   - File names, sample parsing, usage parsing, and trace parsing are not redefined here: `samples`, `usage`, and `traces` rows come from the `RunStore` readers of Task 6 (bad rows skipped the same way everywhere).
@@ -7324,7 +7769,7 @@ from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError
 from hypothex.core.ids import utcnow
 from hypothex.core.records import GitInfo, RunRecord, RunStatus, ScoreRecord, UsageTotals
-from hypothex.core.sources import group_id_for, iter_rows
+from hypothex.core.sources import group_id_for, iter_rows, select_fields
 from tests.factories import make_record
 
 T0 = utcnow()
@@ -7514,6 +7959,26 @@ def test_missing_files_yield_no_rows(ctx: Context, toy_repo: Path) -> None:
         assert list(iter_rows(ctx, [rec], source)) == []
 
 
+def test_fields_that_name_row_keys_keep_their_values(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "r1", seed=7)
+    ctx.add_score(
+        rec, ScoreRecord(metric="accuracy", version="v1", key="value", value=0.75, created_at=T0)
+    )
+    fields = ["run_id", "group_id", "seed", "value"]
+    assert list(iter_rows(ctx, [rec], "scores", fields=fields)) == [
+        {"run_id": "r1", "group_id": "aaaa@c1", "seed": 7, "value": 0.75}
+    ]
+    row = {"run_id": "r1", "group_id": "g", "seed": 1, "metric": "m", "value": 2.0}
+    assert select_fields(row, ["seed", "value", "nope"]) == {
+        "run_id": "r1",
+        "group_id": "g",
+        "seed": 1,
+        "value": 2.0,
+        "nope": None,
+    }
+    assert select_fields(row, None) is row
+
+
 def test_fields_restriction_fills_missing_with_none(ctx: Context, toy_repo: Path) -> None:
     rec = _run(ctx, toy_repo, "r1", params={"model": "rf"})
     rows = list(iter_rows(ctx, [rec], "runs", fields=["params.model", "params.nope"]))
@@ -7645,10 +8110,38 @@ def iter_rows(
     for run in runs:
         base = {"run_id": run.run_id, "group_id": group_id_for(run), "seed": run.seed}
         for row in reader(ctx, run, refs):
-            if fields is None:
-                yield {**base, **row}
-            else:
-                yield {**base, **{f: row.get(f) for f in fields}}
+            yield select_fields({**base, **row}, fields)
+
+
+def select_fields(row: dict[str, Any], fields: list[str] | None) -> dict[str, Any]:
+    """
+    Keep ``run_id``, ``group_id``, ``seed`` and the listed fields of a full row.
+
+    The projection is taken from the full row, so listing ``run_id``,
+    ``group_id``, or ``seed`` keeps their values instead of blanking them.
+
+    Parameters
+    ----------
+    row : dict
+        A full row from a source (with ``run_id``, ``group_id``, ``seed``).
+    fields : list of str or None
+        Fields to keep; ``None`` keeps the whole row.
+
+    Returns
+    -------
+    dict
+        The projected row; a listed field the row lacks is ``None``.
+
+    Examples
+    --------
+    >>> select_fields({"run_id": "r1", "group_id": "g", "seed": 1, "v": 2}, ["seed", "x"])
+    {'run_id': 'r1', 'group_id': 'g', 'seed': 1, 'x': None}
+    """
+    if fields is None:
+        return row
+    out = {key: row.get(key) for key in ("run_id", "group_id", "seed")}
+    out.update({f: row.get(f) for f in fields})
+    return out
 
 
 def _flat(prefix: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -7763,7 +8256,7 @@ _READERS: dict[str, Callable[[Context, RunRecord, _Refs], Iterator[dict[str, Any
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_sources.py -v`
-Expected: `11 passed`.
+Expected: `12 passed`.
 
 Run: `uv run ruff check src/hypothex/core/sources.py tests/core/test_sources.py && uv run ruff format --check src/hypothex/core/sources.py tests/core/test_sources.py && uv run ty check src/hypothex/core/sources.py tests/core/test_sources.py`
 Expected: `All checks passed!`, `2 files already formatted`, and `All checks passed!`.
@@ -7792,7 +8285,8 @@ git commit -m "feat: flat row sources over run folders for views"
   to avoid an import cycle. This task runs after Task 18 because it needs `iter_rows`.
 - Produces: `view_context(ctx: Context, project: str, task: str) -> tuple[set[str], dict[str, set[str]]]`.
   Metrics = the task's configured metrics ∪ scored metric names ∪ indexed step-metric names ∪
-  `samples/<name>.jsonl` stems, over the newest `CONTEXT_RUNS = 20` runs (archived included).
+  sample series names (`RunStore.read_samples`, the original names, not the hashed file stems),
+  over the newest `CONTEXT_RUNS = 20` runs (archived included).
   Fields = for every `Source`, the union of row keys over the first `CONTEXT_ROWS_PER_RUN = 500`
   rows per run (every source is a key, empty set if unseen). The API (`views/validate`, `PUT
   views/{name}`), CLI `hx view validate`/`add`, and MCP `add_view` pass these two values to
@@ -7943,7 +8437,7 @@ def view_context(ctx: Context, project: str, task: str) -> tuple[set[str], dict[
 
     Reads the task's newest ``CONTEXT_RUNS`` runs (archived included). Metric names
     are the task's configured metrics plus every scored metric, logged step metric,
-    and ``samples/<name>.jsonl`` name. Fields are the keys of the first
+    and sample series name (``RunStore.read_samples``). Fields are the keys of the first
     ``CONTEXT_ROWS_PER_RUN`` rows per run of each source (``sources.iter_rows``).
 
     Parameters
@@ -7971,7 +8465,7 @@ def view_context(ctx: Context, project: str, task: str) -> tuple[set[str], dict[
         metrics.update(s.metric for s in scores)
     for record in runs:
         metrics.update(p.name for p in ctx.index.metric_points(record.run_id))
-        metrics.update(p.stem for p in (ctx.run_dir(record) / "samples").glob("*.jsonl"))
+        metrics.update(ctx.store.read_samples(record.project, record.run_id))
     fields: dict[str, set[str]] = {}
     for source in get_args(Source):
         seen: set[str] = set()
@@ -7985,7 +8479,7 @@ def view_context(ctx: Context, project: str, task: str) -> tuple[set[str], dict[
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_views.py -q`
-Expected: `56 passed`.
+Expected: `59 passed`.
 
 Run: `uv run ruff format --check src/hypothex/core/views.py tests/core/test_views.py && uv run ruff check src/hypothex/core/views.py tests/core/test_views.py && uv run ty check src/hypothex/core/views.py tests/core/test_views.py && uv run python -m doctest src/hypothex/core/views.py && echo doctest-ok`
 Expected: `2 files already formatted`, `All checks passed!`, `All checks passed!`, `doctest-ok`.
@@ -8009,14 +8503,14 @@ git commit -m "feat: collect known metrics and fields for view validation"
 - Test: `tests/core/test_panels.py`
 
 **Interfaces:**
-- Consumes: Task 18 (`iter_rows`); `leaderboard.group_id_for` (Task 10); `RunStore.list_traces`, `RunStore.read_trace` (Task 6); `queries.refresh_project(ctx, project) -> ProjectEntry` and `queries.primary_examples` (Task 14); `leaderboard.build_leaderboard(project, task, config, runs, scores, versions=None, *, per_example=None) -> Leaderboard` with `headline`, `stat_strip`, rows with `label` (contract 1.7); `views.PanelSpec`, `PanelType`, `RunFilter`, `ViewSpec`, `PanelData` (contract 1.4); `ctx.index.list_runs`, `ctx.index.scores_for`, `ctx.find_record`.
+- Consumes: Task 18 (`iter_rows`, `select_fields`); `views.VERSION_REF`, `views.vega_spec_problems` (Task 16); `leaderboard.group_id_for` (Task 10); `RunStore.list_traces`, `RunStore.read_trace` (Task 6); `queries.refresh_project(ctx, project) -> ProjectEntry` and `queries.primary_examples` (Task 14); `leaderboard.build_leaderboard(project, task, config, runs, scores, versions=None, *, per_example=None) -> Leaderboard` with `headline`, `stat_strip`, rows with `label` (contract 1.7); `views.PanelSpec`, `PanelType`, `RunFilter`, `ViewSpec`, `PanelData` (contract 1.4); `ctx.index.list_runs`, `ctx.index.scores_for`, `ctx.find_record`.
 - Produces (`hypothex.core.panels`):
   - `class PanelResult(BaseModel)`: `type: PanelType`, `title: str`, `rows: list[dict[str, Any]]`, `meta: dict[str, Any] = {}`.
   - `query_panel(ctx: Context, project: str, task: str, panel: PanelSpec, runs_filter: RunFilter | None = None) -> PanelResult` — `markdown` and `trace` with `data.run_id` never touch the task (the run-trace API route can call it for exploratory runs); unknown task → `ConfigError("unknown task ...")`.
   - `query_view(ctx: Context, project: str, task: str, view: ViewSpec) -> list[PanelResult]` — view must already be resolved; `view.runs` applies to every panel; per-panel `HypothexError` → `meta.error`.
   - `MAX_TABLE_ROWS = 5000`.
-  - Row shapes in this task: `stat_strip` rows = `Leaderboard.stat_strip`, `meta.headline`; `leaderboard` rows = `LeaderboardRow.model_dump(mode="json")`, `meta` = `headline, primary, higher_is_better, metric_versions, noise, needs_reeval, unscored`; `table`/`vega_lite` rows = `iter_rows(..., source or "runs", fields)`, `meta` = `source, total[, warnings]` (+ `spec` for vega-lite); `trace` rows = eight trace keys, `meta` = `run_id, example_id, failed_turn[, warnings]` (no `data.run_id`: newest selected run with traces, first failing example else first example); `markdown` rows `[]`, `meta.text`.
-  - Private helpers later tasks use: `_Scope` (`ctx`, `entry`, `task`, `runs`, `board()`, `board_labels()`), `_HANDLERS: dict[str, Callable[[_Scope, PanelSpec], PanelResult]]`, `_row_matches`, `_build_board`.
+  - Row shapes in this task: `stat_strip` rows = `Leaderboard.stat_strip`, `meta.headline`; `leaderboard` rows = `LeaderboardRow.model_dump(mode="json")`, `meta` = `headline, primary, higher_is_better, metric_versions, noise, needs_reeval, unscored`; `table`/`vega_lite` rows = `iter_rows(..., source or "runs")` filtered by `data.filter` on the full row, then projected to `fields` with `sources.select_fields` (so a filter may use a field the table does not show), `meta` = `source, total[, warnings]` (+ `spec` for vega-lite); a `runs` table may list the field `version` (`views.VERSION_REF`, spec 8.4): the run's `TaskSpec.version_param` param, else the creation time (`YYYY-MM-DD HH:MM:SS`, UTC) of the first selected run of its seed group; `vega_lite` replaces the root `data` with `{"values": []}` and raises `ConfigError("<problem> at spec.<path>")` when `views.vega_spec_problems` finds any other external resource or image mark (a panel error in `query_view`); `trace` rows = eight trace keys, `meta` = `run_id, example_id, failed_turn[, warnings]` (no `data.run_id`: newest selected run with traces, first failing example else first example); `markdown` rows `[]`, `meta.text`.
+  - Private helpers later tasks use: `_Scope` (`ctx`, `entry`, `task`, `runs`, `board()`, `board_labels()`), `_HANDLERS: dict[str, Callable[[_Scope, PanelSpec], PanelResult]]`, `_row_matches`, `_build_board`, `_run_versions(scope) -> dict[str, tuple[bool, str]]` (run id → (whether the value is the version param, version text); Task 22's ordinal x uses it).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -8029,6 +8523,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from hypothex.core import panels
 from hypothex.core import queries as q
@@ -8080,6 +8575,14 @@ def _panel(type_: str, **kw: Any) -> PanelSpec:
 
 def _ids(result: PanelResult) -> list[str]:
     return [row["run_id"] for row in result.rows]
+
+
+def _set_task(repo: Path, **fields: Any) -> None:
+    """Change toy-acc's entry in ``hypothex.yaml``; every query re-reads the config."""
+    path = repo / "hypothex.yaml"
+    config = yaml.safe_load(path.read_text())
+    config["tasks"]["toy-acc"].update(fields)
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
 
 
 # markdown, stat strip, leaderboard ----------------------------------------------
@@ -8187,6 +8690,39 @@ def test_table_source_fields_and_row_filter(ctx: Context, toy_repo: Path) -> Non
     assert result.meta == {"source": "usage", "total": 1}
 
 
+def test_table_filters_full_rows_before_projecting(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "r1", seed=2)
+    _score(ctx, rec, 0.75)
+    ctx.add_score(
+        rec, ScoreRecord(metric="broken", version="v1", key="value", value=0.5, created_at=T0)
+    )
+    # the filter reads "metric", which the table does not show
+    panel = _panel(
+        "table",
+        data={"source": "scores", "fields": ["value"], "filter": {"metric": "accuracy"}},
+    )
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert result.rows == [{"run_id": "r1", "group_id": "aaaa@c1", "seed": 2, "value": 0.75}]
+    assert result.meta == {"source": "scores", "total": 1}
+
+
+def test_runs_table_version_field(ctx: Context, toy_repo: Path) -> None:
+    _run(ctx, toy_repo, "a", minute=0, params={"version": "v2", "prompt_version": "p7"})
+    _run(ctx, toy_repo, "b", "bbbb", minute=1)  # no version param: its group's first run time
+    _run(ctx, toy_repo, "c", "bbbb", minute=2)
+    panel = _panel("table", data={"source": "runs", "fields": ["version"]})
+    first_b = (T0 + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    rows = query_panel(ctx, "toy", "toy-acc", panel).rows
+    assert [(r["run_id"], r["version"]) for r in rows] == [
+        ("a", "v2"),
+        ("b", first_b),
+        ("c", first_b),
+    ]
+    _set_task(toy_repo, version_param="prompt_version")
+    rows = query_panel(ctx, "toy", "toy-acc", panel).rows
+    assert [r["version"] for r in rows] == ["p7", first_b, first_b]
+
+
 def test_table_truncates_large_sources(
     ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8217,6 +8753,23 @@ def test_vega_lite_spec_has_empty_values(ctx: Context, toy_repo: Path) -> None:
     assert result.rows == [
         {"run_id": "r1", "group_id": "aaaa@c1", "seed": None, "params.lr": "0.1"}
     ]
+
+
+def test_vega_lite_nested_external_data_is_a_panel_error(ctx: Context, toy_repo: Path) -> None:
+    _run(ctx, toy_repo, "r1")
+    spec = {
+        "layer": [
+            {"mark": "point"},
+            {"mark": "line", "data": {"url": "https://example.com/x.json"}},
+        ]
+    }
+    panel = _panel("vega_lite", spec=spec, data={"source": "runs"})
+    with pytest.raises(ConfigError, match=r"resources \(url\) at spec\.layer\.1\.data\.url"):
+        query_panel(ctx, "toy", "toy-acc", panel)
+    # views that were never validated (inline, editor preview): one panel error, not a 500
+    (result,) = query_view(ctx, "toy", "toy-acc", ViewSpec(title="v", panels=[panel]))
+    assert result.rows == []
+    assert result.meta["error"].startswith("vega_lite spec must not load external resources")
 
 
 # trace --------------------------------------------------------------------------
@@ -8348,9 +8901,16 @@ from hypothex.core.errors import ConfigError, HypothexError
 from hypothex.core.leaderboard import Leaderboard, build_leaderboard, group_id_for
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import RunRecord
-from hypothex.core.sources import iter_rows
+from hypothex.core.sources import iter_rows, select_fields
 from hypothex.core.store import ProjectEntry
-from hypothex.core.views import PanelSpec, PanelType, RunFilter, ViewSpec
+from hypothex.core.views import (
+    VERSION_REF,
+    PanelSpec,
+    PanelType,
+    RunFilter,
+    ViewSpec,
+    vega_spec_problems,
+)
 
 MAX_TABLE_ROWS = 5000
 
@@ -8604,16 +9164,49 @@ def _leaderboard(scope: _Scope, panel: PanelSpec) -> PanelResult:
     )
 
 
+def _run_versions(scope: _Scope) -> dict[str, tuple[bool, str]]:
+    """
+    Run id -> (from the version param, version text) for every selected run.
+
+    The text is the run param ``TaskSpec.version_param`` names; a run without
+    it gets the creation time (UTC, ``YYYY-MM-DD HH:MM:SS``) of the first
+    selected run of its seed group (spec 8.4). ``scope.runs`` is oldest first.
+    """
+    param = scope.entry.config.tasks[scope.task].version_param
+    first: dict[str, RunRecord] = {}
+    for r in scope.runs:
+        first.setdefault(group_id_for(r), r)
+    out: dict[str, tuple[bool, str]] = {}
+    for r in scope.runs:
+        value = r.params.get(param)
+        if value is not None:
+            out[r.run_id] = (True, value)
+            continue
+        created = first[group_id_for(r)].created_at
+        created = created if created.tzinfo else created.replace(tzinfo=UTC)
+        out[r.run_id] = (False, created.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S"))
+    return out
+
+
 def _table_rows(scope: _Scope, panel: PanelSpec) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Source rows filtered on the full row, then projected to ``data.fields``.
+
+    Filtering first lets ``data.filter`` use a field the table does not show.
+    """
     source = panel.data.source or "runs"
+    fields = panel.data.fields
+    versions = _run_versions(scope) if source == "runs" and VERSION_REF in (fields or []) else {}
     rows: list[dict[str, Any]] = []
     total = 0
-    for row in iter_rows(scope.ctx, scope.runs, source, panel.data.fields):
+    for row in iter_rows(scope.ctx, scope.runs, source):
+        if versions:
+            row[VERSION_REF] = versions[row["run_id"]][1]
         if panel.data.filter and not _row_matches(row, panel.data.filter):
             continue
         total += 1
         if len(rows) < MAX_TABLE_ROWS:
-            rows.append(row)
+            rows.append(select_fields(row, fields))
     meta: dict[str, Any] = {"source": source, "total": total}
     if total > MAX_TABLE_ROWS:
         meta["warnings"] = [f"showing the first {MAX_TABLE_ROWS} of {total} rows"]
@@ -8626,9 +9219,20 @@ def _table(scope: _Scope, panel: PanelSpec) -> PanelResult:
 
 
 def _vega_lite(scope: _Scope, panel: PanelSpec) -> PanelResult:
-    rows, meta = _table_rows(scope, panel)
+    """
+    Rows plus the spec with its root ``data`` replaced by ``{"values": []}``.
+
+    Any other external resource (nested ``data.url``, lookup sources, image
+    marks, ``href``, ``embedOptions``) raises: views that were never validated
+    (inline in ``hypothex.yaml``, editor previews) reach this point too.
+    """
     spec = copy.deepcopy(panel.spec or {})
     spec["data"] = {"values": []}
+    problems = vega_spec_problems(spec)
+    if problems:
+        loc, message = problems[0]
+        raise ConfigError(f"{message} at spec.{'.'.join(str(p) for p in loc)}")
+    rows, meta = _table_rows(scope, panel)
     return PanelResult(type="vega_lite", title=panel.title, rows=rows, meta={**meta, "spec": spec})
 
 
@@ -8687,7 +9291,7 @@ _HANDLERS = {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `14 passed`.
+Expected: `17 passed`.
 
 Run: `uv run ruff check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ruff format --check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ty check src/hypothex/core/panels.py`
 Expected: `All checks passed!`, `2 files already formatted`, `All checks passed!`.
@@ -8711,7 +9315,8 @@ git commit -m "feat: panel query engine with run selection, leaderboard, table, 
 - Consumes: Task 20 (`_Scope`, `PanelResult`, `_HANDLERS`); `records.Artifact` with `step: int | None`, `metrics: dict[str, float]` (contract 1.2); `ctx.store.read_metric_points`, `ctx.store.read_artifacts`.
 - Produces:
   - `curves` rows `{run_id, group_id, seed, name, step, value}` (one per logged point of `data.metrics`, default all names except the x metric; x is `step` or the value of `data.step_metric` logged at the same step, points without it dropped); `meta` = `x, metrics, checkpoints: [{run_id, step, value, best}], events: [{run_id, step, kind}], groups: [{group_id, label}]`.
-  - Spike rule (contract 1.6): for names containing `loss`, point `i ≥ 1` is a spike when `value > 5 × median(previous ≤ 20 values)` and that median is `> 0`. `killed`/`failed` runs get an event at their last plotted x.
+  - Spike rule (contract 1.6, exactly): for names containing `loss`, point `i ≥ 1` is a spike when `value > 5 × median(previous ≤ 20 values)`. There is no exemption for a zero median: `[0, 3]` spikes at the second point. `killed`/`failed` runs get an event at their last plotted x.
+  - Checkpoints use the same x as the curves: with `data.step_metric`, a checkpoint's `step` is that metric's value logged at the checkpoint's training step, and a checkpoint without one is dropped (as curve points are).
   - Checkpoint value = `data.y` if set, else the first `data.metrics` name found in the checkpoint metrics, else the alphabetically first checkpoint metric; per run the best is the min for names containing `loss`/`error`, else the max.
   - `_groups(scope, panel) -> list[tuple[str, str, list[RunRecord]]]` and `_own_label(members, key) -> str` (used by Tasks 22 and 23; `_own_label` applies `leaderboard.group_label`, the one label rule); `_spikes(points: list[MetricPoint]) -> list[int]`; constants `SPIKE_WINDOW = 20`, `SPIKE_FACTOR = 5.0`.
 
@@ -8812,6 +9417,31 @@ def test_curves_step_metric_and_group_by_run(ctx: Context, toy_repo: Path) -> No
     assert result.meta["x"] == "epoch"
 
 
+def test_checkpoints_use_the_step_metric_x(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "c1")
+    _jsonl(
+        ctx.run_dir(rec) / "metrics.jsonl",
+        [{"name": "epoch", "step": s, "value": s // 100} for s in (0, 100, 200, 300)]
+        + [{"name": "val/acc", "step": s, "value": 0.1 * s / 100} for s in (100, 200, 300)],
+    )
+    _jsonl(
+        ctx.run_dir(rec) / "artifacts.jsonl",
+        [
+            {"kind": "checkpoint", "path": "/a", "step": 100, "metrics": {"val/acc": 0.1}},
+            {"kind": "checkpoint", "path": "/b", "step": 300, "metrics": {"val/acc": 0.3}},
+            {"kind": "checkpoint", "path": "/c", "step": 250, "metrics": {"val/acc": 0.9}},
+        ],
+    )
+    panel = _panel("curves", data={"metrics": ["val/acc"], "step_metric": "epoch"})
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert [r["step"] for r in result.rows] == [1, 2, 3]
+    # training steps 100 and 300 are epochs 1 and 3; step 250 has no epoch value: dropped
+    assert result.meta["checkpoints"] == [
+        {"run_id": "c1", "step": 1, "value": 0.1, "best": False},
+        {"run_id": "c1", "step": 3, "value": 0.3, "best": True},
+    ]
+
+
 def test_spike_detection_rules() -> None:
     def pts(values: list[float]) -> list[MetricPoint]:
         return [MetricPoint(name="loss", step=i, value=v) for i, v in enumerate(values)]
@@ -8819,7 +9449,8 @@ def test_spike_detection_rules() -> None:
     assert panels._spikes(pts([1.0, 5.0, 5.1])) == []  # median(1, 5) = 3 -> 5.1 < 15
     assert panels._spikes(pts([1.0, 5.1])) == [1]
     assert panels._spikes(pts([1.0, 5.0])) == []  # not strictly greater than 5x
-    assert panels._spikes(pts([0.0, 3.0])) == []  # median 0: undefined ratio, skipped
+    assert panels._spikes(pts([0.0, 3.0])) == [1]  # 3 > 5 x median(0) = 0 (contract rule)
+    assert panels._spikes(pts([0.0, 0.0, 0.0])) == []  # 0 > 0 is false
     # only the previous 20 values count: median(20 x 3.0) = 3 -> 16 > 15 is a spike,
     # although the median of the whole history (21 x 10.0, 20 x 3.0) would be 10
     assert panels._spikes(pts([10.0] * 21 + [3.0] * 20 + [16.0])) == [41]
@@ -8828,7 +9459,7 @@ def test_spike_detection_rules() -> None:
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `4 failed, 14 passed`; the curves tests fail with `KeyError: 'curves'` and `test_spike_detection_rules` with `AttributeError: module 'hypothex.core.panels' has no attribute '_spikes'`.
+Expected: `5 failed, 17 passed`; the curves tests fail with `KeyError: 'curves'` and `test_spike_detection_rules` with `AttributeError: module 'hypothex.core.panels' has no attribute '_spikes'`.
 
 - [ ] **Step 3: Implement curves**
 
@@ -8849,9 +9480,16 @@ from hypothex.core.errors import ConfigError, HypothexError
 from hypothex.core.leaderboard import Leaderboard, build_leaderboard, group_id_for, group_label
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
-from hypothex.core.sources import iter_rows
+from hypothex.core.sources import iter_rows, select_fields
 from hypothex.core.store import ProjectEntry
-from hypothex.core.views import PanelSpec, PanelType, RunFilter, ViewSpec
+from hypothex.core.views import (
+    VERSION_REF,
+    PanelSpec,
+    PanelType,
+    RunFilter,
+    ViewSpec,
+    vega_spec_problems,
+)
 
 MAX_TABLE_ROWS = 5000
 SPIKE_WINDOW = 20
@@ -8895,13 +9533,17 @@ def _lower_is_better(name: str) -> bool:
 
 
 def _spikes(points: list[MetricPoint]) -> list[int]:
-    """Steps whose value exceeds 5x the median of the previous 20 values."""
+    """
+    Steps whose value exceeds 5x the median of the previous 20 values.
+
+    Exactly the contract rule ``value > 5 × median(previous 20 values)``: a zero
+    median makes any positive value a spike (a loss leaving a flat zero).
+    """
     steps: list[int] = []
     values = [p.value for p in points]
     for i in range(1, len(points)):
         window = values[max(0, i - SPIKE_WINDOW) : i]
-        median = statistics.median(window)
-        if median > 0 and values[i] > SPIKE_FACTOR * median:
+        if values[i] > SPIKE_FACTOR * statistics.median(window):
             steps.append(points[i].step)
     return steps
 
@@ -8966,7 +9608,7 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
         if run.status in (RunStatus.KILLED, RunStatus.FAILED) and last_x is not None:
             run_events.append({"run_id": run.run_id, "step": last_x, "kind": run.status.value})
         events.extend(sorted(run_events, key=lambda e: e["step"]))
-        checkpoints.extend(_checkpoint_rows(scope, run, panel))
+        checkpoints.extend(_checkpoint_rows(scope, run, panel, x_of))
     return PanelResult(
         type="curves",
         title=panel.title,
@@ -8981,8 +9623,21 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
     )
 
 
-def _checkpoint_rows(scope: _Scope, run: RunRecord, panel: PanelSpec) -> list[dict[str, Any]]:
-    arts = _checkpoints(scope, run)
+def _checkpoint_rows(
+    scope: _Scope, run: RunRecord, panel: PanelSpec, x_of: dict[int, float] | None
+) -> list[dict[str, Any]]:
+    """
+    Checkpoint marks of one run, at the curves' x.
+
+    ``x_of`` maps a training step to the ``data.step_metric`` value logged at
+    that step (``None`` when x is the step itself); a checkpoint whose step has
+    no such value is dropped, like a curve point.
+    """
+    arts = [
+        a
+        for a in _checkpoints(scope, run)
+        if x_of is None or (a.step is not None and a.step in x_of)
+    ]
     if not arts:
         return []
     name = panel.data.y
@@ -8993,7 +9648,7 @@ def _checkpoint_rows(scope: _Scope, run: RunRecord, panel: PanelSpec) -> list[di
     out = [
         {
             "run_id": run.run_id,
-            "step": a.step,
+            "step": a.step if x_of is None or a.step is None else x_of[a.step],
             "value": a.metrics.get(name) if name else None,
             "best": False,
         }
@@ -9023,7 +9678,7 @@ _HANDLERS = {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `18 passed`.
+Expected: `22 passed`.
 
 Run: `uv run ruff check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ruff format --check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ty check src/hypothex/core/panels.py`
 Expected: all clean.
@@ -9044,11 +9699,12 @@ git commit -m "feat: curves panel with spikes, kills, and best checkpoints"
 - Test: `tests/core/test_panels.py` (records import line, append tests)
 
 **Interfaces:**
-- Consumes: Tasks 20–21 (`_Scope`, `_groups`, `_stat_strip`); `seeds.summarize(values) -> Stats` (t-interval, `ci_low`/`ci_high` None for n=1); `stats.quantile`; `store.safe_stem` and `RunStore.read_samples` (Task 6); `LeaderboardRow.test_interval` (contract 1.7); `leaderboard.pick_field` (Task 11) and `leaderboard._natural_key` (Task 12); `headlines.fmt_value` (Task 9); `fsutil.read_jsonl`; `RunRecord.usage` (contract 1.2); `_lower_is_better` (Task 21) and `Leaderboard.higher_is_better` for the regression direction.
+- Consumes: Tasks 20–21 (`_Scope`, `_groups`, `_stat_strip`); `seeds.summarize(values) -> Stats` (t-interval, `ci_low`/`ci_high` None for n=1); `stats.quantile`; `RunStore.read_samples` (Task 6; series keyed by their original names); `_run_versions` (Task 20) and `views.VERSION_REF` (Task 16); `LeaderboardRow.test_interval` (contract 1.7); `leaderboard.pick_field` (Task 11) and `leaderboard._natural_key` (Task 12); `headlines.fmt_value` (Task 9); `fsutil.read_jsonl`; `RunRecord.usage` (contract 1.2); `_lower_is_better` (Task 21) and `Leaderboard.higher_is_better` for the regression direction.
 - Produces:
-  - `scatter` rows `{group_id, label, x, x_lo, x_hi, y, y_lo, y_hi, seeds: [{x, y}], pareto, regression}`; `meta` = `x, y, x_type, scale, pareto`. Missing `data.x` → `ConfigError("scatter panel needs data.x")` and a `pareto` key other than `x`/`y` → `ConfigError("pareto keys are x and y")` (the same rules as view validation; the editor preview queries views that were not validated, and `query_view` turns a `ConfigError` into that panel's `meta.error` instead of a 500). Missing `data.y` → the task's primary metric (`Leaderboard.primary`, e.g. `solved/value`; `meta.y` holds the resolved reference). Groups with no run having both values are dropped.
-  - Ordinal x (spec 8.4, versions in order): when `data.x` is `params.<p>`/`vars.<p>` and any selected run has a value that `float()` rejects (e.g. `v9`), x is the raw text, rows are sorted with `leaderboard._natural_key` (`v9` before `v10`), `x_lo`/`x_hi` are `None`, no row is on a Pareto front, and `meta.x_type = "ordinal"`. Otherwise `meta.x_type = "quantitative"`.
-  - Intervals: seed t-interval (`seeds.summarize`) on both axes; when `y` is the task's primary metric and grouping is by seed group, `y_lo`/`y_hi` come from the leaderboard row's test-set interval if it has one (spec 8.1, "two kinds of noise").
+  - `scatter` rows `{group_id, label, x, x_lo, x_hi, y, y_lo, y_hi, seeds: [{x, y}], pareto, regression}`; `meta` = `x, y, x_type, scale, pareto, y_higher_is_better, best_group` (contract 1.6: `y_higher_is_better` is the y direction below, `best_group` the `group_id` of the row with the best mean y in that direction, first row on a tie, `None` without rows; both are sent whatever `pareto` says, so the UI never assumes higher is better for a loss or a cost). Missing `data.x` → `ConfigError("scatter panel needs data.x")` and a `pareto` key other than `x`/`y` → `ConfigError("pareto keys are x and y")` (the same rules as view validation; the editor preview queries views that were not validated, and `query_view` turns a `ConfigError` into that panel's `meta.error` instead of a 500). Missing `data.y` → the task's primary metric (`Leaderboard.primary`, e.g. `solved/value`; `meta.y` holds the resolved reference). Groups with no run having both values are dropped.
+  - Ordinal x (spec 8.4, versions in order): when `data.x` is `params.<p>`/`vars.<p>` or `version` and any selected run has a value that `float()` rejects (e.g. `v9`), x is the raw text, rows are sorted with `leaderboard._natural_key` (`v9` before `v10`), `x_lo`/`x_hi` are `None`, no row is on a Pareto front, and `meta.x_type = "ordinal"`. Otherwise `meta.x_type = "quantitative"`.
+  - `data.x: version` (`views.VERSION_REF`, spec 8.4) reads the run param `TaskSpec.version_param` names; a group whose runs lack it gets the creation time of its first run (`_run_versions`, Task 20), so a task without version params still gets a version axis. Groups with a param value come first (natural order), then the others by time.
+  - Intervals: seed t-interval (`seeds.summarize`) on both axes; when `y` is the task's primary metric at the leaderboard's metric version (no `@version`, or the one in `Leaderboard.metric_versions`) and grouping is by seed group, `y_lo`/`y_hi` come from the leaderboard row's test-set interval if it has one (spec 8.1, "two kinds of noise"). An explicit other version (`accuracy@v0` while the board uses `v1`) keeps its own seed interval, never the board version's.
   - `pareto`: with `panel.pareto` (e.g. `{x: min, y: max}`) a row is on the front when no other row is at least as good on every axis and strictly better on one; without `panel.pareto` every row is `False`.
   - `regression` (contract 1.6, spec 8.4 "regressions marked"): only on an ordinal x. Walking the rows in natural order, a row regresses when it is worse than the best earlier row by more than that row's interval allows: higher-is-better `y_hi < best.y_lo`, lower-is-better `y_lo > best.y_hi`; a `None` bound on either side flags nothing; ties keep the earlier row as best. Direction (`_y_higher_is_better`): `usage.*` is lower-is-better; the task primary uses `Leaderboard.higher_is_better`; another configured metric uses its `higher_is_better`; any other name uses `not _lower_is_better(name)` (Task 21: `loss`/`error` names). Quantitative x → every row `False`.
   - `_run_value(scope, run, ref) -> float | None` resolves, in order: `usage.<field>` (run totals) or `usage.<field>/solved` (the run total divided by the number of examples the run solved on the task's primary metric: its binary per-example field, chosen by `pick_field`, true or 1; `None` when that field is not binary or nothing was solved; spec 8.4 "cost per success"; any other `/` suffix → `ConfigError("usage references are usage.<field> or usage.<field>/solved")`), `params.<p>` / `vars.<p>` (float cast), configured metric `name[@version][/key]` (newest good score, default current version and key `value`; spec 8.6: when no score has that key and `key` is in `AGGREGATES`, the aggregate of the per-example values in `predictions/scores.<name>@<version>.jsonl`, field chosen by `pick_field(rows, name)`), samples `name` (mean) or `name/<agg>` with `agg` in `AGGREGATES = ("mean", "median", "min", "max", "p50", "p90", "p95", "p99")`, then the last logged value of the history metric named exactly `ref`. A value that is not finite (NaN or ±inf, e.g. a NaN score or loss) counts as no value: `None`, so it never becomes a null point or breaks a Pareto comparison.
@@ -9120,6 +9776,8 @@ def test_scatter_groups_intervals_and_pareto(ctx: Context, toy_repo: Path) -> No
         "x_type": "quantitative",
         "scale": "linear",
         "pareto": {"x": "min", "y": "max"},
+        "y_higher_is_better": True,
+        "best_group": "aaaa@c1",  # svm, mean accuracy 0.85
     }
 
 
@@ -9303,9 +9961,7 @@ def test_usage_per_solved_divides_by_solved_examples(ctx: Context, toy_repo: Pat
         ctx.run_dir(none) / "predictions" / "scores.accuracy@v1.jsonl",
         [{"id": "ex-0", "correct": False}],
     )
-    panel = _panel(
-        "scatter", data={"x": "usage.usd", "y": "usage.usd/solved", "group_by": "run"}
-    )
+    panel = _panel("scatter", data={"x": "usage.usd", "y": "usage.usd/solved", "group_by": "run"})
     rows = query_panel(ctx, "toy", "toy-acc", panel).rows
     # s1: $3.00 over 3 solved examples = 1.0; s2 solved nothing, so it has no value (dropped)
     assert [(r["group_id"], r["x"], r["y"]) for r in rows] == [("s1", 3.0, 1.0)]
@@ -9350,12 +10006,88 @@ def test_stat_strip_with_metrics_summarises_selected_runs(ctx: Context, toy_repo
         },
     ]
     assert set(result.meta) == {"headline"}
+
+
+def test_scatter_meta_carries_y_direction_and_best_group(ctx: Context, toy_repo: Path) -> None:
+    for rid, group, usd, acc, minute in [("a1", "aaaa", 0.1, 0.8, 0), ("b1", "bbbb", 0.3, 0.9, 1)]:
+        rec = _run(ctx, toy_repo, rid, group, minute=minute, usage=UsageTotals(usd=usd))
+        _score(ctx, rec, acc)
+        _jsonl(
+            ctx.run_dir(rec) / "metrics.jsonl", [{"name": "val/loss", "step": 1, "value": 1 - acc}]
+        )
+
+    def meta(data: dict[str, str]) -> tuple[bool, str | None]:
+        result = query_panel(ctx, "toy", "toy-acc", _panel("scatter", data=data))
+        return result.meta["y_higher_is_better"], result.meta["best_group"]
+
+    # no pareto settings anywhere: the best group still follows the y direction
+    assert meta({"x": "usage.usd"}) == (True, "bbbb@c1")  # primary accuracy: 0.9 wins
+    assert meta({"x": "accuracy", "y": "usage.usd"}) == (False, "aaaa@c1")  # $0.1 wins
+    assert meta({"x": "usage.usd", "y": "val/loss"}) == (False, "bbbb@c1")  # loss 0.1 wins
+    assert meta({"x": "usage.usd", "y": "nothing"}) == (True, None)  # no rows
+
+
+def test_scatter_uses_the_test_interval_only_at_the_board_version(
+    ctx: Context, toy_repo: Path
+) -> None:
+    for rid, seed, usd, old in [("s1", 1, 0.1, 0.4), ("s2", 2, 0.3, 0.6)]:
+        rec = _run(ctx, toy_repo, rid, seed=seed, minute=seed, usage=UsageTotals(usd=usd))
+        _score(ctx, rec, 0.75)  # accuracy@v1: the board's version
+        ctx.add_score(
+            rec, ScoreRecord(metric="accuracy", version="v0", key="value", value=old, created_at=T0)
+        )
+        _jsonl(
+            ctx.run_dir(rec) / "predictions" / "scores.accuracy@v1.jsonl",
+            [{"id": f"ex-{i}", "correct": ok} for i, ok in enumerate([True, True, True, False])],
+        )
+    for y in ("accuracy", "accuracy@v1"):
+        (row,) = query_panel(
+            ctx, "toy", "toy-acc", _panel("scatter", data={"x": "usage.usd", "y": y})
+        ).rows
+        # pooled 3 of 4 correct: statsmodels proportion_confint(3, 4, method="wilson")
+        assert (row["y_lo"], row["y_hi"]) == pytest.approx(
+            (0.30064184258240184, 0.9544127391902995)
+        )
+    old = _panel("scatter", data={"x": "usage.usd", "y": "accuracy@v0"})
+    (row,) = query_panel(ctx, "toy", "toy-acc", old).rows
+    # v0 is not the board's version: its own seed t-interval, 0.5 +- 12.706 * 0.1
+    assert row["y"] == pytest.approx(0.5)
+    assert (row["y_lo"], row["y_hi"]) == pytest.approx((0.5 - 1.2706, 0.5 + 1.2706))
+
+
+def test_scatter_version_x_follows_version_param_then_creation_time(
+    ctx: Context, toy_repo: Path
+) -> None:
+    for rid, group, params, acc, minute in [
+        ("a", "aaaa", {"prompt_version": "p10"}, 0.7, 0),
+        ("b", "bbbb", {"prompt_version": "p9"}, 0.6, 1),
+        ("c", "cccc", {}, 0.5, 2),
+        ("d", "dddd", {}, 0.4, 3),
+    ]:
+        rec = _run(ctx, toy_repo, rid, group, minute=minute, params=params)
+        _score(ctx, rec, acc)
+    t0, t1, t2, t3 = ((T0 + timedelta(minutes=m)).strftime("%Y-%m-%d %H:%M:%S") for m in range(4))
+    panel = _panel("scatter", data={"x": "version"})
+    # default version_param "version": no run has it, so every group falls back to the
+    # creation time of its first run (spec 8.4) instead of vanishing from the plot
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert result.meta["x_type"] == "ordinal"
+    assert [r["x"] for r in result.rows] == [t0, t1, t2, t3]
+    _set_task(toy_repo, version_param="prompt_version")
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    # params first in natural order (p9 before p10), then the fallback groups by time
+    assert [(r["x"], r["y"]) for r in result.rows] == [
+        ("p9", 0.6),
+        ("p10", 0.7),
+        (t2, 0.5),
+        (t3, 0.4),
+    ]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `12 failed, 18 passed`; the eleven scatter tests (including `test_scatter_bad_pareto_key_is_a_panel_error`, `test_non_finite_values_count_as_missing`, `test_usage_per_solved_divides_by_solved_examples`, `test_scatter_flags_regressions_on_ordinal_x`, and `test_scatter_quantitative_x_never_flags_regressions`) fail with `KeyError: 'scatter'` and `test_stat_strip_with_metrics_summarises_selected_runs` with `AssertionError` (the strip is still the task's generic strip).
+Expected: `15 failed, 22 passed`; the fourteen scatter tests (including `test_scatter_bad_pareto_key_is_a_panel_error`, `test_non_finite_values_count_as_missing`, `test_usage_per_solved_divides_by_solved_examples`, `test_scatter_flags_regressions_on_ordinal_x`, `test_scatter_quantitative_x_never_flags_regressions`, `test_scatter_meta_carries_y_direction_and_best_group`, `test_scatter_uses_the_test_interval_only_at_the_board_version`, and `test_scatter_version_x_follows_version_param_then_creation_time`) fail with `KeyError: 'scatter'` and `test_stat_strip_with_metrics_summarises_selected_runs` with `AssertionError` (the strip is still the task's generic strip).
 
 - [ ] **Step 3: Implement scatter**
 
@@ -9366,7 +10098,7 @@ import copy
 import math
 import statistics
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
@@ -9389,10 +10121,17 @@ from hypothex.core.leaderboard import (
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
 from hypothex.core.seeds import summarize
-from hypothex.core.sources import iter_rows
+from hypothex.core.sources import iter_rows, select_fields
 from hypothex.core.stats import quantile
-from hypothex.core.store import ProjectEntry, safe_stem
-from hypothex.core.views import PanelSpec, PanelType, RunFilter, ViewSpec
+from hypothex.core.store import ProjectEntry
+from hypothex.core.views import (
+    VERSION_REF,
+    PanelSpec,
+    PanelType,
+    RunFilter,
+    ViewSpec,
+    vega_spec_problems,
+)
 
 MAX_TABLE_ROWS = 5000
 SPIKE_WINDOW = 20
@@ -9458,10 +10197,10 @@ def _aggregate(values: list[float], agg: str) -> float | None:
 
 
 def _samples(scope: _Scope, run: RunRecord, name: str) -> list[float]:
+    """A run's raw samples of series ``name`` (the name given to ``log_samples``)."""
     if not name:
         return []
-    series = scope.ctx.store.read_samples(run.project, run.run_id)
-    return series.get(safe_stem(name), [])
+    return scope.ctx.store.read_samples(run.project, run.run_id).get(name, [])
 
 
 def _example_values(scope: _Scope, run: RunRecord, name: str, version: str) -> list[float]:
@@ -9573,13 +10312,17 @@ def _interval(values: list[float]) -> tuple[float | None, float | None]:
     return stats.ci_low, stats.ci_high
 
 
-def _is_ordinal(groups: list[tuple[str, str, list[RunRecord]]], x_ref: str) -> bool:
-    """Whether ``x_ref`` is a params/vars field with a value that is not a number."""
-    if not x_ref.startswith(("params.", "vars.")):
+def _is_ordinal(
+    groups: list[tuple[str, str, list[RunRecord]]],
+    x_ref: str,
+    text_of: Callable[[RunRecord], str | None],
+) -> bool:
+    """Whether ``x_ref`` is a params/vars field or ``version`` with a non-numeric value."""
+    if x_ref != VERSION_REF and not x_ref.startswith(("params.", "vars.")):
         return False
     for _, _, members in groups:
         for r in members:
-            raw = _param_raw(r, x_ref)
+            raw = text_of(r)
             if raw is not None and _as_float(raw) is None:
                 return True
     return False
@@ -9595,6 +10338,9 @@ def _scatter(scope: _Scope, panel: PanelSpec) -> PanelResult:
     there are no x intervals and no Pareto front, and ``meta.x_type`` is
     ``"ordinal"`` (else ``"quantitative"``). Only an ordinal axis sets
     ``regression`` (``_mark_regressions``); otherwise every row has ``False``.
+    ``x: version`` reads the task's version param, else the group's first-run
+    creation time (``_run_versions``). ``meta.y_higher_is_better`` and
+    ``meta.best_group`` (best mean y in that direction) are always set.
     """
     x_ref = panel.data.x
     if not x_ref:
@@ -9602,19 +10348,38 @@ def _scatter(scope: _Scope, panel: PanelSpec) -> PanelResult:
     if panel.pareto and set(panel.pareto) - {"x", "y"}:
         # the same rule as view validation; unvalidated previews reach this point
         raise ConfigError("pareto keys are x and y")
-    primary = scope.board().primary
+    board = scope.board()
+    primary = board.primary
     y_ref = panel.data.y or primary
-    board_rows = {row.group_id: row for row in scope.board().rows}
-    y_name, _ = parse_metric_version(y_ref.partition("/")[0])
+    board_rows = {row.group_id: row for row in board.rows}
+    y_name, y_version = parse_metric_version(y_ref.partition("/")[0])
     y_key = y_ref.partition("/")[2] or "value"
-    y_is_primary = (panel.data.group_by or "group") == "group" and f"{y_name}/{y_key}" == primary
+    # the board's test-set interval belongs to the primary at the board's metric version;
+    # an explicit other version (accuracy@v0 while the board uses v1) keeps seed intervals
+    board_version = y_version is None or y_version == board.metric_versions.get(y_name)
+    y_is_primary = (
+        (panel.data.group_by or "group") == "group"
+        and f"{y_name}/{y_key}" == primary
+        and board_version
+    )
+    higher = _y_higher_is_better(scope, y_ref)
     groups = _groups(scope, panel)
-    ordinal = _is_ordinal(groups, x_ref)
+    versions = _run_versions(scope) if x_ref == VERSION_REF else {}
+
+    def text_of(r: RunRecord) -> str | None:
+        return versions[r.run_id][1] if x_ref == VERSION_REF else _param_raw(r, x_ref)
+
+    ordinal = _is_ordinal(groups, x_ref, text_of)
     rows: list[dict[str, Any]] = []
     for key, label, members in groups:
         seeds: list[dict[str, Any]] = []
         for r in members:
-            x = _param_raw(r, x_ref) if ordinal else _run_value(scope, r, x_ref)
+            if ordinal:
+                x: float | str | None = text_of(r)
+            elif x_ref == VERSION_REF:
+                x = _as_float(versions[r.run_id][1])
+            else:
+                x = _run_value(scope, r, x_ref)
             y = _run_value(scope, r, y_ref)
             if x is not None and y is not None:
                 seeds.append({"x": x, "y": y})
@@ -9650,10 +10415,16 @@ def _scatter(scope: _Scope, panel: PanelSpec) -> PanelResult:
             }
         )
     if ordinal:
-        rows.sort(key=lambda row: _natural_key(row["x"]))
-        _mark_regressions(rows, _y_higher_is_better(scope, y_ref))
+        # version axis: groups with a version param value first, then fallback times
+        from_param = {
+            key: any(versions[r.run_id][0] for r in members) if versions else True
+            for key, _, members in groups
+        }
+        rows.sort(key=lambda row: (not from_param[row["group_id"]], _natural_key(row["x"])))
+        _mark_regressions(rows, higher)
     elif panel.pareto:
         _mark_pareto(rows, panel.pareto)
+    best = (max if higher else min)(rows, key=lambda row: row["y"]) if rows else None
     return PanelResult(
         type="scatter",
         title=panel.title,
@@ -9664,6 +10435,8 @@ def _scatter(scope: _Scope, panel: PanelSpec) -> PanelResult:
             "x_type": "ordinal" if ordinal else "quantitative",
             "scale": panel.scale,
             "pareto": panel.pareto,
+            "y_higher_is_better": higher,
+            "best_group": best["group_id"] if best is not None else None,
         },
     )
 
@@ -9744,7 +10517,7 @@ _HANDLERS = {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `30 passed`.
+Expected: `37 passed`.
 
 Run: `uv run ruff check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ruff format --check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ty check src/hypothex/core/panels.py`
 Expected: all clean.
@@ -9773,7 +10546,7 @@ git commit -m "feat: scatter panel with seed intervals, pareto front, ordinal x;
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/core/test_panels.py` add `import yaml` on the line after `import pytest`. Then append to the end of `tests/core/test_panels.py`:
+Append to the end of `tests/core/test_panels.py` (`_set_task` and `import yaml` come from Task 20):
 
 ```python
 # distribution ----------------------------------------------------------------------
@@ -9821,14 +10594,6 @@ def test_distribution_quantiles_seeds_and_ecdf(ctx: Context, toy_repo: Path) -> 
         "render": "chart",
         "baseline": None,
     }
-
-
-def _set_task(repo: Path, **fields: Any) -> None:
-    """Change toy-acc's entry in ``hypothex.yaml``; every query re-reads the config."""
-    path = repo / "hypothex.yaml"
-    config = yaml.safe_load(path.read_text())
-    config["tasks"]["toy-acc"].update(fields)
-    path.write_text(yaml.safe_dump(config, sort_keys=False))
 
 
 def _latency_groups(ctx: Context, repo: Path) -> None:
@@ -9959,7 +10724,7 @@ def test_grid_uses_explicit_field_and_rejects_unknown_metric(ctx: Context, toy_r
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `6 failed, 30 passed`; the tests fail with `KeyError: 'distribution'` or `KeyError: 'grid'`.
+Expected: `6 failed, 37 passed`; the tests fail with `KeyError: 'distribution'` or `KeyError: 'grid'`.
 
 - [ ] **Step 3: Implement distribution and grid**
 
@@ -9971,7 +10736,7 @@ import math
 import random
 import statistics
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
@@ -9994,10 +10759,17 @@ from hypothex.core.leaderboard import (
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
 from hypothex.core.seeds import summarize
-from hypothex.core.sources import iter_rows
+from hypothex.core.sources import iter_rows, select_fields
 from hypothex.core.stats import ecdf_points, quantile
-from hypothex.core.store import ProjectEntry, safe_stem
-from hypothex.core.views import PanelSpec, PanelType, RunFilter, ViewSpec
+from hypothex.core.store import ProjectEntry
+from hypothex.core.views import (
+    VERSION_REF,
+    PanelSpec,
+    PanelType,
+    RunFilter,
+    ViewSpec,
+    vega_spec_problems,
+)
 
 MAX_TABLE_ROWS = 5000
 SPIKE_WINDOW = 20
@@ -10209,7 +10981,7 @@ _HANDLERS = {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_panels.py -v tests/core/test_sources.py`
-Expected: `47 passed`.
+Expected: `55 passed`.
 
 Run: `uv run ruff check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ruff format --check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ty check src/hypothex/core/panels.py`
 Expected: all clean.
@@ -15727,7 +16499,11 @@ Metric references use ``name@version/key`` (version and key are optional). The
 aggregates ``/mean``, ``/median``, and ``/p95`` apply to samples and per-example values.
 Run usage totals are ``usage.usd``, ``usage.seconds``, ``usage.tokens_in``,
 ``usage.tokens_out``, and ``usage.calls``; ``usage.usd/solved`` divides a run's total by the
-examples it solved on the task's primary metric (cost per success).
+examples it solved on the task's primary metric (cost per success). A logged history
+metric is named in full (``val/top1``). ``version`` is the task's version ordering key: the
+run param ``version_param`` names (``version`` by default), or the creation time of the
+group's first run when that param is missing; it works as a scatter ``x`` and as a
+``runs`` table field. A ``grid`` panel's ``data.y`` is a per-example field (``partial``).
 
 Panels
 ------
@@ -15749,7 +16525,9 @@ grid           Items by groups; each cell is the fraction of seeds that solved t
 table          Raw rows from a ``source`` restricted to ``fields``.
 trace          The steps of one agent attempt (``data.run_id``, ``data.example_id``).
 markdown       Static ``text``.
-vega_lite      A Vega-Lite ``spec`` drawn over rows from a ``source``.
+vega_lite      A Vega-Lite ``spec`` drawn over rows from a ``source``. Rows arrive inline
+               only: ``url``, ``href``, ``embedOptions`` (at any depth) and ``image``
+               marks are rejected.
 ============== ==========================================================================
 
 Sources for ``table`` and ``vega_lite``: ``runs``, ``scores``, ``metrics``,
@@ -15854,7 +16632,7 @@ Inputs: part files B1–B7 (`.superpowers/plan-parts/`), the contract, and spec 
 
 **Duplication removed** (one copy kept, the others now call it):
 
-- File-name sanitising: `store.safe_stem` (B2.1) kept. `sources.safe_name` and `sources.trace_path` (B5.1) removed; `panels._samples` (B5.4) uses `safe_stem`.
+- File-name sanitising: `store.safe_stem` (B2.1) kept. `sources.safe_name` and `sources.trace_path` (B5.1) removed; `panels._samples` (B5.4) reads `RunStore.read_samples`, keyed by the original series names.
 - Trace parsing and summaries: `store.TraceStep`, `RunStore.list_traces`, `RunStore.read_trace` (B2.1) kept. B2.1 already named `list_traces` as the body of `GET /runs/{id}/traces`. Removed: `sources.trace_step` (B5.1), the file reads in `panels._trace_for` (B5.2), and `api._trace_summaries` (B7.3).
 - Samples and usage parsing: `RunStore.read_samples`, `read_usage`, `sum_usage` (B2.1) kept. Removed: the file reads in `sources._samples` and `sources._usage` (B5.1), `panels._samples` and `panels._usage_values` (B5.4, B5.5), and `demo._usage_totals` (B6.2). Side effect: every reader now skips NaN, bool, and invalid rows the same way.
 - Seed-group id: it was computed in `leaderboard._make_row` (B3.2), `sources.group_id_for` (B5.1), and `overview._group_id` (B6.1). There is now one public `leaderboard.group_id_for` (Task 10). `sources` re-exports it, so the Task 18 test still imports it from there.
@@ -15878,4 +16656,22 @@ Inputs: part files B1–B7 (`.superpowers/plan-parts/`), the contract, and spec 
 - Task 32: the `{example_id:path}` route and its test.
 - Task 34: the `hx show` git wording, the `hx demo` guard for non-demo homes, and one test for each.
 
-**Not re-run.** The part authors ran their own code blocks. The edits above were made during assembly. They were checked only for Python syntax, plus two behaviour checks in this repo's environment: FastAPI's router with `{example_id:path}` and `%2F`, and the 500 that a NaN in a JSON response causes. The edited tasks are 10–14, 17, 18, 20–25, 27, 30, 32, and 34. Run each task's test step as written. The expected counts are updated: Task 18 `11 passed`, Task 23 `47 passed`, Task 32 has 4 new tests in `tests/api/test_app.py` and 1 in `tests/test_demo.py` (`14 passed`), and Task 34 has 6 new tests. Later fixes: Task 22 `30 passed`, Task 29 `21 passed`. Regressions and baseline (contract 1.6 `regression`, `vs_baseline`; 1.4 `render`): Task 22 has 2 new tests (`30 passed`), Task 23 has 2 new tests (`47 passed`).
+**Not re-run.** The part authors ran their own code blocks. The edits above were made during assembly. They were checked only for Python syntax, plus two behaviour checks in this repo's environment: FastAPI's router with `{example_id:path}` and `%2F`, and the 500 that a NaN in a JSON response causes. The edited tasks are 10–14, 17, 18, 20–25, 27, 30, 32, and 34. Run each task's test step as written. The expected counts are updated: Task 32 has 4 new tests in `tests/api/test_app.py` and 1 in `tests/test_demo.py` (`14 passed`), Task 34 has 6 new tests, and Task 29 `21 passed`. The counts of Tasks 1–23 are the review-round-1 counts below.
+
+**Review round 1 (Codex review items 2–13, controller item C1, rulings R1–R3).**
+
+- Item 2, Task 18: `iter_rows` projects from the merged row with the new public `sources.select_fields`, so listing `run_id`/`group_id`/`seed` keeps their values.
+- Item 3, Task 16: a reference that is exactly a known metric name is valid before any `@`/`/` split (`val/top1`); a grid's `data.y` is checked against per-example fields (`unknown per-example field <f>`).
+- Item 4, Task 20: `table`/`vega_lite` filter full rows, then project with `select_fields`.
+- Item 5, Task 1: `examples_needed` scans every `n` (O(1) tail update per count change, exact confirmation), so it returns the true minimum: `(51, 49, 1000)` → 96,500, not 96,677; tests pin the scipy p-values and a full scan.
+- Item 6, Task 12: `headlines.paired_gain_interval(gain, fixed, broken, n_shared)`; `build_leaderboard` counts the shared example ids (`_paired_gain`) and passes `gain_interval` to `task_headline`.
+- Item 7, Task 22: the leaderboard's test interval is reused only when `y` is the primary at the board's metric version.
+- Item 8, Tasks 15/16/20/22: the reference `version` (`views.VERSION_REF`) resolves `TaskSpec.version_param`, else the group's first-run creation time; the agent_iteration preset uses it for both scatters and the Changes table.
+- Item 9 backend and R3, Task 22 and contract 1.6: scatter `meta.y_higher_is_better` and `meta.best_group`, sent whatever `pareto` says.
+- Item 10 and R1, Tasks 6/7/19/22 and contract 1.10: `safe_stem` appends `-<sha1[:8]>` when it changes a name; traces and samples store the original id/name in every row; an empty trace writes a marker line; `read_samples` keys series by original name.
+- Item 11 backend and C1, Tasks 16/20: `views.vega_spec_problems` rejects `url`/`href`/`embedOptions` at any depth and `image` marks, in validation and in the panel engine (a panel error for unvalidated views).
+- Item 12, Tasks 6/7: `UsageRow.usd/seconds` and `TraceStep.seconds` use `allow_inf_nan=False`; the SDK rejects `inf`, the readers skip it.
+- Item 13 and R2, Task 21 and contract 1.6: the zero-median exemption is gone (`[0, 3]` spikes).
+- Non-blocking note, Task 21: checkpoints use the curves' `step_metric` x and are dropped without one.
+
+Verification: Tasks 1–23 were applied to a scratch worktree of `phase-1b` at `f7e7fd0` by a script that follows each step's replace/insert/append instructions. Full suite `441 passed`; `ruff format --check`, `ruff check`, and `ty check src` clean; the doctests of `stats`, `store`, `headlines`, `leaderboard`, `views`, `sources`, and `panels` pass. Per-task counts after the fixes: Task 1 `32`, Task 2 `54`, Task 6 `15`, Task 7 `12`, Task 16 `40`, Task 17 `57`, Task 18 `12`, Task 19 `59`, Task 20 `17`, Task 21 `22`, Task 22 `37`, Task 23 `55` (panels + sources). Tasks 24–35 were not re-run; they use the changed code only through `log_trace`, `log_samples`, `list_traces`, and the presets, whose demo assertions are unchanged (all demo runs carry `params.version`).

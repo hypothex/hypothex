@@ -40,6 +40,7 @@
 3. **Every route must show its screen and keep its search values.** A route left on its placeholder, or a run route that drops `?log=stderr` (the Overview's `Open stderr` link) or `?example=`, silently loses the user's click. Tests: `/r/:runId keeps ?log and ?example for the run page` in Task 35 and `every route renders its own screen, not the placeholder` in Task 41.
 4. **The Examples page on a task whose binary field is not `correct`.** Agent tasks score `solved`. Phase 1a `GET /compare/examples` and `GET /runs/{id}/predictions` default to `field="correct"` (the backend plan does not change them; its `pick_field` is used only inside the leaderboard), and `compare_examples` keeps only examples that have `field`. So a request without `field` on an agent task answers 200 with `fixed = []`, `broken = []`, `both_pass = both_fail = 0`: the page shows `fixes 0, breaks 0, p = 1.00` and an empty errors table, with no error. The page must read the field from one row of B's per-example scores (`correct`, then `solved`, then the first boolean field) and send it to both routes. Test: `sends the solved field to compare and to the errors query` in Task 37.
 5. **A panel that throws on a page.** Malformed rows in one panel of a Task or Run page must show `Panel failed: <message>` in that panel while the other panels still draw. Test: `a panel that throws shows its error and the other panels still draw` in Task 25.
+6. **A view spec must not make the page fetch anything.** A `vega_lite` spec can name URLs below the root (`layer[].data.url`, a `lookup` source, an image mark's `url`) that `buildSpec` does not strip, and the backend validation is the only other guard. The panel embeds with `DENY_LOADER`, which refuses every resource. Test: `DENY_LOADER: the same URLs are refused; no fetch, no image download` in Task 20 (real Vega; the spy-loader test beside it is the control).
 
 ---
 
@@ -753,7 +754,7 @@ git commit -m "feat(ui): design tokens from the ui-v4 mockup and shared base sty
 - Consumes: the backend plan's routes (contract section 2) on a running `hx serve`; phase 1a routes and pydantic models (`RunRecord`, `RunDetail`, `TaskSummary`, `PredictionPage`, `ExampleDiff`, `LogChunk`, `EvalReport`, `Stats`); contract 1.2-1.9 shapes.
 - Produces:
   - `ui/src/api/types.ts`: `export interface paths` (openapi-typescript output; never edited by hand).
-  - `ui/src/api/models.ts`: every response and body shape of contract sections 1–2 (records, leaderboard, overview, views and panels, panel row shapes `CurvesRow`, `ScatterRow`, `DistributionRow` (with `DeltaCI`), `GridRow`, `TraceRow`, `StatItem`, events `HxEvent`, `WsMessage`, enums `RunStatus`, `TaskKind`, `PanelType`, `Source`, `LogStream`).
+  - `ui/src/api/models.ts`: every response and body shape of contract sections 1–2 (records, leaderboard, overview, views and panels, panel row shapes `CurvesRow`, `ScatterRow` (with its panel meta `ScatterMeta`: `x, y, x_type, scale, pareto, y_higher_is_better, best_group`), `DistributionRow` (with `DeltaCI`), `GridRow`, `TraceRow`, `StatItem`, events `HxEvent`, `WsMessage`, enums `RunStatus`, `TaskKind`, `PanelType`, `Source`, `LogStream`).
   - `ui/src/api/client.ts`: `ROUTES` (as const, `satisfies Record<string, keyof paths>`); `class ApiError extends Error { status: number; type: string; issues: ValidationIssue[]; body: unknown; static from(status, body): ApiError }`; `buildUrl(route, params?, query?): string`; `request<T>(method, route, opts?): Promise<T>`; `wsUrl(): string`; `newCommandId(): string`; `api` with: `environment, overview(since?), projects, tasks(project?), task(p, t), leaderboard(p, t, metrics?), taskKind(p, t), views(p, t), view(p, t, name), saveView(p, t, name, text, opts?), deleteView(p, t, name), validateView(p, t, text), queryView(p, t, body), runs(query?), run(id), runMetrics(id), runLogs(id, stream?, offset?), runPredictions(id, query?), runTraces(id), runTrace(id, exampleId), compareExamples(a, b, metric, field?) (no field query parameter unless given; the server then uses `correct`, so callers that can meet other fields pass one, see Task 37), rerun(id, opts?), reinfer(id, checkpoint?, opts?), reevalRun(id, args?, opts?), reevalTask(p, t, args?, opts?), stop(id, opts?), tag(id, add, remove?, opts?), star(id, on, opts?), archive(id, on, opts?), note(id, text, opts?)`. Every read takes an optional trailing `signal?: AbortSignal`. Actions send `{command_id: <uuid>, created_by: "human"}` unless `opts` overrides.
   - `ui/test/api/fetch-mock.ts`: `mockFetch`, `mockRoutes` (longest prefix wins; a `null` body answers 404), `Call`.
 
@@ -1426,6 +1427,7 @@ export interface SavedView {
 export interface ViewValidation {
   ok: boolean;
   issues: ValidationIssue[];
+  /** The view resolved (`resolve_view`): `from:` preset panels with layouts first, no `from`. */
   view?: ViewSpec | null;
 }
 
@@ -1470,6 +1472,22 @@ export interface ScatterRow {
   pareto: boolean;
   /** Ordinal x only: worse than the best earlier row by more than its 95% CI. */
   regression: boolean;
+}
+
+/** Scatter `meta` (contract 1.6). The UI takes the y direction and best group from here. */
+export interface ScatterMeta {
+  /** Resolved x reference, e.g. `usage.usd` or `version`. */
+  x: string;
+  /** Resolved y reference; `data.y` defaults to the task primary. */
+  y: string;
+  x_type: "quantitative" | "ordinal";
+  scale: "linear" | "log";
+  /** The panel's Pareto directions; null when the view sets none (then no row is on a front). */
+  pareto: { x?: "min" | "max"; y?: "min" | "max" } | null;
+  /** Direction of the y metric, whatever `pareto` says (`usage.*` cost and time are lower-is-better). */
+  y_higher_is_better: boolean;
+  /** Group with the best mean y in that direction; null when no row qualifies. */
+  best_group: string | null;
 }
 
 /** `[delta_rel, lo, hi]`: relative change vs the baseline and its 95% bootstrap CI. */
@@ -2340,8 +2358,10 @@ afterEach(() => {
 });
 
 type AppRouter = ReturnType<typeof renderApp>["router"];
+/** TanStack's union of route ids (`"/" | "/t/$project/$task" | ...`); a plain string fails TS2769. */
+type RouteId = AppRouter["state"]["matches"][number]["routeId"];
 const leaf = (router: AppRouter) => router.state.matches.at(-1);
-const settled = (router: AppRouter, routeId: string) =>
+const settled = (router: AppRouter, routeId: RouteId) =>
   waitFor(() => expect(leaf(router)?.routeId).toBe(routeId));
 
 describe("routes", () => {
@@ -6818,7 +6838,7 @@ Conventions in this part:
 - SVG charts use a fixed `viewBox` and `width="100%"`, so they need no layout measurement and render the same in happy-dom and the browser.
 - Hover text is a native `<title>`. Tests read `<title>` elements directly, because Testing Library's `getByTitle` only finds `svg > title`.
 - Row types are aliases of the Task 3 models. `fmtNum` (Table.tsx) formats numbers in these panels; `xAxis`, `xScale`, `logTicks`, `niceLogDomain`, `fmtTick`, `SERIES_LIGHT`, `SERIES_DARK` and `seriesColor` (Distribution.tsx) serve Scatter and VegaLite. The task order respects these imports.
-- `meta` keys read beyond contract 1.6 are optional with fallbacks: `scale`, `unit`, `x_label`, `y_label`, `pareto` (`{x, y}` directions), `best_group`. The backend (backend plan Tasks 22–23) sends none of `unit`, `x_label`, `y_label`: scatter gets `meta = {x, y, x_type, scale, pareto}` with the metric or field refs, and distribution gets `{name, scale, render, baseline}`. Contract 1.6 row flags drawn here: scatter `regression` (ordinal x only, Task 18) and distribution `vs_baseline` (the `render: table` percentile table, Task 17). So axis captions fall back to those refs (`meta.x`, `meta.y`, `meta.name`) before the generic `x` and `y`, and each panel has a test with meta in the backend shape.
+- `meta` keys read beyond contract 1.6 are optional with fallbacks: `scale`, `unit`, `x_label`, `y_label`, `pareto` (`{x, y}` directions). The backend (backend plan Tasks 22–23) sends none of `unit`, `x_label`, `y_label`: scatter gets `meta = {x, y, x_type, scale, pareto, y_higher_is_better, best_group}` (`ScatterMeta`, Task 3) with the metric or field refs, and distribution gets `{name, scale, render, baseline}`. Scatter takes the best group and the y direction from `best_group` and `y_higher_is_better` whether or not `pareto` is set (loss, cost and time are lower-is-better). Contract 1.6 row flags drawn here: scatter `regression` (ordinal x only, Task 18) and distribution `vs_baseline` (the `render: table` percentile table, Task 17). So axis captions fall back to those refs (`meta.x`, `meta.y`, `meta.name`) before the generic `x` and `y`, and each panel has a test with meta in the backend shape.
 - The series palette (5 fixed slots, never cycled; the 6th and later series use `--ink-3`) was checked with the dataviz palette validator. Light passes, but its yellow slot is below 3:1 contrast, so every Distribution series is also labelled directly. Dark passes.
 
 ### Task 14: Table panel and the shared number formatter
@@ -8594,8 +8614,8 @@ git commit -m "feat(ui): distribution panel with ECDF, percentile ticks, and per
 - Test: `ui/test/panels/Scatter.test.tsx`
 
 **Interfaces:**
-- Consumes: `PanelResult` from `ui/src/panels/index.ts` (Task 11; fields `type`, `title`, `rows`, optional `meta`); `fmtNum` (`./Table`, Task 14); `xAxis`, `xScale`, `fmtTick` (`./Distribution`, Task 17). Rows `{group_id, label, x, x_lo, x_hi, y, y_lo, y_hi, seeds: [{x, y}], pareto: bool, regression: bool}` (contract 1.6 `scatter`; the server decides front membership and regressions); `meta.x_type` (`"ordinal"`: x is text such as `v9`, rows arrive in axis order); optional `meta.pareto` (`{x: "min"|"max", y: "min"|"max"}`, default `{x: "min", y: "max"}`), `meta.scale`, `meta.x_label`, `meta.y_label`, `meta.x`, `meta.y`, `meta.best_group` (the backend's meta is `{x, y, scale, pareto}` with the metric or field refs; captions are `x_label`, else `x`, else `"x"`, and the same for y).
-- Produces: `ScatterPanel({ result })` (default export too); `paretoPath(front: {x, y}[], xDir: "min" | "max", tailTo?: number): [number, number][]` (data-space staircase vertices); `bestIndex(rows, yDir, bestGroup?): number`; types `Dir`, `ScatterRow` (re-exported from the Task 3 models). Geometry: viewBox 640x360, x range [52, 624], y range [316, 26]. Ordinal x (`meta.x_type = "ordinal"`): one equal band per row in row order, the point at the band centre (`52 + (i + 0.5) * 572 / rows`), tick labels are the x texts, no x whiskers, no Pareto line, no hollow "dominated" style. A row with `regression: true` on an ordinal axis (spec 8.4 "regressions marked") has its mean filled with `var(--fail)`, a `▼` glyph below it (`[data-testid="regression"]`, `var(--fail)`) with the tooltip `regression vs best earlier version`, and its point tooltip ends with `, regression vs best earlier version`; the key gains a `regression` item when any row regresses.
+- Consumes: `PanelResult` from `ui/src/panels/index.ts` (Task 11; fields `type`, `title`, `rows`, optional `meta`); `fmtNum` (`./Table`, Task 14); `xAxis`, `xScale`, `fmtTick` (`./Distribution`, Task 17). Rows `{group_id, label, x, x_lo, x_hi, y, y_lo, y_hi, seeds: [{x, y}], pareto: bool, regression: bool}` (contract 1.6 `scatter`; the server decides front membership and regressions); `meta.x_type` (`"ordinal"`: x is text such as `v9`, rows arrive in axis order); `meta.y_higher_is_better: boolean` and `meta.best_group: string | null` (contract 1.6 `ScatterMeta`, Task 3: the y metric's own direction, `usage.*` lower-is-better, and the group the server ranks best in it; both are set whatever the Pareto settings); optional `meta.pareto` (`{x: "min"|"max", y: "min"|"max"}`; null or missing means no front, so rows with `pareto: false` are drawn plain, not hollow "dominated", and the key has no Pareto items), `meta.scale`, `meta.x_label`, `meta.y_label`, `meta.x`, `meta.y` (the backend's meta is `{x, y, x_type, scale, pareto, y_higher_is_better, best_group}` with the metric or field refs; captions are `x_label`, else `x`, else `"x"`, and the same for y). Best group: `best_group` when it is a string, none when it is null, else (older or hand-built meta) the best mean in `yDirOf(meta)`.
+- Produces: `ScatterPanel({ result })` (default export too); `paretoPath(front: {x, y}[], xDir: "min" | "max", tailTo?: number): [number, number][]` (data-space staircase vertices); `bestIndex(rows, yDir, bestGroup?: string | null): number` (null → -1); `yDirOf(meta): Dir` (`y_higher_is_better`, else `pareto.y`, else `"max"`); types `Dir`, `ScatterRow`, `ScatterMeta` (re-exported from the Task 3 models). Geometry: viewBox 640x360, x range [52, 624], y range [316, 26]. Ordinal x (`meta.x_type = "ordinal"`): one equal band per row in row order, the point at the band centre (`52 + (i + 0.5) * 572 / rows`), tick labels are the x texts, no x whiskers, no Pareto line, no hollow "dominated" style. A row with `regression: true` on an ordinal axis (spec 8.4 "regressions marked") has its mean filled with `var(--fail)`, a `▼` glyph below it (`[data-testid="regression"]`, `var(--fail)`) with the tooltip `regression vs best earlier version`, and its point tooltip ends with `, regression vs best earlier version`; the key gains a `regression` item when any row regresses.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -8605,7 +8625,14 @@ git commit -m "feat(ui): distribution panel with ECDF, percentile ticks, and per
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import type { PanelResult } from "../../src/panels/index";
-import { bestIndex, paretoPath, type ScatterRow, ScatterPanel } from "../../src/panels/Scatter";
+import {
+  bestIndex,
+  paretoPath,
+  type ScatterMeta,
+  type ScatterRow,
+  ScatterPanel,
+  yDirOf,
+} from "../../src/panels/Scatter";
 
 afterEach(cleanup);
 
@@ -8654,11 +8681,12 @@ const ROWS: ScatterRow[] = [
   },
 ];
 
-const scatter = (meta: Record<string, unknown>, rows: ScatterRow[] = ROWS): PanelResult => ({
+// `object` so a typed `ScatterMeta` (no index signature) and ad hoc metas both fit
+const scatter = (meta: object, rows: ScatterRow[] = ROWS): PanelResult => ({
   type: "scatter",
   title: "Cost vs solved",
   rows: rows as unknown as Record<string, unknown>[],
-  meta,
+  meta: meta as Record<string, unknown>,
 });
 
 const META = { x_label: "$ / attempt", y_label: "solved@v2", pareto: { x: "min", y: "max" } };
@@ -8711,7 +8739,18 @@ describe("bestIndex", () => {
     expect(bestIndex(ROWS, "max")).toBe(0);
     expect(bestIndex(ROWS, "min")).toBe(1);
     expect(bestIndex(ROWS, "max", "g3")).toBe(2);
+    expect(bestIndex(ROWS, "max", null)).toBe(-1); // the server found no best group
     expect(bestIndex([], "max")).toBe(-1);
+  });
+});
+
+describe("yDirOf", () => {
+  test("the metric's direction wins over the Pareto settings", () => {
+    expect(yDirOf({ y_higher_is_better: false, pareto: { x: "min", y: "max" } })).toBe("min");
+    expect(yDirOf({ y_higher_is_better: true, pareto: { x: "min", y: "min" } })).toBe("max");
+    expect(yDirOf({ pareto: { x: "min", y: "min" } })).toBe("min");
+    expect(yDirOf({ pareto: null })).toBe("max");
+    expect(yDirOf({})).toBe("max");
   });
 });
 
@@ -8788,7 +8827,15 @@ describe("ScatterPanel", () => {
   });
 
   test("the backend's meta names the axes and tooltips with the metric refs", () => {
-    const backend = { x: "usage.usd", y: "solved@v2/value", scale: "linear", pareto: { x: "min", y: "max" } };
+    const backend: ScatterMeta = {
+      x: "usage.usd",
+      y: "solved@v2/value",
+      x_type: "quantitative",
+      scale: "linear",
+      pareto: { x: "min", y: "max" },
+      y_higher_is_better: true,
+      best_group: "g1",
+    };
     const { container } = render(<ScatterPanel result={scatter(backend)} />);
     expect(screen.getByText("usage.usd")).toBeTruthy();
     expect(screen.getByText("solved@v2/value")).toBeTruthy();
@@ -8796,6 +8843,50 @@ describe("ScatterPanel", () => {
     expect(titles).toContain(
       "beam\nsolved@v2/value 0.500 [0.430, 0.570]\nusage.usd 0.500 [0.450, 0.550]\n0 seeds, dominated",
     );
+    expect(mean(container, "g1").dataset.best).toBe("true");
+  });
+
+  test("lower-is-better y with no Pareto settings: the server's best group is lit", () => {
+    // e.g. a loss against wall time: the lowest mean (greedy, 0.4) is best, and with no
+    // `pareto` in the view every row arrives `pareto: false` without being "dominated"
+    const loss: ScatterMeta = {
+      x: "usage.seconds",
+      y: "val/loss",
+      x_type: "quantitative",
+      scale: "linear",
+      pareto: null,
+      y_higher_is_better: false,
+      best_group: "g2",
+    };
+    const rows = ROWS.map((r) => ({ ...r, pareto: false }));
+    const { container } = render(<ScatterPanel result={scatter(loss, rows)} />);
+    expect(mean(container, "g2").dataset.best).toBe("true");
+    expect(mean(container, "g2").style.fill).toBe("var(--best)");
+    expect(mean(container, "g1").dataset.best).toBe("false");
+    expect(mean(container, "g1").style.fill).toBe("var(--ink)");
+    expect(mean(container, "g3").style.fill).toBe("var(--ink)"); // not hollow
+    expect(container.querySelector('[data-testid="pareto"]')).toBeNull();
+    expect(screen.queryByText("Pareto")).toBeNull();
+    expect(screen.queryByText("dominated")).toBeNull();
+    const titles = [...container.querySelectorAll("title")].map((t) => t.textContent);
+    expect(titles).toContain(
+      "beam\nval/loss 0.500 [0.430, 0.570]\nusage.seconds 0.500 [0.450, 0.550]\n0 seeds",
+    );
+  });
+
+  test("y_higher_is_better beats pareto.y; a null best_group lights no group", () => {
+    // Pareto says y max, but the metric is lower-is-better: without best_group the lowest mean wins
+    const low = render(
+      <ScatterPanel result={scatter({ ...META, y_higher_is_better: false })} />,
+    );
+    expect(mean(low.container, "g2").dataset.best).toBe("true");
+    expect(mean(low.container, "g1").dataset.best).toBe("false");
+    low.unmount();
+    const none = render(
+      <ScatterPanel result={scatter({ ...META, y_higher_is_better: true, best_group: null })} />,
+    );
+    expect(none.container.querySelectorAll('[data-best="true"]').length).toBe(0);
+    expect(mean(none.container, "g1").style.fill).toBe("var(--ink)"); // front, not best
   });
 
   test("ordinal x: versions in order; a regression is drawn in the failure colour with ▼", () => {
@@ -8816,12 +8907,14 @@ describe("ScatterPanel", () => {
       regression,
     });
     // the backend's meta for the agent_iteration "Solved by version" panel
-    const meta = {
-      x: "params.version",
+    const meta: ScatterMeta = {
+      x: "version",
       y: "solved/value",
       x_type: "ordinal",
       scale: "linear",
       pareto: null,
+      y_higher_is_better: true,
+      best_group: "v2",
     };
     const rows = [version("v1", 0.5, false), version("v2", 0.7, false), version("v3", 0.6, true)];
     const { container } = render(<ScatterPanel result={scatter(meta, rows)} />);
@@ -8848,7 +8941,7 @@ describe("ScatterPanel", () => {
     expect(container.querySelectorAll("[data-seed]").length).toBe(6);
     const titles = [...container.querySelectorAll("title")].map((t) => t.textContent);
     expect(titles).toContain(
-      "v3\nsolved/value 0.600 [0.575, 0.625]\nparams.version v3\n2 seeds, regression vs best earlier version",
+      "v3\nsolved/value 0.600 [0.575, 0.625]\nversion v3\n2 seeds, regression vs best earlier version",
     );
     expect(screen.getByText("regression")).toBeTruthy(); // key item
     expect(screen.queryByText("Pareto")).toBeNull();
@@ -8876,18 +8969,20 @@ Expected: FAIL with `error: Cannot find module '../../src/panels/Scatter' from '
  * a dashed Pareto staircase through the groups the query engine marked `pareto: true`.
  * On an ordinal x (`meta.x_type = "ordinal"`, e.g. versions) rows sit in equal bands in
  * row order, and rows the engine marked `regression: true` are drawn in the failure colour.
+ * The best group comes from the server (`meta.best_group`, in the y metric's own direction
+ * `meta.y_higher_is_better`), never from the Pareto settings.
  */
 import { scaleLinear } from "d3-scale";
 import type { CSSProperties } from "react";
-import type { ScatterRow } from "../api/models";
+import type { ScatterMeta, ScatterRow } from "../api/models";
 import { fmtTick, xAxis, xScale } from "./Distribution";
 import type { PanelResult } from "./index";
 import { fmtNum } from "./Table";
 
 /** Optimisation direction of one axis. */
 export type Dir = "min" | "max";
-/** One group's scatter row (contract 1.6). */
-export type { ScatterRow };
+/** One group's scatter row and the panel meta (contract 1.6). */
+export type { ScatterMeta, ScatterRow };
 
 /**
  * Vertices of the Pareto staircase in data space.
@@ -8916,8 +9011,12 @@ export function paretoPath(
   return out;
 }
 
-/** Index of the best row: `bestGroup` if given, else best y for `yDir`; -1 if empty. */
-export function bestIndex(rows: ScatterRow[], yDir: Dir, bestGroup?: string): number {
+/**
+ * Index of the best row: the row of `bestGroup` when it is a string, -1 when it is null
+ * (the server found no best group), else the best y for `yDir`; -1 if `rows` is empty.
+ */
+export function bestIndex(rows: ScatterRow[], yDir: Dir, bestGroup?: string | null): number {
+  if (bestGroup === null) return -1;
   if (bestGroup !== undefined) return rows.findIndex((r) => r.group_id === bestGroup);
   let best = -1;
   rows.forEach((r, i) => {
@@ -8928,6 +9027,20 @@ export function bestIndex(rows: ScatterRow[], yDir: Dir, bestGroup?: string): nu
 
 function dirOf(v: unknown, fallback: Dir): Dir {
   return v === "min" || v === "max" ? v : fallback;
+}
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Direction of y for the best-group highlight: `meta.y_higher_is_better` (the metric's own
+ * direction, set by the server whatever the Pareto settings), else `meta.pareto.y`, else
+ * higher is better.
+ */
+export function yDirOf(meta: Record<string, unknown>): Dir {
+  if (typeof meta.y_higher_is_better === "boolean") return meta.y_higher_is_better ? "max" : "min";
+  return dirOf(isObj(meta.pareto) ? meta.pareto.y : undefined, "max");
 }
 
 const W = 640;
@@ -8979,15 +9092,20 @@ const numeric = (v: number | string | null): number | null => (typeof v === "num
 /**
  * Scatter panel. Reads `meta.x_label`, `meta.y_label` (else the backend's refs `meta.x`,
  * `meta.y`), `meta.scale` (x axis), `meta.x_type` (`"ordinal"`: text x in row order),
- * `meta.pareto` (`{x, y}` directions, default `{x: "min", y: "max"}`) and `meta.best_group`.
+ * `meta.pareto` (`{x, y}` directions; null or missing: no front), `meta.best_group` and
+ * `meta.y_higher_is_better` (see `ScatterMeta`).
  */
 export function ScatterPanel({ result }: { result: PanelResult }) {
   const rows = result.rows as unknown as ScatterRow[];
   const meta = (result.meta ?? {}) as Record<string, unknown>;
   if (rows.length === 0) return <p style={T.empty}>No data</p>;
-  const dirs = (meta.pareto ?? {}) as Record<string, unknown>;
-  const xDir = dirOf(dirs.x, "min");
-  const yDir = dirOf(dirs.y, "max");
+  const ordinal = meta.x_type === "ordinal";
+  // A front exists only when the view sets Pareto directions on a numeric x; otherwise the
+  // server marks every row `pareto: false`, which must not read as "dominated".
+  const dirs = !ordinal && isObj(meta.pareto) ? meta.pareto : null;
+  const hasFront = dirs !== null;
+  const xDir = dirOf(dirs?.x, "min");
+  const yDir = yDirOf(meta);
   const kind = meta.scale === "log" ? "log" : "linear";
   const label = (...keys: string[]) => {
     const hit = keys.map((k) => meta[k]).find((v) => typeof v === "string" && v !== "");
@@ -8995,13 +9113,10 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
   };
   const xLabel = label("x_label", "x") ?? "x";
   const yLabel = label("y_label", "y") ?? "y";
-  const best = bestIndex(
-    rows,
-    yDir,
-    typeof meta.best_group === "string" ? meta.best_group : undefined,
-  );
+  const bestGroup =
+    typeof meta.best_group === "string" || meta.best_group === null ? meta.best_group : undefined;
+  const best = bestIndex(rows, yDir, bestGroup);
 
-  const ordinal = meta.x_type === "ordinal";
   const nums = (vs: (number | null)[]) => vs.filter((v): v is number => v !== null);
   const xs = ordinal
     ? []
@@ -9024,7 +9139,7 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
     .range([H - PB, PT]);
   const yTicks = ys0.ticks(5);
 
-  const front = ordinal
+  const front = !hasFront
     ? []
     : rows.flatMap((r) => (r.pareto && typeof r.x === "number" ? [{ x: r.x, y: r.y }] : []));
   const regressions = ordinal ? rows.filter((r) => r.regression).length : 0;
@@ -9039,7 +9154,11 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
         viewBox={`0 0 ${W} ${H}`}
         width="100%"
         role="img"
-        aria-label={`${xLabel} against ${yLabel}; ${front.length} of ${rows.length} on the Pareto front`}
+        aria-label={
+          hasFront
+            ? `${xLabel} against ${yLabel}; ${front.length} of ${rows.length} on the Pareto front`
+            : `${xLabel} against ${yLabel}`
+        }
         style={{ display: "block", overflow: "visible", fontFamily: "var(--sans)" }}
       >
         <text x={PL} y={PT - 12} style={T.lblS}>
@@ -9091,17 +9210,17 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
           const x = ordinal ? bandX(i) : X(Number(r.x));
           const y = Y(r.y);
           const isBest = i === best;
-          const dominated = !ordinal && !r.pareto;
+          const dominated = hasFront && !r.pareto;
           const regressed = ordinal && r.regression;
           const right = x + 12 + r.label.length * 7 <= W - PR;
           const xLine = ordinal
             ? `${xLabel} ${r.x}`
             : `${xLabel} ${fmtNum(Number(r.x))}${range(r.x_lo, r.x_hi)}`;
-          const status = ordinal
-            ? regressed
-              ? `, ${REGRESSION_TIP}`
-              : ""
-            : `, ${r.pareto ? "on the Pareto front" : "dominated"}`;
+          const status = regressed
+            ? `, ${REGRESSION_TIP}`
+            : hasFront
+              ? `, ${r.pareto ? "on the Pareto front" : "dominated"}`
+              : "";
           return (
             <g key={r.group_id} data-group={r.group_id}>
               {r.seeds.map((s, k) => (
@@ -9180,7 +9299,7 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
           </svg>
           seed
         </span>
-        {!ordinal && (
+        {hasFront && (
           <span style={T.keyItem} title="No other group is better on both axes">
             <svg width="22" height="12" aria-hidden="true">
               <path d="M1 10H11V2H21" style={T.pareto} />
@@ -9188,7 +9307,7 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
             Pareto
           </span>
         )}
-        {!ordinal && (
+        {hasFront && (
           <span style={T.keyItem} title="Another group is at least as good on both axes">
             <svg width="12" height="12" aria-hidden="true">
               <rect x="2" y="2" width="8" height="8" rx="1.5" style={meanStyle(false, true)} />
@@ -9218,7 +9337,7 @@ export default ScatterPanel;
 - [ ] **Step 4: Run the tests and the type check**
 
 Run: `cd ui && bun test test/panels/Scatter.test.tsx && bunx tsc --noEmit -p .`
-Expected: PASS, `13 pass`, `0 fail`; `tsc` prints nothing and exits 0.
+Expected: PASS, `16 pass`, `0 fail`; `tsc` prints nothing and exits 0.
 
 - [ ] **Step 5: Commit**
 
@@ -9574,11 +9693,11 @@ git commit -m "feat(ui): items by groups grid panel"
 **Files:**
 - Create: `ui/src/panels/VegaLite.tsx`
 - Modify: `ui/src/panels/index.ts` (register the seven Part 3 panels), `ui/test/panels/index.test.tsx` (append a test), `ui/package.json`, `ui/bun.lock` (Vega packages)
-- Test: `ui/test/panels/VegaLite.test.tsx`
+- Test: `ui/test/panels/VegaLite.test.tsx` (vega-embed mocked), `ui/test/panels/VegaLite.render.test.tsx` (real Vega, resource loading)
 
 **Interfaces:**
-- Consumes: `PanelResult` from `ui/src/panels/index.ts` (Task 11; fields `type`, `title`, `rows`, optional `meta`); `SERIES_LIGHT`, `SERIES_DARK` (`./Distribution`, Task 17); `vega-embed` default export `embed(el, spec, opts): Promise<Result>`. `meta.spec` is the view's Vega-Lite spec with `data.values` empty (contract 1.6 `vega_lite`); `rows` are the `iter_rows` dicts restricted to `fields`.
-- Produces: `VegaLitePanel({ result })` (default export too); `buildSpec(spec, rows, config): object` (row copies go into `data.values`, `url`/`name` are dropped, the theme is merged under the spec's own `config`, a single view gets `width: "container"`, the input is not changed); `themeConfig(tokens, theme)`; `readTokens(theme, getVar?)`; `TOKEN_FALLBACK`; `deepMerge(base, over)`; `cssVar(name)`. The colour mode comes from `useTheme` (Task 5), so the header toggle and the ⌘K command both re-theme the chart. Task 20 also registers every Part 3 panel in `PANELS`. Embed options: `{actions: false, renderer: "svg"}`. The previous view is finalized on re-render and on unmount. Errors show in a `role="alert"` box.
+- Consumes: `PanelResult` from `ui/src/panels/index.ts` (Task 11; fields `type`, `title`, `rows`, optional `meta`); `SERIES_LIGHT`, `SERIES_DARK` (`./Distribution`, Task 17); `vega-embed` default export `embed(el, spec, opts): Promise<Result>` and type `EmbedOptions`; `vega` type `Loader` (`load`, `sanitize`, `http`, `file`). `meta.spec` is the view's Vega-Lite spec with `data.values` empty (contract 1.6 `vega_lite`); `rows` are the `iter_rows` dicts restricted to `fields`.
+- Produces: `VegaLitePanel({ result })` (default export too); `buildSpec(spec, rows, config): object` (row copies go into `data.values`, `url`/`name` are dropped, `usermeta` is dropped because vega-embed reads `usermeta.embedOptions` as options, the theme is merged under the spec's own `config`, a single view gets `width: "container"`, the input is not changed); `EXTERNAL_DISABLED = "external resources are disabled"`; `DENY_LOADER: Loader` (all four methods reject with `EXTERNAL_DISABLED`); `EMBED_OPTIONS`; `themeConfig(tokens, theme)`; `readTokens(theme, getVar?)`; `TOKEN_FALLBACK`; `deepMerge(base, over)`; `cssVar(name)`. The colour mode comes from `useTheme` (Task 5), so the header toggle and the ⌘K command both re-theme the chart. Task 20 also registers every Part 3 panel in `PANELS`. Embed options: `EMBED_OPTIONS = {actions: false, renderer: "svg", loader: DENY_LOADER}`. Vega sends every data URL (`load`), image and link URL (`sanitize`) through the view's loader, so the deny-all loader blocks nested `data.url` in layers and concats, `lookup` sources and image marks, whatever the backend's spec validation (backend Task 20) misses; `VegaLite.render.test.tsx` proves it with real Vega and a spy loader as the control. The previous view is finalized on re-render and on unmount. Errors show in a `role="alert"` box.
 
 - [ ] **Step 1: Install Vega and write the failing test**
 
@@ -9603,8 +9722,16 @@ const embedMock = mock(async (_el: HTMLElement, spec: unknown, _opts: unknown) =
 }));
 mock.module("vega-embed", () => ({ default: embedMock }));
 
-const { buildSpec, deepMerge, readTokens, themeConfig, TOKEN_FALLBACK, VegaLitePanel } =
-  await import("../../src/panels/VegaLite");
+const {
+  buildSpec,
+  DENY_LOADER,
+  deepMerge,
+  EXTERNAL_DISABLED,
+  readTokens,
+  themeConfig,
+  TOKEN_FALLBACK,
+  VegaLitePanel,
+} = await import("../../src/panels/VegaLite");
 
 beforeEach(() => {
   embedMock.mockClear();
@@ -9660,6 +9787,34 @@ describe("buildSpec", () => {
     expect("width" in out).toBe(false);
     expect(out.data).toEqual({ values: ROWS });
   });
+
+  test("usermeta is dropped, so a spec cannot set its own embed options", () => {
+    const spec = {
+      ...SPEC,
+      usermeta: { embedOptions: { actions: true, config: "https://evil.example/c.json" } },
+    };
+    const out = buildSpec(spec, ROWS, theme);
+    expect("usermeta" in out).toBe(false);
+    expect("usermeta" in spec).toBe(true);
+  });
+});
+
+describe("DENY_LOADER", () => {
+  test("refuses every kind of resource", async () => {
+    const url = "https://evil.example/x.csv";
+    const attempts = [
+      DENY_LOADER.load(url),
+      DENY_LOADER.sanitize(url, { context: "image" }),
+      DENY_LOADER.sanitize(url, { context: "href" }),
+      DENY_LOADER.http(url, {}),
+      DENY_LOADER.file("/etc/passwd"),
+    ];
+    const results = await Promise.allSettled(attempts);
+    expect(results.map((r) => r.status)).toEqual(Array(5).fill("rejected"));
+    for (const r of results) {
+      expect((r as PromiseRejectedResult).reason.message).toBe(EXTERNAL_DISABLED);
+    }
+  });
 });
 
 describe("tokens and theme", () => {
@@ -9685,7 +9840,8 @@ describe("VegaLitePanel", () => {
     const [el, spec, opts] = embedMock.mock.calls[0];
     expect(el).toBe(screen.getByTestId("vega"));
     expect((spec as Obj).data).toEqual({ values: ROWS });
-    expect(opts).toEqual({ actions: false, renderer: "svg" });
+    expect(opts).toEqual({ actions: false, renderer: "svg", loader: DENY_LOADER });
+    expect((opts as { loader: unknown }).loader).toBe(DENY_LOADER);
     expect(axisOf(spec as Obj).labelColor).toBe("#767C87");
   });
 
@@ -9718,10 +9874,135 @@ describe("VegaLitePanel", () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+`ui/test/panels/VegaLite.render.test.tsx` (real Vega, not mocked: vega-embed is mocked in the other file, so this file compiles and renders with `vega` and `vega-lite` directly, with the same `buildSpec` and loader the panel hands to vega-embed):
 
-Run: `cd ui && bun test test/panels/VegaLite.test.tsx`
-Expected: FAIL with `error: Cannot find module '../../src/panels/VegaLite' from '.../ui/test/panels/VegaLite.test.tsx'`.
+```tsx
+/**
+ * Real Vega (no vega-embed mock): a spec that names external resources in nested places
+ * reaches the page's loader, and `DENY_LOADER` refuses every one, so nothing is fetched.
+ * The spy loader test is the control: it shows the same spec does ask for all three URLs.
+ */
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { type Loader, None, parse, View } from "vega";
+import { compile, type TopLevelSpec } from "vega-lite";
+import { buildSpec, DENY_LOADER, themeConfig, TOKEN_FALLBACK } from "../../src/panels/VegaLite";
+
+type Obj = Record<string, unknown>;
+
+const EVIL = "https://evil.example";
+// Root data is replaced by the panel rows; the three URLs sit where `buildSpec` does not look.
+const SPEC: Obj = {
+  data: { url: `${EVIL}/root.csv` },
+  transform: [
+    { lookup: "a", from: { data: { url: `${EVIL}/lookup.csv` }, key: "a", fields: ["b"] } },
+  ],
+  layer: [
+    { mark: "point", encoding: { x: { field: "a", type: "quantitative" } } },
+    {
+      data: { url: `${EVIL}/layer.csv` },
+      mark: "rule",
+      encoding: { x: { field: "a", type: "quantitative" } },
+    },
+    {
+      mark: { type: "image", width: 10, height: 10 },
+      encoding: {
+        x: { field: "a", type: "quantitative" },
+        url: { value: `${EVIL}/pixel.png` },
+      },
+    },
+  ],
+};
+const WANTED = [`${EVIL}/lookup.csv`, `${EVIL}/layer.csv`, `${EVIL}/pixel.png`];
+
+const realFetch = globalThis.fetch;
+const realImage = globalThis.Image;
+const fetched = mock(async (_input: RequestInfo | URL) => new Response("a,b\n1,2\n"));
+let images: string[] = [];
+
+beforeEach(() => {
+  fetched.mockClear();
+  images = [];
+  globalThis.fetch = fetched as unknown as typeof fetch;
+  // Records every image Vega starts to download, then reports it loaded.
+  globalThis.Image = class {
+    crossOrigin: string | null = null;
+    complete = false;
+    width = 10;
+    height = 10;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    set src(url: string) {
+      images.push(url);
+      setTimeout(() => {
+        this.complete = true;
+        this.onload?.();
+      }, 0);
+    }
+  } as unknown as typeof Image;
+});
+afterEach(() => {
+  globalThis.fetch = realFetch;
+  globalThis.Image = realImage;
+  document.body.innerHTML = "";
+});
+
+/** Compile and render the panel's spec with real Vega; returns every URI the loader saw. */
+async function renderWith(inner: Loader): Promise<string[]> {
+  const asked: string[] = [];
+  const loader: Loader = {
+    load: (uri, options) => {
+      asked.push(uri);
+      return inner.load(uri, options);
+    },
+    sanitize: (uri, options) => {
+      asked.push(uri);
+      return inner.sanitize(uri, options);
+    },
+    http: (uri, options) => inner.http(uri, options),
+    file: (name) => inner.file(name),
+  };
+  const full = buildSpec(SPEC, [{ a: 1 }], themeConfig(TOKEN_FALLBACK.light, "light"));
+  const el = document.createElement("div");
+  document.body.append(el);
+  const view = new View(parse(compile(full as unknown as TopLevelSpec).spec), {
+    loader,
+    renderer: "svg",
+    container: el,
+    logLevel: None,
+  });
+  await view.runAsync();
+  await new Promise((r) => setTimeout(r, 20)); // image loads start after the first render
+  view.finalize();
+  return asked;
+}
+
+describe("VegaLite resources with real Vega", () => {
+  test("control: an allowing loader is asked for the nested data and the image", async () => {
+    const allow: Loader = {
+      load: async () => "a,b\n1,2\n",
+      sanitize: async (uri) => ({ href: uri }),
+      http: async () => "",
+      file: async () => "",
+    };
+    const asked = await renderWith(allow);
+    for (const url of WANTED) expect(asked).toContain(url);
+    expect(asked).not.toContain(`${EVIL}/root.csv`); // buildSpec replaced the root data
+    expect(images).toEqual([`${EVIL}/pixel.png`]);
+  });
+
+  test("DENY_LOADER: the same URLs are refused; no fetch, no image download", async () => {
+    const asked = await renderWith(DENY_LOADER);
+    for (const url of WANTED) expect(asked).toContain(url);
+    expect(fetched).not.toHaveBeenCalled();
+    expect(images).toEqual([]);
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cd ui && bun test test/panels/VegaLite.test.tsx test/panels/VegaLite.render.test.tsx`
+Expected: FAIL: both files report `error: Cannot find module '../../src/panels/VegaLite'`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -9732,8 +10013,14 @@ Expected: FAIL with `error: Cannot find module '../../src/panels/VegaLite' from 
  * Vega-Lite panel: renders `meta.spec` with vega-embed, injecting the panel rows as
  * `data.values` and a Hypothex theme built from the current design tokens. Re-embeds when
  * the colour mode changes (`useTheme` from the shell).
+ *
+ * A view spec is untrusted input (anyone with repo access writes one), so the panel never
+ * lets Vega reach the network: every resource goes through `DENY_LOADER`, which refuses it.
+ * That covers nested `data.url` in layers and concats, `lookup` sources, image marks and
+ * `href` links, whatever the server-side validation missed.
  */
-import embed, { type Result, type VisualizationSpec } from "vega-embed";
+import type { Loader } from "vega";
+import embed, { type EmbedOptions, type Result, type VisualizationSpec } from "vega-embed";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { type Theme, useTheme } from "../shell/ThemeToggle";
 import { SERIES_DARK, SERIES_LIGHT } from "./Distribution";
@@ -9795,6 +10082,21 @@ const TOKEN_VARS: Record<keyof Tokens, string> = {
 };
 
 const MULTI_VIEW = ["facet", "hconcat", "vconcat", "concat", "repeat"];
+
+/** Message of every refused resource load. */
+export const EXTERNAL_DISABLED = "external resources are disabled";
+
+const refuse = (): Promise<never> => Promise.reject(new Error(EXTERNAL_DISABLED));
+
+/**
+ * A Vega loader that refuses every resource. Vega sends all data URLs (`load`), image and
+ * link URLs (`sanitize`) and raw requests (`http`, `file`) through the view's loader, so
+ * with this loader no spec can make the page fetch anything.
+ */
+export const DENY_LOADER: Loader = { load: refuse, sanitize: refuse, http: refuse, file: refuse };
+
+/** Options for every embed: no action menu, SVG output, no resource loading. */
+export const EMBED_OPTIONS: EmbedOptions = { actions: false, renderer: "svg", loader: DENY_LOADER };
 
 function isPlain(v: unknown): v is Obj {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -9863,16 +10165,19 @@ export function deepMerge(base: Obj, over: Obj): Obj {
 /**
  * Build the spec to embed: copies of `rows` become `data.values` (`url`/`name` are dropped),
  * the theme is merged under the spec's own `config`, and single views fill the container
- * width. The input spec is not modified.
+ * width. `usermeta` is dropped, because vega-embed reads `usermeta.embedOptions` as embed
+ * options (it could turn the action menu back on or name config and patch URLs). The input
+ * spec is not modified.
  */
 export function buildSpec(spec: Obj, rows: Obj[], config: Obj): Obj {
   const data = isPlain(spec.data) ? spec.data : {};
   const keep = Object.fromEntries(
     Object.entries(data).filter(([k]) => k !== "url" && k !== "name" && k !== "values"),
   );
+  const { usermeta: _usermeta, ...rest } = spec;
   const out: Obj = {
     $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-    ...spec,
+    ...rest,
     data: { ...keep, values: rows.map((r) => ({ ...r })) },
     config: deepMerge(config, isPlain(spec.config) ? spec.config : {}),
   };
@@ -9907,7 +10212,7 @@ export function VegaLitePanel({ result }: { result: PanelResult }) {
     let view: Result | null = null;
     setError(null);
     const full = buildSpec(spec, rows, themeConfig(readTokens(theme), theme));
-    embed(el, full as VisualizationSpec, { actions: false, renderer: "svg" })
+    embed(el, full as VisualizationSpec, EMBED_OPTIONS)
       .then((r) => {
         if (cancelled) r.finalize();
         else view = r;
@@ -9944,8 +10249,8 @@ export default VegaLitePanel;
 
 - [ ] **Step 4: Run the tests and the type check**
 
-Run: `cd ui && bun test test/panels/VegaLite.test.tsx && bunx tsc --noEmit -p .`
-Expected: PASS, `9 pass`, `0 fail`; `tsc` prints nothing and exits 0.
+Run: `cd ui && bun test test/panels/VegaLite.test.tsx test/panels/VegaLite.render.test.tsx && bunx tsc --noEmit -p .`
+Expected: PASS, `13 pass`, `0 fail` (11 mocked, 2 real Vega); `tsc` prints nothing and exits 0.
 
 - [ ] **Step 5: Register the seven data panels**
 
@@ -10026,7 +10331,7 @@ Expected: every panel test passes, `0 fail`; `tsc` prints nothing. The existing 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add ui/package.json ui/bun.lock ui/src/panels/VegaLite.tsx ui/test/panels/VegaLite.test.tsx ui/src/panels/index.ts ui/test/panels/index.test.tsx
+git add ui/package.json ui/bun.lock ui/src/panels/VegaLite.tsx ui/test/panels/VegaLite.test.tsx ui/test/panels/VegaLite.render.test.tsx ui/src/panels/index.ts ui/test/panels/index.test.tsx
 git commit -m "feat(ui): vega-lite panel and registry entries for every data panel"
 ```
 
@@ -17377,7 +17682,7 @@ git commit -m "feat(ui): view preview grid with 12-column layout ruler"
 - Test: `ui/test/pages/ViewEditor.test.tsx`
 
 **Interfaces:**
-- Consumes: Task 38 `YamlEditor`, `YamlEditorHandle`, `ValidationIssue`, `outlineView`, `panelAtLine`; Task 39 `PanelPalette`, `PanelType`, `panelSnippet`, `planInsert`; Task 40 `Preview`, `PanelResult`, `LayoutHint`; Task 3 `api`, `ApiError`, `ViewSpec`; Task 4 `useView`, `useLeaderboard`, `useViewQuery`, `useSaveView`; Task 25 `PanelBody`. HTTP: `GET .../views/{name}` → `{info, text, view}`; `POST .../views/validate` `{text}` → `{ok, issues, view?}`; `POST .../views/query` `{view}` → `{panels}`; `PUT .../views/{name}` `{text, command_id}` → `{info, view}` or 400 `{error, type, issues}`; `GET .../leaderboard` → `Leaderboard` with `primary`.
+- Consumes: Task 38 `YamlEditor`, `YamlEditorHandle`, `ValidationIssue`, `outlineView`, `panelAtLine`; Task 39 `PanelPalette`, `PanelType`, `panelSnippet`, `planInsert`; Task 40 `Preview`, `PanelResult`, `LayoutHint`; Task 3 `api`, `ApiError`, `ViewSpec`; Task 4 `useView`, `useLeaderboard`, `useViewQuery`, `useSaveView`; Task 25 `PanelBody`. HTTP: `GET .../views/{name}` → `{info, text, view}`; `POST .../views/validate` `{text}` → `{ok, issues, view?}` (`view` is resolved: `from:` preset panels with their layouts first, no `from`); `POST .../views/query` `{view}` → `{panels}`; `PUT .../views/{name}` `{text, command_id}` → `{info, view}` or 400 `{error, type, issues}`; `GET .../leaderboard` → `Leaderboard` with `primary`.
 - Produces:
   - `ViewEditor(props: { project: string; task: string; view: string; onSaved?: (name: string) => void; renderPanel?: (result: PanelResult) => ReactNode })` (named and default export). `view` is the `:view` route param (`new` for a new view); `renderPanel` defaults to `PanelBody`.
   - In `ui/src/router.tsx`: `ViewEditorScreen`, which passes `onSaved={(name) => navigate({ to: "/t/$project/$task", params: { project, task }, search: { view: name } })}`.
@@ -17385,12 +17690,11 @@ git commit -m "feat(ui): view preview grid with 12-column layout ruler"
   - `isViewName(name: string): boolean` (`^[a-z0-9][a-z0-9_-]*$`, not `overview`)
   - `metricOf(primary: string): string` (`"accuracy/value"` → `"accuracy"`)
   - `cliCommand(project: string, task: string, name: string, text: string): string`
-  - `resolvePanels(view: ViewSpec, preset: ViewSpec | null): PanelSpec[]` (the panels of `view` after `from:`, the same merge as the server's `resolve_view`: preset panels first, a view panel whose non-empty title equals a preset panel's replaces it in place, every other view panel is appended; `view.panels` unchanged when there is no `from` or no preset)
 
 Behaviour:
 - Validation: the text is debounced 300 ms, then `POST views/validate`. The TanStack Query key includes the text, so an answer for old text never lands on new text, and undo back to a checked text needs no request.
 - Preview: whenever validation returns `ok` with a `view`, `POST views/query {view}` runs with that unsaved view; the last good preview stays on screen (dimmed, `stale`) while the YAML is invalid. Validation issues inside a panel replace that panel's body with the message (matched by the panel's title, which is also how `resolve_view` matches panels).
-- `from:` views: `POST views/validate` returns the view as written (not resolved), while `POST views/query` resolves `from:`, so inherited preset panels have no layout in `good.panels`. The editor loads the preset with `useView(project, task, "overview")` (the task kind's preset, resolved, with layouts) when `good.from` is set, and `resolvePanels(good, preset)` gives the full panel list. Preview layouts and the `✓ valid · N panels` count come from that list. The preset is used only when its `info.kind` equals `good.from`; for a `from:` of another kind (no route serves that preset) the count falls back to the preview's result count and inherited panels use the default full-width layout.
+- `from:` views: `POST views/validate` returns the view resolved (contract 2: `resolve_view(view)` by alias), so `good.panels` already holds the preset panels with their layouts, a view panel with a preset panel's title in that panel's place, and the other view panels appended; `from` is gone. This holds for any preset `from` names, including another task kind's (a generic task's view may say `from: agent_iteration`). The preview (`POST views/query {view: good}`), its layouts and the `✓ valid · N panels` count all come from `good.panels`; the editor never fetches a preset itself. Tests: `a from: view previews the resolved panels ...` and `a from: of another kind previews that kind's resolved panels`.
 - Cursor → selection: the panel under the cursor is lit in the preview and its columns on the ruler; clicking a preview panel moves the cursor to its `- type:` line.
 - Save: `useSaveView` sends `PUT views/{name}` with `{text, command_id}` (a fresh UUID per click). Disabled while checking, while invalid (tooltip `Fix N error(s) to save`), when nothing changed, or when the name is bad. For `new` and `overview` a Name box appears (`overview` is reserved). On success: the text becomes the new baseline, the task's view list, view document and panel queries refresh (so the new tab shows), `onSaved(name)` runs. On 400 the server's `issues` replace the markers and the error shows in an alert.
 - Discard: back to the loaded text (or `NEW_VIEW_TEXT`).
@@ -17413,14 +17717,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { outlineView } from "../../src/editor/YamlEditor";
 import type { ViewSpec } from "../../src/api/models";
-import {
-  cliCommand,
-  isViewName,
-  metricOf,
-  NEW_VIEW_TEXT,
-  resolvePanels,
-  ViewEditor,
-} from "../../src/pages/ViewEditor";
+import { cliCommand, isViewName, metricOf, NEW_VIEW_TEXT, ViewEditor } from "../../src/pages/ViewEditor";
 
 const VIEWS = "/api/v1/tasks/toy/toy-acc/views";
 const GOOD = "title: acc only\npanels:\n  - type: leaderboard\n    title: board\n    data: {metrics: [accuracy]}\n";
@@ -17433,15 +17730,35 @@ const BAD_ISSUE = {
   message: "unknown metric acuracy",
   suggestion: "accuracy",
 };
-// A view that inherits the generic preset and adds one narrow panel.
-const FROM_TEXT = "title: with preset\nfrom: generic\npanels:\n  - type: markdown\n    title: Note\n    text: hi\n    layout: {span: 4}\n";
-// What `GET views/overview` serves for a generic task: the preset, resolved, with layouts.
-const PRESET: ViewSpec = {
-  title: "Overview",
-  panels: [
-    { type: "stat_strip", title: "Summary", layout: { span: 12, row: null } },
-    { type: "leaderboard", title: "Leaderboard", layout: { span: 8, row: null } },
-  ],
+// A view that inherits the task's own kind (generic) and adds one narrow panel.
+const FROM_TEXT =
+  "title: with preset\nfrom: generic\npanels:\n  - type: markdown\n    title: Note\n    text: hi\n    layout: {span: 4}\n";
+// A view on this generic task that inherits another kind's preset and replaces its
+// `Changes` panel by title (resolve_view keeps the preset position).
+const CROSS_TEXT =
+  "title: iteration board\nfrom: agent_iteration\npanels:\n  - type: markdown\n    title: Changes\n    text: see PR\n    layout: {span: 6}\n";
+// `POST views/validate` returns `resolve_view(view)` (contract 2): preset panels with
+// their layouts first, the view's panels replacing same-title ones or appended, no `from`.
+const RESOLVED: Record<string, ViewSpec> = {
+  [FROM_TEXT]: {
+    title: "with preset",
+    panels: [
+      { type: "stat_strip", title: "Summary", layout: { span: 12, row: 1 } },
+      { type: "leaderboard", title: "Leaderboard", layout: { span: 12, row: 2 } },
+      { type: "markdown", title: "Note", text: "hi", layout: { span: 4, row: null } },
+    ],
+  },
+  [CROSS_TEXT]: {
+    title: "iteration board",
+    panels: [
+      { type: "stat_strip", title: "Summary", layout: { span: 12, row: 1 } },
+      { type: "scatter", title: "Solved by version", layout: { span: 12, row: 2 } },
+      { type: "scatter", title: "$ per solved", layout: { span: 6, row: 3 } },
+      { type: "markdown", title: "Changes", text: "see PR", layout: { span: 6, row: null } },
+      { type: "grid", title: "Flips", layout: { span: 12, row: 4 } },
+      { type: "leaderboard", title: "Leaderboard", layout: { span: 12, row: 5 } },
+    ],
+  },
 };
 
 interface Call {
@@ -17465,18 +17782,7 @@ function fakeServer(url: string, method: string, body: Record<string, unknown> |
   if (url === `${VIEWS}/validate`) {
     const text = String(body?.text);
     if (text.includes("acuracy")) return json(200, { ok: false, issues: [BAD_ISSUE] });
-    if (text === FROM_TEXT) {
-      // validate returns the view as written: `from` kept, preset panels not expanded
-      return json(200, {
-        ok: true,
-        issues: [],
-        view: {
-          title: "with preset",
-          from: "generic",
-          panels: [{ type: "markdown", title: "Note", text: "hi", layout: { span: 4, row: null } }],
-        },
-      });
-    }
+    if (RESOLVED[text]) return json(200, { ok: true, issues: [], view: RESOLVED[text] });
     const panels = outlineView(text).panels.map((p) => ({
       type: "leaderboard",
       title: p.title,
@@ -17485,18 +17791,15 @@ function fakeServer(url: string, method: string, body: Record<string, unknown> |
     return json(200, { ok: true, issues: [], view: { title: text.split("\n")[0].slice(7), panels } });
   }
   if (url === `${VIEWS}/query`) {
-    // like the server, query resolves `from:` (the preset panels come first)
-    const view = body?.view as { from?: string; panels: { type: string; title: string }[] };
-    const panels = view.from === "generic" ? [...(PRESET.panels ?? []), ...view.panels] : view.panels;
+    // the editor sends the validated view, already resolved: one result per panel
+    const view = body?.view as ViewSpec;
     return json(200, {
-      panels: panels.map((p) => ({ type: p.type, title: p.title ?? "", rows: [], meta: {} })),
-    });
-  }
-  if (method === "GET" && url === `${VIEWS}/overview` && docText === FROM_TEXT) {
-    return json(200, {
-      info: { name: "overview", title: "Overview", origin: "preset", path: null, kind: "generic" },
-      text: "title: Overview\n",
-      view: PRESET,
+      panels: (view.panels ?? []).map((p) => ({
+        type: p.type,
+        title: p.title ?? "",
+        rows: [],
+        meta: {},
+      })),
     });
   }
   if (method === "GET" && (url === `${VIEWS}/acc` || url === `${VIEWS}/overview`)) {
@@ -17577,25 +17880,6 @@ describe("helpers", () => {
     ]);
   });
 
-  test("resolvePanels applies from: like the server's resolve_view", () => {
-    const view: ViewSpec = {
-      title: "v",
-      from: "generic",
-      panels: [
-        { type: "leaderboard", title: "Leaderboard", layout: { span: 6 } },
-        { type: "markdown", title: "Note" },
-      ],
-    };
-    expect(resolvePanels(view, PRESET).map((p) => [p.type, p.title, p.layout?.span])).toEqual([
-      ["stat_strip", "Summary", 12],
-      ["leaderboard", "Leaderboard", 6],
-      ["markdown", "Note", undefined],
-    ]);
-    expect(resolvePanels(view, null)).toBe(view.panels ?? []);
-    const plain: ViewSpec = { title: "p", panels: [{ type: "markdown", title: "Note" }] };
-    expect(resolvePanels(plain, PRESET)).toEqual([{ type: "markdown", title: "Note" }]);
-    expect(resolvePanels({ title: "empty" }, null)).toEqual([]);
-  });
 });
 
 describe("ViewEditor", () => {
@@ -17692,18 +17976,37 @@ describe("ViewEditor", () => {
     expect([put?.url, put?.body?.text]).toEqual([`${VIEWS}/acc_copy`, GOOD]);
   });
 
-  test("a from: view previews inherited panels with the preset's layouts and counts them", async () => {
+  const asides = async (title: string) =>
+    (await screen.findByRole("region", { name: title })).querySelector(".aside")?.textContent;
+
+  test("a from: view previews the resolved panels with the preset's layouts and counts them", async () => {
     docText = FROM_TEXT;
     renderEditor("acc");
     await waitFor(() => expect(status()).toContain("✓ valid · 3 panels"));
-    expect(calls.some((c) => c.method === "GET" && c.url === `${VIEWS}/overview`)).toBe(true);
-    const asides = async (title: string) =>
-      (await screen.findByRole("region", { name: title })).querySelector(".aside")?.textContent;
     expect(await asides("Summary")).toBe("12/12");
-    expect(await asides("Leaderboard")).toBe("8/12");
+    expect(await asides("Leaderboard")).toBe("12/12");
     expect(await asides("Note")).toBe("4/12");
+    // the resolved view is what gets previewed; no extra preset fetch
     const query = calls.find((c) => c.url === `${VIEWS}/query`);
-    expect((query?.body?.view as ViewSpec).from).toBe("generic");
+    const sent = (query?.body?.view as ViewSpec).panels ?? [];
+    expect(sent.map((p) => p.title)).toEqual(["Summary", "Leaderboard", "Note"]);
+    expect(calls.some((c) => c.method === "GET" && c.url === `${VIEWS}/overview`)).toBe(false);
+  });
+
+  test("a from: of another kind previews that kind's resolved panels", async () => {
+    // the task is generic; the view inherits agent_iteration and replaces its Changes panel
+    docText = CROSS_TEXT;
+    renderEditor("acc");
+    await waitFor(() => expect(status()).toContain("✓ valid · 6 panels"));
+    expect(await asides("Solved by version")).toBe("12/12");
+    expect(await asides("$ per solved")).toBe("6/12");
+    expect(await asides("Changes")).toBe("6/12");
+    const changes = await screen.findByRole("region", { name: "Changes" });
+    expect(changes.textContent).toContain("markdown body");
+    expect(await asides("Leaderboard")).toBe("12/12");
+    const query = calls.find((c) => c.url === `${VIEWS}/query`);
+    expect((query?.body?.view as ViewSpec).panels?.length).toBe(6);
+    expect(calls.some((c) => c.method === "GET" && c.url === `${VIEWS}/overview`)).toBe(false);
   });
 
   test("a 400 from Save shows the error and the server's issues", async () => {
@@ -17787,7 +18090,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import "../editor/editor.css";
 import { ApiError, api } from "../api/client";
-import type { PanelSpec, ViewSpec } from "../api/models";
+import type { ViewSpec } from "../api/models";
 import { useLeaderboard, useSaveView, useView, useViewQuery } from "../api/queries";
 import { PanelPalette, type PanelType, panelSnippet, planInsert } from "../editor/PanelPalette";
 import { type LayoutHint, type PanelResult, Preview } from "../editor/Preview";
@@ -17828,30 +18131,6 @@ export function cliCommand(project: string, task: string, name: string, text: st
   while (lines.has(tag)) tag = `${tag}_`;
   const file = `/tmp/hx-view-${name}.yaml`;
   return `cat > ${file} <<'${tag}'\n${body}${tag}\nhx view add ${task} --file ${file} --name ${name} -p ${project}`;
-}
-
-/**
- * The panels of `view` after `from:`, merged the way the server's `resolve_view` does.
- *
- * Preset panels come first; a view panel whose non-empty title equals a preset panel's
- * title replaces it in place; every other view panel is appended. With no `from` or no
- * `preset`, the view's own panels come back unchanged. `POST views/validate` returns the
- * view as written, so the editor needs this to lay out and count inherited panels.
- */
-export function resolvePanels(view: ViewSpec, preset: ViewSpec | null): PanelSpec[] {
-  const own = view.panels ?? [];
-  if (!view.from || !preset) return own;
-  const panels = [...(preset.panels ?? [])];
-  const position = new Map<string, number>();
-  panels.forEach((p, i) => {
-    if (p.title) position.set(p.title, i);
-  });
-  for (const panel of own) {
-    const at = panel.title ? position.get(panel.title) : undefined;
-    if (at === undefined) panels.push(panel);
-    else panels[at] = panel;
-  }
-  return panels;
 }
 
 function useDebounced<T>(value: T, ms: number): T {
@@ -17919,13 +18198,9 @@ export function ViewEditor({ project, task, view, onSaved, renderPanel = registr
   }, [validation.data]);
 
   const preview = useViewQuery(project, task, good ? { view: good } : null);
-  // `from:` views: the task kind's preset (resolved, with layouts) fills in inherited panels.
-  const presetDoc = useView(project, task, good?.from ? "overview" : null);
-  const presetData = presetDoc.data;
-  const preset: ViewSpec | null =
-    good?.from && presetData && presetData.info.kind === good.from ? presetData.view : null;
-  const resolved = good ? resolvePanels(good, preset) : [];
-  const resolvedComplete = !good?.from || preset !== null;
+  // `POST views/validate` returns the view resolved (contract 2): `from:` preset panels,
+  // with their layouts, are already in `good.panels`, for any preset kind.
+  const resolved = good?.panels ?? [];
 
   const checking = !loaded || debounced !== text || validation.isFetching || !validation.data;
   const valid = !checking && validation.data?.ok === true;
@@ -17997,8 +18272,7 @@ export function ViewEditor({ project, task, view, onSaved, renderPanel = registr
   };
 
   const firstIssueLine = issues.find((i) => i.line !== null)?.line ?? null;
-  // The resolved count; for a `from:` of another kind, the server-resolved preview's count.
-  const nPanels = resolvedComplete ? resolved.length : results.length;
+  const nPanels = resolved.length;
   let status: ReactNode;
   if (validation.error) status = <span className="vs err">✕ {validation.error.message}</span>;
   else if (checking) status = <span className="vs">checking</span>;

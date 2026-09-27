@@ -71,6 +71,7 @@ class PanelSpec(BaseModel, extra="forbid"):
     spec: dict[str, Any] | None = None                              # vega_lite
     text: str | None = None                                         # markdown
     scale: Literal["linear","log"] = "linear"                       # distribution/scatter x
+    render: Literal["chart","table"] = "chart"                      # distribution: "table" = percentile table with Δ vs baseline
 class ViewSpec(BaseModel, extra="forbid"):
     title: str; from_: TaskKind | None = Field(None, alias="from"); runs: RunFilter = RunFilter(); panels: list[PanelSpec] = []
 class ValidationIssue(BaseModel): line: int | None; path: str; message: str; suggestion: str | None = None
@@ -109,11 +110,11 @@ def query_panel(ctx: Context, project: str, task: str, panel: PanelSpec, runs_fi
 def query_view(ctx: Context, project: str, task: str, view: ViewSpec) -> list[PanelResult]: ...
 ```
 Row shapes (keys exact):
-- `stat_strip`: `{label, value, unit, tooltip}`; `meta.headline: str`.
+- `stat_strip`: `{label, value, unit, tooltip}`; `meta.headline: str`. With `data.metrics`, one row per reference (mean over the selected runs after `filter`/`pick`); without it, the task's stat strip.
 - `leaderboard`: one row per seed group = `LeaderboardRow` fields (1.7) as JSON.
 - `curves`: `{run_id, group_id, seed, name, step, value}`; `meta.checkpoints: [{run_id, step, value, best: bool}]`, `meta.events: [{run_id, step, kind: "spike"|"killed"|"failed"}]`, `meta.groups: [{group_id, label}]`.
-- `scatter`: `{group_id, label, x, x_lo, x_hi, y, y_lo, y_hi, seeds: [{x, y}], pareto: bool}`.
-- `distribution`: `{group_id, label, n, p50, p95, p99, ecdf: [[x, y], ...], seeds: [{run_id, p50, p95, p99}]}`.
+- `scatter`: `{group_id, label, x, x_lo, x_hi, y, y_lo, y_hi, seeds: [{x, y}], pareto: bool, regression: bool}`; `meta.x, meta.y` (resolved; `data.y` defaults to the task primary), `meta.x_type: "quantitative"|"ordinal"`. Ordinal when `data.x` is a `params.`/`vars.` field with a non-numeric value: `x` is the raw string, rows are in natural order (`v9` before `v10`), `x_lo`/`x_hi` are null, no Pareto front. `regression` is true only when `meta.x_type == "ordinal"` and the row's y is worse than the best y among all earlier rows by more than that earlier best row's CI allows: higher-is-better `y_hi < best_earlier.y_lo`, lower-is-better `y_lo > best_earlier.y_hi` (a null bound on either side → false; ties keep the earlier row as best). Direction: the task primary uses `Leaderboard.higher_is_better`; `usage.*` is lower-is-better; another configured metric uses its `higher_is_better`; any other name is lower-is-better when it contains `loss` or `error`. Quantitative x → always false.
+- `distribution`: `{group_id, label, n, p50, p95, p99, ecdf: [[x, y], ...], seeds: [{run_id, p50, p95, p99}], vs_baseline: {p50: [delta_rel, lo, hi], p95: [...], p99: [...]} | null}`; `meta.name, meta.scale, meta.render` (`panel.render`), `meta.baseline` (the baseline row's `group_id` or null). The baseline is the row the task's `TaskSpec.baseline` selects (`tag:<t>`: the first group with a run tagged `<t>`; else a group_id, group_id prefix, or config_hash); the baseline row itself, every row when no baseline is configured or none matches, and every row when a baseline percentile is 0 get null. `delta_rel = (row.pXX − base.pXX) / base.pXX` on the pooled percentiles; `lo`/`hi` are the 2.5th/97.5th percentiles of a percentile bootstrap over the per-seed percentile values of both groups (1000 resamples, each percentile with its own `random.Random(0)`; per resample: draw the row's seeds with replacement, then the baseline's, take `(mean_row − mean_base) / mean_base`); `lo`/`hi` are null when either side has < 2 repeats.
 - `grid`: `{item_id, group_id, value}` (value = fraction of seeds solved, 0..1); `meta.items: [item_id...]` ordered by difficulty (mean value asc), `meta.groups`.
 - `table`, `vega_lite`: rows from `iter_rows` restricted to `fields`; `vega_lite` adds `meta.spec` (the spec with `data.values` left empty; the UI injects rows).
 - `trace`: `{turn, tool, args, result, tokens_in, tokens_out, seconds, error}`; `meta.run_id`, `meta.example_id`, `meta.failed_turn`.
@@ -126,7 +127,7 @@ Spike detection for curves: a point is a spike if `value > 5 × median(previous 
 class NoiseInterval(BaseModel): lo: float; hi: float; method: Literal["wilson","bootstrap"]; n: int
 class VersusBest(BaseModel): delta: float; p: float | None; fixed: int | None; broken: int | None; test: Literal["sign","paired_bootstrap","welch"] | None; examples_needed: int | None
 class LeaderboardRow(...):           # add
-    label: str                         # short name: group hypothesis first clause, or tag, or "group <id>"
+    label: str                         # short name: for agent_iteration tasks, the group's `version_param` value when set; otherwise group hypothesis first clause, or tag, or "group <id>"
     seed_values: dict[str, list[float]]   # per metric/key, one value per seed (run order)
     identical_seeds: bool              # n>1 and all primary seed values equal
     test_interval: NoiseInterval | None
@@ -182,7 +183,7 @@ Writes real projects (repo dirs under `<home>/demo-repos/`) and runs through the
 | GET | `/tasks/{project}/{task}/views/{name}` | | `{info: ViewInfo, text: str, view: ViewSpec}` (text = YAML as stored; presets serialised) |
 | PUT | `/tasks/{project}/{task}/views/{name}` | `{text, command_id?}` | `{info, view}`; 400 with `{error, issues: [ValidationIssue]}` if invalid |
 | DELETE | `/tasks/{project}/{task}/views/{name}` | | `{ok: true}`; 400 for `overview` |
-| POST | `/tasks/{project}/{task}/views/validate` | `{text}` | `{ok, issues, view?}` |
+| POST | `/tasks/{project}/{task}/views/validate` | `{text}` | `{ok, issues, view? (resolved)}` — `view` is `resolve_view(view)` serialised by alias, so `from:` preset panels (with layouts) come first; the preset is the one `from` names, whatever the task's kind |
 | POST | `/tasks/{project}/{task}/views/query` | `{view?: ViewSpec, name?: str, panel?: PanelSpec}` | `{panels: [PanelResult]}` |
 | GET | `/tasks/{project}/{task}/leaderboard` | existing | `Leaderboard` (with 1.7 additions) |
 | GET | `/runs/{id}/traces` | | `[{example_id, turns, failed}]` |
@@ -200,7 +201,7 @@ MCP tools: `list_views(task, project=None)`, `get_view(task, name, project=None)
 
 - Bun + Vite + React 19 + TypeScript (strict). TanStack Router (file-free, code routes) + TanStack Query. CodeMirror 6 (`@codemirror/lang-yaml`, lint gutter) for the view editor. `vega-embed` for `vega_lite`. `d3-scale`, `d3-shape`, `d3-array`, `d3-format` for chart math. No Tailwind, no component kit.
 - Tests: `bun test` with `happy-dom` + `@testing-library/react` for components; Playwright (`bunx playwright test`) smoke tests against `hx serve` on a demo home.
-- Build: `bun run build` writes to `src/hypothex/ui_dist/` (git-ignored; built in CI and before packaging). `hatch` includes `ui_dist` in the wheel via `[tool.hatch.build.targets.wheel.force-include]` only when present.
+- Build: `bun run build` writes to `src/hypothex/ui_dist/` (git-ignored; built in CI and before packaging). `hatch` includes `ui_dist` in the wheel only when present, via `artifacts = ["src/hypothex/ui_dist/**"]` under `[tool.hatch.build.targets.wheel]` (not `force-include`, which fails the build when the folder is missing).
 - Types: `ui/src/api/types.ts` generated from `/api/openapi.json` with `bunx openapi-typescript`, checked in; `bun run gen:types` regenerates.
 - Routes: `/` Overview, `/t/:project/:task` Task (view tabs, `?view=<name>`), `/t/:project/:task/edit/:view` View editor (`new` for a new view), `/r/:runId` Run, `/x/:a/:b` Examples (query `metric`).
 - Design tokens: copied verbatim from `docs/mockups/ui-v4/index.html` into `ui/src/styles/tokens.css` (light + `[data-theme=dark]`).

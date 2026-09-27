@@ -711,4 +711,5 @@ Each phase gets its own implementation plan.
 | UI style | Journal-figure, terse (mockup ui-v4) | User choice after 3 directions + revisions |
 | Dashboards | Task kinds as preset views; custom YAML views with a panel library and a Vega-Lite escape hatch | Training, agent evals, agent iteration, and system benchmarks need different views; users add their own |
 | Noise | Seed noise and test-set noise shown separately | Seeds alone overstate certainty on small test sets |
+| Regressions & baseline | scatter rows flag regressions on ordinal x; distribution rows carry Δ vs baseline with repeat-bootstrap CI | Needed by agent_iteration and system_bench presets |
 | Name | Hypothex / `hx` | Free on PyPI + npm (checked 2026-09-26) |

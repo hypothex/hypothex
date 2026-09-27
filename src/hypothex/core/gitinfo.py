@@ -11,6 +11,7 @@ from hypothex.core.errors import GitError
 from hypothex.core.records import GitInfo
 
 DIFF_LIMIT_BYTES = 5 * 1024 * 1024
+UNTRACKED_LIST_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -106,9 +107,36 @@ def head_commit(path: Path) -> str | None:
     return out.stdout.strip() if out.returncode == 0 else None
 
 
+def untracked_files(path: Path) -> list[str]:
+    """
+    List untracked, non-ignored files of the whole repo containing ``path``.
+
+    Parameters
+    ----------
+    path : Path
+        Directory inside a git repo (any subdirectory works).
+
+    Returns
+    -------
+    list of str
+        Paths relative to the repo root, in git's (sorted) order; empty when
+        ``path`` is not inside a git repo.
+    """
+    top = _git(path, "rev-parse", "--show-toplevel")
+    if top.returncode != 0:
+        return []
+    out = _git(Path(top.stdout.strip()), "ls-files", "--others", "--exclude-standard", "-z")
+    if out.returncode != 0:
+        return []
+    return [name for name in out.stdout.split("\0") if name]
+
+
 def git_info(path: Path) -> GitInfo:
     """
     Describe the git state of ``path``.
+
+    ``dirty`` counts tracked changes only (staged or unstaged), matching what
+    ``capture_diff`` saves. Untracked files are reported separately.
 
     Parameters
     ----------
@@ -125,13 +153,47 @@ def git_info(path: Path) -> GitInfo:
         return GitInfo()
     branch = _git(path, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or None
     remote = _git(path, "remote", "get-url", "origin")
-    dirty = bool(_git(path, "status", "--porcelain").stdout.strip())
+    status = _git(path, "status", "--porcelain", "--untracked-files=no")
+    untracked = untracked_files(path)
     return GitInfo(
         repo=strip_credentials(remote.stdout.strip()) if remote.returncode == 0 else None,
         commit=commit,
         branch=branch,
-        dirty=dirty,
+        dirty=bool(status.stdout.strip()),
+        untracked_count=len(untracked),
+        untracked=untracked[:UNTRACKED_LIST_LIMIT],
     )
+
+
+def git_state_label(info: GitInfo) -> str:
+    """
+    One-line wording of a run's git state for run pages and ``hx show``.
+
+    Parameters
+    ----------
+    info : GitInfo
+        The run's recorded git state.
+
+    Returns
+    -------
+    str
+        ``"no git"``, ``"dirty"``, ``"dirty, N untracked"``,
+        ``"untracked files only (N)"``, or ``"clean"``.
+
+    Examples
+    --------
+    >>> git_state_label(GitInfo(commit="abc", untracked_count=2))
+    'untracked files only (2)'
+    >>> git_state_label(GitInfo(commit="abc", dirty=True))
+    'dirty'
+    """
+    if info.commit is None:
+        return "no git"
+    if info.dirty:
+        return f"dirty, {info.untracked_count} untracked" if info.untracked_count else "dirty"
+    if info.untracked_count:
+        return f"untracked files only ({info.untracked_count})"
+    return "clean"
 
 
 def capture_diff(path: Path, limit: int = DIFF_LIMIT_BYTES) -> DiffCapture:

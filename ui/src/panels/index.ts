@@ -6,6 +6,7 @@
  */
 import { Component, createElement, type ComponentType, type ReactElement, type ReactNode } from "react";
 import type { PanelResult as ApiPanelResult, PanelType } from "../api/models";
+import { Leaderboard } from "./Leaderboard";
 import { StatStrip } from "./StatStrip";
 import "./panels.css";
 
@@ -29,6 +30,7 @@ export interface PanelProps {
 /** Registered panel components. Later panel groups add their entries here. */
 export const PANELS: Partial<Record<PanelType, ComponentType<PanelProps>>> = {
   stat_strip: StatStrip,
+  leaderboard: Leaderboard,
 };
 
 /** Return the component for `type`, or `null` if none is registered. */

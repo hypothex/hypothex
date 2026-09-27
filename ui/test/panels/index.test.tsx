@@ -41,3 +41,10 @@ test("Panel contains a panel that throws", () => {
     else delete PANELS.table;
   }
 });
+
+test("the registry maps leaderboard to Leaderboard", async () => {
+  const { Leaderboard } = await import("../../src/panels/Leaderboard");
+  expect(panelFor("leaderboard")).toBe(Leaderboard);
+  render(<Panel result={{ type: "leaderboard", title: "", rows: [] }} />);
+  expect(screen.getByText("No scored runs yet")).toBeTruthy();
+});

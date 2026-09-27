@@ -1,0 +1,7 @@
+/* Panel layouts. Values copied from docs/mockups/ui-v4 and docs/mockups/kinds/training.
+   The stat strip uses the shared `.stats` rules in styles/base.css. */
+.panel-error {
+  padding: 10px 12px; border: 1px solid var(--fail); border-radius: 6px;
+  color: var(--fail); font-size: 13px;
+}
+.panel-empty { margin: 0; font-size: 13px; color: var(--ink-3); }

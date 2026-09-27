@@ -34,12 +34,21 @@ class RunKind(StrEnum):
 
 
 class GitInfo(BaseModel):
-    """Git state of the working copy a run was launched from."""
+    """
+    Git state of the working copy a run was launched from.
+
+    ``dirty`` is True only for changes to tracked files (what ``git.diff``
+    captures). Untracked files are counted separately in
+    ``untracked_count``; ``untracked`` holds the first 20 of their paths,
+    relative to the repo root.
+    """
 
     repo: str | None = None
     commit: str | None = None
     branch: str | None = None
     dirty: bool = False
+    untracked_count: int = 0
+    untracked: list[str] = Field(default_factory=list)
 
 
 class DatasetRef(BaseModel):
@@ -57,12 +66,29 @@ class DatasetRef(BaseModel):
 
 
 class Artifact(BaseModel):
-    """A large file recorded by path, not copied."""
+    """
+    A large file recorded by path, not copied.
+
+    Checkpoints also carry the training ``step`` they were saved at and the
+    ``metrics`` logged with them (for example ``{"val_loss": 1.92}``).
+    """
 
     kind: str
     path: str
     host: str = "local"
     size: int | None = None
+    step: int | None = None
+    metrics: dict[str, float] = Field(default_factory=dict)
+
+
+class UsageTotals(BaseModel):
+    """Summed resource use of a run (from ``usage.jsonl``) or of a group of runs."""
+
+    tokens_in: int = 0
+    tokens_out: int = 0
+    usd: float = 0.0
+    seconds: float = 0.0
+    calls: int = 0
 
 
 class ExecutorInfo(BaseModel):
@@ -108,6 +134,7 @@ class RunRecord(BaseModel):
     starred: bool = False
     archived: bool = False
     created_by: str = "human"
+    usage: UsageTotals | None = None
 
     @property
     def command_display(self) -> str:

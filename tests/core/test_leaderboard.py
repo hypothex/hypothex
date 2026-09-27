@@ -3,9 +3,10 @@ from typing import Any
 
 import pytest
 
+from hypothex.core import stats
 from hypothex.core.config import ProjectConfig
 from hypothex.core.ids import utcnow
-from hypothex.core.leaderboard import build_leaderboard, group_label
+from hypothex.core.leaderboard import build_leaderboard, group_label, pick_field
 from hypothex.core.records import GitInfo, RunRecord, RunStatus, ScoreRecord, UsageTotals
 from tests.factories import make_record
 
@@ -243,3 +244,130 @@ def test_nan_score_is_ignored_like_an_error() -> None:
     assert [r.label for r in board.rows] == ["ok run"]
     assert board.unscored == ["a0"]
     assert "nan" not in board.model_dump_json().lower()
+
+
+# phase 1b: test-set noise and paired tests ---------------------------------------------
+def binary(n: int, right: set[int]) -> dict[str, dict[str, Any]]:
+    return {f"e{i}": {"correct": i in right} for i in range(n)}
+
+
+def test_pick_field() -> None:
+    assert pick_field([{"correct": True, "loss": 0.2}]) == ("correct", True)
+    assert pick_field([{"solved": 1}, {"solved": 0}]) == ("solved", True)
+    assert pick_field([{"hit": 1}, {"hit": 0}]) == ("hit", False)
+    assert pick_field([{"ok": False, "f1": 0.5}]) == ("ok", True)
+    assert pick_field([{"a": 0.1, "f1": 0.5}], key="f1") == ("f1", False)
+    assert pick_field([{"a": 0.1, "f1": None}], key="f1") == ("a", False)
+    assert pick_field([{"note": "x"}]) is None
+    assert pick_field([]) is None
+
+
+def test_binary_examples_give_wilson_interval_and_sign_test() -> None:
+    runs = [krun("a0", "a", hypothesis="svm"), krun("b0", "b", hypothesis="rf")]
+    scores = {"a0": acc(0.8), "b0": acc(0.4)}
+    per_example = {"a0": binary(10, set(range(8))), "b0": binary(10, {0, 1, 2, 8})}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    best, other = board.rows
+    # Reference: statsmodels proportion_confint(8, 10, method="wilson")
+    ti = best.test_interval
+    assert ti is not None and (ti.method, ti.n) == ("wilson", 10)
+    assert ti.lo == pytest.approx(0.49016247153664183)
+    assert ti.hi == pytest.approx(0.9433178485456247)
+    # Reference: statsmodels proportion_confint(4, 10, method="wilson")
+    assert other.test_interval is not None
+    assert other.test_interval.lo == pytest.approx(0.16818032970623614)
+    assert other.test_interval.hi == pytest.approx(0.6873262302663417)
+    assert best.vs_best is None
+    vs = other.vs_best
+    assert vs is not None and vs.test == "sign"
+    assert vs.delta == pytest.approx(-0.4)
+    assert (vs.fixed, vs.broken) == (5, 1)  # e3..e7 only svm; e8 only rf
+    assert vs.p == pytest.approx(0.21875)  # scipy.stats.binomtest(1, 6).pvalue = 14/64
+    assert vs.examples_needed == stats.examples_needed(5, 1, 10)
+    assert vs.examples_needed is not None
+
+
+def test_seeds_pooled_per_example_by_majority() -> None:
+    runs = [krun(f"a{i}", "a", minute=i) for i in range(3)] + [krun("b0", "b")]
+    scores = {"a0": acc(0.5), "a1": acc(0.5), "a2": acc(0.5), "b0": acc(0.25)}
+    per_example = {
+        "a0": binary(4, {0, 1}),
+        "a1": binary(4, {0, 2}),
+        "a2": binary(4, {0, 1}),
+        "b0": binary(4, {2}),
+    }
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    best, other = board.rows
+    assert best.identical_seeds and best.seed_values == {"acc/value": [0.5, 0.5, 0.5]}
+    # pooled per example: 1, 2/3, 1/3, 0 -> 2 of 4; statsmodels wilson(2, 4)
+    assert best.test_interval is not None and best.test_interval.n == 4
+    assert best.test_interval.lo == pytest.approx(0.15003898915214947)
+    assert best.test_interval.hi == pytest.approx(0.8499610108478506)
+    vs = other.vs_best
+    assert vs is not None and (vs.fixed, vs.broken) == (2, 1)  # majority: a passes e0, e1
+    assert vs.p == pytest.approx(1.0)  # scipy.stats.binomtest(1, 3).pvalue
+
+
+def test_continuous_examples_use_bootstrap() -> None:
+    runs = [krun("a0", "a"), krun("b0", "b")]
+    scores = {"a0": acc(0.75), "b0": acc(0.5)}
+    a_vals, b_vals = [0.9, 0.8, 0.7, 0.6], [0.5, 0.6, 0.4, 0.5]
+    per_example = {
+        "a0": {f"e{i}": {"score": v} for i, v in enumerate(a_vals)},
+        "b0": {f"e{i}": {"score": v} for i, v in enumerate(b_vals)},
+    }
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    best, other = board.rows
+    ti = best.test_interval
+    assert ti is not None and ti.method == "bootstrap" and ti.n == 4
+    assert (ti.lo, ti.hi) == stats.bootstrap_mean_interval(a_vals)
+    assert 0.6 <= ti.lo <= 0.75 <= ti.hi <= 0.9
+    vs = other.vs_best
+    assert vs is not None and vs.test == "paired_bootstrap"
+    assert vs.p == stats.paired_bootstrap_p(b_vals, a_vals)
+    assert vs.fixed is None and vs.broken is None and vs.examples_needed is None
+
+
+def test_without_examples_seed_groups_use_welch() -> None:
+    runs, scores = [], {}
+    for g, values in {"a": [0.80, 0.82, 0.81], "b": [0.70, 0.71, 0.69], "c": [0.5]}.items():
+        for i, v in enumerate(values):
+            runs.append(krun(f"{g}{i}", g, minute=i))
+            scores[f"{g}{i}"] = acc(v)
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example={})
+    _, b, c = board.rows
+    assert b.test_interval is None
+    assert b.vs_best is not None and b.vs_best.test == "welch"
+    # Reference: scipy.stats.ttest_ind(b, a, equal_var=False).pvalue
+    assert b.vs_best.p == pytest.approx(0.00017563538261646214, rel=1e-6)
+    assert c.vs_best is not None and c.vs_best.test is None and c.vs_best.p is None
+    assert c.vs_best.delta == pytest.approx(-0.31)
+
+
+def test_examples_of_other_runs_are_ignored() -> None:
+    runs = [krun("a0", "a"), krun("x", "x", archived=True)]
+    # rows of an archived run and of an unknown run would make "correct" non-binary
+    per_example = {
+        "a0": binary(2, {0}),
+        "x": {"e0": {"correct": 0.5}},
+        "ghost": {"e1": {"correct": 0.5}},
+    }
+    board = build_leaderboard("toy", "t", KINDS, runs, {"a0": acc(0.5)}, per_example=per_example)
+    ti = board.rows[0].test_interval
+    assert ti is not None and (ti.method, ti.n) == ("wilson", 2)
+
+
+def test_paired_test_uses_only_shared_examples() -> None:
+    # b0 was scored on the first 5 examples only (the test split grew between runs)
+    runs = [krun("a0", "a", hypothesis="svm"), krun("b0", "b", hypothesis="rf")]
+    scores = {"a0": acc(0.8), "b0": acc(0.4)}
+    per_example = {"a0": binary(10, set(range(8))), "b0": binary(5, {0, 1})}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    best, other = board.rows
+    assert best.test_interval is not None and best.test_interval.n == 10
+    assert other.test_interval is not None and other.test_interval.n == 5
+    vs = other.vs_best
+    assert vs is not None and vs.test == "sign"
+    assert (vs.fixed, vs.broken) == (3, 0)  # e2, e3, e4; e5..e9 are not shared
+    assert vs.p == pytest.approx(0.25)  # scipy.stats.binomtest(0, 3).pvalue = 2 / 8
+    assert vs.examples_needed == stats.examples_needed(3, 0, 5)

@@ -10,11 +10,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from hypothex.core import stats
 from hypothex.core.config import ProjectConfig, TaskKind, TaskSpec, parse_metric_key
 from hypothex.core.headlines import percentile_of
 from hypothex.core.records import RunRecord, RunStatus, ScoreRecord, UsageTotals
 from hypothex.core.seeds import Stats, intervals_overlap, summarize
 
+PerExample = dict[str, dict[str, dict[str, Any]]]
+"""run_id -> example_id -> per-example fields of the primary metric."""
+
+BINARY_FIELDS = ("correct", "solved")
 LABEL_MAX = 32
 _CLAUSE = re.compile(
     r"[,;:()]|\s[-–—]\s|\.(?:\s|$)|\s(?:because|should|so that|since|to see if|in order to)\s",
@@ -158,6 +163,124 @@ def _higher_is_better(config: ProjectConfig, spec: TaskSpec) -> bool:
     return config.metrics[metric].higher_is_better
 
 
+# test-set noise --------------------------------------------------------------------
+def _is_number(v: Any) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def pick_field(rows: Iterable[dict[str, Any]], key: str = "value") -> tuple[str, bool] | None:
+    """
+    Choose the per-example field used for test-set noise and paired tests.
+
+    Parameters
+    ----------
+    rows : iterable of dict
+        Per-example score dicts (one per example and run).
+    key : str
+        The primary metric's key, preferred among numeric fields.
+
+    Returns
+    -------
+    tuple of (str, bool) or None
+        Field name and whether it is binary. Order: ``correct`` or ``solved``
+        if binary (bools, or 0/1); any all-bool field (sorted by name);
+        ``key`` if numeric; any all-numeric field. ``None`` values are ignored.
+
+    Examples
+    --------
+    >>> pick_field([{"correct": True, "loss": 0.2}])
+    ('correct', True)
+    >>> pick_field([{"f1": 0.5}], key="f1")
+    ('f1', False)
+    """
+    values: dict[str, list[Any]] = defaultdict(list)
+    for row in rows:
+        for k, v in row.items():
+            if v is not None:
+                values[k].append(v)
+
+    def binary(k: str) -> bool:
+        vs = values[k]
+        if all(isinstance(v, bool) for v in vs):
+            return True
+        return k in BINARY_FIELDS and all(isinstance(v, int) and v in (0, 1) for v in vs)
+
+    for k in BINARY_FIELDS:
+        if k in values and binary(k):
+            return k, True
+    for k in sorted(values):
+        if all(isinstance(v, bool) for v in values[k]):
+            return k, True
+    if key in values and all(_is_number(v) for v in values[key]):
+        return key, False
+    for k in sorted(values):
+        if all(_is_number(v) for v in values[k]):
+            return k, False
+    return None
+
+
+def _pool(run_ids: list[str], per_example: PerExample, field: str) -> dict[str, float]:
+    seen: dict[str, list[float]] = defaultdict(list)
+    for rid in run_ids:
+        for ex, fields in per_example.get(rid, {}).items():
+            v = fields.get(field)
+            if isinstance(v, bool | int | float) and math.isfinite(v):
+                seen[ex].append(float(v))
+    return {ex: math.fsum(vs) / len(vs) for ex, vs in seen.items()}
+
+
+def _test_interval(pooled: dict[str, float], binary: bool) -> NoiseInterval | None:
+    if not pooled:
+        return None
+    values = [pooled[k] for k in sorted(pooled)]
+    if binary:
+        successes = math.floor(math.fsum(values) + 0.5)
+        lo, hi = stats.wilson_interval(successes, len(values))
+        return NoiseInterval(lo=lo, hi=hi, method="wilson", n=len(values))
+    lo, hi = stats.bootstrap_mean_interval(values)
+    return NoiseInterval(lo=lo, hi=hi, method="bootstrap", n=len(values))
+
+
+def _versus(
+    row: LeaderboardRow,
+    best: LeaderboardRow,
+    pooled: dict[str, dict[str, float]],
+    binary: bool | None,
+    primary: str,
+) -> VersusBest:
+    assert row.primary is not None and best.primary is not None
+    delta = row.primary.mean - best.primary.mean
+    mine, theirs = pooled.get(row.group_id, {}), pooled.get(best.group_id, {})
+    common = sorted(mine.keys() & theirs.keys())
+    if common and binary:
+        row_pass = [mine[k] > 0.5 for k in common]
+        best_pass = [theirs[k] > 0.5 for k in common]
+        fixed = sum(1 for r, b in zip(row_pass, best_pass, strict=True) if b and not r)
+        broken = sum(1 for r, b in zip(row_pass, best_pass, strict=True) if r and not b)
+        return VersusBest(
+            delta=delta,
+            p=stats.sign_test(fixed, broken),
+            fixed=fixed,
+            broken=broken,
+            test="sign",
+            examples_needed=stats.examples_needed(fixed, broken, len(common)),
+        )
+    if common and binary is False:
+        p = stats.paired_bootstrap_p([mine[k] for k in common], [theirs[k] for k in common])
+        return VersusBest(
+            delta=delta, p=p, fixed=None, broken=None, test="paired_bootstrap", examples_needed=None
+        )
+    p = stats.welch_p(row.seed_values.get(primary, []), best.seed_values.get(primary, []))
+    return VersusBest(
+        delta=delta,
+        p=p,
+        fixed=None,
+        broken=None,
+        test="welch" if p is not None else None,
+        examples_needed=None,
+    )
+
+
 # rows --------------------------------------------------------------------------------
 def _sum_usage(members: list[RunRecord]) -> UsageTotals | None:
     used = [m.usage for m in members if m.usage is not None]
@@ -221,6 +344,8 @@ def build_leaderboard(
     runs: list[RunRecord],
     scores: dict[str, list[ScoreRecord]],
     versions: dict[str, str] | None = None,
+    *,
+    per_example: PerExample | None = None,
 ) -> Leaderboard:
     """
     Build a leaderboard for one task.
@@ -242,6 +367,10 @@ def build_leaderboard(
         Scores per run id.
     versions : dict of str to str, optional
         Metric version overrides; default is each metric's current version.
+    per_example : dict, optional
+        run_id -> example_id -> per-example fields of the primary metric at
+        the selected version. Enables test-set intervals and paired tests;
+        without it rows are compared with a Welch t-test over seed values.
 
     Returns
     -------
@@ -286,7 +415,16 @@ def build_leaderboard(
         if r.run_id in per_run:
             groups[(r.config_hash, r.git.commit)].append(r)
 
-    rows = [_make_row(members, per_run, spec, primary) for members in groups.values()]
+    examples = {rid: ex for rid, ex in (per_example or {}).items() if rid in per_run}
+    picked = pick_field((f for ex in examples.values() for f in ex.values()), primary_key)
+    rows: list[LeaderboardRow] = []
+    pooled: dict[str, dict[str, float]] = {}
+    for members in groups.values():
+        row = _make_row(members, per_run, spec, primary)
+        if picked is not None:
+            pooled[row.group_id] = _pool(row.run_ids, examples, picked[0])
+            row.test_interval = _test_interval(pooled[row.group_id], picked[1])
+        rows.append(row)
 
     def sort_key(row: LeaderboardRow) -> tuple[int, float]:
         if row.primary is None:
@@ -295,10 +433,12 @@ def build_leaderboard(
 
     rows.sort(key=sort_key)
     if rows and rows[0].primary is not None:
-        best = rows[0].primary
+        best = rows[0]
         for row in rows[1:]:
-            if row.primary is not None:
-                row.within_noise_of_best = intervals_overlap(row.primary, best)
+            if row.primary is not None and best.primary is not None:
+                row.within_noise_of_best = intervals_overlap(row.primary, best.primary)
+                binary = picked[1] if picked is not None else None
+                row.vs_best = _versus(row, best, pooled, binary, primary)
 
     return Leaderboard(
         project=project,

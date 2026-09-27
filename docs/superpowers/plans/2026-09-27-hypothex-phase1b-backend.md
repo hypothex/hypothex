@@ -1535,7 +1535,7 @@ git commit -m "fix(git): count only tracked changes as dirty and record untracke
 ### Task 5: Task kind, inline views, baseline, and version param in `hypothex.yaml`
 
 **Files:**
-- Modify: `src/hypothex/core/config.py` (imports, constants, `TaskSpec`, `ProjectConfig._check_references`, `starter_config`)
+- Modify: `src/hypothex/core/config.py` (imports, constants, `TaskSpec`, `ProjectConfig._check_references`, `starter_config`, YAML guards and `load_project_config`)
 - Test: `tests/core/test_config.py` (one assertion added, tests appended)
 
 **Interfaces:**
@@ -1544,7 +1544,10 @@ git commit -m "fix(git): count only tracked changes as dirty and record untracke
   - `TaskKind = Literal["generic", "training", "agent_eval", "agent_iteration", "system_bench"]`
   - `TaskSpec.kind: TaskKind = "generic"`, `TaskSpec.views: dict[str, dict[str, Any]] = {}` (bodies validated later by `hypothex.core.views`), `TaskSpec.baseline: str | None = None`, `TaskSpec.version_param: str = "version"` (non-empty).
   - `VIEW_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"` and `RESERVED_VIEW_NAMES = frozenset({"overview"})`; `hypothex.core.views` should import these instead of redefining them. Bad or reserved inline view names fail at config load with `ConfigError`.
-  - `load_project_config` rejects a YAML anchor or alias anywhere under `tasks.<task>.views` (a view could contain itself: `spec: &s {mark: point, layer: [*s]}`) with `ConfigError("<path>: YAML anchors and aliases are not allowed in views (line N)")`, N the 1-based line of the first one. Anchors elsewhere in `hypothex.yaml` stay allowed. Helper `_views_anchor_line(text) -> int | None` walks the `yaml.parse` events.
+  - Two general YAML guards, used by `load_project_config` here and by `views.validate_view_text` (Task 16):
+    - `scan_yaml(text) -> YamlScan` streams the `yaml.parse` events before anything is composed or loaded (the loader recurses once per level, so 600 nested `[` raised `RecursionError`). `YamlScan(problem, first_anchor, views_anchor, cycle)`: `problem = ("YAML nested too deeply (over 64 levels)", line)` at the first collection deeper than `YAML_MAX_DEPTH = 64`, or `("YAML too large (over 100000 events)", line)` past `YAML_MAX_EVENTS = 100_000` (the scan stops there); `first_anchor` = line of the first anchor or alias anywhere; `views_anchor` = line of the first anchor or alias at or under `tasks.<task>.views`, where a key written as an alias (`*vk:` with `&vk views` elsewhere) is resolved to the scalar its anchor names; `cycle` = line of the first alias to a collection that is still open.
+    - `has_cycle(data) -> bool`: an iterative (non-recursive) walk of the loaded value; a dict or list met again while on the current path (by `id()`) is a cycle.
+  - `load_project_config` raises `ConfigError("<path>: <message> (line N)")` with, in this order: the `scan_yaml` problem; `YAML anchors and aliases are not allowed in views` (`NO_VIEW_ANCHORS`) for `views_anchor`; `YAML aliases must not form a cycle` (`YAML_CYCLE`) when `has_cycle` finds one anywhere (line = `scan.cycle`, omitted if None). Anchors elsewhere in `hypothex.yaml` stay allowed.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1616,6 +1619,10 @@ def test_invalid_task_kind_and_view_names(tmp_path: Path, addition: str, message
 LOOP_LINE = "            spec: &s {mark: point, layer: [*s]}"
 
 
+def _line_of(text: str, needle: str) -> int:
+    return next(i for i, row in enumerate(text.splitlines(), 1) if needle in row)
+
+
 def test_inline_view_anchors_and_aliases_are_rejected_with_their_line(tmp_path: Path) -> None:
     # regression: this inline view contains itself; it loaded, then views recursed forever
     loop = (
@@ -1623,7 +1630,7 @@ def test_inline_view_anchors_and_aliases_are_rejected_with_their_line(tmp_path: 
         f"          - type: vega_lite\n{LOOP_LINE}\n"
     )
     text = VALID.replace("    primary: topk/k=1\n", "    primary: topk/k=1\n" + loop)
-    line = text.splitlines().index(LOOP_LINE) + 1
+    line = _line_of(text, LOOP_LINE)
     with pytest.raises(
         ConfigError, match=rf"YAML anchors and aliases are not allowed in views \(line {line}\)"
     ):
@@ -1632,8 +1639,43 @@ def test_inline_view_anchors_and_aliases_are_rejected_with_their_line(tmp_path: 
     text = VALID.replace("    split: test\n", "    split: &sp test\n").replace(
         "    primary: topk/k=1\n", "    primary: topk/k=1\n    views: {v: {title: *sp}}\n"
     )
-    line = text.splitlines().index("    views: {v: {title: *sp}}") + 1
+    line = _line_of(text, "views: {v: {title: *sp}}")
     with pytest.raises(ConfigError, match=rf"not allowed in views \(line {line}\)"):
+        load_project_config(_write(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    "views",
+    [
+        "{loop: {title: loop, panels: [{type: vega_lite, spec: &s {mark: point, layer: [*s]}}]}}",
+        "{v: {title: x}}",
+    ],
+)
+def test_views_key_written_as_an_alias_is_resolved(tmp_path: Path, views: str) -> None:
+    # regression: `*vk:` names `views` through an anchor defined elsewhere, which hid
+    # the self-referencing view below it from a check that only read plain keys
+    text = VALID.replace("    split: test\n", "    split: test\n    description: &vk views\n")
+    text = text.replace("    primary: topk/k=1\n", f"    primary: topk/k=1\n    *vk: {views}\n")
+    line = _line_of(text, "*vk:")
+    with pytest.raises(
+        ConfigError, match=rf"YAML anchors and aliases are not allowed in views \(line {line}\)"
+    ):
+        load_project_config(_write(tmp_path, text))
+
+
+def test_deep_or_cyclic_yaml_is_a_config_error(tmp_path: Path) -> None:
+    # regression: 600 nested lists raised RecursionError inside the YAML loader
+    deep = "[" * 600 + "]" * 600
+    text = VALID.replace("    split: test\n", f"    split: test\n    description: {deep}\n")
+    line = _line_of(text, "description:")
+    with pytest.raises(
+        ConfigError, match=rf"YAML nested too deeply \(over 64 levels\) \(line {line}\)"
+    ):
+        load_project_config(_write(tmp_path, text))
+    # a cycle outside views: metric params that contain themselves
+    text = VALID.replace("    params: {k: [1, 5]}\n", "    params: &p {k: [1, 5], again: *p}\n")
+    line = _line_of(text, "again: *p")
+    with pytest.raises(ConfigError, match=rf"YAML aliases must not form a cycle \(line {line}\)"):
         load_project_config(_write(tmp_path, text))
 
 
@@ -1644,12 +1686,17 @@ def test_anchors_outside_views_stay_allowed(tmp_path: Path) -> None:
     assert "*test" in text
     cfg = load_project_config(_write(tmp_path, text))
     assert cfg.datasets["uspto50k"].splits["test"] == "data/test.jsonl"
+    shared = VALID.replace("    params: {k: [1, 5]}\n", "    params: &p {k: [1, 5]}\n")
+    shared = shared.replace("    split: test\n", "    split: test\n    description: *p\n")
+    assert "*p" in shared  # a shared (not cyclic) mapping: passes the guards
+    with pytest.raises(ConfigError, match="description"):  # then fails the model: not a str
+        load_project_config(_write(tmp_path, shared))
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/core/test_config.py -q`
-Expected: `7 failed, 14 passed` (`AttributeError: 'TaskSpec' object has no attribute 'kind'`, `ConfigError ... Extra inputs are not permitted` for the `views`/`baseline` keys, and in `test_inline_view_anchors_and_aliases_are_rejected_with_their_line` a `ConfigError` about the unknown `views` key that does not match the anchors message). The `kind: benchmark` and `version_param: ''` cases, and `test_anchors_outside_views_stay_allowed`, already pass.
+Expected: `10 failed, 14 passed` (`AttributeError: 'TaskSpec' object has no attribute 'kind'`; `ConfigError ... Extra inputs are not permitted` for the `views`/`baseline` keys, also in the anchor and aliased-key tests, where it does not match the expected message; `RecursionError` in `test_deep_or_cyclic_yaml_is_a_config_error`). The `kind: benchmark` and `version_param: ''` cases, and `test_anchors_outside_views_stay_allowed`, already pass.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -1662,7 +1709,7 @@ from typing import Any
 with
 
 ```python
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 ```
 
 Replace
@@ -1795,41 +1842,93 @@ def load_project_config(repo: Path) -> ProjectConfig:
 with
 
 ```python
-def _views_anchor_line(text: str) -> int | None:
-    """
-    Return the 1-based line of the first YAML anchor or alias under ``tasks.<task>.views``.
+YAML_MAX_DEPTH = 64
+YAML_MAX_EVENTS = 100_000
+NO_VIEW_ANCHORS = "YAML anchors and aliases are not allowed in views"
+YAML_CYCLE = "YAML aliases must not form a cycle"
 
-    Inline views may not use anchors or aliases: a view could contain itself
-    (``spec: &s {mark: point, layer: [*s]}``) and every later walk of it would
-    recurse forever. Anchors elsewhere in ``hypothex.yaml`` stay allowed. Only the
-    parser events are read, so nothing is composed or constructed.
+
+class YamlScan(NamedTuple):
+    """
+    What ``scan_yaml`` found in a YAML text; lines are 1-based, None when absent.
+
+    Attributes
+    ----------
+    problem : tuple of (str, int) or None
+        ``(message, line)`` when the text nests deeper than ``YAML_MAX_DEPTH``
+        or has more than ``YAML_MAX_EVENTS`` parser events; the scan stopped there.
+    first_anchor : int or None
+        Line of the first anchor or alias anywhere.
+    views_anchor : int or None
+        Line of the first anchor or alias at or under ``tasks.<task>.views``, with
+        alias keys resolved to the scalar their anchor names.
+    cycle : int or None
+        Line of the first alias to a collection that is still open (one of its own
+        ancestors), so the loaded value would contain itself.
+    """
+
+    problem: tuple[str, int] | None
+    first_anchor: int | None
+    views_anchor: int | None
+    cycle: int | None
+
+
+def _in_views(path: tuple[Any, ...]) -> bool:
+    """Tell whether a key path is ``tasks.<task>.views`` or below it."""
+    return len(path) >= 3 and path[0] == "tasks" and path[2] == "views"
+
+
+def scan_yaml(text: str) -> YamlScan:
+    """
+    Pre-scan YAML text as a stream of parser events, before anything is built.
+
+    ``yaml.compose`` and ``yaml.safe_load`` recurse once per nesting level, so a
+    few hundred nested ``[`` raise ``RecursionError``. This scan keeps a depth
+    counter instead and stops at the first collection deeper than
+    ``YAML_MAX_DEPTH`` or the first event past ``YAML_MAX_EVENTS``. On the way it
+    finds anchors and aliases: the first anywhere (view files allow none), the
+    first at or under ``tasks.<task>.views`` (inline views allow none; a key
+    written as an alias, ``*vk:``, is resolved to the scalar its anchor names),
+    and the first alias to a collection that is still open (a cycle).
 
     Parameters
     ----------
     text : str
-        The text of ``hypothex.yaml``.
+        YAML text.
 
     Returns
     -------
-    int or None
-        The line, or None when no view uses an anchor or alias.
+    YamlScan
+        The first problem and the lines of interest.
 
     Raises
     ------
     yaml.YAMLError
-        If the text is not valid YAML.
+        If the text is not valid YAML (up to where the scan stopped).
 
     Examples
     --------
-    >>> _views_anchor_line("tasks:\\n  t:\\n    views: {v: {title: &a x}}\\n")
-    3
-    >>> _views_anchor_line("base: &b {a: 1}\\ntasks: {t: {x: *b}}\\n") is None
-    True
+    >>> scan_yaml("a: " + "[" * 70 + "]" * 70).problem
+    ('YAML nested too deeply (over 64 levels)', 1)
+    >>> scan_yaml("n: &k views\\ntasks:\\n  t:\\n    *k: {v: {title: x}}\\n").views_anchor
+    4
+    >>> scan_yaml("a: &a [1, *a]\\n").cycle
+    1
+    >>> scan_yaml("a: &a [1]\\nb: *a\\n")
+    YamlScan(problem=None, first_anchor=1, views_anchor=None, cycle=None)
     """
-    # one frame per open mapping or sequence: its path of keys, and for a mapping
+    first_anchor: int | None = None
+    views_anchor: int | None = None
+    cycle: int | None = None
+    scalars: dict[str, str] = {}  # anchor -> scalar value, to resolve alias keys
+    # one frame per open collection: its key path, its anchor, and for a mapping
     # whether the next node is a key and the last key read
     frames: list[dict[str, Any]] = []
-    for event in yaml.parse(text, Loader=yaml.SafeLoader):
+    for count, event in enumerate(yaml.parse(text, Loader=yaml.SafeLoader), start=1):
+        line = event.start_mark.line + 1
+        if count > YAML_MAX_EVENTS:
+            too_large = (f"YAML too large (over {YAML_MAX_EVENTS} events)", line)
+            return YamlScan(too_large, first_anchor, views_anchor, cycle)
         if isinstance(event, yaml.CollectionEndEvent):
             frames.pop()
             continue
@@ -1838,32 +1937,100 @@ def _views_anchor_line(text: str) -> int | None:
         path: tuple[Any, ...] = ()
         if frames:
             top = frames[-1]
-            path = top["path"]
             if not top["mapping"]:
-                path = (*path, None)
-            elif top["key_next"]:
-                top["key"] = event.value if isinstance(event, yaml.ScalarEvent) else None
+                path = (*top["path"], None)
             else:
-                path = (*path, top["key"])
-            top["key_next"] = not top["key_next"]
-        in_views = len(path) >= 3 and path[0] == "tasks" and path[2] == "views"
-        if in_views and event.anchor is not None:
-            return event.start_mark.line + 1
+                if top["key_next"]:
+                    if isinstance(event, yaml.ScalarEvent):
+                        top["key"] = event.value
+                    elif isinstance(event, yaml.AliasEvent):
+                        top["key"] = scalars.get(event.anchor or "")
+                    else:
+                        top["key"] = None
+                top["key_next"] = not top["key_next"]
+                path = (*top["path"], top["key"])
+        if event.anchor is not None:
+            if first_anchor is None:
+                first_anchor = line
+            if views_anchor is None and _in_views(path):
+                views_anchor = line
+            if isinstance(event, yaml.AliasEvent):
+                if cycle is None and any(f["anchor"] == event.anchor for f in frames):
+                    cycle = line
+            elif isinstance(event, yaml.ScalarEvent):
+                scalars[event.anchor] = event.value
         if isinstance(event, yaml.CollectionStartEvent):
+            if len(frames) >= YAML_MAX_DEPTH:
+                too_deep = (f"YAML nested too deeply (over {YAML_MAX_DEPTH} levels)", line)
+                return YamlScan(too_deep, first_anchor, views_anchor, cycle)
             frames.append(
                 {
                     "path": path,
+                    "anchor": event.anchor,
                     "mapping": isinstance(event, yaml.MappingStartEvent),
                     "key_next": True,
                     "key": None,
                 }
             )
-    return None
+    return YamlScan(None, first_anchor, views_anchor, cycle)
+
+
+def has_cycle(data: Any) -> bool:
+    """
+    Tell whether a loaded YAML value contains itself (a cycle made by aliases).
+
+    An iterative depth-first walk, so depth never costs Python stack: a dict or
+    list met again while it is still on the current path is a cycle. Containers
+    already finished are not walked twice, so shared (non-cyclic) aliases cost
+    linear time.
+
+    Parameters
+    ----------
+    data : Any
+        A value from ``yaml.safe_load``.
+
+    Returns
+    -------
+    bool
+        True if some dict or list contains itself.
+
+    Examples
+    --------
+    >>> loop = {"a": 1}
+    >>> loop["self"] = [loop]
+    >>> shared = [1]
+    >>> has_cycle(loop), has_cycle({"x": shared, "y": {"z": shared}})
+    (True, False)
+    """
+    on_path: set[int] = set()
+    done: set[int] = set()
+    stack: list[tuple[Any, bool]] = [(data, False)]
+    while stack:
+        node, leaving = stack.pop()
+        if leaving:
+            on_path.discard(id(node))
+            done.add(id(node))
+            continue
+        if not isinstance(node, dict | list) or id(node) in done:
+            continue
+        if id(node) in on_path:
+            return True
+        on_path.add(id(node))
+        stack.append((node, True))
+        children = node.values() if isinstance(node, dict) else node
+        stack.extend((child, False) for child in children)
+    return False
 
 
 def load_project_config(repo: Path) -> ProjectConfig:
     """
     Load and validate ``<repo>/hypothex.yaml``.
+
+    The text is pre-scanned first (``scan_yaml``): nesting deeper than
+    ``YAML_MAX_DEPTH`` or more than ``YAML_MAX_EVENTS`` events, and any anchor or
+    alias at or under ``tasks.<task>.views``, are errors with their line. After
+    loading, a value that contains itself (``has_cycle``) is an error too.
+    Anchors elsewhere stay allowed.
 
     Parameters
     ----------
@@ -1878,25 +2045,38 @@ def load_project_config(repo: Path) -> ProjectConfig:
     Raises
     ------
     ConfigError
-        If the file is missing or invalid, or an inline view (anything under
-        ``tasks.<task>.views``) uses a YAML anchor or alias.
+        If the file is missing or invalid, too deep or too large, uses an anchor
+        or alias in an inline view, or has aliases that form a cycle.
     """
     path = repo / CONFIG_FILENAME
     if not path.is_file():
         raise ConfigError(f"no {CONFIG_FILENAME} in {repo}; run `hx init` first")
     try:
-        anchor = _views_anchor_line(path.read_text(encoding="utf-8"))
-        if anchor is None:
-            return ProjectConfig.model_validate(read_yaml(path))
-    except (ValidationError, ValueError, yaml.YAMLError) as exc:
+        scan = scan_yaml(path.read_text(encoding="utf-8"))
+        blocked = scan.problem is not None or scan.views_anchor is not None
+        data = None if blocked else read_yaml(path)
+    except (ValueError, yaml.YAMLError) as exc:
         raise ConfigError(f"{path}: {exc}") from exc
-    raise ConfigError(f"{path}: YAML anchors and aliases are not allowed in views (line {anchor})")
+    line: int | None
+    if scan.problem is not None:
+        message, line = scan.problem
+    elif scan.views_anchor is not None:
+        message, line = NO_VIEW_ANCHORS, scan.views_anchor
+    elif has_cycle(data):
+        message, line = YAML_CYCLE, scan.cycle
+    else:
+        try:
+            return ProjectConfig.model_validate(data)
+        except (ValidationError, ValueError) as exc:
+            raise ConfigError(f"{path}: {exc}") from exc
+    where = "" if line is None else f" (line {line})"
+    raise ConfigError(f"{path}: {message}{where}")
 ```
 
 - [ ] **Step 4: Run the tests, then the whole suite**
 
 Run: `uv run pytest tests/core/test_config.py -q`
-Expected: `21 passed`.
+Expected: `24 passed`.
 
 Run: `uv run pytest -q && uv run ruff check . && uv run ruff format --check . && uv run ty check src`
 Expected: every test passes (0 failed), then `All checks passed!`, `... files already formatted`, `All checks passed!`.
@@ -6770,7 +6950,7 @@ git commit -m "feat: add view models and task-kind preset views"
 - Test: `tests/core/test_views.py` (import block, append tests)
 
 **Interfaces:**
-- Consumes: Task 15 models, `load_preset`, `PRESET_DIR`.
+- Consumes: Task 15 models, `load_preset`, `PRESET_DIR`; `config.scan_yaml`, `config.has_cycle`, `config.YAML_CYCLE` (Task 5).
 - Produces:
   - `validate_view_text(text: str, known_metrics: set[str], known_fields: dict[str, set[str]]) -> tuple[ViewSpec | None, list[ValidationIssue]]`.
   - Constants `ROW_KEYS = frozenset({"run_id", "group_id", "seed"})` (always valid fields),
@@ -6784,14 +6964,16 @@ git commit -m "feat: add view models and task-kind preset views"
     options that could swap the loader) and every `image` mark. The walk is bounded
     (`VEGA_MAX_DEPTH = 64` nested mappings/lists, `VEGA_MAX_NODES = 10_000` values): past a
     bound it returns only `[(at, "vega_lite spec is too deep (over 64 levels)")]` or
-    `[(at, "vega_lite spec is too large (over 10000 values)")]`, so a self-referencing spec
-    (YAML aliases in `hypothex.yaml`, which view validation never sees) is a panel error,
+    `[(at, "vega_lite spec is too large (over 10000 values)")]`, so a spec that reaches the
+    panel engine without YAML (a JSON query body, a self-referencing dict) is a panel error,
     never a `RecursionError`.
-  - YAML anchors and aliases are not allowed in view text: `validate_view_text` scans the
-    `yaml.parse` events before composing and returns `(None, [issue])` for the first
-    anchor (`&name`) or alias (`*name`, including `<<: *name`) with its 1-based line and
-    path `""`. A self-referencing view (`spec: &s {mark: point, layer: [*s]}`) therefore
-    never reaches the loader, the models, or `vega_spec_problems`.
+  - `validate_view_text` runs the Task 5 guards first: `config.scan_yaml(text)` before
+    `yaml.compose` (its `problem`, e.g. `YAML nested too deeply (over 64 levels)` for 600
+    nested lists, and then `YAML anchors and aliases are not allowed` for its
+    `first_anchor`, each `(None, [issue])` with the 1-based line and path `""`), then
+    `config.has_cycle` on the loaded value (`YAML aliases must not form a cycle`). A
+    self-referencing view (`spec: &s {mark: point, layer: [*s]}`) or a deep one never
+    reaches the composer, the models, or `vega_spec_problems`.
   - Metric references: a reference that is exactly a known metric name (history names keep
     their `/`, e.g. `val/top1`) is valid before it is split into `name[@version][/key]`.
     A `grid` panel's `data.y` is a per-example field (`partial` in
@@ -6805,8 +6987,9 @@ git commit -m "feat: add view models and task-kind preset views"
     `vega_lite spec must not load external resources (<key>)`,
     `vega_lite image marks are not allowed`, `pareto keys are x and y`,
     `duplicate panel title <t>`, `a view is a mapping with title and panels`, `YAML: <problem>`,
-    `YAML anchors and aliases are not allowed`, `vega_lite spec is too deep (over 64 levels)`,
-    `vega_lite spec is too large (over 10000 values)`.
+    `YAML anchors and aliases are not allowed`, `YAML nested too deeply (over 64 levels)`,
+    `YAML too large (over 100000 events)`, `YAML aliases must not form a cycle`,
+    `vega_lite spec is too deep (over 64 levels)`, `vega_lite spec is too large (over 10000 values)`.
   - `ValidationIssue.path` looks like `panels[1].data.y`; `line` is 1-based, from the key's
     `yaml.compose` mark (or the nearest existing parent when the key is missing).
 
@@ -7170,16 +7353,19 @@ def _vega_view(spec: str) -> str:
     )
 
 
-def test_vega_lite_spec_depth_and_size_are_bounded() -> None:
-    # 63 nested mappings under the root spec: 64 levels, the limit, still checked
-    view, issues = validate_view_text(_vega_view("{a: " * 63 + "1" + "}" * 63), set(), {})
+def test_deep_or_huge_yaml_is_rejected_before_it_is_loaded() -> None:
+    # regression: 600 nested lists (no alias) raised RecursionError inside yaml.compose
+    deep = (None, [(5, "", "YAML nested too deeply (over 64 levels)", None)])
+    assert _check(_vega_view("[" * 600 + "]" * 600)) == deep
+    # 60 nested mappings under the spec: 64 levels in the whole document, the limit
+    view, issues = validate_view_text(_vega_view("{a: " * 60 + "1" + "}" * 60), set(), {})
     assert view is not None and issues == []
-    deep = _vega_view("{a: " * 64 + "1" + "}" * 64)
-    view, issues = validate_view_text(deep, set(), {})
-    assert view is not None
-    assert [(i.line, i.path, i.message) for i in issues] == [
-        (5, "panels[0].spec", "vega_lite spec is too deep (over 64 levels)")
-    ]
+    assert _check(_vega_view("{a: " * 61 + "1" + "}" * 61)) == deep
+    huge = _vega_view("[" + ", ".join(["0"] * 100_000) + "]")
+    assert _check(huge) == (None, [(5, "", "YAML too large (over 100000 events)", None)])
+
+
+def test_vega_lite_spec_size_is_bounded() -> None:
     wide = _vega_view("[" + ", ".join(["0"] * 10_000) + "]")
     view, issues = validate_view_text(wide, set(), {})
     assert view is not None
@@ -7212,7 +7398,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from hypothex.core.config import TaskKind
+from hypothex.core.config import YAML_CYCLE, TaskKind, has_cycle, scan_yaml
 from hypothex.core.errors import ConfigError
 from hypothex.core.records import RunStatus
 
@@ -7512,36 +7698,17 @@ def _semantic_issues(
     ]
 
 
-def _first_anchor_line(text: str) -> int | None:
-    """
-    Return the 1-based line of the first YAML anchor or alias in ``text``.
-
-    Scans the parser events, so nothing is composed or constructed: an alias
-    (``*name``, also in ``<<: *name``) is found even when it refers to its own
-    parent or to no anchor at all.
-
-    Examples
-    --------
-    >>> _first_anchor_line("a: 1\\nb: &x 2\\nc: *x\\n")
-    2
-    >>> _first_anchor_line("a: 1\\n") is None
-    True
-    """
-    for event in yaml.parse(text, Loader=yaml.SafeLoader):
-        if isinstance(event, yaml.NodeEvent) and event.anchor is not None:
-            return event.start_mark.line + 1
-    return None
-
-
 def validate_view_text(
     text: str, known_metrics: set[str], known_fields: dict[str, set[str]]
 ) -> tuple[ViewSpec | None, list[ValidationIssue]]:
     """
     Parse and check a view's YAML text.
 
-    YAML anchors and aliases are not allowed (a view could refer to itself); the
-    first one is a schema error with its line. Schema errors (bad YAML, anchors,
-    unknown keys, wrong types) return no view. Semantic
+    The text is pre-scanned before it is loaded (``config.scan_yaml``): nesting
+    deeper than 64 levels, more than 100,000 parser events, and any YAML anchor
+    or alias (a view could refer to itself) are schema errors with their line; a
+    loaded value that contains itself (``config.has_cycle``) is one too. Schema
+    errors (bad YAML, those guards, unknown keys, wrong types) return no view. Semantic
     problems (unknown metric or field, missing ``source``/``text``/``spec``,
     duplicate titles) return the parsed view plus issues, so a preview can still
     render; the view is valid only when the issue list is empty. Metric and field
@@ -7567,9 +7734,12 @@ def validate_view_text(
     (True, 3, 'leaderboard')
     """
     try:
-        anchor = _first_anchor_line(text)
-        if anchor is not None:
-            return None, [ValidationIssue(line=anchor, path="", message=NO_ANCHORS)]
+        scan = scan_yaml(text)
+        if scan.problem is not None:
+            message, line = scan.problem
+            return None, [ValidationIssue(line=line, path="", message=message)]
+        if scan.first_anchor is not None:
+            return None, [ValidationIssue(line=scan.first_anchor, path="", message=NO_ANCHORS)]
         root = yaml.compose(text, Loader=yaml.SafeLoader)
         data = yaml.safe_load(text)
     except yaml.MarkedYAMLError as exc:
@@ -7578,6 +7748,8 @@ def validate_view_text(
         return None, [ValidationIssue(line=line, path="", message=f"YAML: {exc.problem or exc}")]
     except yaml.YAMLError as exc:
         return None, [ValidationIssue(line=None, path="", message=f"YAML: {exc}")]
+    if has_cycle(data):  # the shared guard; without aliases no cycle can form
+        return None, [ValidationIssue(line=scan.cycle, path="", message=YAML_CYCLE)]
     if not isinstance(root, yaml.MappingNode):
         line = root.start_mark.line + 1 if root is not None else 1
         message = "a view is a mapping with title and panels"
@@ -7592,7 +7764,7 @@ def validate_view_text(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_views.py -q`
-Expected: `42 passed`.
+Expected: `43 passed`.
 
 Run: `uv run ruff format --check src/hypothex/core/views.py tests/core/test_views.py && uv run ruff check src/hypothex/core/views.py tests/core/test_views.py && uv run ty check src/hypothex/core/views.py tests/core/test_views.py`
 Expected: `2 files already formatted`, `All checks passed!`, `All checks passed!`.
@@ -7837,9 +8009,12 @@ from hypothex.core.config import (
     CONFIG_FILENAME,
     RESERVED_VIEW_NAMES,
     VIEW_NAME_PATTERN,
+    YAML_CYCLE,
     ProjectConfig,
     TaskKind,
     TaskSpec,
+    has_cycle,
+    scan_yaml,
 )
 from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.fsutil import atomic_write_text
@@ -8108,7 +8283,7 @@ def delete_view(repo: Path, task: str, name: str) -> None:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_views.py -q`
-Expected: `59 passed`.
+Expected: `60 passed`.
 
 Run: `uv run ruff format --check src/hypothex/core/views.py tests/core/test_views.py && uv run ruff check src/hypothex/core/views.py tests/core/test_views.py && uv run ty check src/hypothex/core/views.py tests/core/test_views.py`
 Expected: `2 files already formatted`, `All checks passed!`, `All checks passed!`.
@@ -8816,9 +8991,12 @@ from hypothex.core.config import (
     CONFIG_FILENAME,
     RESERVED_VIEW_NAMES,
     VIEW_NAME_PATTERN,
+    YAML_CYCLE,
     ProjectConfig,
     TaskKind,
     TaskSpec,
+    has_cycle,
+    scan_yaml,
 )
 from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.fsutil import atomic_write_text
@@ -8888,7 +9066,7 @@ def view_context(ctx: Context, project: str, task: str) -> tuple[set[str], dict[
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_views.py -q`
-Expected: `61 passed`.
+Expected: `62 passed`.
 
 Run: `uv run ruff format --check src/hypothex/core/views.py tests/core/test_views.py && uv run ruff check src/hypothex/core/views.py tests/core/test_views.py && uv run ty check src/hypothex/core/views.py tests/core/test_views.py && uv run python -m doctest src/hypothex/core/views.py && echo doctest-ok`
 Expected: `2 files already formatted`, `All checks passed!`, `All checks passed!`, `doctest-ok`.
@@ -15735,17 +15913,21 @@ def test_view_anchors_and_huge_specs_are_issues_never_500(
     assert put.json()["type"] == "ViewValidationError" and put.json()["issues"] == [anchors]
     checked = client.post(f"{VIEWS}/validate", json={"text": looped})
     assert checked.status_code == 200 and checked.json() == {"ok": False, "issues": [anchors]}
-    # 70 nested lists: past the 64-level bound of vega_spec_problems
+    # regression: 600 nested lists (no alias) raised RecursionError inside yaml.compose
     deep = looped.replace(
-        "&s {mark: point, layer: [*s]}", "{mark: point, x: " + "[" * 70 + "]" * 70 + "}"
+        "&s {mark: point, layer: [*s]}", "{mark: point, x: " + "[" * 600 + "]" * 600 + "}"
     )
+    too_deep = {
+        "line": 5,
+        "path": "",
+        "message": "YAML nested too deeply (over 64 levels)",
+        "suggestion": None,
+    }
     put = client.put(f"{VIEWS}/loop", json={"text": deep})
     assert put.status_code == 400 and put.json()["type"] == "ViewValidationError"
-    too_deep = (5, "panels[0].spec", "vega_lite spec is too deep (over 64 levels)")
-    assert [(i["line"], i["path"], i["message"]) for i in put.json()["issues"]] == [too_deep]
+    assert put.json()["issues"] == [too_deep]
     checked = client.post(f"{VIEWS}/validate", json={"text": deep})
-    assert checked.status_code == 200
-    assert checked.json()["ok"] is False and checked.json()["issues"] == put.json()["issues"]
+    assert checked.status_code == 200 and checked.json() == {"ok": False, "issues": [too_deep]}
     assert not _view_path(toy_repo, "loop").exists()
 
 
@@ -16656,11 +16838,6 @@ from hypothex.core.gitinfo import git_state_label
 from hypothex.core.layout import default_home
 ```
 
-Add `from hypothex.core.gitinfo import git_state_label` directly after the
-`from hypothex.core.execution import ...` line, and
-`from hypothex.core.layout import default_home` directly after the
-`from hypothex.core.jsonutil import to_jsonable` line (isort order).
-
 In `show`, replace
 
 ```python
@@ -17065,8 +17242,10 @@ Validation
 A view is checked before it is saved: the schema, metric names (with a nearest-name
 suggestion), sources, fields, and the Vega-Lite spec shape. Every issue has a line
 number. An invalid view is never saved. YAML anchors and aliases (``&name``, ``*name``,
-``<<: *name``) are not allowed, and a Vega-Lite spec may be at most 64 levels deep and
-hold at most 10,000 values.
+``<<: *name``) are not allowed, YAML may nest at most 64 levels (and hold at most 100,000
+parser events), and a Vega-Lite spec may hold at most 10,000 values. Inline views in
+``hypothex.yaml`` follow the same rule: an anchor or alias under ``tasks.<task>.views`` is a
+config error; anchors elsewhere in the file are fine as long as they form no cycle.
 
 .. code-block:: bash
 
@@ -17206,8 +17385,9 @@ Verification: Tasks 1–23 were applied to a scratch worktree of `phase-1b` at `
 **Review round 2 (three findings and the inline-view follow-up, rulings as given).**
 
 - Stem collision, Tasks 6/7 and contract 1.10: `safe_stem("a/b") == safe_stem("a_b-3ec69c85")` before. `safe_stem` now also hashes a name that already ends in `-[0-9a-f]{8}` (`a_b-3ec69c85` → `a_b-3ec69c85-d64fa8bc`), so only an 8-hex-digit sha1 prefix collision can share a stem; the new `store.check_stem_owner` makes `log_trace` / `log_samples` raise `StoreError("id collision: ...")` and write nothing when the file stores a different original. The contract no longer claims that stems never collide. Tests: `test_safe_stem_hashes_names_that_already_look_hashed`, `test_check_stem_owner_rejects_a_different_original` (Task 6), `test_trace_and_sample_writers_refuse_a_file_of_another_id` (Task 7); `test_safe_stem_never_merges_distinct_names` gains the pair.
-- Recursive view YAML, Tasks 16/31/35 and contract 1.4: `spec: &s {mark: point, layer: [*s]}` raised `RecursionError`. `validate_view_text` rejects the first anchor or alias (`YAML anchors and aliases are not allowed`, its line, from the `yaml.parse` events), and `vega_spec_problems` is bounded (64 levels, 10,000 values; `too deep` / `too large`), so an aliased spec in `hypothex.yaml` is a panel error. Tests: `test_yaml_anchors_and_aliases_are_rejected_with_their_line`, `test_vega_lite_spec_depth_and_size_are_bounded` (Task 16), `test_view_anchors_and_huge_specs_are_issues_never_500` (Task 31: PUT 400 with issues, validate 200 `{ok: false, issues}`), doctests of `vega_spec_problems` (a self-referencing dict) and `_first_anchor_line`.
-- Inline views with anchors, Tasks 5/30/31/34 and contract 1.3: `load_project_config` rejects any YAML anchor or alias under `tasks.<task>.views` (`ConfigError`: `YAML anchors and aliases are not allowed in views (line N)`, found by `_views_anchor_line` in the `yaml.parse` events); anchors elsewhere in `hypothex.yaml` stay allowed. `refresh_project` keeps the last good config, so `mcp.server._find_view` re-loads `hypothex.yaml` before it answers "unknown view" and raises that `ConfigError` instead: `GET .../views/{name}` answers 400 and `hx view show` exits 1 with the error, never a 500. The `validate` route is unchanged (200, `{ok: false, issues}`). Task 34 also gains the two imports it used without adding (`git_state_label`, `default_home`). Tests: `test_inline_view_anchors_and_aliases_are_rejected_with_their_line`, `test_anchors_outside_views_stay_allowed` (Task 5), `test_inline_view_with_anchors_is_a_config_error_not_500` (Task 31), `test_view_show_reports_an_inline_view_with_anchors_cleanly` (Task 34), doctests of `_views_anchor_line`.
+- Recursive view YAML, Tasks 16/31/35 and contract 1.4: `spec: &s {mark: point, layer: [*s]}` raised `RecursionError`. `validate_view_text` rejects the first anchor or alias (`YAML anchors and aliases are not allowed`, its line, from the `yaml.parse` events), and `vega_spec_problems` is bounded (64 levels, 10,000 values; `too deep` / `too large`), so an aliased spec in `hypothex.yaml` is a panel error. Tests: `test_yaml_anchors_and_aliases_are_rejected_with_their_line`, `test_vega_lite_spec_size_is_bounded` (Task 16), `test_view_anchors_and_huge_specs_are_issues_never_500` (Task 31: PUT 400 with issues, validate 200 `{ok: false, issues}`), doctest of `vega_spec_problems` (a self-referencing dict). Round 3 replaced the anchor check with the Task 5 guards (next items).
+- Inline views with anchors, Tasks 5/30/31/34 and contract 1.3: `load_project_config` rejects any YAML anchor or alias under `tasks.<task>.views` (`ConfigError`: `YAML anchors and aliases are not allowed in views (line N)`, found by `scan_yaml`); anchors elsewhere in `hypothex.yaml` stay allowed. `refresh_project` keeps the last good config, so `mcp.server._find_view` re-loads `hypothex.yaml` before it answers "unknown view" and raises that `ConfigError` instead: `GET .../views/{name}` answers 400 and `hx view show` exits 1 with the error, never a 500. The `validate` route is unchanged (200, `{ok: false, issues}`). Task 34 also gains the two imports it used without adding (`git_state_label`, `default_home`). Tests: `test_inline_view_anchors_and_aliases_are_rejected_with_their_line`, `test_anchors_outside_views_stay_allowed` (Task 5), `test_inline_view_with_anchors_is_a_config_error_not_500` (Task 31), `test_view_show_reports_an_inline_view_with_anchors_cleanly` (Task 34).
+- Round 3 (Codex), Tasks 5/16/31/34/35 and contracts 1.3/1.4: two holes remained. An alias used as a mapping key (`&vk views` elsewhere, `*vk:` under `tasks.t`) hid a cyclic inline view from the key-only check; 600 nested lists with no alias raised `RecursionError` inside `yaml.compose`. The targeted anchor helpers (`_views_anchor_line`, `_first_anchor_line`) are replaced by two general guards in `hypothex.core.config`, used by both `load_project_config` and `validate_view_text`: `scan_yaml` (a streaming pre-scan of the `yaml.parse` events before compose or load: depth > 64 → `YAML nested too deeply (over 64 levels)`, > 100,000 events → `YAML too large (over 100000 events)`, each with its line; it also reports the first anchor/alias, the first one at or under `tasks.<task>.views` with alias keys resolved to their anchored scalar, and the first alias to a still-open collection) and `has_cycle` (an iterative walk of the loaded value; `YAML aliases must not form a cycle`). View files still allow no anchors at all; `hypothex.yaml` allows them outside views unless they form a cycle. The YAML depth guard now fires before the 64-level bound of `vega_spec_problems`, which stays for specs that arrive without YAML. Task 34's duplicated import paragraph is removed. Tests: `test_views_key_written_as_an_alias_is_resolved` (the exact aliased-key example, cyclic and not), `test_deep_or_cyclic_yaml_is_a_config_error` (600 nested lists; a cycle outside views), `test_anchors_outside_views_stay_allowed` (legit anchors load; a shared mapping passes the guards) (Task 5); `test_deep_or_huge_yaml_is_rejected_before_it_is_loaded` (600 nested lists, the 64-level edge, 100,000 events) (Task 16); the 600-nested-lists case in `test_view_anchors_and_huge_specs_are_issues_never_500` (Task 31: PUT 400, validate 200 `{ok: false}`); doctests of `scan_yaml` and `has_cycle`.
 - Version filter, Tasks 20/35 and contract 1.6: `{source: runs, fields: [status], filter: {version: p10}}` returned nothing because `version` was added only when `fields` listed it. `_table_rows` now sets `version` on every full `runs` row before the filter. Test: `test_runs_table_filters_on_version_it_does_not_show` (Task 20).
 
-Verification (round 2): Tasks 1–23, 30, 31, and 34 were applied by the same script to a scratch worktree of `phase-1b` at `a4baa19` (Tasks 24–29, 32, and 33 skipped: they touch none of the files of Tasks 30, 31, and 34 that were checked). Full suite `464 passed` plus the 2 `hx demo` tests of Task 34, which need `hypothex.demo` (Task 25, skipped) and fail with `ModuleNotFoundError` only for that reason; `ruff check` clean after each task's own `ruff format` step; `ty check src` clean except the same unresolved `hypothex.demo` import; the doctests of `stats`, `store`, `headlines`, `leaderboard`, `views`, `sources`, and `panels` pass. The regressions were confirmed on the unfixed code (equal stems, `RecursionError`, `[]` rows, and a 404 instead of the config error when `_find_view` does not re-load). Per-task counts: Task 5 `21` (`7 failed, 14 passed` at Step 2), Task 6 `17`, Task 7 `13`, Task 16 `42`, Task 17 `59`, Task 19 `61`, Task 20 `18`, Task 21 `23`, Task 22 `38`, Task 23 `56` (panels + sources); Task 31 adds 9 view tests, Task 34 adds 7 tests. Other counts are unchanged.
+Verification (round 2): Tasks 1–23, 30, 31, and 34 were applied by the same script to a scratch worktree of `phase-1b` at `a4baa19` (Tasks 24–29, 32, and 33 skipped: they touch none of the files of Tasks 30, 31, and 34 that were checked). Full suite `468 passed` (after round 3) plus the 2 `hx demo` tests of Task 34, which need `hypothex.demo` (Task 25, skipped) and fail with `ModuleNotFoundError` only for that reason; `ruff check` clean after each task's own `ruff format` step; `ty check src` clean except the same unresolved `hypothex.demo` import; the doctests of `stats`, `store`, `headlines`, `leaderboard`, `views`, `sources`, and `panels` pass. The regressions were confirmed on the unfixed code (equal stems, `RecursionError`, `[]` rows, a 404 instead of the config error when `_find_view` does not re-load, `RecursionError` from `yaml.compose` on 600 nested lists, and the aliased `*vk:` key invisible to the round-2 check). Per-task counts: Task 5 `24` (`10 failed, 14 passed` at Step 2), Task 6 `17`, Task 7 `13`, Task 16 `43`, Task 17 `60`, Task 19 `62`, Task 20 `18`, Task 21 `23`, Task 22 `38`, Task 23 `56` (panels + sources); Task 31 adds 9 view tests, Task 34 adds 7 tests. Other counts are unchanged.

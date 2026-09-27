@@ -14,6 +14,9 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router";
+import { useState } from "react";
+
+import { CommandPalette } from "./shell/CommandPalette";
 import { Header } from "./shell/Header";
 
 export interface TaskSearch {
@@ -68,14 +71,16 @@ export function NotFound() {
   );
 }
 
-/** Page frame: header, the routed screen in `<main>`. */
+/** Page frame: header, the routed screen in `<main>`, the command palette. */
 export function AppShell() {
+  const [paletteOpen, setPaletteOpen] = useState(false);
   return (
     <>
-      <Header />
+      <Header onFind={() => setPaletteOpen(true)} />
       <main>
         <Outlet />
       </main>
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
     </>
   );
 }

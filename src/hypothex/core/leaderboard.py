@@ -6,13 +6,19 @@ import math
 import re
 from collections import defaultdict
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel
 
 from hypothex.core import stats
 from hypothex.core.config import ProjectConfig, TaskKind, TaskSpec, parse_metric_key
-from hypothex.core.headlines import percentile_of
+from hypothex.core.headlines import (
+    paired_gain_interval,
+    percentile_of,
+    task_headline,
+    task_stat_strip,
+)
 from hypothex.core.records import RunRecord, RunStatus, ScoreRecord, UsageTotals
 from hypothex.core.seeds import Stats, intervals_overlap, summarize
 
@@ -153,6 +159,66 @@ def _version_of(members: list[RunRecord], param: str) -> str | None:
         value = m.params.get(param) or m.vars.get(param)
         if value:
             return value
+    return None
+
+
+def _natural_key(text: str) -> tuple[tuple[int, int | str], ...]:
+    return tuple(
+        (0, int(tok)) if tok.isdigit() else (1, tok.lower()) for tok in re.findall(r"\d+|\D+", text)
+    )
+
+
+def _first_version(
+    rows: list[LeaderboardRow], members_of: dict[str, list[RunRecord]], param: str
+) -> str | None:
+    def key(row: LeaderboardRow) -> tuple[int, tuple[tuple[int, int | str], ...], datetime]:
+        members = members_of[row.group_id]
+        version = _version_of(members, param)
+        created = members[0].created_at
+        return (0, _natural_key(version), created) if version else (1, (), created)
+
+    scored = [r for r in rows if r.primary is not None]
+    return min(scored, key=key).group_id if scored else None
+
+
+def _paired_gain(
+    best: LeaderboardRow, first: LeaderboardRow, pooled: dict[str, dict[str, float]]
+) -> tuple[float, float] | None:
+    """
+    Paired 95% interval of ``best - first`` over the examples both were scored on.
+
+    Uses the sign-test counts of ``first.vs_best`` (computed on those same shared
+    examples) and counts the shared ids here, where they are still known.
+    """
+    vs = first.vs_best
+    if (
+        vs is None
+        or vs.test != "sign"
+        or vs.fixed is None
+        or vs.broken is None
+        or best.primary is None
+        or first.primary is None
+    ):
+        return None
+    shared = pooled.get(best.group_id, {}).keys() & pooled.get(first.group_id, {}).keys()
+    gain = best.primary.mean - first.primary.mean
+    return paired_gain_interval(gain, vs.fixed, vs.broken, len(shared))
+
+
+def _select_group(
+    selector: str | None, rows: list[LeaderboardRow], members_of: dict[str, list[RunRecord]]
+) -> str | None:
+    if not selector:
+        return None
+    if selector.startswith("tag:"):
+        tag = selector.removeprefix("tag:")
+        for row in rows:
+            if any(tag in m.tags for m in members_of[row.group_id]):
+                return row.group_id
+        return None
+    for row in rows:
+        if selector in (row.group_id, row.config_hash) or row.group_id.startswith(selector):
+            return row.group_id
     return None
 
 
@@ -375,7 +441,7 @@ def build_leaderboard(
     Returns
     -------
     Leaderboard
-        Ranked seed groups and runs that need attention.
+        Ranked seed groups, runs that need attention, headline and stat strip.
     """
     spec = config.tasks[task]
     chosen = {m: (versions or {}).get(m, config.metrics[m].version) for m in spec.metrics}
@@ -440,7 +506,19 @@ def build_leaderboard(
                 binary = picked[1] if picked is not None else None
                 row.vs_best = _versus(row, best, pooled, binary, primary)
 
-    return Leaderboard(
+    by_id = {r.run_id: r for r in eligible}
+    members_of = {row.group_id: [by_id[i] for i in row.run_ids] for row in rows}
+    reference = None
+    gain_interval = None
+    if spec.kind == "system_bench":
+        reference = _select_group(spec.baseline, rows, members_of)
+    elif spec.kind == "agent_iteration":
+        reference = _first_version(rows, members_of, spec.version_param)
+        first = next((row for row in rows if row.group_id == reference), None)
+        if first is not None and first is not rows[0]:
+            gain_interval = _paired_gain(rows[0], first, pooled)
+
+    board = Leaderboard(
         project=project,
         task=task,
         primary=primary,
@@ -453,3 +531,6 @@ def build_leaderboard(
         kind=spec.kind,
         stat_strip=[],
     )
+    board.headline = task_headline(board, reference=reference, gain_interval=gain_interval)
+    board.stat_strip = task_stat_strip(board, reference=reference)
+    return board

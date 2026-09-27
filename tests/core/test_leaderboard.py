@@ -371,3 +371,86 @@ def test_paired_test_uses_only_shared_examples() -> None:
     assert (vs.fixed, vs.broken) == (3, 0)  # e2, e3, e4; e5..e9 are not shared
     assert vs.p == pytest.approx(0.25)  # scipy.stats.binomtest(0, 3).pvalue = 2 / 8
     assert vs.examples_needed == stats.examples_needed(3, 0, 5)
+
+
+# phase 1b: headline, stat strip, baseline, version order ------------------------------
+def test_board_headline_and_stat_strip_generic() -> None:
+    runs = [krun("a0", "a", hypothesis="svm"), krun("b0", "b", hypothesis="rf")]
+    scores = {"a0": acc(0.8), "b0": acc(0.4)}
+    per_example = {"a0": binary(10, set(range(8))), "b0": binary(10, {0, 1, 2, 8})}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    assert board.headline == "svm +0.400 over rf, p = 0.22"
+    assert [s["label"] for s in board.stat_strip] == [
+        "Δ acc",
+        "paired p",
+        "fixed / broken",
+        "svm 95% CI",
+        "seed σ",
+        "n for p < 0.05",
+    ]
+    assert [s["value"] for s in board.stat_strip][:5] == [
+        "+0.400",
+        "0.22",
+        "5 / 1",
+        "0.490–0.943",
+        "—",
+    ]
+    assert build_leaderboard("toy", "t", KINDS, [], {}).headline == "No scored runs yet"
+
+
+def test_system_bench_headline_vs_baseline() -> None:
+    runs, scores = bench_runs()
+    board = build_leaderboard("toy", "sb", KINDS, runs, scores)
+    # exp(mean log fast - mean log base) - 1 = -29.6 %; Welch CI on log values [-34, -24] %
+    # (same numbers as tests/core/test_headlines.py::test_welch_interval)
+    assert board.headline == "fast p95 −30% vs baseline [−34, −24]"
+    assert [s["label"] for s in board.stat_strip] == ["p95", "Δ p95", "repeats", "repeat σ"]
+    by_id = KINDS.model_copy(deep=True)
+    by_id.tasks["sb"].baseline = board.rows[1].group_id
+    assert build_leaderboard("toy", "sb", by_id, runs, scores).headline == board.headline
+    by_id.tasks["sb"].baseline = "tag:nothing"
+    assert build_leaderboard("toy", "sb", by_id, runs, scores).headline == "fast p95 310"
+
+
+def test_agent_iteration_orders_versions_naturally() -> None:
+    right = {"v9": set(range(4)), "v10": set(range(5)), "v11": set(range(7))}
+    runs = [krun(v, v, task="ai", params={"version": v}, hypothesis=f"try {v}") for v in right]
+    scores = {v: acc(len(r) / 10) for v, r in right.items()}
+    per_example = {v: binary(10, r) for v, r in right.items()}
+    board = build_leaderboard("toy", "ai", KINDS, runs, scores, per_example=per_example)
+    assert [r.label for r in board.rows] == ["v11", "v10", "v9"]
+    # first version is v9 (natural order), not v10 (string order); CI from 3 fixed, 0 broken
+    assert board.headline == "v11 0.700, +0.300 over v9 [0.016, 0.584]"
+    assert board.stat_strip[0] == {
+        "label": "fixed / broken vs v9",
+        "value": "3 / 0",
+        "unit": "",
+        "tooltip": "Examples v9 missed and v11 solved, and the reverse",
+    }
+
+
+def test_agent_iteration_gain_interval_counts_only_shared_examples() -> None:
+    # 100 examples per version, only s0..s9 shared; v2 solves s0..s5, v1 none of them
+    v1 = {f"a{i}": {"correct": i < 20} for i in range(90)}
+    v1 |= {f"s{i}": {"correct": False} for i in range(10)}
+    v2 = {f"b{i}": {"correct": i < 74} for i in range(90)}
+    v2 |= {f"s{i}": {"correct": i < 6} for i in range(10)}
+    runs = [
+        krun(v, v, task="ai", params={"version": v}, minute=i) for i, v in enumerate(["v1", "v2"])
+    ]
+    scores = {"v1": acc(0.2), "v2": acc(0.8)}
+    board = build_leaderboard("toy", "ai", KINDS, runs, scores, per_example={"v1": v1, "v2": v2})
+    vs = board.rows[1].vs_best
+    assert vs is not None and (vs.fixed, vs.broken) == (6, 0)
+    # 0.6 +/- 1.959964 * sqrt((0.6 - 0.36) / 10) = [0.296, 0.904];
+    # min(group n) = 100 would give [0.553, 0.647]
+    assert board.headline == "v2 0.800, +0.600 over v1 [0.296, 0.904]"
+
+
+def test_agent_iteration_without_version_uses_creation_time() -> None:
+    runs = [
+        krun("y", "y", task="ai", minute=5, hypothesis="second try"),
+        krun("x", "x", task="ai", minute=0, hypothesis="first try"),
+    ]
+    board = build_leaderboard("toy", "ai", KINDS, runs, {"x": acc(0.4), "y": acc(0.6)})
+    assert board.headline == "second try 0.600, +0.200 over first try"

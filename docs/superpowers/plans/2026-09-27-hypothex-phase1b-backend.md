@@ -31,7 +31,7 @@
 - Git: `GitInfo.dirty` counts tracked changes only. Untracked files are recorded as `untracked_count` plus the first 20 repo-relative paths. Wording: `untracked files only (N)`.
 - Task kinds are exactly `generic` (default), `training`, `agent_eval`, `agent_iteration`, `system_bench`. A kind picks the preset view and run-detail layout; it never changes storage or evaluation.
 - Views: names match `^[a-z0-9][a-z0-9_-]*$`; `overview` is reserved for the kind preset; files live at `<repo>/.hypothex/views/<task>/<name>.yaml` (atomic write, text stored byte for byte); presets ship at `src/hypothex/views/presets/<kind>.yaml`; an invalid view is never saved.
-- Example-id and sample-name file stems: `[^A-Za-z0-9_.-]` → `_`, plus `-<sha1(name)[:8]>` when that changed the name (so distinct names never share a file), through the one helper `store.safe_stem`. Files store the original id or name in every row.
+- Example-id and sample-name file stems: `[^A-Za-z0-9_.-]` → `_`, plus `-<sha1(name)[:8]>` when that changed the name or when the name already ends in `-` + 8 lowercase hex digits, through the one helper `store.safe_stem`. Files store the original id or name in every row, and writers call `store.check_stem_owner` first: an existing file that stores a different original raises `StoreError("id collision: ...")`.
 - Telemetry floats (usage `usd`/`seconds`, trace `seconds`) must be finite: `inf` is rejected like `nan` by the SDK and skipped by the readers.
 - Seed-group id: `<config hash hex[:8]>@<commit[:7]>` (`nogit` without git), through the one helper `leaderboard.group_id_for`. Group labels come from the one helper `leaderboard.group_label`.
 - Headlines are one line generated from data. Metrics in [0, 1] get 3 decimals; p-values read `p = 0.15` (two decimals), `p = 0.004` (three decimals when 0.001 ≤ p < 0.01, so a value never reads `p = 0.00`), or `p < 0.001` when tiny; negatives use U+2212 `−`.
@@ -1544,6 +1544,7 @@ git commit -m "fix(git): count only tracked changes as dirty and record untracke
   - `TaskKind = Literal["generic", "training", "agent_eval", "agent_iteration", "system_bench"]`
   - `TaskSpec.kind: TaskKind = "generic"`, `TaskSpec.views: dict[str, dict[str, Any]] = {}` (bodies validated later by `hypothex.core.views`), `TaskSpec.baseline: str | None = None`, `TaskSpec.version_param: str = "version"` (non-empty).
   - `VIEW_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"` and `RESERVED_VIEW_NAMES = frozenset({"overview"})`; `hypothex.core.views` should import these instead of redefining them. Bad or reserved inline view names fail at config load with `ConfigError`.
+  - `load_project_config` rejects a YAML anchor or alias anywhere under `tasks.<task>.views` (a view could contain itself: `spec: &s {mark: point, layer: [*s]}`) with `ConfigError("<path>: YAML anchors and aliases are not allowed in views (line N)")`, N the 1-based line of the first one. Anchors elsewhere in `hypothex.yaml` stay allowed. Helper `_views_anchor_line(text) -> int | None` walks the `yaml.parse` events.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1610,12 +1611,45 @@ def test_invalid_task_kind_and_view_names(tmp_path: Path, addition: str, message
     text = VALID.replace("    primary: topk/k=1\n", "    primary: topk/k=1\n" + addition)
     with pytest.raises(ConfigError, match=message):
         load_project_config(_write(tmp_path, text))
+
+
+LOOP_LINE = "            spec: &s {mark: point, layer: [*s]}"
+
+
+def test_inline_view_anchors_and_aliases_are_rejected_with_their_line(tmp_path: Path) -> None:
+    # regression: this inline view contains itself; it loaded, then views recursed forever
+    loop = (
+        "    views:\n      loop:\n        title: loop\n        panels:\n"
+        f"          - type: vega_lite\n{LOOP_LINE}\n"
+    )
+    text = VALID.replace("    primary: topk/k=1\n", "    primary: topk/k=1\n" + loop)
+    line = text.splitlines().index(LOOP_LINE) + 1
+    with pytest.raises(
+        ConfigError, match=rf"YAML anchors and aliases are not allowed in views \(line {line}\)"
+    ):
+        load_project_config(_write(tmp_path, text))
+    # an alias inside views to an anchor outside them is rejected as well
+    text = VALID.replace("    split: test\n", "    split: &sp test\n").replace(
+        "    primary: topk/k=1\n", "    primary: topk/k=1\n    views: {v: {title: *sp}}\n"
+    )
+    line = text.splitlines().index("    views: {v: {title: *sp}}") + 1
+    with pytest.raises(ConfigError, match=rf"not allowed in views \(line {line}\)"):
+        load_project_config(_write(tmp_path, text))
+
+
+def test_anchors_outside_views_stay_allowed(tmp_path: Path) -> None:
+    text = VALID.replace(
+        "    path: data/test.jsonl\n", "    path: &test data/test.jsonl\n"
+    ).replace("test: data/test.jsonl}", "test: *test}")
+    assert "*test" in text
+    cfg = load_project_config(_write(tmp_path, text))
+    assert cfg.datasets["uspto50k"].splits["test"] == "data/test.jsonl"
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/core/test_config.py -q`
-Expected: `6 failed, 13 passed` (`AttributeError: 'TaskSpec' object has no attribute 'kind'`, and `ConfigError ... Extra inputs are not permitted` for the `views`/`baseline` keys). The `kind: benchmark` and `version_param: ''` cases already pass because unknown keys are rejected.
+Expected: `7 failed, 14 passed` (`AttributeError: 'TaskSpec' object has no attribute 'kind'`, `ConfigError ... Extra inputs are not permitted` for the `views`/`baseline` keys, and in `test_inline_view_anchors_and_aliases_are_rejected_with_their_line` a `ConfigError` about the unknown `views` key that does not match the anchors message). The `kind: benchmark` and `version_param: ''` cases, and `test_anchors_outside_views_stay_allowed`, already pass.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -1727,10 +1761,142 @@ with
 stages:
 ```
 
+Replace the whole `load_project_config` function
+
+```python
+def load_project_config(repo: Path) -> ProjectConfig:
+    """
+    Load and validate ``<repo>/hypothex.yaml``.
+
+    Parameters
+    ----------
+    repo : Path
+        Repository root directory.
+
+    Returns
+    -------
+    ProjectConfig
+        The parsed and validated project config.
+
+    Raises
+    ------
+    ConfigError
+        If the file is missing or invalid.
+    """
+    path = repo / CONFIG_FILENAME
+    if not path.is_file():
+        raise ConfigError(f"no {CONFIG_FILENAME} in {repo}; run `hx init` first")
+    try:
+        return ProjectConfig.model_validate(read_yaml(path))
+    except (ValidationError, ValueError, yaml.YAMLError) as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+```
+
+with
+
+```python
+def _views_anchor_line(text: str) -> int | None:
+    """
+    Return the 1-based line of the first YAML anchor or alias under ``tasks.<task>.views``.
+
+    Inline views may not use anchors or aliases: a view could contain itself
+    (``spec: &s {mark: point, layer: [*s]}``) and every later walk of it would
+    recurse forever. Anchors elsewhere in ``hypothex.yaml`` stay allowed. Only the
+    parser events are read, so nothing is composed or constructed.
+
+    Parameters
+    ----------
+    text : str
+        The text of ``hypothex.yaml``.
+
+    Returns
+    -------
+    int or None
+        The line, or None when no view uses an anchor or alias.
+
+    Raises
+    ------
+    yaml.YAMLError
+        If the text is not valid YAML.
+
+    Examples
+    --------
+    >>> _views_anchor_line("tasks:\\n  t:\\n    views: {v: {title: &a x}}\\n")
+    3
+    >>> _views_anchor_line("base: &b {a: 1}\\ntasks: {t: {x: *b}}\\n") is None
+    True
+    """
+    # one frame per open mapping or sequence: its path of keys, and for a mapping
+    # whether the next node is a key and the last key read
+    frames: list[dict[str, Any]] = []
+    for event in yaml.parse(text, Loader=yaml.SafeLoader):
+        if isinstance(event, yaml.CollectionEndEvent):
+            frames.pop()
+            continue
+        if not isinstance(event, yaml.NodeEvent):
+            continue
+        path: tuple[Any, ...] = ()
+        if frames:
+            top = frames[-1]
+            path = top["path"]
+            if not top["mapping"]:
+                path = (*path, None)
+            elif top["key_next"]:
+                top["key"] = event.value if isinstance(event, yaml.ScalarEvent) else None
+            else:
+                path = (*path, top["key"])
+            top["key_next"] = not top["key_next"]
+        in_views = len(path) >= 3 and path[0] == "tasks" and path[2] == "views"
+        if in_views and event.anchor is not None:
+            return event.start_mark.line + 1
+        if isinstance(event, yaml.CollectionStartEvent):
+            frames.append(
+                {
+                    "path": path,
+                    "mapping": isinstance(event, yaml.MappingStartEvent),
+                    "key_next": True,
+                    "key": None,
+                }
+            )
+    return None
+
+
+def load_project_config(repo: Path) -> ProjectConfig:
+    """
+    Load and validate ``<repo>/hypothex.yaml``.
+
+    Parameters
+    ----------
+    repo : Path
+        Repository root directory.
+
+    Returns
+    -------
+    ProjectConfig
+        The parsed and validated project config.
+
+    Raises
+    ------
+    ConfigError
+        If the file is missing or invalid, or an inline view (anything under
+        ``tasks.<task>.views``) uses a YAML anchor or alias.
+    """
+    path = repo / CONFIG_FILENAME
+    if not path.is_file():
+        raise ConfigError(f"no {CONFIG_FILENAME} in {repo}; run `hx init` first")
+    try:
+        anchor = _views_anchor_line(path.read_text(encoding="utf-8"))
+        if anchor is None:
+            return ProjectConfig.model_validate(read_yaml(path))
+    except (ValidationError, ValueError, yaml.YAMLError) as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+    raise ConfigError(f"{path}: YAML anchors and aliases are not allowed in views (line {anchor})")
+```
+
 - [ ] **Step 4: Run the tests, then the whole suite**
 
 Run: `uv run pytest tests/core/test_config.py -q`
-Expected: `19 passed`.
+Expected: `21 passed`.
 
 Run: `uv run pytest -q && uv run ruff check . && uv run ruff format --check . && uv run ty check src`
 Expected: every test passes (0 failed), then `All checks passed!`, `... files already formatted`, `All checks passed!`.
@@ -1755,7 +1921,8 @@ ends. Contract: section 1.10. Spec: section 8.7.
 - `RunRecord.usage: UsageTotals | None = None`.
 
 **Produces (used by `core.sources`, `core.panels`, `core.leaderboard`, the API, and `hypothex.demo`):**
-- `hypothex.core.store.safe_stem(name: str) -> str` — `[^A-Za-z0-9_.-]` → `_`; when that changes the name, `-` + the first 8 hex digits of `sha1(name)` are appended, so distinct names never share a file (`a/b` → `a_b-3ec69c85`, `a_b` stays `a_b`); `ValueError` on `""`.
+- `hypothex.core.store.safe_stem(name: str) -> str` — `[^A-Za-z0-9_.-]` → `_`; `-` + the first 8 hex digits of `sha1(name)` are appended when that changes the name OR when the name already ends in `-[0-9a-f]{8}` (`a/b` → `a_b-3ec69c85`, `a_b-3ec69c85` → `a_b-3ec69c85-d64fa8bc`, `a_b` stays `a_b`); `ValueError` on `""`. Two distinct names share a stem only when they sanitise alike and their sha1 digests share 8 hex digits; `check_stem_owner` catches that.
+- `hypothex.core.store.check_stem_owner(path: Path, key: str, original: str) -> None` — called by every trace/sample writer before it writes `path`; when the file exists and its first line stores a different string under `key` (`example_id` for traces, `name` for samples), raises `StoreError("id collision: <file> already holds <key> '<stored>', not '<original>'")`. A missing file, an empty file, or a first line without that key passes.
 - `hypothex.core.store.UsageRow(BaseModel)`: `example_id: str | None = None`, `tokens_in: int = 0`, `tokens_out: int = 0`, `usd: float = 0.0`, `seconds: float = 0.0` (all `>= 0`; floats must be finite, so `inf` is rejected like `nan`).
 - `hypothex.core.store.TraceStep(BaseModel)`: `turn: int`, `tool: str | None = None`, `args: Any = None`, `result: Any = None`, `tokens_in: int = 0`, `tokens_out: int = 0`, `seconds: float = 0.0` (finite), `error: str | None = None`.
 - `hypothex.core.store.sum_usage(rows: Iterable[UsageRow]) -> UsageTotals | None` (None when no rows; `calls` = row count).
@@ -1770,7 +1937,7 @@ ends. Contract: section 1.10. Spec: section 8.7.
   - `samples/<safe_stem(name)>.jsonl`: `{"name": str, "value": float}` (the original series name in every row); appended.
   - `artifacts.jsonl` checkpoint row: `{"kind": "checkpoint", "path", "host", "size", "step", "metrics"}`.
 
-Known limit, owned outside this part: a run marked `lost` by `core.control` does not get `usage` totals (only `execute_run` finalises). File names never collide: `safe_stem` adds a hash of the original name whenever it has to replace a character, and every row stores the original id or name.
+Known limit, owned outside this part: a run marked `lost` by `core.control` does not get `usage` totals (only `execute_run` finalises). File names: `safe_stem` adds a hash of the original name whenever it has to replace a character or the name already looks hashed, so a stem is shared only on an 8-hex-digit sha1 prefix collision; every row stores the original id or name, and `log_trace` / `log_samples` refuse (`StoreError`, nothing written) to write a file that stores a different original.
 
 ---
 
@@ -1782,7 +1949,7 @@ Known limit, owned outside this part: a run marked `lost` by `core.control` does
 
 **Interfaces:**
 - Consumes: `hypothex.core.records.UsageTotals` (Task 3); existing `read_jsonl`, `_parse_rows`, `Layout.run_dir`.
-- Produces: `safe_stem`, `UsageRow`, `TraceStep`, `sum_usage`, `RunStore.read_usage`, `RunStore.list_traces`, `RunStore.read_trace`, `RunStore.read_samples` (signatures in the Part 2 notes above). These are the only readers of `usage.jsonl`, `traces/`, and `samples/`: `core.sources`, `core.panels`, the API, and `hypothex.demo` all call them.
+- Produces: `safe_stem`, `check_stem_owner`, `UsageRow`, `TraceStep`, `sum_usage`, `RunStore.read_usage`, `RunStore.list_traces`, `RunStore.read_trace`, `RunStore.read_samples` (signatures in the Part 2 notes above). These are the only readers of `usage.jsonl`, `traces/`, and `samples/`: `core.sources`, `core.panels`, the API, and `hypothex.demo` all call them.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1797,7 +1964,14 @@ with
 
 ```python
 from hypothex.core.records import ScoreRecord, UsageTotals
-from hypothex.core.store import RunStore, TraceStep, UsageRow, safe_stem, sum_usage
+from hypothex.core.store import (
+    RunStore,
+    TraceStep,
+    UsageRow,
+    check_stem_owner,
+    safe_stem,
+    sum_usage,
+)
 ```
 
 and replace the first four lines
@@ -1833,10 +2007,43 @@ def test_safe_stem_replaces_unsafe_characters_and_adds_a_hash() -> None:
 
 
 def test_safe_stem_never_merges_distinct_names() -> None:
-    names = ["a/b", "a_b", "a b", "a:b"]
+    names = ["a/b", "a_b", "a b", "a:b", "a_b-3ec69c85"]
     stems = [safe_stem(n) for n in names]
     assert stems[:2] == ["a_b-3ec69c85", "a_b"]
     assert len(set(stems)) == len(names)
+
+
+def test_safe_stem_hashes_names_that_already_look_hashed() -> None:
+    # regression: "a_b-3ec69c85" is already safe, but kept as is it would take the
+    # file of "a/b"; a name ending in "-" + 8 lowercase hex digits is hashed too
+    assert safe_stem("a/b") == "a_b-3ec69c85"
+    assert safe_stem("a_b-3ec69c85") == "a_b-3ec69c85-d64fa8bc"  # sha1(...)[:8]
+    assert safe_stem("a/b") != safe_stem("a_b-3ec69c85")
+    assert safe_stem("run-12345678") == "run-12345678-736848d3"
+    assert safe_stem("run-1234567") == "run-1234567"  # 7 digits: not a hash tail
+    assert safe_stem("run-ABCDEF12") == "run-ABCDEF12"  # upper case: not a hash tail
+
+
+def test_check_stem_owner_rejects_a_different_original(tmp_path: Path) -> None:
+    path = tmp_path / "a_b-3ec69c85.jsonl"
+    check_stem_owner(path, "example_id", "a/b")  # no file yet
+    path.write_text("")
+    check_stem_owner(path, "example_id", "a/b")  # empty file
+    path.write_text('{"example_id": "a/b", "turn": 1}\n')
+    check_stem_owner(path, "example_id", "a/b")  # the same original: overwrite is fine
+    path.write_text('{"example_id": "x/y", "turn": 1}\n')
+    with pytest.raises(
+        StoreError,
+        match=r"id collision: a_b-3ec69c85\.jsonl already holds example_id 'x/y', not 'a/b'",
+    ):
+        check_stem_owner(path, "example_id", "a/b")
+    samples = tmp_path / "lat.jsonl"
+    samples.write_text('{"name": "lat", "value": 1.0}\n')
+    check_stem_owner(samples, "name", "lat")
+    with pytest.raises(StoreError, match="id collision"):
+        check_stem_owner(samples, "name", "lat2")
+    samples.write_text('{"value": 1.0}\n')  # written by hand, no stored name: not checked
+    check_stem_owner(samples, "name", "lat2")
 
 
 def test_read_usage_skips_bad_rows_and_sums(store: RunStore) -> None:
@@ -1979,6 +2186,7 @@ Replace the line `RUN_SUBDIRS = ("logs", "predictions", "env")` with this block 
 ```python
 RUN_SUBDIRS = ("logs", "predictions", "env")
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
+_HASH_TAIL = re.compile(r"-[0-9a-f]{8}\Z")
 
 
 def safe_stem(name: str) -> str:
@@ -1986,10 +2194,13 @@ def safe_stem(name: str) -> str:
     Turn an example id or sample name into a file name stem.
 
     Every character outside ``[A-Za-z0-9_.-]`` becomes ``_``, so the name can never
-    contain a path separator and leave its folder. When that changes the name,
-    ``-`` and the first 8 hex digits of ``sha1(name)`` are appended, so two
-    distinct names (``a/b`` and ``a_b``) never share a file. A name that is
-    already safe is returned unchanged.
+    contain a path separator and leave its folder. ``-`` and the first 8 hex digits
+    of ``sha1(name)`` are appended when that changes the name, and also when the
+    name already ends in ``-`` plus 8 lowercase hex digits (so ``a_b-3ec69c85``
+    cannot take the stem of ``a/b``). Any other name is returned unchanged. So an
+    unchanged stem never ends in a hash and a hashed one always does: two distinct
+    names share a stem only if they sanitise alike and their sha1 digests share the
+    first 8 hex digits, which ``check_stem_owner`` catches before a write.
 
     Parameters
     ----------
@@ -2012,13 +2223,59 @@ def safe_stem(name: str) -> str:
     'route_7_b-5db86396'
     >>> safe_stem("a_b")
     'a_b'
+    >>> safe_stem("a_b-3ec69c85")
+    'a_b-3ec69c85-d64fa8bc'
     """
     if not name:
         raise ValueError("name must not be empty")
     stem = _UNSAFE_CHARS.sub("_", name)
-    if stem == name:
+    if stem == name and not _HASH_TAIL.search(name):
         return stem
     return f"{stem}-{hashlib.sha1(name.encode('utf-8')).hexdigest()[:8]}"
+
+
+def check_stem_owner(path: Path, key: str, original: str) -> None:
+    """
+    Refuse to write a trace or sample file that belongs to a different id or name.
+
+    ``safe_stem`` gives two distinct names one stem only on an 8-hex-digit sha1
+    prefix collision. Every row of a trace or sample file stores the original id
+    (``example_id``) or name (``name``), so writers call this before they write:
+    an existing file whose first line stores a different original is a collision.
+
+    Parameters
+    ----------
+    path : Path
+        The trace or sample file about to be written.
+    key : str
+        Row key of the original: ``example_id`` for traces, ``name`` for samples.
+    original : str
+        The id or name about to be written.
+
+    Raises
+    ------
+    StoreError
+        If the file exists and its first line stores a different string under
+        ``key``. A missing or empty file, or a first line without that key (a file
+        written by hand), passes.
+
+    Examples
+    --------
+    >>> check_stem_owner(Path("/nonexistent/a_b.jsonl"), "example_id", "a_b")
+    """
+    if not path.is_file():
+        return
+    with path.open("rb") as fh:
+        first = fh.readline()
+    try:
+        row = json.loads(first)
+    except ValueError:
+        return
+    stored = row.get(key) if isinstance(row, dict) else None
+    if isinstance(stored, str) and stored != original:
+        raise StoreError(
+            f"id collision: {path.name} already holds {key} {stored!r}, not {original!r}"
+        )
 
 
 class UsageRow(BaseModel):
@@ -2251,7 +2508,7 @@ def _parse_steps(raws: list[dict[str, Any]]) -> list[TraceStep]:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_store.py -v`
-Expected: `15 passed`.
+Expected: `17 passed`.
 
 - [ ] **Step 5: Lint, format, type-check**
 
@@ -2274,7 +2531,7 @@ git commit -m "feat: store readers for usage, traces, and raw samples"
 - Test: `tests/test_sdk.py`
 
 **Interfaces:**
-- Consumes: `safe_stem`, `TraceStep`, `UsageRow` from `hypothex.core.store` (Task 6); `Artifact.step` / `Artifact.metrics` (Task 3); `atomic_write_text`, `append_jsonl`, `open_jsonl_append` from `hypothex.core.fsutil`.
+- Consumes: `safe_stem`, `check_stem_owner`, `TraceStep`, `UsageRow` from `hypothex.core.store` (Task 6); `Artifact.step` / `Artifact.metrics` (Task 3); `atomic_write_text`, `append_jsonl`, `open_jsonl_append` from `hypothex.core.fsutil`.
 - Produces (contract 1.10, on both `Run` and `NoopRun`):
   - `log_trace(self, example_id: str, steps: Iterable[Mapping[str, Any]]) -> None`
   - `log_usage(self, tokens_in: int = 0, tokens_out: int = 0, usd: float = 0.0, seconds: float = 0.0, example_id: str | None = None) -> None`
@@ -2283,9 +2540,10 @@ git commit -m "feat: store readers for usage, traces, and raw samples"
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/test_sdk.py`, add this import after `from hypothex import sdk`:
+In `tests/test_sdk.py`, add these imports after `from hypothex import sdk`:
 
 ```python
+from hypothex.core.errors import StoreError
 from hypothex.core.records import Artifact
 ```
 
@@ -2362,6 +2620,29 @@ def test_log_trace_keeps_similar_ids_apart_and_empty_traces(run_env: Path) -> No
     assert [r["tool"] for r in _lines(traces / "a_b.jsonl")] == ["y"]
     # an empty trace still creates its file, with a marker line that keeps the id
     assert _lines(traces / "e_0-7569d147.jsonl") == [{"example_id": "e/0"}]
+
+
+def test_trace_and_sample_writers_refuse_a_file_of_another_id(run_env: Path) -> None:
+    run = hx.current()
+    # regression: "a_b-3ec69c85" looks like the stem of "a/b", so it is hashed too
+    run.log_trace("a/b", [{"tool": "x"}])
+    run.log_trace("a_b-3ec69c85", [{"tool": "y"}])
+    traces = run_env / "traces"
+    assert [r["tool"] for r in _lines(traces / "a_b-3ec69c85.jsonl")] == ["x"]
+    assert [r["tool"] for r in _lines(traces / "a_b-3ec69c85-d64fa8bc.jsonl")] == ["y"]
+    # a sha1 prefix collision cannot be produced on demand: plant a file that stores
+    # another id under the stem of "k/1", as a colliding id would have written it
+    planted = traces / "k_1-3437d2e8.jsonl"  # sha1("k/1")[:8]
+    planted.write_text('{"example_id": "other", "turn": 1}\n')
+    with pytest.raises(StoreError, match="id collision: k_1-3437d2e8.jsonl already holds"):
+        run.log_trace("k/1", [{"tool": "z"}])
+    assert planted.read_text() == '{"example_id": "other", "turn": 1}\n'  # untouched
+    samples = run_env / "samples"
+    samples.mkdir()
+    (samples / "lat_ms-94293541.jsonl").write_text('{"name": "other", "value": 1.0}\n')
+    with pytest.raises(StoreError, match="id collision: lat_ms-94293541.jsonl already holds"):
+        run.log_samples("lat ms", [2.0])  # sha1("lat ms")[:8] = 94293541
+    assert _lines(samples / "lat_ms-94293541.jsonl") == [{"name": "other", "value": 1.0}]
 
 
 def test_log_trace_rejects_bad_steps_without_writing(run_env: Path) -> None:
@@ -2444,7 +2725,7 @@ def test_log_checkpoint_records_step_and_metrics(run_env: Path, tmp_path: Path) 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/test_sdk.py -v`
-Expected: 7 failures, each `AttributeError: 'Run' object has no attribute 'log_trace'` (or `log_usage` / `log_samples` / `log_checkpoint`; `'NoopRun' object has no attribute 'log_checkpoint'` for the no-op test). The 5 older tests pass.
+Expected: 8 failures, each `AttributeError: 'Run' object has no attribute 'log_trace'` (or `log_usage` / `log_samples` / `log_checkpoint`; `'NoopRun' object has no attribute 'log_checkpoint'` for the no-op test). The 5 older tests pass.
 
 - [ ] **Step 3: Implement the SDK calls**
 
@@ -2485,7 +2766,7 @@ from hypothex.core.fsutil import (
     atomic_write_text,
     open_jsonl_append,
 )
-from hypothex.core.store import TraceStep, UsageRow, safe_stem
+from hypothex.core.store import TraceStep, UsageRow, check_stem_owner, safe_stem
 
 
 def _why(exc: ValidationError) -> str:
@@ -2703,8 +2984,8 @@ class Run:
         error}``; every key is optional except that ``turn`` defaults to the step's
         1-based position. A non-empty ``error`` marks the step (and the trace) failed.
         The file name is ``store.safe_stem(example_id)`` (unsafe characters become
-        ``_`` plus a hash of the id, so ids never collide); the original id is stored
-        in each line. An empty ``steps`` still writes the file, as one marker line
+        ``_`` plus a hash of the id); the original id is stored in each line. An
+        empty ``steps`` still writes the file, as one marker line
         ``{"example_id": <id>}``, so the trace list shows it with 0 turns.
 
         Parameters
@@ -2720,6 +3001,9 @@ class Run:
             If ``example_id`` is empty or a step is invalid (for example a negative
             token count, an infinite ``seconds``, or a non-integer ``turn``); nothing
             is written then.
+        StoreError
+            If the trace file of this stem already holds another example id (an id
+            collision, ``store.check_stem_owner``); nothing is written then.
 
         Examples
         --------
@@ -2742,6 +3026,7 @@ class Run:
             lines.append(json.dumps(row, default=str) + "\n")
         if not lines:
             lines.append(json.dumps({"example_id": example_id}) + "\n")
+        check_stem_owner(path, "example_id", example_id)
         atomic_write_text(path, "".join(lines))
 
     def log_usage(
@@ -2798,7 +3083,7 @@ class Run:
         Each value becomes one ``{"name": name, "value": v}`` line. Percentiles are
         computed from these raw values, so log every sample, not a summary. The file
         name is ``store.safe_stem(name)`` (unsafe characters become ``_`` plus a hash
-        of the name, so names never collide); readers use the stored ``name``.
+        of the name); readers use the stored ``name``.
 
         Parameters
         ----------
@@ -2812,6 +3097,9 @@ class Run:
         ValueError
             If ``name`` is empty or a value is not a finite number; nothing is
             written then.
+        StoreError
+            If the sample file of this stem already holds another series name (a
+            name collision, ``store.check_stem_owner``); nothing is written then.
 
         Examples
         --------
@@ -2824,6 +3112,7 @@ class Run:
         ]
         if not lines:
             return
+        check_stem_owner(path, "name", name)
         with open_jsonl_append(path) as fh:
             fh.write("".join(lines).encode("utf-8"))
 
@@ -2944,7 +3233,7 @@ Notes for the implementer:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/test_sdk.py -v`
-Expected: `12 passed`.
+Expected: `13 passed`.
 
 - [ ] **Step 5: Lint, format, type-check**
 
@@ -6492,7 +6781,17 @@ git commit -m "feat: add view models and task-kind preset views"
   - `vega_spec_problems(spec: Any, at: tuple[str | int, ...] = ()) -> list[tuple[tuple[str | int, ...], str]]`
     (public; the panel engine calls it too, Task 20): every `url`, `href`, or `embedOptions` key
     at any depth (inline data only: no data URLs, lookup sources, image URLs, links, or embed
-    options that could swap the loader) and every `image` mark.
+    options that could swap the loader) and every `image` mark. The walk is bounded
+    (`VEGA_MAX_DEPTH = 64` nested mappings/lists, `VEGA_MAX_NODES = 10_000` values): past a
+    bound it returns only `[(at, "vega_lite spec is too deep (over 64 levels)")]` or
+    `[(at, "vega_lite spec is too large (over 10000 values)")]`, so a self-referencing spec
+    (YAML aliases in `hypothex.yaml`, which view validation never sees) is a panel error,
+    never a `RecursionError`.
+  - YAML anchors and aliases are not allowed in view text: `validate_view_text` scans the
+    `yaml.parse` events before composing and returns `(None, [issue])` for the first
+    anchor (`&name`) or alias (`*name`, including `<<: *name`) with its 1-based line and
+    path `""`. A self-referencing view (`spec: &s {mark: point, layer: [*s]}`) therefore
+    never reaches the loader, the models, or `vega_spec_problems`.
   - Metric references: a reference that is exactly a known metric name (history names keep
     their `/`, e.g. `val/top1`) is valid before it is split into `name[@version][/key]`.
     A `grid` panel's `data.y` is a per-example field (`partial` in
@@ -6505,7 +6804,9 @@ git commit -m "feat: add view models and task-kind preset views"
     `vega_lite spec needs mark, layer, or a composition`,
     `vega_lite spec must not load external resources (<key>)`,
     `vega_lite image marks are not allowed`, `pareto keys are x and y`,
-    `duplicate panel title <t>`, `a view is a mapping with title and panels`, `YAML: <problem>`.
+    `duplicate panel title <t>`, `a view is a mapping with title and panels`, `YAML: <problem>`,
+    `YAML anchors and aliases are not allowed`, `vega_lite spec is too deep (over 64 levels)`,
+    `vega_lite spec is too large (over 10000 values)`.
   - `ValidationIssue.path` looks like `panels[1].data.y`; `line` is 1-based, from the key's
     `yaml.compose` mark (or the nearest existing parent when the key is missing).
 
@@ -6832,6 +7133,59 @@ panels:
         (15, "panels[0].spec.transform[0].from.data.url", f"{external} (url)"),
         (16, "panels[0].spec.usermeta.embedOptions", f"{external} (embedOptions)"),
     ]
+
+
+NO_ANCHORS = "YAML anchors and aliases are not allowed"
+# regression: the spec refers to itself; loading it used to raise RecursionError
+RECURSIVE_VIEW = """\
+title: t
+panels:
+  - type: vega_lite
+    data: {source: runs}
+    spec: &s {mark: point, layer: [*s]}
+"""
+
+
+def test_yaml_anchors_and_aliases_are_rejected_with_their_line() -> None:
+    assert _check(RECURSIVE_VIEW) == (None, [(5, "", NO_ANCHORS, None)])
+    shared = """\
+title: t
+panels:
+  - type: markdown
+    title: A
+    text: &note shared text
+  - type: markdown
+    title: B
+    text: *note
+"""
+    assert _check(shared) == (None, [(5, "", NO_ANCHORS, None)])
+    merge = "title: t\npanels:\n  - type: grid\n    layout:\n      <<: *wide\n"
+    assert _check(merge) == (None, [(5, "", NO_ANCHORS, None)])  # alias with no anchor
+
+
+def _vega_view(spec: str) -> str:
+    return (
+        "title: t\npanels:\n  - type: vega_lite\n    data: {source: runs}\n"
+        f"    spec: {{mark: point, extra: {spec}}}\n"
+    )
+
+
+def test_vega_lite_spec_depth_and_size_are_bounded() -> None:
+    # 63 nested mappings under the root spec: 64 levels, the limit, still checked
+    view, issues = validate_view_text(_vega_view("{a: " * 63 + "1" + "}" * 63), set(), {})
+    assert view is not None and issues == []
+    deep = _vega_view("{a: " * 64 + "1" + "}" * 64)
+    view, issues = validate_view_text(deep, set(), {})
+    assert view is not None
+    assert [(i.line, i.path, i.message) for i in issues] == [
+        (5, "panels[0].spec", "vega_lite spec is too deep (over 64 levels)")
+    ]
+    wide = _vega_view("[" + ", ".join(["0"] * 10_000) + "]")
+    view, issues = validate_view_text(wide, set(), {})
+    assert view is not None
+    assert [(i.line, i.path, i.message) for i in issues] == [
+        (5, "panels[0].spec", "vega_lite spec is too large (over 10000 values)")
+    ]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -6874,6 +7228,9 @@ FIELD_PREFIXES = ("usage.", "params.", "vars.")
 VEGA_ROOT_KEYS = frozenset({"mark", "layer", "concat", "hconcat", "vconcat", "facet", "repeat"})
 VEGA_BLOCKED_KEYS = frozenset({"url", "href", "embedOptions"})
 VERSION_REF = "version"
+VEGA_MAX_DEPTH = 64
+VEGA_MAX_NODES = 10_000
+NO_ANCHORS = "YAML anchors and aliases are not allowed"
 
 Loc = tuple[str | int, ...]
 ```
@@ -7012,6 +7369,10 @@ def _example_field_problem(
     return f"unknown per-example field {name}", _closest(name, fields)
 
 
+class _SpecTooBig(Exception):
+    """Raised inside ``vega_spec_problems`` when a spec passes a size bound."""
+
+
 def vega_spec_problems(spec: Any, at: Loc = ()) -> list[tuple[Loc, str]]:
     """
     Find what a Vega-Lite spec may not contain: external resources and images.
@@ -7019,7 +7380,11 @@ def vega_spec_problems(spec: Any, at: Loc = ()) -> list[tuple[Loc, str]]:
     Rows reach a ``vega_lite`` panel only inline, so every ``url`` (data, lookup
     sources, image marks), ``href`` (links), and ``embedOptions`` (vega-embed
     options, which can swap the loader) key is rejected at any depth, and so is
-    every ``image`` mark.
+    every ``image`` mark. The walk is bounded: more than ``VEGA_MAX_DEPTH`` nested
+    mappings and lists, or more than ``VEGA_MAX_NODES`` values, gives the single
+    problem "too deep" or "too large" at ``at`` instead. A spec that contains
+    itself (YAML aliases in ``hypothex.yaml``) is "too deep", not a
+    ``RecursionError``.
 
     Parameters
     ----------
@@ -7039,22 +7404,40 @@ def vega_spec_problems(spec: Any, at: Loc = ()) -> list[tuple[Loc, str]]:
     [(('layer', 0, 'data', 'url'), 'vega_lite spec must not load external resources (url)')]
     >>> vega_spec_problems({"mark": {"type": "image"}})
     [(('mark',), 'vega_lite image marks are not allowed')]
+    >>> loop = {"mark": "point"}
+    >>> loop["layer"] = [loop]
+    >>> vega_spec_problems(loop, ("spec",))
+    [(('spec',), 'vega_lite spec is too deep (over 64 levels)')]
     """
     found: list[tuple[Loc, str]] = []
-    if isinstance(spec, dict):
-        for key, value in spec.items():
-            here: Loc = (*at, str(key))
-            if key in VEGA_BLOCKED_KEYS:
-                found.append((here, f"vega_lite spec must not load external resources ({key})"))
-            elif key == "mark" and (
-                value == "image" or (isinstance(value, dict) and value.get("type") == "image")
-            ):
-                found.append((here, "vega_lite image marks are not allowed"))
-            else:
-                found += vega_spec_problems(value, here)
-    elif isinstance(spec, list):
-        for i, item in enumerate(spec):
-            found += vega_spec_problems(item, (*at, i))
+    seen = 0
+
+    def walk(node: Any, loc: Loc, level: int) -> None:
+        nonlocal seen
+        seen += 1
+        if seen > VEGA_MAX_NODES:
+            raise _SpecTooBig(f"vega_lite spec is too large (over {VEGA_MAX_NODES} values)")
+        if isinstance(node, dict | list) and level > VEGA_MAX_DEPTH:
+            raise _SpecTooBig(f"vega_lite spec is too deep (over {VEGA_MAX_DEPTH} levels)")
+        if isinstance(node, dict):
+            for key, value in node.items():
+                here: Loc = (*loc, str(key))
+                if key in VEGA_BLOCKED_KEYS:
+                    found.append((here, f"vega_lite spec must not load external resources ({key})"))
+                elif key == "mark" and (
+                    value == "image" or (isinstance(value, dict) and value.get("type") == "image")
+                ):
+                    found.append((here, "vega_lite image marks are not allowed"))
+                else:
+                    walk(value, here, level + 1)
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                walk(item, (*loc, i), level + 1)
+
+    try:
+        walk(spec, at, 1)
+    except _SpecTooBig as exc:
+        return [(at, str(exc))]
     return found
 
 
@@ -7129,13 +7512,36 @@ def _semantic_issues(
     ]
 
 
+def _first_anchor_line(text: str) -> int | None:
+    """
+    Return the 1-based line of the first YAML anchor or alias in ``text``.
+
+    Scans the parser events, so nothing is composed or constructed: an alias
+    (``*name``, also in ``<<: *name``) is found even when it refers to its own
+    parent or to no anchor at all.
+
+    Examples
+    --------
+    >>> _first_anchor_line("a: 1\\nb: &x 2\\nc: *x\\n")
+    2
+    >>> _first_anchor_line("a: 1\\n") is None
+    True
+    """
+    for event in yaml.parse(text, Loader=yaml.SafeLoader):
+        if isinstance(event, yaml.NodeEvent) and event.anchor is not None:
+            return event.start_mark.line + 1
+    return None
+
+
 def validate_view_text(
     text: str, known_metrics: set[str], known_fields: dict[str, set[str]]
 ) -> tuple[ViewSpec | None, list[ValidationIssue]]:
     """
     Parse and check a view's YAML text.
 
-    Schema errors (bad YAML, unknown keys, wrong types) return no view. Semantic
+    YAML anchors and aliases are not allowed (a view could refer to itself); the
+    first one is a schema error with its line. Schema errors (bad YAML, anchors,
+    unknown keys, wrong types) return no view. Semantic
     problems (unknown metric or field, missing ``source``/``text``/``spec``,
     duplicate titles) return the parsed view plus issues, so a preview can still
     render; the view is valid only when the issue list is empty. Metric and field
@@ -7161,6 +7567,9 @@ def validate_view_text(
     (True, 3, 'leaderboard')
     """
     try:
+        anchor = _first_anchor_line(text)
+        if anchor is not None:
+            return None, [ValidationIssue(line=anchor, path="", message=NO_ANCHORS)]
         root = yaml.compose(text, Loader=yaml.SafeLoader)
         data = yaml.safe_load(text)
     except yaml.MarkedYAMLError as exc:
@@ -7183,7 +7592,7 @@ def validate_view_text(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_views.py -q`
-Expected: `40 passed`.
+Expected: `42 passed`.
 
 Run: `uv run ruff format --check src/hypothex/core/views.py tests/core/test_views.py && uv run ruff check src/hypothex/core/views.py tests/core/test_views.py && uv run ty check src/hypothex/core/views.py tests/core/test_views.py`
 Expected: `2 files already formatted`, `All checks passed!`, `All checks passed!`.
@@ -7699,7 +8108,7 @@ def delete_view(repo: Path, task: str, name: str) -> None:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_views.py -q`
-Expected: `57 passed`.
+Expected: `59 passed`.
 
 Run: `uv run ruff format --check src/hypothex/core/views.py tests/core/test_views.py && uv run ruff check src/hypothex/core/views.py tests/core/test_views.py && uv run ty check src/hypothex/core/views.py tests/core/test_views.py`
 Expected: `2 files already formatted`, `All checks passed!`, `All checks passed!`.
@@ -8479,7 +8888,7 @@ def view_context(ctx: Context, project: str, task: str) -> tuple[set[str], dict[
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_views.py -q`
-Expected: `59 passed`.
+Expected: `61 passed`.
 
 Run: `uv run ruff format --check src/hypothex/core/views.py tests/core/test_views.py && uv run ruff check src/hypothex/core/views.py tests/core/test_views.py && uv run ty check src/hypothex/core/views.py tests/core/test_views.py && uv run python -m doctest src/hypothex/core/views.py && echo doctest-ok`
 Expected: `2 files already formatted`, `All checks passed!`, `All checks passed!`, `doctest-ok`.
@@ -8509,7 +8918,7 @@ git commit -m "feat: collect known metrics and fields for view validation"
   - `query_panel(ctx: Context, project: str, task: str, panel: PanelSpec, runs_filter: RunFilter | None = None) -> PanelResult` — `markdown` and `trace` with `data.run_id` never touch the task (the run-trace API route can call it for exploratory runs); unknown task → `ConfigError("unknown task ...")`.
   - `query_view(ctx: Context, project: str, task: str, view: ViewSpec) -> list[PanelResult]` — view must already be resolved; `view.runs` applies to every panel; per-panel `HypothexError` → `meta.error`.
   - `MAX_TABLE_ROWS = 5000`.
-  - Row shapes in this task: `stat_strip` rows = `Leaderboard.stat_strip`, `meta.headline`; `leaderboard` rows = `LeaderboardRow.model_dump(mode="json")`, `meta` = `headline, primary, higher_is_better, metric_versions, noise, needs_reeval, unscored`; `table`/`vega_lite` rows = `iter_rows(..., source or "runs")` filtered by `data.filter` on the full row, then projected to `fields` with `sources.select_fields` (so a filter may use a field the table does not show), `meta` = `source, total[, warnings]` (+ `spec` for vega-lite); a `runs` table may list the field `version` (`views.VERSION_REF`, spec 8.4): the run's `TaskSpec.version_param` param, else the creation time (`YYYY-MM-DD HH:MM:SS`, UTC) of the first selected run of its seed group; `vega_lite` replaces the root `data` with `{"values": []}` and raises `ConfigError("<problem> at spec.<path>")` when `views.vega_spec_problems` finds any other external resource or image mark (a panel error in `query_view`); `trace` rows = eight trace keys, `meta` = `run_id, example_id, failed_turn[, warnings]` (no `data.run_id`: newest selected run with traces, first failing example else first example); `markdown` rows `[]`, `meta.text`.
+  - Row shapes in this task: `stat_strip` rows = `Leaderboard.stat_strip`, `meta.headline`; `leaderboard` rows = `LeaderboardRow.model_dump(mode="json")`, `meta` = `headline, primary, higher_is_better, metric_versions, noise, needs_reeval, unscored`; `table`/`vega_lite` rows = `iter_rows(..., source or "runs")` filtered by `data.filter` on the full row, then projected to `fields` with `sources.select_fields` (so a filter may use a field the table does not show), `meta` = `source, total[, warnings]` (+ `spec` for vega-lite); every `runs` row carries the synthetic field `version` (`views.VERSION_REF`, spec 8.4), set on the full row before `data.filter` runs and whatever `fields` lists, so `filter: {version: p10}` works on a table that does not show `version`: the run's `TaskSpec.version_param` param, else the creation time (`YYYY-MM-DD HH:MM:SS`, UTC) of the first selected run of its seed group; `vega_lite` replaces the root `data` with `{"values": []}` and raises `ConfigError("<problem> at spec.<path>")` when `views.vega_spec_problems` finds any other external resource or image mark (a panel error in `query_view`); `trace` rows = eight trace keys, `meta` = `run_id, example_id, failed_turn[, warnings]` (no `data.run_id`: newest selected run with traces, first failing example else first example); `markdown` rows `[]`, `meta.text`.
   - Private helpers later tasks use: `_Scope` (`ctx`, `entry`, `task`, `runs`, `board()`, `board_labels()`), `_HANDLERS: dict[str, Callable[[_Scope, PanelSpec], PanelResult]]`, `_row_matches`, `_build_board`, `_run_versions(scope) -> dict[str, tuple[bool, str]]` (run id → (whether the value is the version param, version text); Task 22's ordinal x uses it).
 
 - [ ] **Step 1: Write the failing tests**
@@ -8721,6 +9130,21 @@ def test_runs_table_version_field(ctx: Context, toy_repo: Path) -> None:
     _set_task(toy_repo, version_param="prompt_version")
     rows = query_panel(ctx, "toy", "toy-acc", panel).rows
     assert [r["version"] for r in rows] == ["p7", first_b, first_b]
+
+
+def test_runs_table_filters_on_version_it_does_not_show(ctx: Context, toy_repo: Path) -> None:
+    # regression: `version` was added only when `fields` listed it, so this matched nothing
+    _run(ctx, toy_repo, "a", minute=0, seed=1, params={"version": "p10"})
+    _run(ctx, toy_repo, "b", "bbbb", minute=1, seed=1, params={"version": "p9"})
+    _run(ctx, toy_repo, "c", "cccc", minute=2, seed=1)  # no param: a creation time
+    panel = _panel(
+        "table", data={"source": "runs", "fields": ["status"], "filter": {"version": "p10"}}
+    )
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert result.rows == [{"run_id": "a", "group_id": "aaaa@c1", "seed": 1, "status": "finished"}]
+    assert result.meta == {"source": "runs", "total": 1}
+    everything = query_panel(ctx, "toy", "toy-acc", _panel("table", data={"source": "runs"}))
+    assert [r["version"] for r in everything.rows][:2] == ["p10", "p9"]  # no fields: shown
 
 
 def test_table_truncates_large_sources(
@@ -9192,11 +9616,14 @@ def _table_rows(scope: _Scope, panel: PanelSpec) -> tuple[list[dict[str, Any]], 
     """
     Source rows filtered on the full row, then projected to ``data.fields``.
 
-    Filtering first lets ``data.filter`` use a field the table does not show.
+    Filtering first lets ``data.filter`` use a field the table does not show. The
+    synthetic ``version`` field (``VERSION_REF``) is set on every full ``runs`` row
+    before the filter, whatever ``fields`` lists, so ``filter: {version: p10}``
+    works on a table that shows only ``status``.
     """
     source = panel.data.source or "runs"
     fields = panel.data.fields
-    versions = _run_versions(scope) if source == "runs" and VERSION_REF in (fields or []) else {}
+    versions = _run_versions(scope) if source == "runs" else {}
     rows: list[dict[str, Any]] = []
     total = 0
     for row in iter_rows(scope.ctx, scope.runs, source):
@@ -9291,7 +9718,7 @@ _HANDLERS = {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `17 passed`.
+Expected: `18 passed`.
 
 Run: `uv run ruff check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ruff format --check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ty check src/hypothex/core/panels.py`
 Expected: `All checks passed!`, `2 files already formatted`, `All checks passed!`.
@@ -9459,7 +9886,7 @@ def test_spike_detection_rules() -> None:
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `5 failed, 17 passed`; the curves tests fail with `KeyError: 'curves'` and `test_spike_detection_rules` with `AttributeError: module 'hypothex.core.panels' has no attribute '_spikes'`.
+Expected: `5 failed, 18 passed`; the curves tests fail with `KeyError: 'curves'` and `test_spike_detection_rules` with `AttributeError: module 'hypothex.core.panels' has no attribute '_spikes'`.
 
 - [ ] **Step 3: Implement curves**
 
@@ -9678,7 +10105,7 @@ _HANDLERS = {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `22 passed`.
+Expected: `23 passed`.
 
 Run: `uv run ruff check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ruff format --check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ty check src/hypothex/core/panels.py`
 Expected: all clean.
@@ -10087,7 +10514,7 @@ def test_scatter_version_x_follows_version_param_then_creation_time(
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `15 failed, 22 passed`; the fourteen scatter tests (including `test_scatter_bad_pareto_key_is_a_panel_error`, `test_non_finite_values_count_as_missing`, `test_usage_per_solved_divides_by_solved_examples`, `test_scatter_flags_regressions_on_ordinal_x`, `test_scatter_quantitative_x_never_flags_regressions`, `test_scatter_meta_carries_y_direction_and_best_group`, `test_scatter_uses_the_test_interval_only_at_the_board_version`, and `test_scatter_version_x_follows_version_param_then_creation_time`) fail with `KeyError: 'scatter'` and `test_stat_strip_with_metrics_summarises_selected_runs` with `AssertionError` (the strip is still the task's generic strip).
+Expected: `15 failed, 23 passed`; the fourteen scatter tests (including `test_scatter_bad_pareto_key_is_a_panel_error`, `test_non_finite_values_count_as_missing`, `test_usage_per_solved_divides_by_solved_examples`, `test_scatter_flags_regressions_on_ordinal_x`, `test_scatter_quantitative_x_never_flags_regressions`, `test_scatter_meta_carries_y_direction_and_best_group`, `test_scatter_uses_the_test_interval_only_at_the_board_version`, and `test_scatter_version_x_follows_version_param_then_creation_time`) fail with `KeyError: 'scatter'` and `test_stat_strip_with_metrics_summarises_selected_runs` with `AssertionError` (the strip is still the task's generic strip).
 
 - [ ] **Step 3: Implement scatter**
 
@@ -10517,7 +10944,7 @@ _HANDLERS = {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `37 passed`.
+Expected: `38 passed`.
 
 Run: `uv run ruff check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ruff format --check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ty check src/hypothex/core/panels.py`
 Expected: all clean.
@@ -10724,7 +11151,7 @@ def test_grid_uses_explicit_field_and_rejects_unknown_metric(ctx: Context, toy_r
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/core/test_panels.py -v`
-Expected: `6 failed, 37 passed`; the tests fail with `KeyError: 'distribution'` or `KeyError: 'grid'`.
+Expected: `6 failed, 38 passed`; the tests fail with `KeyError: 'distribution'` or `KeyError: 'grid'`.
 
 - [ ] **Step 3: Implement distribution and grid**
 
@@ -10981,7 +11408,7 @@ _HANDLERS = {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_panels.py -v tests/core/test_sources.py`
-Expected: `55 passed`.
+Expected: `56 passed`.
 
 Run: `uv run ruff check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ruff format --check src/hypothex/core/panels.py tests/core/test_panels.py && uv run ty check src/hypothex/core/panels.py`
 Expected: all clean.
@@ -14724,6 +15151,7 @@ from hypothex.core import control
 from hypothex.core import panels as core_panels
 from hypothex.core import queries as q
 from hypothex.core import views as core_views
+from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, HypothexError, StoreError
 from hypothex.core.evaluation import reeval
@@ -14823,6 +15251,9 @@ def _find_view(
     for info in core_views.list_views(Path(entry.repo), entry.config, task_name):
         if info.name == name:
             return entry, task_name, info
+    # refresh_project keeps the last good config when hypothex.yaml is invalid, so
+    # a view that exists only in the broken file would be "unknown": report why
+    load_project_config(Path(entry.repo))  # raises ConfigError if the file is invalid
     raise StoreError(f"unknown view {name!r} for task {entry.project}/{task_name}")
 
 
@@ -14859,6 +15290,9 @@ def view_document(
     ------
     StoreError
         The task has no view with this name.
+    ConfigError
+        The view is not in the last good config and ``hypothex.yaml`` is invalid
+        now (for example an inline view with YAML anchors).
     """
     entry, task_name, info = _find_view(ctx, task, name, project)
     spec = entry.config.tasks[task_name]
@@ -15279,6 +15713,61 @@ def test_query_views(client: TestClient, ctx: Context, toy_repo: Path) -> None:
     assert client.post(f"{VIEWS}/query", json={"name": "nope"}).status_code == 404
     bad_panel = client.post(f"{VIEWS}/query", json={"panel": {"type": "pie"}})
     assert bad_panel.status_code == 422
+
+
+def test_view_anchors_and_huge_specs_are_issues_never_500(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    _scored(ctx, toy_repo)
+    # regression: this spec refers to itself; validating it raised RecursionError (a 500)
+    looped = (
+        "title: loop\npanels:\n  - type: vega_lite\n    data: {source: runs}\n"
+        "    spec: &s {mark: point, layer: [*s]}\n"
+    )
+    anchors = {
+        "line": 5,
+        "path": "",
+        "message": "YAML anchors and aliases are not allowed",
+        "suggestion": None,
+    }
+    put = client.put(f"{VIEWS}/loop", json={"text": looped})
+    assert put.status_code == 400
+    assert put.json()["type"] == "ViewValidationError" and put.json()["issues"] == [anchors]
+    checked = client.post(f"{VIEWS}/validate", json={"text": looped})
+    assert checked.status_code == 200 and checked.json() == {"ok": False, "issues": [anchors]}
+    # 70 nested lists: past the 64-level bound of vega_spec_problems
+    deep = looped.replace(
+        "&s {mark: point, layer: [*s]}", "{mark: point, x: " + "[" * 70 + "]" * 70 + "}"
+    )
+    put = client.put(f"{VIEWS}/loop", json={"text": deep})
+    assert put.status_code == 400 and put.json()["type"] == "ViewValidationError"
+    too_deep = (5, "panels[0].spec", "vega_lite spec is too deep (over 64 levels)")
+    assert [(i["line"], i["path"], i["message"]) for i in put.json()["issues"]] == [too_deep]
+    checked = client.post(f"{VIEWS}/validate", json={"text": deep})
+    assert checked.status_code == 200
+    assert checked.json()["ok"] is False and checked.json()["issues"] == put.json()["issues"]
+    assert not _view_path(toy_repo, "loop").exists()
+
+
+def test_inline_view_with_anchors_is_a_config_error_not_500(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    _scored(ctx, toy_repo)
+    config_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(config_path.read_text())
+    spec: dict = {"mark": "point"}
+    spec["layer"] = [spec]  # safe_dump writes the loop as &id001 ... *id001
+    cfg["tasks"]["toy-acc"]["views"] = {
+        "loop": {"title": "loop", "panels": [{"type": "vega_lite", "spec": spec}]}
+    }
+    text = yaml.safe_dump(cfg, sort_keys=False)
+    config_path.write_text(text)
+    line = next(i for i, row in enumerate(text.splitlines(), 1) if "&id001" in row)
+    resp = client.get(f"{VIEWS}/loop")
+    assert resp.status_code == 400 and resp.json()["type"] == "ConfigError"
+    assert (
+        f"YAML anchors and aliases are not allowed in views (line {line})" in resp.json()["error"]
+    )
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -15380,7 +15869,7 @@ with the same id is accepted; a repeat after success returns the stored first re
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/api/test_app.py -v`
-Expected: PASS (all old tests plus the 7 new view tests).
+Expected: PASS (all old tests plus the 9 new view tests).
 
 - [ ] **Step 5: Lint, format, type-check**
 
@@ -16052,6 +16541,29 @@ def test_view_validate_reports_issues_and_exits_1(in_repo: Path) -> None:
     assert human.exit_code == 1 and "line 5" in human.stdout and "did you mean accuracy" in human.stdout
 
 
+def test_view_show_reports_an_inline_view_with_anchors_cleanly(
+    in_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _run()
+    config_path = in_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(config_path.read_text())
+    spec: dict = {"mark": "point"}
+    spec["layer"] = [spec]  # safe_dump writes the loop as &id001 ... *id001
+    cfg["tasks"]["toy-acc"]["views"] = {
+        "loop": {"title": "loop", "panels": [{"type": "vega_lite", "spec": spec}]}
+    }
+    text = yaml.safe_dump(cfg, sort_keys=False)
+    config_path.write_text(text)
+    line = next(i for i, row in enumerate(text.splitlines(), 1) if "&id001" in row)
+    monkeypatch.setattr(sys, "argv", ["hx", "view", "show", "toy-acc", "loop", "--json"])
+    with pytest.raises(SystemExit) as exc:
+        cli()
+    assert exc.value.code == 1
+    err = json.loads(capsys.readouterr().out)
+    assert err["type"] == "ConfigError"
+    assert f"YAML anchors and aliases are not allowed in views (line {line})" in err["error"]
+
+
 def test_view_add_invalid_is_not_saved_and_reports_issues(
     in_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -16130,6 +16642,18 @@ from hypothex.core.config import (
     starter_config,
 )
 from hypothex.core.errors import ConfigError, HypothexError, RunError
+```
+
+Add `from hypothex.core.gitinfo import git_state_label` directly after the
+`from hypothex.core.execution import ...` line, and `from hypothex.core.layout import default_home`
+directly after `from hypothex.core.jsonutil import to_jsonable` (`show` and `demo` below use them):
+
+```python
+from hypothex.core.gitinfo import git_state_label
+```
+
+```python
+from hypothex.core.layout import default_home
 ```
 
 Add `from hypothex.core.gitinfo import git_state_label` directly after the
@@ -16320,7 +16844,7 @@ def cli() -> None:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/cli/test_cli.py tests/test_skill.py -v`
-Expected: PASS (all old tests plus the 6 new ones; `test_every_hx_command_in_skill_exists`
+Expected: PASS (all old tests plus the 7 new ones; `test_every_hx_command_in_skill_exists`
 still passes).
 
 - [ ] **Step 5: Lint, format, type-check**
@@ -16502,8 +17026,9 @@ Run usage totals are ``usage.usd``, ``usage.seconds``, ``usage.tokens_in``,
 examples it solved on the task's primary metric (cost per success). A logged history
 metric is named in full (``val/top1``). ``version`` is the task's version ordering key: the
 run param ``version_param`` names (``version`` by default), or the creation time of the
-group's first run when that param is missing; it works as a scatter ``x`` and as a
-``runs`` table field. A ``grid`` panel's ``data.y`` is a per-example field (``partial``).
+group's first run when that param is missing; it works as a scatter ``x``, as a
+``runs`` table field, and in a ``runs`` ``data.filter`` (``filter: {version: p10}``), also
+when ``fields`` does not list it. A ``grid`` panel's ``data.y`` is a per-example field (``partial``).
 
 Panels
 ------
@@ -16539,7 +17064,9 @@ Validation
 
 A view is checked before it is saved: the schema, metric names (with a nearest-name
 suggestion), sources, fields, and the Vega-Lite spec shape. Every issue has a line
-number. An invalid view is never saved.
+number. An invalid view is never saved. YAML anchors and aliases (``&name``, ``*name``,
+``<<: *name``) are not allowed, and a Vega-Lite spec may be at most 64 levels deep and
+hold at most 10,000 values.
 
 .. code-block:: bash
 
@@ -16656,7 +17183,7 @@ Inputs: part files B1–B7 (`.superpowers/plan-parts/`), the contract, and spec 
 - Task 32: the `{example_id:path}` route and its test.
 - Task 34: the `hx show` git wording, the `hx demo` guard for non-demo homes, and one test for each.
 
-**Not re-run.** The part authors ran their own code blocks. The edits above were made during assembly. They were checked only for Python syntax, plus two behaviour checks in this repo's environment: FastAPI's router with `{example_id:path}` and `%2F`, and the 500 that a NaN in a JSON response causes. The edited tasks are 10–14, 17, 18, 20–25, 27, 30, 32, and 34. Run each task's test step as written. The expected counts are updated: Task 32 has 4 new tests in `tests/api/test_app.py` and 1 in `tests/test_demo.py` (`14 passed`), Task 34 has 6 new tests, and Task 29 `21 passed`. The counts of Tasks 1–23 are the review-round-1 counts below.
+**Not re-run.** The part authors ran their own code blocks. The edits above were made during assembly. They were checked only for Python syntax, plus two behaviour checks in this repo's environment: FastAPI's router with `{example_id:path}` and `%2F`, and the 500 that a NaN in a JSON response causes. The edited tasks are 10–14, 17, 18, 20–25, 27, 30, 32, and 34. Run each task's test step as written. The expected counts are updated: Task 32 has 4 new tests in `tests/api/test_app.py` and 1 in `tests/test_demo.py` (`14 passed`), Task 34 has 6 new tests, and Task 29 `21 passed`. The counts of Tasks 1–23 are the review-round-2 counts at the end.
 
 **Review round 1 (Codex review items 2–13, controller item C1, rulings R1–R3).**
 
@@ -16675,3 +17202,12 @@ Inputs: part files B1–B7 (`.superpowers/plan-parts/`), the contract, and spec 
 - Non-blocking note, Task 21: checkpoints use the curves' `step_metric` x and are dropped without one.
 
 Verification: Tasks 1–23 were applied to a scratch worktree of `phase-1b` at `f7e7fd0` by a script that follows each step's replace/insert/append instructions. Full suite `441 passed`; `ruff format --check`, `ruff check`, and `ty check src` clean; the doctests of `stats`, `store`, `headlines`, `leaderboard`, `views`, `sources`, and `panels` pass. Per-task counts after the fixes: Task 1 `32`, Task 2 `54`, Task 6 `15`, Task 7 `12`, Task 16 `40`, Task 17 `57`, Task 18 `12`, Task 19 `59`, Task 20 `17`, Task 21 `22`, Task 22 `37`, Task 23 `55` (panels + sources). Tasks 24–35 were not re-run; they use the changed code only through `log_trace`, `log_samples`, `list_traces`, and the presets, whose demo assertions are unchanged (all demo runs carry `params.version`).
+
+**Review round 2 (three findings and the inline-view follow-up, rulings as given).**
+
+- Stem collision, Tasks 6/7 and contract 1.10: `safe_stem("a/b") == safe_stem("a_b-3ec69c85")` before. `safe_stem` now also hashes a name that already ends in `-[0-9a-f]{8}` (`a_b-3ec69c85` → `a_b-3ec69c85-d64fa8bc`), so only an 8-hex-digit sha1 prefix collision can share a stem; the new `store.check_stem_owner` makes `log_trace` / `log_samples` raise `StoreError("id collision: ...")` and write nothing when the file stores a different original. The contract no longer claims that stems never collide. Tests: `test_safe_stem_hashes_names_that_already_look_hashed`, `test_check_stem_owner_rejects_a_different_original` (Task 6), `test_trace_and_sample_writers_refuse_a_file_of_another_id` (Task 7); `test_safe_stem_never_merges_distinct_names` gains the pair.
+- Recursive view YAML, Tasks 16/31/35 and contract 1.4: `spec: &s {mark: point, layer: [*s]}` raised `RecursionError`. `validate_view_text` rejects the first anchor or alias (`YAML anchors and aliases are not allowed`, its line, from the `yaml.parse` events), and `vega_spec_problems` is bounded (64 levels, 10,000 values; `too deep` / `too large`), so an aliased spec in `hypothex.yaml` is a panel error. Tests: `test_yaml_anchors_and_aliases_are_rejected_with_their_line`, `test_vega_lite_spec_depth_and_size_are_bounded` (Task 16), `test_view_anchors_and_huge_specs_are_issues_never_500` (Task 31: PUT 400 with issues, validate 200 `{ok: false, issues}`), doctests of `vega_spec_problems` (a self-referencing dict) and `_first_anchor_line`.
+- Inline views with anchors, Tasks 5/30/31/34 and contract 1.3: `load_project_config` rejects any YAML anchor or alias under `tasks.<task>.views` (`ConfigError`: `YAML anchors and aliases are not allowed in views (line N)`, found by `_views_anchor_line` in the `yaml.parse` events); anchors elsewhere in `hypothex.yaml` stay allowed. `refresh_project` keeps the last good config, so `mcp.server._find_view` re-loads `hypothex.yaml` before it answers "unknown view" and raises that `ConfigError` instead: `GET .../views/{name}` answers 400 and `hx view show` exits 1 with the error, never a 500. The `validate` route is unchanged (200, `{ok: false, issues}`). Task 34 also gains the two imports it used without adding (`git_state_label`, `default_home`). Tests: `test_inline_view_anchors_and_aliases_are_rejected_with_their_line`, `test_anchors_outside_views_stay_allowed` (Task 5), `test_inline_view_with_anchors_is_a_config_error_not_500` (Task 31), `test_view_show_reports_an_inline_view_with_anchors_cleanly` (Task 34), doctests of `_views_anchor_line`.
+- Version filter, Tasks 20/35 and contract 1.6: `{source: runs, fields: [status], filter: {version: p10}}` returned nothing because `version` was added only when `fields` listed it. `_table_rows` now sets `version` on every full `runs` row before the filter. Test: `test_runs_table_filters_on_version_it_does_not_show` (Task 20).
+
+Verification (round 2): Tasks 1–23, 30, 31, and 34 were applied by the same script to a scratch worktree of `phase-1b` at `a4baa19` (Tasks 24–29, 32, and 33 skipped: they touch none of the files of Tasks 30, 31, and 34 that were checked). Full suite `464 passed` plus the 2 `hx demo` tests of Task 34, which need `hypothex.demo` (Task 25, skipped) and fail with `ModuleNotFoundError` only for that reason; `ruff check` clean after each task's own `ruff format` step; `ty check src` clean except the same unresolved `hypothex.demo` import; the doctests of `stats`, `store`, `headlines`, `leaderboard`, `views`, `sources`, and `panels` pass. The regressions were confirmed on the unfixed code (equal stems, `RecursionError`, `[]` rows, and a 404 instead of the config error when `_find_view` does not re-load). Per-task counts: Task 5 `21` (`7 failed, 14 passed` at Step 2), Task 6 `17`, Task 7 `13`, Task 16 `42`, Task 17 `59`, Task 19 `61`, Task 20 `18`, Task 21 `23`, Task 22 `38`, Task 23 `56` (panels + sources); Task 31 adds 9 view tests, Task 34 adds 7 tests. Other counts are unchanged.

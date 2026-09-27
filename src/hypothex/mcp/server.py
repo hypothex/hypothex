@@ -255,6 +255,8 @@ def remove_view(ctx: Context, task: str, name: str, project: str | None = None) 
         Task name, or ``project/task``.
     name : str
         View name.
+    project : str, optional
+        Project to restrict the search to.
 
     Returns
     -------

@@ -43,6 +43,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hypothex"]
+# The built UI (bun run build -> src/hypothex/ui_dist) is git-ignored. `artifacts`
+# includes it when present and is a no-op when absent; `force-include` would fail
+# the build ("Forced include not found") on a checkout without a UI build.
+artifacts = ["src/hypothex/ui_dist/**"]
 
 [tool.ruff]
 line-length = 100

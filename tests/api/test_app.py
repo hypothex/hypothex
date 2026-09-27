@@ -445,3 +445,37 @@ def test_task_kind_and_run_view(client: TestClient, ctx: Context, toy_repo: Path
     assert [p["type"] for p in agent["run_view"]] == ["trace", "grid", "table"]
     assert agent["run_view"][2]["data"]["source"] == "traces"
     assert client.get("/api/v1/tasks/toy/nope/kind").status_code == 400
+
+
+INDEX_HTML = "<!doctype html><div id=root></div>"
+
+
+@pytest.fixture
+def ui_dir(tmp_path: Path) -> Path:
+    d = tmp_path / "ui_dist"
+    (d / "assets").mkdir(parents=True)
+    (d / "index.html").write_text(INDEX_HTML)
+    (d / "assets" / "app.js").write_text("console.log(1)")
+    return d
+
+
+def test_serves_ui_with_spa_fallback(home: Path, ui_dir: Path) -> None:
+    app = create_app(home, background_repair=False, ui_dir=ui_dir)
+    with TestClient(app, base_url="http://127.0.0.1:7777") as c:
+        assert c.get("/").text == INDEX_HTML
+        for route in ("/t/toy/toy-acc?view=acc", "/r/20260927-120000-toy-acc-ab12", "/x/a/b"):
+            resp = c.get(route)
+            assert resp.status_code == 200 and resp.text == INDEX_HTML, route
+        assert c.get("/assets/app.js").text == "console.log(1)"
+        assert c.get("/assets/missing.js").status_code == 404
+        api = c.get("/api/v1/nope")
+        assert api.status_code == 404
+        assert api.headers["content-type"].startswith("application/json")
+        assert c.get("/api/v1/runs").json() == []
+
+
+def test_no_ui_build_means_api_only(home: Path, tmp_path: Path) -> None:
+    app = create_app(home, background_repair=False, ui_dir=tmp_path / "missing")
+    with TestClient(app, base_url="http://127.0.0.1:7777") as c:
+        assert c.get("/").status_code == 404
+        assert c.get("/api/v1/runs").json() == []

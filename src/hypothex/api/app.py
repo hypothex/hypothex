@@ -15,7 +15,10 @@ from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import Response
+from starlette.types import Scope
 
 from hypothex._version import __version__
 from hypothex.api.security import OriginGuard, allowed_hosts
@@ -47,6 +50,41 @@ REPAIR_INTERVAL_SECONDS = 30.0
 WS_POLL_SECONDS = 0.5
 WS_BATCH = 500
 UI_DIST = Path(__file__).resolve().parent.parent / "ui_dist"
+NO_UI_FALLBACK = frozenset({"api", "mcp", ".well-known", "assets"})
+
+
+class SpaStaticFiles(StaticFiles):
+    """
+    Serve the built UI; unknown client-side routes get ``index.html``.
+
+    The UI routes (``/t/...``, ``/r/...``, ``/x/...``) exist only in the browser, so a
+    reload must still load the app. Paths under ``api``, ``mcp``, ``.well-known``, and
+    ``assets`` keep their 404, so a missing API route stays a JSON error and a missing
+    script is not answered with HTML.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """
+        Return the file at ``path``, or ``index.html`` for unknown UI routes.
+
+        Parameters
+        ----------
+        path : str
+            Path relative to the UI folder.
+        scope : Scope
+            ASGI scope.
+
+        Returns
+        -------
+        Response
+        """
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            parts = Path(path).parts
+            if exc.status_code != 404 or (parts and parts[0] in NO_UI_FALLBACK):
+                raise
+            return await super().get_response("index.html", scope)
 
 
 class ActionBody(BaseModel):
@@ -175,7 +213,11 @@ def _run_view(kind: str) -> list[PanelSpec]:
 
 
 def create_app(
-    home: Path | None = None, *, background_repair: bool = True, host: str | None = None
+    home: Path | None = None,
+    *,
+    background_repair: bool = True,
+    host: str | None = None,
+    ui_dir: Path | None = None,
 ) -> FastAPI:
     """
     Build the FastAPI application.
@@ -184,6 +226,9 @@ def create_app(
     address (or ``host``), else the answer is ``400``; a state-changing request
     or WebSocket handshake with a foreign ``Origin`` is rejected with ``403``.
     This blocks DNS-rebinding and cross-site attacks from a browser page.
+
+    When ``ui_dir`` holds ``index.html`` the UI is served at ``/``; unknown
+    non-API paths return ``index.html`` so browser routes survive a reload.
 
     Parameters
     ----------
@@ -194,6 +239,8 @@ def create_app(
     host : str, optional
         The address the server binds to; also accepted as ``Host`` unless it is
         a wildcard such as ``0.0.0.0``.
+    ui_dir : Path, optional
+        Built UI folder; defaults to the packaged ``hypothex/ui_dist``.
 
     Returns
     -------
@@ -499,6 +546,7 @@ def create_app(
 
     app.mount("/mcp", mcp_http)
 
-    if (UI_DIST / "index.html").is_file():
-        app.mount("/", StaticFiles(directory=UI_DIST, html=True), name="ui")
+    ui = ui_dir or UI_DIST
+    if (ui / "index.html").is_file():
+        app.mount("/", SpaStaticFiles(directory=ui, html=True), name="ui")
     return app

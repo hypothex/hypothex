@@ -8,3 +8,4 @@ docs/_build/
 examples/toy-classifier/data/
 docs/mockups/archive/
 .superpowers/plan-parts/
+src/hypothex/ui_dist/

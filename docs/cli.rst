@@ -196,7 +196,9 @@ Servers
 
    hx serve
 
-Serve the HTTP/WebSocket API (and the UI once built) on ``127.0.0.1:7777``.
+Serve the HTTP/WebSocket API on ``127.0.0.1:7777``, and the UI at
+``http://127.0.0.1:7777/`` when the package contains a UI build
+(``src/hypothex/ui_dist``; ``cd ui && bun run build`` makes one).
 
 .. code-block:: bash
 

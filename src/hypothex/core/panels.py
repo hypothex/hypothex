@@ -3,20 +3,34 @@
 from __future__ import annotations
 
 import copy
+import math
 import statistics
 from collections import defaultdict
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+from hypothex.core.config import parse_metric_version
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, HypothexError
-from hypothex.core.leaderboard import Leaderboard, build_leaderboard, group_id_for, group_label
+from hypothex.core.fsutil import read_jsonl
+from hypothex.core.headlines import fmt_value
+from hypothex.core.leaderboard import (
+    Leaderboard,
+    _natural_key,
+    build_leaderboard,
+    group_id_for,
+    group_label,
+    pick_field,
+)
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
+from hypothex.core.seeds import summarize
 from hypothex.core.sources import iter_rows, select_fields
+from hypothex.core.stats import quantile
 from hypothex.core.store import ProjectEntry
 from hypothex.core.views import (
     VERSION_REF,
@@ -30,6 +44,7 @@ from hypothex.core.views import (
 MAX_TABLE_ROWS = 5000
 SPIKE_WINDOW = 20
 SPIKE_FACTOR = 5.0
+AGGREGATES = ("mean", "median", "min", "max", "p50", "p90", "p95", "p99")
 
 
 class PanelResult(BaseModel):
@@ -254,11 +269,38 @@ def _markdown(panel: PanelSpec) -> PanelResult:
 
 
 def _stat_strip(scope: _Scope, panel: PanelSpec) -> PanelResult:
+    """
+    The task's stat strip, or one item per ``data.metrics`` reference.
+
+    With ``data.metrics`` each item is the mean of ``_run_value`` over the
+    selected runs (after ``data.filter`` and ``data.pick``) that have a value.
+    """
     board = scope.board()
+    rows: list[dict[str, Any]] = []
+    if not panel.data.metrics:
+        rows = [dict(item) for item in board.stat_strip]
+    else:
+        groups = _groups(scope, panel)
+        only = f" of {groups[0][1]}" if len(groups) == 1 else ""
+        for ref in panel.data.metrics:
+            values = [v for r in scope.runs if (v := _run_value(scope, r, ref)) is not None]
+            if not values:
+                tooltip = f"No value in the {len(scope.runs)} selected runs"
+                rows.append({"label": ref, "value": "—", "unit": "", "tooltip": tooltip})
+                continue
+            n = len(values)
+            rows.append(
+                {
+                    "label": ref,
+                    "value": fmt_value(math.fsum(values) / n),
+                    "unit": "",
+                    "tooltip": f"Mean of {n} run{'s' if n != 1 else ''}{only}",
+                }
+            )
     return PanelResult(
         type="stat_strip",
         title=panel.title,
-        rows=[dict(item) for item in board.stat_strip],
+        rows=rows,
         meta={"headline": board.headline},
     )
 
@@ -562,10 +604,329 @@ def _checkpoint_rows(
     return out
 
 
+def _aggregate(values: list[float], agg: str) -> float | None:
+    if not values:
+        return None
+    if agg == "mean":
+        return math.fsum(values) / len(values)
+    if agg == "median":
+        return statistics.median(values)
+    if agg == "min":
+        return min(values)
+    if agg == "max":
+        return max(values)
+    return quantile(values, int(agg[1:]) / 100)
+
+
+def _samples(scope: _Scope, run: RunRecord, name: str) -> list[float]:
+    """A run's raw samples of series ``name`` (the name given to ``log_samples``)."""
+    if not name:
+        return []
+    return scope.ctx.store.read_samples(run.project, run.run_id).get(name, [])
+
+
+def _example_values(scope: _Scope, run: RunRecord, name: str, version: str) -> list[float]:
+    """Per-example values of a metric: the field ``pick_field`` chooses, one per example."""
+    path = scope.ctx.run_dir(run) / "predictions" / f"scores.{name}@{version}.jsonl"
+    if not path.is_file():
+        return []
+    rows = [{k: v for k, v in row.items() if k != "id"} for row in read_jsonl(path)]
+    picked = pick_field(rows, name)
+    if picked is None:
+        return []
+    field = picked[0]
+    return [float(row[field]) for row in rows if row.get(field) is not None]
+
+
+def _solved(scope: _Scope, run: RunRecord) -> int | None:
+    """
+    Count the examples a run solved on the task's primary metric.
+
+    ``None`` when the run has no per-example file or its field (chosen by
+    ``pick_field``, as for test-set noise) is not binary.
+    """
+    name = scope.board().primary.partition("/")[0]
+    spec = scope.entry.config.metrics.get(name)
+    if spec is None:
+        return None
+    path = scope.ctx.run_dir(run) / "predictions" / f"scores.{name}@{spec.version}.jsonl"
+    rows = [{k: v for k, v in row.items() if k != "id"} for row in read_jsonl(path)]
+    picked = pick_field(rows, name)
+    if picked is None or not picked[1]:
+        return None
+    field = picked[0]
+    return sum(1 for row in rows if row.get(field) in (True, 1))
+
+
+def _param_raw(run: RunRecord, ref: str) -> str | None:
+    """The raw ``params.<p>`` / ``vars.<p>`` value as text, or ``None``."""
+    for prefix, values in (("params.", run.params), ("vars.", run.vars)):
+        if ref.startswith(prefix):
+            return values.get(ref.removeprefix(prefix))
+    return None
+
+
+def _as_float(text: str) -> float | None:
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _run_value(scope: _Scope, run: RunRecord, ref: str) -> float | None:
+    """
+    Resolve a reference to one finite number for one run.
+
+    Order: ``usage.<field>`` (run totals) or ``usage.<field>/solved`` (the total
+    per example solved on the primary metric), ``params.<p>``/``vars.<p>`` (cast to
+    float), a configured metric ``name[@version][/key]`` (newest good score;
+    when no score has that key and the key is an aggregate such as ``median``,
+    the aggregate of the metric's per-example values), samples ``name[/agg]``,
+    then the last logged value of a history metric named exactly ``ref``.
+    NaN and ±inf count as no value (``None``): they would become null points
+    in JSON and make every Pareto comparison false.
+    """
+    value = _resolve_value(scope, run, ref)
+    return value if value is not None and math.isfinite(value) else None
+
+
+def _resolve_value(scope: _Scope, run: RunRecord, ref: str) -> float | None:
+    """The raw value behind ``_run_value``; may be NaN or ±inf."""
+    if ref.startswith("usage."):
+        field, _, per = ref.removeprefix("usage.").partition("/")
+        if per not in ("", "solved"):
+            raise ConfigError("usage references are usage.<field> or usage.<field>/solved")
+        value = getattr(run.usage, field, None) if run.usage is not None else None
+        if not isinstance(value, int | float):
+            return None
+        if not per:
+            return float(value)
+        solved = _solved(scope, run)
+        return float(value) / solved if solved else None
+    if ref.startswith(("params.", "vars.")):
+        raw = _param_raw(run, ref)
+        return None if raw is None else _as_float(raw)
+    head, _, key = ref.partition("/")
+    name, version = parse_metric_version(head)
+    metrics = scope.entry.config.metrics
+    if name in metrics:
+        version = version or metrics[name].version
+        key = key or "value"
+        found: float | None = None
+        for s in scope.ctx.store.read_scores(run.project, run.run_id):
+            if (s.metric, s.version, s.key) == (name, version, key) and s.error is None:
+                found = s.value
+        if found is None and key in AGGREGATES:
+            return _aggregate(_example_values(scope, run, name, version), key)
+        return found
+    whole = _samples(scope, run, ref)
+    if whole:
+        return _aggregate(whole, "mean")
+    if key in AGGREGATES:
+        return _aggregate(_samples(scope, run, head), key)
+    history = scope.ctx.store.read_metric_points(run.project, run.run_id)
+    points = [p for p in history if p.name == ref]
+    return max(points, key=lambda p: p.step).value if points else None
+
+
+def _interval(values: list[float]) -> tuple[float | None, float | None]:
+    stats = summarize(values)
+    return stats.ci_low, stats.ci_high
+
+
+def _is_ordinal(
+    groups: list[tuple[str, str, list[RunRecord]]],
+    x_ref: str,
+    text_of: Callable[[RunRecord], str | None],
+) -> bool:
+    """Whether ``x_ref`` is a params/vars field or ``version`` with a non-numeric value."""
+    if x_ref != VERSION_REF and not x_ref.startswith(("params.", "vars.")):
+        return False
+    for _, _, members in groups:
+        for r in members:
+            raw = text_of(r)
+            if raw is not None and _as_float(raw) is None:
+                return True
+    return False
+
+
+def _scatter(scope: _Scope, panel: PanelSpec) -> PanelResult:
+    """
+    One point per group: mean x and y over its runs, with seed intervals.
+
+    ``data.y`` defaults to the task's primary metric. A ``params``/``vars`` x
+    with a value that is not a number (e.g. ``version: v9``) makes an ordinal
+    axis: x is the raw text, rows are in natural order (``v9`` before ``v10``),
+    there are no x intervals and no Pareto front, and ``meta.x_type`` is
+    ``"ordinal"`` (else ``"quantitative"``). Only an ordinal axis sets
+    ``regression`` (``_mark_regressions``); otherwise every row has ``False``.
+    ``x: version`` reads the task's version param, else the group's first-run
+    creation time (``_run_versions``). ``meta.y_higher_is_better`` and
+    ``meta.best_group`` (best mean y in that direction) are always set.
+    """
+    x_ref = panel.data.x
+    if not x_ref:
+        raise ConfigError("scatter panel needs data.x")
+    if panel.pareto and set(panel.pareto) - {"x", "y"}:
+        # the same rule as view validation; unvalidated previews reach this point
+        raise ConfigError("pareto keys are x and y")
+    board = scope.board()
+    primary = board.primary
+    y_ref = panel.data.y or primary
+    board_rows = {row.group_id: row for row in board.rows}
+    y_name, y_version = parse_metric_version(y_ref.partition("/")[0])
+    y_key = y_ref.partition("/")[2] or "value"
+    # the board's test-set interval belongs to the primary at the board's metric version;
+    # an explicit other version (accuracy@v0 while the board uses v1) keeps seed intervals
+    board_version = y_version is None or y_version == board.metric_versions.get(y_name)
+    y_is_primary = (
+        (panel.data.group_by or "group") == "group"
+        and f"{y_name}/{y_key}" == primary
+        and board_version
+    )
+    higher = _y_higher_is_better(scope, y_ref)
+    groups = _groups(scope, panel)
+    versions = _run_versions(scope) if x_ref == VERSION_REF else {}
+
+    def text_of(r: RunRecord) -> str | None:
+        return versions[r.run_id][1] if x_ref == VERSION_REF else _param_raw(r, x_ref)
+
+    ordinal = _is_ordinal(groups, x_ref, text_of)
+    rows: list[dict[str, Any]] = []
+    for key, label, members in groups:
+        seeds: list[dict[str, Any]] = []
+        for r in members:
+            if ordinal:
+                x: float | str | None = text_of(r)
+            elif x_ref == VERSION_REF:
+                x = _as_float(versions[r.run_id][1])
+            else:
+                x = _run_value(scope, r, x_ref)
+            y = _run_value(scope, r, y_ref)
+            if x is not None and y is not None:
+                seeds.append({"x": x, "y": y})
+        if not seeds:
+            continue
+        ys = [s["y"] for s in seeds]
+        x_lo: float | None = None
+        x_hi: float | None = None
+        if ordinal:
+            x_mid: float | str = ", ".join(sorted({s["x"] for s in seeds}, key=_natural_key))
+        else:
+            xs = [s["x"] for s in seeds]
+            x_mid = math.fsum(xs) / len(xs)
+            x_lo, x_hi = _interval(xs)
+        y_lo, y_hi = _interval(ys)
+        board_row = board_rows.get(key)
+        test = board_row.test_interval if y_is_primary and board_row is not None else None
+        if test is not None:
+            y_lo, y_hi = test.lo, test.hi
+        rows.append(
+            {
+                "group_id": key,
+                "label": label,
+                "x": x_mid,
+                "x_lo": x_lo,
+                "x_hi": x_hi,
+                "y": math.fsum(ys) / len(ys),
+                "y_lo": y_lo,
+                "y_hi": y_hi,
+                "seeds": seeds,
+                "pareto": False,
+                "regression": False,
+            }
+        )
+    if ordinal:
+        # version axis: groups with a version param value first, then fallback times
+        from_param = {
+            key: any(versions[r.run_id][0] for r in members) if versions else True
+            for key, _, members in groups
+        }
+        rows.sort(key=lambda row: (not from_param[row["group_id"]], _natural_key(row["x"])))
+        _mark_regressions(rows, higher)
+    elif panel.pareto:
+        _mark_pareto(rows, panel.pareto)
+    best = (max if higher else min)(rows, key=lambda row: row["y"]) if rows else None
+    return PanelResult(
+        type="scatter",
+        title=panel.title,
+        rows=rows,
+        meta={
+            "x": x_ref,
+            "y": y_ref,
+            "x_type": "ordinal" if ordinal else "quantitative",
+            "scale": panel.scale,
+            "pareto": panel.pareto,
+            "y_higher_is_better": higher,
+            "best_group": best["group_id"] if best is not None else None,
+        },
+    )
+
+
+def _mark_pareto(rows: list[dict[str, Any]], directions: Mapping[str, str]) -> None:
+    """Set ``pareto`` on rows that no other row dominates."""
+    axes = [(axis, 1.0 if d == "max" else -1.0) for axis, d in directions.items()]
+
+    def better_or_equal(a: dict[str, Any], b: dict[str, Any]) -> bool:
+        return all(sign * a[axis] >= sign * b[axis] for axis, sign in axes)
+
+    def strictly_better(a: dict[str, Any], b: dict[str, Any]) -> bool:
+        return any(sign * a[axis] > sign * b[axis] for axis, sign in axes)
+
+    for row in rows:
+        row["pareto"] = not any(
+            other is not row and better_or_equal(other, row) and strictly_better(other, row)
+            for other in rows
+        )
+
+
+def _y_higher_is_better(scope: _Scope, y_ref: str) -> bool:
+    """
+    Direction of a scatter y reference.
+
+    ``usage.*`` (cost, tokens, time) is lower-is-better; the task's primary
+    uses the leaderboard's direction; another configured metric uses its
+    ``higher_is_better``; any other name is lower-is-better when it names a
+    loss or an error.
+    """
+    if y_ref.startswith("usage."):
+        return False
+    board = scope.board()
+    head, _, key = y_ref.partition("/")
+    name, _ = parse_metric_version(head)
+    if f"{name}/{key or 'value'}" == board.primary:
+        return board.higher_is_better
+    metrics = scope.entry.config.metrics
+    if name in metrics:
+        return metrics[name].higher_is_better
+    return not _lower_is_better(y_ref)
+
+
+def _mark_regressions(rows: list[dict[str, Any]], higher: bool) -> None:
+    """
+    Flag rows worse than the best earlier row by more than its interval allows.
+
+    ``rows`` are in axis order. Higher-is-better: a row regresses when its
+    ``y_hi`` is below the best earlier row's ``y_lo``; lower-is-better: when
+    its ``y_lo`` is above the best earlier row's ``y_hi``. A ``None`` bound on
+    either side flags nothing. Ties keep the earlier row as best.
+    """
+    best: dict[str, Any] | None = None
+    for row in rows:
+        if best is not None:
+            mine = row["y_hi"] if higher else row["y_lo"]
+            bound = best["y_lo"] if higher else best["y_hi"]
+            if mine is not None and bound is not None:
+                row["regression"] = mine < bound if higher else mine > bound
+        if best is None or (row["y"] > best["y"] if higher else row["y"] < best["y"]):
+            best = row
+
+
 _HANDLERS = {
     "stat_strip": _stat_strip,
     "leaderboard": _leaderboard,
     "curves": _curves,
+    "scatter": _scatter,
     "table": _table,
     "vega_lite": _vega_lite,
     "trace": _trace,

@@ -1,4 +1,5 @@
 import json
+import math
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,14 @@ from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError
 from hypothex.core.ids import utcnow
 from hypothex.core.panels import PanelResult, query_panel, query_view
-from hypothex.core.records import GitInfo, MetricPoint, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.records import (
+    GitInfo,
+    MetricPoint,
+    RunRecord,
+    RunStatus,
+    ScoreRecord,
+    UsageTotals,
+)
 from hypothex.core.store import safe_stem
 from hypothex.core.views import PanelData, PanelSpec, RunFilter, ViewSpec
 from tests.factories import make_record
@@ -488,3 +496,352 @@ def test_spike_detection_rules() -> None:
     # only the previous 20 values count: median(20 x 3.0) = 3 -> 16 > 15 is a spike,
     # although the median of the whole history (21 x 10.0, 20 x 3.0) would be 10
     assert panels._spikes(pts([10.0] * 21 + [3.0] * 20 + [16.0])) == [41]
+
+
+# scatter --------------------------------------------------------------------------
+def test_scatter_groups_intervals_and_pareto(ctx: Context, toy_repo: Path) -> None:
+    for rid, group, hyp, usd, acc, minute in [
+        ("s1", "aaaa", "svm", 0.1, 0.8, 0),
+        ("s2", "aaaa", "svm", 0.3, 0.9, 1),
+        ("f1", "bbbb", "rf", 0.05, 0.6, 2),
+        ("g1", "cccc", "gbm", 0.5, 0.7, 3),
+    ]:
+        rec = _run(
+            ctx, toy_repo, rid, group, minute=minute, hypothesis=hyp, usage=UsageTotals(usd=usd)
+        )
+        _score(ctx, rec, acc)
+    panel = _panel(
+        "scatter", data={"x": "usage.usd", "y": "accuracy"}, pareto={"x": "min", "y": "max"}
+    )
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    by_label = {r["label"]: r for r in result.rows}
+    svm = by_label["svm"]
+    # 95% t-interval, df=1: t = 12.706 (seeds._T_975); stdev([0.1, 0.3]) / sqrt(2) = 0.1
+    assert svm["x"] == pytest.approx(0.2)
+    assert svm["x_lo"] == pytest.approx(0.2 - 1.2706)
+    assert svm["x_hi"] == pytest.approx(0.2 + 1.2706)
+    # stdev([0.8, 0.9]) / sqrt(2) = 0.05 -> half-width 0.6353
+    assert svm["y"] == pytest.approx(0.85)
+    assert svm["y_lo"] == pytest.approx(0.85 - 0.6353)
+    assert svm["y_hi"] == pytest.approx(0.85 + 0.6353)
+    assert svm["seeds"] == [{"x": 0.1, "y": 0.8}, {"x": 0.3, "y": 0.9}]
+    assert by_label["rf"]["x_lo"] is None and by_label["rf"]["y_hi"] is None
+    # gbm (0.5, 0.7) is dominated by svm (0.2, 0.85): costlier and worse
+    assert {r["label"]: r["pareto"] for r in result.rows} == {
+        "svm": True,
+        "rf": True,
+        "gbm": False,
+    }
+    assert not any(r["regression"] for r in result.rows)  # quantitative x never regresses
+    assert result.meta == {
+        "x": "usage.usd",
+        "y": "accuracy",
+        "x_type": "quantitative",
+        "scale": "linear",
+        "pareto": {"x": "min", "y": "max"},
+        "y_higher_is_better": True,
+        "best_group": "aaaa@c1",  # svm, mean accuracy 0.85
+    }
+
+
+def test_scatter_without_pareto_marks_nothing_and_skips_missing(
+    ctx: Context, toy_repo: Path
+) -> None:
+    rec = _run(ctx, toy_repo, "s1", params={"lr": "0.1"})
+    _score(ctx, rec, 0.5)
+    _run(ctx, toy_repo, "s2", "bbbb", params={"lr": "0.2"})  # no score -> no y -> dropped
+    panel = _panel("scatter", data={"x": "params.lr", "y": "accuracy"})
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert [(r["x"], r["y"], r["pareto"]) for r in result.rows] == [(0.1, 0.5, False)]
+
+
+def test_scatter_reads_samples_aggregates_and_history(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "s1")
+    _jsonl(ctx.run_dir(rec) / "samples" / "lat.jsonl", [{"value": v} for v in (1, 2, 3, 4)])
+    _jsonl(
+        ctx.run_dir(rec) / "metrics.jsonl",
+        [
+            {"name": "val/loss", "step": 1, "value": 0.9},
+            {"name": "val/loss", "step": 5, "value": 0.3},
+        ],
+    )
+    panel = _panel("scatter", data={"x": "lat/p50", "y": "val/loss", "group_by": "run"})
+    (row,) = query_panel(ctx, "toy", "toy-acc", panel).rows
+    # numpy-linear p50 of [1, 2, 3, 4] = 2.5; history value = last step's value
+    assert (row["group_id"], row["x"], row["y"]) == ("s1", 2.5, 0.3)
+    mean_panel = _panel("scatter", data={"x": "lat", "y": "lat/max", "group_by": "run"})
+    (row,) = query_panel(ctx, "toy", "toy-acc", mean_panel).rows
+    assert (row["x"], row["y"]) == (2.5, 4.0)
+
+
+def test_scatter_requires_x_and_defaults_y_to_primary(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "s1", usage=UsageTotals(usd=0.2))
+    _score(ctx, rec, 0.5)
+    with pytest.raises(ConfigError, match="needs data.x"):
+        query_panel(ctx, "toy", "toy-acc", _panel("scatter", data={"y": "accuracy"}))
+    result = query_panel(ctx, "toy", "toy-acc", _panel("scatter", data={"x": "usage.usd"}))
+    assert [(r["x"], r["y"]) for r in result.rows] == [(0.2, 0.5)]
+    assert (result.meta["y"], result.meta["x_type"]) == ("accuracy/value", "quantitative")
+
+
+def test_scatter_bad_pareto_key_is_a_panel_error(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "s1", usage=UsageTotals(usd=0.2))
+    _score(ctx, rec, 0.5)
+    bad = _panel("scatter", data={"x": "usage.usd"}, pareto={"z": "min"})
+    with pytest.raises(ConfigError, match="pareto keys are x and y"):
+        query_panel(ctx, "toy", "toy-acc", bad)
+    # the editor preview sends views that were not validated: one panel error, not a 500
+    view = ViewSpec(title="v", panels=[bad, _panel("markdown", text="ok")])
+    broken, notes = query_view(ctx, "toy", "toy-acc", view)
+    assert (broken.rows, broken.meta) == ([], {"error": "pareto keys are x and y"})
+    assert notes.meta == {"text": "ok"}
+
+
+def test_non_finite_values_count_as_missing(ctx: Context, toy_repo: Path) -> None:
+    a = _run(ctx, toy_repo, "s1", usage=UsageTotals(usd=0.1))
+    nan_score = ScoreRecord(metric="accuracy", version="v1", key="value", value=0.0, created_at=T0)
+    # json.dumps writes NaN; json.loads and pydantic read it back as float("nan")
+    _jsonl(
+        ctx.run_dir(a) / "scores.jsonl", [{**nan_score.model_dump(mode="json"), "value": math.nan}]
+    )
+    b = _run(ctx, toy_repo, "s2", "bbbb", minute=1, usage=UsageTotals(usd=0.2))
+    _score(ctx, b, 0.5)
+    _jsonl(
+        ctx.run_dir(b) / "metrics.jsonl",
+        [
+            {"name": "val/loss", "step": 1, "value": 0.4},
+            {"name": "val/loss", "step": 2, "value": math.nan},
+        ],
+    )
+    panel = _panel(
+        "scatter",
+        data={"x": "usage.usd", "y": "accuracy", "group_by": "run"},
+        pareto={"x": "min", "y": "max"},
+    )
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    # s1's NaN score is no value, so s1 is dropped instead of a null point on the front
+    assert [(r["group_id"], r["x"], r["y"], r["pareto"]) for r in result.rows] == [
+        ("s2", 0.2, 0.5, True)
+    ]
+    loss = _panel("scatter", data={"x": "usage.usd", "y": "val/loss", "group_by": "run"})
+    assert query_panel(ctx, "toy", "toy-acc", loss).rows == []  # last val/loss point is NaN
+
+
+def test_scatter_categorical_x_is_ordinal_in_natural_order(ctx: Context, toy_repo: Path) -> None:
+    for rid, group, version, acc, minute in [
+        ("a1", "aaaa", "v10", 0.9, 0),
+        ("b1", "bbbb", "v9", 0.7, 1),
+        ("b2", "bbbb", "v9", 0.8, 2),
+    ]:
+        rec = _run(ctx, toy_repo, rid, group, minute=minute, params={"version": version})
+        _score(ctx, rec, acc)
+    panel = _panel(
+        "scatter", data={"x": "params.version", "y": "accuracy"}, pareto={"x": "min", "y": "max"}
+    )
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    # float("v9") fails, so x keeps the text; v9 sorts before v10 (natural order)
+    assert [(r["x"], r["x_lo"], r["x_hi"]) for r in result.rows] == [
+        ("v9", None, None),
+        ("v10", None, None),
+    ]
+    assert [r["y"] for r in result.rows] == pytest.approx([0.75, 0.9])
+    assert result.rows[0]["seeds"] == [{"x": "v9", "y": 0.7}, {"x": "v9", "y": 0.8}]
+    assert not any(r["pareto"] for r in result.rows)  # no Pareto front on an ordinal axis
+    assert result.meta["x_type"] == "ordinal"
+
+
+def _version_series(ctx: Context, repo: Path, xs: list[str]) -> None:
+    """
+    Five seed groups in order, one per ``params.version`` value in ``xs``.
+
+    Each group has 3 seeds whose accuracy and ``usage.usd`` are ``mean - 0.01``,
+    ``mean``, ``mean + 0.01`` for means 0.50, 0.60, 0.70, 0.60, 0.68.
+    """
+    means = [0.50, 0.60, 0.70, 0.60, 0.68]
+    for i, (x, mean) in enumerate(zip(xs, means, strict=True)):
+        for j, step in enumerate((-0.01, 0.0, 0.01)):
+            value = mean + step
+            rec = _run(
+                ctx,
+                repo,
+                f"r{i}{j}",
+                f"aaa{i}",
+                minute=3 * i + j,
+                seed=j + 1,
+                params={"version": x},
+                usage=UsageTotals(usd=value),
+            )
+            _score(ctx, rec, value)
+
+
+def test_scatter_flags_regressions_on_ordinal_x(ctx: Context, toy_repo: Path) -> None:
+    _version_series(ctx, toy_repo, ["v1", "v2", "v3", "v4", "v5"])
+    solved = query_panel(ctx, "toy", "toy-acc", _panel("scatter", data={"x": "params.version"}))
+    assert solved.meta["x_type"] == "ordinal"
+    # 3 seeds, stdev 0.01: 95% t half-width = 4.303 * 0.01 / sqrt(3) = 0.0248 (no test-set
+    # interval: the runs have no per-example scores). Accuracy is higher-is-better.
+    # v4: y_hi 0.6248 < best earlier (v3) y_lo 0.6752 -> regression.
+    # v5: 0.68 is below v3 but its y_hi 0.7048 >= 0.6752 -> within noise, not flagged.
+    assert [(r["x"], r["regression"]) for r in solved.rows] == [
+        ("v1", False),
+        ("v2", False),
+        ("v3", False),
+        ("v4", True),
+        ("v5", False),
+    ]
+    assert solved.rows[3]["y_hi"] == pytest.approx(0.60 + 4.303 * 0.01 / math.sqrt(3))
+    cost = _panel("scatter", data={"x": "params.version", "y": "usage.usd"})
+    # usage is lower-is-better: v1 (0.50, y_hi 0.5248) stays the best; every later y_lo
+    # (0.5752, 0.6752, 0.5752, 0.6552) is above it
+    assert [r["regression"] for r in query_panel(ctx, "toy", "toy-acc", cost).rows] == [
+        False,
+        True,
+        True,
+        True,
+        True,
+    ]
+
+
+def test_scatter_quantitative_x_never_flags_regressions(ctx: Context, toy_repo: Path) -> None:
+    # the same values as the ordinal series, but versions 1..5 are numbers
+    _version_series(ctx, toy_repo, ["1", "2", "3", "4", "5"])
+    result = query_panel(ctx, "toy", "toy-acc", _panel("scatter", data={"x": "params.version"}))
+    assert result.meta["x_type"] == "quantitative"
+    assert [r["x"] for r in result.rows] == [1.0, 2.0, 3.0, 4.0, 5.0]
+    assert [r["regression"] for r in result.rows] == [False] * 5
+
+
+def test_usage_per_solved_divides_by_solved_examples(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "s1", usage=UsageTotals(usd=3.0))
+    _score(ctx, rec, 0.75)
+    _jsonl(
+        ctx.run_dir(rec) / "predictions" / "scores.accuracy@v1.jsonl",
+        [{"id": f"ex-{i}", "correct": ok} for i, ok in enumerate([True, True, True, False])],
+    )
+    none = _run(ctx, toy_repo, "s2", "bbbb", minute=1, usage=UsageTotals(usd=2.0))
+    _score(ctx, none, 0.0)
+    _jsonl(
+        ctx.run_dir(none) / "predictions" / "scores.accuracy@v1.jsonl",
+        [{"id": "ex-0", "correct": False}],
+    )
+    panel = _panel("scatter", data={"x": "usage.usd", "y": "usage.usd/solved", "group_by": "run"})
+    rows = query_panel(ctx, "toy", "toy-acc", panel).rows
+    # s1: $3.00 over 3 solved examples = 1.0; s2 solved nothing, so it has no value (dropped)
+    assert [(r["group_id"], r["x"], r["y"]) for r in rows] == [("s1", 3.0, 1.0)]
+    bad = _panel("scatter", data={"x": "usage.usd/attempt"})
+    with pytest.raises(ConfigError, match=r"usage\.<field>/solved"):
+        query_panel(ctx, "toy", "toy-acc", bad)
+
+
+def test_metric_aggregate_keys_read_per_example_scores(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "s1")
+    _jsonl(
+        ctx.run_dir(rec) / "predictions" / "scores.accuracy@v1.jsonl",
+        [{"id": f"ex-{i}", "len": v} for i, v in enumerate((4, 1, 3, 10))],
+    )
+    ctx.add_score(
+        rec, ScoreRecord(metric="accuracy", version="v1", key="p95", value=7.0, created_at=T0)
+    )
+    panel = _panel(
+        "scatter", data={"x": "accuracy@v1/median", "y": "accuracy/max", "group_by": "run"}
+    )
+    (row,) = query_panel(ctx, "toy", "toy-acc", panel).rows
+    # no "median"/"max" score: aggregate the per-example field (median 3.5, max 10)
+    assert (row["x"], row["y"]) == (3.5, 10.0)
+    stored = _panel(
+        "scatter", data={"x": "accuracy/p95", "y": "accuracy@v1/mean", "group_by": "run"}
+    )
+    (row,) = query_panel(ctx, "toy", "toy-acc", stored).rows
+    assert (row["x"], row["y"]) == (7.0, 4.5)  # a stored "p95" score wins
+
+
+def test_stat_strip_with_metrics_summarises_selected_runs(ctx: Context, toy_repo: Path) -> None:
+    _two_groups(ctx, toy_repo)
+    panel = _panel("stat_strip", data={"metrics": ["accuracy@v1", "usage.usd"], "pick": "best"})
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert result.rows == [
+        {"label": "accuracy@v1", "value": "0.850", "unit": "", "tooltip": "Mean of 2 runs of svm"},
+        {
+            "label": "usage.usd",
+            "value": "—",
+            "unit": "",
+            "tooltip": "No value in the 2 selected runs",
+        },
+    ]
+    assert set(result.meta) == {"headline"}
+
+
+def test_scatter_meta_carries_y_direction_and_best_group(ctx: Context, toy_repo: Path) -> None:
+    for rid, group, usd, acc, minute in [("a1", "aaaa", 0.1, 0.8, 0), ("b1", "bbbb", 0.3, 0.9, 1)]:
+        rec = _run(ctx, toy_repo, rid, group, minute=minute, usage=UsageTotals(usd=usd))
+        _score(ctx, rec, acc)
+        _jsonl(
+            ctx.run_dir(rec) / "metrics.jsonl", [{"name": "val/loss", "step": 1, "value": 1 - acc}]
+        )
+
+    def meta(data: dict[str, str]) -> tuple[bool, str | None]:
+        result = query_panel(ctx, "toy", "toy-acc", _panel("scatter", data=data))
+        return result.meta["y_higher_is_better"], result.meta["best_group"]
+
+    # no pareto settings anywhere: the best group still follows the y direction
+    assert meta({"x": "usage.usd"}) == (True, "bbbb@c1")  # primary accuracy: 0.9 wins
+    assert meta({"x": "accuracy", "y": "usage.usd"}) == (False, "aaaa@c1")  # $0.1 wins
+    assert meta({"x": "usage.usd", "y": "val/loss"}) == (False, "bbbb@c1")  # loss 0.1 wins
+    assert meta({"x": "usage.usd", "y": "nothing"}) == (True, None)  # no rows
+
+
+def test_scatter_uses_the_test_interval_only_at_the_board_version(
+    ctx: Context, toy_repo: Path
+) -> None:
+    for rid, seed, usd, old in [("s1", 1, 0.1, 0.4), ("s2", 2, 0.3, 0.6)]:
+        rec = _run(ctx, toy_repo, rid, seed=seed, minute=seed, usage=UsageTotals(usd=usd))
+        _score(ctx, rec, 0.75)  # accuracy@v1: the board's version
+        ctx.add_score(
+            rec, ScoreRecord(metric="accuracy", version="v0", key="value", value=old, created_at=T0)
+        )
+        _jsonl(
+            ctx.run_dir(rec) / "predictions" / "scores.accuracy@v1.jsonl",
+            [{"id": f"ex-{i}", "correct": ok} for i, ok in enumerate([True, True, True, False])],
+        )
+    for y in ("accuracy", "accuracy@v1"):
+        (row,) = query_panel(
+            ctx, "toy", "toy-acc", _panel("scatter", data={"x": "usage.usd", "y": y})
+        ).rows
+        # pooled 3 of 4 correct: statsmodels proportion_confint(3, 4, method="wilson")
+        assert (row["y_lo"], row["y_hi"]) == pytest.approx(
+            (0.30064184258240184, 0.9544127391902995)
+        )
+    old = _panel("scatter", data={"x": "usage.usd", "y": "accuracy@v0"})
+    (row,) = query_panel(ctx, "toy", "toy-acc", old).rows
+    # v0 is not the board's version: its own seed t-interval, 0.5 +- 12.706 * 0.1
+    assert row["y"] == pytest.approx(0.5)
+    assert (row["y_lo"], row["y_hi"]) == pytest.approx((0.5 - 1.2706, 0.5 + 1.2706))
+
+
+def test_scatter_version_x_follows_version_param_then_creation_time(
+    ctx: Context, toy_repo: Path
+) -> None:
+    for rid, group, params, acc, minute in [
+        ("a", "aaaa", {"prompt_version": "p10"}, 0.7, 0),
+        ("b", "bbbb", {"prompt_version": "p9"}, 0.6, 1),
+        ("c", "cccc", {}, 0.5, 2),
+        ("d", "dddd", {}, 0.4, 3),
+    ]:
+        rec = _run(ctx, toy_repo, rid, group, minute=minute, params=params)
+        _score(ctx, rec, acc)
+    t0, t1, t2, t3 = ((T0 + timedelta(minutes=m)).strftime("%Y-%m-%d %H:%M:%S") for m in range(4))
+    panel = _panel("scatter", data={"x": "version"})
+    # default version_param "version": no run has it, so every group falls back to the
+    # creation time of its first run (spec 8.4) instead of vanishing from the plot
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert result.meta["x_type"] == "ordinal"
+    assert [r["x"] for r in result.rows] == [t0, t1, t2, t3]
+    _set_task(toy_repo, version_param="prompt_version")
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    # params first in natural order (p9 before p10), then the fallback groups by time
+    assert [(r["x"], r["y"]) for r in result.rows] == [
+        ("p9", 0.6),
+        ("p10", 0.7),
+        (t2, 0.5),
+        (t3, 0.4),
+    ]

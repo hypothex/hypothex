@@ -1,3 +1,6 @@
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+
 import pytest
 
 from hypothex.core.config import TaskKind
@@ -6,15 +9,17 @@ from hypothex.core.headlines import (
     fmt_p,
     fmt_pct,
     fmt_value,
+    overview_headline,
     paired_gain_interval,
     percentile_of,
     task_headline,
     task_stat_strip,
     welch_interval,
 )
+from hypothex.core.ids import utcnow
 from hypothex.core.leaderboard import Leaderboard, LeaderboardRow, NoiseInterval, VersusBest
 from hypothex.core.records import UsageTotals
-from hypothex.core.seeds import summarize
+from hypothex.core.seeds import Stats, summarize
 
 
 def row(
@@ -292,3 +297,59 @@ def test_stat_strip_system_bench() -> None:
     ]
     assert strip[1]["tooltip"] == "p50 change vs baseline, 95% CI −31 to −22%"
     assert labels(task_stat_strip(b)) == ["p95", "repeats", "repeat σ"]
+
+
+# overview headline ----------------------------------------------------------------
+T0 = utcnow()
+
+
+@dataclass
+class Idea:
+    project: str
+    task: str | None
+    label: str
+    primary: Stats | None
+    created_at: datetime
+
+
+@dataclass
+class Proj:
+    project: str
+    task: str
+    best: float | None
+
+
+@dataclass
+class Summary:
+    running: list[object] = field(default_factory=list)
+    ideas: list[Idea] = field(default_factory=list)
+    projects: list[Proj] = field(default_factory=list)
+
+
+def test_overview_headline_from_board() -> None:
+    svm = row("SVM", [0.922])
+    rf = row("rf", [0.885], vs=sign(-0.037, 9, 3, 0.1467))
+    b = board("generic", [svm, rf])
+    assert overview_headline(Summary(), board=b) == "Idle. SVM leads toy-test by 0.037, p = 0.15"
+    busy = Summary(running=[object(), object()])
+    assert overview_headline(busy, board=b) == "2 running. SVM leads toy-test by 0.037, p = 0.15"
+    assert overview_headline(Summary(), board=board("generic", [svm])) == (
+        "Idle. SVM leads toy-test at 0.922"
+    )
+
+
+def test_overview_headline_from_summary() -> None:
+    assert overview_headline(Summary()) == "Idle. No scored runs yet"
+    ideas = [
+        Idea("toy", "toy-test", "rf", summarize([0.885]), T0),
+        Idea("toy", "toy-test", "SVM", summarize([0.922]), T0 + timedelta(minutes=5)),
+        Idea("toy", "toy-test", "knn", summarize([0.867]), T0 + timedelta(minutes=1)),
+        Idea("other", "old", "x", summarize([0.1]), T0 - timedelta(days=1)),
+    ]
+    projects = [Proj("toy", "toy-test", 0.922), Proj("other", "old", 0.5)]
+    summary = Summary(running=[object()], ideas=ideas, projects=projects)
+    assert overview_headline(summary) == "1 running. SVM leads toy-test by 0.037"
+    lone = Summary(ideas=[ideas[1]], projects=projects)
+    assert overview_headline(lone) == "Idle. SVM leads toy-test at 0.922"
+    moved = Summary(ideas=[ideas[0]], projects=projects)
+    assert overview_headline(moved) == "Idle. toy-test best 0.922"

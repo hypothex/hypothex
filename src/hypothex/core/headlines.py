@@ -6,9 +6,10 @@ import math
 import re
 import statistics
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Protocol
 
-from hypothex.core.seeds import t_critical
+from hypothex.core.seeds import Stats, t_critical
 from hypothex.core.stats import Z95
 
 if TYPE_CHECKING:
@@ -495,3 +496,102 @@ def _bench_strip(
     out.append(_stat("repeats", str(best.n), f"Repeats of {best.label}"))
     out.append(_seed_sigma(best, word="repeat"))
     return out
+
+
+# overview headline --------------------------------------------------------------------
+class IdeaLike(Protocol):
+    """What ``overview_headline`` reads from an idea row (``overview.IdeaRow``)."""
+
+    @property
+    def project(self) -> str: ...
+    @property
+    def task(self) -> str | None: ...
+    @property
+    def label(self) -> str: ...
+    @property
+    def primary(self) -> Stats | None: ...
+    @property
+    def created_at(self) -> datetime: ...
+
+
+class ProjectLike(Protocol):
+    """What ``overview_headline`` reads from a project row (``overview.ProjectRow``)."""
+
+    @property
+    def project(self) -> str: ...
+    @property
+    def task(self) -> str | None: ...
+    @property
+    def best(self) -> float | None: ...
+
+
+class SummaryLike(Protocol):
+    """What ``overview_headline`` reads from ``overview.OverviewSummary``."""
+
+    @property
+    def running(self) -> Sequence[object]: ...
+    @property
+    def ideas(self) -> Sequence[IdeaLike]: ...
+    @property
+    def projects(self) -> Sequence[ProjectLike]: ...
+
+
+def overview_headline(summary: SummaryLike, *, board: Leaderboard | None = None) -> str:
+    """
+    Return the Overview page's one-line status.
+
+    Parameters
+    ----------
+    summary : OverviewSummary
+        The overview (any object with ``running``, ``ideas``, ``projects``).
+    board : Leaderboard, optional
+        Leaderboard of the task to lead with. With it, the line carries the
+        paired p-value; without it, the task of the newest scored idea is used.
+
+    Returns
+    -------
+    str
+        For example ``"Idle. SVM leads toy-test by 0.037, p = 0.15"`` or
+        ``"2 running. SVM leads toy-test by 0.037"``.
+    """
+    n = len(summary.running)
+    prefix = "Idle." if n == 0 else f"{n} running."
+    lead = _board_lead(board) if board is not None else _summary_lead(summary)
+    return f"{prefix} {lead}"
+
+
+def _board_lead(board: Leaderboard) -> str:
+    rows = _scored(board)
+    if not rows:
+        return NO_RUNS
+    best = rows[0]
+    if len(rows) == 1:
+        return f"{best.label} leads {board.task} at {fmt_value(_mean(best))}"
+    runner = rows[1]
+    text = f"{best.label} leads {board.task} by {fmt_value(abs(_mean(best) - _mean(runner)))}"
+    if runner.vs_best is not None and runner.vs_best.p is not None:
+        text += f", {fmt_p(runner.vs_best.p)}"
+    return text
+
+
+def _summary_lead(summary: SummaryLike) -> str:
+    scored = [i for i in summary.ideas if i.primary is not None and i.task is not None]
+    if not scored:
+        return NO_RUNS
+    focus = max(scored, key=lambda i: i.created_at)
+    same = [i for i in scored if (i.project, i.task) == (focus.project, focus.task)]
+    best = next(
+        (p.best for p in summary.projects if (p.project, p.task) == (focus.project, focus.task)),
+        None,
+    )
+    task = str(focus.task)
+    if best is None:
+        return f"{task} has no best yet"
+    leader = next((i for i in same if i.primary and math.isclose(i.primary.mean, best)), None)
+    if leader is None:
+        return f"{task} best {fmt_value(best)}"
+    others = [i for i in same if i is not leader and i.primary is not None]
+    if not others:
+        return f"{leader.label} leads {task} at {fmt_value(best)}"
+    gap = min(abs(best - i.primary.mean) for i in others if i.primary is not None)
+    return f"{leader.label} leads {task} by {fmt_value(gap)}"

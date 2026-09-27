@@ -1,0 +1,35 @@
+# Preset view for task kind "agent_iteration" (spec 8.4, mockup docs/mockups/kinds/agent_iteration).
+# `version` is the task's version ordering key: the run param TaskSpec.version_param names
+# ("version" by default, e.g. prompt_version), or, for a group whose runs lack that param, the
+# creation time of the group's first run (spec 8.4). So this view works for any version_param.
+# "$ per solved" is each run's usage.usd divided by the examples it solved on the primary
+# metric (usage.<field>/solved), averaged over seeds. Both scatters have an ordinal x (version
+# text), so each row carries `regression`: worse than the best earlier version by more than
+# that version's 95% CI (spec 8.4 "regressions marked"; the UI draws it in the failure colour).
+title: overview
+panels:
+  - type: stat_strip
+    title: Summary
+    layout: {span: 12, row: 1}
+  - type: scatter
+    title: Solved by version
+    data: {x: version, group_by: group}
+    layout: {span: 12, row: 2}
+  - type: scatter
+    title: $ per solved
+    data: {x: version, y: usage.usd/solved, group_by: group}
+    layout: {span: 6, row: 3}
+  - type: table
+    title: Changes
+    data:
+      source: runs
+      fields: [group_id, version, created_by, created_at]
+    layout: {span: 6, row: 3}
+  - type: grid
+    title: Flips
+    data: {group_by: group}
+    layout: {span: 12, row: 4}
+  - type: leaderboard
+    title: Leaderboard
+    noise: [seed, test_set]
+    layout: {span: 12, row: 5}

@@ -1,0 +1,10 @@
+# Preset view for task kind "generic" (spec 8.4): stat strip and leaderboard.
+title: overview
+panels:
+  - type: stat_strip
+    title: Summary
+    layout: {span: 12, row: 1}
+  - type: leaderboard
+    title: Leaderboard
+    noise: [seed, test_set]
+    layout: {span: 12, row: 2}

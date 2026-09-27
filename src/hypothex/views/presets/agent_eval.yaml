@@ -1,0 +1,37 @@
+# Preset view for task kind "agent_eval" (spec 8.4, mockup docs/mockups/kinds/agent_eval).
+# Failure categories come from the per-example prediction field meta.category.
+title: overview
+panels:
+  - type: stat_strip
+    title: Summary
+    layout: {span: 12, row: 1}
+  - type: leaderboard
+    title: Leaderboard
+    noise: [seed, test_set]
+    layout: {span: 12, row: 2}
+  - type: scatter
+    title: Cost vs solved
+    data: {x: usage.usd, group_by: group}
+    pareto: {x: min, y: max}
+    layout: {span: 7, row: 3}
+  - type: vega_lite
+    title: Failures
+    data:
+      source: predictions
+      fields: [group_id, meta.category]
+    spec:
+      transform:
+        - filter: "isValid(datum['meta.category'])"
+      mark: bar
+      encoding:
+        y: {field: group_id, type: nominal, title: null}
+        x: {aggregate: count, type: quantitative, title: failed}
+        color: {field: meta\.category, type: nominal, title: null}
+    layout: {span: 5, row: 3}
+  - type: grid
+    title: Per target
+    data: {group_by: group}
+    layout: {span: 12, row: 4}
+  - type: trace
+    title: Attempt
+    layout: {span: 12, row: 5}

@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{ name = "Shreyas Vinaya Sathyanarayana", email = "shreyas.college@gmail.com" }]
 dependencies = [
-  "pydantic>=2.8",
+  "pydantic>=2.11",
   "pyyaml>=6.0",
   "typer>=0.12",
   "click>=8.2",

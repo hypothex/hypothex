@@ -1,0 +1,43 @@
+# Preset view for task kind "training" (spec 8.4, mockup docs/mockups/kinds/training).
+# Curves with no metrics list show every logged step metric as small multiples.
+title: overview
+panels:
+  - type: stat_strip
+    title: Summary
+    layout: {span: 12, row: 1}
+  - type: leaderboard
+    title: Configs
+    noise: [seed, test_set]
+    layout: {span: 12, row: 2}
+  - type: curves
+    title: Curves
+    data: {group_by: group, step_metric: step}
+    layout: {span: 12, row: 3}
+  - type: table
+    title: Runs
+    data:
+      source: runs
+      fields: [run_id, group_id, seed, status, created_by, usage.seconds]
+    layout: {span: 8, row: 4}
+  # GPU sparklines beside the runs table: one small line per run of the history metric
+  # sys/gpu_util (the name `hx demo` writes; rename it to match your task).
+  - type: vega_lite
+    title: GPU
+    data:
+      source: metrics
+      filter: {name: sys/gpu_util}
+      fields: [name, step, value]
+    spec:
+      height: 18
+      mark: {type: line, strokeWidth: 1}
+      encoding:
+        row: {field: run_id, type: nominal, title: null, header: {labelAngle: 0, labelAlign: left}}
+        x: {field: step, type: quantitative, title: null, axis: null}
+        y: {field: value, type: quantitative, title: null, axis: null, scale: {domain: [0, 100]}}
+    layout: {span: 4, row: 4}
+  # Task-level checkpoints: val/top1 per run; meta.checkpoints marks every checkpoint and
+  # each run's best (curves panel, contract 1.6).
+  - type: curves
+    title: Checkpoints
+    data: {metrics: [val/top1], group_by: run, step_metric: step}
+    layout: {span: 12, row: 5}

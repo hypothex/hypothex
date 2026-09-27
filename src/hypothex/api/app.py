@@ -26,7 +26,17 @@ from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.records import RunStatus
-from hypothex.mcp.server import build_server
+from hypothex.core.views import PanelSpec, ViewSpec
+from hypothex.mcp.server import (
+    ViewValidationError,
+    build_server,
+    list_task_views,
+    put_view,
+    query_task_view,
+    remove_view,
+    validate_view,
+    view_document,
+)
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +98,26 @@ class NoteBody(ActionBody):
 
     text: str
     author: str = "api"
+
+
+class ViewTextBody(BaseModel):
+    """Body of ``POST /api/v1/tasks/{project}/{task}/views/validate``."""
+
+    text: str
+
+
+class ViewPutBody(ActionBody):
+    """Body of ``PUT /api/v1/tasks/{project}/{task}/views/{name}``."""
+
+    text: str
+
+
+class ViewQueryBody(BaseModel):
+    """Body of ``POST .../views/query``: one panel, an unsaved view, or a saved view's name."""
+
+    view: ViewSpec | None = None
+    name: str | None = None
+    panel: PanelSpec | None = None
 
 
 async def _repair_loop(ctx: Context) -> None:
@@ -158,9 +188,10 @@ def create_app(
     @app.exception_handler(HypothexError)
     async def hypothex_error(_: Request, exc: HypothexError) -> JSONResponse:
         status = 404 if isinstance(exc, StoreError) else 400
-        return JSONResponse(
-            status_code=status, content={"error": str(exc), "type": type(exc).__name__}
-        )
+        content: dict[str, Any] = {"error": str(exc), "type": type(exc).__name__}
+        if isinstance(exc, ViewValidationError):
+            content["issues"] = to_jsonable(exc.issues)
+        return JSONResponse(status_code=status, content=content)
 
     def once(body: ActionBody, fn: Callable[[], Any]) -> dict[str, Any]:
         return ctx.events.run_once(body.command_id, lambda: to_jsonable(fn()))
@@ -208,6 +239,33 @@ def create_app(
             body,
             lambda: reeval(ctx, project=project, task=task, metric=body.metric, force=body.force),
         )
+
+    # views -------------------------------------------------------------------------
+    @app.get("/api/v1/tasks/{project}/{task}/views")
+    def views(project: str, task: str) -> list[dict[str, Any]]:
+        return to_jsonable(list_task_views(ctx, task, project))
+
+    @app.post("/api/v1/tasks/{project}/{task}/views/validate")
+    def views_validate(project: str, task: str, body: ViewTextBody) -> dict[str, Any]:
+        return validate_view(ctx, task, body.text, project)
+
+    @app.post("/api/v1/tasks/{project}/{task}/views/query")
+    def views_query(project: str, task: str, body: ViewQueryBody) -> dict[str, Any]:
+        return query_task_view(
+            ctx, task, project=project, name=body.name, view=body.view, panel=body.panel
+        )
+
+    @app.get("/api/v1/tasks/{project}/{task}/views/{name}")
+    def view_get(project: str, task: str, name: str) -> dict[str, Any]:
+        return view_document(ctx, task, name, project)
+
+    @app.put("/api/v1/tasks/{project}/{task}/views/{name}")
+    def view_put(project: str, task: str, name: str, body: ViewPutBody) -> dict[str, Any]:
+        return once(body, lambda: put_view(ctx, task, name, body.text, project))
+
+    @app.delete("/api/v1/tasks/{project}/{task}/views/{name}")
+    def view_delete(project: str, task: str, name: str) -> dict[str, Any]:
+        return remove_view(ctx, task, name, project)
 
     # runs ----------------------------------------------------------------------------
     @app.get("/api/v1/runs")

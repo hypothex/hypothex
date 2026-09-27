@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import logging
-from collections.abc import Iterator
+import math
+import re
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError
@@ -26,12 +29,178 @@ from hypothex.core.fsutil import (
 )
 from hypothex.core.ids import utcnow
 from hypothex.core.layout import Layout
-from hypothex.core.records import Artifact, MetricPoint, RunRecord, ScoreRecord
+from hypothex.core.records import Artifact, MetricPoint, RunRecord, ScoreRecord, UsageTotals
 
 log = logging.getLogger(__name__)
 _M = TypeVar("_M", bound=BaseModel)
 
 RUN_SUBDIRS = ("logs", "predictions", "env")
+_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
+_HASH_TAIL = re.compile(r"-[0-9a-f]{8}\Z")
+
+
+def safe_stem(name: str) -> str:
+    """
+    Turn an example id or sample name into a file name stem.
+
+    Every character outside ``[A-Za-z0-9_.-]`` becomes ``_``, so the name can never
+    contain a path separator and leave its folder. ``-`` and the first 8 hex digits
+    of ``sha1(name)`` are appended when that changes the name, and also when the
+    name already ends in ``-`` plus 8 lowercase hex digits (so ``a_b-3ec69c85``
+    cannot take the stem of ``a/b``). Any other name is returned unchanged. So an
+    unchanged stem never ends in a hash and a hashed one always does: two distinct
+    names share a stem only if they sanitise alike and their sha1 digests share the
+    first 8 hex digits, which ``check_stem_owner`` catches before a write.
+
+    Parameters
+    ----------
+    name : str
+        Example id or sample name.
+
+    Returns
+    -------
+    str
+        The file name stem.
+
+    Raises
+    ------
+    ValueError
+        If ``name`` is empty.
+
+    Examples
+    --------
+    >>> safe_stem("route 7/b")
+    'route_7_b-5db86396'
+    >>> safe_stem("a_b")
+    'a_b'
+    >>> safe_stem("a_b-3ec69c85")
+    'a_b-3ec69c85-d64fa8bc'
+    """
+    if not name:
+        raise ValueError("name must not be empty")
+    stem = _UNSAFE_CHARS.sub("_", name)
+    if stem == name and not _HASH_TAIL.search(name):
+        return stem
+    return f"{stem}-{hashlib.sha1(name.encode('utf-8')).hexdigest()[:8]}"
+
+
+def check_stem_owner(path: Path, key: str, original: str) -> None:
+    """
+    Refuse to write a trace or sample file that belongs to a different id or name.
+
+    ``safe_stem`` gives two distinct names one stem only on an 8-hex-digit sha1
+    prefix collision. Every row of a trace or sample file stores the original id
+    (``example_id``) or name (``name``), so writers call this before they write:
+    an existing file whose first line stores a different original is a collision.
+
+    Parameters
+    ----------
+    path : Path
+        The trace or sample file about to be written.
+    key : str
+        Row key of the original: ``example_id`` for traces, ``name`` for samples.
+    original : str
+        The id or name about to be written.
+
+    Raises
+    ------
+    StoreError
+        If the file exists and its first line stores a different string under
+        ``key``. A missing or empty file, or a first line without that key (a file
+        written by hand), passes.
+
+    Examples
+    --------
+    >>> check_stem_owner(Path("/nonexistent/a_b.jsonl"), "example_id", "a_b")
+    """
+    if not path.is_file():
+        return
+    with path.open("rb") as fh:
+        first = fh.readline()
+    try:
+        row = json.loads(first)
+    except ValueError:
+        return
+    stored = row.get(key) if isinstance(row, dict) else None
+    if isinstance(stored, str) and stored != original:
+        raise StoreError(
+            f"id collision: {path.name} already holds {key} {stored!r}, not {original!r}"
+        )
+
+
+class UsageRow(BaseModel):
+    """
+    One ``log_usage`` call; a line of ``usage.jsonl``.
+
+    Examples
+    --------
+    >>> UsageRow(tokens_in=100, usd=0.25).tokens_out
+    0
+    """
+
+    example_id: str | None = None
+    tokens_in: int = Field(0, ge=0)
+    tokens_out: int = Field(0, ge=0)
+    # allow_inf_nan=False: ge=0 alone lets +inf through, and an inf in the run
+    # totals would break JSON responses later
+    usd: float = Field(0.0, ge=0, allow_inf_nan=False)
+    seconds: float = Field(0.0, ge=0, allow_inf_nan=False)
+
+
+class TraceStep(BaseModel):
+    """
+    One step of an agent trajectory; a line of ``traces/<example_id>.jsonl``.
+
+    Unknown keys are dropped. A non-empty ``error`` marks the step as failed.
+    ``seconds`` must be finite.
+
+    Examples
+    --------
+    >>> TraceStep(turn=1, tool="check_stock", error="timeout").error
+    'timeout'
+    """
+
+    turn: int
+    tool: str | None = None
+    args: Any = None
+    result: Any = None
+    tokens_in: int = Field(0, ge=0)
+    tokens_out: int = Field(0, ge=0)
+    seconds: float = Field(0.0, ge=0, allow_inf_nan=False)
+    error: str | None = None
+
+
+def sum_usage(rows: Iterable[UsageRow]) -> UsageTotals | None:
+    """
+    Add up usage rows into run totals.
+
+    Parameters
+    ----------
+    rows : iterable of UsageRow
+        Rows from ``RunStore.read_usage``.
+
+    Returns
+    -------
+    UsageTotals or None
+        Sums of every field and ``calls`` = number of rows; None if there are no rows.
+
+    Examples
+    --------
+    >>> sum_usage([UsageRow(tokens_in=3, usd=0.25), UsageRow(tokens_in=4, usd=0.5)])
+    UsageTotals(tokens_in=7, tokens_out=0, usd=0.75, seconds=0.0, calls=2)
+    >>> sum_usage([]) is None
+    True
+    """
+    items = list(rows)
+    if not items:
+        return None
+    return UsageTotals(
+        tokens_in=sum(r.tokens_in for r in items),
+        tokens_out=sum(r.tokens_out for r in items),
+        usd=math.fsum(r.usd for r in items),
+        seconds=math.fsum(r.seconds for r in items),
+        calls=len(items),
+    )
 
 
 class ProjectEntry(BaseModel):
@@ -400,6 +569,125 @@ class RunStore:
         """
         return _parse_rows(Artifact, self.layout.run_dir(project, run_id) / "artifacts.jsonl")
 
+    def read_usage(self, project: str, run_id: str) -> list[UsageRow]:
+        """
+        Read the usage rows logged by the SDK for a run.
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+        run_id : str
+            Run id.
+
+        Returns
+        -------
+        list of UsageRow
+            Rows of ``usage.jsonl`` in the order written; malformed rows (for example a
+            negative token count) are skipped.
+        """
+        return _parse_rows(UsageRow, self.layout.run_dir(project, run_id) / "usage.jsonl")
+
+    def list_traces(self, project: str, run_id: str) -> list[dict[str, Any]]:
+        """
+        Summarise every trace logged for a run.
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+        run_id : str
+            Run id.
+
+        Returns
+        -------
+        list of dict
+            One ``{"example_id": str, "turns": int, "failed": bool}`` per trace file,
+            sorted by example id. ``example_id`` is the original id written by
+            ``log_trace`` (also for an empty trace, whose file holds one marker line);
+            the file stem only for files written without it. ``failed`` is True when
+            any step has a non-empty ``error``.
+        """
+        folder = self.layout.run_dir(project, run_id) / "traces"
+        if not folder.is_dir():
+            return []
+        found: list[dict[str, Any]] = []
+        for path in sorted(folder.glob("*.jsonl")):
+            raw = read_jsonl(path)
+            steps = _parse_steps(raw)
+            original = next((r["example_id"] for r in raw if "example_id" in r), None)
+            found.append(
+                {
+                    "example_id": original if isinstance(original, str) else path.stem,
+                    "turns": len(steps),
+                    "failed": any(step.error for step in steps),
+                }
+            )
+        return sorted(found, key=lambda row: row["example_id"])
+
+    def read_trace(self, project: str, run_id: str, example_id: str) -> list[TraceStep]:
+        """
+        Read one example's trace.
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+        run_id : str
+            Run id.
+        example_id : str
+            Example id as given to ``log_trace`` (sanitised here the same way).
+
+        Returns
+        -------
+        list of TraceStep
+            Steps in file order; ``[]`` if the example has no trace. A step without
+            ``turn`` gets its 1-based position; malformed steps are skipped.
+
+        Raises
+        ------
+        ValueError
+            If ``example_id`` is empty.
+        """
+        path = self.layout.run_dir(project, run_id) / "traces" / f"{safe_stem(example_id)}.jsonl"
+        return _parse_steps(read_jsonl(path))
+
+    def read_samples(self, project: str, run_id: str) -> dict[str, list[float]]:
+        """
+        Read every raw sample series logged for a run.
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+        run_id : str
+            Run id.
+
+        Returns
+        -------
+        dict of str to list of float
+            Series name to values in the order written, sorted by name. The name is
+            the original one ``log_samples`` stores in each row (the file stem only
+            for files written without it). Rows whose ``value`` is not a finite
+            number are skipped.
+        """
+        folder = self.layout.run_dir(project, run_id) / "samples"
+        if not folder.is_dir():
+            return {}
+        series: dict[str, list[float]] = {}
+        for path in sorted(folder.glob("*.jsonl")):
+            rows = read_jsonl(path)
+            name = next((r["name"] for r in rows if isinstance(r.get("name"), str)), path.stem)
+            values: list[float] = []
+            for raw in rows:
+                value = raw.get("value")
+                if isinstance(value, bool) or not isinstance(value, int | float):
+                    continue
+                if math.isfinite(value):
+                    values.append(float(value))
+            series.setdefault(name, []).extend(values)
+        return dict(sorted(series.items()))
+
     def append_note(self, project: str, run_id: str, text: str, author: str) -> None:
         """
         Append a note to the run's ``notes.md``.
@@ -528,3 +816,29 @@ def _parse_rows(model: type[_M], path: Path) -> list[_M]:
         except ValidationError:
             continue
     return rows
+
+
+def _parse_steps(raws: list[dict[str, Any]]) -> list[TraceStep]:
+    """
+    Parse trace rows, giving a row without ``turn`` its 1-based position.
+
+    Parameters
+    ----------
+    raws : list of dict
+        Rows read from a trace file.
+
+    Returns
+    -------
+    list of TraceStep
+        Valid steps in file order; invalid rows and the empty-trace marker line
+        (``{"example_id": ...}`` alone) are skipped.
+    """
+    steps: list[TraceStep] = []
+    for position, raw in enumerate(raws, start=1):
+        if raw.keys() == {"example_id"}:
+            continue
+        try:
+            steps.append(TraceStep.model_validate({"turn": position, **raw}))
+        except ValidationError:
+            continue
+    return steps

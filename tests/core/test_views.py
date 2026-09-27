@@ -1,11 +1,14 @@
 import json
-from typing import get_args
+from pathlib import Path
+from typing import Any, get_args
 
 import pytest
 from pydantic import ValidationError
 
-from hypothex.core.config import TaskKind
-from hypothex.core.errors import ConfigError
+from hypothex.core import config as core_config
+from hypothex.core import views as core_views
+from hypothex.core.config import ProjectConfig, TaskKind
+from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.views import (
     PRESET_DIR,
     PanelData,
@@ -13,9 +16,14 @@ from hypothex.core.views import (
     PanelSpec,
     RunFilter,
     ViewSpec,
+    delete_view,
+    get_view,
+    list_views,
     load_preset,
     resolve_view,
+    save_view,
     validate_view_text,
+    views_dir,
 )
 
 PRESET_TYPES = {
@@ -509,3 +517,145 @@ def test_vega_lite_spec_size_is_bounded() -> None:
     assert [(i.line, i.path, i.message) for i in issues] == [
         (5, "panels[0].spec", "vega_lite spec is too large (over 10000 values)")
     ]
+
+
+# ---- list / get / save / delete ----
+
+FILE_VIEW = """\
+title: route quality
+from: agent_eval
+panels:
+  - type: markdown
+    title: Note
+    text: critic helps on deep targets
+"""
+
+
+def _config(views: dict[str, dict[str, Any]] | None = None) -> ProjectConfig:
+    return ProjectConfig.model_validate(
+        {
+            "project": "toy",
+            "datasets": {"d": {"version": "v1", "path": "d.jsonl"}},
+            "metrics": {"solved": {"version": "v2", "fn": "m:solved"}},
+            "tasks": {
+                "bench": {
+                    "dataset": "d",
+                    "metrics": ["solved"],
+                    "primary": "solved",
+                    "kind": "agent_eval",
+                    "views": views or {},
+                }
+            },
+        }
+    )
+
+
+def test_views_dir_is_under_repo(tmp_path: Path) -> None:
+    assert views_dir(tmp_path, "bench") == tmp_path / ".hypothex" / "views" / "bench"
+
+
+def test_list_views_orders_preset_inline_files_and_file_wins(tmp_path: Path) -> None:
+    config = _config(
+        {
+            "costs": {"title": "Costs", "panels": []},
+            "shared": {"title": "inline shared", "panels": []},
+        }
+    )
+    # Config validation rejects reserved and bad names, so set them after
+    # validation to exercise the skip path in list_views.
+    config.tasks["bench"].views["overview"] = {"title": "ignored", "panels": []}
+    config.tasks["bench"].views["Bad Name"] = {"title": "ignored", "panels": []}
+    save_view(tmp_path, "bench", "shared", "title: file shared\npanels: []\n")
+    save_view(tmp_path, "bench", "route", FILE_VIEW)
+    infos = list_views(tmp_path, config, "bench")
+    assert [(i.name, i.origin, i.title, i.kind) for i in infos] == [
+        ("overview", "preset", "overview", "agent_eval"),
+        ("costs", "inline", "Costs", None),
+        ("route", "file", "route quality", "agent_eval"),
+        ("shared", "file", "file shared", None),
+    ]
+    assert infos[0].path is None
+    assert infos[1].path == str(tmp_path / "hypothex.yaml")
+    assert infos[2].path == str(views_dir(tmp_path, "bench") / "route.yaml")
+
+
+def test_list_views_keeps_unparseable_file_with_name_as_title(tmp_path: Path) -> None:
+    save_view(tmp_path, "bench", "broken", "title: [unclosed\n")
+    names = [(i.name, i.title) for i in list_views(tmp_path, _config(), "bench")]
+    assert names == [("overview", "overview"), ("broken", "broken")]
+
+
+def test_list_views_unknown_task(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="unknown task 'nope'"):
+        list_views(tmp_path, _config(), "nope")
+
+
+def test_get_view_overview_file_and_inline(tmp_path: Path) -> None:
+    config = _config({"costs": {"title": "Costs", "from": "generic", "panels": []}})
+    save_view(tmp_path, "bench", "route", FILE_VIEW)
+    assert get_view(tmp_path, config, "bench", "overview") == load_preset("agent_eval")
+    route = get_view(tmp_path, config, "bench", "route")
+    assert route.title == "route quality"
+    assert route.from_ is None
+    assert [p.title for p in route.panels] == [
+        "Summary",
+        "Leaderboard",
+        "Cost vs solved",
+        "Failures",
+        "Per target",
+        "Attempt",
+        "Note",
+    ]
+    costs = get_view(tmp_path, config, "bench", "costs")
+    assert [p.type for p in costs.panels] == ["stat_strip", "leaderboard"]
+
+
+def test_get_view_missing_and_invalid(tmp_path: Path) -> None:
+    config = _config({"bad": {"title": "b", "panels": [{"type": "pie"}]}})
+    with pytest.raises(StoreError, match="no view 'nope' for task 'bench'"):
+        get_view(tmp_path, config, "bench", "nope")
+    with pytest.raises(StoreError):
+        get_view(tmp_path, config, "bench", "../escape")
+    with pytest.raises(ConfigError, match=r"tasks\.bench\.views\.bad"):
+        get_view(tmp_path, config, "bench", "bad")
+    save_view(tmp_path, "bench", "typo", "title: t\npanels:\n  - type: leaderbord\n")
+    with pytest.raises(ConfigError, match="typo.yaml: line 3: unknown type leaderbord"):
+        get_view(tmp_path, config, "bench", "typo")
+
+
+def test_save_view_writes_text_exactly_and_atomically(tmp_path: Path) -> None:
+    path = save_view(tmp_path, "bench", "route", FILE_VIEW)
+    assert path == tmp_path / ".hypothex" / "views" / "bench" / "route.yaml"
+    assert path.read_text(encoding="utf-8") == FILE_VIEW
+    save_view(tmp_path, "bench", "route", "title: café v2\n")
+    assert path.read_text(encoding="utf-8") == "title: café v2\n"
+    assert sorted(p.name for p in path.parent.iterdir()) == ["route.yaml"]
+
+
+@pytest.mark.parametrize("name", ["Bad", "a/b", "../x", "", "-lead", "a.b", "ok\n"])
+def test_save_view_rejects_bad_names(tmp_path: Path, name: str) -> None:
+    with pytest.raises(ConfigError, match="must match"):
+        save_view(tmp_path, "bench", name, "title: t\n")
+    assert not views_dir(tmp_path, "bench").exists()
+
+
+def test_overview_is_reserved(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="'overview' is the preset view"):
+        save_view(tmp_path, "bench", "overview", "title: t\n")
+    with pytest.raises(ConfigError, match="'overview' is the preset view"):
+        delete_view(tmp_path, "bench", "overview")
+
+
+def test_reserved_view_name_comes_from_config() -> None:
+    # one source of truth: views uses config's set, it does not define its own
+    assert core_views.RESERVED_VIEW_NAMES is core_config.RESERVED_VIEW_NAMES
+    assert frozenset({core_views.RESERVED_VIEW}) == core_config.RESERVED_VIEW_NAMES
+    assert core_views.RESERVED_VIEW == "overview"
+
+
+def test_delete_view(tmp_path: Path) -> None:
+    path = save_view(tmp_path, "bench", "route", FILE_VIEW)
+    delete_view(tmp_path, "bench", "route")
+    assert not path.exists()
+    with pytest.raises(StoreError, match="no view file 'route' for task 'bench'"):
+        delete_view(tmp_path, "bench", "route")

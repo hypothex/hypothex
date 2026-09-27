@@ -11,8 +11,19 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from hypothex.core.config import YAML_CYCLE, TaskKind, has_cycle, scan_yaml
-from hypothex.core.errors import ConfigError
+from hypothex.core.config import (
+    CONFIG_FILENAME,
+    RESERVED_VIEW_NAMES,
+    VIEW_NAME_PATTERN,
+    YAML_CYCLE,
+    ProjectConfig,
+    TaskKind,
+    TaskSpec,
+    has_cycle,
+    scan_yaml,
+)
+from hypothex.core.errors import ConfigError, StoreError
+from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.records import RunStatus
 
 if TYPE_CHECKING:
@@ -34,6 +45,10 @@ Source = Literal["runs", "scores", "metrics", "predictions", "samples", "usage",
 Noise = Literal["seed", "test_set"]
 
 PRESET_DIR = Path(__file__).resolve().parent.parent / "views" / "presets"
+
+# The preset's name, derived from config (Task 5): one source of truth for reserved names.
+# The unpacking fails at import if config ever reserves more than one name.
+(RESERVED_VIEW,) = RESERVED_VIEW_NAMES
 
 ROW_KEYS = frozenset({"run_id", "group_id", "seed"})
 FIELD_PREFIXES = ("usage.", "params.", "vars.")
@@ -577,3 +592,248 @@ def validate_view_text(
     except ValidationError as exc:
         return None, [_schema_issue(root, err) for err in exc.errors()]
     return view, _semantic_issues(view, root, known_metrics, known_fields)
+
+
+def views_dir(repo: Path, task: str) -> Path:
+    """
+    Return the folder holding a task's view files.
+
+    Parameters
+    ----------
+    repo : Path
+        Project repository root.
+    task : str
+        Task name.
+
+    Returns
+    -------
+    Path
+        ``<repo>/.hypothex/views/<task>/``.
+
+    Examples
+    --------
+    >>> views_dir(Path("/r"), "t").as_posix()
+    '/r/.hypothex/views/t'
+    """
+    return repo / ".hypothex" / "views" / task
+
+
+def _valid_name(name: str) -> bool:
+    """Return True if ``name`` is a usable, non-reserved view name."""
+    return name not in RESERVED_VIEW_NAMES and re.fullmatch(VIEW_NAME_PATTERN, name) is not None
+
+
+def check_view_name(name: str) -> None:
+    """
+    Raise ``ConfigError`` unless ``name`` can name a view file.
+
+    Parameters
+    ----------
+    name : str
+        Proposed view name.
+
+    Raises
+    ------
+    ConfigError
+        If ``name`` is ``overview`` (the preset) or does not match ``VIEW_NAME_PATTERN``.
+
+    Examples
+    --------
+    >>> check_view_name("route-quality")
+    """
+    if name in RESERVED_VIEW_NAMES:
+        raise ConfigError(f"{name!r} is the preset view of the task kind; pick another name")
+    if not _valid_name(name):
+        raise ConfigError(f"view name {name!r} must match {VIEW_NAME_PATTERN}")
+
+
+def _task_spec(config: ProjectConfig, task: str) -> TaskSpec:
+    """Return a task's spec or raise ``ConfigError``."""
+    if task not in config.tasks:
+        raise ConfigError(f"unknown task {task!r} in project {config.project!r}")
+    return config.tasks[task]
+
+
+def _mapping(text: str) -> dict[str, Any]:
+    """Parse YAML text leniently: ``{}`` for invalid YAML or a non-mapping."""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _info(
+    name: str, body: dict[str, Any], origin: Literal["inline", "file"], path: Path
+) -> ViewInfo:
+    """Build a ``ViewInfo`` from a raw view body."""
+    title = body.get("title")
+    kind = body.get("from")
+    return ViewInfo(
+        name=name,
+        title=title if isinstance(title, str) else name,
+        origin=origin,
+        path=str(path),
+        kind=kind if kind in get_args(TaskKind) else None,
+    )
+
+
+def list_views(repo: Path, config: ProjectConfig, task: str) -> list[ViewInfo]:
+    """
+    List a task's views: the kind's preset as ``overview``, then inline, then files.
+
+    A file view and an inline view with the same name are listed once, as the file.
+    Names that are reserved or do not match ``VIEW_NAME_PATTERN`` are skipped.
+
+    Parameters
+    ----------
+    repo : Path
+        Project repository root.
+    config : ProjectConfig
+        Parsed ``hypothex.yaml``.
+    task : str
+        Task name.
+
+    Returns
+    -------
+    list of ViewInfo
+
+    Raises
+    ------
+    ConfigError
+        If the task is unknown.
+    """
+    spec = _task_spec(config, task)
+    infos = [
+        ViewInfo(
+            name=RESERVED_VIEW,
+            title=load_preset(spec.kind).title,
+            origin="preset",
+            path=None,
+            kind=spec.kind,
+        )
+    ]
+    files: dict[str, ViewInfo] = {}
+    directory = views_dir(repo, task)
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.yaml")):
+            if _valid_name(path.stem):
+                body = _mapping(path.read_text(encoding="utf-8"))
+                files[path.stem] = _info(path.stem, body, "file", path)
+    infos.extend(
+        _info(name, body, "inline", repo / CONFIG_FILENAME)
+        for name, body in spec.views.items()
+        if _valid_name(name) and name not in files
+    )
+    infos.extend(files.values())
+    return infos
+
+
+def get_view(repo: Path, config: ProjectConfig, task: str, name: str) -> ViewSpec:
+    """
+    Load one view of a task and resolve its ``from``.
+
+    Parameters
+    ----------
+    repo : Path
+        Project repository root.
+    config : ProjectConfig
+        Parsed ``hypothex.yaml``.
+    task : str
+        Task name.
+    name : str
+        View name; ``overview`` is the preset of the task's kind.
+
+    Returns
+    -------
+    ViewSpec
+        The resolved view.
+
+    Raises
+    ------
+    ConfigError
+        If the task is unknown or the stored view is invalid.
+    StoreError
+        If the task has no view with this name.
+    """
+    spec = _task_spec(config, task)
+    if name == RESERVED_VIEW:
+        return load_preset(spec.kind)
+    if _valid_name(name):
+        path = views_dir(repo, task) / f"{name}.yaml"
+        if path.is_file():
+            view, issues = validate_view_text(path.read_text(encoding="utf-8"), set(), {})
+            if view is None:
+                first = issues[0]
+                where = f"line {first.line}: " if first.line is not None else ""
+                raise ConfigError(f"{path}: {where}{first.message}")
+            return resolve_view(view)
+        if name in spec.views:
+            try:
+                view = ViewSpec.model_validate(spec.views[name])
+            except ValidationError as exc:
+                raise ConfigError(
+                    f"{repo / CONFIG_FILENAME}: tasks.{task}.views.{name}: {exc}"
+                ) from exc
+            return resolve_view(view)
+    raise StoreError(f"no view {name!r} for task {task!r}")
+
+
+def save_view(repo: Path, task: str, name: str, text: str) -> Path:
+    """
+    Write a view's YAML text to ``<repo>/.hypothex/views/<task>/<name>.yaml`` atomically.
+
+    The caller validates ``text`` first (``validate_view_text``); this only checks the name.
+
+    Parameters
+    ----------
+    repo : Path
+        Project repository root.
+    task : str
+        Task name.
+    name : str
+        View name matching ``VIEW_NAME_PATTERN``, not ``overview``.
+    text : str
+        View YAML, stored exactly as given.
+
+    Returns
+    -------
+    Path
+        The written file.
+
+    Raises
+    ------
+    ConfigError
+        If the name is invalid or reserved.
+    """
+    check_view_name(name)
+    path = views_dir(repo, task) / f"{name}.yaml"
+    atomic_write_text(path, text)
+    return path
+
+
+def delete_view(repo: Path, task: str, name: str) -> None:
+    """
+    Delete a view file.
+
+    Parameters
+    ----------
+    repo : Path
+        Project repository root.
+    task : str
+        Task name.
+    name : str
+        View name.
+
+    Raises
+    ------
+    ConfigError
+        If the name is invalid or is the reserved ``overview``.
+    StoreError
+        If there is no view file with this name (inline views live in ``hypothex.yaml``).
+    """
+    check_view_name(name)
+    path = views_dir(repo, task) / f"{name}.yaml"
+    if not path.is_file():
+        raise StoreError(f"no view file {name!r} for task {task!r}")
+    path.unlink()

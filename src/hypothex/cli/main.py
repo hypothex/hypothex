@@ -866,7 +866,7 @@ def demo(
     as_json: JsonFlag = False,
 ) -> None:
     """Seed demo projects and runs into an empty home (UI tests, docs screenshots)."""
-    from hypothex.demo import DEMO_TASKS, seed_demo
+    from hypothex.demo import seed_demo
 
     known = get_args(TaskKind)
     chosen = [k.strip() for item in kinds or [] for k in item.split(",") if k.strip()]
@@ -874,9 +874,13 @@ def demo(
     if unknown:
         raise ConfigError(f"unknown kind(s) {', '.join(unknown)}; choose from {', '.join(known)}")
     home = (_state.home or default_home()).expanduser().resolve()
-    demo_projects = {project for project, _ in DEMO_TASKS.values()}
+    # a project is the demo's only when its repo is under <home>/demo-repos/: a
+    # name alone is not enough (the repo's own example is also "toy-classifier")
+    demo_repos = home / "demo-repos"
     theirs = sorted(
-        e.project for e in _ctx().store.list_projects() if e.project not in demo_projects
+        e.project
+        for e in _ctx().store.list_projects()
+        if not Path(e.repo).resolve().is_relative_to(demo_repos)
     )
     if theirs:
         raise ConfigError(

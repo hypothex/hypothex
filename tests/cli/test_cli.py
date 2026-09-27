@@ -7,8 +7,11 @@ import yaml
 from typer.testing import CliRunner
 
 from hypothex.cli.main import app, cli
+from hypothex.core.config import load_project_config
+from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, RunError
 from hypothex.core.views import load_preset
+from hypothex.demo import DEMO_TASKS
 from tests.factories import write_toy_project
 
 runner = CliRunner()
@@ -280,6 +283,46 @@ def test_demo_refuses_a_home_with_real_projects(in_repo: Path) -> None:
     with pytest.raises(ConfigError, match=r"already has projects \(toy\)"):
         runner.invoke(app, ["demo", "--kinds", "generic"], catch_exceptions=False)
     assert [p["project"] for p in hx("projects")] == ["toy"]
+
+
+def test_demo_refuses_a_real_project_with_a_demo_name(home: Path) -> None:
+    # regression: the guard matched demo projects by name, and the repo's own example
+    # is also "toy-classifier", so the demo was seeded next to the user's real project
+    example = Path(__file__).resolve().parents[2] / "examples" / "toy-classifier"
+    config = load_project_config(example)
+    assert config.project == DEMO_TASKS["generic"][0]
+    Context.open(home).store.register_project(config, example)
+    with pytest.raises(ConfigError, match=r"already has projects \(toy-classifier\)"):
+        runner.invoke(app, ["demo", "--kinds", "training"], catch_exceptions=False)
+    assert [p["project"] for p in hx("projects")] == ["toy-classifier"]
+
+
+def test_demo_adds_kinds_to_a_demo_home(home: Path) -> None:
+    # projects whose repo is under <home>/demo-repos/ are the demo's own
+    hx("demo", "--kinds", "generic")
+    assert list(hx("demo", "--kinds", "training")) == ["training"]
+    assert {p["project"] for p in hx("projects")} == {
+        DEMO_TASKS["generic"][0],
+        DEMO_TASKS["training"][0],
+    }
+
+
+def test_view_list_and_show_with_a_non_utf8_file(
+    in_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _run()
+    path = in_repo / ".hypothex" / "views" / "toy-acc" / "latin.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes("title: café\npanels: []\n".encode("latin-1"))
+    assert [(v["name"], v["title"]) for v in hx("view", "list", "toy-acc")][1:] == [
+        ("latin", "latin")
+    ]
+    monkeypatch.setattr(sys, "argv", ["hx", "view", "show", "toy-acc", "latin", "--json"])
+    with pytest.raises(SystemExit) as exc:
+        cli()
+    assert exc.value.code == 1
+    err = json.loads(capsys.readouterr().out)
+    assert err["type"] == "ConfigError" and "cannot read view file" in err["error"]
 
 
 def test_show_says_untracked_files_only(in_repo: Path) -> None:

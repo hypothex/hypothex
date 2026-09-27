@@ -660,11 +660,21 @@ def _task_spec(config: ProjectConfig, task: str) -> TaskSpec:
     return config.tasks[task]
 
 
-def _mapping(text: str) -> dict[str, Any]:
-    """Parse YAML text leniently: ``{}`` for invalid YAML or a non-mapping."""
+def _file_body(path: Path) -> dict[str, Any]:
+    """
+    Read a view file leniently for listing: ``{}`` when it cannot be used.
+
+    A file that cannot be read or decoded as UTF-8, fails the ``scan_yaml`` guards
+    (too deep, too many events, anchors), is invalid YAML, or is not a mapping
+    gives ``{}``, so one bad file never breaks the whole list.
+    """
     try:
+        text = path.read_text(encoding="utf-8")
+        scan = scan_yaml(text)
+        if scan.problem is not None or scan.first_anchor is not None:
+            return {}
         data = yaml.safe_load(text)
-    except yaml.YAMLError:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -689,7 +699,9 @@ def list_views(repo: Path, config: ProjectConfig, task: str) -> list[ViewInfo]:
     List a task's views: the kind's preset as ``overview``, then inline, then files.
 
     A file view and an inline view with the same name are listed once, as the file.
-    Names that are reserved or do not match ``VIEW_NAME_PATTERN`` are skipped.
+    Names that are reserved or do not match ``VIEW_NAME_PATTERN`` are skipped. A
+    view file that cannot be read, decoded, or parsed is still listed, with its
+    name as the title (``get_view`` reports why it is invalid).
 
     Parameters
     ----------
@@ -724,7 +736,7 @@ def list_views(repo: Path, config: ProjectConfig, task: str) -> list[ViewInfo]:
     if directory.is_dir():
         for path in sorted(directory.glob("*.yaml")):
             if _valid_name(path.stem):
-                body = _mapping(path.read_text(encoding="utf-8"))
+                body = _file_body(path)
                 files[path.stem] = _info(path.stem, body, "file", path)
     infos.extend(
         _info(name, body, "inline", repo / CONFIG_FILENAME)
@@ -758,7 +770,8 @@ def get_view(repo: Path, config: ProjectConfig, task: str, name: str) -> ViewSpe
     Raises
     ------
     ConfigError
-        If the task is unknown or the stored view is invalid.
+        If the task is unknown, or the stored view cannot be read, is not UTF-8,
+        or is invalid.
     StoreError
         If the task has no view with this name.
     """
@@ -768,7 +781,11 @@ def get_view(repo: Path, config: ProjectConfig, task: str, name: str) -> ViewSpe
     if _valid_name(name):
         path = views_dir(repo, task) / f"{name}.yaml"
         if path.is_file():
-            view, issues = validate_view_text(path.read_text(encoding="utf-8"), set(), {})
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ConfigError(f"{path}: cannot read view file: {exc}") from exc
+            view, issues = validate_view_text(text, set(), {})
             if view is None:
                 first = issues[0]
                 where = f"line {first.line}: " if first.line is not None else ""

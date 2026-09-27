@@ -591,6 +591,71 @@ def test_list_views_keeps_unparseable_file_with_name_as_title(tmp_path: Path) ->
     assert names == [("overview", "overview"), ("broken", "broken")]
 
 
+BAD_FILES: dict[str, bytes] = {
+    "latin1": "title: café\npanels: []\n".encode("latin-1"),  # not UTF-8
+    "deep": b"title: " + b"[" * 1000 + b"]" * 1000 + b"\n",  # yaml.safe_load recurses
+    "aliased": b"title: &t x\npanels: *t\n",  # anchors fail the scan_yaml guard
+}
+
+
+def _write_bad_files(repo: Path) -> None:
+    directory = views_dir(repo, "bench")
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, data in BAD_FILES.items():
+        (directory / f"{name}.yaml").write_bytes(data)
+    (directory / "adir.yaml").mkdir()  # read_text raises IsADirectoryError
+
+
+def test_list_views_lists_unreadable_files_with_name_as_title(tmp_path: Path) -> None:
+    # regression: a Latin-1 file raised UnicodeDecodeError and a deep one RecursionError,
+    # so one bad file on disk broke every view route with a 500
+    _write_bad_files(tmp_path)
+    save_view(tmp_path, "bench", "route", FILE_VIEW)
+    names = [(i.name, i.title) for i in list_views(tmp_path, _config(), "bench")]
+    assert names == [
+        ("overview", "overview"),
+        ("adir", "adir"),
+        ("aliased", "aliased"),
+        ("deep", "deep"),
+        ("latin1", "latin1"),
+        ("route", "route quality"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "message"),
+    [
+        ("latin1", r"latin1\.yaml: cannot read view file: .*utf-8"),
+        ("deep", r"deep\.yaml: line 1: YAML nested too deeply"),
+        ("aliased", r"aliased\.yaml: line 1: YAML anchors and aliases are not allowed"),
+    ],
+)
+def test_get_view_unreadable_file_is_a_config_error(
+    tmp_path: Path, name: str, message: str
+) -> None:
+    _write_bad_files(tmp_path)
+    with pytest.raises(ConfigError, match=message):
+        get_view(tmp_path, _config(), "bench", name)
+
+
+def test_get_view_unreadable_path_is_a_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_view(tmp_path, "bench", "route", FILE_VIEW)
+
+    real_read_text = Path.read_text
+
+    def denied(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.is_relative_to(tmp_path):  # view files only; presets still read
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(ConfigError, match=r"route\.yaml: cannot read view file: .*denied"):
+        get_view(tmp_path, _config(), "bench", "route")
+    assert [i.title for i in list_views(tmp_path, _config(), "bench")][1:] == ["route"]
+
+
 def test_list_views_unknown_task(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="unknown task 'nope'"):
         list_views(tmp_path, _config(), "nope")

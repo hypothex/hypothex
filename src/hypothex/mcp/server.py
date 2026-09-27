@@ -150,14 +150,18 @@ def view_document(ctx: Context, task: str, name: str, project: str | None = None
     """
     entry, task_name, info = _find_view(ctx, task, name, project)
     spec = entry.config.tasks[task_name]
+    # get_view first: it turns an unreadable or invalid file into a ConfigError
+    view = core_views.get_view(Path(entry.repo), entry.config, task_name, name)
     if info.origin == "file" and info.path is not None:
-        text = Path(info.path).read_text(encoding="utf-8")
+        try:
+            text = Path(info.path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ConfigError(f"{info.path}: cannot read view file: {exc}") from exc
     elif info.origin == "inline":
         text = _yaml(spec.views[name])
     else:
         preset = core_views.load_preset(spec.kind)
         text = _yaml(preset.model_dump(mode="json", by_alias=True, exclude_defaults=True))
-    view = core_views.get_view(Path(entry.repo), entry.config, task_name, name)
     return {"info": to_jsonable(info), "text": text, "view": dump_view(view)}
 
 

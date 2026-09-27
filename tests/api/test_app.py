@@ -376,6 +376,35 @@ def test_inline_view_with_anchors_is_a_config_error_not_500(
     )
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        "title: café\npanels: []\n".encode("latin-1"),
+        b"title: " + b"[" * 1000 + b"]" * 1000 + b"\n",
+    ],
+    ids=["latin1", "deep"],
+)
+def test_one_bad_view_file_never_breaks_the_task_page(
+    client: TestClient, ctx: Context, toy_repo: Path, data: bytes
+) -> None:
+    # regression: list_views raised UnicodeDecodeError / RecursionError, so every
+    # view route of the task returned a 500
+    _scored(ctx, toy_repo)
+    path = _view_path(toy_repo, "bad")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    listed = client.get(VIEWS)
+    assert listed.status_code == 200
+    assert [(v["name"], v["title"]) for v in listed.json()][1:] == [("bad", "bad")]
+    default = client.post(f"{VIEWS}/query", json={})
+    assert default.status_code == 200
+    assert len(default.json()["panels"]) == len(load_preset("generic").panels)
+    assert client.get(f"{VIEWS}/overview").status_code == 200
+    for resp in (client.get(f"{VIEWS}/bad"), client.post(f"{VIEWS}/query", json={"name": "bad"})):
+        assert resp.status_code == 400
+        assert resp.json()["type"] == "ConfigError" and "bad.yaml" in resp.json()["error"]
+
+
 def test_overview_route(client: TestClient, ctx: Context, toy_repo: Path) -> None:
     _scored(ctx, toy_repo)
     body = client.get("/api/v1/overview").json()

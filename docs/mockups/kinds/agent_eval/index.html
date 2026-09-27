@@ -1,0 +1,975 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hypothex · retro-bench-200</title>
+<script>
+  (function () {
+    var q = new URLSearchParams(location.search).get("theme");
+    var t = q || localStorage.getItem("hx-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400..700;1,6..72,400..500&display=swap" rel="stylesheet">
+<style>
+/* ------------------------------------------------------------------ tokens (ui-v4) */
+:root {
+  --paper: #F6F7F3;
+  --paper-2: #ECEEE8;
+  --ink: #15181E;
+  --ink-2: #464C57;
+  --ink-3: #767C87;
+  --rule: #D5D8D0;
+  --rule-2: #E4E6E0;
+  --best: #00846A;
+  --best-wash: rgba(0, 132, 106, .12);
+  --best-edge: rgba(0, 132, 106, .50);
+  --fail: #C8412B;
+  --fail-wash: rgba(200, 65, 43, .08);
+  --agent: #5B48C2;
+  --human: #A66A12;
+  /* failure categories: validated categorical slots (light, surface #F6F7F3); "gave up" is the neutral */
+  --f-timeout: #2a78d6;
+  --f-loop: #eda100;
+  --f-smiles: #e87ba4;
+  --f-tool: #4a3aa7;
+  --f-gave: #9AA0A9;
+  --serif: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --paper: #12161C;
+  --paper-2: #1A1F27;
+  --ink: #E9ECEF;
+  --ink-2: #AEB5BF;
+  --ink-3: #7C8490;
+  --rule: #2C333D;
+  --rule-2: #222830;
+  --best: #1FA282;
+  --best-wash: rgba(31, 162, 130, .17);
+  --best-edge: rgba(31, 162, 130, .60);
+  --fail: #DE5F49;
+  --fail-wash: rgba(222, 95, 73, .12);
+  --agent: #8C7BEA;
+  --human: #C08629;
+  --f-timeout: #3987e5;
+  --f-loop: #c98500;
+  --f-smiles: #d55181;
+  --f-tool: #9085e9;
+  --f-gave: #5E6672;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 400 15px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:hover { text-decoration-color: currentColor; }
+:focus-visible { outline: 2px solid var(--agent); outline-offset: 2px; border-radius: 3px; }
+button { font: inherit; color: inherit; }
+.num { font-variant-numeric: tabular-nums; }
+.path, code, kbd { font-family: var(--mono); font-size: .86em; }
+
+/* ------------------------------------------------------------------ chrome */
+.bar {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--rule);
+}
+.bar-in { max-width: 1280px; margin: 0 auto; padding: 0 40px; height: 60px; display: flex; align-items: stretch; gap: 40px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 600 21px/1 var(--serif); letter-spacing: -.01em; }
+.brand svg { display: block; }
+.sample { align-self: center; margin-left: -26px; font: 500 11.5px/1 var(--sans); color: var(--human); border: 1px solid color-mix(in srgb, var(--human) 55%, transparent); border-radius: 99px; padding: 3px 8px; cursor: help; white-space: nowrap; }
+.tabs { display: flex; gap: 4px; }
+.tabs a {
+  display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: var(--ink-3);
+  font-size: 14.5px; border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tabs a:hover { color: var(--ink); }
+.tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
+.bar-r { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.find {
+  display: flex; align-items: center; gap: 28px; height: 34px; padding: 0 8px 0 12px; min-width: 250px;
+  border: 1px solid var(--rule); border-radius: 7px; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 13.5px;
+}
+.find:hover { border-color: var(--ink-3); }
+.find kbd { margin-left: auto; font-family: var(--sans); font-size: 12px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; }
+.theme { height: 34px; padding: 0 12px; border: 1px solid var(--rule); border-radius: 7px; background: transparent; cursor: pointer; font-size: 13.5px; color: var(--ink-2); display: flex; gap: 8px; align-items: center; }
+.theme:hover { border-color: var(--ink-3); color: var(--ink); }
+
+main { max-width: 1280px; margin: 0 auto; padding: 44px 40px 120px; }
+.view[hidden] { display: none; }
+
+/* ------------------------------------------------------------------ type */
+.crumb { margin: 0 0 18px; font-size: 13.5px; color: var(--ink-3); }
+.crumb a { color: var(--ink-2); text-decoration: none; }
+.crumb a:hover { text-decoration: underline; }
+.crumb .sep { margin: 0 6px; color: var(--rule); }
+h1.finding {
+  margin: 0; white-space: nowrap;
+  font: 500 44px/1.06 var(--serif); font-variation-settings: "opsz" 72;
+  letter-spacing: -.018em;
+}
+h1.finding .then { color: var(--ink-2); font-weight: 400; }
+.metaline { margin: 14px 0 0; display: flex; flex-wrap: wrap; gap: 4px 22px; font-size: 14px; color: var(--ink-3); font-variant-numeric: tabular-nums; align-items: center; }
+.metaline b { color: var(--ink-2); font-weight: 500; }
+.hint { text-decoration: underline dotted var(--rule); text-underline-offset: 3px; cursor: help; }
+.tag { font-size: 12.5px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 99px; padding: 1px 9px; }
+.tag.kind { color: var(--ink); border-color: var(--ink-3); cursor: help; }
+
+/* stat strip */
+.stats { display: flex; flex-wrap: wrap; gap: 14px 0; margin: 0; padding: 0; }
+.stats > div { padding: 0 32px; border-left: 1px solid var(--rule-2); cursor: help; display: flex; flex-direction: column-reverse; }
+.stats > div:first-child { padding-left: 0; border-left: 0; }
+.stats dt { font-size: 12.5px; color: var(--ink-3); }
+.stats dd { margin: 0 0 3px; font: 400 25px/1.1 var(--sans); letter-spacing: -.012em; font-variant-numeric: tabular-nums; color: var(--ink); }
+.stats dd small { font-size: 15px; color: var(--ink-3); letter-spacing: 0; }
+.stats dd.bad { color: var(--fail); }
+
+/* figure panels */
+.fig { margin-top: 64px; }
+.fig-h { display: flex; align-items: baseline; gap: 12px; margin: 0 0 18px; }
+.fig-h .pl { font: 700 19px/1 var(--sans); }
+.fig-h .t { font: 600 16px/1.3 var(--sans); }
+.fig-h .aside { margin-left: auto; font-size: 13px; color: var(--ink-3); display: flex; gap: 14px; align-items: center; }
+.small { font-size: 13px; color: var(--ink-3); }
+
+/* svg figure text */
+svg text { font-family: var(--sans); fill: var(--ink-2); }
+svg .tk { font-size: 11.5px; fill: var(--ink-3); font-variant-numeric: tabular-nums; }
+svg .lbl { font-size: 12.5px; fill: var(--ink-2); }
+svg .lbl-s { font-size: 11.5px; fill: var(--ink-3); }
+svg .lbl-b { font-size: 12.5px; fill: var(--ink); font-weight: 600; }
+svg .lbl-best { font-size: 12.5px; fill: var(--best); font-weight: 600; }
+svg .axis { stroke: var(--ink-3); stroke-width: 1; }
+svg .grid { stroke: var(--rule-2); stroke-width: 1; }
+svg .hair { stroke: var(--rule); stroke-width: 1; }
+svg .band { fill: var(--best-wash); }
+svg .band-edge { stroke: var(--best-edge); stroke-width: 1; }
+svg .bestline { stroke: var(--best); stroke-width: 1.25; }
+svg .whisk { stroke: var(--ink-3); stroke-width: 1.5; stroke-linecap: round; fill: none; }
+svg .whisk.best { stroke: var(--best); }
+svg .mean { fill: var(--ink); stroke: var(--paper); stroke-width: 2; }
+svg .mean.best { fill: var(--best); }
+svg .mean.dom { fill: var(--paper); stroke: var(--ink-3); stroke-width: 1.6; }
+svg .seed { fill: var(--ink-2); stroke: var(--paper); stroke-width: 2; }
+svg .seed.best { fill: var(--best); }
+svg .seed.faint { fill: var(--ink-3); stroke-width: 1.5; }
+svg .dia { fill: var(--paper); stroke: var(--ink); stroke-width: 1.6; }
+svg .dia.best { stroke: var(--best); fill: var(--best-wash); }
+svg .lead { stroke: var(--ink-3); stroke-width: 1; fill: none; }
+svg .pareto { stroke: var(--ink); stroke-width: 1.4; fill: none; stroke-dasharray: 5 4; }
+svg .m-fail { stroke: var(--fail); stroke-width: 2; stroke-linecap: round; }
+svg .hit { fill: transparent; }
+svg .hit.go { cursor: pointer; }
+svg .selcol { fill: none; stroke: var(--ink); stroke-width: 1.5; }
+
+/* who glyph */
+.who { display: inline-flex; align-items: center; gap: 6px; }
+.who i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.who.agent i { background: var(--agent); }
+.who.human i { background: var(--human); border-radius: 1px; }
+
+/* buttons */
+.btn {
+  height: 32px; padding: 0 13px; border-radius: 6px; border: 1px solid var(--rule); background: transparent;
+  font-size: 13.5px; color: var(--ink); cursor: pointer; white-space: nowrap;
+}
+.btn:hover { border-color: var(--ink-3); }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.primary:hover { opacity: .88; }
+.btn:disabled { color: var(--ink-3); cursor: not-allowed; border-color: var(--rule-2); }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; background: transparent; height: 26px; padding: 0 10px; font-size: 12.5px; color: var(--ink-3); cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.sel { font: inherit; font-size: 12.5px; color: var(--ink); background: transparent; border: 1px solid var(--rule); border-radius: 6px; height: 28px; padding: 0 6px; }
+.cmd {
+  display: block; padding: 12px 14px; background: var(--paper-2); border-radius: 6px;
+  font: 400 13px/1.6 var(--mono); color: var(--ink); white-space: pre-wrap; word-break: break-word;
+}
+
+/* key */
+.key { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 14px; font-size: 13px; color: var(--ink-2); }
+.key span { display: inline-flex; align-items: center; gap: 7px; }
+.key svg { display: block; overflow: visible; }
+.key .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+/* filters */
+.filters { display: flex; align-items: center; gap: 22px; margin-top: 36px; padding: 12px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-size: 13.5px; color: var(--ink-2); }
+.filters label { display: inline-flex; align-items: center; gap: 8px; }
+.filters select { font: inherit; color: var(--ink); background: transparent; border: 1px solid var(--rule); border-radius: 6px; height: 30px; padding: 0 8px; }
+.filters input { accent-color: var(--ink); }
+.filters .r { margin-left: auto; display: flex; gap: 8px; }
+
+/* ------------------------------------------------------------------ leaderboard (forest) */
+.lb-stats { margin-bottom: 30px; }
+.forest { position: relative; }
+.frow { display: grid; grid-template-columns: minmax(0, 1fr) 112px 470px 64px 56px 112px; gap: 0 24px; align-items: start; border-bottom: 1px solid var(--rule-2); min-height: 84px; padding: 16px 0 14px; }
+.frow.head { min-height: 0; padding: 0 0 10px; border-bottom: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); align-items: end; }
+.frow.axisrow { border-bottom: 0; min-height: 44px; padding: 0; }
+.frow .nm { font-weight: 600; font-size: 16px; }
+.frow .meta { font-size: 12.5px; color: var(--ink-3); margin-top: 5px; display: flex; flex-direction: column; gap: 2px; }
+.frow .meta .runs a { font-variant-numeric: tabular-nums; margin-right: 6px; }
+.frow .meta .runs a.cur { color: var(--ink); font-weight: 600; }
+.frow .acc { text-align: right; }
+.frow .big { font: 400 24px/1.05 var(--sans); letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.frow .sd { font-size: 13px; color: var(--ink-3); margin-top: 5px; font-variant-numeric: tabular-nums; }
+.frow .c { text-align: right; font-size: 14.5px; font-variant-numeric: tabular-nums; padding-top: 4px; }
+.frow .c small { display: block; font-size: 12.5px; color: var(--ink-3); margin-top: 3px; }
+.frow .vd { font-size: 14px; padding-top: 4px; font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 8px; cursor: help; }
+.frow .vd small { color: var(--ink-3); font-size: 12.5px; }
+.vg { width: 10px; height: 10px; display: inline-block; flex: none; }
+.vg.best { background: var(--best); transform: rotate(45deg) scale(.8); }
+.vg.band { background: var(--best-wash); outline: 1px solid var(--best-edge); }
+.vg.behind { border: 1.5px solid var(--ink-3); border-radius: 50%; }
+.forest > svg { position: absolute; top: 0; pointer-events: none; overflow: visible; }
+
+/* ------------------------------------------------------------------ grids */
+.two-x { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 72px; align-items: start; margin-top: 64px; }
+.two-x .fig { margin-top: 0; }
+.run-grid { display: grid; grid-template-columns: minmax(0, 1fr) 440px; gap: 72px; margin-top: 64px; align-items: start; }
+.run-grid .fig { margin-top: 0; }
+
+/* ------------------------------------------------------------------ trajectory */
+.traj { width: 100%; border-collapse: collapse; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.traj th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12.5px; padding: 0 10px 8px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.traj td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--rule-2); vertical-align: middle; white-space: nowrap; }
+.traj .r { text-align: right; }
+.traj .n { color: var(--ink-3); width: 34px; padding-left: 8px; }
+.traj .tool { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
+.traj .args { font-family: var(--mono); font-size: 12px; color: var(--ink-2); max-width: 0; overflow: hidden; text-overflow: ellipsis; width: 36%; }
+.traj .res { width: 30%; }
+.traj .res { color: var(--ink-2); }
+.traj .ms { width: 132px; }
+.traj .msb { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.traj .msb i { display: block; height: 6px; border-radius: 0 3px 3px 0; background: var(--ink-3); opacity: .55; }
+.traj tr.warn .res { color: var(--ink); }
+.traj tr.warn .n::after { content: "!"; color: var(--human); font-weight: 700; margin-left: 4px; }
+.traj tr.same .tool::after { content: attr(data-same); font-family: var(--sans); font-size: 11.5px; color: var(--ink-3); margin-left: 6px; }
+.traj tr.fail td { background: var(--fail-wash); color: var(--ink); }
+.traj tr.fail td:first-child { box-shadow: inset 3px 0 0 var(--fail); }
+.traj tr.fail .res { color: var(--fail); font-weight: 600; }
+.traj tr.fail .msb i { background: var(--fail); opacity: 1; }
+.traj tr.fail .n { color: var(--fail); font-weight: 600; }
+.traj tfoot td { border-bottom: 0; color: var(--ink-3); font-size: 12.5px; padding-top: 10px; }
+.traj tfoot td b { color: var(--ink); font-weight: 500; }
+
+/* ------------------------------------------------------------------ paths tree (ui-v4) */
+.tree { font-size: 14px; }
+.tree .root { display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; gap: 0 14px; align-items: baseline; padding: 14px 0 10px; border-top: 1px solid var(--rule); }
+.tree .root:first-child { border-top: 0; padding-top: 0; }
+.tree .k { color: var(--ink); font-weight: 550; }
+.p { font-family: var(--mono); font-size: 12.5px; word-break: break-all; color: var(--ink); }
+.p .pre { color: var(--ink-3); }
+.p .hst { color: var(--ink-2); }
+.tree .kids { list-style: none; margin: 0 0 6px 90px; padding: 0; }
+.tree .kids li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto; gap: 0 10px; align-items: baseline; padding: 4px 0; }
+.tree .kids li .br { color: var(--ink-3); font-family: var(--mono); font-size: 13px; }
+.tree .kids li .what { font-size: 12.5px; color: var(--ink-3); text-align: right; white-space: nowrap; }
+.tree .kids li.hl .p { font-weight: 500; }
+.copy { border: 0; background: transparent; color: var(--ink-3); font-size: 12.5px; cursor: pointer; padding: 4px; border-radius: 4px; align-self: center; }
+.copy:hover { color: var(--ink); background: var(--paper-2); }
+.gitline { margin: 2px 0 6px 90px; font: 400 13px/1.5 var(--sans); color: var(--ink-3); }
+.cmdrow { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 0 14px; align-items: start; padding: 0 0 16px; }
+.actions { display: flex; gap: 8px; }
+.run-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 40px; align-items: start; }
+.run-top .actions { padding-top: 8px; }
+.selrun { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 18px; padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
+.selrun .nm { font-weight: 600; }
+.selrun .small { margin-top: 2px; }
+
+/* across-configs */
+.xc { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+.xc td { padding: 9px 0; border-bottom: 1px solid var(--rule-2); vertical-align: middle; }
+.xc tr:last-child td { border-bottom: 0; }
+.xc .mk { display: flex; gap: 10px; align-items: center; }
+.xc .mk svg { display: block; overflow: visible; }
+.xc .r { text-align: right; color: var(--ink-2); }
+.xc .nm { font-weight: 550; width: 190px; }
+.xc .r { width: 70px; }
+
+/* ------------------------------------------------------------------ palette, toast, tooltip */
+.pal { position: fixed; inset: 0; z-index: 50; display: none; background: color-mix(in srgb, var(--ink) 22%, transparent); }
+.pal.on { display: block; }
+.pal-box { width: 600px; margin: 110px auto 0; background: var(--paper); border: 1px solid var(--rule); border-radius: 10px; box-shadow: 0 24px 60px -20px rgba(10, 14, 20, .35); overflow: hidden; }
+.pal-in { width: 100%; border: 0; border-bottom: 1px solid var(--rule); background: transparent; color: var(--ink); font: 400 20px/1 var(--serif); padding: 20px; outline: none; }
+.pal-list { list-style: none; margin: 0; padding: 8px; max-height: 420px; overflow: auto; }
+.pal-list .grp { font-size: 12px; color: var(--ink-3); padding: 10px 12px 4px; }
+.pal-list li.it { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 9px 12px; border-radius: 6px; cursor: pointer; font-size: 14.5px; align-items: baseline; }
+.pal-list li.it small { color: var(--ink-3); font-size: 12.5px; }
+.pal-list li.it[aria-selected="true"] { background: var(--paper-2); }
+.toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px); opacity: 0; background: var(--ink); color: var(--paper); padding: 10px 16px; border-radius: 7px; font-size: 13.5px; transition: all .18s ease; pointer-events: none; z-index: 60; }
+.toast.on { opacity: 1; transform: translate(-50%, 0); }
+.tip { position: fixed; z-index: 40; pointer-events: none; background: var(--ink); color: var(--paper); font-size: 12.5px; line-height: 1.4; padding: 7px 10px; border-radius: 6px; max-width: 320px; opacity: 0; transition: opacity .08s; }
+.tip.on { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (max-width: 1100px) {
+  .two-x, .run-grid { grid-template-columns: 1fr; gap: 48px; }
+  .frow { grid-template-columns: minmax(0, 1fr) 112px 360px 0 0 112px; }
+  .frow .c { display: none; }
+  .find { min-width: 0; } .find span { display: none; }
+  h1.finding { white-space: normal; font-size: 36px; }
+}
+@media (max-width: 720px) {
+  .bar-in { padding: 0 16px; gap: 16px; } main { padding: 28px 16px 80px; }
+  .tabs a { padding: 0 6px; font-size: 13.5px; }
+  h1.finding { font-size: 28px; }
+  .brand span, .sample { display: none; }
+  .frow { grid-template-columns: minmax(0, 1fr) 100px; } .frow .fplot, .frow .vd { display: none; }
+}
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="#dash" aria-label="Hypothex, dashboard">
+      <svg width="22" height="18" viewBox="0 0 22 18" aria-hidden="true">
+        <rect x="9" y="1" width="8" height="16" style="fill:var(--best-wash)"/>
+        <line x1="9" y1="1" x2="9" y2="17" style="stroke:var(--best-edge)"/><line x1="17" y1="1" x2="17" y2="17" style="stroke:var(--best-edge)"/>
+        <line x1="1" y1="9" x2="21" y2="9" style="stroke:var(--ink);stroke-width:1.4"/>
+        <rect x="10" y="5" width="5.6" height="5.6" transform="rotate(45 12.8 7.8)" style="fill:var(--best)"/>
+        <circle cx="4" cy="9" r="2.6" style="fill:var(--ink)"/>
+      </svg>
+      <span>Hypothex</span>
+    </a>
+    <span class="sample" title="Invented numbers for this mockup. Generated in data.js from one seeded model.">sample data</span>
+    <nav class="tabs" aria-label="Screens">
+      <a href="#dash">Dashboard</a>
+      <a href="#attempt">Attempt</a>
+    </nav>
+    <div class="bar-r">
+      <button class="find" id="findBtn" type="button" aria-haspopup="dialog"><span>Find a run, target or path</span><kbd>⌘K</kbd></button>
+      <button class="theme" id="themeBtn" type="button" aria-label="Switch colour mode">
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7 1a6 6 0 0 1 0 12z" fill="currentColor"/></svg>
+        <span id="themeLbl">Dark</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="view" id="v-dash" aria-labelledby="dash-h"></section>
+  <section class="view" id="v-attempt" aria-labelledby="att-h" hidden></section>
+</main>
+
+<div class="pal" id="pal" role="dialog" aria-modal="true" aria-label="Find and run commands">
+  <div class="pal-box">
+    <input class="pal-in" id="palIn" placeholder="Find a run, target, path or command" autocomplete="off" aria-controls="palList">
+    <ul class="pal-list" id="palList" role="listbox"></ul>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script src="data.js"></script>
+<script>
+/* ================================================================== data */
+const HX = window.HX, T = HX.task, N = T.n, SEEDS = HX.seeds, TG = HX.targets, A = HX.attempts, FAILS = HX.fails;
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const f3 = v => v.toFixed(3), f4 = v => v.toFixed(4);
+const MINUS = "−";
+const usd = v => "$" + (v < 0.1 ? v.toFixed(3) : v.toFixed(2));
+const kTok = v => v >= 1e6 ? (v / 1e6).toFixed(2) + "M" : v >= 1e4 ? Math.round(v / 1000) + "k" : (v / 1000).toFixed(1) + "k";
+const whoKind = c => (c.startsWith("agent:") ? "agent" : "human");
+const whoHtml = c => `<span class="who ${whoKind(c)}" title="${whoKind(c) === "agent" ? "launched by an agent" : "launched by a person"}"><i></i>${esc(c)}</span>`;
+
+function wilson(p, n, z = 1.96) {
+  const z2 = z * z, d = 1 + z2 / n;
+  const c = (p + z2 / (2 * n)) / d;
+  const h = (z * Math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))) / d;
+  return [c - h, c + h];
+}
+function choose(n, k) { let r = 1; for (let i = 1; i <= k; i++) r = r * (n - k + i) / i; return r; }
+function signP(b, c) { const n = b + c, k = Math.min(b, c); let p = 0; for (let i = 0; i <= k; i++) p += choose(n, i) / Math.pow(2, n); return Math.min(1, 2 * p); }
+
+/* per-config aggregates, all from the attempt rows */
+const CFG = HX.configs.map(c => {
+  const all = SEEDS.flatMap(s => A[c.id][s]);
+  const seedRate = SEEDS.map(s => A[c.id][s].filter(a => a.solved).length / N);
+  const seedCost = SEEDS.map(s => A[c.id][s].reduce((x, a) => x + a.cost, 0) / N);
+  const seedWall = SEEDS.map(s => A[c.id][s].reduce((x, a) => x + a.wall, 0) / N);
+  const mean = seedRate.reduce((a, b) => a + b) / SEEDS.length;
+  const sd = Math.sqrt(seedRate.reduce((a, p) => a + (p - mean) ** 2, 0) / (SEEDS.length - 1));
+  const solves = all.filter(a => a.solved).length;
+  const costTot = all.reduce((x, a) => x + a.cost, 0);
+  const fails = Object.fromEntries(FAILS.map(f => [f, all.filter(a => a.fail === f).length]));
+  const perTarget = TG.map((t, i) => SEEDS.filter(s => A[c.id][s][i].solved).length);
+  return {
+    ...c, all, seedRate, seedCost, seedWall, mean, sd, ci: wilson(mean, N),
+    cost: costTot / all.length, wall: all.reduce((x, a) => x + a.wall, 0) / all.length,
+    perSolve: costTot / solves, turns: all.reduce((x, a) => x + a.turns, 0) / all.length,
+    tokIn: all.reduce((x, a) => x + a.tok_in, 0) / all.length,
+    fails, nFail: all.length - solves, perTarget,
+  };
+}).sort((a, b) => b.mean - a.mean);
+const byId = Object.fromEntries(CFG.map(c => [c.id, c]));
+const BEST = CFG[0], RUN = CFG[1];
+const BAND = BEST.ci;
+const inBand = c => c !== BEST && c.mean >= BAND[0];
+/* paired, per target: solved by the seed majority (2 of 3) */
+let ONLY_B = 0, ONLY_R = 0;
+TG.forEach((t, i) => { const b = BEST.perTarget[i] >= 2, r = RUN.perTarget[i] >= 2; if (b && !r) ONLY_B++; if (r && !b) ONLY_R++; });
+const P_SIGN = signP(ONLY_B, ONLY_R);
+const GAP = BEST.mean - RUN.mean;
+const COST_PCT = Math.round(100 * RUN.cost / BEST.cost);
+
+/* selected run and attempt */
+const SELC = byId[HX.sel.cfg], SELS = HX.sel.seed, SELT = TG[HX.sel.t], SELA = A[SELC.id][SELS][HX.sel.t];
+const SEL_RUN = HX.runId(SELC.id, SELS);
+const RUN_DIR = HX.runRoot + "/" + SEL_RUN;
+const hostPath = p => `${HX.host}:${p}`;
+
+/* ---- svg primitives (ui-v4) ---- */
+const S = {
+  line: (x1, y1, x2, y2, c) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="${c}"/>`,
+  rect: (x, y, w, h, c, extra = "") => `<rect x="${x}" y="${y}" width="${Math.max(0, w)}" height="${h}" class="${c}" ${extra}/>`,
+  circ: (x, y, r, c, extra = "") => `<circle cx="${x}" cy="${y}" r="${r}" class="${c}" ${extra}/>`,
+  text: (x, y, t, c, a = "start", extra = "") => `<text x="${x}" y="${y}" class="${c}" text-anchor="${a}" ${extra}>${t}</text>`,
+  dia: (x, y, r, c) => `<path d="M${x} ${y - r}L${x + r} ${y}L${x} ${y + r}L${x - r} ${y}Z" class="${c}"/>`,
+  sq: (x, y, r, c) => `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}" rx="1.5" class="${c}"/>`,
+  cross: (x, y, r) => `<path d="M${x - r} ${y - r}L${x + r} ${y + r}M${x + r} ${y - r}L${x - r} ${y + r}" class="m-fail"/>`,
+  svg: (w, h, body, extra = "") => `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" ${extra}>${body}</svg>`,
+};
+function seedDots(X, vals, y, cls = "seed") {
+  const xs = vals.map(v => X(v)).sort((a, b) => a - b);
+  let h = "", prev = -1e9, lvl = 0;
+  xs.forEach(x => { lvl = x - prev < 8 ? lvl + 1 : 0; h += S.circ(x, y - lvl * 8, 3.8, cls); prev = x; });
+  return h;
+}
+function whisker(X, y, lo, hi, best) {
+  return `<path d="M${X(lo)} ${y}H${X(hi)}M${X(lo)} ${y - 4}V${y + 4}M${X(hi)} ${y - 4}V${y + 4}" class="whisk${best ? " best" : ""}"/>`;
+}
+const G = {
+  band: `<svg width="18" height="12"><rect x="3" y="0" width="12" height="12" class="band"/><line x1="3" y1="0" x2="3" y2="12" class="band-edge"/><line x1="15" y1="0" x2="15" y2="12" class="band-edge"/></svg>`,
+  hband: `<svg width="18" height="12"><rect x="0" y="2" width="18" height="8" class="band"/><line x1="0" y1="2" x2="18" y2="2" class="band-edge"/><line x1="0" y1="10" x2="18" y2="10" class="band-edge"/></svg>`,
+  seed: `<svg width="18" height="12">${S.circ(5, 6, 3.6, "seed")}${S.circ(13, 6, 3.6, "seed")}</svg>`,
+  whisk: `<svg width="22" height="12"><path d="M2 6H20M2 2V10M20 2V10" class="whisk"/></svg>`,
+  vwhisk: `<svg width="12" height="16"><path d="M6 1V15M2 1H10M2 15H10" class="whisk"/>${S.sq(6, 8, 3.5, "mean")}</svg>`,
+  mean: `<svg width="12" height="12">${S.sq(6, 6, 4.5, "mean")}</svg>`,
+  dom: `<svg width="12" height="12">${S.sq(6, 6, 4, "mean dom")}</svg>`,
+  pareto: `<svg width="22" height="12"><path d="M1 10H11V2H21" class="pareto"/></svg>`,
+  cross: `<svg width="12" height="12">${S.cross(6, 6, 4)}</svg>`,
+  solved: `<svg width="12" height="12">${S.circ(6, 6, 4.5, "mean")}</svg>`,
+};
+const COPY = `<svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="display:block"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M9 2.5V2a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`;
+const copyBtn = abs => `<button class="copy" type="button" data-copy="${esc(abs)}" title="Copy ${esc(abs)}" aria-label="Copy path">${COPY}</button>`;
+
+const FCOL = { "timeout": "var(--f-timeout)", "loop": "var(--f-loop)", "invalid SMILES": "var(--f-smiles)", "tool error": "var(--f-tool)", "gave up": "var(--f-gave)" };
+
+/* ================================================================== DASHBOARD */
+const XDOM = [0.30, 0.85], XTICKS = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85];
+const xs = (w, pl, pr) => v => pl + ((v - XDOM[0]) / (XDOM[1] - XDOM[0])) * (w - pl - pr);
+function verdictOf(c) {
+  if (c === BEST) return { k: "best", t: "best", s: "", tip: "Highest mean solved@v2. Its 95% CI (Wilson, n = 200 targets) is the green band." };
+  const gap = BEST.mean - c.mean;
+  if (inBand(c)) return { k: "band", t: MINUS + f3(gap), s: `p ${P_SIGN.toFixed(2)}`, tip: `Mean inside the best's 95% CI: not shown worse. Paired sign test on targets solved by 2 of 3 seeds: ${ONLY_B} vs ${ONLY_R}, p = ${P_SIGN.toFixed(3)}.` };
+  return { k: "behind", t: MINUS + f3(gap), s: "", tip: "Mean below the best's 95% CI." };
+}
+
+const X_MODE = new URLSearchParams(location.search).get("x") === "time" ? "wall" : "cost"; /* deep link: ?x=time */
+function renderDash() {
+  const runLinks = c => SEEDS.map((s, i) => `<a href="#attempt" class="${c === SELC && s === SELS ? "cur" : ""}" title="${esc(HX.runId(c.id, s))}\nsolved ${f3(c.seedRate[i])}, ${usd(c.seedCost[i])} / attempt">s${s}</a>`).join("");
+  const rows = CFG.map((c, i) => {
+    const v = verdictOf(c);
+    return `<div class="frow" data-row="${i}">
+      <div><div class="nm" title="${esc(c.name)}\nmodel ${esc(c.model)}\ntools: ${esc(c.tools)}">${esc(c.short)}</div>
+        <div class="meta">${whoHtml(HX.created_by[c.id])}<span class="runs">${runLinks(c)}<span>@ ${c.commit}</span></span></div></div>
+      <div class="acc"><div class="big">${f3(c.mean)}</div>
+        <div class="sd"><span title="std of solved@v2 over ${SEEDS.length} seeds">± ${f3(c.sd)}</span></div>
+        <div class="sd"><span title="95% CI, Wilson, n = ${N} targets">${f3(c.ci[0])}–${f3(c.ci[1])}</span></div></div>
+      <div class="fplot"></div>
+      <div class="c" title="mean cost per attempt\n${usd(c.perSolve)} per solved target"><span>${usd(c.cost)}</span><small>${usd(c.perSolve)}</small></div>
+      <div class="c" title="mean wall time per attempt\nmean turns ${c.turns.toFixed(1)}"><span>${Math.round(c.wall)} s</span><small>${c.turns.toFixed(1)} t</small></div>
+      <div class="vd" title="${esc(v.tip)}"><span class="vg ${v.k}"></span><span>${v.t}</span>${v.s ? `<small>${v.s}</small>` : ""}</div>
+    </div>`;
+  }).join("");
+
+  const nAtt = CFG.length * SEEDS.length * N;
+  $("#v-dash").innerHTML = `
+    <p class="crumb"><a href="#dash">${esc(HX.project)}</a><span class="sep">/</span>${esc(T.name)}</p>
+    <h1 class="finding" id="dash-h">${esc(RUN.short)} ${f3(RUN.mean)} <span class="then">vs</span> ${esc(BEST.short)} ${f3(BEST.mean)} <span class="then">at</span> ${COST_PCT}% <span class="then">of the cost</span></h1>
+    <p class="metaline"><span class="tag kind" title="Task kind: ${esc(T.kind_label)}">agent eval</span><span>${N} targets</span><span class="hint" title="${esc(T.metric_tip)}">solved@v2</span><span>${SEEDS.length} seeds</span><span>${nAtt.toLocaleString("en-US")} attempts</span></p>
+
+    <div class="filters" role="group" aria-label="Filters">
+      <label title="Metric version">Metric <select><option>solved@v2</option><option>solved@v1</option></select></label>
+      <label><input type="checkbox" checked id="showSeeds"> Seeds</label>
+      <span class="r"><button class="btn" type="button" data-toast="Exported attempts.csv">Export CSV</button><button class="btn primary" type="button" data-toast="Re-evaluation queued: 12 runs, solved@v2">Re-evaluate all</button></span>
+    </div>
+
+    <div class="fig">
+      <div class="fig-h"><span class="pl">a</span><span class="t">Leaderboard</span><span class="aside">${CFG.length} configs, ${CFG.length * SEEDS.length} runs</span></div>
+      <dl class="stats lb-stats">
+        <div title="${esc(BEST.short)} minus ${esc(RUN.short)}, mean solved@v2 = ${(GAP * N).toFixed(1)} of ${N} targets"><dt>Δ solved</dt><dd>${f3(GAP)}</dd></div>
+        <div title="Exact two-sided sign test on targets solved by 2 of 3 seeds in one config only. p = ${P_SIGN.toFixed(3)}"><dt>paired p</dt><dd>${P_SIGN.toFixed(2)}</dd></div>
+        <div title="Targets only ${esc(BEST.short)} solves / only ${esc(RUN.short)} solves (2 of 3 seeds)"><dt>targets won</dt><dd>${ONLY_B} <small>/</small> ${ONLY_R}</dd></div>
+        <div title="${esc(BEST.short)} 95% CI (Wilson, n = ${N}). ${esc(RUN.short)} ${f3(RUN.mean)} is inside it."><dt>${esc(BEST.short)} 95% CI</dt><dd>${f3(BAND[0])}–${f3(BAND[1])}</dd></div>
+        <div title="$ per attempt: ${usd(RUN.cost)} vs ${usd(BEST.cost)}. $ per solved target: ${usd(RUN.perSolve)} vs ${usd(BEST.perSolve)}"><dt>$ / attempt</dt><dd>${usd(RUN.cost)} <small>vs</small> ${usd(BEST.cost)}</dd></div>
+        <div title="Std of solved@v2 over 3 seeds: ${CFG.map(c => `${c.short} ${f3(c.sd)}`).join(", ")}"><dt>seed σ, max</dt><dd>${f3(Math.max(...CFG.map(c => c.sd)))}</dd></div>
+      </dl>
+      <div class="forest" id="forest">
+        <div class="frow head"><div>Config</div><div class="acc">solved@v2</div><div>seeds, 95% CI</div><div class="c" title="$ per attempt, $ per solved">$</div><div class="c" title="seconds and turns per attempt">time</div><div>vs best</div></div>
+        ${rows}
+        <div class="frow axisrow"><div></div><div></div><div class="fplot"></div><div></div><div></div><div></div></div>
+      </div>
+      <div class="key" aria-label="Key">
+        <span>${G.seed}seed</span>
+        <span title="Wilson, n = ${N} targets">${G.whisk}95% CI</span>
+        <span>${G.band}best's CI</span>
+      </div>
+    </div>
+
+    <div class="two-x">
+      <div class="fig">
+        <div class="fig-h"><span class="pl">b</span><span class="t" id="scTitle">${X_MODE === "cost" ? "Cost" : "Time"} vs solved</span>
+          <span class="aside"><span class="seg" role="group" aria-label="x axis"><button type="button" data-x="cost" aria-pressed="${X_MODE === "cost"}" title="$ per attempt">$</button><button type="button" data-x="wall" aria-pressed="${X_MODE === "wall"}" title="seconds per attempt">time</button></span></span></div>
+        <div id="scatter"></div>
+        <div class="key" aria-label="Key">
+          <span>${G.vwhisk}mean, 95% CI</span>
+          <span>${G.seed}seed</span>
+          <span title="No config is both cheaper and better">${G.pareto}Pareto</span>
+          <span title="On neither axis better than another config">${G.dom}dominated</span>
+          <span>${G.hband}best's CI</span>
+        </div>
+      </div>
+      <div class="fig">
+        <div class="fig-h"><span class="pl">c</span><span class="t">Failures</span><span class="aside" title="failed attempts per config, of ${N * SEEDS.length}">of ${N * SEEDS.length}</span></div>
+        <div id="fails"></div>
+        <div class="key" aria-label="Key">${FAILS.map(f => `<span title="${esc(HX.fail_tip[f])}"><i class="sw" style="background:${FCOL[f]}"></i>${esc(f)}</span>`).join("")}</div>
+      </div>
+    </div>
+
+    <div class="fig">
+      <div class="fig-h"><span class="pl">d</span><span class="t">Per target</span>
+        <span class="aside"><label class="small" style="display:inline-flex;gap:8px;align-items:center">sort <select class="sel" id="mxSort"><option value="diff">difficulty</option><option value="gap">${esc(BEST.short)} − scorer</option><option value="id">id</option></select></label></span></div>
+      <div id="matrix"></div>
+      <div class="key" aria-label="Key">
+        ${[0, 1, 2, 3].map(k => `<span><i class="sw" style="background:${mxCol(k)};${k === 0 ? "outline:1px solid var(--rule);outline-offset:-1px" : ""}"></i>${k}/3</span>`).join("")}
+        <span style="color:var(--ink-3)">seeds solved</span>
+      </div>
+    </div>
+
+    <div class="run-grid">
+      <div class="fig">
+        <div class="fig-h"><span class="pl">e</span><span class="t">Attempt ${esc(SELT.id)}</span><span class="aside"><span>${esc(SELC.short)}, s${SELS}</span><a href="#attempt">open</a></span></div>
+        ${trajTable(false)}
+      </div>
+      <div class="fig">
+        <div class="fig-h"><span class="pl">f</span><span class="t">Run</span><span class="aside" title="host of every path below">${esc(HX.host)}</span></div>
+        <div class="selrun"><div><div class="nm">${esc(SELC.short)}, seed ${SELS}</div><div class="small num">solved ${f3(SELC.seedRate[SELS - 1])}, ${usd(SELC.seedCost[SELS - 1])} / attempt</div></div>
+          ${actionsHtml()}</div>
+        ${runTree(false)}
+      </div>
+    </div>`;
+  drawDash();
+  $("#showSeeds").addEventListener("change", drawForest);
+  $("#mxSort").addEventListener("change", drawMatrix);
+  document.querySelectorAll("#v-dash .seg button").forEach(b => b.addEventListener("click", () => {
+    document.querySelectorAll("#v-dash .seg button").forEach(x => x.setAttribute("aria-pressed", x === b));
+    $("#scTitle").textContent = b.dataset.x === "cost" ? "Cost vs solved" : "Time vs solved";
+    drawScatter();
+  }));
+}
+
+function actionsHtml() {
+  return `<div class="actions">
+    <button class="btn" type="button" title="Same config, seed ${SELS}, commit ${SELC.commit}" data-toast="Rerun queued: ${esc(SELC.short)}, seed ${SELS}">Rerun</button>
+    <button class="btn primary" type="button" title="Re-score saved routes with solved@v2" data-toast="Re-evaluation queued: 200 attempts, solved@v2">Re-evaluate</button>
+    <button class="btn" type="button" disabled title="Finished">Stop</button>
+  </div>`;
+}
+
+function pathHtml(abs, host = true) {
+  const i = abs.lastIndexOf("/") + 1;
+  return `<span class="p" style="word-break:normal">${host ? `<span class="hst">${esc(HX.host)}:</span>` : ""}<span class="pre">${esc(abs.slice(0, i)).replace(/\//g, "/<wbr>")}</span><span style="white-space:nowrap">${esc(abs.slice(i))}</span></span>`;
+}
+function runTree(full) {
+  const repo = HX.repo, run = RUN_DIR;
+  const kid = (base, rel, what = "", br = "├", hl = false, tip = "") => `<li class="${hl ? "hl" : ""}"><span class="br">${br}</span><span class="p">${esc(rel)}</span><span class="what"${tip ? ` title="${esc(tip)}"` : ""}>${what}</span>${copyBtn(hostPath(base + "/" + rel))}</li>`;
+  const att = `attempts/${SELT.id}`;
+  return `<div class="tree">
+    ${full ? `<div class="cmdrow"><span class="k">Command</span><code class="cmd">hx-agent run -c configs/${SELC.id}.yaml --seed ${SELS} --only ${SELT.id}</code></div>` : ""}
+    <div class="root"><span class="k" title="Code and inputs">Project</span><span>${pathHtml(repo)}</span>${copyBtn(hostPath(repo))}</div>
+    <p class="gitline"><span class="p">main @ ${SELC.commit}</span>&nbsp; clean</p>
+    <ul class="kids">
+      ${kid(repo, `configs/${SELC.id}.yaml`, "")}
+      ${kid(repo, "data/retro-bench-200.jsonl", `v2 <span style="color:var(--best)">✓</span>`, "├", false, "Hash matched at launch: sha256:9f41c07e…")}
+      ${kid(repo, "stock/emolecules-2026-06.smi", "1.2M", "└", false, "Purchasable building blocks, 1.2M SMILES")}
+    </ul>
+    <div class="root"><span class="k" title="Everything this run wrote">Run</span><span>${pathHtml(run)}</span>${copyBtn(hostPath(run))}</div>
+    <ul class="kids">
+      ${kid(run, "attempts.jsonl", "200")}
+      ${full ? kid(run, att + "/trajectory.jsonl", `${SELA.turns} steps`, "├", true) + kid(run, att + "/route.json", "none") + kid(run, att + "/tool_calls.log", "") : kid(run, "attempts/", "200")}
+      ${kid(run, "scores/solved@v2.json", "")}
+      ${kid(run, "logs/stderr.log", "", "└")}
+    </ul>
+  </div>`;
+}
+
+function trajTable(full) {
+  const tr = HX.traj, maxMs = Math.max(...tr.map(s => s.ms));
+  const rows = tr.map((s, i) => `<tr class="${s.fail ? "fail" : ""}${s.warn ? " warn" : ""}${s.same ? " same" : ""}" title="${s.same ? `same call as turn ${s.same}` : ""}${s.fail ? "\nloop detector: 3rd identical call" : ""}${s.warn ? "tool error, agent retried" : ""}">
+      <td class="n">${i + 1}</td>
+      <td class="tool" ${s.same ? `data-same="↺${s.same}"` : ""}>${esc(s.tool)}</td>
+      ${full ? `<td class="args" title="${esc(s.args)}">${esc(s.args)}</td>` : ""}
+      <td class="res">${esc(s.res)}</td>
+      <td class="r" title="tokens in">${kTok(s.ti)}</td>
+      ${full ? `<td class="r" title="tokens out">${s.to}</td>` : ""}
+      <td class="ms"><span class="msb"><i style="width:${Math.round((s.ms / maxMs) * (full ? 70 : 56))}px"></i>${(s.ms / 1000).toFixed(1)}</span></td>
+    </tr>`).join("");
+  const tot = `<tr><td></td><td><b>${tr.length}</b> turns</td>${full ? "<td></td>" : ""}<td><b style="color:var(--fail)">loop</b></td><td class="r"><b>${kTok(SELA.tok_in)}</b></td>${full ? `<td class="r"><b>${kTok(SELA.tok_out)}</b></td>` : ""}<td class="r"><b>${SELA.wall.toFixed(1)}</b> s</td></tr>`;
+  return `<table class="traj" aria-label="Trajectory">
+    <thead><tr><th class="n">#</th><th>tool</th>${full ? "<th>args</th>" : ""}<th>result</th><th class="r">in</th>${full ? `<th class="r">out</th>` : ""}<th class="r">s</th></tr></thead>
+    <tbody>${rows}</tbody><tfoot>${tot}</tfoot></table>`;
+}
+
+/* ---- a: forest ---- */
+function drawForest() {
+  const box = $("#forest"); if (!box || !box.offsetParent) return;
+  box.querySelectorAll(":scope > svg").forEach(s => s.remove());
+  const first = box.querySelector(".fplot");
+  const left = first.offsetLeft, W = first.clientWidth, H = box.clientHeight;
+  const X = xs(W, 8, 8);
+  const showSeeds = $("#showSeeds") ? $("#showSeeds").checked : true;
+  const head = box.querySelector(".frow.head"), axisRow = box.querySelector(".frow.axisrow");
+  const yTop = head.offsetTop + head.offsetHeight, yAx = axisRow.offsetTop + 8;
+  let h = "";
+  XTICKS.forEach(t => (h += S.line(X(t), yTop, X(t), yAx, "grid")));
+  h += S.rect(X(BAND[0]), yTop, X(BAND[1]) - X(BAND[0]), yAx - yTop, "band") + S.line(X(BAND[0]), yTop, X(BAND[0]), yAx, "band-edge") + S.line(X(BAND[1]), yTop, X(BAND[1]), yAx, "band-edge");
+  h += S.line(X(BEST.mean), yTop, X(BEST.mean), yAx, "bestline");
+  CFG.forEach((c, i) => {
+    const r = box.querySelector(`.frow[data-row="${i}"]`);
+    const yS = r.offsetTop + 30, yI = r.offsetTop + 58, isB = c === BEST;
+    if (showSeeds) {
+      h += seedDots(X, c.seedRate, yS, "seed" + (isB ? " best" : ""));
+      h += `<rect x="${X(Math.min(...c.seedRate)) - 10}" y="${yS - 18}" width="${X(Math.max(...c.seedRate)) - X(Math.min(...c.seedRate)) + 20}" height="26" class="hit" data-tip="${esc(c.short)}\n${SEEDS.map((s, k) => `s${s} ${f3(c.seedRate[k])}`).join(", ")}"/>`;
+    }
+    h += whisker(X, yI, c.ci[0], c.ci[1], isB);
+    h += S.sq(X(c.mean), yI, 4.5, "mean" + (isB ? " best" : ""));
+    h += `<rect x="${X(c.ci[0])}" y="${yI - 10}" width="${X(c.ci[1]) - X(c.ci[0])}" height="20" class="hit" data-tip="${esc(c.short)}\nmean ${f4(c.mean)}\n95% CI ${f3(c.ci[0])}–${f3(c.ci[1])} (Wilson, n = ${N})"/>`;
+  });
+  h += S.line(0, yAx, W, yAx, "axis");
+  XTICKS.forEach((t, i) => { h += S.line(X(t), yAx, X(t), yAx + 4, "axis"); if (i % 2 === 0) h += S.text(X(t), yAx + 17, t.toFixed(2), "tk", "middle"); });
+  h += S.text(W, yAx + 36, "solved@v2", "lbl-s", "end");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("width", W); svg.setAttribute("height", H + 20); svg.setAttribute("viewBox", `0 0 ${W} ${H + 20}`);
+  svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "solved@v2 by config, seed scores and 95% intervals");
+  svg.style.left = left + "px"; svg.style.pointerEvents = "auto";
+  svg.innerHTML = h; box.appendChild(svg);
+}
+
+/* ---- b: cost / time vs solved, Pareto frontier ---- */
+function drawScatter() {
+  const el = $("#scatter"); if (!el || !el.offsetParent) return;
+  const mode = $("#v-dash .seg button[aria-pressed='true']").dataset.x;
+  const W = el.clientWidth, H = 360, PL = 40, PR = 14, PT = 12, PB = 44;
+  const Y0 = 0.30, Y1 = 0.85;
+  const Y = v => PT + (1 - (v - Y0) / (Y1 - Y0)) * (H - PT - PB);
+  let X, ticks, fmt, xl;
+  if (mode === "cost") {
+    const lo = Math.log10(0.008), hi = Math.log10(2.2);
+    X = v => PL + ((Math.log10(v) - lo) / (hi - lo)) * (W - PL - PR);
+    ticks = [0.01, 0.03, 0.1, 0.3, 1]; fmt = t => "$" + t; xl = "$ / attempt, log";
+  } else {
+    const lo = 0, hi = 130;
+    X = v => PL + ((v - lo) / (hi - lo)) * (W - PL - PR);
+    ticks = [0, 30, 60, 90, 120]; fmt = t => t + " s"; xl = "s / attempt";
+  }
+  const xv = c => (mode === "cost" ? c.cost : c.wall);
+  const xsd = (c, k) => (mode === "cost" ? c.seedCost[k] : c.seedWall[k]);
+  let h = "";
+  [0.3, 0.4, 0.5, 0.6, 0.7, 0.8].forEach(t => { h += S.line(PL, Y(t), W - PR, Y(t), "grid") + S.text(PL - 8, Y(t) + 4, t.toFixed(1), "tk", "end"); });
+  ticks.forEach(t => { h += S.line(X(t), H - PB, X(t), H - PB + 4, "axis") + S.text(X(t), H - PB + 17, fmt(t), "tk", "middle"); });
+  h += S.line(PL, H - PB, W - PR, H - PB, "axis");
+  h += S.text(W - PR, H - PB + 36, xl, "lbl-s", "end");
+  /* best's CI as a horizontal band */
+  h += S.rect(PL, Y(BAND[1]), W - PL - PR, Y(BAND[0]) - Y(BAND[1]), "band") + S.line(PL, Y(BAND[1]), W - PR, Y(BAND[1]), "band-edge") + S.line(PL, Y(BAND[0]), W - PR, Y(BAND[0]), "band-edge");
+  /* Pareto frontier: lower x and higher solved are better */
+  const sorted = [...CFG].sort((a, b) => xv(a) - xv(b));
+  let bestY = -1; const front = [];
+  sorted.forEach(c => { if (c.mean > bestY) { front.push(c); bestY = c.mean; } });
+  let d = `M${X(xv(front[0]))} ${Y(front[0].mean)}`;
+  for (let i = 1; i < front.length; i++) d += `H${X(xv(front[i]))}V${Y(front[i].mean)}`;
+  d += `H${W - PR}`;
+  h += `<path d="${d}" class="pareto"/>`;
+  /* obstacles for label placement: frontier segments, whiskers, plot edges */
+  const obs = [];
+  const pts = [[X(xv(front[0])), Y(front[0].mean)]];
+  for (let i = 1; i < front.length; i++) { const px = X(xv(front[i])); pts.push([px, pts[pts.length - 1][1]], [px, Y(front[i].mean)]); }
+  pts.push([W - PR, pts[pts.length - 1][1]]);
+  for (let i = 1; i < pts.length; i++) { const [a, b] = pts[i - 1], [c2, d2] = pts[i]; obs.push([Math.min(a, c2) - 3, Math.min(b, d2) - 3, Math.max(a, c2) + 3, Math.max(b, d2) + 3]); }
+  CFG.forEach(c => { const x = X(xv(c)); obs.push([x - 7, Y(c.ci[1]) - 2, x + 7, Y(c.ci[0]) + 2]); });
+  const hit = (b, o) => b[0] < o[2] && b[2] > o[0] && b[1] < o[3] && b[3] > o[1];
+  CFG.forEach(c => {
+    const x = X(xv(c)), y = Y(c.mean), isB = c === BEST, dom = !front.includes(c);
+    SEEDS.forEach((s, k) => (h += S.circ(X(xsd(c, k)), Y(c.seedRate[k]), 3.2, "seed faint")));
+    h += `<path d="M${x} ${Y(c.ci[0])}V${Y(c.ci[1])}M${x - 4} ${Y(c.ci[0])}H${x + 4}M${x - 4} ${Y(c.ci[1])}H${x + 4}" class="whisk${isB ? " best" : ""}"/>`;
+    h += S.sq(x, y, 5, "mean" + (isB ? " best" : dom ? " dom" : ""));
+    const sub = `${f3(c.mean)}, ${mode === "cost" ? usd(c.cost) : Math.round(c.wall) + " s"}`;
+    const w = Math.max(c.short.length * 7.2, sub.length * 6.2);
+    const cands = [[x - 12 - w, y - 10], [x + 12, y - 10], [x + 10, y - 40], [x - 10 - w, y - 40], [x + 10, y + 12], [x - 10 - w, y + 12]];
+    let pos = cands[0];
+    for (const [bx, by] of cands) {
+      const b = [bx, by, bx + w, by + 30];
+      if (bx < PL + 4 || bx + w > W || by < 0 || by + 30 > H - PB) continue;
+      if (obs.some(o => hit(b, o))) continue;
+      pos = [bx, by]; break;
+    }
+    obs.push([pos[0], pos[1], pos[0] + w, pos[1] + 30]);
+    h += S.text(pos[0], pos[1] + 10, esc(c.short), isB ? "lbl-best" : dom ? "lbl" : "lbl-b");
+    h += S.text(pos[0], pos[1] + 25, sub, "lbl-s");
+    h += `<rect x="${x - 14}" y="${Y(c.ci[1]) - 4}" width="28" height="${Y(c.ci[0]) - Y(c.ci[1]) + 8}" class="hit" data-tip="${esc(c.short)}\nsolved ${f3(c.mean)}, 95% CI ${f3(c.ci[0])}–${f3(c.ci[1])}\n${usd(c.cost)} / attempt, ${usd(c.perSolve)} / solve\n${Math.round(c.wall)} s / attempt${dom ? "\ndominated" : "\non the Pareto frontier"}"/>`;
+  });
+  el.innerHTML = S.svg(W, H, h, `role="img" aria-label="${mode === "cost" ? "Cost" : "Time"} per attempt against solved@v2 with Pareto frontier" style="overflow:visible"`);
+}
+
+/* ---- c: failure categories, stacked ---- */
+function drawFails() {
+  const el = $("#fails"); if (!el || !el.offsetParent) return;
+  const W = el.clientWidth, LW = 132, RW = 40, ROWH = 62, BH = 22, TOP = 6;
+  const MAX = 400, X = v => LW + (v / MAX) * (W - LW - RW);
+  const H = TOP + CFG.length * ROWH + 40;
+  let h = "";
+  [0, 100, 200, 300, 400].forEach(t => { h += S.line(X(t), TOP, X(t), TOP + CFG.length * ROWH, "grid"); h += S.text(X(t), TOP + CFG.length * ROWH + 17, t, "tk", "middle"); });
+  h += S.line(LW, TOP + CFG.length * ROWH, W - RW, TOP + CFG.length * ROWH, "axis");
+  h += S.text(W - RW, TOP + CFG.length * ROWH + 36, "failed attempts", "lbl-s", "end");
+  CFG.forEach((c, i) => {
+    const y = TOP + i * ROWH + (ROWH - BH) / 2 - 6;
+    h += S.text(0, y + BH / 2 + 4, esc(c.short), c === BEST ? "lbl-b" : "lbl");
+    let x = 0;
+    FAILS.forEach(f => {
+      const n = c.fails[f]; if (!n) return;
+      const x0 = X(x) + (x ? 1 : 0), x1 = X(x + n) - 1;
+      h += `<rect x="${x0}" y="${y}" width="${Math.max(1, x1 - x0)}" height="${BH}" rx="2" style="fill:${FCOL[f]}"/>`;
+      if (x1 - x0 >= 24) h += S.text((x0 + x1) / 2, y + BH + 14, n, "tk", "middle");
+      h += `<rect x="${x0}" y="${y - 4}" width="${Math.max(4, x1 - x0)}" height="${BH + 8}" class="hit" data-tip="${esc(c.short)}: ${esc(f)}\n${n} of ${SEEDS.length * N} attempts (${Math.round((100 * n) / c.nFail)}% of failures)\n${esc(HX.fail_tip[f])}"/>`;
+      x += n;
+    });
+    h += S.text(X(c.nFail) + 8, y + BH / 2 + 4, c.nFail, "lbl-b");
+  });
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="Failed attempts by category per config" style="overflow:visible"');
+}
+
+/* ---- d: per-target outcome matrix ---- */
+function mxCol(k) {
+  return k === 0 ? "var(--paper-2)" : k === 3 ? "var(--ink)" : `color-mix(in srgb, var(--ink) ${k === 1 ? 28 : 58}%, var(--paper))`;
+}
+function drawMatrix() {
+  const el = $("#matrix"); if (!el || !el.offsetParent) return;
+  const mode = $("#mxSort").value;
+  const W = el.clientWidth, LW = 150, TOP = 26, RH = 26, CH = 20;
+  const cw = (W - LW) / N;
+  const idx = TG.map((t, i) => i);
+  const tot = i => CFG.reduce((a, c) => a + c.perTarget[i], 0);
+  if (mode === "diff") idx.sort((a, b) => tot(b) - tot(a) || TG[a].b - TG[b].b);
+  else if (mode === "gap") idx.sort((a, b) => (BEST.perTarget[b] - RUN.perTarget[b]) - (BEST.perTarget[a] - RUN.perTarget[a]) || tot(b) - tot(a));
+  let h = "";
+  const selPos = idx.indexOf(HX.sel.t);
+  CFG.forEach((c, r) => {
+    const y = TOP + r * RH;
+    h += S.text(0, y + CH / 2 + 4, esc(c.short), c === BEST ? "lbl-b" : "lbl");
+    h += S.text(LW - 12, y + CH / 2 + 4, Math.round(c.mean * N), "tk", "end");
+    idx.forEach((ti, j) => {
+      const k = c.perTarget[ti];
+      h += `<rect x="${(LW + j * cw).toFixed(2)}" y="${y}" width="${Math.max(1, cw - 1).toFixed(2)}" height="${CH}" style="fill:${mxCol(k)}"/>`;
+    });
+  });
+  /* hover columns */
+  idx.forEach((ti, j) => {
+    const t = TG[ti], sel = ti === HX.sel.t;
+    h += `<rect x="${(LW + j * cw).toFixed(2)}" y="${TOP}" width="${cw.toFixed(2)}" height="${CFG.length * RH}" class="hit${sel ? " go" : ""}" ${sel ? 'data-go="#attempt"' : ""} data-tip="${esc(t.id)}, ${esc(t.cls)}, depth ${t.depth}\n${CFG.map(c => `${c.short}: ${c.perTarget[ti]}/3`).join("\n")}"/>`;
+  });
+  /* selected target */
+  const sx = LW + selPos * cw;
+  h += `<rect x="${(sx - 1.5).toFixed(2)}" y="${TOP - 3}" width="${(cw + 2).toFixed(2)}" height="${CFG.length * RH + 2}" rx="1" class="selcol"/>`;
+  h += S.text(sx + cw / 2, TOP - 10, esc(SELT.id), "lbl-b", sx > W - 40 ? "end" : "middle");
+  const yb = TOP + CFG.length * RH + 14;
+  if (mode === "diff") { h += S.text(LW, yb, "easy", "lbl-s") + S.text(W, yb, "hard", "lbl-s", "end"); }
+  else if (mode === "gap") { h += S.text(LW, yb, `${BEST.short} better`, "lbl-s") + S.text(W, yb, "scorer better", "lbl-s", "end"); }
+  else { h += S.text(LW, yb, TG[0].id, "lbl-s") + S.text(W, yb, TG[N - 1].id, "lbl-s", "end"); }
+  h += S.text(LW - 12, TOP - 10, "solved", "lbl-s", "end");
+  el.innerHTML = S.svg(W, yb + 6, h, 'role="img" aria-label="Seeds solved per target and config" style="overflow:visible"');
+}
+function drawDash() { drawForest(); drawScatter(); drawFails(); drawMatrix(); }
+
+/* ================================================================== ATTEMPT */
+function drawAcross(el) {
+  const i = HX.sel.t;
+  const rows = CFG.map(c => {
+    const marks = SEEDS.map(s => {
+      const a = A[c.id][s][i], cur = c === SELC && s === SELS;
+      const g = a.solved ? S.circ(8, 8, 5, "mean" + (c === BEST ? " best" : "")) : S.cross(8, 8, 4.5);
+      const ring = cur ? `<circle cx="8" cy="8" r="8" style="fill:none;stroke:var(--ink);stroke-width:1.2"/>` : "";
+      return `<span title="s${s}: ${a.solved ? "solved" : a.fail}, ${a.turns} turns, ${usd(a.cost)}, ${a.wall.toFixed(0)} s"><svg width="16" height="16" aria-hidden="true">${ring}${g}</svg></span>`;
+    }).join("");
+    const mt = SEEDS.map(s => A[c.id][s][i].turns).sort((a, b) => a - b)[1];
+    const mc = SEEDS.map(s => A[c.id][s][i].cost).sort((a, b) => a - b)[1];
+    return `<tr><td class="nm">${esc(c.short)}</td><td class="mkc"><span class="mk">${marks}</span></td><td class="r" title="median turns">${mt} t</td><td class="r" title="median cost">${usd(mc)}</td></tr>`;
+  }).join("");
+  el.innerHTML = `<table class="xc">${rows}</table>`;
+}
+
+function drawCtx(el) {
+  if (!el || !el.offsetParent) return;
+  const tr = HX.traj, W = el.clientWidth, H = 170, PL = 34, PB = 26, PT = 8;
+  const MAX = 25000, Y = v => PT + (1 - v / MAX) * (H - PT - PB);
+  const step = (W - PL) / tr.length, bw = Math.min(22, step - 6);
+  let h = "";
+  [0, 10000, 20000].forEach(t => { h += S.line(PL, Y(t), W, Y(t), t ? "grid" : "axis") + S.text(PL - 8, Y(t) + 4, t ? t / 1000 + "k" : "0", "tk", "end"); });
+  tr.forEach((s, i) => {
+    const cx = PL + step * (i + 0.5), y = Y(s.ti);
+    const col = s.fail ? "var(--fail)" : s.same ? "var(--ink-2)" : "var(--ink-3)";
+    h += `<path d="M${cx - bw / 2} ${Y(0)}V${y + 3}Q${cx - bw / 2} ${y} ${cx - bw / 2 + 3} ${y}H${cx + bw / 2 - 3}Q${cx + bw / 2} ${y} ${cx + bw / 2} ${y + 3}V${Y(0)}Z" style="fill:${col};opacity:${s.fail || s.same ? 1 : .55}"/>`;
+    if (s.same) h += S.text(cx, y - 6, "↺", "lbl-s", "middle");
+    h += S.text(cx, H - 8, i + 1, s.fail ? "lbl-b" : "tk", "middle", s.fail ? 'style="fill:var(--fail)"' : "");
+    h += `<rect x="${cx - step / 2}" y="${PT}" width="${step}" height="${H - PT - PB}" class="hit" data-tip="turn ${i + 1}: ${esc(s.tool)}${s.same ? ` (↺ turn ${s.same})` : ""}\nin ${s.ti.toLocaleString("en-US")}, out ${s.to}"/>`;
+  });
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="Input tokens per turn" style="overflow:visible"');
+}
+
+function renderAttempt() {
+  const a = SELA, t = SELT, turnFail = HX.traj.findIndex(s => s.fail) + 1;
+  $("#v-attempt").innerHTML = `
+    <p class="crumb"><a href="#dash">${esc(HX.project)}</a><span class="sep">/</span><a href="#dash">${esc(T.name)}</a><span class="sep">/</span>${esc(SELC.short)}<span class="sep">/</span><span title="${esc(SEL_RUN)}">s${SELS}</span><span class="sep">/</span>${esc(t.id)}</p>
+    <div class="run-top">
+      <div>
+        <h1 class="finding" id="att-h">${esc(t.id)} failed: loop at turn ${turnFail}, ${usd(a.cost)}</h1>
+        <div class="metaline">
+          <span class="who" title="Loop detector stopped the attempt"><svg width="10" height="10" aria-hidden="true">${S.cross(5, 5, 4)}</svg><b>loop</b></span>
+          <span>seed ${SELS}</span>
+          <span>14:19:52 UTC</span>
+          ${whoHtml(HX.created_by[SELC.id])}
+          <span>${esc(HX.host)}</span>
+          <span class="tag" title="target class">${esc(t.cls)}</span>
+          <span class="tag" title="reference route depth">depth ${t.depth}</span>
+          <span class="p hint" style="font-size:12.5px;color:var(--ink-3)" title="${esc(t.smiles)}">${esc(t.smiles.slice(0, 24))}…</span>
+        </div>
+      </div>
+      ${actionsHtml()}
+    </div>
+
+    <div class="fig" style="margin-top:44px">
+      <dl class="stats">
+        <div title="of the ${T.budget.turns}-turn budget"><dt>turns</dt><dd>${a.turns} <small>/ ${T.budget.turns}</small></dd></div>
+        <div title="tool calls, 1 per turn here"><dt>tool calls</dt><dd>${a.tool_calls}</dd></div>
+        <div title="input tokens, all turns: ${a.tok_in.toLocaleString("en-US")}"><dt>tokens in</dt><dd>${kTok(a.tok_in)}</dd></div>
+        <div title="output tokens: ${a.tok_out.toLocaleString("en-US")}"><dt>tokens out</dt><dd>${kTok(a.tok_out)}</dd></div>
+        <div title="config mean ${usd(SELC.cost)} per attempt"><dt>cost</dt><dd>${usd(a.cost)} <small>${(a.cost / SELC.cost).toFixed(1)}×</small></dd></div>
+        <div title="of the ${T.budget.secs} s budget; config mean ${Math.round(SELC.wall)} s"><dt>wall</dt><dd>${a.wall.toFixed(1)} <small>s</small></dd></div>
+        <div title="${esc(HX.fail_tip.loop)}"><dt>failure</dt><dd class="bad">loop</dd></div>
+      </dl>
+    </div>
+
+    <div class="fig">
+      <div class="fig-h"><span class="pl">a</span><span class="t">Trajectory</span><span class="aside"><span title="same call as an earlier turn">↺ repeat</span><span title="tool error, agent retried"><b style="color:var(--human)">!</b> tool error</span><span title="step that ended the attempt"><svg width="10" height="10" style="display:inline-block;vertical-align:-1px">${S.rect(0, 0, 10, 10, "", 'style="fill:var(--fail)" rx="2"')}</svg> fail</span></span></div>
+      ${trajTable(true)}
+    </div>
+
+    <div class="two-x">
+      <div class="fig">
+        <div class="fig-h"><span class="pl">b</span><span class="t">${esc(t.id)} across configs</span><span class="aside"><span>${G.solved}solved</span><span>${G.cross}failed</span></span></div>
+        <div id="across"></div>
+        <div class="fig" style="margin-top:56px">
+          <div class="fig-h"><span class="pl">c</span><span class="t">Tokens in, per turn</span><span class="aside" title="context grows each turn; every token is re-read">${kTok(a.tok_in)} total</span></div>
+          <div id="ctx"></div>
+        </div>
+      </div>
+      <div class="fig">
+        <div class="fig-h"><span class="pl">d</span><span class="t">Where</span><span class="aside" title="host of every path below">${esc(HX.host)}</span></div>
+        ${runTree(true)}
+      </div>
+    </div>`;
+  drawAcross($("#across"));
+  drawCtx($("#ctx"));
+}
+
+/* ================================================================== routing, theme, palette */
+const VIEWS = { dash: renderDash, attempt: renderAttempt };
+const REDRAW = { dash: drawDash, attempt: () => drawCtx($("#ctx")) };
+const rendered = {};
+let current = "dash";
+function show() {
+  const v = (location.hash || "#dash").slice(1);
+  current = VIEWS[v] ? v : "dash";
+  Object.keys(VIEWS).forEach(k => ($("#v-" + k).hidden = k !== current));
+  document.querySelectorAll(".tabs a").forEach(a => { if (a.getAttribute("href") === "#" + current) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+  if (!rendered[current]) { VIEWS[current](); rendered[current] = true; } else REDRAW[current]();
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", show);
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => REDRAW[current](), 120); });
+
+function setThemeLabel() { $("#themeLbl").textContent = document.documentElement.dataset.theme === "dark" ? "Light" : "Dark"; }
+function toggleTheme() {
+  const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = t; localStorage.setItem("hx-theme", t); setThemeLabel();
+}
+$("#themeBtn").addEventListener("click", toggleTheme);
+
+let toastT;
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2200); }
+document.addEventListener("click", e => {
+  const c = e.target.closest("[data-copy]");
+  if (c) { navigator.clipboard && navigator.clipboard.writeText(c.dataset.copy).catch(() => {}); toast("Copied " + c.dataset.copy); return; }
+  const g = e.target.closest("[data-go]"); if (g) { location.hash = g.getAttribute("data-go"); return; }
+  const t = e.target.closest("[data-toast]"); if (t) toast(t.dataset.toast);
+});
+
+const tip = $("#tip");
+document.addEventListener("mousemove", e => {
+  const t = e.target.closest && e.target.closest("[data-tip]");
+  if (!t) { tip.classList.remove("on"); return; }
+  tip.innerHTML = esc(t.getAttribute("data-tip")).replace(/\n/g, "<br>");
+  tip.style.left = Math.min(innerWidth - 340, e.clientX + 14) + "px"; tip.style.top = (e.clientY + 16) + "px";
+  tip.classList.add("on");
+});
+
+const CMDS = [
+  { g: "Go to", t: "Dashboard", s: T.name, go: () => (location.hash = "#dash") },
+  { g: "Go to", t: `Attempt ${SELT.id}`, s: `${SELC.short}, seed ${SELS}`, go: () => (location.hash = "#attempt") },
+  ...CFG.flatMap(c => SEEDS.map(s => ({ g: "Runs", t: HX.runId(c.id, s), s: `${c.short}, seed ${s}`, go: () => (location.hash = "#dash") }))),
+  { g: "Paths", t: "Copy run folder", s: HX.host + ":…/" + SEL_RUN, go: () => toast("Copied " + hostPath(RUN_DIR)) },
+  { g: "Commands", t: "Re-evaluate all runs", s: "solved@v2", go: () => toast("Re-evaluation queued: 12 runs, solved@v2") },
+  { g: "Commands", t: "Switch colour mode", s: "light or dark", go: toggleTheme },
+];
+let palItems = CMDS, palSel = 0;
+function palRender() {
+  let lastG = "", h = "";
+  palItems.forEach((c, i) => {
+    if (c.g !== lastG) { h += `<li class="grp" role="presentation">${esc(c.g)}</li>`; lastG = c.g; }
+    h += `<li class="it" role="option" id="po${i}" data-i="${i}" aria-selected="${i === palSel}"><span>${esc(c.t)}</span><small>${esc(c.s)}</small></li>`;
+  });
+  $("#palList").innerHTML = h || `<li class="grp">No match</li>`;
+  $("#palIn").setAttribute("aria-activedescendant", "po" + palSel);
+}
+function palOpen() { $("#pal").classList.add("on"); $("#palIn").value = ""; palItems = CMDS; palSel = 0; palRender(); $("#palIn").focus(); }
+function palClose() { $("#pal").classList.remove("on"); $("#findBtn").focus(); }
+function palRun(i) { const c = palItems[i]; if (!c) return; palClose(); c.go(); }
+$("#findBtn").addEventListener("click", palOpen);
+$("#pal").addEventListener("click", e => { if (e.target.id === "pal") palClose(); const li = e.target.closest("li.it"); if (li) palRun(+li.dataset.i); });
+$("#palIn").addEventListener("input", e => { const q = e.target.value.toLowerCase(); palItems = CMDS.filter(c => (c.t + " " + c.s + " " + c.g).toLowerCase().includes(q)); palSel = 0; palRender(); });
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); $("#pal").classList.contains("on") ? palClose() : palOpen(); return; }
+  if (!$("#pal").classList.contains("on")) return;
+  if (e.key === "Escape") palClose();
+  else if (e.key === "ArrowDown") { palSel = Math.min(palItems.length - 1, palSel + 1); palRender(); e.preventDefault(); }
+  else if (e.key === "ArrowUp") { palSel = Math.max(0, palSel - 1); palRender(); e.preventDefault(); }
+  else if (e.key === "Enter") palRun(palSel);
+});
+
+setThemeLabel();
+document.fonts.ready.then(show);
+</script>
+</body>
+</html>

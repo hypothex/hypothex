@@ -1,0 +1,1082 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hypothex · route-api-latency</title>
+<script>
+  (function () {
+    var q = new URLSearchParams(location.search).get("theme");
+    var t = q || localStorage.getItem("hx-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400..700;1,6..72,400..500&display=swap" rel="stylesheet">
+<style>
+/* ------------------------------------------------------------------ tokens (ui-v4) */
+:root {
+  --paper: #F6F7F3;
+  --paper-2: #ECEEE8;
+  --ink: #15181E;
+  --ink-2: #464C57;
+  --ink-3: #767C87;
+  --rule: #D5D8D0;
+  --rule-2: #E4E6E0;
+  --best: #00846A;
+  --best-wash: rgba(0, 132, 106, .12);
+  --best-edge: rgba(0, 132, 106, .50);
+  --fail: #C8412B;
+  --fail-wash: rgba(200, 65, 43, .09);
+  --agent: #5B48C2;
+  --human: #A66A12;
+  /* version identity (validated all-pairs, light surface #F6F7F3) */
+  --v-baseline: #e0602e;
+  --v-cache: #2a78d6;
+  --v-async: #b8447e;
+  --serif: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --paper: #12161C;
+  --paper-2: #1A1F27;
+  --ink: #E9ECEF;
+  --ink-2: #AEB5BF;
+  --ink-3: #7C8490;
+  --rule: #2C333D;
+  --rule-2: #222830;
+  --best: #1FA282;
+  --best-wash: rgba(31, 162, 130, .17);
+  --best-edge: rgba(31, 162, 130, .60);
+  --fail: #DE5F49;
+  --fail-wash: rgba(222, 95, 73, .12);
+  --agent: #8C7BEA;
+  --human: #C08629;
+  /* validated all-pairs, dark surface #12161C */
+  --v-baseline: #e06a35;
+  --v-cache: #4a90e8;
+  --v-async: #c95aa8;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 400 15px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:hover { text-decoration-color: currentColor; }
+:focus-visible { outline: 2px solid var(--agent); outline-offset: 2px; border-radius: 3px; }
+button { font: inherit; color: inherit; }
+.num { font-variant-numeric: tabular-nums; }
+.path, code, kbd { font-family: var(--mono); font-size: .86em; }
+
+/* ------------------------------------------------------------------ chrome */
+.bar {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--rule);
+}
+.bar-in { max-width: 1280px; margin: 0 auto; padding: 0 40px; height: 60px; display: flex; align-items: stretch; gap: 40px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 600 21px/1 var(--serif); letter-spacing: -.01em; }
+.brand svg { display: block; }
+.tabs { display: flex; gap: 4px; }
+.tabs a {
+  display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: var(--ink-3);
+  font-size: 14.5px; border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tabs a:hover { color: var(--ink); }
+.tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
+.bar-r { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.find {
+  display: flex; align-items: center; gap: 28px; height: 34px; padding: 0 8px 0 12px; min-width: 250px;
+  border: 1px solid var(--rule); border-radius: 7px; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 13.5px;
+}
+.find:hover { border-color: var(--ink-3); }
+.find kbd { margin-left: auto; font-family: var(--sans); font-size: 12px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; }
+.theme { height: 34px; padding: 0 12px; border: 1px solid var(--rule); border-radius: 7px; background: transparent; cursor: pointer; font-size: 13.5px; color: var(--ink-2); display: flex; gap: 8px; align-items: center; }
+.theme:hover { border-color: var(--ink-3); color: var(--ink); }
+.sample { font-size: 12px; color: var(--ink-2); border: 1px dashed var(--ink-3); border-radius: 99px; padding: 2px 9px; cursor: help; white-space: nowrap; }
+
+main { max-width: 1280px; margin: 0 auto; padding: 44px 40px 120px; }
+.view[hidden] { display: none; }
+
+/* ------------------------------------------------------------------ type */
+.crumb { margin: 0 0 18px; font-size: 13.5px; color: var(--ink-3); display: flex; align-items: center; flex-wrap: wrap; }
+.crumb a { color: var(--ink-2); text-decoration: none; }
+.crumb a:hover { text-decoration: underline; }
+.crumb .sep { margin: 0 6px; color: var(--rule); }
+.crumb .tag { margin-left: 12px; }
+h1.finding {
+  margin: 0; max-width: 24em;
+  font: 500 46px/1.06 var(--serif); font-variation-settings: "opsz" 72;
+  letter-spacing: -.018em; text-wrap: balance;
+}
+.metaline { margin: 14px 0 0; display: flex; flex-wrap: wrap; gap: 4px 22px; font-size: 14px; color: var(--ink-3); font-variant-numeric: tabular-nums; align-items: center; }
+.metaline b { color: var(--ink-2); font-weight: 500; }
+.hint { text-decoration: underline dotted var(--rule); text-underline-offset: 3px; cursor: help; }
+
+/* stat strip: numbers with short labels; explanations live in the title tooltips */
+.stats { display: flex; flex-wrap: wrap; gap: 14px 0; margin: 34px 0 0; padding: 0; }
+.stats > div { padding: 0 32px; border-left: 1px solid var(--rule-2); cursor: help; display: flex; flex-direction: column-reverse; }
+.stats > div:first-child { padding-left: 0; border-left: 0; }
+.stats dt { font-size: 12.5px; color: var(--ink-3); }
+.stats dd { margin: 0 0 3px; font: 400 25px/1.1 var(--sans); letter-spacing: -.012em; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.stats dd small { font-size: 15px; color: var(--ink-3); letter-spacing: 0; }
+.stats dd.flag { color: var(--fail); }
+
+/* figure panels: space, letters, captions. No boxes. */
+.fig { margin-top: 64px; }
+.fig-h { display: flex; align-items: baseline; gap: 12px; margin: 0 0 18px; }
+.fig-h .pl { font: 700 19px/1 var(--sans); }
+.fig-h .t { font: 600 16px/1.3 var(--sans); }
+.fig-h .aside { margin-left: auto; font-size: 13px; color: var(--ink-3); display: inline-flex; gap: 14px; align-items: baseline; }
+.small { font-size: 13px; color: var(--ink-3); }
+
+/* svg figure text */
+svg text { font-family: var(--sans); fill: var(--ink-2); }
+svg .tk { font-size: 11.5px; fill: var(--ink-3); font-variant-numeric: tabular-nums; }
+svg .lbl { font-size: 12.5px; fill: var(--ink-2); }
+svg .lbl-s { font-size: 11.5px; fill: var(--ink-3); }
+svg .lbl-b { font-size: 12.5px; fill: var(--ink); font-weight: 600; }
+svg .lbl-f { font-size: 12px; fill: var(--fail); font-weight: 600; }
+svg .axis { stroke: var(--ink-3); stroke-width: 1; }
+svg .grid { stroke: var(--rule-2); stroke-width: 1; }
+svg .hair { stroke: var(--rule); stroke-width: 1; }
+svg .band { fill: var(--best-wash); }
+svg .band-edge { stroke: var(--best-edge); stroke-width: 1; }
+svg .bestline { stroke: var(--best); stroke-width: 1.25; }
+svg .whisk { stroke: var(--ink-3); stroke-width: 1.5; stroke-linecap: round; fill: none; }
+svg .whisk.best { stroke: var(--best); }
+svg .whisk.thin { stroke-width: 1; }
+svg .mean { fill: var(--ink); stroke: var(--paper); stroke-width: 2; }
+svg .mean.best { fill: var(--best); }
+svg .seed { fill: var(--ink-2); stroke: var(--paper); stroke-width: 2; }
+svg .seed.out { fill: var(--paper); stroke: var(--fail); stroke-width: 1.8; }
+svg .dia { fill: var(--paper); stroke: var(--ink); stroke-width: 1.6; }
+svg .dia.best { stroke: var(--best); fill: var(--best-wash); }
+svg .lead { stroke: var(--ink-3); stroke-width: 1; fill: none; }
+svg .m-fail { stroke: var(--fail); stroke-width: 2; stroke-linecap: round; }
+svg .nnwin { fill: var(--fail-wash); }
+svg .nnedge { stroke: var(--fail); stroke-width: 1; stroke-dasharray: 2 3; opacity: .6; }
+svg .hit { fill: transparent; cursor: default; }
+svg .pt { stroke: var(--paper); stroke-width: 1.5; }
+
+/* who glyph */
+.who { display: inline-flex; align-items: center; gap: 6px; }
+.who i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.who.agent i { background: var(--agent); }
+.who.human i { background: var(--human); border-radius: 1px; }
+.vs { display: inline-flex; align-items: center; gap: 8px; }
+.vs i { width: 10px; height: 3px; border-radius: 2px; display: inline-block; flex: none; }
+
+/* buttons */
+.btn {
+  height: 32px; padding: 0 13px; border-radius: 6px; border: 1px solid var(--rule); background: transparent;
+  font-size: 13.5px; color: var(--ink); cursor: pointer; white-space: nowrap;
+}
+.btn:hover { border-color: var(--ink-3); }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.primary:hover { opacity: .88; }
+.btn:disabled { color: var(--ink-3); cursor: not-allowed; border-color: var(--rule-2); }
+.cmd {
+  display: block; padding: 12px 14px; background: var(--paper-2); border-radius: 6px;
+  font: 400 13px/1.6 var(--mono); color: var(--ink); white-space: pre-wrap; word-break: break-word;
+}
+.tag { font-size: 12.5px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 99px; padding: 1px 9px; }
+.tag.flag { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 45%, transparent); }
+.key { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 14px; font-size: 13px; color: var(--ink-2); }
+.key span { display: inline-flex; align-items: center; gap: 7px; }
+.key svg { display: block; overflow: visible; }
+
+/* ------------------------------------------------------------------ filters, forest (ui-v4) */
+.filters { display: flex; align-items: center; gap: 22px; margin-top: 40px; padding: 12px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-size: 13.5px; color: var(--ink-2); }
+.filters label { display: inline-flex; align-items: center; gap: 8px; }
+.filters select { font: inherit; color: var(--ink); background: transparent; border: 1px solid var(--rule); border-radius: 6px; height: 30px; padding: 0 8px; }
+.filters input { accent-color: var(--ink); }
+.filters .r { margin-left: auto; display: flex; gap: 8px; }
+
+.forest { position: relative; }
+.frow { display: grid; grid-template-columns: minmax(0, 1fr) 104px 560px 92px 104px; gap: 0 24px; align-items: start; border-bottom: 1px solid var(--rule-2); min-height: 90px; padding: 16px 0 14px; }
+.frow.head { min-height: 0; padding: 0 0 10px; border-bottom: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); align-items: end; }
+.frow.axisrow { border-bottom: 0; min-height: 44px; }
+.frow .nm { font-weight: 600; font-size: 16px; display: flex; align-items: center; gap: 9px; }
+.frow .nm .sw { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+.frow .meta { font-size: 12.5px; color: var(--ink-3); margin-top: 5px; display: flex; flex-direction: column; gap: 2px; }
+.frow .meta .rl a { margin-right: 6px; }
+.frow .meta .rl a.out { color: var(--fail); text-decoration-color: color-mix(in srgb, var(--fail) 50%, transparent); }
+.frow .acc { text-align: right; }
+.frow .big { font: 400 24px/1.05 var(--sans); letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.frow .sd { font-size: 13px; color: var(--ink-3); margin-top: 5px; font-variant-numeric: tabular-nums; display: flex; justify-content: flex-end; align-items: center; gap: 5px; cursor: help; }
+.frow .dl { text-align: right; font-size: 14.5px; font-variant-numeric: tabular-nums; padding-top: 4px; cursor: help; }
+.frow .dl small { display: block; font-size: 12.5px; color: var(--ink-3); margin-top: 3px; }
+.frow .vd { font-size: 14px; padding-top: 4px; font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 8px; cursor: help; }
+.vg { width: 10px; height: 10px; display: inline-block; flex: none; }
+.vg.best { background: var(--best); transform: rotate(45deg) scale(.8); }
+.vg.band { background: var(--best-wash); outline: 1px solid var(--best-edge); }
+.vg.behind { border: 1.5px solid var(--ink-3); border-radius: 50%; }
+.forest > svg { position: absolute; top: 0; pointer-events: none; overflow: visible; }
+
+/* ------------------------------------------------------------------ grids */
+.two { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 72px; margin-top: 64px; align-items: start; }
+.two > .fig, .two > .col > .fig:first-child { margin-top: 0; }
+.col > .fig + .fig { margin-top: 56px; }
+
+/* percentile table */
+.pt { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.pt th { font: 500 12.5px/1.3 var(--sans); color: var(--ink-3); text-align: right; padding: 0 0 9px 18px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.pt th:first-child { text-align: left; padding-left: 0; }
+.pt td { text-align: right; padding: 12px 0 11px 18px; border-bottom: 1px solid var(--rule-2); vertical-align: top; font-size: 16px; white-space: nowrap; }
+.pt td:first-child { text-align: left; padding-left: 0; font-size: 14.5px; font-weight: 550; }
+.pt tr:last-child td { border-bottom: 0; }
+.pt td small { display: block; font-size: 12.5px; color: var(--ink-3); margin-top: 3px; cursor: help; }
+.pt td small.ref { color: var(--ink-3); }
+.pt td .bm { display: inline-block; width: 7px; height: 7px; background: var(--best); transform: rotate(45deg); margin-right: 8px; vertical-align: 2px; }
+
+/* run list and path tree */
+.rl-tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.rl-tbl th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12.5px; padding: 0 12px 8px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.rl-tbl td { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--rule-2); vertical-align: middle; white-space: nowrap; }
+.rl-tbl tr:last-child td { border-bottom: 0; }
+.rl-tbl tbody tr { cursor: pointer; }
+.rl-tbl tbody tr:hover td { background: color-mix(in srgb, var(--paper-2) 60%, transparent); }
+.rl-tbl tbody tr[aria-selected="true"] td { background: var(--paper-2); }
+.rl-tbl tbody tr[aria-selected="true"] td:first-child { box-shadow: inset 2px 0 0 var(--ink); }
+.rl-tbl td:first-child { padding-left: 10px; }
+.rl-tbl th:first-child { padding-left: 10px; }
+.rl-tbl .r { text-align: right; font-variant-numeric: tabular-nums; }
+.rl-tbl .x { color: var(--fail); font-weight: 600; }
+
+.tree { font-size: 14px; }
+.tree .root { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; gap: 0 14px; align-items: baseline; padding: 12px 0 8px; border-top: 1px solid var(--rule); }
+.tree .root:first-child { border-top: 0; padding-top: 0; }
+.tree .k { color: var(--ink); font-weight: 550; }
+.p { font-family: var(--mono); font-size: 12.5px; word-break: break-all; color: var(--ink); }
+.p .pre { color: var(--ink-3); }
+.host { font-family: var(--sans); font-size: 11.5px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 4px; padding: 0 5px; margin-right: 8px; vertical-align: 1px; white-space: nowrap; }
+.tree .kids { list-style: none; margin: 0 0 4px 98px; padding: 0; }
+.tree .kids li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto; gap: 0 8px; align-items: baseline; padding: 3px 0; }
+.tree .kids li .br { color: var(--ink-3); font-family: var(--mono); font-size: 12.5px; }
+.tree .kids li .what { font-size: 12px; color: var(--ink-3); text-align: right; font-variant-numeric: tabular-nums; }
+.copy { border: 0; background: transparent; color: var(--ink-3); font-size: 12.5px; cursor: pointer; padding: 4px; border-radius: 4px; align-self: center; }
+.copy:hover { color: var(--ink); background: var(--paper-2); }
+.gitline { margin: 2px 0 6px 98px; font: 400 12.5px/1.5 var(--sans); color: var(--ink-3); }
+.cmdrow { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 0 14px; align-items: start; padding: 0 0 14px; }
+.actions { display: flex; gap: 8px; }
+.sel-h { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px; font-size: 14px; }
+.sel-h b { font-weight: 600; }
+
+.attempts { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+.attempts li { display: grid; grid-template-columns: 28px 76px minmax(0, 1fr) auto; gap: 0 10px; padding: 9px 0; border-top: 1px solid var(--rule-2); align-items: baseline; font-variant-numeric: tabular-nums; }
+.attempts li:first-child { border-top: 0; padding-top: 0; }
+.attempts .n { color: var(--ink-3); }
+.attempts .st.ok { color: var(--best); }
+.attempts .st.bad { color: var(--fail); }
+.attempts .why { color: var(--ink-3); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.run-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 40px; align-items: start; }
+.run-top .actions { padding-top: 12px; }
+
+/* ------------------------------------------------------------------ palette, toast, tooltip (ui-v4) */
+.pal { position: fixed; inset: 0; z-index: 50; display: none; background: color-mix(in srgb, var(--ink) 22%, transparent); }
+.pal.on { display: block; }
+.pal-box { width: 600px; margin: 110px auto 0; background: var(--paper); border: 1px solid var(--rule); border-radius: 10px; box-shadow: 0 24px 60px -20px rgba(10, 14, 20, .35); overflow: hidden; }
+.pal-in { width: 100%; border: 0; border-bottom: 1px solid var(--rule); background: transparent; color: var(--ink); font: 400 20px/1 var(--serif); padding: 20px 20px; outline: none; }
+.pal-list { list-style: none; margin: 0; padding: 8px; max-height: 420px; overflow: auto; }
+.pal-list .grp { font-size: 12px; color: var(--ink-3); padding: 10px 12px 4px; }
+.pal-list li.it { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 9px 12px; border-radius: 6px; cursor: pointer; font-size: 14.5px; align-items: baseline; }
+.pal-list li.it small { color: var(--ink-3); font-size: 12.5px; }
+.pal-list li.it[aria-selected="true"] { background: var(--paper-2); }
+.toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px); opacity: 0; background: var(--ink); color: var(--paper); padding: 10px 16px; border-radius: 7px; font-size: 13.5px; transition: all .18s ease; pointer-events: none; z-index: 60; }
+.toast.on { opacity: 1; transform: translate(-50%, 0); }
+.tip { position: fixed; z-index: 40; pointer-events: none; background: var(--ink); color: var(--paper); font-size: 12.5px; line-height: 1.4; padding: 7px 10px; border-radius: 6px; max-width: 320px; opacity: 0; transition: opacity .08s; }
+.tip.on { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (max-width: 1100px) {
+  .two { grid-template-columns: 1fr; gap: 48px; }
+  .frow { grid-template-columns: minmax(0, 1fr) 104px 380px 80px 0; }
+  .frow .vd { display: none; }
+  .find { min-width: 0; } .find span { display: none; }
+}
+@media (max-width: 720px) {
+  .bar-in { padding: 0 16px; gap: 16px; } main { padding: 28px 16px 80px; }
+  h1.finding { font-size: 30px; }
+  .brand span, .sample { display: none; }
+  .frow { grid-template-columns: minmax(0, 1fr) 90px 0 70px 0; } .frow .fplot { visibility: hidden; }
+}
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="#task" aria-label="Hypothex, task">
+      <svg width="22" height="18" viewBox="0 0 22 18" aria-hidden="true">
+        <rect x="9" y="1" width="8" height="16" style="fill:var(--best-wash)"/>
+        <line x1="9" y1="1" x2="9" y2="17" style="stroke:var(--best-edge)"/><line x1="17" y1="1" x2="17" y2="17" style="stroke:var(--best-edge)"/>
+        <line x1="1" y1="9" x2="21" y2="9" style="stroke:var(--ink);stroke-width:1.4"/>
+        <rect x="10" y="5" width="5.6" height="5.6" transform="rotate(45 12.8 7.8)" style="fill:var(--best)"/>
+        <circle cx="4" cy="9" r="2.6" style="fill:var(--ink)"/>
+      </svg>
+      <span>Hypothex</span>
+    </a>
+    <nav class="tabs" aria-label="Screens">
+      <a href="#task">Task</a>
+      <a href="#run">Run</a>
+    </nav>
+    <div class="bar-r">
+      <span class="sample" title="Invented numbers, generated by data.js with a fixed seed">sample data</span>
+      <button class="find" id="findBtn" type="button" aria-haspopup="dialog"><span>Find a run, task or path</span><kbd>⌘K</kbd></button>
+      <button class="theme" id="themeBtn" type="button" aria-label="Switch colour mode">
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7 1a6 6 0 0 1 0 12z" fill="currentColor"/></svg>
+        <span id="themeLbl">Dark</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="view" id="v-task" aria-labelledby="task-h"></section>
+  <section class="view" id="v-run" aria-labelledby="run-h" hidden></section>
+</main>
+
+<div class="pal" id="pal" role="dialog" aria-modal="true" aria-label="Find and run commands">
+  <div class="pal-box">
+    <input class="pal-in" id="palIn" placeholder="Find a run, task, path or command" autocomplete="off" aria-controls="palList">
+    <ul class="pal-list" id="palList" role="listbox"></ul>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script src="data.js"></script>
+<script>
+/* ================================================================== helpers */
+const HX = window.HX, T = HX.task, VERS = HX.versions, RUNS = HX.runs;
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const MINUS = "−";
+const sgnPct = (v, d = 0) => (v < 0 ? MINUS : "+") + Math.abs(v * 100).toFixed(d) + "%";
+const pctNum = (v, d = 0) => (v < 0 ? MINUS : "+") + Math.abs(v * 100).toFixed(d);
+const ms = v => (v < 100 ? v.toFixed(1) : Math.round(v).toString());
+const short = id => id.slice(-4);
+const vById = Object.fromEntries(VERS.map(v => [v.id, v]));
+const vColor = id => `var(--v-${id})`;
+const hm = iso => iso.slice(11, 16);
+
+/* ---- per-run statistics, computed from raw samples ---- */
+const Q = { p50: 0.5, p95: 0.95, p99: 0.99 };
+function quant(s, p) { const h = (s.length - 1) * p, lo = Math.floor(h); return s[lo] + (h - lo) * ((s[lo + 1] ?? s[lo]) - s[lo]); }
+/* distribution-free CI of a quantile from order statistics */
+function quantCI(s, p) {
+  const n = s.length, sd = Math.sqrt(n * p * (1 - p));
+  return [s[Math.max(0, Math.floor(n * p - 1.96 * sd) - 1)], s[Math.min(n - 1, Math.ceil(n * p + 1.96 * sd) - 1)]];
+}
+RUNS.forEach(r => {
+  const ok = [];
+  for (let i = 0; i < r.samples.lat.length; i++) if (!r.samples.err[i]) ok.push(r.samples.lat[i]);
+  const s = Float64Array.from(ok).sort();
+  r.sorted = s;
+  r.st = { n: r.samples.lat.length, ok: s.length, errors: r.samples.lat.length - s.length, rps: s.length / r.duration_s };
+  for (const k in Q) { r.st[k] = quant(s, Q[k]); r.st[k + "_ci"] = quantCI(s, Q[k]); }
+  r.st.err_rate = r.st.errors / r.st.n;
+  r.st.timeouts = [...r.samples.err].filter(e => e === 1).length;
+  r.v = vById[r.version];
+});
+const runById = Object.fromEntries(RUNS.map(r => [r.run_id, r]));
+
+/* t quantile (0.975) by df, interpolated in 1/df */
+function t975(df) {
+  const tb = [[1, 12.706], [2, 4.303], [3, 3.182], [4, 2.776], [5, 2.571], [6, 2.447], [8, 2.306], [10, 2.228], [15, 2.131], [20, 2.086], [30, 2.042], [1e9, 1.96]];
+  if (df <= 1) return tb[0][1];
+  for (let i = 1; i < tb.length; i++) if (df <= tb[i][0]) { const [a, ta] = tb[i - 1], [b, tb2] = tb[i]; const w = (1 / df - 1 / a) / (1 / b - 1 / a); return ta + w * (tb2 - ta); }
+  return 1.96;
+}
+const meanOf = a => a.reduce((x, y) => x + y, 0) / a.length;
+const sdOf = a => { if (a.length < 2) return 0; const m = meanOf(a); return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / (a.length - 1)); };
+
+/* ---- state ---- */
+const state = { metric: "p95", showRepeats: true, dropFlagged: false, selected: HX.selected };
+const included = vid => RUNS.filter(r => r.version === vid && !(state.dropFlagged && r.flag));
+const LOWER = { p50: true, p95: true, p99: true, rps: false, err_rate: true };
+
+function agg(vid, m) {
+  const rs = included(vid), vals = rs.map(r => r.st[m]);
+  const mean = meanOf(vals), sd = sdOf(vals), h = rs.length > 1 ? t975(rs.length - 1) * sd / Math.sqrt(rs.length) : 0;
+  return { rs, vals, mean, sd, ci: [mean - h, mean + h], n: rs.length };
+}
+/* ratio vs baseline on the log scale, Welch t interval */
+function ratio(vid, m, ref = "baseline") {
+  const a = included(vid).map(r => Math.log(r.st[m])), b = included(ref).map(r => Math.log(r.st[m]));
+  const d = meanOf(a) - meanOf(b);
+  const va = sdOf(a) ** 2 / a.length, vb = sdOf(b) ** 2 / b.length, se = Math.sqrt(va + vb);
+  const df = se === 0 ? 1e9 : (va + vb) ** 2 / ((va * va) / Math.max(1, a.length - 1) + (vb * vb) / Math.max(1, b.length - 1));
+  const h = t975(df) * se;
+  return { r: Math.exp(d) - 1, lo: Math.exp(d - h) - 1, hi: Math.exp(d + h) - 1, df };
+}
+function pooledErr(vid) {
+  const rs = included(vid), e = rs.reduce((a, r) => a + r.st.errors, 0), n = rs.reduce((a, r) => a + r.st.n, 0);
+  return { e, n, rate: e / n, ci: wilson(e / n, n) };
+}
+function wilson(p, n, z = 1.96) {
+  const z2 = z * z, d = 1 + z2 / n, c = (p + z2 / (2 * n)) / d;
+  const h = (z * Math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))) / d;
+  return [Math.max(0, c - h), c + h];
+}
+/* the flag rule: primary metric > 10% off the median of the other repeats */
+function devFromOthers(r, m) {
+  const others = RUNS.filter(u => u.version === r.version && u !== r).map(u => u.st[m]);
+  return r.st[m] / meanOf(others) - 1;
+}
+function bestOf(m) { return VERS.map(v => ({ v, a: agg(v.id, m) })).sort((x, y) => LOWER[m] ? x.a.mean - y.a.mean : y.a.mean - x.a.mean)[0]; }
+
+/* ---- svg primitives (ui-v4) ---- */
+const S = {
+  line: (x1, y1, x2, y2, c, extra = "") => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="${c}" ${extra}/>`,
+  rect: (x, y, w, h, c, extra = "") => `<rect x="${x}" y="${y}" width="${Math.max(0, w)}" height="${h}" class="${c}" ${extra}/>`,
+  circ: (x, y, r, c, extra = "") => `<circle cx="${x}" cy="${y}" r="${r}" class="${c}" ${extra}/>`,
+  text: (x, y, t, c, a = "start", extra = "") => `<text x="${x}" y="${y}" class="${c}" text-anchor="${a}" ${extra}>${t}</text>`,
+  dia: (x, y, r, c) => `<path d="M${x} ${y - r}L${x + r} ${y}L${x} ${y + r}L${x - r} ${y}Z" class="${c}"/>`,
+  sq: (x, y, r, c) => `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}" rx="1.5" class="${c}"/>`,
+  cross: (x, y, r) => `<path d="M${x - r} ${y - r}L${x + r} ${y + r}M${x + r} ${y - r}L${x - r} ${y + r}" class="m-fail"/>`,
+  svg: (w, h, body, extra = "") => `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" ${extra}>${body}</svg>`,
+};
+const whisker = (X, y, lo, hi, cls = "") => `<path d="M${X(lo)} ${y}H${X(hi)}M${X(lo)} ${y - 4}V${y + 4}M${X(hi)} ${y - 4}V${y + 4}" class="whisk ${cls}"/>`;
+function niceTicks(a, b, n = 6) {
+  const span = b - a, step0 = span / n, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 2.5, 5, 10].map(f => f * mag).find(s => span / s <= n) || 10 * mag;
+  const out = []; for (let v = Math.ceil(a / step) * step; v <= b + 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+}
+const LOGT = [5, 10, 20, 50, 100, 200, 500, 1000];
+const G = {
+  seed: `<svg width="18" height="12">${S.circ(5, 6, 3.6, "seed")}${S.circ(13, 6, 3.6, "seed")}</svg>`,
+  out: `<svg width="12" height="12">${S.circ(6, 6, 3.8, "seed out")}</svg>`,
+  dia: `<svg width="18" height="12">${S.dia(9, 6, 5.5, "dia")}</svg>`,
+  whisk: `<svg width="22" height="12"><path d="M2 6H20M2 2V10M20 2V10" class="whisk"/></svg>`,
+  thin: `<svg width="22" height="12"><path d="M4 6H18" class="whisk thin"/>${S.circ(11, 6, 3.4, "seed")}</svg>`,
+  band: `<svg width="18" height="12"><rect x="3" y="0" width="12" height="12" class="band"/><line x1="3" y1="0" x2="3" y2="12" class="band-edge"/><line x1="15" y1="0" x2="15" y2="12" class="band-edge"/></svg>`,
+  nn: `<svg width="18" height="12"><rect x="2" y="0" width="14" height="12" class="nnwin"/></svg>`,
+};
+const COPY = `<svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="display:block"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M9 2.5V2a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`;
+const copyBtn = abs => `<button class="copy" type="button" data-copy="${esc(abs)}" title="Copy ${esc(T.host)}:${esc(abs)}" aria-label="Copy path">${COPY}</button>`;
+const whoHtml = c => `<span class="who ${c.startsWith("agent:") ? "agent" : "human"}"><i></i>${esc(c)}</span>`;
+const vsw = id => `<span class="vs"><i style="background:${vColor(id)}"></i>${esc(vById[id].name)}</span>`;
+
+/* ================================================================== TASK DASHBOARD */
+function headlineNums() {
+  const b = bestOf("p95"), d = ratio(b.v.id, "p95");
+  return { b, d };
+}
+function renderTask() {
+  const { b, d } = headlineNums();
+  const bid = b.v.id, flagged = RUNS.filter(r => r.flag);
+  const d50 = ratio(bid, "p50"), d99 = ratio(bid, "p99"), drps = ratio(bid, "rps");
+  const pe = pooledErr(bid);
+  const ciTxt = `[${pctNum(d.lo)}, ${pctNum(d.hi)}]`;
+
+  $("#v-task").innerHTML = `
+    <p class="crumb"><a href="#task">${esc(T.project)}</a><span class="sep">/</span>${esc(T.task)}<span class="tag" title="Task kind: traditional system benchmark">system_bench</span></p>
+    <h1 class="finding" id="task-h">${esc(b.v.name)} p95 ${sgnPct(d.r)} vs baseline <span class="num" style="color:var(--ink-2);font-weight:400" title="95% CI of the p95 ratio, Welch t on log p95 over ${b.a.n} + ${agg("baseline", "p95").n} repeats">${ciTxt}</span></h1>
+    <p class="metaline"><span>${VERS.length} versions × 3</span><span>${T.requests} req</span><span>c ${T.concurrency}</span><span title="${esc(T.gpu)}"><span class="host" style="margin:0">${esc(T.host)}</span></span><span>${esc(T.endpoint)}</span></p>
+    <dl class="stats" id="topStats"></dl>
+
+    <div class="filters" role="group" aria-label="Filters">
+      <label>Metric <select id="metricSel"><option value="p50">p50</option><option value="p95" selected>p95</option><option value="p99">p99</option></select></label>
+      <label><input type="checkbox" checked id="repChk"> Repeats</label>
+      <label title="Drop runs flagged as outliers (noisy neighbour)"><input type="checkbox" id="dropChk"> Drop flagged</label>
+      <span class="r"><button class="btn" type="button" data-toast="Exported route-api-latency.csv">Export CSV</button><button class="btn primary" type="button" data-toast="Re-evaluation queued for ${RUNS.length} runs">Re-evaluate all</button></span>
+    </div>
+
+    <div class="fig">
+      <div class="fig-h"><span class="pl">a</span><span class="t">Leaderboard</span><span class="aside" id="lbAside"></span></div>
+      <div class="forest" id="forest"></div>
+      <div class="key" aria-label="Key">
+        <span title="One point per repeat. Its line: 95% CI from that run's ${T.requests} samples (order statistics)">${G.thin}repeat, sample CI</span>
+        <span>${G.out}flagged</span>
+        <span title="t interval over repeats">${G.whisk}repeat 95% CI</span>
+        <span>${G.band}best's CI</span>
+        <span title="All repeats gave one value">${G.dia}×3 identical</span>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="fig">
+        <div class="fig-h"><span class="pl">b</span><span class="t">Latency</span><span class="aside">ms, log</span></div>
+        <div id="violin"></div>
+      </div>
+      <div class="fig">
+        <div class="fig-h"><span class="pl">c</span><span class="t">Throughput vs concurrency</span></div>
+        <div id="sweep"></div>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="fig">
+        <div class="fig-h"><span class="pl">d</span><span class="t">Percentiles</span><span class="aside" title="Mean over repeats. Below: change vs baseline, 95% CI (Welch t on logs)">ms, Δ vs baseline</span></div>
+        <div id="ptab"></div>
+      </div>
+      <div class="fig">
+        <div class="fig-h"><span class="pl">e</span><span class="t">Error rate</span><span class="aside" title="Timeouts (&gt; 1 s) and 5xx, of ${T.requests} per run">%</span></div>
+        <div id="errPlot"></div>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="fig">
+        <div class="fig-h"><span class="pl">f</span><span class="t">Utilisation</span><span class="aside">r1, ${esc(T.host)}</span></div>
+        <div id="util"></div>
+      </div>
+      <div class="fig">
+        <div class="fig-h"><span class="pl">g</span><span class="t">Repeat spread</span><span class="aside" id="spreadAside"></span></div>
+        <div id="spread"></div>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="fig">
+        <div class="fig-h"><span class="pl">h</span><span class="t">Raw samples</span><span class="aside">${RUNS.length} runs</span></div>
+        <div id="runList"></div>
+      </div>
+      <div class="fig">
+        <div class="fig-h"><span class="pl">i</span><span class="t">Selected run</span></div>
+        <div id="selPane"></div>
+      </div>
+    </div>`;
+
+  $("#metricSel").addEventListener("change", e => { state.metric = e.target.value; drawTaskCharts(); });
+  $("#repChk").addEventListener("change", e => { state.showRepeats = e.target.checked; drawForest(); });
+  $("#dropChk").addEventListener("change", e => { state.dropFlagged = e.target.checked; renderTask(); $("#dropChk").checked = state.dropFlagged; $("#metricSel").value = state.metric; $("#repChk").checked = state.showRepeats; });
+  drawTaskCharts();
+}
+
+function drawTopStats() {
+  const { b, d } = headlineNums(), bid = b.v.id;
+  const d50 = ratio(bid, "p50"), d99 = ratio(bid, "p99"), drps = ratio(bid, "rps");
+  const pe = pooledErr(bid), flagged = RUNS.filter(r => r.flag);
+  const f = flagged[0];
+  $("#topStats").innerHTML = `
+    <div title="${esc(b.v.name)} p95 ${ms(b.a.mean)} ms vs baseline ${ms(agg("baseline", "p95").mean)} ms, mean of repeats"><dt>p95 ms</dt><dd>${ms(b.a.mean)} <small>vs ${ms(agg("baseline", "p95").mean)}</small></dd></div>
+    <div title="p50 change vs baseline, 95% CI ${pctNum(d50.lo)} to ${pctNum(d50.hi)}%"><dt>Δ p50</dt><dd>${sgnPct(d50.r)}</dd></div>
+    <div title="p99 change vs baseline, 95% CI ${pctNum(d99.lo)} to ${pctNum(d99.hi)}%"><dt>Δ p99</dt><dd>${sgnPct(d99.r)}</dd></div>
+    <div title="Throughput at c ${T.concurrency}: ${agg(bid, "rps").mean.toFixed(1)} vs ${agg("baseline", "rps").mean.toFixed(1)} req/s. 95% CI ${pctNum(drps.lo)} to ${pctNum(drps.hi)}%"><dt>Δ req/s</dt><dd>${sgnPct(drps.r)}</dd></div>
+    <div title="${esc(b.v.name)}: ${pe.e} errors of ${pe.n}, all 503 (queue full)"><dt>errors</dt><dd>${pe.e} <small>/ ${(pe.n / 1000).toFixed(0)}k</small></dd></div>
+    <div title="${f ? `${esc(f.v.name)} r${f.repeat}: CPU steal ${f.flag.steal}% at ${f.flag.t0}–${f.flag.t1} s (noisy neighbour). p95 ${sgnPct(devFromOthers(f, "p95"))} vs its other repeats.` : ""}"><dt>flagged</dt><dd class="flag">${flagged.length} <small>run</small></dd></div>`;
+}
+
+function drawTaskCharts() {
+  drawTopStats(); drawForest(); drawViolin($("#violin")); drawSweep($("#sweep")); drawPTable($("#ptab"));
+  drawErr($("#errPlot")); drawUtilGrid($("#util")); drawSpread($("#spread")); drawRunList(); drawSel();
+}
+
+/* ---- a: forest leaderboard ---- */
+function drawForest() {
+  const m = state.metric, best = bestOf(m), box = $("#forest");
+  const ag = Object.fromEntries(VERS.map(v => [v.id, agg(v.id, m)]));
+  const order = [...VERS].sort((x, y) => ag[x.id].mean - ag[y.id].mean);
+  $("#lbAside").innerHTML = `<span>${m} ms, lower is better</span>`;
+  const rows = order.map(v => {
+    const a = ag[v.id], isB = v === best.v;
+    const r = v.id === "baseline" ? null : ratio(v.id, m);
+    const gap = a.mean / best.a.mean - 1;
+    const inBand = !isB && a.mean <= best.a.ci[1];
+    const vd = isB ? `<span class="vg best"></span>best` : `<span class="vg ${inBand ? "band" : "behind"}"></span>${sgnPct(gap)}`;
+    const vdTip = isB ? "Lowest mean. Its repeat 95% CI is the green band." : inBand ? "Mean inside the best's 95% CI: not proven slower." : "Mean outside the best's 95% CI.";
+    const pooled = a.rs.flatMap(u => [...u.sorted]).sort((x, y) => x - y);
+    const pci = quantCI(Float64Array.from(pooled), Q[m]);
+    return `<div class="frow" data-v="${v.id}">
+      <div><div class="nm"><span class="sw" style="background:${vColor(v.id)}"></span>${esc(v.name)}</div>
+        <div class="meta"><span>${whoHtml(v.by)}</span><span class="p" style="font-size:12px;color:var(--ink-3)">${esc(v.branch)}@${v.commit.slice(0, 4)}</span>
+        <span class="rl">${RUNS.filter(u => u.version === v.id).map(u => `<a href="#run" data-run="${u.run_id}" class="${u.flag ? "out" : ""}" title="${esc(u.run_id)}${u.flag ? "\nflagged: " + u.flag.kind : ""}">r${u.repeat}</a>`).join("")}</span></div></div>
+      <div class="acc"><div class="big">${ms(a.mean)}</div>
+        <div class="sd"><span title="sd over ${a.n} repeats">± ${ms(a.sd)}</span></div>
+        <div class="sd"><span title="95% CI from ${pooled.length} pooled samples (order statistics)">${ms(pci[0])}–${ms(pci[1])}</span></div></div>
+      <div class="fplot"></div>
+      <div class="dl" title="${r ? `${m} vs baseline, 95% CI (Welch t on logs, df ${r.df.toFixed(1)})` : "reference"}">${r ? `${sgnPct(r.r)}<small>${pctNum(r.lo)}, ${pctNum(r.hi)}</small>` : `<span style="color:var(--ink-3)">ref</span>`}</div>
+      <div class="vd" title="${vdTip}">${vd}</div>
+    </div>`;
+  }).join("");
+  box.innerHTML = `<div class="frow head"><div>Version</div><div class="acc">${m} ms</div><div>repeats, 95% CI</div><div class="dl" style="padding:0">Δ baseline</div><div>vs best</div></div>${rows}<div class="frow axisrow"><div></div><div></div><div class="fplot"></div><div></div><div></div></div>`;
+
+  const cells = [...box.querySelectorAll(".fplot")], first = cells[0];
+  const left = first.offsetLeft, W = first.clientWidth, H = box.clientHeight;
+  const all = VERS.flatMap(v => [...ag[v.id].rs.flatMap(u => [u.st[m], ...u.st[m + "_ci"]]), ...ag[v.id].ci]);
+  let lo = Math.min(...all), hi = Math.max(...all); const pad = (hi - lo) * 0.06; lo -= pad; hi += pad;
+  const ticks = niceTicks(lo, hi, 7);
+  const X = v => 8 + ((v - lo) / (hi - lo)) * (W - 16);
+  const head = box.querySelector(".frow.head"), axisRow = box.querySelector(".frow.axisrow");
+  const yTop = head.offsetTop + head.offsetHeight, yAx = axisRow.offsetTop + 8;
+  let h = "";
+  ticks.forEach(t => (h += S.line(X(t), yTop, X(t), yAx, "grid")));
+  h += S.rect(X(best.a.ci[0]), yTop, X(best.a.ci[1]) - X(best.a.ci[0]), yAx - yTop, "band") + S.line(X(best.a.ci[0]), yTop, X(best.a.ci[0]), yAx, "band-edge") + S.line(X(best.a.ci[1]), yTop, X(best.a.ci[1]), yAx, "band-edge");
+  h += S.line(X(best.a.mean), yTop, X(best.a.mean), yAx, "bestline");
+  order.forEach(v => {
+    const r = box.querySelector(`.frow[data-v="${v.id}"]`), a = ag[v.id], isB = v === best.v;
+    const yS = r.offsetTop + 30, yI = r.offsetTop + 60;
+    if (state.showRepeats) {
+      const allSame = a.sd === 0 && a.n > 1;
+      if (allSame) { h += S.dia(X(a.mean), yS, 6.5, "dia" + (isB ? " best" : "")); h += S.text(X(a.mean) + 11, yS + 4, `×${a.n}`, "lbl-b"); }
+      else {
+        const pts = a.rs.map(u => ({ u, x: X(u.st[m]) })).sort((p, q) => p.x - q.x);
+        let prev = -1e9, lvl = 0;
+        pts.forEach(p => {
+          lvl = p.x - prev < 9 ? lvl + 1 : 0; prev = p.x;
+          const y = yS - lvl * 9, ci = p.u.st[m + "_ci"];
+          h += `<path d="M${X(ci[0])} ${y}H${X(ci[1])}" class="whisk thin"/>`;
+          h += S.circ(p.x, y, 3.8, "seed" + (p.u.flag ? " out" : ""));
+          if (p.u.flag) h += S.text(p.x, y - 9, `r${p.u.repeat}`, "lbl-f", "middle");
+          h += `<circle cx="${p.x}" cy="${y}" r="9" class="hit" data-tip="${esc(`${v.name} r${p.u.repeat}  ${short(p.u.run_id)}\n${m} ${ms(p.u.st[m])} ms\nsample CI ${ms(ci[0])}–${ms(ci[1])}${p.u.flag ? `\nflagged: ${p.u.flag.kind}, steal ${p.u.flag.steal}%` : ""}`)}"/>`;
+        });
+      }
+    }
+    h += whisker(X, yI, a.ci[0], a.ci[1], isB ? "best" : "");
+    h += S.sq(X(a.mean), yI, 4.5, "mean" + (isB ? " best" : ""));
+    h += `<rect x="${X(a.ci[0])}" y="${yI - 10}" width="${Math.max(20, X(a.ci[1]) - X(a.ci[0]))}" height="20" class="hit" data-tip="${esc(`${v.name}\nmean ${ms(a.mean)} ms, sd ${ms(a.sd)}\nrepeat 95% CI ${ms(a.ci[0])}–${ms(a.ci[1])} (t, n ${a.n})`)}"/>`;
+  });
+  h += S.line(0, yAx, W, yAx, "axis");
+  ticks.forEach(t => { h += S.line(X(t), yAx, X(t), yAx + 4, "axis") + S.text(X(t), yAx + 17, t, "tk", "middle"); });
+  h += S.text(W, yAx + 36, `${m} ms`, "lbl-s", "end");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("width", W); svg.setAttribute("height", H + 20); svg.setAttribute("viewBox", `0 0 ${W} ${H + 20}`);
+  svg.setAttribute("role", "img"); svg.setAttribute("aria-label", `Forest plot of ${m} by version with repeats and 95% CIs`);
+  svg.style.left = left + "px"; svg.style.pointerEvents = "auto"; svg.innerHTML = h;
+  box.appendChild(svg);
+  box.querySelectorAll("[data-run]").forEach(a => a.addEventListener("click", () => { state.selected = a.dataset.run; rendered.run = false; }));
+}
+
+/* ---- b: violins on log ms ---- */
+function logX(W, pl, pr, a = 5, b = 1000) { const la = Math.log10(a), lb = Math.log10(b); return v => pl + ((Math.log10(Math.max(a, Math.min(b, v))) - la) / (lb - la)) * (W - pl - pr); }
+function density(sorted, grid, bw) {
+  const la = Math.log10(5), lb = Math.log10(1000), nb = 400, bins = new Float64Array(nb);
+  for (const v of sorted) { const k = Math.floor(((Math.log10(v) - la) / (lb - la)) * nb); if (k >= 0 && k < nb) bins[k]++; }
+  return grid.map(g => { let s = 0; for (let k = 0; k < nb; k++) { if (!bins[k]) continue; const c = la + ((k + .5) / nb) * (lb - la), z = (g - c) / bw; if (Math.abs(z) < 4) s += bins[k] * Math.exp(-.5 * z * z); } return s; });
+}
+function drawViolin(el) {
+  const W = el.clientWidth, PL = 112, PR = 12, RH = 92, TOP = 26;
+  const X = logX(W, PL, PR);
+  const H = TOP + RH * VERS.length + 44;
+  const la = Math.log10(5), lb = Math.log10(1000), grid = [...Array(220)].map((_, i) => la + (i / 219) * (lb - la));
+  const dens = VERS.map(v => { const s = Float64Array.from(included(v.id).flatMap(r => [...r.sorted])).sort(); return { v, s, d: density(s, grid, 0.022) }; });
+  const maxD = Math.max(...dens.map(o => Math.max(...o.d)));
+  let h = "";
+  LOGT.forEach(t => (h += S.line(X(t), TOP - 8, X(t), H - 40, "grid")));
+  dens.forEach((o, i) => {
+    const cy = TOP + RH * i + RH / 2, amp = RH * 0.46;
+    const pts = grid.map((g, k) => [PL + ((g - la) / (lb - la)) * (W - PL - PR), (o.d[k] / maxD) * amp]).filter(p => p[1] > 0.25 || true);
+    const top = pts.map(p => `${p[0].toFixed(1)},${(cy - p[1]).toFixed(1)}`).join("L"), bot = pts.slice().reverse().map(p => `${p[0].toFixed(1)},${(cy + p[1]).toFixed(1)}`).join("L");
+    h += `<path d="M${top}L${bot}Z" style="fill:${vColor(o.v.id)};fill-opacity:.2;stroke:${vColor(o.v.id)};stroke-width:1.5;stroke-linejoin:round"/>`;
+    h += S.text(0, cy + 4, esc(o.v.name), "lbl-b");
+    ["p50", "p95", "p99"].forEach((k, j) => {
+      const v = quant(o.s, Q[k]), x = X(v), th = [10, 15, 20][j];
+      h += S.line(x, cy - th, x, cy + th, "", `style="stroke:var(--ink);stroke-width:${j === 1 ? 2 : 1.25}"`);
+      if (i === 0) h += S.text(x, TOP - 12, k, "lbl-s", "middle");
+      h += `<rect x="${x - 5}" y="${cy - 22}" width="10" height="44" class="hit" data-tip="${esc(`${o.v.name} ${k} ${ms(v)} ms\n${o.s.length} samples, ${included(o.v.id).length} repeats`)}"/>`;
+    });
+  });
+  const yA = H - 40;
+  h += S.line(PL, yA, W - PR, yA, "axis");
+  LOGT.forEach(t => (h += S.line(X(t), yA, X(t), yA + 4, "axis") + S.text(X(t), yA + 17, t >= 1000 ? "1 s" : t, "tk", "middle")));
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="Latency distributions by version on a log scale, with p50, p95 and p99 ticks" style="pointer-events:auto;overflow:visible"');
+}
+
+/* ---- c: throughput vs concurrency ---- */
+function drawSweep(el) {
+  const W = el.clientWidth, H = 330, PL = 38, PR = 96, TOP = 12, BOT = 280;
+  const C = HX.conc, maxY = 600;
+  const X = c => PL + (Math.log2(c) / Math.log2(C[C.length - 1])) * (W - PL - PR);
+  const Y = v => BOT - (v / maxY) * (BOT - TOP);
+  let h = "";
+  [0, 100, 200, 300, 400, 500, 600].forEach(t => { h += S.line(PL, Y(t), W - PR, Y(t), t ? "grid" : "axis"); h += S.text(PL - 8, Y(t) + 4, t === 600 ? "req/s" : t, t === 600 ? "lbl-s" : "tk", "end"); });
+  h += S.line(X(T.concurrency), TOP, X(T.concurrency), BOT, "lead", 'stroke-dasharray="2 3"');
+  h += S.text(X(T.concurrency) + 6, TOP + 10, `c ${T.concurrency}`, "lbl-s");
+  const ends = [];
+  VERS.forEach(v => {
+    const pts = HX.sweep[v.id];
+    h += `<path d="M${pts.map(p => `${X(p.c).toFixed(1)},${Y(p.rps).toFixed(1)}`).join("L")}" style="fill:none;stroke:${vColor(v.id)};stroke-width:2;stroke-linejoin:round"/>`;
+    pts.forEach(p => { h += S.circ(X(p.c), Y(p.rps), 3.4, "pt", `style="fill:${vColor(v.id)}"`); h += `<circle cx="${X(p.c)}" cy="${Y(p.rps)}" r="9" class="hit" data-tip="${esc(`${v.name}\nc ${p.c}: ${p.rps} req/s`)}"/>`; });
+    ends.push({ v, y: Y(pts[pts.length - 1].rps), val: pts[pts.length - 1].rps });
+  });
+  ends.sort((a, b) => a.y - b.y); for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 30) ends[i].y = ends[i - 1].y + 30;
+  ends.forEach(e => { h += S.text(W - PR + 10, e.y - 1, esc(e.v.name), "lbl"); h += S.text(W - PR + 10, e.y + 13, `${Math.round(e.val)}`, "lbl-s"); });
+  h += S.line(PL, BOT, W - PR, BOT, "axis");
+  C.forEach(c => (h += S.line(X(c), BOT, X(c), BOT + 4, "axis") + S.text(X(c), BOT + 17, c, "tk", "middle")));
+  h += S.text(W - PR, BOT + 36, "concurrency", "lbl-s", "end");
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="Throughput vs concurrency per version" style="pointer-events:auto;overflow:visible"');
+}
+
+/* ---- d: percentile table ---- */
+function drawPTable(el) {
+  const cols = [["p50", "p50"], ["p95", "p95"], ["p99", "p99"], ["rps", "req/s"]];
+  const bests = Object.fromEntries(cols.map(([k]) => [k, bestOf(k).v.id]));
+  const rows = VERS.map(v => `<tr><td>${vsw(v.id)}</td>${cols.map(([k]) => {
+    const a = agg(v.id, k), r = v.id === "baseline" ? null : ratio(v.id, k);
+    const val = k === "rps" ? a.mean.toFixed(0) : ms(a.mean);
+    const tip = `${v.name} ${k}: repeats ${a.vals.map(x => k === "rps" ? x.toFixed(1) : ms(x)).join(", ")}${r ? `\nvs baseline ${sgnPct(r.r, 1)}, 95% CI ${pctNum(r.lo, 1)} to ${pctNum(r.hi, 1)}%` : ""}`;
+    return `<td title="${esc(tip)}">${bests[k] === v.id ? `<span class="bm" title="best"></span>` : ""}${val}${r ? `<small>${sgnPct(r.r)} <span style="opacity:.8">[${pctNum(r.lo)}, ${pctNum(r.hi)}]</span></small>` : `<small class="ref">ref</small>`}</td>`;
+  }).join("")}<td title="${esc(`${pooledErr(v.id).e} errors of ${pooledErr(v.id).n}`)}">${pooledErr(v.id).e}<small>${(pooledErr(v.id).rate * 100).toFixed(2)}%</small></td></tr>`).join("");
+  el.innerHTML = `<table class="pt"><thead><tr><th></th>${cols.map(c => `<th>${c[1]}</th>`).join("")}<th>errors</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+/* ---- e: error rate ---- */
+function drawErr(el) {
+  const W = el.clientWidth, PL = 104, PR = 14, RH = 56, TOP = 18;
+  const H = TOP + RH * VERS.length + 42, maxX = 0.12;
+  const X = v => PL + (v / maxX) * (W - PL - PR);
+  const ticks = [0, 0.04, 0.08, 0.12];
+  let h = "";
+  ticks.forEach(t => (h += S.line(X(t), TOP, X(t), H - 42, "grid")));
+  VERS.forEach((v, i) => {
+    const y = TOP + RH * i + RH / 2 - 4, pe = pooledErr(v.id), rs = included(v.id);
+    h += S.text(0, y + 4, esc(v.name), "lbl");
+    const rates = rs.map(r => r.st.err_rate * 100);
+    if (rates.every(x => x === rates[0])) { h += S.dia(X(rates[0]), y - 7, 5.5, "dia"); h += S.text(X(rates[0]) + 10, y - 3, `×${rates.length}`, "lbl-b"); }
+    else {
+      const seen = {};
+      rs.forEach(r => { const x = X(r.st.err_rate * 100), k = x.toFixed(0), lvl = (seen[k] = (seen[k] || 0) + 1) - 1; h += S.circ(x, y - 7 - lvl * 8, 3.6, "seed" + (r.flag ? " out" : "")); h += `<circle cx="${x}" cy="${y - 7 - lvl * 8}" r="8" class="hit" data-tip="${esc(`${v.name} r${r.repeat}: ${r.st.errors} errors${r.st.timeouts ? `, ${r.st.timeouts} timeouts` : ""}`)}"/>`; });
+    }
+    h += whisker(X, y + 8, pe.ci[0] * 100, pe.ci[1] * 100).replace('class="whisk ', 'class="whisk thin ');
+    h += S.sq(X(pe.rate * 100), y + 8, 3.5, "mean");
+    h += `<rect x="${X(0)}" y="${y + 1}" width="${X(pe.ci[1] * 100) - X(0) + 8}" height="14" class="hit" data-tip="${esc(`${v.name} pooled ${pe.e}/${pe.n}\n95% CI ${(pe.ci[0] * 100).toFixed(3)}–${(pe.ci[1] * 100).toFixed(3)}% (Wilson)`)}"/>`;
+  });
+  const yA = H - 42;
+  h += S.line(PL, yA, W - PR, yA, "axis");
+  ticks.forEach(t => (h += S.line(X(t), yA, X(t), yA + 4, "axis") + S.text(X(t), yA + 17, t === 0 ? "0" : t.toFixed(2), "tk", "middle")));
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="Error rate per version, repeats and pooled 95% CI" style="pointer-events:auto;overflow:visible"');
+}
+
+/* ---- f: utilisation small multiples ---- */
+const UM = [["cpu", "CPU", "%", 100], ["gpu", "GPU", "%", 100], ["mem", "mem", "GB", 12]];
+function strip(W, H, series, X, max, color, extra = "") {
+  const Y = v => H - 2 - (v / max) * (H - 4);
+  const pts = series.map((v, i) => `${X(i + 0.5).toFixed(1)},${Y(v).toFixed(1)}`);
+  return `<path d="M${X(0.5)},${H - 1}L${pts.join("L")}L${X(series.length - 0.5)},${H - 1}Z" style="fill:${color};fill-opacity:.14"/><path d="M${pts.join("L")}" style="fill:none;stroke:${color};stroke-width:1.5;stroke-linejoin:round" ${extra}/>`;
+}
+function drawUtilGrid(el) {
+  const W = el.clientWidth, LW = 56, GAP = 18, SH = 46, RG = 16, TOP = 22;
+  const cw = (W - LW - GAP * (VERS.length - 1)) / VERS.length, tmax = 42;
+  const H = TOP + UM.length * (SH + RG) + 28;
+  let h = "";
+  VERS.forEach((v, ci) => {
+    const x0 = LW + ci * (cw + GAP), X = s => x0 + (s / tmax) * cw;
+    const run = RUNS.find(r => r.version === v.id && r.repeat === 1);
+    h += `<rect x="${x0}" y="4" width="10" height="3" rx="1.5" style="fill:${vColor(v.id)}"/>` + S.text(x0 + 16, 10, esc(v.name), "lbl");
+    UM.forEach(([k, lbl, unit, max], ri) => {
+      const y0 = TOP + ri * (SH + RG);
+      const s = run.util[k], mean = meanOf(s);
+      h += `<g transform="translate(0,${y0})">` + S.line(x0, SH, x0 + cw, SH, "hair") + S.line(x0, 0, x0 + cw, 0, "grid") + strip(cw, SH, s, X, max, vColor(v.id)) + `</g>`;
+      h += S.text(x0 + cw, y0 + 12, `${k === "mem" ? s[s.length - 1].toFixed(1) : Math.round(mean)}`, "lbl-b", "end");
+      h += `<rect x="${x0}" y="${y0}" width="${cw}" height="${SH}" class="hit" data-tip="${esc(`${v.name} r1 ${lbl}\n${k === "mem" ? `end ${s[s.length - 1].toFixed(2)} GB, start ${s[0].toFixed(2)}` : `mean ${mean.toFixed(1)}%, max ${Math.max(...s).toFixed(1)}%`}\n${s.length} s @ 1 Hz, scale 0–${max} ${unit}`)}"/>`;
+      if (ci === 0) h += S.text(0, y0 + SH / 2 + 4, `${lbl} ${unit}`, "lbl-s");
+    });
+    const yA = TOP + UM.length * (SH + RG) - RG + 2;
+    [0, 20, 40].forEach(t => (h += S.line(X(t), yA - 2, X(t), yA + 2, "axis") + S.text(X(t), yA + 15, t === 40 ? "40 s" : t, "tk", t === 40 ? "end" : "middle", t === 40 ? 'dx="6"' : "")));
+  });
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="CPU, GPU and memory over time for repeat 1 of each version" style="pointer-events:auto;overflow:visible"');
+}
+
+/* ---- g: repeat spread ---- */
+function devFromMedian(r, m) {
+  const vals = RUNS.filter(u => u.version === r.version).map(u => u.st[m]).sort((x, y) => x - y);
+  return r.st[m] / vals[Math.floor(vals.length / 2)] - 1;
+}
+function drawSpread(el) {
+  const m = state.metric;
+  const W = el.clientWidth, PL = 104, PR = 16, RH = 50, TOP = 22;
+  const H = TOP + RH * VERS.length + 36, lo = -0.06, hi = 0.26;
+  const X = v => PL + ((v - lo) / (hi - lo)) * (W - PL - PR);
+  $("#spreadAside").innerHTML = `<span title="Each repeat's ${m} vs the median repeat of its version. Flag: over +10%">${m}, vs median</span>`;
+  let h = "";
+  const yEnd = H - 36;
+  [-0.05, 0.05, 0.15, 0.2, 0.25].forEach(t => (h += S.line(X(t), TOP - 8, X(t), yEnd, "grid")));
+  h += S.rect(X(0.10), TOP - 8, X(hi) - X(0.10), yEnd - TOP + 8, "nnwin") + S.line(X(0.10), TOP - 8, X(0.10), yEnd, "nnedge");
+  h += S.text(X(0.10) + 6, TOP + 2, "flag", "lbl-f");
+  h += S.line(X(0), TOP - 8, X(0), yEnd, "lead");
+  VERS.forEach((v, i) => {
+    const y = TOP + RH * i + RH / 2;
+    h += S.text(0, y + 4, esc(v.name), "lbl");
+    const rs = RUNS.filter(r => r.version === v.id).map(r => ({ r, d: devFromMedian(r, m) })).sort((a, b) => a.d - b.d);
+    let prev = -1e9, lvl = 0;
+    rs.forEach(({ r, d }) => {
+      const x = X(d); lvl = x - prev < 8 ? lvl + 1 : 0; prev = x;
+      const yy = y - lvl * 8;
+      h += S.circ(x, yy, 4, "seed" + (r.flag ? " out" : ""));
+      if (r.flag) h += S.text(x + 9, yy + 4, `r${r.repeat} ${sgnPct(d)}`, "lbl-f");
+      h += `<circle cx="${x}" cy="${yy}" r="9" class="hit" data-tip="${esc(`${v.name} r${r.repeat}\n${m} ${ms(r.st[m])} ms, ${sgnPct(d, 1)} vs median${r.flag ? `\nnoisy neighbour: steal ${r.flag.steal}% at ${r.flag.t0}–${r.flag.t1} s` : ""}`)}"/>`;
+    });
+  });
+  h += S.line(PL, yEnd, W - PR, yEnd, "axis");
+  [-0.05, 0, 0.1, 0.2].forEach(t => (h += S.line(X(t), yEnd, X(t), yEnd + 4, "axis") + S.text(X(t), yEnd + 17, t === 0 ? "0" : sgnPct(t), "tk", "middle")));
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="Each repeat vs the median repeat; one flagged outlier" style="pointer-events:auto;overflow:visible"');
+}
+
+/* ---- h: raw samples list, i: selected run ---- */
+function drawRunList() {
+  const el = $("#runList");
+  el.innerHTML = `<table class="rl-tbl"><thead><tr><th>version</th><th>run</th><th><span class="host" title="All samples are on this host">${esc(T.host)}</span></th><th class="r">p95</th><th></th></tr></thead><tbody>${RUNS.map((r, i) => {
+    const p = HX.paths(r.run_id).samples, firstOfV = i === 0 || RUNS[i - 1].version !== r.version;
+    return `<tr data-sel="${r.run_id}" aria-selected="${r.run_id === state.selected}" tabindex="0"><td>${firstOfV ? vsw(r.version) : ""}</td><td class="num" title="${esc(r.run_id)}">r${r.repeat} <span style="color:var(--ink-3)">${short(r.run_id)}</span>${r.flag ? ` <span class="x" title="flagged: ${esc(r.flag.kind)}">!</span>` : ""}</td>
+      <td title="${esc(r.host)}:${esc(p)}"><span class="p"><span class="pre">${esc(HX.store)}/…${esc(short(r.run_id))}/</span>samples.parquet</span></td><td class="r">${ms(r.st.p95)}</td><td style="padding-right:0">${copyBtn(p)}</td></tr>`;
+  }).join("")}</tbody></table>`;
+  el.querySelectorAll("tr[data-sel]").forEach(tr => {
+    const pick = () => { state.selected = tr.dataset.sel; rendered.run = false; drawRunList(); drawSel(); };
+    tr.addEventListener("click", e => { if (!e.target.closest(".copy")) pick(); });
+    tr.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+  });
+}
+function pathTree(r, compact) {
+  const P = HX.paths(r.run_id);
+  const rel = a => a.slice(P.run_dir.length + 1);
+  const kid = (abs, what = "", br = "├") => `<li><span class="br">${br}</span><span class="p">${esc(rel(abs))}</span><span class="what">${what}</span>${copyBtn(abs)}</li>`;
+  const cmd = HX.command.join(" ").replace("{run_dir}", "$RUN");
+  return `
+    ${compact ? "" : `<div class="cmdrow"><span class="k" style="font-weight:550">Load</span><code class="cmd">${esc(cmd)}</code></div>
+    <div class="cmdrow"><span class="k" style="font-weight:550">Server</span><code class="cmd">${esc(HX.server[r.version])}</code></div>`}
+    <div class="tree">
+      <div class="root"><span class="k">Repo</span><span><span class="host">${esc(r.host)}</span><span class="p">${esc(HX.repo)}</span></span>${copyBtn(HX.repo)}</div>
+      <p class="gitline"><span class="p">${esc(r.branch)} @ ${r.commit.slice(0, 7)}</span>&nbsp; clean</p>
+      <div class="root"><span class="k">Run</span><span><span class="host">${esc(r.host)}</span><span class="p" style="word-break:normal"><span class="pre">${esc(HX.store).replace(/\//g, "/<wbr>")}/</span><wbr>${esc(r.run_id)}</span></span>${copyBtn(P.run_dir)}</div>
+      <ul class="kids">
+        ${kid(P.samples, `${(r.st.n / 1000).toFixed(0)}k rows`)}
+        ${kid(P.util, `${r.util.cpu.length} s`)}
+        ${compact ? "" : kid(P.server) + kid(P.stdout) + kid(P.stderr)}
+        ${kid(P.env, "", "└")}
+      </ul>
+    </div>`;
+}
+function actionsHtml(r) {
+  return `<div class="actions">
+    <button class="btn" type="button" title="Same command, ${esc(r.branch)} @ ${r.commit.slice(0, 7)}, ${esc(r.host)}" data-toast="Rerun queued on ${esc(r.host)}">Rerun</button>
+    <button class="btn primary" type="button" title="Recompute percentiles from samples.parquet" data-toast="Re-evaluation queued for ${short(r.run_id)}">Re-evaluate</button>
+    <button class="btn" type="button" disabled title="Finished">Stop</button></div>`;
+}
+function drawSel() {
+  const r = runById[state.selected];
+  $("#selPane").innerHTML = `<div class="sel-h">${vsw(r.version)}<b>r${r.repeat}</b><span class="small num">${esc(short(r.run_id))}</span>${r.flag ? `<span class="tag flag" title="CPU steal ${r.flag.steal}% at ${r.flag.t0}–${r.flag.t1} s">flagged</span>` : ""}<a href="#run" style="margin-left:auto;font-size:13.5px">Open</a></div>
+    ${pathTree(r, true)}<div style="margin-top:18px">${actionsHtml(r)}</div>`;
+}
+
+/* ================================================================== RUN / ATTEMPT DETAIL */
+function renderRun() {
+  const r = runById[state.selected], v = r.v;
+  const sib = RUNS.filter(u => u.version === r.version && u !== r);
+  const dev = k => r.st[k] / meanOf(sib.map(u => u.st[k])) - 1;
+  const sibTxt = sib.map(u => "r" + u.repeat).join("–");
+  const att = r.attempts[r.attempts.length - 1];
+  const maxSteal = Math.max(...r.util.steal);
+
+  $("#v-run").innerHTML = `
+    <p class="crumb"><a href="#task">${esc(T.project)}</a><span class="sep">/</span><a href="#task">${esc(T.task)}</a><span class="sep">/</span>${esc(v.name)}<span class="sep">/</span>r${r.repeat}<span class="sep">/</span><span class="num">${esc(r.run_id)}</span></p>
+    <div class="run-top">
+      <div>
+        <h1 class="finding" id="run-h">${esc(v.name)} r${r.repeat} p95 ${sgnPct(dev("p95"))} vs ${sibTxt}</h1>
+        <div class="metaline">
+          <span class="who" title="exit ${att.exit}"><i style="background:var(--best)"></i><b>finished</b>&nbsp;${r.duration_s.toFixed(1)} s</span>
+          <span title="${r.attempts.length} attempts">attempt ${att.n}/${r.attempts.length}</span>
+          <span>${hm(r.created_at)} UTC</span>
+          ${whoHtml(r.created_by)}
+          <span title="${esc(T.gpu)}"><span class="host" style="margin:0">${esc(r.host)}</span></span>
+          <span class="p" style="color:var(--ink-3)">${esc(r.branch)}@${r.commit.slice(0, 7)}</span>
+          ${r.flag ? `<span class="tag flag" title="Flagged: CPU steal ${r.flag.steal}% at ${r.flag.t0}–${r.flag.t1} s">${esc(r.flag.kind)}</span>` : ""}
+        </div>
+      </div>
+      ${actionsHtml(r)}
+    </div>
+    <dl class="stats">
+      ${[["p50", "p50 ms"], ["p95", "p95 ms"], ["p99", "p99 ms"]].map(([k, l]) => `<div title="${k} ${r.st[k].toFixed(1)} ms, sample 95% CI ${ms(r.st[k + "_ci"][0])}–${ms(r.st[k + "_ci"][1])}; ${sibTxt}: ${sib.map(u => ms(u.st[k])).join(", ")}"><dt>${l}</dt><dd>${ms(r.st[k])} <small>${sgnPct(dev(k))}</small></dd></div>`).join("")}
+      <div title="${r.st.ok} ok / ${r.duration_s.toFixed(2)} s; ${sibTxt}: ${sib.map(u => u.st.rps.toFixed(1)).join(", ")}"><dt>req/s</dt><dd>${r.st.rps.toFixed(0)} <small>${sgnPct(dev("rps"))}</small></dd></div>
+      <div title="${r.st.timeouts} timeouts (&gt; 1 s), ${r.st.errors - r.st.timeouts} 5xx, of ${r.st.n}"><dt>errors</dt><dd${r.st.errors ? ' class="flag"' : ""}>${r.st.errors} <small>/ ${r.st.n}</small></dd></div>
+      <div title="Max 1 s CPU steal on ${esc(r.host)}. Others: ${sib.map(u => Math.max(...u.util.steal).toFixed(1)).join(", ")}%"><dt>steal max</dt><dd${maxSteal > 5 ? ' class="flag"' : ""}>${maxSteal.toFixed(0)}<small>%</small></dd></div>
+    </dl>
+
+    <div class="two">
+      <div class="col">
+        <div class="fig">
+          <div class="fig-h"><span class="pl">a</span><span class="t">Latency over time</span><span class="aside"><span>ms, log</span></span></div>
+          <div id="scatter"></div>
+          <div class="key"><span><svg width="12" height="12">${S.circ(6, 6, 2, "", `style="fill:${vColor(r.version)};opacity:.5"`)}</svg>request</span><span><svg width="22" height="12"><path d="M2 6H20" style="stroke:var(--ink);stroke-width:2"/></svg>p95, 1 s</span><span><svg width="12" height="12">${S.cross(6, 6, 3.5)}</svg>timeout</span>${r.flag ? `<span>${G.nn}steal &gt; 5%</span>` : ""}</div>
+        </div>
+        <div class="fig" style="margin-top:40px">
+          <div class="fig-h"><span class="pl">b</span><span class="t">Utilisation</span><span class="aside">1 Hz</span></div>
+          <div id="rutil"></div>
+        </div>
+        <div class="fig">
+          <div class="fig-h"><span class="pl">c</span><span class="t">Attempts</span></div>
+          <ul class="attempts">${r.attempts.map(a => `<li><span class="n">#${a.n}</span><span class="st ${a.status === "finished" ? "ok" : "bad"}">${a.status === "finished" ? "finished" : "exit " + a.exit}</span><span class="why" title="${esc(a.why || "")}">${esc(a.why ? a.why.split(":")[0] : "")}</span><span class="num small">${a.secs} s</span></li>`).join("")}</ul>
+        </div>
+      </div>
+      <div class="col">
+        <div class="fig">
+          <div class="fig-h"><span class="pl">d</span><span class="t">vs ${sibTxt}</span><span class="aside" title="Share of requests slower than x, log-log">tail, ms</span></div>
+          <div id="ecdf"></div>
+        </div>
+        <div class="fig">
+          <div class="fig-h"><span class="pl">e</span><span class="t">Paths</span></div>
+          ${pathTree(r, false)}
+        </div>
+      </div>
+    </div>`;
+  drawRunCharts();
+}
+function drawRunCharts() {
+  const r = runById[state.selected];
+  drawScatter($("#scatter"), r); drawRunUtil($("#rutil"), r); drawEcdf($("#ecdf"), r);
+}
+const RPL = 64, RPR = 58;
+function timeX(W, r) { const tmax = Math.ceil(r.duration_s); return s => RPL + (s / tmax) * (W - RPL - RPR); }
+function nnBand(r, X, y0, y1) { return r.flag ? S.rect(X(r.flag.t0), y0, X(r.flag.t1) - X(r.flag.t0), y1 - y0, "nnwin") + S.line(X(r.flag.t0), y0, X(r.flag.t0), y1, "nnedge") + S.line(X(r.flag.t1), y0, X(r.flag.t1), y1, "nnedge") : ""; }
+function drawScatter(el, r) {
+  const W = el.clientWidth, H = 340, TOP = 30, BOT = 300;
+  const X = timeX(W, r), la = Math.log10(5), lb = Math.log10(1200);
+  const Y = v => BOT - ((Math.log10(Math.max(5, v)) - la) / (lb - la)) * (BOT - TOP);
+  let h = nnBand(r, X, TOP - 14, BOT);
+  if (r.flag) h += S.text((X(r.flag.t0) + X(r.flag.t1)) / 2, TOP - 20, `steal ${r.flag.steal}%`, "lbl-f", "middle");
+  LOGT.forEach(t => { h += S.line(RPL, Y(t), W - RPR, Y(t), "grid"); h += S.text(RPL - 8, Y(t) + 4, t >= 1000 ? "1 s" : t, "tk", "end"); });
+  let dots = "";
+  const s = r.samples;
+  for (let i = 0; i < s.t.length; i++) {
+    if (s.err[i] === 1) continue;
+    dots += `M${X(s.t[i]).toFixed(1)} ${Y(s.lat[i]).toFixed(1)}h0`;
+  }
+  h += `<path d="${dots}" style="stroke:${vColor(r.version)};stroke-width:2.6;stroke-linecap:round;opacity:.4"/>`;
+  for (let i = 0; i < s.t.length; i++) if (s.err[i] === 1) h += S.cross(X(s.t[i]), Y(1000), 3.5);
+  /* rolling p95, 1 s windows stepped 0.25 s */
+  const pts = [];
+  for (let c = 0.5; c <= r.duration_s - 0.5; c += 0.25) {
+    const w = []; for (let i = 0; i < s.t.length; i++) if (!s.err[i] && s.t[i] >= c - 0.5 && s.t[i] < c + 0.5) w.push(s.lat[i]);
+    if (w.length > 20) { w.sort((a, b) => a - b); pts.push([X(c), Y(quant(w, 0.95)), c, quant(w, 0.95)]); }
+  }
+  h += `<path d="M${pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join("L")}" style="fill:none;stroke:var(--ink);stroke-width:2;stroke-linejoin:round"/>`;
+  const lp = pts[pts.length - 1];
+  h += S.text(W - RPR + 8, lp[1] + 4, "p95", "lbl-b");
+  pts.filter((_, i) => i % 2 === 0).forEach(p => (h += `<rect x="${p[0] - 5}" y="${TOP}" width="10" height="${BOT - TOP}" class="hit" data-tip="${p[2].toFixed(1)} s: p95 ${ms(p[3])} ms"/>`));
+  h += S.line(RPL, BOT, W - RPR, BOT, "axis");
+  const tmax = Math.ceil(r.duration_s);
+  for (let t = 0; t <= tmax; t += 5) h += S.line(X(t), BOT, X(t), BOT + 4, "axis") + S.text(X(t), BOT + 17, t + (t + 5 > tmax ? " s" : ""), "tk", "middle");
+  el.innerHTML = S.svg(W, H, h, `role="img" aria-label="Latency of each request over time with rolling p95" style="pointer-events:auto;overflow:visible"`);
+}
+function drawRunUtil(el, r) {
+  const W = el.clientWidth, SH = 40, RG = 12;
+  const rows = [["cpu", "CPU", "%", 100], ["steal", "steal", "%", 100], ["gpu", "GPU", "%", 100], ["mem", "mem", "GB", 12]];
+  const X = timeX(W, r), H = rows.length * (SH + RG) + 30;
+  let h = nnBand(r, X, 0, rows.length * (SH + RG) - RG);
+  rows.forEach(([k, lbl, unit, max], i) => {
+    const y0 = i * (SH + RG), s = r.util[k];
+    const col = k === "steal" ? "var(--fail)" : vColor(r.version);
+    h += `<g transform="translate(0,${y0})">` + S.line(RPL, SH, W - RPR, SH, "hair") + S.line(RPL, 0, W - RPR, 0, "grid") + strip(W, SH, s, X, max, col) + `</g>`;
+    h += S.text(RPL - 10, y0 + SH / 2 + 4, `${lbl} ${unit}`, "lbl-s", "end");
+    const val = k === "mem" ? s[s.length - 1].toFixed(1) : Math.round(k === "steal" ? Math.max(...s) : meanOf(s));
+    h += S.text(W - RPR + 8, y0 + SH / 2 + 4, val, "lbl-b");
+    h += `<rect x="${RPL}" y="${y0}" width="${W - RPL - RPR}" height="${SH}" class="hit" data-tip="${esc(`${lbl}: ${k === "mem" ? `end ${s[s.length - 1]} GB` : k === "steal" ? `max ${Math.max(...s)}%` : `mean ${meanOf(s).toFixed(1)}%`}\nscale 0–${max} ${unit}`)}"/>`;
+  });
+  const yA = rows.length * (SH + RG) - RG;
+  h += S.line(RPL, yA, W - RPR, yA, "axis");
+  const tmax = Math.ceil(r.duration_s);
+  for (let t = 0; t <= tmax; t += 5) h += S.line(X(t), yA, X(t), yA + 4, "axis") + S.text(X(t), yA + 17, t + (t + 5 > tmax ? " s" : ""), "tk", "middle");
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="CPU, steal, GPU and memory over the run" style="pointer-events:auto;overflow:visible"');
+}
+function drawEcdf(el, r) {
+  /* tail plot: share of requests slower than x, log-log */
+  const W = el.clientWidth, H = 300, PL = 44, PR = 12, TOP = 12, BOT = 256;
+  const X = logX(W, PL, PR, 5, 1000);
+  const ly0 = 0, ly1 = -3.7;
+  const Y = p => TOP + ((ly0 - Math.log10(Math.max(2e-4, p))) / (ly0 - ly1)) * (BOT - TOP);
+  let h = "";
+  [[1, "100%"], [0.05, "p95"], [0.01, "p99"], [0.001, ".1%"]].forEach(([p, l]) => { h += S.line(PL, Y(p), W - PR, Y(p), p === 0.05 || p === 0.01 ? "hair" : "grid"); h += S.text(PL - 6, Y(p) + 4, l, p === 0.05 || p === 0.01 ? "lbl-s" : "tk", "end"); });
+  [5, 10, 20, 50, 100, 200, 500, 1000].forEach(t => (h += S.line(X(t), TOP, X(t), BOT, "grid")));
+  const runs = RUNS.filter(u => u.version === r.version).sort((a, b) => (a === r) - (b === r));
+  runs.forEach(u => {
+    const s = u.sorted, n = u.st.n, me = u === r;
+    let d = "", last = -1;
+    for (let i = 0; i < s.length; i++) {
+      const x = X(s[i]); if (x - last < 0.8 && i < s.length - 1) continue; last = x;
+      d += `${d ? "L" : "M"}${x.toFixed(1)},${Y((n - i) / n).toFixed(1)}`;
+    }
+    h += `<path d="${d}" style="fill:none;stroke:${me ? "var(--ink)" : vColor(u.version)};stroke-width:${me ? 2 : 1.5};stroke-linejoin:round;opacity:${me ? 1 : .75}"/>`;
+    h += S.circ(X(u.st.p95), Y(0.05), me ? 4 : 3.2, me ? "mean" : "seed", `data-tip="${esc(`r${u.repeat} p95 ${ms(u.st.p95)} ms, p99 ${ms(u.st.p99)} ms`)}"`);
+    if (u.st.timeouts) h += S.cross(X(1000), Y(u.st.timeouts / n), 3.5);
+  });
+  const oth = runs.filter(u => u !== r);
+  h += S.text(X(r.st.p95) + 9, Y(0.05) - 7, `r${r.repeat}`, "lbl-b");
+  h += S.text(X(Math.min(...oth.map(u => u.st.p95))) - 8, Y(0.05) + 16, oth.map(u => "r" + u.repeat).join(" "), "lbl", "end");
+  h += S.line(PL, BOT, W - PR, BOT, "axis");
+  [5, 20, 100, 500].forEach(t => (h += S.line(X(t), BOT, X(t), BOT + 4, "axis") + S.text(X(t), BOT + 17, t, "tk", "middle")));
+  h += S.text(X(1000), BOT + 17, "1 s", "tk", "end");
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="Latency tail of this repeat against its sibling repeats, share slower than x, log-log" style="pointer-events:auto;overflow:visible"');
+}
+
+/* ================================================================== routing, theme, palette */
+const VIEWS = { task: renderTask, run: renderRun };
+const REDRAW = { task: drawTaskCharts, run: drawRunCharts };
+const rendered = {};
+let current = "task";
+function show() {
+  const v = (location.hash || "#task").slice(1);
+  current = VIEWS[v] ? v : "task";
+  Object.keys(VIEWS).forEach(k => ($("#v-" + k).hidden = k !== current));
+  document.querySelectorAll(".tabs a").forEach(a => { if (a.getAttribute("href") === "#" + current) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+  if (!rendered[current]) { VIEWS[current](); rendered[current] = true; } else REDRAW[current]();
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", show);
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => REDRAW[current](), 120); });
+
+function setThemeLabel() { $("#themeLbl").textContent = document.documentElement.dataset.theme === "dark" ? "Light" : "Dark"; }
+function toggleTheme() {
+  const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = t; localStorage.setItem("hx-theme", t); setThemeLabel();
+}
+$("#themeBtn").addEventListener("click", toggleTheme);
+
+let toastT;
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2200); }
+document.addEventListener("click", e => {
+  const c = e.target.closest("[data-copy]");
+  if (c) { navigator.clipboard && navigator.clipboard.writeText(`${T.host}:${c.dataset.copy}`).catch(() => {}); toast(`Copied ${T.host}:${c.dataset.copy}`); return; }
+  const t = e.target.closest("[data-toast]"); if (t) toast(t.dataset.toast);
+});
+const tip = $("#tip");
+document.addEventListener("mousemove", e => {
+  const t = e.target.closest && e.target.closest("[data-tip]");
+  if (!t) { tip.classList.remove("on"); return; }
+  tip.innerHTML = esc(t.getAttribute("data-tip")).replace(/\n/g, "<br>");
+  tip.style.left = Math.min(innerWidth - 340, e.clientX + 14) + "px"; tip.style.top = (e.clientY + 16) + "px";
+  tip.classList.add("on");
+});
+
+const CMDS = [
+  { g: "Go to", t: "Task", s: `${T.project} / ${T.task}`, go: () => (location.hash = "#task") },
+  ...RUNS.map(r => ({ g: "Runs", t: `${r.v.name} r${r.repeat}`, s: short(r.run_id) + (r.flag ? ", flagged" : ""), go: () => { state.selected = r.run_id; rendered.run = false; location.hash = "#run"; if (current === "run") show(); } })),
+  { g: "Commands", t: "Switch colour mode", s: "light or dark", go: toggleTheme },
+];
+let palItems = CMDS, palSel = 0;
+function palRender() {
+  let lastG = "", h = "";
+  palItems.forEach((c, i) => { if (c.g !== lastG) { h += `<li class="grp" role="presentation">${esc(c.g)}</li>`; lastG = c.g; } h += `<li class="it" role="option" id="po${i}" data-i="${i}" aria-selected="${i === palSel}"><span>${esc(c.t)}</span><small>${esc(c.s)}</small></li>`; });
+  $("#palList").innerHTML = h || `<li class="grp">No match</li>`;
+}
+function palOpen() { $("#pal").classList.add("on"); $("#palIn").value = ""; palItems = CMDS; palSel = 0; palRender(); $("#palIn").focus(); }
+function palClose() { $("#pal").classList.remove("on"); $("#findBtn").focus(); }
+function palRun(i) { const c = palItems[i]; if (!c) return; palClose(); c.go(); }
+$("#findBtn").addEventListener("click", palOpen);
+$("#pal").addEventListener("click", e => { if (e.target.id === "pal") palClose(); const li = e.target.closest("li.it"); if (li) palRun(+li.dataset.i); });
+$("#palIn").addEventListener("input", e => { const q = e.target.value.toLowerCase(); palItems = CMDS.filter(c => (c.t + " " + c.s + " " + c.g).toLowerCase().includes(q)); palSel = 0; palRender(); });
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); $("#pal").classList.contains("on") ? palClose() : palOpen(); return; }
+  if (!$("#pal").classList.contains("on")) return;
+  if (e.key === "Escape") palClose();
+  else if (e.key === "ArrowDown") { palSel = Math.min(palItems.length - 1, palSel + 1); palRender(); e.preventDefault(); }
+  else if (e.key === "ArrowUp") { palSel = Math.max(0, palSel - 1); palRender(); e.preventDefault(); }
+  else if (e.key === "Enter") palRun(palSel);
+});
+
+setThemeLabel();
+document.fonts.ready.then(show);
+</script>
+</body>
+</html>

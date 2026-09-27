@@ -465,29 +465,135 @@ Teaches the loop:
 5. `hx compare` against the current best; write a note with the finding.
 6. Never delete runs; never change a metric without bumping its version.
 
-## 8. UI
+## 8. UI, task kinds, and views (phase 1b)
 
-React + TypeScript + Vite, built with Bun; TanStack Router/Query/Table; Tailwind +
-shadcn/ui; ECharts for curves (handles large point counts). Built assets ship inside the
-Python wheel; `hx serve` serves them. Dark and light mode. `⌘K` command palette to jump to
-any project, task, or run. Visual mockups are made and approved before UI build starts.
+Approved mockups (2026-09-27): `docs/mockups/ui-v4/` (base design system and the
+Overview, Leaderboard, Run, Examples screens) and `docs/mockups/kinds/{training,
+agent_eval, agent_iteration, system_bench, custom_view}/`. The mockups are the visual
+reference; where this section and a mockup disagree, this section wins.
 
-Screens:
+### 8.1 Principles
 
-1. **Overview** — all projects: running / queued / finished today / failed, recent
-   runs feed, host + GPU status (phase 2).
-2. **Project** — tasks, datasets, metrics (with versions and changelog), recent runs,
-   notebook (phase 3).
-3. **Task leaderboard** — seed-group rows, primary metric sort, other metrics as
-   columns, metric-version badges, "within noise" markers, paper baselines as pinned rows
-   (phase 3), "re-evaluate N runs" button, export (phase 3).
-4. **Run detail** — hypothesis, status, command (copy), paths panel (repo@commit,
-   dataset host:path + hash status, run dir, artifacts host:path), config, env, live logs,
-   metric charts, scores by version, tags/star/notes, actions: rerun / re-infer /
-   re-evaluate / stop.
-5. **Compare** — 2+ runs: config diff, score diff, overlaid curves.
-6. **Example browser** — paged per-example predictions + per-example scores; filter to
-   failures; two-run diff (fixed by A, broken by B).
+- **Terse.** Numbers, glyphs, short labels. No explanatory sentences on the page;
+  explanations live in hover tooltips. Each page's headline is one line with the finding
+  and its number (for example `SVM +0.037 over rf, p = 0.15`), generated from the data.
+- **Journal-figure style.** Panels are lettered (a, b, c …) with a few-word title. No
+  identical bordered cards; panels are separated by space and hairlines.
+- **Two kinds of noise, always.** Seed noise (per-seed dots; identical seeds collapse to a
+  `◇×3` glyph, never a fake `± 0`) and test-set noise (95% interval, section 8.5). The best
+  group's test-set interval is drawn as a band that other rows are compared against.
+- **Where everything is.** Every run page lists code, data, run folder, logs, predictions,
+  checkpoints as `host:path`; the run folder is shown once and its children relative to it.
+- Dark and light mode are equal citizens. `⌘K` palette searches projects, tasks, runs,
+  and paths. Monospace only for paths, commands, and YAML.
+
+### 8.2 Stack
+
+React + TypeScript + Vite, built and tested with Bun, in `ui/`. TanStack Router and
+Query. Plain CSS with design tokens copied from `ui-v4` (no Tailwind, no component kit).
+Charts are React SVG components using `d3-scale`/`d3-shape`/`d3-array` for math only.
+`vega-embed` renders `vega_lite` panels. Built assets ship in the wheel at
+`src/hypothex/ui_dist/`; `hx serve` serves them. Live updates come from the WebSocket
+event stream (section 5.3).
+
+### 8.3 Screens
+
+1. **Overview** — headline status line; runs-by-launcher timeline (agent vs human,
+   failed, archived, current best); recent ideas (one line per seed group, one mark per
+   seed); running; failures with a link to stderr; projects table.
+2. **Task** — view tabs: the kind's preset view, any custom views, `+ view`.
+3. **Run** — kind-specific run detail (8.4) plus the common parts: hypothesis as title,
+   status, stat strip, scores by metric version, where everything is, notes, actions
+   (rerun / re-infer / re-evaluate / stop).
+4. **Examples** — two-run per-example comparison: 2×2 outcome table, one-mark-per-example
+   strip, sign-test p, failing examples list.
+5. **View editor** — YAML on the left with inline validation (red marker, message,
+   suggested fix), live preview on the right on a 12-column grid, insert-panel palette,
+   Save (disabled while invalid), Discard, Copy as CLI.
+
+### 8.4 Task kinds
+
+`TaskSpec.kind` in `hypothex.yaml`: `generic` (default), `training`, `agent_eval`,
+`agent_iteration`, `system_bench`. A kind is only a preset view (8.6) plus a run-detail
+layout; it never changes storage or evaluation.
+
+| Kind | Preset task view | Run detail adds |
+|---|---|---|
+| generic | stat strip, leaderboard | metric charts |
+| training | leaderboard (best checkpoint or final), small-multiple curves (train/val loss, val metric, lr; seeds faint, mean bold, best checkpoint marked, spikes and kills marked), runs table with GPU sparklines, checkpoints | stacked curves on one step axis, checkpoints list |
+| agent_eval | leaderboard with $ and time, cost-or-time vs score scatter with Pareto front, failure-category bars, items × configs outcome grid, trajectory of a selected attempt | step list (turn, tool, args, result, tokens, seconds; failing step marked), same item across configs, tokens per turn |
+| agent_iteration | score over versions with CI ribbon and change labels, regressions marked, cost per success over versions, changes table, flip grid between two versions, leaderboard | same as agent_eval |
+| system_bench | leaderboard on a chosen percentile, latency distributions (log scale, p50/p95/p99 ticks), percentile table with Δ and CI vs baseline, throughput vs concurrency, error rate, utilisation strips, repeat spread with outliers flagged | latency over time, utilisation strips, tail vs other repeats |
+
+`agent_iteration` orders seed groups by `version` (a run param, default: creation time of
+the group's first run). `system_bench` compares against `baseline:` (a seed-group
+selector in the task spec).
+
+### 8.5 Statistics (`hypothex.core.stats`)
+
+- **Test-set interval** per seed group: if the metric's per-example field is binary
+  (`correct`/`solved`/any bool), the Wilson 95% interval with `n` = examples scored;
+  otherwise a percentile bootstrap over examples (1,000 resamples, fixed seed 0). Seeds are
+  pooled by averaging per example first.
+- **Paired comparison vs best**: binary → exact two-sided sign test on discordant examples
+  (fixed vs broken); continuous → paired bootstrap of the mean difference. Reported as `p`.
+- **Examples needed**: the smallest `n` at which the observed discordant rate would give
+  `p < 0.05` (shown as `≈250`).
+- **Seed comparison** (training, no per-example data): Welch t-test over seed values.
+- Percentiles for `system_bench` use the raw samples (8.7); their CI comes from repeats.
+All functions are pure, typed, and unit-tested against known values (scipy is not a
+dependency; exact binomial tails are computed directly).
+
+### 8.6 Views: user-defined dashboards
+
+A view is YAML: a list of panels. Presets for each kind ship in the package
+(`src/hypothex/views/presets/<kind>.yaml`). Custom views live in the project repo at
+`.hypothex/views/<task>/<name>.yaml` (committed with the code); a task may also declare
+`views:` inline in `hypothex.yaml`. The UI editor saves to the file form.
+
+```yaml
+title: route quality
+from: agent_eval            # optional: start from a preset and override panels
+runs: {status: finished}    # run filter: status, tags, created_by, since
+panels:
+  - type: stat_strip | leaderboard | curves | scatter | distribution | grid |
+          table | trace | markdown | vega_lite
+    title: Best config
+    data: {metrics, x, y, group_by, filter, pick, source, fields}   # per type
+    layout: {span: 1-12, row: N}
+    # type-specific: noise (leaderboard), pareto (scatter), spec (vega_lite), text (markdown)
+```
+
+- Metric references use the existing syntax (`name@version/key`, section 6); aggregates
+  `/mean`, `/median`, `/p95` apply to samples and per-example values.
+- `source` for `table`/`vega_lite`: `runs`, `scores`, `metrics` (step history),
+  `predictions` (per-example rows + per-example scores), `samples`, `usage`, `traces`.
+- Validation (`hypothex.core.views.validate_view`) checks schema, metric names (with a
+  nearest-name suggestion), sources, fields, and Vega-Lite spec shape; errors carry a line
+  number. Invalid views are never saved.
+- Panel data is computed server-side: `POST /api/v1/views/query` takes a panel and returns
+  rows; the UI never reads files.
+- CLI: `hx view list <task>`, `hx view show <task> <name>`, `hx view init <task> --from
+  <kind> --name N`, `hx view add <task> --file view.yaml`, `hx view validate <file>`.
+  MCP: `list_views`, `get_view`, `add_view` (validates first). API: `GET/PUT/DELETE
+  /api/v1/tasks/{project}/{task}/views/{name}`, `POST .../views/validate`.
+
+### 8.7 SDK and storage additions
+
+- `run.log_trace(example_id, steps)` → `traces/<example_id>.jsonl`; a step is
+  `{turn, tool, args, result, tokens_in, tokens_out, seconds, error?}`.
+- `run.log_usage(tokens_in=0, tokens_out=0, usd=0.0, seconds=0.0, example_id=None)` →
+  `usage.jsonl`; run totals are indexed.
+- `run.log_samples(name, values)` → `samples/<name>.jsonl` (raw values, e.g. latencies).
+- Prediction rows may carry `meta.category` (failure type) and `meta.difficulty`.
+- `run.log_checkpoint(path, step, metrics)` = `log_artifact(kind="checkpoint")` plus step
+  and metrics, used by the training views.
+
+### 8.8 Git state fix
+
+`GitInfo.dirty` counts tracked changes only. Untracked files are recorded separately as
+`git.untracked` (count + first 20 names). The run page says "untracked files only" when
+there is no tracked diff. This fixes a misleading warning found in the acceptance run.
 
 ## 9. Phase 3 features (design summary)
 
@@ -580,7 +686,7 @@ hypothex/
 | Phase | Scope | Done when |
 |---|---|---|
 | **1a. Core backend** | Sections 2–4, 5.1 (local), 5.2–5.3 for the Mac environment only (descriptor, event log, idempotent commands, resumable WebSocket streams, startup repair), 5.4 local runner, 6, 7 (all interfaces, local actions), 10, 11 for these parts. | Toy E2E green in CI; DeepRetro onboarded with one task and ≥ 3 runs; an agent completes the section 7.5 loop using only the skill file. |
-| **1b. UI** | Section 8 screens 1–6 (no host status), after mockups are approved. | All six screens work against the toy store; Playwright smoke test green. |
+| **1b. UI, kinds, views** | Section 8: stats, views (presets + custom + editor), SDK additions, git fix, all screens for all kinds, WebSocket live updates. | Each kind's preset renders against a seeded store; a custom view round-trips through editor, file, CLI, and MCP; Playwright smoke test green in both modes. |
 | **2. Scale** | Remote env servers: SSH bootstrap + tunnel, `hx hosts add`, `hx service install`, hub supervisors + replay from many envs, file sync (5.5), SLURM runner, stale/lost rules (5.6), queue, sweeps, host/GPU status, cost. | A DeepRetro run launched from the UI on SLURM and on an SSH box, pulled, scored, and shown on the leaderboard. |
 | **3. Team + output** | Notebook, paper baselines, Slack + email alerts, weekly summary, export, storage cleanup, pairing + scoped auth, Tailscale access, Postgres server mode. | A collaborator pairs a laptop with a server hub, sees the same projects, and launches a run on a shared environment. |
 
@@ -602,4 +708,7 @@ Each phase gets its own implementation plan.
 | Agents | CLI `--json`, MCP, HTTP, skill file | User choice: all four |
 | Seeds | Seed groups with mean ± std | AI research claims need noise estimates |
 | Alerts | Slack + email | User choice |
+| UI style | Journal-figure, terse (mockup ui-v4) | User choice after 3 directions + revisions |
+| Dashboards | Task kinds as preset views; custom YAML views with a panel library and a Vega-Lite escape hatch | Training, agent evals, agent iteration, and system benchmarks need different views; users add their own |
+| Noise | Seed noise and test-set noise shown separately | Seeds alone overstate certainty on small test sets |
 | Name | Hypothex / `hx` | Free on PyPI + npm (checked 2026-09-26) |

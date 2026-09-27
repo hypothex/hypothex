@@ -7,3 +7,4 @@ docs/_build/
 .ruff_cache/
 examples/toy-classifier/data/
 docs/mockups/archive/
+.superpowers/plan-parts/

@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from hypothex.api.app import _run_view
 from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.control import repair_runs
@@ -14,7 +15,7 @@ from hypothex.core.ids import utcnow
 from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_view
 from hypothex.core.records import RunRecord, RunStatus
-from hypothex.core.views import get_view
+from hypothex.core.views import ViewSpec, get_view
 from hypothex.demo import (
     _SEEDERS,
     DEMO_EPOCH,
@@ -394,3 +395,26 @@ def test_existing_project_blocks_every_kind(tmp_path: Path) -> None:
     with pytest.raises(StoreError, match="toy-classifier"):
         seed_demo(home, ["system_bench", "generic"])
     assert not Context.open(home).layout.project_dir("route-search").exists()
+
+
+def test_every_kind_run_view_queries_cleanly(dctx: Context) -> None:
+    for kind, ref in REFS.items():
+        entry, task = q.resolve_task(dctx, ref)
+        finished = [
+            r
+            for r in _runs(dctx, entry.project)
+            if r.status == RunStatus.FINISHED and not r.archived
+        ]
+        run_id = finished[-1].run_id
+        # scoped to one run the way the UI's scopeToRun does; traces have their own section
+        panels = [
+            p.model_copy(update={"data": p.data.model_copy(update={"filter": {"run_id": run_id}})})
+            for p in _run_view(kind)
+            if p.type != "trace"
+        ]
+        results = query_view(dctx, entry.project, task, ViewSpec(title="run", panels=panels))
+        for result in results:
+            assert "error" not in result.meta, (kind, result.title, result.meta.get("error"))
+        if kind == "system_bench":
+            (latency,) = [r for r in results if r.type == "distribution"]
+            assert [row["n"] for row in latency.rows] == [5000]

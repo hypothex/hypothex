@@ -7,6 +7,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -25,8 +26,10 @@ from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
 from hypothex.core.jsonutil import to_jsonable
+from hypothex.core.overview import build_overview
+from hypothex.core.panels import query_panel
 from hypothex.core.records import RunStatus
-from hypothex.core.views import PanelSpec, ViewSpec
+from hypothex.core.views import PanelData, PanelSpec, ViewSpec
 from hypothex.mcp.server import (
     ViewValidationError,
     build_server,
@@ -130,6 +133,47 @@ async def _repair_loop(ctx: Context) -> None:
             log.exception("run repair failed")
 
 
+def _run_view(kind: str) -> list[PanelSpec]:
+    """
+    Run-detail panels for a task kind (spec section 8.4); the UI fills in the run.
+
+    Parameters
+    ----------
+    kind : str
+        Task kind.
+
+    Returns
+    -------
+    list of PanelSpec
+        Fresh panel specs, in display order.
+    """
+    if kind == "training":
+        return [PanelSpec(type="curves", title="curves", data=PanelData(step_metric="step"))]
+    if kind in ("agent_eval", "agent_iteration"):
+        return [
+            PanelSpec(type="trace", title="steps"),
+            PanelSpec(type="grid", title="same item across configs"),
+            PanelSpec(
+                type="table",
+                title="tokens per turn",
+                data=PanelData(
+                    source="traces", fields=["example_id", "turn", "tokens_in", "tokens_out"]
+                ),
+            ),
+        ]
+    if kind == "system_bench":
+        return [
+            PanelSpec(type="curves", title="over time"),
+            PanelSpec(
+                type="distribution",
+                title="latency",
+                scale="log",
+                data=PanelData(metrics=["latency_ms"]),
+            ),
+        ]
+    return [PanelSpec(type="curves", title="metrics")]
+
+
 def create_app(
     home: Path | None = None, *, background_repair: bool = True, host: str | None = None
 ) -> FastAPI:
@@ -201,6 +245,13 @@ def create_app(
     def environment() -> dict[str, Any]:
         return ctx.descriptor.model_dump(mode="json")
 
+    # overview ----------------------------------------------------------------------
+    @app.get("/api/v1/overview")
+    def overview(since: datetime | None = None) -> dict[str, Any]:
+        if since is not None and since.tzinfo is None:
+            since = since.replace(tzinfo=UTC)
+        return to_jsonable(build_overview(ctx, since))
+
     # projects & tasks ------------------------------------------------------------
     @app.get("/api/v1/projects")
     def projects() -> list[dict[str, Any]]:
@@ -239,6 +290,12 @@ def create_app(
             body,
             lambda: reeval(ctx, project=project, task=task, metric=body.metric, force=body.force),
         )
+
+    @app.get("/api/v1/tasks/{project}/{task}/kind")
+    def task_kind(project: str, task: str) -> dict[str, Any]:
+        entry, name = q.resolve_task(ctx, task, project)
+        kind = entry.config.tasks[name].kind
+        return {"kind": kind, "run_view": to_jsonable(_run_view(kind))}
 
     # views -------------------------------------------------------------------------
     @app.get("/api/v1/tasks/{project}/{task}/views")
@@ -311,6 +368,25 @@ def create_app(
     @app.get("/api/v1/runs/{run_id}/metrics")
     def run_metrics(run_id: str) -> list[dict[str, Any]]:
         return to_jsonable(q.metric_history(ctx, run_id))
+
+    @app.get("/api/v1/runs/{run_id}/traces")
+    def run_traces(run_id: str) -> list[dict[str, Any]]:
+        record = ctx.find_record(run_id)
+        return ctx.store.list_traces(record.project, record.run_id)
+
+    # `:path` keeps example ids such as "HumanEval/0" in one parameter.
+    @app.get("/api/v1/runs/{run_id}/traces/{example_id:path}")
+    def run_trace(run_id: str, example_id: str) -> dict[str, Any]:
+        record = ctx.find_record(run_id)
+        known = {t["example_id"] for t in ctx.store.list_traces(record.project, record.run_id)}
+        if example_id not in known:
+            raise StoreError(f"run {run_id} has no trace for example {example_id!r}")
+        panel = PanelSpec(
+            type="trace",
+            title=example_id,
+            data=PanelData(run_id=run_id, example_id=example_id),
+        )
+        return to_jsonable(query_panel(ctx, record.project, record.task or "", panel))
 
     @app.get("/api/v1/runs/{run_id}/logs")
     def run_logs(run_id: str, stream: str = "stdout", offset: int | None = None) -> dict[str, Any]:

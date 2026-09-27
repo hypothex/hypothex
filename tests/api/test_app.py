@@ -12,6 +12,7 @@ from hypothex.api.app import create_app
 from hypothex.core.context import Context
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.views import get_view, load_preset
+from hypothex.sdk import Run
 from tests.factories import PREDS_075, seed_finished_run
 
 WS_URL = "ws://127.0.0.1:7777/api/v1/ws"  # TestClient defaults to Host "testserver"
@@ -373,3 +374,74 @@ def test_inline_view_with_anchors_is_a_config_error_not_500(
     assert (
         f"YAML anchors and aliases are not allowed in views (line {line})" in resp.json()["error"]
     )
+
+
+def test_overview_route(client: TestClient, ctx: Context, toy_repo: Path) -> None:
+    _scored(ctx, toy_repo)
+    body = client.get("/api/v1/overview").json()
+    assert [t["run_id"] for t in body["timeline"]] == ["r1"]
+    assert body["headline"].startswith("Idle")
+    assert ("toy", "toy-acc") in {(p["project"], p["task"]) for p in body["projects"]}
+    # a naive timestamp is read as UTC instead of failing an aware/naive comparison
+    later = client.get("/api/v1/overview", params={"since": "2999-01-01T00:00:00"})
+    assert later.status_code == 200 and later.json()["timeline"] == []
+    earlier = client.get("/api/v1/overview", params={"since": "2000-01-01T00:00:00+00:00"})
+    assert [t["run_id"] for t in earlier.json()["timeline"]] == ["r1"]
+    assert client.get("/api/v1/overview", params={"since": "yesterday"}).status_code == 422
+
+
+def test_run_traces(client: TestClient, ctx: Context, toy_repo: Path) -> None:
+    rec = seed_finished_run(ctx, toy_repo, "r1")
+    run = Run(ctx.run_dir(rec), "r1", rec.project)
+    step = {
+        "tool": "bash",
+        "args": {"cmd": "ls"},
+        "result": "ok",
+        "tokens_in": 10,
+        "tokens_out": 5,
+        "seconds": 0.5,
+    }
+    run.log_trace("ex-2", [{"turn": 1, **step}, {"turn": 2, **step, "error": "boom"}])
+    run.log_trace("ex-1", [{"turn": 1, **step}, {"turn": 2, **step}, {"turn": 3, **step}])
+    assert client.get("/api/v1/runs/r1/traces").json() == [
+        {"example_id": "ex-1", "turns": 3, "failed": False},
+        {"example_id": "ex-2", "turns": 2, "failed": True},
+    ]
+    trace = client.get("/api/v1/runs/r1/traces/ex-2").json()
+    assert trace["type"] == "trace"
+    assert [(r["turn"], r["tool"]) for r in trace["rows"]] == [(1, "bash"), (2, "bash")]
+    assert (trace["meta"]["run_id"], trace["meta"]["example_id"]) == ("r1", "ex-2")
+    assert trace["meta"]["failed_turn"] == 2
+    unknown = client.get("/api/v1/runs/r1/traces/ex-9")
+    assert unknown.status_code == 404 and "ex-9" in unknown.json()["error"]
+    assert client.get("/api/v1/runs/nope/traces").status_code == 404
+
+
+def test_trace_ids_with_slashes(client: TestClient, ctx: Context, toy_repo: Path) -> None:
+    rec = seed_finished_run(ctx, toy_repo, "r1")
+    run = Run(ctx.run_dir(rec), "r1", rec.project)
+    run.log_trace("HumanEval/0", [{"tool": "bash", "error": "boom"}])
+    assert client.get("/api/v1/runs/r1/traces").json() == [
+        {"example_id": "HumanEval/0", "turns": 1, "failed": True}
+    ]
+    for path in ("HumanEval/0", "HumanEval%2F0"):
+        resp = client.get(f"/api/v1/runs/r1/traces/{path}")
+        assert resp.status_code == 200, path
+        assert resp.json()["meta"]["example_id"] == "HumanEval/0"
+        assert resp.json()["meta"]["failed_turn"] == 1
+
+
+def test_task_kind_and_run_view(client: TestClient, ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    generic = client.get("/api/v1/tasks/toy/toy-acc/kind").json()
+    assert generic["kind"] == "generic"
+    assert [(p["type"], p["title"]) for p in generic["run_view"]] == [("curves", "metrics")]
+    config_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(config_path.read_text())
+    cfg["tasks"]["toy-acc"]["kind"] = "agent_eval"
+    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    agent = client.get("/api/v1/tasks/toy/toy-acc/kind").json()
+    assert agent["kind"] == "agent_eval"
+    assert [p["type"] for p in agent["run_view"]] == ["trace", "grid", "table"]
+    assert agent["run_view"][2]["data"]["source"] == "traces"
+    assert client.get("/api/v1/tasks/toy/nope/kind").status_code == 400

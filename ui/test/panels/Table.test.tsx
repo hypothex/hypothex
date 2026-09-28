@@ -10,6 +10,7 @@ import {
   ROW_CAP,
   sortRows,
   TablePanel,
+  visibleColumns,
   tableColumns,
 } from "../../src/panels/Table";
 
@@ -152,4 +153,14 @@ test("headers are short names with the field as tooltip; deltas are signed; run 
   const link = screen.getByRole("link", { name: "4093" });
   expect(link.getAttribute("href")).toBe("/r/20260927-110306-toy-test-4093");
   expect(link.closest("td")?.getAttribute("title")).toBe("20260927-110306-toy-test-4093");
+});
+
+test("group_id folds into the label column, whose tooltip keeps the id", () => {
+  expect(visibleColumns(["run_id", "group_id", "label", "seed"])).toEqual(["run_id", "label", "seed"]);
+  expect(visibleColumns(["run_id", "group_id"])).toEqual(["run_id", "group_id"]);
+  const rows = [{ run_id: "r1", group_id: "9b8c87bd@3d9e1a7", label: "base recipe", seed: 1 }];
+  const { container } = render(<TablePanel result={{ type: "table", title: "t", rows, meta: {} }} />);
+  expect([...container.querySelectorAll("th")].map((th) => th.textContent)).toEqual(["run", "label", "seed"]);
+  const cell = container.querySelectorAll("tbody td")[1];
+  expect(cell?.getAttribute("title")).toBe("base recipe\n9b8c87bd@3d9e1a7");
 });

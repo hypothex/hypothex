@@ -77,6 +77,14 @@ export function shortRun(runId: string): string {
   return runId.split("-").pop() || runId;
 }
 
+/**
+ * Columns to draw: every column, except that `group_id` folds into `label` when both are
+ * present (the label names the group; its id is the label cell's tooltip).
+ */
+export function visibleColumns(cols: string[]): string[] {
+  return cols.includes("label") ? cols.filter((c) => c !== "group_id") : cols;
+}
+
 /** Column names: the union of row keys, in order of first appearance. */
 export function tableColumns(rows: Row[]): string[] {
   const seen = new Set<string>();
@@ -142,7 +150,7 @@ const S = {
 /** Table panel. Click a header to sort ascending, again for descending, again to reset. */
 export function TablePanel({ result }: { result: PanelResult }) {
   const rows = result.rows as Row[];
-  const cols = useMemo(() => tableColumns(rows), [rows]);
+  const cols = useMemo(() => visibleColumns(tableColumns(rows)), [rows]);
   const [sort, setSort] = useState<{ key: string; dir: SortDir } | null>(null);
   const sorted = useMemo(() => (sort ? sortRows(rows, sort.key, sort.dir) : rows), [rows, sort]);
   if (rows.length === 0) return <p style={S.empty}>No rows</p>;
@@ -182,7 +190,11 @@ export function TablePanel({ result }: { result: PanelResult }) {
                 const text = typeof v === "number" && isDeltaColumn(c) ? fmtSigned(v) : fmtCell(v);
                 const align = typeof v === "number" || (numeric.has(c) && (v === null || v === undefined)) ? "right" : "left";
                 return (
-                  <td key={c} title={text} style={{ ...S.td, textAlign: align }}>
+                  <td
+                    key={c}
+                    title={c === "label" && typeof row.group_id === "string" ? `${text}\n${row.group_id}` : text}
+                    style={{ ...S.td, textAlign: align }}
+                  >
                     {c === "run_id" && typeof v === "string" ? (
                       <a href={`/r/${encodeURIComponent(v)}`}>{shortRun(v)}</a>
                     ) : (

@@ -24,12 +24,14 @@ export const PAGES_CSS = `
 .page .ov-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 72px; margin-top: 64px; }
 .page .ov-grid .fig { margin-top: 0; }
 .page .side .fig + .fig { margin-top: 48px; }
-.page .timeline svg { width: 100%; height: auto; overflow: visible; }
+.page .timeline svg { display: block; overflow: visible; }
 .page .timeline .ln { font: 600 13px var(--sans); fill: var(--ink); }
 .page .timeline .lc { font: 400 12px var(--sans); fill: var(--ink-3); }
 .page .timeline .grid { stroke: var(--rule-2); }
 .page .timeline .lane, .page .timeline .axis { stroke: var(--rule); }
-.page .timeline .tick, .page .timeline .cl { font: 400 12px var(--sans); fill: var(--ink-3); }
+.page .timeline .tick { font: 400 11px var(--sans); fill: var(--ink-3); }
+.page .timeline .cl { font: 400 12px var(--sans); fill: var(--ink-3); }
+.page .timeline .cl.more { fill: var(--ink-2); cursor: help; }
 .page .timeline .cl.best { fill: var(--ink); font-weight: 600; }
 .page .timeline .mark { cursor: pointer; }
 .page .timeline .key { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 14px; font-size: 13px; color: var(--ink-2); }

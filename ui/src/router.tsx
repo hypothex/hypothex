@@ -13,6 +13,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  useNavigate,
 } from "@tanstack/react-router";
 import { type ReactElement, useState } from "react";
 
@@ -20,6 +21,7 @@ import { ExamplesPage } from "./pages/Examples";
 import { OverviewPage } from "./pages/Overview";
 import { RunPage } from "./pages/Run";
 import { TaskPage } from "./pages/Task";
+import { ViewEditor } from "./pages/ViewEditor";
 import { CommandPalette } from "./shell/CommandPalette";
 import { Header } from "./shell/Header";
 
@@ -115,6 +117,21 @@ function ExamplesScreen(): ReactElement {
   return <ExamplesPage a={a} b={b} metric={metric} />;
 }
 
+/** `/t/$project/$task/edit/$view`: the view editor; Save opens the saved view's tab. */
+function ViewEditorScreen(): ReactElement {
+  const { project, task, view } = viewEditorRoute.useParams();
+  const navigate = useNavigate();
+  return (
+    <ViewEditor
+      key={`${project}/${task}/${view}`}
+      project={project}
+      task={task}
+      view={view}
+      onSaved={(name) => void navigate({ to: "/t/$project/$task", params: { project, task }, search: { view: name } })}
+    />
+  );
+}
+
 export const rootRoute = createRootRoute({ component: AppShell, notFoundComponent: NotFound });
 
 export const overviewRoute = createRoute({
@@ -133,7 +150,7 @@ export const taskRoute = createRoute({
 export const viewEditorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/t/$project/$task/edit/$view",
-  component: () => <ScreenPending name="View editor" />,
+  component: ViewEditorScreen,
 });
 
 export const runRoute = createRoute({

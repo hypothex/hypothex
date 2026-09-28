@@ -77,6 +77,16 @@ describe("routes", () => {
   });
 });
 
+test("every route renders its own screen, not the placeholder", async () => {
+  const { cleanup } = await import("@testing-library/react");
+  for (const path of ["/", "/t/toy/acc", "/t/toy/acc/edit/new", "/r/r1", "/x/r1/r2?metric=accuracy"]) {
+    const { router } = renderApp(path);
+    await waitFor(() => expect(router.state.status).toBe("idle"));
+    expect([path, screen.queryByTestId("screen-pending")]).toEqual([path, null]);
+    cleanup();
+  }
+});
+
 describe("search serialization", () => {
   test("parseSearch keeps every value a string; stringifySearch matches URLSearchParams", () => {
     expect(parseSearch("?example=42&view=2024&metric=accuracy%40v1&flag=true")).toEqual({

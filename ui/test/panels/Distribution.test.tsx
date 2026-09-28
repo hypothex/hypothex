@@ -245,3 +245,13 @@ describe("DistributionPanel as a percentile table", () => {
     expect(cell(container, "g2", "p50").getAttribute("title")).toBe("cache p50: repeats 12");
   });
 });
+
+test("the ECDF 'share' title sits above the top tick label, not on it", () => {
+  const { container } = render(<DistributionPanel result={dist({})} />);
+  const share = container.querySelector("[data-testid='share']");
+  const one = [...container.querySelectorAll("text")].find((t) => t.textContent === "1");
+  // tick labels are 11 px: the "1" occupies [baseline - 11, baseline]
+  const shareBase = Number(share?.getAttribute("y"));
+  const oneTop = Number(one?.getAttribute("y")) - 11;
+  expect(shareBase + 3).toBeLessThanOrEqual(oneTop);
+});

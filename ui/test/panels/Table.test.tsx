@@ -1,7 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { PanelResult } from "../../src/panels/index";
-import { fmtCell, fmtNum, ROW_CAP, sortRows, TablePanel, tableColumns } from "../../src/panels/Table";
+import { MINUS } from "../../src/charts/Scale";
+import {
+  columnLabel,
+  fmtCell,
+  fmtNum,
+  fmtSigned,
+  ROW_CAP,
+  sortRows,
+  TablePanel,
+  tableColumns,
+} from "../../src/panels/Table";
 
 afterEach(cleanup);
 
@@ -120,4 +130,26 @@ test("a missing value in a numeric column is right-aligned with the numbers", ()
     ["—", "right"],
     ["0.025", "right"],
   ]);
+});
+
+test("headers are short names with the field as tooltip; deltas are signed; run ids short", () => {
+  expect(columnLabel("run_id")).toBe("run");
+  expect(columnLabel("delta_prev")).toBe("Δ prev");
+  expect(columnLabel("usage.tokens_in")).toBe("tokens in");
+  expect(columnLabel("meta.category")).toBe("category");
+  expect(columnLabel("usage.seconds")).toBe("time");
+  expect(fmtSigned(0.025)).toBe("+0.025");
+  expect(fmtSigned(-0.048)).toBe(`${MINUS}0.048`);
+  expect(fmtSigned(0)).toBe("0");
+  const rows = [
+    { run_id: "20260927-110306-toy-test-4093", delta_prev: 0.025 },
+    { run_id: "20260927-110304-toy-test-d45c", delta_prev: -0.048 },
+  ];
+  const { container } = render(<TablePanel result={{ type: "table", title: "t", rows, meta: {} }} />);
+  const head = screen.getByRole("button", { name: "Δ prev" });
+  expect(head.getAttribute("title")).toBe("delta_prev");
+  expect(bodyCells(container, 1)).toEqual(["+0.025", `${MINUS}0.048`]);
+  const link = screen.getByRole("link", { name: "4093" });
+  expect(link.getAttribute("href")).toBe("/r/20260927-110306-toy-test-4093");
+  expect(link.closest("td")?.getAttribute("title")).toBe("20260927-110306-toy-test-4093");
 });

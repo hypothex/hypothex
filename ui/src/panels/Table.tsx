@@ -40,6 +40,43 @@ export function fmtCell(v: unknown): string {
   return JSON.stringify(v);
 }
 
+const COLUMN_NAMES: Record<string, string> = {
+  run_id: "run",
+  group_id: "group",
+  created_by: "by",
+  "usage.usd": "$",
+  "usage.seconds": "time",
+};
+
+/**
+ * Header text for a field: `run_id` → `run`, `delta_prev` → `Δ prev`, `usage.tokens_in` →
+ * `tokens in`, `meta.category` → `category`. The raw field stays in the header tooltip.
+ */
+export function columnLabel(field: string): string {
+  const known = COLUMN_NAMES[field];
+  if (known) return known;
+  return field
+    .replace(/^(usage|meta)\./, "")
+    .replace(/^delta_/, "Δ ")
+    .replace(/_/g, " ");
+}
+
+/** A change column (`delta_prev`, `Δ`): its numbers carry a sign. */
+export function isDeltaColumn(field: string): boolean {
+  return /^(delta|Δ)/i.test(field);
+}
+
+/** A signed number: `+0.025`, `−0.048`, `0`. */
+export function fmtSigned(v: number): string {
+  const s = fmtNum(v);
+  return v > 0 && Number(s.replace(/,/g, "")) !== 0 ? `+${s}` : s;
+}
+
+/** Short run id for a cell: the last `-` segment (`…-toy-test-4093` → `4093`). */
+export function shortRun(runId: string): string {
+  return runId.split("-").pop() || runId;
+}
+
 /** Column names: the union of row keys, in order of first appearance. */
 export function tableColumns(rows: Row[]): string[] {
   const seen = new Set<string>();
@@ -130,8 +167,8 @@ export function TablePanel({ result }: { result: PanelResult }) {
                 aria-sort={ariaSort(c)}
                 style={{ ...S.th, textAlign: numeric.has(c) ? "right" : "left" }}
               >
-                <button type="button" style={S.sortBtn} onClick={() => toggle(c)}>
-                  {c}
+                <button type="button" style={S.sortBtn} title={c} onClick={() => toggle(c)}>
+                  {columnLabel(c)}
                 </button>
               </th>
             ))}
@@ -142,12 +179,12 @@ export function TablePanel({ result }: { result: PanelResult }) {
             <tr key={i}>
               {cols.map((c) => {
                 const v = row[c];
-                const text = fmtCell(v);
+                const text = typeof v === "number" && isDeltaColumn(c) ? fmtSigned(v) : fmtCell(v);
                 const align = typeof v === "number" || (numeric.has(c) && (v === null || v === undefined)) ? "right" : "left";
                 return (
                   <td key={c} title={text} style={{ ...S.td, textAlign: align }}>
                     {c === "run_id" && typeof v === "string" ? (
-                      <a href={`/r/${encodeURIComponent(v)}`}>{v}</a>
+                      <a href={`/r/${encodeURIComponent(v)}`}>{shortRun(v)}</a>
                     ) : (
                       text
                     )}

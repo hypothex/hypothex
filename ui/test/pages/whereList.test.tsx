@@ -83,6 +83,20 @@ describe("buildWhere", () => {
   });
 });
 
+test("a long artifact path outside the run folder shows its tail, full path as tooltip and copy", () => {
+  const long = "/scratch/shreyas/hx/rxn-forward/runs/20260925-131516-uspto-forward-to-5a7a/ckpt/step_002000.pt";
+  const detail = makeDetail(
+    {
+      artifacts: [{ kind: "checkpoint", path: long, host: "gpu-a03", size: null, step: 2000, metrics: {} }],
+    },
+    {},
+  );
+  const row = buildWhere(detail).at(-1)?.rows.at(-1);
+  expect(row?.display).toBe("gpu-a03:…/ckpt/step_002000.pt");
+  expect(row?.copy).toBe(`gpu-a03:${long}`);
+  expect(row?.title).toBe(`gpu-a03:${long}`);
+});
+
 test("gitLine separates tracked changes from untracked files", () => {
   const base = { repo: null, commit: "8f4cac43877b", branch: "main" };
   expect(gitLine({ ...base, dirty: false, untracked_count: 0 })).toEqual({

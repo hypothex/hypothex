@@ -4,7 +4,7 @@
  * children relative to it; copy buttons copy the full path.
  */
 import { CopyButton } from "./CopyButton";
-import { displayPath, fmtBytes, isNum, relativeTo, shellJoin, splitHostPath } from "./format";
+import { displayPath, fmtBytes, isNum, relativeTo, shellJoin, splitHostPath, tailPath } from "./format";
 import { AppLink, hrefs } from "./links";
 import type { GitInfo, RunDetail } from "./types";
 
@@ -14,7 +14,12 @@ export interface WhereRow {
   indent: boolean;
   note?: string;
   href?: string;
+  /** The full path, when `display` is shortened. */
+  title?: string;
 }
+
+/** Longest artifact path shown whole; longer ones outside the run folder show their tail. */
+export const LONG_PATH = 48;
 
 export interface WhereGroup {
   title: string;
@@ -110,7 +115,12 @@ export function buildWhere(detail: RunDetail): WhereGroup[] {
         isNum(art.step) ? `step ${art.step}` : null,
         isNum(art.size) ? fmtBytes(art.size) : null,
       ]);
-      run.rows.push(whereRow({ host: art.host, path: art.path }, dir, { note }));
+      const row = whereRow({ host: art.host, path: art.path }, dir, { note });
+      if (!row.indent && row.display.length > LONG_PATH) {
+        row.display = displayPath(art.host, tailPath(art.path, 2));
+        row.title = row.copy;
+      }
+      run.rows.push(row);
     }
     groups.push(run);
   }
@@ -156,7 +166,7 @@ export function WhereList({ detail }: { detail: RunDetail }) {
                 {kids.map((row, i) => (
                   <li key={`${row.copy}-${i}`}>
                     <span className="br">{row.indent ? (i === kids.length - 1 ? "└" : "├") : "·"}</span>
-                    <span className="p">
+                    <span className="p" title={row.title}>
                       {row.href ? (
                         <AppLink href={row.href} title="Open">
                           {row.display}

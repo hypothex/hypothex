@@ -32,6 +32,7 @@ panels:
     data: {source: samples, metrics: [latency_ms], group_by: group}
     render: table
     layout: {span: 6, row: 4}
+  # Error rate as a percent; ticks stay at least 0.01% apart so no two labels read the same.
   - type: vega_lite
     title: Error rate
     data:
@@ -43,7 +44,7 @@ panels:
       height: {step: 28}
       encoding:
         y: {field: label, type: nominal, title: null}
-        x: {aggregate: mean, field: value, type: quantitative, title: error rate, axis: {format: ".2~%"}}
+        x: {aggregate: mean, field: value, type: quantitative, title: error rate, axis: {format: ".2~%", tickMinStep: 0.0001}}
         tooltip:
           - {field: label, type: nominal, title: config}
           - {aggregate: mean, field: value, type: quantitative, title: mean error rate, format: ".3~%"}

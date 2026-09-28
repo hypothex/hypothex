@@ -127,6 +127,21 @@ export interface CurvesModel {
 export const MAX_COLS = 3;
 /** Width of the row-label gutter. */
 export const LABEL_W = 104;
+/**
+ * Width of the row-label gutter: at least {@link LABEL_W}, wider when a metric name plus
+ * its y tick labels would not fit (12 px names, 11 px ticks), at most 220 px.
+ */
+export function labelGutter(model: CurvesModel): number {
+  let need = 0;
+  for (const name of model.names) {
+    const scale = model.scales[name] ?? { kind: "linear", domain: [0, 1] };
+    const ticks = yScaleFor(scale, 0, ROW_H).ticks.map(fmtValue);
+    const tickW = Math.max(0, ...ticks.map((t) => Math.ceil(t.length * 11 * 0.6)));
+    need = Math.max(need, Math.ceil(name.length * 12 * 0.56) + tickW + 22);
+  }
+  return Math.min(220, Math.max(LABEL_W, need));
+}
+
 /** Gap between columns. */
 export const COL_GAP = 36;
 /** Height of the column-title strip. */
@@ -353,13 +368,14 @@ interface StackProps {
 function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactElement {
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   const [hover, setHover] = useState<{ col: number; step: number } | null>(null);
-  const colW = Math.max(40, (width - LABEL_W - COL_GAP * (cols - 1)) / cols);
+  const gutter = labelGutter(model);
+  const colW = Math.max(40, (width - gutter - COL_GAP * (cols - 1)) / cols);
   const { rows, bottom } = rowGeometry(model.names);
   const H = bottom + 30;
   const xTicks = linear([0, model.maxStep || 1], 0, 1, 4).ticks;
 
   const columns = groups.map((g, ci) => {
-    const x0 = LABEL_W + ci * (colW + COL_GAP);
+    const x0 = gutter + ci * (colW + COL_GAP);
     const x = linear([0, model.maxStep || 1], x0, x0 + colW, 4);
     const runIds = new Set(
       model.names.flatMap((n) => model.cells.get(cellKey(g.group_id, n))?.runs.map((r) => r.run_id) ?? []),
@@ -433,7 +449,7 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
               <g key={r.name} className="curve-cell" data-name={r.name}>
                 {scale.kind === "lr" ? null : <GridY y={y.at} ticks={y.ticks} x0={col.x0} x1={col.x0 + colW} />}
                 {col.ci === 0 && scale.kind !== "lr" ? (
-                  <AxisLeftLabels y={y.at} ticks={y.ticks} x={LABEL_W - 10} format={fmtValue} />
+                  <AxisLeftLabels y={y.at} ticks={y.ticks} x={gutter - 10} format={fmtValue} />
                 ) : null}
                 <line
                   className={ri === rows.length - 1 ? "axis" : "hair"}

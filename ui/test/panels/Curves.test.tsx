@@ -6,6 +6,8 @@ import {
   buildCurves,
   cellKey,
   isLoss,
+  LABEL_W,
+  labelGutter,
   isLr,
   meanSeries,
   valueAt,
@@ -244,4 +246,17 @@ describe("small multiple titles", () => {
     const model = buildCurves(points(), { groups: [{ group_id: "base", label: "base" }, { group_id: "aug", label: "+aug" }] });
     expect(model.groups.map((g) => g.label)).toEqual(["base", "+aug"]);
   });
+});
+
+test("the label gutter widens so a long metric name clears its tick labels", () => {
+  const short = buildCurves(points(), undefined);
+  expect(labelGutter(short)).toBeGreaterThanOrEqual(LABEL_W);
+  expect(labelGutter(short)).toBeLessThan(120);
+  const long = buildCurves(
+    points().map((p) => ({ ...p, name: p.name === "train_loss" ? "latency_p95_ms_rolling" : p.name })),
+    undefined,
+  );
+  // 22 chars at 12 px (~148 px) plus the tick labels and gaps
+  expect(labelGutter(long)).toBeGreaterThan(170);
+  expect(labelGutter(long)).toBeLessThanOrEqual(220);
 });

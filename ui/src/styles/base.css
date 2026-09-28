@@ -160,6 +160,8 @@ svg .hit { fill: transparent; cursor: default; }
 .tbl th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12.5px; padding: 0 0 8px; border-bottom: 1px solid var(--rule); }
 .tbl td { padding: 10px 0; border-bottom: 1px solid var(--rule-2); vertical-align: top; }
 .tbl .r { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl th + th, .tbl td + td { padding-left: 20px; }
+.tbl td .sw { margin-right: 7px; }
 .tbl tr:last-child td { border-bottom: 0; }
 .tag { font-size: 12.5px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 99px; padding: 1px 9px; }
 .p { font-family: var(--mono); font-size: 13px; word-break: break-all; color: var(--ink); }

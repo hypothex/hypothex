@@ -39,4 +39,9 @@ describe("base.css", () => {
       expect(css).toContain(sel);
     }
   });
+
+  test("table columns keep a gap so adjacent headers and cells never touch", async () => {
+    const css = await read("../../src/styles/base.css");
+    expect(css).toContain(".tbl th + th, .tbl td + td { padding-left: 20px; }");
+  });
 });

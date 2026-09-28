@@ -52,24 +52,38 @@ export interface GroupJson {
 /**
  * Column titles for `groups`: `run_label`, else `label`. Titles that still repeat (one
  * column per run of the same idea) get the run's seed (`baseline s2`) when the column
- * holds a single seed, else a counter (`baseline #2`).
+ * holds a single seed (and the seeds differ), else a counter (`baseline #2`), never a mix.
  */
 export function columnTitles(groups: GroupJson[], seedsOf: (groupId: string) => (number | null)[]): GroupJson[] {
   const base = groups.map((g) => {
     const run = typeof g.run_label === "string" && g.run_label.trim() ? g.run_label.trim() : null;
     return run ?? (typeof g.label === "string" && g.label.trim() ? g.label : g.group_id);
   });
-  const count = new Map<string, number>();
-  for (const b of base) count.set(b, (count.get(b) ?? 0) + 1);
+  const oneSeed = (id: string): number | null => {
+    const seeds = [...new Set(seedsOf(id))];
+    return seeds.length === 1 && typeof seeds[0] === "number" ? seeds[0] : null;
+  };
+  const members = new Map<string, GroupJson[]>();
+  groups.forEach((g, i) => {
+    const b = base[i] ?? g.group_id;
+    members.set(b, [...(members.get(b) ?? []), g]);
+  });
+  // seeds name the columns only when every column of the label has its own distinct seed
+  const bySeed = new Set(
+    [...members.entries()]
+      .filter(([, gs]) => {
+        const seeds = gs.map((g) => oneSeed(g.group_id));
+        return seeds.every((x) => x !== null) && new Set(seeds).size === seeds.length;
+      })
+      .map(([b]) => b),
+  );
   const seen = new Map<string, number>();
   return groups.map((g, i) => {
     const b = base[i] ?? g.group_id;
-    if ((count.get(b) ?? 0) < 2) return { ...g, label: b };
+    if ((members.get(b)?.length ?? 0) < 2) return { ...g, label: b };
     const k = (seen.get(b) ?? 0) + 1;
     seen.set(b, k);
-    const seeds = [...new Set(seedsOf(g.group_id))];
-    const seed = seeds.length === 1 ? seeds[0] : null;
-    return { ...g, label: seed !== null && seed !== undefined ? `${b} s${seed}` : `${b} #${k}` };
+    return { ...g, label: bySeed.has(b) ? `${b} s${oneSeed(g.group_id)}` : `${b} #${k}` };
   });
 }
 

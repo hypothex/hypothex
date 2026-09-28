@@ -233,6 +233,13 @@ describe("small multiple titles", () => {
     expect(model.groups.map((g) => g.label)).toEqual(["base s1", "base s2", "aug s1", "aug s2"]);
   });
 
+  test("a column without a known seed switches the whole label to counters", () => {
+    const groups = RUNS.map((r) => ({ group_id: r.run_id, label: r.group_id }));
+    const rows = (perRun(groups).rows as unknown as CurvePoint[]).filter((p) => p.run_id !== "a2");
+    const model = buildCurves(rows, { groups });
+    expect(model.groups.map((g) => g.label)).toEqual(["base s1", "base s2", "aug #1", "aug #2"]);
+  });
+
   test("unique labels are left alone", () => {
     const model = buildCurves(points(), { groups: [{ group_id: "base", label: "base" }, { group_id: "aug", label: "+aug" }] });
     expect(model.groups.map((g) => g.label)).toEqual(["base", "+aug"]);

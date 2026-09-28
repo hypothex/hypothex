@@ -552,7 +552,9 @@ def overview_headline(summary: SummaryLike, *, board: Leaderboard | None = None)
     -------
     str
         For example ``"Idle. SVM leads toy-test by 0.037, p = 0.15"`` or
-        ``"2 running. SVM leads toy-test by 0.037"``.
+        ``"2 running. SVM leads toy-test by 0.037"``. A ``system_bench`` board
+        leads with its task headline: ``"Idle. async-worker p95 −29% vs baseline
+        [−32, −26]"``.
     """
     n = len(summary.running)
     prefix = "Idle." if n == 0 else f"{n} running."
@@ -564,6 +566,9 @@ def _board_lead(board: Leaderboard) -> str:
     rows = _scored(board)
     if not rows:
         return NO_RUNS
+    if board.kind == "system_bench" and board.headline:
+        # a gap in ms reads badly ("leads by 45.0"): reuse the task's relative change
+        return board.headline
     best = rows[0]
     if len(rows) == 1:
         return f"{best.label} leads {board.task} at {fmt_value(_mean(best))}"

@@ -332,6 +332,8 @@ def test_overview_of_demo(dctx: Context) -> None:
         "human": 15,
     }
     assert [r.params["config"] for r in summary.running] == ["lr2e-4"]
+    # the newest scored idea is a system_bench task: same phrasing as its task headline
+    assert summary.headline == "1 running. async-worker p95 −29% vs baseline [−32, −26]"
     assert len(summary.failures) == 4 and all(f.retried_ok for f in summary.failures)
     assert [(p.project, p.runs, p.kind) for p in summary.projects] == [
         ("retro-agent", 27, "agent_iteration"),

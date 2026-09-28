@@ -338,6 +338,15 @@ def test_overview_headline_from_board() -> None:
     )
 
 
+def test_overview_headline_for_system_bench_uses_the_task_headline() -> None:
+    fast = row("async-worker", [166.0, 168.0, 164.0], primary="lat/p95")
+    base = row("baseline", [233.0, 231.0, 235.0], vs=welch(67.0, 0.001), primary="lat/p95")
+    b = board("system_bench", [fast, base], primary="lat/p95", higher=False)
+    b.headline = task_headline(b, reference=base.group_id)
+    assert b.headline.startswith("async-worker p95 −29% vs baseline [")
+    assert overview_headline(Summary(running=[object()]), board=b) == f"1 running. {b.headline}"
+
+
 def test_overview_headline_from_summary() -> None:
     assert overview_headline(Summary()) == "Idle. No scored runs yet"
     ideas = [

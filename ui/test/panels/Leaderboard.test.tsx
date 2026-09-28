@@ -9,6 +9,7 @@ import {
   fmtDuration,
   metricLabel,
   primaryKey,
+  rowInterval,
   verdictOf,
   type LeaderboardRowJson,
 } from "../../src/panels/Leaderboard";
@@ -318,6 +319,37 @@ describe("Leaderboard number formatting", () => {
     const big = container.querySelector(".frow[data-row] .big");
     expect(big?.textContent).toBe("165.6");
     expect(big?.getAttribute("title")).toBe("165.6 ms");
+  });
+
+  test("rows without a test-set interval get their seed t-interval as the whisker", () => {
+    const withCi = LAT.map((r) =>
+      r.primary
+        ? { ...r, primary: { ...r.primary, ci_low: r.primary.mean - 7, ci_high: r.primary.mean + 7 } }
+        : r,
+    );
+    const { container } = render(<Leaderboard result={board({ primary: "latency/p95", unit: "ms" }, withCi)} />);
+    expect(container.querySelectorAll(".fplot path.whisk").length).toBe(3);
+    const first = container.querySelector(".frow[data-row] .acc");
+    expect(first?.querySelectorAll(".sd")[1]?.textContent).toBe("159–173");
+    expect([...container.querySelectorAll(".key span")].map((s) => s.textContent)).toContain("95% CI");
+  });
+
+  test("rowInterval: test set first, then seeds; none for identical or single seeds", () => {
+    const seedCi = { mean: 0.9, std: 0.01, n: 3, ci_low: 0.875, ci_high: 0.925 };
+    expect(rowInterval(SVM, true, true)?.kind).toBe("test");
+    const seedRow = { ...RF, test_interval: null, primary: seedCi };
+    expect(rowInterval(seedRow, true, true)).toEqual({
+      lo: 0.875,
+      hi: 0.925,
+      kind: "seed",
+      name: "95% CI",
+      how: "t-interval over 3 seeds",
+    });
+    expect(rowInterval(seedRow, true, false)).toBeNull();
+    expect(rowInterval({ ...seedRow, identical_seeds: true }, true, true)).toBeNull();
+    expect(rowInterval({ ...seedRow, primary: { ...seedCi, n: 1 } }, true, true)).toBeNull();
+    // noise: [seed] hides the test-set whisker but not the seed interval
+    expect(rowInterval({ ...SVM, primary: seedCi, identical_seeds: false }, false, true)?.kind).toBe("seed");
   });
 
   test("a long second-metric header is clipped, with the key as its tooltip", () => {

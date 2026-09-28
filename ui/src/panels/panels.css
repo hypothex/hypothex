@@ -9,7 +9,7 @@
 /* leaderboard: one grid row per seed group; the plot column is an SVG per row */
 .forest { position: relative; }
 .frow {
-  display: grid; grid-template-columns: minmax(0, 1fr) 118px minmax(240px, 600px) 64px 128px;
+  display: grid; grid-template-columns: minmax(0, 1fr) 118px minmax(240px, 600px) 84px 128px;
   gap: 0 24px; align-items: start; border-bottom: 1px solid var(--rule-2);
   box-sizing: border-box; height: 105px; padding: 16px 0 14px; /* plot SVG = 105 - 1 border = 104 */
 }

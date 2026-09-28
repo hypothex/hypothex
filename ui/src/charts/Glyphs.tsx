@@ -287,7 +287,7 @@ export function Key({ items }: { items: KeyItem[] }): ReactElement {
   return (
     <div className="key" aria-label="Key">
       {items.map((it) => (
-        <span key={it.glyph} title={it.title}>
+        <span key={`${it.glyph}-${it.label}`} title={it.title}>
           <KeyGlyph kind={it.glyph} />
           {it.label}
         </span>

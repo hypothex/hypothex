@@ -2,7 +2,8 @@
  * `leaderboard` panel: a forest plot with one row per seed group.
  *
  * Shows both kinds of noise: per-seed dots (identical seeds collapse to a diamond
- * with `×n`) and the test-set 95% interval as a whisker. The best group's interval
+ * with `×n`) and the test-set 95% interval as a whisker; a group with no test-set
+ * interval (e.g. benchmarks, training runs) gets its seed t-interval. The best group's interval
  * is a band behind every row; the last column says how each row compares to it.
  */
 import type { ReactElement } from "react";
@@ -129,6 +130,45 @@ export function bestBand(best: LeaderboardRowJson | null): Band | null {
   return null;
 }
 
+/** The whisker interval of one row. */
+export interface RowInterval {
+  lo: number;
+  hi: number;
+  /** `test`: test-set interval; `seed`: t-interval over seeds. */
+  kind: "test" | "seed";
+  /** Short name: `test-set 95% CI` or `95% CI`. */
+  name: string;
+  /** Method, e.g. `Wilson, n = 180` or `t-interval over 3 seeds`. */
+  how: string;
+}
+
+/**
+ * The interval drawn as a row's whisker: the test-set interval when shown, else the
+ * t-interval over seeds when seeds are shown and differ.
+ */
+export function rowInterval(
+  row: LeaderboardRowJson,
+  showTest: boolean,
+  showSeeds: boolean,
+): RowInterval | null {
+  const t = row.test_interval;
+  if (showTest && t) {
+    return {
+      lo: t.lo,
+      hi: t.hi,
+      kind: "test",
+      name: "test-set 95% CI",
+      how: `${t.method === "wilson" ? "Wilson" : "bootstrap"}, n = ${t.n}`,
+    };
+  }
+  const p = row.primary;
+  if (!showSeeds || !p || row.identical_seeds || p.n < 2) return null;
+  if (p.ci_low == null || p.ci_high == null || !Number.isFinite(p.ci_low) || !Number.isFinite(p.ci_high)) {
+    return null;
+  }
+  return { lo: p.ci_low, hi: p.ci_high, kind: "seed", name: "95% CI", how: `t-interval over ${p.n} seeds` };
+}
+
 function testTip(v: VersusBestJson | null): string {
   if (!v || v.p == null) return "";
   const p = v.p < 0.001 ? "p < 0.001" : `p = ${fmtP(v.p)}`;
@@ -221,7 +261,7 @@ function RowPlot({ row, pkey, x, width, band, best, showSeeds, showTest, tip, fm
   const s = row.primary;
   const isBest = row === best;
   const seeds = row.seed_values[pkey] ?? [];
-  const t = row.test_interval;
+  const t = rowInterval(row, showTest, showSeeds);
   return (
     <svg
       className="hx-chart"
@@ -257,10 +297,10 @@ function RowPlot({ row, pkey, x, width, band, best, showSeeds, showTest, tip, fm
           <rect className="hit" x={x.at(s.mean) - 40} y={SEED_Y - 14} width={80} height={24} />
         </g>
       ) : null}
-      {s && showTest && t ? (
+      {s && t ? (
         <g
           {...tip.bind(
-            `${row.label}\nmean ${fmt.value(s.mean)}\ntest-set 95% CI ${fmt.num(t.lo)}–${fmt.value(t.hi)}\n(${t.method === "wilson" ? "Wilson" : "bootstrap"}, n = ${t.n})`,
+            `${row.label}\nmean ${fmt.value(s.mean)}\n${t.name} ${fmt.num(t.lo)}–${fmt.value(t.hi)}\n(${t.how})`,
           )}
         >
           <Whisker x1={x.at(t.lo)} x2={x.at(t.hi)} y={CI_Y} best={isBest} />
@@ -309,7 +349,8 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
     if (!r.primary) continue;
     values.push(r.primary.mean);
     if (showSeeds) values.push(...(r.seed_values[pkey] ?? []));
-    if (showTest && r.test_interval) values.push(r.test_interval.lo, r.test_interval.hi);
+    const ci = rowInterval(r, showTest, showSeeds);
+    if (ci) values.push(ci.lo, ci.hi);
   }
   if (band) values.push(band.lo, band.hi);
   const x = linear(niceDomain(values), PAD, width - PAD);
@@ -321,8 +362,12 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
       keyItems.push({ glyph: "identical", label: "identical seeds", title: "All seeds gave one score" });
     }
   }
-  if (showTest && rows.some((r) => r.test_interval)) {
+  const kinds = new Set(rows.map((r) => rowInterval(r, showTest, showSeeds)?.kind));
+  if (kinds.has("test")) {
     keyItems.push({ glyph: "whisker", label: "test-set 95% CI" });
+  }
+  if (kinds.has("seed")) {
+    keyItems.push({ glyph: "whisker", label: "95% CI", title: "t-interval over seeds" });
   }
   if (band) keyItems.push({ glyph: "band", label: "best's CI", title: band.how });
 
@@ -346,6 +391,7 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
           const s = row.primary;
           const second = secondKey ? row.scores[secondKey] : undefined;
           const u = row.usage;
+          const ci = rowInterval(row, showTest, showSeeds);
           return (
             <div className="frow" data-row={i} key={row.group_id}>
               <div>
@@ -371,12 +417,10 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
                 <div className="sd">
                   <SeedSpread row={row} fmt={fmt} />
                 </div>
-                {showTest && row.test_interval ? (
+                {ci ? (
                   <div className="sd">
-                    <span
-                      title={`test-set 95% CI (${row.test_interval.method === "wilson" ? "Wilson" : "bootstrap"}, n = ${row.test_interval.n})`}
-                    >
-                      {fmt.bound(row.test_interval.lo)}–{fmt.bound(row.test_interval.hi)}
+                    <span title={`${ci.name} (${ci.how})`}>
+                      {fmt.bound(ci.lo)}–{fmt.bound(ci.hi)}
                     </span>
                   </div>
                 ) : null}

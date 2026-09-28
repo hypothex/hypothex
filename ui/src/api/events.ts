@@ -1,0 +1,408 @@
+/**
+ * Live updates over `/api/v1/ws`.
+ *
+ * One stream per app: subscribe with `after_sequence`, receive the replay, then live
+ * events. Reconnects with 3/4/8/16 s backoff (reset after 30 s stable), drops duplicate
+ * sequences, and turns events into TanStack Query invalidations (spec 5.3, 8.2). The last
+ * delivered sequence is kept in `sessionStorage`, so a page load resumes there instead of
+ * replaying the whole event log.
+ */
+import { type QueryClient, type QueryKey, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+
+import { wsUrl } from "./client";
+import type { HxEvent, WsMessage } from "./models";
+import { RUN_EVENT_INVALIDATES } from "./queries";
+
+/** One entry of the server's event log (`hypothex.core.events.Event`). */
+export type { HxEvent };
+
+/** Messages the server sends on `/api/v1/ws`. */
+export type ServerMessage = WsMessage;
+
+/** `connected`: open and subscribed. `ready`: replay done, live from here on. */
+export type StreamStatus = "connecting" | "connected" | "ready" | "offline";
+
+/** The part of the browser `WebSocket` the stream uses (tests pass a fake). */
+export interface SocketLike {
+  readyState: number;
+  onopen: ((ev: Event) => void) | null;
+  onmessage: ((ev: MessageEvent) => void) | null;
+  onclose: ((ev: CloseEvent) => void) | null;
+  onerror: ((ev: Event) => void) | null;
+  send(data: string): void;
+  close(): void;
+}
+
+/** Timer functions (tests pass a fake clock). */
+export interface Clock {
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+export interface EventStreamOptions {
+  /** WebSocket URL, e.g. `ws://127.0.0.1:7777/api/v1/ws`. */
+  url: string;
+  /** Called with new events, deduplicated by sequence, in order, batched. */
+  onEvents: (events: HxEvent[]) => void;
+  onStatus?: (status: StreamStatus) => void;
+  createSocket?: (url: string) => SocketLike;
+  clock?: Clock;
+  /** Last sequence already seen and trusted; the first subscribe replays after it. Default 0. */
+  afterSequence?: number;
+  /**
+   * Sequence saved by an earlier page load (not trusted: the server may serve another
+   * store now). The first subscribe asks for the events after `resumeSequence - 1`; event
+   * `resumeSequence` must come back before `ready` (it is not delivered again), else the
+   * stream reconnects from 0. Ignored when `afterSequence` is given.
+   */
+  resumeSequence?: number;
+  /** Called with the last delivered sequence after `ready` and after each batch. */
+  onSequence?: (sequence: number) => void;
+}
+
+export interface EventStreamHookOptions {
+  url?: string;
+  createSocket?: (url: string) => SocketLike;
+  clock?: Clock;
+  /** Where the last sequence is kept; default `sessionStorage`, `null` keeps nothing. */
+  storage?: Pick<Storage, "getItem" | "setItem"> | null;
+}
+
+/** Reconnect delays in ms: 3, 4, 8, then 16 s for every later attempt. */
+export const BACKOFF_MS: readonly number[] = [3_000, 4_000, 8_000, 16_000];
+/** A connection open this long resets the backoff to its first step. */
+export const STABLE_RESET_MS = 30_000;
+/** Live events that arrive within this window are delivered as one batch. */
+export const FLUSH_MS = 250;
+
+/** `sessionStorage` key for the last delivered event sequence (per tab and origin). */
+export const SEQUENCE_KEY = "hx-ws-sequence";
+
+/** The stored sequence, or 0 when it is missing, not a positive integer, or unreadable. */
+export function readSequence(storage: Pick<Storage, "getItem"> | null): number {
+  try {
+    const raw = storage?.getItem(SEQUENCE_KEY) ?? "";
+    const value = /^[0-9]+$/.test(raw) ? Number(raw) : 0;
+    return Number.isSafeInteger(value) ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Save the sequence; a full or disabled storage only means the next load replays more. */
+export function writeSequence(storage: Pick<Storage, "setItem"> | null, sequence: number): void {
+  try {
+    storage?.setItem(SEQUENCE_KEY, String(sequence));
+  } catch {
+    // ignore: the next page load replays from an older sequence
+  }
+}
+
+function defaultStorage(): Pick<Storage, "getItem" | "setItem"> | null {
+  try {
+    return globalThis.sessionStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** `RUN_EVENT_INVALIDATES` families whose next key segment is the project. */
+const BY_PROJECT = new Set(["task", "leaderboard", "views/query"]);
+
+const CONNECTING = 0;
+
+const realClock: Clock = {
+  setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+/** Delay before reconnect attempt `attempt` (0-based). */
+export function backoffDelay(attempt: number): number {
+  const index = Math.min(Math.max(attempt, 0), BACKOFF_MS.length - 1);
+  return BACKOFF_MS[index] ?? 16_000;
+}
+
+/**
+ * Query keys to invalidate for one event. Only `run.*` events change query data.
+ *
+ * The families are `RUN_EVENT_INVALIDATES` (Task 4), narrowed where the key allows:
+ * `["task" | "leaderboard", project]`, `["views", "query", project]`, `["run", runId]`
+ * (prefix match, so `["run", id]` covers its metrics, logs, predictions and traces).
+ */
+export function keysForEvent(event: HxEvent): QueryKey[] {
+  if (!event.type.startsWith("run.")) return [];
+  const keys: QueryKey[] = [];
+  for (const family of RUN_EVENT_INVALIDATES) {
+    const id = family.join("/");
+    if (id === "run") {
+      if (event.run_id) keys.push([...family, event.run_id]);
+    } else if (event.project && BY_PROJECT.has(id)) {
+      keys.push([...family, event.project]);
+    } else {
+      keys.push([...family]);
+    }
+  }
+  return keys;
+}
+
+/** Union of `keysForEvent` over a batch, without duplicates, in first-seen order. */
+export function keysForEvents(events: readonly HxEvent[]): QueryKey[] {
+  const seen = new Set<string>();
+  const keys: QueryKey[] = [];
+  for (const event of events) {
+    for (const key of keysForEvent(event)) {
+      const id = JSON.stringify(key);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+/** Invalidate every query a batch of events may have changed (active ones refetch). */
+export function invalidateForEvents(client: QueryClient, events: readonly HxEvent[]): void {
+  for (const queryKey of keysForEvents(events)) void client.invalidateQueries({ queryKey });
+}
+
+/** Connection supervisor for `/api/v1/ws` (one per app). */
+export class EventStream {
+  private readonly options: EventStreamOptions;
+  private readonly clock: Clock;
+  private readonly createSocket: (url: string) => SocketLike;
+  private socket: SocketLike | null = null;
+  private lastSequence: number;
+  /** A stored sequence still to be confirmed by the server (see `resumeSequence`). */
+  private anchor: number | null = null;
+  private attempt = 0;
+  private ready = false;
+  private running = false;
+  private pending: HxEvent[] = [];
+  private reconnectTimer: unknown = null;
+  private stableTimer: unknown = null;
+  private flushTimer: unknown = null;
+
+  constructor(options: EventStreamOptions) {
+    this.options = options;
+    this.clock = options.clock ?? realClock;
+    this.createSocket = options.createSocket ?? ((url) => new WebSocket(url));
+    const resume = options.resumeSequence ?? 0;
+    if (options.afterSequence === undefined && resume > 0) {
+      this.lastSequence = resume - 1;
+      this.anchor = resume;
+    } else {
+      this.lastSequence = options.afterSequence ?? 0;
+    }
+  }
+
+  /** Highest event sequence seen so far. */
+  get sequence(): number {
+    return this.lastSequence;
+  }
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.connect();
+  }
+
+  stop(): void {
+    this.running = false;
+    this.cancel(this.reconnectTimer);
+    this.cancel(this.stableTimer);
+    this.cancel(this.flushTimer);
+    this.reconnectTimer = null;
+    this.stableTimer = null;
+    this.flushTimer = null;
+    this.pending = [];
+    const socket = this.socket;
+    this.socket = null;
+    if (!socket) return;
+    socket.onmessage = null;
+    socket.onclose = null;
+    socket.onerror = null;
+    if (socket.readyState === CONNECTING) {
+      // close() on a CONNECTING socket makes browsers log an error; close once it opens.
+      socket.onopen = () => socket.close();
+    } else {
+      socket.onopen = null;
+      socket.close();
+    }
+  }
+
+  private cancel(handle: unknown): void {
+    if (handle !== null) this.clock.clearTimeout(handle);
+  }
+
+  private setStatus(status: StreamStatus): void {
+    this.options.onStatus?.(status);
+  }
+
+  private connect(): void {
+    this.ready = false;
+    this.setStatus("connecting");
+    let socket: SocketLike;
+    try {
+      socket = this.createSocket(this.options.url);
+    } catch {
+      this.setStatus("offline");
+      this.scheduleReconnect();
+      return;
+    }
+    this.socket = socket;
+    socket.onopen = () => {
+      if (socket !== this.socket) return;
+      this.setStatus("connected");
+      socket.send(JSON.stringify({ type: "subscribe", after_sequence: this.lastSequence }));
+      this.stableTimer = this.clock.setTimeout(() => {
+        this.stableTimer = null;
+        this.attempt = 0;
+      }, STABLE_RESET_MS);
+    };
+    socket.onmessage = (ev) => {
+      if (socket === this.socket) this.handle(ev.data);
+    };
+    socket.onerror = () => {
+      // A close event always follows an error; reconnecting happens there.
+    };
+    socket.onclose = () => {
+      if (socket === this.socket) this.handleClose();
+    };
+  }
+
+  private handleClose(): void {
+    this.socket = null;
+    this.ready = false;
+    this.cancel(this.stableTimer);
+    this.stableTimer = null;
+    if (!this.running) return;
+    this.setStatus("offline");
+    this.scheduleReconnect();
+  }
+
+  /** The server lacks the stored sequence (another or a reset store): start over from 0. */
+  private restartFromZero(): void {
+    this.anchor = null;
+    this.lastSequence = 0;
+    this.pending = [];
+    this.cancel(this.stableTimer);
+    this.stableTimer = null;
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onclose = null;
+      socket.onerror = null;
+      socket.close();
+    }
+    this.connect();
+  }
+
+  private scheduleReconnect(): void {
+    const delay = backoffDelay(this.attempt);
+    this.attempt += 1;
+    this.reconnectTimer = this.clock.setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.running) this.connect();
+    }, delay);
+  }
+
+  private handle(data: unknown): void {
+    let message: unknown;
+    try {
+      message = JSON.parse(String(data));
+    } catch {
+      return;
+    }
+    if (typeof message !== "object" || message === null) return;
+    const msg = message as { type?: unknown; event?: Partial<HxEvent>; last_sequence?: unknown };
+    if (msg.type === "event") {
+      this.receive(msg.event);
+    } else if (msg.type === "ready") {
+      if (this.anchor !== null) {
+        this.restartFromZero();
+        return;
+      }
+      const last = typeof msg.last_sequence === "number" ? msg.last_sequence : this.lastSequence;
+      this.markReady(last);
+    } else if (msg.type === "error") {
+      // The subscribe itself was rejected; retrying would repeat the same error.
+      this.stop();
+      this.setStatus("offline");
+    }
+  }
+
+  private receive(event: Partial<HxEvent> | undefined): void {
+    if (!event || typeof event.sequence !== "number" || typeof event.type !== "string") return;
+    if (this.anchor !== null && event.sequence > this.lastSequence) {
+      // First event after a resume: the stored one (seen on an earlier page) confirms it;
+      // a higher one means it is gone, but every later event still arrives.
+      const anchor = this.anchor;
+      this.anchor = null;
+      if (event.sequence === anchor) {
+        this.lastSequence = anchor;
+        return;
+      }
+    }
+    if (event.sequence <= this.lastSequence) return;
+    this.lastSequence = event.sequence;
+    this.pending.push(event as HxEvent);
+    if (this.ready && this.flushTimer === null) {
+      this.flushTimer = this.clock.setTimeout(() => {
+        this.flushTimer = null;
+        this.flush();
+        this.options.onSequence?.(this.lastSequence);
+      }, FLUSH_MS);
+    }
+  }
+
+  private markReady(lastSequence: number): void {
+    this.ready = true;
+    this.lastSequence = Math.max(this.lastSequence, lastSequence);
+    this.setStatus("ready");
+    this.flush();
+    this.options.onSequence?.(this.lastSequence);
+  }
+
+  private flush(): void {
+    if (this.pending.length === 0) return;
+    const batch = this.pending;
+    this.pending = [];
+    this.options.onEvents(batch);
+  }
+}
+
+/**
+ * Subscribe to live events for the app's lifetime and invalidate affected queries.
+ *
+ * Call once (through `LiveUpdates`). Options are read on mount only (tests pass fakes).
+ */
+export function useEventStream(options: EventStreamHookOptions = {}): StreamStatus {
+  const client = useQueryClient();
+  const [status, setStatus] = useState<StreamStatus>("connecting");
+  const initial = useRef(options);
+  useEffect(() => {
+    const { url, createSocket, clock } = initial.current;
+    const storage = initial.current.storage === undefined ? defaultStorage() : initial.current.storage;
+    const stream = new EventStream({
+      url: url ?? wsUrl(),
+      onEvents: (events) => invalidateForEvents(client, events),
+      onStatus: setStatus,
+      onSequence: (sequence) => writeSequence(storage, sequence),
+      resumeSequence: readSequence(storage),
+      createSocket,
+      clock,
+    });
+    stream.start();
+    return () => stream.stop();
+  }, [client]);
+  return status;
+}
+
+/** Keeps the app's queries live; render once inside the `QueryClientProvider`. */
+export function LiveUpdates(): null {
+  useEventStream();
+  return null;
+}

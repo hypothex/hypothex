@@ -37,6 +37,8 @@ describe("idea helpers", () => {
     expect(ideaScore(running)).toBe("running");
     const one: IdeaRow = { ...rf, primary: { mean: 0.5, std: 0, n: 1, ci_low: null, ci_high: null } };
     expect(ideaSub(one)).toBe("1 seed");
+    const fast: IdeaRow = { ...rf, unit: "ms", primary: { mean: 165.6, std: 2.8, n: 3, ci_low: null, ci_high: null } };
+    expect([ideaScore(fast), ideaSub(fast)]).toEqual(["166 ms", "± 2.80"]);
   });
 });
 
@@ -92,6 +94,7 @@ const latency = (group_id: string, mean: number, lo: number, hi: number): IdeaRo
   test_interval: { lo, hi, method: "bootstrap", n: 50 },
   identical_seeds: false,
   best_band: { lo: 166, hi: 180, method: "bootstrap", n: 50 },
+  unit: "ms",
 });
 const mixed: IdeaRow[] = [
   ideas[0] as IdeaRow,
@@ -132,6 +135,9 @@ test("IdeaList draws one axis per task, so accuracy rows keep a visible best ban
   expect(band?.getAttribute("width")).toMatch(/%$/);
   expect(Number.parseFloat(band?.getAttribute("width") ?? "0")).toBeGreaterThan(40);
   expect(within(groups[1] as HTMLElement).getAllByRole("listitem")).toHaveLength(2);
+  // latency rows show their unit, accuracy rows none
+  expect(within(groups[1] as HTMLElement).getByText("172 ms")).toBeTruthy();
+  expect(within(groups[0] as HTMLElement).getByText("0.9222")).toBeTruthy();
 });
 
 test("RunningList shows none, or one link per run", () => {
@@ -159,6 +165,12 @@ test("ProjectsTable links each task and shows runs and best", () => {
   expect(link.getAttribute("href")).toBe("/t/toy-classifier/toy-test");
   const cells = screen.getAllByRole("cell").map((c) => c.textContent);
   expect(cells).toEqual(["toy-classifier / toy-test", "12", "0.9222"]);
+});
+
+test("ProjectsTable shows the best value with the task's unit", () => {
+  const [row] = makeOverview().projects;
+  render(<ProjectsTable projects={[{ ...row!, best: 165.62, unit: "ms" }]} />);
+  expect(screen.getAllByRole("cell").map((c) => c.textContent)[2]).toBe("166 ms");
 });
 
 test("ProjectsTable has fixed number columns with a gap, and clips long task names", () => {

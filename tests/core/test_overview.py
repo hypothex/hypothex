@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hypothex.core import queries as q
 from hypothex.core.context import Context
@@ -267,6 +268,22 @@ def test_projects_table_counts_finished_runs_and_best(ctx: Context, scene: datet
     assert rows == [
         ("toy", "toy-acc", 4, 1.0, "generic"),
         ("toy", "toy-broken", 0, None, "generic"),
+    ]
+
+
+def test_ideas_and_projects_carry_the_primary_unit(ctx: Context, toy_repo: Path) -> None:
+    config = yaml.safe_load((toy_repo / "hypothex.yaml").read_text())
+    config["metrics"]["accuracy"]["unit"] = "pts"
+    (toy_repo / "hypothex.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    now = utcnow()
+    _run(ctx, toy_repo, "a1", ago=timedelta(minutes=5), now=now, correct=[True, False])
+    _run(ctx, toy_repo, "n1", ago=timedelta(minutes=4), now=now, task=None)
+    summary = build_overview(ctx)
+    assert {(i.task, i.unit) for i in summary.ideas} == {("toy-acc", "pts"), (None, "")}
+    # both tasks rank by accuracy, so both carry its unit
+    assert [(p.task, p.unit) for p in summary.projects] == [
+        ("toy-acc", "pts"),
+        ("toy-broken", "pts"),
     ]
 
 

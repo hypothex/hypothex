@@ -1,6 +1,7 @@
 /** Pure formatting helpers shared by the pages. Times are shown in UTC. */
 import { format } from "d3-format";
 import { MINUS, fmtP as pDigits } from "../../charts/Scale";
+import { withUnit } from "../../charts/valueFormat";
 import type { RunRecord } from "./types";
 
 /** Shown for a missing value (the same glyph as the panels). */
@@ -31,6 +32,18 @@ export function fmtScore(v: number | null | undefined): string {
   if (a <= 1) return minus(v.toFixed(4));
   if (a < 1000) return minus(sig3(v));
   return minus(si3(v));
+}
+
+/**
+ * A metric value with its unit: `166 ms`, `$0.55`, `1.23k tokens`; `fmtScore` without a
+ * unit. Dollars from 0.01 to 100 keep cents, like the backend's `fmt_metric`.
+ */
+export function fmtScoreUnit(v: number | null | undefined, unit = ""): string {
+  if (!isNum(v)) return DASH;
+  if (!unit) return fmtScore(v);
+  const a = Math.abs(v);
+  const num = unit === "$" && a >= 0.01 && a < 100 ? v.toFixed(2) : a < 1000 ? sig3(v) : si3(v);
+  return withUnit(minus(num), unit);
 }
 
 /** A signed metric difference, e.g. `+0.0333`. */

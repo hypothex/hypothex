@@ -1,7 +1,7 @@
 /** Overview panel: recent ideas, one row per seed group with seed marks and intervals. */
 import { scaleLinear } from "d3-scale";
 import { fmtSig3 } from "../../charts/valueFormat";
-import { DASH, fmtClock, fmtInterval, fmtScore, isAgent, isNum } from "./format";
+import { DASH, fmtClock, fmtInterval, fmtScore, fmtScoreUnit, isAgent, isNum } from "./format";
 import { AppLink, hrefs } from "./links";
 import { ACTIVE_STATUSES, FAILED_STATUSES, type IdeaRow, type RunStatus } from "./types";
 
@@ -72,7 +72,7 @@ export function groupIdeas(ideas: IdeaRow[]): IdeaGroup[] {
 
 /** The big number of a row, or what happened instead. */
 export function ideaScore(idea: IdeaRow): string {
-  if (idea.primary) return fmtScore(idea.primary.mean);
+  if (idea.primary) return fmtScoreUnit(idea.primary.mean, idea.unit);
   if (idea.statuses.some((s) => ACTIVE_STATUSES.has(s))) return "running";
   if (idea.statuses.length > 0 && idea.statuses.every((s) => FAILED_STATUSES.has(s))) {
     return "failed";

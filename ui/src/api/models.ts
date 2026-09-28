@@ -308,6 +308,8 @@ export interface IdeaRow {
   test_interval: NoiseInterval | null;
   identical_seeds: boolean;
   best_band: NoiseInterval | null;
+  /** Display unit of the task's primary metric (`""`, `ms`, `$`, `tokens`, `s`). */
+  unit: string;
 }
 
 export interface FailureRow {
@@ -325,6 +327,8 @@ export interface ProjectRow {
   runs: number;
   best: number | null;
   kind: TaskKind;
+  /** Display unit of the task's primary metric; `""` without one. */
+  unit: string;
 }
 
 export interface OverviewSummary {

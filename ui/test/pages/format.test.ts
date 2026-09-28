@@ -11,6 +11,7 @@ import {
   fmtInterval,
   fmtP,
   fmtScore,
+  fmtScoreUnit,
   fmtSigned,
   fmtTime,
   fmtUsd,
@@ -28,6 +29,16 @@ import {
 import { makeRecord } from "./fixtures";
 
 describe("numbers", () => {
+  test("fmtScoreUnit adds the unit: 3 significant digits, cents for small dollars", () => {
+    expect(fmtScoreUnit(165.62, "ms")).toBe("166 ms");
+    expect(fmtScoreUnit(0.5512, "$")).toBe("$0.55");
+    expect(fmtScoreUnit(332.4, "$")).toBe("$332");
+    expect(fmtScoreUnit(0.25, "s")).toBe("0.25 s");
+    expect(fmtScoreUnit(15300, "tokens")).toBe("15.3k tokens");
+    expect(fmtScoreUnit(0.9222, "")).toBe("0.9222");
+    expect(fmtScoreUnit(null, "ms")).toBe("—");
+  });
+
   test("fmtScore uses 4 decimals in [-1, 1], 3 significant digits above, SI above 1000", () => {
     expect(fmtScore(0.9222222222222222)).toBe("0.9222");
     expect(fmtScore(1)).toBe("1.0000");

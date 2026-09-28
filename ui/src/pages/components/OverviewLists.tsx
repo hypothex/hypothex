@@ -1,6 +1,6 @@
 /** Overview side panels: running runs, failures, projects. */
 import { CopyButton } from "./CopyButton";
-import { firstClause, fmtClock, fmtScore, fmtTime, shortId, tailPath } from "./format";
+import { firstClause, fmtClock, fmtScoreUnit, fmtTime, shortId, tailPath } from "./format";
 import { AppLink, hrefs } from "./links";
 import type { FailureRow, ProjectRow, RunRecord } from "./types";
 
@@ -73,7 +73,7 @@ export function ProjectsTable({ projects }: { projects: ProjectRow[] }) {
                 </AppLink>
               </td>
               <td className="r">{p.runs}</td>
-              <td className="r">{fmtScore(p.best)}</td>
+              <td className="r">{fmtScoreUnit(p.best, p.unit)}</td>
             </tr>
           );
         })}

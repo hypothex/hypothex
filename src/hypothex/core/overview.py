@@ -55,6 +55,8 @@ class IdeaRow(BaseModel):
     test_interval: NoiseInterval | None
     identical_seeds: bool
     best_band: NoiseInterval | None
+    unit: str = ""
+    """Display unit of the task's primary metric (``Leaderboard.unit``): ``ms``, ``$``."""
 
 
 class FailureRow(BaseModel):
@@ -76,6 +78,8 @@ class ProjectRow(BaseModel):
     runs: int
     best: float | None
     kind: TaskKind
+    unit: str = ""
+    """Display unit of the task's primary metric (``Leaderboard.unit``); ``""`` without one."""
 
 
 class OverviewSummary(BaseModel):
@@ -173,6 +177,7 @@ def _boards(ctx: Context) -> tuple[dict[tuple[str, str], Leaderboard], list[Proj
                     runs=len(finished),
                     best=best.mean if best is not None else None,
                     kind=entry.config.tasks[task].kind,
+                    unit=board.unit,
                 )
             )
     return boards, rows
@@ -293,6 +298,7 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
     for (project, task, gid), members in groups.items():
         row = board_row(members[0])
         best = best_of.get((project, task)) if task is not None else None
+        task_board = boards.get((project, task)) if task is not None else None
         ideas.append(
             IdeaRow(
                 project=project,
@@ -306,6 +312,7 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
                 test_interval=row.test_interval if row is not None else None,
                 identical_seeds=row.identical_seeds if row is not None else False,
                 best_band=best.test_interval if best is not None else None,
+                unit=task_board.unit if task_board is not None else "",
             )
         )
     ideas.sort(key=lambda i: (i.created_at, i.group_id), reverse=True)

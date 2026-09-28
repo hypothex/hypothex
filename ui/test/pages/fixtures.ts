@@ -247,6 +247,7 @@ export function makeOverview(): OverviewSummary {
         test_interval: band,
         identical_seeds: true,
         best_band: band,
+        unit: "",
       },
       {
         project: "toy-classifier",
@@ -260,6 +261,7 @@ export function makeOverview(): OverviewSummary {
         test_interval: null,
         identical_seeds: false,
         best_band: band,
+        unit: "",
       },
       {
         project: "toy-classifier",
@@ -273,6 +275,7 @@ export function makeOverview(): OverviewSummary {
         test_interval: { lo: 0.83, hi: 0.924, method: "wilson", n: 180 },
         identical_seeds: false,
         best_band: band,
+        unit: "",
       },
     ],
     running: [],
@@ -287,7 +290,7 @@ export function makeOverview(): OverviewSummary {
       },
     ],
     projects: [
-      { project: "toy-classifier", task: "toy-test", runs: 12, best: 0.9222222222222222, kind: "generic" },
+      { project: "toy-classifier", task: "toy-test", runs: 12, best: 0.9222222222222222, kind: "generic", unit: "" },
     ],
   };
 }

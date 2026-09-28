@@ -14,9 +14,10 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router";
-import { useState } from "react";
+import { type ReactElement, useState } from "react";
 
 import { OverviewPage } from "./pages/Overview";
+import { TaskPage } from "./pages/Task";
 import { CommandPalette } from "./shell/CommandPalette";
 import { Header } from "./shell/Header";
 
@@ -86,6 +87,13 @@ export function AppShell() {
   );
 }
 
+/** `/t/$project/$task?view=`: the Task page. Screens declare their return type, which keeps the route types free of cycles. */
+function TaskScreen(): ReactElement {
+  const { project, task } = taskRoute.useParams();
+  const { view } = taskRoute.useSearch();
+  return <TaskPage project={project} task={task} view={view} />;
+}
+
 export const rootRoute = createRootRoute({ component: AppShell, notFoundComponent: NotFound });
 
 export const overviewRoute = createRoute({
@@ -98,7 +106,7 @@ export const taskRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/t/$project/$task",
   validateSearch: (search: Record<string, unknown>): TaskSearch => ({ view: str(search.view) }),
-  component: () => <ScreenPending name="Task" />,
+  component: TaskScreen,
 });
 
 export const viewEditorRoute = createRoute({

@@ -7,6 +7,7 @@ import {
   fmtCell,
   fmtNum,
   fmtSigned,
+  panelColumns,
   ROW_CAP,
   sortRows,
   TablePanel,
@@ -115,6 +116,19 @@ describe("TablePanel", () => {
     const { container } = render(<TablePanel result={table(many)} />);
     expect(container.querySelectorAll("tbody tr").length).toBe(ROW_CAP);
     expect(screen.getByText("500 of 501 rows")).toBeTruthy();
+  });
+
+  test("meta.columns (the view's fields) are the only columns drawn", () => {
+    const rows = [
+      { run_id: "r1", group_id: "g", label: "svm", seed: 1, turn: 1, tokens_in: 90, tokens_out: 12, seconds: 0.4 },
+    ];
+    const columns = ["turn", "tokens_in", "tokens_out", "seconds"];
+    expect(panelColumns(rows, { columns })).toEqual(columns);
+    expect(panelColumns(rows, {})).toEqual(["run_id", "label", "seed", ...columns]);
+    render(<TablePanel result={{ ...table(rows), meta: { columns } }} />);
+    const heads = screen.getAllByRole("columnheader").map((h) => h.textContent);
+    expect(heads).toHaveLength(4);
+    expect(heads.some((h) => /run|label|seed/.test(h ?? ""))).toBe(false);
   });
 
   test("empty result says so", () => {

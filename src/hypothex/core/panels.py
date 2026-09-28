@@ -380,7 +380,9 @@ def _table_rows(scope: _Scope, panel: PanelSpec) -> tuple[list[dict[str, Any]], 
     synthetic ``version`` field (``VERSION_REF``) is set on every full ``runs`` row
     before the filter, whatever ``fields`` lists, so ``filter: {version: p10}``
     works on a table that shows only ``status``. The task-level ``groups`` source
-    (``group_rows``) keeps exactly the listed ``fields``, in order.
+    (``group_rows``) keeps exactly the listed ``fields``, in order. With ``fields``,
+    ``meta.columns`` lists them: the columns the table draws (per-run rows still carry
+    ``run_id``, ``group_id``, ``label`` and ``seed`` for links and filters).
     """
     source = panel.data.source or "runs"
     fields = panel.data.fields
@@ -403,6 +405,8 @@ def _table_rows(scope: _Scope, panel: PanelSpec) -> tuple[list[dict[str, Any]], 
             else:
                 rows.append(select_fields(row, fields))
     meta: dict[str, Any] = {"source": source, "total": total}
+    if fields is not None:
+        meta["columns"] = list(fields)  # the table shows these; rows keep ROW_KEYS too
     if total > MAX_TABLE_ROWS:
         meta["warnings"] = [f"showing the first {MAX_TABLE_ROWS} of {total} rows"]
     return rows, meta

@@ -463,3 +463,6 @@ def test_every_kind_run_view_queries_cleanly(dctx: Context) -> None:
         if kind == "system_bench":
             (latency,) = [r for r in results if r.type == "distribution"]
             assert [row["n"] for row in latency.rows] == [5000]
+        if kind in ("agent_eval", "agent_iteration"):
+            (tokens,) = [r for r in results if r.title == "tokens per turn"]
+            assert tokens.meta["columns"] == ["turn", "tokens_in", "tokens_out", "seconds"]

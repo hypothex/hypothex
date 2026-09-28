@@ -473,6 +473,8 @@ def test_task_kind_and_run_view(client: TestClient, ctx: Context, toy_repo: Path
     assert agent["kind"] == "agent_eval"
     assert [p["type"] for p in agent["run_view"]] == ["trace", "grid", "table"]
     assert agent["run_view"][2]["data"]["source"] == "traces"
+    # tokens per turn shows only these columns
+    assert agent["run_view"][2]["data"]["fields"] == ["turn", "tokens_in", "tokens_out", "seconds"]
     assert client.get("/api/v1/tasks/toy/nope/kind").status_code == 400
 
 

@@ -88,7 +88,7 @@ distribution   Sample distributions (ECDF) with p50, p95, p99; ``scale: log`` fo
                ``render: table`` draws the percentile table, with the change vs the task's
                ``baseline`` group and a 95% bootstrap CI over repeats.
 grid           Items by groups; each cell is the fraction of seeds that solved the item.
-table          Raw rows from a ``source`` restricted to ``fields``.
+table          Raw rows from a ``source``; with ``fields``, only those columns are drawn.
 trace          The steps of one agent attempt (``data.run_id``, ``data.example_id``).
 markdown       Static ``text``.
 vega_lite      A Vega-Lite ``spec`` drawn over rows from a ``source``. Rows arrive inline

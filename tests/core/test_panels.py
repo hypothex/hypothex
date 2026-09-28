@@ -184,7 +184,8 @@ def test_table_source_fields_and_row_filter(ctx: Context, toy_repo: Path) -> Non
             "usd": 0.25,
         }
     ]
-    assert result.meta == {"source": "usage", "total": 1}
+    # the table draws the listed fields; rows keep run_id/group_id/label/seed too
+    assert result.meta == {"source": "usage", "total": 1, "columns": ["example_id", "usd"]}
 
 
 def test_table_filters_full_rows_before_projecting(ctx: Context, toy_repo: Path) -> None:
@@ -202,7 +203,7 @@ def test_table_filters_full_rows_before_projecting(ctx: Context, toy_repo: Path)
     assert result.rows == [
         {"run_id": "r1", "group_id": "aaaa@c1", "label": "group aaaa@c1", "seed": 2, "value": 0.75}
     ]
-    assert result.meta == {"source": "scores", "total": 1}
+    assert result.meta == {"source": "scores", "total": 1, "columns": ["value"]}
 
 
 def test_runs_table_version_field(ctx: Context, toy_repo: Path) -> None:
@@ -240,9 +241,10 @@ def test_runs_table_filters_on_version_it_does_not_show(ctx: Context, toy_repo: 
             "status": "finished",
         }
     ]
-    assert result.meta == {"source": "runs", "total": 1}
+    assert result.meta == {"source": "runs", "total": 1, "columns": ["status"]}
     everything = query_panel(ctx, "toy", "toy-acc", _panel("table", data={"source": "runs"}))
     assert [r["version"] for r in everything.rows][:2] == ["p10", "p9"]  # no fields: shown
+    assert "columns" not in everything.meta  # no fields: every row key is a column
 
 
 def test_table_rows_carry_leaderboard_labels(ctx: Context, toy_repo: Path) -> None:

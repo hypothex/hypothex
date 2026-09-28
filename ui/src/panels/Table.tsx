@@ -147,10 +147,23 @@ const S = {
   empty: { fontSize: 13, color: "var(--ink-3)", margin: 0 },
 } satisfies Record<string, CSSProperties>;
 
+/**
+ * The columns a table draws: the view's `fields` (`meta.columns`) when it lists them, so
+ * the always-kept `run_id`, `label` and `seed` stay hidden unless listed; else every row key.
+ */
+export function panelColumns(rows: Row[], meta: Record<string, unknown> | undefined): string[] {
+  const listed = meta?.columns;
+  if (Array.isArray(listed) && listed.length > 0 && listed.every((c) => typeof c === "string")) {
+    return visibleColumns(listed as string[]);
+  }
+  return visibleColumns(tableColumns(rows));
+}
+
 /** Table panel. Click a header to sort ascending, again for descending, again to reset. */
 export function TablePanel({ result }: { result: PanelResult }) {
   const rows = result.rows as Row[];
-  const cols = useMemo(() => visibleColumns(tableColumns(rows)), [rows]);
+  const meta = result.meta as Record<string, unknown> | undefined;
+  const cols = useMemo(() => panelColumns(rows, meta), [rows, meta]);
   const [sort, setSort] = useState<{ key: string; dir: SortDir } | null>(null);
   const sorted = useMemo(() => (sort ? sortRows(rows, sort.key, sort.dir) : rows), [rows, sort]);
   if (rows.length === 0) return <p style={S.empty}>No rows</p>;

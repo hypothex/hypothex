@@ -195,7 +195,7 @@ def _run_view(kind: str) -> list[PanelSpec]:
                 type="table",
                 title="tokens per turn",
                 data=PanelData(
-                    source="traces", fields=["example_id", "turn", "tokens_in", "tokens_out"]
+                    source="traces", fields=["turn", "tokens_in", "tokens_out", "seconds"]
                 ),
             ),
         ]

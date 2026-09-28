@@ -11,7 +11,7 @@ from hypothex.core.context import Context
 from hypothex.core.datasets import resolve_dataset_path
 from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.fsutil import read_jsonl
-from hypothex.core.leaderboard import group_id_for, group_label
+from hypothex.core.leaderboard import group_id_for, seed_group_label
 from hypothex.core.records import RunRecord
 
 if TYPE_CHECKING:
@@ -37,9 +37,10 @@ def group_labels(runs: list[RunRecord], version_param: str | None = None) -> dic
     """
     Short name per seed group of the given runs.
 
-    The rule of ``LeaderboardRow.label``: the group's ``version_param`` value when
-    ``version_param`` is given and a run has it (``agent_iteration`` tasks); else
-    ``group_label`` of the newest non-empty hypothesis and the group's tags.
+    ``leaderboard.seed_group_label`` per group, the rule of ``LeaderboardRow.label``:
+    the group's ``version_param`` value when ``version_param`` is given and a run has
+    it (``agent_iteration`` tasks); else ``group_label`` of the newest non-empty
+    hypothesis and the group's tags.
 
     Parameters
     ----------
@@ -61,20 +62,7 @@ def group_labels(runs: list[RunRecord], version_param: str | None = None) -> dic
     members: dict[str, list[RunRecord]] = {}
     for r in sorted(runs, key=lambda r: (r.created_at, r.run_id)):
         members.setdefault(group_id_for(r), []).append(r)
-    out: dict[str, str] = {}
-    for key, group in members.items():
-        version = _version_of(group, version_param) if version_param is not None else None
-        if version:
-            out[key] = version
-            continue
-        hypothesis = next((r.hypothesis for r in reversed(group) if r.hypothesis.strip()), "")
-        out[key] = group_label(hypothesis, (t for r in group for t in r.tags), key)
-    return out
-
-
-def _version_of(members: list[RunRecord], param: str) -> str | None:
-    """The first non-empty ``params``/``vars`` value of ``param`` among ``members``."""
-    return next((v for m in members if (v := m.params.get(param) or m.vars.get(param))), None)
+    return {key: seed_group_label(group, key, version_param) for key, group in members.items()}
 
 
 def iter_rows(

@@ -8,6 +8,7 @@ from hypothex.core.config import ProjectConfig
 from hypothex.core.ids import utcnow
 from hypothex.core.leaderboard import build_leaderboard, group_label, pick_field
 from hypothex.core.records import GitInfo, RunRecord, RunStatus, ScoreRecord, UsageTotals
+from hypothex.core.sources import group_labels
 from tests.factories import make_record
 
 CFG = ProjectConfig.model_validate(
@@ -214,6 +215,21 @@ def test_rows_carry_seed_values_launchers_usage_and_labels() -> None:
     assert a.usage == UsageTotals(tokens_in=150, tokens_out=7, usd=0.75, seconds=1.5, calls=3)
     assert b.usage is None
     assert a.test_interval is None and a.vs_best is None
+
+
+def test_label_skips_an_empty_latest_hypothesis_like_group_labels() -> None:
+    runs = [
+        krun("a0", "a", hypothesis="svm, rbf kernel"),
+        krun("a1", "a", minute=1, hypothesis=""),  # latest run: empty hypothesis
+        krun("b0", "b", tags=["rf"]),
+        krun("b1", "b", minute=1, hypothesis="  "),
+        krun("c0", "c"),
+    ]
+    scores = {"a0": acc(0.9), "a1": acc(0.9), "b0": acc(0.8), "b1": acc(0.8), "c0": acc(0.1)}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    labels = {r.group_id: r.label for r in board.rows}
+    assert list(labels.values()) == ["svm", "rf", "group c@c1"]
+    assert group_labels(runs) == labels  # one rule for the board and the sources
 
 
 def test_system_bench_percentile_is_lower_is_better() -> None:

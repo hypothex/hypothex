@@ -140,6 +140,41 @@ def group_label(hypothesis: str, tags: Iterable[str], group_id: str) -> str:
     return tag_list[0] if tag_list else f"group {group_id}"
 
 
+def seed_group_label(
+    members: list[RunRecord], group_id: str, version_param: str | None = None
+) -> str:
+    """
+    The one label rule for a seed group (``LeaderboardRow.label`` and ``group_labels``).
+
+    Parameters
+    ----------
+    members : list of RunRecord
+        The group's runs, oldest first.
+    group_id : str
+        The group id, used when there is nothing else.
+    version_param : str, optional
+        The task's ``version_param`` (``agent_iteration`` tasks only), else ``None``.
+
+    Returns
+    -------
+    str
+        The ``version_param`` value when given and a run has it; else ``group_label``
+        of the newest non-empty hypothesis and the group's tags (the first tag, else
+        ``"group <id>"``).
+
+    Examples
+    --------
+    >>> old = make_record(hypothesis="svm, rbf kernel")  # doctest: +SKIP
+    >>> seed_group_label([old, make_record(hypothesis="")], "g")  # doctest: +SKIP
+    'svm'
+    """
+    version = _version_of(members, version_param) if version_param is not None else None
+    if version:
+        return version
+    hypothesis = next((r.hypothesis for r in reversed(members) if r.hypothesis.strip()), "")
+    return group_label(hypothesis, (t for m in members for t in m.tags), group_id)
+
+
 def group_id_for(run: RunRecord) -> str:
     """
     Return the seed-group id of a run.
@@ -400,11 +435,8 @@ def _make_row(
     }
     summary = {k: summarize(v) for k, v in seed_values.items()}
     prim = seed_values.get(primary, [])
-    version = _version_of(members, spec.version_param)
-    if spec.kind == "agent_iteration" and version:
-        label = version
-    else:
-        label = group_label(latest.hypothesis, (t for m in members for t in m.tags), group_id)
+    param = spec.version_param if spec.kind == "agent_iteration" else None
+    label = seed_group_label(members, group_id, param)
     return LeaderboardRow(
         group_id=group_id,
         run_ids=[m.run_id for m in members],

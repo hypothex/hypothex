@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import "../editor/editor.css";
 import { ApiError, api } from "../api/client";
 import type { ViewSpec } from "../api/models";
-import { useLeaderboard, useSaveView, useView, useViewQuery } from "../api/queries";
+import { useLeaderboard, useSaveView, useView, useViewQuery, useViews } from "../api/queries";
 import { PanelPalette, type PanelType, panelSnippet, planInsert } from "../editor/PanelPalette";
 import { type LayoutHint, type PanelResult, Preview } from "../editor/Preview";
 import {
@@ -93,6 +93,8 @@ export function ViewEditor({ project, task, view, onSaved, renderPanel = registr
     setLoaded(true);
   }, [doc.data, loaded]);
 
+  // A new name must not overwrite a view that is already there (PUT replaces the file).
+  const views = useViews(project, task);
   const board = useLeaderboard(project, task);
   const metric = board.data ? metricOf(board.data.primary) : "metric";
 
@@ -154,12 +156,20 @@ export function ViewEditor({ project, task, view, onSaved, renderPanel = registr
   }
 
   const nameOk = isViewName(name);
-  const canSave = valid && nameOk && (dirty || nameEditable) && !save.isPending;
+  const listed = !nameEditable || views.data !== undefined;
+  const taken = nameEditable && (views.data?.some((v) => v.name === name) ?? false);
+  const canSave = valid && nameOk && listed && !taken && (dirty || nameEditable) && !save.isPending;
   const saveTitle = invalid
     ? `Fix ${issues.length} error${issues.length === 1 ? "" : "s"} to save`
     : !nameOk
       ? "Name: a-z, 0-9, _ or -, not overview"
-      : `Validate, then write .hypothex/views/${task}/${name}.yaml`;
+      : taken
+        ? `${name} exists: open it to edit`
+        : !listed
+          ? views.error
+            ? `Cannot list views: ${views.error.message}`
+            : "Checking the names in use"
+          : `Validate, then write .hypothex/views/${task}/${name}.yaml`;
   const cli = nameOk ? cliCommand(project, task, name, text) : "";
 
   const onInsert = (type: PanelType) => {

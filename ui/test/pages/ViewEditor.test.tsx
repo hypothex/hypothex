@@ -88,6 +88,13 @@ function fakeServer(url: string, method: string, body: Record<string, unknown> |
       })),
     });
   }
+  if (method === "GET" && url === VIEWS) {
+    return json(200, [
+      { name: "overview", title: "Overview", origin: "preset", path: null, kind: "generic" },
+      { name: "acc", title: "acc only", origin: "file", path: "/r/acc.yaml", kind: "generic" },
+      { name: "cost_notes", title: "cost notes", origin: "inline", path: null, kind: null },
+    ]);
+  }
   if (method === "GET" && (url === `${VIEWS}/acc` || url === `${VIEWS}/overview`)) {
     return json(200, {
       info: { name: "acc", title: "acc only", origin: "file", path: "/r/acc.yaml", kind: "generic" },
@@ -247,6 +254,30 @@ describe("ViewEditor", () => {
     fireEvent.click(button("Save"));
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith("acc2"));
     expect(calls.find((c) => c.method === "PUT")?.url).toBe(`${VIEWS}/acc2`);
+  });
+
+  test("a new name that is already a view blocks Save and never PUTs", async () => {
+    renderEditor("new");
+    await waitFor(() => expect(status()).toContain("✓ valid · 0 panels"));
+    const nameBox = screen.getByLabelText("Name");
+    fireEvent.change(nameBox, { target: { value: "acc" } });
+    await waitFor(() => expect(button("Save").title).toBe("acc exists: open it to edit"));
+    expect(button("Save").disabled).toBe(true);
+    fireEvent.change(nameBox, { target: { value: "cost_notes" } });
+    expect(button("Save").disabled).toBe(true);
+    expect(button("Save").title).toBe("cost_notes exists: open it to edit");
+    fireEvent.click(button("Save"));
+    fireEvent.change(nameBox, { target: { value: "acc3" } });
+    expect(button("Save").disabled).toBe(false);
+    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+  });
+
+  test("the overview preset cannot be saved over an existing file view", async () => {
+    renderEditor("overview");
+    await waitFor(() => expect(status()).toContain("✓ valid · 1 panel"));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "acc" } });
+    await waitFor(() => expect(button("Save").title).toBe("acc exists: open it to edit"));
+    expect(button("Save").disabled).toBe(true);
   });
 
   test("the overview preset saves only under a new name, even unchanged", async () => {

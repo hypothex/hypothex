@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import type { PanelResult } from "../../src/panels/index";
 import {
+  axisTitle,
   bestIndex,
+  refLabel,
   paretoPath,
   type ScatterMeta,
   type ScatterRow,
@@ -202,7 +204,7 @@ describe("ScatterPanel", () => {
     }
   });
 
-  test("the backend's meta names the axes and tooltips with the metric refs", () => {
+  test("the backend's meta names the axes and tooltips with short metric names", () => {
     const backend: ScatterMeta = {
       x: "usage.usd",
       y: "solved@v2/value",
@@ -213,11 +215,11 @@ describe("ScatterPanel", () => {
       best_group: "g1",
     };
     const { container } = render(<ScatterPanel result={scatter(backend)} />);
-    expect(screen.getByText("usage.usd")).toBeTruthy();
-    expect(screen.getByText("solved@v2/value")).toBeTruthy();
+    expect(screen.getByText("cost")).toBeTruthy();
+    expect(screen.getByText("solved@v2")).toBeTruthy();
     const titles = [...container.querySelectorAll("title")].map((t) => t.textContent);
     expect(titles).toContain(
-      "beam\nsolved@v2/value 0.500 [0.430, 0.570]\nusage.usd 0.500 [0.450, 0.550]\n0 seeds, dominated",
+      "beam\nsolved@v2 0.500 [0.430, 0.570]\ncost 0.500 [0.450, 0.550]\n0 seeds, dominated",
     );
     expect(mean(container, "g1").dataset.best).toBe("true");
   });
@@ -246,7 +248,7 @@ describe("ScatterPanel", () => {
     expect(screen.queryByText("dominated")).toBeNull();
     const titles = [...container.querySelectorAll("title")].map((t) => t.textContent);
     expect(titles).toContain(
-      "beam\nval/loss 0.500 [0.430, 0.570]\nusage.seconds 0.500 [0.450, 0.550]\n0 seeds",
+      "beam\nval loss 0.500 [0.430, 0.570]\ntime 0.500 [0.450, 0.550]\n0 seeds",
     );
   });
 
@@ -317,10 +319,41 @@ describe("ScatterPanel", () => {
     expect(container.querySelectorAll("[data-seed]").length).toBe(6);
     const titles = [...container.querySelectorAll("title")].map((t) => t.textContent);
     expect(titles).toContain(
-      "v3\nsolved/value 0.600 [0.575, 0.625]\nversion v3\n2 seeds, regression vs best earlier version",
+      "v3\nsolved 0.600 [0.575, 0.625]\nversion v3\n2 seeds, regression vs best earlier version",
     );
     expect(screen.getByText("regression")).toBeTruthy(); // key item
     expect(screen.queryByText("Pareto")).toBeNull();
+  });
+
+  test("refLabel and axisTitle shorten refs and place units", () => {
+    expect(refLabel("solved/value")).toBe("solved");
+    expect(refLabel("latency/p95")).toBe("latency p95");
+    expect(refLabel("usage.usd")).toBe("cost");
+    expect(refLabel("usage.usd/solved")).toBe("cost per solved");
+    expect(refLabel("usage.tokens_in")).toBe("tokens in");
+    expect(refLabel("version")).toBe("version");
+    expect(axisTitle("latency p95", "ms")).toBe("latency p95, ms");
+    expect(axisTitle("cost", "$", true)).toBe("cost, log");
+  });
+
+  test("x_unit and y_unit: currency leads each tick and the tooltip value", () => {
+    const meta: ScatterMeta = {
+      x: "usage.usd",
+      y: "usage.usd/solved",
+      x_type: "quantitative",
+      scale: "linear",
+      pareto: null,
+      y_higher_is_better: false,
+      best_group: "g1",
+      x_unit: "$",
+      y_unit: "$",
+    };
+    const { container } = render(<ScatterPanel result={scatter(meta)} />);
+    const ticks = [...container.querySelectorAll("text[data-tick]")].map((t) => t.textContent);
+    expect(ticks.every((t) => t?.startsWith("$"))).toBe(true);
+    expect(screen.getByText("cost per solved")).toBeTruthy();
+    const titles = [...container.querySelectorAll("title")].map((t) => t.textContent ?? "");
+    expect(titles.some((t) => t.includes("cost per solved $0.5") && t.includes("cost $0.5"))).toBe(true);
   });
 
   test("empty result says so", () => {

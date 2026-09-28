@@ -10,7 +10,7 @@ import { scaleLinear } from "d3-scale";
 import type { CSSProperties } from "react";
 import type { ScatterMeta, ScatterRow } from "../api/models";
 import { FS, useElementWidth } from "../charts/Scale";
-import { valueFormatter } from "../charts/valueFormat";
+import { valueFormatter, withUnit } from "../charts/valueFormat";
 import { fmtTick, xAxis, xScale } from "./Distribution";
 import type { PanelResult } from "./index";
 import { fmtNum } from "./Table";
@@ -77,6 +77,29 @@ function isObj(v: unknown): v is Record<string, unknown> {
 export function yDirOf(meta: Record<string, unknown>): Dir {
   if (typeof meta.y_higher_is_better === "boolean") return meta.y_higher_is_better ? "max" : "min";
   return dirOf(isObj(meta.pareto) ? meta.pareto.y : undefined, "max");
+}
+
+const USAGE_NAMES: Record<string, string> = { usd: "cost", seconds: "time", calls: "calls" };
+
+/**
+ * Short axis name for a backend metric ref: `solved/value` → `solved`, `latency/p95` →
+ * `latency p95`, `usage.usd` → `cost`, `usage.usd/solved` → `cost per solved`.
+ */
+export function refLabel(ref: string): string {
+  if (ref.startsWith("usage.")) {
+    const [field = "", per] = ref.slice("usage.".length).split("/");
+    const name = USAGE_NAMES[field] ?? field.replace(/_/g, " ");
+    return per ? `${name} per ${per}` : name;
+  }
+  return ref.replace(/\/value$/, "").replace(/\//g, " ");
+}
+
+const CURRENCY = new Set(["$", "£", "€"]);
+
+/** A currency unit leads each tick (`$20`); other units go in the axis title. */
+export function axisTitle(label: string, unit: string, log = false): string {
+  const withU = unit && !CURRENCY.has(unit) ? `${label}, ${unit}` : label;
+  return log ? `${withU}, log` : withU;
 }
 
 /** Width used before layout is known (and in test DOMs). */
@@ -151,8 +174,12 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
     const hit = keys.map((k) => meta[k]).find((v) => typeof v === "string" && v !== "");
     return typeof hit === "string" ? hit : null;
   };
-  const xLabel = label("x_label", "x") ?? "x";
-  const yLabel = label("y_label", "y") ?? "y";
+  const xLabel = label("x_label") ?? refLabel(label("x") ?? "x");
+  const yLabel = label("y_label") ?? refLabel(label("y") ?? "y");
+  const xUnit = typeof meta.x_unit === "string" ? meta.x_unit : "";
+  const yUnit = typeof meta.y_unit === "string" ? meta.y_unit : typeof meta.unit === "string" ? meta.unit : "";
+  const xTick = (v: number) => (CURRENCY.has(xUnit) ? withUnit(fmtTick(v), xUnit) : fmtTick(v));
+  const yTick = (v: number) => (CURRENCY.has(yUnit) ? withUnit(fmtTick(v), yUnit) : fmtTick(v));
   const bestGroup =
     typeof meta.best_group === "string" || meta.best_group === null ? meta.best_group : undefined;
   const best = bestIndex(rows, yDir, bestGroup);
@@ -164,10 +191,10 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
         nums([numeric(r.x), r.x_lo, r.x_hi, ...r.seeds.map((s) => numeric(s.x))]),
       );
   const ys = rows.flatMap((r) => nums([r.y, r.y_lo, r.y_hi, ...r.seeds.map((s) => s.y)]));
-  // `meta.unit` / `meta.value_format` describe y; without them fall back to plain numbers
+  // `meta.y_unit` (or `meta.unit`) and `meta.value_format` describe y; without them plain numbers
   const yFmt =
-    typeof meta.unit === "string" || typeof meta.value_format === "string"
-      ? valueFormatter(meta, ys, yLabel)
+    yUnit || typeof meta.value_format === "string"
+      ? valueFormatter({ unit: yUnit, value_format: meta.value_format }, ys, yLabel)
       : null;
   const yVal = (v: number) => (yFmt ? yFmt.value(v) : fmtNum(v));
   const yRange = (lo: number | null, hi: number | null) =>
@@ -210,13 +237,13 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
         style={{ display: "block", overflow: "visible", fontFamily: "var(--sans)" }}
       >
         <text x={PL} y={PT - 12} style={T.lblS}>
-          {yLabel}
+          {axisTitle(yLabel, yUnit)}
         </text>
         {yTicks.map((t) => (
           <g key={`y${t}`}>
             <line x1={PL} x2={W - PR} y1={Y(t)} y2={Y(t)} style={T.grid} />
             <text x={PL - 8} y={Y(t) + 4} textAnchor="end" style={T.tk}>
-              {fmtTick(t)}
+              {yTick(t)}
             </text>
           </g>
         ))}
@@ -240,18 +267,18 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
               <g key={`x${t}`}>
                 <line x1={X(t)} x2={X(t)} y1={H - PB} y2={H - PB + 4} style={T.axis} />
                 <text
-                  data-tick={fmtTick(t)}
+                  data-tick={xTick(t)}
                   x={X(t)}
                   y={H - PB + 17}
                   textAnchor="middle"
                   style={T.tk}
                 >
-                  {fmtTick(t)}
+                  {xTick(t)}
                 </text>
               </g>
             ))}
         <text x={W - PR} y={H - PB + 36} textAnchor="end" style={T.lblS}>
-          {kind === "log" && !ordinal ? `${xLabel}, log` : xLabel}
+          {axisTitle(xLabel, xUnit, kind === "log" && !ordinal)}
         </text>
         {stairsD && <path data-testid="pareto" d={stairsD} style={T.pareto} />}
         {rows.map((r, i) => {
@@ -263,7 +290,7 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
           const right = x + 12 + r.label.length * 7 <= W - PR;
           const xLine = ordinal
             ? `${xLabel} ${r.x}`
-            : `${xLabel} ${fmtNum(Number(r.x))}${range(r.x_lo, r.x_hi)}`;
+            : `${xLabel} ${withUnit(fmtNum(Number(r.x)), xUnit)}${range(r.x_lo, r.x_hi)}`;
           const status = regressed
             ? `, ${REGRESSION_TIP}`
             : hasFront

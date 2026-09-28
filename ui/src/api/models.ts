@@ -471,6 +471,10 @@ export interface ScatterMeta {
   y_higher_is_better: boolean;
   /** Group with the best mean y in that direction; null when no row qualifies. */
   best_group: string | null;
+  /** Display unit of x (`$`, `ms`, ...); `""` when none. */
+  x_unit?: string;
+  /** Display unit of y; `""` when none. */
+  y_unit?: string;
 }
 
 /** `[delta_rel, lo, hi]`: relative change vs the baseline and its 95% bootstrap CI. */

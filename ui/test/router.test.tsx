@@ -58,6 +58,18 @@ describe("routes", () => {
     expect(leaf(router)?.search).toEqual({ view: "2024" });
   });
 
+  test("/r/:runId keeps ?log and ?example for the run page", async () => {
+    const { router } = renderApp("/r/r1?log=stderr&example=T-014");
+    await settled(router, "/r/$runId");
+    expect(leaf(router)?.search).toEqual({ log: "stderr", example: "T-014" });
+  });
+
+  test("/r/:runId keeps a numeric ?example id as a string", async () => {
+    const { router } = renderApp("/r/r1?example=42");
+    await settled(router, "/r/$runId");
+    expect(leaf(router)?.search).toEqual({ log: undefined, example: "42" });
+  });
+
   test("an unknown path shows Not found with a way home", async () => {
     renderApp("/nope/at/all");
     expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Not found");

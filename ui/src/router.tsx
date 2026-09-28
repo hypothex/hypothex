@@ -17,6 +17,7 @@ import {
 import { type ReactElement, useState } from "react";
 
 import { OverviewPage } from "./pages/Overview";
+import { RunPage } from "./pages/Run";
 import { TaskPage } from "./pages/Task";
 import { CommandPalette } from "./shell/CommandPalette";
 import { Header } from "./shell/Header";
@@ -27,6 +28,11 @@ export interface TaskSearch {
 
 export interface ExamplesSearch {
   metric?: string;
+}
+
+export interface RunSearch {
+  log?: string;
+  example?: string;
 }
 
 const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
@@ -94,6 +100,13 @@ function TaskScreen(): ReactElement {
   return <TaskPage project={project} task={task} view={view} />;
 }
 
+/** `/r/$runId?log=&example=`: the Run page. */
+function RunScreen(): ReactElement {
+  const { runId } = runRoute.useParams();
+  const { log, example } = runRoute.useSearch();
+  return <RunPage runId={runId} log={log} example={example} />;
+}
+
 export const rootRoute = createRootRoute({ component: AppShell, notFoundComponent: NotFound });
 
 export const overviewRoute = createRoute({
@@ -118,7 +131,11 @@ export const viewEditorRoute = createRoute({
 export const runRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/r/$runId",
-  component: () => <ScreenPending name="Run" />,
+  validateSearch: (search: Record<string, unknown>): RunSearch => ({
+    log: str(search.log),
+    example: str(search.example),
+  }),
+  component: RunScreen,
 });
 
 export const examplesRoute = createRoute({

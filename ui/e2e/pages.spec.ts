@@ -71,12 +71,18 @@ for (const kind of KINDS) {
     );
     expect(layout.kind).toBe(kind);
 
+    // a run without traces hides the panels that read them (trace, source: traces)
+    const traces = await getJson<unknown[]>(request, `/api/v1/runs/${run.run_id}/traces`);
+    const readsTraces = (p: PanelLite) => p.type === "trace" || p.data?.source === "traces";
+
     await page.goto(`/r/${run.run_id}`);
     await expectTheme(page, theme);
     await expect(page.getByText(run.hypothesis || run.run_id).first()).toBeVisible();
     for (const panel of layout.run_view) {
       if (!panel.title) continue;
-      await expect(page.getByRole("heading", { name: panel.title }).first()).toBeVisible();
+      const heading = page.getByRole("heading", { name: panel.title });
+      if (traces.length === 0 && readsTraces(panel)) await expect(heading).toHaveCount(0);
+      else await expect(heading.first()).toBeVisible();
     }
   });
 }

@@ -30,6 +30,7 @@ export interface ViewInfoLite {
 export interface PanelLite {
   type: string;
   title: string;
+  data?: { source?: string | null } | null;
 }
 export interface BoardLite {
   headline: string;

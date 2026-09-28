@@ -16,6 +16,7 @@ import {
 } from "@tanstack/react-router";
 import { useState } from "react";
 
+import { OverviewPage } from "./pages/Overview";
 import { CommandPalette } from "./shell/CommandPalette";
 import { Header } from "./shell/Header";
 
@@ -90,7 +91,7 @@ export const rootRoute = createRootRoute({ component: AppShell, notFoundComponen
 export const overviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: () => <ScreenPending name="Overview" />,
+  component: OverviewPage,
 });
 
 export const taskRoute = createRoute({

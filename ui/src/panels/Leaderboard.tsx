@@ -18,7 +18,6 @@ import {
   type KeyItem,
 } from "../charts/Glyphs";
 import {
-  f3,
   f4,
   fmtP,
   linear,
@@ -29,6 +28,7 @@ import {
   type LinearScale,
 } from "../charts/Scale";
 import { useTooltip, type Tooltip } from "../charts/Tooltip";
+import { valueFormatter, type ValueFormatter } from "../charts/valueFormat";
 import type { LeaderboardRow, NoiseInterval, Stats, UsageTotals, VersusBest } from "../api/models";
 import type { PanelProps } from "./index";
 
@@ -149,6 +149,7 @@ export function verdictOf(
   row: LeaderboardRowJson,
   best: LeaderboardRowJson | null,
   band: Band | null,
+  fmt?: ValueFormatter,
 ): Verdict {
   if (row === best) {
     return { kind: "best", text: "best", p: "", tip: "Best mean. Its 95% CI is the green band." };
@@ -166,7 +167,7 @@ export function verdictOf(
     : "No 95% CI for the best group.";
   return {
     kind: inBand ? "band" : "behind",
-    text: signed(m - best.primary.mean, 3),
+    text: fmt ? fmt.delta(m, best.primary.mean) : signed(m - best.primary.mean, 3),
     p,
     tip: base + testTip(row.vs_best),
   };
@@ -183,7 +184,7 @@ function Who({ by }: { by: string[] }): ReactElement {
   );
 }
 
-function SeedSpread({ row }: { row: LeaderboardRowJson }): ReactElement | null {
+function SeedSpread({ row, fmt }: { row: LeaderboardRowJson; fmt: ValueFormatter }): ReactElement | null {
   const s = row.primary;
   if (!s) return null;
   if (row.identical_seeds) {
@@ -200,7 +201,7 @@ function SeedSpread({ row }: { row: LeaderboardRowJson }): ReactElement | null {
       </span>
     );
   }
-  return <span title={`std over ${s.n} seeds`}>± {f4(s.std)}</span>;
+  return <span title={`std over ${s.n} seeds`}>± {fmt.spread(s.std)}</span>;
 }
 
 interface PlotProps {
@@ -213,9 +214,10 @@ interface PlotProps {
   showSeeds: boolean;
   showTest: boolean;
   tip: Tooltip;
+  fmt: ValueFormatter;
 }
 
-function RowPlot({ row, pkey, x, width, band, best, showSeeds, showTest, tip }: PlotProps): ReactElement {
+function RowPlot({ row, pkey, x, width, band, best, showSeeds, showTest, tip, fmt }: PlotProps): ReactElement {
   const s = row.primary;
   const isBest = row === best;
   const seeds = row.seed_values[pkey] ?? [];
@@ -226,7 +228,7 @@ function RowPlot({ row, pkey, x, width, band, best, showSeeds, showTest, tip }: 
       width={width}
       height={ROW_H}
       role="img"
-      aria-label={`${row.label}: ${s ? f4(s.mean) : "no score"}`}
+      aria-label={`${row.label}: ${s ? fmt.value(s.mean) : "no score"}`}
     >
       <GridX x={x.at} ticks={x.ticks} y0={0} y1={ROW_H} />
       {band ? <BestBand x1={x.at(band.lo)} x2={x.at(band.hi)} y0={0} y1={ROW_H} /> : null}
@@ -243,8 +245,8 @@ function RowPlot({ row, pkey, x, width, band, best, showSeeds, showTest, tip }: 
         <g
           {...tip.bind(
             row.identical_seeds
-              ? `${row.label}\n×${s.n}: all seeds gave ${f4(s.mean)}`
-              : `${row.label}\nseeds: ${seeds.map(f4).join(", ")}`,
+              ? `${row.label}\n×${s.n}: all seeds gave ${fmt.value(s.mean)}`
+              : `${row.label}\nseeds: ${seeds.map(fmt.value).join(", ")}`,
           )}
         >
           {row.identical_seeds ? (
@@ -258,7 +260,7 @@ function RowPlot({ row, pkey, x, width, band, best, showSeeds, showTest, tip }: 
       {s && showTest && t ? (
         <g
           {...tip.bind(
-            `${row.label}\nmean ${f4(s.mean)}\ntest-set 95% CI ${f4(t.lo)}–${f4(t.hi)}\n(${t.method === "wilson" ? "Wilson" : "bootstrap"}, n = ${t.n})`,
+            `${row.label}\nmean ${fmt.value(s.mean)}\ntest-set 95% CI ${fmt.num(t.lo)}–${fmt.value(t.hi)}\n(${t.method === "wilson" ? "Wilson" : "bootstrap"}, n = ${t.n})`,
           )}
         >
           <Whisker x1={x.at(t.lo)} x2={x.at(t.hi)} y={CI_Y} best={isBest} />
@@ -293,6 +295,14 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
     .find((k) => k !== pkey);
   const best = rows.find((r) => r.primary && r.vs_best == null) ?? null;
   const band = bestBand(best);
+  const fmt = valueFormatter(meta, rows.flatMap((r) => (r.primary ? [r.primary.mean] : [])), pkey);
+  const fmt2 = valueFormatter(
+    // the unit and format describe the primary metric, not the second column
+    undefined,
+    rows.flatMap((r) => (secondKey && r.scores[secondKey] ? [r.scores[secondKey].mean] : [])),
+    secondKey ?? "",
+  );
+  const unitTip = fmt.unit ? ` (${fmt.unit})` : "";
 
   const values: number[] = [];
   for (const r of rows) {
@@ -321,13 +331,18 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
       <div className="forest">
         <div className="frow head">
           <div>Idea</div>
-          <div className="acc">{metricLabel(pkey)}</div>
+          <div className="acc" title={`${pkey}${unitTip}`}>
+            {metricLabel(pkey)}
+            {fmt.unit ? ` ${fmt.unit}` : ""}
+          </div>
           <div ref={plotRef}>{plotHead}</div>
-          <div className="f1">{secondKey ? metricLabel(secondKey) : ""}</div>
+          <div className="f1 hd" title={secondKey ?? ""}>
+            {secondKey ? metricLabel(secondKey) : ""}
+          </div>
           <div>vs best</div>
         </div>
         {rows.map((row, i) => {
-          const v = verdictOf(row, best, band);
+          const v = verdictOf(row, best, band, fmt);
           const s = row.primary;
           const second = secondKey ? row.scores[secondKey] : undefined;
           const u = row.usage;
@@ -350,16 +365,18 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
                 </div>
               </div>
               <div className="acc">
-                <div className="big">{s ? f4(s.mean) : "—"}</div>
+                <div className="big" title={s ? fmt.value(s.mean) : undefined}>
+                  {s ? fmt.num(s.mean) : "—"}
+                </div>
                 <div className="sd">
-                  <SeedSpread row={row} />
+                  <SeedSpread row={row} fmt={fmt} />
                 </div>
                 {showTest && row.test_interval ? (
                   <div className="sd">
                     <span
                       title={`test-set 95% CI (${row.test_interval.method === "wilson" ? "Wilson" : "bootstrap"}, n = ${row.test_interval.n})`}
                     >
-                      {f3(row.test_interval.lo)}–{f3(row.test_interval.hi)}
+                      {fmt.bound(row.test_interval.lo)}–{fmt.bound(row.test_interval.hi)}
                     </span>
                   </div>
                 ) : null}
@@ -375,9 +392,10 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
                   showSeeds={showSeeds}
                   showTest={showTest}
                   tip={tip}
+                  fmt={fmt}
                 />
               </div>
-              <div className="f1">{second ? f4(second.mean) : ""}</div>
+              <div className="f1">{second ? fmt2.value(second.mean) : ""}</div>
               <div className="vd" title={v.tip}>
                 {v.kind === "none" ? null : <span className={`vg ${v.kind}`} />}
                 {best && row !== best && s && pkey ? (
@@ -405,7 +423,7 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
                 x0={0}
                 x1={width}
                 format={tickFormat(x.ticks)}
-                label={metricLabel(pkey)}
+                label={fmt.unit ? `${metricLabel(pkey)}, ${fmt.unit}` : metricLabel(pkey)}
               />
             </svg>
           </div>

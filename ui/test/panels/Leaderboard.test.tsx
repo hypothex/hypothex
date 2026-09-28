@@ -286,3 +286,43 @@ describe("Leaderboard panel", () => {
     expect(screen.getByText("No scored runs yet")).toBeTruthy();
   });
 });
+
+describe("Leaderboard number formatting", () => {
+  const lat = (id: string, mean: number, std: number, best = false) =>
+    row({
+      group_id: id,
+      label: id,
+      scores: { "latency/p95": stat(mean, std), "errors/rate": stat(0.0003) },
+      primary: stat(mean, std),
+      seed_values: { "latency/p95": [mean - std, mean, mean + std] },
+      vs_best: best ? null : { delta: mean - 165.6221, p: 0.09, fixed: null, broken: null, test: "welch", examples_needed: null },
+    });
+  const LAT = [lat("async-worker", 165.6221, 2.8011, true), lat("cache-enabled", 210.5802, 25.2433), lat("baseline", 233.2682, 2.3312)];
+
+  test("without meta: 3 significant figures and relative latency deltas", () => {
+    const { container } = render(<Leaderboard result={board({ primary: "latency/p95" }, LAT)} />);
+    const rows = [...container.querySelectorAll<HTMLElement>(".frow[data-row]")];
+    expect(rows.map((r) => r.querySelector(".big")?.textContent)).toEqual(["166", "211", "233"]);
+    expect(rows[0]?.querySelector(".sd")?.textContent).toBe("± 2.80");
+    expect(rows.map((r) => r.querySelector(".vd a, .vd span:not(.vg)")?.textContent)).toEqual(["best", "+27%", "+41%"]);
+    // the second column keeps its own (score) format
+    expect(rows[0]?.querySelector(".f1")?.textContent).toBe("0.0003");
+  });
+
+  test("meta.unit labels the header and the axis; meta.value_format wins", () => {
+    const { container } = render(
+      <Leaderboard result={board({ primary: "latency/p95", unit: "ms", value_format: ".1f" }, LAT)} />,
+    );
+    expect(container.querySelector(".frow.head .acc")?.textContent).toBe("latency p95 ms");
+    expect(container.querySelector(".axisrow .lbl-s")?.textContent).toBe("latency p95, ms");
+    const big = container.querySelector(".frow[data-row] .big");
+    expect(big?.textContent).toBe("165.6");
+    expect(big?.getAttribute("title")).toBe("165.6 ms");
+  });
+
+  test("a long second-metric header is clipped, with the key as its tooltip", () => {
+    const { container } = render(<Leaderboard result={board({ primary: "latency/p95" }, LAT)} />);
+    const hd = container.querySelector(".frow.head .f1.hd");
+    expect(hd?.getAttribute("title")).toBe("errors/rate");
+  });
+});

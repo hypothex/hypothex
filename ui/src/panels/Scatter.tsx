@@ -10,6 +10,7 @@ import { scaleLinear } from "d3-scale";
 import type { CSSProperties } from "react";
 import type { ScatterMeta, ScatterRow } from "../api/models";
 import { FS, useElementWidth } from "../charts/Scale";
+import { valueFormatter } from "../charts/valueFormat";
 import { fmtTick, xAxis, xScale } from "./Distribution";
 import type { PanelResult } from "./index";
 import { fmtNum } from "./Table";
@@ -163,6 +164,14 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
         nums([numeric(r.x), r.x_lo, r.x_hi, ...r.seeds.map((s) => numeric(s.x))]),
       );
   const ys = rows.flatMap((r) => nums([r.y, r.y_lo, r.y_hi, ...r.seeds.map((s) => s.y)]));
+  // `meta.unit` / `meta.value_format` describe y; without them fall back to plain numbers
+  const yFmt =
+    typeof meta.unit === "string" || typeof meta.value_format === "string"
+      ? valueFormatter(meta, ys, yLabel)
+      : null;
+  const yVal = (v: number) => (yFmt ? yFmt.value(v) : fmtNum(v));
+  const yRange = (lo: number | null, hi: number | null) =>
+    yFmt && lo !== null && hi !== null ? ` [${yFmt.num(lo)}, ${yFmt.value(hi)}]` : range(lo, hi);
   const { domain: xDom, ticks: xTicks } = xAxis(kind, xs);
   const X = xScale(kind, xDom, [PL, W - PR]);
   // ordinal: one equal band per row, in row order (the engine sorts versions naturally)
@@ -316,7 +325,7 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
               </text>
               <rect x={x - 14} y={y - 14} width={28} height={28} style={{ fill: "transparent" }}>
                 <title>
-                  {`${r.label}\n${yLabel} ${fmtNum(r.y)}${range(r.y_lo, r.y_hi)}\n` +
+                  {`${r.label}\n${yLabel} ${yVal(r.y)}${yRange(r.y_lo, r.y_hi)}\n` +
                     `${xLine}\n${r.seeds.length} seeds${status}`}
                 </title>
               </rect>

@@ -4,7 +4,10 @@ import {
   KindPanels,
   kindPanelCount,
   pickExample,
+  readsTraces,
+  runViewPanels,
   scopeToRun,
+  sentenceCase,
 } from "../../src/pages/components/KindPanels";
 import { LogView } from "../../src/pages/components/LogView";
 import type { PanelSpec } from "../../src/pages/components/types";
@@ -64,6 +67,25 @@ describe("helpers", () => {
     expect(pickExample([])).toBeNull();
     expect(kindPanelCount([...SPECS, { type: "trace", title: "again" }])).toBe(2);
   });
+});
+
+test("runViewPanels: sentence-case titles; no trace panels for a run without traces", () => {
+  const agent: PanelSpec[] = [
+    { type: "trace", title: "steps" },
+    { type: "grid", title: "same item across configs" },
+    { type: "table", title: "tokens per turn", data: { source: "traces" } },
+  ];
+  expect(sentenceCase("tokens per turn")).toBe("Tokens per turn");
+  expect(sentenceCase("")).toBe("");
+  expect(agent.map(readsTraces)).toEqual([true, false, true]);
+  expect(runViewPanels(agent, 0).map((p) => p.title)).toEqual(["Same item across configs"]);
+  expect(runViewPanels(agent, 2).map((p) => p.title)).toEqual([
+    "Steps",
+    "Same item across configs",
+    "Tokens per turn",
+  ]);
+  // traces not loaded yet: keep every panel
+  expect(runViewPanels(agent)).toHaveLength(3);
 });
 
 test("KindPanels queries scoped panels and shows the failed trace first", async () => {

@@ -121,8 +121,12 @@ export const useRunPredictions = (runId: string, query: M.PredictionsQuery = {})
     placeholderData: keepPreviousData,
   });
 
-export const useRunTraces = (runId: string) =>
-  useQuery({ queryKey: queryKeys.runTraces(runId), queryFn: ({ signal }) => api.runTraces(runId, signal) });
+export const useRunTraces = (runId: string, enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.runTraces(runId),
+    queryFn: ({ signal }) => api.runTraces(runId, signal),
+    enabled,
+  });
 
 /** One trace; idle until `exampleId` is set. */
 export const useRunTrace = (runId: string, exampleId: string | null) =>

@@ -4,10 +4,10 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
-import { queryKeys, useRun } from "../api/queries";
+import { queryKeys, useRun, useRunTraces } from "../api/queries";
 import { Figure, panelLetter } from "./components/Figure";
 import { firstClause, shortId } from "./components/format";
-import { KindPanels, kindPanelCount } from "./components/KindPanels";
+import { KindPanels, kindPanelCount, readsTraces, runViewPanels } from "./components/KindPanels";
 import { AppLink, hrefs } from "./components/links";
 import { LogView } from "./components/LogView";
 import { Notes } from "./components/Notes";
@@ -54,6 +54,8 @@ export function RunPage({ runId, log, example }: RunPageProps) {
     enabled: hasTask,
     queryFn: ({ signal }) => api.leaderboard(project, task, [], signal),
   });
+  const kindSpecs = kind.data?.run_view ?? [];
+  const traces = useRunTraces(runId, kindSpecs.some(readsTraces));
 
   if (run.error) {
     return (
@@ -75,7 +77,7 @@ export function RunPage({ runId, log, example }: RunPageProps) {
   const detail = run.data;
   const row = board.data?.rows.find((r) => r.run_ids.includes(runId)) ?? null;
   const primary = primaryRef(board.data ?? null, row);
-  const specs = kind.data?.run_view ?? [];
+  const specs = runViewPanels(kindSpecs, traces.data?.length);
   const stream = asLogStream(log);
   const label = row?.label ?? firstClause(record.hypothesis, `run ${shortId(runId)}`);
   const title = record.hypothesis || label;

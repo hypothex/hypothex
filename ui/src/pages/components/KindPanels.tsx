@@ -35,6 +35,26 @@ export function splitRunView(specs: PanelSpec[]): { regular: PanelSpec[]; trace:
   };
 }
 
+/** A panel that shows traces: the trace section, or a panel reading `source: traces`. */
+export function readsTraces(panel: PanelSpec): boolean {
+  return panel.type === "trace" || (panel.data as { source?: unknown } | undefined)?.source === "traces";
+}
+
+/** `tokens per turn` → `Tokens per turn`. */
+export function sentenceCase(title: string): string {
+  return title ? title.charAt(0).toUpperCase() + title.slice(1) : title;
+}
+
+/**
+ * The run-view panels to draw for one run: titles in sentence case (as the page's own
+ * sections), and, when the run has no traces (`traceCount === 0`), no trace panels, which
+ * would only say "no traces". `traceCount` undefined (not known yet) keeps them.
+ */
+export function runViewPanels(specs: PanelSpec[], traceCount?: number): PanelSpec[] {
+  const kept = traceCount === 0 ? specs.filter((p) => !readsTraces(p)) : specs;
+  return kept.map((p) => (p.title ? { ...p, title: sentenceCase(p.title) } : p));
+}
+
 /** How many lettered panels `KindPanels` draws for these specs. */
 export function kindPanelCount(specs: PanelSpec[]): number {
   const { regular, trace } = splitRunView(specs);

@@ -10,6 +10,7 @@ import {
   labelGutter,
   isLr,
   meanSeries,
+  ownAxisNames,
   valueAt,
   type CheckpointJson,
   type CurvePoint,
@@ -168,6 +169,9 @@ describe("Curves panel", () => {
     expect(base.querySelectorAll("line.ev").length).toBe(3);
     expect(base.querySelectorAll("path.evg").length).toBe(1);
     expect(base.querySelector(".event.spike text.lbl-s")?.textContent).toBe("500");
+    // event labels from the server are the tooltips of the marks
+    expect(base.querySelector(".event.spike title")?.textContent).toBe("spike 500");
+    expect(aug.querySelector(".event.killed title")?.textContent).toBe("killed 600");
     const carets = [...base.querySelectorAll(".clip-caret text")].map((t) => t.textContent);
     expect(carets).toEqual(["3", "0.44"]);
     expect(aug.querySelectorAll("path.m-fail").length).toBe(2);
@@ -222,8 +226,13 @@ describe("small multiple titles", () => {
     meta: { groups },
   });
 
-  test("run labels from meta.groups title each column", () => {
-    const groups = RUNS.map((r) => ({ group_id: r.run_id, label: r.group_id, run_label: `${r.group_id} r${r.seed}` }));
+  test("the server's per-run labels title each column", () => {
+    const groups = RUNS.map((r) => ({
+      group_id: r.run_id,
+      label: `${r.group_id} r${r.seed}`,
+      seed_group: r.group_id,
+      repeat: r.seed,
+    }));
     const { container } = render(<Curves result={perRun(groups)} />);
     const titles = [...container.querySelectorAll("text.ttl")].map((t) => t.textContent);
     expect(titles).toEqual(["base r1", "base r2", "aug r1", "aug r2"]);
@@ -259,4 +268,31 @@ test("the label gutter widens so a long metric name clears its tick labels", () 
   // 22 chars at 12 px (~148 px) plus the tick labels and gaps
   expect(labelGutter(long)).toBeGreaterThan(170);
   expect(labelGutter(long)).toBeLessThanOrEqual(220);
+});
+
+test("a metric on a far different step range gets its own axis below the others", () => {
+  expect(ownAxisNames({ cpu: 40, gpu: 38, mem: 40, "sweep/rps": 128 })).toEqual(["sweep/rps"]);
+  expect(ownAxisNames({ loss: 20000, top1: 20000, lr: 20000 })).toEqual([]);
+  expect(ownAxisNames({ only: 5 })).toEqual([]);
+  const rows: CurvePoint[] = [];
+  for (let s = 0; s <= 40; s += 10) {
+    rows.push({ run_id: "r", group_id: "g", seed: 1, name: "cpu", step: s, value: 50 + s });
+    rows.push({ run_id: "r", group_id: "g", seed: 1, name: "gpu", step: s, value: 60 });
+  }
+  for (const c of [1, 16, 64, 128]) rows.push({ run_id: "r", group_id: "g", seed: 1, name: "sweep/rps", step: c, value: c * 2 });
+  const model = buildCurves(rows, { groups: [{ group_id: "g", label: "g" }] });
+  expect(model.names).toEqual(["cpu", "gpu", "sweep/rps"]);
+  expect(model.ownAxis).toEqual(["sweep/rps"]);
+  expect(model.maxStep).toBe(40);
+  const { container } = render(<Curves result={result(rows, { groups: [{ group_id: "g", label: "g" }] })} />);
+  // shared axis (0..40) under gpu, the last shared row; the sweep's own axis (0..128) at the bottom
+  const tickTexts = [...container.querySelectorAll("text.tk")].map((t) => t.textContent);
+  expect(tickTexts).toContain("40");
+  expect(tickTexts).toContain("100");
+});
+
+test("a series with a single point is drawn as a dot", () => {
+  const rows: CurvePoint[] = [{ run_id: "r", group_id: "g", seed: 1, name: "train_accuracy", step: 0, value: 0.97 }];
+  const { container } = render(<Curves result={result(rows, { groups: [{ group_id: "g", label: "g" }] })} />);
+  expect(container.querySelectorAll("circle[data-dot]").length).toBe(1);
 });

@@ -27,6 +27,7 @@
 .hx-chart .hit:focus-visible { outline: none; stroke: var(--agent); stroke-width: 1; }
 .hx-chart .sl { stroke: var(--ink-3); stroke-width: 1; fill: none; opacity: .6; }
 .hx-chart .ml { stroke: var(--ink); stroke-width: 2; fill: none; stroke-linejoin: round; }
+.hx-chart .md { fill: var(--ink); stroke: var(--paper); stroke-width: 1; }
 .hx-chart .lrl { stroke: var(--ink-2); stroke-width: 1.5; fill: none; }
 .hx-chart .lra { fill: var(--paper-2); }
 .hx-chart .ev { stroke: var(--fail); stroke-width: 1.25; stroke-dasharray: 3 3; }

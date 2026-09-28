@@ -1,7 +1,9 @@
 /**
  * `curves` panel: small multiples of metric histories.
  *
- * One column per seed group, one row per metric, all on one step axis. Seeds are
+ * One column per seed group, one row per metric, on one shared step axis; a metric whose
+ * steps span a very different range (e.g. a sweep logged with step = concurrency) goes
+ * below the others with its own axis. A series with one point is a dot. Seeds are
  * faint lines, the seed mean is bold. The best checkpoint of each run is a green
  * dot; loss spikes are dashed red lines with a spike glyph, killed or failed runs
  * end in a red cross. Values pushed off the panel by a spike get a red caret with
@@ -40,25 +42,29 @@ export interface EventJson {
   run_id: string;
   step: number;
   kind: "spike" | "killed" | "failed";
-}
-
-/** `meta.groups[]`. Per-run small multiples may carry a `run_label` (e.g. `baseline r1`). */
-export interface GroupJson {
-  group_id: string;
-  label: string;
-  run_label?: string;
+  /** Short text from the server, e.g. `spike 9k`, `killed 14k`. */
+  label?: string;
 }
 
 /**
- * Column titles for `groups`: `run_label`, else `label`. Titles that still repeat (one
- * column per run of the same idea) get the run's seed (`baseline s2`) when the column
- * holds a single seed (and the seeds differ), else a counter (`baseline #2`), never a mix.
+ * `meta.groups[]`. With `group_by: run` each entry is one run: `label` is already
+ * `<config> r<n>`, `seed_group` is the run's seed group and `repeat` its `n`.
+ */
+export interface GroupJson {
+  group_id: string;
+  label: string;
+  seed_group?: string;
+  repeat?: number;
+}
+
+/**
+ * Column titles for `groups`: `label`, else the group id. Titles that still repeat (one
+ * column per run of the same idea, without the server's run labels) get the run's seed
+ * (`baseline s2`) when the column holds a single seed (and the seeds differ), else a
+ * counter (`baseline #2`), never a mix.
  */
 export function columnTitles(groups: GroupJson[], seedsOf: (groupId: string) => (number | null)[]): GroupJson[] {
-  const base = groups.map((g) => {
-    const run = typeof g.run_label === "string" && g.run_label.trim() ? g.run_label.trim() : null;
-    return run ?? (typeof g.label === "string" && g.label.trim() ? g.label : g.group_id);
-  });
+  const base = groups.map((g) => (typeof g.label === "string" && g.label.trim() ? g.label.trim() : g.group_id));
   const oneSeed = (id: string): number | null => {
     const seeds = [...new Set(seedsOf(id))];
     return seeds.length === 1 && typeof seeds[0] === "number" ? seeds[0] : null;
@@ -117,7 +123,12 @@ export interface CurvesModel {
   groups: GroupJson[];
   names: string[];
   cells: Map<string, Cell>;
+  /** Last step of the shared axis. */
   maxStep: number;
+  /** Last step of each metric. */
+  rowMax: Record<string, number>;
+  /** Metrics drawn on their own step axis (after the shared rows). */
+  ownAxis: string[];
   scales: Record<string, RowScale>;
   checkpoints: PlacedCheckpoint[];
   events: Array<EventJson & { group_id: string }>;
@@ -151,6 +162,27 @@ export const ROW_H = 116;
 export const LR_ROW_H = 40;
 /** Gap between metric rows. */
 export const ROW_GAP = 16;
+/** Space for an x axis under a row that is not the last. */
+export const AXIS_GAP = 30;
+/** A metric whose last step is this many times off the median metric's gets its own axis. */
+export const OWN_AXIS_RATIO = 2;
+
+/**
+ * Metrics whose step range is far from the others (last step more than
+ * {@link OWN_AXIS_RATIO} times above or below the median metric's last step).
+ */
+export function ownAxisNames(rowMax: Record<string, number>): string[] {
+  const names = Object.keys(rowMax);
+  if (names.length < 2) return [];
+  const sorted = names.map((n) => rowMax[n] ?? 0).sort((a, b) => a - b);
+  const median = sorted[Math.floor((sorted.length - 1) / 2)] ?? 0;
+  if (median <= 0) return [];
+  return names.filter((n) => {
+    const m = rowMax[n] ?? 0;
+    return m > median * OWN_AXIS_RATIO || m * OWN_AXIS_RATIO < median;
+  });
+}
+
 /** Share of the step axis after a spike that is left out of the y-domain. */
 export const SPIKE_WINDOW = 0.1;
 
@@ -235,7 +267,7 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
   const names: string[] = [];
   const runGroup = new Map<string, string>();
   const byRun = new Map<string, Map<string, RunSeries>>();
-  let maxStep = 0;
+  const rowMax: Record<string, number> = {};
   for (const p of rows) {
     if (!Number.isFinite(p.value) || !Number.isFinite(p.step)) continue;
     if (!known.has(p.group_id)) {
@@ -249,9 +281,13 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
     let rs = series.get(p.name);
     if (!rs) series.set(p.name, (rs = { run_id: p.run_id, seed: p.seed, points: [] }));
     rs.points.push([p.step, p.value]);
-    maxStep = Math.max(maxStep, p.step);
+    rowMax[p.name] = Math.max(rowMax[p.name] ?? 0, p.step);
   }
-  names.sort((a, b) => Number(isLr(a)) - Number(isLr(b)));
+  const ownAxis = ownAxisNames(rowMax);
+  const own = (n: string): number => (ownAxis.includes(n) ? 1 : 0);
+  names.sort((a, b) => own(a) - own(b) || Number(isLr(a)) - Number(isLr(b)));
+  const shared = names.filter((n) => !ownAxis.includes(n));
+  const maxStep = Math.max(0, ...shared.map((n) => rowMax[n] ?? 0));
 
   const cells = new Map<string, Cell>();
   for (const series of byRun.values()) {
@@ -269,9 +305,9 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
   }
 
   const spikes = events.filter((e) => e.kind === "spike");
-  const window = SPIKE_WINDOW * maxStep;
   const scales: Record<string, RowScale> = {};
   for (const name of names) {
+    const window = SPIKE_WINDOW * (rowMax[name] ?? 0);
     const vals: number[] = [];
     for (const [runId, series] of byRun) {
       const own = spikes.filter((e) => e.run_id === runId);
@@ -313,6 +349,8 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
     names,
     cells,
     maxStep,
+    rowMax,
+    ownAxis,
     scales,
     checkpoints,
     events: events
@@ -330,14 +368,19 @@ interface RowGeom {
   name: string;
   top: number;
   h: number;
+  /** Draw an x axis under this row (the last shared row before own-axis rows, and own-axis rows). */
+  axis: boolean;
 }
 
-function rowGeometry(names: string[]): { rows: RowGeom[]; bottom: number } {
+function rowGeometry(names: string[], ownAxis: string[] = []): { rows: RowGeom[]; bottom: number } {
   let y = TITLE_H;
-  const rows = names.map((name) => {
+  const lastShared = names.filter((n) => !ownAxis.includes(n)).at(-1);
+  const rows = names.map((name, i) => {
     const h = isLr(name) ? LR_ROW_H : ROW_H;
-    const r = { name, top: y, h };
-    y += h + ROW_GAP;
+    const last = i === names.length - 1;
+    const axis = ownAxis.includes(name) || (name === lastShared && ownAxis.length > 0);
+    const r = { name, top: y, h, axis: axis && !last };
+    y += h + (axis && !last ? AXIS_GAP : ROW_GAP);
     return r;
   });
   return { rows, bottom: y - ROW_GAP };
@@ -370,9 +413,11 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
   const [hover, setHover] = useState<{ col: number; step: number } | null>(null);
   const gutter = labelGutter(model);
   const colW = Math.max(40, (width - gutter - COL_GAP * (cols - 1)) / cols);
-  const { rows, bottom } = rowGeometry(model.names);
+  const { rows, bottom } = rowGeometry(model.names, model.ownAxis);
   const H = bottom + 30;
   const xTicks = linear([0, model.maxStep || 1], 0, 1, 4).ticks;
+  const rowStepMax = (name: string): number =>
+    model.ownAxis.includes(name) ? model.rowMax[name] || 1 : model.maxStep || 1;
 
   const columns = groups.map((g, ci) => {
     const x0 = gutter + ci * (colW + COL_GAP);
@@ -440,9 +485,11 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
             const y = yScaleFor(scale, r.top, r.h);
             const cell = model.cells.get(cellKey(col.g.group_id, r.name));
             const clipId = `${uid}-c${col.ci}r${ri}`;
+            const xr = model.ownAxis.includes(r.name) ? linear([0, rowStepMax(r.name)], col.x0, col.x0 + colW, 4) : col.x;
             const path = line<[number, number]>()
-              .x((p) => col.x.at(p[0]))
+              .x((p) => xr.at(p[0]))
               .y((p) => y.at(p[1]));
+            const dot = (pts: Array<[number, number]>) => (pts.length === 1 ? pts[0] : null);
             const lrRun = cell?.runs.reduce((a, b) => (b.points.length > a.points.length ? b : a));
             const lrPeak = lrRun ? Math.max(...lrRun.points.map((p) => p[1])) : 0;
             return (
@@ -468,7 +515,7 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
                         className="lra"
                         d={
                           area<[number, number]>()
-                            .x((p) => col.x.at(p[0]))
+                            .x((p) => xr.at(p[0]))
                             .y0(y.at(0))
                             .y1((p) => y.at(p[1]))(lrRun.points) ?? ""
                         }
@@ -481,6 +528,15 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
                         <path key={rs.run_id} className="sl" data-run={rs.run_id} d={path(rs.points) ?? ""} />
                       ))}
                       {cell ? <path className="ml" d={path(cell.mean) ?? ""} /> : null}
+                      {cell && dot(cell.mean) ? (
+                        <circle
+                          className="md"
+                          data-dot=""
+                          cx={xr.at(dot(cell.mean)?.[0] ?? 0)}
+                          cy={y.at(dot(cell.mean)?.[1] ?? 0)}
+                          r={3}
+                        />
+                      ) : null}
                     </>
                   )}
                 </g>
@@ -494,11 +550,12 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
                   .map((e) => {
                     const rs = cell?.runs.find((x) => x.run_id === e.run_id);
                     if (e.kind === "spike") {
-                      const ex = col.x.at(e.step);
+                      const ex = xr.at(e.step);
                       const after = rs?.points.find((p) => p[0] >= e.step);
                       const vy = after ? y.at(after[1]) : null;
                       return (
                         <g key={`${e.run_id}-${e.step}-${e.kind}`} className="event spike">
+                          <title>{e.label ?? `spike ${kStep(e.step)}`}</title>
                           <line className="ev" x1={ex} x2={ex} y1={r.top} y2={r.top + r.h} />
                           {ri === 0 ? (
                             <>
@@ -520,17 +577,46 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
                     const last = rs?.points.at(-1);
                     if (scale.kind === "lr" || !last) return null;
                     const ky = Math.max(r.top, Math.min(r.top + r.h, y.at(last[1])));
-                    return <KillMark key={`${e.run_id}-${e.kind}`} x={col.x.at(last[0])} y={ky} />;
+                    return (
+                      <g key={`${e.run_id}-${e.kind}`} className={`event ${e.kind}`}>
+                        <title>{e.label ?? `${e.kind} ${kStep(e.step)}`}</title>
+                        <KillMark x={xr.at(last[0])} y={ky} />
+                      </g>
+                    );
                   })}
                 {model.checkpoints
                   .filter((c) => c.name === r.name && c.group_id === col.g.group_id)
                   .map((c) => (
-                    <CheckpointMark key={`${c.run_id}-${c.step}`} cx={col.x.at(c.step)} cy={y.at(c.value)} best />
+                    <CheckpointMark key={`${c.run_id}-${c.step}`} cx={xr.at(c.step)} cy={y.at(c.value)} best />
                   ))}
+                {r.axis ? (
+                  <AxisBottom
+                    x={xr.at}
+                    ticks={xr.ticks}
+                    y={r.top + r.h}
+                    x0={col.x0}
+                    x1={col.x0 + colW}
+                    format={kStep}
+                  />
+                ) : null}
               </g>
             );
           })}
-          <AxisBottom x={col.x.at} ticks={xTicks} y={bottom} x0={col.x0} x1={col.x0 + colW} format={kStep} />
+          {(() => {
+            const lastName = model.names.at(-1) ?? "";
+            const own = model.ownAxis.includes(lastName);
+            const xl = own ? linear([0, rowStepMax(lastName)], col.x0, col.x0 + colW, 4) : col.x;
+            return (
+              <AxisBottom
+                x={xl.at}
+                ticks={own ? xl.ticks : xTicks}
+                y={bottom}
+                x0={col.x0}
+                x1={col.x0 + colW}
+                format={kStep}
+              />
+            );
+          })()}
           {hover?.col === col.ci ? (
             <line className="xh" x1={col.x.at(hover.step)} x2={col.x.at(hover.step)} y1={TITLE_H - 4} y2={bottom} />
           ) : null}

@@ -300,6 +300,29 @@ test("a metric on a far different step range gets its own axis below the others"
   expect(tickTexts).toContain("100");
 });
 
+test("the hover crosshair uses each row's own x scale on own-axis rows", () => {
+  const rows: CurvePoint[] = [];
+  for (let s = 0; s <= 40; s += 10) {
+    rows.push({ run_id: "r", group_id: "g", seed: 1, name: "cpu", step: s, value: 50 + s });
+    rows.push({ run_id: "r", group_id: "g", seed: 1, name: "gpu", step: s, value: 60 });
+  }
+  for (const c of [1, 16, 64, 128]) rows.push({ run_id: "r", group_id: "g", seed: 1, name: "sweep/rps", step: c, value: c * 2 });
+  const meta = { groups: [{ group_id: "g", label: "g" }] };
+  const { container } = render(<Curves result={result(rows, meta)} />);
+  // one column at the fallback width 960: x0 = gutter, colW = 960 - gutter
+  const x0 = labelGutter(buildCurves(rows, meta));
+  const colW = 960 - x0;
+  // a quarter across: step 10 of 0..40 on the shared rows, 32 -> nearest 16 of 0..128 on the sweep
+  fireEvent.mouseMove(container.querySelector('rect.hit[data-hit="g"]') as Element, { clientX: x0 + colW / 4 });
+  const xAt = (row: string) => Number(container.querySelector(`line.xh[data-row="${row}"]`)?.getAttribute("x1"));
+  expect(xAt("cpu")).toBeCloseTo(x0 + colW * (10 / 40), 6);
+  expect(xAt("gpu")).toBeCloseTo(x0 + colW * (10 / 40), 6);
+  expect(xAt("sweep/rps")).toBeCloseTo(x0 + colW * (16 / 128), 6);
+  const lines = screen.getByRole("tooltip").textContent?.split("\n") ?? [];
+  expect(lines[0]).toBe("g, step 10");
+  expect(lines[3]).toBe("sweep/rps (step 16)  s1 32  mean 32");
+});
+
 test("a series with a single point is drawn as a dot", () => {
   const rows: CurvePoint[] = [{ run_id: "r", group_id: "g", seed: 1, name: "train_accuracy", step: 0, value: 0.97 }];
   const { container } = render(<Curves result={result(rows, { groups: [{ group_id: "g", label: "g" }] })} />);

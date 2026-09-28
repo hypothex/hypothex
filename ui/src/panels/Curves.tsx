@@ -431,14 +431,16 @@ interface StackProps {
 
 function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactElement {
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
-  const [hover, setHover] = useState<{ col: number; step: number } | null>(null);
+  // the hovered column and the mouse's x in svg pixels; each row maps it to its own step
+  const [hover, setHover] = useState<{ col: number; px: number } | null>(null);
   const gutter = labelGutter(model);
   const colW = Math.max(40, (width - gutter - COL_GAP * (cols - 1)) / cols);
   const { rows, bottom } = rowGeometry(model.names, model.ownAxis);
   const H = bottom + 30;
   const xTicks = linear([0, model.maxStep || 1], 0, 1, 4).ticks;
-  const rowStepMax = (name: string): number =>
-    model.ownAxis.includes(name) ? model.rowMax[name] || 1 : model.maxStep || 1;
+  const own = (name: string): boolean => model.ownAxis.includes(name);
+  const rowStepMax = (name: string): number => (own(name) ? model.rowMax[name] || 1 : model.maxStep || 1);
+  const shared = model.names.filter((n) => !own(n));
 
   const columns = groups.map((g, ci) => {
     const x0 = gutter + ci * (colW + COL_GAP);
@@ -446,38 +448,67 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
     const runIds = new Set(
       model.names.flatMap((n) => model.cells.get(cellKey(g.group_id, n))?.runs.map((r) => r.run_id) ?? []),
     );
-    const steps = [
-      ...new Set(
-        model.names.flatMap((n) => model.cells.get(cellKey(g.group_id, n))?.mean.map((p) => p[0]) ?? []),
-      ),
-    ].sort((a, b) => a - b);
-    return { g, ci, x0, x, runIds, steps };
+    const meanSteps = (names: string[]): number[] =>
+      [
+        ...new Set(names.flatMap((n) => model.cells.get(cellKey(g.group_id, n))?.mean.map((p) => p[0]) ?? [])),
+      ].sort((a, b) => a - b);
+    const sharedSteps = meanSteps(shared);
+    const ownSteps = new Map(model.ownAxis.map((n) => [n, meanSteps([n])]));
+    /** The x scale of one row: the column's shared scale, or the row's own step range. */
+    const xOf = (name: string) => (own(name) ? linear([0, rowStepMax(name)], x0, x0 + colW, 4) : x);
+    /** The row's mean step nearest to pixel `px` on that row's own x scale. */
+    const stepAt = (name: string, px: number): number | null => {
+      const steps = own(name) ? (ownSteps.get(name) ?? []) : sharedSteps;
+      return steps[bisectCenter(steps, xOf(name).invert(px))] ?? null;
+    };
+    return { g, ci, x0, x, runIds, xOf, stepAt };
   });
 
-  const tipText = (col: (typeof columns)[number], step: number): string => {
-    const lines = [`${col.g.label}, step ${step.toLocaleString("en-US")}`];
+  const tipText = (col: (typeof columns)[number], px: number): string => {
+    const head = shared.length > 0 ? col.stepAt(shared[0] ?? "", px) : null;
+    const lines = [head == null ? col.g.label : `${col.g.label}, step ${head.toLocaleString("en-US")}`];
     for (const name of model.names) {
       const cell = model.cells.get(cellKey(col.g.group_id, name));
-      if (!cell) continue;
+      const step = col.stepAt(name, px);
+      if (!cell || step == null) continue;
       const parts = cell.runs.map((r) => {
         const last = r.points.at(-1);
         const v = last && step <= last[0] ? valueAt(r.points, step) : null;
         return `${r.seed != null ? `s${r.seed}` : r.run_id.slice(-4)} ${v == null ? "—" : fmtValue(v)}`;
       });
       const m = valueAt(cell.mean, step);
-      lines.push(`${name}  ${parts.join("  ")}  mean ${m == null ? "—" : fmtValue(m)}`);
+      // an own-axis row names its own step: it is not the header's step
+      const label = own(name) ? `${name} (step ${step.toLocaleString("en-US")})` : name;
+      lines.push(`${label}  ${parts.join("  ")}  mean ${m == null ? "—" : fmtValue(m)}`);
     }
     return lines.join("\n");
   };
 
   const move = (col: (typeof columns)[number], e: MouseEvent<SVGRectElement>): void => {
     const svg = e.currentTarget.closest("svg");
-    const left = svg ? svg.getBoundingClientRect().left : 0;
-    const raw = col.x.invert(e.clientX - left);
-    const step = col.steps[bisectCenter(col.steps, raw)];
-    if (step == null) return;
-    setHover({ col: col.ci, step });
-    onHover(tipText(col, step), e.clientX, e.clientY);
+    const px = e.clientX - (svg ? svg.getBoundingClientRect().left : 0);
+    if (model.names.every((n) => col.stepAt(n, px) == null)) return;
+    setHover({ col: col.ci, px });
+    onHover(tipText(col, px), e.clientX, e.clientY);
+  };
+
+  /**
+   * The crosshair: one line through the column on the shared scale; with own-axis rows,
+   * one segment per row, each at that row's step on that row's own x scale.
+   */
+  const crosshair = (col: (typeof columns)[number], px: number): ReactElement[] => {
+    if (model.ownAxis.length === 0) {
+      const step = col.stepAt(model.names[0] ?? "", px);
+      if (step == null) return [];
+      const xs = col.x.at(step);
+      return [<line key="xh" className="xh" x1={xs} x2={xs} y1={TITLE_H - 4} y2={bottom} />];
+    }
+    return rows.flatMap((r) => {
+      const step = col.stepAt(r.name, px);
+      if (step == null) return [];
+      const xs = col.xOf(r.name).at(step);
+      return [<line key={r.name} className="xh" data-row={r.name} x1={xs} x2={xs} y1={r.top} y2={r.top + r.h} />];
+    });
   };
 
   return (
@@ -506,7 +537,7 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
             const y = yScaleFor(scale, r.top, r.h);
             const cell = model.cells.get(cellKey(col.g.group_id, r.name));
             const clipId = `${uid}-c${col.ci}r${ri}`;
-            const xr = model.ownAxis.includes(r.name) ? linear([0, rowStepMax(r.name)], col.x0, col.x0 + colW, 4) : col.x;
+            const xr = col.xOf(r.name);
             const path = line<[number, number]>()
               .x((p) => xr.at(p[0]))
               .y((p) => y.at(p[1]));
@@ -625,12 +656,11 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
           })}
           {(() => {
             const lastName = model.names.at(-1) ?? "";
-            const own = model.ownAxis.includes(lastName);
-            const xl = own ? linear([0, rowStepMax(lastName)], col.x0, col.x0 + colW, 4) : col.x;
+            const xl = col.xOf(lastName);
             return (
               <AxisBottom
                 x={xl.at}
-                ticks={own ? xl.ticks : xTicks}
+                ticks={own(lastName) ? xl.ticks : xTicks}
                 y={bottom}
                 x0={col.x0}
                 x1={col.x0 + colW}
@@ -638,9 +668,7 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
               />
             );
           })()}
-          {hover?.col === col.ci ? (
-            <line className="xh" x1={col.x.at(hover.step)} x2={col.x.at(hover.step)} y1={TITLE_H - 4} y2={bottom} />
-          ) : null}
+          {hover?.col === col.ci ? crosshair(col, hover.px) : null}
           <rect
             className="hit"
             data-hit={col.g.group_id}

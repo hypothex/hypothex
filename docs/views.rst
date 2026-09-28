@@ -119,7 +119,8 @@ The ``groups`` source is task-level: one row per seed group, in version order (t
 ``hypothesis``, ``primary`` (the leaderboard mean), ``primary_lo`` and ``primary_hi``
 (95% interval), ``delta_prev`` (``primary`` minus the previous group's), and ``changes``:
 the ``params``/``vars`` that differ from the previous group
-(``model: sonnet-5 → opus-5.5; tools: +stock_check``), else the short commit. A
+(``model: sonnet-5 → opus-5.5; tools: +stock_check``), else the short commit; the first
+group has nothing to compare with, so its ``changes`` is empty (shown as ``—``). A
 ``groups`` table keeps exactly the listed ``fields``:
 
 .. code-block:: yaml

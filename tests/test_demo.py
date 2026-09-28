@@ -386,6 +386,7 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
                 "model: gpt-4.1-mini → gpt-4.1",
                 "prompt: react-1 → concise-2",
             ]
+            assert changes[0]["changes"] == ""  # first version: nothing to compare with
             assert changes[0]["delta_prev"] is None
             assert changes[5]["delta_prev"] == pytest.approx(0.5583333 - 0.6066667, abs=1e-6)
         if kind == "system_bench":

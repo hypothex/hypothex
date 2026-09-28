@@ -446,7 +446,8 @@ def group_changes(prev: RunRecord | None, run: RunRecord, version_param: str) ->
     Parameters
     ----------
     prev : RunRecord or None
-        Latest run of the previous group in version order; ``None`` for the first.
+        Latest run of the previous group in version order; ``None`` for the first
+        group, which gives ``""`` (nothing to compare with; the UI shows ``—``).
     run : RunRecord
         Latest run of this group.
     version_param : str
@@ -457,16 +458,17 @@ def group_changes(prev: RunRecord | None, run: RunRecord, version_param: str) ->
     str
         ``params``/``vars`` keys whose values differ, ``key: old → new`` joined by
         ``; `` (comma-separated values show added and removed items, ``tools:
-        +stock_check``); with no such key, the short commit (``""`` without git).
+        +stock_check``); with no such key, the short commit (``""`` without git);
+        ``""`` for the first group.
 
     Examples
     --------
     >>> group_changes(v1, v2, "version")  # doctest: +SKIP
     'model: sonnet-5 → opus-5.5; tools: +stock_check'
     """
-    commit = (run.git.commit or "")[:7]
     if prev is None:
-        return commit
+        return ""
+    commit = (run.git.commit or "")[:7]
     old, new = _settings(prev, version_param), _settings(run, version_param)
     keys = [*new, *(k for k in old if k not in new)]
     parts = [_change(k, old.get(k), new.get(k)) for k in keys if old.get(k) != new.get(k)]

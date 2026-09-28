@@ -280,13 +280,13 @@ def test_data_filter_matches_group_labels(ctx: Context, toy_repo: Path) -> None:
     assert _ids(query_panel(ctx, "toy", "toy-acc", table)) == ["s1", "s2"]
 
 
-def test_group_changes_lists_differing_params_else_the_commit() -> None:
+def test_group_changes_lists_differing_params_else_the_commit_first_group_empty() -> None:
     def rec(commit: str | None, **params: str) -> RunRecord:
         return make_record(params=params, vars={"lr": "0.1"}, git=GitInfo(commit=commit))
 
     v1 = rec("aaaaaaa111", version="v1", model="sonnet-5", tools="search,expand")
     v2 = rec("bbbbbbb222", version="v2", model="opus-5.5", tools="search,expand,stock_check")
-    assert panels.group_changes(None, v1, "version") == "aaaaaaa"
+    assert panels.group_changes(None, v1, "version") == ""  # first group: nothing to compare
     assert (
         panels.group_changes(v1, v2, "version") == "model: sonnet-5 → opus-5.5; tools: +stock_check"
     )
@@ -338,7 +338,7 @@ def test_groups_source_one_row_per_group_in_version_order(ctx: Context, toy_repo
     assert (a["commit"], a["created_by"], a["hypothesis"]) == ("c1", "agent:y, human:x", "try aaaa")
     assert a["primary"] == pytest.approx(0.8)
     assert a["primary_lo"] < 0.8 < a["primary_hi"]  # seed t-interval (no per-example file)
-    assert b["delta_prev"] is None and b["changes"] == "c1"
+    assert b["delta_prev"] is None and b["changes"] == ""  # first row: nothing to compare
     assert a["delta_prev"] == pytest.approx(0.2)
     assert a["changes"] == "model: mb → ma"
     assert (c["primary"], c["primary_lo"], c["delta_prev"]) == (None, None, None)

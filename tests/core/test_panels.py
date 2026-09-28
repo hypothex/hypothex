@@ -594,6 +594,27 @@ def test_curves_step_metric_and_group_by_run(ctx: Context, toy_repo: Path) -> No
     assert result.meta["x"] == "epoch"
 
 
+def test_group_by_run_labels_each_repeat_of_its_config(ctx: Context, toy_repo: Path) -> None:
+    for rid, group, minute in [("b1", "aaaa", 0), ("c1", "bbbb", 1), ("b2", "aaaa", 2)]:
+        rec = _run(ctx, toy_repo, rid, group, minute=minute, hypothesis=f"h{group[0]}")
+        _jsonl(ctx.run_dir(rec) / "metrics.jsonl", [{"name": "gpu_pct", "step": 0, "value": 40}])
+        _score(ctx, rec, 0.5)
+    curves = _panel("curves", data={"metrics": ["gpu_pct"], "group_by": "run"})
+    result = query_panel(ctx, "toy", "toy-acc", curves)
+    assert result.meta["groups"] == [
+        {"group_id": "b1", "label": "ha r1", "seed_group": "aaaa@c1", "repeat": 1},
+        {"group_id": "c1", "label": "hb r1", "seed_group": "bbbb@c1", "repeat": 1},
+        {"group_id": "b2", "label": "ha r2", "seed_group": "aaaa@c1", "repeat": 2},
+    ]
+    # other panels grouped by run get the same labels
+    scatter = _panel("scatter", data={"x": "gpu_pct", "group_by": "run"})
+    assert [r["label"] for r in query_panel(ctx, "toy", "toy-acc", scatter).rows] == [
+        "ha r1",
+        "hb r1",
+        "ha r2",
+    ]
+
+
 def test_checkpoints_use_the_step_metric_x(ctx: Context, toy_repo: Path) -> None:
     rec = _run(ctx, toy_repo, "c1")
     _jsonl(

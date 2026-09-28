@@ -403,6 +403,10 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
             assert all(lo is not None and lo <= hi for d in deltas for _, lo, hi in d.values())
             # async: repeat p95s 163-169 ms vs baseline 231-235 ms, about -29%
             assert min(d["p95"][0] for d in deltas) < -0.25
+            # utilisation small multiples: one per run, named by config and repeat
+            util = [g["label"] for g in results["Utilisation"].meta["groups"]]
+            assert util[:3] == ["baseline r1", "baseline r2", "baseline r3"]
+            assert len(set(util)) == len(util)
             # 9 finished runs: p95 for the spread
             assert len(results["Repeat spread"].rows) == 9
             # bars and points are named by config label, not group id

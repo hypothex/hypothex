@@ -618,7 +618,12 @@ def _own_label(members: list[RunRecord], key: str) -> str:
 
 
 def _groups(scope: _Scope, panel: PanelSpec) -> list[tuple[str, str, list[RunRecord]]]:
-    """Return ``(key, label, members)`` per group, in order of first run."""
+    """
+    Return ``(key, label, members)`` per group, in order of first run.
+
+    ``group_by: run`` labels each run ``<group label> r<n>``, ``n`` its position in
+    its seed group (oldest first), so small multiples of one config stay apart.
+    """
     by = panel.data.group_by or "group"
     members: dict[str, list[RunRecord]] = defaultdict(list)
     for r in scope.runs:
@@ -631,11 +636,26 @@ def _groups(scope: _Scope, panel: PanelSpec) -> list[tuple[str, str, list[RunRec
         else:
             key = group_id_for(r)
         members[key].append(r)
-    labels = scope.labels() if by == "group" else {}
+    labels = scope.labels() if by in ("group", "run") else {}
+    repeat = _repeats(scope.runs) if by == "run" else {}
     out: list[tuple[str, str, list[RunRecord]]] = []
     for key, runs in members.items():
-        label = f"seed {runs[0].seed}" if by == "seed" else labels.get(key)
+        if by == "run":
+            label: str | None = f"{labels[group_id_for(runs[0])]} r{repeat[key]}"
+        else:
+            label = f"seed {runs[0].seed}" if by == "seed" else labels.get(key)
         out.append((key, label or _own_label(runs, key), runs))
+    return out
+
+
+def _repeats(runs: list[RunRecord]) -> dict[str, int]:
+    """Run id -> 1-based position of the run in its seed group (``runs`` oldest first)."""
+    seen: dict[str, int] = defaultdict(int)
+    out: dict[str, int] = {}
+    for r in runs:
+        gid = group_id_for(r)
+        seen[gid] += 1
+        out[r.run_id] = seen[gid]
     return out
 
 
@@ -755,10 +775,15 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
     rows: list[dict[str, Any]] = []
     checkpoints: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
-    groups: list[dict[str, str]] = []
+    groups: list[dict[str, Any]] = []
     group_of: dict[str, str] = {}
+    by_run = panel.data.group_by == "run"
+    repeat = _repeats(scope.runs) if by_run else {}
     for key, label, members in _groups(scope, panel):
-        groups.append({"group_id": key, "label": label})
+        entry: dict[str, Any] = {"group_id": key, "label": label}
+        if by_run:
+            entry |= {"seed_group": group_id_for(members[0]), "repeat": repeat[key]}
+        groups.append(entry)
         for r in members:
             group_of[r.run_id] = key
     names_seen: list[str] = []

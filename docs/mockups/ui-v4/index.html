@@ -1,0 +1,1231 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hypothex</title>
+<script>
+  (function () {
+    var q = new URLSearchParams(location.search).get("theme");
+    var t = q || localStorage.getItem("hx-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400..700;1,6..72,400..500&display=swap" rel="stylesheet">
+<style>
+/* ------------------------------------------------------------------ tokens */
+:root {
+  --paper: #F6F7F3;
+  --paper-2: #ECEEE8;
+  --ink: #15181E;
+  --ink-2: #464C57;
+  --ink-3: #767C87;
+  --rule: #D5D8D0;
+  --rule-2: #E4E6E0;
+  --best: #00846A;
+  --best-wash: rgba(0, 132, 106, .12);
+  --best-edge: rgba(0, 132, 106, .50);
+  --fail: #C8412B;
+  --agent: #5B48C2;
+  --human: #A66A12;
+  --serif: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --paper: #12161C;
+  --paper-2: #1A1F27;
+  --ink: #E9ECEF;
+  --ink-2: #AEB5BF;
+  --ink-3: #7C8490;
+  --rule: #2C333D;
+  --rule-2: #222830;
+  --best: #1FA282;
+  --best-wash: rgba(31, 162, 130, .17);
+  --best-edge: rgba(31, 162, 130, .60);
+  --fail: #DE5F49;
+  --agent: #8C7BEA;
+  --human: #C08629;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 400 15px/1.5 var(--sans);
+  font-feature-settings: "ss01" 0;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:hover { text-decoration-color: currentColor; }
+:focus-visible { outline: 2px solid var(--agent); outline-offset: 2px; border-radius: 3px; }
+button { font: inherit; color: inherit; }
+.num { font-variant-numeric: tabular-nums; }
+.path, code, kbd { font-family: var(--mono); font-size: .86em; }
+
+/* ------------------------------------------------------------------ chrome */
+.bar {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--rule);
+}
+.bar-in { max-width: 1280px; margin: 0 auto; padding: 0 40px; height: 60px; display: flex; align-items: stretch; gap: 40px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 600 21px/1 var(--serif); letter-spacing: -.01em; }
+.brand svg { display: block; }
+.tabs { display: flex; gap: 4px; }
+.tabs a {
+  display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: var(--ink-3);
+  font-size: 14.5px; border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tabs a:hover { color: var(--ink); }
+.tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
+.bar-r { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.find {
+  display: flex; align-items: center; gap: 28px; height: 34px; padding: 0 8px 0 12px; min-width: 250px;
+  border: 1px solid var(--rule); border-radius: 7px; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 13.5px;
+}
+.find:hover { border-color: var(--ink-3); }
+.find kbd { margin-left: auto; font-family: var(--sans); font-size: 12px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; }
+.theme { height: 34px; padding: 0 12px; border: 1px solid var(--rule); border-radius: 7px; background: transparent; cursor: pointer; font-size: 13.5px; color: var(--ink-2); display: flex; gap: 8px; align-items: center; }
+.theme:hover { border-color: var(--ink-3); color: var(--ink); }
+
+main { max-width: 1280px; margin: 0 auto; padding: 44px 40px 120px; }
+.view[hidden] { display: none; }
+
+/* ------------------------------------------------------------------ type */
+.crumb { margin: 0 0 18px; font-size: 13.5px; color: var(--ink-3); }
+.crumb a { color: var(--ink-2); text-decoration: none; }
+.crumb a:hover { text-decoration: underline; }
+.crumb .sep { margin: 0 6px; color: var(--rule); }
+h1.finding {
+  margin: 0; max-width: 21em;
+  font: 500 46px/1.06 var(--serif); font-variation-settings: "opsz" 72;
+  letter-spacing: -.018em; text-wrap: balance;
+}
+h1.finding .then { color: var(--ink-2); font-weight: 400; }
+.lede { margin: 18px 0 0; max-width: 64ch; font: 400 19.5px/1.5 var(--serif); font-variation-settings: "opsz" 16; color: var(--ink-2); text-wrap: pretty; }
+.metaline { margin: 14px 0 0; display: flex; flex-wrap: wrap; gap: 4px 22px; font-size: 14px; color: var(--ink-3); font-variant-numeric: tabular-nums; align-items: center; }
+.metaline b { color: var(--ink-2); font-weight: 500; }
+.hint { text-decoration: underline dotted var(--rule); text-underline-offset: 3px; cursor: help; }
+
+/* stat strip: numbers with short labels; explanations live in the title tooltips */
+.stats { display: flex; flex-wrap: wrap; gap: 14px 0; margin: 0; padding: 0; }
+.stats > div { padding: 0 32px; border-left: 1px solid var(--rule-2); cursor: help; }
+.stats > div:first-child { padding-left: 0; border-left: 0; }
+.stats dt { font-size: 12.5px; color: var(--ink-3); }
+.stats dd { margin: 0 0 3px; font: 400 25px/1.1 var(--sans); letter-spacing: -.012em; font-variant-numeric: tabular-nums; color: var(--ink); }
+.stats dd small { font-size: 15px; color: var(--ink-3); letter-spacing: 0; }
+.stats > div { display: flex; flex-direction: column-reverse; }
+
+/* figure panels: space, letters, captions. No boxes. */
+.fig { margin-top: 64px; }
+.fig + .fig { margin-top: 64px; }
+.fig-h { display: flex; align-items: baseline; gap: 12px; margin: 0 0 18px; }
+.fig-h .pl { font: 700 19px/1 var(--sans); }
+.fig-h .t { font: 600 16px/1.3 var(--sans); }
+.fig-h .aside { margin-left: auto; font-size: 13px; color: var(--ink-3); }
+.caption { margin: 16px 0 0; max-width: 78ch; font: 400 15.5px/1.52 var(--serif); font-variation-settings: "opsz" 12; color: var(--ink-2); text-wrap: pretty; }
+.caption b { font-weight: 650; color: var(--ink); }
+.small { font-size: 13px; color: var(--ink-3); }
+
+/* svg figure text */
+svg text { font-family: var(--sans); fill: var(--ink-2); }
+svg .tk { font-size: 11.5px; fill: var(--ink-3); font-variant-numeric: tabular-nums; }
+svg .lbl { font-size: 12.5px; fill: var(--ink-2); }
+svg .lbl-s { font-size: 11.5px; fill: var(--ink-3); }
+svg .lbl-b { font-size: 12.5px; fill: var(--ink); font-weight: 600; }
+svg .axis { stroke: var(--ink-3); stroke-width: 1; }
+svg .grid { stroke: var(--rule-2); stroke-width: 1; }
+svg .hair { stroke: var(--rule); stroke-width: 1; }
+svg .band { fill: var(--best-wash); }
+svg .band-edge { stroke: var(--best-edge); stroke-width: 1; }
+svg .bestline { stroke: var(--best); stroke-width: 1.25; }
+svg .whisk { stroke: var(--ink-3); stroke-width: 1.5; stroke-linecap: round; fill: none; }
+svg .whisk.best { stroke: var(--best); }
+svg .mean { fill: var(--ink); stroke: var(--paper); stroke-width: 2; }
+svg .mean.best { fill: var(--best); }
+svg .seed { fill: var(--ink-2); stroke: var(--paper); stroke-width: 2; }
+svg .dia { fill: var(--paper); stroke: var(--ink); stroke-width: 1.6; }
+svg .dia.best { stroke: var(--best); fill: var(--best-wash); }
+svg .lead { stroke: var(--ink-3); stroke-width: 1; fill: none; }
+svg .gap { stroke: var(--ink); stroke-width: 1.25; fill: none; }
+svg .m-agent { fill: var(--agent); }
+svg .m-human { fill: var(--human); }
+svg .m-best { fill: var(--best); }
+svg .m-ring { fill: var(--paper); stroke-width: 1.6; }
+svg .m-ring.agent { stroke: var(--agent); }
+svg .m-ring.human { stroke: var(--human); }
+svg .m-fail { stroke: var(--fail); stroke-width: 2; stroke-linecap: round; }
+svg .ringed { stroke: var(--paper); stroke-width: 2; }
+svg .hit { fill: transparent; cursor: default; }
+
+/* who glyph */
+.who { display: inline-flex; align-items: center; gap: 6px; }
+.who i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.who.agent i { background: var(--agent); }
+.who.human i { background: var(--human); border-radius: 1px; }
+
+/* buttons */
+.btn {
+  height: 32px; padding: 0 13px; border-radius: 6px; border: 1px solid var(--rule); background: transparent;
+  font-size: 13.5px; color: var(--ink); cursor: pointer; white-space: nowrap;
+}
+.btn:hover { border-color: var(--ink-3); }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.primary:hover { opacity: .88; }
+.btn:disabled { color: var(--ink-3); cursor: not-allowed; border-color: var(--rule-2); }
+.btn.link { border: 0; padding: 0; height: auto; color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; }
+.btn.link:hover { color: var(--ink); text-decoration-color: currentColor; }
+
+.cmd {
+  display: block; padding: 12px 14px; background: var(--paper-2); border-radius: 6px;
+  font: 400 13px/1.6 var(--mono); color: var(--ink); white-space: pre-wrap; word-break: break-word;
+}
+
+/* ------------------------------------------------------------------ overview */
+.ov-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 72px; margin-top: 64px; }
+.ov-grid .fig { margin-top: 0; }
+.side .fig + .fig { margin-top: 48px; }
+.key { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 14px; font-size: 13px; color: var(--ink-2); }
+.key span { display: inline-flex; align-items: center; gap: 7px; }
+.key svg { display: block; overflow: visible; }
+
+.ideas { list-style: none; margin: 0; padding: 0; }
+.idea {
+  display: grid; grid-template-columns: 56px minmax(0, 1fr) 420px 84px; gap: 0 20px; align-items: center;
+  padding: 13px 0; border-top: 1px solid var(--rule-2);
+}
+.idea:first-child { border-top: 0; }
+.idea .mks { display: flex; gap: 4px; align-items: center; }
+.idea .nm { font-weight: 550; font-size: 15px; }
+.idea .nm a { text-decoration: none; }
+.idea .nm a:hover { text-decoration: underline; }
+.idea .meta { font-size: 13px; color: var(--ink-3); margin-top: 1px; }
+.idea .sc { text-align: right; font-size: 15px; font-variant-numeric: tabular-nums; }
+.idea .sc small { display: block; font-size: 12.5px; color: var(--ink-3); }
+.idea.dim .nm, .idea.dim .sc { color: var(--ink-3); font-weight: 400; }
+.idea-axis { display: grid; grid-template-columns: 56px minmax(0, 1fr) 420px 84px; gap: 0 20px; border-top: 1px solid var(--rule); padding-top: 0; }
+.fold { margin-top: 6px; }
+.fold summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); padding: 8px 0; list-style: none; }
+.fold summary::-webkit-details-marker { display: none; }
+.fold summary::before { content: "+ "; color: var(--ink-3); }
+.fold[open] summary::before { content: "\2212  "; }
+
+.side p { margin: 0 0 12px; }
+.fail-b { font: 400 15.5px/1.5 var(--serif); color: var(--ink-2); }
+.fail-b b { color: var(--ink); font-weight: 650; }
+.fail-b .small { font-family: var(--sans); }
+.fail-b .x { color: var(--fail); font-family: var(--sans); font-weight: 600; margin-right: 6px; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tbl th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12.5px; padding: 0 0 8px; border-bottom: 1px solid var(--rule); }
+.tbl td { padding: 10px 0; border-bottom: 1px solid var(--rule-2); vertical-align: top; }
+.tbl .r { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl tr:last-child td { border-bottom: 0; }
+
+/* ------------------------------------------------------------------ leaderboard */
+.filters { display: flex; align-items: center; gap: 22px; margin-top: 36px; padding: 12px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-size: 13.5px; color: var(--ink-2); }
+.filters label { display: inline-flex; align-items: center; gap: 8px; }
+.filters select { font: inherit; color: var(--ink); background: transparent; border: 1px solid var(--rule); border-radius: 6px; height: 30px; padding: 0 8px; }
+.filters input { accent-color: var(--ink); }
+.filters .r { margin-left: auto; display: flex; gap: 8px; }
+
+.verdict .stats { margin-bottom: 26px; }
+.forest { position: relative; }
+.frow { display: grid; grid-template-columns: minmax(0, 1fr) 118px 600px 64px 128px; gap: 0 24px; align-items: start; border-bottom: 1px solid var(--rule-2); min-height: 84px; padding: 16px 0 14px; }
+.frow.head { min-height: 0; padding: 0 0 10px; border-bottom: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); align-items: end; }
+.frow.axisrow { border-bottom: 0; min-height: 44px; }
+.frow .nm { font-weight: 600; font-size: 16px; }
+.frow .meta { font-size: 12.5px; color: var(--ink-3); margin-top: 5px; display: flex; flex-direction: column; gap: 2px; }
+.frow .acc { text-align: right; }
+.frow .big { font: 400 24px/1.05 var(--sans); letter-spacing: -.01em; }
+.frow .sd { font-size: 13px; color: var(--ink-3); margin-top: 5px; font-variant-numeric: tabular-nums; display: flex; justify-content: flex-end; align-items: center; gap: 5px; }
+.frow .sd svg { overflow: visible; }
+.frow .f1 { text-align: right; font-size: 14.5px; font-variant-numeric: tabular-nums; padding-top: 4px; }
+.frow .vd { font-size: 14px; padding-top: 4px; font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 8px; cursor: help; }
+.frow .vd small { color: var(--ink-3); font-size: 12.5px; }
+.lbhead .fig-h .aside { margin-left: auto; }
+.vg { width: 10px; height: 10px; display: inline-block; flex: none; }
+.vg.best { background: var(--best); transform: rotate(45deg) scale(.8); }
+.vg.band { background: var(--best-wash); outline: 1px solid var(--best-edge); }
+.vg.behind { border: 1.5px solid var(--ink-3); border-radius: 50%; }
+.forest > svg { position: absolute; top: 0; pointer-events: none; overflow: visible; }
+
+/* ------------------------------------------------------------------ run */
+.run-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 40px; align-items: start; }
+.actions { display: flex; gap: 8px; padding-top: 10px; }
+.hyp-q { margin: 20px 0 0; max-width: 70ch; font: italic 400 19px/1.5 var(--serif); color: var(--ink-2); }
+h1.hyp { font-size: 27px; line-height: 1.25; font-weight: 450; max-width: 40em; text-wrap: pretty; letter-spacing: -.01em; }
+.runscore { text-align: right; font: 300 44px/1 var(--sans); letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin-top: 18px; }
+.runscore small { display: block; font: 400 12.5px/1.4 var(--sans); color: var(--ink-3); letter-spacing: 0; margin-top: 6px; }
+.notes.clip { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.status { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 18px; font-size: 14px; color: var(--ink-2); align-items: center; }
+.tag { font-size: 12.5px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 99px; padding: 1px 9px; }
+.run-grid { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 72px; margin-top: 64px; }
+.run-grid .fig { margin-top: 0; }
+.run-grid .col > .fig + .fig { margin-top: 56px; }
+
+.tree { font-size: 14px; }
+.tree .root { display: grid; grid-template-columns: 116px minmax(0, 1fr) auto; gap: 0 16px; align-items: baseline; padding: 14px 0 10px; border-top: 1px solid var(--rule); }
+.tree .root:first-child { border-top: 0; padding-top: 0; }
+.tree .k { color: var(--ink); font-weight: 550; }
+.tree .k small { display: block; color: var(--ink-3); font-weight: 400; font-size: 12.5px; }
+.p { font-family: var(--mono); font-size: 13px; word-break: break-all; color: var(--ink); }
+.p .pre { color: var(--ink-3); }
+.host { font-family: var(--sans); font-size: 11.5px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 4px; padding: 0 5px; margin-right: 8px; vertical-align: 1px; }
+.tree .kids { list-style: none; margin: 0 0 6px 132px; padding: 0; }
+.tree .kids li { display: grid; grid-template-columns: 18px minmax(0, 1fr) 150px auto; gap: 0 10px; align-items: baseline; padding: 5px 0; }
+.tree .kids li .br { color: var(--ink-3); font-family: var(--mono); font-size: 13px; }
+.tree .kids li .what { font-size: 12.5px; color: var(--ink-3); text-align: right; }
+.copy { border: 0; background: transparent; color: var(--ink-3); font-size: 12.5px; cursor: pointer; padding: 4px; border-radius: 4px; align-self: center; }
+.copy:hover { color: var(--ink); background: var(--paper-2); }
+.gitline { margin: 4px 0 8px 132px; font: 400 13px/1.5 var(--sans); color: var(--ink-3); }
+.gitline b { color: var(--ink); font-weight: 650; }
+.cmdrow { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 0 16px; align-items: start; padding: 0 0 18px; }
+.cmdrow .tmpl { margin-top: 6px; font-size: 12.5px; color: var(--ink-3); }
+
+.scores { width: 100%; border-collapse: collapse; }
+.scores td { padding: 12px 0; border-top: 1px solid var(--rule-2); vertical-align: top; font-size: 14px; }
+.scores tr:first-child td { border-top: 0; }
+.scores .v { font: 400 30px/1 var(--sans); letter-spacing: -.015em; text-align: right; }
+.scores small { display: block; color: var(--ink-3); font-size: 12.5px; margin-top: 4px; }
+.scores .v small { font-size: 12.5px; letter-spacing: 0; white-space: nowrap; }
+.notes { font: 400 15.5px/1.55 var(--serif); color: var(--ink-2); margin: 0 0 12px; }
+.notes .by { font: 400 12.5px/1.4 var(--sans); color: var(--ink-3); margin-bottom: 6px; display: flex; gap: 10px; }
+
+/* ------------------------------------------------------------------ examples */
+.ab { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; margin-top: 36px; padding: 18px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+.ab .side-lbl { font-size: 12.5px; color: var(--ink-3); }
+.ab .nm { font-weight: 600; font-size: 16px; margin-top: 2px; }
+.ab .meta { font-size: 13px; color: var(--ink-3); margin-top: 3px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.ab .row { display: flex; justify-content: space-between; align-items: end; gap: 20px; }
+.ab .acc { font: 300 38px/1 var(--sans); letter-spacing: -.02em; text-align: right; }
+.ab .acc small { display: block; font-size: 12.5px; color: var(--ink-3); font-weight: 400; letter-spacing: 0; margin-top: 4px; }
+
+.two { display: grid; grid-template-columns: 440px minmax(0, 1fr); gap: 72px; align-items: start; }
+.two-x { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 64px; align-items: start; }
+.two-x .fig { margin-top: 0; }
+.ot { border-collapse: collapse; width: 100%; }
+.ot th { font: 500 13px/1.3 var(--sans); color: var(--ink-3); padding: 0 12px 10px; text-align: center; }
+.ot th.rh { text-align: right; padding: 0 16px 0 0; width: 96px; vertical-align: middle; white-space: nowrap; }
+.ot td { width: 44%; height: 124px; text-align: center; vertical-align: middle; border: 1px solid var(--rule); }
+.ot tr:first-child td { border-top: 1px solid var(--ink-3); }
+.ot .n { font: 300 50px/1 var(--sans); letter-spacing: -.02em; display: block; }
+.ot .w { font-size: 13px; color: var(--ink-2); display: inline-flex; gap: 7px; align-items: center; margin-top: 6px; }
+.ot .fx { background: var(--best-wash); }
+.ot .br { background: color-mix(in srgb, var(--fail) 10%, transparent); }
+.ot .same .n { color: var(--ink-2); }
+.sw { width: 9px; height: 9px; display: inline-block; border-radius: 2px; }
+.sw.fx { background: var(--best); }
+.sw.br { background: var(--fail); }
+.sw.bw { background: var(--ink-2); }
+.sw.bp { background: var(--rule); }
+.said { font: 400 26px/1.25 var(--serif); font-variation-settings: "opsz" 36; letter-spacing: -.008em; margin: 0; color: var(--ink); text-wrap: pretty; }
+.said-sub { font: 400 16.5px/1.55 var(--serif); color: var(--ink-2); margin: 16px 0 0; max-width: 58ch; }
+.said-sub b { color: var(--ink); font-weight: 650; }
+.wrong td.pv { color: var(--ink); font-weight: 600; }
+.wrong .rfnote { display: inline-flex; gap: 7px; align-items: center; }
+
+/* ------------------------------------------------------------------ palette, toast, tooltip */
+.pal { position: fixed; inset: 0; z-index: 50; display: none; background: color-mix(in srgb, var(--ink) 22%, transparent); }
+.pal.on { display: block; }
+.pal-box {
+  width: 600px; margin: 110px auto 0; background: var(--paper); border: 1px solid var(--rule); border-radius: 10px;
+  box-shadow: 0 24px 60px -20px rgba(10, 14, 20, .35); overflow: hidden;
+}
+.pal-in { width: 100%; border: 0; border-bottom: 1px solid var(--rule); background: transparent; color: var(--ink); font: 400 20px/1 var(--serif); padding: 20px 20px; outline: none; }
+.pal-list { list-style: none; margin: 0; padding: 8px; max-height: 420px; overflow: auto; }
+.pal-list .grp { font-size: 12px; color: var(--ink-3); padding: 10px 12px 4px; }
+.pal-list li.it { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 9px 12px; border-radius: 6px; cursor: pointer; font-size: 14.5px; align-items: baseline; }
+.pal-list li.it small { color: var(--ink-3); font-size: 12.5px; }
+.pal-list li.it[aria-selected="true"] { background: var(--paper-2); }
+.pal-foot { border-top: 1px solid var(--rule); padding: 10px 20px; font-size: 12.5px; color: var(--ink-3); display: flex; gap: 18px; }
+.pal-foot kbd { font-family: var(--sans); font-size: 11.5px; border: 1px solid var(--rule); border-radius: 4px; padding: 0 5px; color: var(--ink-2); }
+.toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px); opacity: 0; background: var(--ink); color: var(--paper); padding: 10px 16px; border-radius: 7px; font-size: 13.5px; transition: all .18s ease; pointer-events: none; z-index: 60; }
+.toast.on { opacity: 1; transform: translate(-50%, 0); }
+.tip { position: fixed; z-index: 40; pointer-events: none; background: var(--ink); color: var(--paper); font-size: 12.5px; line-height: 1.4; padding: 7px 10px; border-radius: 6px; max-width: 300px; opacity: 0; transition: opacity .08s; }
+.tip.on { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (max-width: 1100px) {
+  .ov-grid, .run-grid, .verdict, .two, .two-x { grid-template-columns: 1fr; gap: 48px; }
+  .frow { grid-template-columns: minmax(0, 1fr) 118px 400px 0 120px; }
+  .frow .f1 { display: none; }
+  .find { min-width: 0; } .find span { display: none; }
+}
+@media (max-width: 720px) {
+  .bar-in { padding: 0 16px; gap: 16px; } main { padding: 28px 16px 80px; }
+  .tabs a { padding: 0 6px; font-size: 13.5px; }
+  h1.finding { font-size: 32px; }
+  .brand span { display: none; }
+  .ab { grid-template-columns: 1fr; }
+  .idea, .idea-axis { grid-template-columns: 48px minmax(0, 1fr) 90px; } .idea .spk, .idea-axis .spk { display: none; }
+}
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="#overview" aria-label="Hypothex, overview">
+      <svg width="22" height="18" viewBox="0 0 22 18" aria-hidden="true">
+        <rect x="9" y="1" width="8" height="16" style="fill:var(--best-wash)"/>
+        <line x1="9" y1="1" x2="9" y2="17" style="stroke:var(--best-edge)"/><line x1="17" y1="1" x2="17" y2="17" style="stroke:var(--best-edge)"/>
+        <line x1="1" y1="9" x2="21" y2="9" style="stroke:var(--ink);stroke-width:1.4"/>
+        <rect x="10" y="5" width="5.6" height="5.6" transform="rotate(45 12.8 7.8)" style="fill:var(--best)"/>
+        <circle cx="4" cy="9" r="2.6" style="fill:var(--ink)"/>
+      </svg>
+      <span>Hypothex</span>
+    </a>
+    <nav class="tabs" aria-label="Screens">
+      <a href="#overview">Overview</a>
+      <a href="#board">Leaderboard</a>
+      <a href="#run">Run</a>
+      <a href="#examples">Examples</a>
+    </nav>
+    <div class="bar-r">
+      <button class="find" id="findBtn" type="button" aria-haspopup="dialog"><span>Find a run, task or path</span><kbd>⌘K</kbd></button>
+      <button class="theme" id="themeBtn" type="button" aria-label="Switch colour mode">
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7 1a6 6 0 0 1 0 12z" fill="currentColor"/></svg>
+        <span id="themeLbl">Dark</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="view" id="v-overview" aria-labelledby="ov-h"></section>
+  <section class="view" id="v-board" aria-labelledby="lb-h" hidden></section>
+  <section class="view" id="v-run" aria-labelledby="run-h" hidden></section>
+  <section class="view" id="v-examples" aria-labelledby="ex-h" hidden></section>
+</main>
+
+<div class="pal" id="pal" role="dialog" aria-modal="true" aria-label="Find and run commands">
+  <div class="pal-box">
+    <input class="pal-in" id="palIn" placeholder="Find a run, task, path or command" autocomplete="off" aria-controls="palList">
+    <ul class="pal-list" id="palList" role="listbox"></ul>
+    <div class="pal-foot"><span><kbd>↑</kbd> <kbd>↓</kbd> move</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span></div>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script src="data.js"></script>
+<script>
+/* ================================================================== data */
+const HX = window.HX, LB = HX.lb, RUNS = HX.runs, SHOW = HX.show, REC = SHOW.record, EX = HX.ex;
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const f4 = v => v.toFixed(4);
+const f3 = v => v.toFixed(3);
+const plural = (n, w, p) => n + " " + (n === 1 ? w : (p || w + "s"));
+const tOf = iso => new Date(iso);
+const hms = iso => iso.slice(11, 19);
+const hm = iso => iso.slice(11, 16);
+const short = id => id.slice(-4);
+const MINUS = "−";
+const sgn = v => (v < 0 ? MINUS : "+") + Math.abs(v).toFixed(3);
+
+/* test-set size, from the paired example counts */
+const N_TEST = EX.both_pass + EX.both_fail + EX.fixed.length + EX.broken.length;
+
+/* Wilson score interval for a binomial proportion. successes may be fractional
+   (a mean over seeds x n); the interval is then that of the average run. */
+function wilson(p, n, z = 1.96) {
+  const z2 = z * z, d = 1 + z2 / n;
+  const c = (p + z2 / (2 * n)) / d;
+  const h = (z * Math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))) / d;
+  return [c - h, c + h];
+}
+/* exact two-sided sign test on discordant pairs (b fixed, c broken) */
+function choose(n, k) { let r = 1; for (let i = 1; i <= k; i++) r = r * (n - k + i) / i; return r; }
+function binomPmf(n, k) { return choose(n, k) / Math.pow(2, n); }
+function signP(b, c) {
+  const n = b + c, k = Math.min(b, c);
+  let p = 0; for (let i = 0; i <= k; i++) p += binomPmf(n, i);
+  return Math.min(1, 2 * p);
+}
+/* how many test examples, at the same flip rate and split, until the split is significant */
+function examplesNeeded(fixed, broken, nNow) {
+  const rate = (fixed + broken) / nNow, share = fixed / (fixed + broken);
+  for (let n = nNow; n <= 20000; n += 10) {
+    const d = Math.round(n * rate), b = Math.round(d * share);
+    if (signP(b, d - b) < 0.05) return n;
+  }
+  return null;
+}
+
+/* short names for ideas */
+function shortName(h) {
+  if (/^RBF-kernel SVM/.test(h)) return "RBF-kernel SVM";
+  const m = h.match(/^baseline (\w+)/); if (m) return "Baseline " + m[1];
+  const d = h.match(/^debug test (\w+)/); if (d) return "Debug test " + d[1];
+  return h;
+}
+function nick(h) {
+  if (/^RBF-kernel SVM/.test(h)) return "SVM";
+  const m = h.match(/^baseline (\w+)/); if (m) return m[1];
+  return shortName(h);
+}
+const whoKind = c => (c.startsWith("agent:") ? "agent" : "human");
+const whoHtml = c => `<span class="who ${whoKind(c)}"><i></i>${esc(c)}</span>`;
+
+const runById = Object.fromEntries(RUNS.map(r => [r.run_id, r]));
+const groupOfRun = {};
+LB.rows.forEach(g => g.run_ids.forEach(id => (groupOfRun[id] = g)));
+
+/* per-seed scores. The leaderboard JSON only has mean/std/n. For std 0 every seed
+   equals the mean. For rf the three values are solved from mean, std and the seed-3
+   value in HX.cmp. The real API should return per-seed scores. */
+function seedValues(row, key = LB.primary) {
+  const s = row.scores[key];
+  if (s.std === 0) return Array(s.n).fill(s.mean);
+  const i = HX.cmp.run_ids.indexOf(row.latest_run_id);
+  const ck = key.replace("/", "@v1/");
+  if (s.n === 3 && i >= 0 && HX.cmp.scores[ck]) {
+    const k = HX.cmp.scores[ck][i], dk = k - s.mean;
+    const q = 2 * s.std * s.std - dk * dk, sd = -dk, p = (sd * sd - q) / 2;
+    const r = Math.sqrt(Math.max(0, sd * sd - 4 * p));
+    return [s.mean + (sd + r) / 2, s.mean + (sd - r) / 2, k];
+  }
+  return [];
+}
+
+/* ---- the verdict, computed once and used on every screen ---- */
+const BEST = LB.rows[0];
+const BAND = wilson(BEST.primary.mean, N_TEST);
+const RUNNER = LB.rows[1];
+const GAP = BEST.primary.mean - RUNNER.primary.mean;
+const P_SIGN = signP(EX.fixed.length, EX.broken.length);
+const N_NEED = examplesNeeded(EX.fixed.length, EX.broken.length, N_TEST);
+const inBand = row => row !== BEST && row.primary.mean >= BAND[0];
+const PROVEN = P_SIGN < 0.05 && !inBand(RUNNER);
+function verdictOf(row) {
+  if (row === BEST) return { k: "best", t: "best", s: "", tip: "Best mean. Its test-set 95% CI is the green band." };
+  const gap = BEST.primary.mean - row.primary.mean;
+  const paired = HX.cmp.run_ids.includes(row.latest_run_id);
+  const p = paired ? `p ${P_SIGN.toFixed(2)}` : "";
+  if (inBand(row)) return { k: "band", t: MINUS + f3(gap), s: p, tip: `Mean inside the best's 95% CI: not proven worse.${paired ? ` Paired sign test on seed 3, p = ${P_SIGN.toFixed(3)}.` : ""}` };
+  return { k: "behind", t: MINUS + f3(gap), s: p, tip: "Mean below the best's 95% CI." };
+}
+const VERDICT_LINE = `${nick(BEST.hypothesis)} +${f3(GAP)} over ${nick(RUNNER.hypothesis)}, p = ${P_SIGN.toFixed(2)}`;
+
+/* ---- the shared accuracy scale: every accuracy panel uses it ---- */
+const DOM = [0.76, 0.97];
+const TICKS = [0.78, 0.80, 0.82, 0.84, 0.86, 0.88, 0.90, 0.92, 0.94, 0.96];
+const scale = (w, pl = 0, pr = 0) => v => pl + ((v - DOM[0]) / (DOM[1] - DOM[0])) * (w - pl - pr);
+
+/* ---- svg primitives ---- */
+const S = {
+  line: (x1, y1, x2, y2, c) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="${c}"/>`,
+  rect: (x, y, w, h, c, extra = "") => `<rect x="${x}" y="${y}" width="${Math.max(0, w)}" height="${h}" class="${c}" ${extra}/>`,
+  circ: (x, y, r, c, extra = "") => `<circle cx="${x}" cy="${y}" r="${r}" class="${c}" ${extra}/>`,
+  text: (x, y, t, c, a = "start", extra = "") => `<text x="${x}" y="${y}" class="${c}" text-anchor="${a}" ${extra}>${t}</text>`,
+  dia: (x, y, r, c) => `<path d="M${x} ${y - r}L${x + r} ${y}L${x} ${y + r}L${x - r} ${y}Z" class="${c}"/>`,
+  sq: (x, y, r, c) => `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}" rx="1.5" class="${c}"/>`,
+  cross: (x, y, r) => `<path d="M${x - r} ${y - r}L${x + r} ${y + r}M${x + r} ${y - r}L${x - r} ${y + r}" class="m-fail"/>`,
+  svg: (w, h, body, extra = "") => `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" ${extra}>${body}</svg>`,
+};
+/* seed dots: stack dots that would overlap (a tiny beeswarm) so every seed stays visible */
+function seedDots(X, vals, y) {
+  const xs = vals.map(v => X(v)).sort((a, b) => a - b);
+  let h = "", prev = -1e9, lvl = 0;
+  xs.forEach(x => { lvl = x - prev < 8 ? lvl + 1 : 0; h += S.circ(x, y - lvl * 8, 3.8, "seed"); prev = x; });
+  return h;
+}
+/* the signature: the best idea's test-set interval, drawn as one band */
+function band(X, y0, y1, edges = true) {
+  const a = X(BAND[0]), b = X(BAND[1]);
+  return S.rect(a, y0, b - a, y1 - y0, "band") + (edges ? S.line(a, y0, a, y1, "band-edge") + S.line(b, y0, b, y1, "band-edge") : "");
+}
+function whisker(X, y, lo, hi, best) {
+  return `<path d="M${X(lo)} ${y}H${X(hi)}M${X(lo)} ${y - 4}V${y + 4}M${X(hi)} ${y - 4}V${y + 4}" class="whisk${best ? " best" : ""}"/>`;
+}
+function axis(X, y, x0, x1, labels = true, every = 1) {
+  let h = S.line(x0, y, x1, y, "axis");
+  TICKS.forEach((t, i) => {
+    h += S.line(X(t), y, X(t), y + 4, "axis");
+    if (labels && i % every === 0) h += S.text(X(t), y + 17, t.toFixed(2), "tk", "middle");
+  });
+  return h;
+}
+/* tiny glyph svgs for keys and verdict lines */
+const G = {
+  band: `<svg width="18" height="12"><rect x="3" y="0" width="12" height="12" class="band"/><line x1="3" y1="0" x2="3" y2="12" class="band-edge"/><line x1="15" y1="0" x2="15" y2="12" class="band-edge"/></svg>`,
+  seed: `<svg width="18" height="12">${S.circ(5, 6, 3.6, "seed")}${S.circ(13, 6, 3.6, "seed")}</svg>`,
+  dia: `<svg width="18" height="12">${S.dia(9, 6, 5.5, "dia")}</svg>`,
+  whisk: `<svg width="22" height="12"><path d="M2 6H20M2 2V10M20 2V10" class="whisk"/></svg>`,
+  pair: `<svg width="18" height="12"><rect x="1" y="1" width="4" height="10" rx="1" style="fill:var(--best)"/><rect x="7" y="1" width="4" height="10" rx="1" style="fill:var(--best)"/><rect x="13" y="1" width="4" height="10" rx="1" style="fill:var(--fail)"/></svg>`,
+};
+
+/* ================================================================== groups for the overview */
+function buildGroups() {
+  const out = [], seen = {};
+  const sorted = [...RUNS].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  for (const r of sorted) {
+    const lb = groupOfRun[r.run_id];
+    const key = lb ? "lb:" + lb.group_id : `h:${r.hypothesis}|${r.status}|${r.archived}`;
+    if (!seen[key]) { seen[key] = { key, lb: lb || null, runs: [] }; out.push(seen[key]); }
+    seen[key].runs.push(r);
+  }
+  out.forEach(g => { g.runs.sort((a, b) => (a.created_at < b.created_at ? -1 : 1)); g.first = g.runs[0]; g.last = g.runs[g.runs.length - 1]; g.who = g.first.created_by; });
+  return out.sort((a, b) => (a.last.created_at < b.last.created_at ? 1 : -1));
+}
+const GROUPS = buildGroups();
+
+/* ================================================================== OVERVIEW */
+function markFor(r, x, y) {
+  const lb = groupOfRun[r.run_id];
+  if (r.status === "failed") return S.cross(x, y, 4);
+  if (lb === BEST) return S.circ(x, y, 5, "m-best ringed");
+  if (r.archived) return S.circ(x, y, 4, "m-ring " + whoKind(r.created_by));
+  return S.circ(x, y, 5, "m-" + whoKind(r.created_by) + " ringed");
+}
+function seedMarkHtml(r) {
+  const lb = groupOfRun[r.run_id];
+  const body = r.status === "failed" ? S.cross(7, 7, 4) : lb === BEST ? S.circ(7, 7, 5, "m-best") : r.archived ? S.circ(7, 7, 4, "m-ring " + whoKind(r.created_by)) : S.circ(7, 7, 5, "m-" + whoKind(r.created_by));
+  return `<svg width="14" height="14" style="overflow:visible" aria-hidden="true">${body}</svg>`;
+}
+
+function drawTimeline(el) {
+  const W = el.clientWidth, LBLW = 176, PADR = 16;
+  const creators = [...new Set(RUNS.map(r => r.created_by))].sort((a, b) => (whoKind(a) === "agent" ? -1 : 1));
+  const t0 = tOf("2026-09-26T21:00:10Z").getTime(), t1 = tOf("2026-09-26T21:03:20Z").getTime();
+  const TX = iso => LBLW + ((tOf(iso).getTime() - t0) / (t1 - t0)) * (W - LBLW - PADR);
+  const ROWH = 88, TOP = 8;
+  let h = "";
+  const ticks = [];
+  for (let s = 0; s <= 210; s += 30) ticks.push(new Date(tOf("2026-09-26T21:00:00Z").getTime() + s * 1000).toISOString());
+  const yAxis = TOP + creators.length * ROWH + 6;
+  ticks.forEach(iso => {
+    const x = TX(iso); if (x < LBLW || x > W - PADR) return;
+    const minute = iso.slice(17, 19) === "00";
+    h += S.line(x, TOP, x, yAxis, "grid");
+    h += S.line(x, yAxis, x, yAxis + 4, "axis");
+    if (minute) h += S.text(x, yAxis + 18, hm(iso), "tk", "middle");
+  });
+  h += S.line(LBLW, yAxis, W - PADR, yAxis, "axis");
+  h += S.text(W - PADR, yAxis + 36, "UTC, 26 Sep 2026", "lbl-s", "end");
+
+  creators.forEach((c, ci) => {
+    const rs = RUNS.filter(r => r.created_by === c);
+    const y = TOP + ci * ROWH + ROWH - 24;
+    const nf = rs.filter(r => r.status === "failed").length;
+    const kind = whoKind(c);
+    h += S.line(LBLW, y, W - PADR, y, "hair");
+    h += (kind === "agent" ? S.circ(6, y - 13, 4.5, "m-agent") : S.rect(1.5, y - 17.5, 9, 9, "m-human", 'rx="1"'));
+    h += S.text(20, y - 9, esc(c), "lbl-b");
+    h += S.text(20, y + 9, `${plural(rs.length, "run")}${nf ? `, ${nf} failed` : ""}`, "lbl-s");
+    /* cluster labels with leaders, staggered to avoid collisions */
+    const gs = GROUPS.filter(g => g.who === c).sort((a, b) => (a.first.created_at < b.first.created_at ? -1 : 1));
+    const placed = [];
+    const put = (cx, label, cls) => {
+      const w = label.length * 6.6;
+      let lvl = 0;
+      while (placed.some(p => p.lvl === lvl && Math.abs(p.cx - cx) < (p.w + w) / 2 + 12)) lvl++;
+      placed.push({ cx, w, lvl });
+      const ly = y - 20 - lvl * 16;
+      h += S.line(cx, ly + 4, cx, y - 8, "lead");
+      h += S.text(cx, ly, esc(label), cls, "middle");
+    };
+    const dbg = gs.filter(g => g.first.archived && g.first.status === "finished");
+    gs.forEach(g => {
+      const xs = g.runs.map(r => TX(r.created_at));
+      const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+      let label;
+      if (g.lb === BEST) label = `${nick(g.first.hypothesis)}, best`;
+      else if (g.first.status === "failed") label = `${nick(g.first.hypothesis)}, exit ${g.first.exit_code}`;
+      else if (g.first.archived) label = null;
+      else label = nick(g.first.hypothesis);
+      if (!label) return;
+      put(cx, label, g.lb === BEST ? "lbl-b" : "lbl");
+    });
+    if (dbg.length) {
+      const xs = dbg.flatMap(g => g.runs.map(r => TX(r.created_at)));
+      put((Math.min(...xs) + Math.max(...xs)) / 2, `debug ×${dbg.length}`, "lbl");
+    }
+    rs.forEach(r => {
+      const x = TX(r.created_at);
+      h += markFor(r, x, y);
+      h += `<circle cx="${x}" cy="${y}" r="9" class="hit" data-tip="${esc(`${r.run_id}\n${shortName(r.hypothesis)}, seed ${r.seed}\n${r.status}${r.exit_code ? ", exit " + r.exit_code : ""}${r.archived ? ", archived" : ""}\nlaunched ${hms(r.created_at)} by ${r.created_by}`)}"/>`;
+    });
+  });
+  el.innerHTML = S.svg(W, yAxis + 44, h, 'role="img" aria-label="Runs by launch time, one row per launcher" style="pointer-events:auto"');
+}
+
+function drawSpark(el, row) {
+  const W = el.clientWidth || 230, H = 30, y = 15;
+  const X = scale(W, 6, 6);
+  let h = band(X, 0, H) + S.line(X(BEST.primary.mean), 0, X(BEST.primary.mean), H, "bestline");
+  if (row) {
+    const iv = wilson(row.primary.mean, N_TEST);
+    h += whisker(X, y, iv[0], iv[1], row === BEST);
+    h += S.sq(X(row.primary.mean), y, 4.5, "mean" + (row === BEST ? " best" : ""));
+  }
+  el.innerHTML = S.svg(W, H, h, 'aria-hidden="true"');
+}
+function drawSparkAxis(el) {
+  const W = el.clientWidth || 230;
+  const X = scale(W, 6, 6);
+  let h = S.line(0, 0, W, 0, "axis");
+  [0.80, 0.85, 0.90, 0.95].forEach(t => { h += S.line(X(t), 0, X(t), 4, "axis") + S.text(X(t), 17, t.toFixed(2), "tk", "middle"); });
+  h += band(X, -4, 0, false);
+  el.innerHTML = S.svg(W, 22, h, 'aria-hidden="true" style="overflow:visible"');
+}
+
+function renderOverview() {
+  const failed = RUNS.filter(r => r.status === "failed");
+  const running = RUNS.filter(r => r.status === "running");
+  const failG = GROUPS.find(g => g.first.status === "failed");
+  const retry = GROUPS.find(g => g.lb && g.first.hypothesis === failG.first.hypothesis);
+  const errPath = SHOW.paths.stderr.replaceAll(REC.run_id, failG.first.run_id);
+
+  const ideaLine = g => {
+    const r0 = g.first, lb = g.lb;
+    const mks = g.runs.map(seedMarkHtml).join("");
+    let sc;
+    if (lb) sc = `${f4(lb.primary.mean)}<small>${lb.primary.std === 0 && lb.n > 1 ? noSpread(lb.n) : "± " + f4(lb.primary.std)}</small>`;
+    else if (r0.status === "failed") sc = `<span>failed</span><small>exit ${r0.exit_code}</small>`;
+    else sc = `<span>archived</span>`;
+    return `<li class="idea${r0.archived ? " dim" : ""}">
+      <span class="mks" title="${plural(g.runs.length, "seed")}">${mks}</span>
+      <div><div class="nm" title="${esc(r0.hypothesis)}"><a href="#${lb === BEST ? "run" : "board"}">${esc(shortName(r0.hypothesis))}</a></div>
+        <div class="meta">${esc(r0.created_by)}, ${hm(r0.created_at)}</div></div>
+      <div class="spk" ${lb ? `data-spark="${lb.group_id}"` : ""}></div>
+      <div class="sc">${sc}</div>
+    </li>`;
+  };
+  const main = GROUPS.filter(g => !(g.first.archived && g.first.status === "finished"));
+  const folded = GROUPS.filter(g => g.first.archived && g.first.status === "finished");
+
+  $("#v-overview").innerHTML = `
+    <p class="crumb">All projects</p>
+    <h1 class="finding" id="ov-h">${running.length ? plural(running.length, "run") + " running" : "Idle"}. ${esc(nick(BEST.hypothesis))} leads ${esc(LB.task).replace(/-/g, "‑")} by ${f3(GAP)}, p = ${P_SIGN.toFixed(2)}</h1>
+    <p class="metaline"><span>${RUNS.length} runs today</span><span>${failed.length} failed</span><span>${HX.tasks.length} task</span></p>
+
+    <div class="fig">
+      <div class="fig-h"><span class="pl">a</span><span class="t">Runs by launcher</span></div>
+      <div id="timeline"></div>
+      <div class="key" aria-label="Key">
+        <span><svg width="12" height="12">${S.circ(6, 6, 5, "m-agent")}</svg>agent</span>
+        <span><svg width="12" height="12">${S.circ(6, 6, 5, "m-human")}</svg>human</span>
+        <span><svg width="12" height="12">${S.circ(6, 6, 5, "m-best")}</svg>current best</span>
+        <span><svg width="12" height="12">${S.cross(6, 6, 4)}</svg>failed</span>
+        <span><svg width="12" height="12">${S.circ(6, 6, 4, "m-ring agent")}</svg>archived</span>
+      </div>
+    </div>
+
+    <div class="ov-grid">
+      <div class="fig">
+        <div class="fig-h"><span class="pl">b</span><span class="t">Ideas</span></div>
+        <ul class="ideas">${main.map(ideaLine).join("")}</ul>
+        <div class="idea-axis"><div></div><div></div><div class="spk" id="sparkAxis"></div><div class="small" style="padding-top:6px;text-align:right">accuracy v1</div></div>
+        <details class="fold"><summary>${folded.length} archived</summary><ul class="ideas">${folded.map(ideaLine).join("")}</ul></details>
+      </div>
+      <div class="side">
+        <div class="fig">
+          <div class="fig-h"><span class="pl">c</span><span class="t">Running</span></div>
+          ${running.length ? "" : `<p class="small hint" style="display:inline-block;margin:0" title="Start one: hx run -t ${esc(LB.task)} -H &quot;why&quot; --seed 1 -- python train_eval.py --seed {seed}">none</p>`}
+        </div>
+        <div class="fig">
+          <div class="fig-h"><span class="pl">d</span><span class="t">Failures</span></div>
+          <p class="fail-b" title="Launched by ${esc(failG.first.created_by)} at ${hms(failG.first.created_at)}. Retried at ${hms(retry.first.created_at)}; all ${retry.runs.length} seeds finished."><span class="x">×${failed.length}</span><b>${esc(nick(failG.first.hypothesis))}, exit ${failG.first.exit_code}</b> <span class="small num">${hms(failG.first.created_at)}, retry ok</span></p>
+          <p class="p" style="margin:0 0 10px;word-break:normal"><span class="pre">…/runs/</span>${esc(failG.first.run_id)}<span class="pre">/</span><wbr>logs/stderr.log</p>
+          <div style="display:flex;gap:8px"><button class="btn" type="button" data-toast="Opened stderr for ${failG.first.run_id}">Open stderr</button><button class="btn" type="button" data-copy="${esc(errPath)}">Copy path</button></div>
+        </div>
+        <div class="fig">
+          <div class="fig-h"><span class="pl">e</span><span class="t">Projects</span></div>
+          <table class="tbl"><thead><tr><th>Task</th><th class="r">Runs</th><th class="r">Best</th></tr></thead>
+          <tbody>${HX.tasks.map(t => `<tr><td><a href="#board">${esc(t.project)} / ${esc(t.name)}</a></td><td class="r">${t.n_runs}</td><td class="r">${f4(t.best)}</td></tr>`).join("")}</tbody></table>
+        </div>
+      </div>
+    </div>`;
+  drawOverviewCharts();
+}
+function drawOverviewCharts() {
+  drawTimeline($("#timeline"));
+  document.querySelectorAll("#v-overview [data-spark]").forEach(el => drawSpark(el, LB.rows.find(r => r.group_id === el.dataset.spark)));
+  drawSparkAxis($("#sparkAxis"));
+}
+
+/* ================================================================== LEADERBOARD */
+function drawRuler(el) {
+  const W = el.clientWidth, H = 296, PL = 10, PR = 10;
+  const X = scale(W, PL, PR);
+  const y0 = 30, yAx = 262;
+  const best = BEST.primary.mean, rfm = RUNNER.primary.mean;
+  let h = "";
+  TICKS.forEach(t => (h += S.line(X(t), y0 - 4, X(t), yAx, "grid")));
+  h += band(X, y0 - 4, yAx);
+  h += `<g data-tip="${nick(BEST.hypothesis)} test-set 95% CI (Wilson, n = ${N_TEST})">` + S.text((X(BAND[0]) + X(BAND[1])) / 2, y0 - 12, `${nick(BEST.hypothesis)} 95% CI`, "lbl-s", "middle") + `</g>`;
+  const rowY = [76, 136, 196, 232];
+  LB.rows.forEach((row, i) => {
+    const y = rowY[i], m = row.primary.mean, isB = row === BEST;
+    const faint = i >= 2;
+    const seeds = seedValues(row);
+    const zero = row.primary.std === 0;
+    if (!faint) {
+      if (zero) {
+        h += S.dia(X(m), y, 7.5, "dia" + (isB ? " best" : ""));
+        h += S.text(X(m) + 13, y + 4, "×3", "lbl-b");
+      } else {
+        h += seedDots(X, seeds, y - 14);
+        h += S.sq(X(m), y, 5, "mean");
+      }
+    } else {
+      h += S.sq(X(m), y, 3.5, "mean");
+    }
+    const lx = zero || faint ? X(m) - (isB ? 13 : 10) : X(Math.min(...seeds, m)) - 10;
+    h += S.text(lx, y + 4, `${esc(nick(row.hypothesis))} ${f3(m)}`, faint ? "lbl-s" : isB ? "lbl-b" : "lbl", "end");
+    h += `<rect x="${X(m) - 60}" y="${y - 12}" width="120" height="24" class="hit" data-tip="${esc(shortName(row.hypothesis))}\nmean ${f4(m)}${zero ? `\n×${row.primary.n}: all seeds gave one score` : `\nseeds ${seeds.map(f4).join(", ")}`}"/>`;
+  });
+  /* gap bracket from rf to svm */
+  const gy = 166;
+  h += `<path d="M${X(rfm)} ${gy - 5}V${gy + 5}M${X(rfm)} ${gy}H${X(best)}M${X(best)} ${gy - 5}V${gy + 5}" class="gap"/>`;
+  h += S.line(X(best), rowY[0] + 10, X(best), gy - 5, "lead");
+  h += S.line(X(rfm), rowY[1] + 7, X(rfm), gy - 5, "lead");
+  h += S.text((X(rfm) + X(best)) / 2, gy + 17, `Δ ${f3(GAP)}`, "lbl-b", "middle");
+  h += `<rect x="${X(rfm)}" y="${gy - 8}" width="${X(best) - X(rfm)}" height="30" class="hit" data-tip="Δ ${f4(GAP)} = ${Math.round(GAP * N_TEST * 10) / 10} of ${N_TEST} examples"/>`;
+  h += axis(X, yAx, 0, W);
+  h += S.text(W, yAx + 36, "accuracy v1", "lbl-s", "end");
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="SVM leads rf by 0.037; rf mean is inside the SVM test-set 95% CI" style="overflow:visible;pointer-events:auto"');
+}
+
+const DIA_SM = `<svg width="12" height="12" aria-hidden="true">${S.dia(6, 6, 5, "dia")}</svg>`;
+const COPY = `<svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="display:block"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M9 2.5V2a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`;
+const copyBtn = abs => `<button class="copy" type="button" data-copy="${esc(abs)}" title="Copy path" aria-label="Copy path">${COPY}</button>`;
+const noSpread = n => `<span class="hint" title="${n} seeds, one score: the model ignores the seed">${DIA_SM}×${n}</span>`;
+
+function renderBoard() {
+  const rows = LB.rows.map((row, i) => {
+    const v = verdictOf(row), s = row.primary, zero = s.std === 0 && s.n > 1;
+    const iv = wilson(s.mean, N_TEST);
+    const who = runById[row.latest_run_id].created_by;
+    return `<div class="frow" data-row="${i}">
+      <div><div class="nm" title="${esc(row.hypothesis)}">${esc(shortName(row.hypothesis))}</div>
+        <div class="meta">${whoHtml(who)}<span><a href="#run">${short(row.latest_run_id)}</a> @ ${row.commit.slice(0, 7)}</span></div></div>
+      <div class="acc"><div class="big">${f4(s.mean)}</div>
+        <div class="sd">${zero ? noSpread(s.n) : `<span title="std over ${s.n} seeds">± ${f4(s.std)}</span>`}</div>
+        <div class="sd"><span title="test-set 95% CI (Wilson, n = ${N_TEST})">${f3(iv[0])}–${f3(iv[1])}</span></div></div>
+      <div class="fplot"></div>
+      <div class="f1">${f4(row.scores["macro_f1/value"].mean)}</div>
+      <div class="vd" title="${esc(v.tip)}"><span class="vg ${v.k}"></span><span>${v.t}</span>${v.s ? `<small>${v.s}</small>` : ""}</div>
+    </div>`;
+  }).join("");
+  const nNeed = N_NEED ? Math.round(N_NEED / 50) * 50 : null;
+
+  $("#v-board").innerHTML = `
+    <p class="crumb"><a href="#overview">${esc(LB.project)}</a><span class="sep">/</span>${esc(LB.task)}</p>
+    <h1 class="finding" id="lb-h">${esc(VERDICT_LINE)}</h1>
+    <p class="metaline"><span>toyset v1</span><span>n = ${N_TEST}</span><span>accuracy v1</span></p>
+
+    <div class="filters" role="group" aria-label="Filters">
+      <label title="Metric versions">Metrics <select><option>accuracy v1, macro_f1 v1</option></select></label>
+      <label><input type="checkbox" checked id="showSeeds"> Seeds</label>
+      <span class="r"><button class="btn" type="button" data-toast="Exported leaderboard.csv">Export CSV</button><button class="btn primary" type="button" data-toast="Re-evaluation queued for 12 runs">Re-evaluate all</button></span>
+    </div>
+
+    <div class="fig">
+      <div class="fig-h"><span class="pl">a</span><span class="t">${esc(nick(BEST.hypothesis))} vs ${esc(nick(RUNNER.hypothesis))}</span></div>
+      <div class="verdict">
+        <dl class="stats">
+          <div title="Difference in mean accuracy, ${f4(GAP)} = ${Math.round(GAP * N_TEST * 10) / 10} of ${N_TEST} examples"><dt>Δ accuracy</dt><dd>${f3(GAP)}</dd></div>
+          <div title="Exact two-sided sign test on the ${EX.fixed.length + EX.broken.length} examples that changed (seed 3 vs seed 3). p = ${P_SIGN.toFixed(3)}"><dt>paired p</dt><dd>${P_SIGN.toFixed(2)}</dd></div>
+          <div title="Test examples the ${esc(nick(BEST.hypothesis))} got right and ${esc(nick(RUNNER.hypothesis))} got wrong, and the reverse"><dt><a href="#examples">fixed / broken</a></dt><dd>${EX.fixed.length} <small>/</small> ${EX.broken.length}</dd></div>
+          <div title="${esc(nick(BEST.hypothesis))} test-set 95% CI (Wilson, n = ${N_TEST}). The ${esc(nick(RUNNER.hypothesis))} mean ${f3(RUNNER.primary.mean)} is inside it."><dt>${esc(nick(BEST.hypothesis))} 95% CI</dt><dd>${f3(BAND[0])}–${f3(BAND[1])}</dd></div>
+          <div title="${esc(nick(RUNNER.hypothesis))} std over ${RUNNER.n} seeds. ${esc(nick(BEST.hypothesis))} has none: ×${BEST.n}, one score."><dt>seed σ</dt><dd>${f4(RUNNER.primary.std)}</dd></div>
+          ${nNeed ? `<div title="Test examples needed for the same flip rate and split to reach p < 0.05"><dt>n for p &lt; 0.05</dt><dd>≈${nNeed}</dd></div>` : ""}
+        </dl>
+        <div id="ruler"></div>
+      </div>
+    </div>
+
+    <div class="fig lbhead">
+      <div class="fig-h"><span class="pl">b</span><span class="t">All ideas</span><span class="aside">${LB.rows.length} ideas, ${LB.rows.reduce((a, r) => a + r.n, 0)} runs</span></div>
+      <div class="forest" id="forest">
+        <div class="frow head"><div>Idea</div><div class="acc">accuracy v1</div><div>seeds, 95% CI</div><div class="f1">macro F1</div><div>vs best</div></div>
+        ${rows}
+        <div class="frow axisrow"><div></div><div></div><div class="fplot"></div><div></div><div></div></div>
+      </div>
+      <div class="key" aria-label="Key">
+        <span>${G.seed}seed</span>
+        <span title="All seeds gave one score">${G.dia}×3 identical seeds</span>
+        <span title="Wilson, n = ${N_TEST}">${G.whisk}test-set 95% CI</span>
+        <span>${G.band}best's CI</span>
+      </div>
+    </div>`;
+  drawBoardCharts();
+  $("#showSeeds").addEventListener("change", drawForest);
+}
+
+function drawForest() {
+  const box = $("#forest"); if (!box || !box.offsetParent) return;
+  box.querySelectorAll(":scope > svg").forEach(s => s.remove());
+  const cells = [...box.querySelectorAll(".fplot")];
+  const first = cells[0];
+  const left = first.offsetLeft, W = first.clientWidth;
+  const H = box.clientHeight;
+  const X = scale(W, 8, 8);
+  const showSeeds = $("#showSeeds") ? $("#showSeeds").checked : true;
+  const head = box.querySelector(".frow.head");
+  const axisRow = box.querySelector(".frow.axisrow");
+  const yTop = head.offsetTop + head.offsetHeight;
+  const yAx = axisRow.offsetTop + 8;
+  let h = "";
+  TICKS.forEach(t => (h += S.line(X(t), yTop, X(t), yAx, "grid")));
+  h += band(X, yTop, yAx);
+  h += S.line(X(BEST.primary.mean), yTop, X(BEST.primary.mean), yAx, "bestline");
+  LB.rows.forEach((row, i) => {
+    const r = box.querySelector(`.frow[data-row="${i}"]`);
+    const yS = r.offsetTop + 30, yI = r.offsetTop + 58;
+    const s = row.primary, iv = wilson(s.mean, N_TEST), isB = row === BEST;
+    const tipS = `${esc(shortName(row.hypothesis))}\nseeds: ${seedValues(row).map(f4).join(", ")}`;
+    const tipI = `${esc(shortName(row.hypothesis))}\nmean ${f4(s.mean)}\ntest-set 95% CI ${f4(iv[0])}–${f4(iv[1])}\n(Wilson, n = ${N_TEST})`;
+    if (showSeeds) {
+      if (s.std === 0 && s.n > 1) {
+        h += S.dia(X(s.mean), yS, 6.5, "dia" + (isB ? " best" : ""));
+        h += S.text(X(s.mean) + (isB ? -11 : 11), yS + 4, `×${s.n}`, "lbl-b", isB ? "end" : "start");
+      } else {
+        h += seedDots(X, seedValues(row), yS);
+      }
+      h += `<rect x="${X(s.mean) - 40}" y="${yS - 10}" width="80" height="20" class="hit" data-tip="${tipS}"/>`;
+    }
+    h += whisker(X, yI, iv[0], iv[1], isB);
+    h += S.sq(X(s.mean), yI, 4.5, "mean" + (isB ? " best" : ""));
+    h += `<rect x="${X(iv[0])}" y="${yI - 10}" width="${X(iv[1]) - X(iv[0])}" height="20" class="hit" data-tip="${tipI}"/>`;
+  });
+  h += axis(X, yAx, 0, W);
+  h += S.text(W, yAx + 36, "accuracy v1", "lbl-s", "end");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("width", W); svg.setAttribute("height", H + 20);
+  svg.setAttribute("viewBox", `0 0 ${W} ${H + 20}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Forest plot of accuracy by idea, with seed scores and test-set intervals");
+  svg.style.left = left + "px";
+  svg.style.pointerEvents = "auto";
+  svg.innerHTML = h;
+  box.appendChild(svg);
+}
+function drawBoardCharts() { drawRuler($("#ruler")); drawForest(); }
+
+/* ================================================================== RUN */
+function pathHtml(abs, leafFrom) {
+  const i = leafFrom != null ? leafFrom : abs.lastIndexOf("/") + 1;
+  return `<span class="p" style="word-break:normal"><span class="pre">${esc(abs.slice(0, i)).replace(/\//g, "/<wbr>")}</span><span style="white-space:nowrap">${esc(abs.slice(i))}</span></span>`;
+}
+function drawSeeds(el, g) {
+  const W = el.clientWidth, X = scale(W, 6, 6);
+  const s = g.primary, iv = wilson(s.mean, N_TEST);
+  let h = "";
+  TICKS.forEach(t => (h += S.line(X(t), 6, X(t), 92, "grid")));
+  h += band(X, 6, 92);
+  h += S.dia(X(s.mean), 30, 7, "dia best");
+  h += S.text(X(s.mean) - 13, 34, `${f4(s.mean)}`, "lbl-b", "end");
+  h += S.text(X(s.mean) + 13, 34, `×${s.n}`, "lbl-b", "start");
+  h += `<rect x="${X(s.mean) - 70}" y="18" width="140" height="24" class="hit" data-tip="seeds 1, 2, 3: all ${f4(s.mean)}\nthe model ignores the seed"/>`;
+  h += `<rect x="${X(iv[0])}" y="54" width="${X(iv[1]) - X(iv[0])}" height="20" class="hit" data-tip="test-set 95% CI ${f4(iv[0])}–${f4(iv[1])}\n(Wilson, n = ${N_TEST})"/>`;
+  h += whisker(X, 64, iv[0], iv[1], true);
+  h += S.sq(X(s.mean), 64, 4.5, "mean best");
+  h += axis(X, 92, 0, W, true, 2);
+  h += S.text(W, 128, "accuracy v1", "lbl-s", "end");
+  el.innerHTML = S.svg(W, 134, h, 'role="img" aria-label="All three seeds scored the same; the test-set interval is 0.874 to 0.953" style="pointer-events:auto"');
+}
+
+function renderRun() {
+  const r = REC, g = groupOfRun[r.run_id], ds = r.datasets[0], ck = r.artifacts.find(a => a.kind === "checkpoint");
+  const secs = ((tOf(r.ended_at) - tOf(r.started_at)) / 1000).toFixed(1);
+  const P = SHOW.paths, runDir = P.run_dir, repo = P.repo;
+  const rel = abs => abs.startsWith(runDir + "/") ? abs.slice(runDir.length + 1) : abs;
+  const relRepo = abs => abs.startsWith(repo + "/") ? abs.slice(repo.length + 1) : abs;
+  const primaryScore = SHOW.scores.find(s => s.metric + "/" + s.key === LB.primary);
+  const iv = wilson(primaryScore.value, N_TEST);
+  const note = SHOW.notes.trim();
+  const noteHead = note.match(/^##\s*(\S+)\s+\S+\s+(.*)$/m);
+  const noteBody = note.replace(/^##.*$/m, "").trim();
+  const cut = noteBody.indexOf(". ");
+  const noteFirst = cut > 0 ? noteBody.slice(0, cut + 1) : noteBody, noteRest = cut > 0 ? noteBody.slice(cut + 1) : "";
+  const commit7 = r.git.commit.slice(0, 7);
+  const tracked = r.git.dirty && !SHOW.has_diff; /* dirty, but no tracked-file diff was found */
+  const gitTip = tracked ? `Untracked files only (data/). Tracked code matches ${commit7}. No remote.` : r.git.dirty ? "Tracked files changed; diff saved as git.diff." : "Clean working tree.";
+  const kid = (abs, what, br = "├", tip = "") => `<li><span class="br">${br}</span><span class="p">${esc(rel(abs))}</span><span class="what"${tip ? ` title="${esc(tip)}"` : ""}>${what}</span>${copyBtn(abs)}</li>`;
+
+  $("#v-run").innerHTML = `
+    <p class="crumb"><a href="#overview">${esc(r.project)}</a><span class="sep">/</span><a href="#board">${esc(r.task)}</a><span class="sep">/</span>${esc(shortName(r.hypothesis))}<span class="sep">/</span>${esc(r.run_id)}</p>
+    <div class="run-top">
+      <div>
+        <h1 class="finding hyp" id="run-h">${esc(r.hypothesis)}</h1>
+        <div class="metaline">
+          <span class="who agent" title="exit ${r.exit_code}"><i style="background:var(--best)"></i><b>finished</b>&nbsp;${secs} s</span>
+          <span>seed ${r.seed}</span>
+          <span>${hms(r.started_at)} UTC</span>
+          ${whoHtml(r.created_by)}
+          <span>${esc(r.host)}</span>
+          ${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join("")}
+        </div>
+      </div>
+      <div>
+        <div class="actions">
+          <button class="btn" type="button" title="Same command, commit ${commit7}" data-toast="Rerun queued: same command, commit ${commit7}">Rerun</button>
+          <button class="btn" type="button" title="From checkpoint model.pkl" data-toast="Re-infer queued from checkpoint model.pkl">Re-infer</button>
+          <button class="btn primary" type="button" data-toast="Re-evaluation queued with accuracy v1, macro_f1 v1">Re-evaluate</button>
+          <button class="btn" type="button" disabled title="Already finished">Stop</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="run-grid">
+      <div class="col">
+        <div class="fig">
+          <div class="fig-h"><span class="pl">a</span><span class="t">Paths</span><span class="aside"><span class="host" style="margin:0" title="All paths are on this host">local</span></span></div>
+          <div class="cmdrow"><div class="tree"><span class="k">Command</span></div><div><code class="cmd">${esc(r.command.join(" "))}</code>
+            <div class="tmpl" title="Command template">template <span class="p" style="font-size:12px">${esc(r.command_template.join(" "))}</span></div></div></div>
+          <div class="tree">
+            <div class="root"><span class="k" title="Working directory">Project</span>
+              <span>${pathHtml(repo)}</span>${copyBtn(repo)}</div>
+            <p class="gitline"><span title="${esc(gitTip)}"><span class="p">${esc(r.git.branch)} @ ${commit7}</span>&nbsp; ${tracked ? "tracked clean" : r.git.dirty ? "dirty, git.diff" : "clean"}</span></p>
+            <ul class="kids">
+              ${kid(ds.path, `${esc(ds.name)} ${esc(ds.version)}, ${(ds.size / 1000).toFixed(1)} KB <span style="color:var(--best)">✓</span>`, "└", `Hash matched at launch: ${ds.hash}`).replace(esc(rel(ds.path)), esc(relRepo(ds.path)))}
+            </ul>
+            <div class="root"><span class="k" title="Everything this run wrote">Run</span>
+              <span>${pathHtml(runDir)}</span>${copyBtn(runDir)}</div>
+            <ul class="kids">
+              ${kid(P.stdout, "")}
+              ${kid(P.stderr, "")}
+              ${kid(P.predictions, "")}
+              ${kid(P.env, "")}
+              ${kid(ck.path, `${(ck.size / 1000).toFixed(1)} KB`, "└", "checkpoint")}
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="fig">
+          <div class="fig-h"><span class="pl">b</span><span class="t">Scores</span></div>
+          <table class="scores"><tbody>${SHOW.scores.map(s => `<tr>
+            <td>${esc(s.metric)} ${esc(s.version)}<small title="scored at, source hash">${hms(s.created_at)}&nbsp; ${esc(s.source_hash.slice(7, 15))}</small></td>
+            <td class="v">${f4(s.value)}${s === primaryScore ? `<small title="test-set 95% CI (Wilson, n = ${N_TEST})">${f3(iv[0])}–${f3(iv[1])}</small>` : ""}</td></tr>`).join("")}</tbody></table>
+          <p class="small" style="margin:10px 0 0" title="Logged during training">logged: ${SHOW.metric_names.map(esc).join(", ")}</p>
+        </div>
+        <div class="fig">
+          <div class="fig-h"><span class="pl">c</span><span class="t">Seeds</span></div>
+          <div id="seedPlot"></div>
+        </div>
+        <div class="fig">
+          <div class="fig-h"><span class="pl">d</span><span class="t">Notes</span></div>
+          <div class="notes">${noteHead ? `<div class="by">${whoHtml(noteHead[2].replace(/^\W+\s*/, ""))}<span>${noteHead[1].slice(0, 10)} ${noteHead[1].slice(11, 16)}</span></div>` : ""}${esc(noteFirst)}<span id="noteRest" hidden>${esc(noteRest)}</span></div>
+          <div style="display:flex;gap:8px">${noteRest ? `<button class="btn" type="button" id="noteMore" aria-controls="noteRest" aria-expanded="false">More</button>` : ""}<button class="btn" type="button" data-toast="Note editor opened">Add note</button></div>
+        </div>
+      </div>
+    </div>`;
+  drawSeeds($("#seedPlot"), g);
+  const more = $("#noteMore");
+  if (more) more.addEventListener("click", () => { const r = $("#noteRest"), open = r.hidden; r.hidden = !open; more.textContent = open ? "Less" : "More"; more.setAttribute("aria-expanded", open); });
+}
+
+/* ================================================================== EXAMPLES */
+function drawStrip(el) {
+  const W = el.clientWidth, H = 112;
+  const segs = [
+    { n: EX.fixed.length, c: "var(--best)", t: `${EX.fixed.length} fixed` },
+    { n: EX.broken.length, c: "var(--fail)", t: `${EX.broken.length} broken` },
+    { n: EX.both_fail, c: "var(--ink-2)", t: `${EX.both_fail} both wrong` },
+    { n: EX.both_pass, c: "var(--rule)", t: `${EX.both_pass} both right` },
+  ];
+  const GAPW = 10, total = N_TEST;
+  const unit = (W - GAPW * (segs.length - 1)) / total;
+  let x = 0, h = "";
+  const y0 = 4, bh = 56;
+  const lab = [];
+  segs.forEach((s, si) => {
+    const sx = x;
+    for (let i = 0; i < s.n; i++) {
+      h += `<rect x="${(x + 0.5).toFixed(2)}" y="${y0}" width="${Math.max(1, unit - 1.5).toFixed(2)}" height="${bh}" rx="1" style="fill:${s.c}"/>`;
+      x += unit;
+    }
+    lab.push({ x: sx, w: x - sx, t: s.t, si });
+    x += GAPW;
+  });
+  /* labels below, one line; each label starts at its segment or after the previous label, with an elbow leader */
+  let nextX = 0;
+  const yb = y0 + bh;
+  lab.forEach(l => {
+    const tw = l.t.length * 6.7;
+    const mid = l.x + Math.min(l.w, 24) / 2;
+    const lx = Math.max(l.x, nextX);
+    const ly = yb + 40;
+    const ey = yb + 4 + (lab.length - 1 - l.si) * 5;
+    h += `<path d="M${mid} ${yb + 3}V${ey}H${lx + 1}V${ly - 12}" class="lead"/>`;
+    h += S.text(lx, ly, esc(l.t), l.si < 2 ? "lbl-b" : "lbl");
+    nextX = lx + tw + 22;
+  });
+  el.innerHTML = S.svg(W, H, h, `role="img" aria-label="180 test examples: ${segs.map(s => s.t).join(", ")}" style="overflow:visible"`);
+}
+function drawNull(el) {
+  const W = el.clientWidth, H = 300;
+  const n = EX.fixed.length + EX.broken.length, obs = EX.fixed.length, lo = Math.min(EX.fixed.length, EX.broken.length);
+  const PL = 4, PR = 4, base = 250, top = 34;
+  const pm = [...Array(n + 1)].map((_, k) => binomPmf(n, k));
+  const maxP = Math.max(...pm);
+  const step = (W - PL - PR) / (n + 1), bw = Math.min(34, step - 8);
+  let h = "";
+  pm.forEach((p, k) => {
+    const cx = PL + step * (k + 0.5);
+    const bh = (p / maxP) * (base - top);
+    const tail = k >= obs || k <= lo;
+    h += `<path d="M${cx - bw / 2} ${base}V${base - bh + 4}Q${cx - bw / 2} ${base - bh} ${cx - bw / 2 + 4} ${base - bh}H${cx + bw / 2 - 4}Q${cx + bw / 2} ${base - bh} ${cx + bw / 2} ${base - bh + 4}V${base}Z" style="fill:${tail ? "var(--ink)" : "var(--rule)"}"/>`;
+    h += `<rect x="${cx - step / 2}" y="${top + 40}" width="${step}" height="${base - top - 40}" class="hit" data-tip="${k} fixed, ${n - k} broken\nchance if the runs are equally good: ${(p * 100).toFixed(1)}%"/>`;
+    h += S.text(cx, base + 17, k, "tk", "middle");
+  });
+  h += S.line(0, base, W, base, "axis");
+  const cObs = PL + step * (obs + 0.5), cMid = PL + step * (n / 2 + 0.5);
+  h += S.line(cObs, base - (pm[obs] / maxP) * (base - top) - 6, cObs, top + 34, "lead");
+  h += `<g data-tip="observed ${obs} fixed, ${n - obs} broken\nexact two-sided sign test: dark bars sum to p = ${P_SIGN.toFixed(3)}">` + S.text(cObs, top + 10, `${obs}:${n - obs}`, "lbl-b", "middle") + S.text(cObs, top + 26, `p = ${P_SIGN.toFixed(2)}`, "lbl-b", "middle") + `</g>`;
+  h += S.text(W, base + 40, `fixed, of ${n} changed`, "lbl-s", "end");
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="Chance distribution of fixed examples out of 12 if the runs were equally good; the dark tails sum to 0.146" style="overflow:visible;pointer-events:auto"');
+}
+
+function renderExamples() {
+  const A = runById[EX.a], B = runById[EX.b];
+  const nA = nick(A.hypothesis), nB = nick(B.hypothesis);
+  const net = EX.fixed.length - EX.broken.length;
+  const accA = HX.cmp.scores["accuracy@v1/value"][0], accB = HX.cmp.scores["accuracy@v1/value"][1];
+  const P = HX.preds;
+  const signTip = `Exact two-sided sign test on the ${EX.fixed.length + EX.broken.length} examples that changed. p = ${P_SIGN.toFixed(3)}. At this flip rate, about ${Math.round(N_NEED / 50) * 50} examples would reach p < 0.05.`;
+  const rowsWrong = P.rows.map(r => {
+    const broken = EX.broken.includes(r.id);
+    return `<tr><td><span class="p" style="font-family:var(--sans);font-size:14px">${esc(r.id)}</span></td><td class="r pv">${r.prediction}</td><td class="r">${r.reference}</td>
+      <td style="padding-left:32px"><span class="rfnote" title="${broken ? `${esc(nA)} was right: broken by the ${esc(nB)}` : `${esc(nA)} was wrong too`}">${broken ? `<span class="sw br"></span>right` : `<span class="sw bw"></span>wrong`}</span></td></tr>`;
+  }).join("");
+
+  $("#v-examples").innerHTML = `
+    <p class="crumb"><a href="#overview">${esc(LB.project)}</a><span class="sep">/</span><a href="#board">${esc(LB.task)}</a><span class="sep">/</span>examples</p>
+    <h1 class="finding" id="ex-h">${esc(nB)} fixes ${EX.fixed.length}, breaks ${EX.broken.length} vs ${esc(nA)}, <span title="${esc(signTip)}" style="cursor:help">p = ${P_SIGN.toFixed(2)}</span></h1>
+    <p class="metaline"><span>n = ${N_TEST}</span><span>net +${net}</span><span>Δ +${(net / N_TEST).toFixed(4)}</span></p>
+
+    <div class="ab">
+      <div class="row"><div><div class="side-lbl">A</div><div class="nm">${esc(shortName(A.hypothesis))}, seed ${A.seed}</div><div class="meta">${whoHtml(A.created_by)}<span>${esc(A.run_id)}</span></div></div>
+        <div class="acc">${f4(accA)}<small>accuracy v1</small></div></div>
+      <div class="row"><div><div class="side-lbl">B</div><div class="nm">${esc(shortName(B.hypothesis))}, seed ${B.seed}</div><div class="meta">${whoHtml(B.created_by)}<span>${esc(B.run_id)}</span></div></div>
+        <div class="acc">${f4(accB)}<small>accuracy v1</small></div></div>
+    </div>
+
+    <div class="two" style="margin-top:64px">
+      <div class="fig" style="margin-top:0">
+        <div class="fig-h"><span class="pl">a</span><span class="t">Outcomes</span></div>
+        <table class="ot" aria-label="Outcome table">
+          <thead><tr><th></th><th>${esc(nB)} right</th><th>${esc(nB)} wrong</th></tr></thead>
+          <tbody>
+            <tr><th class="rh" scope="row">${esc(nA)} right</th><td class="same" title="right in both"><span class="n">${EX.both_pass}</span></td><td class="br" title="broken by the ${esc(nB)}"><span class="n">${EX.broken.length}</span><span class="w"><span class="sw br"></span>broken</span></td></tr>
+            <tr><th class="rh" scope="row">${esc(nA)} wrong</th><td class="fx" title="fixed by the ${esc(nB)}"><span class="n">${EX.fixed.length}</span><span class="w"><span class="sw fx"></span>fixed</span></td><td class="same" title="wrong in both"><span class="n">${EX.both_fail}</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="fig" style="margin-top:0">
+        <div class="fig-h"><span class="pl">b</span><span class="t hint" title="${esc(signTip)}">Sign test</span><span class="aside">${EX.fixed.length + EX.broken.length} changed</span></div>
+        <div id="nullPlot"></div>
+      </div>
+    </div>
+
+    <div class="fig">
+      <div class="fig-h"><span class="pl">c</span><span class="t">Per example</span><span class="aside">${N_TEST}</span></div>
+      <div id="strip"></div>
+    </div>
+
+    <div class="fig" style="max-width:640px">
+      <div class="fig-h"><span class="pl">d</span><span class="t">${esc(nB)} errors</span><span class="aside">${P.rows.length} of ${P.total}</span></div>
+      <table class="tbl wrong"><thead><tr><th>Example</th><th class="r">${esc(nB)}</th><th class="r">label</th><th style="padding-left:32px">${esc(nA)}</th></tr></thead><tbody>${rowsWrong}</tbody></table>
+      <p class="small" style="margin-top:12px"><button class="btn link" type="button" data-toast="Loaded the other ${P.total - P.rows.length} examples">+${P.total - P.rows.length} more</button></p>
+    </div>`;
+  drawStrip($("#strip"));
+  drawNull($("#nullPlot"));
+}
+
+/* ================================================================== routing, theme, palette */
+const VIEWS = { overview: renderOverview, board: renderBoard, run: renderRun, examples: renderExamples };
+const REDRAW = { overview: drawOverviewCharts, board: drawBoardCharts, run: () => drawSeeds($("#seedPlot"), groupOfRun[REC.run_id]), examples: () => { drawStrip($("#strip")); drawNull($("#nullPlot")); } };
+const rendered = {};
+let current = "overview";
+function show() {
+  const v = (location.hash || "#overview").slice(1);
+  current = VIEWS[v] ? v : "overview";
+  Object.keys(VIEWS).forEach(k => ($("#v-" + k).hidden = k !== current));
+  document.querySelectorAll(".tabs a").forEach(a => { if (a.getAttribute("href") === "#" + current) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+  if (!rendered[current]) { VIEWS[current](); rendered[current] = true; } else REDRAW[current]();
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", show);
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => REDRAW[current](), 120); });
+
+function setThemeLabel() { $("#themeLbl").textContent = document.documentElement.dataset.theme === "dark" ? "Light" : "Dark"; }
+function toggleTheme() {
+  const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = t; localStorage.setItem("hx-theme", t); setThemeLabel();
+}
+$("#themeBtn").addEventListener("click", toggleTheme);
+
+let toastT;
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2200); }
+document.addEventListener("click", e => {
+  const c = e.target.closest("[data-copy]");
+  if (c) { navigator.clipboard && navigator.clipboard.writeText(c.dataset.copy).catch(() => {}); toast("Copied " + c.dataset.copy); return; }
+  const t = e.target.closest("[data-toast]"); if (t) toast(t.dataset.toast);
+});
+
+/* tooltips on marks */
+const tip = $("#tip");
+document.addEventListener("mousemove", e => {
+  const t = e.target.closest && e.target.closest("[data-tip]");
+  if (!t) { tip.classList.remove("on"); return; }
+  tip.innerHTML = esc(t.getAttribute("data-tip")).replace(/\n/g, "<br>");
+  tip.style.left = Math.min(innerWidth - 320, e.clientX + 14) + "px"; tip.style.top = (e.clientY + 16) + "px";
+  tip.classList.add("on");
+});
+
+/* command palette */
+const CMDS = [
+  { g: "Go to", t: "Overview", s: "all projects", go: () => (location.hash = "#overview") },
+  { g: "Go to", t: "Leaderboard", s: `${LB.project} / ${LB.task}`, go: () => (location.hash = "#board") },
+  { g: "Go to", t: `Run ${short(REC.run_id)}`, s: `${shortName(REC.hypothesis)}, seed ${REC.seed}`, go: () => (location.hash = "#run") },
+  { g: "Go to", t: "Examples", s: `rf seed 3 against SVM seed 3`, go: () => (location.hash = "#examples") },
+  ...RUNS.filter(r => !r.archived).slice(0, 6).map(r => ({ g: "Runs", t: r.run_id, s: `${shortName(r.hypothesis)}, seed ${r.seed}`, go: () => (location.hash = "#run") })),
+  { g: "Paths", t: "Copy run folder", s: "…/runs/" + REC.run_id, go: () => { navigator.clipboard && navigator.clipboard.writeText(SHOW.paths.run_dir).catch(() => {}); toast("Copied " + SHOW.paths.run_dir); } },
+  { g: "Paths", t: "Copy dataset path", s: "data/test.jsonl", go: () => toast("Copied " + REC.datasets[0].path) },
+  { g: "Commands", t: "Re-evaluate all runs", s: "accuracy v1, macro_f1 v1", go: () => toast("Re-evaluation queued for 12 runs") },
+  { g: "Commands", t: "Switch colour mode", s: "light or dark", go: toggleTheme },
+];
+let palItems = CMDS, palSel = 0;
+function palRender() {
+  let lastG = "", h = "";
+  palItems.forEach((c, i) => {
+    if (c.g !== lastG) { h += `<li class="grp" role="presentation">${esc(c.g)}</li>`; lastG = c.g; }
+    h += `<li class="it" role="option" id="po${i}" data-i="${i}" aria-selected="${i === palSel}"><span>${esc(c.t)}</span><small>${esc(c.s)}</small></li>`;
+  });
+  $("#palList").innerHTML = h || `<li class="grp">Nothing matches. Try a run id, task name or path.</li>`;
+  $("#palIn").setAttribute("aria-activedescendant", "po" + palSel);
+}
+function palOpen() { $("#pal").classList.add("on"); $("#palIn").value = ""; palItems = CMDS; palSel = 0; palRender(); $("#palIn").focus(); }
+function palClose() { $("#pal").classList.remove("on"); $("#findBtn").focus(); }
+function palRun(i) { const c = palItems[i]; if (!c) return; palClose(); c.go(); }
+$("#findBtn").addEventListener("click", palOpen);
+$("#pal").addEventListener("click", e => { if (e.target.id === "pal") palClose(); const li = e.target.closest("li.it"); if (li) palRun(+li.dataset.i); });
+$("#palIn").addEventListener("input", e => { const q = e.target.value.toLowerCase(); palItems = CMDS.filter(c => (c.t + " " + c.s + " " + c.g).toLowerCase().includes(q)); palSel = 0; palRender(); });
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); $("#pal").classList.contains("on") ? palClose() : palOpen(); return; }
+  if (!$("#pal").classList.contains("on")) return;
+  if (e.key === "Escape") palClose();
+  else if (e.key === "ArrowDown") { palSel = Math.min(palItems.length - 1, palSel + 1); palRender(); e.preventDefault(); }
+  else if (e.key === "ArrowUp") { palSel = Math.max(0, palSel - 1); palRender(); e.preventDefault(); }
+  else if (e.key === "Enter") palRun(palSel);
+});
+
+setThemeLabel();
+document.fonts.ready.then(() => {
+  show();
+  if (new URLSearchParams(location.search).get("pal")) { palOpen(); $("#palIn").value = "svm"; palItems = CMDS.filter(c => (c.t + " " + c.s).toLowerCase().includes("svm") || c.g === "Go to"); palRender(); }
+});
+</script>
+</body>
+</html>

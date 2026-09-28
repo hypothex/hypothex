@@ -159,6 +159,17 @@ Archive a run (``--off`` to unarchive) to hide a dead end without deleting it.
 
 Add a note to a run.
 
+Views
+-----
+
+.. code-block:: bash
+
+   hx view list TASK --json
+   hx view add TASK --file view.yaml --json
+
+List a task's dashboards, or validate and save one. See :doc:`views` for the YAML
+format and the other ``hx view`` commands.
+
 Datasets
 --------
 
@@ -196,7 +207,9 @@ Servers
 
    hx serve
 
-Serve the HTTP/WebSocket API (and the UI once built) on ``127.0.0.1:7777``.
+Serve the HTTP/WebSocket API on ``127.0.0.1:7777``, and the UI at
+``http://127.0.0.1:7777/`` when the package contains a UI build
+(``src/hypothex/ui_dist``; ``cd ui && bun run build`` makes one).
 
 .. code-block:: bash
 

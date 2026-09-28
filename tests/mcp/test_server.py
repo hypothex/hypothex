@@ -29,7 +29,22 @@ EXPECTED_TOOLS = {
     "add_note",
     "tag_run",
     "get_predictions",
+    "list_views",
+    "get_view",
+    "add_view",
+    "query_view",
 }
+
+GOOD_VIEW = """\
+title: acc only
+panels:
+  - type: leaderboard
+    title: board
+    data: {metrics: [accuracy]}
+"""
+# "acuracy" is one letter off; difflib.get_close_matches("acuracy", ["accuracy"]) ->
+# ["accuracy"]. The bad name sits on line 5 (1-based) of the text.
+BAD_VIEW = GOOD_VIEW.replace("[accuracy]", "[acuracy]")
 
 
 def call(home: Path, name: str, args: dict[str, Any] | None = None) -> tuple[bool, Any]:
@@ -108,3 +123,39 @@ def test_mcp_is_served_over_http(home: Path) -> None:
         )
         assert resp.status_code == 200
         assert "hypothex" in resp.text
+
+
+def test_view_tools(home: Path, ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    path = toy_repo.resolve() / ".hypothex" / "views" / "toy-acc" / "acc.yaml"
+
+    err, listed = call(home, "list_views", {"task": "toy-acc"})
+    assert not err
+    assert [(v["name"], v["origin"]) for v in listed["views"]] == [("overview", "preset")]
+
+    err, bad = call(home, "add_view", {"task": "toy-acc", "name": "acc", "yaml_text": BAD_VIEW})
+    assert not err and bad["ok"] is False
+    assert (bad["issues"][0]["line"], bad["issues"][0]["suggestion"]) == (5, "accuracy")
+    assert not path.exists()
+
+    err, good = call(home, "add_view", {"task": "toy-acc", "name": "acc", "yaml_text": GOOD_VIEW})
+    assert not err and good["ok"] is True
+    assert (good["info"]["name"], good["info"]["path"]) == ("acc", str(path))
+    assert path.read_text() == GOOD_VIEW
+
+    err, doc = call(home, "get_view", {"task": "toy-acc", "name": "acc"})
+    assert not err and doc["text"] == GOOD_VIEW and doc["view"]["title"] == "acc only"
+    assert "from_" not in doc["view"]
+
+    err, result = call(home, "query_view", {"task": "toy-acc", "name": "acc"})
+    assert not err
+    assert [p["type"] for p in result["panels"]] == ["leaderboard"]
+    assert [r["run_ids"] for r in result["panels"][0]["rows"]] == [["r1"]]
+
+    err, message = call(home, "get_view", {"task": "toy-acc", "name": "nope"})
+    assert err and "unknown view 'nope'" in message
+    err, message = call(
+        home, "add_view", {"task": "toy-acc", "name": "overview", "yaml_text": GOOD_VIEW}
+    )
+    assert err and "preset view" in message

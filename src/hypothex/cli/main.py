@@ -8,7 +8,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast, get_args
 
 import typer
 import yaml
@@ -17,17 +17,20 @@ from hypothex._version import __version__
 from hypothex.core import queries as q
 from hypothex.core.config import (
     CONFIG_FILENAME,
+    TaskKind,
     find_repo_root,
     parse_metric_version,
     starter_config,
 )
 from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
-from hypothex.core.errors import HypothexError, RunError
+from hypothex.core.errors import ConfigError, HypothexError, RunError
 from hypothex.core.evaluation import reeval, validate_project
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
+from hypothex.core.gitinfo import git_state_label
 from hypothex.core.index import rebuild_index
 from hypothex.core.jsonutil import to_jsonable
+from hypothex.core.layout import default_home
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
 
 app = typer.Typer(
@@ -39,6 +42,8 @@ task_app = typer.Typer(no_args_is_help=True, help="Inspect tasks.")
 datasets_app = typer.Typer(no_args_is_help=True, help="Dataset fingerprints and checks.")
 app.add_typer(task_app, name="task")
 app.add_typer(datasets_app, name="datasets")
+view_app = typer.Typer(no_args_is_help=True, help="Task views: dashboards written as YAML.")
+app.add_typer(view_app, name="view")
 
 JsonFlag = Annotated[bool, typer.Option("--json", help="Print machine-readable JSON.")]
 ProjectOpt = Annotated[str | None, typer.Option("--project", "-p", help="Project name.")]
@@ -172,6 +177,12 @@ def _warn_seed(record: RunRecord) -> None:
     warning = seed_warning(record.command_template, record.seed)
     if warning is not None:
         typer.secho(f"warning: {warning}", fg="yellow", err=True)
+
+
+def _issue_text(issue: dict[str, Any]) -> str:
+    where = f"line {issue['line']}: " if issue.get("line") else ""
+    hint = f" (did you mean {issue['suggestion']}?)" if issue.get("suggestion") else ""
+    return f"{where}{issue['path']}: {issue['message']}{hint}"
 
 
 RUN_SETTINGS = {"allow_extra_args": True, "ignore_unknown_options": True}
@@ -366,7 +377,7 @@ def show(run_id: str, as_json: JsonFlag = False) -> None:
     typer.secho(f"{r.run_id}  [{r.status.value}]  {r.project}/{r.task or 'exploratory'}", bold=True)
     typer.echo(f"hypothesis: {r.hypothesis or '—'}")
     typer.echo(f"command:    {r.command_display}")
-    typer.echo(f"git:        {r.git.commit or '—'}{' (dirty)' if r.git.dirty else ''}")
+    typer.echo(f"git:        {r.git.commit or '—'}  {git_state_label(r.git)}")
     typer.secho("paths:", bold=True)
     for k, v in detail.paths.items():
         typer.echo(f"  {k:<22} {v}")
@@ -683,6 +694,101 @@ def note(
     _emit({"ok": True}, as_json, "noted")
 
 
+# views ----------------------------------------------------------------------------
+# The helpers live in hypothex.mcp.server (shared with the API and MCP); importing it
+# loads the MCP SDK, so each command imports it lazily to keep `hx` startup fast.
+@view_app.command("list")
+def view_list(task: str, project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
+    """List a task's views: preset `overview`, inline views, view files."""
+    from hypothex.mcp.server import list_task_views
+
+    views = list_task_views(_ctx(), task, project)
+    if as_json:
+        _print_json(views)
+        return
+    _table(
+        ["name", "title", "origin", "path"], [[v.name, v.title, v.origin, v.path] for v in views]
+    )
+
+
+@view_app.command("show")
+def view_show(task: str, name: str, project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
+    """Print a view's YAML."""
+    from hypothex.mcp.server import view_document
+
+    doc = view_document(_ctx(), task, name, project)
+    if as_json:
+        _print_json(doc)
+    else:
+        typer.echo(doc["text"], nl=not doc["text"].endswith("\n"))
+
+
+@view_app.command("init")
+def view_init(
+    task: str,
+    from_kind: Annotated[str, typer.Option("--from", help="Preset kind to start from.")],
+    name: Annotated[str, typer.Option("--name", help="View name.")],
+    project: ProjectOpt = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Create a view file that starts from a kind's preset panels."""
+    from hypothex.mcp.server import list_task_views, put_view
+
+    c = _ctx()
+    if name in {v.name for v in list_task_views(c, task, project)}:
+        raise ConfigError(f"view {name!r} exists; edit it, or replace it with `hx view add`")
+    text = yaml.safe_dump({"title": name, "from": from_kind, "panels": []}, sort_keys=False)
+    out = put_view(c, task, name, text, project)
+    _emit(out, as_json, f"wrote {out['info']['path']}")
+
+
+@view_app.command("add")
+def view_add(
+    task: str,
+    file: Annotated[
+        Path, typer.Option("--file", exists=True, dir_okay=False, help="View YAML file.")
+    ],
+    name: Annotated[str | None, typer.Option("--name", help="View name (default: stem).")] = None,
+    project: ProjectOpt = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Validate a view file and save it under .hypothex/views/<task>/."""
+    from hypothex.mcp.server import put_view
+
+    out = put_view(_ctx(), task, name or file.stem, file.read_text(encoding="utf-8"), project)
+    _emit(out, as_json, f"wrote {out['info']['path']}")
+
+
+@view_app.command("validate")
+def view_validate(
+    task: str,
+    file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, help="View YAML file.")],
+    project: ProjectOpt = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Check a view file against the task's metrics and fields; save nothing."""
+    from hypothex.mcp.server import validate_view
+
+    report = validate_view(_ctx(), task, file.read_text(encoding="utf-8"), project)
+    if as_json:
+        _print_json(report)
+    else:
+        for issue in report["issues"]:
+            typer.secho(f"{file}: {_issue_text(issue)}", fg="red")
+        if report["ok"]:
+            typer.secho("ok", fg="green")
+    if not report["ok"]:
+        raise typer.Exit(1)
+
+
+@view_app.command("rm")
+def view_rm(task: str, name: str, project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
+    """Delete a view file."""
+    from hypothex.mcp.server import remove_view
+
+    _emit(remove_view(_ctx(), task, name, project), as_json, f"removed {name}")
+
+
 # datasets & maintenance -------------------------------------------------------------
 @datasets_app.command("check")
 def datasets_check(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
@@ -751,15 +857,55 @@ def mcp() -> None:
     build_server(_state.home).run()
 
 
+@app.command(hidden=True)
+def demo(
+    kinds: Annotated[
+        list[str] | None,
+        typer.Option("--kinds", help="Kinds to seed (repeat or comma-separate; default: all)."),
+    ] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Seed demo projects and runs into an empty home (UI tests, docs screenshots)."""
+    from hypothex.demo import seed_demo
+
+    known = get_args(TaskKind)
+    chosen = [k.strip() for item in kinds or [] for k in item.split(",") if k.strip()]
+    unknown = sorted(set(chosen) - set(known))
+    if unknown:
+        raise ConfigError(f"unknown kind(s) {', '.join(unknown)}; choose from {', '.join(known)}")
+    home = (_state.home or default_home()).expanduser().resolve()
+    # a project is the demo's only when its repo is under <home>/demo-repos/: a
+    # name alone is not enough (the repo's own example is also "toy-classifier")
+    demo_repos = home / "demo-repos"
+    theirs = sorted(
+        e.project
+        for e in _ctx().store.list_projects()
+        if not Path(e.repo).resolve().is_relative_to(demo_repos)
+    )
+    if theirs:
+        raise ConfigError(
+            f"{home} already has projects ({', '.join(theirs)}); seed the demo into an "
+            "empty home instead: hx --home /tmp/hx-demo demo"
+        )
+    made = seed_demo(home, cast("list[TaskKind]", chosen or list(known)))
+    _emit(made, as_json, "\n".join(f"{kind}: {ref}" for kind, ref in made.items()))
+
+
 def cli() -> None:
     """Console entry point: expected errors print cleanly (JSON with --json)."""
     try:
         app()
     except HypothexError as exc:
+        issues = [to_jsonable(i) for i in getattr(exc, "issues", [])]
         if "--json" in sys.argv:
-            print(json.dumps({"error": str(exc), "type": type(exc).__name__}))
+            payload: dict[str, Any] = {"error": str(exc), "type": type(exc).__name__}
+            if issues:
+                payload["issues"] = issues
+            print(json.dumps(payload))
         else:
             print(f"error: {exc}", file=sys.stderr)
+            for issue in issues:
+                print(f"  {_issue_text(issue)}", file=sys.stderr)
         raise SystemExit(1) from None
 
 

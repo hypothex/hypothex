@@ -7,6 +7,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -14,7 +15,10 @@ from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import Response
+from starlette.types import Scope
 
 from hypothex._version import __version__
 from hypothex.api.security import OriginGuard, allowed_hosts
@@ -25,8 +29,20 @@ from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
 from hypothex.core.jsonutil import to_jsonable
+from hypothex.core.overview import build_overview
+from hypothex.core.panels import query_panel
 from hypothex.core.records import RunStatus
-from hypothex.mcp.server import build_server
+from hypothex.core.views import PanelData, PanelSpec, ViewSpec
+from hypothex.mcp.server import (
+    ViewValidationError,
+    build_server,
+    list_task_views,
+    put_view,
+    query_task_view,
+    remove_view,
+    validate_view,
+    view_document,
+)
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +50,41 @@ REPAIR_INTERVAL_SECONDS = 30.0
 WS_POLL_SECONDS = 0.5
 WS_BATCH = 500
 UI_DIST = Path(__file__).resolve().parent.parent / "ui_dist"
+NO_UI_FALLBACK = frozenset({"api", "mcp", ".well-known", "assets"})
+
+
+class SpaStaticFiles(StaticFiles):
+    """
+    Serve the built UI; unknown client-side routes get ``index.html``.
+
+    The UI routes (``/t/...``, ``/r/...``, ``/x/...``) exist only in the browser, so a
+    reload must still load the app. Paths under ``api``, ``mcp``, ``.well-known``, and
+    ``assets`` keep their 404, so a missing API route stays a JSON error and a missing
+    script is not answered with HTML.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """
+        Return the file at ``path``, or ``index.html`` for unknown UI routes.
+
+        Parameters
+        ----------
+        path : str
+            Path relative to the UI folder.
+        scope : Scope
+            ASGI scope.
+
+        Returns
+        -------
+        Response
+        """
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            parts = Path(path).parts
+            if exc.status_code != 404 or (parts and parts[0] in NO_UI_FALLBACK):
+                raise
+            return await super().get_response("index.html", scope)
 
 
 class ActionBody(BaseModel):
@@ -90,6 +141,26 @@ class NoteBody(ActionBody):
     author: str = "api"
 
 
+class ViewTextBody(BaseModel):
+    """Body of ``POST /api/v1/tasks/{project}/{task}/views/validate``."""
+
+    text: str
+
+
+class ViewPutBody(ActionBody):
+    """Body of ``PUT /api/v1/tasks/{project}/{task}/views/{name}``."""
+
+    text: str
+
+
+class ViewQueryBody(BaseModel):
+    """Body of ``POST .../views/query``: one panel, an unsaved view, or a saved view's name."""
+
+    view: ViewSpec | None = None
+    name: str | None = None
+    panel: PanelSpec | None = None
+
+
 async def _repair_loop(ctx: Context) -> None:
     """Mark orphaned runs lost every ``REPAIR_INTERVAL_SECONDS``."""
     while True:
@@ -100,8 +171,53 @@ async def _repair_loop(ctx: Context) -> None:
             log.exception("run repair failed")
 
 
+def _run_view(kind: str) -> list[PanelSpec]:
+    """
+    Run-detail panels for a task kind (spec section 8.4); the UI fills in the run.
+
+    Parameters
+    ----------
+    kind : str
+        Task kind.
+
+    Returns
+    -------
+    list of PanelSpec
+        Fresh panel specs, in display order.
+    """
+    if kind == "training":
+        return [PanelSpec(type="curves", title="curves", data=PanelData(step_metric="step"))]
+    if kind in ("agent_eval", "agent_iteration"):
+        return [
+            PanelSpec(type="trace", title="steps"),
+            PanelSpec(type="grid", title="same item across configs"),
+            PanelSpec(
+                type="table",
+                title="tokens per turn",
+                data=PanelData(
+                    source="traces", fields=["turn", "tokens_in", "tokens_out", "seconds"]
+                ),
+            ),
+        ]
+    if kind == "system_bench":
+        return [
+            PanelSpec(type="curves", title="over time"),
+            PanelSpec(
+                type="distribution",
+                title="latency",
+                scale="log",
+                data=PanelData(metrics=["latency_ms"]),
+            ),
+        ]
+    return [PanelSpec(type="curves", title="metrics")]
+
+
 def create_app(
-    home: Path | None = None, *, background_repair: bool = True, host: str | None = None
+    home: Path | None = None,
+    *,
+    background_repair: bool = True,
+    host: str | None = None,
+    ui_dir: Path | None = None,
 ) -> FastAPI:
     """
     Build the FastAPI application.
@@ -110,6 +226,9 @@ def create_app(
     address (or ``host``), else the answer is ``400``; a state-changing request
     or WebSocket handshake with a foreign ``Origin`` is rejected with ``403``.
     This blocks DNS-rebinding and cross-site attacks from a browser page.
+
+    When ``ui_dir`` holds ``index.html`` the UI is served at ``/``; unknown
+    non-API paths return ``index.html`` so browser routes survive a reload.
 
     Parameters
     ----------
@@ -120,6 +239,8 @@ def create_app(
     host : str, optional
         The address the server binds to; also accepted as ``Host`` unless it is
         a wildcard such as ``0.0.0.0``.
+    ui_dir : Path, optional
+        Built UI folder; defaults to the packaged ``hypothex/ui_dist``.
 
     Returns
     -------
@@ -158,9 +279,10 @@ def create_app(
     @app.exception_handler(HypothexError)
     async def hypothex_error(_: Request, exc: HypothexError) -> JSONResponse:
         status = 404 if isinstance(exc, StoreError) else 400
-        return JSONResponse(
-            status_code=status, content={"error": str(exc), "type": type(exc).__name__}
-        )
+        content: dict[str, Any] = {"error": str(exc), "type": type(exc).__name__}
+        if isinstance(exc, ViewValidationError):
+            content["issues"] = to_jsonable(exc.issues)
+        return JSONResponse(status_code=status, content=content)
 
     def once(body: ActionBody, fn: Callable[[], Any]) -> dict[str, Any]:
         return ctx.events.run_once(body.command_id, lambda: to_jsonable(fn()))
@@ -169,6 +291,13 @@ def create_app(
     @app.get("/.well-known/hypothex/environment")
     def environment() -> dict[str, Any]:
         return ctx.descriptor.model_dump(mode="json")
+
+    # overview ----------------------------------------------------------------------
+    @app.get("/api/v1/overview")
+    def overview(since: datetime | None = None) -> dict[str, Any]:
+        if since is not None and since.tzinfo is None:
+            since = since.replace(tzinfo=UTC)
+        return to_jsonable(build_overview(ctx, since))
 
     # projects & tasks ------------------------------------------------------------
     @app.get("/api/v1/projects")
@@ -208,6 +337,39 @@ def create_app(
             body,
             lambda: reeval(ctx, project=project, task=task, metric=body.metric, force=body.force),
         )
+
+    @app.get("/api/v1/tasks/{project}/{task}/kind")
+    def task_kind(project: str, task: str) -> dict[str, Any]:
+        entry, name = q.resolve_task(ctx, task, project)
+        kind = entry.config.tasks[name].kind
+        return {"kind": kind, "run_view": to_jsonable(_run_view(kind))}
+
+    # views -------------------------------------------------------------------------
+    @app.get("/api/v1/tasks/{project}/{task}/views")
+    def views(project: str, task: str) -> list[dict[str, Any]]:
+        return to_jsonable(list_task_views(ctx, task, project))
+
+    @app.post("/api/v1/tasks/{project}/{task}/views/validate")
+    def views_validate(project: str, task: str, body: ViewTextBody) -> dict[str, Any]:
+        return validate_view(ctx, task, body.text, project)
+
+    @app.post("/api/v1/tasks/{project}/{task}/views/query")
+    def views_query(project: str, task: str, body: ViewQueryBody) -> dict[str, Any]:
+        return query_task_view(
+            ctx, task, project=project, name=body.name, view=body.view, panel=body.panel
+        )
+
+    @app.get("/api/v1/tasks/{project}/{task}/views/{name}")
+    def view_get(project: str, task: str, name: str) -> dict[str, Any]:
+        return view_document(ctx, task, name, project)
+
+    @app.put("/api/v1/tasks/{project}/{task}/views/{name}")
+    def view_put(project: str, task: str, name: str, body: ViewPutBody) -> dict[str, Any]:
+        return once(body, lambda: put_view(ctx, task, name, body.text, project))
+
+    @app.delete("/api/v1/tasks/{project}/{task}/views/{name}")
+    def view_delete(project: str, task: str, name: str) -> dict[str, Any]:
+        return remove_view(ctx, task, name, project)
 
     # runs ----------------------------------------------------------------------------
     @app.get("/api/v1/runs")
@@ -253,6 +415,25 @@ def create_app(
     @app.get("/api/v1/runs/{run_id}/metrics")
     def run_metrics(run_id: str) -> list[dict[str, Any]]:
         return to_jsonable(q.metric_history(ctx, run_id))
+
+    @app.get("/api/v1/runs/{run_id}/traces")
+    def run_traces(run_id: str) -> list[dict[str, Any]]:
+        record = ctx.find_record(run_id)
+        return ctx.store.list_traces(record.project, record.run_id)
+
+    # `:path` keeps example ids such as "HumanEval/0" in one parameter.
+    @app.get("/api/v1/runs/{run_id}/traces/{example_id:path}")
+    def run_trace(run_id: str, example_id: str) -> dict[str, Any]:
+        record = ctx.find_record(run_id)
+        known = {t["example_id"] for t in ctx.store.list_traces(record.project, record.run_id)}
+        if example_id not in known:
+            raise StoreError(f"run {run_id} has no trace for example {example_id!r}")
+        panel = PanelSpec(
+            type="trace",
+            title=example_id,
+            data=PanelData(run_id=run_id, example_id=example_id),
+        )
+        return to_jsonable(query_panel(ctx, record.project, record.task or "", panel))
 
     @app.get("/api/v1/runs/{run_id}/logs")
     def run_logs(run_id: str, stream: str = "stdout", offset: int | None = None) -> dict[str, Any]:
@@ -365,6 +546,7 @@ def create_app(
 
     app.mount("/mcp", mcp_http)
 
-    if (UI_DIST / "index.html").is_file():
-        app.mount("/", StaticFiles(directory=UI_DIST, html=True), name="ui")
+    ui = ui_dir or UI_DIST
+    if (ui / "index.html").is_file():
+        app.mount("/", SpaStaticFiles(directory=ui, html=True), name="ui")
     return app

@@ -9,6 +9,8 @@ Experiment tracker and control panel for AI researchers and their agents.
    quickstart
    project_file
    cli
+   views
+   ui
    sdk
    agents
    architecture

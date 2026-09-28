@@ -1,0 +1,867 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hypothex: retro-bench-200</title>
+<script>
+  (function () {
+    var q = new URLSearchParams(location.search).get("theme");
+    var t = q || localStorage.getItem("hx-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400..700;1,6..72,400..500&display=swap" rel="stylesheet">
+<style>
+/* ------------------------------------------------------------------ tokens (ui-v4) */
+:root {
+  --paper: #F6F7F3;
+  --paper-2: #ECEEE8;
+  --ink: #15181E;
+  --ink-2: #464C57;
+  --ink-3: #767C87;
+  --rule: #D5D8D0;
+  --rule-2: #E4E6E0;
+  --best: #00846A;
+  --best-wash: rgba(0, 132, 106, .12);
+  --best-edge: rgba(0, 132, 106, .50);
+  --fail: #C8412B;
+  --agent: #5B48C2;
+  --human: #A66A12;
+  --ribbon: rgba(70, 76, 87, .085);
+  --serif: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --paper: #12161C;
+  --paper-2: #1A1F27;
+  --ink: #E9ECEF;
+  --ink-2: #AEB5BF;
+  --ink-3: #7C8490;
+  --rule: #2C333D;
+  --rule-2: #222830;
+  --best: #1FA282;
+  --best-wash: rgba(31, 162, 130, .17);
+  --best-edge: rgba(31, 162, 130, .60);
+  --fail: #DE5F49;
+  --agent: #8C7BEA;
+  --human: #C08629;
+  --ribbon: rgba(174, 181, 191, .09);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 400 15px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:hover { text-decoration-color: currentColor; }
+:focus-visible { outline: 2px solid var(--agent); outline-offset: 2px; border-radius: 3px; }
+button { font: inherit; color: inherit; }
+.num { font-variant-numeric: tabular-nums; }
+.path, code, kbd { font-family: var(--mono); font-size: .86em; }
+
+/* ------------------------------------------------------------------ chrome */
+.bar {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--rule);
+}
+.bar-in { max-width: 1280px; margin: 0 auto; padding: 0 40px; height: 60px; display: flex; align-items: stretch; gap: 40px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 600 21px/1 var(--serif); letter-spacing: -.01em; }
+.brand svg { display: block; }
+.tabs { display: flex; gap: 4px; }
+.tabs a {
+  display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: var(--ink-3);
+  font-size: 14.5px; border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tabs a:hover { color: var(--ink); }
+.tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
+.bar-r { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.find {
+  display: flex; align-items: center; gap: 28px; height: 34px; padding: 0 8px 0 12px; min-width: 250px;
+  border: 1px solid var(--rule); border-radius: 7px; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 13.5px;
+}
+.find:hover { border-color: var(--ink-3); }
+.find kbd { margin-left: auto; font-family: var(--sans); font-size: 12px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; }
+.theme { height: 34px; padding: 0 12px; border: 1px solid var(--rule); border-radius: 7px; background: transparent; cursor: pointer; font-size: 13.5px; color: var(--ink-2); display: flex; gap: 8px; align-items: center; }
+.theme:hover { border-color: var(--ink-3); color: var(--ink); }
+.sample { font-size: 12px; color: var(--human); border: 1px dashed currentColor; border-radius: 99px; padding: 1px 9px; cursor: help; }
+
+main { max-width: 1280px; margin: 0 auto; padding: 44px 40px 120px; }
+.view[hidden] { display: none; }
+
+/* ------------------------------------------------------------------ type */
+.crumb { margin: 0 0 18px; font-size: 13.5px; color: var(--ink-3); display: flex; align-items: center; flex-wrap: wrap; }
+.crumb a { color: var(--ink-2); text-decoration: none; }
+.crumb a:hover { text-decoration: underline; }
+.crumb .sep { margin: 0 6px; color: var(--rule); }
+.crumb .tag { margin-left: 14px; cursor: help; }
+h1.finding {
+  margin: 0; white-space: nowrap;
+  font: 500 46px/1.06 var(--serif); font-variation-settings: "opsz" 72;
+  letter-spacing: -.018em;
+}
+h1.finding .ci { color: var(--ink-2); font-weight: 400; cursor: help; }
+.metaline { margin: 14px 0 0; display: flex; flex-wrap: wrap; gap: 4px 22px; font-size: 14px; color: var(--ink-3); font-variant-numeric: tabular-nums; align-items: center; }
+.metaline b { color: var(--ink-2); font-weight: 500; }
+.hint { text-decoration: underline dotted var(--rule); text-underline-offset: 3px; cursor: help; }
+
+/* stat strip */
+.stats { display: flex; flex-wrap: wrap; gap: 14px 0; margin: 36px 0 0; padding: 0; }
+.stats > div { padding: 0 32px; border-left: 1px solid var(--rule-2); cursor: help; display: flex; flex-direction: column-reverse; }
+.stats > div:first-child { padding-left: 0; border-left: 0; }
+.stats dt { font-size: 12.5px; color: var(--ink-3); }
+.stats dd { margin: 0 0 3px; font: 400 25px/1.1 var(--sans); letter-spacing: -.012em; font-variant-numeric: tabular-nums; color: var(--ink); }
+.stats dd small { font-size: 15px; color: var(--ink-3); letter-spacing: 0; }
+.stats.sm dd { font-size: 21px; }
+
+/* figure panels */
+.fig { margin-top: 64px; }
+.fig-h { display: flex; align-items: baseline; gap: 12px; margin: 0 0 18px; }
+.fig-h .pl { font: 700 19px/1 var(--sans); }
+.fig-h .t { font: 600 16px/1.3 var(--sans); }
+.fig-h .aside { margin-left: auto; font-size: 13px; color: var(--ink-3); display: flex; gap: 8px; align-items: center; }
+.small { font-size: 13px; color: var(--ink-3); }
+
+/* svg figure text */
+svg text { font-family: var(--sans); fill: var(--ink-2); }
+svg .tk { font-size: 11.5px; fill: var(--ink-3); font-variant-numeric: tabular-nums; }
+svg .lbl { font-size: 12.5px; fill: var(--ink-2); }
+svg .lbl-s { font-size: 11.5px; fill: var(--ink-3); }
+svg .lbl-b { font-size: 12.5px; fill: var(--ink); font-weight: 600; }
+svg .vx { font-size: 13px; fill: var(--ink); font-weight: 600; }
+svg .axis { stroke: var(--ink-3); stroke-width: 1; }
+svg .grid { stroke: var(--rule-2); stroke-width: 1; }
+svg .hair { stroke: var(--rule); stroke-width: 1; }
+svg .band { fill: var(--best-wash); }
+svg .band-edge { stroke: var(--best-edge); stroke-width: 1; }
+svg .bestline { stroke: var(--best); stroke-width: 1.25; }
+svg .ribbon { fill: var(--ribbon); }
+svg .ribbon-edge { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 2 3; fill: none; opacity: .7; }
+svg .trend { stroke: var(--ink-2); stroke-width: 2; fill: none; stroke-linejoin: round; }
+svg .trend.bad { stroke: var(--fail); }
+svg .whisk { stroke: var(--ink-3); stroke-width: 1.5; stroke-linecap: round; fill: none; }
+svg .whisk.best { stroke: var(--best); }
+svg .mean { fill: var(--ink); stroke: var(--paper); stroke-width: 2; }
+svg .mean.best { fill: var(--best); }
+svg .mean.bad { fill: var(--fail); }
+svg .seed { fill: var(--ink-2); stroke: var(--paper); stroke-width: 1.5; }
+svg .seed.me { fill: var(--ink); stroke: var(--ink); stroke-width: 1; }
+svg .dia { fill: var(--paper); stroke: var(--ink); stroke-width: 1.6; }
+svg .lead { stroke: var(--ink-3); stroke-width: 1; fill: none; }
+svg .bar { fill: var(--ink-3); }
+svg .bar.best { fill: var(--best); }
+svg .bar.bad { fill: var(--fail); }
+svg .down { fill: var(--fail); }
+svg .hit { fill: transparent; cursor: default; }
+svg .hit.click { cursor: pointer; }
+svg .hit.click:hover { fill: var(--ribbon); }
+svg .m-fail { stroke: var(--fail); stroke-width: 1.8; stroke-linecap: round; }
+svg .cell-s { fill: var(--ink-2); }
+svg .cell-u { fill: none; stroke: var(--ink-3); stroke-width: 1.2; }
+svg .cell-sel { fill: none; stroke: var(--ink); stroke-width: 2; }
+svg .fx { fill: var(--best); }
+svg .br { fill: var(--fail); }
+svg .bw { fill: var(--ink-2); }
+svg .bp { fill: var(--rule); }
+
+/* who glyph */
+.who { display: inline-flex; align-items: center; gap: 6px; }
+.who i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.who.agent i { background: var(--agent); }
+.who.human i { background: var(--human); border-radius: 1px; }
+
+/* buttons */
+.btn {
+  height: 32px; padding: 0 13px; border-radius: 6px; border: 1px solid var(--rule); background: transparent;
+  font-size: 13.5px; color: var(--ink); cursor: pointer; white-space: nowrap;
+}
+.btn:hover { border-color: var(--ink-3); }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.primary:hover { opacity: .88; }
+.btn:disabled { color: var(--ink-3); cursor: not-allowed; border-color: var(--rule-2); }
+.cmd {
+  display: block; padding: 12px 14px; background: var(--paper-2); border-radius: 6px;
+  font: 400 13px/1.6 var(--mono); color: var(--ink); white-space: pre-wrap; word-break: break-word;
+}
+
+/* key */
+.key { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 14px; font-size: 13px; color: var(--ink-2); }
+.key span { display: inline-flex; align-items: center; gap: 7px; }
+.key svg { display: block; overflow: visible; }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tbl th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12.5px; padding: 0 12px 8px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.tbl td { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule-2); vertical-align: baseline; white-space: nowrap; }
+.tbl .r { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl .m { font-family: var(--mono); font-size: 12.5px; }
+.tbl .mut { color: var(--ink-3); }
+.tbl .vv { font-weight: 600; }
+.tbl tr.bad .dv { color: var(--fail); }
+.tbl tr.base td { color: var(--ink-3); }
+.tbl tr.base td.vv { color: var(--ink); }
+.tbl tr.sel td { background: var(--paper-2); }
+.dn { color: var(--fail); font-size: 11px; margin-right: 3px; }
+
+/* ------------------------------------------------------------------ task dashboard */
+.two { display: grid; grid-template-columns: minmax(0, 1fr) 452px; gap: 64px; align-items: start; margin-top: 64px; }
+.two .fig { margin-top: 0; }
+.two .fig-h { height: 32px; align-items: center; }
+.chart-stack .fig-b { margin-top: 18px; }
+.ylab { font-size: 12.5px; color: var(--ink-3); }
+
+.pick { display: flex; gap: 10px; align-items: center; font-size: 13.5px; color: var(--ink-2); }
+.pick select { font: inherit; color: var(--ink); background: transparent; border: 1px solid var(--rule); border-radius: 6px; height: 30px; padding: 0 6px; }
+
+.lb { font-size: 14px; }
+.lrow { display: grid; grid-template-columns: 26px 170px 64px 64px 104px minmax(0, 1fr) 62px 112px 108px; gap: 0 16px; align-items: center; border-bottom: 1px solid var(--rule-2); height: 46px; font-variant-numeric: tabular-nums; }
+.lrow.head { height: auto; padding-bottom: 8px; border-bottom: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); align-items: end; }
+.lrow.axisrow { border-bottom: 0; height: 40px; align-items: start; }
+.lrow .rk { color: var(--ink-3); font-size: 12.5px; }
+.lrow .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lrow .nm small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 8px; }
+.lrow .r { text-align: right; }
+.lrow .big { font-size: 16px; }
+.lrow .mut { color: var(--ink-3); font-size: 13px; }
+.lrow .fp { align-self: stretch; }
+.lrow .fp svg { display: block; overflow: visible; }
+.lrow .vd { display: flex; gap: 8px; align-items: center; cursor: help; }
+.lrow .vd small { color: var(--ink-3); font-size: 12.5px; }
+.lrow .runs { display: flex; gap: 10px; font-size: 13px; }
+.lrow .runs button { border: 0; background: none; padding: 2px 0; cursor: pointer; color: var(--ink-3); text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; }
+.lrow .runs button:hover { color: var(--ink); }
+.lrow .runs button[aria-pressed="true"] { color: var(--ink); font-weight: 600; text-decoration-color: var(--ink); }
+.vg { width: 10px; height: 10px; display: inline-block; flex: none; }
+.vg.best { background: var(--best); transform: rotate(45deg) scale(.8); }
+.vg.band { background: var(--best-wash); outline: 1px solid var(--best-edge); }
+.vg.behind { border: 1.5px solid var(--ink-3); border-radius: 50%; }
+
+.where { display: grid; grid-template-columns: 1fr; }
+.wrow { display: grid; grid-template-columns: 116px minmax(0, 1fr) auto; gap: 0 12px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--rule-2); }
+.wrow .k { color: var(--ink-3); font-size: 13px; }
+.p { font-family: var(--mono); font-size: 12.5px; color: var(--ink); word-break: break-all; }
+.p .pre { color: var(--ink-3); }
+.copy { border: 0; background: transparent; color: var(--ink-3); font-size: 12.5px; cursor: pointer; padding: 4px; border-radius: 4px; align-self: center; }
+.copy:hover { color: var(--ink); background: var(--paper-2); }
+.runid { font-family: var(--mono); font-size: 13px; color: var(--ink-2); font-weight: 400; }
+
+/* ------------------------------------------------------------------ run */
+.run-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 40px; align-items: start; }
+.actions { display: flex; gap: 8px; padding-top: 6px; }
+.run-grid { display: grid; grid-template-columns: minmax(0, 1fr) 392px; gap: 72px; margin-top: 56px; }
+.run-grid .fig { margin-top: 0; }
+.run-grid .col > .fig + .fig { margin-top: 56px; }
+.smiles { font: 400 13px/1.5 var(--mono); color: var(--ink); margin: 0 0 14px; word-break: break-all; }
+.traj td:nth-child(3), .traj td:nth-child(4) { white-space: normal; }
+.traj .ok { color: var(--best); font-weight: 600; }
+.traj .no { color: var(--fail); }
+.tree { font-size: 14px; }
+.tree .root { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; gap: 0 16px; align-items: baseline; padding: 12px 0 8px; border-top: 1px solid var(--rule); }
+.tree .root:first-child { border-top: 0; padding-top: 0; }
+.tree .k { color: var(--ink); font-weight: 550; }
+.tree .kids { list-style: none; margin: 0 0 6px 112px; padding: 0; }
+.tree .kids li { display: grid; grid-template-columns: 18px minmax(0, 1fr) 120px auto; gap: 0 10px; align-items: baseline; padding: 4px 0; }
+.tree .kids li .br { color: var(--ink-3); font-family: var(--mono); font-size: 13px; }
+.tree .kids li .what { font-size: 12.5px; color: var(--ink-3); text-align: right; }
+.cmdrow { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 0 16px; align-items: start; padding: 0 0 16px; }
+.scores { width: 100%; border-collapse: collapse; }
+.scores td { padding: 12px 0; border-top: 1px solid var(--rule-2); vertical-align: top; font-size: 14px; }
+.scores tr:first-child td { border-top: 0; }
+.scores .v { font: 400 30px/1 var(--sans); letter-spacing: -.015em; text-align: right; font-variant-numeric: tabular-nums; }
+.scores small { display: block; color: var(--ink-3); font-size: 12.5px; margin-top: 4px; }
+.hb { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.hb td { padding: 5px 0; vertical-align: middle; white-space: nowrap; }
+.hb td.l { width: 122px; color: var(--ink-2); }
+.hb td.n { width: 58px; text-align: right; font-variant-numeric: tabular-nums; }
+.hb td.e { width: 36px; text-align: right; font-size: 12.5px; color: var(--fail); font-variant-numeric: tabular-nums; }
+.hb .bar { height: 10px; border-radius: 0 3px 3px 0; background: var(--ink-3); }
+.hb .bar.ink { background: var(--ink-2); }
+.hb tr.first td { padding-bottom: 9px; }
+.hb tr.first + tr td { border-top: 1px solid var(--rule-2); padding-top: 9px; }
+
+/* toast, tooltip */
+.toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px); opacity: 0; background: var(--ink); color: var(--paper); padding: 10px 16px; border-radius: 7px; font-size: 13.5px; transition: all .18s ease; pointer-events: none; z-index: 60; }
+.toast.on { opacity: 1; transform: translate(-50%, 0); }
+.tip { position: fixed; z-index: 40; pointer-events: none; background: var(--ink); color: var(--paper); font-size: 12.5px; line-height: 1.4; padding: 7px 10px; border-radius: 6px; max-width: 320px; opacity: 0; transition: opacity .08s; font-variant-numeric: tabular-nums; }
+.tip.on { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (max-width: 1100px) {
+  .two, .run-grid, .where { grid-template-columns: 1fr; gap: 48px; }
+  h1.finding { white-space: normal; }
+  .lrow { grid-template-columns: 26px 150px 64px 0 0 minmax(0, 1fr) 62px 0 108px; }
+  .lrow > :nth-child(4), .lrow > :nth-child(5), .lrow > :nth-child(8) { display: none; }
+  .find { min-width: 0; } .find span { display: none; }
+}
+@media (max-width: 720px) {
+  .bar-in { padding: 0 16px; gap: 16px; } main { padding: 28px 16px 80px; }
+  h1.finding { font-size: 30px; }
+  .brand span, .sample { display: none; }
+}
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="#task" aria-label="Hypothex">
+      <svg width="22" height="18" viewBox="0 0 22 18" aria-hidden="true">
+        <rect x="9" y="1" width="8" height="16" style="fill:var(--best-wash)"/>
+        <line x1="9" y1="1" x2="9" y2="17" style="stroke:var(--best-edge)"/><line x1="17" y1="1" x2="17" y2="17" style="stroke:var(--best-edge)"/>
+        <line x1="1" y1="9" x2="21" y2="9" style="stroke:var(--ink);stroke-width:1.4"/>
+        <rect x="10" y="5" width="5.6" height="5.6" transform="rotate(45 12.8 7.8)" style="fill:var(--best)"/>
+        <circle cx="4" cy="9" r="2.6" style="fill:var(--ink)"/>
+      </svg>
+      <span>Hypothex</span>
+    </a>
+    <nav class="tabs" aria-label="Screens">
+      <a href="#task">Task</a>
+      <a href="#run">Run</a>
+    </nav>
+    <div class="bar-r">
+      <span class="sample" title="Invented numbers: a seeded simulation, not real runs">sample data</span>
+      <button class="find" id="findBtn" type="button"><span>Find a run, task or path</span><kbd>⌘K</kbd></button>
+      <button class="theme" id="themeBtn" type="button" aria-label="Switch colour mode">
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7 1a6 6 0 0 1 0 12z" fill="currentColor"/></svg>
+        <span id="themeLbl">Dark</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="view" id="v-task" aria-labelledby="task-h"></section>
+  <section class="view" id="v-run" aria-labelledby="run-h" hidden></section>
+</main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script src="data.js"></script>
+<script>
+/* ================================================================== helpers */
+const HX = window.HX, N = HX.n, H = HX.paths.host;
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const MINUS = "−";
+const f3 = v => v.toFixed(3);
+const sg3 = v => (v < 0 ? MINUS : "+") + Math.abs(v).toFixed(3);
+const usd = v => "$" + v.toFixed(2);
+const day = iso => { const d = new Date(iso); return d.getUTCDate() + " " + d.toLocaleString("en", { month: "short", timeZone: "UTC" }); };
+const hm = iso => iso.slice(11, 16);
+const tid = i => "rb-" + String(i + 1).padStart(3, "0");
+const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
+const sd = a => { const m = mean(a); return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / (a.length - 1)); };
+const whoKind = c => (c.startsWith("agent:") ? "agent" : "human");
+const whoHtml = c => `<span class="who ${whoKind(c)}" title="${esc(c)}"><i></i>${esc(c.split(":")[1])}</span>`;
+
+/* exact two-sided sign test on discordant pairs */
+function choose(n, k) { let r = 1; for (let i = 1; i <= k; i++) r = r * (n - k + i) / i; return r; }
+function signP(b, c) { const n = b + c, k = Math.min(b, c); let p = 0; for (let i = 0; i <= k; i++) p += choose(n, i) / 2 ** n; return Math.min(1, 2 * p); }
+const pFmt = p => (p < 0.001 ? "< 0.001" : "= " + (p < 0.01 ? p.toFixed(3) : p.toFixed(2)));
+function wilson(p, n, z = 1.96) { const z2 = z * z, d = 1 + z2 / n, c = (p + z2 / (2 * n)) / d, h = (z * Math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))) / d; return [c - h, c + h]; }
+
+/* ================================================================== derived stats */
+const V = HX.versions.map((v, i) => {
+  const runs = HX.runs.filter(r => r.v === v.v).sort((a, b) => a.seed - b.seed);
+  const bits = runs.map(r => r.solved.split("").map(Number));
+  const seeds = bits.map(b => mean(b));
+  const perT = [...Array(N)].map((_, t) => mean(bits.map(b => b[t])));   /* per-target solve rate over seeds */
+  const m = mean(seeds);
+  const se = sd(perT) / Math.sqrt(N);                                      /* test-set noise */
+  const nSolved = bits.reduce((a, b) => a + b.reduce((x, y) => x + y, 0), 0);
+  const cost = runs.reduce((a, r) => a + r.cost_usd, 0);
+  return { ...v, i, runs, bits, seeds, perT, m, sd: sd(seeds), ci: [m - 1.96 * se, m + 1.96 * se], same: seeds.every(s => s === seeds[0]),
+    maj: perT.map(p => p >= 0.5), cps: cost / nSolved, cpsSeeds: runs.map((r, k) => r.cost_usd / (seeds[k] * N)) };
+});
+V.forEach((v, i) => (v.dPrev = i ? v.m - V[i - 1].m : null));
+const BEST = V.reduce((a, b) => (b.m > a.m ? b : a));
+const BASE = V[0];
+const BAND = BEST.ci;
+const paired = (a, b) => { const d = b.perT.map((x, t) => x - a.perT[t]); const m = mean(d), se = sd(d) / Math.sqrt(N); return { m, lo: m - 1.96 * se, hi: m + 1.96 * se }; };
+const GAIN = paired(BASE, BEST);
+function flips(a, b) {
+  const out = { fx: [], br: [], bw: [], bp: [] };
+  for (let t = 0; t < N; t++) { const A = a.maj[t], B = b.maj[t]; out[!A && B ? "fx" : A && !B ? "br" : A ? "bp" : "bw"].push(t); }
+  out.p = signP(out.fx.length, out.br.length); return out;
+}
+const G1 = flips(BASE, BEST);
+const REGS = V.filter(v => v.dPrev != null && v.dPrev < 0 && v.dPrev < -1.96 * Math.sqrt(sd(v.perT.map((x, t) => x - V[v.i - 1].perT[t])) ** 2 / N));
+const runById = Object.fromEntries(HX.runs.map(r => [r.run_id, r]));
+const verOf = r => V.find(v => v.v === r.v);
+let SEL = HX.detail.run_id;                        /* selected run on the task screen */
+let PA = V[6], PB = V[7];                          /* flip pair */
+
+/* ================================================================== svg primitives */
+const S = {
+  line: (x1, y1, x2, y2, c) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="${c}"/>`,
+  rect: (x, y, w, h, c, extra = "") => `<rect x="${x}" y="${y}" width="${Math.max(0, w)}" height="${h}" class="${c}" ${extra}/>`,
+  circ: (x, y, r, c, extra = "") => `<circle cx="${x}" cy="${y}" r="${r}" class="${c}" ${extra}/>`,
+  text: (x, y, t, c, a = "start", extra = "") => `<text x="${x}" y="${y}" class="${c}" text-anchor="${a}" ${extra}>${t}</text>`,
+  dia: (x, y, r, c) => `<path d="M${x} ${y - r}L${x + r} ${y}L${x} ${y + r}L${x - r} ${y}Z" class="${c}"/>`,
+  sq: (x, y, r, c) => `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}" rx="1.5" class="${c}"/>`,
+  down: (x, y, r) => `<path d="M${x - r} ${y - r * .7}H${x + r}L${x} ${y + r * .8}Z" class="down"/>`,
+  cross: (x, y, r) => `<path d="M${x - r} ${y - r}L${x + r} ${y + r}M${x + r} ${y - r}L${x - r} ${y + r}" class="m-fail"/>`,
+  svg: (w, h, body, extra = "") => `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" ${extra}>${body}</svg>`,
+};
+const G = {
+  seed: `<svg width="18" height="12">${S.circ(5, 6, 3.4, "seed")}${S.circ(13, 6, 3.4, "seed")}</svg>`,
+  dia: `<svg width="14" height="12">${S.dia(7, 6, 5.5, "dia")}</svg>`,
+  mean: `<svg width="12" height="12">${S.sq(6, 6, 4.5, "mean")}</svg>`,
+  ribbon: `<svg width="22" height="12"><rect x="1" y="1" width="20" height="10" class="ribbon"/></svg>`,
+  band: `<svg width="22" height="12"><rect x="1" y="1" width="20" height="10" class="band"/><line x1="1" y1="1" x2="21" y2="1" class="band-edge"/><line x1="1" y1="11" x2="21" y2="11" class="band-edge"/></svg>`,
+  down: `<svg width="12" height="12">${S.down(6, 6, 5)}</svg>`,
+  whisk: `<svg width="22" height="12"><path d="M2 6H20M2 2V10M20 2V10" class="whisk"/></svg>`,
+  sw: c => `<svg width="12" height="12"><rect x="1" y="1" width="10" height="10" rx="2" class="${c}"/></svg>`,
+};
+const COPY = `<svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="display:block"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M9 2.5V2a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`;
+const copyBtn = abs => `<button class="copy" type="button" data-copy="${esc(abs)}" title="Copy ${esc(abs)}" aria-label="Copy path">${COPY}</button>`;
+const hp = (abs, leafFrom) => { const i = leafFrom != null ? leafFrom : abs.lastIndexOf("/", abs.length - 2) + 1; return `<span class="p"><span class="pre">${H}:${esc(abs.slice(0, i))}</span>${esc(abs.slice(i))}</span>`; };
+
+/* ================================================================== shared scales */
+const YD = [0.35, 0.72], YT = [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70];
+function vx(W, PL, PR) { const step = (W - PL - PR) / V.length; return i => PL + step * (i + 0.5); }
+
+/* ---------------- a: solved by version */
+function drawSolved(el) {
+  const W = el.clientWidth, PL = 50, PR = 8, TOP = 34, BOT = 318, HH = 370;
+  const X = vx(W, PL, PR), Y = v => BOT - ((v - YD[0]) / (YD[1] - YD[0])) * (BOT - TOP);
+  let h = "";
+  YT.forEach(t => { h += S.line(PL, Y(t), W - PR, Y(t), "grid") + S.text(PL - 10, Y(t) + 4, t.toFixed(2), "tk", "end"); });
+  /* best's CI: one horizontal band */
+  h += S.rect(PL, Y(BAND[1]), W - PL - PR, Y(BAND[0]) - Y(BAND[1]), "band") + S.line(PL, Y(BAND[1]), W - PR, Y(BAND[1]), "band-edge") + S.line(PL, Y(BAND[0]), W - PR, Y(BAND[0]), "band-edge");
+  /* CI ribbon (test-set noise), stepped per version */
+  const step = (W - PL - PR) / V.length, hw = 16;
+  const up = V.map((v, i) => `${X(i)} ${Y(v.ci[1])}`), dn = [...V].reverse().map(v => `${X(v.i)} ${Y(v.ci[0])}`);
+  h += `<path d="M${up.join("L")}L${dn.join("L")}Z" class="ribbon"/>`;
+  h += `<path d="M${up.join("L")}" class="ribbon-edge"/><path d="M${dn.join("L")}" class="ribbon-edge"/>`;
+  /* trend through means, regressions in red */
+  V.forEach((v, i) => { if (!i) return; h += `<path d="M${X(i - 1)} ${Y(V[i - 1].m)}L${X(i)} ${Y(v.m)}" class="trend${REGS.includes(v) ? " bad" : ""}"/>`; });
+  /* marks */
+  V.forEach((v, i) => {
+    const x = X(i), isB = v === BEST, bad = REGS.includes(v);
+    if (v.same) {
+      h += S.dia(x, Y(v.m), 7, "dia");
+      h += S.text(x + 4, Y(v.m) + 20, "×3", "lbl-b");
+    } else {
+      const xs = [x - 21, x - 14, x - 21];
+      [...v.seeds].sort((a, b) => a - b).forEach((s, k) => (h += S.circ(k === 1 ? x - 13 : x - 20, Y(s), 3.4, "seed")));
+      h += S.sq(x, Y(v.m), 5, "mean" + (isB ? " best" : bad ? " bad" : ""));
+    }
+    if (bad) { h += S.down(x + 16, Y(v.m) + 1, 5) + S.text(x + 25, Y(v.m) + 5, sg3(v.dPrev), "lbl-b"); }
+    if (isB) h += S.text(x + 12, Y(v.m) - 10, f3(v.m), "lbl-b");
+    if (i === 0) h += S.text(x - 12, Y(v.m) + 4, f3(v.m), "lbl-b", "end");
+    /* change label, x tick */
+    h += S.text(x, 14, esc(v.change), bad ? "lbl-b" : "lbl", "middle");
+    h += S.line(x, BOT, x, BOT + 4, "axis");
+    h += S.text(x, BOT + 20, v.v, "vx", "middle") + S.text(x, BOT + 36, day(v.at), "lbl-s", "middle");
+    const tip = `${v.v}  ${v.change}\nsolved ${f3(v.m)}  seed σ ${f3(v.sd)}\n95% CI ${f3(v.ci[0])}–${f3(v.ci[1])} (200 targets)\nseeds ${v.seeds.map(f3).join(", ")}${v.same ? "  (t = 0: identical)" : ""}\nΔ prev ${v.dPrev == null ? "–" : sg3(v.dPrev)}\n$${v.cps.toFixed(2)} per solved\nclick: flips vs previous`;
+    h += `<rect x="${x - step / 2}" y="0" width="${step}" height="${BOT}" class="hit click" data-v="${i}" data-tip="${esc(tip)}"/>`;
+  });
+  h += S.line(PL, BOT, W - PR, BOT, "axis");
+  h += `<g data-tip="${BEST.v} 95% CI over 200 targets: ${f3(BAND[0])}–${f3(BAND[1])}">` + S.text(PL + 8, Y(BAND[1]) + 15, `${BEST.v} 95% CI`, "lbl-s") + `</g>`;
+  el.innerHTML = S.svg(W, HH, h, `role="img" aria-label="Solved fraction by version, v1 to v9" style="overflow:visible"`);
+}
+
+/* ---------------- b: $ per solved, same x */
+function drawCost(el) {
+  const W = el.clientWidth, PL = 50, PR = 8, TOP = 16, BOT = 130, HH = 150;
+  const X = vx(W, PL, PR), CD = [0, 1.8], Y = v => BOT - (v / CD[1]) * (BOT - TOP);
+  const step = (W - PL - PR) / V.length, bw = 20;
+  let h = "";
+  [0.5, 1.0, 1.5].forEach(t => (h += S.line(PL, Y(t), W - PR, Y(t), "grid") + S.text(PL - 10, Y(t) + 4, "$" + t.toFixed(1), "tk", "end")));
+  const maxV = V.reduce((a, b) => (b.cps > a.cps ? b : a));
+  V.forEach((v, i) => {
+    const x = X(i), y = Y(v.cps), r = 4, cls = v === BEST ? "bar best" : "bar";
+    h += `<path d="M${x - bw / 2} ${BOT}V${y + r}Q${x - bw / 2} ${y} ${x - bw / 2 + r} ${y}H${x + bw / 2 - r}Q${x + bw / 2} ${y} ${x + bw / 2} ${y + r}V${BOT}Z" class="${cls}"/>`;
+    if (i === 0 || v === BEST || v === maxV || i === V.length - 1) h += S.text(x + bw / 2 + 5, y + 10, "$" + v.cps.toFixed(2), v === BEST ? "lbl-b" : "lbl", "start");
+    h += S.text(x, BOT + 16, v.v, "tk", "middle");
+    h += `<rect x="${x - step / 2}" y="0" width="${step}" height="${BOT}" class="hit" data-tip="${esc(`${v.v}  $${v.cps.toFixed(2)} per solved\nseeds ${v.cpsSeeds.map(c => "$" + c.toFixed(2)).join(", ")}\n${v.model}`)}"/>`;
+  });
+  h += S.line(PL, BOT, W - PR, BOT, "axis");
+  el.innerHTML = S.svg(W, HH, h, `role="img" aria-label="Dollars per solved target by version" style="overflow:visible"`);
+}
+
+/* ---------------- d: flip grid */
+function drawFlips(el) {
+  const F = flips(PA, PB);
+  const order = [...F.fx.map(t => ["fx", t]), ...F.br.map(t => ["br", t]), ...F.bw.map(t => ["bw", t]), ...F.bp.map(t => ["bp", t])];
+  const C = 18, GP = 4, COLS = 20, W = COLS * (C + GP) - GP, HH = 10 * (C + GP) - GP;
+  const name = { fx: "fixed", br: "broken", bw: "both unsolved", bp: "both solved" };
+  let h = "";
+  order.forEach(([k, t], j) => {
+    const x = (j % COLS) * (C + GP), y = Math.floor(j / COLS) * (C + GP);
+    const a = PA.perT[t] * 3, b = PB.perT[t] * 3;
+    h += `<rect x="${x}" y="${y}" width="${C}" height="${C}" rx="2" class="${k}" data-tip="${tid(t)}  ${name[k]}\n${PA.v} ${a}/3 → ${PB.v} ${b}/3 seeds"/>`;
+  });
+  $("#flipGrid").innerHTML = S.svg(W, HH, h, `role="img" aria-label="${F.fx.length} fixed, ${F.br.length} broken of 200 targets"`);
+  $("#flipStats").innerHTML = `
+    <div title="Unsolved in ${PA.v}, solved in ${PB.v} (majority of 3 seeds)"><dt>fixed</dt><dd>${F.fx.length}</dd></div>
+    <div title="Solved in ${PA.v}, unsolved in ${PB.v}"><dt>broken</dt><dd>${F.br.length}</dd></div>
+    <div title="Exact two-sided sign test on the ${F.fx.length + F.br.length} targets that changed. p = ${F.p.toFixed(4)}"><dt>p</dt><dd>${F.p < 0.001 ? "<0.001" : F.p.toFixed(3)}</dd></div>
+    <div title="Mean solved, ${PB.v} minus ${PA.v}"><dt>Δ</dt><dd>${sg3(PB.m - PA.m)}</dd></div>`;
+  $("#flipKey").innerHTML = `<span>${G.sw("fx")}fixed</span><span>${G.sw("br")}broken</span><span>${G.sw("bw")}both unsolved</span><span>${G.sw("bp")}both solved</span>`;
+}
+
+/* ---------------- e: leaderboard forest row */
+const LX = (W) => v => 6 + ((v - YD[0]) / (YD[1] - YD[0])) * (W - 12);
+function drawForestCell(el, v) {
+  const W = el.clientWidth, HH = el.clientHeight || 46, X = LX(W), isB = v === BEST;
+  let h = "";
+  [0.40, 0.50, 0.60, 0.70].forEach(t => (h += S.line(X(t), 0, X(t), HH, "grid")));
+  h += S.rect(X(BAND[0]), 0, X(BAND[1]) - X(BAND[0]), HH, "band") + S.line(X(BAND[0]), 0, X(BAND[0]), HH, "band-edge") + S.line(X(BAND[1]), 0, X(BAND[1]), HH, "band-edge");
+  h += S.line(X(BEST.m), 0, X(BEST.m), HH, "bestline");
+  const ys = 15, yi = 31;
+  if (v.same) { h += S.dia(X(v.m), ys, 5.5, "dia") + S.text(X(v.m) + 9, ys + 4, "×3", "lbl-b"); }
+  else { let prev = -99, lvl = 0; [...v.seeds].sort((a, b) => a - b).forEach(s => { const x = X(s); lvl = x - prev < 7 ? lvl + 1 : 0; h += S.circ(x, ys - lvl * 7, 3.2, "seed"); prev = x; }); }
+  h += `<path d="M${X(v.ci[0])} ${yi}H${X(v.ci[1])}M${X(v.ci[0])} ${yi - 4}V${yi + 4}M${X(v.ci[1])} ${yi - 4}V${yi + 4}" class="whisk${isB ? " best" : ""}"/>`;
+  h += S.sq(X(v.m), yi, 4, "mean" + (isB ? " best" : ""));
+  h += `<rect x="0" y="0" width="${W}" height="${HH}" class="hit" data-tip="${esc(`${v.v}\nseeds ${v.seeds.map(f3).join(", ")}\n95% CI ${f3(v.ci[0])}–${f3(v.ci[1])} (200 targets)`)}"/>`;
+  el.innerHTML = S.svg(W, HH, h, 'aria-hidden="true"');
+}
+function drawForestAxis(el) {
+  const W = el.clientWidth, X = LX(W);
+  let h = S.line(0, 0, W, 0, "axis");
+  [0.40, 0.50, 0.60, 0.70].forEach(t => (h += S.line(X(t), 0, X(t), 4, "axis") + S.text(X(t), 17, t.toFixed(2), "tk", "middle")));
+  el.innerHTML = S.svg(W, 22, h, 'aria-hidden="true" style="overflow:visible"');
+}
+
+/* ================================================================== TASK screen */
+function verdict(v) {
+  if (v === BEST) return { k: "best", t: "best", tip: "Highest mean solved. Its 95% CI is the green band." };
+  const d = v.m - BEST.m;
+  if (v.m >= BAND[0]) return { k: "band", t: sg3(d), tip: `Inside ${BEST.v}'s 95% CI: not shown worse.` };
+  return { k: "behind", t: sg3(d), tip: `Below ${BEST.v}'s 95% CI.` };
+}
+function renderTask() {
+  const ranked = [...V].sort((a, b) => b.m - a.m);
+  const d0 = HX.versions[0].at, d1 = HX.versions[V.length - 1].at;
+  const lrow = (v, rk) => {
+    const vd = verdict(v);
+    return `<div class="lrow" data-v="${v.i}">
+      <span class="rk">${rk}</span>
+      <span class="nm" title="${esc(v.v + ": " + v.change)}">${v.v}<small>${esc(v.change)}</small></span>
+      <span class="r big">${f3(v.m)}</span>
+      <span class="r mut" title="std over 3 seeds (seed noise)">${v.same ? `<span title="t = 0: 3 identical seeds">${G.dia}</span>` : "± " + f3(v.sd)}</span>
+      <span class="r mut" title="95% CI over 200 targets (test-set noise)">${f3(v.ci[0])}–${f3(v.ci[1])}</span>
+      <span class="fp" data-fp="${v.i}"></span>
+      <span class="r">$${v.cps.toFixed(2)}</span>
+      <span class="vd" title="${esc(vd.tip)}"><span class="vg ${vd.k}"></span>${vd.t}</span>
+      <span class="runs">${v.runs.map(r => `<button type="button" data-run="${r.run_id}" aria-pressed="${r.run_id === SEL}" title="${r.run_id}">s${r.seed}</button>`).join("")}</span>
+    </div>`;
+  };
+  const diffRow = v => {
+    const d = v.delta || {};
+    const bad = REGS.includes(v);
+    const cell = (k, full) => d[k] ? `<td title="${esc(full)}">${esc(d[k])}</td>` : `<td></td>`;
+    return `<tr class="${v.i === 0 ? "base" : ""}${bad ? " bad" : ""}">
+      <td class="vv">${v.v}</td><td class="mut">${day(v.at)}</td><td class="m mut" title="${v.commit}">${v.commit.slice(0, 7)}</td><td>${whoHtml(v.by).replace(/<\/i>[^<]*/, "</i>")}</td>
+      ${cell("prompt", v.prompt_file)}${cell("tools", v.tools.join(", "))}${cell("model", v.model)}${cell("config", Object.entries(v.config).map(([k, x]) => k + " " + x).join(", "))}
+      <td class="r dv">${v.dPrev == null ? "" : (bad ? `<span class="dn">▼</span>` : "") + sg3(v.dPrev)}</td></tr>`;
+  };
+
+  $("#v-task").innerHTML = `
+    <p class="crumb"><a href="#task">${HX.project}</a><span class="sep">/</span>${HX.task}<span class="tag" title="Task kind: agent_iteration. Panels: score and cost by version, changes, flips.">agent iteration</span></p>
+    <h1 class="finding" id="task-h">${BEST.v} solves ${f3(BEST.m)}, ${sg3(GAIN.m)} over ${BASE.v} <span class="ci" title="Paired 95% CI over 200 targets">[${f3(GAIN.lo)}, ${f3(GAIN.hi)}]</span></h1>
+    <p class="metaline"><span>${HX.metric}</span><span>n = ${N}</span><span>${V.length} versions</span><span>${HX.runs.length} runs</span><span>${day(d0)}–${day(d1)}</span></p>
+
+    <dl class="stats">
+      <div title="Paired: targets ${BASE.v} missed and ${BEST.v} solved, and the reverse (majority of 3 seeds)"><dt>fixed / broken vs ${BASE.v}</dt><dd>${G1.fx.length} <small>/</small> ${G1.br.length}</dd></div>
+      <div title="Exact two-sided sign test on ${G1.fx.length + G1.br.length} changed targets"><dt>paired p</dt><dd>${G1.p < 0.001 ? "<0.001" : G1.p.toFixed(3)}</dd></div>
+      <div title="${BEST.v} std over 3 seeds"><dt>seed σ</dt><dd>${f3(BEST.sd)}</dd></div>
+      <div title="${BEST.v} dollars per solved target; ${BASE.v} was $${BASE.cps.toFixed(2)}"><dt>$ / solved</dt><dd>${BEST.cps.toFixed(2)} <small>vs ${BASE.cps.toFixed(2)}</small></dd></div>
+      <div title="Drops larger than their paired 95% CI: ${REGS.map(r => r.v + " " + sg3(r.dPrev)).join(", ")}"><dt>regressions</dt><dd>${REGS.length} <small>${REGS.map(r => r.v).join(", ")}</small></dd></div>
+      <div title="${V[8].v} is inside ${BEST.v}'s CI at $${V[8].cps.toFixed(2)} per solved"><dt>${V[8].v} vs ${BEST.v}</dt><dd>${sg3(V[8].m - BEST.m)} <small>$${V[8].cps.toFixed(2)}</small></dd></div>
+    </dl>
+
+    <div class="fig chart-stack">
+      <div class="fig-h"><span class="pl">a</span><span class="t">Solved by version</span><span class="aside">${HX.metric}</span></div>
+      <div id="solvedPlot"></div>
+      <div class="fig-h fig-b"><span class="pl">b</span><span class="t">$ per solved</span><span class="aside">${V[0].model} → ${V[4].model} at ${V[4].v}</span></div>
+      <div id="costPlot"></div>
+      <div class="key">
+        <span>${G.seed}seed</span><span title="Temperature 0: all 3 seeds gave one score">${G.dia}×3 identical</span><span>${G.mean}mean</span>
+        <span title="95% CI of the mean over 200 targets">${G.ribbon}95% CI</span><span>${G.band}${BEST.v} CI</span><span title="Drop larger than its paired 95% CI">${G.down}regression</span>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="fig">
+        <div class="fig-h"><span class="pl">c</span><span class="t hint" title="Only what changed from the previous version. Blank = unchanged.">Changes</span></div>
+        <table class="tbl" id="diffT"><thead><tr><th>ver</th><th>date</th><th>commit</th><th></th><th>prompt</th><th>tools</th><th>model</th><th>config</th><th class="r">Δ solved</th></tr></thead>
+        <tbody>${V.map(diffRow).join("")}</tbody></table>
+      </div>
+      <div class="fig">
+        <div class="fig-h"><span class="pl">d</span><span class="t">Flips</span>
+          <span class="aside pick"><select id="pa" aria-label="Version A">${V.map(v => `<option value="${v.i}"${v === PA ? " selected" : ""}>${v.v}</option>`).join("")}</select>→<select id="pb" aria-label="Version B">${V.map(v => `<option value="${v.i}"${v === PB ? " selected" : ""}>${v.v}</option>`).join("")}</select></span></div>
+        <dl class="stats sm" id="flipStats" style="margin:0 0 18px"></dl>
+        <div id="flipGrid"></div>
+        <div class="key" id="flipKey"></div>
+      </div>
+    </div>
+
+    <div class="fig">
+      <div class="fig-h"><span class="pl">e</span><span class="t">Leaderboard</span><span class="aside">${V.length} versions, ${HX.runs.length} runs</span></div>
+      <div class="lb">
+        <div class="lrow head"><span></span><span>version</span><span class="r">solved</span><span class="r" title="std over 3 seeds">seed σ</span><span class="r" title="95% CI over 200 targets">95% CI</span><span>seeds, CI</span><span class="r">$/solved</span><span>vs best</span><span>runs</span></div>
+        ${ranked.map((v, k) => lrow(v, k + 1)).join("")}
+        <div class="lrow axisrow"><span></span><span></span><span></span><span></span><span></span><span class="fp" id="fpAxis"></span><span></span><span></span><span></span></div>
+      </div>
+    </div>
+
+    <div class="fig" id="selRun"></div>`;
+
+  $("#pa").addEventListener("change", e => { PA = V[+e.target.value]; drawFlips(); });
+  $("#pb").addEventListener("change", e => { PB = V[+e.target.value]; drawFlips(); });
+  $("#v-task").addEventListener("click", e => {
+    const b = e.target.closest("[data-run]");
+    if (b) { SEL = b.dataset.run; document.querySelectorAll("[data-run]").forEach(x => x.setAttribute("aria-pressed", x.dataset.run === SEL)); renderSel(); return; }
+    const c = e.target.closest("rect[data-v]");
+    if (c && +c.dataset.v > 0) { PB = V[+c.dataset.v]; PA = V[+c.dataset.v - 1]; $("#pa").value = PA.i; $("#pb").value = PB.i; drawFlips(); $("#flipGrid").scrollIntoView({ behavior: "smooth", block: "center" }); }
+  });
+  renderSel();
+  drawTask();
+}
+function renderSel() {
+  const r = runById[SEL], v = verOf(r), P = HX.paths, rd = `${P.store}/${r.run_id}/`;
+  const row = (k, abs, tip, leaf) => `<div class="wrow"><span class="k"${tip ? ` title="${esc(tip)}"` : ""}>${k}</span>${hp(abs, leaf)}${copyBtn(H + ":" + abs)}</div>`;
+  const solvedN = Math.round(v.seeds[r.seed - 1] * N);
+  $("#selRun").innerHTML = `
+    <div class="fig-h"><span class="pl">f</span><span class="t">${v.v} s${r.seed}</span><span class="runid" title="run id">${r.run_id}</span>
+      <span class="aside">
+        <span class="num" title="solved, $ per solved">${solvedN}/200&nbsp; $${(r.cost_usd / solvedN).toFixed(2)}</span>
+        <a class="btn" href="#run" style="display:inline-flex;align-items:center;text-decoration:none">Open</a>
+        <button class="btn" type="button" title="Same command, commit ${v.commit.slice(0, 7)}, seed ${r.seed}" data-toast="Rerun queued: ${v.v} seed ${r.seed}">Rerun</button>
+        <button class="btn primary" type="button" title="Score saved trajectories with ${HX.metric}" data-toast="Re-evaluation queued: ${r.run_id}">Re-evaluate</button>
+        <button class="btn" type="button" disabled title="Finished">Stop</button>
+      </span></div>
+    <div class="where">
+      <div>
+        ${row("repo", P.repo + "/", `@ ${v.commit.slice(0, 7)}`, 0)}
+        ${row("prompt", P.repo + "/" + v.prompt_file, v.prompt)}
+        ${row("tools", P.repo + "/configs/tools.yaml", v.tools.join(", "))}
+        ${row("bench", P.bench, "retro-bench-200, 200 targets")}
+      </div>
+      <div>
+        ${row("run", rd, "Everything this run wrote", P.store.length + 1)}
+        ${row("results", rd + "results.jsonl", "one line per target")}
+        ${row("traces", rd + "trajectories/", "200 files")}
+        ${row("logs", rd + "logs/stdout.log", "")}
+      </div>
+    </div>`;
+}
+function drawTask() {
+  drawSolved($("#solvedPlot"));
+  drawCost($("#costPlot"));
+  drawFlips();
+  document.querySelectorAll("#v-task [data-fp]").forEach(el => drawForestCell(el, V[+el.dataset.fp]));
+  drawForestAxis($("#fpAxis"));
+}
+
+/* ================================================================== RUN screen */
+let TSEL = HX.detail.traj_target;
+function drawTargets() {
+  const D = HX.detail, r = runById[D.run_id];
+  const C = 28, GP = 5, COLS = 20, W = COLS * (C + GP) - GP, HH = 10 * (C + GP) - GP;
+  let h = "";
+  for (let t = 0; t < N; t++) {
+    const x = (t % COLS) * (C + GP), y = Math.floor(t / COLS) * (C + GP), ok = r.solved[t] === "1", cat = D.fail[t];
+    const err = cat === "invalid SMILES" || cat === "timeout";
+    if (ok) h += `<rect x="${x}" y="${y}" width="${C}" height="${C}" rx="3" class="cell-s"/>`;
+    else h += `<rect x="${x + .6}" y="${y + .6}" width="${C - 1.2}" height="${C - 1.2}" rx="3" class="cell-u"/>` + (err ? S.cross(x + C / 2, y + C / 2, 5) : "");
+    if (t === TSEL) h += `<rect x="${x - 3}" y="${y - 3}" width="${C + 6}" height="${C + 6}" rx="5" class="cell-sel"/>`;
+    h += `<rect x="${x}" y="${y}" width="${C}" height="${C}" class="hit click" data-t="${t}" data-tip="${tid(t)}  ${ok ? "solved" : cat}\n${D.steps[t]} steps  $${D.cost[t].toFixed(2)}"/>`;
+  }
+  $("#tgtGrid").innerHTML = S.svg(W, HH, h, `role="img" aria-label="200 targets, solved or not"`);
+}
+function drawSeedsRun(el) {
+  const v = verOf(runById[HX.detail.run_id]), me = runById[HX.detail.run_id].seed;
+  const W = el.clientWidth, D0 = [0.60, 0.72], X = s => 6 + ((s - D0[0]) / (D0[1] - D0[0])) * (W - 12);
+  let h = "";
+  [0.62, 0.64, 0.66, 0.68, 0.70].forEach(t => (h += S.line(X(t), 6, X(t), 84, "grid")));
+  h += S.rect(X(BAND[0]), 6, X(BAND[1]) - X(BAND[0]), 78, "band") + S.line(X(BAND[0]), 6, X(BAND[0]), 84, "band-edge") + S.line(X(BAND[1]), 6, X(BAND[1]), 84, "band-edge");
+  v.runs.forEach((r, k) => {
+    const x = X(v.seeds[k]), y = 30 - (k === 2 ? 11 : 0);
+    h += S.circ(x, y, r.seed === me ? 5 : 4, "seed" + (r.seed === me ? " me" : ""));
+    h += S.text(x + (r.seed === me ? 9 : -9), y + 4, "s" + r.seed, r.seed === me ? "lbl-b" : "lbl-s", r.seed === me ? "start" : "end");
+  });
+  h += `<path d="M${X(v.ci[0])} 60H${X(v.ci[1])}M${X(v.ci[0])} 56V64M${X(v.ci[1])} 56V64" class="whisk best"/>` + S.sq(X(v.m), 60, 4.5, "mean best");
+  h += `<rect x="0" y="0" width="${W}" height="84" class="hit" data-tip="${esc(`${v.v} seeds ${v.seeds.map(f3).join(", ")}\nmean ${f3(v.m)}, 95% CI ${f3(v.ci[0])}–${f3(v.ci[1])}`)}"/>`;
+  h += S.line(0, 84, W, 84, "axis");
+  [0.62, 0.66, 0.70].forEach(t => (h += S.line(X(t), 84, X(t), 88, "axis") + S.text(X(t), 101, t.toFixed(2), "tk", "middle")));
+  el.innerHTML = S.svg(W, 106, h, `role="img" aria-label="${v.v} seed scores" style="overflow:visible"`);
+}
+function renderTraj() {
+  const D = HX.detail, r = runById[D.run_id], t = TSEL, ok = r.solved[t] === "1";
+  const has = t === D.traj_target;
+  const trace = `${HX.paths.store}/${r.run_id}/trajectories/${tid(t)}.jsonl`;
+  $("#trajH").innerHTML = `<span class="pl">b</span><span class="t">${tid(t)}</span><span class="aside"><span class="num">${ok ? "solved" : esc(D.fail[t])}&nbsp; ${D.steps[t]} steps&nbsp; $${D.cost[t].toFixed(2)}</span>${copyBtn(H + ":" + trace)}</span>`;
+  $("#trajB").innerHTML = has ? `
+    <p class="smiles" title="target SMILES">${esc(D.traj_smiles)}</p>
+    <table class="tbl traj"><thead><tr><th class="r">#</th><th>tool</th><th>input</th><th>output</th><th class="r">k tok</th><th class="r">s</th></tr></thead><tbody>
+    ${D.traj.map((s, k) => `<tr><td class="r mut">${k + 1}</td><td>${esc(s.tool)}</td><td class="m">${esc(s.in)}</td><td class="${s.out === "solved" ? "ok" : s.out === "not in stock" ? "no" : ""}">${esc(s.out)}</td><td class="r mut">${s.tok.toFixed(1)}</td><td class="r mut">${s.s.toFixed(1)}</td></tr>`).join("")}
+    </tbody></table>` : `<p class="p" style="margin:0">${hp(trace)}</p>`;
+}
+function renderRun() {
+  const D = HX.detail, r = runById[D.run_id], v = verOf(r);
+  const nS = r.solved.split("").filter(c => c === "1").length, frac = nS / N, iv = wilson(frac, N);
+  const dur = (new Date(r.ended_at) - new Date(r.started_at)) / 60000;
+  const P = HX.paths, rd = `${P.store}/${r.run_id}/`;
+  const cats = {}; Object.values(D.fail).forEach(c => (cats[c] = (cats[c] || 0) + 1));
+  const outs = [["solved", nS], ...Object.entries(cats).sort((a, b) => b[1] - a[1])];
+  const maxO = Math.max(...outs.map(o => o[1]));
+  const maxT = Math.max(...D.tools.map(t => t.calls));
+  const med = [...D.steps].sort((a, b) => a - b)[N / 2];
+  const kid = (abs, what, br = "├", tip = "") => `<li><span class="br">${br}</span><span class="p">${esc(abs.slice(rd.length))}</span><span class="what"${tip ? ` title="${esc(tip)}"` : ""}>${what}</span>${copyBtn(H + ":" + abs)}</li>`;
+  const kidR = (abs, what, br = "├", tip = "") => `<li><span class="br">${br}</span><span class="p">${esc(abs.slice(P.repo.length + 1))}</span><span class="what"${tip ? ` title="${esc(tip)}"` : ""}>${what}</span>${copyBtn(H + ":" + abs)}</li>`;
+  const cmd = `hx run -t ${HX.task} --seed ${r.seed} -- python -m agent.eval --config configs/${v.v}.yaml --seed ${r.seed}`;
+
+  $("#v-run").innerHTML = `
+    <p class="crumb"><a href="#task">${HX.project}</a><span class="sep">/</span><a href="#task">${HX.task}</a><span class="sep">/</span>${v.v}<span class="sep">/</span>${r.run_id}</p>
+    <div class="run-top">
+      <div>
+        <h1 class="finding" id="run-h">${v.v} s${r.seed} solves ${nS}/${N}, <span title="dollars per solved target">$${(r.cost_usd / nS).toFixed(2)} each</span></h1>
+        <div class="metaline">
+          <span class="who" title="exit ${r.exit_code}"><i style="background:var(--best)"></i><b>finished</b>&nbsp;${Math.floor(dur / 60)}h ${Math.round(dur % 60)}m</span>
+          <span>${day(r.started_at)} ${hm(r.started_at)} UTC</span>
+          ${whoHtml(v.by)}
+          <span>${r.host}</span>
+          <span class="path" title="${v.commit}">${v.commit.slice(0, 7)}</span>
+          <span>${v.model}</span>
+          <span class="tag" title="Task kind">agent iteration</span>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" type="button" title="Same command, commit ${v.commit.slice(0, 7)}" data-toast="Rerun queued: ${v.v} seed ${r.seed}">Rerun</button>
+        <button class="btn primary" type="button" title="Score saved trajectories with ${HX.metric}" data-toast="Re-evaluation queued: ${r.run_id}">Re-evaluate</button>
+        <button class="btn" type="button" disabled title="Finished">Stop</button>
+      </div>
+    </div>
+
+    <dl class="stats">
+      <div title="Wilson 95% CI, n = 200"><dt>solved, 95% CI</dt><dd>${f3(frac)} <small>${f3(iv[0])}–${f3(iv[1])}</small></dd></div>
+      <div title="This seed minus the ${v.v} mean over 3 seeds"><dt>vs ${v.v} mean</dt><dd>${sg3(frac - v.m)}</dd></div>
+      <div title="API spend, whole run"><dt>cost</dt><dd>$${r.cost_usd.toFixed(0)}</dd></div>
+      <div title="Prompt + completion tokens"><dt>tokens</dt><dd>${r.tokens_m.toFixed(1)}<small>M</small></dd></div>
+      <div title="All tool calls, 200 targets"><dt>tool calls</dt><dd>${r.tool_calls.toLocaleString("en")}</dd></div>
+      <div title="Median agent steps per target; budget ${v.config.budget}"><dt>median steps</dt><dd>${med} <small>/ ${v.config.budget}</small></dd></div>
+    </dl>
+
+    <div class="run-grid">
+      <div class="col">
+        <div class="fig">
+          <div class="fig-h"><span class="pl">a</span><span class="t">Targets</span><span class="aside">${nS} solved</span></div>
+          <div id="tgtGrid"></div>
+          <div class="key"><span>${`<svg width="12" height="12"><rect x="1" y="1" width="10" height="10" rx="2" class="cell-s"/></svg>`}solved</span><span><svg width="12" height="12"><rect x="1.5" y="1.5" width="9" height="9" rx="2" class="cell-u"/></svg>unsolved</span><span title="invalid SMILES or timeout"><svg width="12" height="12">${S.cross(6, 6, 4)}</svg>error</span></div>
+        </div>
+        <div class="fig">
+          <div class="fig-h" id="trajH"></div>
+          <div id="trajB"></div>
+        </div>
+        <div class="fig">
+          <div class="fig-h"><span class="pl">c</span><span class="t">Paths</span><span class="aside"><span class="tag" title="All paths are on this host">${H}</span></span></div>
+          <div class="cmdrow"><div class="tree"><span class="k">Command</span></div><div><code class="cmd">${esc(cmd)}</code></div></div>
+          <div class="tree">
+            <div class="root"><span class="k">Repo</span><span>${hp(P.repo + "/", 0)}</span>${copyBtn(H + ":" + P.repo)}</div>
+            <ul class="kids">
+              ${kidR(P.repo + "/" + v.prompt_file, v.prompt, "├", "prompt")}
+              ${kidR(P.repo + "/configs/tools.yaml", v.tools.length + " tools", "├", v.tools.join(", "))}
+              ${kidR(P.repo + "/configs/" + v.v + ".yaml", "t " + v.config.temperature + ", budget " + v.config.budget, "└", Object.entries(v.config).map(([k, x]) => k + " " + x).join(", "))}
+            </ul>
+            <div class="root"><span class="k">Data</span><span>${hp(P.bench)}</span>${copyBtn(H + ":" + P.bench)}</div>
+            <ul class="kids"><li><span class="br">└</span>${hp(P.stock)}<span class="what" title="stock_check database">stock</span>${copyBtn(H + ":" + P.stock)}</li></ul>
+            <div class="root"><span class="k">Run</span><span>${hp(rd, P.store.length + 1)}</span>${copyBtn(H + ":" + rd)}</div>
+            <ul class="kids">
+              ${kid(rd + "results.jsonl", "200 rows")}
+              ${kid(rd + "trajectories/", "200 files")}
+              ${kid(rd + "logs/stdout.log", "")}
+              ${kid(rd + "logs/stderr.log", "")}
+              ${kid(rd + "env.lock", "", "└", "pip freeze, git state")}
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="fig">
+          <div class="fig-h"><span class="pl">d</span><span class="t">Scores</span></div>
+          <table class="scores"><tbody>
+            <tr><td>${HX.metric}<small title="Wilson 95% CI, n = 200">${f3(iv[0])}–${f3(iv[1])}</small></td><td class="v">${f3(frac)}</td></tr>
+            <tr><td>$ / solved<small>${v.v} mean $${v.cps.toFixed(2)}</small></td><td class="v">${(r.cost_usd / nS).toFixed(2)}</td></tr>
+          </tbody></table>
+        </div>
+        <div class="fig">
+          <div class="fig-h"><span class="pl">e</span><span class="t">Seeds</span><span class="aside">${v.v}, ${HX.metric}</span></div>
+          <div id="seedPlot"></div>
+        </div>
+        <div class="fig">
+          <div class="fig-h"><span class="pl">f</span><span class="t">Outcomes</span></div>
+          <table class="hb"><tbody>${outs.map(([k, n], j) => `<tr class="${j === 0 ? "first" : ""}"><td class="l">${esc(k)}</td><td><div class="bar${j === 0 ? " ink" : ""}" style="width:${(n / maxO) * 100}%"></div></td><td class="n">${n}</td></tr>`).join("")}</tbody></table>
+        </div>
+        <div class="fig">
+          <div class="fig-h"><span class="pl">g</span><span class="t">Tools</span><span class="aside">calls, errors</span></div>
+          <table class="hb"><tbody>${D.tools.map(t => `<tr><td class="l">${esc(t.name)}</td><td><div class="bar" style="width:${(t.calls / maxT) * 100}%"></div></td><td class="n">${t.calls.toLocaleString("en")}</td><td class="e" title="errors">${t.errors || ""}</td></tr>`).join("")}</tbody></table>
+        </div>
+      </div>
+    </div>`;
+  $("#v-run").addEventListener("click", e => {
+    const c = e.target.closest("rect[data-t]"); if (!c) return;
+    TSEL = +c.dataset.t; drawTargets(); renderTraj();
+  });
+  drawRun();
+}
+function drawRun() { drawTargets(); renderTraj(); drawSeedsRun($("#seedPlot")); }
+
+/* ================================================================== routing, theme */
+const VIEWS = { task: renderTask, run: renderRun };
+const REDRAW = { task: drawTask, run: drawRun };
+const rendered = {};
+let current = "task";
+function show() {
+  const v = (location.hash || "#task").slice(1);
+  current = VIEWS[v] ? v : "task";
+  Object.keys(VIEWS).forEach(k => ($("#v-" + k).hidden = k !== current));
+  document.querySelectorAll(".tabs a").forEach(a => (a.getAttribute("href") === "#" + current ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
+  if (!rendered[current]) { VIEWS[current](); rendered[current] = true; } else REDRAW[current]();
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", show);
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => REDRAW[current](), 120); });
+
+function setThemeLabel() { $("#themeLbl").textContent = document.documentElement.dataset.theme === "dark" ? "Light" : "Dark"; }
+function toggleTheme() {
+  const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = t; localStorage.setItem("hx-theme", t); setThemeLabel();
+}
+$("#themeBtn").addEventListener("click", toggleTheme);
+$("#findBtn").addEventListener("click", () => toast("Search: run id, version, target or path"));
+
+let toastT;
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2200); }
+document.addEventListener("click", e => {
+  const c = e.target.closest("[data-copy]");
+  if (c) { navigator.clipboard && navigator.clipboard.writeText(c.dataset.copy).catch(() => {}); toast("Copied " + c.dataset.copy); return; }
+  const t = e.target.closest("[data-toast]"); if (t) toast(t.dataset.toast);
+});
+const tip = $("#tip");
+document.addEventListener("mousemove", e => {
+  const t = e.target.closest && e.target.closest("[data-tip]");
+  if (!t) { tip.classList.remove("on"); return; }
+  tip.innerHTML = esc(t.getAttribute("data-tip")).replace(/\n/g, "<br>");
+  tip.style.left = Math.min(innerWidth - 340, e.clientX + 14) + "px"; tip.style.top = (e.clientY + 16) + "px";
+  tip.classList.add("on");
+});
+
+setThemeLabel();
+document.fonts.ready.then(show);
+</script>
+</body>
+</html>

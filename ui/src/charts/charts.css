@@ -1,0 +1,43 @@
+/* Chart marks. Values copied from docs/mockups/ui-v4 and docs/mockups/kinds/training. */
+.hx-chart { display: block; overflow: visible; }
+.hx-chart.glyph { display: inline-block; vertical-align: middle; }
+.hx-chart text { font-family: var(--sans); fill: var(--ink-2); }
+.hx-chart .tk { font-size: 11px; fill: var(--ink-3); font-variant-numeric: tabular-nums; }
+.hx-chart .lbl { font-size: 12px; fill: var(--ink-2); }
+.hx-chart .lbl-s { font-size: 11px; fill: var(--ink-3); }
+.hx-chart .lbl-b { font-size: 12px; fill: var(--ink); font-weight: 600; }
+.hx-chart .ttl { font-size: 14px; font-weight: 600; fill: var(--ink); }
+.hx-chart .axis { stroke: var(--ink-3); stroke-width: 1; }
+.hx-chart .grid { stroke: var(--rule-2); stroke-width: 1; }
+.hx-chart .hair { stroke: var(--rule); stroke-width: 1; }
+.hx-chart .band { fill: var(--best-wash); }
+.hx-chart .band-edge { stroke: var(--best-edge); stroke-width: 1; }
+.hx-chart .bestline { stroke: var(--best); stroke-width: 1.25; }
+.hx-chart .whisk { stroke: var(--ink-3); stroke-width: 1.5; stroke-linecap: round; fill: none; }
+.hx-chart .whisk.best { stroke: var(--best); }
+.hx-chart .mean { fill: var(--ink); stroke: var(--paper); stroke-width: 2; }
+.hx-chart .mean.best { fill: var(--best); }
+.hx-chart .seed { fill: var(--ink-2); stroke: var(--paper); stroke-width: 2; }
+.hx-chart .dia { fill: var(--paper); stroke: var(--ink); stroke-width: 1.6; }
+.hx-chart .dia.best { stroke: var(--best); fill: var(--best-wash); }
+.hx-chart .m-best { fill: var(--best); }
+.hx-chart .ringed { stroke: var(--paper); stroke-width: 2; }
+.hx-chart .m-fail { stroke: var(--fail); stroke-width: 2; stroke-linecap: round; fill: none; }
+.hx-chart .hit { fill: transparent; cursor: default; }
+.hx-chart .hit:focus-visible { outline: none; stroke: var(--agent); stroke-width: 1; }
+.hx-chart .sl { stroke: var(--ink-3); stroke-width: 1; fill: none; opacity: .6; }
+.hx-chart .ml { stroke: var(--ink); stroke-width: 2; fill: none; stroke-linejoin: round; }
+.hx-chart .md { fill: var(--ink); stroke: var(--paper); stroke-width: 1; }
+.hx-chart .lrl { stroke: var(--ink-2); stroke-width: 1.5; fill: none; }
+.hx-chart .lra { fill: var(--paper-2); }
+.hx-chart .ev { stroke: var(--fail); stroke-width: 1.25; stroke-dasharray: 3 3; }
+.hx-chart .evg { stroke: var(--fail); stroke-width: 1.6; fill: none; stroke-linejoin: round; stroke-linecap: round; }
+.hx-chart .clipm { fill: var(--fail); }
+.hx-chart .ck { fill: var(--paper); stroke: var(--ink-2); stroke-width: 1.4; }
+.hx-chart .xh { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 2 2; pointer-events: none; }
+
+.hx-tip {
+  position: fixed; z-index: 50; pointer-events: none; max-width: 320px;
+  padding: 7px 10px; border-radius: 6px; background: var(--ink); color: var(--paper);
+  font: 400 12.5px/1.45 var(--sans); font-variant-numeric: tabular-nums; white-space: pre-line;
+}

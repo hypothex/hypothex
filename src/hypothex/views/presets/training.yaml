@@ -1,0 +1,58 @@
+# Preset view for task kind "training" (spec 8.4, mockup docs/mockups/kinds/training).
+# Curves: loss, accuracy, then the learning rate, one row each (the names `hx demo` writes;
+# rename them to match your task). A curves panel with no metrics list shows every logged step
+# metric. GPU utilisation stays in the GPU sparklines beside the runs table.
+title: overview
+panels:
+  - type: stat_strip
+    title: Summary
+    layout: {span: 12, row: 1}
+  - type: leaderboard
+    title: Configs
+    noise: [seed, test_set]
+    layout: {span: 12, row: 2}
+  - type: curves
+    title: Curves
+    data: {metrics: [train/loss, val/loss, val/top1, lr], group_by: group, step_metric: step}
+    layout: {span: 12, row: 3}
+  - type: table
+    title: Runs
+    data:
+      source: runs
+      fields: [run_id, label, seed, status, created_by]
+    layout: {span: 8, row: 4}
+  # GPU sparklines beside the runs table: one small line per run of the history metric
+  # sys/gpu_util (the name `hx demo` writes; rename it to match your task), named by config
+  # label and seed, in run order like the table.
+  - type: vega_lite
+    title: GPU
+    data:
+      source: metrics
+      filter: {name: sys/gpu_util}
+      fields: [name, step, value]
+    spec:
+      height: 18
+      transform:
+        - calculate: "datum.label + ' s' + datum.seed"
+          as: run
+      mark: {type: line, strokeWidth: 1}
+      encoding:
+        row:
+          field: run
+          type: nominal
+          title: null
+          sort: {field: run_id, op: min}
+          header: {labelAngle: 0, labelAlign: left, labelLimit: 130}
+        tooltip:
+          - {field: run_id, type: nominal, title: run}
+          - {field: step, type: quantitative}
+          - {field: value, type: quantitative, title: GPU %}
+        x: {field: step, type: quantitative, title: null, axis: null}
+        y: {field: value, type: quantitative, title: null, axis: null, scale: {domain: [0, 100]}}
+    layout: {span: 4, row: 4}
+  # Task-level checkpoints: val/top1 per run; meta.checkpoints marks every checkpoint and
+  # each run's best (curves panel, contract 1.6).
+  - type: curves
+    title: Checkpoints
+    data: {metrics: [val/top1], group_by: run, step_metric: step}
+    layout: {span: 12, row: 5}

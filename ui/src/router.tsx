@@ -1,0 +1,197 @@
+/**
+ * Code-defined routes (contract section 4):
+ * `/` Overview, `/t/$project/$task?view=` Task, `/t/$project/$task/edit/$view` View editor
+ * (`new` for a new view), `/r/$runId` Run, `/x/$a/$b?metric=` Examples.
+ *
+ * Each screen replaces its `ScreenPending` component below with the real screen. Screens
+ * read params with `getRouteApi("<route id>")` to avoid importing this module.
+ */
+import {
+  Link,
+  Outlet,
+  type RouterHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  useNavigate,
+} from "@tanstack/react-router";
+import { type ReactElement, useState } from "react";
+
+import { ExamplesPage } from "./pages/Examples";
+import { OverviewPage } from "./pages/Overview";
+import { RunPage } from "./pages/Run";
+import { TaskPage } from "./pages/Task";
+import { ViewEditor } from "./pages/ViewEditor";
+import { CommandPalette } from "./shell/CommandPalette";
+import { Header } from "./shell/Header";
+
+export interface TaskSearch {
+  view?: string;
+}
+
+export interface ExamplesSearch {
+  metric?: string;
+}
+
+export interface RunSearch {
+  log?: string;
+  example?: string;
+}
+
+const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
+
+/**
+ * Search parser for the router: plain `URLSearchParams`, every value a string.
+ * TanStack's default JSON-parses values (`?example=42` becomes the number 42), which
+ * `str()` would then drop; `hrefs` build every in-app link with `URLSearchParams`, so the
+ * router reads search strings the same way. A repeated key keeps its last value.
+ */
+export function parseSearch(searchStr: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of new URLSearchParams(searchStr)) out[key] = value;
+  return out;
+}
+
+/** The inverse of `parseSearch`: drops `undefined`/`null`, `String()`s the rest, adds `?`. */
+export function stringifySearch(search: Record<string, unknown>): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(search)) {
+    if (value !== undefined && value !== null) params.set(key, String(value));
+  }
+  const out = params.toString();
+  return out ? `?${out}` : "";
+}
+
+/** Stand-in until the screen's own component is wired in; shows the screen name. */
+export function ScreenPending({ name }: { name: string }) {
+  return (
+    <h1 className="finding" data-testid="screen-pending">
+      {name}
+    </h1>
+  );
+}
+
+export function NotFound() {
+  return (
+    <>
+      <h1 className="finding">Not found</h1>
+      <p className="metaline">
+        <Link to="/">Overview</Link>
+      </p>
+    </>
+  );
+}
+
+/** Page frame: header, the routed screen in `<main>`, the command palette. */
+export function AppShell() {
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  return (
+    <>
+      <Header onFind={() => setPaletteOpen(true)} />
+      <main>
+        <Outlet />
+      </main>
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+    </>
+  );
+}
+
+/** `/t/$project/$task?view=`: the Task page. Screens declare their return type, which keeps the route types free of cycles. */
+function TaskScreen(): ReactElement {
+  const { project, task } = taskRoute.useParams();
+  const { view } = taskRoute.useSearch();
+  return <TaskPage project={project} task={task} view={view} />;
+}
+
+/** `/r/$runId?log=&example=`: the Run page. */
+function RunScreen(): ReactElement {
+  const { runId } = runRoute.useParams();
+  const { log, example } = runRoute.useSearch();
+  return <RunPage runId={runId} log={log} example={example} />;
+}
+
+/** `/x/$a/$b?metric=`: the Examples page. */
+function ExamplesScreen(): ReactElement {
+  const { a, b } = examplesRoute.useParams();
+  const { metric } = examplesRoute.useSearch();
+  return <ExamplesPage a={a} b={b} metric={metric} />;
+}
+
+/** `/t/$project/$task/edit/$view`: the view editor; Save opens the saved view's tab. */
+function ViewEditorScreen(): ReactElement {
+  const { project, task, view } = viewEditorRoute.useParams();
+  const navigate = useNavigate();
+  return (
+    <ViewEditor
+      key={`${project}/${task}/${view}`}
+      project={project}
+      task={task}
+      view={view}
+      onSaved={(name) => void navigate({ to: "/t/$project/$task", params: { project, task }, search: { view: name } })}
+    />
+  );
+}
+
+export const rootRoute = createRootRoute({ component: AppShell, notFoundComponent: NotFound });
+
+export const overviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/",
+  component: OverviewPage,
+});
+
+export const taskRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/t/$project/$task",
+  validateSearch: (search: Record<string, unknown>): TaskSearch => ({ view: str(search.view) }),
+  component: TaskScreen,
+});
+
+export const viewEditorRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/t/$project/$task/edit/$view",
+  component: ViewEditorScreen,
+});
+
+export const runRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/r/$runId",
+  validateSearch: (search: Record<string, unknown>): RunSearch => ({
+    log: str(search.log),
+    example: str(search.example),
+  }),
+  component: RunScreen,
+});
+
+export const examplesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/x/$a/$b",
+  validateSearch: (search: Record<string, unknown>): ExamplesSearch => ({ metric: str(search.metric) }),
+  component: ExamplesScreen,
+});
+
+export const routeTree = rootRoute.addChildren([
+  overviewRoute,
+  taskRoute,
+  viewEditorRoute,
+  runRoute,
+  examplesRoute,
+]);
+
+/** Build the router; tests pass a memory history. */
+export function createAppRouter(history?: RouterHistory) {
+  return createRouter({
+    routeTree,
+    history,
+    parseSearch,
+    stringifySearch,
+    defaultPreload: "intent",
+    scrollRestoration: true,
+  });
+}
+
+declare module "@tanstack/react-router" {
+  interface Register {
+    router: ReturnType<typeof createAppRouter>;
+  }
+}

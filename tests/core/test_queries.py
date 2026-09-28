@@ -137,3 +137,35 @@ def test_check_datasets(ctx: Context, toy_repo: Path) -> None:
     assert [d.status for d in q.check_datasets(ctx)] == ["ok"]
     data.write_text(data.read_text() + '{"id": "ex-9", "reference": 1}\n')
     assert [d.status for d in q.check_datasets(ctx)] == ["changed"]
+
+
+def test_leaderboard_uses_per_example_scores(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "a", predictions=PREDS_075)
+    seed_finished_run(ctx, toy_repo, "b", predictions=ALL_RIGHT, config_hash="sha256:bbbb")
+    evaluate_run(ctx, "a")
+    evaluate_run(ctx, "b")
+    board = q.get_leaderboard(ctx, "toy-acc")
+    best, other = board.rows
+    assert best.run_ids == ["b"] and board.kind == "generic"
+    # Reference: statsmodels proportion_confint(4, 4, method="wilson")
+    assert best.test_interval is not None and best.test_interval.n == 4
+    assert best.test_interval.lo == pytest.approx(0.5101091635454027)
+    assert best.test_interval.hi == pytest.approx(1.0)
+    vs = other.vs_best
+    assert vs is not None and (vs.test, vs.fixed, vs.broken) == ("sign", 1, 0)
+    assert vs.p == pytest.approx(1.0)  # scipy.stats.binomtest(0, 1).pvalue
+    assert board.headline == f"group {best.group_id} +0.250 over group {other.group_id}, p = 1.00"
+    plain = q.get_leaderboard(ctx, "toy-acc", examples=False)
+    assert plain.rows[0].test_interval is None
+    assert plain.rows[1].vs_best is not None and plain.rows[1].vs_best.test is None
+
+
+def test_leaderboard_examples_follow_version_override(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "a", predictions=PREDS_075)
+    evaluate_run(ctx, "a")
+    write_toy_project(toy_repo, accuracy_version="v2")
+    evaluate_run(ctx, "a")
+    (ctx.run_dir(ctx.find_record("a")) / "predictions" / "scores.accuracy@v2.jsonl").unlink()
+    assert q.get_leaderboard(ctx, "toy-acc").rows[0].test_interval is None
+    old = q.get_leaderboard(ctx, "toy-acc", versions={"accuracy": "v1"})
+    assert old.rows[0].test_interval is not None and old.rows[0].test_interval.n == 4

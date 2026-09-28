@@ -30,6 +30,7 @@ from hypothex.core.gitinfo import capture_diff, git_info
 from hypothex.core.ids import new_run_id, utcnow
 from hypothex.core.records import ExecutorInfo, RunKind, RunRecord, RunStatus
 from hypothex.core.seeds import config_hash, run_fingerprint
+from hypothex.core.store import sum_usage
 
 STOP_MARKER = "stop_requested"
 TERM_GRACE_SECONDS = 10.0
@@ -474,11 +475,13 @@ def execute_run(
     else:
         status = RunStatus.FAILED
     logged = ctx.store.read_artifacts(record.project, record.run_id)
+    usage = sum_usage(ctx.store.read_usage(record.project, record.run_id))
     ctx.index.replace_metric_points(
         record.run_id, ctx.store.read_metric_points(record.project, record.run_id)
     )
 
     def finish(r: RunRecord) -> RunRecord:
+        # A path logged twice (e.g. an overwritten last.pt) keeps its latest step/metrics.
         merged = {(a.kind, a.path): a for a in [*r.artifacts, *logged]}
         return r.model_copy(
             update={
@@ -486,6 +489,7 @@ def execute_run(
                 "ended_at": utcnow(),
                 "exit_code": exit_code,
                 "artifacts": list(merged.values()),
+                "usage": usage,
             }
         )
 

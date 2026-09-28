@@ -1,0 +1,819 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hypothex, views</title>
+<script>
+  (function () {
+    var q = new URLSearchParams(location.search).get("theme");
+    var t = q || localStorage.getItem("hx-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400..700;1,6..72,400..500&display=swap" rel="stylesheet">
+<style>
+/* ------------------------------------------------------------------ tokens (ui-v4) */
+:root {
+  --paper: #F6F7F3;
+  --paper-2: #ECEEE8;
+  --ink: #15181E;
+  --ink-2: #464C57;
+  --ink-3: #767C87;
+  --rule: #D5D8D0;
+  --rule-2: #E4E6E0;
+  --best: #00846A;
+  --best-wash: rgba(0, 132, 106, .12);
+  --best-edge: rgba(0, 132, 106, .50);
+  --fail: #C8412B;
+  --agent: #5B48C2;
+  --human: #A66A12;
+  --serif: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --paper: #12161C;
+  --paper-2: #1A1F27;
+  --ink: #E9ECEF;
+  --ink-2: #AEB5BF;
+  --ink-3: #7C8490;
+  --rule: #2C333D;
+  --rule-2: #222830;
+  --best: #1FA282;
+  --best-wash: rgba(31, 162, 130, .17);
+  --best-edge: rgba(31, 162, 130, .60);
+  --fail: #DE5F49;
+  --agent: #8C7BEA;
+  --human: #C08629;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 400 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+a { color: inherit; text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:hover { text-decoration-color: currentColor; }
+:focus-visible { outline: 2px solid var(--agent); outline-offset: 2px; border-radius: 3px; }
+button { font: inherit; color: inherit; }
+.hint { text-decoration: underline dotted var(--rule); text-underline-offset: 3px; cursor: help; }
+
+/* ------------------------------------------------------------------ chrome (ui-v4) */
+.bar { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--paper) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--rule); }
+.bar-in { max-width: 1280px; margin: 0 auto; padding: 0 40px; height: 60px; display: flex; align-items: stretch; gap: 40px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 600 21px/1 var(--serif); letter-spacing: -.01em; }
+.brand svg { display: block; }
+.tabs { display: flex; gap: 4px; }
+.tabs a { display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: var(--ink-3); font-size: 14.5px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs a:hover { color: var(--ink); }
+.tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
+.bar-r { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.find { display: flex; align-items: center; gap: 28px; height: 34px; padding: 0 8px 0 12px; min-width: 250px; border: 1px solid var(--rule); border-radius: 7px; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 13.5px; }
+.find kbd { margin-left: auto; font-family: var(--sans); font-size: 12px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; }
+.theme { height: 34px; padding: 0 12px; border: 1px solid var(--rule); border-radius: 7px; background: transparent; cursor: pointer; font-size: 13.5px; color: var(--ink-2); display: flex; gap: 8px; align-items: center; }
+.theme:hover { border-color: var(--ink-3); color: var(--ink); }
+
+main { max-width: 1280px; margin: 0 auto; padding: 44px 40px 120px; }
+main.wide { max-width: 1440px; padding-left: 32px; padding-right: 32px; }
+body.wide .bar-in { max-width: 1440px; padding: 0 32px; }
+.screen[hidden] { display: none; }
+
+/* ------------------------------------------------------------------ type (ui-v4) */
+.crumb { margin: 0 0 18px; font-size: 13.5px; color: var(--ink-3); display: flex; align-items: center; flex-wrap: wrap; }
+.crumb a { color: var(--ink-2); text-decoration: none; }
+.crumb a:hover { text-decoration: underline; }
+.crumb .sep { margin: 0 6px; color: var(--rule); }
+.sample { margin-left: 14px; font-size: 12px; color: var(--ink-2); border: 1px dashed var(--ink-3); border-radius: 99px; padding: 0 9px; line-height: 20px; cursor: help; }
+h1.finding { margin: 0; max-width: 26em; font: 500 46px/1.06 var(--serif); font-variation-settings: "opsz" 72; letter-spacing: -.018em; text-wrap: balance; }
+.metaline { margin: 14px 0 0; display: flex; flex-wrap: wrap; gap: 4px 22px; font-size: 14px; color: var(--ink-3); font-variant-numeric: tabular-nums; align-items: center; }
+.metaline b { color: var(--ink-2); font-weight: 500; }
+
+.stats { display: flex; flex-wrap: wrap; gap: 14px 0; margin: 0; padding: 0; }
+.stats > div { padding: 0 32px; border-left: 1px solid var(--rule-2); cursor: help; display: flex; flex-direction: column-reverse; }
+.stats > div:first-child { padding-left: 0; border-left: 0; }
+.stats dt { font-size: 12.5px; color: var(--ink-3); }
+.stats dd { margin: 0 0 3px; font: 400 25px/1.1 var(--sans); letter-spacing: -.012em; font-variant-numeric: tabular-nums; color: var(--ink); }
+.stats dd small { font-size: 15px; color: var(--ink-3); letter-spacing: 0; margin-left: 2px; }
+
+.fig-h { display: flex; align-items: baseline; gap: 12px; margin: 0 0 18px; }
+.fig-h .pl { font: 700 19px/1 var(--sans); }
+.fig-h .t { font: 600 16px/1.3 var(--sans); }
+.fig-h .aside { margin-left: auto; font-size: 13px; color: var(--ink-3); display: inline-flex; align-items: center; gap: 10px; }
+.fig-h .ty { color: var(--ink-3); display: inline-flex; cursor: help; align-self: center; }
+.small { font-size: 13px; color: var(--ink-3); }
+
+svg text { font-family: var(--sans); fill: var(--ink-2); }
+svg .tk { font-size: 11.5px; fill: var(--ink-3); font-variant-numeric: tabular-nums; }
+svg .lbl { font-size: 12.5px; fill: var(--ink-2); }
+svg .lbl-s { font-size: 11.5px; fill: var(--ink-3); }
+svg .lbl-b { font-size: 12.5px; fill: var(--ink); font-weight: 600; }
+svg .nm { font-size: 13.5px; fill: var(--ink); font-weight: 600; }
+svg .val { font-size: 17px; fill: var(--ink); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+svg .cell { font-size: 12px; font-variant-numeric: tabular-nums; }
+svg .axis { stroke: var(--ink-3); stroke-width: 1; }
+svg .grid { stroke: var(--rule-2); stroke-width: 1; }
+svg .hair { stroke: var(--rule); stroke-width: 1; }
+svg .band { fill: var(--best-wash); }
+svg .band-edge { stroke: var(--best-edge); stroke-width: 1; }
+svg .bestline { stroke: var(--best); stroke-width: 1.25; }
+svg .whisk { stroke: var(--ink-3); stroke-width: 1.5; stroke-linecap: round; fill: none; }
+svg .whisk.best { stroke: var(--best); }
+svg .mean { fill: var(--ink); stroke: var(--paper); stroke-width: 2; }
+svg .mean.best { fill: var(--best); }
+svg .seed { fill: var(--ink-2); stroke: var(--paper); stroke-width: 2; }
+svg .seed-s { fill: var(--ink-3); opacity: .55; }
+svg .dia { fill: var(--paper); stroke: var(--ink); stroke-width: 1.6; }
+svg .dia.best { stroke: var(--best); fill: var(--best-wash); }
+svg .front { fill: none; stroke: var(--best); stroke-width: 1.5; stroke-linejoin: round; }
+svg .m-best { fill: var(--best); stroke: var(--paper); stroke-width: 2; }
+svg .m-dom { fill: var(--paper); stroke: var(--ink-2); stroke-width: 1.6; }
+svg .ring { fill: none; stroke: var(--ink-3); stroke-width: 1.5; }
+svg .hit { fill: transparent; }
+
+.who { display: inline-flex; align-items: center; gap: 6px; }
+.who i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.who.agent i { background: var(--agent); }
+.who.human i { background: var(--human); border-radius: 1px; }
+
+.btn { height: 32px; padding: 0 13px; border-radius: 6px; border: 1px solid var(--rule); background: transparent; font-size: 13.5px; color: var(--ink); cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 7px; }
+.btn:hover { border-color: var(--ink-3); }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.primary:hover { opacity: .88; }
+.btn:disabled, .btn.primary:disabled { background: transparent; color: var(--ink-3); cursor: not-allowed; border-color: var(--rule); opacity: 1; }
+.btn.link { border: 0; padding: 0; height: auto; color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; }
+.btn.link:hover { color: var(--ink); text-decoration-color: currentColor; }
+
+.key { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 12px; font-size: 13px; color: var(--ink-2); }
+.key span { display: inline-flex; align-items: center; gap: 7px; }
+.key svg { display: block; overflow: visible; }
+
+/* ------------------------------------------------------------------ view tabs */
+.vtabs { display: flex; align-items: stretch; gap: 2px; margin-top: 40px; border-bottom: 1px solid var(--rule); }
+.vtabs a, .vtabs button.add { display: inline-flex; align-items: center; gap: 8px; padding: 0 14px; height: 42px; text-decoration: none; color: var(--ink-3); font-size: 14.5px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: transparent; cursor: pointer; }
+.vtabs a:first-child { padding-left: 0; }
+.vtabs a:hover, .vtabs button.add:hover { color: var(--ink); }
+.vtabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
+.vtabs small { font-size: 12px; color: var(--ink-3); font-weight: 400; }
+.vtabs .ic { display: inline-flex; color: var(--ink-3); }
+.vtabs .r { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+
+/* ------------------------------------------------------------------ panel grid */
+.vgrid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); column-gap: 48px; row-gap: 64px; margin-top: 48px; }
+.panel { min-width: 0; }
+.notes { font: 400 17px/1.6 var(--serif); font-variation-settings: "opsz" 14; color: var(--ink-2); margin: 0; text-wrap: pretty; }
+.notes b { color: var(--ink); font-weight: 650; }
+.notes p { margin: 0; }
+.legend { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-size: 12.5px; color: var(--ink-3); }
+.legend .ramp { width: 150px; height: 8px; border-radius: 2px; }
+.legend .ends { display: flex; justify-content: space-between; width: 150px; font-variant-numeric: tabular-nums; }
+.ramp-wrap { display: flex; flex-direction: column; gap: 3px; }
+
+/* ------------------------------------------------------------------ edit */
+.ed-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; align-items: end; }
+.ed-top h1 { font: 500 34px/1.1 var(--serif); font-variation-settings: "opsz" 48; letter-spacing: -.014em; margin: 0; display: flex; align-items: baseline; gap: 16px; }
+.ed-top h1 small { font: 400 13.5px/1 var(--sans); color: var(--ink-3); letter-spacing: 0; display: inline-flex; align-items: center; gap: 6px; }
+.ed-top h1 small i { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-2); display: inline-block; }
+.ed-act { display: flex; gap: 8px; }
+.split { display: grid; grid-template-columns: 640px minmax(0, 1fr); gap: 40px; margin-top: 28px; align-items: start; }
+
+.ins { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 14px; }
+.ins > span { font-size: 12.5px; color: var(--ink-3); padding-top: 7px; width: 42px; flex: none; }
+.lib { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; flex: 1; }
+.lib button { height: 30px; display: inline-flex; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid var(--rule); border-radius: 6px; background: transparent; cursor: pointer; font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
+.lib button svg { color: var(--ink-3); flex: none; }
+.lib button:hover { border-color: var(--ink-3); color: var(--ink); }
+.lib button:hover svg { color: var(--ink); }
+
+.editor { background: var(--paper-2); border-radius: 8px; overflow: hidden; }
+.ed-bar { display: flex; align-items: center; gap: 14px; height: 38px; padding: 0 14px; border-bottom: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); }
+.ed-bar .file { color: var(--ink-2); }
+.ed-bar .file b { color: var(--ink); font-weight: 500; }
+.ed-bar .vs { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; }
+.vs.ok { color: var(--best); }
+.vs.err { color: var(--fail); }
+.vs a { color: var(--ink-2); font-weight: 400; }
+.code { padding: 10px 0 14px; font: 400 12px/20px var(--mono); color: var(--ink); }
+.ln { display: grid; grid-template-columns: 40px 18px minmax(0, 1fr); padding-right: 12px; }
+.ln .n { text-align: right; color: var(--ink-3); opacity: .8; font-variant-numeric: tabular-nums; user-select: none; }
+.ln .g { text-align: center; color: var(--fail); font-family: var(--sans); font-weight: 700; font-size: 11px; }
+.ln .c { white-space: pre-wrap; word-break: break-word; padding-left: 2px; }
+.ln.sel { background: color-mix(in srgb, var(--paper) 70%, transparent); }
+.ln.sel .g { box-shadow: inset 2px 0 0 var(--ink-3); }
+.ln.bad { background: color-mix(in srgb, var(--fail) 9%, transparent); }
+.ln.bad .g { box-shadow: inset 2px 0 0 var(--fail); }
+.ln.new { background: var(--best-wash); }
+.ln.msg { font-family: var(--sans); font-size: 12.5px; line-height: 1.4; padding: 4px 12px 8px 0; background: color-mix(in srgb, var(--fail) 9%, transparent); }
+.ln.msg .g { box-shadow: inset 2px 0 0 var(--fail); }
+.ln.msg .c { color: var(--fail); display: flex; gap: 14px; align-items: baseline; white-space: normal; }
+.ln.msg .c .btn.link { color: var(--ink-2); font-size: 12.5px; }
+.ln.fold .c { color: var(--ink-3); }
+.fold-chip { font-family: var(--sans); font-size: 11.5px; color: var(--ink-3); border: 1px solid var(--rule); border-radius: 4px; padding: 0 6px; margin-left: 2px; cursor: pointer; background: var(--paper); }
+.y-k { color: var(--ink-2); }
+.y-p { color: var(--ink-3); }
+.y-c { color: var(--ink-3); font-style: italic; }
+.y-t { color: var(--ink); font-weight: 500; }
+.y-n { color: var(--ink); }
+.y-s { color: var(--ink); }
+.y-m { color: var(--ink); text-decoration: underline dotted var(--ink-3); text-underline-offset: 3px; cursor: help; }
+.y-err { text-decoration: underline wavy var(--fail); text-decoration-thickness: 1px; text-underline-offset: 3px; text-decoration-skip-ink: none; }
+.y-txt { color: var(--ink-2); }
+
+.pv-h { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; height: 30px; }
+.pv-h .t { font: 600 14px/1 var(--sans); }
+.pv-h .aside { margin-left: auto; font-size: 12.5px; color: var(--ink-3); }
+.ruler { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); column-gap: 16px; margin-bottom: 14px; }
+.ruler span { height: 5px; border-radius: 1px; background: var(--rule-2); position: relative; }
+.ruler span.on { background: var(--ink-3); }
+.ruler span b { position: absolute; top: 8px; left: 0; right: 0; text-align: center; font: 400 10.5px/1 var(--sans); color: var(--ink-3); }
+.pv { position: sticky; top: 84px; }
+.checks { margin-top: 28px; border-top: 1px solid var(--rule); padding-top: 14px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 20px; font-size: 12.5px; color: var(--ink-2); }
+.checks div { display: flex; align-items: center; gap: 7px; min-width: 0; cursor: help; }
+.checks .pl { font-weight: 700; color: var(--ink); }
+.checks svg { color: var(--ink-3); flex: none; }
+.checks .ok { color: var(--best); font-weight: 600; }
+.checks .no { color: var(--fail); font-weight: 600; }
+.checks .tx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); }
+.pgrid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; margin-top: 26px; }
+.pp { min-width: 0; border: 1px solid var(--rule); border-radius: 7px; padding: 12px 14px 14px; cursor: pointer; }
+.pp:hover { border-color: var(--ink-3); }
+.pp.sel { border-color: var(--ink-2); box-shadow: 0 0 0 1px var(--ink-2); }
+.pp.bad { border-color: var(--fail); box-shadow: 0 0 0 1px var(--fail); }
+.pp.new { border-style: dashed; border-color: var(--best-edge); }
+.pp .fig-h { margin-bottom: 12px; gap: 9px; }
+.pp .fig-h .pl { font-size: 15px; }
+.pp .fig-h .t { font-size: 13.5px; }
+.pp .fig-h .aside { font-size: 11.5px; gap: 8px; }
+.pp .stats > div { padding: 0 18px; }
+.pp .stats > div:first-child { padding-left: 0; }
+.pp .stats dd { font-size: 20px; }
+.pp .stats dd small { font-size: 13px; }
+.pp .stats dt { font-size: 11.5px; }
+.pp .notes { font-size: 14.5px; line-height: 1.55; }
+.pp .legend { margin-top: 10px; font-size: 11.5px; }
+.perr { min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-size: 13px; color: var(--ink-2); text-align: center; }
+.perr .x { color: var(--fail); font-weight: 600; font-size: 13.5px; }
+.pnew { min-height: 90px; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 13px; color: var(--ink-3); }
+
+/* ------------------------------------------------------------------ toast, tooltip */
+.toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px); opacity: 0; background: var(--ink); color: var(--paper); padding: 10px 16px; border-radius: 7px; font-size: 13.5px; transition: all .18s ease; pointer-events: none; z-index: 60; max-width: 80vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toast.on { opacity: 1; transform: translate(-50%, 0); }
+.tip { position: fixed; z-index: 40; pointer-events: none; background: var(--ink); color: var(--paper); font-size: 12.5px; line-height: 1.4; padding: 7px 10px; border-radius: 6px; max-width: 300px; opacity: 0; transition: opacity .08s; }
+.tip.on { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (max-width: 1100px) {
+  .split { grid-template-columns: 1fr; }
+  .vgrid { column-gap: 32px; }
+  .vgrid > .panel { grid-column: 1 / -1 !important; grid-row: auto !important; }
+  .find { min-width: 0; } .find span { display: none; }
+}
+@media (max-width: 720px) {
+  .bar-in { padding: 0 16px; gap: 16px; } main, main.wide { padding: 28px 16px 80px; }
+  h1.finding { font-size: 32px; }
+  .brand span { display: none; }
+  .lib { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pgrid > .pp { grid-column: 1 / -1 !important; grid-row: auto !important; }
+}
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="#view" aria-label="Hypothex">
+      <svg width="22" height="18" viewBox="0 0 22 18" aria-hidden="true">
+        <rect x="9" y="1" width="8" height="16" style="fill:var(--best-wash)"/>
+        <line x1="9" y1="1" x2="9" y2="17" style="stroke:var(--best-edge)"/><line x1="17" y1="1" x2="17" y2="17" style="stroke:var(--best-edge)"/>
+        <line x1="1" y1="9" x2="21" y2="9" style="stroke:var(--ink);stroke-width:1.4"/>
+        <rect x="10" y="5" width="5.6" height="5.6" transform="rotate(45 12.8 7.8)" style="fill:var(--best)"/>
+        <circle cx="4" cy="9" r="2.6" style="fill:var(--ink)"/>
+      </svg>
+      <span>Hypothex</span>
+    </a>
+    <nav class="tabs" aria-label="Screens">
+      <a href="#view">View</a>
+      <a href="#edit">Edit view</a>
+    </nav>
+    <div class="bar-r">
+      <button class="find" type="button" data-toast="Find: not in this mockup"><span>Find a run, task or path</span><kbd>⌘K</kbd></button>
+      <button class="theme" id="themeBtn" type="button" aria-label="Switch colour mode">
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7 1a6 6 0 0 1 0 12z" fill="currentColor"/></svg>
+        <span id="themeLbl">Dark</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="screen" id="s-view" aria-labelledby="v-h"></section>
+  <section class="screen" id="s-edit" aria-labelledby="e-h" hidden></section>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script src="data.js"></script>
+<script>
+/* ================================================================== data */
+const D = window.HXV;
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const MINUS = "−";
+const f3 = v => v.toFixed(3), f4 = v => v.toFixed(4);
+const mean = a => a.reduce((s, v) => s + v, 0) / a.length;
+const sd = a => { const m = mean(a); return Math.sqrt(a.reduce((s, v) => s + (v - m) * (v - m), 0) / (a.length - 1)); };
+const N = D.dataset.n;
+
+function wilson(p, n, z = 1.96) {
+  const z2 = z * z, d = 1 + z2 / n, c = (p + z2 / (2 * n)) / d;
+  const h = (z * Math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))) / d;
+  return [c - h, c + h];
+}
+function choose(n, k) { let r = 1; for (let i = 1; i <= k; i++) r = r * (n - k + i) / i; return r; }
+function signP(b, c) { const n = b + c, k = Math.min(b, c); let p = 0; for (let i = 0; i <= k; i++) p += choose(n, i) / Math.pow(2, n); return Math.min(1, 2 * p); }
+
+const CF = D.configs.map(c => ({ ...c, m: mean(c.seeds), s: sd(c.seeds), t: mean(c.time), l: mean(c.len), same: c.seeds.every(v => v === c.seeds[0]) }))
+  .sort((a, b) => b.m - a.m);
+const BEST = CF[0], RUN = CF[1];
+const BAND = wilson(BEST.m, N);
+const GAP = BEST.m - RUN.m;
+const P = signP(D.pair.fixed, D.pair.broken);
+const inBand = c => c !== BEST && c.m >= BAND[0];
+/* pareto: lower time and lower length both better */
+CF.forEach(c => (c.front = !CF.some(o => o !== c && o.t <= c.t && o.l <= c.l && (o.t < c.t || o.l < c.l))));
+const FRONT = CF.filter(c => c.front).sort((a, b) => a.t - b.t);
+const NRUNS = CF.reduce((s, c) => s + c.seeds.length, 0);
+
+/* ================================================================== svg primitives (ui-v4) */
+const S = {
+  line: (x1, y1, x2, y2, c) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="${c}"/>`,
+  rect: (x, y, w, h, c, extra = "") => `<rect x="${x}" y="${y}" width="${Math.max(0, w)}" height="${h}" class="${c}" ${extra}/>`,
+  circ: (x, y, r, c, extra = "") => `<circle cx="${x}" cy="${y}" r="${r}" class="${c}" ${extra}/>`,
+  text: (x, y, t, c, a = "start", extra = "") => `<text x="${x}" y="${y}" class="${c}" text-anchor="${a}" ${extra}>${t}</text>`,
+  dia: (x, y, r, c) => `<path d="M${x} ${y - r}L${x + r} ${y}L${x} ${y + r}L${x - r} ${y}Z" class="${c}"/>`,
+  sq: (x, y, r, c) => `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}" rx="1.5" class="${c}"/>`,
+  svg: (w, h, body, extra = "") => `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" ${extra}>${body}</svg>`,
+};
+function seedDots(X, vals, y, r = 3.6) {
+  const xs = vals.map(X).sort((a, b) => a - b);
+  let h = "", prev = -1e9, lvl = 0;
+  xs.forEach(x => { lvl = x - prev < 2 * r ? lvl + 1 : 0; h += S.circ(x, y - lvl * 2 * r, r, "seed"); prev = x; });
+  return h;
+}
+const G = {
+  band: `<svg width="18" height="12"><rect x="3" y="0" width="12" height="12" class="band"/><line x1="3" y1="0" x2="3" y2="12" class="band-edge"/><line x1="15" y1="0" x2="15" y2="12" class="band-edge"/></svg>`,
+  seed: `<svg width="18" height="12">${S.circ(5, 6, 3.6, "seed")}${S.circ(13, 6, 3.6, "seed")}</svg>`,
+  dia: `<svg width="18" height="12">${S.dia(9, 6, 5.5, "dia")}</svg>`,
+  whisk: `<svg width="22" height="12"><path d="M2 6H20M2 2V10M20 2V10" class="whisk"/></svg>`,
+  front: `<svg width="26" height="12"><path d="M2 2H13V10H24" class="front"/>${S.circ(2, 2, 3.5, "m-best")}${S.circ(13, 10, 3.5, "m-best")}</svg>`,
+  dom: `<svg width="12" height="12">${S.circ(6, 6, 4, "m-dom")}</svg>`,
+  seedS: `<svg width="12" height="12">${S.circ(6, 6, 2.6, "seed-s")}</svg>`,
+};
+
+/* ---- panel library icons: 14px, stroke only ---- */
+const ic = body => `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+const LIB = [
+  { t: "stat_strip", n: "stat strip", d: "numbers with short labels", i: ic(`<path d="M1.5 4v6M7 4v6M12.5 4v6"/><path d="M3.5 7h1.5M9 7h1.5" stroke-width="2"/>`) },
+  { t: "leaderboard", n: "leaderboard", d: "forest plot: seeds and test-set CI", i: ic(`<path d="M2 4.5h8M2 9.5h6M2 3v3M10 3v3M2 8v3M8 8v3"/><rect x="5" y="3.5" width="2" height="2" fill="currentColor" stroke="none"/><rect x="4" y="8.5" width="2" height="2" fill="currentColor" stroke="none"/>`) },
+  { t: "curves", n: "curves", d: "line over step or time, by seed group", i: ic(`<path d="M1.5 12c2.5-1 3-6 5.5-6.5S10 3 12.5 2"/><path d="M1.5 12.5h11" opacity=".5"/>`) },
+  { t: "scatter", n: "scatter", d: "two metrics, optional pareto front", i: ic(`<path d="M2 3v3.5h3.5V9H10v2.5"/><circle cx="2" cy="3" r=".6" fill="currentColor"/><circle cx="9" cy="4" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="7" r="1" fill="currentColor" stroke="none"/>`) },
+  { t: "distribution", n: "distribution", d: "ecdf or violin per group", i: ic(`<path d="M1.5 12H4V9.5h2.5V6H9V3.5h3.5"/>`) },
+  { t: "grid", n: "grid", d: "items x groups outcome matrix", i: ic(`<rect x="1.5" y="1.5" width="4.5" height="4.5" rx=".6"/><rect x="8" y="1.5" width="4.5" height="4.5" rx=".6" fill="currentColor"/><rect x="1.5" y="8" width="4.5" height="4.5" rx=".6" fill="currentColor"/><rect x="8" y="8" width="4.5" height="4.5" rx=".6"/>`) },
+  { t: "table", n: "table", d: "rows of runs or items", i: ic(`<path d="M1.5 3h11M1.5 7h11M1.5 11h11M5 3v8"/>`) },
+  { t: "trace", n: "trace", d: "agent step list", i: ic(`<path d="M3.5 2v10"/><circle cx="3.5" cy="3" r="1.3" fill="currentColor"/><circle cx="3.5" cy="7" r="1.3" fill="currentColor"/><circle cx="3.5" cy="11" r="1.3" fill="currentColor"/><path d="M7 3h5M7 7h4M7 11h5"/>`) },
+  { t: "markdown", n: "markdown", d: "short note", i: ic(`<path d="M1.5 3h11M1.5 6.3h11M1.5 9.6h7"/>`) },
+  { t: "vega_lite", n: "vega-lite", d: "raw Vega-Lite spec over a run's JSONL or metrics", i: ic(`<path d="M4.5 1.5c-1.5 0-1.5 1-1.5 2.3S2.5 6.3 1.5 7c1 .7 1.5 1.2 1.5 3.2s0 2.3 1.5 2.3M9.5 1.5c1.5 0 1.5 1 1.5 2.3s.5 2.5 1.5 3.2c-1 .7-1.5 1.2-1.5 3.2s0 2.3-1.5 2.3"/>`) },
+];
+const LIBBY = Object.fromEntries(LIB.map(l => [l.t, l]));
+
+/* ================================================================== theme-aware colour */
+function tok(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function hex2rgb(h) { h = h.replace("#", ""); return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16)); }
+function lum([r, g, b]) { const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); }
+function contrast(a, b) { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
+/* sequential: one hue (the best hue), paper to full, value 0..1 */
+function seq(v) {
+  const a = hex2rgb(tok("--paper")), b = hex2rgb(tok("--best"));
+  const t = 0.06 + 0.94 * Math.max(0, Math.min(1, v));
+  const c = a.map((x, i) => Math.round(x + (b[i] - x) * t));
+  const ink = hex2rgb(tok("--ink")), paper = a;
+  /* paper text once it reads at >= 3.5:1 (dark cells in light mode, bright cells in dark mode) */
+  const txt = contrast(c, paper) >= 3.5 ? "var(--paper)" : "var(--ink)";
+  return { fill: `rgb(${c.join(",")})`, txt };
+}
+
+/* ================================================================== panels */
+/* a: stat strip */
+function statStrip() {
+  const iv = wilson(BEST.m, N);
+  return `<dl class="stats">
+    <div title="${esc(BEST.id)}, mean of ${BEST.seeds.length} seeds: ${BEST.seeds.map(f3).join(", ")}. Test-set 95% CI ${f3(iv[0])}–${f3(iv[1])} (Wilson, n = ${N})."><dt>solved v2</dt><dd>${f3(BEST.m)}</dd></div>
+    <div title="Median reactions per found route, over solved targets; mean of seeds"><dt>route len</dt><dd>${BEST.l.toFixed(1)}<small>steps</small></dd></div>
+    <div title="Median wall seconds per target; mean of seeds"><dt>solve time</dt><dd>${Math.round(BEST.t)}<small>s</small></dd></div>
+    <div title="Mean LLM tokens per target"><dt>tokens</dt><dd>${BEST.tokens.toFixed(1)}<small>k</small></dd></div>
+  </dl>`;
+}
+
+/* b: leaderboard, forest plot. Two noise kinds: seed dots (seed noise) and the
+   Wilson whisker (test-set noise); the green band is the best config's CI. */
+const LB_DOM = [0.40, 0.82], LB_TICKS = [0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80];
+function lbHeight(compact) { return 30 + CF.length * (compact ? 46 : 56) + 44; }
+function drawLB(el, compact) {
+  const W = el.clientWidth, RH = compact ? 46 : 56, TOP = 30, H = lbHeight(compact);
+  const valX = compact ? 146 : 184, pL = valX + 20, pR = W - (compact ? 30 : 92), vdX = pR + 16;
+  const X = v => pL + ((v - LB_DOM[0]) / (LB_DOM[1] - LB_DOM[0])) * (pR - pL);
+  const yEnd = TOP + CF.length * RH;
+  let h = "";
+  h += S.text(0, 14, "config", "lbl-s") + S.text(valX, 14, "solved v2", "lbl-s", "end") + S.text(pL, 14, "seeds, 95% CI", "lbl-s");
+  if (!compact) h += S.text(vdX, 14, "vs best", "lbl-s");
+  h += S.line(0, TOP - 8, W, TOP - 8, "hair");
+  LB_TICKS.forEach(t => (h += S.line(X(t), TOP - 8, X(t), yEnd, "grid")));
+  h += S.rect(X(BAND[0]), TOP - 8, X(BAND[1]) - X(BAND[0]), yEnd - TOP + 8, "band");
+  h += S.line(X(BAND[0]), TOP - 8, X(BAND[0]), yEnd, "band-edge") + S.line(X(BAND[1]), TOP - 8, X(BAND[1]), yEnd, "band-edge");
+  h += S.line(X(BEST.m), TOP - 8, X(BEST.m), yEnd, "bestline");
+  CF.forEach((c, i) => {
+    const top = TOP + i * RH, yS = top + (compact ? 13 : 17), yI = top + (compact ? 29 : 35);
+    const isB = c === BEST, iv = wilson(c.m, N);
+    if (i) h += S.line(0, top, W, top, "grid");
+    h += S.text(0, top + (compact ? 17 : 22), esc(c.id), compact ? "lbl-b" : "nm");
+    if (!compact) h += `<g transform="translate(0 ${top + 39})">${c.who.startsWith("agent") ? S.circ(4, -4, 3.5, "", 'style="fill:var(--agent)"') : S.rect(0.5, -7.5, 7, 7, "", 'style="fill:var(--human)" rx="1"')}${S.text(13, 0, esc(c.who), "lbl-s")}</g>`;
+    h += S.text(valX, top + (compact ? 17 : 22), f3(c.m), compact ? "lbl-b" : "val", "end");
+    h += S.text(valX, top + (compact ? 33 : 40), c.same ? `×${c.seeds.length} same` : `± ${c.s.toFixed(3)}`, "lbl-s", "end");
+    if (c.same) { h += S.dia(X(c.m), yS, 6, "dia" + (isB ? " best" : "")); }
+    else h += seedDots(X, c.seeds, yS, compact ? 2.8 : 3.6);
+    h += `<path d="M${X(iv[0])} ${yI}H${X(iv[1])}M${X(iv[0])} ${yI - 4}V${yI + 4}M${X(iv[1])} ${yI - 4}V${yI + 4}" class="whisk${isB ? " best" : ""}"/>`;
+    h += S.sq(X(c.m), yI, 4.2, "mean" + (isB ? " best" : ""));
+    const tip = `${c.id}\nseeds ${c.seeds.map(f3).join(", ")}${c.same ? " (identical)" : ""}\nmean ${f4(c.m)}\ntest-set 95% CI ${f3(iv[0])}–${f3(iv[1])} (Wilson, n = ${N})`;
+    h += `<rect x="${pL}" y="${top + 2}" width="${pR - pL}" height="${RH - 4}" class="hit" data-tip="${esc(tip)}"/>`;
+    /* verdict */
+    const vy = top + (compact ? 17 : 22);
+    if (isB) {
+      h += `<g data-tip="Best mean. Its 95% CI is the green band.">${S.dia(vdX + 5, vy - 4, 5, "", ).replace('class=""', 'style="fill:var(--best)"')}${compact ? "" : S.text(vdX + 16, vy, "best", "lbl")}</g>`;
+    } else if (inBand(c)) {
+      h += `<g data-tip="Mean inside the best's 95% CI: not proven worse. Paired sign test p = ${P.toFixed(3)}.">${S.rect(vdX, vy - 9, 10, 10, "band")}${S.rect(vdX, vy - 9, 10, 10, "band-edge", 'fill="none"')}${compact ? "" : S.text(vdX + 16, vy, MINUS + f3(BEST.m - c.m), "lbl") + S.text(vdX + 16, vy + 15, `p ${P.toFixed(2)}`, "lbl-s")}</g>`;
+    } else {
+      h += `<g data-tip="Mean below the best's 95% CI.">${S.circ(vdX + 5, vy - 4, 4.5, "ring")}${compact ? "" : S.text(vdX + 16, vy, MINUS + f3(BEST.m - c.m), "lbl")}</g>`;
+    }
+  });
+  h += S.line(pL, yEnd, pR, yEnd, "axis");
+  LB_TICKS.forEach((t, i) => { h += S.line(X(t), yEnd, X(t), yEnd + 4, "axis"); if (!compact || i % 2 === 1) h += S.text(X(t), yEnd + 17, t.toFixed(2), "tk", "middle"); });
+  h += S.text(pR, yEnd + 36, "solved v2", "lbl-s", "end");
+  el.innerHTML = S.svg(W, H, h, `role="img" aria-label="${esc(BEST.id)} leads ${esc(RUN.id)} by ${f3(GAP)}; ${esc(RUN.id)} is inside the best's 95% CI" style="overflow:visible"`);
+}
+
+/* c: scatter, route length vs solve time, pareto front (min, min) */
+function drawSC(el, compact, H) {
+  const W = el.clientWidth;
+  const pL = compact ? 28 : 34, pR = 10, pT = 24, pB = 40;
+  const XD = [0, 200], YD = [4, 8.5];
+  const X = v => pL + ((v - XD[0]) / (XD[1] - XD[0])) * (W - pL - pR);
+  const Y = v => H - pB - ((v - YD[0]) / (YD[1] - YD[0])) * (H - pT - pB);
+  let h = "";
+  [5, 6, 7, 8].forEach(t => { h += S.line(pL, Y(t), W - pR, Y(t), "grid"); });
+  [4, 5, 6, 7, 8].forEach(t => { h += S.text(pL - 8, Y(t) + 4, t, "tk", "end"); });
+  [50, 100, 150, 200].forEach(t => { h += S.line(X(t), pT, X(t), H - pB, "grid"); });
+  h += S.line(pL, H - pB, W - pR, H - pB, "axis");
+  [0, 50, 100, 150, 200].forEach(t => { h += S.line(X(t), H - pB, X(t), H - pB + 4, "axis") + S.text(X(t), H - pB + 17, t, "tk", "middle"); });
+  h += S.text(W - pR, H - 4, "solve time, s", "lbl-s", "end");
+  h += S.text(pL - 8, pT - 12, "route len, steps", "lbl-s", "start");
+  /* seeds first, faint */
+  CF.forEach(c => c.time.forEach((t, i) => (h += S.circ(X(t), Y(c.len[i]), 2.4, "seed-s"))));
+  /* front as a staircase */
+  let d = `M${X(FRONT[0].t)} ${Y(FRONT[0].l)}`;
+  for (let i = 1; i < FRONT.length; i++) d += `H${X(FRONT[i].t)}V${Y(FRONT[i].l)}`;
+  h += `<path d="${d}" class="front"/>`;
+  CF.forEach(c => {
+    const x = X(c.t), y = Y(c.l);
+    h += c.front ? S.circ(x, y, 5, "m-best") : S.circ(x, y, 4.5, "m-dom");
+    const L = c.lbl, cls = c === BEST ? "lbl-b" : "lbl";
+    h += S.text(x + (compact ? L.dx * 0.8 : L.dx), y + L.dy, esc(c.id), compact ? (c === BEST ? "lbl-b" : "lbl-s") : cls, L.a);
+    const dom = !c.front ? CF.find(o => o.front && o.t <= c.t && o.l <= c.l) : null;
+    h += `<circle cx="${x}" cy="${y}" r="11" class="hit" data-tip="${esc(`${c.id}\nsolve time ${Math.round(c.t)} s (seeds ${c.time.map(v => Math.round(v)).join(", ")})\nroute len ${c.l.toFixed(1)} steps\n${c.front ? "on the pareto front" : "dominated by " + dom.id}`)}"/>`;
+  });
+  el.innerHTML = S.svg(W, H, h, `role="img" aria-label="Route length against solve time; ${FRONT.length} of ${CF.length} configs on the pareto front" style="overflow:visible"`);
+}
+
+/* d: vega_lite heatmap (rendered by vega-lite with the Hypothex theme) */
+function drawHM(el, compact) {
+  const W = el.clientWidth, LW = compact ? 112 : 150, CH = compact ? 28 : 34, HT = compact ? 40 : 44, GAP = 2;
+  const cw = (W - LW) / D.bins.length;
+  let h = "";
+  h += S.text(0, 14, "ref steps", "lbl-s");
+  h += S.text(0, 31, "targets", "lbl-s");
+  D.bins.forEach((b, j) => {
+    const cx = LW + cw * j + cw / 2;
+    h += S.text(cx, 14, b.k, "lbl", "middle") + S.text(cx, 31, b.n, "tk", "middle");
+  });
+  CF.forEach((c, i) => {
+    const y = HT + i * CH;
+    h += S.text(LW - 12, y + CH / 2 + 4, esc(c.id), c === BEST ? "lbl-b" : "lbl", "end");
+    c.bins.forEach((v, j) => {
+      const r = v / D.bins[j].n, col = seq(r), x = LW + cw * j;
+      h += `<rect x="${x + GAP / 2}" y="${y + GAP / 2}" width="${cw - GAP}" height="${CH - GAP}" rx="2" style="fill:${col.fill}" data-tip="${esc(`${c.id}, ${D.bins[j].k} steps\nsolved ${r.toFixed(3)} (${v.toFixed(1)} of ${D.bins[j].n}, mean of 3 seeds)`)}"/>`;
+      h += `<text x="${x + cw / 2}" y="${y + CH / 2 + 4}" text-anchor="middle" class="cell" style="fill:${col.txt};pointer-events:none">${r.toFixed(2)}</text>`;
+    });
+  });
+  const H = HT + CF.length * CH + 2;
+  el.innerHTML = S.svg(W, H, h, 'role="img" aria-label="Solved rate by reference route length and config"');
+  const lg = el.nextElementSibling;
+  if (lg && lg.classList.contains("legend")) lg.querySelector(".ramp").style.background = `linear-gradient(90deg, ${seq(0).fill}, ${seq(0.5).fill}, ${seq(1).fill})`;
+}
+
+/* e: markdown */
+function md(lines) {
+  return lines.map(l => `<p>${esc(l).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")}</p>`).join("");
+}
+const NOTE = D.yaml.filter(l => typeof l === "string").slice(-3, -1).map(l => l.trim());
+
+/* ---- panel definitions: the rendered side of the YAML ---- */
+const PANELS = [
+  { l: "a", t: "Best config", type: "stat_strip", span: 12, row: 1, q: "solved@v2, route_len@v1/median, solve_time@v1/median, tokens@v1/mean; pick best" },
+  { l: "b", t: "Solved", type: "leaderboard", span: 7, row: 2, q: "y solved@v2 by config; noise seed + test_set" },
+  { l: "c", t: "Length vs time", type: "scatter", span: 5, row: 2, q: "x solve_time@v1/median, y route_len@v1/median by config; pareto min, min" },
+  { l: "d", t: "Solved by depth", type: "vega_lite", span: 8, row: 3, q: "inline spec, rect; predictions: config, ref_steps, solved" },
+  { l: "e", t: "Note", type: "markdown", span: 4, row: 3, q: "2 lines" },
+];
+function panelHead(p, extra = "") {
+  const lib = LIBBY[p.type];
+  return `<div class="fig-h"><span class="pl">${p.l}</span><span class="t">${esc(p.t)}</span><span class="aside">${extra}<span class="ty" title="${esc(lib.n)}: ${esc(p.q)}">${lib.i}</span></span></div>`;
+}
+function panelBody(p, compact) {
+  switch (p.type) {
+    case "stat_strip": return statStrip();
+    case "leaderboard": return `<div class="chart" data-c="lb"></div>` + (compact ? "" : `<div class="key"><span>${G.seed}seed</span><span title="All seeds gave one score">${G.dia}identical seeds</span><span title="Wilson, n = ${N}">${G.whisk}test-set 95% CI</span><span>${G.band}best's CI</span></div>`);
+    case "scatter": return `<div class="chart" data-c="sc"></div>` + (compact ? "" : `<div class="key"><span title="Configs no other config beats on both axes">${G.front}pareto</span><span>${G.dom}dominated</span><span>${G.seedS}seed</span></div>`);
+    case "vega_lite": return `<div class="chart" data-c="hm"></div><div class="legend"><span>solved</span><span class="ramp-wrap"><span class="ramp"></span><span class="ends"><span>0</span><span>0.5</span><span>1</span></span></span></div>`;
+    case "markdown": return `<div class="notes">${md(NOTE)}</div>`;
+  }
+  return "";
+}
+function asideFor(p) {
+  if (p.type === "stat_strip") return `<span class="who agent" title="Best by solved v2, launched by ${esc(BEST.who)}"><i></i>${esc(BEST.id)}</span>`;
+  if (p.type === "leaderboard") return `<span>${CF.length} configs, ${NRUNS} runs</span>`;
+  if (p.type === "scatter") return `<span title="Configs on the pareto front">${FRONT.length} of ${CF.length} on front</span>`;
+  if (p.type === "vega_lite") return `<span title="Raw Vega-Lite spec over each run's predictions.jsonl">vega-lite</span>`;
+  return "";
+}
+function drawCharts(root, compact) {
+  const lb = root.querySelector('[data-c="lb"]');
+  if (lb) drawLB(lb, compact);
+  const sc = root.querySelector('[data-c="sc"]');
+  if (sc) drawSC(sc, compact, lbHeight(compact));
+  const hm = root.querySelector('[data-c="hm"]');
+  if (hm) drawHM(hm, compact);
+}
+
+/* ================================================================== screen 1: view */
+function crumb(extra = "") {
+  return `<p class="crumb"><a href="#view">${esc(D.project)}</a><span class="sep">/</span><a href="#view">${esc(D.task)}</a>${extra}<span class="sample" title="Invented numbers for this mockup">sample data</span></p>`;
+}
+function renderView() {
+  const rq = D.views[1];
+  $("#s-view").innerHTML = `
+    ${crumb()}
+    <h1 class="finding" id="v-h">${esc(BEST.id)} +${f3(GAP)} over ${esc(RUN.id)}, p = ${P.toFixed(2)}</h1>
+    <p class="metaline"><span>${esc(D.dataset.name)} ${esc(D.dataset.version)}</span><span>n = ${N}</span><span>solved v2</span><span>${CF.length} configs, ${NRUNS} runs</span></p>
+
+    <nav class="vtabs" aria-label="Views">
+      <a href="#view" data-toast="overview: preset view, not drawn in this mockup" title="Preset from kind agent_eval. hx view init --from agent_eval copied it into hypothex.yaml.">overview <small>preset</small></a>
+      <a href="#view" aria-current="page" title="Custom view, ${rq.panels} panels. Added by ${esc(rq.by)} with the MCP tool add_view.">route quality <span class="who agent"><i></i></span></a>
+      <button class="add" type="button" title="New view: hx view add, or hx view init --from training | agent_eval | agent_iteration | system_bench" data-toast="New view: blank, or copy a preset">+ view</button>
+      <span class="r"><span class="small">${rq.panels} panels</span><button class="btn" type="button" onclick="location.hash='#edit'" title="Edit the YAML of this view">Edit</button></span>
+    </nav>
+
+    <div class="vgrid" id="vgrid">
+      ${PANELS.map(p => `<section class="panel" style="grid-column:span ${p.span};grid-row:${p.row}" aria-label="${esc(p.t)}">${panelHead(p, asideFor(p))}${panelBody(p, false)}</section>`).join("")}
+    </div>`;
+  drawCharts($("#vgrid"), false);
+}
+
+/* ================================================================== screen 2: edit */
+const Q = new URLSearchParams(location.search);
+const ED = { bad: Q.get("state") !== "valid", sel: "scatter", added: [] };
+const BAD_FROM = "y: route_len@v1/median", BAD_TO = "y: route_length@v1/median";
+
+function yamlLines() {
+  /* returns [{n, text} | {n, fold, count}] with real line numbers */
+  const out = []; let n = 1;
+  const src = D.yaml.map(l => (typeof l === "string" && ED.bad && l.trim() === BAD_FROM ? l.replace(BAD_FROM, BAD_TO) : l));
+  const extra = ED.added.flatMap(t => ["", ...snippet(t)]);
+  src.concat(extra).forEach((l, i) => {
+    if (typeof l === "string") out.push({ n: n++, text: l, isNew: i >= src.length });
+    else { out.push({ n, fold: l.fold, count: l.n }); n += l.n; }
+  });
+  return out;
+}
+function snippet(t) {
+  const row = 4 + ED.added.indexOf(t);
+  const base = { curves: "data: {x: time, y: tokens@v1/mean, group_by: config}", distribution: "data: {x: solve_time@v1/median, group_by: config, kind: ecdf}", grid: "data: {items: target, group_by: config, y: solved@v2}", table: "data: {metrics: [solved@v2, tokens@v1/mean], group_by: config}", trace: "data: {runs: latest, source: steps}", markdown: "text: |", stat_strip: "data: {metrics: [solved@v2], pick: best}", leaderboard: "data: {y: solved@v2, group_by: config}", scatter: "data: {x: tokens@v1/mean, y: solved@v2, group_by: config}", vega_lite: "spec: {mark: point}" }[t];
+  return [`          - type: ${t}`, `            title: New ${LIBBY[t].n}`, `            ${base}`, `            layout: {span: 12, row: ${row}}`];
+}
+
+/* validation: every metric ref must exist, at a known version and key */
+function validate(lines) {
+  const errs = [];
+  lines.forEach(L => {
+    if (!L.text) return;
+    const re = /([A-Za-z_]\w*)@v(\d+)(?:\/(\w+))?/g; let m;
+    while ((m = re.exec(L.text))) {
+      const def = D.metrics[m[1]];
+      if (!def) {
+        const near = Object.keys(D.metrics).find(k => m[1].startsWith(k) || k.startsWith(m[1].slice(0, 5)));
+        errs.push({ n: L.n, tok: m[0], msg: `unknown metric ${m[1]}`, fix: near ? m[0].replace(m[1], near) : null, near });
+      } else if ("v" + m[2] !== def.v) errs.push({ n: L.n, tok: m[0], msg: `${m[1]} is at ${def.v}` });
+    }
+  });
+  return errs;
+}
+
+/* tiny YAML highlighter */
+function hlValue(s, key, errTok) {
+  const re = /("[^"]*")|([A-Za-z_]\w*@v\d+(?:\/\w+)?)|([A-Za-z_][\w]*)(?=:\s)|((?<![\w\-])-?\d+(?:\.\d+)?(?![\w@]))|([{}\[\],:|])/g;
+  let out = "", last = 0, m;
+  while ((m = re.exec(s))) {
+    out += plain(s.slice(last, m.index), key);
+    if (m[1]) out += `<span class="y-s">${esc(m[1])}</span>`;
+    else if (m[2]) {
+      const name = m[2].split("@")[0], def = D.metrics[name];
+      out += `<span class="y-m${m[2] === errTok ? " y-err" : ""}" title="${def ? esc(`${name} ${def.v}: ${def.d}`) : "unknown metric"}">${esc(m[2])}</span>`;
+    }
+    else if (m[3]) out += `<span class="y-k">${esc(m[3])}</span>`;
+    else if (m[4]) out += `<span class="y-n">${esc(m[4])}</span>`;
+    else out += `<span class="y-p">${esc(m[5])}</span>`;
+    last = re.lastIndex;
+  }
+  return out + plain(s.slice(last), key);
+}
+function plain(s, key) { return s ? (key === "type" && s.trim() ? `<span class="y-t">${esc(s)}</span>` : esc(s)) : ""; }
+function hl(line, inBlock, errTok) {
+  if (inBlock) return `<span class="y-txt">${esc(line)}</span>`;
+  let code = line, com = "";
+  const ci = line.search(/\s#\s/);
+  if (ci >= 0) { code = line.slice(0, ci); com = line.slice(ci); }
+  let out = "", key = null, rest = code;
+  const m = code.match(/^(\s*)(- )?([A-Za-z_][\w\-]*)(:)(.*)$/);
+  const li = code.match(/^(\s*)(- )(.*)$/);
+  if (m) { out = m[1] + (m[2] ? `<span class="y-p">-</span> ` : "") + `<span class="y-k">${esc(m[3])}</span><span class="y-p">:</span>`; key = m[3]; rest = m[5]; }
+  else if (li) { out = li[1] + `<span class="y-p">-</span> `; rest = li[3]; }
+  else { out = ""; rest = code; }
+  out += hlValue(rest, key, errTok);
+  if (com) out += `<span class="y-c">${esc(com)}</span>`;
+  return out;
+}
+
+/* which lines belong to which panel (for selection) */
+function panelRanges(lines) {
+  const r = []; let cur = null;
+  lines.forEach((L, i) => {
+    if (!L.text) return;
+    const m = L.text.match(/^\s{10}- type: (\w+)/);
+    if (m) { cur = { type: m[1], from: i, to: i }; r.push(cur); }
+    else if (cur && /^\s{12}\S/.test(L.text)) cur.to = i;
+    else if (cur && /^\s{14,}/.test(L.text)) cur.to = i;
+  });
+  return r;
+}
+
+function renderEditor() {
+  const lines = yamlLines();
+  const errs = validate(lines);
+  const err = errs[0];
+  const ranges = panelRanges(lines);
+  const sel = ranges.find(r => r.type === ED.sel && !lines[r.from].isNew) || null;
+  let inBlock = false, blockIndent = 0, h = "";
+  lines.forEach((L, i) => {
+    if (L.fold) {
+      h += `<div class="ln fold"><span class="n">${L.n}</span><span class="g"></span><span class="c">${L.n === 1 ? "" : "      "}<span class="fold-chip" title="Lines ${L.n}–${L.n + L.count - 1}, folded">${esc(L.fold)}, ${L.count} lines</span></span></div>`;
+      return;
+    }
+    const ind = L.text.match(/^\s*/)[0].length;
+    if (inBlock && L.text.trim() && ind <= blockIndent) inBlock = false;
+    const bad = err && err.n === L.n;
+    const isSel = sel && i >= sel.from && i <= sel.to;
+    h += `<div class="ln${bad ? " bad" : isSel ? " sel" : ""}${L.isNew ? " new" : ""}"><span class="n">${L.n}</span><span class="g" ${bad ? `title="${esc(err.msg)}"` : ""}>${bad ? "✕" : ""}</span><span class="c" style="padding-left:${ind + 4}ch;text-indent:-${ind + 4}ch">${hl(L.text, inBlock, bad ? err.tok : null) || " "}</span></div>`;
+    if (bad) {
+      h += `<div class="ln msg" role="alert"><span class="n"></span><span class="g"></span><span class="c"><span>${esc(err.msg)}</span>${err.fix ? `<button class="btn link" type="button" id="fixBtn" title="Replace ${esc(err.tok)} with ${esc(err.fix)}">use ${esc(err.near)}</button>` : ""}</span></div>`;
+    }
+    if (/:\s*\|\s*$/.test(L.text)) { inBlock = true; blockIndent = ind; }
+  });
+  const nPanels = ranges.length;
+  const state = err
+    ? `<span class="vs err" title="${esc(err.msg)}, line ${err.n}. Save is blocked until it is fixed.">✕ ${errs.length} error <a href="#L${err.n}" id="gotoErr">ln ${err.n}</a></span>`
+    : `<span class="vs ok" title="Schema, metric names, versions and keys checked">✓ valid <span class="small" style="font-weight:400">${nPanels} panels</span></span>`;
+  return { html: `<div class="ed-bar"><span class="file"><b>hypothex.yaml</b></span><span title="Path in the file">tasks › ${esc(D.task)} › views › route_quality</span>${state}</div><div class="code" id="code">${h}</div>`, err, errs, nPanels };
+}
+
+function renderEdit() {
+  const E = renderEditor();
+  const cli = cliText();
+  $("#s-edit").innerHTML = `
+    ${crumb(`<span class="sep">/</span>route quality`)}
+    <div class="ed-top">
+      <h1 id="e-h">Edit route quality <small title="Not saved to hypothex.yaml yet"><i></i>unsaved</small></h1>
+      <div class="ed-act">
+        <button class="btn" type="button" id="discardBtn">Discard</button>
+        <button class="btn" type="button" data-copy="${esc(cli)}" data-toast-copy="Copied hx view add -t ${esc(D.task)} route_quality" title="${esc(cli.split("\n")[0])}">${ic('<rect x="4.5" y="4.5" width="8" height="8" rx="1.5"/><path d="M9.5 2.5V2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5"/>')}Copy as CLI</button>
+        <button class="btn primary" type="button" id="saveBtn" ${E.err ? `disabled title="Fix ${E.errs.length} error to save"` : 'title="Validate, then write to hypothex.yaml"'}>Save</button>
+      </div>
+    </div>
+    <div class="split">
+      <div>
+        <div class="ins"><span>Insert</span><div class="lib">${LIB.map(l => `<button type="button" data-ins="${l.t}" title="${esc(l.t)}: ${esc(l.d)}">${l.i}${esc(l.n)}</button>`).join("")}</div></div>
+        <div class="editor" id="editor">${E.html}</div>
+      </div>
+      <div class="pv">
+        <div class="pv-h"><span class="t">Preview</span><span class="aside" id="pvSel"></span></div>
+        <div class="ruler" id="ruler">${Array.from({ length: 12 }, (_, i) => `<span><b>${i + 1}</b></span>`).join("")}</div>
+        <div class="pgrid" id="pgrid"></div>
+        <div class="checks" id="checks"></div>
+      </div>
+    </div>`;
+  renderPreview(E);
+  bindEdit();
+}
+
+function renderPreview(E) {
+  const selP = PANELS.find(p => p.type === ED.sel);
+  const cells = PANELS.map(p => {
+    const bad = E.err && p.type === "scatter";
+    const body = bad
+      ? `<div class="perr"><span class="x">✕ ${esc(E.err.tok)}</span><span class="small">${esc(E.err.msg)}, ln ${E.err.n}</span></div>`
+      : panelBody(p, true);
+    return `<section class="pp${bad ? " bad" : p === selP ? " sel" : ""}" data-p="${p.type}" style="grid-column:span ${p.span};grid-row:${p.row}" tabindex="0" aria-label="${esc(p.t)}">${panelHead(p, bad ? "" : `<span title="span ${p.span} of 12, row ${p.row}">${p.span}/12</span>`)}${body}</section>`;
+  }).join("") + ED.added.map((t, i) => `<section class="pp new" style="grid-column:span 12;grid-row:${4 + i}"><div class="fig-h"><span class="pl">${String.fromCharCode(102 + i)}</span><span class="t">New ${esc(LIBBY[t].n)}</span><span class="aside"><span class="ty">${LIBBY[t].i}</span></span></div><div class="pnew">${LIBBY[t].i}<span>${esc(LIBBY[t].n)}, span 12, row ${4 + i}</span></div></section>`).join("");
+  $("#pgrid").innerHTML = cells;
+  const CK = { stat_strip: ["4 metrics", "Metric names, versions and keys"], leaderboard: ["solved@v2", "Metric exists; group_by config is a run field"], scatter: ["x, y", "Both axes resolve to metrics"], vega_lite: ["spec ok", "Spec checked against the Vega-Lite 5 schema; fields exist in predictions.jsonl"], markdown: ["2 lines", "Markdown, no scripts"] };
+  $("#checks").innerHTML = PANELS.map(p => {
+    const bad = E.err && p.type === "scatter";
+    return `<div title="${esc(bad ? E.err.msg + ", line " + E.err.n : CK[p.type][1])}"><span class="pl">${p.l}</span>${LIBBY[p.type].i}<span class="${bad ? "no" : "ok"}">${bad ? "✕" : "✓"}</span><span class="tx">${esc(bad ? "route_length" : CK[p.type][0])}</span></div>`;
+  }).join("");
+  /* ruler: light the selected panel's columns */
+  let c0 = 0;
+  if (selP) { const same = PANELS.filter(p => p.row === selP.row); for (const p of same) { if (p === selP) break; c0 += p.span; } }
+  document.querySelectorAll("#ruler span").forEach((s, i) => s.classList.toggle("on", !!selP && i >= c0 && i < c0 + selP.span));
+  $("#pvSel").textContent = selP ? `${selP.l}: span ${selP.span}, row ${selP.row}` : "";
+  drawCharts($("#pgrid"), true);
+}
+
+function cliText() {
+  const lines = yamlLines().filter(L => L.text != null);
+  const start = lines.findIndex(L => /^\s{6}route_quality:/.test(L.text));
+  const body = lines.slice(start + 1).map(L => L.text.slice(8)).join("\n");
+  return `hx view add -t ${D.task} route_quality -f - <<'YAML'\n${body}\nYAML`;
+}
+
+function bindEdit() {
+  const fix = $("#fixBtn");
+  if (fix) fix.addEventListener("click", () => { ED.bad = false; renderEdit(); toast("Replaced route_length with route_len"); });
+  $("#discardBtn").addEventListener("click", () => { ED.bad = false; ED.added = []; renderEdit(); toast("Discarded changes"); });
+  $("#saveBtn").addEventListener("click", () => toast("Saved route_quality to hypothex.yaml"));
+  document.querySelectorAll("[data-ins]").forEach(b => b.addEventListener("click", () => { ED.added.push(b.dataset.ins); renderEdit(); toast(`Inserted ${LIBBY[b.dataset.ins].n}, span 12, row ${3 + ED.added.length}`); }));
+  document.querySelectorAll("#pgrid .pp[data-p]").forEach(p => p.addEventListener("click", () => { ED.sel = p.dataset.p; renderEdit(); }));
+}
+
+/* ================================================================== routing, theme */
+const SCREENS = { view: renderView, edit: renderEdit };
+let current = "view";
+function show() {
+  const v = (location.hash || "#view").slice(1);
+  current = SCREENS[v] ? v : "view";
+  Object.keys(SCREENS).forEach(k => ($("#s-" + k).hidden = k !== current));
+  $("#main").classList.toggle("wide", current === "edit");
+  document.body.classList.toggle("wide", current === "edit");
+  document.querySelectorAll(".tabs a").forEach(a => (a.getAttribute("href") === "#" + current ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
+  SCREENS[current]();
+  window.scrollTo(0, 0);
+}
+function redraw() { drawCharts(current === "edit" ? $("#pgrid") : $("#vgrid"), current === "edit"); }
+window.addEventListener("hashchange", show);
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(redraw, 120); });
+
+function setThemeLabel() { $("#themeLbl").textContent = document.documentElement.dataset.theme === "dark" ? "Light" : "Dark"; }
+$("#themeBtn").addEventListener("click", () => {
+  const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = t; localStorage.setItem("hx-theme", t); setThemeLabel(); redraw();
+});
+
+let toastT;
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2200); }
+document.addEventListener("click", e => {
+  const c = e.target.closest("[data-copy]");
+  if (c) { navigator.clipboard && navigator.clipboard.writeText(c.dataset.copy).catch(() => {}); toast(c.dataset.toastCopy || "Copied"); return; }
+  const t = e.target.closest("[data-toast]"); if (t) { e.preventDefault(); toast(t.dataset.toast); }
+});
+const tip = $("#tip");
+document.addEventListener("mousemove", e => {
+  const t = e.target.closest && e.target.closest("[data-tip]");
+  if (!t) { tip.classList.remove("on"); return; }
+  tip.innerHTML = esc(t.getAttribute("data-tip")).replace(/\n/g, "<br>");
+  tip.style.left = Math.min(innerWidth - 320, e.clientX + 14) + "px"; tip.style.top = (e.clientY + 16) + "px";
+  tip.classList.add("on");
+});
+
+setThemeLabel();
+document.fonts.ready.then(show);
+</script>
+</body>
+</html>

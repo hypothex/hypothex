@@ -1,0 +1,88 @@
+# Preset view for task kind "system_bench" (spec 8.4, mockup docs/mockups/kinds/system_bench).
+# Latency comes from raw samples named latency_ms (run.log_samples). The throughput sweep is the
+# history metric sweep/rps logged with step = concurrency; the error rate is the score
+# errors/rate; utilisation is the history metrics gpu_pct and cpu_pct; the repeat spread reads
+# the score latency/p95. These are the names `hx demo` writes; copy this view and rename them
+# to match your task. The percentile table is the latency_ms distribution drawn as a table
+# (render: table): pooled p50/p95/p99 per group, with the change vs the task's baseline group
+# (TaskSpec.baseline, e.g. tag:baseline) and a 95% bootstrap CI over repeats. Bars and rows are
+# named by `label`, the seed group's short name (as on the leaderboard).
+title: overview
+panels:
+  - type: stat_strip
+    title: Summary
+    layout: {span: 12, row: 1}
+  - type: leaderboard
+    title: Leaderboard
+    noise: [seed, test_set]
+    layout: {span: 12, row: 2}
+  - type: distribution
+    title: Latency
+    data: {source: samples, metrics: [latency_ms], group_by: group}
+    scale: log
+    layout: {span: 7, row: 3}
+  - type: curves
+    title: Throughput vs concurrency
+    data: {metrics: [sweep/rps], group_by: group}
+    layout: {span: 5, row: 3}
+  # Percentile table: one row per group, p50/p95/p99 columns, each with Δ and 95% CI vs the
+  # baseline group (distribution rows' vs_baseline; the baseline row shows "ref").
+  - type: distribution
+    title: Percentiles
+    data: {source: samples, metrics: [latency_ms], group_by: group}
+    render: table
+    layout: {span: 6, row: 4}
+  # Error rate as a percent; ticks stay at least 0.01% apart so no two labels read the same.
+  - type: vega_lite
+    title: Error rate
+    data:
+      source: scores
+      filter: {metric: errors, key: rate}
+      fields: [metric, key, value]
+    spec:
+      mark: bar
+      height: {step: 28}
+      encoding:
+        y: {field: label, type: nominal, title: null}
+        x: {aggregate: mean, field: value, type: quantitative, title: error rate, axis: {format: ".2~%", tickMinStep: 0.0001}}
+        tooltip:
+          - {field: label, type: nominal, title: config}
+          - {aggregate: mean, field: value, type: quantitative, title: mean error rate, format: ".3~%"}
+    layout: {span: 6, row: 4}
+  # Utilisation: one small multiple per config (seed group), each repeat a faint line and the
+  # mean of the repeats bold, like the training curves. The run page keeps one run's curves.
+  - type: curves
+    title: Utilisation
+    data: {metrics: [gpu_pct, cpu_pct], group_by: group}
+    layout: {span: 8, row: 5}
+  # Repeat spread: each repeat's p95 vs the median repeat of its group; over +10% is flagged
+  # (the mockup's outlier rule, e.g. a noisy neighbour).
+  - type: vega_lite
+    title: Repeat spread
+    data:
+      source: scores
+      filter: {metric: latency, key: p95}
+      fields: [metric, key, value]
+    spec:
+      transform:
+        - joinaggregate: [{op: median, field: value, as: median}]
+          groupby: [group_id]
+        - calculate: "datum.value / datum.median - 1"
+          as: vs_median
+        - calculate: "datum.vs_median > 0.1"
+          as: flagged
+      mark: {type: point, filled: true, size: 50}
+      height: {step: 32}
+      encoding:
+        y: {field: label, type: nominal, title: null}
+        x: {field: vs_median, type: quantitative, title: p95 vs median repeat, axis: {format: "+%"}}
+        color:
+          field: flagged
+          type: nominal
+          scale: {domain: [false, true]}
+          legend: {title: null, orient: bottom, labelExpr: "datum.label == 'true' ? 'over +10%' : 'within 10%'"}
+        tooltip:
+          - {field: run_id, type: nominal}
+          - {field: seed, type: quantitative, title: repeat}
+          - {field: value, type: quantitative, title: p95 ms, format: ".1f"}
+    layout: {span: 4, row: 5}

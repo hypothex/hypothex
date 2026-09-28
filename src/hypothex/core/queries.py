@@ -11,7 +11,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from hypothex.core.config import load_project_config, parse_metric_version
+from hypothex.core.config import (
+    ProjectConfig,
+    load_project_config,
+    parse_metric_key,
+    parse_metric_version,
+)
 from hypothex.core.context import Context
 from hypothex.core.datasets import (
     DatasetDrift,
@@ -186,11 +191,63 @@ def resolve_task(ctx: Context, ref: str, project: str | None = None) -> tuple[Pr
     return matches[0], ref
 
 
+def primary_examples(
+    ctx: Context,
+    config: ProjectConfig,
+    task: str,
+    runs: list[RunRecord],
+    versions: dict[str, str] | None,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """
+    Load the per-example scores of a task's primary metric for its leaderboard runs.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    config : ProjectConfig
+        The project's config.
+    task : str
+        Task name.
+    runs : list of RunRecord
+        Candidate runs; only finished, unarchived runs of ``task`` are read.
+    versions : dict of str to str or None
+        Metric version overrides; default is each metric's current version.
+
+    Returns
+    -------
+    dict
+        run_id -> example_id -> per-example fields (without ``id``), read from
+        ``predictions/scores.<metric>@<version>.jsonl``. Runs without that file
+        are left out.
+    """
+    metric, _ = parse_metric_key(config.tasks[task].primary)
+    version = (versions or {}).get(metric, config.metrics[metric].version)
+    name = f"scores.{metric}@{version}.jsonl"
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for r in runs:
+        if r.task != task or r.status != RunStatus.FINISHED or r.archived:
+            continue
+        path = ctx.run_dir(r) / "predictions" / name
+        if path.is_file():
+            out[r.run_id] = {
+                str(row["id"]): {k: v for k, v in row.items() if k != "id"}
+                for row in read_jsonl(path)
+                if "id" in row
+            }
+    return out
+
+
 def get_leaderboard(
-    ctx: Context, ref: str, project: str | None = None, versions: dict[str, str] | None = None
+    ctx: Context,
+    ref: str,
+    project: str | None = None,
+    versions: dict[str, str] | None = None,
+    *,
+    examples: bool = True,
 ) -> Leaderboard:
     """
-    Build the leaderboard of a task from indexed runs and scores.
+    Build the leaderboard of a task from indexed runs, scores, and per-example scores.
 
     Parameters
     ----------
@@ -202,6 +259,10 @@ def get_leaderboard(
         Project to restrict the search to.
     versions : dict of str to str, optional
         Metric version overrides; default is each metric's current version.
+    examples : bool
+        Read each run's per-example scores of the primary metric
+        (``predictions/scores.<metric>@<version>.jsonl``) for test-set
+        intervals and paired tests. ``False`` skips the file reads.
 
     Returns
     -------
@@ -210,12 +271,15 @@ def get_leaderboard(
     entry, task = resolve_task(ctx, ref, project)
     runs = ctx.index.list_runs(project=entry.project, task=task, include_archived=True, limit=None)
     scores = ctx.index.scores_for(r.run_id for r in runs)
-    return build_leaderboard(entry.project, task, entry.config, runs, scores, versions)
+    per_example = primary_examples(ctx, entry.config, task, runs, versions) if examples else None
+    return build_leaderboard(
+        entry.project, task, entry.config, runs, scores, versions, per_example=per_example
+    )
 
 
 def _summary(ctx: Context, entry: ProjectEntry, name: str) -> TaskSummary:
     spec = entry.config.tasks[name]
-    board = get_leaderboard(ctx, name, entry.project)
+    board = get_leaderboard(ctx, name, entry.project, examples=False)
     best = board.rows[0].primary.mean if board.rows and board.rows[0].primary else None
     n_runs = len(
         ctx.index.list_runs(project=entry.project, task=name, status=RunStatus.FINISHED, limit=None)

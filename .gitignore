@@ -6,3 +6,7 @@ docs/_build/
 .pytest_cache/
 .ruff_cache/
 examples/toy-classifier/data/
+docs/mockups/archive/
+.superpowers/plan-parts/
+src/hypothex/ui_dist/
+ui/node_modules/

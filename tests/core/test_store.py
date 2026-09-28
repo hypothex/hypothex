@@ -1,15 +1,24 @@
 import fcntl
+import math
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from hypothex.core.config import ProjectConfig
 from hypothex.core.errors import RunNotFoundError, StoreError
 from hypothex.core.fsutil import append_jsonl
 from hypothex.core.ids import utcnow
 from hypothex.core.layout import Layout
-from hypothex.core.records import ScoreRecord
-from hypothex.core.store import RunStore
+from hypothex.core.records import ScoreRecord, UsageTotals
+from hypothex.core.store import (
+    RunStore,
+    TraceStep,
+    UsageRow,
+    check_stem_owner,
+    safe_stem,
+    sum_usage,
+)
 from tests.factories import make_record
 
 
@@ -110,3 +119,147 @@ def test_project_lock_excludes_other_holders(store: RunStore) -> None:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     with lock_file.open("a") as fh:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # released on exit
+
+
+def test_safe_stem_replaces_unsafe_characters_and_adds_a_hash() -> None:
+    # sha1("route 7/b:ü")[:8] = b85600fe, sha1("../x")[:8] = 72e4d01d
+    assert safe_stem("route 7/b:ü") == "route_7_b__-b85600fe"
+    assert safe_stem("a-b_c.d") == "a-b_c.d"  # already safe: unchanged, no hash
+    assert safe_stem("../x") == ".._x-72e4d01d"
+    with pytest.raises(ValueError, match="must not be empty"):
+        safe_stem("")
+
+
+def test_safe_stem_never_merges_distinct_names() -> None:
+    names = ["a/b", "a_b", "a b", "a:b", "a_b-3ec69c85"]
+    stems = [safe_stem(n) for n in names]
+    assert stems[:2] == ["a_b-3ec69c85", "a_b"]
+    assert len(set(stems)) == len(names)
+
+
+def test_safe_stem_hashes_names_that_already_look_hashed() -> None:
+    # regression: "a_b-3ec69c85" is already safe, but kept as is it would take the
+    # file of "a/b"; a name ending in "-" + 8 lowercase hex digits is hashed too
+    assert safe_stem("a/b") == "a_b-3ec69c85"
+    assert safe_stem("a_b-3ec69c85") == "a_b-3ec69c85-d64fa8bc"  # sha1(...)[:8]
+    assert safe_stem("a/b") != safe_stem("a_b-3ec69c85")
+    assert safe_stem("run-12345678") == "run-12345678-736848d3"
+    assert safe_stem("run-1234567") == "run-1234567"  # 7 digits: not a hash tail
+    assert safe_stem("run-ABCDEF12") == "run-ABCDEF12"  # upper case: not a hash tail
+
+
+def test_check_stem_owner_rejects_a_different_original(tmp_path: Path) -> None:
+    path = tmp_path / "a_b-3ec69c85.jsonl"
+    check_stem_owner(path, "example_id", "a/b")  # no file yet
+    path.write_text("")
+    check_stem_owner(path, "example_id", "a/b")  # empty file
+    path.write_text('{"example_id": "a/b", "turn": 1}\n')
+    check_stem_owner(path, "example_id", "a/b")  # the same original: overwrite is fine
+    path.write_text('{"example_id": "x/y", "turn": 1}\n')
+    with pytest.raises(
+        StoreError,
+        match=r"id collision: a_b-3ec69c85\.jsonl already holds example_id 'x/y', not 'a/b'",
+    ):
+        check_stem_owner(path, "example_id", "a/b")
+    samples = tmp_path / "lat.jsonl"
+    samples.write_text('{"name": "lat", "value": 1.0}\n')
+    check_stem_owner(samples, "name", "lat")
+    with pytest.raises(StoreError, match="id collision"):
+        check_stem_owner(samples, "name", "lat2")
+    samples.write_text('{"value": 1.0}\n')  # written by hand, no stored name: not checked
+    check_stem_owner(samples, "name", "lat2")
+
+
+def test_read_usage_skips_bad_rows_and_sums(store: RunStore) -> None:
+    store.create_run(make_record())
+    path = store.layout.run_dir("toy", "r1") / "usage.jsonl"
+    append_jsonl(
+        path, {"example_id": "a", "tokens_in": 100, "tokens_out": 20, "usd": 0.25, "seconds": 1.5}
+    )
+    append_jsonl(path, {"tokens_in": -1})  # negative: skipped
+    append_jsonl(path, {"tokens_in": "many"})  # not a number: skipped
+    append_jsonl(path, {"usd": math.inf})  # json writes Infinity and reads it back: skipped
+    append_jsonl(path, {"seconds": math.nan})  # NaN: skipped
+    append_jsonl(
+        path, {"example_id": None, "tokens_in": 50, "tokens_out": 5, "usd": 0.125, "seconds": 0.5}
+    )
+    assert "Infinity" in path.read_text()
+    rows = store.read_usage("toy", "r1")
+    assert rows == [
+        UsageRow(example_id="a", tokens_in=100, tokens_out=20, usd=0.25, seconds=1.5),
+        UsageRow(tokens_in=50, tokens_out=5, usd=0.125, seconds=0.5),
+    ]
+    # 0.25 + 0.125 and 1.5 + 0.5 are exact in binary floating point.
+    assert sum_usage(rows) == UsageTotals(
+        tokens_in=150, tokens_out=25, usd=0.375, seconds=2.0, calls=2
+    )
+    assert sum_usage([]) is None
+    assert store.read_usage("toy", "missing") == []
+
+
+def test_usage_and_trace_floats_must_be_finite() -> None:
+    with pytest.raises(ValidationError, match="finite number"):
+        UsageRow(usd=math.inf)
+    with pytest.raises(ValidationError, match="finite number"):
+        TraceStep(turn=1, seconds=math.inf)
+
+
+def test_list_and_read_traces(store: RunStore) -> None:
+    store.create_run(make_record())
+    traces = store.layout.run_dir("toy", "r1") / "traces"
+    assert store.list_traces("toy", "r1") == []
+    ab = traces / f"{safe_stem('a/b')}.jsonl"  # a_b-3ec69c85.jsonl
+    append_jsonl(
+        ab,
+        {
+            "example_id": "a/b",
+            "turn": 1,
+            "tool": "retro_expand",
+            "tokens_in": 4410,
+            "tokens_out": 512,
+            "seconds": 4.82,
+        },
+    )
+    append_jsonl(
+        ab, {"example_id": "a/b", "turn": 2, "tool": "check_stock", "error": "timeout 8 s"}
+    )
+    append_jsonl(ab, {"example_id": "a/b", "turn": 3, "seconds": math.inf})  # not finite: skipped
+    append_jsonl(traces / "c.jsonl", {"tool": "score_routes"})  # no turn, no example_id
+    append_jsonl(traces / "c.jsonl", {"turn": "x"})  # invalid: skipped
+    # an empty trace is one marker line holding the original id
+    append_jsonl(traces / f"{safe_stem('e/0')}.jsonl", {"example_id": "e/0"})
+    assert store.list_traces("toy", "r1") == [
+        {"example_id": "a/b", "turns": 2, "failed": True},
+        {"example_id": "c", "turns": 1, "failed": False},
+        {"example_id": "e/0", "turns": 0, "failed": False},
+    ]
+    steps = store.read_trace("toy", "r1", "a/b")
+    assert steps == [
+        TraceStep(turn=1, tool="retro_expand", tokens_in=4410, tokens_out=512, seconds=4.82),
+        TraceStep(turn=2, tool="check_stock", error="timeout 8 s"),
+    ]
+    assert store.read_trace("toy", "r1", "a_b") == []  # a different id, a different file
+    assert store.read_trace("toy", "r1", "c") == [TraceStep(turn=1, tool="score_routes")]
+    assert store.read_trace("toy", "r1", "e/0") == []
+    assert store.read_trace("toy", "r1", "nope") == []
+
+
+def test_read_samples(store: RunStore) -> None:
+    store.create_run(make_record())
+    samples = store.layout.run_dir("toy", "r1") / "samples"
+    assert store.read_samples("toy", "r1") == {}
+    samples.mkdir()
+    (samples / "latency_ms.jsonl").write_text(
+        '{"value": 12.5}\n{"value": 15}\n{"value": "slow"}\n{"value": true}\n{"value": NaN}\n'
+        '{"value": Infinity}\n'
+    )
+    (samples / "ttft.jsonl").write_text('{"value": 3.0}\n')
+    # the SDK stores the original name in every row; the key is that name, not the stem
+    (samples / f"{safe_stem('latency ms')}.jsonl").write_text(
+        '{"name": "latency ms", "value": 1.0}\n{"name": "latency ms", "value": 2.0}\n'
+    )
+    assert store.read_samples("toy", "r1") == {
+        "latency ms": [1.0, 2.0],
+        "latency_ms": [12.5, 15.0],
+        "ttft": [3.0],
+    }

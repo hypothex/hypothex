@@ -1,0 +1,19 @@
+/* Categorical series palette (design tokens for charts). Slots and steps come from the
+   validated mockup palettes (docs/mockups/kinds/system_bench, agent_eval): adjacent CVD
+   dE >= 15.7 in light and >= 16.7 in dark. `--cat-neutral` is the "other" slot. */
+:root {
+  --cat-1: #2a78d6;
+  --cat-2: #e0602e;
+  --cat-3: #b8447e;
+  --cat-4: #eda100;
+  --cat-5: #4a3aa7;
+  --cat-neutral: #9AA0A9;
+}
+[data-theme="dark"] {
+  --cat-1: #4a90e8;
+  --cat-2: #e06a35;
+  --cat-3: #c95aa8;
+  --cat-4: #c98500;
+  --cat-5: #9085e9;
+  --cat-neutral: #5E6672;
+}

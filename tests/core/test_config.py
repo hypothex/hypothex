@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from hypothex.core.config import (
     CONFIG_FILENAME,
+    MetricSpec,
     find_repo_root,
     load_project_config,
     parse_metric_key,
@@ -105,3 +107,133 @@ def test_find_repo_root_walks_up(tmp_path: Path) -> None:
 def test_starter_config_is_valid(tmp_path: Path) -> None:
     cfg = load_project_config(_write(tmp_path, starter_config("my-proj")))
     assert cfg.project == "my-proj"
+    assert cfg.tasks["example-test"].kind == "generic"
+
+
+def test_task_kind_and_view_fields_default(tmp_path: Path) -> None:
+    task = load_project_config(_write(tmp_path, VALID)).tasks["uspto-topk"]
+    assert task.kind == "generic"
+    assert task.views == {}
+    assert task.baseline is None
+    assert task.version_param == "version"
+
+
+def test_task_kind_and_views_load(tmp_path: Path) -> None:
+    text = VALID.replace(
+        "    primary: topk/k=1\n",
+        "    primary: topk/k=1\n"
+        "    kind: system_bench\n"
+        "    baseline: tag:baseline\n"
+        "    version_param: prompt_version\n"
+        "    views:\n"
+        "      route-quality:\n"
+        "        title: route quality\n"
+        "        panels: [{type: leaderboard}]\n",
+    )
+    task = load_project_config(_write(tmp_path, text)).tasks["uspto-topk"]
+    assert task.kind == "system_bench"
+    assert task.baseline == "tag:baseline"
+    assert task.version_param == "prompt_version"
+    assert task.views == {
+        "route-quality": {"title": "route quality", "panels": [{"type": "leaderboard"}]}
+    }
+
+
+@pytest.mark.parametrize(
+    ("addition", "message"),
+    [
+        ("    kind: benchmark\n", "kind"),
+        ("    version_param: ''\n", "version_param"),
+        ("    views: {Route: {title: x}}\n", "view name 'Route' must match"),
+        ("    views: {overview: {title: x}}\n", "reserved"),
+        ("    views: {a.b: {title: x}}\n", "view name 'a.b' must match"),
+    ],
+)
+def test_invalid_task_kind_and_view_names(tmp_path: Path, addition: str, message: str) -> None:
+    text = VALID.replace("    primary: topk/k=1\n", "    primary: topk/k=1\n" + addition)
+    with pytest.raises(ConfigError, match=message):
+        load_project_config(_write(tmp_path, text))
+
+
+LOOP_LINE = "            spec: &s {mark: point, layer: [*s]}"
+
+
+def _line_of(text: str, needle: str) -> int:
+    return next(i for i, row in enumerate(text.splitlines(), 1) if needle in row)
+
+
+def test_inline_view_anchors_and_aliases_are_rejected_with_their_line(tmp_path: Path) -> None:
+    # regression: this inline view contains itself; it loaded, then views recursed forever
+    loop = (
+        "    views:\n      loop:\n        title: loop\n        panels:\n"
+        f"          - type: vega_lite\n{LOOP_LINE}\n"
+    )
+    text = VALID.replace("    primary: topk/k=1\n", "    primary: topk/k=1\n" + loop)
+    line = _line_of(text, LOOP_LINE)
+    with pytest.raises(
+        ConfigError, match=rf"YAML anchors and aliases are not allowed in views \(line {line}\)"
+    ):
+        load_project_config(_write(tmp_path, text))
+    # an alias inside views to an anchor outside them is rejected as well
+    text = VALID.replace("    split: test\n", "    split: &sp test\n").replace(
+        "    primary: topk/k=1\n", "    primary: topk/k=1\n    views: {v: {title: *sp}}\n"
+    )
+    line = _line_of(text, "views: {v: {title: *sp}}")
+    with pytest.raises(ConfigError, match=rf"not allowed in views \(line {line}\)"):
+        load_project_config(_write(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    "views",
+    [
+        "{loop: {title: loop, panels: [{type: vega_lite, spec: &s {mark: point, layer: [*s]}}]}}",
+        "{v: {title: x}}",
+    ],
+)
+def test_views_key_written_as_an_alias_is_resolved(tmp_path: Path, views: str) -> None:
+    # regression: `*vk:` names `views` through an anchor defined elsewhere, which hid
+    # the self-referencing view below it from a check that only read plain keys
+    text = VALID.replace("    split: test\n", "    split: test\n    description: &vk views\n")
+    text = text.replace("    primary: topk/k=1\n", f"    primary: topk/k=1\n    *vk: {views}\n")
+    line = _line_of(text, "*vk:")
+    with pytest.raises(
+        ConfigError, match=rf"YAML anchors and aliases are not allowed in views \(line {line}\)"
+    ):
+        load_project_config(_write(tmp_path, text))
+
+
+def test_deep_or_cyclic_yaml_is_a_config_error(tmp_path: Path) -> None:
+    # regression: 600 nested lists raised RecursionError inside the YAML loader
+    deep = "[" * 600 + "]" * 600
+    text = VALID.replace("    split: test\n", f"    split: test\n    description: {deep}\n")
+    line = _line_of(text, "description:")
+    with pytest.raises(
+        ConfigError, match=rf"YAML nested too deeply \(over 64 levels\) \(line {line}\)"
+    ):
+        load_project_config(_write(tmp_path, text))
+    # a cycle outside views: metric params that contain themselves
+    text = VALID.replace("    params: {k: [1, 5]}\n", "    params: &p {k: [1, 5], again: *p}\n")
+    line = _line_of(text, "again: *p")
+    with pytest.raises(ConfigError, match=rf"YAML aliases must not form a cycle \(line {line}\)"):
+        load_project_config(_write(tmp_path, text))
+
+
+def test_anchors_outside_views_stay_allowed(tmp_path: Path) -> None:
+    text = VALID.replace(
+        "    path: data/test.jsonl\n", "    path: &test data/test.jsonl\n"
+    ).replace("test: data/test.jsonl}", "test: *test}")
+    assert "*test" in text
+    cfg = load_project_config(_write(tmp_path, text))
+    assert cfg.datasets["uspto50k"].splits["test"] == "data/test.jsonl"
+    shared = VALID.replace("    params: {k: [1, 5]}\n", "    params: &p {k: [1, 5]}\n")
+    shared = shared.replace("    split: test\n", "    split: test\n    description: *p\n")
+    assert "*p" in shared  # a shared (not cyclic) mapping: passes the guards
+    with pytest.raises(ConfigError, match="description"):  # then fails the model: not a str
+        load_project_config(_write(tmp_path, shared))
+
+
+def test_metric_unit_is_optional_and_short() -> None:
+    assert MetricSpec(version="v1", fn="m:f").unit == ""
+    assert MetricSpec(version="v1", fn="m:f", unit="ms").unit == "ms"
+    with pytest.raises(ValidationError):
+        MetricSpec(version="v1", fn="m:f", unit="milliseconds")

@@ -32,6 +32,9 @@ export const PAGES_CSS = `
 .page .timeline .tick, .page .timeline .cl { font: 400 12px var(--sans); fill: var(--ink-3); }
 .page .timeline .cl.best { fill: var(--ink); font-weight: 600; }
 .page .timeline .mark { cursor: pointer; }
+.page .timeline .key { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 14px; font-size: 13px; color: var(--ink-2); }
+.page .timeline .key span { display: inline-flex; align-items: center; gap: 7px; }
+.page .timeline .key svg { display: block; overflow: visible; }
 .page .ideas { list-style: none; margin: 0; padding: 0; }
 .page .idea { display: grid; grid-template-columns: 56px minmax(0, 1fr) minmax(0, 420px) 84px; gap: 0 20px; align-items: center; padding: 14px 0; border-top: 1px solid var(--rule-2); }
 .page .idea:first-child { border-top: 0; }

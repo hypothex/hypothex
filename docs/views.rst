@@ -94,7 +94,8 @@ vega_lite      A Vega-Lite ``spec`` drawn over rows from a ``source``. Rows arri
 ============== ==========================================================================
 
 Sources for ``table`` and ``vega_lite``: ``runs``, ``scores``, ``metrics``,
-``predictions``, ``samples``, ``usage``, ``traces``. Every row has ``run_id``,
+``predictions``, ``samples``, ``usage``, ``traces``, and ``groups``. Every row of the
+per-run sources has ``run_id``,
 ``group_id``, ``label`` (the seed group's short name, as on the leaderboard), and
 ``seed``. Encode charts by ``label`` so they show config names:
 
@@ -108,6 +109,23 @@ Sources for ``table`` and ``vega_lite``: ``runs``, ``scores``, ``metrics``,
        encoding:
          y: {field: label, type: nominal, title: null}
          x: {aggregate: mean, field: value, type: quantitative}
+
+The ``groups`` source is task-level: one row per seed group, in version order (the
+``version`` rule above; ``v9`` before ``v10``). Its keys are ``group_id``, ``label``,
+``version``, ``run_id`` (latest run), ``n`` (runs), ``commit``, ``created_by``,
+``hypothesis``, ``primary`` (the leaderboard mean), ``primary_lo`` and ``primary_hi``
+(95% interval), ``delta_prev`` (``primary`` minus the previous group's), and ``changes``:
+the ``params``/``vars`` that differ from the previous group
+(``model: sonnet-5 → opus-5.5; tools: +stock_check``), else the short commit. A
+``groups`` table keeps exactly the listed ``fields``:
+
+.. code-block:: yaml
+
+   - type: table
+     title: Changes
+     data:
+       source: groups
+       fields: [version, changes, commit, delta_prev, primary, n]
 
 Validation
 ----------

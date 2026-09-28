@@ -128,7 +128,8 @@ def iter_rows(
     Raises
     ------
     ConfigError
-        If ``source`` is not a known source.
+        If ``source`` is not a per-run source (``groups`` is built per task by
+        the panel engine, ``panels.group_rows``).
 
     Examples
     --------
@@ -136,6 +137,8 @@ def iter_rows(
     >>> rows[0]  # doctest: +SKIP
     {'run_id': 'r1', 'group_id': 'aaaa@c1', 'label': 'svm', 'seed': 1, 'value': 0.75}
     """
+    if source == "groups":
+        raise ConfigError("groups is a task-level source; read it through a table panel")
     if source not in SOURCES:
         raise ConfigError(f"unknown source {source!r}; use one of {', '.join(SOURCES)}")
     reader = _READERS[source]

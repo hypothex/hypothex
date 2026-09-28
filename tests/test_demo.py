@@ -370,6 +370,18 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
             # v3 is the cheapest (0.918, hi 1.004); v4..v9 all have y_lo above 1.004
             # (v4 1.127, v9 1.056), so each is flagged
             assert [row["regression"] for row in cost.rows] == [False] * 3 + [True] * 6
+            # Changes: one row per version with only what changed (kinds/agent_iteration)
+            changes = results["Changes"].rows
+            assert [row["version"] for row in changes] == [f"v{i}" for i in range(1, 10)]
+            assert [row["changes"] for row in changes[1:6]] == [
+                "retries: 1 → 3",
+                "tools: +stock_check; temperature: 0 → 0.6",
+                "depth: 4 → 6",
+                "model: gpt-4.1-mini → gpt-4.1",
+                "prompt: react-1 → concise-2",
+            ]
+            assert changes[0]["delta_prev"] is None
+            assert changes[5]["delta_prev"] == pytest.approx(0.5583333 - 0.6066667, abs=1e-6)
         if kind == "system_bench":
             assert results["Latency"].rows[0]["n"] == 15_000  # 3 repeats x 5,000 requests
             errors = results["Error rate"].rows

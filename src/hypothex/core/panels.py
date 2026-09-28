@@ -7,7 +7,7 @@ import math
 import random
 import statistics
 from collections import defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
@@ -18,7 +18,7 @@ from hypothex.core.config import parse_metric_key, parse_metric_version
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, HypothexError
 from hypothex.core.fsutil import read_jsonl
-from hypothex.core.headlines import fmt_value
+from hypothex.core.headlines import MINUS, fmt_value
 from hypothex.core.leaderboard import (
     Leaderboard,
     _natural_key,
@@ -376,25 +376,170 @@ def _table_rows(scope: _Scope, panel: PanelSpec) -> tuple[list[dict[str, Any]], 
     Filtering first lets ``data.filter`` use a field the table does not show. The
     synthetic ``version`` field (``VERSION_REF``) is set on every full ``runs`` row
     before the filter, whatever ``fields`` lists, so ``filter: {version: p10}``
-    works on a table that shows only ``status``.
+    works on a table that shows only ``status``. The task-level ``groups`` source
+    (``group_rows``) keeps exactly the listed ``fields``, in order.
     """
     source = panel.data.source or "runs"
     fields = panel.data.fields
     versions = _run_versions(scope) if source == "runs" else {}
     rows: list[dict[str, Any]] = []
     total = 0
-    for row in iter_rows(scope.ctx, scope.runs, source, labels=scope.labels()):
+    if source == "groups":
+        full: Iterable[dict[str, Any]] = group_rows(scope)
+    else:
+        full = iter_rows(scope.ctx, scope.runs, source, labels=scope.labels())
+    for row in full:
         if versions:
             row[VERSION_REF] = versions[row["run_id"]][1]
         if panel.data.filter and not _row_matches(row, panel.data.filter):
             continue
         total += 1
         if len(rows) < MAX_TABLE_ROWS:
-            rows.append(select_fields(row, fields))
+            if source == "groups":
+                rows.append(row if fields is None else {f: row.get(f) for f in fields})
+            else:
+                rows.append(select_fields(row, fields))
     meta: dict[str, Any] = {"source": source, "total": total}
     if total > MAX_TABLE_ROWS:
         meta["warnings"] = [f"showing the first {MAX_TABLE_ROWS} of {total} rows"]
     return rows, meta
+
+
+def _version_text(members: list[RunRecord], versions: dict[str, tuple[bool, str]]) -> str:
+    """A group's version: its first version-param value, else its first-run time."""
+    return next(
+        (versions[r.run_id][1] for r in members if versions[r.run_id][0]),
+        versions[members[0].run_id][1],
+    )
+
+
+def _items(value: str) -> list[str] | None:
+    """Comma-separated items of a param value, or ``None`` when it has no comma."""
+    return [t.strip() for t in value.split(",") if t.strip()] if "," in value else None
+
+
+def _change(key: str, old: str | None, new: str | None) -> str:
+    """One changed key: ``model: a → b``, ``tools: +x −y`` for lists, ``— `` for missing."""
+    if old is not None and new is not None:
+        before, after = _items(old), _items(new)
+        if before is not None or after is not None:
+            before, after = before or [old], after or [new]
+            diff = [f"+{t}" for t in after if t not in before]
+            diff += [f"{MINUS}{t}" for t in before if t not in after]
+            if diff:
+                return f"{key}: {' '.join(diff)}"
+    return f"{key}: {old if old is not None else '—'} → {new if new is not None else '—'}"
+
+
+def _settings(run: RunRecord, skip: str) -> dict[str, str]:
+    """A run's ``vars`` then ``params`` (params win), without the version param."""
+    return {k: v for k, v in {**run.vars, **run.params}.items() if k != skip}
+
+
+def group_changes(prev: RunRecord | None, run: RunRecord, version_param: str) -> str:
+    """
+    Short text of what changed from the previous group's latest run to this one.
+
+    Parameters
+    ----------
+    prev : RunRecord or None
+        Latest run of the previous group in version order; ``None`` for the first.
+    run : RunRecord
+        Latest run of this group.
+    version_param : str
+        The task's version param, never listed as a change.
+
+    Returns
+    -------
+    str
+        ``params``/``vars`` keys whose values differ, ``key: old → new`` joined by
+        ``; `` (comma-separated values show added and removed items, ``tools:
+        +stock_check``); with no such key, the short commit (``""`` without git).
+
+    Examples
+    --------
+    >>> group_changes(v1, v2, "version")  # doctest: +SKIP
+    'model: sonnet-5 → opus-5.5; tools: +stock_check'
+    """
+    commit = (run.git.commit or "")[:7]
+    if prev is None:
+        return commit
+    old, new = _settings(prev, version_param), _settings(run, version_param)
+    keys = [*new, *(k for k in old if k not in new)]
+    parts = [_change(k, old.get(k), new.get(k)) for k in keys if old.get(k) != new.get(k)]
+    return "; ".join(parts) if parts else commit
+
+
+def group_rows(scope: _Scope) -> list[dict[str, Any]]:
+    """
+    One row per seed group of the scope's runs, in version order (``groups`` source).
+
+    Version order is the ordinal ``version`` axis of the scatter: groups with a
+    version-param value first, in natural order (``v9`` before ``v10``), then groups
+    without one by first-run creation time.
+
+    Parameters
+    ----------
+    scope : _Scope
+        The panel's runs and task-level data.
+
+    Returns
+    -------
+    list of dict
+        Rows with the ``views.GROUP_FIELDS`` keys: ``group_id``, ``label``,
+        ``version``, ``run_id`` (latest run), ``n`` (runs), ``commit`` (7 chars),
+        ``created_by`` (comma-joined), ``hypothesis`` (newest non-empty),
+        ``primary`` (leaderboard mean, ``None`` off the board), ``primary_lo`` /
+        ``primary_hi`` (test-set interval, else the seed interval), ``delta_prev``
+        (``primary`` minus the previous row's; ``None`` for the first row or a
+        missing side), and ``changes`` (``group_changes``).
+    """
+    versions = _run_versions(scope)
+    param = scope.entry.config.tasks[scope.task].version_param
+    board = {row.group_id: row for row in scope.board().rows}
+    labels = scope.labels()
+    members: dict[str, list[RunRecord]] = defaultdict(list)
+    for r in scope.runs:
+        members[group_id_for(r)].append(r)
+
+    def order(gid: str) -> tuple[bool, tuple[tuple[int, int | str], ...]]:
+        runs = members[gid]
+        from_param = any(versions[r.run_id][0] for r in runs)
+        return (not from_param, _natural_key(_version_text(runs, versions)))
+
+    rows: list[dict[str, Any]] = []
+    prev_run: RunRecord | None = None
+    prev_primary: float | None = None
+    for gid in sorted(members, key=order):
+        runs = members[gid]
+        latest = runs[-1]
+        row = board.get(gid)
+        primary = row.primary.mean if row is not None and row.primary is not None else None
+        lo = hi = None
+        if row is not None and row.test_interval is not None:
+            lo, hi = row.test_interval.lo, row.test_interval.hi
+        elif row is not None and row.primary is not None:
+            lo, hi = row.primary.ci_low, row.primary.ci_high
+        delta = None if primary is None or prev_primary is None else primary - prev_primary
+        rows.append(
+            {
+                "group_id": gid,
+                "label": labels[gid],
+                "version": _version_text(runs, versions),
+                "run_id": latest.run_id,
+                "n": len(runs),
+                "commit": (latest.git.commit or "")[:7] or None,
+                "created_by": ", ".join(sorted({r.created_by for r in runs})),
+                "hypothesis": next((r.hypothesis for r in reversed(runs) if r.hypothesis), ""),
+                "primary": primary,
+                "primary_lo": lo,
+                "primary_hi": hi,
+                "delta_prev": delta,
+                "changes": group_changes(prev_run, latest, param),
+            }
+        )
+        prev_run, prev_primary = latest, primary
+    return rows
 
 
 def _table(scope: _Scope, panel: PanelSpec) -> PanelResult:

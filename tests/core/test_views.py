@@ -14,6 +14,7 @@ from hypothex.core.ids import utcnow
 from hypothex.core.index import index_run
 from hypothex.core.records import ScoreRecord
 from hypothex.core.views import (
+    GROUP_FIELDS,
     PRESET_DIR,
     PanelData,
     PanelLayout,
@@ -95,7 +96,9 @@ def test_presets_cover_the_spec_items() -> None:
     assert "Cost by version" not in iteration
     cost = iteration["$ per solved"]
     assert (cost.data.x, cost.data.y) == ("version", "usage.usd/solved")
-    assert iteration["Changes"].data.fields == ["group_id", "version", "created_by", "created_at"]
+    changes = iteration["Changes"].data
+    assert changes.source == "groups"  # one row per version, not per run
+    assert changes.fields == ["version", "changes", "commit", "delta_prev", "primary", "n"]
     bench = {p.title: p for p in load_preset("system_bench").panels}
     percentiles = bench["Percentiles"]
     assert (percentiles.type, percentiles.render) == ("distribution", "table")
@@ -371,6 +374,21 @@ panels:
     data: {source: traces, fields: [anything]}
 """
     assert _check(text)[1] == []
+
+
+def test_groups_source_fields_are_fixed() -> None:
+    text = """\
+title: t
+panels:
+  - type: table
+    data: {source: groups, fields: [version, changes, delta_prev, primary, n]}
+  - type: table
+    data: {source: groups, fields: [run_id, seed, chnages]}
+"""
+    assert _check(text)[1] == [
+        (6, "panels[1].data.fields[1]", "unknown field seed in groups", None),
+        (6, "panels[1].data.fields[2]", "unknown field chnages in groups", "changes"),
+    ]
 
 
 def test_duplicate_panel_titles() -> None:
@@ -755,7 +773,17 @@ def test_view_context_collects_metrics_and_fields(ctx: Context, toy_repo: Path) 
     metrics, fields = view_context(ctx, "toy", "toy-acc")
 
     assert metrics == {"accuracy", "train_loss", "latency_ms"}
-    assert set(fields) == {"runs", "scores", "metrics", "predictions", "samples", "usage", "traces"}
+    assert set(fields) == {
+        "runs",
+        "scores",
+        "metrics",
+        "predictions",
+        "samples",
+        "usage",
+        "traces",
+        "groups",
+    }
+    assert {"label"} <= fields["scores"]
     assert {"run_id", "group_id", "seed", "metric", "version", "key", "value"} <= fields["scores"]
     assert {"run_id", "group_id", "seed", "name", "step", "value"} <= fields["metrics"]
     assert {"run_id", "id", "prediction"} <= fields["predictions"]
@@ -768,4 +796,5 @@ def test_view_context_without_runs_has_config_metrics_only(ctx: Context, toy_rep
     ctx.register_project(toy_repo)
     metrics, fields = view_context(ctx, "toy", "toy-acc")
     assert metrics == {"accuracy"}
+    assert fields.pop("groups") == set(GROUP_FIELDS)  # task-level: fixed keys, runs or not
     assert all(seen == set() for seen in fields.values())

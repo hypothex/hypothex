@@ -44,7 +44,7 @@ PanelType = Literal[
     "markdown",
     "vega_lite",
 ]
-Source = Literal["runs", "scores", "metrics", "predictions", "samples", "usage", "traces"]
+Source = Literal["runs", "scores", "metrics", "predictions", "samples", "usage", "traces", "groups"]
 Noise = Literal["seed", "test_set"]
 
 PRESET_DIR = Path(__file__).resolve().parent.parent / "views" / "presets"
@@ -54,6 +54,22 @@ PRESET_DIR = Path(__file__).resolve().parent.parent / "views" / "presets"
 (RESERVED_VIEW,) = RESERVED_VIEW_NAMES
 
 ROW_KEYS = frozenset({"run_id", "group_id", "label", "seed"})
+GROUP_FIELDS = (
+    "group_id",
+    "label",
+    "version",
+    "run_id",
+    "n",
+    "commit",
+    "created_by",
+    "hypothesis",
+    "primary",
+    "primary_lo",
+    "primary_hi",
+    "delta_prev",
+    "changes",
+)
+"""Keys of a ``groups`` source row (one row per seed group, in version order)."""
 FIELD_PREFIXES = ("usage.", "params.", "vars.")
 VEGA_ROOT_KEYS = frozenset({"mark", "layer", "concat", "hconcat", "vconcat", "facet", "repeat"})
 
@@ -492,8 +508,11 @@ def _panel_issues(
     if panel.type in ("table", "vega_lite") and data.source is None:
         out.append(((*at, "data"), f"{panel.type} needs data.source", None))
     known = known_fields.get(data.source, set()) if data.source else set()
+    if data.source == "groups":
+        known = set(GROUP_FIELDS)
     if known:
-        allowed = known | ROW_KEYS | ({VERSION_REF} if data.source == "runs" else set())
+        row_keys = set() if data.source == "groups" else ROW_KEYS
+        allowed = known | row_keys | ({VERSION_REF} if data.source == "runs" else set())
         for j, name in enumerate(data.fields or []):
             if name not in allowed:
                 out.append(
@@ -869,7 +888,8 @@ def view_context(ctx: Context, project: str, task: str) -> tuple[set[str], dict[
     Reads the task's newest ``CONTEXT_RUNS`` runs (archived included). Metric names
     are the task's configured metrics plus every scored metric, logged step metric,
     and sample series name (``RunStore.read_samples``). Fields are the keys of the first
-    ``CONTEXT_ROWS_PER_RUN`` rows per run of each source (``sources.iter_rows``).
+    ``CONTEXT_ROWS_PER_RUN`` rows per run of each source (``sources.iter_rows``); the
+    task-level ``groups`` source always has ``GROUP_FIELDS``.
 
     Parameters
     ----------
@@ -897,8 +917,10 @@ def view_context(ctx: Context, project: str, task: str) -> tuple[set[str], dict[
     for record in runs:
         metrics.update(p.name for p in ctx.index.metric_points(record.run_id))
         metrics.update(ctx.store.read_samples(record.project, record.run_id))
-    fields: dict[str, set[str]] = {}
+    fields: dict[str, set[str]] = {"groups": set(GROUP_FIELDS)}
     for source in get_args(Source):
+        if source == "groups":
+            continue
         seen: set[str] = set()
         for record in runs:
             for row in islice(iter_rows(ctx, [record], source), CONTEXT_ROWS_PER_RUN):

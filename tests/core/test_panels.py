@@ -22,7 +22,7 @@ from hypothex.core.records import (
     UsageTotals,
 )
 from hypothex.core.store import safe_stem
-from hypothex.core.views import PanelData, PanelSpec, RunFilter, ViewSpec
+from hypothex.core.views import GROUP_FIELDS, PanelData, PanelSpec, RunFilter, ViewSpec
 from tests.factories import make_record
 
 T0 = utcnow()
@@ -277,6 +277,82 @@ def test_data_filter_matches_group_labels(ctx: Context, toy_repo: Path) -> None:
     assert [r["group_id"] for r in query_panel(ctx, "toy", "toy-acc", panel).rows] == ["bbbb@c1"]
     table = _panel("table", data={"source": "runs", "fields": [], "filter": {"label": "svm"}})
     assert _ids(query_panel(ctx, "toy", "toy-acc", table)) == ["s1", "s2"]
+
+
+def test_group_changes_lists_differing_params_else_the_commit() -> None:
+    def rec(commit: str | None, **params: str) -> RunRecord:
+        return make_record(params=params, vars={"lr": "0.1"}, git=GitInfo(commit=commit))
+
+    v1 = rec("aaaaaaa111", version="v1", model="sonnet-5", tools="search,expand")
+    v2 = rec("bbbbbbb222", version="v2", model="opus-5.5", tools="search,expand,stock_check")
+    assert panels.group_changes(None, v1, "version") == "aaaaaaa"
+    assert (
+        panels.group_changes(v1, v2, "version") == "model: sonnet-5 → opus-5.5; tools: +stock_check"
+    )
+    v3 = rec("ccccccc333", version="v3", model="opus-5.5", tools="search", depth="6")
+    assert panels.group_changes(v2, v3, "version") == "tools: −expand −stock_check; depth: — → 6"
+    v4 = rec("ddddddd444", version="v4", model="opus-5.5", tools="search")
+    assert panels.group_changes(v3, v4, "version") == "depth: 6 → —"
+    # the version param never counts as a change; nothing else differs -> the commit
+    v5 = rec("eeeeeee555", version="v5", model="opus-5.5", tools="search")
+    assert panels.group_changes(v4, v5, "version") == "eeeeeee"
+    nogit = rec(None, version="v6", model="opus-5.5", tools="search")
+    assert panels.group_changes(v4, nogit, "version") == ""
+
+
+def test_groups_source_one_row_per_group_in_version_order(ctx: Context, toy_repo: Path) -> None:
+    runs = [
+        ("a1", "aaaa", "v10", 1, 0.9, 0, "c1"),
+        ("a2", "aaaa", "v10", 2, 0.7, 1, "c1"),
+        ("b1", "bbbb", "v9", 1, 0.6, 2, "c1"),
+        ("b2", "bbbb", "v9", 2, 0.6, 3, "c1"),
+        ("c1", "cccc", None, 1, None, 4, "c1"),  # no version param, not scored
+    ]
+    for rid, group, version, seed, value, minute, _ in runs:
+        params = {"model": "m" + group[0]} | ({"version": version} if version else {})
+        rec = _run(
+            ctx,
+            toy_repo,
+            rid,
+            group,
+            minute=minute,
+            seed=seed,
+            params=params,
+            created_by="human:x" if seed == 1 else "agent:y",
+            hypothesis=f"try {group}",
+        )
+        if value is not None:
+            _score(ctx, rec, value)
+    panel = _panel("table", data={"source": "groups"})
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert result.meta == {"source": "groups", "total": 3}
+    b, a, c = result.rows
+    assert [r["version"] for r in result.rows] == [
+        "v9",
+        "v10",
+        (T0 + timedelta(minutes=4)).strftime("%Y-%m-%d %H:%M:%S"),
+    ]
+    assert set(a) == set(GROUP_FIELDS)
+    assert (a["group_id"], a["label"], a["run_id"], a["n"]) == ("aaaa@c1", "try aaaa", "a2", 2)
+    assert (a["commit"], a["created_by"], a["hypothesis"]) == ("c1", "agent:y, human:x", "try aaaa")
+    assert a["primary"] == pytest.approx(0.8)
+    assert a["primary_lo"] < 0.8 < a["primary_hi"]  # seed t-interval (no per-example file)
+    assert b["delta_prev"] is None and b["changes"] == "c1"
+    assert a["delta_prev"] == pytest.approx(0.2)
+    assert a["changes"] == "model: mb → ma"
+    assert (c["primary"], c["primary_lo"], c["delta_prev"]) == (None, None, None)
+    # fields keep exactly the listed keys, in order; the filter reads the full row
+    fields = ["version", "changes", "delta_prev", "n"]
+    panel = _panel("table", data={"source": "groups", "fields": fields, "filter": {"n": 2}})
+    rows = query_panel(ctx, "toy", "toy-acc", panel).rows
+    assert [list(r) for r in rows] == [fields, fields]
+    assert [r["version"] for r in rows] == ["v9", "v10"]
+
+
+def test_iter_rows_refuses_the_task_level_groups_source(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "r1")
+    with pytest.raises(ConfigError, match="groups is a task-level source"):
+        list(panels.iter_rows(ctx, [rec], "groups"))
 
 
 def test_table_truncates_large_sources(

@@ -19,11 +19,13 @@ panels:
     title: $ per solved
     data: {x: version, y: usage.usd/solved, group_by: group}
     layout: {span: 6, row: 3}
+  # One row per version (source: groups): what changed from the previous version (params,
+  # vars, else the commit), the change in the primary metric, and its mean over seeds.
   - type: table
     title: Changes
     data:
-      source: runs
-      fields: [group_id, version, created_by, created_at]
+      source: groups
+      fields: [version, changes, commit, delta_prev, primary, n]
     layout: {span: 6, row: 3}
   - type: grid
     title: Flips

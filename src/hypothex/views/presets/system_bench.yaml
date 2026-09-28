@@ -5,7 +5,8 @@
 # the score latency/p95. These are the names `hx demo` writes; copy this view and rename them
 # to match your task. The percentile table is the latency_ms distribution drawn as a table
 # (render: table): pooled p50/p95/p99 per group, with the change vs the task's baseline group
-# (TaskSpec.baseline, e.g. tag:baseline) and a 95% bootstrap CI over repeats.
+# (TaskSpec.baseline, e.g. tag:baseline) and a 95% bootstrap CI over repeats. Bars and rows are
+# named by `label`, the seed group's short name (as on the leaderboard).
 title: overview
 panels:
   - type: stat_strip
@@ -35,13 +36,13 @@ panels:
     title: Error rate
     data:
       source: scores
-      fields: [group_id, metric, key, value]
+      fields: [metric, key, value]
     spec:
       transform:
         - filter: "datum.metric == 'errors' && datum.key == 'rate'"
       mark: bar
       encoding:
-        y: {field: group_id, type: nominal, title: null}
+        y: {field: label, type: nominal, title: null}
         x: {aggregate: mean, field: value, type: quantitative, title: error rate}
     layout: {span: 6, row: 4}
   - type: curves
@@ -66,7 +67,7 @@ panels:
           as: flagged
       mark: {type: point, filled: true}
       encoding:
-        y: {field: group_id, type: nominal, title: null}
+        y: {field: label, type: nominal, title: null}
         x: {field: vs_median, type: quantitative, title: p95 vs median repeat, axis: {format: "+%"}}
         color: {field: flagged, type: nominal, title: "over +10%"}
         tooltip:

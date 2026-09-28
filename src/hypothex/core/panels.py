@@ -30,7 +30,7 @@ from hypothex.core.leaderboard import (
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
 from hypothex.core.seeds import summarize
-from hypothex.core.sources import iter_rows, select_fields
+from hypothex.core.sources import group_labels, iter_rows, select_fields
 from hypothex.core.stats import ecdf_points, quantile
 from hypothex.core.store import ProjectEntry
 from hypothex.core.views import (
@@ -81,6 +81,7 @@ class _Scope:
     task: str
     runs: list[RunRecord]
     _board: Leaderboard | None = None
+    _labels: dict[str, str] | None = None
 
     def board(self) -> Leaderboard:
         """Leaderboard over this scope's runs (built once)."""
@@ -88,9 +89,23 @@ class _Scope:
             self._board = _build_board(self.ctx, self.entry, self.task, self.runs)
         return self._board
 
-    def board_labels(self) -> dict[str, str]:
-        """Leaderboard label per seed-group id."""
-        return {row.group_id: row.label for row in self.board().rows}
+    def labels(self) -> dict[str, str]:
+        """
+        Label per seed-group id of this scope's runs (built once).
+
+        The leaderboard's label for groups on the board; ``sources.group_labels``
+        (the same rule) for groups that are not, such as running or unscored ones.
+        """
+        if self._labels is None:
+            own = _task_labels(self.entry, self.task, self.runs)
+            self._labels = {**own, **{row.group_id: row.label for row in self.board().rows}}
+        return self._labels
+
+
+def _task_labels(entry: ProjectEntry, task: str, runs: list[RunRecord]) -> dict[str, str]:
+    """``sources.group_labels`` with the task's version param for ``agent_iteration``."""
+    spec = entry.config.tasks[task]
+    return group_labels(runs, spec.version_param if spec.kind == "agent_iteration" else None)
 
 
 def query_panel(
@@ -215,9 +230,13 @@ def _query(
     if runs_filter is not None:
         runs = [r for r in runs if _run_matches(r, runs_filter)]
     if panel.data.filter and panel.type not in ("table", "vega_lite"):
+        labels = _task_labels(entry, task, runs)
+        if "label" in panel.data.filter:
+            board = _build_board(ctx, entry, task, runs)
+            labels.update({row.group_id: row.label for row in board.rows})
         keep = {
             row["run_id"]
-            for row in iter_rows(ctx, runs, "runs")
+            for row in iter_rows(ctx, runs, "runs", labels=labels)
             if _row_matches(row, panel.data.filter)
         }
         runs = [r for r in runs if r.run_id in keep]
@@ -364,7 +383,7 @@ def _table_rows(scope: _Scope, panel: PanelSpec) -> tuple[list[dict[str, Any]], 
     versions = _run_versions(scope) if source == "runs" else {}
     rows: list[dict[str, Any]] = []
     total = 0
-    for row in iter_rows(scope.ctx, scope.runs, source):
+    for row in iter_rows(scope.ctx, scope.runs, source, labels=scope.labels()):
         if versions:
             row[VERSION_REF] = versions[row["run_id"]][1]
         if panel.data.filter and not _row_matches(row, panel.data.filter):
@@ -464,7 +483,7 @@ def _groups(scope: _Scope, panel: PanelSpec) -> list[tuple[str, str, list[RunRec
         else:
             key = group_id_for(r)
         members[key].append(r)
-    labels = scope.board_labels() if by == "group" else {}
+    labels = scope.labels() if by == "group" else {}
     out: list[tuple[str, str, list[RunRecord]]] = []
     for key, runs in members.items():
         label = f"seed {runs[0].seed}" if by == "seed" else labels.get(key)

@@ -9,7 +9,7 @@ from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError
 from hypothex.core.ids import utcnow
 from hypothex.core.records import GitInfo, RunRecord, RunStatus, ScoreRecord, UsageTotals
-from hypothex.core.sources import group_id_for, iter_rows, select_fields
+from hypothex.core.sources import group_id_for, group_labels, iter_rows, select_fields
 from tests.factories import make_record
 
 T0 = utcnow()
@@ -60,6 +60,7 @@ def test_runs_source_flattens_record(ctx: Context, toy_repo: Path) -> None:
         {
             "run_id": "r1",
             "group_id": "aaaa@c1",
+            "label": "svm",
             "seed": 3,
             "status": "finished",
             "created_at": rec.created_at.isoformat(),
@@ -97,6 +98,7 @@ def test_scores_source_skips_errors(ctx: Context, toy_repo: Path) -> None:
         {
             "run_id": "r1",
             "group_id": "aaaa@c1",
+            "label": "group aaaa@c1",
             "seed": 1,
             "metric": "accuracy",
             "version": "v1",
@@ -114,9 +116,30 @@ def test_metrics_source_reads_full_history(ctx: Context, toy_repo: Path) -> None
     )
     rows = list(iter_rows(ctx, [rec], "metrics", fields=["step", "value"]))
     assert rows == [
-        {"run_id": "r1", "group_id": "aaaa@c1", "seed": None, "step": 0, "value": 1.0},
-        {"run_id": "r1", "group_id": "aaaa@c1", "seed": None, "step": 1, "value": 0.5},
-        {"run_id": "r1", "group_id": "aaaa@c1", "seed": None, "step": 2, "value": 1.0 / 3},
+        {
+            "run_id": "r1",
+            "group_id": "aaaa@c1",
+            "label": "group aaaa@c1",
+            "seed": None,
+            "step": 0,
+            "value": 1.0,
+        },
+        {
+            "run_id": "r1",
+            "group_id": "aaaa@c1",
+            "label": "group aaaa@c1",
+            "seed": None,
+            "step": 1,
+            "value": 0.5,
+        },
+        {
+            "run_id": "r1",
+            "group_id": "aaaa@c1",
+            "label": "group aaaa@c1",
+            "seed": None,
+            "step": 2,
+            "value": 1.0 / 3,
+        },
     ]
 
 
@@ -137,6 +160,7 @@ def test_predictions_source_joins_references_meta_and_scores(ctx: Context, toy_r
         {
             "run_id": "r1",
             "group_id": "aaaa@c1",
+            "label": "group aaaa@c1",
             "seed": None,
             "id": "ex-0",
             "prediction": 0,
@@ -148,6 +172,7 @@ def test_predictions_source_joins_references_meta_and_scores(ctx: Context, toy_r
         {
             "run_id": "r1",
             "group_id": "aaaa@c1",
+            "label": "group aaaa@c1",
             "seed": None,
             "id": "ex-1",
             "prediction": 0,
@@ -171,7 +196,7 @@ def test_samples_usage_and_traces_sources(ctx: Context, toy_repo: Path) -> None:
             {"turn": 2, "tool": "edit", "error": "patch failed"},
         ],
     )
-    base = {"run_id": "r1", "group_id": "aaaa@c1", "seed": 2}
+    base = {"run_id": "r1", "group_id": "aaaa@c1", "label": "group aaaa@c1", "seed": 2}
     assert list(iter_rows(ctx, [rec], "samples")) == [
         {**base, "name": "latency_ms", "value": 12.0},
         {**base, "name": "latency_ms", "value": 15.5},
@@ -204,14 +229,15 @@ def test_fields_that_name_row_keys_keep_their_values(ctx: Context, toy_repo: Pat
     ctx.add_score(
         rec, ScoreRecord(metric="accuracy", version="v1", key="value", value=0.75, created_at=T0)
     )
-    fields = ["run_id", "group_id", "seed", "value"]
+    fields = ["run_id", "group_id", "label", "seed", "value"]
     assert list(iter_rows(ctx, [rec], "scores", fields=fields)) == [
-        {"run_id": "r1", "group_id": "aaaa@c1", "seed": 7, "value": 0.75}
+        {"run_id": "r1", "group_id": "aaaa@c1", "label": "group aaaa@c1", "seed": 7, "value": 0.75}
     ]
-    row = {"run_id": "r1", "group_id": "g", "seed": 1, "metric": "m", "value": 2.0}
+    row = {"run_id": "r1", "group_id": "g", "label": "x", "seed": 1, "metric": "m", "value": 2.0}
     assert select_fields(row, ["seed", "value", "nope"]) == {
         "run_id": "r1",
         "group_id": "g",
+        "label": "x",
         "seed": 1,
         "value": 2.0,
         "nope": None,
@@ -226,6 +252,7 @@ def test_fields_restriction_fills_missing_with_none(ctx: Context, toy_repo: Path
         {
             "run_id": "r1",
             "group_id": "aaaa@c1",
+            "label": "group aaaa@c1",
             "seed": None,
             "params.model": "rf",
             "params.nope": None,
@@ -244,3 +271,25 @@ def test_unknown_source_raises(ctx: Context, toy_repo: Path) -> None:
     rec = _run(ctx, toy_repo, "r1")
     with pytest.raises(ConfigError, match="unknown source 'nope'"):
         list(iter_rows(ctx, [rec], "nope"))  # ty: ignore[invalid-argument-type]
+
+
+def test_group_labels_follow_the_leaderboard_rule() -> None:
+    older = make_record("a", config_hash="sha256:aaaa", hypothesis="svm, rbf kernel")
+    newer = make_record(
+        "b", config_hash="sha256:aaaa", hypothesis="", created_at=older.created_at + timedelta(1)
+    )
+    tagged = make_record("c", config_hash="sha256:bbbb", tags=["rf", "base"])
+    versioned = make_record("d", config_hash="sha256:cccc", params={"version": "v3"})
+    labels = group_labels([newer, older, tagged, versioned])
+    # newest non-empty hypothesis, else first tag, else "group <id>"
+    assert labels == {"aaaa@nogit": "svm", "bbbb@nogit": "base", "cccc@nogit": "group cccc@nogit"}
+    assert group_labels([versioned], version_param="version") == {"cccc@nogit": "v3"}
+
+
+def test_rows_carry_group_labels_and_accept_overrides(ctx: Context, toy_repo: Path) -> None:
+    a = _run(ctx, toy_repo, "a", hypothesis="svm; rbf")
+    b = _run(ctx, toy_repo, "b", minute=1, config_hash="sha256:bbbb", tags=["rf"])
+    rows = list(iter_rows(ctx, [a, b], "runs", fields=[]))
+    assert [(r["group_id"], r["label"]) for r in rows] == [("aaaa@c1", "svm"), ("bbbb@c1", "rf")]
+    rows = list(iter_rows(ctx, [a, b], "runs", fields=[], labels={"bbbb@c1": "forest"}))
+    assert [r["label"] for r in rows] == ["svm", "forest"]

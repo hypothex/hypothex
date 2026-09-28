@@ -215,3 +215,9 @@ MCP tools: `list_views(task, project=None)`, `get_view(task, name, project=None)
 
 - `docs/superpowers/plans/2026-09-27-hypothex-phase1b-backend.md` — sections 1–3 (+ `hx serve` serving the built UI, fixtures).
 - `docs/superpowers/plans/2026-09-27-hypothex-phase1b-frontend.md` — section 4, depends on the backend plan being merged (uses `hx demo` for fixtures).
+
+## QA additions (2026-09-28)
+
+Additive changes found in QA. Nothing above is renamed or removed.
+
+- **Row labels** (1.5, 1.6). Every `iter_rows` row carries `label` next to `group_id`: the seed group's short name, the `LeaderboardRow.label` rule (`agent_iteration`: the `version_param` value; else the first clause of the newest non-empty hypothesis, a tag, or `group <id>`). `iter_rows(..., labels=None)` takes a `group_id → label` map; the panel engine passes the leaderboard's labels, so `table`/`vega_lite` rows match the leaderboard. `select_fields` always keeps `run_id`, `group_id`, `label`, `seed`; `label` is a valid `fields` entry and `data.filter` key. The `agent_eval` (Failures) and `system_bench` (Error rate, Repeat spread) presets encode `y` by `label`.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -11,7 +11,7 @@ from hypothex.core.context import Context
 from hypothex.core.datasets import resolve_dataset_path
 from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.fsutil import read_jsonl
-from hypothex.core.leaderboard import group_id_for
+from hypothex.core.leaderboard import group_id_for, group_label
 from hypothex.core.records import RunRecord
 
 if TYPE_CHECKING:
@@ -27,7 +27,54 @@ SOURCES: tuple[str, ...] = (
     "traces",
 )
 
+ROW_KEYS: tuple[str, ...] = ("run_id", "group_id", "label", "seed")
+"""Keys every per-run source row carries, whatever ``fields`` lists."""
+
 _Refs = dict[tuple[str, str | None], dict[str, Any]]
+
+
+def group_labels(runs: list[RunRecord], version_param: str | None = None) -> dict[str, str]:
+    """
+    Short name per seed group of the given runs.
+
+    The rule of ``LeaderboardRow.label``: the group's ``version_param`` value when
+    ``version_param`` is given and a run has it (``agent_iteration`` tasks); else
+    ``group_label`` of the newest non-empty hypothesis and the group's tags.
+
+    Parameters
+    ----------
+    runs : list of RunRecord
+        Runs in any order; they are grouped by ``group_id_for``.
+    version_param : str, optional
+        The task's ``version_param`` for ``agent_iteration`` tasks, else ``None``.
+
+    Returns
+    -------
+    dict of str to str
+        Label per ``group_id``.
+
+    Examples
+    --------
+    >>> group_labels([make_record(hypothesis="svm, rbf kernel")])  # doctest: +SKIP
+    {'aaaa@c1': 'svm'}
+    """
+    members: dict[str, list[RunRecord]] = {}
+    for r in sorted(runs, key=lambda r: (r.created_at, r.run_id)):
+        members.setdefault(group_id_for(r), []).append(r)
+    out: dict[str, str] = {}
+    for key, group in members.items():
+        version = _version_of(group, version_param) if version_param is not None else None
+        if version:
+            out[key] = version
+            continue
+        hypothesis = next((r.hypothesis for r in reversed(group) if r.hypothesis.strip()), "")
+        out[key] = group_label(hypothesis, (t for r in group for t in r.tags), key)
+    return out
+
+
+def _version_of(members: list[RunRecord], param: str) -> str | None:
+    """The first non-empty ``params``/``vars`` value of ``param`` among ``members``."""
+    return next((v for m in members if (v := m.params.get(param) or m.vars.get(param))), None)
 
 
 def iter_rows(
@@ -35,12 +82,13 @@ def iter_rows(
     runs: list[RunRecord],
     source: Source,
     fields: list[str] | None = None,
+    labels: Mapping[str, str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """
     Yield flat rows of one data source across runs.
 
-    Every row carries ``run_id``, ``group_id``, and ``seed``. Other keys per
-    source:
+    Every row carries ``run_id``, ``group_id``, ``label`` (the seed group's short
+    name, as on the leaderboard), and ``seed``. Other keys per source:
 
     - ``runs``: ``status``, ``created_at`` (ISO string), ``created_by``,
       ``hypothesis``, ``tags``, ``host``, ``exit_code``, ``params.*``,
@@ -66,8 +114,11 @@ def iter_rows(
     source : {"runs", "scores", "metrics", "predictions", "samples", "usage", "traces"}
         Which data source to read.
     fields : list of str, optional
-        Keep only these keys (plus ``run_id``, ``group_id``, ``seed``);
+        Keep only these keys (plus ``run_id``, ``group_id``, ``label``, ``seed``);
         missing keys become ``None``.
+    labels : mapping of str to str, optional
+        Label per ``group_id`` (the panel engine passes the leaderboard's);
+        groups it lacks get ``group_labels(runs)``.
 
     Yields
     ------
@@ -83,29 +134,31 @@ def iter_rows(
     --------
     >>> rows = list(iter_rows(ctx, runs, "scores", fields=["value"]))  # doctest: +SKIP
     >>> rows[0]  # doctest: +SKIP
-    {'run_id': 'r1', 'group_id': 'aaaa@c1', 'seed': 1, 'value': 0.75}
+    {'run_id': 'r1', 'group_id': 'aaaa@c1', 'label': 'svm', 'seed': 1, 'value': 0.75}
     """
     if source not in SOURCES:
         raise ConfigError(f"unknown source {source!r}; use one of {', '.join(SOURCES)}")
     reader = _READERS[source]
     refs: _Refs = {}
+    names = {**group_labels(runs), **(labels or {})}
     for run in runs:
-        base = {"run_id": run.run_id, "group_id": group_id_for(run), "seed": run.seed}
+        gid = group_id_for(run)
+        base = {"run_id": run.run_id, "group_id": gid, "label": names[gid], "seed": run.seed}
         for row in reader(ctx, run, refs):
             yield select_fields({**base, **row}, fields)
 
 
 def select_fields(row: dict[str, Any], fields: list[str] | None) -> dict[str, Any]:
     """
-    Keep ``run_id``, ``group_id``, ``seed`` and the listed fields of a full row.
+    Keep ``run_id``, ``group_id``, ``label``, ``seed`` and the listed fields of a full row.
 
     The projection is taken from the full row, so listing ``run_id``,
-    ``group_id``, or ``seed`` keeps their values instead of blanking them.
+    ``group_id``, ``label``, or ``seed`` keeps their values instead of blanking them.
 
     Parameters
     ----------
     row : dict
-        A full row from a source (with ``run_id``, ``group_id``, ``seed``).
+        A full row from a source (with ``run_id``, ``group_id``, ``label``, ``seed``).
     fields : list of str or None
         Fields to keep; ``None`` keeps the whole row.
 
@@ -116,12 +169,13 @@ def select_fields(row: dict[str, Any], fields: list[str] | None) -> dict[str, An
 
     Examples
     --------
-    >>> select_fields({"run_id": "r1", "group_id": "g", "seed": 1, "v": 2}, ["seed", "x"])
-    {'run_id': 'r1', 'group_id': 'g', 'seed': 1, 'x': None}
+    >>> row = {"run_id": "r1", "group_id": "g", "label": "svm", "seed": 1, "v": 2}
+    >>> select_fields(row, ["seed", "x"])
+    {'run_id': 'r1', 'group_id': 'g', 'label': 'svm', 'seed': 1, 'x': None}
     """
     if fields is None:
         return row
-    out = {key: row.get(key) for key in ("run_id", "group_id", "seed")}
+    out = {key: row.get(key) for key in ROW_KEYS}
     out.update({f: row.get(f) for f in fields})
     return out
 

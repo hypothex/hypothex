@@ -53,7 +53,7 @@ PRESET_DIR = Path(__file__).resolve().parent.parent / "views" / "presets"
 # The unpacking fails at import if config ever reserves more than one name.
 (RESERVED_VIEW,) = RESERVED_VIEW_NAMES
 
-ROW_KEYS = frozenset({"run_id", "group_id", "seed"})
+ROW_KEYS = frozenset({"run_id", "group_id", "label", "seed"})
 FIELD_PREFIXES = ("usage.", "params.", "vars.")
 VEGA_ROOT_KEYS = frozenset({"mark", "layer", "concat", "hconcat", "vconcat", "facet", "repeat"})
 

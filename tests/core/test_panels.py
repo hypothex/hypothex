@@ -174,7 +174,14 @@ def test_table_source_fields_and_row_filter(ctx: Context, toy_repo: Path) -> Non
     )
     result = query_panel(ctx, "toy", "toy-acc", panel)
     assert result.rows == [
-        {"run_id": "u1", "group_id": "aaaa@c1", "seed": 4, "example_id": "ex-1", "usd": 0.25}
+        {
+            "run_id": "u1",
+            "group_id": "aaaa@c1",
+            "label": "group aaaa@c1",
+            "seed": 4,
+            "example_id": "ex-1",
+            "usd": 0.25,
+        }
     ]
     assert result.meta == {"source": "usage", "total": 1}
 
@@ -191,7 +198,9 @@ def test_table_filters_full_rows_before_projecting(ctx: Context, toy_repo: Path)
         data={"source": "scores", "fields": ["value"], "filter": {"metric": "accuracy"}},
     )
     result = query_panel(ctx, "toy", "toy-acc", panel)
-    assert result.rows == [{"run_id": "r1", "group_id": "aaaa@c1", "seed": 2, "value": 0.75}]
+    assert result.rows == [
+        {"run_id": "r1", "group_id": "aaaa@c1", "label": "group aaaa@c1", "seed": 2, "value": 0.75}
+    ]
     assert result.meta == {"source": "scores", "total": 1}
 
 
@@ -221,10 +230,53 @@ def test_runs_table_filters_on_version_it_does_not_show(ctx: Context, toy_repo: 
         "table", data={"source": "runs", "fields": ["status"], "filter": {"version": "p10"}}
     )
     result = query_panel(ctx, "toy", "toy-acc", panel)
-    assert result.rows == [{"run_id": "a", "group_id": "aaaa@c1", "seed": 1, "status": "finished"}]
+    assert result.rows == [
+        {
+            "run_id": "a",
+            "group_id": "aaaa@c1",
+            "label": "group aaaa@c1",
+            "seed": 1,
+            "status": "finished",
+        }
+    ]
     assert result.meta == {"source": "runs", "total": 1}
     everything = query_panel(ctx, "toy", "toy-acc", _panel("table", data={"source": "runs"}))
     assert [r["version"] for r in everything.rows][:2] == ["p10", "p9"]  # no fields: shown
+
+
+def test_table_rows_carry_leaderboard_labels(ctx: Context, toy_repo: Path) -> None:
+    _two_groups(ctx, toy_repo)
+    _run(ctx, toy_repo, "c1", "cccc", minute=3, status=RunStatus.RUNNING, tags=["knn"])
+    scores = _panel("table", data={"source": "scores", "fields": ["value"]})
+    rows = query_panel(ctx, "toy", "toy-acc", scores).rows
+    assert [(r["group_id"], r["label"]) for r in rows] == [
+        ("aaaa@c1", "svm"),
+        ("aaaa@c1", "svm"),
+        ("bbbb@c1", "rf"),
+    ]
+    runs = query_panel(ctx, "toy", "toy-acc", _panel("table", data={"source": "runs"})).rows
+    assert runs[-1]["label"] == "knn"  # not on the board: the same rule over its own runs
+
+
+def test_agent_iteration_rows_are_labelled_by_version(ctx: Context, toy_repo: Path) -> None:
+    _set_task(toy_repo, kind="agent_iteration")
+    for rid, group, version, minute in [("a", "aaaa", "v1", 0), ("b", "bbbb", "v2", 1)]:
+        rec = _run(
+            ctx, toy_repo, rid, group, minute=minute, hypothesis="x", params={"version": version}
+        )
+        _score(ctx, rec, 0.5)
+    _run(ctx, toy_repo, "c", "cccc", minute=2, status=RunStatus.RUNNING, params={"version": "v3"})
+    table = _panel("table", data={"source": "runs", "fields": []})
+    rows = query_panel(ctx, "toy", "toy-acc", table).rows
+    assert [r["label"] for r in rows] == ["v1", "v2", "v3"]
+
+
+def test_data_filter_matches_group_labels(ctx: Context, toy_repo: Path) -> None:
+    _two_groups(ctx, toy_repo)
+    panel = _panel("leaderboard", data={"filter": {"label": "rf"}})
+    assert [r["group_id"] for r in query_panel(ctx, "toy", "toy-acc", panel).rows] == ["bbbb@c1"]
+    table = _panel("table", data={"source": "runs", "fields": [], "filter": {"label": "svm"}})
+    assert _ids(query_panel(ctx, "toy", "toy-acc", table)) == ["s1", "s2"]
 
 
 def test_table_truncates_large_sources(
@@ -255,7 +307,13 @@ def test_vega_lite_spec_has_empty_values(ctx: Context, toy_repo: Path) -> None:
     }
     assert panel.spec is not None and panel.spec["data"] == {"url": "https://example.com/x.json"}
     assert result.rows == [
-        {"run_id": "r1", "group_id": "aaaa@c1", "seed": None, "params.lr": "0.1"}
+        {
+            "run_id": "r1",
+            "group_id": "aaaa@c1",
+            "label": "group aaaa@c1",
+            "seed": None,
+            "params.lr": "0.1",
+        }
     ]
 
 

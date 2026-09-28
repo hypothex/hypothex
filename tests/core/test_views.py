@@ -366,7 +366,7 @@ def test_fields_accept_row_keys_and_skip_unknown_sources() -> None:
 title: t
 panels:
   - type: table
-    data: {source: runs, fields: [run_id, group_id, seed, usage.usd]}
+    data: {source: runs, fields: [run_id, group_id, label, seed, usage.usd]}
   - type: table
     data: {source: traces, fields: [anything]}
 """

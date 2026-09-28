@@ -1,5 +1,6 @@
 # Preset view for task kind "agent_eval" (spec 8.4, mockup docs/mockups/kinds/agent_eval).
-# Failure categories come from the per-example prediction field meta.category.
+# Failure categories come from the per-example prediction field meta.category. Bars are named
+# by `label`, the seed group's short name (as on the leaderboard).
 title: overview
 panels:
   - type: stat_strip
@@ -18,13 +19,13 @@ panels:
     title: Failures
     data:
       source: predictions
-      fields: [group_id, meta.category]
+      fields: [meta.category]
     spec:
       transform:
         - filter: "isValid(datum['meta.category'])"
       mark: bar
       encoding:
-        y: {field: group_id, type: nominal, title: null}
+        y: {field: label, type: nominal, title: null}
         x: {aggregate: count, type: quantitative, title: failed}
         color: {field: meta\.category, type: nominal, title: null}
     layout: {span: 5, row: 3}

@@ -95,7 +95,19 @@ vega_lite      A Vega-Lite ``spec`` drawn over rows from a ``source``. Rows arri
 
 Sources for ``table`` and ``vega_lite``: ``runs``, ``scores``, ``metrics``,
 ``predictions``, ``samples``, ``usage``, ``traces``. Every row has ``run_id``,
-``group_id``, and ``seed``.
+``group_id``, ``label`` (the seed group's short name, as on the leaderboard), and
+``seed``. Encode charts by ``label`` so they show config names:
+
+.. code-block:: yaml
+
+   - type: vega_lite
+     title: Error rate
+     data: {source: scores, filter: {metric: errors, key: rate}, fields: [value]}
+     spec:
+       mark: bar
+       encoding:
+         y: {field: label, type: nominal, title: null}
+         x: {aggregate: mean, field: value, type: quantitative}
 
 Validation
 ----------

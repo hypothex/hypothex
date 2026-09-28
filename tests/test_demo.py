@@ -387,6 +387,20 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
             assert min(d["p95"][0] for d in deltas) < -0.25
             # 9 finished runs: p95 for the spread
             assert len(results["Repeat spread"].rows) == 9
+            # bars and points are named by config label, not group id
+            names = {"baseline", "cache-enabled", "async-worker"}
+            for title in ("Error rate", "Repeat spread"):
+                assert {row["label"] for row in results[title].rows} == names
+                assert results[title].meta["spec"]["encoding"]["y"]["field"] == "label"
+        if kind == "agent_eval":
+            failures = results["Failures"]
+            assert failures.meta["spec"]["encoding"]["y"]["field"] == "label"
+            assert {row["label"] for row in failures.rows} == {
+                "Opus 5.5",
+                "Sonnet 5 + scorer",
+                "Sonnet 5",
+                "gpt-5-mini",
+            }
 
 
 def test_existing_project_blocks_every_kind(tmp_path: Path) -> None:

@@ -4,7 +4,7 @@ import { createElement } from "react";
 export const PAGES_CSS = `
 .page { max-width: 1280px; margin: 0 auto; }
 .page .crumb .tag { margin-left: 10px; }
-.page h1.headline { margin: 0; max-width: 21em; font: 500 46px/1.06 var(--serif); letter-spacing: -.018em; text-wrap: balance; }
+.page h1.headline { margin: 0; max-width: 26em; font: 500 46px/1.06 var(--serif); letter-spacing: -.018em; text-wrap: balance; }
 .page h1.headline { hyphens: manual; overflow-wrap: normal; word-break: normal; }
 .page h1.headline .nb { white-space: nowrap; }
 .page h1.headline.long { font-size: 27px; line-height: 1.25; font-weight: 450; max-width: 40em; text-wrap: pretty; }

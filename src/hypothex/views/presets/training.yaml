@@ -1,5 +1,7 @@
 # Preset view for task kind "training" (spec 8.4, mockup docs/mockups/kinds/training).
-# Curves with no metrics list show every logged step metric as small multiples.
+# Curves: loss, accuracy, then the learning rate, one row each (the names `hx demo` writes;
+# rename them to match your task). A curves panel with no metrics list shows every logged step
+# metric. GPU utilisation stays in the GPU sparklines beside the runs table.
 title: overview
 panels:
   - type: stat_strip
@@ -11,7 +13,7 @@ panels:
     layout: {span: 12, row: 2}
   - type: curves
     title: Curves
-    data: {group_by: group, step_metric: step}
+    data: {metrics: [train/loss, val/loss, val/top1, lr], group_by: group, step_metric: step}
     layout: {span: 12, row: 3}
   - type: table
     title: Runs

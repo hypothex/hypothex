@@ -77,6 +77,8 @@ Type           Shows
 stat_strip     A row of headline numbers.
 leaderboard    Seed groups ranked by the primary metric, with seed and test-set noise.
 curves         Metric history by step; seeds faint, mean bold, checkpoints and spikes.
+               Rows follow ``data.metrics`` order. A loss spike is one event per episode,
+               labelled with its step (``spike 9k``); so is a kill (``killed 14k``).
 scatter        One metric against another per group, with an optional Pareto front. A
                non-numeric ``params.``/``vars.`` x (e.g. ``v9``) is an ordinal axis in
                natural order; rows worse than the best earlier version by more than its

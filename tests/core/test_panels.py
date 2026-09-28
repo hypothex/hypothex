@@ -546,8 +546,8 @@ def test_curves_rows_spikes_kills_and_checkpoints(ctx: Context, toy_repo: Path) 
     }
     # step 22: 6.0 > 5 x median(previous 20 values = 1.0); val/acc jumps are ignored (no "loss")
     assert result.meta["events"] == [
-        {"run_id": "c1", "step": 22, "kind": "spike"},
-        {"run_id": "c2", "step": 4, "kind": "killed"},
+        {"run_id": "c1", "step": 22, "kind": "spike", "label": "spike 22"},
+        {"run_id": "c2", "step": 4, "kind": "killed", "label": "killed 4"},
     ]
     assert result.meta["checkpoints"] == [
         {"run_id": "c1", "step": 10, "value": 0.5, "best": False},
@@ -630,6 +630,33 @@ def test_spike_detection_rules() -> None:
     # only the previous 20 values count: median(20 x 3.0) = 3 -> 16 > 15 is a spike,
     # although the median of the whole history (21 x 10.0, 20 x 3.0) would be 10
     assert panels._spikes(pts([10.0] * 21 + [3.0] * 20 + [16.0])) == [41]
+
+
+def test_curves_spike_episode_is_one_event_across_loss_metrics(
+    ctx: Context, toy_repo: Path
+) -> None:
+    rec = _run(ctx, toy_repo, "c1", status=RunStatus.FAILED)
+    steps = [s * 500 for s in range(40)]  # 0 .. 19,500
+
+    def loss(name: str, spiked: set[int]) -> list[dict[str, Any]]:
+        return [{"name": name, "step": s, "value": 9.0 if s in spiked else 1.0} for s in steps]
+
+    # train loss spikes at 12k, 12.5k, 13k; val loss at 12.5k (inside the same episode);
+    # a second train spike at 18k is its own event
+    points = loss("train/loss", {12_000, 12_500, 13_000, 18_000}) + loss("val/loss", {12_500})
+    _jsonl(ctx.run_dir(rec) / "metrics.jsonl", points)
+    result = query_panel(ctx, "toy", "toy-acc", _panel("curves", data={"group_by": "run"}))
+    assert result.meta["events"] == [
+        {"run_id": "c1", "step": 12_000, "kind": "spike", "label": "spike 12k"},
+        {"run_id": "c1", "step": 18_000, "kind": "spike", "label": "spike 18k"},
+        {"run_id": "c1", "step": 19_500, "kind": "failed", "label": "failed 20k"},
+    ]
+
+
+def test_short_step_labels() -> None:
+    cases = {0: "0", 950: "950", 9000: "9k", 9500: "9.5k", 14_250: "14k", 1_250_000: "1.3M"}
+    assert {x: panels.short_step(x) for x in cases} == cases
+    assert panels.short_step(2.5) == "2.5"
 
 
 # scatter --------------------------------------------------------------------------

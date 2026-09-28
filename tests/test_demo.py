@@ -355,6 +355,10 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
         if kind == "training":
             assert {row["name"] for row in results["GPU"].rows} == {"sys/gpu_util"}
             assert results["Checkpoints"].meta["checkpoints"]
+            curves = results["Curves"].meta
+            assert curves["metrics"] == ["train/loss", "val/loss", "val/top1", "lr"]
+            # one spike episode (base recipe seed 2, train and val loss) and one kill
+            assert [e["label"] for e in curves["events"]] == ["spike 9k", "killed 14k"]
         if kind == "agent_iteration":
             solved = results["Solved by version"]
             assert solved.meta["x_type"] == "ordinal"

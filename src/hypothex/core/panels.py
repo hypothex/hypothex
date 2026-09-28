@@ -657,6 +657,79 @@ def _spikes(points: list[MetricPoint]) -> list[int]:
     return steps
 
 
+def _spike_ranges(
+    series: list[MetricPoint], x_of: dict[int, float] | None
+) -> list[tuple[float, float]]:
+    """
+    ``(first x, last x)`` of each run of consecutive spike points (``_spikes``).
+
+    ``x_of`` maps a step to the curves' x (``None``: x is the step); a point
+    without an x is skipped, as on the curve.
+    """
+    flagged = set(_spikes(series))
+    out: list[tuple[float, float]] = []
+    inside = False
+    for p in series:
+        x = p.step if x_of is None else x_of.get(p.step)
+        if x is None:
+            continue
+        if p.step in flagged:
+            if inside:
+                out[-1] = (out[-1][0], x)
+            else:
+                out.append((x, x))
+            inside = True
+        else:
+            inside = False
+    return out
+
+
+def _merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Merge overlapping ``(start, end)`` ranges, e.g. one spike in train and val loss."""
+    merged: list[tuple[float, float]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def short_step(x: float) -> str:
+    """
+    A step or x value in at most four characters: ``950``, ``9.5k``, ``14k``, ``1.2M``.
+
+    Parameters
+    ----------
+    x : float
+        The step (or ``step_metric`` value).
+
+    Returns
+    -------
+    str
+        Thousands as ``k`` and millions as ``M``, with one decimal below 10.
+
+    Examples
+    --------
+    >>> short_step(9000), short_step(9500), short_step(14250), short_step(950)
+    ('9k', '9.5k', '14k', '950')
+    """
+    for size, suffix in ((1e6, "M"), (1e3, "k")):
+        if abs(x) >= size:
+            v = x / size
+            if abs(v) < 10:
+                text = f"{math.floor(v * 10 + 0.5) / 10:.1f}".removesuffix(".0")
+            else:
+                text = str(math.floor(v + 0.5))
+            return text + suffix
+    return str(int(x)) if float(x).is_integer() else f"{x:.3g}"
+
+
+def _event(run_id: str, x: float, kind: str) -> dict[str, Any]:
+    """A curves event with its short label, e.g. ``spike 9k`` or ``killed 14k``."""
+    return {"run_id": run_id, "step": x, "kind": kind, "label": f"{kind} {short_step(x)}"}
+
+
 def _checkpoints(scope: _Scope, run: RunRecord) -> list[Artifact]:
     logged = scope.ctx.store.read_artifacts(run.project, run.run_id)
     merged = {(a.kind, a.path): a for a in [*run.artifacts, *logged]}
@@ -689,6 +762,7 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
             x_of = {p.step: p.value for p in by_name.get(x_name, [])}
         names = wanted if wanted is not None else sorted(n for n in by_name if n != x_name)
         run_events: list[dict[str, Any]] = []
+        spike_ranges: list[tuple[float, float]] = []
         last_x: float | None = None
         for name in names:
             series = sorted(by_name.get(name, []), key=lambda p: p.step)
@@ -710,12 +784,11 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
                     }
                 )
             if "loss" in name.lower():
-                for step in _spikes(series):
-                    x = step if x_of is None else x_of.get(step)
-                    if x is not None:
-                        run_events.append({"run_id": run.run_id, "step": x, "kind": "spike"})
+                spike_ranges += _spike_ranges(series, x_of)
+        for start, _ in _merge_ranges(spike_ranges):
+            run_events.append(_event(run.run_id, start, "spike"))
         if run.status in (RunStatus.KILLED, RunStatus.FAILED) and last_x is not None:
-            run_events.append({"run_id": run.run_id, "step": last_x, "kind": run.status.value})
+            run_events.append(_event(run.run_id, last_x, run.status.value))
         events.extend(sorted(run_events, key=lambda e: e["step"]))
         checkpoints.extend(_checkpoint_rows(scope, run, panel, x_of))
     return PanelResult(

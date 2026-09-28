@@ -252,7 +252,8 @@ function assignName(
  * Returns
  * -------
  * CurvesModel
- *     Groups in `meta.groups` order (unknown groups appended), metric names in
+ *     Groups in `meta.groups` order (unknown groups appended, groups with no points
+ *     dropped), metric names in
  *     first-seen order with learning-rate rows last, and per-row scales. Points of a
  *     spiked run within {@link SPIKE_WINDOW} of the axis after the spike are left
  *     out of the y-domain so one spike does not flatten every other line.
@@ -344,8 +345,10 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
     list.push(rs.seed);
     seedsByGroup.set(g, list);
   }
+  // a group with no points at all (e.g. a run that failed before logging) gets no empty column
+  const drawn = groups.filter((g) => names.some((n) => cells.has(cellKey(g.group_id, n))));
   return {
-    groups: columnTitles(groups, (id) => seedsByGroup.get(id) ?? []),
+    groups: columnTitles(drawn, (id) => seedsByGroup.get(id) ?? []),
     names,
     cells,
     maxStep,

@@ -141,6 +141,12 @@ describe("model", () => {
     expect(m.groups.map((g) => g.group_id)).toEqual(["base", "zeta"]);
     expect(m.cells.get(cellKey("zeta", "train_loss"))?.runs[0]?.points).toEqual([[100, 0.5]]);
   });
+
+  test("a group with no points gets no column", () => {
+    const rows = points().filter((p) => p.group_id === "base");
+    const m = buildCurves(rows, { groups: [{ group_id: "base", label: "base" }, { group_id: "failed", label: "cache r3" }] });
+    expect(m.groups.map((g) => g.group_id)).toEqual(["base"]);
+  });
 });
 
 describe("Curves panel", () => {
@@ -246,7 +252,9 @@ describe("small multiple titles", () => {
 
   test("a column without a known seed switches the whole label to counters", () => {
     const groups = RUNS.map((r) => ({ group_id: r.run_id, label: r.group_id }));
-    const rows = (perRun(groups).rows as unknown as CurvePoint[]).filter((p) => p.run_id !== "a2");
+    const rows = (perRun(groups).rows as unknown as CurvePoint[]).map((p) =>
+      p.run_id === "a2" ? { ...p, seed: null } : p,
+    );
     const model = buildCurves(rows, { groups });
     expect(model.groups.map((g) => g.label)).toEqual(["base s1", "base s2", "aug #1", "aug #2"]);
   });

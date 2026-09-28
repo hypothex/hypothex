@@ -1,18 +1,32 @@
 /** Overview panel: recent ideas, one row per seed group with seed marks and intervals. */
 import { scaleLinear } from "d3-scale";
+import { fmtSig3 } from "../../charts/valueFormat";
 import { DASH, fmtClock, fmtInterval, fmtScore, isAgent, isNum } from "./format";
 import { AppLink, hrefs } from "./links";
 import { ACTIVE_STATUSES, FAILED_STATUSES, type IdeaRow, type RunStatus } from "./types";
 
 const STRIP_H = 30;
 
+/**
+ * The interval drawn for a row: its test-set 95% CI, else the seed t-interval when the
+ * seeds differ (benchmarks and training runs have no test-set interval).
+ */
+export function ideaInterval(idea: IdeaRow): { lo: number; hi: number; how: string } | null {
+  const t = idea.test_interval;
+  if (t) return { lo: t.lo, hi: t.hi, how: "test-set 95% CI" };
+  const p = idea.primary;
+  if (!p || idea.identical_seeds || p.n < 2 || !isNum(p.ci_low) || !isNum(p.ci_high)) return null;
+  return { lo: p.ci_low, hi: p.ci_high, how: `95% CI over ${p.n} seeds` };
+}
+
 /** The x domain of the rows' intervals, best bands, and means, padded 5%. */
 export function ideaDomain(ideas: IdeaRow[]): [number, number] | null {
   const values: number[] = [];
   for (const idea of ideas) {
+    const iv = ideaInterval(idea);
     const candidates = [
-      idea.test_interval?.lo,
-      idea.test_interval?.hi,
+      iv?.lo,
+      iv?.hi,
       idea.best_band?.lo,
       idea.best_band?.hi,
       idea.primary?.mean,
@@ -71,7 +85,7 @@ export function ideaSub(idea: IdeaRow): string {
   const p = idea.primary;
   if (!p) return "";
   if (idea.identical_seeds) return `◇×${p.n}`;
-  if (p.n > 1) return `± ${fmtScore(p.std)}`;
+  if (p.n > 1) return `± ${Math.abs(p.mean) > 1 ? fmtSig3(p.std) : fmtScore(p.std)}`;
   return "1 seed";
 }
 
@@ -108,11 +122,11 @@ function IntervalStrip({ idea, domain }: { idea: IdeaRow; domain: [number, numbe
   const x = (v: number) => pct(domain, v);
   const mid = STRIP_H / 2;
   const band = idea.best_band;
-  const iv = idea.test_interval;
+  const iv = ideaInterval(idea);
   const bandW = band ? Math.max(0, (band.hi - band.lo) / (domain[1] - domain[0] || 1)) : 0;
   return (
     <svg className="iv" height={STRIP_H}>
-      {iv ? <title>{`95% CI ${fmtInterval(iv.lo, iv.hi)}`}</title> : null}
+      {iv ? <title>{`${iv.how} ${fmtInterval(iv.lo, iv.hi)}`}</title> : null}
       {band ? (
         <rect
           x={x(band.lo)}

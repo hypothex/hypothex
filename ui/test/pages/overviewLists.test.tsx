@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { IdeaList, groupIdeas, ideaDomain, ideaScore, ideaSub, pct } from "../../src/pages/components/IdeaList";
+import {
+  IdeaList,
+  groupIdeas,
+  ideaDomain,
+  ideaInterval,
+  ideaScore,
+  ideaSub,
+  pct,
+} from "../../src/pages/components/IdeaList";
 import { FailureList, ProjectsTable, RunningList } from "../../src/pages/components/OverviewLists";
 import { PAGES_CSS } from "../../src/pages/components/styles";
 import type { IdeaRow } from "../../src/pages/components/types";
@@ -32,6 +40,21 @@ describe("idea helpers", () => {
   });
 });
 
+test("without a test-set interval a row shows its seed CI; big means get 3 significant figures", () => {
+  const [, , rf] = ideas as [IdeaRow, IdeaRow, IdeaRow];
+  const bench: IdeaRow = {
+    ...rf,
+    test_interval: null,
+    primary: { mean: 165.62, std: 2.8011, n: 3, ci_low: 158.66, ci_high: 172.58 },
+  };
+  expect(ideaInterval(bench)).toEqual({ lo: 158.66, hi: 172.58, how: "95% CI over 3 seeds" });
+  expect(ideaSub(bench)).toBe("± 2.80");
+  expect(ideaInterval({ ...bench, identical_seeds: true })).toBeNull();
+  const { container } = render(<IdeaList ideas={[bench]} />);
+  expect(container.querySelector("svg.iv title")?.textContent).toBe("95% CI over 3 seeds 159–173");
+  expect(container.querySelectorAll("svg.iv line")).toHaveLength(3);
+});
+
 test("idea strips use percentage geometry, not a scaled viewBox", () => {
   expect(pct([0, 2], 0.5)).toBe("25%");
   expect(pct([1, 1], 1)).toBe("50%");
@@ -50,7 +73,7 @@ test("IdeaList draws one mark per seed and dims failed groups", () => {
   const rows = container.querySelectorAll("li.idea");
   expect(rows).toHaveLength(3);
   expect(rows[1]?.classList.contains("dim")).toBe(true);
-  expect(rows[0]?.querySelector("svg.iv title")?.textContent).toBe("95% CI 0.874–0.953");
+  expect(rows[0]?.querySelector("svg.iv title")?.textContent).toBe("test-set 95% CI 0.874–0.953");
   const name = within(rows[0] as HTMLElement).getByRole("link", { name: "RBF-kernel SVM" });
   expect(name.getAttribute("href")).toBe("/t/toy-classifier/toy-test");
   expect(within(rows[2] as HTMLElement).getByText("human, 21:00")).toBeTruthy();

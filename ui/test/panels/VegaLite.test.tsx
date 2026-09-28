@@ -18,6 +18,9 @@ const {
   DENY_LOADER,
   deepMerge,
   EXTERNAL_DISABLED,
+  isMultiView,
+  isRowFacet,
+  PROBE_W,
   readTokens,
   themeConfig,
   TOKEN_FALLBACK,
@@ -79,6 +82,29 @@ describe("buildSpec", () => {
     expect(out.data).toEqual({ values: ROWS });
   });
 
+  test("single views fit the width only; facet encodings are multi-view", () => {
+    expect(buildSpec(SPEC, ROWS, theme).autosize).toEqual({ type: "fit-x", contains: "padding" });
+    const rowSpec = { mark: "line", encoding: { row: { field: "run_id" }, x: { field: "step" } } };
+    expect(isMultiView(rowSpec)).toBe(true);
+    const out = buildSpec(rowSpec, ROWS, theme);
+    expect("width" in out).toBe(false);
+    expect("autosize" in out).toBe(false);
+  });
+
+  test("a row facet takes the given cell width; other layouts ignore it", () => {
+    const rowSpec = { mark: "line", encoding: { row: { field: "run_id" } } };
+    expect(isRowFacet(rowSpec)).toBe(true);
+    expect(buildSpec(rowSpec, ROWS, theme, 321).width).toBe(321);
+    const op = { facet: { row: { field: "g" } }, spec: { mark: "bar" } };
+    expect(isRowFacet(op)).toBe(true);
+    expect((buildSpec(op, ROWS, theme, 300).spec as Obj).width).toBe(300);
+    expect(isRowFacet({ ...rowSpec, width: 100 })).toBe(false);
+    expect(isRowFacet({ mark: "bar", encoding: { row: {}, column: {} } })).toBe(false);
+    expect(isRowFacet({ facet: { row: {} }, columns: 2, spec: {} })).toBe(false);
+    expect(isRowFacet(SPEC)).toBe(false);
+    expect("width" in buildSpec({ hconcat: [] }, ROWS, theme, 300)).toBe(false);
+  });
+
   test("usermeta is dropped, so a spec cannot set its own embed options", () => {
     const spec = {
       ...SPEC,
@@ -87,6 +113,15 @@ describe("buildSpec", () => {
     const out = buildSpec(spec, ROWS, theme);
     expect("usermeta" in out).toBe(false);
     expect("usermeta" in spec).toBe(true);
+  });
+});
+
+describe("row facet fitting", () => {
+  test("the first embed probes a fixed cell width", async () => {
+    const spec = { mark: "line", encoding: { row: { field: "run_id" } } };
+    render(<VegaLitePanel result={{ type: "vega_lite", title: "t", rows: ROWS, meta: { spec } }} />);
+    await waitFor(() => expect(embedMock).toHaveBeenCalled());
+    expect((embedMock.mock.calls[0]?.[1] as Obj).width).toBe(PROBE_W);
   });
 });
 

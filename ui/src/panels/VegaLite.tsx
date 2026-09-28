@@ -76,6 +76,32 @@ const TOKEN_VARS: Record<Exclude<keyof Tokens, "cat">, string> = {
 };
 
 const MULTI_VIEW = ["facet", "hconcat", "vconcat", "concat", "repeat"];
+const FACET_CHANNELS = ["row", "column", "facet"];
+
+/** True when the spec is a composite view (`width: "container"` does not apply to it). */
+export function isMultiView(spec: Obj): boolean {
+  if (MULTI_VIEW.some((k) => k in spec)) return true;
+  const enc = isPlain(spec.encoding) ? spec.encoding : {};
+  return FACET_CHANNELS.some((k) => k in enc);
+}
+
+/**
+ * True for a one-column facet (`encoding.row`, or `facet: {row}` with no `columns`) with no
+ * width of its own: its cell width can be set so the whole chart fits the panel.
+ */
+export function isRowFacet(spec: Obj): boolean {
+  const enc = isPlain(spec.encoding) ? spec.encoding : null;
+  if (enc && "row" in enc && !("column" in enc) && !("facet" in enc)) return !("width" in spec);
+  const facet = isPlain(spec.facet) ? spec.facet : null;
+  if (facet && "row" in facet && !("column" in facet) && !("columns" in spec)) {
+    const inner = isPlain(spec.spec) ? spec.spec : {};
+    return !("width" in inner);
+  }
+  return false;
+}
+
+/** Cell width of the first embed of a row facet; the second embed fits the panel. */
+export const PROBE_W = 200;
 
 /** Message of every refused resource load. */
 export const EXTERNAL_DISABLED = "external resources are disabled";
@@ -190,11 +216,11 @@ export function deepMerge(base: Obj, over: Obj): Obj {
 /**
  * Build the spec to embed: copies of `rows` become `data.values` (`url`/`name` are dropped),
  * the theme is merged under the spec's own `config`, and single views fill the container
- * width. `usermeta` is dropped, because vega-embed reads `usermeta.embedOptions` as embed
+ * width. A row facet gets `cellWidth` as its cell width when given. `usermeta` is dropped, because vega-embed reads `usermeta.embedOptions` as embed
  * options (it could turn the action menu back on or name config and patch URLs). The input
  * spec is not modified.
  */
-export function buildSpec(spec: Obj, rows: Obj[], config: Obj): Obj {
+export function buildSpec(spec: Obj, rows: Obj[], config: Obj, cellWidth?: number): Obj {
   const data = isPlain(spec.data) ? spec.data : {};
   const keep = Object.fromEntries(
     Object.entries(data).filter(([k]) => k !== "url" && k !== "name" && k !== "values"),
@@ -206,7 +232,14 @@ export function buildSpec(spec: Obj, rows: Obj[], config: Obj): Obj {
     data: { ...keep, values: rows.map((r) => ({ ...r })) },
     config: deepMerge(config, isPlain(spec.config) ? spec.config : {}),
   };
-  if (!("width" in spec) && !MULTI_VIEW.some((k) => k in spec)) out.width = "container";
+  if (!("width" in spec) && !isMultiView(spec)) {
+    out.width = "container";
+    if (!("autosize" in spec)) out.autosize = { type: "fit-x", contains: "padding" };
+  }
+  if (cellWidth !== undefined && isRowFacet(spec)) {
+    if (isPlain(spec.facet)) out.spec = { ...(isPlain(spec.spec) ? spec.spec : {}), width: cellWidth };
+    else out.width = cellWidth;
+  }
   return out;
 }
 
@@ -236,15 +269,27 @@ export function VegaLitePanel({ result }: { result: PanelResult }) {
     let cancelled = false;
     let view: Result | null = null;
     setError(null);
-    const full = buildSpec(spec, rows, themeConfig(readTokens(theme), theme));
-    embed(el, full as VisualizationSpec, EMBED_OPTIONS)
-      .then((r) => {
-        if (cancelled) r.finalize();
-        else view = r;
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+    const config = themeConfig(readTokens(theme), theme);
+    const fit = isRowFacet(spec);
+    const draw = (cellWidth?: number): Promise<void> =>
+      embed(el, buildSpec(spec, rows, config, cellWidth) as VisualizationSpec, EMBED_OPTIONS).then((r) => {
+        if (cancelled) {
+          r.finalize();
+          return;
+        }
+        view = r;
+        if (cellWidth !== PROBE_W) return;
+        // A row facet: the chart is the cell plus labels and padding; fit it to the panel.
+        const drawn = Number(el.querySelector("svg")?.getAttribute("width"));
+        const target = Math.floor(el.clientWidth - (drawn - PROBE_W));
+        if (!(drawn > 0) || !(el.clientWidth > 0) || target < 40 || Math.abs(target - PROBE_W) < 2) return;
+        r.finalize();
+        view = null;
+        return draw(target);
       });
+    draw(fit ? PROBE_W : undefined).catch((e: unknown) => {
+      if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+    });
     return () => {
       cancelled = true;
       view?.finalize();
@@ -264,7 +309,7 @@ export function VegaLitePanel({ result }: { result: PanelResult }) {
           Vega-Lite: {error}
         </p>
       )}
-      <div ref={ref} data-testid="vega" style={{ width: "100%" }} />
+      <div ref={ref} data-testid="vega" style={{ width: "100%", overflowX: "auto" }} />
     </div>
   );
 }

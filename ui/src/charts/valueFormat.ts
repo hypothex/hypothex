@@ -1,8 +1,10 @@
 /**
  * Metric value formatting driven by panel meta.
  *
- * The server may send `meta.unit` (e.g. `ms`, `$`, `%`) and `meta.value_format` (a
- * d3-format specifier, e.g. `.3~r`, `.1%`, `,.0f`). Without them the rule is: values
+ * The server may send `meta.unit` (e.g. `ms`, `$`, `%`) and `meta.value_format`: one of the
+ * backend hints `fraction` (4 decimals, absolute deltas), `number` (3 significant figures,
+ * absolute deltas) or `percent_delta` (3 significant figures, deltas as a relative change),
+ * or else a d3-format specifier (e.g. `.3~r`, `.1%`, `,.0f`). Without them the rule is: values
  * above 1 in magnitude, or with a unit, get 3 significant figures and the unit; values in
  * [-1, 1] keep 4 decimals (scores such as accuracy). Differences of latency-like metrics
  * read as a relative change (`+27%`), since "45 ms slower" depends on the baseline.
@@ -113,11 +115,13 @@ export function valueFormatter(
   key = "",
 ): ValueFormatter {
   const unit = typeof meta?.unit === "string" ? meta.unit.trim() : "";
-  const custom = parseFormat(meta?.value_format);
+  const hint = meta?.value_format;
+  const known = hint === "fraction" || hint === "number" || hint === "percent_delta";
+  const custom = known ? null : parseFormat(hint);
   const big = values.some((v) => Number.isFinite(v) && Math.abs(v) > 1);
-  const latency = isLatencyLike(unit, key);
-  const num = custom ?? (unit || big ? fmtSig3 : f4);
-  const scoreLike = !custom && !unit && !big;
+  const latency = hint === "percent_delta" || (!known && isLatencyLike(unit, key));
+  const scoreLike = hint === "fraction" ? !unit : !known && !custom && !unit && !big;
+  const num = custom ?? (scoreLike ? f4 : fmtSig3);
   return {
     unit,
     num,

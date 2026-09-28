@@ -60,6 +60,26 @@ describe("value_format from meta", () => {
     expect(valueFormatter({ value_format: "zz" }, [0.5]).value(0.42131)).toBe("0.4213");
   });
 
+  test("backend hint fraction keeps 4 decimals and absolute deltas", () => {
+    const f = valueFormatter({ unit: "", value_format: "fraction" }, [0.7417], "solved/value");
+    expect(f.value(0.74167)).toBe("0.7417");
+    expect(f.spread(0.01609)).toBe("0.0161");
+    expect(f.delta(0.725, 0.74167)).toBe(`${MINUS}0.017`);
+  });
+
+  test("backend hint number gives 3 significant figures and absolute deltas", () => {
+    const f = valueFormatter({ unit: "tokens", value_format: "number" }, [1234], "usage.tokens");
+    expect(f.value(1234.4)).toBe("1,230 tokens");
+    expect(f.delta(1300, 1234)).toBe("+66 tokens");
+  });
+
+  test("backend hint percent_delta gives relative deltas whatever the key", () => {
+    const f = valueFormatter({ unit: "ms", value_format: "percent_delta" }, [165.6], "p95");
+    expect(f.value(165.62)).toBe("166 ms");
+    expect(f.spread(2.801)).toBe("2.80");
+    expect(f.delta(210.58, 165.62)).toBe("+27%");
+  });
+
   test("format plus unit", () => {
     expect(valueFormatter({ value_format: ",.0f", unit: "ms" }, [1234]).value(1234.4)).toBe("1,234 ms");
   });

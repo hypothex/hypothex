@@ -211,3 +211,30 @@ describe("Curves panel", () => {
     expect(screen.getByText("No metric history yet")).toBeTruthy();
   });
 });
+
+describe("small multiple titles", () => {
+  const perRun = (groups: Record<string, unknown>[]): PanelResult => ({
+    type: "curves",
+    title: "Utilisation",
+    rows: RUNS.map((r) => ({ run_id: r.run_id, group_id: r.run_id, seed: r.seed, name: "gpu", step: 0, value: 1 })),
+    meta: { groups },
+  });
+
+  test("run labels from meta.groups title each column", () => {
+    const groups = RUNS.map((r) => ({ group_id: r.run_id, label: r.group_id, run_label: `${r.group_id} r${r.seed}` }));
+    const { container } = render(<Curves result={perRun(groups)} />);
+    const titles = [...container.querySelectorAll("text.ttl")].map((t) => t.textContent);
+    expect(titles).toEqual(["base r1", "base r2", "aug r1", "aug r2"]);
+  });
+
+  test("repeated labels without run labels get the run's seed", () => {
+    const groups = RUNS.map((r) => ({ group_id: r.run_id, label: r.group_id }));
+    const model = buildCurves(perRun(groups).rows as unknown as CurvePoint[], { groups });
+    expect(model.groups.map((g) => g.label)).toEqual(["base s1", "base s2", "aug s1", "aug s2"]);
+  });
+
+  test("unique labels are left alone", () => {
+    const model = buildCurves(points(), { groups: [{ group_id: "base", label: "base" }, { group_id: "aug", label: "+aug" }] });
+    expect(model.groups.map((g) => g.label)).toEqual(["base", "+aug"]);
+  });
+});

@@ -42,10 +42,35 @@ export interface EventJson {
   kind: "spike" | "killed" | "failed";
 }
 
-/** `meta.groups[]`. */
+/** `meta.groups[]`. Per-run small multiples may carry a `run_label` (e.g. `baseline r1`). */
 export interface GroupJson {
   group_id: string;
   label: string;
+  run_label?: string;
+}
+
+/**
+ * Column titles for `groups`: `run_label`, else `label`. Titles that still repeat (one
+ * column per run of the same idea) get the run's seed (`baseline s2`) when the column
+ * holds a single seed, else a counter (`baseline #2`).
+ */
+export function columnTitles(groups: GroupJson[], seedsOf: (groupId: string) => (number | null)[]): GroupJson[] {
+  const base = groups.map((g) => {
+    const run = typeof g.run_label === "string" && g.run_label.trim() ? g.run_label.trim() : null;
+    return run ?? (typeof g.label === "string" && g.label.trim() ? g.label : g.group_id);
+  });
+  const count = new Map<string, number>();
+  for (const b of base) count.set(b, (count.get(b) ?? 0) + 1);
+  const seen = new Map<string, number>();
+  return groups.map((g, i) => {
+    const b = base[i] ?? g.group_id;
+    if ((count.get(b) ?? 0) < 2) return { ...g, label: b };
+    const k = (seen.get(b) ?? 0) + 1;
+    seen.set(b, k);
+    const seeds = [...new Set(seedsOf(g.group_id))];
+    const seed = seeds.length === 1 ? seeds[0] : null;
+    return { ...g, label: seed !== null && seed !== undefined ? `${b} s${seed}` : `${b} #${k}` };
+  });
 }
 
 /** One run's points for one metric, sorted by step. */
@@ -245,8 +270,17 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
     const group = runGroup.get(ck.run_id);
     if (name && group) checkpoints.push({ ...ck, name, group_id: group });
   }
+  const seedsByGroup = new Map<string, (number | null)[]>();
+  for (const series of byRun.values()) {
+    const rs = series.values().next().value;
+    if (!rs) continue;
+    const g = runGroup.get(rs.run_id) ?? "";
+    const list = seedsByGroup.get(g) ?? [];
+    list.push(rs.seed);
+    seedsByGroup.set(g, list);
+  }
   return {
-    groups,
+    groups: columnTitles(groups, (id) => seedsByGroup.get(id) ?? []),
     names,
     cells,
     maxStep,
@@ -365,9 +399,12 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
       ))}
       {columns.map((col) => (
         <g key={col.g.group_id} className="curve-col" data-group={col.g.group_id}>
-          <text className="ttl" x={col.x0} y={15}>
-            {col.g.label}
-          </text>
+          <g>
+            <title>{col.g.group_id}</title>
+            <text className="ttl" x={col.x0} y={15}>
+              {col.g.label}
+            </text>
+          </g>
           {rows.map((r, ri) => {
             const scale = model.scales[r.name] ?? { kind: "linear", domain: [0, 1] };
             const y = yScaleFor(scale, r.top, r.h);

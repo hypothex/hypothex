@@ -76,6 +76,7 @@ def test_preset_details_match_spec() -> None:
     assert bench["Latency"].data.metrics == ["latency_ms"]
     assert bench["Throughput vs concurrency"].data.metrics == ["sweep/rps"]
     assert bench["Utilisation"].data.metrics == ["gpu_pct", "cpu_pct"]
+    assert bench["Utilisation"].data.group_by == "group"  # one small multiple per config
     training = {p.title: p for p in load_preset("training").panels}
     assert training["Curves"].data.step_metric == "step"
     assert training["Runs"].data.source == "runs"

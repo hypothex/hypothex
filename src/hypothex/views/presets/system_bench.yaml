@@ -49,9 +49,11 @@ panels:
           - {field: label, type: nominal, title: config}
           - {aggregate: mean, field: value, type: quantitative, title: mean error rate, format: ".3~%"}
     layout: {span: 6, row: 4}
+  # Utilisation: one small multiple per config (seed group), each repeat a faint line and the
+  # mean of the repeats bold, like the training curves. The run page keeps one run's curves.
   - type: curves
     title: Utilisation
-    data: {metrics: [gpu_pct, cpu_pct], group_by: run}
+    data: {metrics: [gpu_pct, cpu_pct], group_by: group}
     layout: {span: 8, row: 5}
   # Repeat spread: each repeat's p95 vs the median repeat of its group; over +10% is flagged
   # (the mockup's outlier rule, e.g. a noisy neighbour).

@@ -1,4 +1,5 @@
 import time
+from collections import defaultdict
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -404,10 +405,17 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
             assert all(lo is not None and lo <= hi for d in deltas for _, lo, hi in d.values())
             # async: repeat p95s 163-169 ms vs baseline 231-235 ms, about -29%
             assert min(d["p95"][0] for d in deltas) < -0.25
-            # utilisation small multiples: one per run, named by config and repeat
-            util = [g["label"] for g in results["Utilisation"].meta["groups"]]
-            assert util[:3] == ["baseline r1", "baseline r2", "baseline r3"]
-            assert len(set(util)) == len(util)
+            # utilisation small multiples: one per config, its 3 repeats inside it
+            util = results["Utilisation"]
+            assert [g["label"] for g in util.meta["groups"]] == [
+                "baseline",
+                "cache-enabled",
+                "async-worker",
+            ]
+            runs_per_group: dict[str, set[str]] = defaultdict(set)
+            for row in util.rows:
+                runs_per_group[row["group_id"]].add(row["run_id"])
+            assert sorted(len(v) for v in runs_per_group.values()) == [3, 3, 3]
             # 9 finished runs: p95 for the spread
             assert len(results["Repeat spread"].rows) == 9
             # bars and points are named by config label, not group id

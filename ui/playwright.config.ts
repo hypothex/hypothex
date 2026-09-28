@@ -38,9 +38,12 @@ export default defineConfig<ThemeOptions>({
       use: { ...devices["Desktop Chrome"], colorScheme: "light", theme: "light" },
     },
     {
+      // Runs after light-edit (not just light/dark): live.spec.ts posts a note to the
+      // same shared demo run from both edit projects, and the Notes panel shows only the
+      // newest one, so the two projects must not write to it at the same time.
       name: "dark-edit",
       testMatch: WRITES,
-      dependencies: ["light", "dark"],
+      dependencies: ["light", "dark", "light-edit"],
       use: { ...devices["Desktop Chrome"], colorScheme: "dark", theme: "dark" },
     },
   ],

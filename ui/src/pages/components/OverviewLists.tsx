@@ -49,7 +49,12 @@ export function FailureList({ failures }: { failures: FailureRow[] }) {
 export function ProjectsTable({ projects }: { projects: ProjectRow[] }) {
   if (projects.length === 0) return <p className="small">none</p>;
   return (
-    <table className="tbl">
+    <table className="tbl projects">
+      <colgroup>
+        <col />
+        <col className="c-runs" />
+        <col className="c-best" />
+      </colgroup>
       <thead>
         <tr>
           <th>Task</th>
@@ -58,15 +63,20 @@ export function ProjectsTable({ projects }: { projects: ProjectRow[] }) {
         </tr>
       </thead>
       <tbody>
-        {projects.map((p) => (
-          <tr key={`${p.project}/${p.task}`} title={p.kind}>
-            <td>
-              <AppLink href={hrefs.task(p.project, p.task)}>{`${p.project} / ${p.task}`}</AppLink>
-            </td>
-            <td className="r">{p.runs}</td>
-            <td className="r">{fmtScore(p.best)}</td>
-          </tr>
-        ))}
+        {projects.map((p) => {
+          const name = `${p.project} / ${p.task}`;
+          return (
+            <tr key={`${p.project}/${p.task}`} title={p.kind}>
+              <td className="nm">
+                <AppLink href={hrefs.task(p.project, p.task)} title={name}>
+                  {name}
+                </AppLink>
+              </td>
+              <td className="r">{p.runs}</td>
+              <td className="r">{fmtScore(p.best)}</td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { IdeaList, groupIdeas, ideaDomain, ideaScore, ideaSub, pct } from "../../src/pages/components/IdeaList";
 import { FailureList, ProjectsTable, RunningList } from "../../src/pages/components/OverviewLists";
+import { PAGES_CSS } from "../../src/pages/components/styles";
 import type { IdeaRow } from "../../src/pages/components/types";
 import { RUN_FAILED, RUN_SVM, STORE, makeOverview, makeRecord } from "./fixtures";
 import { mockClipboard } from "./helpers";
@@ -135,4 +136,14 @@ test("ProjectsTable links each task and shows runs and best", () => {
   expect(link.getAttribute("href")).toBe("/t/toy-classifier/toy-test");
   const cells = screen.getAllByRole("cell").map((c) => c.textContent);
   expect(cells).toEqual(["toy-classifier / toy-test", "12", "0.9222"]);
+});
+
+test("ProjectsTable has fixed number columns with a gap, and clips long task names", () => {
+  const { container } = render(<ProjectsTable projects={makeOverview().projects} />);
+  const table = container.querySelector("table.projects");
+  expect([...(table?.querySelectorAll("col") ?? [])].map((c) => c.className)).toEqual(["", "c-runs", "c-best"]);
+  expect(table?.querySelector("td.nm a")?.getAttribute("title")).toBe("toy-classifier / toy-test");
+  for (const rule of [".page .projects { table-layout: fixed; }", ".page .projects td + td", "text-overflow: ellipsis"]) {
+    expect(PAGES_CSS).toContain(rule);
+  }
 });

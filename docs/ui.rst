@@ -14,7 +14,8 @@ Screens
 -------
 
 - **Overview** (``/``): one-line status, runs by launcher, ideas, running runs, recent
-  failures (with ``Open stderr``), and projects.
+  failures (with ``Open stderr``), and projects. Ideas are grouped by task, and each task
+  has its own x axis, because tasks use different metrics.
 - **Task** (``/t/<project>/<task>?view=<name>``): the task's views as tabs. ``overview``
   is the preset for the task kind; every other tab is a saved view (see :doc:`views`).
   ``+ view`` opens the view editor.
@@ -26,7 +27,8 @@ Screens
   with the paired sign test.
 - **View editor** (``/t/<project>/<task>/edit/<view>``, ``new`` for a new view): YAML on
   the left with inline validation, a live preview on the right, then Save (writes
-  ``.hypothex/views/<task>/<name>.yaml``) or Copy as CLI.
+  ``.hypothex/views/<task>/<name>.yaml``) or Copy as CLI. A new view cannot take the
+  name of a view that is already there: open that view to edit it.
 
 Press ``⌘K`` (``Ctrl K`` on Linux and Windows) to find a run, task or path. The
 colour-mode button in the header switches light and dark mode.

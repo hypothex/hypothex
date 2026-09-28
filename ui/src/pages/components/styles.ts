@@ -47,6 +47,8 @@ export const PAGES_CSS = `
 .page .idea svg.iv { width: 100%; height: 30px; overflow: visible; }
 .page .idea-axis svg { width: 100%; height: 24px; overflow: visible; }
 .page .idea-axis text { font: 400 11.5px var(--sans); fill: var(--ink-3); }
+.page .idea-axis .ax-l { font-size: 12.5px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page .idea-group + .idea-group { margin-top: 18px; }
 .page .fail-b { font: 400 15.5px/1.5 var(--serif); color: var(--ink-2); margin: 0 0 16px; }
 .page .fail-b b { color: var(--ink); font-weight: 650; }
 .page .fail-b .x { color: var(--fail); font-family: var(--sans); font-weight: 600; margin-right: 6px; }

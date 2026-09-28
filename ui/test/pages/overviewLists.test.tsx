@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { IdeaList, ideaDomain, ideaScore, ideaSub } from "../../src/pages/components/IdeaList";
+import { IdeaList, groupIdeas, ideaDomain, ideaScore, ideaSub } from "../../src/pages/components/IdeaList";
 import { FailureList, ProjectsTable, RunningList } from "../../src/pages/components/OverviewLists";
 import type { IdeaRow } from "../../src/pages/components/types";
 import { RUN_FAILED, RUN_SVM, STORE, makeOverview, makeRecord } from "./fixtures";
@@ -42,6 +42,60 @@ test("IdeaList draws one mark per seed and dims failed groups", () => {
   const name = within(rows[0] as HTMLElement).getByRole("link", { name: "RBF-kernel SVM" });
   expect(name.getAttribute("href")).toBe("/t/toy-classifier/toy-test");
   expect(within(rows[2] as HTMLElement).getByText("human, 21:00")).toBeTruthy();
+});
+
+// A second task on another scale (latency in ms, lower is better), interleaved by time.
+const latency = (group_id: string, mean: number, lo: number, hi: number): IdeaRow => ({
+  project: "svc",
+  task: "latency",
+  group_id,
+  label: `cache ${group_id}`,
+  created_by: "human",
+  created_at: "2026-09-26T21:02:00Z",
+  statuses: ["finished"],
+  primary: { mean, std: 0, n: 1, ci_low: null, ci_high: null },
+  test_interval: { lo, hi, method: "bootstrap", n: 50 },
+  identical_seeds: false,
+  best_band: { lo: 166, hi: 180, method: "bootstrap", n: 50 },
+});
+const mixed: IdeaRow[] = [
+  ideas[0] as IdeaRow,
+  latency("l1", 172, 166, 180),
+  ideas[1] as IdeaRow,
+  latency("l2", 220, 210, 233),
+  ideas[2] as IdeaRow,
+];
+
+test("groupIdeas gives each task its own rows and domain, in first-seen order", () => {
+  const groups = groupIdeas(mixed);
+  expect(groups.map((g) => [g.project, g.task, g.ideas.map((i) => i.group_id)])).toEqual([
+    ["toy-classifier", "toy-test", ["63c2ec5f@8f4cac4", "63c2ec5f@0000000", "5a810ddb@2bbf5a3"]],
+    ["svc", "latency", ["l1", "l2"]],
+  ]);
+  // the accuracy domain is the one from the accuracy rows alone
+  expect(groups[0]?.domain).toEqual(ideaDomain(ideas));
+  const [lo, hi] = groups[1]?.domain ?? [0, 0];
+  expect(lo).toBeCloseTo(166 - 67 * 0.05, 6);
+  expect(hi).toBeCloseTo(233 + 67 * 0.05, 6);
+});
+
+test("IdeaList draws one axis per task, so accuracy rows keep a visible best band", () => {
+  const { container } = render(<IdeaList ideas={mixed} />);
+  const groups = container.querySelectorAll(".idea-group");
+  expect(groups).toHaveLength(2);
+  const axes = [...container.querySelectorAll(".idea-axis")];
+  expect(axes.map((a) => a.querySelector(".ax-l")?.textContent)).toEqual([
+    "toy-classifier / toy-test",
+    "svc / latency",
+  ]);
+  expect(axes[1]?.querySelector(".ax-l")?.getAttribute("title")).toBe("x axis: the primary metric of svc / latency");
+  const ticks = (i: number) => [...(axes[i]?.querySelectorAll("text") ?? [])].map((t) => t.textContent);
+  expect(ticks(0).every((t) => Number(t) > 0.8 && Number(t) < 1)).toBe(true);
+  expect(ticks(1).every((t) => Number(t) >= 160 && Number(t) <= 240)).toBe(true);
+  // the best band of the accuracy task spans a real width on its own axis
+  const band = groups[0]?.querySelector("li.idea svg.iv rect");
+  expect(Number(band?.getAttribute("width"))).toBeGreaterThan(100);
+  expect(within(groups[1] as HTMLElement).getAllByRole("listitem")).toHaveLength(2);
 });
 
 test("RunningList shows none, or one link per run", () => {

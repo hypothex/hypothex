@@ -7,7 +7,7 @@ import { ACTIVE_STATUSES, FAILED_STATUSES, type IdeaRow, type RunStatus } from "
 const STRIP_W = 420;
 const STRIP_H = 30;
 
-/** The shared x domain of every row's interval, best band, and mean, padded 5%. */
+/** The x domain of the rows' intervals, best bands, and means, padded 5%. */
 export function ideaDomain(ideas: IdeaRow[]): [number, number] | null {
   const values: number[] = [];
   for (const idea of ideas) {
@@ -25,6 +25,36 @@ export function ideaDomain(ideas: IdeaRow[]): [number, number] | null {
   const hi = Math.max(...values);
   const pad = (hi - lo) * 0.05 || 0.01;
   return [lo - pad, hi + pad];
+}
+
+/** The rows of one task, which share a primary metric and so one x axis. */
+export interface IdeaGroup {
+  project: string;
+  task: string | null;
+  ideas: IdeaRow[];
+  domain: [number, number] | null;
+}
+
+/**
+ * Split rows by (project, task), in order of first appearance, each with its own domain.
+ *
+ * Tasks have different metrics (units and directions), so rows of two tasks never share
+ * an axis. Rows keep their order inside a group.
+ */
+export function groupIdeas(ideas: IdeaRow[]): IdeaGroup[] {
+  const groups = new Map<string, IdeaGroup>();
+  for (const idea of ideas) {
+    const key = JSON.stringify([idea.project, idea.task]);
+    let group = groups.get(key);
+    if (!group) {
+      group = { project: idea.project, task: idea.task, ideas: [], domain: null };
+      groups.set(key, group);
+    }
+    group.ideas.push(idea);
+  }
+  const out = [...groups.values()];
+  for (const group of out) group.domain = ideaDomain(group.ideas);
+  return out;
 }
 
 /** The big number of a row, or what happened instead. */
@@ -100,16 +130,20 @@ function IntervalStrip({ idea, domain }: { idea: IdeaRow; domain: [number, numbe
   );
 }
 
-function Axis({ domain }: { domain: [number, number] }) {
+function Axis({ domain, group }: { domain: [number, number]; group: IdeaGroup }) {
   const x = scaleLinear().domain(domain).range([4, STRIP_W - 4]);
+  const tick = x.tickFormat(4);
+  const name = group.task ? `${group.project} / ${group.task}` : group.project;
   return (
     <div className="idea idea-axis">
       <span />
-      <span />
+      <span className="ax-l" title={`x axis: the primary metric of ${name}`}>
+        {name}
+      </span>
       <svg viewBox={`0 0 ${STRIP_W} 24`}>
         {x.ticks(4).map((t) => (
           <text key={t} x={x(t)} y={16} textAnchor="middle">
-            {t.toFixed(2)}
+            {tick(t)}
           </text>
         ))}
       </svg>
@@ -118,43 +152,44 @@ function Axis({ domain }: { domain: [number, number] }) {
   );
 }
 
+function IdeaLine({ idea, domain }: { idea: IdeaRow; domain: [number, number] | null }) {
+  const agent = isAgent(idea.created_by);
+  return (
+    <li className={idea.primary ? "idea" : "idea dim"}>
+      <span className="mks">
+        {idea.statuses.map((status, i) => (
+          <SeedMark key={`${i}-${status}`} status={status} agent={agent} />
+        ))}
+      </span>
+      <div>
+        <div className="nm">
+          {idea.task ? <AppLink href={hrefs.task(idea.project, idea.task)}>{idea.label}</AppLink> : idea.label}
+        </div>
+        <div className="meta">{`${idea.created_by}, ${fmtClock(idea.created_at)}`}</div>
+      </div>
+      {domain ? <IntervalStrip idea={idea} domain={domain} /> : <span />}
+      <div className="sc">
+        {ideaScore(idea)}
+        <small title={idea.identical_seeds ? "all seeds gave the same score" : undefined}>{ideaSub(idea)}</small>
+      </div>
+    </li>
+  );
+}
+
 export function IdeaList({ ideas }: { ideas: IdeaRow[] }) {
   if (ideas.length === 0) return <p className="small">no ideas in this window</p>;
-  const domain = ideaDomain(ideas);
   return (
     <div>
-      <ul className="ideas">
-        {ideas.map((idea) => {
-          const agent = isAgent(idea.created_by);
-          return (
-            <li key={idea.group_id} className={idea.primary ? "idea" : "idea dim"}>
-              <span className="mks">
-                {idea.statuses.map((status, i) => (
-                  <SeedMark key={`${i}-${status}`} status={status} agent={agent} />
-                ))}
-              </span>
-              <div>
-                <div className="nm">
-                  {idea.task ? (
-                    <AppLink href={hrefs.task(idea.project, idea.task)}>{idea.label}</AppLink>
-                  ) : (
-                    idea.label
-                  )}
-                </div>
-                <div className="meta">{`${idea.created_by}, ${fmtClock(idea.created_at)}`}</div>
-              </div>
-              {domain ? <IntervalStrip idea={idea} domain={domain} /> : <span />}
-              <div className="sc">
-                {ideaScore(idea)}
-                <small title={idea.identical_seeds ? "all seeds gave the same score" : undefined}>
-                  {ideaSub(idea)}
-                </small>
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-      {domain ? <Axis domain={domain} /> : null}
+      {groupIdeas(ideas).map((group) => (
+        <div className="idea-group" key={JSON.stringify([group.project, group.task])}>
+          <ul className="ideas">
+            {group.ideas.map((idea) => (
+              <IdeaLine key={idea.group_id} idea={idea} domain={group.domain} />
+            ))}
+          </ul>
+          {group.domain ? <Axis domain={group.domain} group={group} /> : null}
+        </div>
+      ))}
     </div>
   );
 }

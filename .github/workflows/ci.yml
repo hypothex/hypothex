@@ -22,3 +22,41 @@ jobs:
       - run: uv run ty check src
       - run: uv run pytest -q
       - run: uv run sphinx-build -b html docs docs/_build/html
+
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+      - name: Install Python package
+        working-directory: .
+        run: uv sync
+      - name: Install UI dependencies
+        run: bun install --frozen-lockfile
+      - name: Unit tests
+        run: bun test
+      - name: Build
+        run: bun run build
+      - name: Type-check e2e
+        run: bunx tsc -p e2e/tsconfig.json
+      - name: Install Chromium
+        run: bunx playwright install --with-deps chromium
+      - name: Playwright smoke tests
+        run: bunx playwright test
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            ui/e2e/.report
+            ui/e2e/.results
+          retention-days: 7

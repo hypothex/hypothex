@@ -87,6 +87,17 @@ describe("runStats", () => {
     ]);
   });
 
+  test("the board's unit: suffix units go in the unit field, $ leads the value", () => {
+    const board = { ...makeBoard(), unit: "ms", value_format: "percent_delta" };
+    const row = board.rows[0] ?? null;
+    const primary = primaryRef(board, row);
+    expect(primary?.unit).toBe("ms");
+    const [first] = runStats(makeDetail(), primary, row);
+    expect([first?.value, first?.unit]).toEqual(["0.922", "ms"]);
+    const usd = runStats(makeDetail(), primaryRef({ ...board, unit: "$", value_format: "number" }, row), row)[0];
+    expect([usd?.value, usd?.unit]).toEqual(["$0.922", null]);
+  });
+
   test("usage and a failing exit code; no board means no score stats", () => {
     const detail = makeDetail({
       status: "failed",

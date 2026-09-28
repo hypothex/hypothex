@@ -43,6 +43,10 @@ export interface PrimaryRef {
   version: string;
   key: string;
   interval: NoiseInterval | null;
+  /** Display unit of the primary metric (`board.unit`), `""` when none. */
+  unit?: string;
+  /** Format hint (`board.value_format`). */
+  valueFormat?: string;
 }
 
 /** The task's primary metric at its current version, with the run group's test interval. */
@@ -51,7 +55,14 @@ export function primaryRef(board: Leaderboard | null, row: LeaderboardRow | null
   const [metric = board.primary, key = "value"] = board.primary.split("/");
   const version = board.metric_versions[metric];
   if (!version) return null;
-  return { metric, version, key, interval: row?.test_interval ?? null };
+  return {
+    metric,
+    version,
+    key,
+    interval: row?.test_interval ?? null,
+    unit: board.unit ?? "",
+    valueFormat: board.value_format,
+  };
 }
 
 export interface ScoresListProps {

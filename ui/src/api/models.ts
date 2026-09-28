@@ -276,6 +276,10 @@ export interface Leaderboard {
   headline: string;
   kind: TaskKind;
   stat_strip: StatItem[];
+  /** Display unit of the primary metric (`""`, `ms`, `$`, `tokens`, `s`). */
+  unit?: string;
+  /** Format hint of the primary metric: `fraction`, `number` or `percent_delta`. */
+  value_format?: string;
 }
 
 // overview (contract 1.9) ----------------------------------------------------------------

@@ -72,7 +72,7 @@ describe("buildSpec", () => {
     expect(axisOf(out).labelFontSize).toBe(20);
     expect(axisOf(out).labelColor).toBe("#767C87");
     expect(out.width).toBe("container");
-    expect(out.$schema).toBe("https://vega.github.io/schema/vega-lite/v5.json");
+    expect(out.$schema).toBe("https://vega.github.io/schema/vega-lite/v6.json");
     expect((spec.data as Obj).values).toEqual([]);
   });
 

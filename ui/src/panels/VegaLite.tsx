@@ -227,7 +227,7 @@ export function buildSpec(spec: Obj, rows: Obj[], config: Obj, cellWidth?: numbe
   );
   const { usermeta: _usermeta, ...rest } = spec;
   const out: Obj = {
-    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    $schema: "https://vega.github.io/schema/vega-lite/v6.json",
     ...rest,
     data: { ...keep, values: rows.map((r) => ({ ...r })) },
     config: deepMerge(config, isPlain(spec.config) ? spec.config : {}),

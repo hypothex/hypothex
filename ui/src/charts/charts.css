@@ -2,10 +2,10 @@
 .hx-chart { display: block; overflow: visible; }
 .hx-chart.glyph { display: inline-block; vertical-align: middle; }
 .hx-chart text { font-family: var(--sans); fill: var(--ink-2); }
-.hx-chart .tk { font-size: 11.5px; fill: var(--ink-3); font-variant-numeric: tabular-nums; }
-.hx-chart .lbl { font-size: 12.5px; fill: var(--ink-2); }
-.hx-chart .lbl-s { font-size: 11.5px; fill: var(--ink-3); }
-.hx-chart .lbl-b { font-size: 12.5px; fill: var(--ink); font-weight: 600; }
+.hx-chart .tk { font-size: 11px; fill: var(--ink-3); font-variant-numeric: tabular-nums; }
+.hx-chart .lbl { font-size: 12px; fill: var(--ink-2); }
+.hx-chart .lbl-s { font-size: 11px; fill: var(--ink-3); }
+.hx-chart .lbl-b { font-size: 12px; fill: var(--ink); font-weight: 600; }
 .hx-chart .ttl { font-size: 14px; font-weight: 600; fill: var(--ink); }
 .hx-chart .axis { stroke: var(--ink-3); stroke-width: 1; }
 .hx-chart .grid { stroke: var(--rule-2); stroke-width: 1; }

@@ -4,6 +4,7 @@
  */
 import type { CSSProperties } from "react";
 import type { GridRow } from "../api/models";
+import { FS, useElementWidth } from "../charts/Scale";
 import type { PanelResult } from "./index";
 import { fmtNum } from "./Table";
 
@@ -79,16 +80,24 @@ export function gridLayout(rows: GridRow[], meta: Record<string, unknown>): Grid
   return { items, groups, cells };
 }
 
-const W = 720;
-const LW = 150;
+/** Width used before layout is known (and in test DOMs). */
+export const GRID_FALLBACK_W = 720;
+/** Least width of the label gutter (group label plus the solved count). */
+export const MIN_LW = 150;
+
+/** Gutter width for these labels: room for the longest label at 12 px plus the count. */
+export function labelGutter(groups: GridGroup[]): number {
+  const longest = Math.max(0, ...groups.map((g) => g.label.length));
+  return Math.min(260, Math.max(MIN_LW, Math.ceil(longest * 7 + 56)));
+}
 const TOP = 24;
 const RH = 24;
 const CH = 18;
 
 const T = {
-  tk: { fontSize: 11.5, fill: "var(--ink-3)", fontVariantNumeric: "tabular-nums" },
-  lbl: { fontSize: 12.5, fill: "var(--ink-2)" },
-  lblS: { fontSize: 11.5, fill: "var(--ink-3)" },
+  tk: { fontSize: FS.tick, fill: "var(--ink-3)", fontVariantNumeric: "tabular-nums" },
+  lbl: { fontSize: FS.label, fill: "var(--ink-2)" },
+  lblS: { fontSize: FS.tick, fill: "var(--ink-3)" },
   key: {
     display: "flex",
     flexWrap: "wrap",
@@ -105,19 +114,21 @@ const T = {
 
 /** Grid panel. Reads `meta.items` (hardest first) and `meta.groups`. */
 export function GridPanel({ result }: { result: PanelResult }) {
+  const [ref, W] = useElementWidth<HTMLDivElement>(GRID_FALLBACK_W);
   const rows = result.rows as unknown as GridRow[];
   const meta = (result.meta ?? {}) as Record<string, unknown>;
   if (rows.length === 0) return <p style={T.empty}>No items</p>;
   const { items, groups, cells } = gridLayout(rows, meta);
+  const LW = labelGutter(groups);
   const cw = (W - LW) / items.length;
   const gap = cw > 4 ? 1 : 0;
   const yb = TOP + groups.length * RH + 14;
 
   return (
-    <div>
+    <div ref={ref}>
       <svg
-        viewBox={`0 0 ${W} ${yb + 6}`}
-        width="100%"
+        width={W}
+        height={yb + 6}
         role="img"
         aria-label={`Share of seeds solved for ${items.length} items by ${groups.length} groups`}
         style={{ display: "block", overflow: "visible", fontFamily: "var(--sans)" }}

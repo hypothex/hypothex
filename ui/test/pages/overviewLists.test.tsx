@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { IdeaList, groupIdeas, ideaDomain, ideaScore, ideaSub } from "../../src/pages/components/IdeaList";
+import { IdeaList, groupIdeas, ideaDomain, ideaScore, ideaSub, pct } from "../../src/pages/components/IdeaList";
 import { FailureList, ProjectsTable, RunningList } from "../../src/pages/components/OverviewLists";
 import type { IdeaRow } from "../../src/pages/components/types";
 import { RUN_FAILED, RUN_SVM, STORE, makeOverview, makeRecord } from "./fixtures";
@@ -29,6 +29,17 @@ describe("idea helpers", () => {
     const one: IdeaRow = { ...rf, primary: { mean: 0.5, std: 0, n: 1, ci_low: null, ci_high: null } };
     expect(ideaSub(one)).toBe("1 seed");
   });
+});
+
+test("idea strips use percentage geometry, not a scaled viewBox", () => {
+  expect(pct([0, 2], 0.5)).toBe("25%");
+  expect(pct([1, 1], 1)).toBe("50%");
+  const { container } = render(<IdeaList ideas={ideas} />);
+  for (const svg of container.querySelectorAll("svg.iv, .idea-axis svg")) {
+    expect(svg.getAttribute("viewBox")).toBeNull();
+    expect(svg.getAttribute("preserveAspectRatio")).toBeNull();
+  }
+  expect(container.querySelector(".idea-axis text")?.getAttribute("x")).toMatch(/%$/);
 });
 
 test("IdeaList draws one mark per seed and dims failed groups", () => {
@@ -94,7 +105,8 @@ test("IdeaList draws one axis per task, so accuracy rows keep a visible best ban
   expect(ticks(1).every((t) => Number(t) >= 160 && Number(t) <= 240)).toBe(true);
   // the best band of the accuracy task spans a real width on its own axis
   const band = groups[0]?.querySelector("li.idea svg.iv rect");
-  expect(Number(band?.getAttribute("width"))).toBeGreaterThan(100);
+  expect(band?.getAttribute("width")).toMatch(/%$/);
+  expect(Number.parseFloat(band?.getAttribute("width") ?? "0")).toBeGreaterThan(40);
   expect(within(groups[1] as HTMLElement).getAllByRole("listitem")).toHaveLength(2);
 });
 

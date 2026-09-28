@@ -6,7 +6,13 @@
  */
 import { scaleLinear, scaleLog } from "d3-scale";
 import { format } from "d3-format";
-import { useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useRef, useState } from "react";
+
+/**
+ * Chart text sizes in CSS px. Charts are drawn at their measured width (never scaled by a
+ * `viewBox`), so these are the sizes on screen whatever the panel width.
+ */
+export const FS = { tick: 11, label: 12, title: 14 } as const;
 
 /** A numeric position function, value to pixel. */
 export type Pos = (v: number) => number;
@@ -141,16 +147,18 @@ export function logScale(domain: [number, number], r0: number, r1: number): Line
 /**
  * Measure an element's width, falling back to `fallback` when layout is unknown.
  *
- * Charts render at `fallback` first (and in test DOMs, where width is 0), then
- * re-render at the measured width and on every resize.
+ * Returns a callback ref: charts render at `fallback` first (and in test DOMs, where width
+ * is 0), then re-render at the measured width and on every resize. The ref may attach
+ * after the first render (a chart that first shows "no data"), and still gets measured.
  */
 export function useElementWidth<T extends HTMLElement>(
   fallback: number,
-): [RefObject<T | null>, number] {
-  const ref = useRef<T | null>(null);
+): [(el: T | null) => void, number] {
   const [width, setWidth] = useState(fallback);
-  useLayoutEffect(() => {
-    const el = ref.current;
+  const observer = useRef<ResizeObserver | null>(null);
+  const ref = useCallback((el: T | null) => {
+    observer.current?.disconnect();
+    observer.current = null;
     if (!el) return;
     const read = (): void => {
       const w = el.getBoundingClientRect().width;
@@ -158,9 +166,8 @@ export function useElementWidth<T extends HTMLElement>(
     };
     read();
     if (typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(read);
-    ro.observe(el);
-    return () => ro.disconnect();
+    observer.current = new ResizeObserver(read);
+    observer.current.observe(el);
   }, []);
   return [ref, width];
 }

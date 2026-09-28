@@ -46,7 +46,7 @@ export const PAGES_CSS = `
 .page .idea.dim .nm, .page .idea.dim .sc { color: var(--ink-3); font-weight: 400; }
 .page .idea svg.iv { width: 100%; height: 30px; overflow: visible; }
 .page .idea-axis svg { width: 100%; height: 24px; overflow: visible; }
-.page .idea-axis text { font: 400 11.5px var(--sans); fill: var(--ink-3); }
+.page .idea-axis text { font: 400 11px var(--sans); fill: var(--ink-3); }
 .page .idea-axis .ax-l { font-size: 12.5px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .page .idea-group + .idea-group { margin-top: 18px; }
 .page .fail-b { font: 400 15.5px/1.5 var(--serif); color: var(--ink-2); margin: 0 0 16px; }
@@ -119,7 +119,8 @@ export const PAGES_CSS = `
 .page .sw.broken { background: var(--fail); }
 .page .sw.both_fail { background: var(--ink-2); }
 .page .sw.both_pass { background: var(--rule); }
-.page .strip svg, .page .signtest svg { width: 100%; height: auto; overflow: visible; }
+.page .strip svg { width: 100%; height: auto; overflow: visible; }
+.page .signtest svg { display: block; overflow: visible; }
 .page .strip rect.fixed { fill: var(--best); }
 .page .strip rect.broken { fill: var(--fail); }
 .page .strip rect.both_fail { fill: var(--ink-2); }
@@ -128,7 +129,7 @@ export const PAGES_CSS = `
 .page .strip-key li { display: inline-flex; gap: 7px; align-items: center; }
 .page .signtest rect { fill: var(--rule); }
 .page .signtest rect[data-tail="true"] { fill: var(--ink); }
-.page .signtest text { font: 400 11.5px var(--sans); fill: var(--ink-3); }
+.page .signtest text { font: 400 11px var(--sans); fill: var(--ink-3); }
 .page .signtest .obs { stroke: var(--ink-3); }
 .page .signtest text.obs-l { fill: var(--ink); font-weight: 600; }
 `;

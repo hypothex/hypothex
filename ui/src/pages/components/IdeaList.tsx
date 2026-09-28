@@ -4,7 +4,6 @@ import { DASH, fmtClock, fmtInterval, fmtScore, isAgent, isNum } from "./format"
 import { AppLink, hrefs } from "./links";
 import { ACTIVE_STATUSES, FAILED_STATUSES, type IdeaRow, type RunStatus } from "./types";
 
-const STRIP_W = 420;
 const STRIP_H = 30;
 
 /** The x domain of the rows' intervals, best bands, and means, padded 5%. */
@@ -98,19 +97,27 @@ function SeedMark({ status, agent }: { status: RunStatus; agent: boolean }) {
   );
 }
 
+/** Position of `v` in `domain` as an SVG percentage length, so strips need no viewBox. */
+export function pct(domain: [number, number], v: number): string {
+  const [lo, hi] = domain;
+  const t = hi === lo ? 0.5 : (v - lo) / (hi - lo);
+  return `${+(t * 100).toFixed(3)}%`;
+}
+
 function IntervalStrip({ idea, domain }: { idea: IdeaRow; domain: [number, number] }) {
-  const x = scaleLinear().domain(domain).range([4, STRIP_W - 4]);
+  const x = (v: number) => pct(domain, v);
   const mid = STRIP_H / 2;
   const band = idea.best_band;
   const iv = idea.test_interval;
+  const bandW = band ? Math.max(0, (band.hi - band.lo) / (domain[1] - domain[0] || 1)) : 0;
   return (
-    <svg className="iv" viewBox={`0 0 ${STRIP_W} ${STRIP_H}`} preserveAspectRatio="none">
+    <svg className="iv" height={STRIP_H}>
       {iv ? <title>{`95% CI ${fmtInterval(iv.lo, iv.hi)}`}</title> : null}
       {band ? (
         <rect
           x={x(band.lo)}
           y={0}
-          width={Math.max(0, x(band.hi) - x(band.lo))}
+          width={`${+(bandW * 100).toFixed(3)}%`}
           height={STRIP_H}
           fill="var(--best-wash)"
           stroke="var(--best-edge)"
@@ -124,15 +131,17 @@ function IntervalStrip({ idea, domain }: { idea: IdeaRow; domain: [number, numbe
         </g>
       ) : null}
       {idea.primary ? (
-        <rect x={x(idea.primary.mean) - 3.5} y={mid - 3.5} width={7} height={7} fill="var(--ink)" />
+        <svg x={x(idea.primary.mean)} y={mid} overflow="visible">
+          <rect data-mean="" x={-3.5} y={-3.5} width={7} height={7} fill="var(--ink)" />
+        </svg>
       ) : null}
     </svg>
   );
 }
 
 function Axis({ domain, group }: { domain: [number, number]; group: IdeaGroup }) {
-  const x = scaleLinear().domain(domain).range([4, STRIP_W - 4]);
-  const tick = x.tickFormat(4);
+  const s = scaleLinear().domain(domain);
+  const tick = s.tickFormat(4);
   const name = group.task ? `${group.project} / ${group.task}` : group.project;
   return (
     <div className="idea idea-axis">
@@ -140,9 +149,9 @@ function Axis({ domain, group }: { domain: [number, number]; group: IdeaGroup })
       <span className="ax-l" title={`x axis: the primary metric of ${name}`}>
         {name}
       </span>
-      <svg viewBox={`0 0 ${STRIP_W} 24`}>
-        {x.ticks(4).map((t) => (
-          <text key={t} x={x(t)} y={16} textAnchor="middle">
+      <svg height={24}>
+        {s.ticks(4).map((t) => (
+          <text key={t} x={pct(domain, t)} y={16} textAnchor="middle">
             {tick(t)}
           </text>
         ))}

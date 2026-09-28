@@ -101,10 +101,10 @@ h1.finding .then { color: var(--ink-2); font-weight: 400; }
 
 /* svg figure text */
 svg text { font-family: var(--sans); fill: var(--ink-2); }
-svg .tk { font-size: 11.5px; fill: var(--ink-3); font-variant-numeric: tabular-nums; }
-svg .lbl { font-size: 12.5px; fill: var(--ink-2); }
-svg .lbl-s { font-size: 11.5px; fill: var(--ink-3); }
-svg .lbl-b { font-size: 12.5px; fill: var(--ink); font-weight: 600; }
+svg .tk { font-size: 11px; fill: var(--ink-3); font-variant-numeric: tabular-nums; }
+svg .lbl { font-size: 12px; fill: var(--ink-2); }
+svg .lbl-s { font-size: 11px; fill: var(--ink-3); }
+svg .lbl-b { font-size: 12px; fill: var(--ink); font-weight: 600; }
 svg .axis { stroke: var(--ink-3); stroke-width: 1; }
 svg .grid { stroke: var(--rule-2); stroke-width: 1; }
 svg .hair { stroke: var(--rule); stroke-width: 1; }

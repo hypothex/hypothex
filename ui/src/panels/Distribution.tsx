@@ -8,6 +8,7 @@ import { scaleLinear, scaleLog } from "d3-scale";
 import { curveStepAfter, line } from "d3-shape";
 import type { CSSProperties } from "react";
 import type { DistributionRow } from "../api/models";
+import { FS, useElementWidth } from "../charts/Scale";
 import type { PanelResult } from "./index";
 import { fmtNum } from "./Table";
 
@@ -115,11 +116,13 @@ export function xAxis(
   return { domain: [d0, d1], ticks: s.ticks(6) };
 }
 
-// viewBox geometry
-const W = 720;
+// geometry in CSS px; the width is measured
+/** Width used before layout is known (and in test DOMs). */
+export const DIST_FALLBACK_W = 720;
 const PL = 132;
 const PR = 16;
-const TOP = 12;
+/** Top of the ECDF plot; the `share` axis title sits above it, clear of the `1` tick. */
+export const TOP = 26;
 const EH = 180;
 const GAP = 34;
 const RH = 36;
@@ -128,10 +131,10 @@ const TICK_WIDTH = { p50: 1.25, p95: 2, p99: 1.25 } as const;
 const QS = ["p50", "p95", "p99"] as const;
 
 const T = {
-  tk: { fontSize: 11.5, fill: "var(--ink-3)", fontVariantNumeric: "tabular-nums" },
-  lbl: { fontSize: 12.5, fill: "var(--ink-2)" },
-  lblB: { fontSize: 12.5, fill: "var(--ink)", fontWeight: 600 },
-  lblS: { fontSize: 11.5, fill: "var(--ink-3)" },
+  tk: { fontSize: FS.tick, fill: "var(--ink-3)", fontVariantNumeric: "tabular-nums" },
+  lbl: { fontSize: FS.label, fill: "var(--ink-2)" },
+  lblB: { fontSize: FS.label, fill: "var(--ink)", fontWeight: 600 },
+  lblS: { fontSize: FS.tick, fill: "var(--ink-3)" },
   axis: { stroke: "var(--ink-3)", strokeWidth: 1 },
   grid: { stroke: "var(--rule-2)", strokeWidth: 1 },
   hair: { stroke: "var(--rule)", strokeWidth: 1 },
@@ -250,6 +253,7 @@ function PercentileTable({
  * `{name, scale, render, baseline}`).
  */
 export function DistributionPanel({ result }: { result: PanelResult }) {
+  const [ref, W] = useElementWidth<HTMLDivElement>(DIST_FALLBACK_W);
   const rows = result.rows as unknown as DistRow[];
   const meta = (result.meta ?? {}) as Record<string, unknown>;
   if (rows.length === 0) return <p style={T.empty}>No samples</p>;
@@ -286,9 +290,10 @@ export function DistributionPanel({ result }: { result: PanelResult }) {
   const u = unit ? ` ${unit}` : "";
 
   return (
+    <div ref={ref}>
     <svg
-      viewBox={`0 0 ${W} ${H}`}
-      width="100%"
+      width={W}
+      height={H}
       role="img"
       aria-label={`Distributions of ${rows.length} groups, ${kind} scale, with p50, p95 and p99 ticks`}
       style={{ display: "block", overflow: "visible", fontFamily: "var(--sans)" }}
@@ -304,7 +309,7 @@ export function DistributionPanel({ result }: { result: PanelResult }) {
           </text>
         </g>
       ))}
-      <text x={PL - 8} y={TOP - 2} textAnchor="end" style={T.lblS}>
+      <text data-testid="share" x={PL} y={TOP - 14} textAnchor="middle" style={T.lblS}>
         share
       </text>
       {rows.map((r, i) => {
@@ -388,6 +393,7 @@ export function DistributionPanel({ result }: { result: PanelResult }) {
         {xLabel}
       </text>
     </svg>
+    </div>
   );
 }
 

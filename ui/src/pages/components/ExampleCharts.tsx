@@ -2,6 +2,7 @@
 import { max, range } from "d3-array";
 import { scaleBand, scaleLinear } from "d3-scale";
 import type { ReactElement } from "react";
+import { useElementWidth } from "../../charts/Scale";
 import { type Segment, binomPmf, exampleTotal, signTestP, stripSegments } from "./examples";
 import { fmtP, fmtValue } from "./format";
 import type { ExampleDiff, PredictionRow } from "./types";
@@ -106,12 +107,14 @@ export function ExampleStrip({ diff }: { diff: ExampleDiff }) {
   );
 }
 
-const ST_W = 640;
+/** Width used before layout is known (and in test DOMs). */
+export const ST_FALLBACK_W = 640;
 const ST_H = 220;
 const ST_BOTTOM = 24;
 const ST_TOP = 40;
 
 export function SignTestChart({ fixed, broken }: { fixed: number; broken: number }) {
+  const [ref, ST_W] = useElementWidth<HTMLDivElement>(ST_FALLBACK_W);
   const n = fixed + broken;
   if (n === 0) return <p className="small">no changed examples</p>;
   const pmf = binomPmf(n);
@@ -123,11 +126,12 @@ export function SignTestChart({ fixed, broken }: { fixed: number; broken: number
     .domain([0, max(pmf) ?? 1])
     .range([ST_H - ST_BOTTOM, ST_TOP]);
   const bw = x.bandwidth();
-  const every = n <= 24 ? 1 : Math.ceil(n / 12);
+  // at least ~28 px per labelled tick, so the fixed-size labels never collide
+  const every = Math.max(1, Math.ceil((n + 1) / Math.max(1, Math.floor(ST_W / 28))));
   const ox = (x(fixed) ?? 0) + bw / 2;
   return (
-    <div className="signtest" title="Exact two-sided binomial test on the examples that changed">
-      <svg viewBox={`0 0 ${ST_W} ${ST_H}`} aria-label="Sign test null distribution">
+    <div ref={ref} className="signtest" title="Exact two-sided binomial test on the examples that changed">
+      <svg width={ST_W} height={ST_H} aria-label="Sign test null distribution">
         {pmf.map((v, k) => (
           <rect
             key={`b${k}`}

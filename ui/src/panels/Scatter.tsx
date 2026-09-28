@@ -9,6 +9,7 @@
 import { scaleLinear } from "d3-scale";
 import type { CSSProperties } from "react";
 import type { ScatterMeta, ScatterRow } from "../api/models";
+import { FS, useElementWidth } from "../charts/Scale";
 import { fmtTick, xAxis, xScale } from "./Distribution";
 import type { PanelResult } from "./index";
 import { fmtNum } from "./Table";
@@ -77,19 +78,21 @@ export function yDirOf(meta: Record<string, unknown>): Dir {
   return dirOf(isObj(meta.pareto) ? meta.pareto.y : undefined, "max");
 }
 
-const W = 640;
-const H = 360;
+/** Width used before layout is known (and in test DOMs). */
+export const SCATTER_FALLBACK_W = 640;
+/** Plot height for a plot `w` px wide: 9/16 of the width, 240 to 360 px. */
+export const scatterHeight = (w: number): number => Math.round(Math.min(360, Math.max(240, w * 0.5625)));
 const PL = 52;
 const PR = 16;
 const PT = 26;
 const PB = 44;
 
 const T = {
-  tk: { fontSize: 11.5, fill: "var(--ink-3)", fontVariantNumeric: "tabular-nums" },
-  lbl: { fontSize: 12.5, fill: "var(--ink-2)" },
-  lblB: { fontSize: 12.5, fill: "var(--ink)", fontWeight: 600 },
-  lblBest: { fontSize: 12.5, fill: "var(--best)", fontWeight: 600 },
-  lblS: { fontSize: 11.5, fill: "var(--ink-3)" },
+  tk: { fontSize: FS.tick, fill: "var(--ink-3)", fontVariantNumeric: "tabular-nums" },
+  lbl: { fontSize: FS.label, fill: "var(--ink-2)" },
+  lblB: { fontSize: FS.label, fill: "var(--ink)", fontWeight: 600 },
+  lblBest: { fontSize: FS.label, fill: "var(--best)", fontWeight: 600 },
+  lblS: { fontSize: FS.tick, fill: "var(--ink-3)" },
   axis: { stroke: "var(--ink-3)", strokeWidth: 1 },
   grid: { stroke: "var(--rule-2)", strokeWidth: 1 },
   whisk: { stroke: "var(--ink-3)", strokeWidth: 1.5, strokeLinecap: "round", fill: "none" },
@@ -130,9 +133,11 @@ const numeric = (v: number | string | null): number | null => (typeof v === "num
  * `meta.y_higher_is_better` (see `ScatterMeta`).
  */
 export function ScatterPanel({ result }: { result: PanelResult }) {
+  const [ref, W] = useElementWidth<HTMLDivElement>(SCATTER_FALLBACK_W);
   const rows = result.rows as unknown as ScatterRow[];
   const meta = (result.meta ?? {}) as Record<string, unknown>;
   if (rows.length === 0) return <p style={T.empty}>No data</p>;
+  const H = scatterHeight(W);
   const ordinal = meta.x_type === "ordinal";
   // A front exists only when the view sets Pareto directions on a numeric x; otherwise the
   // server marks every row `pareto: false`, which must not read as "dominated".
@@ -183,10 +188,10 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
     .join("");
 
   return (
-    <div>
+    <div ref={ref}>
       <svg
-        viewBox={`0 0 ${W} ${H}`}
-        width="100%"
+        width={W}
+        height={H}
         role="img"
         aria-label={
           hasFront

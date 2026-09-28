@@ -16,6 +16,7 @@ import {
 } from "@tanstack/react-router";
 import { type ReactElement, useState } from "react";
 
+import { ExamplesPage } from "./pages/Examples";
 import { OverviewPage } from "./pages/Overview";
 import { RunPage } from "./pages/Run";
 import { TaskPage } from "./pages/Task";
@@ -107,6 +108,13 @@ function RunScreen(): ReactElement {
   return <RunPage runId={runId} log={log} example={example} />;
 }
 
+/** `/x/$a/$b?metric=`: the Examples page. */
+function ExamplesScreen(): ReactElement {
+  const { a, b } = examplesRoute.useParams();
+  const { metric } = examplesRoute.useSearch();
+  return <ExamplesPage a={a} b={b} metric={metric} />;
+}
+
 export const rootRoute = createRootRoute({ component: AppShell, notFoundComponent: NotFound });
 
 export const overviewRoute = createRoute({
@@ -142,7 +150,7 @@ export const examplesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/x/$a/$b",
   validateSearch: (search: Record<string, unknown>): ExamplesSearch => ({ metric: str(search.metric) }),
-  component: () => <ScreenPending name="Examples" />,
+  component: ExamplesScreen,
 });
 
 export const routeTree = rootRoute.addChildren([

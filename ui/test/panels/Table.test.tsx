@@ -111,3 +111,13 @@ describe("TablePanel", () => {
     expect(screen.getByText("No rows")).toBeTruthy();
   });
 });
+
+test("a missing value in a numeric column is right-aligned with the numbers", () => {
+  const rows = [{ v: "v1", d: null }, { v: "v2", d: 0.025 }];
+  const { container } = render(<TablePanel result={{ type: "table", title: "t", rows, meta: {} }} />);
+  const cells = [...container.querySelectorAll("tbody tr")].map((tr) => tr.querySelectorAll("td")[1] as HTMLElement);
+  expect(cells.map((td) => [td.textContent, td.style.textAlign])).toEqual([
+    ["—", "right"],
+    ["0.025", "right"],
+  ]);
+});

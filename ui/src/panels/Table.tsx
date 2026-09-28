@@ -143,7 +143,7 @@ export function TablePanel({ result }: { result: PanelResult }) {
               {cols.map((c) => {
                 const v = row[c];
                 const text = fmtCell(v);
-                const align = typeof v === "number" ? "right" : "left";
+                const align = typeof v === "number" || (numeric.has(c) && (v === null || v === undefined)) ? "right" : "left";
                 return (
                   <td key={c} title={text} style={{ ...S.td, textAlign: align }}>
                     {c === "run_id" && typeof v === "string" ? (

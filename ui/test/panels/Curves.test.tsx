@@ -9,6 +9,7 @@ import {
   LABEL_W,
   labelGutter,
   isLr,
+  isSystem,
   meanSeries,
   ownAxisNames,
   valueAt,
@@ -303,4 +304,15 @@ test("a series with a single point is drawn as a dot", () => {
   const rows: CurvePoint[] = [{ run_id: "r", group_id: "g", seed: 1, name: "train_accuracy", step: 0, value: 0.97 }];
   const { container } = render(<Curves result={result(rows, { groups: [{ group_id: "g", label: "g" }] })} />);
   expect(container.querySelectorAll("circle[data-dot]").length).toBe(1);
+});
+
+test("rows follow meta.metrics; system metrics go below the model's, lr last", () => {
+  expect(isSystem("sys/gpu_util")).toBe(true);
+  expect(isSystem("system.mem")).toBe(true);
+  expect(isSystem("sysadmin_score")).toBe(false);
+  const names = ["sys/gpu_mem_gb", "sys/gpu_util", "lr", "train/loss", "val/loss", "val/top1"];
+  const rows: CurvePoint[] = names.map((name) => ({ run_id: "r", group_id: "g", seed: 1, name, step: 0, value: 0.5 }));
+  expect(buildCurves(rows, {}).names).toEqual(["train/loss", "val/loss", "val/top1", "sys/gpu_mem_gb", "sys/gpu_util", "lr"]);
+  const listed = buildCurves(rows, { metrics: ["val/top1", "train/loss", "val/loss", "lr"] }).names;
+  expect(listed.slice(0, 3)).toEqual(["val/top1", "train/loss", "val/loss"]);
 });

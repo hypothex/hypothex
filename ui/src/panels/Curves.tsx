@@ -191,6 +191,11 @@ export function isLr(name: string): boolean {
   return /(^|[/_.])lr$|learning_rate$/.test(name);
 }
 
+/** True for system metrics logged beside the model's (`sys/gpu_util`, `system.mem`). */
+export function isSystem(name: string): boolean {
+  return /^sys(tem)?[/._]/.test(name);
+}
+
 /** True for loss metric names. */
 export function isLoss(name: string): boolean {
   return /loss/i.test(name);
@@ -254,7 +259,8 @@ function assignName(
  * CurvesModel
  *     Groups in `meta.groups` order (unknown groups appended, groups with no points
  *     dropped), metric names in
- *     first-seen order with learning-rate rows last, and per-row scales. Points of a
+ *     `meta.metrics` order (else first-seen), system metrics after the model's and
+ *     learning-rate rows last, and per-row scales. Points of a
  *     spiked run within {@link SPIKE_WINDOW} of the axis after the spike are left
  *     out of the y-domain so one spike does not flatten every other line.
  */
@@ -286,7 +292,19 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
   }
   const ownAxis = ownAxisNames(rowMax);
   const own = (n: string): number => (ownAxis.includes(n) ? 1 : 0);
-  names.sort((a, b) => own(a) - own(b) || Number(isLr(a)) - Number(isLr(b)));
+  // the view's metric order when given; system metrics (`sys/...`) below the model's
+  const listed = Array.isArray(meta?.metrics) ? (meta.metrics as unknown[]) : [];
+  const at = (n: string): number => {
+    const i = listed.indexOf(n);
+    return i < 0 ? listed.length : i;
+  };
+  names.sort(
+    (a, b) =>
+      own(a) - own(b) ||
+      Number(isLr(a)) - Number(isLr(b)) ||
+      Number(isSystem(a)) - Number(isSystem(b)) ||
+      at(a) - at(b),
+  );
   const shared = names.filter((n) => !ownAxis.includes(n));
   const maxStep = Math.max(0, ...shared.map((n) => rowMax[n] ?? 0));
 

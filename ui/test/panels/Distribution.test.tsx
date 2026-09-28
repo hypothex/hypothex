@@ -3,6 +3,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import type { PanelResult } from "../../src/panels/index";
 import {
   DistributionPanel,
+  axisTitle,
   fmtTick,
   logTicks,
   niceLogDomain,

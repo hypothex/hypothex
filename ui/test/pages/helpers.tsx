@@ -2,6 +2,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { NavigateContext } from "../../src/pages/components/links";
+import {
+  type PanelRegistry,
+  PanelRegistryContext,
+} from "../../src/pages/components/PanelGrid";
+import type { PanelResult } from "../../src/pages/components/types";
 
 /** One request the mocked `fetch` saw. */
 export interface Call {
@@ -78,14 +83,27 @@ export function mockClipboard(fail = false): string[] {
 
 export interface RenderOpts {
   navigate?: (href: string) => void;
+  registry?: PanelRegistry;
 }
 
-/** Render inside a fresh QueryClient (no query retries), with an optional navigate spy. */
+/** Render inside a fresh QueryClient (no query retries), with optional fakes. */
 export function renderWithClient(ui: ReactElement, opts: RenderOpts = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   let tree = <QueryClientProvider client={client}>{ui}</QueryClientProvider>;
+  if (opts.registry) {
+    tree = <PanelRegistryContext.Provider value={opts.registry}>{tree}</PanelRegistryContext.Provider>;
+  }
   if (opts.navigate) {
     tree = <NavigateContext.Provider value={opts.navigate}>{tree}</NavigateContext.Provider>;
   }
   return { ...render(tree), client };
+}
+
+function FakePanel({ result }: { result: PanelResult }) {
+  return <div data-testid={`panel-${result.type}`}>{`${result.title}:${result.rows.length}`}</div>;
+}
+
+/** A panel registry whose panels print `"<title>:<row count>"`. */
+export function fakeRegistry(types: string[]): PanelRegistry {
+  return Object.fromEntries(types.map((t) => [t, FakePanel]));
 }

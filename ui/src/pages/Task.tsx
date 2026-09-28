@@ -10,6 +10,7 @@ import { ErrorBox, Loading } from "./components/QueryState";
 import { PageStyles } from "./components/styles";
 import type { Leaderboard } from "./components/types";
 import { useAction } from "./components/useAction";
+import { Unbroken } from "./components/Headline";
 
 export interface TaskPageProps {
   project: string;
@@ -61,7 +62,9 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
           </span>
         ) : null}
       </p>
-      <h1 className="headline">{board.data?.headline ?? task}</h1>
+      <h1 className="headline">
+        <Unbroken text={board.data?.headline ?? task} />
+      </h1>
       {board.error ? <ErrorBox error={board.error} /> : null}
       {board.data ? (
         <p className="metaline">

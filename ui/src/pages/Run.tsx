@@ -19,6 +19,7 @@ import { StatStrip } from "./components/StatStrip";
 import { StatusLine } from "./components/StatusLine";
 import { PageStyles } from "./components/styles";
 import { WhereList } from "./components/WhereList";
+import { Unbroken } from "./components/Headline";
 
 const LOG_STREAMS = ["stdout", "stderr", "supervisor"] as const;
 type LogStream = (typeof LOG_STREAMS)[number];
@@ -109,7 +110,9 @@ export function RunPage({ runId, log, example }: RunPageProps) {
         ) : null}
       </p>
       <div className="run-top">
-        <h1 className={title.length > LONG_TITLE ? "headline long" : "headline"}>{title}</h1>
+        <h1 className={title.length > LONG_TITLE ? "headline long" : "headline"}>
+          <Unbroken text={title} />
+        </h1>
         <RunActions record={record} />
       </div>
       <StatusLine record={record} />

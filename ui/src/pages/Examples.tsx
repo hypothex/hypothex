@@ -15,6 +15,7 @@ import { ErrorBox, Loading } from "./components/QueryState";
 import { scoreFor } from "./components/ScoresList";
 import { PageStyles } from "./components/styles";
 import type { PredictionPage, RunDetail } from "./components/types";
+import { Unbroken } from "./components/Headline";
 
 export interface ExamplesPageProps {
   a: string;
@@ -142,7 +143,9 @@ export function ExamplesPage({ a, b, metric }: ExamplesPageProps) {
         ) : null}
         examples
       </p>
-      <h1 className="headline">{diff && labels ? examplesHeadline(labelA, labelB, diff) : "Examples"}</h1>
+      <h1 className="headline">
+        <Unbroken text={diff && labels ? examplesHeadline(labelA, labelB, diff) : "Examples"} />
+      </h1>
       {diff ? (
         <p className="metaline">
           {examplesMeta(diff).map((text) => (

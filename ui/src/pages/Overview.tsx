@@ -10,11 +10,14 @@ import { ErrorBox, Loading } from "./components/QueryState";
 import { RunTimeline } from "./components/RunTimeline";
 import { PageStyles } from "./components/styles";
 import type { OverviewSummary } from "./components/types";
+import { Unbroken } from "./components/Headline";
 
 function OverviewBody({ summary }: { summary: OverviewSummary }) {
   return (
     <>
-      <h1 className="headline">{summary.headline}</h1>
+      <h1 className="headline">
+        <Unbroken text={summary.headline} />
+      </h1>
       <p className="metaline">
         {Object.entries(summary.counts).map(([key, value]) => (
           <span key={key}>{`${value} ${key}`}</span>

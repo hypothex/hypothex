@@ -19,10 +19,11 @@ panels:
     title: Runs
     data:
       source: runs
-      fields: [run_id, group_id, seed, status, created_by, usage.seconds]
+      fields: [run_id, label, seed, status, created_by]
     layout: {span: 8, row: 4}
   # GPU sparklines beside the runs table: one small line per run of the history metric
-  # sys/gpu_util (the name `hx demo` writes; rename it to match your task).
+  # sys/gpu_util (the name `hx demo` writes; rename it to match your task), named by config
+  # label and seed, in run order like the table.
   - type: vega_lite
     title: GPU
     data:
@@ -31,9 +32,21 @@ panels:
       fields: [name, step, value]
     spec:
       height: 18
+      transform:
+        - calculate: "datum.label + ' s' + datum.seed"
+          as: run
       mark: {type: line, strokeWidth: 1}
       encoding:
-        row: {field: run_id, type: nominal, title: null, header: {labelAngle: 0, labelAlign: left}}
+        row:
+          field: run
+          type: nominal
+          title: null
+          sort: {field: run_id, op: min}
+          header: {labelAngle: 0, labelAlign: left, labelLimit: 130}
+        tooltip:
+          - {field: run_id, type: nominal, title: run}
+          - {field: step, type: quantitative}
+          - {field: value, type: quantitative, title: GPU %}
         x: {field: step, type: quantitative, title: null, axis: null}
         y: {field: value, type: quantitative, title: null, axis: null, scale: {domain: [0, 100]}}
     layout: {span: 4, row: 4}

@@ -24,10 +24,11 @@ panels:
       transform:
         - filter: "isValid(datum['meta.category'])"
       mark: bar
+      height: {step: 30}
       encoding:
         y: {field: label, type: nominal, title: null}
-        x: {aggregate: count, type: quantitative, title: failed}
-        color: {field: meta\.category, type: nominal, title: null}
+        x: {aggregate: count, type: quantitative, title: failed attempts}
+        color: {field: meta\.category, type: nominal, title: null, legend: {orient: bottom, columns: 3}}
     layout: {span: 5, row: 3}
   - type: grid
     title: Per target

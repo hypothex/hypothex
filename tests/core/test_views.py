@@ -87,7 +87,7 @@ def test_presets_cover_the_spec_items() -> None:
     training = {p.title: p for p in load_preset("training").panels}
     gpu = training["GPU"]
     assert (gpu.data.source, gpu.data.filter) == ("metrics", {"name": "sys/gpu_util"})
-    assert gpu.spec is not None and gpu.spec["encoding"]["row"]["field"] == "run_id"
+    assert gpu.spec is not None and gpu.spec["encoding"]["row"]["field"] == "run"  # label + seed
     assert (training["Runs"].layout.row, gpu.layout.row) == (4, 4)  # sparklines beside the table
     assert training["Checkpoints"].type == "curves"
     assert training["Checkpoints"].data.metrics == ["val/top1"]

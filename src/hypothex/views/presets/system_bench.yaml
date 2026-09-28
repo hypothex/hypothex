@@ -36,14 +36,17 @@ panels:
     title: Error rate
     data:
       source: scores
+      filter: {metric: errors, key: rate}
       fields: [metric, key, value]
     spec:
-      transform:
-        - filter: "datum.metric == 'errors' && datum.key == 'rate'"
       mark: bar
+      height: {step: 28}
       encoding:
         y: {field: label, type: nominal, title: null}
-        x: {aggregate: mean, field: value, type: quantitative, title: error rate}
+        x: {aggregate: mean, field: value, type: quantitative, title: error rate, axis: {format: ".2~%"}}
+        tooltip:
+          - {field: label, type: nominal, title: config}
+          - {aggregate: mean, field: value, type: quantitative, title: mean error rate, format: ".3~%"}
     layout: {span: 6, row: 4}
   - type: curves
     title: Utilisation
@@ -65,11 +68,16 @@ panels:
           as: vs_median
         - calculate: "datum.vs_median > 0.1"
           as: flagged
-      mark: {type: point, filled: true}
+      mark: {type: point, filled: true, size: 50}
+      height: {step: 32}
       encoding:
         y: {field: label, type: nominal, title: null}
         x: {field: vs_median, type: quantitative, title: p95 vs median repeat, axis: {format: "+%"}}
-        color: {field: flagged, type: nominal, title: "over +10%"}
+        color:
+          field: flagged
+          type: nominal
+          scale: {domain: [false, true]}
+          legend: {title: null, orient: bottom, labelExpr: "datum.label == 'true' ? 'over +10%' : 'within 10%'"}
         tooltip:
           - {field: run_id, type: nominal}
           - {field: seed, type: quantitative, title: repeat}

@@ -20,7 +20,9 @@ type Quantile = "p50" | "p95" | "p99";
 type Scale = "linear" | "log";
 
 /**
- * Categorical series colours, fixed order, light and dark steps.
+ * Categorical series colours, fixed order, light and dark steps. The same values are the
+ * `--cat-1` .. `--cat-5` tokens in `styles/palette.css`; these arrays are the fallback
+ * when a token cannot be read (Vega needs concrete colours).
  *
  * Checked with the dataviz palette validator: light passes with adjacent CVD dE >= 15.7
  * (the yellow slot is below 3:1 contrast, so every series is also direct-labelled); dark
@@ -29,10 +31,10 @@ type Scale = "linear" | "log";
 export const SERIES_LIGHT = ["#2a78d6", "#e0602e", "#b8447e", "#eda100", "#4a3aa7"] as const;
 export const SERIES_DARK = ["#4a90e8", "#e06a35", "#c95aa8", "#c98500", "#9085e9"] as const;
 
-/** Colour for series `i`; follows `color-scheme`. Series past the fifth share muted ink. */
+/** Colour for series `i`: the `--cat-N` token. Series past the fifth share muted ink. */
 export function seriesColor(i: number): string {
   if (i < 0 || i >= SERIES_LIGHT.length) return "var(--ink-3)";
-  return `light-dark(${SERIES_LIGHT[i]}, ${SERIES_DARK[i]})`;
+  return `var(--cat-${i + 1})`;
 }
 
 const MANTISSAS = [1, 2, 5] as const;

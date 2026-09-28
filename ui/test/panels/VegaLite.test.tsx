@@ -122,6 +122,44 @@ describe("tokens and theme", () => {
     expect(((dark.range as Obj).category as string[])[0]).toBe("#4a90e8");
     expect((dark.range as Obj).ramp).toEqual(["#1A1F27", "#1FA282"]);
   });
+
+  test("readTokens takes the category palette from the --cat-N tokens", () => {
+    const t = readTokens("light", (n) => (n === "--cat-2" ? " #123456 " : ""));
+    expect(t.cat).toEqual(["#2a78d6", "#123456", "#b8447e", "#eda100", "#4a3aa7"]);
+    const cfg = themeConfig(t, "light");
+    expect((cfg.range as Obj).category).toEqual(t.cat);
+  });
+
+  test("fonts and sizes match the app charts; bars use the palette, not ink", () => {
+    const t = TOKEN_FALLBACK.dark;
+    const cfg = themeConfig(t, "dark");
+    const axis = cfg.axis as Obj;
+    expect([axis.labelFont, axis.titleFont, (cfg.legend as Obj).labelFont]).toEqual([t.sans, t.sans, t.sans]);
+    expect([axis.labelFontSize, axis.titleFontSize]).toEqual([11, 12]);
+    expect((cfg.bar as Obj).color).toBe("#4a90e8");
+    expect((cfg.bar as Obj).color).not.toBe(t.ink);
+  });
+
+  test("the palette tokens in palette.css match the fallback arrays", async () => {
+    const css = await Bun.file(new URL("../../src/styles/palette.css", import.meta.url)).text();
+    const [light, dark] = css.split('[data-theme="dark"]');
+    TOKEN_FALLBACK.light.cat.forEach((c, i) => expect(light).toContain(`--cat-${i + 1}: ${c};`));
+    TOKEN_FALLBACK.dark.cat.forEach((c, i) => expect(dark).toContain(`--cat-${i + 1}: ${c};`));
+  });
+
+  test("the theme never overrides the spec's legend labels or its own config", () => {
+    const spec = {
+      mark: "bar",
+      encoding: {
+        color: { field: "over", type: "nominal", legend: { labelExpr: "datum.value ? 'over' : 'ok'" } },
+      },
+      config: { bar: { color: "#abcdef" } },
+    };
+    const out = buildSpec(spec, ROWS, themeConfig(TOKEN_FALLBACK.light, "light"));
+    expect(out.encoding).toEqual(spec.encoding);
+    expect(((out.config as Obj).bar as Obj).color).toBe("#abcdef");
+    expect(((out.config as Obj).legend as Obj).labelExpr).toBeUndefined();
+  });
 });
 
 describe("VegaLitePanel", () => {

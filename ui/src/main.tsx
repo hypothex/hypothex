@@ -1,5 +1,6 @@
 import "./styles/tokens.css";
 import "./styles/base.css";
+import "./styles/palette.css";
 
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";

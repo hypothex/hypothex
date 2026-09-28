@@ -12,6 +12,7 @@ import type { Loader } from "vega";
 import embed, { type EmbedOptions, type Result, type VisualizationSpec } from "vega-embed";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { type Theme, useTheme } from "../shell/ThemeToggle";
+import { FS } from "../charts/Scale";
 import { SERIES_DARK, SERIES_LIGHT } from "./Distribution";
 import type { PanelResult } from "./index";
 
@@ -28,6 +29,8 @@ export type Tokens = {
   rule2: string;
   best: string;
   sans: string;
+  /** Categorical palette, `--cat-1` .. `--cat-5`. */
+  cat: string[];
 };
 
 const SANS = '"Geist", ui-sans-serif, system-ui, sans-serif';
@@ -44,6 +47,7 @@ export const TOKEN_FALLBACK: Record<Theme, Tokens> = {
     rule2: "#E4E6E0",
     best: "#00846A",
     sans: SANS,
+    cat: [...SERIES_LIGHT],
   },
   dark: {
     paper: "#12161C",
@@ -55,10 +59,11 @@ export const TOKEN_FALLBACK: Record<Theme, Tokens> = {
     rule2: "#222830",
     best: "#1FA282",
     sans: SANS,
+    cat: [...SERIES_DARK],
   },
 };
 
-const TOKEN_VARS: Record<keyof Tokens, string> = {
+const TOKEN_VARS: Record<Exclude<keyof Tokens, "cat">, string> = {
   paper: "--paper",
   paper2: "--paper-2",
   ink: "--ink",
@@ -99,15 +104,27 @@ export function cssVar(name: string): string {
 /** Resolve tokens to concrete colours (Vega cannot use `var(...)`). */
 export function readTokens(theme: Theme, getVar: (name: string) => string = cssVar): Tokens {
   const out = { ...TOKEN_FALLBACK[theme] };
-  for (const key of Object.keys(TOKEN_VARS) as (keyof Tokens)[]) {
+  for (const key of Object.keys(TOKEN_VARS) as Exclude<keyof Tokens, "cat">[]) {
     const v = getVar(TOKEN_VARS[key]).trim();
     if (v) out[key] = v;
   }
+  out.cat = out.cat.map((fallback, i) => getVar(`--cat-${i + 1}`).trim() || fallback);
   return out;
 }
 
-/** Vega-Lite `config` matching the Hypothex figure style. */
-export function themeConfig(t: Tokens, theme: Theme): Obj {
+/** Chart text sizes, the same as the app's SVG charts (`FS`). */
+const FONT = { tick: FS.tick, label: FS.label, title: FS.title } as const;
+
+/**
+ * Vega-Lite `config` matching the Hypothex figure style: app fonts and sizes, token
+ * colours, the categorical palette for `category`, and the first palette slot for area
+ * marks (bars, rects, areas, arcs), so a single-series bar is never plain ink.
+ *
+ * Only defaults live here: the spec's own `config` is merged on top, and encodings
+ * (such as a legend `labelExpr` that turns booleans into short labels) are never touched.
+ */
+export function themeConfig(t: Tokens, _theme: Theme): Obj {
+  const fill = t.cat[0] ?? t.ink2;
   return {
     background: "transparent",
     font: t.sans,
@@ -118,23 +135,42 @@ export function themeConfig(t: Tokens, theme: Theme): Obj {
       gridColor: t.rule2,
       labelColor: t.ink3,
       titleColor: t.ink2,
-      labelFontSize: 11.5,
-      titleFontSize: 12.5,
+      labelFont: t.sans,
+      titleFont: t.sans,
+      labelFontSize: FONT.tick,
+      titleFontSize: FONT.label,
       titleFontWeight: 400,
+      titlePadding: 8,
+      labelPadding: 4,
     },
     legend: {
       labelColor: t.ink2,
       titleColor: t.ink3,
-      labelFontSize: 12.5,
-      titleFontSize: 12.5,
+      labelFont: t.sans,
+      titleFont: t.sans,
+      labelFontSize: FONT.label,
+      titleFontSize: FONT.tick,
       titleFontWeight: 400,
+      symbolSize: 60,
     },
-    header: { labelColor: t.ink2, titleColor: t.ink2 },
-    title: { color: t.ink, fontSize: 14, fontWeight: 600 },
+    header: {
+      labelColor: t.ink2,
+      titleColor: t.ink2,
+      labelFont: t.sans,
+      titleFont: t.sans,
+      labelFontSize: FONT.label,
+      titleFontSize: FONT.label,
+      labelFontWeight: 600,
+    },
+    title: { color: t.ink, font: t.sans, fontSize: FONT.title, fontWeight: 600 },
     mark: { color: t.ink },
-    text: { color: t.ink },
+    bar: { color: fill },
+    rect: { color: fill },
+    area: { color: fill },
+    arc: { color: fill },
+    text: { color: t.ink, font: t.sans, fontSize: FONT.label },
     range: {
-      category: [...(theme === "dark" ? SERIES_DARK : SERIES_LIGHT)],
+      category: [...t.cat],
       ramp: [t.paper2, t.best],
       heatmap: [t.paper2, t.best],
     },

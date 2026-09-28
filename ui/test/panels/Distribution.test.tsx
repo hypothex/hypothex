@@ -115,8 +115,8 @@ describe("signed percents", () => {
 
 describe("seriesColor", () => {
   test("fixed order with light and dark steps, then muted ink", () => {
-    expect(seriesColor(0)).toBe("light-dark(#2a78d6, #4a90e8)");
-    expect(seriesColor(1)).toBe("light-dark(#e0602e, #e06a35)");
+    expect(seriesColor(0)).toBe("var(--cat-1)");
+    expect(seriesColor(1)).toBe("var(--cat-2)");
     expect(seriesColor(5)).toBe("var(--ink-3)");
   });
 });

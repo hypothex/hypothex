@@ -5,9 +5,9 @@ from __future__ import annotations
 import math
 import re
 import statistics
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from hypothex.core.seeds import Stats, t_critical
 from hypothex.core.stats import Z95
@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 MINUS = "−"
 NO_RUNS = "No scored runs yet"
 _PERCENTILE = re.compile(r"(?<![A-Za-z0-9])p(\d{1,2}(?:\.\d+)?)(?![0-9])")
+_MS = re.compile(r"(?:^|[^a-z])ms(?:$|[^a-z])|latency")
+_SECONDS = re.compile(r"seconds|(?:^|[^a-z])secs?(?:$|[^a-z])|_s$")
+
+ValueFormat = Literal["fraction", "number", "percent_delta"]
+"""How the UI formats a metric: ``fraction`` (3 decimals, absolute deltas),
+``number`` (3 significant figures and the unit, absolute deltas), or
+``percent_delta`` (values as ``number``, vs-best deltas as relative %)."""
+TIME_UNITS = ("ms", "s")
 
 
 # formatting ------------------------------------------------------------------
@@ -52,6 +60,188 @@ def fmt_value(x: float) -> str:
     else:
         body = f"{a:,.0f}"
     return MINUS + body if x < 0 and body.strip("0.,") else body
+
+
+def metric_unit(ref: str, configured: str = "") -> str:
+    """
+    Display unit of a metric reference.
+
+    Parameters
+    ----------
+    ref : str
+        Metric reference (``latency/p95``, ``usage.usd/solved``, ``cost_usd``).
+    configured : str
+        The metric's ``MetricSpec.unit``; wins when set.
+
+    Returns
+    -------
+    str
+        ``$`` for ``usd``/``cost``, ``tokens`` for ``token``, ``ms`` for ``latency``
+        or an ``ms`` word, ``s`` for ``seconds``/``sec``/``_s``; else ``""``.
+
+    Examples
+    --------
+    >>> metric_unit("latency/p95"), metric_unit("usage.usd/solved"), metric_unit("top1")
+    ('ms', '$', '')
+    """
+    if configured:
+        return configured
+    name = ref.lower()
+    if "usd" in name or "cost" in name or "$" in name:
+        return "$"
+    if "token" in name:
+        return "tokens"
+    if _MS.search(name):
+        return "ms"
+    if _SECONDS.search(name.split("/")[0]):
+        return "s"
+    return ""
+
+
+def value_format(unit: str, values: Iterable[float], higher_is_better: bool) -> ValueFormat:
+    """
+    Pick how a metric's values and deltas are shown.
+
+    Parameters
+    ----------
+    unit : str
+        The metric's unit (``metric_unit``).
+    values : iterable of float
+        Values the metric takes (e.g. every group mean).
+    higher_is_better : bool
+        The metric's direction.
+
+    Returns
+    -------
+    str
+        ``percent_delta`` for a lower-is-better time (``ms``, ``s``); ``number``
+        for any other unit or a value outside [0, 1]; else ``fraction``.
+
+    Examples
+    --------
+    >>> value_format("ms", [166.0], False), value_format("", [0.74], True)
+    ('percent_delta', 'fraction')
+    """
+    if unit in TIME_UNITS and not higher_is_better:
+        return "percent_delta"
+    if unit or any(not 0 <= v <= 1 for v in values):
+        return "number"
+    return "fraction"
+
+
+def fmt_sig3(x: float) -> str:
+    """
+    Format a number with 3 significant figures, trailing zeros dropped.
+
+    Parameters
+    ----------
+    x : float
+        Value to format.
+
+    Returns
+    -------
+    str
+        Grouped thousands, Unicode minus; never scientific notation.
+
+    Examples
+    --------
+    >>> fmt_sig3(165.6221), fmt_sig3(0.5519), fmt_sig3(0.55), fmt_sig3(1234.4)
+    ('166', '0.552', '0.55', '1,230')
+    """
+    if x == 0 or not math.isfinite(x):
+        return "0" if x == 0 else str(x)
+    a = abs(x)
+    decimals = 2 - math.floor(math.log10(a))
+    rounded = round(a, decimals)
+    if rounded and 2 - math.floor(math.log10(rounded)) < decimals:
+        decimals -= 1  # 999.6 rounds up to 1,000: keep 3 figures
+    if decimals <= 0:
+        body = f"{round(a, decimals):,.0f}"
+    else:
+        body = f"{a:.{decimals}f}".rstrip("0").rstrip(".")
+    return MINUS + body if x < 0 and body.strip("0.,") else body
+
+
+def fmt_metric(
+    x: float, unit: str = "", fmt: ValueFormat | None = None, *, suffix: bool = True
+) -> str:
+    """
+    Format a metric value for a headline or stat strip.
+
+    Parameters
+    ----------
+    x : float
+        Value to format.
+    unit : str
+        Its unit (``metric_unit``); ``$`` is a prefix, others a suffix.
+    fmt : {"fraction", "number", "percent_delta"}, optional
+        Format hint; default ``number`` with a unit or outside [0, 1], else
+        ``fraction``.
+    suffix : bool
+        Append a suffix unit (``166 ms``); stat strips pass ``False`` and put the
+        unit in their ``unit`` field. ``$`` is always kept.
+
+    Returns
+    -------
+    str
+        ``fraction``: 3 decimals (``0.742``); otherwise 3 significant figures and the
+        unit (``166 ms``, ``$332``); dollars from 0.01 to 100 keep cents (``$0.55``,
+        ``$1.30``).
+
+    Examples
+    --------
+    >>> fmt_metric(165.62, "ms"), fmt_metric(0.5519, "$"), fmt_metric(0.7417)
+    ('166 ms', '$0.55', '0.742')
+    """
+    if fmt is None:
+        fmt = "number" if unit or not 0 <= x <= 1 else "fraction"
+    if fmt == "fraction" and not unit:
+        return fmt_value(x)
+    body = fmt_sig3(x)
+    if unit == "$" and 0.01 <= round(abs(x), 2) < 100:
+        body = (MINUS if x < 0 else "") + f"{abs(x):.2f}"  # cents: $0.55, $1.30
+    if unit == "$":
+        return MINUS + "$" + body.removeprefix(MINUS) if body.startswith(MINUS) else "$" + body
+    return f"{body} {unit}" if unit and suffix else body
+
+
+def fmt_metric_delta(
+    delta: float, base: float, unit: str = "", fmt: ValueFormat = "fraction", *, suffix: bool = True
+) -> str:
+    """
+    Format a signed difference ``delta`` relative to ``base``.
+
+    Parameters
+    ----------
+    delta : float
+        The difference (e.g. row mean minus best mean).
+    base : float
+        What it is relative to (the best mean).
+    unit : str
+        The metric's unit.
+    fmt : {"fraction", "number", "percent_delta"}
+        Format hint (``value_format``).
+    suffix : bool
+        Append a suffix unit, as in ``fmt_metric``.
+
+    Returns
+    -------
+    str
+        ``percent_delta``: relative whole percent (``+27%``) when ``base`` is not 0;
+        ``number``: signed 3 significant figures and unit (``+45 ms``);
+        ``fraction``: ``fmt_delta`` (``+0.017``).
+
+    Examples
+    --------
+    >>> fmt_metric_delta(45.0, 166.0, "ms", "percent_delta")
+    '+27%'
+    """
+    if fmt == "percent_delta" and base:
+        return fmt_pct(delta / base)
+    if fmt == "fraction" and not unit:
+        return fmt_delta(delta)
+    body = fmt_metric(abs(delta), unit, "number", suffix=suffix)
+    return body if delta == 0 else ("+" if delta > 0 else MINUS) + body
 
 
 def fmt_delta(x: float) -> str:
@@ -275,6 +465,23 @@ def _mean(row: LeaderboardRow) -> float:
     return row.primary.mean
 
 
+def _fmt(board: Leaderboard, x: float, *, suffix: bool = True) -> str:
+    """A primary-metric value in the board's unit and format (``fmt_metric``)."""
+    return fmt_metric(x, board.unit, board.value_format, suffix=suffix)
+
+
+def _dfmt(board: Leaderboard, delta: float, base: float, *, suffix: bool = True) -> str:
+    """A primary-metric difference in the board's format (``fmt_metric_delta``)."""
+    return fmt_metric_delta(delta, base, board.unit, board.value_format, suffix=suffix)
+
+
+def _unit_field(board: Leaderboard, relative: bool = False) -> str:
+    """The stat-strip ``unit`` beside a value: suffix units only, none for percents."""
+    if board.unit == "$" or (relative and board.value_format == "percent_delta"):
+        return ""
+    return board.unit
+
+
 def task_headline(
     board: Leaderboard,
     *,
@@ -313,18 +520,19 @@ def task_headline(
     if board.kind == "system_bench":
         return _bench_headline(board, best, ref)
     if board.kind == "agent_iteration":
-        head = f"{best.label} {fmt_value(_mean(best))}"
+        head = f"{best.label} {_fmt(board, _mean(best))}"
         if ref is None or ref.group_id == best.group_id:
             return head
-        text = f"{head}, {fmt_delta(_mean(best) - _mean(ref))} over {ref.label}"
+        text = f"{head}, {_dfmt(board, _mean(best) - _mean(ref), _mean(ref))} over {ref.label}"
         ci = _gain_interval(best, ref, board.primary, gain_interval)
         if ci is not None:
-            text += f" [{fmt_value(ci[0])}, {fmt_value(ci[1])}]"
+            text += f" [{_fmt(board, ci[0], suffix=False)}, {_fmt(board, ci[1], suffix=False)}]"
         return text
     if len(rows) == 1:
-        return f"{best.label} {fmt_value(_mean(best))}"
+        return f"{best.label} {_fmt(board, _mean(best))}"
     runner = rows[1]
-    text = f"{best.label} {fmt_delta(_mean(best) - _mean(runner))} over {runner.label}"
+    gain = _dfmt(board, _mean(best) - _mean(runner), _mean(runner))
+    text = f"{best.label} {gain} over {runner.label}"
     if runner.vs_best is not None and runner.vs_best.p is not None:
         text += f", {fmt_p(runner.vs_best.p)}"
     return text
@@ -332,7 +540,7 @@ def task_headline(
 
 def _bench_headline(board: Leaderboard, best: LeaderboardRow, base: LeaderboardRow | None) -> str:
     pct = percentile_of(board.primary) or board.primary.split("/")[0]
-    plain = f"{best.label} {pct} {fmt_value(_mean(best))}"
+    plain = f"{best.label} {pct} {_fmt(board, _mean(best))}"
     if base is None or base.group_id == best.group_id:
         return plain
     change = welch_interval(
@@ -352,15 +560,17 @@ def _stat(label: str, value: str, tooltip: str, unit: str = "") -> dict[str, Any
     return {"label": label, "value": value, "unit": unit, "tooltip": tooltip}
 
 
-def _seed_sigma(row: LeaderboardRow, word: str = "seed") -> dict[str, Any]:
+def _seed_sigma(board: Leaderboard, row: LeaderboardRow, word: str = "seed") -> dict[str, Any]:
     assert row.primary is not None
     if row.n < 2:
         return _stat(f"{word} σ", "—", f"{row.label}: single {word}")
     if row.identical_seeds:
         return _stat(f"{word} σ", f"◇×{row.n}", f"{row.label}: all {row.n} {word}s gave one score")
     std = row.primary.std
-    text = f"{std:.4f}" if std < 1 else fmt_value(std)
-    return _stat(f"{word} σ", text, f"Std of {row.label} over {row.n} {word}s")
+    tip = f"Std of {row.label} over {row.n} {word}s"
+    if board.value_format != "fraction" or board.unit:
+        return _stat(f"{word} σ", _fmt(board, std, suffix=False), tip, _unit_field(board))
+    return _stat(f"{word} σ", f"{std:.4f}" if std < 1 else fmt_value(std), tip)
 
 
 def _p_stat(best: LeaderboardRow, other: LeaderboardRow) -> dict[str, Any] | None:
@@ -414,7 +624,8 @@ def _compare_strip(
     vs = runner.vs_best if runner is not None else None
     if runner is not None:
         tip = f"{best.label} minus {runner.label}, mean {name}"
-        out.append(_stat(f"Δ {name}", fmt_delta(_mean(best) - _mean(runner)), tip))
+        delta = _dfmt(board, _mean(best) - _mean(runner), _mean(runner), suffix=False)
+        out.append(_stat(f"Δ {name}", delta, tip, _unit_field(board, relative=True)))
         p = _p_stat(best, runner)
         if p is not None:
             out.append(p)
@@ -427,15 +638,16 @@ def _compare_strip(
         out.append(
             _stat(
                 f"{best.label} 95% CI",
-                f"{fmt_value(ti.lo)}–{fmt_value(ti.hi)}",
+                f"{_fmt(board, ti.lo, suffix=False)}–{_fmt(board, ti.hi, suffix=False)}",
                 f"Test-set 95% CI ({method}, n = {ti.n})",
+                _unit_field(board),
             )
         )
-    out.append(_seed_sigma(best))
+    out.append(_seed_sigma(board, best))
     if board.kind == "agent_eval" and best.usage is not None:
         attempts = best.n * (best.test_interval.n if best.test_interval else 1)
         tip = f"{best.label}: ${best.usage.usd:.2f} over {attempts} attempts"
-        out.append(_stat("$ / attempt", f"${best.usage.usd / attempts:.2f}", tip))
+        out.append(_stat("$ / attempt", fmt_metric(best.usage.usd / attempts, "$"), tip))
     if vs is not None and vs.examples_needed is not None:
         tip = "Test examples needed at the same flip rate to reach p < 0.05"
         out.append(_stat("n for p < 0.05", f"≈{vs.examples_needed}", tip))
@@ -456,12 +668,12 @@ def _iteration_strip(
         p = _p_stat(best, first)
         if p is not None:
             out.append(p)
-    out.append(_seed_sigma(best))
+    out.append(_seed_sigma(board, best))
     if best.usage is not None and best.test_interval is not None:
         solved = _mean(best) * best.test_interval.n * best.n
         if solved > 0:
             tip = f"{best.label}: ${best.usage.usd:.2f} over {solved:g} solved examples"
-            out.append(_stat("$ / solved", f"${best.usage.usd / solved:.2f}", tip))
+            out.append(_stat("$ / solved", fmt_metric(best.usage.usd / solved, "$"), tip))
     out.append(_stat("versions", str(len(board.rows)), "Seed groups in this task"))
     return out
 
@@ -471,10 +683,14 @@ def _bench_strip(
 ) -> list[dict[str, Any]]:
     metric = board.primary.split("/")[0]
     pct = percentile_of(board.primary) or metric
-    unit = "ms" if "ms" in board.primary else ""
+    unit = _unit_field(board)
     out: list[dict[str, Any]] = []
     if base is not None and base.group_id != best.group_id:
-        value = f"{fmt_value(_mean(best))} vs {fmt_value(_mean(base))}"
+        mine, theirs = (
+            _fmt(board, _mean(best), suffix=False),
+            _fmt(board, _mean(base), suffix=False),
+        )
+        value = f"{mine} vs {theirs}"
         tip = f"{best.label} vs baseline {base.label}, mean of repeats"
         out.append(_stat(pct, value, tip, unit))
         keys = [
@@ -492,9 +708,10 @@ def _bench_strip(
                 tip += f", 95% CI {_signed_int(lo * 100)} to {_signed_int(hi * 100)}%"
             out.append(_stat(f"Δ {percentile_of(key)}", fmt_pct(r), tip))
     else:
-        out.append(_stat(pct, fmt_value(_mean(best)), f"{best.label}, mean of repeats", unit))
+        tip = f"{best.label}, mean of repeats"
+        out.append(_stat(pct, _fmt(board, _mean(best), suffix=False), tip, unit))
     out.append(_stat("repeats", str(best.n), f"Repeats of {best.label}"))
-    out.append(_seed_sigma(best, word="repeat"))
+    out.append(_seed_sigma(board, best, word="repeat"))
     return out
 
 
@@ -571,9 +788,10 @@ def _board_lead(board: Leaderboard) -> str:
         return board.headline
     best = rows[0]
     if len(rows) == 1:
-        return f"{best.label} leads {board.task} at {fmt_value(_mean(best))}"
+        return f"{best.label} leads {board.task} at {_fmt(board, _mean(best))}"
     runner = rows[1]
-    text = f"{best.label} leads {board.task} by {fmt_value(abs(_mean(best) - _mean(runner)))}"
+    gap = _dfmt(board, abs(_mean(best) - _mean(runner)), _mean(runner)).removeprefix("+")
+    text = f"{best.label} leads {board.task} by {gap}"
     if runner.vs_best is not None and runner.vs_best.p is not None:
         text += f", {fmt_p(runner.vs_best.p)}"
     return text

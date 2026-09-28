@@ -454,3 +454,32 @@ def test_agent_iteration_without_version_uses_creation_time() -> None:
     ]
     board = build_leaderboard("toy", "ai", KINDS, runs, {"x": acc(0.4), "y": acc(0.6)})
     assert board.headline == "second try 0.600, +0.200 over first try"
+
+
+def test_board_carries_unit_value_format_and_relative_deltas() -> None:
+    runs, scores = bench_runs()
+    # "lat" names no unit: a number outside [0, 1], deltas absolute
+    board = build_leaderboard("toy", "sb", KINDS, runs, scores)
+    assert (board.unit, board.value_format) == ("", "number")
+    base = board.rows[1]
+    assert base.vs_best is not None
+    assert base.vs_best.delta == pytest.approx(130.0)
+    assert base.vs_best.delta_rel == pytest.approx(130.0 / 310.0)
+    assert board.rows[0].vs_best is None
+    # a configured ms unit on a lower-is-better time: relative vs-best deltas, units in text
+    timed = KINDS.model_copy(deep=True)
+    timed.metrics["lat"].unit = "ms"
+    board = build_leaderboard("toy", "sb", timed, runs, scores)
+    assert (board.unit, board.value_format) == ("ms", "percent_delta")
+    assert board.stat_strip[0] == {
+        "label": "p95",
+        "value": "310 vs 440",
+        "unit": "ms",
+        "tooltip": "fast vs baseline base, mean of repeats",
+    }
+    timed.tasks["sb"].baseline = None
+    assert build_leaderboard("toy", "sb", timed, runs, scores).headline == "fast p95 310 ms"
+    # fractions stay fractions
+    runs = [krun("a", "aaaa"), krun("b", "bbbb", minute=1)]
+    board = build_leaderboard("toy", "t", KINDS, runs, {"a": acc(0.9), "b": acc(0.6)})
+    assert (board.unit, board.value_format) == ("", "fraction")

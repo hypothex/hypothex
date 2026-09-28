@@ -14,10 +14,13 @@ from pydantic import BaseModel
 from hypothex.core import stats
 from hypothex.core.config import ProjectConfig, TaskKind, TaskSpec, parse_metric_key
 from hypothex.core.headlines import (
+    ValueFormat,
+    metric_unit,
     paired_gain_interval,
     percentile_of,
     task_headline,
     task_stat_strip,
+    value_format,
 )
 from hypothex.core.records import RunRecord, RunStatus, ScoreRecord, UsageTotals
 from hypothex.core.seeds import Stats, intervals_overlap, summarize
@@ -51,6 +54,8 @@ class VersusBest(BaseModel):
     broken: int | None
     test: Literal["sign", "paired_bootstrap", "welch"] | None
     examples_needed: int | None
+    delta_rel: float | None = None
+    """``delta`` over the best group's mean (``None`` when that mean is 0)."""
 
 
 class LeaderboardRow(BaseModel):
@@ -90,6 +95,10 @@ class Leaderboard(BaseModel):
     headline: str
     kind: TaskKind
     stat_strip: list[dict[str, Any]]
+    unit: str = ""
+    """Display unit of the primary metric (``headlines.metric_unit``): ``ms``, ``$``, ..."""
+    value_format: ValueFormat = "fraction"
+    """How to show primary values and vs-best deltas (``headlines.value_format``)."""
 
 
 # labels and ordering -------------------------------------------------------------
@@ -315,6 +324,20 @@ def _versus(
     primary: str,
 ) -> VersusBest:
     assert row.primary is not None and best.primary is not None
+    vs = _versus_test(row, best, pooled, binary, primary)
+    base = best.primary.mean
+    vs.delta_rel = vs.delta / abs(base) if base else None
+    return vs
+
+
+def _versus_test(
+    row: LeaderboardRow,
+    best: LeaderboardRow,
+    pooled: dict[str, dict[str, float]],
+    binary: bool | None,
+    primary: str,
+) -> VersusBest:
+    assert row.primary is not None and best.primary is not None
     delta = row.primary.mean - best.primary.mean
     mine, theirs = pooled.get(row.group_id, {}), pooled.get(best.group_id, {})
     common = sorted(mine.keys() & theirs.keys())
@@ -518,6 +541,7 @@ def build_leaderboard(
         if first is not None and first is not rows[0]:
             gain_interval = _paired_gain(rows[0], first, pooled)
 
+    unit = metric_unit(primary, config.metrics[primary_metric].unit)
     board = Leaderboard(
         project=project,
         task=task,
@@ -530,6 +554,8 @@ def build_leaderboard(
         headline="",
         kind=spec.kind,
         stat_strip=[],
+        unit=unit,
+        value_format=value_format(unit, (r.primary.mean for r in rows if r.primary), higher),
     )
     board.headline = task_headline(board, reference=reference, gain_interval=gain_interval)
     board.stat_strip = task_stat_strip(board, reference=reference)

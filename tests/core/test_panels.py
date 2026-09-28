@@ -114,7 +114,8 @@ def test_leaderboard_and_stat_strip_match_task_leaderboard(ctx: Context, toy_rep
 
     strip = query_panel(ctx, "toy", "toy-acc", _panel("stat_strip"))
     assert strip.rows == board.stat_strip
-    assert strip.meta == {"headline": board.headline}
+    assert strip.meta == {"headline": board.headline, "unit": "", "value_format": "fraction"}
+    assert (lb.meta["unit"], lb.meta["value_format"]) == ("", "fraction")
 
 
 def test_data_filter_selects_runs_by_flattened_fields(ctx: Context, toy_repo: Path) -> None:
@@ -702,6 +703,8 @@ def test_scatter_groups_intervals_and_pareto(ctx: Context, toy_repo: Path) -> No
         "pareto": {"x": "min", "y": "max"},
         "y_higher_is_better": True,
         "best_group": "aaaa@c1",  # svm, mean accuracy 0.85
+        "x_unit": "$",
+        "y_unit": "",
     }
 
 
@@ -929,7 +932,20 @@ def test_stat_strip_with_metrics_summarises_selected_runs(ctx: Context, toy_repo
             "tooltip": "No value in the 2 selected runs",
         },
     ]
-    assert set(result.meta) == {"headline"}
+    assert set(result.meta) == {"headline", "unit", "value_format"}
+
+
+def test_stat_strip_metrics_use_units(ctx: Context, toy_repo: Path) -> None:
+    for rid, usd, minute in [("a1", 0.5, 0), ("a2", 0.6, 1)]:
+        rec = _run(ctx, toy_repo, rid, minute=minute, usage=UsageTotals(usd=usd, seconds=90.0))
+        _jsonl(ctx.run_dir(rec) / "samples" / "latency_ms.jsonl", [{"value": 165.6}])
+    refs = ["usage.usd", "latency_ms", "usage.seconds"]
+    result = query_panel(ctx, "toy", "toy-acc", _panel("stat_strip", data={"metrics": refs}))
+    assert [(r["value"], r["unit"]) for r in result.rows] == [
+        ("$0.55", ""),  # dollars are a prefix
+        ("166", "ms"),  # 3 significant figures, unit beside the value
+        ("90", "s"),
+    ]
 
 
 def test_scatter_meta_carries_y_direction_and_best_group(ctx: Context, toy_repo: Path) -> None:
@@ -1049,6 +1065,7 @@ def test_distribution_quantiles_seeds_and_ecdf(ctx: Context, toy_repo: Path) -> 
     assert [r["vs_baseline"] for r in result.rows] == [None, None]  # no baseline configured
     assert result.meta == {
         "name": "latency_ms",
+        "unit": "ms",
         "scale": "log",
         "render": "chart",
         "baseline": None,
@@ -1078,6 +1095,7 @@ def test_distribution_vs_baseline_with_repeat_bootstrap(ctx: Context, toy_repo: 
     result = query_panel(ctx, "toy", "toy-acc", panel)
     assert result.meta == {
         "name": "latency_ms",
+        "unit": "ms",
         "scale": "linear",
         "render": "table",
         "baseline": "aaaa@c1",

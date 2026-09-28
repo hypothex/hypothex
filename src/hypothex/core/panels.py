@@ -18,7 +18,7 @@ from hypothex.core.config import parse_metric_key, parse_metric_version
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, HypothexError
 from hypothex.core.fsutil import read_jsonl
-from hypothex.core.headlines import MINUS, fmt_value
+from hypothex.core.headlines import MINUS, fmt_metric, metric_unit
 from hypothex.core.leaderboard import (
     Leaderboard,
     _natural_key,
@@ -311,11 +311,12 @@ def _stat_strip(scope: _Scope, panel: PanelSpec) -> PanelResult:
                 rows.append({"label": ref, "value": "—", "unit": "", "tooltip": tooltip})
                 continue
             n = len(values)
+            unit = _unit(scope, ref)
             rows.append(
                 {
                     "label": ref,
-                    "value": fmt_value(math.fsum(values) / n),
-                    "unit": "",
+                    "value": fmt_metric(math.fsum(values) / n, unit, suffix=False),
+                    "unit": "" if unit == "$" else unit,
                     "tooltip": f"Mean of {n} run{'s' if n != 1 else ''}{only}",
                 }
             )
@@ -323,7 +324,7 @@ def _stat_strip(scope: _Scope, panel: PanelSpec) -> PanelResult:
         type="stat_strip",
         title=panel.title,
         rows=rows,
-        meta={"headline": board.headline},
+        meta={"headline": board.headline, "unit": board.unit, "value_format": board.value_format},
     )
 
 
@@ -337,6 +338,8 @@ def _leaderboard(scope: _Scope, panel: PanelSpec) -> PanelResult:
             "headline": board.headline,
             "primary": board.primary,
             "higher_is_better": board.higher_is_better,
+            "unit": board.unit,
+            "value_format": board.value_format,
             "metric_versions": board.metric_versions,
             "noise": list(panel.noise),
             "needs_reeval": board.needs_reeval,
@@ -634,6 +637,13 @@ def _groups(scope: _Scope, panel: PanelSpec) -> list[tuple[str, str, list[RunRec
         label = f"seed {runs[0].seed}" if by == "seed" else labels.get(key)
         out.append((key, label or _own_label(runs, key), runs))
     return out
+
+
+def _unit(scope: _Scope, ref: str) -> str:
+    """Display unit of a reference: the metric's configured ``unit``, else from its name."""
+    name, _ = parse_metric_version(ref.partition("/")[0])
+    spec = scope.entry.config.metrics.get(name)
+    return metric_unit(ref, spec.unit if spec is not None else "")
 
 
 def _lower_is_better(name: str) -> bool:
@@ -1099,6 +1109,8 @@ def _scatter(scope: _Scope, panel: PanelSpec) -> PanelResult:
             "pareto": panel.pareto,
             "y_higher_is_better": higher,
             "best_group": best["group_id"] if best is not None else None,
+            "x_unit": "" if x_ref == VERSION_REF else _unit(scope, x_ref),
+            "y_unit": _unit(scope, y_ref),
         },
     )
 
@@ -1322,6 +1334,7 @@ def _distribution(scope: _Scope, panel: PanelSpec) -> PanelResult:
         rows=rows,
         meta={
             "name": name,
+            "unit": _unit(scope, name),
             "scale": panel.scale,
             "render": panel.render,
             "baseline": base["group_id"] if base is not None else None,

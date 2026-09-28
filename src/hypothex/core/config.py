@@ -183,6 +183,8 @@ class MetricSpec(_Strict):
     higher_is_better: bool = True
     params: dict[str, Any] = Field(default_factory=dict)
     changelog: dict[str, str] = Field(default_factory=dict)
+    unit: str = Field(default="", max_length=8)
+    """Display unit (``ms``, ``$``, ``tokens``); empty: inferred from the name."""
 
 
 class TaskSpec(_Strict):

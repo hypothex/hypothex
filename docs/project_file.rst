@@ -23,6 +23,7 @@ score it), stage command templates, and any setup needed before a stage runs.
        version: v2
        fn: deepretro.eval.metrics:topk_accuracy   # module:function in this repo
        higher_is_better: true
+       unit: ""                                    # optional display unit: ms, $, tokens
        params: {k: [1, 5, 10]}
        changelog:
          v1: initial
@@ -54,7 +55,9 @@ Sections
    Named metric functions, each a ``module:function`` reference (``fn``) importable
    from the project repo, with a ``version`` and a human-readable ``changelog`` keyed
    by version. Bump ``version`` whenever the metric's code changes; old scores are
-   never overwritten.
+   never overwritten. ``unit`` is optional and only changes display (``166 ms``,
+   ``$0.55``); without it the unit comes from the name (``latency``, ``_ms`` → ``ms``;
+   ``usd``, ``cost`` → ``$``; ``token`` → ``tokens``; ``seconds`` → ``s``).
 
 ``tasks``
    A task pairs a ``dataset`` (and optional ``split``) with one or more ``metrics``,

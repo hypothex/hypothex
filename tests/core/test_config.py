@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from hypothex.core.config import (
     CONFIG_FILENAME,
+    MetricSpec,
     find_repo_root,
     load_project_config,
     parse_metric_key,
@@ -228,3 +230,10 @@ def test_anchors_outside_views_stay_allowed(tmp_path: Path) -> None:
     assert "*p" in shared  # a shared (not cyclic) mapping: passes the guards
     with pytest.raises(ConfigError, match="description"):  # then fails the model: not a str
         load_project_config(_write(tmp_path, shared))
+
+
+def test_metric_unit_is_optional_and_short() -> None:
+    assert MetricSpec(version="v1", fn="m:f").unit == ""
+    assert MetricSpec(version="v1", fn="m:f", unit="ms").unit == "ms"
+    with pytest.raises(ValidationError):
+        MetricSpec(version="v1", fn="m:f", unit="milliseconds")

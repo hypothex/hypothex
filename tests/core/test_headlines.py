@@ -6,14 +6,19 @@ import pytest
 from hypothex.core.config import TaskKind
 from hypothex.core.headlines import (
     fmt_delta,
+    fmt_metric,
+    fmt_metric_delta,
     fmt_p,
     fmt_pct,
+    fmt_sig3,
     fmt_value,
+    metric_unit,
     overview_headline,
     paired_gain_interval,
     percentile_of,
     task_headline,
     task_stat_strip,
+    value_format,
     welch_interval,
 )
 from hypothex.core.ids import utcnow
@@ -103,6 +108,73 @@ def test_fmt_p_and_pct() -> None:
     assert fmt_pct(-0.2956) == "−30%"
     assert fmt_pct(0.041) == "+4%"
     assert fmt_pct(0.004) == "0%"
+
+
+def test_fmt_sig3() -> None:
+    cases = {
+        165.6221: "166",
+        0.5519: "0.552",
+        0.55: "0.55",
+        12.345: "12.3",
+        45.0: "45",
+        1234.4: "1,230",
+        999.6: "1,000",
+        0.0161: "0.0161",
+        -2.8011: "−2.8",
+        0.0: "0",
+    }
+    assert {x: fmt_sig3(x) for x in cases} == cases
+
+
+def test_metric_unit_and_value_format() -> None:
+    assert metric_unit("latency/p95") == "ms"
+    assert metric_unit("p95_ms") == "ms"
+    assert metric_unit("usage.usd/solved") == "$"
+    assert metric_unit("cost_usd") == "$"
+    assert metric_unit("usage.tokens_in") == "tokens"
+    assert metric_unit("usage.seconds") == "s"
+    assert metric_unit("wall_s") == "s"
+    for plain in ("top1", "val/loss", "sweep/rps", "errors/rate", "solved"):
+        assert metric_unit(plain) == "", plain
+    assert metric_unit("top1", "pts") == "pts"  # MetricSpec.unit wins
+    assert value_format("ms", [166.0], higher_is_better=False) == "percent_delta"
+    assert value_format("ms", [166.0], higher_is_better=True) == "number"
+    assert value_format("", [0.2, 1.5], higher_is_better=True) == "number"
+    assert value_format("$", [0.5], higher_is_better=False) == "number"
+    assert value_format("", [0.0, 0.74, 1.0], higher_is_better=True) == "fraction"
+
+
+def test_fmt_metric_and_delta() -> None:
+    assert fmt_metric(165.62, "ms") == "166 ms"
+    assert fmt_metric(165.62, "ms", suffix=False) == "166"
+    assert fmt_metric(0.5519, "$") == "$0.55"
+    assert fmt_metric(1.3, "$") == "$1.30"
+    assert fmt_metric(332.25, "$") == "$332"
+    assert fmt_metric(-1.5, "$") == "−$1.50"
+    assert fmt_metric(12_300.0, "tokens") == "12,300 tokens"
+    assert fmt_metric(0.7417) == "0.742"
+    assert fmt_metric(45.04) == "45"  # outside [0, 1]: 3 significant figures
+    assert fmt_metric_delta(45.0, 166.0, "ms", "percent_delta") == "+27%"
+    assert fmt_metric_delta(-45.0, 166.0, "ms", "number") == "−45 ms"
+    assert fmt_metric_delta(-45.0, 166.0, "ms", "number", suffix=False) == "−45"
+    assert fmt_metric_delta(0.017, 0.72) == "+0.017"
+    assert fmt_metric_delta(0.0, 0.0, "ms", "percent_delta") == "0 ms"
+
+
+def test_headlines_follow_the_board_format() -> None:
+    fast = row("fast", [166.0], primary="lat/value")
+    slow = row("slow", [211.0], vs=welch(45.0, 0.09), primary="lat/value")
+    b = board("generic", [fast, slow], primary="lat/value", higher=False)
+    b.unit, b.value_format = "ms", "percent_delta"
+    assert task_headline(b) == "fast −21% over slow, p = 0.09"
+    assert overview_headline(Summary(), board=b) == "Idle. fast leads toy-test by 21%, p = 0.09"
+    strip = task_stat_strip(b)
+    assert (strip[0]["value"], strip[0]["unit"]) == ("−21%", "")
+    b.value_format = "number"
+    assert task_headline(b) == "fast −45 ms over slow, p = 0.09"
+    assert overview_headline(Summary(), board=b) == "Idle. fast leads toy-test by 45 ms, p = 0.09"
+    strip = task_stat_strip(b)
+    assert (strip[0]["value"], strip[0]["unit"]) == ("−45", "ms")
 
 
 def test_percentile_of() -> None:

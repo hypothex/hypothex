@@ -46,7 +46,7 @@ class Tunnel:                          # one `ssh -N -L` subprocess
 
 ```python
 class ProbeResult(BaseModel): os: str; arch: str; python: str | None; uv: str | None; gpus: int; slurm: str | None; home: str
-class ServerInfo(BaseModel): pid: int; port: int; managed: bool; hx_version: str; protocol_version: int
+class ServerInfo(BaseModel): pid: int; port: int; managed: bool; hx_version: str; protocol_version: int; token: str | None = None  # bearer token of the env server (from server.json, 0600); excluded from dumps
 def probe(target: SshTarget, home: str) -> ProbeResult: ...
 def build_wheel(cache_dir: Path) -> Path: ...                  # `uv build --wheel` of the running package, cached by version; reuse if present
 def install(target: SshTarget, home: str, wheel: Path) -> None: ...   # scp + `uv tool install --force` under <home>/runtime with a lock dir; installs uv into ~/.local/bin if missing
@@ -59,11 +59,11 @@ BOOTSTRAP_SCRIPTS: dict[str, str]   # POSIX sh templates: "probe", "install", "s
 
 ```python
 class EnvClient:
-    def __init__(self, base_url: str, *, timeout: float = 10) -> None: ...
+    def __init__(self, base_url: str, *, timeout: float = 10, token: str | None = None) -> None: ...  # token -> Authorization: Bearer (HTTP and WS)
     def descriptor(self) -> EnvironmentDescriptor: ...
     def get_json(self, path: str, **params: Any) -> Any: ...
     def post_json(self, path: str, body: dict[str, Any]) -> Any: ...
-    def fetch_file(self, run_id: str, rel_path: str, dest: Path, *, max_bytes: int) -> bool: ...   # False when skipped (too big / missing)
+    def fetch_file(self, run_id: str, rel_path: str, dest: Path, *, max_bytes: int, tail: bool = False, offset: int = 0) -> bool: ...   # False when skipped (too big / missing); tail = last max_bytes; offset = byte range for append-only files
     async def events(self, after_sequence: int) -> AsyncIterator[Event]: ...   # WS subscribe, yields events, ends on disconnect
 ```
 Uses `httpx` and `websockets` (or `httpx-ws`; plan picks one, adds it with `uv add`).
@@ -73,7 +73,7 @@ Uses `httpx` and `websockets` (or `httpx-ws`; plan picks one, adds it with `uv a
 ```python
 ConnState = Literal["connecting", "bootstrapping", "connected", "stale", "upgrade", "error", "disabled"]
 class HostState(BaseModel):
-    name: str; kind: HostKind; state: ConnState; since: datetime; message: str = ""
+    name: str; kind: HostKind | Literal["local"]; state: ConnState; since: datetime; message: str = ""   # "local" only for the hub's own row
     environment_id: str | None = None; hx_version: str | None = None; last_sequence: int = 0
     local_port: int | None = None
 class Hub:
@@ -83,6 +83,8 @@ class Hub:
     def state(self, name: str) -> HostState: ...
     def states(self) -> list[HostState]: ...
     def client(self, name: str) -> EnvClient: ...   # raises HostUnavailableError when not connected
+    async def add_host(self, name: str, spec: HostSpec) -> HostState: ...   # one host changes; others keep their sessions
+    async def remove_host(self, name: str) -> None: ...
 class HostUnavailableError(HypothexError): ...
 def mirror_event(ctx: Context, client: EnvClient, host: str, environment_id: str, event: Event) -> None: ...
 MIRROR_FILES = ("run.yaml", "scores.jsonl", "metrics.jsonl", "notes.md", "usage.jsonl", "config.yaml", "git.diff", "git.stat")
@@ -118,7 +120,7 @@ def cancel(job_id: str) -> None: ...
 # hypothex.core.cost
 def compute_cost(record: RunRecord, usd_per_gpu_hour: float | None) -> CostTotals: ...
 ```
-`hx serve --kind slurm|ssh` (default from `environment.json` / probe) enables the scheduler loop (ssh, every 5 s) or the SLURM poll loop (every 30 s). Run-start path: `prepare_run` accepts `gpus: int`, `queue: bool`, `slurm: SlurmDefaults | None`, `diff: str | None` (applied in a worktree, 8A.4).
+`hx serve --kind slurm|ssh` (default from `environment.json` / probe) enables the scheduler loop (ssh, every 5 s) or the SLURM poll loop (every 30 s). Run-start path: `prepare_run` accepts `gpus: int`, `queue: bool`, `slurm: SlurmDefaults | None`, `commit: str | None` (hex sha, fetched when missing), `diff: str | None` (applied on `commit` in a worktree, 8A.4). The hub always sends `commit` with `diff`.
 
 ### 1.7 Sweeps (`hypothex.core.sweeps`)
 
@@ -138,20 +140,25 @@ Hub (and env servers where marked *env*):
 
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
-| GET | `/api/v1/hosts` | | `list[{name, kind, state: HostState, gpus: list[GpuInfo], queue: int, slurm: {pending, running}|null, cost_today_usd: float, projects: list[str]}]` |
+| GET | `/api/v1/hosts` | | `list[{name, kind: "local" \| HostKind, state: HostState, gpus: list[GpuInfo], queue: int, slurm: {pending, running}\|null, cost_today_usd: float, usd_per_gpu_hour: float\|null, projects: list[str]}]` (first row: the hub, `name` and `kind` `"local"`) |
 | POST | `/api/v1/hosts/{host}/connect` / `/disconnect` | `{command_id?}` | `HostState` |
-| POST | `/api/v1/hosts/{host}/runs` | launch body + `{gpus, queue, slurm?: SlurmDefaults, diff?}` | run record (forwarded) |
-| GET | `/api/v1/runs/{id}/files/{path:path}` *env* | `max_bytes` | file bytes; 404 / 413 |
+| POST | `/api/v1/hosts/{host}/runs` | launch body + `{gpus, queue, slurm?: SlurmDefaults, project?, commit?, diff?}` | run record (forwarded) |
+| GET | `/api/v1/runs/{id}/files/{path:path}` *env* | `max_bytes`, `tail?`, `offset?` | file bytes; 404 / 413 |
+| GET | `/api/v1/projects/{project}/entry` *env* | | the host's `ProjectEntry` (the hub copies a host-only project) |
 | GET | `/api/v1/gpus` *env* | | `list[GpuInfo]` |
 | GET | `/api/v1/queue` *env* | | `[{run_id, position, gpus_requested}]` |
-| POST | `/api/v1/sweeps` | `{project, task?, host?, grid, random?, seeds, command, hypothesis, gpus?, queue?, command_id?}` | `SweepSummary` |
+| POST | `/api/v1/sweeps` | `{project, task?, host?, grid, random?, seeds, command, hypothesis, gpus?, queue?, commit?, diff?, command_id?}` | `SweepSummary` |
 | GET | `/api/v1/sweeps/{project}/{id}` | | `SweepSummary` |
 | GET | `/api/v1/projects/{project}/sweeps` | | `list[{id, created_at, n_runs, best}]` |
 | POST | `/api/v1/sweeps/{project}/{id}/cancel_queued` | `{command_id?}` | `SweepSummary` (queued runs of the sweep stopped as `killed`) |
 | POST | `/api/v1/sweeps/{project}/{id}/extend` | `{seeds: list[int], command_id?}` | `SweepSummary` (adds runs for every param combination × new seeds) |
 | POST | `/api/v1/runs/{id}/pull` | `{artifact: kind or path, command_id?}` | `{local_path}` |
 
-Run actions on remote runs (stop, rerun, reinfer, reeval, tags, star, archive, notes) keep their routes; the hub forwards to the owning host by `environment_id`. `GET /api/v1/runs/{id}` adds `host_state: ConnState | null` (null = local).
+Run actions on remote runs (stop, rerun, reinfer, reeval, tags, star, archive, notes) keep their routes; the hub forwards to the owning host by `environment_id`. A run of an environment no configured host serves gets `503` for stop, rerun, reinfer, and reeval. `GET /api/v1/runs/{id}` adds `host_state: ConnState | null` (null = local).
+
+Additive fields (spec 8A.7): leaderboard rows add `cost: CostTotals | null` (sum of the group's runs); the Overview adds `cost_usd` (runs in the window) and `cost_today_usd`.
+
+Env servers (`hx serve --kind ssh|slurm`) require `Authorization: Bearer <token>` on every route except `/.well-known/hypothex/environment`; the token is in the host's `<home>/serve/server.json` (0600) and reaches the hub as `ServerInfo.token`. The hub's own server (the UI) needs no token.
 
 ## 3. CLI and MCP additions
 
@@ -161,7 +168,7 @@ MCP: `list_hosts`, `launch_run(..., host=None, gpus=0, queue=False)`, `launch_sw
 ## 4. Frontend
 
 Additions in `ui/` (same stack and rules as phase 1b):
-- `ui/src/api/models.ts`: `HostState`, `HostRow`, `GpuInfo`, `SweepSummary`, `CostTotals`, executor additions.
+- `ui/src/api/models.ts`: `HostState`, `HostRow`, `GpuInfo`, `SweepSummary`, `CostTotals`, executor additions. `HostRow.kind` and `HostState.kind` are `HostKind | "local"`; `HostRow.usd_per_gpu_hour`, `LeaderboardRow.cost`, `OverviewSummary.cost_usd` / `cost_today_usd` are optional.
 - Overview panel "Hosts" (`ui/src/pages/components/HostsPanel.tsx`) as panel a; the existing "Runs by launcher" timeline, Ideas, Failures and Projects stay below it (the phase 2 mockup dropped the timeline for space; keep it).
 - Launch dialog (`ui/src/launch/LaunchDialog.tsx`), opened from the Task page "New run" and from a sweep page "Rerun sweep".
 - Sweep page route `/s/:project/:id` (`ui/src/pages/Sweep.tsx`) with actions Copy as CLI, Cancel queued, Add seeds.
@@ -173,3 +180,7 @@ Additions in `ui/` (same stack and rules as phase 1b):
 
 - `docs/superpowers/plans/2026-10-03-hypothex-phase2-backend.md` — sections 1–3 + Docker integration harness (`tests/docker/`: sshd image, slurm compose) + docs.
 - `docs/superpowers/plans/2026-10-03-hypothex-phase2-frontend.md` — section 4; Playwright smoke needs fake remote hosts: the backend plan provides ONE command (`hx demo --with-hosts`, plan picks the mechanism, e.g. separate demo homes for fake hosts plus `route: url` entries and a helper that serves them) so `hx serve` on the hub shows connected fake hosts with GPUs, a queue, a SLURM host, and a sweep.
+
+## Changes after the backend plan review (2026-10-03)
+
+All additive; nothing was renamed. `ServerInfo.token` and `EnvClient(token=)` (env-server auth on shared hosts); `EnvClient.fetch_file(tail=, offset=)` and the files route's `tail`/`offset` (log tails, append-only mirroring); `HostState.kind` and host rows accept `"local"` (the hub's own row); host rows add `usd_per_gpu_hour`; leaderboard rows add `cost`, the Overview adds `cost_usd`/`cost_today_usd` (spec 8A.7); `Hub.add_host`/`remove_host`; the host launch and sweep bodies take `commit` (and `project`/`diff`); env route `GET /api/v1/projects/{project}/entry`; `prepare_run` takes `commit`. The frontend plan's "known gaps" for `$/GPU-h` and leaderboard cost are now served by the backend.

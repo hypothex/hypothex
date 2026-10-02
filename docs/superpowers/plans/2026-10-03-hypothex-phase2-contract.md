@@ -147,22 +147,24 @@ Hub (and env servers where marked *env*):
 | POST | `/api/v1/sweeps` | `{project, task?, host?, grid, random?, seeds, command, hypothesis, gpus?, queue?, command_id?}` | `SweepSummary` |
 | GET | `/api/v1/sweeps/{project}/{id}` | | `SweepSummary` |
 | GET | `/api/v1/projects/{project}/sweeps` | | `list[{id, created_at, n_runs, best}]` |
+| POST | `/api/v1/sweeps/{project}/{id}/cancel_queued` | `{command_id?}` | `SweepSummary` (queued runs of the sweep stopped as `killed`) |
+| POST | `/api/v1/sweeps/{project}/{id}/extend` | `{seeds: list[int], command_id?}` | `SweepSummary` (adds runs for every param combination × new seeds) |
 | POST | `/api/v1/runs/{id}/pull` | `{artifact: kind or path, command_id?}` | `{local_path}` |
 
 Run actions on remote runs (stop, rerun, reinfer, reeval, tags, star, archive, notes) keep their routes; the hub forwards to the owning host by `environment_id`. `GET /api/v1/runs/{id}` adds `host_state: ConnState | null` (null = local).
 
 ## 3. CLI and MCP additions
 
-CLI (`--json` everywhere): `hx hosts add|list|status|map|rm|upgrade|connect|disconnect`, `hx service install|uninstall`, `hx launch --host H --gpus N --queue [--partition P --time T --account A]`, `hx sweep ...` (spec 8A.6), `hx sweeps [-p P]`, `hx sweep show <id>`, `hx pull <run_id> [--artifact X]`, `hx serve --kind ssh|slurm`.
-MCP: `list_hosts`, `launch_run(..., host=None, gpus=0, queue=False)`, `launch_sweep(...)`, `get_sweep(project, sweep_id)`, `pull_artifact(run_id, artifact)`.
+CLI (`--json` everywhere): `hx hosts add|list|status|map|rm|upgrade|connect|disconnect`, `hx service install|uninstall`, `hx launch --host H --gpus N --queue [--partition P --time T --account A]`, `hx sweep ...` (spec 8A.6), `hx sweeps [-p P]`, `hx sweep show <id>`, `hx sweep cancel <id>`, `hx sweep extend <id> --seeds 4,5`, `hx pull <run_id> [--artifact X]`, `hx serve --kind ssh|slurm`.
+MCP: `list_hosts`, `launch_run(..., host=None, gpus=0, queue=False)`, `launch_sweep(...)`, `get_sweep(project, sweep_id)`, `cancel_sweep(project, sweep_id)`, `extend_sweep(project, sweep_id, seeds)`, `pull_artifact(run_id, artifact)`.
 
 ## 4. Frontend
 
 Additions in `ui/` (same stack and rules as phase 1b):
 - `ui/src/api/models.ts`: `HostState`, `HostRow`, `GpuInfo`, `SweepSummary`, `CostTotals`, executor additions.
-- Overview panel "Hosts" (`ui/src/pages/components/HostsPanel.tsx`).
+- Overview panel "Hosts" (`ui/src/pages/components/HostsPanel.tsx`) as panel a; the existing "Runs by launcher" timeline, Ideas, Failures and Projects stay below it (the phase 2 mockup dropped the timeline for space; keep it).
 - Launch dialog (`ui/src/launch/LaunchDialog.tsx`), opened from the Task page "New run" and from a sweep page "Rerun sweep".
-- Sweep page route `/s/:project/:id` (`ui/src/pages/Sweep.tsx`).
+- Sweep page route `/s/:project/:id` (`ui/src/pages/Sweep.tsx`) with actions Copy as CLI, Cancel queued, Add seeds.
 - Run page states: queued (position), remote (host, GPUs, SLURM job/node), stale (since), lost (reason); cost line.
 - Live updates: `mirror.run_updated` and `host.*` events invalidate hosts, runs, overview, sweeps.
 - Mockups: `docs/mockups/phase2/`.

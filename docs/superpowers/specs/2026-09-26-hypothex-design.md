@@ -595,6 +595,126 @@ panels:
 `git.untracked` (count + first 20 names). The run page says "untracked files only" when
 there is no tracked diff. This fixes a misleading warning found in the acceptance run.
 
+## 8A. Phase 2 details (approved 2026-10-03)
+
+Builds on 5.2–5.7. Mockups: `docs/mockups/phase2/`. Testing never touches the user's real
+hosts: in-process fake hosts, fake `sbatch`/`squeue`/`sacct`, and Docker containers
+(sshd, small SLURM cluster) for integration tests.
+
+### 8A.1 Environments file and hosts
+
+`~/.hypothex/environments.yaml` (hub only) holds one entry per host:
+
+```yaml
+environments:
+  gpu1:
+    route: ssh            # ssh | url | local
+    ssh_alias: SV-a100-retrollm2   # a Host from ~/.ssh/config
+    kind: ssh             # ssh | slurm
+    home: ~/.hypothex     # hx home on the host (shared FS required for slurm)
+    usd_per_gpu_hour: 2.10   # optional, for cost
+    slurm: {partition: gpu, account: null, time: "02:00:00", gpus: 1}   # kind: slurm only
+    projects: {deepretro: /home/sv/code/DeepRetro}   # project -> repo path on the host
+```
+
+CLI: `hx hosts add <name> --ssh <alias> [--slurm --partition P ...]`, `hx hosts list`,
+`hx hosts status [<name>]`, `hx hosts map <project> <host> <path>`, `hx hosts rm <name>`,
+`hx hosts upgrade <name>`, `hx service install|uninstall` (on the host itself), and
+`hx hosts connect|disconnect <name>`.
+
+### 8A.2 Bootstrap and tunnel
+
+`hx hosts add`/`connect` runs, over the user's own `ssh` binary (agent and config honoured):
+
+1. Probe: `uname`, Python ≥ 3.11 or `uv` available, `nvidia-smi -L`, `sbatch --version`.
+2. Install: the hub builds its own wheel (`uv build --wheel`, cached by version) and copies
+   it with `scp` to `<home>/runtime/wheels/`. The host installs it with
+   `uv tool install --force` into `<home>/runtime/` (if `uv` is missing, it is installed
+   with the official installer into `~/.local/bin`; no network → clear error naming the
+   missing piece). Under a lock dir, so two hubs never race.
+3. Start: reuse a healthy server recorded in `<home>/serve/server.json` (pid, port,
+   managed|external, hx_version); else `nohup hx serve --host 127.0.0.1 --port 0`, wait for
+   the descriptor, on failure return the last 80 log lines.
+4. Tunnel: `ssh -N -L 127.0.0.1:<free local port>:127.0.0.1:<remote port>
+   -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3`. One
+   supervisor per host restarts the tunnel with backoff 3/4/8/16 s (reset after 30 s).
+5. Version check: incompatible `protocol_version` → host shown as "upgrade" and
+   `hx hosts upgrade` reinstalls.
+
+Env servers bind to 127.0.0.1 only. No new network exposure; auth stays in phase 3.
+
+### 8A.3 Hub mirror
+
+- The hub keeps one subscription per host (`after_sequence` replay, 5.3). For each
+  `run.*` event it fetches the run's small files (`run.yaml`, `scores.jsonl`,
+  `metrics.jsonl`, `notes.md`, `predictions/` up to 200 MB, `traces/`, `samples/`,
+  `usage.jsonl`, `logs/` tails) over `GET /api/v1/runs/{id}/files/{path}` and writes them
+  under `<hub store>/<project>/runs/<run_id>/` with `environment_id` = the host's id, then
+  re-indexes. The hub re-emits a mirror event so UI streams update.
+- Per-host cursor (`last_sequence`) is stored in the hub index; restarts resume.
+- Big files stay remote as `host:path` artifacts; `hx pull <run_id> [--artifact KIND|PATH]`
+  copies one on demand with `scp` into `<hub store>/.../pulled/`.
+- Commands for a remote run (stop, rerun, reinfer, reeval, notes, tags) are forwarded to
+  the owning host with the same `command_id`; reeval may also run on the hub when the
+  predictions are mirrored and the project repo exists locally (default: on the host).
+
+### 8A.4 Code on the host
+
+A run on a host uses the mapped repo path. If the requested commit is not present, the
+env server runs `git fetch` in that repo; if the working tree is not at the commit (or the
+saved diff differs), it uses a worktree exactly like `hx rerun` (5.1). Launching from the
+hub with an uncommitted local diff sends the diff with the request; the host applies it in
+the worktree. Missing mapping → clear error naming `hx hosts map`.
+
+### 8A.5 Launch, queue, and GPUs
+
+- `hx launch --host H [--gpus N] [--queue] [--partition P --time T]` (and API `POST
+  /api/v1/hosts/{host}/runs`, MCP `launch_run(host=...)`) forwards to the host.
+- SSH hosts: a host-level scheduler holds `queued` runs. A GPU is free when no hx run holds
+  it and `nvidia-smi --query-compute-apps` shows no process on it. It assigns GPUs, sets
+  `CUDA_VISIBLE_DEVICES`, and starts the run FIFO (first fit). Queue position is visible.
+- SLURM hosts: render `sbatch` (`--gpus`, `--time`, `--partition`, `--account`,
+  `--job-name hx-<run_id>`, `--output <run_dir>/logs/slurm-%j.out`), run `hx run --child`
+  on the node; track `squeue`/`sacct` every 30 s; record `executor.slurm_job_id`, node.
+  `stop` → `scancel`. A job gone without an exit record → `lost` (5.6).
+- Runs record `executor.gpus` (indices) and `executor.host`.
+
+### 8A.6 Sweeps
+
+`hx sweep -t T --grid k=v1,v2 [--grid ...] [--random N --param k=lo:hi[:log]] --seeds S
+--host H [--queue] -- <cmd with {k} and {seed}>` writes `<store>/<project>/sweeps/<id>.yaml`
+(grid, seeds, host, run ids, created_by) and launches all runs with tag `sweep:<id>` and
+params `k=v`. API `POST /api/v1/sweeps`, `GET /api/v1/sweeps/{id}`; MCP `launch_sweep`,
+`get_sweep`. Sweep page `/s/<id>`: headline (best config + score), progress counts,
+params × primary-metric heat table (mean; CI in tooltip), best cell marked, cost total.
+
+### 8A.7 Host status and cost
+
+- `GET /api/v1/hosts` (hub) → per host: connection state (connected | stale since | bootstrapping |
+  upgrade), descriptor, queue length, GPUs `[ {index, name, util, mem_used, mem_total, run_id?,
+  external: bool} ]` (from `nvidia-smi` every 10 s on the host), SLURM pending/running counts,
+  cost today.
+- Cost: `gpu_hours = wall × len(executor.gpus)`; `usd = gpu_hours × usd_per_gpu_hour +
+  usage.usd`. `RunRecord.cost = {gpu_hours, gpu_usd, api_usd, total_usd}` filled at finish.
+  Leaderboards, run pages, sweeps, and the Overview show cost.
+
+### 8A.8 UI additions
+
+Overview "Hosts" panel; Launch dialog (host, GPUs, queue, SLURM fields, seeds, command
+template, hypothesis, resolved-command preview, Copy as CLI); Sweep page; run-page states
+(queued with position, remote host:path + GPUs or SLURM job/node, stale since, lost reason).
+Same terse rules as section 8.
+
+### 8A.9 Tests
+
+- Unit and integration tests use in-process env servers on random ports (`route: url`) and
+  a fake `ssh`/`scp` that executes locally into temp homes, plus fake SLURM commands on
+  `PATH`.
+- Docker integration tests (marked `docker`, skipped when Docker is unavailable): a real
+  sshd container (bootstrap, tunnel, reconnect after `docker restart`) and a small SLURM
+  cluster (submit, status, cancel, lost detection).
+- Never against the user's hosts.
+
 ## 9. Phase 3 features (design summary)
 
 - **Lab notebook:** `<store>/<project>/notebook/YYYY-MM-DD.md`; `[[run:<id>]]` links render
@@ -687,7 +807,7 @@ hypothex/
 |---|---|---|
 | **1a. Core backend** | Sections 2–4, 5.1 (local), 5.2–5.3 for the Mac environment only (descriptor, event log, idempotent commands, resumable WebSocket streams, startup repair), 5.4 local runner, 6, 7 (all interfaces, local actions), 10, 11 for these parts. | Toy E2E green in CI; DeepRetro onboarded with one task and ≥ 3 runs; an agent completes the section 7.5 loop using only the skill file. |
 | **1b. UI, kinds, views** | Section 8: stats, views (presets + custom + editor), SDK additions, git fix, all screens for all kinds, WebSocket live updates. | Each kind's preset renders against a seeded store; a custom view round-trips through editor, file, CLI, and MCP; Playwright smoke test green in both modes. |
-| **2. Scale** | Remote env servers: SSH bootstrap + tunnel, `hx hosts add`, `hx service install`, hub supervisors + replay from many envs, file sync (5.5), SLURM runner, stale/lost rules (5.6), queue, sweeps, host/GPU status, cost. | A DeepRetro run launched from the UI on SLURM and on an SSH box, pulled, scored, and shown on the leaderboard. |
+| **2. Remote + scale** | Remote env servers: SSH bootstrap + tunnel, `hx hosts add`, `hx service install`, hub supervisors + replay from many envs, file sync (5.5), SLURM runner, stale/lost rules (5.6), queue, sweeps, host/GPU status, cost. | A run launched from the UI on the Docker SLURM cluster and on the Docker sshd host is mirrored to the hub, scored, and shown on the leaderboard; a sweep on a fake 8-GPU host queues and allocates GPUs correctly. A first run on the user's real hosts is the user's manual step. |
 | **3. Team + output** | Notebook, paper baselines, Slack + email alerts, weekly summary, export, storage cleanup, pairing + scoped auth, Tailscale access, Postgres server mode. | A collaborator pairs a laptop with a server hub, sees the same projects, and launches a run on a shared environment. |
 
 Each phase gets its own implementation plan.

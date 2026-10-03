@@ -50,6 +50,22 @@ hx_same_proc() {
     [ -z "$2" ] || [ "$(hx_pid_start "$1")" = "$2" ]
 }
 
+hx_stop_pid() {
+    # hx_stop_pid PID START: SIGTERM PID (only while hx_same_proc PID START holds),
+    # wait up to 10 s, then SIGKILL it if it still runs.
+    hx_same_proc "$1" "$2" || return 0
+    kill "$1" 2>/dev/null
+    _hx_i=0
+    while hx_same_proc "$1" "$2" && [ "$_hx_i" -lt 40 ]; do
+        hx_sleep
+        _hx_i=$((_hx_i + 1))
+    done
+    if hx_same_proc "$1" "$2"; then
+        kill -9 "$1" 2>/dev/null
+    fi
+    return 0
+}
+
 hx_owner_dead() {
     # hx_owner_dead OWNER: true only when OWNER ("host|pid|birth") ran on this host
     # and that process is gone, or its pid now names a process with another birth.

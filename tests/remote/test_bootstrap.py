@@ -822,15 +822,129 @@ def test_server_json_holds_a_private_token(host: FakeHost, servers: list[int]) -
 
 
 def test_reuse_needs_this_homes_environment_id(host: FakeHost, servers: list[int]) -> None:
-    # a port that someone else's process took over must never be reused
+    # a server that answers for another environment is never reused, and never
+    # orphaned: the call fails, and only after a stop does a new server start
     _install_source_hx(host)
     first = bs.ensure_server(host.target, "~/.hypothex")
     servers.append(first.pid)
+    sj = host.hx_home / "serve" / "server.json"
+    record = sj.read_text()
     env_file = host.hx_home / "environment.json"
     identity = json.loads(env_file.read_text())
     env_file.write_text(json.dumps({**identity, "environment_id": "someone-else"}))
+    with pytest.raises(
+        BootstrapError, match=rf"\(pid {first.pid}\) .*does not answer for this home"
+    ):
+        bs.ensure_server(host.target, "~/.hypothex")
+    assert _alive(first.pid) and sj.read_text() == record
+    assert bs.stop_server(host.target, "~/.hypothex") is True
+    env_file.write_text(json.dumps(identity))
     second = bs.ensure_server(host.target, "~/.hypothex")
     assert second.pid != first.pid and second.token != first.token
+    assert not _alive(first.pid)
+
+
+def _no_new_server(host: FakeHost, record: str) -> None:
+    """The start script refused: the record is unchanged and no ``hx serve`` ran."""
+    serve = host.hx_home / "serve"
+    assert (serve / "server.json").read_text() == record
+    assert not (serve / "server.log").exists()
+
+
+def test_start_never_replaces_another_nodes_server(host: FakeHost) -> None:
+    # a shared home seen from two login nodes: that server cannot be checked from here
+    _install_source_hx(host)
+    proc = _sleeper_record(host, hostname="login2", pid_start="x")
+    record = (host.hx_home / "serve" / "server.json").read_text()
+    try:
+        with pytest.raises(BootstrapError, match=rf"runs on login2 \(pid {proc.pid}\)"):
+            bs.ensure_server(host.target, "~/.hypothex")
+        assert proc.poll() is None
+        _no_new_server(host, record)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_start_never_orphans_a_live_server_that_does_not_answer(host: FakeHost) -> None:
+    # our own managed server, alive (same birth) but its descriptor never answers
+    _install_source_hx(host)
+    serve = host.hx_home / "serve"
+    serve.mkdir(parents=True)
+    (serve / "server.log").write_text("busy\nstill busy\n")
+    proc = subprocess.Popen(["sleep", "60"])
+    try:
+        record = json.dumps({"pid": proc.pid, "port": 9, "managed": True, "hx_version": "0.1.0",
+                             "protocol_version": 1, "hostname": _hostname(),
+                             "pid_start": _birth(proc.pid)})  # fmt: skip
+        (serve / "server.json").write_text(record)
+        with pytest.raises(BootstrapError, match=rf"\(pid {proc.pid}\) .*does not answer") as info:
+            bs.ensure_server(host.target, "~/.hypothex")
+        assert str(info.value).splitlines()[-2:] == ["busy", "still busy"]  # the log tail
+        assert proc.poll() is None
+        assert (serve / "server.json").read_text() == record
+        assert bs.stop_server(host.target, "~/.hypothex") is True  # stop.sh still finds it
+        assert proc.wait(timeout=10) is not None
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.mark.parametrize("managed", [True, False], ids=["no-birth", "external"])
+def test_start_never_orphans_a_live_server_it_cannot_prove_dead(
+    host: FakeHost, managed: bool
+) -> None:
+    # a live pid without a recorded birth may be our server; an external one is not ours
+    _install_source_hx(host)
+    proc = _sleeper_record(host, hostname=_hostname(), managed=managed)
+    sj = host.hx_home / "serve" / "server.json"
+    if not managed:
+        sj.write_text(json.dumps({**json.loads(sj.read_text()), "pid_start": _birth(proc.pid)}))
+    record = sj.read_text()
+    try:
+        with pytest.raises(BootstrapError, match=rf"\(pid {proc.pid}\) runs but"):
+            bs.ensure_server(host.target, "~/.hypothex")
+        assert proc.poll() is None
+        _no_new_server(host, record)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_start_replaces_a_record_whose_pid_was_recycled(host: FakeHost, servers: list[int]) -> None:
+    # the recorded server died and the OS gave its pid to an unrelated process
+    _install_source_hx(host)
+    proc = _sleeper_record(host, hostname=_hostname(), pid_start="Mon Jan 1 00:00:00 2001")
+    try:
+        info = bs.ensure_server(host.target, "~/.hypothex")
+        assert info.pid != proc.pid and _alive(info.pid)
+        assert proc.poll() is None  # never signalled
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+STUBBORN_HX = """trap '' TERM
+echo $$ > {marker}
+printf '{{"pid": %s, "managed": false}}\\n' $$ > "$HYPOTHEX_HOME/serve/server.json"
+while :; do sleep 1; done
+"""
+
+
+def test_start_timeout_kills_a_server_that_ignores_sigterm(
+    host: FakeHost, monkeypatch: pytest.MonkeyPatch, servers: list[int]
+) -> None:
+    # a half-started server that wrote its own record and ignores SIGTERM: it is
+    # killed for good and its record dropped, so the next start is not blocked
+    monkeypatch.setenv("HX_START_WAIT", "1")
+    marker = host.remote_home / "stubborn.pid"
+    _install_fake_hx(host, STUBBORN_HX.format(marker=marker))
+    with pytest.raises(BootstrapError, match=r"not ready after 1s"):
+        bs.ensure_server(host.target, "~/.hypothex")
+    pid = int(marker.read_text())
+    servers.append(pid)
+    assert not _alive(pid)
+    assert not (host.hx_home / "serve" / "server.json").exists()
 
 
 def test_two_hubs_break_a_dead_lock_once(host: FakeHost, servers: list[int]) -> None:

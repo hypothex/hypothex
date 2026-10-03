@@ -37,16 +37,8 @@ if [ -z "$_birth" ]; then
     echo "HX:reason=server.json has no pid_start; cannot tell the server from a recycled pid"
     exit 0
 fi
-if [ -n "$_pid" ] && hx_same_proc "$_pid" "$_birth"; then
-    kill "$_pid" 2>/dev/null
-    _i=0
-    while hx_alive "$_pid" && [ "$_i" -lt 40 ]; do
-        hx_sleep
-        _i=$((_i + 1))
-    done
-    if hx_same_proc "$_pid" "$_birth"; then
-        kill -9 "$_pid" 2>/dev/null
-    fi
+if [ -n "$_pid" ]; then
+    hx_stop_pid "$_pid" "$_birth"
 fi
 rm -f "$SJ"
 echo "HX:stopped=1"

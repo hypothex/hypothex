@@ -476,10 +476,15 @@ def ensure_server(target: SshTarget, home: str, *, kind: str | None = None) -> S
 
     Reuses the server in ``<home>/serve/server.json`` when its pid is alive on
     this host (with the recorded birth) and its descriptor answers for this
-    home. Otherwise starts ``nohup hx serve --host 127.0.0.1 --port 0`` from
-    ``<home>/runtime/bin``, waits for the
-    descriptor (``HX_START_WAIT`` seconds on the host, default 30), and records
-    it as managed. Start and reuse run under the lock dir ``<home>/serve/.lock``,
+    home. When there is no record, or its process is provably gone (dead, or
+    its pid now has another birth), starts ``nohup hx serve --host 127.0.0.1
+    --port 0`` from ``<home>/runtime/bin``, waits for the descriptor
+    (``HX_START_WAIT`` seconds on the host, default 30), and records it as
+    managed. A home never gets a second server: a record that names another
+    login node, or a live process here that cannot be reused (its descriptor
+    does not answer for this home, it is not managed, or its birth is not
+    recorded), fails the call and keeps the record, so ``stop_server`` can
+    still stop it. Start and reuse run under the lock ``<home>/serve/.lock``,
     so two hubs that start the same host at once share one server.
 
     Parameters
@@ -500,8 +505,11 @@ def ensure_server(target: SshTarget, home: str, *, kind: str | None = None) -> S
     Raises
     ------
     BootstrapError
-        ``hx`` is not installed, or the server exited or was not ready in time;
-        the message ends with the last 80 lines of ``<home>/serve/server.log``.
+        ``hx`` is not installed, or the server exited or was not ready in time
+        (it is then killed; the message ends with the last 80 lines of
+        ``<home>/serve/server.log``), or the recorded server runs on another
+        host or runs here but cannot be reused (the message ends with the last
+        20 log lines).
         A bad ``server.json`` is named by its invalid fields only (never the
         token).
 

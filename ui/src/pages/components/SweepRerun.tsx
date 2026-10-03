@@ -4,7 +4,7 @@
  * and `{seed}` slots), its params and vars (sent with every seed, so the slots fill), its
  * GPUs per run, the sweep's host, and the next seeds after every seed that config used.
  */
-import type { ReactElement } from "react";
+import { type ReactElement, useState } from "react";
 import type { RunRecord, SweepSpec } from "../../api/models";
 import { useProjects } from "../../api/queries";
 import { type Carry, type LaunchDraft, launchDefaults, pinnedCommit } from "../../launch/draft";
@@ -46,14 +46,20 @@ export interface SweepRerunProps {
   onLaunched: (records: RunRecord[], host: string) => void;
 }
 
-/** Loads the project's repo path on the hub, then shows the Launch dialog. */
+/**
+ * Loads the project's repo path on the hub, then shows the Launch dialog.
+ *
+ * The defaults freeze when the dialog opens: run events refetch the sweep while it is
+ * open, and a new best cell must not change the params, vars or commit that Launch sends
+ * (the dialog reads `initial` once, so the seeds shown would no longer match them).
+ */
 export function SweepRerun({ project, spec, best, runs, onClose, onLaunched }: SweepRerunProps): ReactElement {
+  const [d] = useState(() => rerunDefaults(spec, best, runs));
   const projects = useProjects();
   if (projects.error) return <ErrorBox error={projects.error} />;
   if (projects.data === undefined) return <Loading />;
   const repo = projects.data.find((p) => p.project === project)?.repo;
   if (repo === undefined) return <ErrorBox error={new Error(`no repo for ${project} on the hub`)} />;
-  const d = rerunDefaults(spec, best, runs);
   return (
     <LaunchDialog
       project={project}

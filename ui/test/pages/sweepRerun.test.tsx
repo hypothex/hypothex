@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { parseCell } from "../../src/pages/components/SweepModel";
-import { rerunDefaults } from "../../src/pages/components/SweepRerun";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { parseCell, type SweepCellRow } from "../../src/pages/components/SweepModel";
+import { rerunDefaults, SweepRerun } from "../../src/pages/components/SweepRerun";
 import { SweepPage } from "../../src/pages/Sweep";
 import { makeRecord } from "./fixtures";
 import { type Call, mockApi, renderWithClient, restoreFetch } from "./helpers";
 import {
+  CELL_B,
   CELL_D,
   HOSTS,
   NOW,
@@ -109,5 +112,53 @@ describe("Rerun sweep", () => {
       queue: false,
       commit: "8f4cac43877b75953f18ff1daf7e6fc54a5d8f37",
     });
+  });
+
+  test("the defaults freeze when the dialog opens: a new best cell does not change what launches", async () => {
+    const calls = mockApi({
+      "GET /api/v1/hosts": HOSTS,
+      "GET /api/v1/gpus": [],
+      "GET /api/v1/queue": [],
+      "GET /api/v1/projects": [{ project: PROJECT, repo: REPO, description: "", tasks: [TASK] }],
+      "POST /api/v1/runs": (call: Call) => {
+        const seed = (call.body as { seed: number }).seed;
+        return makeRecord({ run_id: `20261003-120000-fwd-r${seed}`, seed, status: "running" });
+      },
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const spec = { ...makeSummary().spec, host: "local" };
+    const launched: number[] = [];
+    const tree = (best: SweepCellRow | null): ReactElement => (
+      <QueryClientProvider client={client}>
+        <SweepRerun
+          project={PROJECT}
+          spec={spec}
+          best={best}
+          runs={RUNS}
+          onClose={() => {}}
+          onLaunched={(records) => launched.push(records.length)}
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree(parseCell(CELL_D)));
+    const dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    // a run finishes while the dialog is open and cell B becomes best
+    rerender(tree(parseCell(CELL_B)));
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("3, 4, 5");
+    fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: "D holds" } });
+    await waitFor(() =>
+      expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true),
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Launch 3" }));
+    await waitFor(() => expect(launched).toEqual([3]));
+    const sent = calls.filter((c) => c.method === "POST" && c.url === "/api/v1/runs");
+    expect(sent.map((c) => (c.body as { seed: number }).seed)).toEqual([3, 4, 5]);
+    for (const c of sent) {
+      expect(c.body).toMatchObject({
+        params: { lr: "3e-4", beam: "10" },
+        vars: { lr: "3e-4", beam: "10" },
+        commit: "8f4cac43877b75953f18ff1daf7e6fc54a5d8f37",
+      });
+    }
   });
 });

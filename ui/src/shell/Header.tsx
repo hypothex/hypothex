@@ -54,10 +54,31 @@ export function updateRecent(prev: RecentTargets, pathname: string, search: Reco
   }
 }
 
+type Json = Record<string, unknown>;
+
+const isObject = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
+const isName = (v: unknown): v is string => typeof v === "string" && v !== "";
+
+/** The well-formed entries of a stored value; anything else (old or corrupt) is dropped. */
+export function parseRecent(value: unknown): RecentTargets {
+  if (!isObject(value)) return {};
+  const out: RecentTargets = {};
+  const { task, run, examples } = value;
+  if (isObject(task) && isName(task.project) && isName(task.task)) {
+    out.task = { project: task.project, task: task.task };
+  }
+  if (isObject(run) && isName(run.runId)) out.run = { runId: run.runId };
+  if (isObject(examples) && isName(examples.a) && isName(examples.b)) {
+    out.examples = { a: examples.a, b: examples.b };
+    if (isName(examples.metric)) out.examples.metric = examples.metric;
+  }
+  return out;
+}
+
 function loadRecent(): RecentTargets {
   try {
     const raw = localStorage.getItem(RECENT_KEY);
-    return raw ? (JSON.parse(raw) as RecentTargets) : {};
+    return raw ? parseRecent(JSON.parse(raw)) : {};
   } catch {
     return {};
   }

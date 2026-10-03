@@ -6,7 +6,7 @@
  * hostname there, on every run).
  */
 import { fmtClock, fmtTime, fmtUsd, parseTime } from "./format";
-import { hostRowForRun } from "./HostsPanel";
+import { gpuCountLabel, hostRowForRun } from "./HostsPanel";
 import { sweepHref } from "./SweepModel";
 import type { CostTotals, GpuInfo, HostRow, RunDetail, RunRecord } from "./types";
 
@@ -78,21 +78,18 @@ export function visibleDevices(gpus: readonly number[]): string {
   return `CUDA_VISIBLE_DEVICES=${gpus.join(",")}`;
 }
 
-/** `NVIDIA A100 80GB PCIe` → `A100 80GB PCIe`. */
-export function shortGpuName(name: string): string {
-  return name.replace(/^NVIDIA\s+/, "");
-}
+/** The hosts grid's GPU model name: `NVIDIA A100 80GB PCIe` → `A100`. */
+export { shortGpuName } from "./HostsPanel";
 
 /**
- * `2× A100 80GB PCIe` when the GPUs (the given indices, else all of the host's) share one
- * model; `2 GPU` when the models differ or are unknown.
+ * `2×A100 80GB` when the GPUs (the given indices, else all of the host's) share one model
+ * and size; `2 GPUs` when they differ or are unknown. Same text as the hosts grid
+ * (`gpuCountLabel`).
  */
 export function gpuLabel(count: number, host: HostRow | null, indices: readonly number[] = []): string {
   const pool: GpuInfo[] = host?.gpus ?? [];
   const picked = indices.length > 0 ? pool.filter((g) => indices.includes(g.index)) : pool;
-  const names = new Set(picked.map((g) => g.name));
-  const [only] = names;
-  return names.size === 1 && only ? `${count}× ${shortGpuName(only)}` : `${count} GPU`;
+  return gpuCountLabel(count, picked);
 }
 
 /** GPUs no hx run holds and no outside process uses (spec 8A.5). */

@@ -16,6 +16,7 @@ import {
   sweepHref,
   visibleDevices,
 } from "../../src/pages/components/remote";
+import { gpuSpec } from "../../src/pages/components/HostsPanel";
 import type { HostRow } from "../../src/pages/components/types";
 import { COST, HOSTS } from "../api/phase2-fixtures";
 import { makeDetail, makeRecord } from "./fixtures";
@@ -91,18 +92,23 @@ test("fmtWait shows seconds, then minutes, then hours and minutes", () => {
 
 test("GPU texts: devices, model names, free count", () => {
   expect(visibleDevices([0, 1])).toBe("CUDA_VISIBLE_DEVICES=0,1");
-  expect(shortGpuName("NVIDIA A100 80GB PCIe")).toBe("A100 80GB PCIe");
+  expect(shortGpuName("NVIDIA A100 80GB PCIe")).toBe("A100");
+  expect(shortGpuName("NVIDIA A100-SXM4-80GB")).toBe("A100");
+  expect(shortGpuName("Tesla V100")).toBe("V100");
   expect(shortGpuName("H100")).toBe("H100");
-  expect(gpuLabel(2, GPU1)).toBe("2× A100 80GB PCIe");
-  expect(gpuLabel(1, GPU1, [0])).toBe("1× A100 80GB PCIe");
-  expect(gpuLabel(2, MCCLEARY, [0, 1])).toBe("2 GPU");
-  expect(gpuLabel(2, null)).toBe("2 GPU");
+  expect(gpuLabel(2, GPU1)).toBe("2×A100 80GB");
+  expect(gpuLabel(1, GPU1, [0])).toBe("1×A100 80GB");
+  expect(gpuLabel(2, MCCLEARY, [0, 1])).toBe("2 GPUs");
+  expect(gpuLabel(2, null)).toBe("2 GPUs");
+  expect(gpuLabel(1, null)).toBe("1 GPU");
   const mixed: HostRow = {
     ...GPU1,
     gpus: GPU1.gpus.map((g) => (g.index === 1 ? { ...g, name: "NVIDIA H100" } : g)),
   };
-  expect(gpuLabel(2, mixed, [0, 1])).toBe("2 GPU");
-  expect(gpuLabel(1, mixed, [1])).toBe("1× H100");
+  expect(gpuLabel(2, mixed, [0, 1])).toBe("2 GPUs");
+  expect(gpuLabel(1, mixed, [1])).toBe("1×H100 80GB");
+  // one GPU, one name: the run page and the hosts grid agree
+  expect(gpuLabel(GPU1.gpus.length, GPU1)).toBe(gpuSpec(GPU1.gpus));
   expect(freeGpus(GPU1)).toBe(1);
   expect(freeGpus(DGX)).toBe(0);
 });

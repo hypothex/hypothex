@@ -41,12 +41,20 @@ export function shortGpuName(name: string): string {
   return parts.length > 0 ? parts.join(" ") : name;
 }
 
-/** `5×A100 80GB` when every GPU is the same model and size, `3 GPUs` otherwise, `""` for none. */
-export function gpuSpec(gpus: GpuInfo[]): string {
-  if (gpus.length === 0) return "";
+/**
+ * `count` GPUs named after `gpus`: `2×A100 80GB` when every one of `gpus` is the same model
+ * and size, else `1 GPU`, `2 GPUs`. The one GPU text of the hosts grid and the run page.
+ */
+export function gpuCountLabel(count: number, gpus: readonly GpuInfo[]): string {
   const kinds = new Set(gpus.map((g) => `${shortGpuName(g.name)} ${Math.round(g.mem_total_mb / 1024)}GB`));
   const [only] = [...kinds];
-  return kinds.size === 1 && only ? `${gpus.length}×${only}` : `${gpus.length} GPUs`;
+  if (kinds.size === 1 && only) return `${count}×${only}`;
+  return `${count} ${count === 1 ? "GPU" : "GPUs"}`;
+}
+
+/** `5×A100 80GB` when every GPU is the same model and size, `3 GPUs` otherwise, `""` for none. */
+export function gpuSpec(gpus: GpuInfo[]): string {
+  return gpus.length === 0 ? "" : gpuCountLabel(gpus.length, gpus);
 }
 
 // GPU cells ----------------------------------------------------------------------------------

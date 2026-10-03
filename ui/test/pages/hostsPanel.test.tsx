@@ -7,6 +7,7 @@ import {
   fmtMoney,
   gpuCells,
   gpuColumns,
+  gpuCountLabel,
   gpuSpec,
   hostRowForRun,
   hostTotals,
@@ -60,6 +61,12 @@ describe("formatting", () => {
     expect(gpuSpec(dgx.gpus)).toBe("2×H100 80GB");
     expect(gpuSpec([gpu(0), gpu(1, { name: "NVIDIA H100 80GB HBM3" })])).toBe("2 GPUs");
     expect(gpuSpec([])).toBe("");
+  });
+
+  test("gpuCountLabel: any count named after a set of GPUs", () => {
+    expect(gpuCountLabel(2, gpu1.gpus)).toBe("2×A100 80GB");
+    expect(gpuCountLabel(1, [gpu(0), gpu(1, { name: "NVIDIA H100 80GB HBM3" })])).toBe("1 GPU");
+    expect(gpuCountLabel(3, [])).toBe("3 GPUs");
   });
 });
 

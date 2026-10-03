@@ -1,0 +1,62 @@
+# Small SLURM cluster for Hypothex Docker integration tests (tests/docker/test_slurm_host.py).
+# Started by the `slurm_cluster` fixture with a unique project name (-p) and:
+#   HX_AUTHORIZED_KEY  public key of the test's throwaway key pair
+#   HX_SLURM_SSH_PORT  free localhost port for the login node's sshd
+# /home is one shared volume (the shared filesystem SLURM hosts need).
+x-slurm-node: &slurm-node
+  build: .
+  image: hypothex-test-slurm:1
+
+services:
+  mysql:
+    image: mariadb:10.11.9
+    hostname: mysql
+    environment:
+      MARIADB_RANDOM_ROOT_PASSWORD: "yes"
+      MARIADB_DATABASE: slurm_acct_db
+      MARIADB_USER: slurm
+      MARIADB_PASSWORD: hx-test-only
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+    volumes:
+      - mysql:/var/lib/mysql
+
+  slurmdbd:
+    <<: *slurm-node
+    hostname: slurmdbd
+    command: ["slurmdbd"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  slurmctld:
+    <<: *slurm-node
+    hostname: slurmctld
+    command: ["slurmctld"]
+    environment:
+      AUTHORIZED_KEY: "${HX_AUTHORIZED_KEY:?set HX_AUTHORIZED_KEY}"
+    ports:
+      - "127.0.0.1:${HX_SLURM_SSH_PORT:?set HX_SLURM_SSH_PORT}:22"
+    volumes:
+      - home:/home
+      - slurmctld_state:/var/spool/slurmctld
+    depends_on:
+      - slurmdbd
+
+  c1:
+    <<: *slurm-node
+    hostname: c1
+    command: ["slurmd"]
+    privileged: true
+    volumes:
+      - home:/home
+    depends_on:
+      - slurmctld
+
+volumes:
+  home: {}
+  mysql: {}
+  slurmctld_state: {}

@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -652,3 +652,133 @@ def host_cursor(ctx: Context, host: str) -> int:
             "SELECT MAX(last_sequence) FROM host_cursors WHERE host = ?", (host,)
         ).fetchone()
     return int(row[0] or 0)
+
+
+# SLURM cluster ----------------------------------------------------------------------------
+@dataclass
+class SlurmCluster:
+    """A running compose project: mysql, slurmdbd, slurmctld (+ sshd), compute node c1."""
+
+    project: str
+    access: SshAccess
+    env: dict[str, str] = field(default_factory=dict)
+
+    def compose(
+        self, *args: str, timeout: float = 600, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        """
+        Run ``docker compose`` for this cluster.
+
+        Parameters
+        ----------
+        *args : str
+        timeout : float
+        check : bool
+
+        Returns
+        -------
+        subprocess.CompletedProcess
+        """
+        cmd = ["docker", "compose", "-f", str(SLURM_COMPOSE), "-p", self.project, *args]
+        return run_cmd(cmd, timeout=timeout, check=check, env=self.env)
+
+    def exec(
+        self, *argv: str, service: str = "slurmctld", user: str = "hx", check: bool = True
+    ) -> str:
+        """
+        Run a command in a cluster container; return stdout.
+
+        Parameters
+        ----------
+        *argv : str
+        service : str
+        user : str
+        check : bool
+
+        Returns
+        -------
+        str
+        """
+        args = ("exec", "-T", "-u", user, "-w", "/home/hx", service, *argv)
+        return self.compose(*args, timeout=120, check=check).stdout
+
+    def sh(self, script: str) -> str:
+        """
+        Run a shell script as ``hx`` on the login node; return stdout.
+
+        Parameters
+        ----------
+        script : str
+
+        Returns
+        -------
+        str
+        """
+        return self.exec("sh", "-c", script)
+
+    def node_state(self) -> str:
+        """
+        Return ``sinfo``'s state of node ``c1`` (e.g. ``idle``, ``down*``).
+
+        Returns
+        -------
+        str
+        """
+        return self.exec("sinfo", "-h", "-n", "c1", "-o", "%T").strip()
+
+    def job_state(self, job_id: str) -> str:
+        """
+        Return a job's live state from ``squeue``, else its final state from ``sacct``.
+
+        Parameters
+        ----------
+        job_id : str
+
+        Returns
+        -------
+        str
+            e.g. ``RUNNING``, ``COMPLETED``, ``CANCELLED by 1000``, ``NODE_FAIL``.
+        """
+        live = self.exec("squeue", "-h", "-j", job_id, "-o", "%T", check=False).strip()
+        if live:
+            return live
+        return self.exec("sacct", "-n", "-X", "-P", "-j", job_id, "-o", "State").strip()
+
+    def sacct(self, job_id: str, column: str) -> str:
+        """
+        Return one ``sacct`` column of a job.
+
+        Parameters
+        ----------
+        job_id : str
+        column : str
+            e.g. ``JobName``, ``NodeList``.
+
+        Returns
+        -------
+        str
+        """
+        return self.exec("sacct", "-n", "-X", "-P", "-j", job_id, "-o", column).strip()
+
+
+@pytest.fixture(scope="module")
+def slurm_cluster(tmp_path_factory: pytest.TempPathFactory) -> Iterator[SlurmCluster]:
+    """Build and start the SLURM compose project; tear it down with its volumes."""
+    port = free_port()
+    access = make_ssh_access(tmp_path_factory.mktemp("slurm-access"), "hx-docker-slurm", port)
+    cluster = SlurmCluster(
+        project=f"hxslurm{uuid.uuid4().hex[:8]}",
+        access=access,
+        env={"HX_AUTHORIZED_KEY": access.public_key, "HX_SLURM_SSH_PORT": str(port)},
+    )
+    try:
+        cluster.compose("build", timeout=1800)
+        cluster.compose("up", "-d", timeout=600)
+        wait_until(lambda: cluster.node_state() == "idle", timeout=300, what="SLURM node c1 idle")
+        wait_for_ssh(access)
+        yield cluster
+    except BaseException:
+        print(cluster.compose("logs", "--no-color", "--tail", "200", check=False).stdout)
+        raise
+    finally:
+        cluster.compose("down", "-v", "--remove-orphans", timeout=300, check=False)

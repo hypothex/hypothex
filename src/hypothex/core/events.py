@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from collections.abc import Callable, Iterator
@@ -11,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import psutil
 from pydantic import BaseModel
 
 from hypothex.core.ids import utcnow
@@ -31,6 +33,37 @@ CREATE TABLE IF NOT EXISTS receipts (
 );
 """
 _PENDING = "__pending__"
+"""Result of a claimed receipt whose command is running: ``__pending__:<pid>:<start time>``."""
+
+
+def _claim_marker() -> str:
+    """The pending marker naming this process as the claimant."""
+    pid = os.getpid()
+    try:
+        started = psutil.Process(pid).create_time()
+    except psutil.Error:
+        started = 0.0
+    return f"{_PENDING}:{pid}:{started}"
+
+
+def _claimant_gone(marker: str) -> bool:
+    """
+    True when the process that claimed a receipt no longer runs.
+
+    A bare ``__pending__`` (written before claimants were recorded) has no
+    owner that could still finish it, so it counts as gone.
+    """
+    parts = marker.split(":")
+    if len(parts) != 3:
+        return True
+    try:
+        pid, started = int(parts[1]), float(parts[2])
+        proc = psutil.Process(pid)
+        if abs(proc.create_time() - started) > 1.0:
+            return True  # the pid was reused
+        return proc.status() == psutil.STATUS_ZOMBIE
+    except (ValueError, psutil.Error):
+        return True
 
 
 class Event(BaseModel):
@@ -164,7 +197,10 @@ class EventLog:
         Run ``fn`` at most once per ``command_id`` and return its stored result.
 
         A second caller with the same id waits for the first result. If ``fn``
-        raises, the claim is released so the command can be retried.
+        raises, the claim is released so the command can be retried. The claim
+        names the claiming process: if that process died before it stored a
+        result (killed, crashed, server restart), the next caller drops the
+        claim and runs ``fn`` itself.
 
         Parameters
         ----------
@@ -180,16 +216,22 @@ class EventLog:
         """
         if command_id is None:
             return fn()
-        with self._conn() as conn:
-            claimed = (
-                conn.execute(
-                    "INSERT OR IGNORE INTO receipts(command_id, result, created_at) VALUES (?,?,?)",
-                    (command_id, _PENDING, utcnow().isoformat()),
-                ).rowcount
-                == 1
-            )
-        if not claimed:
-            return self._wait_for_result(command_id)
+        while True:
+            with self._conn() as conn:
+                claimed = (
+                    conn.execute(
+                        "INSERT OR IGNORE INTO receipts(command_id, result, created_at) "
+                        "VALUES (?,?,?)",
+                        (command_id, _claim_marker(), utcnow().isoformat()),
+                    ).rowcount
+                    == 1
+                )
+            if claimed:
+                break
+            result = self._wait_for_result(command_id)
+            if result is not None:
+                return result
+            # the claimant died without a result: its claim was dropped, so claim it now
         try:
             result = fn()
         except BaseException:
@@ -203,16 +245,34 @@ class EventLog:
             )
         return json.loads(json.dumps(result, default=str))
 
-    def _wait_for_result(self, command_id: str, timeout: float = 60.0) -> dict[str, Any]:
+    def _wait_for_result(self, command_id: str, timeout: float = 60.0) -> dict[str, Any] | None:
+        """
+        Wait for another caller's result.
+
+        Returns
+        -------
+        dict or None
+            The stored result, or None when the claimant died without one
+            (its claim is deleted, so the caller may claim the command).
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self._conn() as conn:
                 row = conn.execute(
                     "SELECT result FROM receipts WHERE command_id = ?", (command_id,)
                 ).fetchone()
-            if row is None:
-                raise CommandTimeoutError(f"command {command_id} failed in another caller; retry")
-            if row["result"] != _PENDING:
-                return json.loads(row["result"])
+                if row is None:
+                    raise CommandTimeoutError(
+                        f"command {command_id} failed in another caller; retry"
+                    )
+                result = row["result"]
+                if not result.startswith(_PENDING):
+                    return json.loads(result)
+                if _claimant_gone(result):
+                    conn.execute(
+                        "DELETE FROM receipts WHERE command_id = ? AND result = ?",
+                        (command_id, result),
+                    )
+                    return None
             time.sleep(0.05)
         raise CommandTimeoutError(f"command {command_id} is still running after {timeout}s")

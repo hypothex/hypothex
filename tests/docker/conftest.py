@@ -13,20 +13,29 @@ They are deselected by default (``addopts = -m 'not docker'``). Run them with::
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import shlex
 import shutil
 import socket
+import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import pytest
 
+from hypothex.core.context import Context
+from hypothex.core.records import RunRecord
+from hypothex.remote.client import EnvClient
+from hypothex.remote.config import EnvironmentsFile, HostSpec, load_hosts, save_hosts
+from hypothex.remote.hub import HostState, Hub
 from hypothex.remote.ssh import SshTarget
 
 T = TypeVar("T")
@@ -400,3 +409,238 @@ def sshd_box(sshd_image: str, tmp_path_factory: pytest.TempPathFactory) -> Itera
         yield SshBox(container=name, access=access)
     finally:
         run_cmd(["docker", "rm", "-f", name], check=False)
+
+
+# hub in a thread ----------------------------------------------------------------------
+def write_hosts(ctx: Context, **hosts: HostSpec) -> None:
+    """
+    Write the hub's ``environments.yaml``.
+
+    Parameters
+    ----------
+    ctx : Context
+        Hub context.
+    **hosts : HostSpec
+        Host name -> spec.
+    """
+    save_hosts(ctx.layout, EnvironmentsFile(environments=dict(hosts)))
+
+
+class HubThread:
+    """
+    Run a ``Hub`` on a private asyncio loop in a daemon thread.
+
+    The test thread polls ``state()`` and reads mirrored files while the hub's
+    supervisors run. Use as a context manager: enter starts, exit stops.
+
+    Parameters
+    ----------
+    ctx : Context
+        Hub context; hosts come from its ``environments.yaml``.
+    """
+
+    def __init__(self, ctx: Context) -> None:
+        self.ctx = ctx
+        self.hub = Hub(ctx, load_hosts(ctx.layout))
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._loop.run_forever, name="hx-hub", daemon=True)
+
+    def __enter__(self) -> HubThread:
+        self._thread.start()
+        asyncio.run_coroutine_threadsafe(self.hub.start(), self._loop).result(timeout=60)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(self.hub.stop(), self._loop).result(timeout=60)
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=10)
+            self._loop.close()
+
+    def client(self, name: str) -> EnvClient:
+        """
+        Return the hub's current client for a host (follows reconnects).
+
+        Parameters
+        ----------
+        name : str
+
+        Returns
+        -------
+        EnvClient
+        """
+        return self.hub.client(name)
+
+    def wait_connected(
+        self, name: str, *, timeout: float, after: HostState | None = None
+    ) -> HostState:
+        """
+        Wait until a host is ``connected`` (and, with ``after``, reconnected since then).
+
+        Parameters
+        ----------
+        name : str
+            Host name.
+        timeout : float
+            Seconds to wait.
+        after : HostState, optional
+            An earlier state; the new one must have a later ``since``.
+
+        Returns
+        -------
+        HostState
+        """
+
+        def check() -> HostState | None:
+            state = self.hub.state(name)
+            if state.state != "connected":
+                return None
+            if after is not None and state.since <= after.since:
+                return None
+            return state
+
+        return wait_until(check, timeout=timeout, what=f"host {name} connected", interval=0.25)
+
+
+def launch(client: EnvClient, command: list[str], **extra: Any) -> dict[str, Any]:
+    """
+    Launch a run in the remote toy project ``dock`` through an env server.
+
+    Parameters
+    ----------
+    client : EnvClient
+        Client of the env server (tunnelled).
+    command : list of str
+        Command to run on the host.
+    **extra
+        Extra launch fields (``gpus``, ``slurm``, ...).
+
+    Returns
+    -------
+    dict
+        The created run record.
+    """
+    body: dict[str, Any] = {
+        "repo": REMOTE_PROJECT,
+        "command": command,
+        "hypothesis": "docker integration",
+        "command_id": uuid.uuid4().hex,
+        **extra,
+    }
+    return client.post_json("/api/v1/runs", body)
+
+
+def remote_record(hub: HubThread, host: str, run_id: str) -> dict[str, Any]:
+    """
+    Return a run's record as the host's env server reports it.
+
+    Parameters
+    ----------
+    hub : HubThread
+    host : str
+    run_id : str
+
+    Returns
+    -------
+    dict
+    """
+    return hub.client(host).get_json(f"/api/v1/runs/{run_id}")["record"]
+
+
+def wait_remote_status(
+    hub: HubThread, host: str, run_id: str, status: str, *, timeout: float
+) -> dict[str, Any]:
+    """
+    Wait until the host reports ``status`` for a run.
+
+    Parameters
+    ----------
+    hub : HubThread
+    host : str
+    run_id : str
+    status : str
+    timeout : float
+
+    Returns
+    -------
+    dict
+        The remote record.
+    """
+
+    def check() -> dict[str, Any] | None:
+        record = remote_record(hub, host, run_id)
+        return record if record["status"] == status else None
+
+    return wait_until(check, timeout=timeout, what=f"{host}:{run_id} {status}")
+
+
+def wait_mirrored(ctx: Context, run_id: str, status: str, *, timeout: float) -> RunRecord:
+    """
+    Wait until the hub's mirror of a ``dock`` run has ``status``.
+
+    Parameters
+    ----------
+    ctx : Context
+        Hub context.
+    run_id : str
+    status : str
+    timeout : float
+
+    Returns
+    -------
+    RunRecord
+        The mirrored record read from the hub's ``run.yaml``.
+    """
+
+    def check() -> RunRecord | None:
+        record = ctx.store.read_record("dock", run_id)
+        return record if record.status == status else None
+
+    return wait_until(check, timeout=timeout, what=f"hub mirror of {run_id} {status}")
+
+
+def mirrored_text(ctx: Context, run_id: str, rel: str, needle: str, *, timeout: float) -> str:
+    """
+    Wait until a mirrored file of a ``dock`` run contains ``needle``; return its text.
+
+    Parameters
+    ----------
+    ctx : Context
+    run_id : str
+    rel : str
+        Path inside the run folder, e.g. ``logs/stdout.log``.
+    needle : str
+    timeout : float
+
+    Returns
+    -------
+    str
+    """
+    path = ctx.layout.run_dir("dock", run_id) / rel
+
+    def check() -> str | None:
+        text = path.read_text(encoding="utf-8")
+        return text if needle in text else None
+
+    return wait_until(check, timeout=timeout, what=f"{needle!r} in mirrored {rel}")
+
+
+def host_cursor(ctx: Context, host: str) -> int:
+    """
+    Return the hub's persisted event cursor for a host (0 when none).
+
+    Parameters
+    ----------
+    ctx : Context
+    host : str
+
+    Returns
+    -------
+    int
+    """
+    with contextlib.closing(sqlite3.connect(ctx.layout.index_db)) as conn:
+        row = conn.execute(
+            "SELECT MAX(last_sequence) FROM host_cursors WHERE host = ?", (host,)
+        ).fetchone()
+    return int(row[0] or 0)

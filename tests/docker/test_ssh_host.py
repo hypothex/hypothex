@@ -7,6 +7,7 @@ import shlex
 import shutil
 from pathlib import Path
 
+import httpx
 import pytest
 from typer.testing import CliRunner
 
@@ -14,15 +15,28 @@ from hypothex import __version__
 from hypothex.cli.main import app
 from hypothex.core.context import Context
 from hypothex.core.environment import PROTOCOL_VERSION
+from hypothex.core.errors import RunNotFoundError
 from hypothex.remote.bootstrap import ensure_server, probe
-from hypothex.remote.config import load_hosts
+from hypothex.remote.client import EnvClient
+from hypothex.remote.config import HostSpec, load_hosts
+from hypothex.remote.ssh import Tunnel
 from tests.docker.conftest import (
+    BOOTSTRAP_TIMEOUT,
     DESCRIPTOR_PY,
     REMOTE_HOME,
+    REMOTE_PROJECT,
+    REMOTE_STORE,
+    HubThread,
     SshBox,
     docker_skip_reason,
+    host_cursor,
+    launch,
     make_ssh_access,
+    mirrored_text,
     run_cmd,
+    wait_mirrored,
+    wait_until,
+    write_hosts,
 )
 
 runner = CliRunner()
@@ -123,3 +137,95 @@ def test_probe_reports_the_box(sshd_box: SshBox) -> None:
     assert result.gpus == 0
     assert result.slurm is None
     assert result.home.endswith("/.hypothex")
+
+
+def box_spec(box: SshBox) -> HostSpec:
+    return HostSpec(route="ssh", ssh_alias=box.access.alias, projects={"dock": REMOTE_PROJECT})
+
+
+@pytest.mark.docker
+def test_hub_tunnels_launches_and_mirrors(sshd_box: SshBox, hub_ctx: Context) -> None:
+    write_hosts(hub_ctx, box=box_spec(sshd_box))
+    with HubThread(hub_ctx) as hub:
+        state = hub.wait_connected("box", timeout=BOOTSTRAP_TIMEOUT)
+        assert state.kind == "ssh"
+        assert state.hx_version == __version__
+        assert state.local_port is not None
+        url = f"http://127.0.0.1:{state.local_port}/.well-known/hypothex/environment"
+        descriptor = httpx.get(url, timeout=10).json()  # through the ssh -L tunnel
+        assert descriptor["environment_id"] == state.environment_id
+        assert descriptor["hostname"] == sshd_box.exec("hostname").strip()
+
+        run_id = launch(hub.client("box"), ["sh", "-c", "echo hello-from-docker"])["run_id"]
+        mirrored = wait_mirrored(hub_ctx, run_id, "finished", timeout=120)
+        assert mirrored.environment_id == state.environment_id
+        assert mirrored.cwd == REMOTE_PROJECT
+        assert mirrored_text(hub_ctx, run_id, "logs/stdout.log", "hello", timeout=60) == (
+            "hello-from-docker\n"
+        )
+        remote_log = f"{REMOTE_STORE}/dock/runs/{run_id}/logs/stdout.log"
+        assert sshd_box.exec("cat", remote_log) == "hello-from-docker\n"
+        assert hub_ctx.index.get_run(run_id) is not None
+
+
+@pytest.mark.docker
+def test_docker_restart_reconnects_with_the_same_identity(
+    sshd_box: SshBox, hub_ctx: Context
+) -> None:
+    write_hosts(hub_ctx, box=box_spec(sshd_box))
+    with HubThread(hub_ctx) as hub:
+        before = hub.wait_connected("box", timeout=BOOTSTRAP_TIMEOUT)
+        sshd_box.restart()  # kills the env server and every ssh connection
+        after = hub.wait_connected("box", timeout=180, after=before)
+        assert after.environment_id == before.environment_id  # identity is not the route
+        info = server_json(sshd_box)
+        sshd_box.exec("kill", "-0", str(info["pid"]))  # a live server again
+
+        run_id = launch(hub.client("box"), ["sh", "-c", "echo after-restart"])["run_id"]
+        wait_mirrored(hub_ctx, run_id, "finished", timeout=120)
+        assert mirrored_text(hub_ctx, run_id, "logs/stdout.log", "after", timeout=60) == (
+            "after-restart\n"
+        )
+
+
+@pytest.mark.docker
+def test_hub_restart_replays_events_missed_while_down(sshd_box: SshBox, hub_ctx: Context) -> None:
+    write_hosts(hub_ctx, box=box_spec(sshd_box))
+    with HubThread(hub_ctx) as hub:
+        hub.wait_connected("box", timeout=BOOTSTRAP_TIMEOUT)
+        first = launch(hub.client("box"), ["sh", "-c", "echo first"])["run_id"]
+        wait_mirrored(hub_ctx, first, "finished", timeout=120)
+    cursor_before = host_cursor(hub_ctx, "box")
+    assert cursor_before > 0
+
+    # hub is down: a run happens on the host through a private tunnel
+    target = sshd_box.access.target()
+    info = ensure_server(target, REMOTE_HOME)
+    tunnel = Tunnel(target, info.port)
+    tunnel.start()
+    try:
+        client = EnvClient(f"http://127.0.0.1:{tunnel.local_port}", token=info.token)
+        missed = launch(client, ["sh", "-c", "echo missed"])["run_id"]
+        wait_until(
+            lambda: client.get_json(f"/api/v1/runs/{missed}")["record"]["status"] == "finished",
+            timeout=120,
+            what="missed run finished on the host",
+        )
+    finally:
+        tunnel.stop()
+    with pytest.raises(RunNotFoundError):
+        hub_ctx.store.read_record("dock", missed)  # nobody mirrored it yet
+
+    with HubThread(hub_ctx) as hub:
+        hub.wait_connected("box", timeout=BOOTSTRAP_TIMEOUT)
+        wait_mirrored(hub_ctx, missed, "finished", timeout=120)
+        assert mirrored_text(hub_ctx, missed, "logs/stdout.log", "missed", timeout=60) == (
+            "missed\n"
+        )
+        wait_until(
+            lambda: host_cursor(hub_ctx, "box") > cursor_before,
+            timeout=60,
+            what="persisted cursor to move past the missed events",
+        )
+        assert hub.hub.state("box").last_sequence >= host_cursor(hub_ctx, "box")
+    assert hub_ctx.store.read_record("dock", first).status == "finished"

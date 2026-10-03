@@ -52,6 +52,12 @@ describe("routes", () => {
     expect(leaf(router)?.search).toEqual({ metric: "accuracy@v1" });
   });
 
+  test("/s/:project/:id is the sweep page", async () => {
+    const { router } = renderApp("/s/rxn/s-7f3a");
+    await settled(router, "/s/$project/$id");
+    expect(leaf(router)?.params).toEqual({ project: "rxn", id: "s-7f3a" });
+  });
+
   test("a numeric-looking ?view stays a string (no JSON parsing)", async () => {
     const { router } = renderApp("/t/toy/acc?view=2024");
     await settled(router, "/t/$project/$task");
@@ -79,7 +85,7 @@ describe("routes", () => {
 
 test("every route renders its own screen, not the placeholder", async () => {
   const { cleanup } = await import("@testing-library/react");
-  for (const path of ["/", "/t/toy/acc", "/t/toy/acc/edit/new", "/r/r1", "/x/r1/r2?metric=accuracy"]) {
+  for (const path of ["/", "/t/toy/acc", "/t/toy/acc/edit/new", "/r/r1", "/x/r1/r2?metric=accuracy", "/s/rxn/s-7f3a"]) {
     const { router } = renderApp(path);
     await waitFor(() => expect(router.state.status).toBe("idle"));
     expect([path, screen.queryByTestId("screen-pending")]).toEqual([path, null]);

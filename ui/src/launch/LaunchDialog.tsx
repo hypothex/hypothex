@@ -557,7 +557,7 @@ export function LaunchDialog({
                 project={project}
                 now={now}
                 lockedTo={launched.host}
-                onPick={(h) => update({ host: h.name, gpus: gpusForHost(draft.gpus, h) })}
+                onPick={(h) => update({ host: h.name, gpus: gpusForHost(draft.gpus, h, host) })}
               />
             )}
           </div>

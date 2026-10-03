@@ -458,7 +458,14 @@ export function progressLabel(counts: Readonly<Record<string, number>>): string 
 }
 
 // --------------------------------------------------------------------------- sort
-/** Sort column (a param name, `n` or `mean`) and direction. */
+/**
+ * Sort keys of the built-in `n` and metric columns. The `#` keeps them apart from param
+ * names, which the backend limits to `^[A-Za-z_][A-Za-z0-9_.]*$` (so a param may be `n`).
+ */
+export const SORT_N = "#n";
+export const SORT_MEAN = "#mean";
+
+/** Sort column (a param name, `SORT_N` or `SORT_MEAN`) and direction. */
 export interface SortState {
   key: string;
   dir: "asc" | "desc";
@@ -466,20 +473,20 @@ export interface SortState {
 
 /** Best cell first: by mean, descending when higher is better. */
 export function defaultSort(higherIsBetter: boolean): SortState {
-  return { key: "mean", dir: higherIsBetter ? "desc" : "asc" };
+  return { key: SORT_MEAN, dir: higherIsBetter ? "desc" : "asc" };
 }
 
-/** Clicking the active column flips it; another column starts ascending (`mean`: best first). */
+/** Clicking the active column flips it; another column starts ascending (the metric: best first). */
 export function nextSort(prev: SortState, key: string, higherIsBetter: boolean): SortState {
   if (prev.key === key) return { key, dir: prev.dir === "asc" ? "desc" : "asc" };
-  return key === "mean" ? defaultSort(higherIsBetter) : { key, dir: "asc" };
+  return key === SORT_MEAN ? defaultSort(higherIsBetter) : { key, dir: "asc" };
 }
 
 const NUMERIC = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i;
 
 function sortValue(cell: SweepCellRow, key: string): number | string | null {
-  if (key === "mean") return cell.mean;
-  if (key === "n") return cell.n;
+  if (key === SORT_MEAN) return cell.mean;
+  if (key === SORT_N) return cell.n;
   const v = cell.params[key];
   if (v === undefined) return null;
   return NUMERIC.test(v.trim()) ? Number(v) : v;

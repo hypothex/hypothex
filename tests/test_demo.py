@@ -646,3 +646,68 @@ def test_sigterm_to_hx_serve_stops_the_demo_hosts(tmp_path: Path) -> None:
             if process_alive(pid, None):
                 os.kill(pid, signal.SIGKILL)
         log.close()
+
+
+def test_demo_host_keeps_a_live_owners_server_file(tmp_path: Path) -> None:
+    # one server per home: a server.json of a live process is never removed, so the
+    # fake host's own `hx serve` refuses to start and the hub start fails loudly
+    import os
+    import socket
+
+    home = tmp_path / "hub"
+    seed_demo(home, ["training"])
+    seed_demo_hosts(home)
+    server_file = home / DEMO_HOSTS_DIR / "gpu1" / "serve" / "server.json"
+    server_file.parent.mkdir(parents=True, exist_ok=True)
+    owner = {"pid": os.getpid(), "port": 9, "hostname": socket.gethostname()}
+    server_file.write_text(json.dumps(owner))
+    with (
+        pytest.raises(StoreError, match=r"demo host gpu1 exited(?s:.*)is alive"),
+        demo_hosts_running(home, ready_timeout=60),
+    ):
+        pass
+    assert json.loads(server_file.read_text()) == owner
+
+
+def _mirrored_demo_session(home: Path) -> list[str]:
+    """Start the fake hosts and the hub; wait until the 6 live runs are sweep members."""
+    with demo_hosts_running(home) as started:
+        assert len(started) == 6
+        app = create_app(home, background_repair=False)
+        with TestClient(app, base_url="http://127.0.0.1:7777") as client:
+
+            def summary() -> dict[str, Any]:
+                return client.get(f"/api/v1/sweeps/rxn-forward/{DEMO_SWEEP_ID}").json()
+
+            wait_until(lambda: set(started) <= set(summary()["run_ids"]), timeout=90)
+            current = summary()
+            assert current["counts"]["total"] == 27
+            for cell in current["cells"]:
+                seeds = [r["seed"] for r in cell["runs"]]
+                assert len(seeds) == len(set(seeds)), cell
+    return started
+
+
+def test_restarting_the_demo_hosts_keeps_the_sweep_at_27(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hypothex.demo as demo
+
+    home = tmp_path / "hub"
+    seed_demo(home, ["training"])
+    seed_demo_hosts(home)
+    gpu_home = home / DEMO_HOSTS_DIR / "gpu1"
+    # first start: its exit leaves the stopped live runs (as a crash would)
+    with monkeypatch.context() as patch:
+        patch.setattr(demo, "_forget_live_runs", lambda home, host: None)
+        first = _mirrored_demo_session(home)
+    assert all(Context.open(gpu_home).index.get_run(r) is not None for r in first)
+    # the next start forgets them on gpu1 and in the hub, then launches 6 new runs
+    second = _mirrored_demo_session(home)
+    assert not set(first) & set(second)
+    for root in (gpu_home, home):
+        ctx = Context.open(root)
+        for run_id in first + second:  # a clean exit forgets the second start's runs too
+            assert ctx.index.get_run(run_id) is None
+            assert not ctx.layout.run_dir("rxn-forward", run_id).exists()
+    assert len(Context.open(gpu_home).index.list_runs(limit=None)) == 21

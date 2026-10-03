@@ -50,6 +50,7 @@ from hypothex.core.context import Context
 from hypothex.core.cost import compute_cost
 from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, StoreError
+from hypothex.core.execution import process_alive
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.ids import new_run_id, utcnow
 from hypothex.core.layout import Layout
@@ -67,6 +68,7 @@ from hypothex.core.store import sum_usage
 from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep, sweep_tag
 from hypothex.core.views import save_view
 from hypothex.remote.config import HostSpec, SlurmDefaults, load_hosts, save_hosts
+from hypothex.remote.hub import CLAIMS_DIR
 from hypothex.sdk import Run
 
 KINDS: tuple[TaskKind, ...] = (
@@ -2030,6 +2032,7 @@ DEMO_HOSTS_DIR = "demo-hosts"
 DEMO_HOSTS_FILE = "hosts.json"
 DEMO_SWEEP_ID = "s-7f3a"
 DEMO_SLEEP_ENV = "HX_DEMO_SLEEP"
+_LIVE_RUNS_FILE = "live-runs.json"  # in <home>/demo-hosts: the run ids `hx serve` launched
 _PLACEHOLDER_URL = "http://127.0.0.1:9"  # `hx serve` rewrites it when it starts the hosts
 _DEMO_GPU_RATE = 1.10
 _DEMO_SLURM_RATE = 0.50
@@ -2445,7 +2448,7 @@ def _start_demo_host(host: _DemoHost) -> subprocess.Popen[bytes]:
         env["HYPOTHEX_FAKE_GPUS"] = host.fake_gpus
     serve_dir = Path(host.home) / "serve"
     serve_dir.mkdir(parents=True, exist_ok=True)
-    (serve_dir / "server.json").unlink(missing_ok=True)
+    # server.json stays: a live owner of this home makes the child refuse (one server per home)
     # --no-auth: the hub reaches these fake hosts by `route: url`, which carries no token
     argv = [
         sys.executable, "-m", "hypothex.cli.main", "--home", host.home,
@@ -2539,7 +2542,41 @@ def _launch_live_runs(home: Path, hosts: list[_DemoHost], urls: dict[str, str]) 
         if resp.status_code >= 400:
             raise StoreError(f"demo host {gpu.name} refused a run: {resp.text[:300]}")
         run_ids.append(resp.json()["run_id"])
+        # recorded run by run, so even a start cut short is forgotten next time
+        atomic_write_text(home / DEMO_HOSTS_DIR / _LIVE_RUNS_FILE, json.dumps(run_ids))
     return run_ids  # tagged for the hub: it counts them once they are mirrored
+
+
+def _serving(host: _DemoHost) -> bool:
+    """True when the ``server.json`` in the fake host's home names a live process."""
+    try:
+        info = json.loads((Path(host.home) / "serve" / "server.json").read_text(encoding="utf-8"))
+        return process_alive(int(info["pid"]), None)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _forget_live_runs(home: Path, gpu: _DemoHost) -> None:
+    """
+    Delete the live runs that a start launched, on gpu1 and in the hub's mirror.
+
+    The demo then holds only its seeded runs again, so each start of ``hx serve``
+    shows the mockup's 27 sweep members (21 seeded + 6 live), never more. The ids
+    come from ``<home>/demo-hosts/live-runs.json``. Nothing is deleted while a
+    server still owns the gpu1 home: its own start then fails loudly instead.
+    """
+    path = home / DEMO_HOSTS_DIR / _LIVE_RUNS_FILE
+    if not path.is_file() or _serving(gpu):
+        return
+    run_ids = [str(r) for r in json.loads(path.read_text(encoding="utf-8"))]
+    project, _ = DEMO_TASKS["training"]
+    for root in (Path(gpu.home), home):  # gpu1 first: the hub never mirrors them back
+        ctx = Context.open(root)
+        for run_id in run_ids:
+            shutil.rmtree(ctx.layout.run_dir(project, run_id), ignore_errors=True)
+            (ctx.layout.store / CLAIMS_DIR / f"{run_id}.json").unlink(missing_ok=True)
+            ctx.index.delete_run(run_id)
+    path.unlink()
 
 
 def _stop_runs(url: str, run_ids: list[str]) -> None:
@@ -2562,7 +2599,11 @@ def demo_hosts_running(home: Path, *, ready_timeout: float = 60.0) -> Iterator[l
     one ``hx serve --kind ...`` process per fake host (gpu1 with fake GPUs, cluster
     with fake SLURM commands on ``PATH``), points the hub's ``environments.yaml`` at
     their ports, and, when gpu1 has no active runs, launches the sweep's 3 running
-    and 3 queued cells there. On exit it stops those runs and the processes.
+    and 3 queued cells there. On exit it stops those runs and the processes, then
+    deletes the runs (on gpu1 and in the hub), so every start shows the same 27
+    sweep members; a start first deletes any that an unclean exit left behind.
+    A fake host whose home a live server already owns fails to start
+    (``StoreError`` with the end of its log): one server per home.
 
     Parameters
     ----------
@@ -2575,12 +2616,21 @@ def demo_hosts_running(home: Path, *, ready_timeout: float = 60.0) -> Iterator[l
     ------
     list of str
         Run ids launched on gpu1 (empty when gpu1 already had active runs).
+
+    Raises
+    ------
+    StoreError
+        If a fake host exits (for example, a live server owns its home) or does
+        not start in ``ready_timeout`` seconds.
     """
     marker = home / DEMO_HOSTS_DIR / DEMO_HOSTS_FILE
     if not marker.is_file():
         yield []
         return
     hosts = [_DemoHost.model_validate(h) for h in json.loads(marker.read_text(encoding="utf-8"))]
+    gpu = next((h for h in hosts if h.fake_gpus), None)
+    if gpu is not None:
+        _forget_live_runs(home, gpu)  # left by a start that did not exit cleanly
     procs: list[subprocess.Popen[bytes]] = []
     urls: dict[str, str] = {}
     started: list[str] = []
@@ -2593,7 +2643,6 @@ def demo_hosts_running(home: Path, *, ready_timeout: float = 60.0) -> Iterator[l
         started = _launch_live_runs(home, hosts, urls)
         yield started
     finally:
-        gpu = next((h for h in hosts if h.fake_gpus), None)
         if gpu is not None and gpu.name in urls and started:
             _stop_runs(urls[gpu.name], started)
         for proc in procs:
@@ -2604,3 +2653,5 @@ def demo_hosts_running(home: Path, *, ready_timeout: float = 60.0) -> Iterator[l
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+        if gpu is not None and procs:
+            _forget_live_runs(home, gpu)

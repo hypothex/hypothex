@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -527,3 +529,346 @@ def test_install_waits_for_live_lock(
         bs.install(host.target, "~/.hypothex", wheel)
     assert lock.exists()  # a live owner's lock is never broken
     assert not (host.hx_home / "runtime" / "bin" / "hx").exists()
+
+
+# --------------------------------------------------------------- ensure_server, stop
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    return not stat.stdout.strip().startswith("Z")
+
+
+@pytest.fixture
+def servers(host: FakeHost) -> Iterator[list[int]]:
+    """Kill every server a test leaves in server.json, and any pid it registers."""
+    pids: list[int] = []
+    yield pids
+    sj = host.hx_home / "serve" / "server.json"
+    if sj.exists():
+        pids.append(json.loads(sj.read_text())["pid"])
+    for pid in pids:
+        with suppress(ProcessLookupError):
+            os.kill(pid, 9)
+
+
+def _install_source_hx(host: FakeHost) -> None:
+    """Put an ``hx`` that runs this checkout's CLI at <home>/runtime/bin/hx."""
+    bin_dir = host.hx_home / "runtime" / "bin"
+    bin_dir.mkdir(parents=True)
+    code = "from hypothex.cli.main import cli; cli()"
+    _write_exec(bin_dir / "hx", f'#!/bin/sh\nexec {PY} -c "{code}" "$@"\n')
+
+
+def _install_fake_hx(host: FakeHost, body: str) -> None:
+    bin_dir = host.hx_home / "runtime" / "bin"
+    bin_dir.mkdir(parents=True)
+    _write_exec(bin_dir / "hx", "#!/bin/sh\n" + body)
+
+
+def _descriptor(port: int) -> dict:
+    import httpx
+
+    return httpx.get(f"http://127.0.0.1:{port}/.well-known/hypothex/environment", timeout=5).json()
+
+
+def test_ensure_server_starts_then_reuses(host: FakeHost, servers: list[int]) -> None:
+    from hypothex import __version__
+    from hypothex.core.environment import PROTOCOL_VERSION
+
+    _install_source_hx(host)
+    info = bs.ensure_server(host.target, "~/.hypothex")
+    assert info.managed is True
+    assert info.port > 0
+    assert info.hx_version == __version__
+    assert info.protocol_version == PROTOCOL_VERSION
+    assert _alive(info.pid)
+    recorded = json.loads((host.hx_home / "serve" / "server.json").read_text())
+    assert recorded["pid"] == info.pid and recorded["port"] == info.port
+    assert recorded["hostname"] == _hostname()
+    desc = _descriptor(info.port)
+    assert desc["hx_version"] == __version__
+    # The server uses <home> as its Hypothex home.
+    assert (
+        desc["environment_id"]
+        == json.loads((host.hx_home / "environment.json").read_text())["environment_id"]
+    )
+    assert bs.ensure_server(host.target, "~/.hypothex") == info
+    assert not (host.hx_home / "serve" / ".lock").exists()
+
+
+def test_ensure_server_replaces_dead_server(host: FakeHost, servers: list[int]) -> None:
+    _install_source_hx(host)
+    serve = host.hx_home / "serve"
+    serve.mkdir(parents=True)
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    stale = {"pid": dead.pid, "port": 1, "managed": True, "hx_version": "0.0.1",
+             "protocol_version": 1, "hostname": _hostname()}  # fmt: skip
+    (serve / "server.json").write_text(json.dumps(stale, indent=2))
+    info = bs.ensure_server(host.target, "~/.hypothex")
+    assert info.pid != dead.pid
+    assert info.port != 1
+    assert _descriptor(info.port)["protocol_version"] == info.protocol_version
+
+
+def test_ensure_server_failure_returns_last_80_log_lines(host: FakeHost) -> None:
+    _install_fake_hx(
+        host, 'i=1; while [ $i -le 100 ]; do echo "line $i"; i=$((i+1)); done; exit 1\n'
+    )
+    with pytest.raises(BootstrapError, match="hx serve exited during startup") as info:
+        bs.ensure_server(host.target, "~/.hypothex")
+    lines = str(info.value).splitlines()
+    assert lines[0] == "gpu1: hx serve exited during startup"
+    assert lines[1:] == [f"line {i}" for i in range(21, 101)]
+    assert not (host.hx_home / "serve" / "server.json").exists()
+
+
+def test_ensure_server_times_out(
+    host: FakeHost, monkeypatch: pytest.MonkeyPatch, servers: list[int]
+) -> None:
+    monkeypatch.setenv("HX_START_WAIT", "1")
+    marker = host.remote_home / "slow.pid"
+    _install_fake_hx(host, f"echo $$ > {marker}\necho booting\nexec sleep 60\n")
+    with pytest.raises(BootstrapError, match=r"not ready after 1s") as info:
+        bs.ensure_server(host.target, "~/.hypothex")
+    assert str(info.value).splitlines()[1:] == ["booting"]
+    pid = int(marker.read_text())
+    servers.append(pid)
+    for _ in range(40):
+        if not _alive(pid):
+            break
+        subprocess.run(["sleep", "0.05"])
+    assert not _alive(pid)  # the half-started server was killed
+
+
+def test_ensure_server_needs_install(host: FakeHost) -> None:
+    with pytest.raises(BootstrapError, match=r"hx is not installed at .*runtime/bin/hx"):
+        bs.ensure_server(host.target, "~/.hypothex")
+
+
+def test_stop_server_managed(host: FakeHost, servers: list[int]) -> None:
+    _install_source_hx(host)
+    info = bs.ensure_server(host.target, "~/.hypothex")
+    assert bs.stop_server(host.target, "~/.hypothex") is True
+    for _ in range(40):
+        if not _alive(info.pid):
+            break
+        subprocess.run(["sleep", "0.05"])
+    assert not _alive(info.pid)
+    assert not (host.hx_home / "serve" / "server.json").exists()
+    assert bs.stop_server(host.target, "~/.hypothex") is False
+
+
+def test_stop_server_leaves_external_alone(host: FakeHost) -> None:
+    serve = host.hx_home / "serve"
+    serve.mkdir(parents=True)
+    proc = subprocess.Popen(["sleep", "60"])
+    try:
+        external = {"pid": proc.pid, "port": 9, "managed": False, "hx_version": "0.1.0",
+                    "protocol_version": 1}  # fmt: skip
+        (serve / "server.json").write_text(json.dumps(external))
+        assert bs.stop_server(host.target, "~/.hypothex") is False
+        assert proc.poll() is None
+        assert (serve / "server.json").exists()
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_server_logs_tail(host: FakeHost) -> None:
+    serve = host.hx_home / "serve"
+    serve.mkdir(parents=True)
+    (serve / "server.log").write_text("".join(f"l{i}\n" for i in range(1, 11)))
+    assert bs.server_logs(host.target, "~/.hypothex", lines=3) == "l8\nl9\nl10"
+    (serve / "server.log").unlink()
+    with pytest.raises(BootstrapError, match="no server log"):
+        bs.server_logs(host.target, "~/.hypothex")
+
+
+def test_bootstrap_scripts_names() -> None:
+    assert set(bs.BOOTSTRAP_SCRIPTS) == {"probe", "install", "start", "stop", "logs"}
+
+
+def _sleeper_record(host: FakeHost, **fields: object) -> subprocess.Popen[bytes]:
+    """A live process recorded as a managed server in server.json."""
+    serve = host.hx_home / "serve"
+    serve.mkdir(parents=True)
+    proc = subprocess.Popen(["sleep", "60"])
+    record = {"pid": proc.pid, "port": 9, "managed": True, "hx_version": "0.1.0",
+              "protocol_version": 1, **fields}  # fmt: skip
+    (serve / "server.json").write_text(json.dumps(record))
+    return proc
+
+
+def test_stop_server_never_signals_another_nodes_server(host: FakeHost) -> None:
+    # a shared home seen from two login nodes: the record names the other node
+    proc = _sleeper_record(host, hostname="login2", pid_start="")
+    try:
+        assert bs.stop_server(host.target, "~/.hypothex") is False
+        assert proc.poll() is None
+        assert (host.hx_home / "serve" / "server.json").exists()
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_stop_server_never_signals_a_recycled_pid(host: FakeHost) -> None:
+    # the server died and the OS gave its pid to this unrelated process
+    proc = _sleeper_record(host, hostname=_hostname(), pid_start="Mon Jan 1 00:00:00 2001")
+    try:
+        assert bs.stop_server(host.target, "~/.hypothex") is True  # the server is gone
+        assert proc.poll() is None
+        assert not (host.hx_home / "serve" / "server.json").exists()
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_stop_server_without_a_birth_record_signals_nothing(host: FakeHost) -> None:
+    proc = _sleeper_record(host, hostname=_hostname())
+    try:
+        assert bs.stop_server(host.target, "~/.hypothex") is False
+        assert proc.poll() is None
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+FAKE_SERVE = """
+import http.server, json, os
+from pathlib import Path
+
+BODY = json.dumps({"environment_id": "e1", "hx_version": "9.9.9", "protocol_version": 1})
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(BODY.encode())
+
+    def log_message(self, *args):
+        pass
+
+
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+record = {"pid": os.getpid(), "port": server.server_address[1], "managed": False,
+          "hx_version": "9.9.9", "protocol_version": 1,
+          "token": os.environ.get("HYPOTHEX_SERVE_TOKEN")}
+serve = Path(os.environ["HYPOTHEX_HOME"]) / "serve"
+(serve / "server.json.tmp").write_text(json.dumps(record, indent=2))
+os.replace(serve / "server.json.tmp", serve / "server.json")
+print("serving, and no uvicorn line", flush=True)
+server.serve_forever()
+"""
+
+
+def test_ensure_server_reads_the_port_from_server_json(
+    host: FakeHost, servers: list[int], tmp_path: Path
+) -> None:
+    # hx serve on a pre-bound socket (Task 47) never logs "Uvicorn running on"
+    script = tmp_path / "fake_serve.py"
+    script.write_text(FAKE_SERVE)
+    _install_fake_hx(host, f"exec {PY} {script}\n")
+    info = bs.ensure_server(host.target, "~/.hypothex")
+    assert (info.hx_version, info.managed) == ("9.9.9", True)
+    assert _descriptor(info.port)["environment_id"] == "e1"
+    assert "Uvicorn" not in (host.hx_home / "serve" / "server.log").read_text()
+    recorded = json.loads((host.hx_home / "serve" / "server.json").read_text())
+    assert recorded["pid_start"] == _birth(info.pid) and recorded["token"] == info.token
+
+
+SENTINEL = "f00d" * 12
+
+
+def test_bad_server_json_never_shows_the_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback
+
+    raw = json.dumps({"pid": "not-a-pid", "port": 1, "managed": True, "hx_version": "x",
+                      "protocol_version": 1, "token": SENTINEL})  # fmt: skip
+    monkeypatch.setattr(bs, "_run_script", lambda *args, **kwargs: ({"server": raw}, []))
+    with pytest.raises(BootstrapError, match=r"bad server.json \(pid\)") as info:
+        bs.ensure_server(SshTarget(alias="gpu1"), "~/.hypothex")
+    assert SENTINEL not in "".join(traceback.format_exception(info.value))
+    monkeypatch.setattr(bs, "_run_script", lambda *a, **k: ({"server": raw[:-9]}, []))
+    with pytest.raises(BootstrapError) as broken:
+        bs.ensure_server(SshTarget(alias="gpu1"), "~/.hypothex")
+    assert SENTINEL[:8] not in "".join(traceback.format_exception(broken.value))
+
+
+def test_ensure_server_passes_the_kind(host: FakeHost) -> None:
+    args = host.remote_home / "args.txt"
+    _install_fake_hx(host, f'echo "$@" > {args}\nexit 1\n')
+    with pytest.raises(BootstrapError, match="exited during startup"):
+        bs.ensure_server(host.target, "~/.hypothex", kind="slurm")
+    assert args.read_text().split() == [
+        "serve", "--host", "127.0.0.1", "--port", "0", "--kind", "slurm",
+    ]  # fmt: skip
+
+
+def test_server_json_holds_a_private_token(host: FakeHost, servers: list[int]) -> None:
+    _install_source_hx(host)
+    info = bs.ensure_server(host.target, "~/.hypothex")
+    assert info.token is not None and len(info.token) == 48
+    serve = host.hx_home / "serve"
+    assert json.loads((serve / "server.json").read_text())["token"] == info.token
+    assert (serve / "server.json").stat().st_mode & 0o777 == 0o600
+    assert serve.stat().st_mode & 0o777 == 0o700
+    assert "token" not in info.model_dump() and info.token not in repr(info)
+
+
+def test_reuse_needs_this_homes_environment_id(host: FakeHost, servers: list[int]) -> None:
+    # a port that someone else's process took over must never be reused
+    _install_source_hx(host)
+    first = bs.ensure_server(host.target, "~/.hypothex")
+    servers.append(first.pid)
+    env_file = host.hx_home / "environment.json"
+    identity = json.loads(env_file.read_text())
+    env_file.write_text(json.dumps({**identity, "environment_id": "someone-else"}))
+    second = bs.ensure_server(host.target, "~/.hypothex")
+    assert second.pid != first.pid and second.token != first.token
+
+
+def test_two_hubs_break_a_dead_lock_once(host: FakeHost, servers: list[int]) -> None:
+    # both waiters see the dead owner; only one may break the lock, and never the new one
+    from concurrent.futures import ThreadPoolExecutor
+
+    _install_source_hx(host)
+    lock = host.hx_home / "serve" / ".lock"
+    lock.mkdir(parents=True)
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    (lock / "owner").write_text(f"{_hostname()}|{dead.pid}|\n")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        infos = list(pool.map(lambda _: bs.ensure_server(host.target, "~/.hypothex"), range(2)))
+    assert infos[0] == infos[1]  # one server, started under one lock holder
+    assert _alive(infos[0].pid)
+    recorded = json.loads((host.hx_home / "serve" / "server.json").read_text())
+    assert recorded["pid"] == infos[0].pid
+    leftovers = sorted(p.name for p in (host.hx_home / "serve").iterdir() if "lock" in p.name)
+    assert leftovers == []  # no .lock, .lock.break, or .lock.stale.* left behind
+
+
+@pytest.mark.parametrize("lock_tool", ["mkdir", "python3"])
+def test_two_hubs_starting_one_host_share_one_server(
+    host: FakeHost, servers: list[int], lock_tool: str
+) -> None:
+    # Review Focus: a laptop and a desktop hub bootstrap the same host at the same time.
+    from concurrent.futures import ThreadPoolExecutor
+
+    if lock_tool == "python3":  # the host can take an OS lock (fcntl) instead of mkdir
+        host.add_tool("python3", f'exec {PY} "$@"\n')
+    _install_source_hx(host)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        infos = list(pool.map(lambda _: bs.ensure_server(host.target, "~/.hypothex"), range(2)))
+    assert infos[0] == infos[1]  # the second hub waited on the lock, then reused the server
+    assert _alive(infos[0].pid)
+    recorded = json.loads((host.hx_home / "serve" / "server.json").read_text())
+    assert recorded["pid"] == infos[0].pid
+    leftovers = sorted(p.name for p in (host.hx_home / "serve").iterdir() if "lock" in p.name)
+    assert leftovers == ([".lock"] if lock_tool == "python3" else [])  # an OS lock file stays
+    assert not (host.hx_home / "serve" / ".lock").is_dir()

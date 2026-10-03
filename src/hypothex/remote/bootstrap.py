@@ -23,7 +23,7 @@ import uuid
 from importlib import resources
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 import hypothex
 from hypothex._version import __version__
@@ -468,3 +468,116 @@ def install(target: SshTarget, home: str, wheel: Path) -> None:
         raise BootstrapError(
             f"{target.alias}: installed hx reports version {installed!r}, expected {expected!r}"
         )
+
+
+def ensure_server(target: SshTarget, home: str, *, kind: str | None = None) -> ServerInfo:
+    """
+    Return a healthy env server on the host, starting one if needed.
+
+    Reuses the server in ``<home>/serve/server.json`` when its pid is alive on
+    this host (with the recorded birth) and its descriptor answers for this
+    home. Otherwise starts ``nohup hx serve --host 127.0.0.1 --port 0`` from
+    ``<home>/runtime/bin``, waits for the
+    descriptor (``HX_START_WAIT`` seconds on the host, default 30), and records
+    it as managed. Start and reuse run under the lock dir ``<home>/serve/.lock``,
+    so two hubs that start the same host at once share one server.
+
+    Parameters
+    ----------
+    target : SshTarget
+        Host to use.
+    home : str
+        Hypothex home on the host; ``~`` is expanded there.
+    kind : str, optional
+        ``ssh`` or ``slurm``: passed as ``hx serve --kind`` to a server this call
+        starts (a reused server keeps its kind).
+
+    Returns
+    -------
+    ServerInfo
+        The running server, with the bearer ``token`` the hub must send.
+
+    Raises
+    ------
+    BootstrapError
+        ``hx`` is not installed, or the server exited or was not ready in time;
+        the message ends with the last 80 lines of ``<home>/serve/server.log``.
+        A bad ``server.json`` is named by its invalid fields only (never the
+        token).
+
+    Examples
+    --------
+    >>> ensure_server(SshTarget(alias="gpu1"), "~/.hypothex").port  # doctest: +SKIP
+    40123
+    """
+    params = {"HX_HOME": home} if kind is None else {"HX_HOME": home, "HX_KIND": kind}
+    values, _ = _run_script(target, "start", timeout=180, **params)
+    raw = values.get("server")
+    if not raw:
+        raise BootstrapError(f"{target.alias}: start script reported no server")
+    try:
+        return ServerInfo.model_validate_json(raw)
+    except ValidationError as exc:
+        # Never echo the raw record or pydantic's input values: they hold the token.
+        fields = sorted({".".join(map(str, err["loc"])) or "record" for err in exc.errors()})
+        raise BootstrapError(f"{target.alias}: bad server.json ({', '.join(fields)})") from None
+
+
+def stop_server(target: SshTarget, home: str) -> bool:
+    """
+    Stop the host's env server if Hypothex started it.
+
+    Parameters
+    ----------
+    target : SshTarget
+        Host to use.
+    home : str
+        Hypothex home on the host.
+
+    Returns
+    -------
+    bool
+        True when a managed server of this host was stopped (or had already
+        died, its pid now free or reused) and ``server.json`` was removed; False
+        for no server, an external one, another login node's, or a record
+        without ``pid_start``.
+
+    Examples
+    --------
+    >>> stop_server(SshTarget(alias="gpu1"), "~/.hypothex")  # doctest: +SKIP
+    True
+    """
+    values, _ = _run_script(target, "stop", HX_HOME=home)
+    return values.get("stopped") == "1"
+
+
+def server_logs(target: SshTarget, home: str, lines: int = 80) -> str:
+    """
+    Return the last lines of the host's ``<home>/serve/server.log``.
+
+    Parameters
+    ----------
+    target : SshTarget
+        Host to use.
+    home : str
+        Hypothex home on the host.
+    lines : int, optional
+        How many lines, by default 80.
+
+    Returns
+    -------
+    str
+        Log lines joined with newlines.
+
+    Raises
+    ------
+    BootstrapError
+        There is no server log.
+
+    Examples
+    --------
+    >>> print(server_logs(SshTarget(alias="gpu1"), "~/.hypothex", lines=1))  # doctest: +SKIP
+    hx serve on http://127.0.0.1:40123
+    """
+    _, logs = _run_script(target, "logs", HX_HOME=home, HX_LINES=str(lines))
+    return "\n".join(logs)

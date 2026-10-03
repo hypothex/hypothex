@@ -191,6 +191,36 @@ def test_remote_sweep_sends_the_client_checkout(
     assert len(sent) == 2
 
 
+def test_remote_sweep_skips_a_host_copy_of_the_project(
+    home: Path, ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hypothex.mcp.server as server_mod
+
+    sent: list[dict[str, Any]] = []
+
+    def record_hub(method: str, path: str, body: dict[str, Any], **kwargs: Any) -> Any:
+        sent.append(body)
+        return {"ok": True}
+
+    monkeypatch.setattr(server_mod, "hub_call", record_hub)
+    entry = ctx.register_project(toy_repo)
+    # a copy from gpu1: its repo names gpu1's folder, which here is also a local folder
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    base = {
+        "project": "toy",
+        "command": SWEEP_CMD,
+        "hypothesis": "remote",
+        "grid": {"x": ["1"]},
+        "seeds": [1],
+        "host": "gpu1",
+    }
+    err, _ = call(home, "launch_sweep", base)
+    assert not err
+    assert "commit" not in sent[-1] and "diff" not in sent[-1]  # the host's mapped checkout runs
+    err, _ = call(home, "launch_sweep", {**base, "repo": str(toy_repo)})  # an explicit opt-in
+    assert not err and sent[-1]["commit"] == git(toy_repo, "rev-parse", "HEAD")
+
+
 def test_mutation_tools_send_host_runs_through_the_hub(
     tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

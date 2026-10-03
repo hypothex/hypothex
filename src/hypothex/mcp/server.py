@@ -793,7 +793,8 @@ def sweep_checkout(ctx: Context, project: str, repo: str | None) -> dict[str, st
     project : str
         The sweep's project.
     repo : str, optional
-        The checkout to send; default the registered repo of ``project``.
+        The checkout to send; default the registered repo of ``project``, unless
+        that entry is a copy from a host (``remote_host``), whose repo is on the host.
 
     Returns
     -------
@@ -809,11 +810,12 @@ def sweep_checkout(ctx: Context, project: str, repo: str | None) -> dict[str, st
         root = Path(repo)
     else:
         try:
-            root = Path(ctx.store.load_project(project).repo)
+            entry = ctx.store.load_project(project)
         except StoreError:
             return {}
-        if not root.is_dir():
-            return {}  # a project copied from a host: its mapped checkout runs
+        root = Path(entry.repo)
+        if entry.remote_host is not None or not root.is_dir():
+            return {}  # a project copied from a host: its repo path is on that host
     fields, _ = client_checkout(root)
     if fields["project"] != project:
         raise ConfigError(f"{root} holds project {fields['project']!r}, not {project!r}")

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import platform
 import socket
-import subprocess
 import uuid
 
 from pydantic import BaseModel
@@ -43,20 +42,24 @@ class EnvironmentDescriptor(BaseModel):
 
 def count_gpus() -> int:
     """
-    Return the number of NVIDIA GPUs visible to ``nvidia-smi``, or 0.
+    Return the number of GPUs ``hypothex.core.gpus.query_gpus`` sees, or 0.
+
+    One source for every GPU number: ``HYPOTHEX_FAKE_GPUS`` (tests, demos) or
+    ``nvidia-smi``.
 
     Returns
     -------
     int
-        GPU count; 0 if ``nvidia-smi`` is missing, times out, or fails.
+        GPU count; 0 if ``nvidia-smi`` is missing, times out, or fails, or the
+        fake GPU file is unreadable.
     """
+    from hypothex.core.errors import ConfigError
+    from hypothex.core.gpus import query_gpus  # lazy: gpus imports Context
+
     try:
-        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.TimeoutExpired):
+        return len(query_gpus())
+    except ConfigError:
         return 0
-    if out.returncode != 0:
-        return 0
-    return sum(1 for line in out.stdout.splitlines() if line.startswith("GPU "))
 
 
 def load_descriptor(layout: Layout) -> EnvironmentDescriptor:

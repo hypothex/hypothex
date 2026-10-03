@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Annotated, Any, cast, get_args
 
 import typer
 import yaml
+from pydantic import ValidationError
 
 from hypothex._version import __version__
 from hypothex.core import queries as q
@@ -39,6 +40,15 @@ from hypothex.core.index import rebuild_index
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import Layout, default_home
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
+from hypothex.remote.config import (
+    HOST_NAME,
+    EnvironmentsFile,
+    HostSpec,
+    SlurmDefaults,
+    environments_path,
+    load_hosts,
+    save_hosts,
+)
 
 if TYPE_CHECKING:
     from hypothex.remote.bootstrap import ServerInfo
@@ -59,6 +69,11 @@ service_app = typer.Typer(
     help="Keep an env server running on this machine (systemd user unit or launchd agent).",
 )
 app.add_typer(service_app, name="service")
+hosts_app = typer.Typer(
+    no_args_is_help=True,
+    help="Remote hosts (SSH GPU boxes, SLURM clusters) that the hub runs on.",
+)
+app.add_typer(hosts_app, name="hosts")
 KindOpt = Annotated[
     str | None, typer.Option("--kind", help="What this machine is to the hub: ssh or slurm.")
 ]
@@ -271,6 +286,66 @@ ParamOpt = Annotated[list[str] | None, typer.Option("--param", help="name=value 
 VarOpt = Annotated[list[str] | None, typer.Option("--var", help="Template var name=value.")]
 StageOpt = Annotated[str | None, typer.Option("--stage", help="Run a stage from hypothex.yaml.")]
 RepoOpt = Annotated[Path | None, typer.Option("--repo", help="Project repo (default: cwd).")]
+
+
+def _hub(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+    # The hub client lives with the MCP helpers; import lazily to keep `hx` fast.
+    from hypothex.mcp.server import hub_call
+
+    return hub_call(method, path, body)
+
+
+def _hub_try(method: str, path: str, body: dict[str, Any] | None = None) -> Any | None:
+    from hypothex.mcp.server import HubUnavailableError, hub_call
+
+    try:
+        return hub_call(method, path, body)
+    except HubUnavailableError:
+        return None
+
+
+def _hosts() -> tuple[Context, EnvironmentsFile]:
+    c = _ctx()
+    return c, load_hosts(c.layout)
+
+
+def _known_host(hosts: EnvironmentsFile, name: str) -> HostSpec:
+    spec = hosts.environments.get(name)
+    if spec is None:
+        raise ConfigError(f"unknown host {name}; see `hx hosts list`")
+    return spec
+
+
+def _bootstrap(c: Context, name: str, spec: HostSpec) -> ServerInfo:
+    # spec 8A.2 steps 1-3 over the user's own ssh: probe, install this hx, start the server
+    from hypothex.mcp.server import ssh_target
+    from hypothex.remote import bootstrap
+
+    target = ssh_target(spec)
+    facts = bootstrap.probe(target, spec.home)
+    if spec.kind == "slurm" and facts.slurm is None:
+        raise ConfigError(f"{name} has no sbatch on PATH; drop --slurm or use the login node")
+    wheel = bootstrap.build_wheel(c.layout.home / "cache" / "wheels")
+    bootstrap.install(target, facts.home, wheel)
+    return bootstrap.ensure_server(target, facts.home, kind=spec.kind)
+
+
+def _status_cells(row: dict[str, Any]) -> list[Any]:
+    gpus = row["gpus"]
+    busy = sum(1 for g in gpus if g.get("run_id") or g.get("external"))
+    slurm = row["slurm"]
+    state = row["state"]
+    return [
+        row["name"],
+        row["kind"],
+        state["state"],
+        str(state["since"])[11:19],
+        f"{busy}/{len(gpus)}" if gpus else None,
+        row["queue"],
+        f"{slurm['pending']}/{slurm['running']}" if slurm else None,
+        f"${row['cost_today_usd']:.2f}",
+        state.get("message") or None,
+    ]
 
 
 # project ---------------------------------------------------------------------------
@@ -1169,6 +1244,179 @@ def service_uninstall(as_json: JsonFlag = False) -> None:
     typer.echo("stop the running server with:")
     for command in out.disable:
         typer.echo(f"  {command}")
+
+
+# hosts ----------------------------------------------------------------------------
+@hosts_app.command("add")
+def hosts_add(
+    name: Annotated[str, typer.Argument(help="Host name: a-z, 0-9, - and _.")],
+    ssh: Annotated[str | None, typer.Option("--ssh", help="Host alias in ~/.ssh/config.")] = None,
+    url: Annotated[str | None, typer.Option("--url", help="URL of a running env server.")] = None,
+    slurm: Annotated[bool, typer.Option("--slurm", help="A SLURM cluster (login node).")] = False,
+    partition: Annotated[str | None, typer.Option(help="SLURM partition.")] = None,
+    account: Annotated[str | None, typer.Option(help="SLURM account.")] = None,
+    time_limit: Annotated[str, typer.Option("--time", help="SLURM time limit.")] = "02:00:00",
+    gpus: Annotated[int, typer.Option("--gpus", help="SLURM GPUs per job.")] = 1,
+    remote_home: Annotated[
+        str, typer.Option("--remote-home", help="hx home on the host.")
+    ] = "~/.hypothex",
+    usd: Annotated[
+        float | None, typer.Option("--usd-per-gpu-hour", help="Price, for cost.")
+    ] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Add a host: for --ssh, install hx there and start its env server; the hub connects it."""
+    from hypothex.mcp.server import LOCAL_HOST
+
+    if (ssh is None) == (url is None):
+        raise ConfigError("give exactly one of --ssh ALIAS or --url URL")
+    if name == LOCAL_HOST or not re.fullmatch(HOST_NAME, name):
+        raise ConfigError(f"host name {name!r} must match {HOST_NAME} and not be 'local'")
+    if not slurm and (partition or account):
+        raise ConfigError("--partition and --account need --slurm")
+    c, hosts = _hosts()
+    if name in hosts.environments:
+        raise ConfigError(f"host {name} exists; remove it first with `hx hosts rm {name}`")
+    try:
+        spec = HostSpec(
+            route="ssh" if ssh else "url",
+            kind="slurm" if slurm else "ssh",
+            ssh_alias=ssh,
+            url=url,
+            home=remote_home,
+            usd_per_gpu_hour=usd,
+            slurm=SlurmDefaults(partition=partition, account=account, time=time_limit, gpus=gpus)
+            if slurm
+            else None,
+        )
+    except ValidationError as exc:
+        raise ConfigError(f"invalid host {name}: {exc.errors()[0]['msg']}") from exc
+    server = _bootstrap(c, name, spec) if spec.route == "ssh" else None
+    environments = {**hosts.environments, name: spec}
+    save_hosts(c.layout, hosts.model_copy(update={"environments": environments}))
+    state = _hub_try("POST", f"/api/v1/hosts/{name}/connect", {})
+    if as_json:
+        _print_json({"name": name, "host": spec, "server": server, "state": state})
+        return
+    typer.echo(f"added {name} to {environments_path(c.layout)}")
+    if server is not None:
+        typer.echo(f"{name}: hx {server.hx_version} on port {server.port}")
+    typer.echo(
+        f"hub: {state['state']}" if state else "the hub is not running; `hx serve` connects it"
+    )
+
+
+@hosts_app.command("list")
+def hosts_list(as_json: JsonFlag = False) -> None:
+    """List the hosts in environments.yaml (no hub needed)."""
+    _, hosts = _hosts()
+    rows: list[dict[str, Any]] = [
+        {"name": n, **s.model_dump(mode="json")} for n, s in hosts.environments.items()
+    ]
+    if as_json:
+        _print_json(rows)
+        return
+    _table(
+        ["host", "kind", "route", "target", "home", "projects"],
+        [
+            [
+                r["name"],
+                r["kind"],
+                r["route"],
+                r["ssh_alias"] or r["url"],
+                r["home"],
+                ", ".join(f"{p}={path}" for p, path in r["projects"].items()) or None,
+            ]
+            for r in rows
+        ],
+    )
+
+
+@hosts_app.command("status")
+def hosts_status(
+    name: Annotated[str | None, typer.Argument(help="One host (default: all).")] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Live state from the hub: connection, GPUs, queue, SLURM jobs, cost today."""
+    rows = _hub("GET", "/api/v1/hosts")
+    if name is not None:
+        rows = [r for r in rows if r["name"] == name]
+        if not rows:
+            raise ConfigError(f"unknown host {name}; see `hx hosts list`")
+    if as_json:
+        _print_json(rows)
+        return
+    _table(
+        ["host", "kind", "state", "since", "gpus busy", "queue", "slurm p/r", "today", "message"],
+        [_status_cells(r) for r in rows],
+    )
+
+
+@hosts_app.command("map")
+def hosts_map(project: str, host: str, path: str, as_json: JsonFlag = False) -> None:
+    """Say where PROJECT's checkout is on HOST (runs there use it)."""
+    c, hosts = _hosts()
+    spec = _known_host(hosts, host)
+    updated = spec.model_copy(update={"projects": {**spec.projects, project: path}})
+    environments = {**hosts.environments, host: updated}
+    save_hosts(c.layout, hosts.model_copy(update={"environments": environments}))
+    _hub_try("POST", "/api/v1/hosts/reload", {})  # a running hub serves the new map at once
+    _emit({"host": host, "project": project, "path": path}, as_json, f"{project} on {host}: {path}")
+
+
+@hosts_app.command("rm")
+def hosts_rm(name: str, as_json: JsonFlag = False) -> None:
+    """Remove a host; its env server and runs keep going on the host."""
+    c, hosts = _hosts()
+    _known_host(hosts, name)
+    environments = {n: s for n, s in hosts.environments.items() if n != name}
+    save_hosts(c.layout, hosts.model_copy(update={"environments": environments}))
+    # then tell a running hub: reload stops the host's supervisor and forgets it
+    # (a disconnect first would only mark it disabled and keep it listed)
+    _hub_try("POST", "/api/v1/hosts/reload", {})
+    _emit({"removed": name}, as_json, f"removed {name}")
+
+
+@hosts_app.command("upgrade")
+def hosts_upgrade(name: str, as_json: JsonFlag = False) -> None:
+    """Install this hx version on the host and restart its env server if needed."""
+    from hypothex.mcp.server import ssh_target
+    from hypothex.remote import bootstrap
+
+    c, hosts = _hosts()
+    spec = _known_host(hosts, name)
+    if spec.route != "ssh":
+        raise ConfigError(f"host {name} is reached by {spec.route}; upgrade hx on it by hand")
+    target = ssh_target(spec)
+    wheel = bootstrap.build_wheel(c.layout.home / "cache" / "wheels")
+    bootstrap.install(target, spec.home, wheel)
+    bootstrap.stop_server(target, spec.home)  # only a server hx started; an external one stays
+    info = bootstrap.ensure_server(target, spec.home, kind=spec.kind)
+    if info.hx_version != __version__:
+        raise ConfigError(
+            f"{name} still runs hx {info.hx_version} (pid {info.pid}); stop that server "
+            f"(`hx service uninstall` or kill the pid) and run `hx hosts upgrade {name}` again"
+        )
+    state = _hub_try("POST", f"/api/v1/hosts/{name}/connect", {})
+    _emit(
+        {"name": name, "server": info, "state": state},
+        as_json,
+        f"{name}: hx {info.hx_version} on port {info.port}",
+    )
+
+
+@hosts_app.command("connect")
+def hosts_connect(name: str, as_json: JsonFlag = False) -> None:
+    """Ask the hub to (re)connect a host."""
+    state = _hub("POST", f"/api/v1/hosts/{name}/connect", {})
+    _emit(state, as_json, f"{name}: {state['state']}")
+
+
+@hosts_app.command("disconnect")
+def hosts_disconnect(name: str, as_json: JsonFlag = False) -> None:
+    """Ask the hub to stop watching a host; its runs keep going."""
+    state = _hub("POST", f"/api/v1/hosts/{name}/disconnect", {})
+    _emit(state, as_json, f"{name}: {state['state']}")
 
 
 @app.command()

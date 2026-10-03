@@ -76,7 +76,10 @@ function NewRun({ project, task, templateRunId, onClose, onLaunched }: NewRunPro
     queryFn: ({ signal }) => api.run(templateRunId ?? "", signal),
     enabled: templateRunId !== null,
   });
-  if (detail.error) return <ErrorBox error={detail.error} />;
+  // A failed runs read would propose seeds that already exist; a failed template read
+  // would open a blank dialog without saying so. Both stop here instead.
+  const error = detail.error ?? runs.error ?? template.error;
+  if (error) return <ErrorBox error={error} />;
   if (detail.data === undefined || runs.isPending || (templateRunId !== null && template.isPending)) {
     return <Loading />;
   }

@@ -123,8 +123,11 @@ describe("TaskPage", () => {
     expect(body.created_by).toBe("human");
   });
 
-  test("New run opens the launch dialog from the best config and links the launched runs", async () => {
-    const calls = mockApi({
+  const RUNS_URL = "GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=1000";
+
+  /** Routes behind the New run dialog: task detail, template run, task runs, hosts. */
+  function newRunRoutes(): Record<string, unknown> {
+    return {
       ...routes("overview"),
       [`GET ${BASE}`]: {
         summary: { project: "toy-classifier", name: "toy-test" },
@@ -134,7 +137,7 @@ describe("TaskPage", () => {
         stages: {},
       },
       [`GET /api/v1/runs/${RUN_SVM}`]: makeDetail(),
-      "GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=1000": [
+      [RUNS_URL]: [
         makeRecord({ run_id: "20260926-200000-toy-test-aa01", seed: 1 }),
         makeRecord({ run_id: "20260926-200100-toy-test-aa02", seed: 2 }),
         makeRecord({ run_id: RUN_RF, seed: 9, config_hash: "sha256:5a810ddb4e0c2f19" }),
@@ -142,6 +145,12 @@ describe("TaskPage", () => {
       "GET /api/v1/hosts": [],
       "GET /api/v1/gpus": [],
       "GET /api/v1/queue": [],
+    };
+  }
+
+  test("New run opens the launch dialog from the best config and links the launched runs", async () => {
+    const calls = mockApi({
+      ...newRunRoutes(),
       "POST /api/v1/runs": (call: Call) => {
         const seed = (call.body as { seed: number }).seed;
         return makeRecord({ run_id: `20261003-120000-toy-test-s${seed}`, seed, status: "running" });
@@ -183,6 +192,30 @@ describe("TaskPage", () => {
       gpus: 0,
       queue: false,
     });
+  });
+
+  test("New run shows the runs read error instead of a dialog with possibly used seeds", async () => {
+    mockApi({
+      ...newRunRoutes(),
+      [RUNS_URL]: new HttpReply(500, { error: "runs index unreadable", type: "StoreError" }),
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("runs index unreadable");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("New run shows the template run read error instead of a blank dialog", async () => {
+    mockApi({
+      ...newRunRoutes(),
+      [`GET /api/v1/runs/${RUN_SVM}`]: new HttpReply(404, { error: `no run ${RUN_SVM}`, type: "StoreError" }),
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(`no run ${RUN_SVM}`);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   test("a tab switch does not draw the previous view's panels under the new view", async () => {

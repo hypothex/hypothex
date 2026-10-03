@@ -5,7 +5,7 @@
  */
 import type { ReactElement } from "react";
 import { AxisBottom, GridX } from "../../charts/Axis";
-import { BestBand, MeanMark, SeedDots, Whisker } from "../../charts/Glyphs";
+import { BestBand, IdenticalSeeds, MeanMark, SeedDots, Whisker } from "../../charts/Glyphs";
 import { linear, niceDomain, tickFormat, useElementWidth } from "../../charts/Scale";
 import { useTooltip } from "../../charts/Tooltip";
 import { isNum } from "./format";
@@ -27,6 +27,11 @@ export interface SweepForestProps {
 const LW = 96;
 const ROW = 34;
 const TOP = 22;
+
+/** Two or more seeds that all gave one score: drawn as `◇×n` (spec: never stacked dots or a fake `± 0`). */
+function identical(seeds: readonly number[]): boolean {
+  return seeds.length > 1 && seeds.every((v) => v === seeds[0]);
+}
 
 export function SweepForest({
   cells,
@@ -74,7 +79,11 @@ export function SweepForest({
                 {label}
               </text>
               {c.lo !== null && c.hi !== null ? <Whisker x1={x.at(c.lo)} x2={x.at(c.hi)} y={y} best={b} /> : null}
-              <SeedDots x={x.at} values={seeds} y={y - 9} r={3} />
+              {identical(seeds) ? (
+                <IdenticalSeeds cx={x.at(seeds[0] ?? 0)} cy={y - 9} n={seeds.length} r={3.5} best={b} />
+              ) : (
+                <SeedDots x={x.at} values={seeds} y={y - 9} r={3} />
+              )}
               <MeanMark cx={x.at(c.mean ?? 0)} cy={y} r={4.2} best={b} />
               {c.n < maxSeeds ? (
                 <text className="lbl-s" x={x.at(c.hi ?? c.mean ?? 0) + 8} y={y + 4}>

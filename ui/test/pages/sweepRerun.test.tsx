@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
+import type { RunRecord } from "../../src/api/models";
+import { SEED_HISTORY_CUT } from "../../src/launch/draft";
 import { parseCell, type SweepCellRow } from "../../src/pages/components/SweepModel";
 import { rerunDefaults, SweepRerun } from "../../src/pages/components/SweepRerun";
 import { SweepPage } from "../../src/pages/Sweep";
@@ -31,6 +33,17 @@ afterEach(() => {
 const SWEEP = `/api/v1/sweeps/${PROJECT}/${SWEEP_ID}`;
 const RUNS_URL = "/api/v1/runs?project=rxn&tag=sweep%3A0a1b2c3d%3As-7f3a&archived=true&limit=1000";
 const REPO = "/Users/sv/code/rxn";
+/** Every run of the sweep's task (the seed history): reruns launch with no sweep tag. */
+const HISTORY_URL = "/api/v1/runs?project=rxn&task=fwd&archived=true&limit=1000";
+const PROJECTS = [{ project: PROJECT, repo: REPO, description: "", tasks: [TASK] }];
+/** A rerun of cell D's config outside the sweep (no sweep tag), with seed `seed`. */
+const outside = (seed: number): RunRecord => ({
+  ...run("d1"),
+  run_id: `20261003-120000-fwd-r${seed}`,
+  seed,
+  tags: [],
+  sweep_id: null,
+});
 
 describe("rerunDefaults", () => {
   test("the best cell's latest run: its template, params and vars, the next seeds, the sweep's host", () => {
@@ -48,6 +61,18 @@ describe("rerunDefaults", () => {
     expect(d.commit).toBe("8f4cac43877b75953f18ff1daf7e6fc54a5d8f37");
     const dirty = RUNS.map((r) => (r.run_id === rid("d1") ? { ...r, git: { ...r.git, dirty: true } } : r));
     expect(rerunDefaults(spec, parseCell(CELL_D), dirty).commit).toBeNull();
+  });
+
+  test("seeds skip every run of the config, reruns outside the sweep too; a cut history proposes none", () => {
+    const spec = makeSummary().spec;
+    expect(rerunDefaults(spec, parseCell(CELL_D), RUNS, [outside(5)]).initial.seeds).toBe("6, 7, 8");
+    const cut = rerunDefaults(spec, parseCell(CELL_D), RUNS, [outside(5)], false);
+    expect([cut.initial.seeds, cut.seedsNote]).toEqual(["", SEED_HISTORY_CUT]);
+  });
+
+  test("a CPU template keeps 0 GPUs", () => {
+    const cpu = RUNS.map((r) => ({ ...r, gpus_requested: 0 }));
+    expect(rerunDefaults(makeSummary().spec, parseCell(CELL_D), cpu).initial.gpus).toBe(0);
   });
 
   test("no scored cell: the sweep's latest run; no runs: seeds 1, 2, 3 and nothing carried", () => {
@@ -71,7 +96,8 @@ describe("Rerun sweep", () => {
       "GET /api/v1/gpus": [],
       "GET /api/v1/queue": [],
       [`GET /api/v1/tasks/${PROJECT}/${TASK}/leaderboard`]: makeSweepBoard(),
-      "GET /api/v1/projects": [{ project: PROJECT, repo: REPO, description: "", tasks: [TASK] }],
+      [`GET ${HISTORY_URL}`]: RUNS,
+      "GET /api/v1/projects": PROJECTS,
       "POST /api/v1/runs": (call: Call) => {
         const seed = (call.body as { seed: number }).seed;
         return makeRecord({ run_id: `20261003-120000-fwd-r${seed}`, seed, status: "running" });
@@ -119,7 +145,8 @@ describe("Rerun sweep", () => {
       "GET /api/v1/hosts": HOSTS,
       "GET /api/v1/gpus": [],
       "GET /api/v1/queue": [],
-      "GET /api/v1/projects": [{ project: PROJECT, repo: REPO, description: "", tasks: [TASK] }],
+      [`GET ${HISTORY_URL}`]: RUNS,
+      "GET /api/v1/projects": PROJECTS,
       "POST /api/v1/runs": (call: Call) => {
         const seed = (call.body as { seed: number }).seed;
         return makeRecord({ run_id: `20261003-120000-fwd-r${seed}`, seed, status: "running" });
@@ -160,5 +187,97 @@ describe("Rerun sweep", () => {
         commit: "8f4cac43877b75953f18ff1daf7e6fc54a5d8f37",
       });
     }
+  });
+
+  test("a second rerun proposes the seeds after the first one's, never the same seeds again", async () => {
+    const started: RunRecord[] = [];
+    const calls = mockApi({
+      [`GET ${SWEEP}`]: makeSummary(),
+      [`GET ${RUNS_URL}`]: RUNS,
+      "GET /api/v1/hosts": HOSTS,
+      "GET /api/v1/gpus": [],
+      "GET /api/v1/queue": [],
+      [`GET /api/v1/tasks/${PROJECT}/${TASK}/leaderboard`]: makeSweepBoard(),
+      [`GET ${HISTORY_URL}`]: () => [...RUNS, ...started],
+      "GET /api/v1/projects": PROJECTS,
+      "POST /api/v1/runs": (call: Call) => {
+        const seed = (call.body as { seed: number }).seed;
+        const rec = { ...outside(seed), status: "running" as const };
+        started.push(rec);
+        return rec;
+      },
+    });
+    renderWithClient(<SweepPage project={PROJECT} sweepId={SWEEP_ID} now={NOW} />);
+    const launch = async (hypothesis: string): Promise<string> => {
+      fireEvent.click(await screen.findByRole("button", { name: "Rerun sweep" }));
+      const dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+      const seeds = (within(dialog).getByLabelText("Seeds") as HTMLInputElement).value;
+      await waitFor(() =>
+        expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true),
+      );
+      fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: hypothesis } });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Launch 3" }));
+      await waitFor(() => expect(document.querySelector('[role="dialog"]') === null).toBe(true));
+      return seeds;
+    };
+    expect(await launch("first")).toBe("3, 4, 5");
+    expect(await launch("second")).toBe("6, 7, 8");
+    const sent = calls.filter((c) => c.method === "POST" && c.url === "/api/v1/runs");
+    expect(sent.map((c) => (c.body as { seed: number }).seed)).toEqual([3, 4, 5, 6, 7, 8]);
+  });
+
+  test("reopened after runs started elsewhere, it reads the history again instead of its cache", async () => {
+    const elsewhere: RunRecord[] = [];
+    mockApi({
+      [`GET ${SWEEP}`]: makeSummary(),
+      [`GET ${RUNS_URL}`]: RUNS,
+      "GET /api/v1/hosts": HOSTS,
+      "GET /api/v1/gpus": [],
+      "GET /api/v1/queue": [],
+      [`GET /api/v1/tasks/${PROJECT}/${TASK}/leaderboard`]: makeSweepBoard(),
+      [`GET ${HISTORY_URL}`]: () => [...RUNS, ...elsewhere],
+      "GET /api/v1/projects": PROJECTS,
+    });
+    const { client } = renderWithClient(<SweepPage project={PROJECT} sweepId={SWEEP_ID} now={NOW} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rerun sweep" }));
+    let dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("3, 4, 5");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(document.querySelector('[role="dialog"]') === null).toBe(true));
+    // an agent reruns the config while the dialog is closed; its run event marks runs stale
+    elsewhere.push(outside(3), outside(4), outside(5));
+    await act(() => client.invalidateQueries({ queryKey: ["runs"] }));
+    fireEvent.click(screen.getByRole("button", { name: "Rerun sweep" }));
+    dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("6, 7, 8");
+  });
+
+  test("opened before the sweep's runs arrive, it waits for them instead of freezing empty defaults", async () => {
+    let release: (runs: RunRecord[]) => void = () => {};
+    const late = new Promise<RunRecord[]>((resolve) => {
+      release = resolve;
+    });
+    mockApi({
+      [`GET ${SWEEP}`]: makeSummary(),
+      [`GET ${RUNS_URL}`]: () => late,
+      "GET /api/v1/hosts": HOSTS,
+      "GET /api/v1/gpus": [],
+      "GET /api/v1/queue": [],
+      [`GET /api/v1/tasks/${PROJECT}/${TASK}/leaderboard`]: makeSweepBoard(),
+      [`GET ${HISTORY_URL}`]: RUNS,
+      "GET /api/v1/projects": PROJECTS,
+    });
+    renderWithClient(<SweepPage project={PROJECT} sweepId={SWEEP_ID} now={NOW} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rerun sweep" }));
+    // the projects and the task history load, the sweep's runs do not: no dialog yet
+    try {
+      await new Promise((r) => setTimeout(r, 50));
+      expect(screen.queryByRole("dialog", { name: "Rerun sweep" }) === null).toBe(true);
+    } finally {
+      release(RUNS);
+    }
+    const dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    expect((within(dialog).getByLabelText("Command") as HTMLTextAreaElement).value).toBe(TEMPLATE.join(" "));
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("3, 4, 5");
   });
 });

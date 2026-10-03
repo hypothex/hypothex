@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { PanelRegistryContext } from "../../src/pages/components/PanelGrid";
 import type { QueryResponse, ViewDetail, ViewInfo } from "../../src/pages/components/types";
+import type { RunRecord } from "../../src/api/models";
 import { TaskPage, boardMeta } from "../../src/pages/Task";
 import { REPO, RUN_RF, RUN_SVM, makeBoard, makeDetail, makeRecord } from "./fixtures";
 import { type Call, HttpReply, fakeRegistry, mockApi, renderWithClient, restoreFetch } from "./helpers";
@@ -193,6 +194,59 @@ describe("TaskPage", () => {
       gpus: 0,
       queue: false,
     });
+  });
+
+  test("New run opened again after a launch proposes the seeds after the ones it started", async () => {
+    const started: RunRecord[] = [];
+    const base = newRunRoutes();
+    const calls = mockApi({
+      ...base,
+      // each launch invalidates runs; the reopened dialog must read the new runs, not the cache
+      [RUNS_URL]: () => [...(base[RUNS_URL] as RunRecord[]), ...started],
+      "POST /api/v1/runs": (call: Call) => {
+        const seed = (call.body as { seed: number }).seed;
+        const rec = makeRecord({ run_id: `20261003-120000-toy-test-s${seed}`, seed, status: "running" });
+        started.push(rec);
+        return rec;
+      },
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    const launch = async (hypothesis: string): Promise<string> => {
+      fireEvent.click(screen.getByRole("button", { name: "New run" }));
+      const dialog = await screen.findByRole("dialog", { name: "New run" });
+      const seeds = (within(dialog).getByLabelText("Seeds") as HTMLInputElement).value;
+      await waitFor(() =>
+        expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true),
+      );
+      fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: hypothesis } });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Launch 3" }));
+      await waitFor(() => expect(document.querySelector('[role="dialog"]') === null).toBe(true));
+      return seeds;
+    };
+    expect(await launch("first")).toBe("4, 5, 6");
+    expect(await launch("second")).toBe("7, 8, 9");
+    const sent = calls.filter((c) => c.method === "POST" && c.url === "/api/v1/runs");
+    expect(sent.map((c) => (c.body as { seed: number }).seed)).toEqual([4, 5, 6, 7, 8, 9]);
+  });
+
+  test("New run reopened after runs started elsewhere reads the runs again instead of its cache", async () => {
+    const elsewhere: RunRecord[] = [];
+    const base = newRunRoutes();
+    mockApi({ ...base, [RUNS_URL]: () => [...(base[RUNS_URL] as RunRecord[]), ...elsewhere] });
+    const { client } = renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    let dialog = await screen.findByRole("dialog", { name: "New run" });
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("4, 5, 6");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(document.querySelector('[role="dialog"]') === null).toBe(true));
+    // an agent launches seeds 4-6 of the config while the dialog is closed; its run event marks runs stale
+    elsewhere.push(...[4, 5, 6].map((seed) => makeRecord({ run_id: `20261003-130000-toy-test-e${seed}`, seed })));
+    await act(() => client.invalidateQueries({ queryKey: ["runs"] }));
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    dialog = await screen.findByRole("dialog", { name: "New run" });
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("7, 8, 9");
   });
 
   test("lists the project's sweeps with their best config, each linking its sweep page", async () => {

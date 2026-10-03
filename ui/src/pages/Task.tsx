@@ -89,7 +89,13 @@ function NewRun({ project, task, templateRunId, onClose, onLaunched }: NewRunPro
     // would open a blank dialog without saying so. Both stop here instead.
     const error = detail.error ?? runs.error ?? template.error;
     if (error) return <ErrorBox error={error} />;
-    if (detail.data === undefined || runs.data === undefined || (templateRunId !== null && template.isPending)) {
+    // a refetch in flight too: a cached list may predate runs started since (by anyone)
+    if (
+      detail.data === undefined ||
+      runs.data === undefined ||
+      runs.isFetching ||
+      (templateRunId !== null && template.isPending)
+    ) {
       return <Loading />;
     }
     const all = runs.data;

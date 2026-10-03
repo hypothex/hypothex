@@ -109,6 +109,26 @@ describe("host picker", () => {
 });
 
 describe("GPUs and queue", () => {
+  test("a CPU template (0 GPUs) stays at 0 on GPU and SLURM hosts and sends gpus 0", async () => {
+    const calls = mockApi({ ...HOSTS, "POST /api/v1/hosts/gpu1/runs": (c: Call) => rec(seedOf(c)) });
+    renderDialog({ initial: { command: CMD, seeds: "4", gpus: 0 } });
+    await ready("gpu1");
+    expect(screen.getByLabelText("GPUs per run").textContent).toBe("0");
+    fireEvent.click(radio("mccleary"));
+    expect(screen.getByLabelText("GPUs per job").textContent).toBe("0");
+    fireEvent.click(radio("gpu1"));
+    expect(screen.getByLabelText("GPUs per run").textContent).toBe("0");
+    // a 0 the hub forced (no GPUs there) goes back to 1 on a GPU host
+    fireEvent.click(radio("local"));
+    fireEvent.click(radio("gpu1"));
+    expect(screen.getByLabelText("GPUs per run").textContent).toBe("1");
+    fireEvent.click(screen.getByRole("button", { name: "Fewer GPUs per run" }));
+    typeHypothesis("cpu only");
+    fireEvent.click(launchButton(1));
+    await waitFor(() => expect(posts(calls)).toHaveLength(1));
+    expect(posts(calls)[0]?.body).toMatchObject({ gpus: 0 });
+  });
+
   test("shows the GPU plan, the queue position, the preview and the summary", async () => {
     mockApi(HOSTS);
     renderDialog();

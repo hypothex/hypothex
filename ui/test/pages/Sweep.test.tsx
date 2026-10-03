@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { SweepPage, sweepRunsQuery } from "../../src/pages/Sweep";
 import { HttpReply, mockApi, renderWithClient, restoreFetch } from "./helpers";
 import {
@@ -180,5 +180,56 @@ describe("SweepPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add seeds" }));
     // 2 new seeds (the count stays 2) × 4 cells
     expect(screen.getByText("5, 6 × 4 cells = 8 runs")).toBeTruthy();
+  });
+
+  test("a failed summary refetch keeps the page and an open Rerun dialog, and shows the error", async () => {
+    const r: Record<string, unknown> = {
+      ...routes(),
+      "GET /api/v1/gpus": [],
+      "GET /api/v1/queue": [],
+      "GET /api/v1/runs?project=rxn&task=fwd&archived=true&limit=1000": RUNS,
+      "GET /api/v1/projects": [{ project: PROJECT, repo: "/Users/sv/code/rxn", description: "", tasks: [TASK] }],
+    };
+    mockApi(r);
+    const { client } = renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Rerun sweep" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: "D holds" } });
+
+    r[`GET ${SWEEP}`] = new HttpReply(503, { error: "hub index locked", type: "IndexError" });
+    await act(() => client.invalidateQueries({ queryKey: ["sweeps"] }));
+    expect((await screen.findByRole("alert")).textContent).toBe("hub index locked");
+    expect(screen.getByRole("heading", { level: 1, name: HEADLINE })).toBeTruthy();
+    const open = screen.getByRole("dialog", { name: "Rerun sweep" });
+    expect((within(open).getByLabelText("Hypothesis") as HTMLTextAreaElement).value).toBe("D holds");
+
+    r[`GET ${SWEEP}`] = makeSummary();
+    await act(() => client.invalidateQueries({ queryKey: ["sweeps"] }));
+    await waitFor(() => expect(screen.queryByRole("alert") === null).toBe(true));
+    expect((within(open).getByLabelText("Hypothesis") as HTMLTextAreaElement).value).toBe("D holds");
+  });
+
+  test("ages tick with the clock while the data stays the same", async () => {
+    const ticks: (() => void)[] = [];
+    const realSetInterval = globalThis.setInterval;
+    globalThis.setInterval = ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if (ms === 30_000) ticks.push(fn);
+      return realSetInterval(fn, ms, ...rest);
+    }) as typeof setInterval;
+    setSystemTime(new Date(NOW));
+    try {
+      mockApi(routes());
+      renderWithClient(<SweepPage project={PROJECT} sweepId={SWEEP_ID} />);
+      const c = await screen.findByRole("region", { name: "c Runs on hosts" });
+      expect(await within(c).findByText("stale 4m")).toBeTruthy();
+      setSystemTime(new Date(NOW + 10 * 60_000));
+      act(() => {
+        for (const tick of ticks) tick();
+      });
+      expect(await within(c).findByText("stale 14m")).toBeTruthy();
+    } finally {
+      setSystemTime();
+      globalThis.setInterval = realSetInterval;
+    }
   });
 });

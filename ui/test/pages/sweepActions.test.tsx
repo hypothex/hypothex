@@ -87,11 +87,41 @@ describe("SweepActions", () => {
 
   test("a refused extend shows the server's reason", async () => {
     mockApi({
-      [`POST ${BASE}/extend`]: new HttpReply(400, { error: "seeds already in sweep s-7f3a: 3", type: "SweepError" }),
+      [`POST ${BASE}/extend`]: new HttpReply(400, {
+        error: "sweep would launch 1008 runs; the limit is 1000",
+        type: "SweepError",
+      }),
     });
     renderActions();
     fireEvent.click(screen.getByRole("button", { name: "Add seeds" }));
     fireEvent.click(screen.getByRole("button", { name: "Add 8 runs" }));
-    expect((await screen.findByRole("alert")).textContent).toBe("seeds already in sweep s-7f3a: 3");
+    expect((await screen.findByRole("alert")).textContent).toBe("sweep would launch 1008 runs; the limit is 1000");
+  });
+
+  test("a lost answer resends the same extend; the hub issues only the missing runs", async () => {
+    // seeds already in the sweep are fine on the hub (`extend_sweep` resumes a cut extend),
+    // so the resend under the same command id may repeat the seeds
+    let tries = 0;
+    const calls = mockApi({
+      [`POST ${BASE}/extend`]: () => {
+        tries += 1;
+        if (tries === 1) throw new TypeError("connection reset");
+        return makeSummary();
+      },
+    });
+    renderActions();
+    fireEvent.click(screen.getByRole("button", { name: "Add seeds" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add 8 runs" }));
+    await waitFor(() => expect(tries).toBe(2));
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Add seeds" })).toBeNull());
+    const sent = calls.filter((c) => c.url === `${BASE}/extend`);
+    expect(sent).toHaveLength(2);
+    expect(sent.map((c) => (c.body as { seeds: number[] }).seeds)).toEqual([
+      [3, 4],
+      [3, 4],
+    ]);
+    const ids = sent.map((c) => (c.body as { command_id: string }).command_id);
+    expect(ids[0]).toBe(ids[1] as string);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

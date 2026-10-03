@@ -59,6 +59,16 @@ test("remoteStats for a running run: GPU use, memory, GPU hours so far", () => {
   ]);
 });
 
+test("remoteStats on SLURM never reads the login node's GPUs for the job's GPU use", () => {
+  // the job's GPU indices are on its compute node; the host row's GPUs are the login node's
+  const job = runningRecord({
+    environment_id: "env-mccleary",
+    executor: { ...runningRecord().executor, type: "slurm", host: "mccleary-login1", slurm_job_id: "4471031", gpus: [0] },
+  });
+  const login = { ...MCCLEARY, gpus: GPU1.gpus };
+  expect(show(remoteStats(job, "running", login, NOW)).map(([label]) => label)).toEqual(["GPU h"]);
+});
+
 test("remoteStats for a stale run: GPU hours and how long the host is gone", () => {
   expect(show(remoteStats(staleRecord(), "stale", DGX, NOW))).toEqual([
     ["GPU h", "7.00", null],
@@ -112,6 +122,29 @@ test("runStats shows no cost for an all-zero cost, and `—` for GPU hours with 
   const withUsage = runStats(makeDetail({ usage, cost: zero }), null, null);
   expect(withUsage.find((s) => s.label === "cost")).toEqual({ label: "cost", value: "$0.000", tooltip: "1 calls" });
   const unpriced = { gpu_hours: 1.5, gpu_usd: 0, api_usd: 0.42, total_usd: 0.42 };
-  const stat = runStats(makeDetail({ cost: unpriced }), null, null).find((s) => s.label === "cost");
-  expect(stat).toEqual({ label: "cost", value: "—", tooltip: "1.50 GPU h, API $0.42, no GPU rate for this host" });
+  const stat = runStats(makeDetail({ cost: unpriced }), null, null, NOW, { ...GPU1, usd_per_gpu_hour: null });
+  expect(stat.find((s) => s.label === "cost")).toEqual({
+    label: "cost",
+    value: "—",
+    tooltip: "1.50 GPU h, API $0.42, no GPU rate for this host",
+  });
+});
+
+test("runStats shows the total when no host row says the rate is missing", () => {
+  const cost = (items: StatItem[]) => items.find((s) => s.label === "cost");
+  const zeroGpuUsd = { gpu_hours: 1.5, gpu_usd: 0, api_usd: 0.42, total_usd: 0.42 };
+  const total = { label: "cost", value: "$0.42", tooltip: "1.50 GPU h, API $0.42" };
+  // without the hosts list nothing says the rate is missing
+  expect(cost(runStats(makeDetail({ cost: zeroGpuUsd }), null, null, NOW))).toEqual(total);
+  // explicitly free GPUs (rate 0), and a field an older hub does not send
+  expect(cost(runStats(makeDetail({ cost: zeroGpuUsd }), null, null, NOW, { ...GPU1, usd_per_gpu_hour: 0 }))).toEqual(
+    total,
+  );
+  const { usd_per_gpu_hour: _, ...noField } = GPU1;
+  expect(cost(runStats(makeDetail({ cost: zeroGpuUsd }), null, null, NOW, noField))).toEqual(total);
+  // a tiny charge rounded to 0 at a set rate
+  const tiny = { gpu_hours: 0.000001, gpu_usd: 0, api_usd: 0, total_usd: 0 };
+  expect(
+    cost(runStats(makeDetail({ cost: tiny }), null, null, NOW, { ...GPU1, usd_per_gpu_hour: 0.1 })),
+  ).toMatchObject({ value: "$0.000" });
 });

@@ -47,6 +47,16 @@ describe("SweepForest", () => {
     expect(screen.getAllByText("n=1")).toHaveLength(3);
   });
 
+  test("identical seeds collapse to one diamond with ×n, never stacked dots", () => {
+    const { container } = renderForest({ seedsOf: (c) => (c.n === 2 ? [0.912, 0.912] : seedValues(c, BOARD)) });
+    const best = container.querySelector('g.frow[data-label="3e-4, 10"]') as Element;
+    expect(best.querySelectorAll("circle.seed")).toHaveLength(0);
+    expect(best.querySelector("g.identical path.dia")).toBeTruthy();
+    expect(best.querySelector("g.identical text")?.textContent).toBe("×2");
+    // the other rows keep their dots
+    expect(container.querySelectorAll("circle.seed")).toHaveLength(3);
+  });
+
   test("hovering a row shows the cell's numbers", () => {
     const { container } = renderForest();
     fireEvent.mouseEnter(container.querySelector("g.frow rect.hit") as Element);

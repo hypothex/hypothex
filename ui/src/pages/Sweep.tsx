@@ -12,6 +12,7 @@ import { queryKeys, useAllRuns, useHosts, useSweep } from "../api/queries";
 import { Figure } from "./components/Figure";
 import { fmtClock, isAgent, primaryMetricName } from "./components/format";
 import { Unbroken } from "./components/Headline";
+import { useNow } from "./components/HostsPanel";
 import { AppLink, hrefs } from "./components/links";
 import { ErrorBox, Loading } from "./components/QueryState";
 import { StatStrip } from "./components/StatStrip";
@@ -59,6 +60,8 @@ export function SweepPage({ project, sweepId, now }: SweepPageProps): ReactEleme
   const memberTag = summary.data?.tag; // the runs query waits for the summary's member tag
   const runs = useAllRuns(sweepRunsQuery(project, memberTag ?? ""), memberTag !== undefined);
   const hosts = useHosts();
+  // ages, GPU-hours and ETA move on with the clock, also while no refetch changes the data
+  const tick = useNow();
   const task = summary.data?.spec.task ?? null;
   const board = useQuery({
     queryKey: queryKeys.leaderboard(project, task ?? "", []),
@@ -80,21 +83,21 @@ export function SweepPage({ project, sweepId, now }: SweepPageProps): ReactEleme
         ) : null}
         {`sweep ${sweepId}`}
       </p>
-      {summary.error ? (
-        <ErrorBox error={summary.error} />
-      ) : summary.data ? (
+      {/* a failed refetch keeps the last summary (and an open dialog in it) and shows the error */}
+      {summary.data ? (
         <SweepBody
           project={project}
           sweepId={sweepId}
           summary={summary.data}
-          runs={runs.data?.runs ?? []}
+          runs={runs.data?.runs}
           hosts={hosts.data}
           board={board.data}
-          now={now ?? Date.now()}
+          now={now ?? tick}
         />
-      ) : (
+      ) : summary.error ? null : (
         <Loading />
       )}
+      {summary.error ? <ErrorBox error={summary.error} /> : null}
       {runs.error && !summary.error ? <ErrorBox error={runs.error} /> : null}
     </div>
   );
@@ -104,7 +107,8 @@ interface SweepBodyProps {
   project: string;
   sweepId: string;
   summary: SweepSummary;
-  runs: readonly RunRecord[];
+  /** The sweep's runs; undefined while they load. */
+  runs: readonly RunRecord[] | undefined;
   hosts: readonly HostRow[] | undefined;
   board: Leaderboard | undefined;
   now: number;
@@ -120,7 +124,7 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
   const version = board?.metric_versions[metric];
   const stale = staleHosts(hosts);
   // membership comes from the backend (`summary.run_ids`, derived from the runs tagged `summary.tag`)
-  const ordered = orderRuns(runs, summary.run_ids);
+  const ordered = orderRuns(runs ?? [], summary.run_ids);
   const byId = new Map(ordered.map((r) => [r.run_id, r]));
   const stateOf = (id: string, fallback: RunStatus | null) => runState(byId.get(id), fallback, stale);
   const seedsOf = (c: SweepCellRow): number[] => seedValues(c, board);
@@ -236,7 +240,7 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
           project={project}
           spec={spec}
           best={best}
-          runs={ordered}
+          runs={runs === undefined ? undefined : ordered}
           onClose={() => setRerun(false)}
           onLaunched={(records, host) => {
             setRerun(false);

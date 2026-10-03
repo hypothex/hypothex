@@ -4,13 +4,18 @@ import { fmtCount, fmtDuration, fmtInterval, fmtScore, fmtUsd, runSeconds } from
 import { costNote } from "./remote";
 import { type PrimaryRef, scoreFor } from "./ScoresList";
 import type { StatItem } from "./StatStrip";
-import type { LeaderboardRow, RunDetail } from "./types";
+import type { HostRow, LeaderboardRow, RunDetail } from "./types";
 
+/**
+ * `host` is the run's hosts row (`runHostRow`), or null without the hosts list; only its
+ * `usd_per_gpu_hour` is read, to tell a host with no GPU rate from a cost that is just small.
+ */
 export function runStats(
   detail: RunDetail,
   primary: PrimaryRef | null,
   row: LeaderboardRow | null,
   now: number = Date.now(),
+  host: HostRow | null = null,
 ): StatItem[] {
   const out: StatItem[] = [];
   const record = detail.record;
@@ -61,9 +66,10 @@ export function runStats(
     if (!cost) out.push({ label: "cost", value: fmtUsd(usage.usd), tooltip: `${usage.calls} calls` });
   }
   // spec 8A.7: GPU hours × rate + API dollars, set when the run ends
-  // GPU hours with no GPU dollars: the host has no rate, so the total is unknown (`—`)
+  // GPU hours unpriced because the host row says it has no rate (`null`): the total is
+  // unknown (`—`). Zero GPU dollars alone prove nothing (free GPUs, a tiny charge rounded)
   if (cost) {
-    const unpriced = cost.gpu_hours > 0 && cost.gpu_usd === 0;
+    const unpriced = host?.usd_per_gpu_hour === null && cost.gpu_hours > 0 && cost.gpu_usd === 0;
     out.push({
       label: "cost",
       value: unpriced ? "—" : fmtUsd(cost.total_usd),

@@ -51,7 +51,8 @@ export function remoteStats(
     }
     return out;
   }
-  if (phase === "running" && host && gpus.length > 0) {
+  // a SLURM job's GPU indices are on its compute node; the host row's GPUs are the login node's
+  if (phase === "running" && host && gpus.length > 0 && !ex.slurm_job_id) {
     const held = host.gpus.filter((g) => gpus.includes(g.index));
     if (held.length > 0) {
       const util = held.reduce((sum, g) => sum + g.util, 0) / held.length;

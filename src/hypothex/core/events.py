@@ -33,16 +33,25 @@ CREATE TABLE IF NOT EXISTS receipts (
 );
 """
 _PENDING = "__pending__"
-"""Result of a claimed receipt whose command is running: ``__pending__:<pid>:<start time>``."""
+"""
+Result of a claimed receipt whose command is running:
+``__pending__:<pid>:<start time>``, with start time ``none`` when it could not
+be read.
+"""
 
 
 def _claim_marker() -> str:
-    """The pending marker naming this process as the claimant."""
+    """
+    The pending marker naming this process as the claimant.
+
+    When psutil cannot read this process's start time the marker records
+    ``none`` (not ``0.0``, which ``_claimant_gone`` would read as a reused pid).
+    """
     pid = os.getpid()
     try:
-        started = psutil.Process(pid).create_time()
+        started = str(psutil.Process(pid).create_time())
     except psutil.Error:
-        started = 0.0
+        started = "none"
     return f"{_PENDING}:{pid}:{started}"
 
 
@@ -51,19 +60,26 @@ def _claimant_gone(marker: str) -> bool:
     True when the process that claimed a receipt no longer runs.
 
     A bare ``__pending__`` (written before claimants were recorded) has no
-    owner that could still finish it, so it counts as gone.
+    owner that could still finish it, so it counts as gone. A marker with no
+    start time (``none``) counts as alive unless its pid is gone or a zombie.
     """
     parts = marker.split(":")
     if len(parts) != 3:
         return True
     try:
-        pid, started = int(parts[1]), float(parts[2])
+        pid = int(parts[1])
+        started = None if parts[2] == "none" else float(parts[2])
+    except ValueError:
+        return True
+    try:
         proc = psutil.Process(pid)
-        if abs(proc.create_time() - started) > 1.0:
+        if started is not None and abs(proc.create_time() - started) > 1.0:
             return True  # the pid was reused
         return proc.status() == psutil.STATUS_ZOMBIE
-    except (ValueError, psutil.Error):
+    except psutil.NoSuchProcess:
         return True
+    except psutil.Error:
+        return started is not None
 
 
 class Event(BaseModel):

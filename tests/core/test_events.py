@@ -1,11 +1,14 @@
+import os
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
+from hypothex.core import events
 from hypothex.core.environment import PROTOCOL_VERSION, load_descriptor
 from hypothex.core.events import EventLog
 from hypothex.core.layout import Layout
@@ -122,3 +125,29 @@ def test_run_once_waits_for_a_live_claimant(tmp_path: Path) -> None:
     started.wait(5)
     assert log.run_once("c2", lambda: {"first": False}) == {"first": True}
     worker.join()
+
+
+def test_claim_marker_without_a_readable_start_time_counts_as_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoStartTime(psutil.Process):
+        def create_time(self) -> float:
+            raise psutil.AccessDenied(self.pid)
+
+    monkeypatch.setattr(events.psutil, "Process", NoStartTime)
+    marker = events._claim_marker()
+    assert marker == f"__pending__:{os.getpid()}:none"
+    # alive: the start time is unknown, but the pid still runs
+    assert events._claimant_gone(marker) is False
+    # gone: the pid no longer exists
+    assert events._claimant_gone(f"__pending__:{_dead_pid()}:none") is True
+
+
+def test_run_once_retries_a_claim_with_no_start_time_whose_pid_is_gone(tmp_path: Path) -> None:
+    log = EventLog(tmp_path / "e.db")
+    with log._conn() as conn:
+        conn.execute(
+            "INSERT INTO receipts(command_id, result, created_at) VALUES (?,?,?)",
+            ("c1", f"__pending__:{_dead_pid()}:none", "2026-01-01T00:00:00+00:00"),
+        )
+    assert log.run_once("c1", lambda: {"ran": True}) == {"ran": True}

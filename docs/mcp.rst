@@ -90,11 +90,13 @@ Hosts and sweeps:
      - Hosts the hub knows, ``local`` first: state, GPUs (and the run or outside
        process that holds each), queue length, SLURM pending/running, cost today.
    * - ``launch_sweep(project, command, hypothesis, grid, seeds, task=None, host=None,
-       random=None, ranges=None, gpus=0, queue=False, agent="mcp")``
+       random=None, ranges=None, gpus=0, queue=False, agent="mcp", repo=None)``
      - Start a sweep. ``grid`` maps each name to its values, e.g.
        ``{"lr": ["1e-4", "3e-4"]}``. ``ranges`` maps a name to ``"low:high[:log]"``,
        sampled ``random`` times. The command must use every name as ``{name}``.
-       Answers the sweep summary.
+       With ``host``, the commit and uncommitted diff of the client's checkout
+       (``repo``, default the project's registered checkout) are sent along, as
+       ``hx sweep --host`` does. Answers the sweep summary.
    * - ``get_sweep(project, sweep_id)``
      - Progress counts, parameters x primary metric cells, best cell, cost.
    * - ``cancel_sweep(project, sweep_id)``

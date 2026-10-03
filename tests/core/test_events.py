@@ -98,17 +98,42 @@ def _dead_pid() -> int:
 
 
 @pytest.mark.parametrize("claim", ["__pending__", "__pending__:{pid}:12.5"])
-def test_run_once_retries_a_claim_whose_claimant_died(tmp_path: Path, claim: str) -> None:
+def test_run_once_never_replays_a_claim_whose_claimant_died(tmp_path: Path, claim: str) -> None:
     log = EventLog(tmp_path / "e.db")
-    with log._conn() as conn:  # a claimant that crashed before it stored a result
+    with log._conn() as conn:  # a claimant that died before it stored a result
         conn.execute(
             "INSERT INTO receipts(command_id, result, created_at) VALUES (?,?,?)",
             ("c1", claim.format(pid=_dead_pid()), "2026-01-01T00:00:00+00:00"),
         )
+    ran: list[str] = []
     start = time.monotonic()
-    assert log.run_once("c1", lambda: {"ran": True}) == {"ran": True}
+    # the dead claimant may have launched a run already: its outcome is unknown, never redone
+    with pytest.raises(events.CommandInterruptedError, match="outcome is unknown"):
+        log.run_once("c1", lambda: ran.append("again") or {"ran": True})
     assert time.monotonic() - start < 5
-    assert log.run_once("c1", lambda: {"ran": "again"}) == {"ran": True}
+    with pytest.raises(events.CommandInterruptedError):  # every later retry says the same
+        log.run_once("c1", lambda: ran.append("again") or {"ran": True})
+    assert ran == []
+    assert log.run_once("c2", lambda: {"ran": True}) == {"ran": True}  # a new id runs
+
+
+def test_an_interrupted_command_is_a_conflict_over_http(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from hypothex.api.app import create_app
+    from hypothex.core.context import Context
+
+    ctx = Context.open(tmp_path / "home")
+    with ctx.events._conn() as conn:
+        conn.execute(
+            "INSERT INTO receipts(command_id, result, created_at) VALUES (?,?,?)",
+            ("c1", f"__pending__:{_dead_pid()}:1.0", "2026-01-01T00:00:00+00:00"),
+        )
+    app = create_app(tmp_path / "home", background_repair=False)
+    with TestClient(app, base_url="http://127.0.0.1:7777") as client:
+        res = client.post("/api/v1/runs/nope/stop", json={"command_id": "c1"})
+    assert res.status_code == 409
+    assert res.json()["type"] == "CommandInterruptedError"
 
 
 def test_run_once_waits_for_a_live_claimant(tmp_path: Path) -> None:
@@ -143,11 +168,12 @@ def test_claim_marker_without_a_readable_start_time_counts_as_alive(
     assert events._claimant_gone(f"__pending__:{_dead_pid()}:none") is True
 
 
-def test_run_once_retries_a_claim_with_no_start_time_whose_pid_is_gone(tmp_path: Path) -> None:
+def test_run_once_reports_a_claim_with_no_start_time_whose_pid_is_gone(tmp_path: Path) -> None:
     log = EventLog(tmp_path / "e.db")
     with log._conn() as conn:
         conn.execute(
             "INSERT INTO receipts(command_id, result, created_at) VALUES (?,?,?)",
             ("c1", f"__pending__:{_dead_pid()}:none", "2026-01-01T00:00:00+00:00"),
         )
-    assert log.run_once("c1", lambda: {"ran": True}) == {"ran": True}
+    with pytest.raises(events.CommandInterruptedError):
+        log.run_once("c1", lambda: {"ran": True})

@@ -48,6 +48,11 @@ same transaction as the events it produces; a repeated ``command_id`` returns th
 first result instead of doing the work twice. This makes a double-clicked
 "Rerun" (or a retried agent call) start exactly one run.
 
+If the server stops while a command runs, the command may already have taken
+effect (a launched run outlives the server). It is never run again under that
+id: a retry gets ``409`` with ``CommandInterruptedError``. Check the runs, then
+send the command again with a new ``command_id``.
+
 Supervisors and repair
 ------------------------
 

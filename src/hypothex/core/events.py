@@ -15,6 +15,7 @@ from typing import Any
 import psutil
 from pydantic import BaseModel
 
+from hypothex.core.errors import HypothexError
 from hypothex.core.ids import utcnow
 
 _SCHEMA = """
@@ -42,6 +43,19 @@ Result of a claimed receipt whose command is running:
 ``__pending__:<pid>:<start time>``, with start time ``none`` when it could not
 be read.
 """
+_INTERRUPTED = "__interrupted__"
+"""
+Result of a receipt whose claimant died before it stored a result:
+``__interrupted__:<time it was found>``. The outcome is unknown, so the
+command is never replayed.
+"""
+
+
+def _interrupted(command_id: str) -> CommandInterruptedError:
+    return CommandInterruptedError(
+        f"command {command_id} was interrupted (the server stopped while it ran); its outcome "
+        "is unknown: check the runs, then send it again with a new command_id"
+    )
 
 
 def _claim_marker() -> str:
@@ -99,6 +113,15 @@ class Event(BaseModel):
 
 class CommandTimeoutError(RuntimeError):
     """A duplicate command waited too long for the first one to finish."""
+
+
+class CommandInterruptedError(HypothexError):
+    """
+    The process running a command died before it stored a result.
+
+    The command may have taken effect (a run launched, a job submitted) or
+    not; it is never run again under the same ``command_id``.
+    """
 
 
 class EventLog:
@@ -278,8 +301,10 @@ class EventLog:
         A second caller with the same id waits for the first result. If ``fn``
         raises, the claim is released so the command can be retried. The claim
         names the claiming process: if that process died before it stored a
-        result (killed, crashed, server restart), the next caller drops the
-        claim and runs ``fn`` itself.
+        result (killed, crashed, server restart), ``fn`` may have taken effect
+        (a launched run outlives the server), so it is never run again: the
+        receipt is marked interrupted and this and every later caller with
+        that id get ``CommandInterruptedError``.
 
         Parameters
         ----------
@@ -292,25 +317,26 @@ class EventLog:
         -------
         dict
             Result of the first successful call.
+
+        Raises
+        ------
+        CommandInterruptedError
+            The first caller died before it stored a result.
+        CommandTimeoutError
+            The first caller failed, or is still running after 60 s.
         """
         if command_id is None:
             return fn()
-        while True:
-            with self._conn() as conn:
-                claimed = (
-                    conn.execute(
-                        "INSERT OR IGNORE INTO receipts(command_id, result, created_at) "
-                        "VALUES (?,?,?)",
-                        (command_id, _claim_marker(), utcnow().isoformat()),
-                    ).rowcount
-                    == 1
-                )
-            if claimed:
-                break
-            result = self._wait_for_result(command_id)
-            if result is not None:
-                return result
-            # the claimant died without a result: its claim was dropped, so claim it now
+        with self._conn() as conn:
+            claimed = (
+                conn.execute(
+                    "INSERT OR IGNORE INTO receipts(command_id, result, created_at) VALUES (?,?,?)",
+                    (command_id, _claim_marker(), utcnow().isoformat()),
+                ).rowcount
+                == 1
+            )
+        if not claimed:
+            return self._wait_for_result(command_id)
         try:
             result = fn()
         except BaseException:
@@ -324,15 +350,21 @@ class EventLog:
             )
         return json.loads(json.dumps(result, default=str))
 
-    def _wait_for_result(self, command_id: str, timeout: float = 60.0) -> dict[str, Any] | None:
+    def _wait_for_result(self, command_id: str, timeout: float = 60.0) -> dict[str, Any]:
         """
         Wait for another caller's result.
 
         Returns
         -------
-        dict or None
-            The stored result, or None when the claimant died without one
-            (its claim is deleted, so the caller may claim the command).
+        dict
+            The stored result.
+
+        Raises
+        ------
+        CommandInterruptedError
+            The claimant died without a result (now, or before).
+        CommandTimeoutError
+            The claimant failed (its claim is gone), or ``timeout`` passed.
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -345,13 +377,15 @@ class EventLog:
                         f"command {command_id} failed in another caller; retry"
                     )
                 result = row["result"]
+                if result.startswith(_INTERRUPTED):
+                    raise _interrupted(command_id)
                 if not result.startswith(_PENDING):
                     return json.loads(result)
                 if _claimant_gone(result):
                     conn.execute(
-                        "DELETE FROM receipts WHERE command_id = ? AND result = ?",
-                        (command_id, result),
+                        "UPDATE receipts SET result = ? WHERE command_id = ? AND result = ?",
+                        (f"{_INTERRUPTED}:{utcnow().isoformat()}", command_id, result),
                     )
-                    return None
+                    raise _interrupted(command_id)
             time.sleep(0.05)
         raise CommandTimeoutError(f"command {command_id} is still running after {timeout}s")

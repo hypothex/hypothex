@@ -38,6 +38,7 @@ from hypothex.core.config import parse_metric_version
 from hypothex.core.context import Context
 from hypothex.core.errors import HypothexError, RunError, StoreError
 from hypothex.core.evaluation import reeval
+from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import RunRequest
 from hypothex.core.gpus import GpuInfo, gpu_status, query_gpus
 from hypothex.core.jsonutil import to_jsonable
@@ -687,6 +688,8 @@ def create_app(
     @app.exception_handler(HypothexError)
     async def hypothex_error(_: Request, exc: HypothexError) -> JSONResponse:
         status = 404 if isinstance(exc, StoreError) else 400
+        if isinstance(exc, CommandInterruptedError):
+            status = 409  # the command's outcome is unknown: never replayed
         content: dict[str, Any] = {"error": str(exc), "type": type(exc).__name__}
         if isinstance(exc, ViewValidationError):
             content["issues"] = to_jsonable(exc.issues)

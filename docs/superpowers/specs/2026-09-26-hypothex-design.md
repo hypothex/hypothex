@@ -284,7 +284,9 @@ processes it owns. Execution always happens inside an environment, never in a cl
 - **Commands are idempotent.** Every mutating call (`launch`, `rerun`, `stop`, ...) carries a
   client-generated `command_id`. The env server stores a receipt in the same transaction
   as the resulting events; a repeated `command_id` returns the first result. A
-  double-clicked "Rerun" starts one run.
+  double-clicked "Rerun" starts one run. A command whose server process died before
+  its result was stored is never replayed: its outcome is unknown, so a retry with
+  that id gets `409 CommandInterruptedError`.
 - **Resumable streams.** The hub subscribes to each env with `after_sequence=<last seen>`.
   The env replays missed events, then streams live ones. The hub drops duplicates by
   sequence. The UI subscribes to the hub the same way.

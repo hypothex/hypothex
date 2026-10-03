@@ -7,13 +7,19 @@ import time
 import pytest
 from pydantic import ValidationError
 
+from hypothex.core.context import Context
+from hypothex.core.errors import StoreError
 from hypothex.core.sweeps import (
     SweepParam,
     SweepSpec,
     expand,
+    load_sweep,
+    new_sweep_id,
     parse_sweep_tag,
     planned_runs,
+    save_sweep,
     sweep_combos,
+    sweep_path,
     sweep_tag,
 )
 
@@ -202,3 +208,55 @@ def test_random_subset_decodes_the_same_combinations_as_the_product() -> None:
     subset = expand(spec, rng_seed=3)
     assert len(subset) == 4 and all(c in full for c in subset)
     assert subset == sorted(subset, key=full.index)  # grid order is kept
+
+
+# --------------------------------------------------------------------------- Task 38 storage
+def test_save_and_load_round_trip(ctx: Context) -> None:
+    spec = spec_of()
+    path = save_sweep(ctx.layout, spec)
+    assert path == ctx.layout.store / "toy" / "sweeps" / "s-0001.yaml"
+    assert load_sweep(ctx.layout, "toy", "s-0001") == spec
+    assert "run_ids" not in path.read_text()  # the definition only: members are tagged runs
+    with pytest.raises(ValidationError):
+        spec_of(run_ids=["r1"])
+
+
+def test_load_missing_sweep_is_a_store_error(ctx: Context) -> None:
+    with pytest.raises(StoreError, match="unknown sweep 's-9999' in project 'toy'"):
+        load_sweep(ctx.layout, "toy", "s-9999")
+
+
+@pytest.mark.parametrize(
+    ("project", "sweep_id"), [("toy", "../x"), ("../toy", "s-1"), ("toy", "s-1\n")]
+)
+def test_unsafe_names_never_build_a_path(ctx: Context, project: str, sweep_id: str) -> None:
+    with pytest.raises(StoreError, match="unknown sweep"):
+        sweep_path(ctx.layout, project, sweep_id)
+
+
+@pytest.mark.parametrize(
+    "text", ["grid: [\n", "id: s-0001\nproject: toy\n", "- just\n- a list\n", ""]
+)
+def test_corrupt_sweep_file_is_a_store_error(ctx: Context, text: str) -> None:
+    path = sweep_path(ctx.layout, "toy", "s-0001")
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+    with pytest.raises(StoreError, match="unreadable sweep file"):
+        load_sweep(ctx.layout, "toy", "s-0001")
+
+
+def test_file_under_the_wrong_name_is_a_store_error(ctx: Context) -> None:
+    save_sweep(ctx.layout, spec_of(id="s-0001"))
+    src = sweep_path(ctx.layout, "toy", "s-0001")
+    src.rename(src.with_name("s-0002.yaml"))
+    with pytest.raises(StoreError, match="holds toy/s-0001"):
+        load_sweep(ctx.layout, "toy", "s-0002")
+
+
+def test_new_sweep_id_reserves_a_fresh_file(ctx: Context, monkeypatch: pytest.MonkeyPatch) -> None:
+    tokens = iter(["abcd", "abcd", "beef"])
+    monkeypatch.setattr("hypothex.core.sweeps.secrets.token_hex", lambda n: next(tokens))
+    assert new_sweep_id(ctx.layout, "toy") == "s-abcd"
+    assert new_sweep_id(ctx.layout, "toy") == "s-beef"
+    assert sweep_path(ctx.layout, "toy", "s-abcd").read_text() == ""
+    assert sweep_path(ctx.layout, "toy", "s-beef").is_file()

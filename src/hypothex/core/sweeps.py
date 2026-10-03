@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import itertools
 import logging
 import math
 import re
+import secrets
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from random import Random
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from hypothex.core.config import BUILTIN_TEMPLATE_VARS, NAME_PATTERN
-from hypothex.core.errors import HypothexError
+from hypothex.core.errors import HypothexError, StoreError
+from hypothex.core.fsutil import read_yaml, write_yaml
+from hypothex.core.layout import Layout
 
 log = logging.getLogger(__name__)
 
@@ -316,3 +324,157 @@ def planned_runs(spec: SweepSpec) -> int:
     else:
         combos = grid
     return combos * len(spec.seeds)
+
+
+# storage -----------------------------------------------------------------------------
+def sweeps_dir(layout: Layout, project: str) -> Path:
+    """
+    Return the folder holding a project's sweep files.
+
+    Parameters
+    ----------
+    layout : Layout
+        Home layout.
+    project : str
+        Project name.
+
+    Returns
+    -------
+    Path
+        ``<store>/<project>/sweeps``.
+    """
+    return layout.project_dir(project) / "sweeps"
+
+
+def sweep_path(layout: Layout, project: str, sweep_id: str) -> Path:
+    """
+    Return the file of one sweep, refusing names that could leave the store.
+
+    Parameters
+    ----------
+    layout : Layout
+        Home layout.
+    project : str
+        Project name.
+    sweep_id : str
+        Sweep id.
+
+    Returns
+    -------
+    Path
+        ``<store>/<project>/sweeps/<id>.yaml``.
+
+    Raises
+    ------
+    StoreError
+        If ``project`` or ``sweep_id`` is not a valid name.
+    """
+    if not re.fullmatch(NAME_PATTERN, project) or not re.fullmatch(SWEEP_ID_PATTERN, sweep_id):
+        raise StoreError(f"unknown sweep {project}/{sweep_id}")
+    return sweeps_dir(layout, project) / f"{sweep_id}.yaml"
+
+
+def save_sweep(layout: Layout, spec: SweepSpec) -> Path:
+    """
+    Atomically write a sweep file.
+
+    Parameters
+    ----------
+    layout : Layout
+        Home layout.
+    spec : SweepSpec
+        The sweep.
+
+    Returns
+    -------
+    Path
+        The written file, ``<store>/<project>/sweeps/<id>.yaml``.
+    """
+    path = sweep_path(layout, spec.project, spec.id)
+    write_yaml(path, spec.model_dump(mode="json"))
+    return path
+
+
+def load_sweep(layout: Layout, project: str, sweep_id: str) -> SweepSpec:
+    """
+    Read a sweep file.
+
+    Parameters
+    ----------
+    layout : Layout
+        Home layout.
+    project : str
+        Project name.
+    sweep_id : str
+        Sweep id.
+
+    Returns
+    -------
+    SweepSpec
+        The stored sweep.
+
+    Raises
+    ------
+    StoreError
+        If the sweep does not exist or its file cannot be parsed.
+    """
+    path = sweep_path(layout, project, sweep_id)
+    if not path.is_file():
+        raise StoreError(f"unknown sweep {sweep_id!r} in project {project!r}")
+    try:
+        spec = SweepSpec.model_validate(read_yaml(path))
+    except (ValueError, yaml.YAMLError) as exc:  # includes pydantic ValidationError
+        raise StoreError(f"unreadable sweep file {path}: {_brief(exc)}") from exc
+    if spec.id != sweep_id or spec.project != project:
+        raise StoreError(f"sweep file {path} holds {spec.project}/{spec.id}")
+    return spec
+
+
+def _brief(exc: Exception) -> str:
+    """One-line message for a validation or parse error."""
+    if isinstance(exc, ValidationError):
+        return "; ".join(
+            f"{'.'.join(str(p) for p in e['loc']) or 'sweep'}: {e['msg']}" for e in exc.errors()
+        )
+    return str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+
+
+@contextmanager
+def _sweep_lock(layout: Layout, project: str, sweep_id: str) -> Iterator[None]:
+    """Hold an exclusive cross-process lock on one sweep file."""
+    path = sweep_path(layout, project, sweep_id).with_suffix(".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def new_sweep_id(layout: Layout, project: str) -> str:
+    """
+    Reserve a new sweep id by creating its (empty) file exclusively.
+
+    Parameters
+    ----------
+    layout : Layout
+        Home layout.
+    project : str
+        Project name.
+
+    Returns
+    -------
+    str
+        ``s-`` plus 4 hex digits (12 after 64 collisions); its file now exists.
+    """
+    folder = sweeps_dir(layout, project)
+    folder.mkdir(parents=True, exist_ok=True)
+    for attempt in range(65):
+        sweep_id = f"s-{secrets.token_hex(2 if attempt < 64 else 6)}"
+        try:
+            sweep_path(layout, project, sweep_id).open("x").close()
+        except FileExistsError:
+            continue
+        return sweep_id
+    raise StoreError(f"could not reserve a sweep id in {folder}")

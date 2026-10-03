@@ -11,12 +11,17 @@ from pathlib import Path
 
 import pytest
 import yaml
+from fastapi.testclient import TestClient
+from typer.testing import CliRunner
 
+from hypothex.api import app as app_module
+from hypothex.api.app import create_app
+from hypothex.cli.main import app, resolve_serve_kind
 from hypothex.core import execution
 from hypothex.core import scheduler as scheduler_module
 from hypothex.core.context import Context
 from hypothex.core.control import launch_run, repair_runs, stop_run, wait_for_run
-from hypothex.core.errors import RunError
+from hypothex.core.errors import ConfigError, RunError
 from hypothex.core.execution import (
     EXECUTION_CLAIM,
     QUEUE_FILE,
@@ -900,3 +905,64 @@ def test_direct_gpu_launch_whose_spawn_fails_frees_the_gpus(
     [run_id] = list(ctx.index.run_ids())
     assert ctx.find_record(run_id).status == RunStatus.FAILED
     assert free_gpus(gpu_status(ctx)) == [0]
+
+
+# environment kind, hx serve --kind, and the scheduler loop in the server -----------------
+def test_resolve_serve_kind_defaults_saves_and_rejects(tmp_path: Path) -> None:
+    home = tmp_path / "srv"
+    assert resolve_serve_kind(home, None) == "local"
+    env_id = json.loads((home / "environment.json").read_text())["environment_id"]
+    assert resolve_serve_kind(home, "ssh") == "ssh"
+    saved = json.loads((home / "environment.json").read_text())
+    assert saved["kind"] == "ssh" and saved["environment_id"] == env_id
+    assert resolve_serve_kind(home, None) == "ssh"
+    with pytest.raises(ConfigError, match="--kind must be ssh or slurm, got 'gpu'"):
+        resolve_serve_kind(home, "gpu")
+    descriptor = Context.open(home).descriptor
+    assert (descriptor.environment_id, descriptor.kind) == (env_id, "ssh")
+
+
+def test_serve_rejects_an_unknown_kind_before_starting(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="got 'gpu'"):
+        CliRunner().invoke(
+            app, ["--home", str(tmp_path / "srv"), "serve", "--kind", "gpu"], catch_exceptions=False
+        )
+
+
+def test_server_kind_sets_the_descriptor_and_runs_the_scheduler(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ticks: list[int] = []
+
+    def tick(self: Scheduler) -> list[str]:
+        ticks.append(1)
+        return []
+
+    monkeypatch.setattr(Scheduler, "tick", tick)
+    monkeypatch.setattr(app_module, "SCHEDULER_INTERVAL_SECONDS", 0.01)
+    base = "http://127.0.0.1:7777"
+    with TestClient(create_app(home, kind="ssh"), base_url=base) as client:
+        assert client.get("/.well-known/hypothex/environment").json()["kind"] == "ssh"
+        deadline = time.monotonic() + 5
+        while len(ticks) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(ticks) >= 2
+    assert not any(t.name == "hx-scheduler" for t in threading.enumerate())
+    ticks.clear()
+    with TestClient(create_app(home, kind="slurm"), base_url=base) as client:
+        assert client.get("/.well-known/hypothex/environment").json()["kind"] == "slurm"
+        time.sleep(0.2)
+    assert ticks == []
+    with pytest.raises(ValueError, match="kind"):
+        create_app(home, kind="gpu")
+
+
+def test_queued_run_starts_from_the_server_loop(
+    home: Path, ctx: Context, toy_repo: Path, gpus: SetGpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gpus([])
+    monkeypatch.setattr(app_module, "SCHEDULER_INTERVAL_SECONDS", 0.05)
+    rid = queue_run(ctx, toy_repo, 0, code="print('served')")
+    with TestClient(create_app(home, kind="ssh"), base_url="http://127.0.0.1:7777"):
+        assert wait_for_run(ctx, rid, timeout=60).status == RunStatus.FINISHED
+    assert stdout_of(ctx, rid) == "served"

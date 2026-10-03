@@ -8,6 +8,7 @@ import errno
 import logging
 import os
 import stat
+import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -36,6 +37,7 @@ from hypothex.core.layout import reserved_run_path
 from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_panel
 from hypothex.core.records import RunStatus
+from hypothex.core.scheduler import run_scheduler_loop
 from hypothex.core.views import PanelData, PanelSpec, ViewSpec
 from hypothex.mcp.server import (
     ViewValidationError,
@@ -52,6 +54,8 @@ from hypothex.remote.client import DIR_HEADER, SIZE_HEADER
 log = logging.getLogger(__name__)
 
 REPAIR_INTERVAL_SECONDS = 30.0
+SCHEDULER_INTERVAL_SECONDS = 5.0
+ENV_KINDS = ("local", "ssh", "slurm")
 WS_POLL_SECONDS = 0.5
 WS_BATCH = 500
 UI_DIST = Path(__file__).resolve().parent.parent / "ui_dist"
@@ -487,6 +491,7 @@ def create_app(
     background_repair: bool = True,
     host: str | None = None,
     ui_dir: Path | None = None,
+    kind: str | None = None,
 ) -> FastAPI:
     """
     Build the FastAPI application.
@@ -504,19 +509,33 @@ def create_app(
     home : Path, optional
         Hypothex home; defaults to ``$HYPOTHEX_HOME`` or ``~/.hypothex``.
     background_repair : bool
-        Mark orphaned runs lost every 30 s (disable in tests).
+        Run the background loops: mark orphaned runs lost every 30 s, and start
+        queued runs whose GPUs are free every 5 s unless the kind is ``slurm``.
+        Disable in tests.
     host : str, optional
         The address the server binds to; also accepted as ``Host`` unless it is
         a wildcard such as ``0.0.0.0``.
     ui_dir : Path, optional
         Built UI folder; defaults to the packaged ``hypothex/ui_dist``.
+    kind : str, optional
+        Environment kind this server reports: ``local``, ``ssh``, or ``slurm``
+        (``hx serve --kind``). Default: the kind saved in ``environment.json``.
 
     Returns
     -------
     FastAPI
         The application; consumers use only this API.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``kind``.
     """
+    if kind is not None and kind not in ENV_KINDS:
+        raise ValueError(f"kind must be one of {', '.join(ENV_KINDS)}, got {kind!r}")
     ctx = Context.open(home)
+    if kind is not None:
+        ctx.descriptor.kind = kind
     mcp_server = build_server(home)
     mcp_http = mcp_server.streamable_http_app(streamable_http_path="/")
 
@@ -524,14 +543,31 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(control.repair_runs, ctx)
         task = asyncio.create_task(_repair_loop(ctx)) if background_repair else None
+        stop = threading.Event()
+        loops: list[threading.Thread] = []
+        if background_repair and ctx.descriptor.kind != "slurm":
+            loops.append(
+                threading.Thread(
+                    target=run_scheduler_loop,
+                    args=(ctx, stop),
+                    kwargs={"interval": SCHEDULER_INTERVAL_SECONDS},
+                    name="hx-scheduler",
+                    daemon=True,
+                )
+            )
+        for loop in loops:
+            loop.start()
         async with mcp_server.session_manager.run():
             try:
                 yield
             finally:
+                stop.set()
                 if task is not None:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
+                for loop in loops:
+                    await asyncio.to_thread(loop.join, 10)
 
     app = FastAPI(
         title="Hypothex",

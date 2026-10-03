@@ -74,7 +74,7 @@ def load_descriptor(layout: Layout) -> EnvironmentDescriptor:
     Returns
     -------
     EnvironmentDescriptor
-        Descriptor with the persisted id and label and live system facts.
+        Descriptor with the persisted id, label, and kind, and live system facts.
     """
     path = layout.environment_json
     if path.is_file():
@@ -85,6 +85,7 @@ def load_descriptor(layout: Layout) -> EnvironmentDescriptor:
     return EnvironmentDescriptor(
         environment_id=identity["environment_id"],
         label=identity["label"],
+        kind=identity.get("kind", "local"),
         os=platform.system().lower(),
         arch=platform.machine(),
         hostname=socket.gethostname(),

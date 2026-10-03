@@ -24,13 +24,15 @@ from hypothex.core.config import (
 )
 from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
+from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, HypothexError, RunError
 from hypothex.core.evaluation import reeval, validate_project
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
+from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gitinfo import git_state_label
 from hypothex.core.index import rebuild_index
 from hypothex.core.jsonutil import to_jsonable
-from hypothex.core.layout import default_home
+from hypothex.core.layout import Layout, default_home
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
 
 app = typer.Typer(
@@ -836,17 +838,87 @@ def repair(as_json: JsonFlag = False) -> None:
         typer.echo(f"marked {len(lost)} runs lost")
 
 
+SERVE_KINDS = ("ssh", "slurm")
+
+
+def check_serve_kind(kind: str | None) -> None:
+    """
+    Check a ``--kind`` option.
+
+    Parameters
+    ----------
+    kind : str or None
+        ``ssh``, ``slurm``, or None (not given).
+
+    Raises
+    ------
+    ConfigError
+        For any other value.
+    """
+    if kind is not None and kind not in SERVE_KINDS:
+        raise ConfigError(f"--kind must be ssh or slurm, got {kind!r}")
+
+
+def resolve_serve_kind(home: Path, kind: str | None) -> str:
+    """
+    Pick the environment kind ``hx serve`` runs as, and remember it.
+
+    Parameters
+    ----------
+    home : Path
+        The Hypothex home of this env server.
+    kind : str or None
+        ``--kind``; None reuses the kind saved in ``environment.json``.
+
+    Returns
+    -------
+    str
+        ``local`` (the hub, or a plain machine), ``ssh`` (runs the GPU queue),
+        or ``slurm`` (submits to SLURM).
+
+    Raises
+    ------
+    ConfigError
+        If ``kind`` is not ``ssh`` or ``slurm``.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> resolve_serve_kind(Path(tempfile.mkdtemp()), None)
+    'local'
+    """
+    check_serve_kind(kind)
+    layout = Layout(home.expanduser().resolve())
+    layout.ensure()
+    load_descriptor(layout)  # creates environment.json with a stable id on first use
+    identity = json.loads(layout.environment_json.read_text(encoding="utf-8"))
+    if kind is None:
+        return str(identity.get("kind", "local"))
+    if identity.get("kind") != kind:
+        atomic_write_text(layout.environment_json, json.dumps({**identity, "kind": kind}, indent=2))
+    return kind
+
+
 @app.command()
 def serve(
     host: Annotated[str, typer.Option(help="Bind address.")] = "127.0.0.1",
     port: Annotated[int, typer.Option(help="Port.")] = 7777,
+    kind: Annotated[
+        str | None,
+        typer.Option(
+            "--kind",
+            help="Run as a host's env server: ssh (GPU queue) or slurm. Default: the saved kind.",
+        ),
+    ] = None,
 ) -> None:
     """Serve the HTTP/WebSocket API (and the UI when built)."""
     import uvicorn
 
     from hypothex.api.app import create_app
 
-    uvicorn.run(create_app(_state.home, host=host), host=host, port=port)
+    home = (_state.home or default_home()).expanduser().resolve()
+    resolved = resolve_serve_kind(home, kind)
+    uvicorn.run(create_app(home, host=host, kind=resolved), host=host, port=port)
 
 
 @app.command()

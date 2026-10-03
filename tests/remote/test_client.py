@@ -206,6 +206,62 @@ def test_fetch_ignores_listing_entries_outside_the_folder(
     assert written == ["mirror/predictions/ok.jsonl"]
 
 
+def _mock_client(handler: Callable[[httpx.Request], httpx.Response]) -> EnvClient:
+    client = EnvClient("http://fake-host")
+    client._http = httpx.Client(base_url="http://fake-host", transport=httpx.MockTransport(handler))
+    return client
+
+
+def test_unparsable_content_length_is_treated_as_unknown(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"abc", headers={"content-length": "oops"})
+
+    client = _mock_client(handler)
+    assert client.fetch_file("r1", "a.txt", tmp_path / "a.txt", max_bytes=10) is True
+    assert (tmp_path / "a.txt").read_bytes() == b"abc"
+    assert client.fetch_file("r1", "a.txt", tmp_path / "b.txt", max_bytes=2) is False
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.txt"]
+
+
+@pytest.mark.parametrize("url", ["127.0.0.1:1", "ftp://127.0.0.1:1", "http://", ""])
+def test_base_url_needs_http_or_https(url: str) -> None:
+    with pytest.raises(ValueError, match="http:// or https://"):
+        EnvClient(url)
+
+
+def test_https_base_url_gives_a_wss_url() -> None:
+    with EnvClient("https://env.example.org/") as client:
+        assert client.ws_url == "wss://env.example.org/api/v1/ws"
+
+
+@pytest.mark.parametrize("listed", [True, False], ids=["files", "empty"])
+def test_a_folder_never_lands_on_an_existing_file(tmp_path: Path, listed: bool) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        rel = request.url.path.split("/files/", 1)[1]
+        if rel == "predictions":
+            listing = [{"path": "predictions/a.jsonl", "size": 1}] if listed else []
+            return httpx.Response(200, json=listing, headers={"X-Hypothex-Dir": "1"})
+        return httpx.Response(200, content=b"a")
+
+    dest = tmp_path / "predictions"
+    dest.write_bytes(b"mine")
+    with pytest.raises(NotADirectoryError, match="is a file"):
+        _mock_client(handler).fetch_file("r1", "predictions", dest, max_bytes=10)
+    assert dest.read_bytes() == b"mine"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["predictions"]
+
+
+def test_a_file_never_lands_on_an_existing_folder(tmp_path: Path) -> None:
+    dest = tmp_path / "scores.jsonl"
+    dest.mkdir()
+    (dest / "keep.txt").write_bytes(b"k")
+    client = _mock_client(lambda request: httpx.Response(200, content=b"{}\n"))
+    with pytest.raises(IsADirectoryError, match="is a folder"):
+        client.fetch_file("r1", "scores.jsonl", dest, max_bytes=10)
+    assert sorted(p.name for p in dest.iterdir()) == ["keep.txt"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["scores.jsonl"]
+
+
 def test_dropped_transfer_leaves_no_partial_file(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         def body() -> Iterator[bytes]:

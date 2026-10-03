@@ -16,7 +16,7 @@ from collections.abc import AsyncGenerator
 from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -179,6 +179,12 @@ class EnvClient:
         The env server's bearer token (``ServerInfo.token``); sent as
         ``Authorization: Bearer <token>`` on every request and the WebSocket.
 
+    Raises
+    ------
+    ValueError
+        ``base_url`` does not start with ``http://`` or ``https://`` or names
+        no host.
+
     Examples
     --------
     >>> client = EnvClient("http://127.0.0.1:7777/", token="t0k")
@@ -188,6 +194,11 @@ class EnvClient:
     """
 
     def __init__(self, base_url: str, *, timeout: float = 10, token: str | None = None) -> None:
+        parts = urlsplit(base_url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError(
+                f"env server URL must start with http:// or https:// and name a host: {base_url!r}"
+            )
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._token = token
@@ -401,6 +412,11 @@ class EnvClient:
         EnvRequestError
             The server answered with an error other than 404/413, or sent an
             invalid folder listing.
+        OSError
+            Writing on this machine failed (``dest`` is unchanged):
+            :class:`NotADirectoryError` for a folder fetched onto an existing
+            file, :class:`IsADirectoryError` for a file fetched onto an existing
+            folder, or a local error such as a full disk.
 
         Examples
         --------
@@ -422,6 +438,10 @@ class EnvClient:
                 listing = _parse_listing(resp.read(), url, resp.status_code)
         except httpx.TransportError as exc:
             raise self._unreachable(exc) from exc
+        if dest.exists() and not dest.is_dir():
+            raise NotADirectoryError(
+                f"{dest} is a file; cannot fetch folder {rel_path!r} of run {run_id} into it"
+            )
         base = PurePosixPath(rel_path)
         for entry in listing:
             parts = _local_parts(entry.path, base)
@@ -435,9 +455,14 @@ class EnvClient:
     @staticmethod
     def _write_stream(resp: httpx.Response, dest: Path, max_bytes: int) -> bool:
         """Stream ``resp`` into ``dest`` atomically; ``False`` if it exceeds ``max_bytes``."""
-        declared = resp.headers.get("content-length")
-        if declared is not None and int(declared) > max_bytes:
+        try:
+            declared = int(resp.headers.get("content-length", ""))
+        except ValueError:
+            declared = None  # missing or unparsable: unknown; the stream limit still holds
+        if declared is not None and declared > max_bytes:
             return False
+        if dest.is_dir() and not dest.is_symlink():
+            raise IsADirectoryError(f"{dest} is a folder; cannot fetch a file onto it")
         dest.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".part", dir=dest.parent)
         done = False

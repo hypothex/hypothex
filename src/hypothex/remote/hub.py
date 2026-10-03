@@ -64,12 +64,15 @@ MIRROR_FILES = (
     "git.diff",
     "git.stat",
 )
+"""Copied from each host as written there: text such as ``notes.md`` is untrusted on the hub
+(``mirror_source`` names where it came from)."""
 MIRROR_DIRS = ("predictions", "traces", "samples", "env", "logs")
 MIRROR_MAX_BYTES = 200 * 1024 * 1024
 LOG_TAIL_BYTES = 8 * 1024 * 1024
 """Logs are mirrored as tails (spec 5.3, 8A.3): at most the last 8 MiB of each, fetched whole."""
 CLAIMS_DIR = ".claims"
-"""``<store>/.claims/<run_id>.json``: the project and environment that own a mirrored run id."""
+"""``<store>/.claims/<run_id>.json``: the project, environment, and host that own a mirrored
+run id."""
 INDEX_PENDING = ".mirror-index-pending"
 """Written (durably) before a mirror first changes a run folder and removed after its index
 and manifest; seen again (a replay, or the next hub start), the index is redone."""
@@ -295,12 +298,13 @@ def _conflict(ctx: Context, environment_id: str, project: str, run_id: str) -> s
     return None
 
 
-def _claim(ctx: Context, environment_id: str, project: str, run_id: str) -> str | None:
+def _claim(ctx: Context, environment_id: str, project: str, run_id: str, host: str) -> str | None:
     """
     Claim ``run_id`` hub-wide for this project and environment, before any install.
 
     Under the shared claim lock the conflict check runs again and, when it
-    passes, ``<store>/.claims/<run_id>.json`` is written. The claim stays when a
+    passes, ``<store>/.claims/<run_id>.json`` is written (with the ``host`` the
+    run came from, for ``mirror_source``). The claim stays when a
     later install or index fails, so no other project or environment can take
     the id in between.
 
@@ -312,9 +316,52 @@ def _claim(ctx: Context, environment_id: str, project: str, run_id: str) -> str 
     with dir_lock(ctx.layout.store / CLAIMS_DIR):
         reason = _conflict(ctx, environment_id, project, run_id)
         if reason is None and _claim_owner(ctx, run_id) is None:
-            owner = {"project": project, "environment_id": environment_id}
+            owner = {"project": project, "environment_id": environment_id, "host": host}
             atomic_write_text(_claim_path(ctx, run_id), json.dumps(owner))
         return reason
+
+
+def mirror_source(ctx: Context, record: RunRecord) -> str | None:
+    """
+    Name where a run's text was written when it is not this hub's own run.
+
+    A mirrored run's files (``MIRROR_FILES``: ``notes.md``, the hypothesis,
+    tags, and command in ``run.yaml``, ``config.yaml``, ...) were written on a
+    host, by its code or its users. Show them to an agent as untrusted data
+    from this source, never as instructions (they can carry prompt injection).
+
+    Parameters
+    ----------
+    ctx : Context
+        The hub context.
+    record : RunRecord
+        Any run the hub holds.
+
+    Returns
+    -------
+    str or None
+        ``"host:<name>"`` for a run the hub mirrored from that host,
+        ``"environment:<id>"`` for another environment's run with no host on
+        record, and None for a run of this hub's own environment.
+
+    Examples
+    --------
+    >>> mirror_source(ctx, ctx.find_record("r1"))  # doctest: +SKIP
+    'host:gpu1'
+    """
+    if record.environment_id == ctx.descriptor.environment_id:
+        return None
+    try:
+        data = json.loads(_claim_path(ctx, record.run_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if (
+        isinstance(data, dict)
+        and data.get("environment_id") == record.environment_id
+        and isinstance(data.get("host"), str)
+    ):
+        return f"host:{data['host']}"
+    return f"environment:{record.environment_id}"
 
 
 def _read_remote_record(path: Path) -> RunRecord | None:
@@ -482,7 +529,7 @@ def mirror_run(
             usd_per_gpu_hour,
         )
         # every file is here: claim the id hub-wide, then install everything at once
-        reason = _claim(ctx, environment_id, project, run_id)
+        reason = _claim(ctx, environment_id, project, run_id, host)
         if reason is not None:
             log.warning("host %s: not mirroring: %s", host, reason)
             return None

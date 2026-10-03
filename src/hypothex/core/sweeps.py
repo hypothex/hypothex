@@ -20,7 +20,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from hypothex.core.config import BUILTIN_TEMPLATE_VARS, NAME_PATTERN
+from hypothex.core.config import BUILTIN_TEMPLATE_VARS, NAME_PATTERN, ProjectConfig
 from hypothex.core.context import Context
 from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.fsutil import read_yaml, write_yaml
@@ -539,21 +539,59 @@ def sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]:
     return sorted(tagged, key=lambda r: (r.created_at, r.run_id))
 
 
-def _board(ctx: Context, spec: SweepSpec, runs: list[RunRecord]) -> Leaderboard | None:
-    """The task leaderboard restricted to the sweep's runs, or None without a task."""
+def unknown_task_headline(task: str) -> str:
+    """
+    Headline of a sweep whose task is not in the project config (e.g. after a rename).
+
+    Parameters
+    ----------
+    task : str
+        The task the sweep names.
+
+    Returns
+    -------
+    str
+        The headline; the summary then has no stats.
+
+    Examples
+    --------
+    >>> unknown_task_headline("toy-acc")
+    'Unknown task toy-acc: not in the project config'
+    """
+    return f"Unknown task {task}: not in the project config"
+
+
+def _task_config(ctx: Context, spec: SweepSpec) -> ProjectConfig | None:
+    """
+    The project config when the sweep's task is in it, else None (no task, or unknown).
+
+    An unreadable project file raises (``StoreError``): a sweep with scored runs
+    must never quietly look unscored. An unknown task is logged; the caller
+    gives it its own headline.
+    """
     if spec.task is None:
         return None
-    try:
-        entry = ctx.store.load_project(spec.project)
-    except StoreError:
+    config = ctx.store.load_project(spec.project).config
+    if spec.task not in config.tasks:
+        log.warning(
+            "sweep %s/%s names task %r, which is not in the project config",
+            spec.project,
+            spec.id,
+            spec.task,
+        )
         return None
-    if spec.task not in entry.config.tasks:
+    return config
+
+
+def _board(
+    ctx: Context, spec: SweepSpec, config: ProjectConfig | None, runs: list[RunRecord]
+) -> Leaderboard | None:
+    """The task leaderboard restricted to ``runs``, or None without a known task."""
+    if spec.task is None or config is None:
         return None
     scores = ctx.index.scores_for(r.run_id for r in runs)
-    per_example = primary_examples(ctx, entry.config, spec.task, runs, None)
-    return build_leaderboard(
-        spec.project, spec.task, entry.config, runs, scores, per_example=per_example
-    )
+    per_example = primary_examples(ctx, config, spec.task, runs, None)
+    return build_leaderboard(spec.project, spec.task, config, runs, scores, per_example=per_example)
 
 
 def _cell(
@@ -615,6 +653,7 @@ def _metric_name(primary: str) -> str:
 def _p_between(
     ctx: Context,
     spec: SweepSpec,
+    config: ProjectConfig | None,
     runs: list[RunRecord],
     board: Leaderboard | None,
     ranked: list[dict[str, Any]],
@@ -631,7 +670,7 @@ def _p_between(
         return None
     rows = {row.group_id: row for row in board.rows}
     ids = set(rows[ranked[0]["group_id"]].run_ids) | set(rows[ranked[1]["group_id"]].run_ids)
-    pair = _board(ctx, spec, [r for r in runs if r.run_id in ids])
+    pair = _board(ctx, spec, config, [r for r in runs if r.run_id in ids])
     if pair is None or len(pair.rows) < 2 or pair.rows[1].vs_best is None:
         return None
     return pair.rows[1].vs_best.p
@@ -690,24 +729,35 @@ def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary:
     Raises
     ------
     StoreError
-        If the sweep does not exist.
+        If the sweep does not exist, or the project file cannot be read.
+        A task that is not in the project config is not an error: the summary
+        has no stats and its headline says so (``unknown_task_headline``).
     """
-    spec = load_sweep(ctx.layout, project, sweep_id)
+    return _summarize(ctx, load_sweep(ctx.layout, project, sweep_id))
+
+
+def _summarize(ctx: Context, spec: SweepSpec) -> SweepSummary:
+    """``summarize_sweep`` for a loaded spec; project errors propagate."""
+    config = _task_config(ctx, spec)
     runs = sweep_runs(ctx, spec)
     counts = dict.fromkeys(STATUS_KEYS, 0)
     for r in runs:
         counts[r.status.value] += 1
     counts["total"] = len(runs)
-    board = _board(ctx, spec, runs)
+    board = _board(ctx, spec, config, runs)
     cells = _cells(spec, runs, board)
     rank = {row.group_id: i for i, row in enumerate(board.rows)} if board is not None else {}
     ranked = sorted((c for c in cells if c["mean"] is not None), key=lambda c: rank[c["group_id"]])
+    if spec.task is not None and config is None:
+        headline = unknown_task_headline(spec.task)
+    else:
+        headline = _headline(board, ranked, _p_between(ctx, spec, config, runs, board, ranked))
     return SweepSummary(
         spec=spec,
         counts=counts,
         cells=cells,
         best=ranked[0] if ranked else None,
-        headline=_headline(board, ranked, _p_between(ctx, spec, runs, board, ranked)),
+        headline=headline,
         total_usd=math.fsum(_run_usd(r) for r in runs),
         run_ids=[r.run_id for r in runs],
         tag=sweep_tag(ctx.descriptor.environment_id, spec.id),
@@ -728,16 +778,23 @@ def list_sweeps(ctx: Context, project: str) -> list[dict[str, Any]]:
     Returns
     -------
     list of dict
-        ``{id, created_at, n_runs, best}`` per sweep; unreadable files are skipped.
+        ``{id, created_at, n_runs, best}`` per sweep; unreadable sweep files are
+        skipped (and logged).
+
+    Raises
+    ------
+    StoreError
+        If the project file cannot be read while a sweep names a task.
     """
     folder = sweeps_dir(ctx.layout, project)
     out: list[dict[str, Any]] = []
     for path in sorted(folder.glob("*.yaml")) if folder.is_dir() else []:
         try:
-            summary = summarize_sweep(ctx, project, path.stem)
+            spec = load_sweep(ctx.layout, project, path.stem)
         except StoreError:
             log.warning("skipping unreadable sweep file %s", path)
             continue
+        summary = _summarize(ctx, spec)
         out.append(
             {
                 "id": summary.spec.id,

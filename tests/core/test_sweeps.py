@@ -36,6 +36,7 @@ from hypothex.core.sweeps import (
     sweep_combos,
     sweep_path,
     sweep_tag,
+    unknown_task_headline,
 )
 from tests.factories import make_record, write_toy_project
 
@@ -438,6 +439,35 @@ def test_summary_without_task_has_no_stats(ctx: Context, toy_repo: Path) -> None
     assert summary.cells[0]["mean"] is None
     assert summary.cells[0]["run_ids"] == ["a1"]
     assert summary.headline == "No scored runs yet"
+
+
+def test_unknown_task_headline() -> None:
+    assert unknown_task_headline("toy-acc") == "Unknown task toy-acc: not in the project config"
+
+
+def test_summary_with_unknown_task_says_so(
+    ctx: Context, toy_repo: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # the task was renamed after the sweep ran: the scored runs must not look unscored
+    ctx.register_project(toy_repo)
+    save_sweep(ctx.layout, spec_of(task="old-name"))
+    add_run(ctx, "a1", "1e-4", 1, RunStatus.FINISHED, 0.7)
+    with caplog.at_level("WARNING", logger="hypothex.core.sweeps"):
+        summary = summarize_sweep(ctx, "toy", "s-0001")
+    assert summary.headline == "Unknown task old-name: not in the project config"
+    assert summary.best is None
+    assert summary.cells[0]["mean"] is None and summary.cells[0]["run_ids"] == ["a1"]
+    assert summary.counts["finished"] == 1 and summary.run_ids == ["a1"]
+    assert "toy/s-0001 names task 'old-name'" in caplog.text
+
+
+def test_unreadable_project_file_raises(ctx: Context, toy_sweep: SweepSpec) -> None:
+    # a corrupt project file never turns scored runs into "No scored runs yet"
+    (ctx.layout.project_dir("toy") / "project.json").write_text("{")
+    with pytest.raises(StoreError):
+        summarize_sweep(ctx, "toy", "s-0001")
+    with pytest.raises(StoreError):
+        list_sweeps(ctx, "toy")
 
 
 def test_membership_is_the_sweep_tag(ctx: Context, toy_repo: Path) -> None:

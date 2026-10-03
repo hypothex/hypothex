@@ -675,3 +675,26 @@ def test_a_start_that_never_committed_frees_the_gpus_and_runs_nothing(
         assert not out.exists()
         assert not (ctx.run_dir(failed) / EXECUTION_CLAIM).exists()
         time.sleep(0.1)
+
+
+def test_a_launch_event_that_fails_after_the_spawn_still_counts_as_started(
+    ctx: Context, toy_repo: Path, gpus: SetGpus, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    gpus([{"index": 0}])
+    out = tmp_path / "executions.txt"
+    rid = queue_run(ctx, toy_repo, 1, code=counting(out))
+    real_emit = ctx.emit
+
+    def emit(event_type: str, *args: object, **kwargs: object) -> object:
+        if event_type == "run.launched":
+            raise OSError(28, "No space left on device")
+        return real_emit(event_type, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ctx, "emit", emit)
+    assert Scheduler(ctx).tick() == [rid]  # the supervisor runs, so the run is started
+    monkeypatch.undo()
+    assert wait_for_run(ctx, rid, timeout=60).status == RunStatus.FINISHED
+    assert out.read_text() == "ran\n"
+    assert not (ctx.run_dir(ctx.find_record(rid)) / QUEUE_FILE).exists()
+    types = [e.type for e in ctx.events.since(0) if e.run_id == rid]
+    assert "run.failed" not in types

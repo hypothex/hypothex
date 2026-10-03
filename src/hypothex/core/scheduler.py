@@ -283,7 +283,16 @@ class Scheduler:
                 )
                 try:
                     spawn_supervisor(self.ctx, record)
-                except OSError as exc:  # never committed: nothing runs, so the GPUs go back
+                except OSError as exc:
+                    if (self.ctx.run_dir(record) / SUPERVISOR_PID_FILE).is_file():
+                        # committed: the supervisor owns the run, only the event failed
+                        log.error(
+                            "run %s started, but its launch was not recorded: %s", entry.run_id, exc
+                        )
+                        marker.unlink(missing_ok=True)
+                        started.append(entry.run_id)
+                        continue
+                    # never committed: nothing runs, so the GPUs go back
                     marker.unlink(missing_ok=True)
                     self.ctx.update_run(
                         entry.run_id,

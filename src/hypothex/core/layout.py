@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -97,14 +98,18 @@ def reserved_run_path(rel_path: str) -> bool:
     Returns
     -------
     bool
-        True when its first component (after empty and ``.`` parts) is ``.hx``.
+        True when its first component (after empty and ``.`` parts) is ``.hx``,
+        compared Unicode-normalised and case-folded (macOS and Windows volumes
+        resolve ``.HX`` to the same folder).
 
     Examples
     --------
     >>> reserved_run_path(".hx/mirror-skips.json"), reserved_run_path("./.hx")
     (True, True)
+    >>> reserved_run_path(".HX/mirror-skips.json")
+    True
     >>> reserved_run_path("predictions/.hx"), reserved_run_path("predictions/x.skipped")
     (False, False)
     """
     parts = [part for part in rel_path.split("/") if part not in ("", ".")]
-    return bool(parts) and parts[0] == HX_DIR
+    return bool(parts) and unicodedata.normalize("NFKC", parts[0]).casefold() == HX_DIR

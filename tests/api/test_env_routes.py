@@ -205,7 +205,15 @@ def test_the_reserved_hx_folder_is_never_served(client: TestClient, run_dir: Pat
     hx = run_dir / ".hx"
     hx.mkdir()
     (hx / "mirror-skips.json").write_text('{"notes.md": {"reason": "too big"}}')
-    for path in (".hx/mirror-skips.json", ".hx", ".hx/", "%2Ehx/mirror-skips.json"):
+    for path in (
+        ".hx/mirror-skips.json",
+        ".hx",
+        ".hx/",
+        "%2Ehx/mirror-skips.json",
+        ".HX/mirror-skips.json",
+        ".Hx",
+        "./.hX/mirror-skips.json",
+    ):
         resp = client.get(f"{FILES}/{path}")
         assert resp.status_code == 404, path
         assert "reserved" in resp.json()["error"] and "too big" not in resp.text

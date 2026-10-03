@@ -29,3 +29,12 @@ def test_new_run_id_format_and_uniqueness() -> None:
     assert new_run_id(None, now=when).split("-")[2] == "explore"
     assert len({new_run_id("t", now=when) for _ in range(50)}) > 40
     assert re.fullmatch(r"[0-9a-f]{16}", new_command_id())
+
+
+def test_reserved_run_path_ignores_case_and_unicode_form() -> None:
+    from hypothex.core.layout import reserved_run_path
+
+    for path in (".hx/a", ".HX/a", ".Hx", "./.hX/mirror-skips.json", "．hx/a"):
+        assert reserved_run_path(path), path
+    for path in ("", "predictions/.HX", "hx/a", ".hxx/a", "a/.hx"):
+        assert not reserved_run_path(path), path

@@ -38,7 +38,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from hypothex.core.errors import RunNotFoundError
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
-from hypothex.core.store import ProjectEntry, RunStore
+from hypothex.core.store import ProjectEntry, RunStore, run_lock
 
 if TYPE_CHECKING:
     from hypothex.core.context import Context
@@ -159,6 +159,13 @@ class PointsPendingRow(Base):
     run_id: Mapped[str] = mapped_column(String, primary_key=True)
 
 
+class ScoresStaleRow(Base):
+    """Runs whose ``scores.jsonl`` may hold scores the index lacks (an add cut short)."""
+
+    __tablename__ = "scores_stale"
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+
+
 # HostCursorRow is not listed: ``clear()`` (``hx reindex``) keeps the mirror cursors,
 # because the mirrored run folders stay on disk and need no replay.
 _DATA_TABLES = (
@@ -172,7 +179,7 @@ _DATA_TABLES = (
     MetricPointRow,
     PointsPendingRow,
 )
-_CARRIED_TABLES = (HostCursorRow,)
+_CARRIED_TABLES = (HostCursorRow, ScoresStaleRow)
 """Rows a rebuild copies from the old index: they are not derived from run folders."""
 
 _BUMP_GENERATION = text(
@@ -632,7 +639,14 @@ class Index:
         """
         with Session(self.engine) as session, session.begin():
             _touch(session, run_id)
-            for model in (RunRow, RunTagRow, ScoreRow, MetricPointRow, PointsPendingRow):
+            for model in (
+                RunRow,
+                RunTagRow,
+                ScoreRow,
+                MetricPointRow,
+                PointsPendingRow,
+                ScoresStaleRow,
+            ):
                 session.execute(delete(model).where(model.run_id == run_id))
 
     def get_meta(self, key: str) -> str | None:
@@ -682,9 +696,39 @@ class Index:
             _touch(session, run_id)
             session.add(ScoreRow(**_score_values(run_id, score)))
 
+    def mark_scores_stale(self, run_id: str) -> None:
+        """
+        Record that a score is about to be appended to the run's ``scores.jsonl``.
+
+        ``replace_scores`` clears the mark. A mark that is still there (the
+        writer died between its file append and its index write) makes
+        ``repair_stale_scores`` re-index the run's scores from the file. A
+        mark is bookkeeping: it does not change the generation.
+
+        Parameters
+        ----------
+        run_id : str
+            Run id.
+        """
+        stmt = sqlite_insert(ScoresStaleRow).values(run_id=run_id).on_conflict_do_nothing()
+        with Session(self.engine) as session, session.begin():
+            session.execute(stmt)
+
+    def stale_score_runs(self) -> list[str]:
+        """
+        Return the runs marked by ``mark_scores_stale`` and not re-indexed since.
+
+        Returns
+        -------
+        list of str
+            Run ids, sorted.
+        """
+        with Session(self.engine) as session:
+            return sorted(session.scalars(select(ScoresStaleRow.run_id)))
+
     def replace_scores(self, run_id: str, scores: list[ScoreRecord]) -> None:
         """
-        Replace all indexed scores of one run.
+        Replace all indexed scores of one run (and clear its stale mark).
 
         Parameters
         ----------
@@ -696,6 +740,7 @@ class Index:
         with Session(self.engine) as session, session.begin():
             _touch(session, run_id)
             session.execute(delete(ScoreRow).where(ScoreRow.run_id == run_id))
+            session.execute(delete(ScoresStaleRow).where(ScoresStaleRow.run_id == run_id))
             if scores:
                 session.execute(insert(ScoreRow), [_score_values(run_id, s) for s in scores])
 
@@ -1269,6 +1314,45 @@ def repair_index_gaps(index: Index, store: RunStore) -> list[str]:
         index_run(index, store, record)
         added.append(run_id)
     return added
+
+
+def repair_stale_scores(index: Index, store: RunStore) -> list[str]:
+    """
+    Re-index the scores of runs whose score add was cut short.
+
+    ``Context.add_score`` marks the run (``Index.mark_scores_stale``), appends
+    to ``scores.jsonl``, then re-indexes the run's scores, which clears the
+    mark. A crash in between leaves the mark; this reads the file again under
+    the run lock, so it never races an add that is still running.
+
+    Parameters
+    ----------
+    index : Index
+        Index to repair.
+    store : RunStore
+        File store, the source of truth.
+
+    Returns
+    -------
+    list of str
+        Run ids whose scores were re-indexed, sorted.
+    """
+    repaired: list[str] = []
+    for run_id in index.stale_score_runs():
+        indexed = index.get_run(run_id)
+        try:
+            project = indexed.project if indexed else store.find_project_of(run_id)
+        except RunNotFoundError:
+            index.replace_scores(run_id, [])  # the folder is gone: nothing to index
+            continue
+        run_dir = store.layout.run_dir(project, run_id)
+        if not run_dir.is_dir():
+            index.replace_scores(run_id, [])
+            continue
+        with run_lock(run_dir):
+            index.replace_scores(run_id, store.read_scores(project, run_id))
+        repaired.append(run_id)
+    return repaired
 
 
 STORE_SCAN_KEY = "store_scanned"

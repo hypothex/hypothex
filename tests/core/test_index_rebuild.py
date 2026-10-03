@@ -196,6 +196,14 @@ def test_rebuild_keeps_mirror_cursors(tmp_path: Path) -> None:
     assert index.get_cursor("gpu1", "env-a") == 42
 
 
+def test_rebuild_keeps_stale_score_marks(tmp_path: Path) -> None:
+    store = _store(tmp_path, runs=1)
+    index = Index(tmp_path / "index.db", store=store)
+    index.mark_scores_stale("r0")  # an add in flight, or cut short
+    rebuild_index(index, store)
+    assert index.stale_score_runs() == ["r0"]
+
+
 def test_one_rebuild_when_many_processes_open_a_stale_index(tmp_path: Path) -> None:
     store = _store(tmp_path, runs=3)
     path = tmp_path / "index.db"

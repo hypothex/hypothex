@@ -78,13 +78,14 @@ interface Failure {
   left: number;
 }
 
-/** Seeds this dialog has started, in launch order, with their records. */
+/** Seeds this dialog has started, in launch order, with their records and the host they run on. */
 interface Launched {
+  host: string | null;
   seeds: number[];
   records: RunRecord[];
 }
 
-const NOTHING_LAUNCHED: Launched = { seeds: [], records: [] };
+const NOTHING_LAUNCHED: Launched = { host: null, seeds: [], records: [] };
 
 type Update = (patch: Partial<LaunchDraft>) => void;
 
@@ -160,29 +161,35 @@ function HostPicker({
   selected,
   project,
   now,
+  lockedTo,
   onPick,
 }: {
   hosts: LaunchHost[];
   selected: string | null;
   project: string;
   now: number;
+  /** after a partial launch the rest of the seeds go to the same host: the others are disabled */
+  lockedTo: string | null;
   onPick: (host: LaunchHost) => void;
 }) {
   return (
     <div className="hp" role="radiogroup" aria-label="Host">
       {hosts.map((h) => {
         const av = availability(h, project, now);
+        const locked = lockedTo !== null && h.name !== lockedTo;
+        const ok = av.ok && !locked;
         const on = h.name === selected;
-        const cls = [on ? "on" : "", av.ok ? "" : "off"].filter(Boolean).join(" ");
+        const cls = [on ? "on" : "", ok ? "" : "off"].filter(Boolean).join(" ");
+        const title = locked ? `seeds started on ${lockedTo}: the rest go there` : av.ok ? hostTitle(h) : av.reason;
         return (
-          <label key={h.name} className={cls || undefined} title={av.ok ? hostTitle(h) : av.reason}>
+          <label key={h.name} className={cls || undefined} title={title}>
             <input
               type="radio"
               name="hx-launch-host"
               value={h.name}
               aria-label={h.name}
               checked={on}
-              disabled={!av.ok}
+              disabled={!ok}
               onChange={() => onPick(h)}
             />
             <span className="nm">{h.name}</span>
@@ -471,6 +478,8 @@ export function LaunchDialog({
 
   const launch = async (): Promise<void> => {
     if (inFlight.current || spec === null || blocked || pending.length === 0) return;
+    // the started seeds and the rest must share one host: onLaunched names a single host
+    if (launched.host !== null && spec.host.name !== launched.host) return;
     inFlight.current = true;
     setFailure(null);
     setProgress(0);
@@ -479,6 +488,7 @@ export function LaunchDialog({
     setProgress(null);
     for (const queryKey of REMOTE_RUN_INVALIDATES) void client.invalidateQueries({ queryKey });
     const done: Launched = {
+      host: spec.host.name,
       seeds: [...launched.seeds, ...pending.slice(0, out.records.length)],
       records: [...launched.records, ...out.records],
     };
@@ -529,6 +539,7 @@ export function LaunchDialog({
                 selected={draft.host}
                 project={project}
                 now={now}
+                lockedTo={launched.host}
                 onPick={(h) => update({ host: h.name, gpus: gpusForHost(draft.gpus, h) })}
               />
             )}

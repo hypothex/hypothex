@@ -407,6 +407,44 @@ describe("Launch", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  test("after a partial launch the host is locked, and onLaunched names the host every seed runs on", async () => {
+    let refuse = true;
+    const calls = mockApi({
+      ...HOSTS,
+      "POST /api/v1/hosts/gpu1/runs": (c: Call) => {
+        if (seedOf(c) === 5 && refuse) {
+          refuse = false;
+          return new HttpReply(400, { error: "runner busy", type: "RunError" });
+        }
+        return rec(seedOf(c));
+      },
+    });
+    const { onLaunched } = renderDialog();
+    await ready();
+    expect(radio("mccleary").disabled).toBe(false);
+    expect(radio("local").disabled).toBe(false);
+    typeHypothesis("beam 10 holds");
+    fireEvent.click(launchButton(3));
+    await screen.findByRole("alert");
+    // seed 4 runs on gpu1: the rest may not go to another host
+    expect(radio("gpu1").checked).toBe(true);
+    expect(radio("gpu1").disabled).toBe(false);
+    for (const name of ["local", "mccleary"]) {
+      expect(radio(name).disabled).toBe(true);
+      expect(rowOf(name).title).toBe("seeds started on gpu1: the rest go there");
+    }
+    fireEvent.click(radio("mccleary"));
+    expect(radio("gpu1").checked).toBe(true);
+    fireEvent.click(launchButton(2));
+    await waitFor(() => expect(onLaunched).toHaveBeenCalledTimes(1));
+    const sent = posts(calls);
+    expect(sent).toHaveLength(4);
+    expect(sent.every((c) => c.url.endsWith("/api/v1/hosts/gpu1/runs"))).toBe(true);
+    const [records, host] = onLaunched.mock.calls[0] as [RunRecord[], string];
+    expect(records.map((r) => r.seed)).toEqual([4, 5, 6]);
+    expect(host).toBe("gpu1");
+  });
+
   test("a partial launch, then an edit: Launch sends only the seeds not launched, under a new attempt", async () => {
     let refuse = true;
     const calls = mockApi({

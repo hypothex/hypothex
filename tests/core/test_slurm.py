@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +16,11 @@ from typer.testing import CliRunner
 
 from hypothex.cli.main import app
 from hypothex.core import control
+from hypothex.core import slurm as slurm_module
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, RunError
 from hypothex.core.execution import RunRequest, prepare_run
+from hypothex.core.ids import utcnow
 from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus
 from hypothex.core.slurm import (
     EXIT_FILE,
@@ -33,12 +36,14 @@ from hypothex.core.slurm import (
     is_finished,
     lost_reason,
     poll,
+    reconcile,
     render_sbatch,
     require_flock,
     run_child,
     run_slurm_settings,
     submit,
     submit_run,
+    track_slurm_run,
 )
 from hypothex.remote.config import SlurmDefaults
 from tests.factories import make_record
@@ -134,6 +139,38 @@ def wait_until(predicate: Callable[[], bool], timeout: float = 30.0) -> None:
 
 def sh(*argv: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(list(argv), input=stdin, capture_output=True, text=True, check=False)
+
+
+def slurm_run(
+    ctx: Context,
+    run_id: str,
+    *,
+    job_id: str = "1000",
+    status: RunStatus = RunStatus.RUNNING,
+    environment_id: str | None = None,
+    **executor: Any,
+) -> RunRecord:
+    """A submitted SLURM run, tracked in the outbox as submit_run leaves it."""
+    record = ctx.create_run(
+        make_record(
+            run_id,
+            status=status,
+            environment_id=environment_id or ctx.descriptor.environment_id,
+            executor=ExecutorInfo(type="slurm", slurm_job_id=job_id, **executor),
+        )
+    )
+    track_slurm_run(ctx.layout, record, comment=f"hx-{run_id}-0000")
+    return record
+
+
+class Crash(BaseException):
+    """The env server dies right here (a BaseException: nothing on the way catches it)."""
+
+
+def dead_pid() -> int:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
 
 
 # fake SLURM commands -----------------------------------------------------------------
@@ -934,3 +971,413 @@ def test_rerun_of_a_gpu_run_waits_for_gpus(
     assert child.gpus_requested == 2
     assert child.status == RunStatus.QUEUED and child.executor.queue_position == 1
     assert not (ctx.run_dir(child) / "supervisor.pid").exists()
+
+
+# reconcile (lost detection) ------------------------------------------------------------------
+def test_reconcile_records_node_of_running_job(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    slurm_run(ctx, "r1", status=RunStatus.QUEUED)
+    changed = reconcile(ctx)
+    assert [(r.run_id, r.status, r.executor.node) for r in changed] == [
+        ("r1", RunStatus.QUEUED, "n1")
+    ]
+    last = ctx.events.since(0, limit=10_000)[-1]
+    assert (last.type, last.payload["slurm_state"], last.payload["node"]) == (
+        "run.slurm_state",
+        "RUNNING",
+        "n1",
+    )
+    assert reconcile(ctx) == []
+
+
+def test_reconcile_marks_vanished_job_lost(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm_run(ctx, "r1", job_id="1000")
+    changed = reconcile(ctx)
+    assert [(r.run_id, r.status) for r in changed] == [("r1", RunStatus.LOST)]
+    assert changed[0].ended_at is not None
+    last = ctx.events.since(0, limit=10_000)[-1]
+    assert last.type == "run.lost"
+    assert last.payload["reason"] == (
+        "slurm job 1000 left the queue; SLURM reports no end state for it; no exit record"
+    )
+    assert last.payload["slurm_state"] is None
+
+
+def test_reconcile_marks_node_fail_lost_with_slurm_state(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "NODE_FAIL", node="r208u06n02", exit="0:0", in_queue=False)
+    slurm_run(ctx, "r1", job_id="1000")
+    [lost] = reconcile(ctx)
+    assert lost.status == RunStatus.LOST
+    last = ctx.events.since(0, limit=10_000)[-1]
+    assert last.payload["slurm_state"] == "NODE_FAIL"
+    assert last.payload["reason"] == (
+        "SLURM ended job 1000 with NODE_FAIL on r208u06n02 (exit 0); no exit record"
+    )
+
+
+def test_reconcile_keeps_runs_with_an_exit_record(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "COMPLETED", node="n1", in_queue=False)
+    record = slurm_run(ctx, "r1", job_id="1000")
+    # the node wrote run.yaml (no event, no index: it never opens the SQLite files)
+    ctx.store.write_record(record.model_copy(update={"status": RunStatus.FINISHED, "exit_code": 0}))
+    assert [(r.run_id, r.status) for r in reconcile(ctx)] == [("r1", RunStatus.FINISHED)]
+    assert ctx.find_record("r1").status == RunStatus.FINISHED
+    indexed = ctx.index.get_run("r1")
+    assert indexed is not None and indexed.status == RunStatus.FINISHED
+    # (task "t" is not in a registered project, so scoring adds run.eval_skipped after it)
+    published = [e for e in ctx.events.since(0, limit=10_000) if e.type == "run.finished"]
+    assert [(e.run_id, e.payload["exit_code"]) for e in published] == [("r1", 0)]
+    assert reconcile(ctx) == []  # published once
+
+
+def test_reconcile_publishes_the_node_s_start(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    record = slurm_run(ctx, "r1", job_id="1000", status=RunStatus.QUEUED, node="n1")
+    ctx.store.write_record(record.model_copy(update={"status": RunStatus.RUNNING}))
+    [started] = reconcile(ctx)
+    assert started.status == RunStatus.RUNNING
+    assert ctx.events.since(0, limit=10_000)[-1].type == "run.started"
+    indexed = ctx.index.get_run("r1")
+    assert indexed is not None and indexed.status == RunStatus.RUNNING
+
+
+def test_reconcile_restores_the_exit_record(ctx: Context, slurm: FakeSlurm) -> None:
+    # the node's exit record is newer than run.yaml (a write that replaced its last one)
+    slurm.add_job("1000", "COMPLETED", node="n1", in_queue=False)
+    record = slurm_run(ctx, "r1", job_id="1000")
+    exit_record = {"run_id": "r1", "status": "failed", "exit_code": 3}
+    exit_record["ended_at"] = "2026-10-03T10:00:00+00:00"
+    (ctx.run_dir(record) / EXIT_FILE).write_text(json.dumps(exit_record))
+    [ended] = reconcile(ctx)
+    assert (ended.status, ended.exit_code) == (RunStatus.FAILED, 3)
+    assert ctx.events.since(0, limit=10_000)[-1].type == "run.failed"
+    assert reconcile(ctx) == []
+
+
+def test_end_to_end_events_come_from_the_login_node(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    slurm.set(mode="run")
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults(gpus=0))
+    record = control.launch_run(ctx, req)
+    control.wait_for_run(ctx, record.run_id, timeout=60)
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id]
+    assert "run.finished" not in types  # the node wrote run.yaml only
+    reconcile(ctx)
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id]
+    assert types[-1] == "run.finished"
+    indexed = ctx.index.get_run(record.run_id)
+    assert indexed is not None and indexed.status == RunStatus.FINISHED
+
+
+def test_reconcile_changes_nothing_when_squeue_fails(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm_run(ctx, "r1", job_id="1000")
+    slurm.set(fail={"squeue": "slurm_load_jobs error: Unable to contact slurm controller"})
+    with pytest.raises(SlurmError):
+        reconcile(ctx)
+    assert ctx.find_record("r1").status == RunStatus.RUNNING
+
+
+def test_reconcile_ignores_local_and_foreign_runs(ctx: Context, slurm: FakeSlurm) -> None:
+    ctx.create_run(
+        make_record("local", status=RunStatus.RUNNING, environment_id=ctx.descriptor.environment_id)
+    )
+    slurm_run(ctx, "foreign", environment_id="another-env")
+    assert reconcile(ctx) == []
+    assert slurm.state()["calls"] == []
+
+
+def test_reconcile_confirm_gone_needs_two_polls(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm_run(ctx, "r1", job_id="1000")
+    gone: dict[str, SlurmJob | None] = {}
+    assert reconcile(ctx, confirm_gone=gone) == []
+    assert gone == {"1000": None}
+    assert ctx.find_record("r1").status == RunStatus.RUNNING
+    [lost] = reconcile(ctx, confirm_gone=gone)
+    assert lost.status == RunStatus.LOST
+    assert gone == {}
+
+
+def test_reconcile_confirm_gone_resets_when_job_reappears(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm_run(ctx, "r1", job_id="1000")
+    gone: dict[str, SlurmJob | None] = {}
+    reconcile(ctx, confirm_gone=gone)
+    slurm.add_job("1000", "RUNNING", node="n1")  # requeued / visible again
+    reconcile(ctx, confirm_gone=gone)
+    assert gone == {}
+    assert ctx.find_record("r1").status == RunStatus.RUNNING
+
+
+def test_the_lost_reason_keeps_slurm_s_end_state(ctx: Context, slurm: FakeSlurm) -> None:
+    # NODE_FAIL in sacct at the first poll; sacct is down at the second
+    slurm.add_job("1000", "NODE_FAIL", node="r208u06n02", exit="0:0", in_queue=False)
+    slurm_run(ctx, "r1", job_id="1000")
+    gone: dict[str, SlurmJob | None] = {}
+    assert reconcile(ctx, confirm_gone=gone) == []
+    slurm.set(fail={"sacct": "sacct: error: Slurm accounting storage is disabled"})
+    [lost] = reconcile(ctx, confirm_gone=gone)
+    assert lost.status == RunStatus.LOST
+    last = ctx.events.since(0, limit=10_000)[-1]
+    assert (last.type, last.payload["slurm_state"]) == ("run.lost", "NODE_FAIL")
+    assert last.payload["reason"].startswith("SLURM ended job 1000 with NODE_FAIL on r208u06n02")
+
+
+def test_a_node_that_ends_during_reconcile_is_published_not_lost(
+    ctx: Context, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slurm_run(ctx, "r1", job_id="1000")
+    real = slurm_module.poll
+
+    def poll_then_the_node_finishes(job_ids: list[str]) -> dict[str, SlurmJob]:
+        jobs = real(job_ids)  # gone: the run is about to be marked lost ...
+        done = ctx.find_record("r1").model_copy(update={"status": RunStatus.FINISHED})
+        ctx.store.write_record(done.model_copy(update={"exit_code": 0}))  # ... the node ends
+        return jobs
+
+    monkeypatch.setattr(slurm_module, "poll", poll_then_the_node_finishes)
+    [done] = reconcile(ctx)
+    assert done.status == RunStatus.FINISHED
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
+    assert "run.lost" not in types and types.count("run.finished") == 1
+    assert ctx.events.since(0, limit=10_000)[-1].payload.get("status") != "lost"
+    assert not outbox(ctx, "r1").exists()  # acknowledged after run.finished, not before
+
+
+def test_an_unknown_outcome_is_resolved_by_the_job_s_comment(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = slurm_module.submit
+
+    def accepted_then_timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        real(script, cwd, comment=comment)
+        raise SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", accepted_then_timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    record = control.launch_run(ctx, req)
+    monkeypatch.setattr(slurm_module, "submit", real)
+    [found] = reconcile(ctx)
+    assert (found.status, found.executor.slurm_job_id) == (RunStatus.QUEUED, "1000")
+    assert json.loads(outbox(ctx, record.run_id).read_text())["state"] == "submitted"
+    assert len(slurm.calls("sbatch")) == 1  # never submitted twice
+
+
+def test_an_unknown_outcome_fails_only_when_slurm_provably_never_took_the_job(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    run_id = control.launch_run(ctx, req).run_id
+    assert reconcile(ctx) == []  # too early: the controller may still create it
+    entry = json.loads(outbox(ctx, run_id).read_text())
+    entry["intent_at"] = "2000-01-01T00:00:00+00:00"
+    outbox(ctx, run_id).write_text(json.dumps(entry))
+    slurm.set(fail={"sacct": "sacct: error: Slurm accounting storage is disabled"})
+    assert reconcile(ctx) == []  # sacct did not answer: unknown, never absent
+    assert ctx.find_record(run_id).status == RunStatus.QUEUED
+    slurm.set(fail={})
+    [failed] = reconcile(ctx)
+    assert failed.status == RunStatus.FAILED
+    last = ctx.events.since(0, limit=10_000)[-1]
+    assert last.type == "run.failed" and "sbatch never accepted" in last.payload["reason"]
+    assert not outbox(ctx, run_id).exists()
+
+
+def test_without_comment_accounting_an_unknown_submission_stays_unknown(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slurm.set(accounting_flags="")  # the cluster's sacct keeps no job comments
+
+    def timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    run_id = control.launch_run(ctx, req).run_id
+    entry = json.loads(outbox(ctx, run_id).read_text())
+    entry["intent_at"] = "2000-01-01T00:00:00+00:00"
+    outbox(ctx, run_id).write_text(json.dumps(entry))
+    assert reconcile(ctx) == [] and reconcile(ctx) == []  # never "absent", however long
+    assert ctx.find_record(run_id).status == RunStatus.QUEUED
+    assert json.loads(outbox(ctx, run_id).read_text())["state"] == "unknown"
+    notices = [
+        e.payload
+        for e in ctx.events.since(0, limit=10_000)
+        if e.run_id == run_id and e.payload.get("reason") == slurm_module.UNRESOLVED_SUBMISSION
+    ]
+    assert notices == [
+        {
+            "reason": "submission outcome unknown; check squeue/sacct",
+            "comment": entry["comment"],
+            "comment_accounting": False,
+        }
+    ]
+    assert slurm.calls("sacct") == []
+
+
+def test_sbatch_killed_after_accepting_is_found_by_its_comment(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    slurm.set(sbatch_signal="KILL")  # the controller took the job; sbatch died before the id
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    record = control.launch_run(ctx, req)
+    assert record.status == RunStatus.QUEUED and record.executor.slurm_job_id is None
+    assert json.loads(outbox(ctx, record.run_id).read_text())["state"] == "unknown"
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id]
+    assert types[-1] == "run.submit_unknown" and "run.failed" not in types
+    slurm.set(sbatch_signal=None)
+    [found] = reconcile(ctx)
+    assert (found.status, found.executor.slurm_job_id) == (RunStatus.QUEUED, "1000")
+    assert len(slurm.calls("sbatch")) == 1  # never submitted twice
+
+
+def test_a_node_that_ends_while_its_intent_is_resolved_is_published(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    run_id = control.launch_run(ctx, req).run_id
+    entry = json.loads(outbox(ctx, run_id).read_text())
+    entry["intent_at"] = "2000-01-01T00:00:00+00:00"
+    outbox(ctx, run_id).write_text(json.dumps(entry))
+    real = slurm_module.find_submitted
+
+    def nothing_found_then_the_node_finishes(comment: str) -> tuple[SlurmJob | None, bool]:
+        answer = real(comment)  # (None, True): no job carries the comment ...
+        node_end = {"status": RunStatus.FINISHED, "exit_code": 0, "ended_at": utcnow()}
+        ctx.store.write_record(ctx.find_record(run_id).model_copy(update=node_end))
+        return answer  # ... yet the node ran it and ended (a late accounting record)
+
+    monkeypatch.setattr(slurm_module, "find_submitted", nothing_found_then_the_node_finishes)
+    [done] = reconcile(ctx)
+    assert done.status == RunStatus.FINISHED
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == run_id]
+    assert "run.failed" not in types and types.count("run.finished") == 1
+    indexed = ctx.index.get_run(run_id)
+    assert indexed is not None and indexed.status == RunStatus.FINISHED
+    assert not outbox(ctx, run_id).exists()  # dropped only after the node's end was published
+
+
+def test_repair_runs_leaves_slurm_runs_to_reconcile(ctx: Context) -> None:
+    old = utcnow() - timedelta(minutes=2)
+    ctx.create_run(
+        make_record(
+            "slurmq",
+            status=RunStatus.QUEUED,
+            created_at=old,
+            environment_id=ctx.descriptor.environment_id,
+            executor=ExecutorInfo(type="slurm", slurm_job_id="1000"),
+        )
+    )
+    ctx.create_run(
+        make_record(
+            "localq",
+            status=RunStatus.QUEUED,
+            created_at=old,
+            environment_id=ctx.descriptor.environment_id,
+        )
+    )
+    assert [r.run_id for r in control.repair_runs(ctx)] == ["localq"]
+    assert ctx.find_record("slurmq").status == RunStatus.QUEUED
+
+
+def outbox(ctx: Context, run_id: str) -> Path:
+    return ctx.layout.home / "slurm" / "outbox" / f"{run_id}.json"
+
+
+def test_crash_after_sbatch_is_matched_to_its_job(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = slurm_module.submit
+
+    def submit_then_crash(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        real(script, cwd, comment=comment)  # SLURM accepted the job ...
+        raise Crash  # ... and the env server died before it recorded the id
+
+    monkeypatch.setattr(slurm_module, "submit", submit_then_crash)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    with pytest.raises(Crash):
+        control.launch_run(ctx, req)
+    monkeypatch.setattr(slurm_module, "submit", real)
+    [run_id] = list(ctx.index.run_ids())
+    stuck = ctx.find_record(run_id)
+    assert (stuck.executor.type, stuck.executor.slurm_job_id) == ("slurm", None)
+    assert [r.run_id for r in control.repair_runs(ctx)] == []  # not a local orphan
+    [found] = reconcile(ctx)
+    assert (found.status, found.executor.slurm_job_id) == (RunStatus.QUEUED, "1000")
+    assert len(slurm.calls("sbatch")) == 1  # never submitted twice
+    assert reconcile(ctx) == []
+
+
+def test_crash_before_sbatch_fails_the_run_once_the_submitter_is_gone(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def crash(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise Crash
+
+    monkeypatch.setattr(slurm_module, "submit", crash)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    with pytest.raises(Crash):
+        control.launch_run(ctx, req)
+    [run_id] = list(ctx.index.run_ids())
+    assert reconcile(ctx) == []  # its submitter (this process) lives: sbatch may still answer
+    entry = json.loads(outbox(ctx, run_id).read_text())
+    entry["submitter"] = {"pid": dead_pid(), "create_time": None}  # the env server restarted
+    outbox(ctx, run_id).write_text(json.dumps(entry))
+    assert reconcile(ctx) == []  # still inside the settle window: no conclusion yet
+    assert json.loads(outbox(ctx, run_id).read_text())["state"] == "unknown"
+    entry = json.loads(outbox(ctx, run_id).read_text())
+    entry["intent_at"] = "2000-01-01T00:00:00+00:00"
+    outbox(ctx, run_id).write_text(json.dumps(entry))
+    [failed] = reconcile(ctx)
+    assert failed.status == RunStatus.FAILED
+    last = ctx.events.since(0, limit=10_000)[-1]
+    assert last.type == "run.failed" and "sbatch never accepted" in last.payload["reason"]
+    assert not outbox(ctx, run_id).exists()
+    assert slurm.calls("sbatch") == []
+
+
+def test_a_job_that_ended_before_its_submission_was_recorded_is_published(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slurm.set(mode="run")
+    real = slurm_module.submit
+
+    def submit_and_let_it_finish(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        job_id = real(script, cwd, comment=comment)
+        wait_until(lambda: not slurm.job(job_id)["in_queue"])  # a fast child is done first
+        return job_id
+
+    monkeypatch.setattr(slurm_module, "submit", submit_and_let_it_finish)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults(gpus=0))
+    record = control.launch_run(ctx, req)
+    indexed = ctx.index.get_run(record.run_id)
+    assert indexed is not None and indexed.status == RunStatus.FINISHED  # before any poll
+    reconcile(ctx)
+    reconcile(ctx)
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id]
+    assert types.count("run.finished") == 1
+    assert not outbox(ctx, record.run_id).exists()
+
+
+def test_a_terminal_run_yaml_indexed_by_another_write_is_still_published(
+    ctx: Context, slurm: FakeSlurm
+) -> None:
+    slurm.add_job("1000", "COMPLETED", node="n1", in_queue=False)
+    record = slurm_run(ctx, "r1", job_id="1000")
+    ctx.store.write_record(record.model_copy(update={"status": RunStatus.FINISHED, "exit_code": 0}))
+    # a tag on the login node reads the node's final run.yaml and indexes it first
+    ctx.update_run("r1", "run.tagged", lambda r: r.model_copy(update={"tags": ["x"]}))
+    indexed = ctx.index.get_run("r1")
+    assert indexed is not None and indexed.status == RunStatus.FINISHED
+    [done] = reconcile(ctx)
+    assert done.status == RunStatus.FINISHED
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
+    assert types.count("run.finished") == 1
+    assert reconcile(ctx) == [] and not outbox(ctx, "r1").exists()

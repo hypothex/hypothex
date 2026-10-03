@@ -534,6 +534,8 @@ def _repair_one(ctx: Context, current: RunRecord) -> RunRecord | None:
     """Mark one active run of this environment lost if its supervisor is gone."""
     if current.environment_id != ctx.descriptor.environment_id:
         return None
+    if current.executor.type == slurm.SLURM_EXECUTOR:
+        return None  # squeue/sacct decide (slurm.reconcile); its pids live on a compute node
     run_dir = ctx.run_dir(current)
     if current.status == RunStatus.QUEUED and _scheduler_held(run_dir):
         return None  # waiting for GPUs: the scheduler owns it, not a supervisor

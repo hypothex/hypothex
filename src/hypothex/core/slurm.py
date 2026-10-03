@@ -27,6 +27,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO, cast
 
@@ -35,13 +36,20 @@ from pydantic import BaseModel
 from hypothex.core.context import Context
 from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, HypothexError, RunError
+from hypothex.core.evaluation import evaluate_run
 from hypothex.core.events import EventLog
-from hypothex.core.execution import execute_run, process_create_time
+from hypothex.core.execution import execute_run, process_alive, process_create_time
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.ids import utcnow
 from hypothex.core.index import Index
 from hypothex.core.layout import Layout
-from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.records import (
+    ACTIVE_STATUSES,
+    TERMINAL_STATUSES,
+    RunRecord,
+    RunStatus,
+    ScoreRecord,
+)
 from hypothex.core.store import RunStore, dir_lock, run_lock
 from hypothex.remote.config import SlurmDefaults, sbatch_option_problem
 
@@ -1329,3 +1337,308 @@ def last_slurm_defaults(layout: Layout) -> SlurmDefaults | None:
         The file exists but cannot be read or is not valid settings.
     """
     return _read_settings(layout.home / LAST_SLURM_DEFAULTS)
+
+
+def _read_exit(run_dir: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads((run_dir / EXIT_FILE).read_text(encoding="utf-8"))
+        RunStatus(data["status"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _apply_exit(exit_record: dict[str, Any]) -> Callable[[RunRecord], RunRecord]:
+    def mutate(r: RunRecord) -> RunRecord:
+        if r.status in TERMINAL_STATUSES:
+            return r
+        ended = exit_record.get("ended_at")
+        return r.model_copy(
+            update={
+                "status": RunStatus(exit_record["status"]),
+                "exit_code": exit_record.get("exit_code"),
+                "ended_at": datetime.fromisoformat(ended) if ended else utcnow(),
+            }
+        )
+
+    return mutate
+
+
+def sync_node_run(ctx: Context, seen: RunStatus, current: RunRecord) -> RunRecord | None:
+    """
+    Publish what the compute node wrote to a SLURM run's folder (login node only).
+
+    The node never opens ``index.db`` or ``events.db`` (Task 27). Here the env
+    server emits the event for the node's new status, updates the index and
+    the metric points, and scores a finished task run.
+
+    Parameters
+    ----------
+    ctx : Context
+        The env server's full context.
+    seen : RunStatus
+        The status the login node last published for the run (the outbox
+        entry's ``published``), whatever the index shows.
+    current : RunRecord
+        The run as ``run.yaml`` says now.
+
+    Returns
+    -------
+    RunRecord or None
+        The run when its status was published, else None.
+    """
+    changed = False
+    if current.status in ACTIVE_STATUSES:
+        exit_record = _read_exit(ctx.run_dir(current))
+        if exit_record is not None:
+            # run.yaml lost the node's last write; the exit record wins
+            status = exit_record["status"]
+            applied = _end_if_active(
+                ctx,
+                current.run_id,
+                f"run.{status}",
+                _apply_exit(exit_record),
+                {"exit_code": exit_record.get("exit_code"), "source": "exit.json"},
+            )
+            if applied is not None:
+                current, seen, changed = applied, applied.status, True
+            else:  # ended meanwhile: the terminal record is published below
+                current = ctx.find_record(current.run_id)
+    if current.status != seen:
+        event = (
+            "run.started" if current.status == RunStatus.RUNNING else f"run.{current.status.value}"
+        )
+        payload: dict[str, Any] = {"status": current.status.value, "source": "node"}
+        if current.exit_code is not None:
+            payload["exit_code"] = current.exit_code
+        ctx.events.append(event, project=current.project, run_id=current.run_id, payload=payload)
+        ctx.index.upsert_run(current)
+        changed = True
+    if changed or current.status == RunStatus.RUNNING:
+        points = ctx.store.read_metric_points(current.project, current.run_id)
+        ctx.index.replace_metric_points(current.run_id, points)
+    scored = bool(ctx.store.read_scores(current.project, current.run_id))
+    if changed and current.status == RunStatus.FINISHED and current.task and not scored:
+        try:
+            evaluate_run(ctx, current.run_id)  # the node never scores (auto_evaluate=False)
+        except HypothexError as exc:
+            ctx.emit("run.eval_skipped", current, {"reason": str(exc)[:500]})
+    if changed or current.status in TERMINAL_STATUSES:
+        mark_published(ctx.layout, current)  # last: a crash before it publishes again
+    return current if changed else None
+
+
+def _published(layout: Layout, current: RunRecord) -> RunStatus:
+    """The status the login node last published for a run (its outbox entry's cursor)."""
+    entry = _intent(layout, current.run_id)
+    try:
+        return RunStatus(entry["published"]) if entry is not None else current.status
+    except (KeyError, ValueError):
+        return current.status
+
+
+def _publish_node_end(ctx: Context, run_id: str) -> RunRecord:
+    """A requested end lost the race with the node: publish the node's own end instead."""
+    current = ctx.find_record(run_id)
+    return sync_node_run(ctx, _published(ctx.layout, current), current) or current
+
+
+UNRESOLVED_SUBMISSION = "submission outcome unknown; check squeue/sacct"
+"""Shown on a run whose submission no lookup can settle (no comment accounting)."""
+
+
+def _intent_age(entry: dict[str, Any]) -> float:
+    try:
+        return (utcnow() - datetime.fromisoformat(entry["intent_at"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return float("inf")
+
+
+def _resolve_intent(ctx: Context, entry: dict[str, Any], current: RunRecord) -> RunRecord | None:
+    """
+    Settle a submission whose job id is not known, by its comment only.
+
+    A job carrying the comment is recorded. The run fails, and the intent is
+    dropped, only when SLURM provably never took the job: both ``squeue`` and
+    ``sacct`` answered without it, its submitter is dead (a ``pending`` one
+    may still be in ``sbatch``), and ``SUBMIT_SETTLE_SECONDS`` passed since
+    the intent. Anything less leaves the intent for the next poll. When the
+    node ended the run meanwhile, its end is published instead of a failure,
+    and only then is the intent dropped. Without comment accounting the
+    answer is never complete: the run stays ``unknown`` and gets one
+    ``run.submit_unknown`` event naming ``UNRESOLVED_SUBMISSION``.
+    """
+    run_id = current.run_id
+    comment = entry.get("comment")
+    if not comment:
+        return None
+    try:
+        job, complete = find_submitted(comment)
+    except SlurmError as exc:
+        log.warning("run %s: squeue failed; submission still unknown: %s", run_id, exc)
+        return None
+    if job is not None:
+        return _record_job(ctx, run_id, job.job_id, recovered=True)
+    if entry.get("state") == "pending":
+        submitter = entry.get("submitter") or {}
+        if process_alive(submitter.get("pid"), submitter.get("create_time")):
+            return None  # sbatch may still answer it
+        entry = _update_intent(ctx.layout, run_id, state="unknown") or entry
+    if _intent_age(entry) < SUBMIT_SETTLE_SECONDS:
+        return None
+    if not complete:
+        if not comment_accounting() and not entry.get("unresolved_notice"):
+            _update_intent(ctx.layout, run_id, unresolved_notice=True)
+            ctx.emit(
+                "run.submit_unknown",
+                current,
+                {"reason": UNRESOLVED_SUBMISSION, "comment": comment, "comment_accounting": False},
+            )
+        return None
+    failed = _end_if_active(
+        ctx,
+        run_id,
+        "run.failed",
+        _end(RunStatus.FAILED),
+        {
+            "reason": f"sbatch never accepted job hx-{run_id}: "
+            f"no job with comment {comment} in squeue or sacct"
+        },
+    )
+    if failed is None:  # the node ended it first: publish that end, never drop it unseen
+        failed = _publish_node_end(ctx, run_id)
+    _drop_intent(ctx.layout, run_id)  # after the end: a crash in between only repeats it
+    return failed
+
+
+def _tracked_slurm_runs(
+    ctx: Context,
+) -> tuple[list[tuple[str, RunRecord]], list[RunRecord]]:
+    """Sync every outbox run from its folder; return (job id, run) pairs to poll and changes."""
+    found: list[tuple[str, RunRecord]] = []
+    changed: list[RunRecord] = []
+    for entry in read_outbox(ctx.layout):
+        run_id = entry["run_id"]
+        try:
+            current = ctx.find_record(run_id)
+        except HypothexError:  # the run is gone
+            _drop_intent(ctx.layout, run_id)
+            continue
+        if current.environment_id != ctx.descriptor.environment_id:
+            _drop_intent(ctx.layout, run_id)
+            continue
+        published = sync_node_run(ctx, RunStatus(entry["published"]), current)
+        if published is not None:
+            changed.append(published)
+            current = published
+        job_id = entry.get("job_id") or current.executor.slurm_job_id
+        if job_id is None:
+            resolved = _resolve_intent(ctx, entry, current)
+            if resolved is not None:
+                changed.append(resolved)
+            continue  # tracked from the next poll on
+        if entry.get("state") != "submitted":  # the node's run.yaml names the job
+            entry = _update_intent(ctx.layout, run_id, state="submitted", job_id=job_id) or entry
+        if entry.get("cancel_requested"):
+            _cancel_requested(ctx, run_id, job_id)
+            continue
+        if current.status in ACTIVE_STATUSES:
+            found.append((job_id, current))
+    return sorted(found, key=lambda pair: pair[1].run_id), changed
+
+
+def _set_node(node: str) -> Callable[[RunRecord], RunRecord]:
+    def mutate(r: RunRecord) -> RunRecord:
+        if r.status in TERMINAL_STATUSES:
+            return r
+        return r.model_copy(update={"executor": r.executor.model_copy(update={"node": node})})
+
+    return mutate
+
+
+def reconcile(
+    ctx: Context, *, confirm_gone: dict[str, SlurmJob | None] | None = None
+) -> list[RunRecord]:
+    """
+    Compare this environment's active SLURM runs with SLURM and fix their state.
+
+    - First, for every run in the SLURM outbox (not the index's active runs),
+      publish what the compute node wrote (``sync_node_run``): the node writes
+      only ``run.yaml`` and ``exit.json``, so the events and the index updates
+      of SLURM runs come from here. A run whose job id was never recorded (its
+      submitter crashed after ``sbatch``) is matched to its job by name and
+      comment, or failed when its submitter is dead and SLURM has no job.
+    - Job queued or running: keep; record its node when SLURM assigned one.
+    - Run already has an exit record (``run.yaml`` is terminal): keep.
+    - Job ended (``sacct``) or vanished, and no exit record: mark ``lost``.
+
+    Parameters
+    ----------
+    ctx : Context
+    confirm_gone : dict of str to SlurmJob or None, optional
+        Job ids seen gone by the previous call, with the ``sacct`` record seen
+        then. When given, a run is marked lost only on the second call in a row
+        that finds its job gone (this tolerates a shared filesystem that shows
+        the node's final ``run.yaml`` late), and the lost reason uses whichever
+        poll had SLURM's end state. Updated in place. None marks at once.
+
+    Returns
+    -------
+    list of RunRecord
+        Runs whose record changed (status published from the node, node
+        recorded, or marked lost).
+
+    Raises
+    ------
+    SlurmError
+        If ``squeue`` fails; only the folder sync has happened then.
+    """
+    runs, changed = _tracked_slurm_runs(ctx)
+    if not runs:
+        if confirm_gone is not None:
+            confirm_gone.clear()
+        return changed
+    jobs = poll([job_id for job_id, _ in runs])
+    gone_now: dict[str, SlurmJob | None] = {}
+    for job_id, record in runs:
+        job = jobs.get(job_id)
+        current = ctx.find_record(record.run_id)
+        if current.status in TERMINAL_STATUSES:  # the node ended it since the folder sync
+            changed.append(_publish_node_end(ctx, current.run_id))
+            continue
+        if job is not None and not is_finished(job):
+            if job.node is not None and job.node != current.executor.node:
+                changed.append(
+                    ctx.update_run(
+                        current.run_id,
+                        "run.slurm_state",
+                        _set_node(job.node),
+                        {"slurm_job_id": job_id, "slurm_state": job.state, "node": job.node},
+                    )
+                )
+            continue
+        if confirm_gone is not None and job_id not in confirm_gone:
+            gone_now[job_id] = job
+            continue
+        if job is None and confirm_gone is not None:
+            job = confirm_gone.get(job_id)  # sacct had the end state at the first poll
+        lost = _end_if_active(
+            ctx,
+            current.run_id,
+            "run.lost",
+            _end(RunStatus.LOST),
+            {
+                "reason": lost_reason(job_id, job),
+                "slurm_job_id": job_id,
+                "slurm_state": job.state if job is not None else None,
+            },
+        )
+        if lost is None:  # the node's end arrived first: publish it, never "lost"
+            changed.append(_publish_node_end(ctx, current.run_id))
+            continue
+        mark_published(ctx.layout, lost)  # acknowledged after the event of this end
+        changed.append(lost)
+    if confirm_gone is not None:
+        confirm_gone.clear()
+        confirm_gone.update(gone_now)
+    return changed

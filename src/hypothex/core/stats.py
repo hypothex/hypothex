@@ -195,7 +195,10 @@ def bootstrap_mean_interval(
     Percentile bootstrap 95% interval for the mean.
 
     NaN values are ignored. Resampling uses ``random.Random(seed)``, so the
-    result is deterministic for a given input.
+    result is deterministic for a given input. If any resample holds both
+    ``inf`` and ``-inf``, its mean is undefined, so the interval is undefined
+    too and ``(nan, nan)`` is returned (dropping those resamples would bias
+    the interval).
 
     Parameters
     ----------
@@ -209,7 +212,8 @@ def bootstrap_mean_interval(
     Returns
     -------
     tuple of (float, float)
-        The 2.5th and 97.5th percentiles of the resampled means.
+        The 2.5th and 97.5th percentiles of the resampled means;
+        ``(nan, nan)`` when a resampled mean is undefined.
 
     Raises
     ------
@@ -220,6 +224,8 @@ def bootstrap_mean_interval(
     --------
     >>> bootstrap_mean_interval([0.5, 0.5, 0.5])
     (0.5, 0.5)
+    >>> bootstrap_mean_interval([math.inf, -math.inf])
+    (nan, nan)
     """
     xs = _clean(values)
     if not xs:
@@ -229,6 +235,8 @@ def bootstrap_mean_interval(
     n = len(xs)
     rng = random.Random(seed)
     means = [sum(rng.choices(xs, k=n)) / n for _ in range(resamples)]
+    if any(math.isnan(m) for m in means):
+        return (math.nan, math.nan)
     return (quantile(means, 0.025), quantile(means, 0.975))
 
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import random
 import re
+import string
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -15,7 +16,6 @@ from pydantic import ValidationError
 
 from hypothex.core.config import (
     NAME_PATTERN,
-    VIEW_NAME_PATTERN,
     ProjectConfig,
     parse_metric_key,
     parse_metric_version,
@@ -233,11 +233,23 @@ name_text = st.one_of(
 )
 
 
+ALNUM = frozenset(string.ascii_lowercase + string.digits)
+
+
+def _spec_name(name: str, more: str) -> bool:
+    """Hand-written oracle: one of ``[a-z0-9]``, then ``[a-z0-9]`` or ``more``."""
+    rest = ALNUM | frozenset(more)
+    return bool(name) and name[0] in ALNUM and all(c in rest for c in name[1:])
+
+
 @FAST
 @given(name_text)
 @example("t\n")
+@example("a.b-c_d")
+@example(".a")
+@example("A")
 def test_task_names_follow_the_pattern_exactly(task: str) -> None:
-    ok = re.fullmatch(NAME_PATTERN, task) is not None
+    ok = _spec_name(task, "_.-")
     try:
         ProjectConfig.model_validate(_config(task))
     except ValidationError:
@@ -251,8 +263,10 @@ def test_task_names_follow_the_pattern_exactly(task: str) -> None:
 @FAST
 @given(name_text)
 @example("v\n")
+@example("a.b")
+@example("overview")
 def test_view_names_follow_the_pattern_exactly(view: str) -> None:
-    ok = re.fullmatch(VIEW_NAME_PATTERN, view) is not None and view != "overview"
+    ok = _spec_name(view, "_-") and view != "overview"
     try:
         ProjectConfig.model_validate(_config("t", view))
     except ValidationError:

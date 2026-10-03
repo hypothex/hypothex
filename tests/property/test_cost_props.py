@@ -32,26 +32,40 @@ usd = st.floats(0, 1e4, allow_nan=False)
 
 
 @st.composite
-def records(draw: st.DrawFn) -> RunRecord:
+def records_with_facts(draw: st.DrawFn) -> tuple[RunRecord, float, int]:
+    """A run plus its wall hours and billed GPUs, worked out from the raw draws."""
     started = draw(st.one_of(st.none(), st.integers(-10_000, 10_000)))
     ended = draw(st.one_of(st.none(), st.integers(-10_000, 1_000_000)))
     slurm = draw(st.booleans())
     gpus = draw(st.lists(st.integers(0, 15), unique=True, max_size=8))
-    return RunRecord.model_construct(
+    requested = draw(st.integers(0, 8))
+    record = RunRecord.model_construct(
         started_at=None if started is None else T0 + timedelta(seconds=started),
         ended_at=None if ended is None else T0 + timedelta(seconds=ended),
         executor=ExecutorInfo(gpus=gpus, slurm_job_id="7" if slurm else None),
-        gpus_requested=draw(st.integers(0, 8)),
+        gpus_requested=requested,
         usage=draw(st.one_of(st.none(), st.builds(UsageTotals, usd=usd))),
         status=draw(st.sampled_from(list(RunStatus))),
     )
+    # the spec, from the integers drawn above: seconds of run time (never
+    # negative, 0 if a timestamp is missing); GPUs held, else SLURM's request
+    seconds = 0 if started is None or ended is None else max(ended - started, 0)
+    n_gpus = len(gpus) if gpus else (requested if slurm else 0)
+    return record, seconds / 3600, n_gpus
+
+
+def records() -> st.SearchStrategy[RunRecord]:
+    return records_with_facts().map(lambda t: t[0])
 
 
 @FAST
-@given(records(), rates)
-def test_cost_is_gpu_hours_times_rate_plus_api(record: RunRecord, rate: float | None) -> None:
+@given(records_with_facts(), rates)
+def test_cost_is_gpu_hours_times_rate_plus_api(
+    facts: tuple[RunRecord, float, int], rate: float | None
+) -> None:
+    record, wall, n_gpus = facts
     cost = compute_cost(record, rate)
-    hours = wall_hours(record) * billed_gpus(record)
+    hours = wall * n_gpus
     api = record.usage.usd if record.usage is not None else 0.0
     assert min(cost.gpu_hours, cost.gpu_usd, cost.api_usd, cost.total_usd) >= 0.0
     assert cost.gpu_hours == pytest.approx(hours, abs=ROUND)
@@ -72,8 +86,11 @@ def test_gpu_cost_is_linear_in_the_rate(record: RunRecord, r1: float, r2: float)
 
 
 @FAST
-@given(records())
-def test_wall_and_gpus_are_never_negative(record: RunRecord) -> None:
+@given(records_with_facts())
+def test_wall_and_gpus_are_never_negative(facts: tuple[RunRecord, float, int]) -> None:
+    record, wall, n_gpus = facts
+    assert wall_hours(record) == pytest.approx(wall, rel=1e-12)
+    assert billed_gpus(record) == n_gpus
     assert wall_hours(record) >= 0.0
     assert billed_gpus(record) >= 0
     if record.executor.gpus:

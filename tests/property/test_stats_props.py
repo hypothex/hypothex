@@ -2,6 +2,7 @@
 
 import math
 import sys
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -86,12 +87,21 @@ def test_wilson_rejects_impossible_counts(k: int, n: int) -> None:
 @given(binom_counts())
 @example((0, 1001))
 @example((3, 2999))
+@example((10, 1075))
 def test_binom_p_matches_scipy(kn: tuple[int, int]) -> None:
     k, n = kn
     p = binom_two_sided_p(k, n)
     assert 0.0 <= p <= 1.0
     ref = 1.0 if n == 0 else sps.binomtest(k, n, 0.5).pvalue
-    assert p == pytest.approx(ref, rel=1e-9, abs=1e-300)
+    if ref < 1e-290:
+        # scipy underflows near the float floor (0.0 for k=10, n=1075); check
+        # against the exact rational tail instead, rounded once to a float
+        tail = sum(math.comb(n, i) for i in range(min(k, n - k) + 1))
+        ref = min(1.0, float(Fraction(2 * tail, 2**n)))
+        # subnormals carry fewer bits, hence the tiny absolute slack
+        assert p == pytest.approx(ref, rel=1e-9, abs=1e-310)
+    else:
+        assert p == pytest.approx(ref, rel=1e-9)
 
 
 @FAST
@@ -205,9 +215,24 @@ def test_bootstrap_rejects_empty_samples_and_no_resamples(nans: list[float], bad
 
 @settings(max_examples=30, deadline=None)
 @given(st.lists(st.sampled_from([math.inf, -math.inf, 1.0, -2.0]), min_size=1, max_size=8))
+@example([math.inf, math.inf, math.inf, -math.inf, -math.inf, -math.inf])
 def test_bootstrap_with_infinities_never_raises(values: list[float]) -> None:
     lo, hi = bootstrap_mean_interval(values, resamples=50)
-    assert not (lo > hi)
+    if math.inf in values and -math.inf in values:
+        # some resample may mix both signs: then the whole interval is undefined
+        assert (math.isnan(lo) and math.isnan(hi)) or lo <= hi
+    else:
+        assert lo <= hi
+
+
+def test_bootstrap_with_mixed_infinities_is_undefined_not_an_error() -> None:
+    # regression: every resample mixed inf and -inf, all means were NaN, and
+    # quantile raised "quantile of an empty sample"
+    mixed = [math.inf, math.inf, math.inf, -math.inf, -math.inf, -math.inf]
+    lo, hi = bootstrap_mean_interval(mixed, resamples=50)
+    assert math.isnan(lo) and math.isnan(hi)
+    lo, hi = bootstrap_mean_interval([math.inf, -math.inf, 1.0])
+    assert math.isnan(lo) and math.isnan(hi)
 
 
 @st.composite

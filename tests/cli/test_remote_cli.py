@@ -99,6 +99,29 @@ def test_local_launch_passes_gpus_and_queue(in_repo: Path, monkeypatch: pytest.M
     assert (seen[0].gpus, seen[0].queue) == (2, True)
 
 
+def test_remote_launch_sends_an_explicit_gpus_0_as_the_slurm_gpus(
+    in_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # an omitted --gpus keeps a SLURM host's default; --gpus 0 must override it (Copy as CLI)
+    bodies: list[dict[str, Any]] = []
+
+    def fake_hub(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+        assert body is not None
+        bodies.append(body)
+        return make_record("fake1").model_dump(mode="json")
+
+    monkeypatch.setattr(cli_main, "_hub", fake_hub)
+    monkeypatch.setattr(cli_main, "_client_checkout", lambda root: {})
+    hx("launch", "--host", "mccleary", "--gpus", "0", "-H", "h", "--", PY, "-c", "1")
+    hx("launch", "--host", "mccleary", "--gpus", "2", "--partition", "gpu", "-H", "h", "--", "x")
+    hx("launch", "--host", "mccleary", "-H", "h", "--", PY, "-c", "1")
+    assert [(b["gpus"], b["slurm"]) for b in bodies] == [
+        (0, {"gpus": 0}),
+        (2, {"partition": "gpu", "gpus": 2}),
+        (0, None),
+    ]
+
+
 def test_local_sweep_commands(in_repo: Path, ctx: Context) -> None:
     out = hx(
         "sweep",

@@ -4,7 +4,7 @@ import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/re
 import { PanelRegistryContext } from "../../src/pages/components/PanelGrid";
 import type { QueryResponse, ViewDetail, ViewInfo } from "../../src/pages/components/types";
 import { TaskPage, boardMeta } from "../../src/pages/Task";
-import { makeBoard } from "./fixtures";
+import { REPO, RUN_RF, RUN_SVM, makeBoard, makeDetail, makeRecord } from "./fixtures";
 import { type Call, HttpReply, fakeRegistry, mockApi, renderWithClient, restoreFetch } from "./helpers";
 
 afterEach(() => {
@@ -121,6 +121,140 @@ describe("TaskPage", () => {
     const body = calls.find((c) => c.url === `${BASE}/reeval`)?.body as Record<string, unknown>;
     expect(typeof body.command_id).toBe("string");
     expect(body.created_by).toBe("human");
+  });
+
+  const RUNS_URL = "GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=1000";
+
+  /** Routes behind the New run dialog: task detail, template run, task runs, hosts. */
+  function newRunRoutes(): Record<string, unknown> {
+    return {
+      ...routes("overview"),
+      [`GET ${BASE}`]: {
+        summary: { project: "toy-classifier", name: "toy-test" },
+        repo: REPO,
+        dataset: { name: "toyset" },
+        metrics: {},
+        stages: {},
+      },
+      [`GET /api/v1/runs/${RUN_SVM}`]: makeDetail(),
+      [RUNS_URL]: [
+        makeRecord({ run_id: "20260926-200000-toy-test-aa01", seed: 1 }),
+        makeRecord({ run_id: "20260926-200100-toy-test-aa02", seed: 2 }),
+        makeRecord({ run_id: RUN_RF, seed: 9, config_hash: "sha256:5a810ddb4e0c2f19" }),
+      ],
+      "GET /api/v1/hosts": [],
+      "GET /api/v1/gpus": [],
+      "GET /api/v1/queue": [],
+    };
+  }
+
+  test("New run opens the launch dialog from the best config and links the launched runs", async () => {
+    const calls = mockApi({
+      ...newRunRoutes(),
+      "POST /api/v1/runs": (call: Call) => {
+        const seed = (call.body as { seed: number }).seed;
+        return makeRecord({ run_id: `20261003-120000-toy-test-s${seed}`, seed, status: "running" });
+      },
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    expect(within(dialog).getByText("toy-classifier / toy-test")).toBeTruthy();
+    expect((within(dialog).getByLabelText("Command") as HTMLTextAreaElement).value).toBe(
+      "python train_eval.py --model svm --seed={seed}",
+    );
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("4, 5, 6");
+    await waitFor(() =>
+      expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true),
+    );
+    fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: "svm holds on new seeds" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Launch 3" }));
+
+    const line = await waitFor(() => {
+      const el = document.querySelector("p.launched");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(line.textContent).toBe("Launched 3 on local: s4 s5 s6");
+    expect(within(line).getByRole("link", { name: "s4" }).getAttribute("href")).toBe(
+      "/r/20261003-120000-toy-test-s4",
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    const sent = calls.filter((c) => c.method === "POST" && c.url === "/api/v1/runs");
+    expect(sent.map((c) => (c.body as { seed: number }).seed)).toEqual([4, 5, 6]);
+    expect(sent[0]?.body).toMatchObject({
+      repo: REPO,
+      task: "toy-test",
+      command: ["python", "train_eval.py", "--model", "svm", "--seed={seed}"],
+      hypothesis: "svm holds on new seeds",
+      gpus: 0,
+      queue: false,
+    });
+  });
+
+  test("New run reads past the first 1,000 runs: an older seed of the template's config is never proposed", async () => {
+    // the newest 1,000 runs belong to other configs; the template's seed 4 is older
+    const newest = Array.from({ length: 1000 }, (_, i) =>
+      makeRecord({ run_id: `20261001-000000-toy-test-n${i}`, seed: 1, config_hash: "sha256:other" }),
+    );
+    const older = makeRecord({ run_id: "20260901-000000-toy-test-old4", seed: 4 });
+    mockApi({
+      ...newRunRoutes(),
+      [RUNS_URL]: newest,
+      "GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=4000": [...newest, older],
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("5, 6, 7");
+  });
+
+  test("a leaderboard update while the dialog is open keeps the dialog and what was typed", async () => {
+    mockApi(newRunRoutes());
+    const { client } = renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: "svm holds on new seeds" } });
+    // a run event: the best config's latest run is now another run, whose read never ends
+    const board = makeBoard();
+    const [best] = board.rows;
+    if (best === undefined) throw new Error("fixture has no rows");
+    board.rows = [{ ...best, latest_run_id: "20261004-000000-toy-test-new1" }, ...board.rows.slice(1)];
+    client.setQueryData(["leaderboard", "toy-classifier", "toy-test", []], board);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const still = screen.getByRole("dialog", { name: "New run" });
+    expect((within(still).getByLabelText("Hypothesis") as HTMLInputElement).value).toBe("svm holds on new seeds");
+    expect((within(still).getByLabelText("Command") as HTMLTextAreaElement).value).toBe(
+      "python train_eval.py --model svm --seed={seed}",
+    );
+  });
+
+  test("New run shows the runs read error instead of a dialog with possibly used seeds", async () => {
+    mockApi({
+      ...newRunRoutes(),
+      [RUNS_URL]: new HttpReply(500, { error: "runs index unreadable", type: "StoreError" }),
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("runs index unreadable");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("New run shows the template run read error instead of a blank dialog", async () => {
+    mockApi({
+      ...newRunRoutes(),
+      [`GET /api/v1/runs/${RUN_SVM}`]: new HttpReply(404, { error: `no run ${RUN_SVM}`, type: "StoreError" }),
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(`no run ${RUN_SVM}`);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   test("a tab switch does not draw the previous view's panels under the new view", async () => {

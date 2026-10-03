@@ -52,7 +52,8 @@ Hosts (hub)
      - Launch on a host. The launch fields (``task``, ``stage``, ``command``,
        ``hypothesis``, ``seed``, ``tags``, ``params``, ``vars``) plus ``gpus``,
        ``queue``, ``slurm`` (``{partition, account, time, gpus, extra}``),
-       ``project``, ``commit``, and ``diff``. Answers the run record.
+       ``project``, ``commit``, and ``diff``. Answers the run record. On a host that is
+       not a SLURM host, ``slurm`` may hold only ``gpus`` (it is ignored there).
 
 For a host launch, give the project by name. Without ``commit``, the hub pins its own
 checkout's ``HEAD`` and sends its uncommitted diff. With ``commit``, the body's

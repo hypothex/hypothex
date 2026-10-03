@@ -33,8 +33,9 @@ Launch
 
 The SLURM settings of a run come from the host's ``slurm`` block in
 ``environments.yaml``. ``--partition``, ``--time``, and ``--account`` on ``hx launch``
-override them for that run, and ``--gpus N`` overrides ``slurm.gpus``. These options
-need a SLURM host; on another host they are refused.
+override them for that run; they need a SLURM host, and on another host they are
+refused. ``--gpus N`` overrides ``slurm.gpus`` (``--gpus 0`` asks for no GPU); without
+``--gpus``, the run gets the host's ``slurm.gpus``.
 
 SLURM runs are always submitted. ``--queue`` has no effect there (SLURM's queue holds
 the job), and ``hx rerun --foreground`` and ``hx reinfer --foreground`` are refused.

@@ -9,8 +9,11 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from hypothex.core.events import EventLog
 from hypothex.core.index import SCHEMA_VERSION, Index
+from hypothex.remote.hub import Backoff, wanted_path
 
 # index cursors -----------------------------------------------------------------------
 
@@ -62,3 +65,45 @@ def test_append_once_writes_one_event_per_key(tmp_path: Path) -> None:
     assert again.append_once("mirror:gpu1:env-1:7", "mirror.run_updated", run_id="r1") is None
     assert again.append_once("mirror:gpu1:env-1:8", "mirror.run_updated", run_id="r1") is not None
     assert [e.sequence for e in log.since(0)] == [1, 2]
+
+
+# pure helpers ------------------------------------------------------------------------
+
+
+def test_backoff_sequence_caps_and_resets_after_stable_connection() -> None:
+    b = Backoff()
+    assert [b.next_delay(0.0) for _ in range(6)] == [3.0, 4.0, 8.0, 16.0, 16.0, 16.0]
+    b.connected(100.0)
+    assert b.next_delay(129.0) == 16.0  # 29 s is not stable yet
+    b.connected(200.0)
+    assert b.next_delay(230.0) == 3.0
+    assert b.next_delay(231.0) == 4.0
+
+
+def test_backoff_rejects_empty_delays() -> None:
+    with pytest.raises(ValueError, match="delays"):
+        Backoff(())
+
+
+@pytest.mark.parametrize(
+    ("rel", "ok"),
+    [
+        ("run.yaml", True),
+        ("scores.jsonl", True),
+        ("git.diff", True),
+        ("predictions/predictions.jsonl", True),
+        ("traces/e1.jsonl", True),
+        ("logs/stdout.log", True),
+        ("artifacts/model.pt", False),
+        ("predictions", False),
+        ("random.txt", False),
+        ("../run.yaml", False),
+        ("logs/../../etc/passwd", False),
+        ("/etc/passwd", False),
+        ("logs//x", False),
+        ("logs\\x", False),
+        ("", False),
+    ],
+)
+def test_wanted_path(rel: str, ok: bool) -> None:
+    assert wanted_path(rel) is ok

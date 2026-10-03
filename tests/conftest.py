@@ -6,7 +6,13 @@ import pytest
 
 from hypothex.core.context import Context
 from tests.factories import write_toy_project
-from tests.fakes import DEAD_HUB, refuse_host_tools, refuse_remote
+from tests.fakes import (
+    DEAD_HUB,
+    FakeRemote,
+    install_fake_remote,
+    refuse_host_tools,
+    refuse_remote,
+)
 
 
 @pytest.fixture
@@ -70,3 +76,9 @@ def isolate_remote(_isolation_bin: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv("HYPOTHEX_FAKE_GPUS", raising=False)
     refuse_remote(_isolation_bin / "no-ssh", monkeypatch)
     refuse_host_tools(_isolation_bin, monkeypatch)
+
+
+@pytest.fixture
+def fake_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeRemote:
+    """Fake ssh/scp world; add hosts with ``fake_remote.add_host("gpu1")``."""
+    return install_fake_remote(tmp_path / "fake-remote", monkeypatch)

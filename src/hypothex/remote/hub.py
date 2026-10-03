@@ -1094,8 +1094,12 @@ class Hub:
         task, sup.task = sup.task, None
         if task is not None:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise  # the cancel was aimed at our caller, not only at the task
         await self._drain(sup)
 
     async def _drain(self, sup: _Supervisor) -> None:

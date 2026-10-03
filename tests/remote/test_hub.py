@@ -1574,6 +1574,32 @@ def test_sessions_close_their_http_clients(
     assert all(c._http.is_closed for c in created)  # no socket leaks on reconnect
 
 
+def test_a_halt_keeps_a_cancel_aimed_at_its_caller(tmp_path: Path) -> None:
+    hub = Hub(Context.open(tmp_path / "hub"), EnvironmentsFile(environments={}))
+    sup = hub._new_supervisor("a", HostSpec(route="url", url="http://127.0.0.1:9"))
+    entered = asyncio.Event()
+
+    async def slow_to_cancel() -> None:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            entered.set()
+            await asyncio.sleep(0.2)  # still unwinding when the caller is cancelled
+            raise
+
+    async def main() -> None:
+        sup.task = asyncio.create_task(slow_to_cancel())
+        await asyncio.sleep(0)
+        caller = asyncio.create_task(hub._halt(sup))
+        await entered.wait()
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert caller.cancelled()
+
+    asyncio.run(main())
+
+
 def test_a_halt_during_the_session_drain_still_closes_clients_and_route(
     tmp_path: Path, servers: tuple[EnvServer, EnvServer], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -292,6 +292,10 @@ def _launch_running(ctx: Context, toy_repo: Path) -> tuple[str, int]:
     running = wait_for_run(ctx, rec.run_id, timeout=30, statuses=frozenset({RunStatus.RUNNING}))
     info = json.loads((ctx.run_dir(running) / "supervisor.pid").read_text())
     assert running.executor.pid == info["pid"] and running.executor.child_pid is not None
+    log = ctx.run_dir(running) / "logs" / "stdout.log"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and "ready" not in (log.read_text() if log.exists() else ""):
+        time.sleep(0.01)  # `running` is saved just before the gate opens (gated spawn)
     return rec.run_id, info["pid"]
 
 

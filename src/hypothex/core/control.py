@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import secrets
-import subprocess
-import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -16,12 +14,13 @@ from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.execution import (
     STOP_MARKER,
+    SUPERVISOR_PID_FILE,
     TERM_GRACE_SECONDS,
     RunRequest,
     execute_run,
     prepare_run,
     process_alive,
-    process_create_time,
+    spawn_supervisor,
     terminate_group,
 )
 from hypothex.core.fsutil import atomic_write_text
@@ -36,7 +35,6 @@ from hypothex.core.records import (
 )
 
 QUEUED_GRACE_SECONDS = 60.0
-SUPERVISOR_PID_FILE = "supervisor.pid"
 WAIT_REPAIR_SECONDS = 5.0
 
 
@@ -55,28 +53,7 @@ def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
         The run as recorded right after launch.
     """
     record = prepare_run(ctx, req)
-    run_dir = ctx.run_dir(record)
-    with (run_dir / "logs" / "supervisor.log").open("ab") as log:
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "hypothex.core.supervisor",
-                record.run_id,
-                "--home",
-                str(ctx.layout.home),
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-        )
-    atomic_write_text(
-        run_dir / SUPERVISOR_PID_FILE,
-        json.dumps({"pid": proc.pid, "create_time": process_create_time(proc.pid)}),
-    )
-    ctx.emit("run.launched", record, {"supervisor_pid": proc.pid})
+    spawn_supervisor(ctx, record)
     return ctx.find_record(record.run_id)
 
 

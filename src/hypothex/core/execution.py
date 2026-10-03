@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -28,13 +30,21 @@ from hypothex.core.evalrunner import default_python_cmd
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.fsutil import atomic_write_bytes, atomic_write_text, read_yaml, write_yaml
 from hypothex.core.gitinfo import capture_diff, git_info
+from hypothex.core.gpus import query_gpus
 from hypothex.core.ids import new_run_id, utcnow
 from hypothex.core.records import ExecutorInfo, RunKind, RunRecord, RunStatus
 from hypothex.core.seeds import config_hash, run_fingerprint
 from hypothex.core.store import sum_usage
+from hypothex.remote.config import SlurmDefaults
 
 STOP_MARKER = "stop_requested"
 TERM_GRACE_SECONDS = 10.0
+SUPERVISOR_PID_FILE = "supervisor.pid"
+QUEUE_FILE = "queue.json"
+EXECUTION_CLAIM = "execution.claim"
+GATE_EXIT = 97
+GATE_ARGV = ("sh", "-c", 'IFS= read -r _ || exit 97; exec "$@"', "hx-gate")
+"""Run commands behind this gate: they start only after the supervisor writes ``go``."""
 
 
 @dataclass
@@ -44,6 +54,14 @@ class RunRequest:
 
     ``command`` is an argv template that may contain ``{vars}``; if it is None
     the ``stage`` template from ``hypothex.yaml`` is used.
+
+    ``gpus`` is how many GPUs the run needs on this host. ``queue`` puts the
+    run in this host's GPU queue instead of starting it now (spec 8A.5).
+    ``slurm`` holds ``sbatch`` settings; a request with it is submitted to
+    SLURM (``control.launch_run``), and SLURM's queue holds it.
+    ``commit`` pins the commit to run and ``diff`` is uncommitted changes to
+    apply on top of it (text of ``git diff HEAD --binary``); when the repo is
+    not already at exactly that state the run uses a git worktree (spec 8A.4).
     """
 
     repo: Path
@@ -60,6 +78,11 @@ class RunRequest:
     parent: str | None = None
     cwd: Path | None = None
     created_by: str = "human"
+    gpus: int = 0
+    queue: bool = False
+    slurm: SlurmDefaults | None = None
+    commit: str | None = None
+    diff: str | None = None
 
 
 def process_create_time(pid: int) -> float | None:
@@ -156,6 +179,93 @@ def seed_warning(template: list[str], seed: int | None) -> str | None:
     )
 
 
+def write_queue_marker(run_dir: Path) -> None:
+    """
+    Mark a queued run as waiting in this host's GPU queue.
+
+    Parameters
+    ----------
+    run_dir : Path
+        The run folder; ``queue.json`` records when the run joined the queue.
+    """
+    atomic_write_text(run_dir / QUEUE_FILE, json.dumps({"enqueued_at": utcnow().isoformat()}))
+
+
+def spawn_supervisor(ctx: Context, record: RunRecord) -> int:
+    """
+    Start a detached supervisor process that executes a queued run.
+
+    Writing ``supervisor.pid`` commits the start: the supervisor waits until
+    that file names its own pid before it executes anything
+    (``hypothex.core.supervisor``). If ``Popen`` or that write fails, the new
+    process is killed and ``OSError`` is raised: nothing will run, so the
+    caller may release the run's GPUs. An error after the commit (emitting
+    ``run.launched``) is raised as it is, and the run counts as started.
+
+    Parameters
+    ----------
+    ctx : Context
+    record : RunRecord
+        A run with status ``queued``.
+
+    Returns
+    -------
+    int
+        The supervisor's pid (also written to ``supervisor.pid``).
+
+    Raises
+    ------
+    OSError
+        The supervisor could not be started; nothing will execute the run.
+    """
+    run_dir = ctx.run_dir(record)
+    with (run_dir / "logs" / "supervisor.log").open("ab") as log:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "hypothex.core.supervisor",
+                record.run_id,
+                "--home",
+                str(ctx.layout.home),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    try:
+        atomic_write_text(
+            run_dir / SUPERVISOR_PID_FILE,
+            json.dumps({"pid": proc.pid, "create_time": process_create_time(proc.pid)}),
+        )
+    except BaseException:
+        # not committed: the supervisor never claims a run whose pid file is not its own
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise
+    ctx.emit("run.launched", record, {"supervisor_pid": proc.pid})
+    return proc.pid
+
+
+def _open_gate(proc: subprocess.Popen[bytes]) -> None:
+    """
+    Let a gated command start: write ``go`` to its stdin, then close the pipe.
+
+    Called only after the run's ``child_pid`` is saved. If the supervisor dies
+    before this, the pipe closes unwritten and the gate exits ``GATE_EXIT``
+    without running the command.
+    """
+    assert proc.stdin is not None
+    with contextlib.suppress(BrokenPipeError):  # the gate already died (killed by a stop)
+        proc.stdin.write(b"go\n")
+        proc.stdin.flush()
+    with contextlib.suppress(BrokenPipeError):
+        proc.stdin.close()
+
+
 def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     """
     Validate a request, create the run folder, and capture git/env/dataset state.
@@ -175,8 +285,8 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     Raises
     ------
     RunError
-        Unknown task/stage, missing template value, command not found, or an
-        agent run without a hypothesis.
+        Unknown task/stage, missing template value, command not found, an
+        agent run without a hypothesis, or more GPUs than this host has.
     """
     repo = req.repo.resolve()
     config = load_project_config(repo)
@@ -199,6 +309,12 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     if req.config_path is not None and not req.config_path.is_file():
         raise RunError(f"config file not found: {req.config_path}")
     user_config = read_yaml(req.config_path) if req.config_path is not None else None
+    if req.gpus < 0:
+        raise RunError(f"gpus must be 0 or more, got {req.gpus}")
+    if req.gpus > 0 and req.slurm is None:  # SLURM allocates GPUs on the compute node
+        total = len(query_gpus())
+        if req.gpus > total:
+            raise RunError(f"asked for {req.gpus} GPUs; this host has {total}")
 
     cwd = (req.cwd or repo).resolve()
     run_id = new_run_id(req.task)
@@ -263,7 +379,11 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         cwd=str(cwd),
         environment_id=ctx.descriptor.environment_id,
         host=ctx.descriptor.label,
-        executor=ExecutorInfo(pid=os.getpid(), pid_create_time=process_create_time(os.getpid())),
+        executor=ExecutorInfo(
+            pid=os.getpid(),
+            pid_create_time=process_create_time(os.getpid()),
+            host=ctx.descriptor.label,
+        ),
         git=git_info(cwd),
         datasets=datasets,
         seed=req.seed,
@@ -272,6 +392,7 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         created_at=utcnow(),
         tags=sorted(set(req.tags)),
         created_by=req.created_by,
+        gpus_requested=req.gpus,
     )
     ctx.create_run(record)
     if user_config is not None:
@@ -394,6 +515,10 @@ def execute_run(
     if record.status != RunStatus.QUEUED:
         raise RunError(f"run {run_id} is {record.status.value}, not queued")
     run_dir = ctx.run_dir(record)
+    try:  # one execution per run, even when two supervisors were spawned for it
+        os.close(os.open(run_dir / EXECUTION_CLAIM, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+    except FileExistsError:
+        raise RunError(f"run {run_id} is already being executed") from None
     # Keep what the scheduler or SLURM recorded (host, gpus, job id, node); the
     # run is no longer waiting, so it has no queue position.
     me = record.executor.model_copy(
@@ -422,13 +547,15 @@ def execute_run(
     }
     if record.seed is not None:
         env["HYPOTHEX_SEED"] = str(record.seed)
+    if record.executor.gpus:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in record.executor.gpus)
     with _forward_termination() as term:
         try:
             proc = subprocess.Popen(
-                record.command,
+                [*GATE_ARGV, *record.command],  # waits for "go": nothing runs unowned
                 cwd=record.cwd,
                 env=env,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
@@ -455,13 +582,24 @@ def execute_run(
         term.attach(proc.pid)
 
         started = me.model_copy(update={"child_pid": proc.pid})
-        ctx.update_run(
-            run_id,
-            "run.started",
-            lambda r: r.model_copy(
-                update={"status": RunStatus.RUNNING, "started_at": utcnow(), "executor": started}
-            ),
-        )
+        try:
+            ctx.update_run(
+                run_id,
+                "run.started",
+                lambda r: r.model_copy(
+                    update={
+                        "status": RunStatus.RUNNING,
+                        "started_at": utcnow(),
+                        "executor": started,
+                    }
+                ),
+            )
+        except BaseException:
+            assert proc.stdin is not None
+            proc.stdin.close()  # never opened: the gate exits without running the command
+            proc.wait()
+            raise
+        _open_gate(proc)  # child_pid is saved: only now may the command run
         pumps = [
             _pump(proc.stdout, run_dir / "logs" / "stdout.log", stdout_sink),
             _pump(proc.stderr, run_dir / "logs" / "stderr.log", stderr_sink),

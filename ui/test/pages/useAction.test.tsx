@@ -1,4 +1,5 @@
 import { afterEach, expect, mock, test } from "bun:test";
+import { useQuery } from "@tanstack/react-query";
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { ApiError, api } from "../../src/api/client";
 import { shouldRetry, useAction } from "../../src/pages/components/useAction";
@@ -73,4 +74,38 @@ test("two clicks send two different command_ids", async () => {
   await waitFor(() => expect(onDone).toHaveBeenCalledTimes(2));
   const ids = calls.map((c) => (c.body as { command_id: string }).command_id);
   expect(new Set(ids).size).toBe(2);
+});
+
+function SlowRefresh({ onDone }: { onDone: (d: { run_id: string }) => void }) {
+  const run = useQuery({ queryKey: ["run", "R"], queryFn: ({ signal }) => api.run("R", signal) });
+  const action = useAction<{ run_id: string }>({
+    send: (_arg, opts) => api.rerun("R", opts),
+    invalidate: [["run", "R"]],
+    onSuccess: onDone,
+  });
+  return (
+    <button type="button" onClick={() => action.run()} disabled={action.pending || run.isPending}>
+      go
+    </button>
+  );
+}
+
+test("calls onSuccess and clears pending without waiting for the invalidated queries", async () => {
+  let loads = 0;
+  mockApi({
+    "GET /api/v1/runs/R": () => {
+      loads += 1;
+      // The first load answers; the refetch after the action never does.
+      return loads === 1 ? { run_id: "R" } : new Promise(() => {});
+    },
+    "POST /api/v1/runs/R/rerun": { run_id: "NEW" },
+  });
+  const onDone = mock((_d: { run_id: string }) => {});
+  renderWithClient(<SlowRefresh onDone={onDone} />);
+  const button = screen.getByRole("button", { name: "go" });
+  await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
+  fireEvent.click(button);
+  await waitFor(() => expect(loads).toBe(2));
+  await waitFor(() => expect(onDone).toHaveBeenCalledWith({ run_id: "NEW" }));
+  await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
 });

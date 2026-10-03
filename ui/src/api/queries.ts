@@ -167,12 +167,12 @@ export function useSaveView(project: string, task: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ name, text }: { name: string; text: string }) => api.saveView(project, task, name, text),
-    onSuccess: async (_data, { name }) => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: queryKeys.views(project, task) }),
-        qc.invalidateQueries({ queryKey: queryKeys.view(project, task, name) }),
-        qc.invalidateQueries({ queryKey: ["views", "query", project, task] }),
-      ]);
+    // Not awaited: the caller's `onSuccess` (the editor navigates away) must not wait
+    // for the editor's own preview query to refetch.
+    onSuccess: (_data, { name }) => {
+      void qc.invalidateQueries({ queryKey: queryKeys.views(project, task) });
+      void qc.invalidateQueries({ queryKey: queryKeys.view(project, task, name) });
+      void qc.invalidateQueries({ queryKey: ["views", "query", project, task] });
     },
   });
 }

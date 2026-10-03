@@ -12,7 +12,9 @@ import {
   useLeaderboard,
   useSaveView,
   useView,
+  useViewQuery,
 } from "../../src/api/queries";
+import { mockApi } from "../pages/helpers";
 import { mockRoutes } from "./fetch-mock";
 
 const realFetch = globalThis.fetch;
@@ -99,5 +101,27 @@ describe("hooks", () => {
     act(() => result.current.mutate({ name: "route", text: "title: r\n" }));
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect([list, doc, panels, other].map((k) => invalidated(qc, k))).toEqual([true, true, true, false]);
+  });
+
+  test("useSaveView succeeds without waiting for the invalidated queries to refetch", async () => {
+    let queries = 0;
+    mockApi({
+      "POST /api/v1/tasks/toy/acc/views/query": () => {
+        queries += 1;
+        // The first load answers; the refetch after the save never does.
+        return queries === 1 ? { panels: [] } : new Promise(() => {});
+      },
+      "PUT /api/v1/tasks/toy/acc/views/route": { info: { name: "route" }, view: { title: "r" } },
+    });
+    const { wrapper } = setup();
+    const { result } = renderHook(
+      () => ({ panels: useViewQuery("toy", "acc", { name: "route" }), save: useSaveView("toy", "acc") }),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.panels.isSuccess).toBe(true));
+    act(() => result.current.save.mutate({ name: "route", text: "title: r\n" }));
+    await waitFor(() => expect(queries).toBe(2));
+    await waitFor(() => expect(result.current.save.isSuccess).toBe(true));
+    expect(result.current.panels.isFetching).toBe(true);
   });
 });

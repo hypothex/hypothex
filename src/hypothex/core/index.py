@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
@@ -369,6 +370,52 @@ class Index:
         with Session(self.engine) as session:
             return set(session.scalars(select(RunRow.run_id)))
 
+    def delete_run(self, run_id: str) -> None:
+        """
+        Drop a run and its tags, scores, and metric points from the index.
+
+        Used when the run's folder is gone; the files are the source of truth.
+
+        Parameters
+        ----------
+        run_id : str
+            Run id.
+        """
+        with Session(self.engine) as session, session.begin():
+            for model in (RunRow, RunTagRow, ScoreRow, MetricPointRow):
+                session.execute(delete(model).where(model.run_id == run_id))
+
+    def get_meta(self, key: str) -> str | None:
+        """
+        Return a stored index setting, or None.
+
+        Parameters
+        ----------
+        key : str
+            Setting name, e.g. ``schema_version``.
+
+        Returns
+        -------
+        str or None
+        """
+        with Session(self.engine) as session:
+            row = session.get(MetaRow, key)
+            return None if row is None else row.value
+
+    def set_meta(self, key: str, value: str) -> None:
+        """
+        Store an index setting.
+
+        Parameters
+        ----------
+        key : str
+            Setting name.
+        value : str
+            Its value.
+        """
+        with Session(self.engine) as session, session.begin():
+            session.merge(MetaRow(key=key, value=value))
+
     # scores -------------------------------------------------------------------
     def add_score(self, run_id: str, score: ScoreRecord) -> None:
         """
@@ -558,4 +605,77 @@ def repair_index_gaps(index: Index, store: RunStore) -> list[str]:
             continue
         index_run(index, store, record)
         added.append(run_id)
+    return added
+
+
+STORE_SCAN_KEY = "store_scanned"
+SETTLED_NANOSECONDS = 2_000_000_000
+"""A folder changed this recently may still be filling in; its scan is not trusted yet."""
+
+
+def store_fingerprint(store: RunStore) -> tuple[str, bool]:
+    """
+    Fingerprint the folders a new run or project changes, without listing runs.
+
+    Creating or deleting a run folder changes the modification time of its
+    project's ``runs/`` folder; a new or re-registered project changes the
+    store folder or its project folder. So this costs one ``stat`` per
+    project, not per run.
+
+    Parameters
+    ----------
+    store : RunStore
+        File store.
+
+    Returns
+    -------
+    fingerprint : str
+        Stable text of the folders' modification times.
+    settled : bool
+        False when any of them changed in the last ``SETTLED_NANOSECONDS`` (a
+        run folder may exist before its ``run.yaml``, and coarse clocks give
+        two changes in one tick the same time).
+
+    Examples
+    --------
+    >>> store_fingerprint(RunStore(layout))  # doctest: +SKIP
+    ('[["", 1759480000000000000], ["toy", ...]]', True)
+    """
+    root = store.layout.store
+    stamps: list[tuple[str, int]] = [("", root.stat().st_mtime_ns)]
+    for project in sorted(p for p in root.iterdir() if p.is_dir()):
+        stamps.append((project.name, project.stat().st_mtime_ns))
+        runs = project / "runs"
+        if runs.is_dir():
+            stamps.append((f"{project.name}/runs", runs.stat().st_mtime_ns))
+    newest = max(ns for _, ns in stamps)
+    return json.dumps(stamps), time.time_ns() - newest >= SETTLED_NANOSECONDS
+
+
+def repair_index_if_changed(index: Index, store: RunStore) -> list[str]:
+    """
+    Run ``repair_index_gaps`` only when run or project folders changed since the last scan.
+
+    ``Context.open`` calls this on every open (each CLI command, each
+    supervisor), so an unchanged store costs one ``stat`` per project instead
+    of a listing of every run folder.
+
+    Parameters
+    ----------
+    index : Index
+        Index to fill in.
+    store : RunStore
+        File store, the source of truth.
+
+    Returns
+    -------
+    list of str
+        Run ids that were added, sorted.
+    """
+    fingerprint, settled = store_fingerprint(store)
+    if index.get_meta(STORE_SCAN_KEY) == fingerprint:
+        return []
+    added = repair_index_gaps(index, store)
+    if settled:  # taken before the scan: a later change gives a new fingerprint
+        index.set_meta(STORE_SCAN_KEY, fingerprint)
     return added

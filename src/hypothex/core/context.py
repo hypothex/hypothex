@@ -10,7 +10,7 @@ from typing import Any
 from hypothex.core.config import load_project_config
 from hypothex.core.environment import EnvironmentDescriptor, load_descriptor
 from hypothex.core.events import EventLog
-from hypothex.core.index import Index, rebuild_index, repair_index_gaps
+from hypothex.core.index import Index, rebuild_index, repair_index_if_changed
 from hypothex.core.layout import Layout, default_home
 from hypothex.core.records import RunRecord, ScoreRecord
 from hypothex.core.store import ProjectEntry, RunStore, run_lock
@@ -36,6 +36,12 @@ class Context:
         """
         Open (and if needed create) a Hypothex home.
 
+        A run folder with no index row (a crash between the file write and the
+        index write) is indexed here. The store is listed only when a run or
+        project folder changed since the last listing
+        (``index.repair_index_if_changed``); an index with a new schema is
+        rebuilt from files.
+
         Parameters
         ----------
         home : Path, optional
@@ -59,7 +65,7 @@ class Context:
         if index.rebuilt_schema:
             rebuild_index(index, store)
         else:
-            repair_index_gaps(index, store)
+            repair_index_if_changed(index, store)
         return ctx
 
     def find_record(self, run_id: str) -> RunRecord:

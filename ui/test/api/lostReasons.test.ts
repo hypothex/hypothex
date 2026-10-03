@@ -13,7 +13,8 @@ function ev(sequence: number, type: string, payload: Record<string, unknown>, ru
   return { sequence, type, project: "toy", run_id, payload, created_at: "2026-10-03T02:14:37Z" };
 }
 
-afterEach(clearLostReasons);
+// act: the preload cleanup() runs after this hook, so a hook from the test may still be mounted
+afterEach(() => act(() => clearLostReasons()));
 
 describe("lost reasons", () => {
   test("lostReasonOf reads run.lost and a mirrored run.lost, nothing else", () => {

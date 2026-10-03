@@ -71,6 +71,31 @@ A view is YAML: `title`, optional `from: <kind>` (start from a preset), optional
 - MCP: `list_views`, `get_view`, `add_view` (returns `issues` on failure),
   `query_view` (panel rows).
 
+## Remote hosts and sweeps
+
+The hub (`hx serve` on the user's machine) runs work on SSH GPU boxes and SLURM
+clusters. Check the hosts first: `hx hosts status --json` (state, GPUs busy, queue,
+SLURM jobs, cost today).
+
+- Launch on a host:
+  `hx launch --json --host gpu1 --gpus 2 --queue -t <task> -H "<why>" -- python train.py --seed '{seed}'`.
+  The host uses its own checkout (set once with `hx hosts map <project> <host> <path>`);
+  uncommitted changes are sent along. SLURM hosts also take `--partition`, `--time`,
+  `--account`.
+- Sweep (a grid x seeds, one command):
+  `hx sweep --json -t <task> -H "<why>" --grid lr=1e-4,3e-4 --grid beam=5,10 --seeds 3 --host gpu1 --queue -- python train.py --lr '{lr}' --beam '{beam}' --seed '{seed}'`.
+  Every swept name must appear in the command (runs also get `$HYPOTHEX_SEED`). Follow it with
+  `hx sweep show <id> --json` (best cell, progress, cost), add seeds with
+  `hx sweep extend <id> --seeds 4,5 --json`, stop the queued runs with
+  `hx sweep cancel <id> --json`. List sweeps: `hx sweeps --json`.
+- Checkpoints stay on the host. Copy one when needed:
+  `hx pull <run_id> --artifact checkpoint --json` (prints `local_path`).
+- A host that the hub cannot reach shows `stale` or `error` in `hx hosts status`.
+  Its runs keep going there and are not lost: do not rerun them. Wait, or run
+  `hx hosts connect <host>`.
+- MCP: `list_hosts`, `launch_run(host=..., gpus=..., queue=True)`, `launch_sweep`,
+  `get_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`.
+
 ## Where things are
 
 `hx show <run_id> --json` → `paths`: `run_dir`, `repo`, `cwd`, `config`,

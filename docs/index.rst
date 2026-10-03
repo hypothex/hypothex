@@ -11,6 +11,7 @@ Experiment tracker and control panel for AI researchers and their agents.
    cli
    views
    ui
+   remote
    sdk
    agents
    architecture

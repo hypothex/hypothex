@@ -57,3 +57,52 @@ def test_views_docs_example_validates() -> None:
     assert issues == []  # e.g. `x: cost` would report "unknown metric cost"
     scatter = next(p for p in view.panels if p.type == "scatter")
     assert (scatter.data.x, scatter.data.y) == ("usage.usd", "solved")
+
+
+def test_skill_remote_section_uses_real_commands_and_tools() -> None:
+    text = SKILL.read_text()
+    group = typer.main.get_command(app)
+    expected = {"hosts": {"status", "map", "connect"}, "sweep": {"show", "extend", "cancel"}}
+    for sub, used_expected in expected.items():
+        known = set(group.commands[sub].commands)  # ty: ignore[unresolved-attribute]
+        used = set(re.findall(rf"\bhx {sub} ([a-z]+)", text))
+        assert used == used_expected, sub
+        assert used <= known, f"unknown {sub} commands in SKILL.md: {used - known}"
+    for tool in (
+        "list_hosts",
+        "launch_run",
+        "launch_sweep",
+        "get_sweep",
+        "cancel_sweep",
+        "extend_sweep",
+        "pull_artifact",
+    ):
+        assert f"`{tool}" in text, tool
+
+
+def test_remote_docs_page_is_in_toctree_and_names_real_commands() -> None:
+    docs = SKILL.parents[2] / "docs"
+    assert "   ui\n   remote\n" in (docs / "index.rst").read_text()
+    page = (docs / "remote.rst").read_text()
+    group = typer.main.get_command(app)
+    top = set(group.commands)  # ty: ignore[unresolved-attribute]
+    used = set(re.findall(r"\bhx ([a-z]+)", page))
+    assert used <= top, f"unknown commands in remote.rst: {used - top}"
+    for sub in ("hosts", "sweep", "service"):
+        known = set(group.commands[sub].commands)  # ty: ignore[unresolved-attribute]
+        named = set(re.findall(rf"\bhx {sub} ([a-z]+)", page))
+        assert named <= known, f"unknown {sub} commands in remote.rst: {named - known}"
+    for phrase in (
+        "hx hosts add",
+        "hx hosts map",
+        "hx launch --host",
+        "hx sweep -t",
+        "hx sweep extend",
+        "hx pull",
+        "hx service install",
+        "demo --with-hosts",
+        "HYPOTHEX_HUB_URL",
+        "environments.yaml",
+        "pull_artifact",
+    ):
+        assert phrase in page, phrase

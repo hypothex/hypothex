@@ -67,6 +67,26 @@ def test_scores_roundtrip(tmp_path: Path) -> None:
     assert idx.scores_for(["r1"]) == {"r1": [s2]}
 
 
+def test_metric_points_for_filters_names_with_the_composite_index(tmp_path: Path) -> None:
+    idx = Index(tmp_path / "i.db")
+    names = ("loss", "acc", "lr")
+    for rid in ("r1", "r2", "r3"):
+        points = [MetricPoint(name=n, step=s, value=float(s)) for n in names for s in (2, 1)]
+        idx.replace_metric_points(rid, points)
+    got = idx.metric_points_for(["r1", "r3", "zz"], names=["loss", "acc"])
+    assert set(got) == {"r1", "r3"}
+    want = [("acc", 1), ("acc", 2), ("loss", 1), ("loss", 2)]
+    assert [(p.name, p.step) for p in got["r1"]] == want
+    assert idx.metric_points("r2") == idx.metric_points_for(["r2"])["r2"]
+    with idx.engine.connect() as conn:
+        plan = conn.exec_driver_sql(
+            "EXPLAIN QUERY PLAN SELECT step, value FROM metric_points "
+            "WHERE run_id IN ('r1', 'r3') AND name IN ('loss') ORDER BY run_id, name, step"
+        ).all()
+    text = " ".join(str(row) for row in plan)
+    assert "ix_metric_points_run_name_step" in text and "TEMP B-TREE" not in text
+
+
 def test_downsample_keeps_last_point_and_limit() -> None:
     points = [MetricPoint(name="loss", step=i, value=float(i)) for i in range(2500)]
     points.append(MetricPoint(name="acc", step=0, value=1.0))

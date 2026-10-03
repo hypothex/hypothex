@@ -28,6 +28,7 @@ from sqlalchemy import (
     select,
     text,
 )
+from sqlalchemy import Index as SqlIndex
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
@@ -122,8 +123,9 @@ class ScoreRow(Base):
 
 class MetricPointRow(Base):
     __tablename__ = "metric_points"
+    __table_args__ = (SqlIndex("ix_metric_points_run_name_step", "run_id", "name", "step"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(String, index=True)
+    run_id: Mapped[str] = mapped_column(String)
     name: Mapped[str] = mapped_column(String)
     step: Mapped[int] = mapped_column(Integer)
     value: Mapped[float] = mapped_column(Float)
@@ -688,22 +690,74 @@ class Index:
         -------
         list of MetricPoint
         """
-        if self.store is not None:
-            with Session(self.engine) as session:
-                pending = session.get(PointsPendingRow, run_id) is not None
-                project = session.scalar(select(RunRow.project).where(RunRow.run_id == run_id))
-            if pending and project is not None:
-                self.replace_metric_points(run_id, self.store.read_metric_points(project, run_id))
-        stmt = (
-            select(MetricPointRow.name, MetricPointRow.step, MetricPointRow.value, MetricPointRow.t)
-            .where(MetricPointRow.run_id == run_id)
-            .order_by(MetricPointRow.name, MetricPointRow.step)
+        return self.metric_points_for([run_id]).get(run_id, [])
+
+    def metric_points_for(
+        self, run_ids: Iterable[str], names: Iterable[str] | None = None
+    ) -> dict[str, list[MetricPoint]]:
+        """
+        Return the indexed metric history of many runs, optionally of some names only.
+
+        Uses the ``(run_id, name, step)`` index, so a chart of a few names over
+        many runs reads only those rows. Points a rebuild skipped are read
+        first, as in ``metric_points``.
+
+        Parameters
+        ----------
+        run_ids : iterable of str
+            Runs to read.
+        names : iterable of str, optional
+            Metric names to keep; ``None`` keeps all.
+
+        Returns
+        -------
+        dict of str to list of MetricPoint
+            Per run, points ordered by name then step; runs with none are omitted.
+
+        Examples
+        --------
+        >>> idx.metric_points_for(["r1", "r2"], names=["loss"])  # doctest: +SKIP
+        {'r1': [MetricPoint(name='loss', step=0, value=1.0, t=None)]}
+        """
+        ids = list(dict.fromkeys(run_ids))
+        wanted = None if names is None else sorted(set(names))
+        self._fill_pending_points(ids)
+        out: dict[str, list[MetricPoint]] = {}
+        cols = (
+            MetricPointRow.run_id,
+            MetricPointRow.name,
+            MetricPointRow.step,
+            MetricPointRow.value,
+            MetricPointRow.t,
         )
         with Session(self.engine) as session:
-            return [
-                MetricPoint(name=name, step=step, value=value, t=t)
-                for name, step, value, t in session.execute(stmt)
-            ]
+            for start in range(0, len(ids), 500):
+                stmt = select(*cols).where(MetricPointRow.run_id.in_(ids[start : start + 500]))
+                if wanted is not None:
+                    stmt = stmt.where(MetricPointRow.name.in_(wanted))
+                stmt = stmt.order_by(
+                    MetricPointRow.run_id, MetricPointRow.name, MetricPointRow.step
+                )
+                for run_id, name, step, value, t in session.execute(stmt):
+                    point = MetricPoint(name=name, step=step, value=value, t=t)
+                    out.setdefault(run_id, []).append(point)
+        return out
+
+    def _fill_pending_points(self, run_ids: list[str]) -> None:
+        """Index the metric files of the runs whose points a rebuild skipped."""
+        if self.store is None or not run_ids:
+            return
+        pending: list[tuple[str, str]] = []
+        with Session(self.engine) as session:
+            for start in range(0, len(run_ids), 500):
+                stmt = (
+                    select(RunRow.run_id, RunRow.project)
+                    .join(PointsPendingRow, PointsPendingRow.run_id == RunRow.run_id)
+                    .where(RunRow.run_id.in_(run_ids[start : start + 500]))
+                )
+                pending.extend((r, p) for r, p in session.execute(stmt))
+        for run_id, project in pending:
+            self.replace_metric_points(run_id, self.store.read_metric_points(project, run_id))
 
     # host cursors -------------------------------------------------------------
     def get_cursor(self, host: str, environment_id: str) -> int:

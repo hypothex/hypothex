@@ -113,6 +113,18 @@ def test_rebuild_does_not_read_metric_files_but_points_stay_available(tmp_path: 
     assert hooked.points_read == 1  # indexed now: the file is read once
 
 
+def test_metric_points_for_reads_skipped_points_of_many_runs(tmp_path: Path) -> None:
+    store = _store(tmp_path, runs=3)
+    index = Index(tmp_path / "index.db", store=store)
+    rebuild_index(index, store)
+    got = index.metric_points_for(["r0", "r2"], names=["loss"])
+    assert {rid: [(p.name, p.step) for p in pts] for rid, pts in got.items()} == {
+        "r0": [("loss", 0)],
+        "r2": [("loss", 0)],
+    }
+    assert index.metric_points_for(["r1"], names=["acc"]) == {}
+
+
 def test_writes_during_a_rebuild_are_kept(tmp_path: Path) -> None:
     store = _store(tmp_path, runs=4)
     index = Index(tmp_path / "index.db", store=store)

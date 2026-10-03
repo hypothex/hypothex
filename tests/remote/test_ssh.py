@@ -1,11 +1,14 @@
+import json
 import os
+import threading
 import time
+import uuid
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from hypothex.remote.ssh import SshError, SshTarget, run_remote
+from hypothex.remote.ssh import SshError, SshTarget, copy_from, copy_to, run_remote
 from tests.fakes import DEAD_HUB, FakeRemote
 
 # --------------------------------------------------------------------------- isolation
@@ -128,3 +131,352 @@ def test_run_remote_missing_ssh_binary_raises(tmp_path: Path) -> None:
     target = SshTarget(alias="gpu1", ssh_bin=str(tmp_path / "no-ssh"))
     with pytest.raises(SshError, match="not found"):
         run_remote(target, "true")
+
+
+# --------------------------------------------------------------------------- copy
+
+
+@pytest.fixture
+def work(tmp_path: Path) -> Path:
+    """The hub's pull work folder (``<hub home>/pulls``), outside every destination."""
+    return tmp_path / "hub-home" / "pulls"
+
+
+def test_copy_to_file_lands_at_remote_path(fake_remote: FakeRemote, tmp_path: Path) -> None:
+    home = fake_remote.add_host("gpu1")
+    target = fake_remote.target("gpu1")
+    run_remote(target, "mkdir -p .hypothex/runtime/wheels")
+    wheel = tmp_path / "hypothex-0.2.0-py3-none-any.whl"
+    wheel.write_bytes(b"PK\x03\x04wheel")
+    copy_to(target, wheel, "~/.hypothex/runtime/wheels/hx.whl")
+    assert (home / ".hypothex/runtime/wheels/hx.whl").read_bytes() == b"PK\x03\x04wheel"
+    argv = fake_remote.calls("scp")[-1]
+    assert argv[:2] == ["-o", "BatchMode=yes"]
+    assert argv[-5:] == ["-s", "-q", "-r", str(wheel), "gpu1:~/.hypothex/runtime/wheels/hx.whl"]
+
+
+def test_copy_to_relative_path_and_directory(fake_remote: FakeRemote, tmp_path: Path) -> None:
+    home = fake_remote.add_host("gpu1")
+    src = tmp_path / "bundle"
+    (src / "sub").mkdir(parents=True)
+    (src / "a.txt").write_text("a")
+    (src / "sub" / "b.txt").write_text("b")
+    copy_to(fake_remote.target("gpu1"), src, "bundle")
+    assert (home / "bundle" / "a.txt").read_text() == "a"
+    assert (home / "bundle" / "sub" / "b.txt").read_text() == "b"
+
+
+def test_copy_to_missing_remote_parent_raises(fake_remote: FakeRemote, tmp_path: Path) -> None:
+    fake_remote.add_host("gpu1")
+    src = tmp_path / "f.txt"
+    src.write_text("x")
+    with pytest.raises(SshError, match="No such file or directory"):
+        copy_to(fake_remote.target("gpu1"), src, "~/missing/dir/f.txt")
+
+
+def test_copy_to_missing_local_raises_before_scp(fake_remote: FakeRemote, tmp_path: Path) -> None:
+    fake_remote.add_host("gpu1")
+    with pytest.raises(SshError, match="no such file"):
+        copy_to(fake_remote.target("gpu1"), tmp_path / "nope.whl", "~/nope.whl")
+    assert fake_remote.calls("scp") == []
+
+
+def test_copy_to_unknown_host_raises(fake_remote: FakeRemote, tmp_path: Path) -> None:
+    src = tmp_path / "f.txt"
+    src.write_text("x")
+    with pytest.raises(SshError, match="Could not resolve hostname nohost"):
+        copy_to(fake_remote.target("nohost"), src, "~/f.txt")
+
+
+def test_copy_rejects_newline_in_remote_path(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
+    fake_remote.add_host("gpu1")
+    src = tmp_path / "f.txt"
+    src.write_text("x")
+    with pytest.raises(SshError, match="invalid remote path"):
+        copy_to(fake_remote.target("gpu1"), src, "a\nb")
+    with pytest.raises(SshError, match="invalid remote path"):
+        copy_from(fake_remote.target("gpu1"), "", tmp_path / "out", work=work)
+
+
+@pytest.mark.parametrize(
+    "remote_path", ["/x;rm -rf ~", "/x $(id)", "/a/`id`", "~/a b", "/a/../etc/passwd", "../up"]
+)
+def test_copy_rejects_shell_and_parent_paths(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path, remote_path: str
+) -> None:
+    fake_remote.add_host("gpu1")
+    src = tmp_path / "f.txt"
+    src.write_text("x")
+    with pytest.raises(SshError, match="invalid remote path"):
+        copy_to(fake_remote.target("gpu1"), src, remote_path)
+    with pytest.raises(SshError, match="invalid remote path"):
+        copy_from(fake_remote.target("gpu1"), remote_path, tmp_path / "out", work=work)
+    assert fake_remote.calls("scp") == []
+
+
+@pytest.mark.parametrize("remote_path", ["/", "~", "~/", "/scratch/ckpt/", "/scratch/."])
+def test_copy_from_needs_a_file_name(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path, remote_path: str
+) -> None:
+    fake_remote.add_host("gpu1")
+    pulled = tmp_path / "pulled"
+    pulled.mkdir()
+    (pulled / "keep.txt").write_text("k")
+    with pytest.raises(SshError, match="invalid remote path"):
+        copy_from(fake_remote.target("gpu1"), remote_path, pulled / "x", work=work)
+    assert (pulled / "keep.txt").read_text() == "k"
+    assert fake_remote.calls("scp") == []
+
+
+def test_copy_from_forces_sftp(fake_remote: FakeRemote, tmp_path: Path, work: Path) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "f.txt").write_text("x")
+    copy_from(fake_remote.target("gpu1"), "f.txt", tmp_path / "f.txt", work=work)
+    assert "-s" in fake_remote.calls("scp")[-1]
+
+
+def test_fake_scp_refuses_paths_outside_fake_root(fake_remote: FakeRemote, tmp_path: Path) -> None:
+    fake_remote.add_host("gpu1")
+    src = tmp_path / "f.txt"
+    src.write_text("x")
+    with pytest.raises(SshError, match="outside the fake remote root"):
+        copy_to(fake_remote.target("gpu1"), src, "/etc/hypothex-test.txt")
+    assert not Path("/etc/hypothex-test.txt").exists()
+
+
+def test_copy_from_file_creates_local_parents(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "ckpt").mkdir()
+    (home / "ckpt" / "best.pt").write_bytes(b"\x00weights")
+    dest = tmp_path / "store" / "pulled" / "best.pt"
+    copy_from(fake_remote.target("gpu1"), "~/ckpt/best.pt", dest, work=work)
+    assert dest.read_bytes() == b"\x00weights"
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["best.pt"]
+
+
+def test_copy_from_directory(fake_remote: FakeRemote, tmp_path: Path, work: Path) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "run" / "ckpt").mkdir(parents=True)
+    (home / "run" / "ckpt" / "model.bin").write_bytes(b"m")
+    (home / "run" / "ckpt" / "cfg.json").write_text("{}")
+    dest = tmp_path / "pulled" / "ckpt"
+    copy_from(fake_remote.target("gpu1"), "run/ckpt", dest, work=work)
+    assert sorted(p.name for p in dest.iterdir()) == ["cfg.json", "model.bin"]
+
+
+def test_copy_from_replaces_existing_file_and_dir(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "f.txt").write_text("new")
+    (home / "d").mkdir()
+    (home / "d" / "new.txt").write_text("n")
+    file_dest = tmp_path / "f.txt"
+    file_dest.write_text("old")
+    dir_dest = tmp_path / "d"
+    dir_dest.mkdir()
+    (dir_dest / "stale.txt").write_text("s")
+    target = fake_remote.target("gpu1")
+    copy_from(target, "f.txt", file_dest, work=work)
+    copy_from(target, "d", dir_dest, work=work)
+    assert file_dest.read_text() == "new"
+    assert sorted(p.name for p in dir_dest.iterdir()) == ["new.txt"]
+
+
+def test_copy_from_missing_remote_leaves_nothing(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
+    fake_remote.add_host("gpu1")
+    out_dir = tmp_path / "out"
+    with pytest.raises(SshError, match="No such file or directory"):
+        copy_from(fake_remote.target("gpu1"), "~/nope.pt", out_dir / "nope.pt", work=work)
+    assert list(out_dir.iterdir()) == []
+    assert list((work / "stage").iterdir()) == []
+
+
+def test_copy_from_failure_keeps_the_old_file(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
+    fake_remote.add_host("gpu1")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    dest = out_dir / "best.pt"
+    dest.write_text("old")
+    with pytest.raises(SshError):
+        copy_from(fake_remote.target("gpu1"), "~/nope.pt", dest, work=work)
+    assert dest.read_text() == "old"
+    assert sorted(p.name for p in out_dir.iterdir()) == ["best.pt"]
+
+
+def test_concurrent_pulls_of_one_file_never_share_a_staging_path(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    for i in range(4):
+        (home / f"v{i}.pt").write_text(f"v{i}" * 50_000)
+    dest = tmp_path / "pulled" / "best.pt"
+    errors: list[Exception] = []
+
+    def pull(i: int) -> None:
+        try:
+            copy_from(fake_remote.target("gpu1"), f"v{i}.pt", dest, work=work)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=pull, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert dest.read_text() in {f"v{i}" * 50_000 for i in range(4)}
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["best.pt"]
+
+
+class _Crash(BaseException):
+    """The process dies right here (nothing on the way catches it)."""
+
+
+def test_a_folder_swap_cut_short_is_recovered(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "d").mkdir()
+    (home / "d" / "new.txt").write_text("n")
+    dest = tmp_path / "out" / "d"
+    dest.mkdir(parents=True)
+    (dest / "old.txt").write_text("o")
+    real = os.replace
+
+    def crash_after_the_old_folder_moved(src: str | Path, dst: str | Path) -> None:
+        real(src, dst)
+        if Path(dst).parent == work / "backup":
+            raise _Crash
+
+    target = fake_remote.target("gpu1")
+    monkeypatch.setattr(os, "replace", crash_after_the_old_folder_moved)
+    with pytest.raises(_Crash):
+        copy_from(target, "d", dest, work=work)
+    monkeypatch.setattr(os, "replace", real)
+    [backup] = (work / "backup").iterdir()
+    [record] = (work / "txn").iterdir()
+    assert not dest.exists() and (backup / "old.txt").is_file()
+    assert list(dest.parent.iterdir()) == []  # nothing of the swap next to the destination
+    assert json.loads(record.read_text()) == {"txn": backup.name, "dest": str(dest)}
+    with pytest.raises(SshError):  # the next pull fails, but the old folder comes back
+        copy_from(target, "nope", dest, work=work)
+    assert sorted(p.name for p in dest.iterdir()) == ["old.txt"]
+    copy_from(target, "d", dest, work=work)
+    assert sorted(p.name for p in dest.iterdir()) == ["new.txt"]
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["d"]
+    assert list((work / "txn").iterdir()) == [] and list((work / "backup").iterdir()) == []
+
+
+def test_a_swap_that_crashed_before_its_first_rename_changes_nothing(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "d").mkdir()
+    (home / "d" / "new.txt").write_text("n")
+    dest = tmp_path / "out" / "d"
+    dest.mkdir(parents=True)
+    (dest / "old.txt").write_text("o")
+    real = os.replace
+
+    def crash_before_any_rename(src: str | Path, dst: str | Path) -> None:
+        raise _Crash
+
+    target = fake_remote.target("gpu1")
+    monkeypatch.setattr(os, "replace", crash_before_any_rename)
+    with pytest.raises(_Crash):
+        copy_from(target, "d", dest, work=work)
+    monkeypatch.setattr(os, "replace", real)
+    assert sorted(p.name for p in dest.iterdir()) == ["old.txt"]  # the record alone is left
+    assert len(list((work / "txn").iterdir())) == 1
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["d"]
+    copy_from(target, "d", dest, work=work)
+    assert sorted(p.name for p in dest.iterdir()) == ["new.txt"]
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["d"]
+    assert list((work / "txn").iterdir()) == []
+
+
+def test_a_pull_never_touches_files_it_did_not_record(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "best.pt").write_text("new")
+    (home / "d").mkdir()
+    (home / "d" / "new.txt").write_text("n")
+    x = tmp_path / "x"
+    x.mkdir()
+    (x / ".best.pt.old").write_text("mine")  # the user's own files, named like backups
+    (x / ".d.old").mkdir()
+    (x / ".d.old" / "keep.txt").write_text("k")
+    (x / ".hx-pull-0123.old").write_text("also mine")
+    target = fake_remote.target("gpu1")
+    copy_from(target, "best.pt", x / "best.pt", work=work)  # a new file next to .best.pt.old
+    copy_from(target, "best.pt", x / "best.pt", work=work)  # and its replacement
+    (x / "d").mkdir()
+    (x / "d" / "stale.txt").write_text("s")
+    copy_from(target, "d", x / "d", work=work)  # a folder swap next to .d.old
+    assert (x / "best.pt").read_text() == "new"
+    assert (x / ".best.pt.old").read_text() == "mine"
+    assert (x / ".d.old" / "keep.txt").read_text() == "k"
+    assert (x / ".hx-pull-0123.old").read_text() == "also mine"
+    assert sorted(p.name for p in (x / "d").iterdir()) == ["new.txt"]
+    assert sorted(p.name for p in x.iterdir()) == [
+        ".best.pt.old",
+        ".d.old",
+        ".hx-pull-0123.old",
+        "best.pt",
+        "d",
+    ]
+
+
+def test_recovery_never_reads_a_look_alike_record_in_a_destination(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
+    # a downloaded artifact named like a transaction record, with matching fields
+    home = fake_remote.add_host("gpu1")
+    (home / "best.pt").write_text("new")
+    (home / "e").mkdir()
+    (home / "e" / "new.txt").write_text("n")
+    x = tmp_path / "x"
+    (x / "e").mkdir(parents=True)
+    (x / "e" / "old.txt").write_text("o")
+    (x / "kept").mkdir()
+    looks: dict[str, str] = {}
+    for dest in ("gone", "kept"):  # its dest missing (would be restored), present (deleted)
+        txn = uuid.uuid4().hex
+        fields = {"txn": txn, "dest": str(x / dest), "backup": f".hx-pull-{txn}.old"}
+        (x / f".hx-pull-{txn}.json").write_text(json.dumps(fields))
+        (x / f".hx-pull-{txn}.old").mkdir()
+        (x / f".hx-pull-{txn}.old" / "mine.txt").write_text(dest)
+        looks[dest] = txn
+    before = sorted(p.name for p in x.iterdir())
+    target = fake_remote.target("gpu1")
+    copy_from(target, "best.pt", x / "best.pt", work=work)
+    copy_from(target, "e", x / "e", work=work)  # a folder swap in the same folder
+    assert sorted(p.name for p in x.iterdir()) == sorted([*before, "best.pt"])
+    for dest, txn in looks.items():
+        assert (x / f".hx-pull-{txn}.old" / "mine.txt").read_text() == dest
+        assert json.loads((x / f".hx-pull-{txn}.json").read_text())["txn"] == txn
+    assert not (x / "gone").exists() and list((x / "kept").iterdir()) == []
+    assert sorted(p.name for p in (x / "e").iterdir()) == ["new.txt"]
+    assert list((work / "txn").iterdir()) == [] and list((work / "backup").iterdir()) == []
+
+
+@pytest.mark.parametrize("name", [".hx-pull-0123456789abcdef0123456789abcdef.json", ".hx-x"])
+def test_a_pull_into_a_reserved_name_is_refused(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path, name: str
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "f.txt").write_text("x")
+    with pytest.raises(SshError, match="reserved"):
+        copy_from(fake_remote.target("gpu1"), "f.txt", tmp_path / "x" / name, work=work)
+    assert not (tmp_path / "x").exists()
+    assert fake_remote.calls("scp") == []

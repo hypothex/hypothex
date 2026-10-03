@@ -1623,6 +1623,81 @@ def test_a_halt_during_the_session_drain_still_closes_clients_and_route(
     asyncio.run(main())
 
 
+def live_session_counter(monkeypatch: pytest.MonkeyPatch) -> set[object]:
+    """Swap ``Hub._session`` for one that stays open and takes a while to clean up."""
+    live: set[object] = set()
+
+    async def slow_session(self: Hub, sup: Any) -> None:
+        token = object()
+        live.add(token)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.1)  # cleanup that another lifecycle call can overtake
+            live.discard(token)
+
+    monkeypatch.setattr(hub_mod.Hub, "_session", slow_session)
+    return live
+
+
+@pytest.mark.parametrize(
+    "rival",
+    ["connect", "disconnect", "remove", "replace"],
+)
+def test_racing_lifecycle_calls_leave_at_most_one_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rival: str
+) -> None:
+    live = live_session_counter(monkeypatch)
+    hub_ctx = Context.open(tmp_path / "hub")
+    spec = HostSpec(route="url", url="http://127.0.0.1:9")
+    only_a = EnvironmentsFile(environments={"a": spec})
+    rivals: dict[str, Callable[[Hub], Any]] = {
+        "connect": lambda hub: hub.connect("a"),
+        "disconnect": lambda hub: hub.disconnect("a"),
+        "remove": lambda hub: hub.remove_host("a"),
+        "replace": lambda hub: hub.add_host("a", HostSpec(route="url", url="http://127.0.0.1:8")),
+    }
+    expected = {"connect": 1, "disconnect": 0, "remove": 0, "replace": 1}
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, only_a))
+        await hub.start()
+        try:
+            await until(lambda: len(live) == 1)
+            first = asyncio.create_task(hub.connect("a"))
+            await asyncio.sleep(0)  # the first call is inside its halt
+            second = asyncio.create_task(rivals[rival](hub))
+            await asyncio.gather(first, second, return_exceptions=True)
+            await asyncio.sleep(0.3)  # every launched session is open by now
+            assert len(live) == expected[rival]
+        finally:
+            await hub.stop()
+        assert live == set()  # stop() reached every session: none is orphaned
+
+    asyncio.run(main())
+
+
+def test_connect_before_start_is_not_launched_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live = live_session_counter(monkeypatch)
+    hub_ctx = Context.open(tmp_path / "hub")
+    only_a = EnvironmentsFile(environments={"a": HostSpec(route="url", url="http://127.0.0.1:9")})
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, only_a))
+        await hub.connect("a")
+        await hub.start()
+        try:
+            await asyncio.sleep(0.3)
+            assert len(live) == 1
+        finally:
+            await hub.stop()
+        assert live == set()
+
+    asyncio.run(main())
+
+
 class RefuseWithoutToken:
     """ASGI wrapper: the descriptor answers, every other request is refused (no token)."""
 

@@ -20,7 +20,7 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -789,6 +789,8 @@ class _Supervisor:
     state: HostState
     backoff: Backoff
     lock: threading.Lock = field(default_factory=threading.Lock)
+    ops: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """Held by each lifecycle step (halt, relaunch, replace, remove) of this host."""
     task: asyncio.Task[None] | None = None
     client: EnvClient | None = None
     tunnel: Tunnel | None = None
@@ -865,13 +867,15 @@ class Hub:
             if repaired:
                 log.info("re-indexed half-mirrored runs: %s", ", ".join(repaired))
         for sup in self._sups.values():
-            if sup.spec.route != "local":
+            if sup.spec.route != "local" and sup.task is None:  # connect() may have run first
                 self._launch(sup)
 
     async def stop(self) -> None:
         """Cancel every supervisor, wait for its shielded mirror work, and close its tunnel."""
-        for sup in self._sups.values():
-            await self._halt(sup)
+        for name in list(self._sups):
+            async with self._owned(name) as sup:
+                if sup is not None:
+                    await self._halt(sup)
         self._started = False
 
     async def add_host(self, name: str, spec: HostSpec) -> HostState:
@@ -893,17 +897,17 @@ class Hub:
         HostState
             The host's state right after the change.
         """
-        old = self._sups.get(name)
-        if old is not None:
-            if old.spec == spec:
-                return old.state.model_copy()
-            await self._halt(old)
-        sup = self._new_supervisor(name, spec)
-        self._sups[name] = sup
-        self.hosts.environments[name] = spec
-        if self._started and spec.route != "local":
-            self._launch(sup)
-        return sup.state.model_copy()
+        async with self._owned(name) as old:
+            if old is not None:
+                if old.spec == spec:
+                    return old.state.model_copy()
+                await self._halt(old)
+            sup = self._new_supervisor(name, spec)
+            self._sups[name] = sup  # waiters on old.ops see it is replaced and move on to sup
+            self.hosts.environments[name] = spec
+            if self._started and spec.route != "local":
+                self._launch(sup)
+            return sup.state.model_copy()
 
     async def remove_host(self, name: str) -> None:
         """
@@ -914,10 +918,11 @@ class Hub:
         name : str
             Host name; unknown names are ignored.
         """
-        sup = self._sups.pop(name, None)
-        self.hosts.environments.pop(name, None)
-        if sup is not None:
-            await self._halt(sup)
+        async with self._owned(name) as sup:
+            self._sups.pop(name, None)
+            self.hosts.environments.pop(name, None)
+            if sup is not None:
+                await self._halt(sup)
 
     async def connect(self, name: str) -> HostState:
         """
@@ -933,12 +938,13 @@ class Hub:
         HostState
             The state right after the restart (usually ``connecting``).
         """
-        sup = self._get(name)
-        if sup.spec.route != "local":
-            await self._halt(sup)
-            self._set(sup, "connecting")
-            self._launch(sup)
-        return sup.state.model_copy()
+        async with self._owned(name, required=True) as sup:
+            assert sup is not None
+            if sup.spec.route != "local":
+                await self._halt(sup)
+                self._set(sup, "connecting")
+                self._launch(sup)
+            return sup.state.model_copy()
 
     async def disconnect(self, name: str) -> HostState:
         """
@@ -954,11 +960,12 @@ class Hub:
         HostState
             The ``disabled`` state.
         """
-        sup = self._get(name)
-        if sup.spec.route != "local":
-            await self._halt(sup)
-            self._set(sup, "disabled", "disconnected")
-        return sup.state.model_copy()
+        async with self._owned(name, required=True) as sup:
+            assert sup is not None
+            if sup.spec.route != "local":
+                await self._halt(sup)
+                self._set(sup, "disabled", "disconnected")
+            return sup.state.model_copy()
 
     def state(self, name: str) -> HostState:
         """
@@ -1022,6 +1029,34 @@ class Hub:
             return self._sups[name]
         except KeyError:
             raise HostUnavailableError(f"unknown host {name!r}") from None
+
+    @contextlib.asynccontextmanager
+    async def _owned(
+        self, name: str, *, required: bool = False
+    ) -> AsyncIterator[_Supervisor | None]:
+        """
+        Hold the lifecycle lock of ``name``'s current supervisor.
+
+        A halt awaits, so without this lock two calls could each relaunch the
+        host (one task handle lost: a session no ``stop()`` reaches), or relaunch
+        a host another call just removed or replaced. If the supervisor was
+        replaced or removed while this call waited, the lock moves to the current
+        one. Yields ``None`` for an unknown host unless ``required``.
+
+        Raises
+        ------
+        HostUnavailableError
+            If ``required`` and the host is unknown (or was removed meanwhile).
+        """
+        while True:
+            sup = self._get(name) if required else self._sups.get(name)
+            if sup is None:
+                yield None
+                return
+            async with sup.ops:
+                if self._sups.get(name) is sup:
+                    yield sup
+                    return
 
     def _set(
         self,

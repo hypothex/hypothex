@@ -487,9 +487,11 @@ export function LaunchDialog({
     inFlight.current = false;
     setProgress(null);
     for (const queryKey of REMOTE_RUN_INVALIDATES) void client.invalidateQueries({ queryKey });
+    const seeds = [...launched.seeds, ...pending.slice(0, out.records.length)];
     const done: Launched = {
-      host: spec.host.name,
-      seeds: [...launched.seeds, ...pending.slice(0, out.records.length)],
+      // lock the host only once a seed runs there: if none started, the user may pick another host
+      host: seeds.length > 0 ? spec.host.name : null,
+      seeds,
       records: [...launched.records, ...out.records],
     };
     setLaunched(done);

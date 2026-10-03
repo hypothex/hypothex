@@ -445,6 +445,37 @@ describe("Launch", () => {
     expect(host).toBe("gpu1");
   });
 
+  test("when the first seed is refused, no host is locked and the retry can go to another host", async () => {
+    const gpu3 = hostRow("gpu3", { gpus: [gpu(0), gpu(1), gpu(2)] });
+    const calls = mockApi({
+      ...HOSTS,
+      "GET /api/v1/hosts": [GPU1, DGX, MCCLEARY, GPU2, gpu3],
+      "POST /api/v1/hosts/gpu1/runs": () => new HttpReply(503, { error: "host unreachable", type: "HostError" }),
+      "POST /api/v1/hosts/gpu3/runs": (c: Call) => rec(seedOf(c)),
+    });
+    const { onLaunched } = renderDialog({ initial: { command: CMD, seeds: "4, 5, 6", host: "gpu1" } });
+    await ready("gpu1");
+    typeHypothesis("beam 10 holds");
+    fireEvent.click(launchButton(3));
+    expect((await screen.findByRole("alert")).textContent).toContain("seed 4: host unreachable");
+    expect(posts(calls)).toHaveLength(1);
+    // no seed started on gpu1: every host the run fits stays open
+    for (const name of ["local", "mccleary", "gpu3"]) {
+      expect(radio(name).disabled).toBe(false);
+      expect(rowOf(name).title).not.toBe("seeds started on gpu1: the rest go there");
+    }
+    fireEvent.click(radio("gpu3"));
+    expect(radio("gpu3").checked).toBe(true);
+    fireEvent.click(launchButton(3));
+    await waitFor(() => expect(onLaunched).toHaveBeenCalledTimes(1));
+    const retry = posts(calls).slice(1);
+    expect(retry.map(seedOf)).toEqual([4, 5, 6]);
+    expect(retry.every((c) => c.url.endsWith("/api/v1/hosts/gpu3/runs"))).toBe(true);
+    const [records, host] = onLaunched.mock.calls[0] as [RunRecord[], string];
+    expect(records.map((r) => r.seed)).toEqual([4, 5, 6]);
+    expect(host).toBe("gpu3");
+  });
+
   test("a partial launch, then an edit: Launch sends only the seeds not launched, under a new attempt", async () => {
     let refuse = true;
     const calls = mockApi({

@@ -297,3 +297,117 @@ def test_mkdir_lock_of_another_host_is_never_broken(tmp_path: Path) -> None:
     out = _take(lock, _lock_path(tmp_path, "mkdir"))
     assert "HX:error=lock" in out and f"remove {lock}" in out
     assert (lock / "owner").read_text().strip() == "login2|4242|x"
+
+
+# ---------------------------------------------------------------------- build_wheel
+@pytest.fixture(scope="session")
+def wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    if shutil.which("uv") is None and not (Path.home() / ".local/bin/uv").exists():
+        pytest.skip("uv is not installed")
+    return bs.build_wheel(tmp_path_factory.mktemp("wheels"))
+
+
+def test_build_wheel_contents(wheel: Path) -> None:
+    import zipfile
+
+    from hypothex import __version__
+
+    assert wheel.name == f"hypothex-{__version__}-py3-none-any.whl"
+    names = set(zipfile.ZipFile(wheel).namelist())
+    assert "hypothex/remote/bootstrap.py" in names
+    assert {f"hypothex/remote/scripts/{n}.sh" for n in ("common", "probe")} <= names
+
+
+def test_build_wheel_is_cached(wheel: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_build(root: Path, out_dir: Path) -> Path:
+        raise AssertionError("must reuse the cached wheel")
+
+    monkeypatch.setattr(bs, "_uv_build", no_build)
+    mtime = wheel.stat().st_mtime_ns
+    again = bs.build_wheel(wheel.parent.parent)
+    assert again == wheel
+    assert again.stat().st_mtime_ns == mtime
+
+
+def test_build_wheel_key_includes_source_digest(wheel: Path) -> None:
+    from hypothex import __version__
+
+    root = bs._source_root()
+    assert root is not None
+    assert wheel.parent.name == f"{__version__}-{bs._source_digest(root)}"
+
+
+def test_source_digest_tracks_content_not_caches(tmp_path: Path) -> None:
+    pkg = tmp_path / "src" / "hypothex"
+    pkg.mkdir(parents=True)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "hypothex"\n')
+    (pkg / "a.py").write_text("x = 1\n")
+    first = bs._source_digest(tmp_path)
+    (pkg / "__pycache__").mkdir()
+    (pkg / "__pycache__" / "a.cpython-311.pyc").write_bytes(b"\x00junk")
+    (pkg / "b.pyc").write_bytes(b"\x00junk")
+    assert bs._source_digest(tmp_path) == first
+    (pkg / "a.py").write_text("x = 2\n")
+    second = bs._source_digest(tmp_path)
+    assert second != first and len(second) == 12
+    (pkg / "a.py").rename(pkg / "c.py")
+    assert bs._source_digest(tmp_path) != second
+
+
+def _installed_hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, published: bool) -> Path:
+    """Act as a non-editable install whose ``uv`` is a fake; return the fake's call log."""
+    from hypothex import __version__
+
+    log = tmp_path / "uv-calls.txt"
+    if published:
+        result = f'printf PK > "$dest/hypothex-{__version__}-py3-none-any.whl"\n'
+    else:
+        result = (
+            f'echo "ERROR: No matching distribution found for hypothex=={__version__}" >&2\n'
+            "exit 1\n"
+        )
+    fake_uv = _write_exec(
+        tmp_path / "uv",
+        "#!/bin/sh\n"
+        f'echo "$@" >> {log}\n'
+        'dest=""\n'
+        'while [ $# -gt 0 ]; do [ "$1" = "--dest" ] && dest=$2; shift; done\n' + result,
+    )
+    monkeypatch.setattr(bs, "_source_root", lambda: None)
+    monkeypatch.setattr(bs, "_uv_bin", lambda: str(fake_uv))
+    return log
+
+
+def test_installed_hub_downloads_its_own_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex import __version__
+
+    log = _installed_hub(tmp_path, monkeypatch, published=True)
+    wheel = bs.build_wheel(tmp_path / "cache")
+    assert wheel == tmp_path / "cache" / __version__ / f"hypothex-{__version__}-py3-none-any.whl"
+    argv = log.read_text().split()
+    assert argv[:6] == ["tool", "run", "--from", "pip", "pip", "download"]
+    assert f"hypothex=={__version__}" in argv and "--no-deps" in argv
+    assert bs.build_wheel(tmp_path / "cache") == wheel  # cached: no second download
+    assert len(log.read_text().splitlines()) == 1
+
+
+def test_installed_hub_without_a_published_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _installed_hub(tmp_path, monkeypatch, published=False)
+    with pytest.raises(
+        BootstrapError, match="run hx from a source checkout or publish this version"
+    ) as info:
+        bs.build_wheel(tmp_path / "cache")
+    assert "No matching distribution" in str(info.value)
+    assert [p.name for p in (tmp_path / "cache").iterdir()] == []
+
+
+def test_build_wheel_without_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bs.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    with pytest.raises(BootstrapError, match="uv is needed on this machine"):
+        bs.build_wheel(tmp_path / "cache")
+    assert [p.name for p in (tmp_path / "cache").iterdir()] == []

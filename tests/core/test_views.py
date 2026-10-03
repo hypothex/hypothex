@@ -799,3 +799,14 @@ def test_view_context_without_runs_has_config_metrics_only(ctx: Context, toy_rep
     assert metrics == {"accuracy"}
     assert fields.pop("groups") == set(GROUP_FIELDS)  # task-level: fixed keys, runs or not
     assert all(seen == set() for seen in fields.values())
+
+
+@pytest.mark.parametrize("task", ["../../../escaped", "a/b", "", "UPPER"])
+def test_save_and_delete_view_refuse_a_bad_task(tmp_path: Path, task: str) -> None:
+    repo = tmp_path / "proj" / "repo"
+    repo.mkdir(parents=True)
+    with pytest.raises(ConfigError, match="task name"):
+        save_view(repo, task, "pwned", "title: x\n")
+    with pytest.raises(ConfigError, match="task name"):
+        delete_view(repo, task, "pwned")
+    assert not (tmp_path / "proj" / "escaped").exists()

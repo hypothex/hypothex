@@ -1065,7 +1065,8 @@ class Hub:
     async def _drain(self, sup: _Supervisor) -> None:
         """Wait for the shielded worker threads of this host's old session."""
         while sup.pending:
-            await asyncio.gather(*list(sup.pending), return_exceptions=True)
+            # asyncio.wait, not gather: a cancel of this wait must not cancel the threads' futures
+            await asyncio.wait(list(sup.pending))
 
     async def _shielded(self, sup: _Supervisor, fn: Callable[..., T], *args: object) -> T:
         """Run ``fn`` in a worker thread that a cancel cannot split; ``_halt`` waits for it."""
@@ -1169,13 +1170,22 @@ class Hub:
                 task.result()
         finally:
             sup.client = None
-            # the shielded apply/refresh threads still use `client`: wait, then close both
-            await self._drain(sup)
+            # the shielded apply/refresh threads still use `client`: wait for them, even
+            # through a cancel (_halt lands here when the session ended on its own), then
+            # close both clients and the route, then let the cancel go on
+            cancel: asyncio.CancelledError | None = None
+            while sup.pending:
+                try:
+                    await self._drain(sup)
+                except asyncio.CancelledError as exc:
+                    cancel = exc
             for http in (client, pinger):
                 if http is not None:
                     with contextlib.suppress(Exception):
                         http.close()
             self._close_route(sup)
+            if cancel is not None:
+                raise cancel
 
     def _read_cursor(self, sup: _Supervisor, env_id: str) -> int:
         with sup.lock:

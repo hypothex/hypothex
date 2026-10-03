@@ -1556,6 +1556,71 @@ def test_sessions_close_their_http_clients(
     assert all(c._http.is_closed for c in created)  # no socket leaks on reconnect
 
 
+def test_a_halt_during_the_session_drain_still_closes_clients_and_route(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, _ = servers
+    seed_run(a.ctx, "a-1")
+    hub_ctx = Context.open(tmp_path / "hub")
+    created: list[Any] = []
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    real = hub_mod.mirror_run
+
+    class CountingClient(hub_mod.EnvClient):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+    class FakeTunnel:
+        local_port = 0
+        stopped = False
+
+        def stop(self) -> None:
+            assert finished.is_set()  # never torn down under a running mirror
+            FakeTunnel.stopped = True
+
+    def blocked_mirror(*args: Any, **kwargs: Any) -> Any:
+        started.set()
+        release.wait(10)
+        try:
+            return real(*args, **kwargs)
+        finally:
+            finished.set()
+
+    async def failing_watch(self: Hub, sup: Any, *args: Any) -> None:
+        await until(started.is_set)
+        sup.tunnel = FakeTunnel()
+        raise RuntimeError("no answer")  # the session ends on its own mid-mirror
+
+    monkeypatch.setattr(hub_mod, "EnvClient", CountingClient)
+    monkeypatch.setattr(hub_mod, "mirror_run", blocked_mirror)
+    monkeypatch.setattr(hub_mod.Hub, "_watch", failing_watch)
+    only_a = EnvironmentsFile(environments={"a": HostSpec(route="url", url=a.url)})
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, only_a))
+        await hub.start()
+        try:
+            sup = hub._sups["a"]
+            await until(lambda: started.is_set() and sup.tunnel is not None)
+            await until(lambda: sup.client is None)  # the session is in its drain
+            halt = asyncio.create_task(hub.disconnect("a"))  # the cancel lands in the drain
+            await asyncio.sleep(0.2)
+            assert not halt.done()  # the halt waits for the mirror thread
+            assert not any(c._http.is_closed for c in created)
+            release.set()
+            await halt
+            assert finished.is_set()
+            assert len(created) == 2
+            assert all(c._http.is_closed for c in created)  # no socket leaks
+            assert FakeTunnel.stopped and sup.tunnel is None  # no orphan tunnel
+        finally:
+            release.set()
+            await hub.stop()
+
+    asyncio.run(main())
+
+
 class RefuseWithoutToken:
     """ASGI wrapper: the descriptor answers, every other request is refused (no token)."""
 

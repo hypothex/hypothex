@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS receipts (
   result TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS event_keys (
+  key TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL
+);
 """
 _PENDING = "__pending__"
 """
@@ -167,6 +171,65 @@ class EventLog:
             project=project,
             run_id=run_id,
             payload=json.loads(json.dumps(body, default=str)),
+            created_at=now,
+        )
+
+    def append_once(
+        self,
+        key: str,
+        type_: str,
+        *,
+        project: str | None = None,
+        run_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> Event | None:
+        """
+        Append one event unless an event with ``key`` was appended before.
+
+        The key and the event are written in one transaction, so a crash
+        never leaves one without the other.
+
+        Parameters
+        ----------
+        key : str
+            Identity of the event, e.g. ``mirror:<host>:<environment_id>:<remote_sequence>``.
+        type_ : str
+            Event type.
+        project, run_id : str, optional
+            What the event is about.
+        payload : dict, optional
+            Event body.
+
+        Returns
+        -------
+        Event or None
+            The stored event, or None when ``key`` was already used.
+        """
+        now = utcnow()
+        body = json.dumps(payload or {}, default=str)
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if conn.execute("SELECT 1 FROM event_keys WHERE key = ?", (key,)).fetchone():
+                    conn.execute("COMMIT")
+                    return None
+                cur = conn.execute(
+                    "INSERT INTO events(type, project, run_id, payload, created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (type_, project, run_id, body, now.isoformat()),
+                )
+                sequence = int(cur.lastrowid or 0)
+                conn.execute("INSERT INTO event_keys(key, sequence) VALUES (?, ?)", (key, sequence))
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return Event(
+            sequence=sequence,
+            type=type_,
+            project=project,
+            run_id=run_id,
+            payload=json.loads(body),
             created_at=now,
         )
 

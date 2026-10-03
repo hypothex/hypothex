@@ -10,13 +10,25 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Boolean, Float, Integer, String, Text, create_engine, delete, event, select
+from sqlalchemy import (
+    Boolean,
+    Float,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    delete,
+    event,
+    func,
+    select,
+)
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import ProjectEntry, RunStore
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_POINTS_PER_METRIC = 1000
 
 
@@ -104,6 +116,17 @@ class MetricPointRow(Base):
     t: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class HostCursorRow(Base):
+    """Last remote event sequence the hub mirrored, per host and environment."""
+
+    __tablename__ = "host_cursors"
+    host: Mapped[str] = mapped_column(String, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(String, primary_key=True)
+    last_sequence: Mapped[int] = mapped_column(Integer, default=0)
+
+
+# HostCursorRow is not listed: ``clear()`` (``hx reindex``) keeps the mirror cursors,
+# because the mirrored run folders stay on disk and need no replay.
 _DATA_TABLES = (
     ProjectRow,
     DatasetRow,
@@ -188,7 +211,7 @@ class Index:
         return True
 
     def clear(self) -> None:
-        """Delete all indexed data (keeps the schema)."""
+        """Delete all indexed data except the hub's mirror cursors (keeps the schema)."""
         with Session(self.engine) as session, session.begin():
             for model in _DATA_TABLES:
                 session.execute(delete(model))
@@ -528,6 +551,63 @@ class Index:
                 MetricPoint(name=r.name, step=r.step, value=r.value, t=r.t)
                 for r in session.scalars(stmt)
             ]
+
+    # host cursors -------------------------------------------------------------
+    def get_cursor(self, host: str, environment_id: str) -> int:
+        """
+        Return the last mirrored event sequence of one host environment.
+
+        Parameters
+        ----------
+        host : str
+            Host name from ``environments.yaml``.
+        environment_id : str
+            The host's stable environment id.
+
+        Returns
+        -------
+        int
+            Last mirrored sequence; 0 when the pair was never mirrored.
+
+        Examples
+        --------
+        >>> import tempfile
+        >>> idx = Index(Path(tempfile.mkdtemp()) / "i.db")
+        >>> idx.get_cursor("gpu1", "env-a")
+        0
+        >>> idx.set_cursor("gpu1", "env-a", 42)
+        >>> idx.get_cursor("gpu1", "env-a")
+        42
+        """
+        with Session(self.engine) as session:
+            row = session.get(HostCursorRow, (host, environment_id))
+            return row.last_sequence if row else 0
+
+    def set_cursor(self, host: str, environment_id: str, last_sequence: int) -> None:
+        """
+        Store the last mirrored event sequence of one host environment.
+
+        The cursor only moves forward: one atomic upsert keeps the larger of
+        the stored and the new value, so a late writer never moves it back.
+
+        Parameters
+        ----------
+        host : str
+            Host name from ``environments.yaml``.
+        environment_id : str
+            The host's stable environment id.
+        last_sequence : int
+            Sequence of the last event the hub mirrored.
+        """
+        stmt = sqlite_insert(HostCursorRow).values(
+            host=host, environment_id=environment_id, last_sequence=last_sequence
+        )
+        newer = func.max(HostCursorRow.last_sequence, stmt.excluded.last_sequence)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["host", "environment_id"], set_={"last_sequence": newer}
+        )
+        with Session(self.engine) as session, session.begin():
+            session.execute(stmt)
 
 
 def index_run(index: Index, store: RunStore, record: RunRecord) -> None:

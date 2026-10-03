@@ -240,8 +240,6 @@ def _remove(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-PULL_RESERVED_PREFIX = ".hx-"
-"""A pull never writes a destination whose name starts with this (reserved for Hypothex)."""
 _TXN_NAME = re.compile(r"[0-9a-f]{32}")
 
 
@@ -252,13 +250,15 @@ def copy_from(
     Copy a remote file or directory to ``local`` with ``scp -s -r`` (SFTP).
 
     ``remote_path`` must be shell-safe, have no ``..`` part, and name a file
-    or directory (not ``/``, ``~``, or a path ending in ``/``); ``local``'s
-    name must not start with ``.hx-``. Hypothex's own state lives only in
-    ``work`` (the hub passes ``<hub home>/pulls``), never next to ``local``:
+    or directory (not ``/``, ``~``, or a path ending in ``/``). Hypothex's
+    own state lives only in ``work`` (the hub passes ``<hub home>/pulls``),
+    never next to ``local``, so any destination name is allowed:
     the copy lands in a unique staging folder ``work/stage/pull-*`` and is
     renamed into place only on success, so ``local`` is never left
     half-written and concurrent pulls never share a staging path. An existing
-    file is replaced atomically (``os.replace``). An existing folder cannot be
+    file is replaced atomically (``os.replace``); a file never replaces an
+    existing folder (:class:`SshError`, the folder is kept). A folder replaces
+    an existing file. An existing folder cannot be
     renamed over, so the swap is first recorded in ``work/txn/<uuid>.json``
     (``{txn, dest}``), the old folder is moved to ``work/backup/<uuid>``, and
     it is removed only once the new one is in place. A swap cut short (a
@@ -285,8 +285,9 @@ def copy_from(
     Raises
     ------
     SshError
-        ``remote_path`` is refused, ``local``'s name is reserved, ``scp``
-        failed (for example the remote path is missing), or the call timed out.
+        ``remote_path`` is refused, ``scp`` failed (for example the remote
+        path is missing), the call timed out, or a remote file would replace
+        the folder ``local``.
 
     Examples
     --------
@@ -294,11 +295,6 @@ def copy_from(
     >>> copy_from(SshTarget(alias="gpu1"), "~/ckpt/best.pt", dest, work=work)  # doctest: +SKIP
     """
     _check_remote_path(remote_path, source=True)
-    if local.name.startswith(PULL_RESERVED_PREFIX):
-        raise SshError(
-            f"invalid destination {local.name!r}: names starting with "
-            f"{PULL_RESERVED_PREFIX!r} are reserved"
-        )
     txn_dir, _, stage_dir = _pull_dirs(work)
     local.parent.mkdir(parents=True, exist_ok=True)
     with _install_lock(txn_dir):
@@ -386,6 +382,8 @@ def _install(part: Path, local: Path, work: Path) -> None:
     txn_dir, backup_dir, _ = _pull_dirs(work)
     with _install_lock(txn_dir):
         _recover_swaps(work)
+        if not part.is_dir() and local.is_dir() and not local.is_symlink():
+            raise SshError(f"{local} is a folder; a pulled file never replaces a folder")
         if part.is_dir() and local.is_dir() and not local.is_symlink():
             # os.replace cannot overwrite a non-empty folder: record the swap, move the old
             # folder to work/backup/<txn>, then swap (_recover_swaps reads the record)

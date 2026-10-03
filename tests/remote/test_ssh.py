@@ -485,15 +485,31 @@ def test_recovery_never_reads_a_look_alike_record_in_a_destination(
 
 
 @pytest.mark.parametrize("name", [".hx-pull-0123456789abcdef0123456789abcdef.json", ".hx-x"])
-def test_a_pull_into_a_reserved_name_is_refused(
+def test_any_destination_name_can_be_pulled(
     fake_remote: FakeRemote, tmp_path: Path, work: Path, name: str
 ) -> None:
+    # pull state lives only under work/, so no destination name is reserved
     home = fake_remote.add_host("gpu1")
     (home / "f.txt").write_text("x")
-    with pytest.raises(SshError, match="reserved"):
-        copy_from(fake_remote.target("gpu1"), "f.txt", tmp_path / "x" / name, work=work)
-    assert not (tmp_path / "x").exists()
-    assert fake_remote.calls("scp") == []
+    copy_from(fake_remote.target("gpu1"), "f.txt", tmp_path / "x" / name, work=work)
+    assert (tmp_path / "x" / name).read_text() == "x"
+
+
+@pytest.mark.parametrize("filled", [True, False], ids=["non-empty", "empty"])
+def test_a_file_never_replaces_a_folder(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path, filled: bool
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "best.pt").write_text("new")
+    dest = tmp_path / "out" / "best.pt"
+    dest.mkdir(parents=True)
+    if filled:
+        (dest / "keep.txt").write_text("k")
+    with pytest.raises(SshError, match="is a folder"):
+        copy_from(fake_remote.target("gpu1"), "best.pt", dest, work=work)
+    assert dest.is_dir()
+    assert sorted(p.name for p in dest.iterdir()) == (["keep.txt"] if filled else [])
+    assert list((work / "stage").iterdir()) == []
 
 
 # --------------------------------------------------------------------------- tunnel

@@ -345,6 +345,7 @@ class Index:
         task: str | None = None,
         status: RunStatus | str | None = None,
         tag: str | None = None,
+        environment_id: str | None = None,
         include_archived: bool = False,
         limit: int | None = 500,
     ) -> list[RunRecord]:
@@ -355,6 +356,8 @@ class Index:
         ----------
         project, task, status, tag : optional
             Filters; ``None`` means no filter.
+        environment_id : str, optional
+            Only runs of this environment (e.g. one host's queue); ``None`` means all.
         include_archived : bool
             Include archived runs.
         limit : int or None
@@ -375,6 +378,8 @@ class Index:
             stmt = stmt.join(RunTagRow, RunTagRow.run_id == RunRow.run_id).where(
                 RunTagRow.tag == tag
             )
+        if environment_id is not None:
+            stmt = stmt.where(RunRow.environment_id == environment_id)
         if not include_archived:
             stmt = stmt.where(RunRow.archived.is_(False))
         if limit is not None:

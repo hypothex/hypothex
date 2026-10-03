@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import json
 import logging
 import os
 import stat
@@ -12,10 +13,11 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
 
+import httpx
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exception_handlers import (
     http_exception_handler,
@@ -25,6 +27,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import func, or_, select, text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
@@ -36,11 +41,14 @@ from hypothex.core import control
 from hypothex.core import queries as q
 from hypothex.core.config import parse_metric_version
 from hypothex.core.context import Context
-from hypothex.core.errors import HypothexError, RunError, StoreError
+from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import RunRequest
+from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gpus import GpuInfo, gpu_status, query_gpus
+from hypothex.core.ids import utcnow
+from hypothex.core.index import RunRow
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import reserved_run_path
 from hypothex.core.overview import build_overview
@@ -51,6 +59,7 @@ from hypothex.core.slurm import SlurmPoller, comment_accounting, require_flock
 from hypothex.core.sweeps import mark_sweep, stop_if_queued
 from hypothex.core.views import PanelData, PanelSpec, ViewSpec
 from hypothex.mcp.server import (
+    LOCAL_HOST,
     ViewValidationError,
     build_server,
     list_task_views,
@@ -61,14 +70,16 @@ from hypothex.mcp.server import (
     validate_view,
     view_document,
 )
-from hypothex.remote.client import DIR_HEADER, SIZE_HEADER
-from hypothex.remote.config import SlurmDefaults
+from hypothex.remote.client import DIR_HEADER, SIZE_HEADER, EnvClient
+from hypothex.remote.config import EnvironmentsFile, HostSpec, SlurmDefaults, load_hosts
+from hypothex.remote.hub import HostState, HostUnavailableError, Hub
 
 log = logging.getLogger(__name__)
 
 REPAIR_INTERVAL_SECONDS = 30.0
 SCHEDULER_INTERVAL_SECONDS = 5.0
 ENV_KINDS = ("local", "ssh", "slurm")
+COST_WINDOW_DAYS = 7
 WS_POLL_SECONDS = 0.5
 WS_BATCH = 500
 UI_DIST = Path(__file__).resolve().parent.parent / "ui_dist"
@@ -312,6 +323,459 @@ def launch_here(ctx: Context, body: RunFields, repo: str) -> RunRecord:
     if body.sweep_id is not None:
         record = mark_sweep(ctx, record.run_id, body.sweep_id)
     return record
+
+
+def _unknown_host(name: str) -> ConfigError:
+    return ConfigError(f"unknown host {name!r}; add it with `hx hosts add {name} --ssh <alias>`")
+
+
+DISABLED_HOSTS_FILE = "hosts_disabled.json"
+"""``<home>/hosts_disabled.json``: hosts the user disconnected, kept across hub restarts."""
+
+
+def _load_disabled(ctx: Context) -> dict[str, datetime]:
+    try:
+        raw = json.loads((ctx.layout.home / DISABLED_HOSTS_FILE).read_text(encoding="utf-8"))
+        return {str(k): datetime.fromisoformat(v) for k, v in raw.items()}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+
+
+def _save_disabled(ctx: Context, disabled: dict[str, datetime]) -> None:
+    data = {k: v.isoformat() for k, v in sorted(disabled.items())}
+    atomic_write_text(ctx.layout.home / DISABLED_HOSTS_FILE, json.dumps(data, indent=2))
+
+
+class HubManager:
+    """
+    The hub's connections to its hosts.
+
+    Owns one contract ``Hub`` for the life of the server. Connecting,
+    disconnecting, adding, or removing a host changes only that host's
+    supervisor (``Hub.add_host`` / ``remove_host`` / ``connect``); every other
+    host keeps its session and tunnel, and no ``ensure_server`` runs again on
+    them. Env servers and their runs keep going in every case, because the hub
+    stops only supervisors and tunnels. Disconnected hosts are saved in
+    ``<home>/hosts_disabled.json``, so a hub restart keeps them disconnected. A
+    malformed ``environments.yaml`` never stops the server: the error is
+    logged, the hosts known before stay listed in state ``error``, and the
+    ``local`` row carries the message. Entries with ``route: local`` are the
+    hub itself.
+
+    Parameters
+    ----------
+    ctx : Context
+        The hub's context.
+    """
+
+    def __init__(self, ctx: Context) -> None:
+        self.ctx = ctx
+        self.hosts = EnvironmentsFile()
+        self.error: str | None = None
+        self.hub: Hub | None = None
+        self.disabled: dict[str, datetime] = _load_disabled(ctx)
+        self.started_at = utcnow()
+        self._seen: dict[str, str] = {}
+        self._lock = asyncio.Lock()
+        self._read_file()
+
+    def _read_file(self) -> bool:
+        """Load ``environments.yaml``; on a bad file keep the last good hosts and report it."""
+        try:
+            self.hosts = load_hosts(self.ctx.layout)
+        except ConfigError as exc:
+            log.error("hub: %s", exc)
+            self.error = str(exc)
+            return False
+        self.error = None
+        return True
+
+    def names(self) -> list[str]:
+        """
+        Return the remote host names, in file order.
+
+        Returns
+        -------
+        list of str
+        """
+        return [n for n, s in self.hosts.environments.items() if s.route != "local"]
+
+    def spec(self, name: str) -> HostSpec:
+        """
+        Return a host's entry.
+
+        Parameters
+        ----------
+        name : str
+
+        Returns
+        -------
+        HostSpec
+
+        Raises
+        ------
+        ConfigError
+            If no remote host has this name.
+        """
+        spec = self.hosts.environments.get(name)
+        if spec is None or spec.route == "local":
+            raise _unknown_host(name)
+        return spec
+
+    def _enabled(self) -> dict[str, HostSpec]:
+        return {
+            n: s
+            for n, s in self.hosts.environments.items()
+            if s.route != "local" and n not in self.disabled
+        }
+
+    async def start(self) -> None:
+        """Start the ``Hub`` and connect every enabled host in ``environments.yaml``."""
+        async with self._lock:
+            if self.hub is None:
+                self._read_file()  # fresh: `hx demo` rewrites URLs before the server starts
+                self.hub = Hub(self.ctx, EnvironmentsFile(environments=self._enabled()))
+                await self.hub.start()
+
+    async def stop(self) -> None:
+        """Stop every supervisor and tunnel (env servers keep running)."""
+        async with self._lock:
+            if self.hub is not None:
+                await self.hub.stop()
+                self.hub = None
+
+    async def reload(self) -> None:
+        """
+        Re-read ``environments.yaml`` and apply only the hosts that changed.
+
+        New or changed enabled hosts are added (``Hub.add_host`` restarts only a
+        host whose entry changed); removed or disabled hosts are stopped. A bad
+        file changes nothing.
+        """
+        async with self._lock:
+            await self._apply_file()
+
+    async def _apply_file(self) -> None:
+        if not self._read_file():
+            return
+        stale = [n for n in self.disabled if n not in self.names()]
+        if stale:
+            for name in stale:
+                self.disabled.pop(name)
+            _save_disabled(self.ctx, self.disabled)
+        if self.hub is None:
+            return
+        wanted = self._enabled()
+        for name in [n for n in self.hub.hosts.environments if n not in wanted]:
+            await self.hub.remove_host(name)
+        for name, spec in wanted.items():
+            await self.hub.add_host(name, spec)
+
+    def _check_file(self, name: str) -> None:
+        if self.error is not None:
+            raise ConfigError(self.error)
+        spec = self.hosts.environments.get(name)
+        if spec is None or spec.route == "local":
+            raise _unknown_host(name)
+
+    async def connect(self, name: str) -> HostState:
+        """
+        (Re)connect one host; also picks up hosts added to the file since start.
+
+        Parameters
+        ----------
+        name : str
+
+        Returns
+        -------
+        HostState
+            The state right after reconnecting (usually ``connecting``).
+        """
+        async with self._lock:
+            self._read_file()
+            self._check_file(name)
+            if self.disabled.pop(name, None) is not None:
+                _save_disabled(self.ctx, self.disabled)
+            running = self.hub is not None and name in self.hub.hosts.environments
+            await self._apply_file()  # starts a new or re-enabled host
+            if running and self.hub is not None:
+                await self.hub.connect(name)  # fresh backoff for this host only
+        return self.state(name)
+
+    async def disconnect(self, name: str) -> HostState:
+        """
+        Stop watching one host until ``connect``; its runs keep going on the host.
+
+        The choice is saved, so a hub restart keeps the host disconnected.
+
+        Parameters
+        ----------
+        name : str
+
+        Returns
+        -------
+        HostState
+            State ``disabled``.
+        """
+        async with self._lock:
+            self._check_file(name)
+            self.disabled.setdefault(name, utcnow())
+            _save_disabled(self.ctx, self.disabled)
+            if self.hub is not None:
+                await self.hub.remove_host(name)
+        return self.state(name)
+
+    def state(self, name: str) -> HostState:
+        """
+        Return a host's connection state.
+
+        Parameters
+        ----------
+        name : str
+
+        Returns
+        -------
+        HostState
+        """
+        spec = self.spec(name)
+        if self.error is not None:
+            return HostState(
+                name=name, kind=spec.kind, state="error", since=self.started_at, message=self.error
+            )
+        if name in self.disabled:
+            return HostState(
+                name=name,
+                kind=spec.kind,
+                state="disabled",
+                since=self.disabled[name],
+                message="disconnected; `hx hosts connect` reconnects",
+            )
+        if self.hub is None:
+            return HostState(
+                name=name,
+                kind=spec.kind,
+                state="disabled",
+                since=self.started_at,
+                message="hub not started",
+            )
+        try:
+            state = self.hub.state(name)
+        except HostUnavailableError:  # in the file, not applied yet: `hx hosts connect`
+            return HostState(
+                name=name,
+                kind=spec.kind,
+                state="disabled",
+                since=self.started_at,
+                message=f"not connected; `hx hosts connect {name}`",
+            )
+        if state.environment_id:
+            self._seen[state.environment_id] = name
+        return state
+
+    def states(self) -> list[HostState]:
+        """
+        Return every remote host's state, in file order.
+
+        Returns
+        -------
+        list of HostState
+        """
+        return [self.state(n) for n in self.names()]
+
+    def client(self, name: str) -> EnvClient:
+        """
+        Return the client of a connected host.
+
+        Parameters
+        ----------
+        name : str
+
+        Returns
+        -------
+        EnvClient
+
+        Raises
+        ------
+        HostUnavailableError
+            If the host is disconnected or not connected now.
+        """
+        if name in self.disabled:
+            raise HostUnavailableError(
+                f"host {name} is disconnected; connect it with `hx hosts connect {name}`"
+            )
+        if self.hub is None or name not in self.hub.hosts.environments:
+            raise HostUnavailableError(
+                f"host {name} is not connected; connect it with `hx hosts connect {name}`"
+            )
+        return self.hub.client(name)
+
+    def host_for_environment(self, environment_id: str) -> str | None:
+        """
+        Return the host that serves an environment.
+
+        Looks at the live states, then at environment ids seen earlier in this
+        process, then at the hub's persisted cursors (``host_cursors``).
+
+        Parameters
+        ----------
+        environment_id : str
+
+        Returns
+        -------
+        str or None
+            The host name; None for this hub's own runs and for environments no
+            configured host serves (they are handled locally, as in phase 1).
+        """
+        if environment_id == self.ctx.descriptor.environment_id:
+            return None
+        if self.hub is not None:
+            for name in self.names():
+                if name not in self.disabled:
+                    self.state(name)
+        name = self._seen.get(environment_id) or self._cursor_host(environment_id)
+        return name if name in self.names() else None
+
+    def _cursor_host(self, environment_id: str) -> str | None:
+        try:
+            with self.ctx.index.engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT host FROM host_cursors WHERE environment_id = :e LIMIT 1"),
+                    {"e": environment_id},
+                ).first()
+        except OperationalError:
+            return None
+        return None if row is None else str(row[0])
+
+
+def environment_runs(ctx: Context, environment_id: str) -> list[RunRecord]:
+    """
+    Return one environment's runs that are active or were created or ended recently.
+
+    Parameters
+    ----------
+    ctx : Context
+    environment_id : str
+
+    Returns
+    -------
+    list of RunRecord
+        Queued/running runs plus runs created or ended in the last
+        ``COST_WINDOW_DAYS`` days (a long run that ended today counts in today's
+        cost, however long ago it started).
+    """
+    floor = (utcnow() - timedelta(days=COST_WINDOW_DAYS)).isoformat()
+    active = [RunStatus.QUEUED.value, RunStatus.RUNNING.value]
+    ended = func.json_extract(RunRow.record_json, "$.ended_at")
+    stmt = select(RunRow.record_json).where(
+        RunRow.environment_id == environment_id,
+        or_(RunRow.status.in_(active), RunRow.created_at >= floor, ended >= floor),
+    )
+    with Session(ctx.index.engine) as session:
+        return [RunRecord.model_validate_json(j) for j in session.scalars(stmt)]
+
+
+def _today_start() -> datetime:
+    return datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _cost_since(runs: list[RunRecord], since: datetime) -> float:
+    total = sum(
+        r.cost.total_usd
+        for r in runs
+        if r.cost is not None and r.ended_at is not None and r.ended_at >= since
+    )
+    return round(total, 4)
+
+
+def host_rows(
+    ctx: Context, manager: HubManager, gpu_cache: GpuCache | None = None
+) -> list[dict[str, Any]]:
+    """
+    Build ``GET /api/v1/hosts``: the hub first (``local``), then each host.
+
+    GPUs and queue length come from a connected host's env server; SLURM counts
+    and today's cost come from the runs the hub has mirrored.
+
+    Parameters
+    ----------
+    ctx : Context
+    manager : HubManager
+    gpu_cache : GpuCache, optional
+        The env routes' cache (``app.state.gpu_cache``); the hub's own GPUs are
+        read through it, so ``nvidia-smi`` runs at most every 10 s.
+
+    Returns
+    -------
+    list of dict
+        ``{name, kind, state, gpus, queue, slurm, cost_today_usd, projects,
+        stale_banner_hours}``.
+    """
+    since = _today_start()
+    eid = ctx.descriptor.environment_id
+    local_runs = environment_runs(ctx, eid)
+    local_state = HostState(
+        name=LOCAL_HOST,
+        kind="local",
+        state="connected",
+        since=manager.started_at,
+        message="" if manager.error is None else manager.error,
+        environment_id=eid,
+        hx_version=__version__,
+        last_sequence=ctx.events.last_sequence(),
+    )
+    seen_gpus = gpu_cache.get() if gpu_cache is not None else None
+    rows: list[dict[str, Any]] = [
+        {
+            "name": LOCAL_HOST,
+            "kind": "local",
+            "state": local_state.model_dump(mode="json"),
+            "gpus": [g.model_dump(mode="json") for g in gpu_status(ctx, seen_gpus)],
+            "queue": sum(1 for r in local_runs if r.status == RunStatus.QUEUED),
+            "slurm": None,
+            "cost_today_usd": _cost_since(local_runs, since),
+            "projects": sorted(e.project for e in ctx.index.list_projects()),
+            "stale_banner_hours": manager.hosts.stale_banner_hours,
+        }
+    ]
+    for state in manager.states():
+        spec = manager.spec(state.name)
+        gpus: list[Any] = []
+        queue = 0
+        if state.state == "connected":
+            with contextlib.suppress(HypothexError, httpx.HTTPError):
+                client = manager.client(state.name)
+                gpus = client.get_json("/api/v1/gpus")
+                queue = len(client.get_json("/api/v1/queue"))
+        runs = environment_runs(ctx, state.environment_id) if state.environment_id else []
+        slurm = None
+        if spec.kind == "slurm":
+            accounting = None  # unknown until the host answers
+            if state.state == "connected":
+                with contextlib.suppress(HypothexError, httpx.HTTPError, AttributeError):
+                    accounting = (
+                        manager.client(state.name)
+                        .get_json("/api/v1/slurm")
+                        .get("comment_accounting")
+                    )
+            slurm = {
+                "pending": sum(1 for r in runs if r.status == RunStatus.QUEUED),
+                "running": sum(1 for r in runs if r.status == RunStatus.RUNNING),
+                "comment_accounting": accounting,
+            }
+        rows.append(
+            {
+                "name": state.name,
+                "kind": spec.kind,
+                "state": state.model_dump(mode="json"),
+                "gpus": gpus,
+                "queue": queue,
+                "slurm": slurm,
+                "cost_today_usd": _cost_since(runs, since),
+                "projects": sorted(spec.projects),
+                "stale_banner_hours": manager.hosts.stale_banner_hours,
+            }
+        )
+    return rows
 
 
 def _run_view(kind: str) -> list[PanelSpec]:
@@ -657,6 +1121,7 @@ def create_app(
     ui_dir: Path | None = None,
     kind: str | None = None,
     auth_token: str | None = None,
+    hub: bool = True,
 ) -> FastAPI:
     """
     Build the FastAPI application.
@@ -694,6 +1159,9 @@ def create_app(
         Require ``Authorization: Bearer <auth_token>`` on every route except the
         descriptor (``hx serve`` sets it from ``HYPOTHEX_SERVE_TOKEN``; see
         ``TokenGuard``).
+    hub : bool
+        Connect to the hosts in ``environments.yaml`` (the hub role). Off in tests
+        that need no live hosts.
 
     Returns
     -------
@@ -710,6 +1178,7 @@ def create_app(
     ctx = Context.open(home)
     if kind is not None:
         ctx.descriptor.kind = kind
+    manager = HubManager(ctx)
     if ctx.descriptor.kind == "slurm":
         require_flock(ctx.layout.home)  # every run-state write takes the run lock
     mcp_server = build_server(context=ctx)  # one Context (and descriptor) for HTTP and MCP
@@ -737,10 +1206,13 @@ def create_app(
         poller = SlurmPoller(ctx) if background_repair and ctx.descriptor.kind == "slurm" else None
         if poller is not None:
             poller.start()
+        if hub:
+            await manager.start()
         async with mcp_server.session_manager.run():
             try:
                 yield
             finally:
+                await manager.stop()
                 stop.set()
                 if poller is not None:
                     # wait for the thread itself: a squeue can block for 60 s, and the
@@ -761,6 +1233,7 @@ def create_app(
         openapi_url="/api/openapi.json",
     )
     app.state.ctx = ctx
+    app.state.hub = manager
     app.state.mcp = mcp_server
     hosts = allowed_hosts(host)
     app.add_middleware(OriginGuard, hosts=hosts)
@@ -770,7 +1243,12 @@ def create_app(
 
     @app.exception_handler(HypothexError)
     async def hypothex_error(_: Request, exc: HypothexError) -> JSONResponse:
-        status = 404 if isinstance(exc, StoreError) else 400
+        if isinstance(exc, StoreError):
+            status = 404
+        elif isinstance(exc, HostUnavailableError):
+            status = 503
+        else:
+            status = 400
         if isinstance(exc, CommandInterruptedError):
             status = 409  # the command's outcome is unknown: never replayed
         content: dict[str, Any] = {"error": str(exc), "type": type(exc).__name__}
@@ -812,6 +1290,26 @@ def create_app(
     @app.get("/.well-known/hypothex/environment")
     def environment() -> dict[str, Any]:
         return ctx.descriptor.model_dump(mode="json")
+
+    # hosts (hub) ---------------------------------------------------------------------
+    @app.get("/api/v1/hosts")
+    def hosts_list() -> list[dict[str, Any]]:
+        return host_rows(ctx, manager, app.state.gpu_cache)
+
+    @app.post("/api/v1/hosts/reload")
+    async def hosts_reload(body: ActionBody | None = None) -> list[dict[str, Any]]:
+        # `hx hosts add|map|rm` wrote environments.yaml: apply it to the running hub
+        await manager.reload()
+        # host_rows makes blocking calls to each host: keep them off the hub's event loop
+        return await asyncio.to_thread(host_rows, ctx, manager, app.state.gpu_cache)
+
+    @app.post("/api/v1/hosts/{host}/connect")
+    async def host_connect(host: str, body: ActionBody | None = None) -> dict[str, Any]:
+        return to_jsonable(await manager.connect(host))
+
+    @app.post("/api/v1/hosts/{host}/disconnect")
+    async def host_disconnect(host: str, body: ActionBody | None = None) -> dict[str, Any]:
+        return to_jsonable(await manager.disconnect(host))
 
     # overview ----------------------------------------------------------------------
     @app.get("/api/v1/overview")
@@ -900,15 +1398,19 @@ def create_app(
         task: str | None = None,
         status: RunStatus | None = None,
         tag: str | None = None,
+        environment_id: str | None = None,
         archived: bool = False,
-        limit: int = 200,
+        limit: Annotated[int, Query(ge=1)] = 200,
     ) -> list[dict[str, Any]]:
+        # no cap below `limit`: the UI pages through a host's queue or a sweep with a
+        # growing limit, starting at 1000
         return to_jsonable(
             ctx.index.list_runs(
                 project=project,
                 task=task,
                 status=status,
                 tag=tag,
+                environment_id=environment_id,
                 include_archived=archived,
                 limit=limit,
             )
@@ -920,7 +1422,11 @@ def create_app(
 
     @app.get("/api/v1/runs/{run_id}")
     def run_detail(run_id: str) -> dict[str, Any]:
-        return to_jsonable(q.show_run(ctx, run_id))
+        detail = q.show_run(ctx, run_id)
+        out = to_jsonable(detail)
+        host = manager.host_for_environment(detail.record.environment_id)
+        out["host_state"] = None if host is None else manager.state(host).state
+        return out
 
     @app.get("/api/v1/runs/{run_id}/metrics")
     def run_metrics(run_id: str) -> list[dict[str, Any]]:

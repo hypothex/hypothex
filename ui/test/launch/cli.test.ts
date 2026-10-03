@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { cliQuote, launchCli, launchCliLine, sbatchLine } from "../../src/launch/cli";
+import { slurmBody } from "../../src/launch/plan";
 import type { LaunchSpec } from "../../src/launch/plan";
 import { launchHost } from "./fixtures";
 
@@ -94,4 +95,22 @@ test("sbatchLine shows the flags hx passes to sbatch", () => {
   );
   expect(sbatchLine({ partition: "", account: "lab", time: " 30 " }, 0)).toBe("sbatch --time 30 --account lab");
   expect(sbatchLine({ partition: "", account: "", time: "" }, 2)).toBe("sbatch --gpus 2");
+});
+
+test("sbatchLine and the CLI line set exactly the SLURM fields slurmBody sends", () => {
+  const cases = [
+    { partition: " gpu ", account: "", time: "08:00:00" },
+    { partition: "", account: " lab ", time: " " },
+    { partition: "\t", account: "", time: " 2-0 " },
+  ];
+  for (const fields of cases) {
+    const sent = Object.entries(slurmBody(fields, 2)).filter(([key]) => key !== "gpus");
+    const flags = sent.map(([key, value]) => `--${key} ${value}`);
+    const host = launchHost({ name: "mccleary", kind: "slurm" });
+    const cli = launchCliLine({ ...SPEC, host, gpus: 2, slurm: fields }, 4);
+    for (const line of [sbatchLine(fields, 2), cli]) {
+      for (const flag of flags) expect(line).toContain(flag);
+      expect(line.match(/--(partition|time|account) /g) ?? []).toHaveLength(flags.length);
+    }
+  }
 });

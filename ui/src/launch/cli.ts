@@ -2,7 +2,7 @@
  * "Copy as CLI": the exact `hx launch` lines the dialog would run, one per seed, quoted for
  * `sh`/`bash`/`zsh`. `{seed}` is always quoted (a shell can drop or expand a bare one).
  */
-import type { LaunchSpec, SlurmFields } from "./plan";
+import { type LaunchSpec, type SlurmFields, slurmBody } from "./plan";
 
 const CLI_SAFE = /^[A-Za-z0-9_\-+=/.,:@%]+$/;
 
@@ -20,13 +20,7 @@ export function launchCliLine(spec: LaunchSpec, seed: number): string {
   if (spec.gpus > 0) parts.push("--gpus", String(spec.gpus));
   if (spec.host.kind === "ssh" && spec.queue) parts.push("--queue");
   if (spec.host.kind === "slurm" && spec.slurm !== null) {
-    // blank fields keep the host's defaults, as in the API body (`slurmBody`)
-    const partition = spec.slurm.partition.trim();
-    const time = spec.slurm.time.trim();
-    const account = spec.slurm.account.trim();
-    if (partition) parts.push("--partition", cliQuote(partition));
-    if (time) parts.push("--time", cliQuote(time));
-    if (account) parts.push("--account", cliQuote(account));
+    parts.push(...slurmFlags(spec.slurm, spec.gpus, ["partition", "time", "account"]));
   }
   parts.push("--seed", String(seed));
   for (const [key, value] of Object.entries(spec.params)) parts.push("--param", cliQuote(`${key}=${value}`));
@@ -47,13 +41,21 @@ export function launchCli(spec: LaunchSpec, seeds: readonly number[]): string {
 
 /** The sbatch flags the dialog sets for a SLURM run (spec 8A.5); the host's defaults fill the rest. */
 export function sbatchLine(slurm: SlurmFields, gpus: number): string {
-  const parts = ["sbatch"];
-  const partition = slurm.partition.trim();
-  const time = slurm.time.trim();
-  const account = slurm.account.trim();
-  if (partition) parts.push("--partition", cliQuote(partition));
-  if (time) parts.push("--time", cliQuote(time));
-  if (gpus > 0) parts.push("--gpus", String(gpus));
-  if (account) parts.push("--account", cliQuote(account));
-  return parts.join(" ");
+  return ["sbatch", ...slurmFlags(slurm, gpus, ["partition", "time", "gpus", "account"])].join(" ");
+}
+
+type SlurmFlag = "partition" | "time" | "account" | "gpus";
+
+/**
+ * `--key value` for each key, in `keys` order, that the API body (`slurmBody`) sends, so the
+ * CLI lines always match what the dialog sends: a blank field (the host's default) is left
+ * out. `--gpus 0` is left out too, as `render_sbatch` leaves it out of the script.
+ */
+function slurmFlags(slurm: SlurmFields, gpus: number, keys: readonly SlurmFlag[]): string[] {
+  const body = slurmBody(slurm, gpus);
+  return keys.flatMap((key) => {
+    const value = body[key];
+    if (value === undefined || value === null || value === 0) return [];
+    return [`--${key}`, typeof value === "number" ? String(value) : cliQuote(value)];
+  });
 }

@@ -146,6 +146,8 @@ def test_sweep_combos_depend_on_the_sweep_id() -> None:
         ({"name": "seed", "values": ["1"]}, "reserved"),
         ({"name": "run_dir", "values": ["1"]}, "reserved"),
         ({"name": "1lr", "values": ["1"]}, "pattern"),
+        ({"name": "lr", "low": 1e-5, "high": 1e-2, "log_scale": True}, "Extra inputs"),
+        ({"name": "lr", "values": ["1"], "scale": "log"}, "Extra inputs"),
     ],
 )
 def test_bad_params_are_rejected(param: dict[str, object], message: str) -> None:

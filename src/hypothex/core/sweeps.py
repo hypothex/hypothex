@@ -44,7 +44,7 @@ class SweepParam(BaseModel):
     True
     """
 
-    model_config = ConfigDict(coerce_numbers_to_str=True)
+    model_config = ConfigDict(coerce_numbers_to_str=True, extra="forbid")
 
     name: str = Field(pattern=PARAM_NAME_PATTERN)
     values: list[str] | None = None

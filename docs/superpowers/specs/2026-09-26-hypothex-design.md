@@ -296,7 +296,9 @@ processes it owns. Execution always happens inside an environment, never in a cl
   "ready" (ready = descriptor fetched and replay done). Auth failures stop retrying until
   the user re-pairs.
 - **Startup repair:** on start, an env server reconciles runs it recorded as `running`:
-  process still alive → keep; SLURM job still in `squeue` → keep; exited with an exit record
+  supervisor process still alive → keep; supervisor dead but the command still alive → the
+  command is terminated and the run marked `lost` (its output pipes are gone, so it cannot be
+  re-attached; ruling 2026-10-03); the rest as follows: SLURM job still in `squeue` → keep; exited with an exit record
   → finish/fail; otherwise → `lost`.
 - **Bounded log tails:** the live log stream keeps the last 5,000 lines / 8 MiB in memory
   and on disk for fast attach; full logs stay in `logs/`.

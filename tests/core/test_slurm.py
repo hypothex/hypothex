@@ -25,7 +25,7 @@ from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, RunError
 from hypothex.core.execution import STOP_MARKER, RunRequest, prepare_run
 from hypothex.core.ids import utcnow
-from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus
+from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus, UsageTotals
 from hypothex.core.slurm import (
     EXIT_FILE,
     SBATCH_FILE,
@@ -1544,17 +1544,17 @@ def test_a_stop_and_the_poller_publish_the_node_s_end_once(
 ) -> None:
     slurm.add_job("1000", "RUNNING", node="n1")
     slurm_run(ctx, "r1", job_id="1000", node="n1")
-    real = slurm_module.mark_published
+    real = slurm_module._update_intent
     pollers: list[threading.Thread] = []
 
-    def poller_runs_before_the_cursor_moves(layout: Any, record: RunRecord) -> None:
-        if record.status == RunStatus.KILLED and not pollers:
+    def poller_runs_before_the_cursor_moves(layout: Any, run_id: str, **fields: Any) -> Any:
+        if fields.get("published") == "killed" and not pollers:
             pollers.append(threading.Thread(target=reconcile, args=(ctx,)))
             pollers[0].start()
             pollers[0].join(1.0)  # the poller must wait for this publication to finish
-        real(layout, record)
+        return real(layout, run_id, **fields)
 
-    monkeypatch.setattr(slurm_module, "mark_published", poller_runs_before_the_cursor_moves)
+    monkeypatch.setattr(slurm_module, "_update_intent", poller_runs_before_the_cursor_moves)
     assert control.stop_run(ctx, "r1", grace=0.0).status == RunStatus.KILLED
     pollers[0].join(30)
     types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
@@ -1712,6 +1712,46 @@ def test_a_stop_racing_the_node_s_end_publishes_the_node_s_end(
     types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
     assert "run.killed" not in types and types.count("run.finished") == 1
     assert not (ctx.layout.home / "slurm" / "outbox" / "r1.json").exists()
+
+
+def _node_ends_late(ctx: Context, run_id: str, *, exit_record: bool) -> RunRecord:
+    """The compute node finishes after the login node's grace: final usage, maybe exit.json."""
+    final = ctx.find_record(run_id).model_copy(
+        update={"usage": UsageTotals(tokens_in=7, calls=1), "exit_code": -15}
+    )
+    ctx.store.write_record(final)
+    if exit_record:
+        (ctx.run_dir(final) / EXIT_FILE).write_text(
+            json.dumps({"run_id": run_id, "status": "killed", "exit_code": -15})
+        )
+    return final
+
+
+@pytest.mark.parametrize("exit_record", [True, False])
+def test_a_stop_past_its_grace_keeps_tracking_until_the_node_s_last_write(
+    ctx: Context, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch, exit_record: bool
+) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    slurm_run(ctx, "r1", job_id="1000", node="n1")
+    monkeypatch.setattr(slurm_module, "cancel", lambda job_id: None)  # the node shuts down slowly
+    assert control.stop_run(ctx, "r1", grace=0.0).status == RunStatus.KILLED
+    assert outbox(ctx, "r1").exists()  # kept: the node may still write
+    if exit_record:
+        reconcile(ctx)  # the job still runs and no exit record: nothing to sync yet
+        assert outbox(ctx, "r1").exists()
+    final = _node_ends_late(ctx, "r1", exit_record=exit_record)
+    if not exit_record:  # the node died without exit.json: settled once the job is gone
+        state = slurm.state()
+        state["jobs"]["1000"].update(state="CANCELLED", in_queue=False)
+        slurm.save(state)
+    reconcile(ctx)
+    indexed = ctx.index.get_run("r1")
+    assert indexed is not None and indexed.usage == final.usage
+    assert indexed.status == RunStatus.KILLED
+    assert not outbox(ctx, "r1").exists()
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
+    assert types.count("run.killed") == 1
+    assert reconcile(ctx) == []
 
 
 # poll loop and hx serve --kind slurm -------------------------------------------------------------

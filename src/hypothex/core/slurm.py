@@ -1018,7 +1018,7 @@ def _outbox_lock(layout: Layout) -> contextlib.AbstractContextManager[None]:
 
 
 def _done(entry: dict[str, Any]) -> bool:
-    """An entry can go: terminal status published, job known, no cancel pending."""
+    """An entry can go: terminal status published, job known, no cancel or node end pending."""
     try:
         published = RunStatus(entry["published"])
     except (KeyError, ValueError):
@@ -1027,6 +1027,7 @@ def _done(entry: dict[str, Any]) -> bool:
         published in TERMINAL_STATUSES
         and entry.get("state") == "submitted"
         and not entry.get("cancel_requested")
+        and not entry.get("node_end_pending")
     )
 
 
@@ -1724,9 +1725,65 @@ def _track_entry(
     if entry.get("cancel_requested"):
         _cancel_requested(ctx, run_id, job_id)
         return None
+    if entry.get("node_end_pending") and current.status in TERMINAL_STATUSES:
+        if (ctx.run_dir(current) / EXIT_FILE).exists():  # the node's last write is there
+            settled = _settle_node_end(ctx, run_id, job_id, None)
+            if settled is not None:
+                changed.append(settled)
+            return None
+        return job_id, current  # settled once SLURM shows the job ended
     if current.status in ACTIVE_STATUSES:
         return job_id, current
     return None
+
+
+def _node_end_pending(layout: Layout, run_id: str) -> bool:
+    entry = _intent(layout, run_id)
+    return bool(entry is not None and entry.get("node_end_pending"))
+
+
+def _settle_node_end(
+    ctx: Context, run_id: str, job_id: str, job: SlurmJob | None
+) -> RunRecord | None:
+    """
+    Sync what the node wrote after a stop that outlived its grace, then forget the run.
+
+    ``stop_slurm_run`` publishes ``killed`` while the node may still be
+    shutting down; the node then writes its final record (usage, artifacts,
+    ``ended_at``) with the same status, so no status change shows it. Once its
+    exit record is there or SLURM shows the job ended, the record is indexed
+    again (with a ``run.slurm_state`` event when it changed), the worktree is
+    released, and the outbox entry goes.
+
+    Returns
+    -------
+    RunRecord or None
+        The run when its indexed record changed.
+    """
+    project = ctx.find_record(run_id).project
+    with _publish_lock(ctx.layout.run_dir(project, run_id)):
+        published = _sync_node_run(ctx, ctx.store.read_record(project, run_id))
+        current = ctx.store.read_record(project, run_id)
+        changed = published is not None
+        if ctx.index.get_run(run_id) != current:
+            ctx.index.upsert_run(current)
+            points = ctx.store.read_metric_points(project, run_id)
+            ctx.index.replace_metric_points(run_id, points)
+            ctx.events.append(
+                "run.slurm_state",
+                project=project,
+                run_id=run_id,
+                payload={
+                    "status": current.status.value,
+                    "slurm_job_id": job_id,
+                    "slurm_state": job.state if job is not None else None,
+                    "final": True,
+                },
+            )
+            changed = True
+        release_worktree(ctx, current)
+        _update_intent(ctx.layout, run_id, node_end_pending=False)  # last: a crash syncs again
+    return current if changed else None
 
 
 def _set_node(node: str) -> Callable[[RunRecord], RunRecord]:
@@ -1811,6 +1868,13 @@ def _reconcile_job(
 ) -> RunRecord | None:
     """Compare one active run with its job (``reconcile``); the run when its record changed."""
     current = ctx.find_record(record.run_id)
+    if current.status in TERMINAL_STATUSES and _node_end_pending(ctx.layout, current.run_id):
+        if job is not None and not is_finished(job):
+            return None  # stopped, and the node is still shutting down
+        if confirm_gone is not None and job_id not in confirm_gone:
+            gone_now[job_id] = job  # the node's last write may show late on a shared filesystem
+            return None
+        return _settle_node_end(ctx, current.run_id, job_id, job)
     if current.status in TERMINAL_STATUSES:  # the node ended it since the folder sync
         return _publish_node_end(ctx, current.run_id)
     if job is not None and not is_finished(job):
@@ -1852,7 +1916,11 @@ def stop_slurm_run(ctx: Context, record: RunRecord, *, grace: float) -> RunRecor
 
     A queued (pending) job is marked killed at once. For a running job,
     SLURM sends SIGTERM to ``hx run --child``, which records ``killed``
-    itself; after ``grace`` seconds without that, the run is marked here.
+    itself; after ``grace`` seconds without that, the run is marked here, and
+    its outbox entry stays (``node_end_pending``) until the node's exit record
+    appears or SLURM shows the job ended: what the node writes meanwhile
+    (usage, artifacts, ``ended_at``) is then indexed and the worktree released
+    (``_settle_node_end``).
 
     Parameters
     ----------
@@ -1885,6 +1953,7 @@ def stop_slurm_run(ctx: Context, record: RunRecord, *, grace: float) -> RunRecor
     # only now: a marker left by a failed scancel would make a job that later ends
     # normally record `killed` on the node
     atomic_write_text(ctx.run_dir(record) / STOP_MARKER, utcnow().isoformat())
+    node_running = record.status == RunStatus.RUNNING and job_id is not None
     if record.status == RunStatus.RUNNING:
         deadline = time.monotonic() + grace
         while time.monotonic() < deadline:
@@ -1902,8 +1971,13 @@ def stop_slurm_run(ctx: Context, record: RunRecord, *, grace: float) -> RunRecor
         )
         if killed is None:  # the node's end came first: publish that end, not `killed`
             return _publish_node_end(ctx, record.run_id)
-        release_worktree(ctx, killed)
-        mark_published(ctx.layout, killed)
+        if node_running:  # the node may still write its end: reconcile syncs it later
+            _update_intent(
+                ctx.layout, record.run_id, published=killed.status.value, node_end_pending=True
+            )
+        else:
+            release_worktree(ctx, killed)
+            mark_published(ctx.layout, killed)
     return killed
 
 

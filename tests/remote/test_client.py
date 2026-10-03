@@ -1,18 +1,25 @@
 """EnvClient against in-process env servers (uvicorn on a random port) and fake WS servers."""
 
+import asyncio
 import contextlib
+import json
 import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
+from http import HTTPStatus
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 import uvicorn
+from websockets.asyncio.server import ServerConnection, serve
+from websockets.http11 import Request, Response
 
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
+from hypothex.core.events import Event
 from hypothex.remote.client import EnvClient, EnvRequestError, EnvUnreachableError
 from tests.factories import seed_finished_run
 
@@ -55,6 +62,41 @@ def free_port() -> int:
 def env(home: Path, ctx: Context) -> Iterator[EnvClient]:
     with live_server(home) as url, EnvClient(url, timeout=5) as client:
         yield client
+
+
+def _event(sequence: int, type_: str = "run.started") -> dict[str, Any]:
+    return {
+        "sequence": sequence,
+        "type": type_,
+        "project": "toy",
+        "run_id": "r1",
+        "payload": {},
+        "created_at": "2026-10-03T00:00:00+00:00",
+    }
+
+
+async def _take(agen: AsyncGenerator[Event, None], n: int, timeout: float = 10) -> list[Event]:
+    out: list[Event] = []
+
+    async def pull() -> None:
+        async for event in agen:
+            out.append(event)
+            if len(out) == n:
+                return
+
+    async with contextlib.aclosing(agen):
+        await asyncio.wait_for(pull(), timeout)
+    return out
+
+
+@contextlib.asynccontextmanager
+async def fake_ws(
+    handler: Callable[[ServerConnection], Awaitable[None]], **options: Any
+) -> AsyncIterator[str]:
+    """A bare WebSocket server on a free port that runs ``handler`` per connection."""
+    async with serve(handler, "127.0.0.1", 0, **options) as server:
+        port = next(iter(server.sockets)).getsockname()[1]
+        yield f"http://127.0.0.1:{port}"
 
 
 # HTTP --------------------------------------------------------------------------------
@@ -198,3 +240,97 @@ def test_bad_listing_raises_env_request_error(tmp_path: Path, answer: bytes) -> 
         client.fetch_file("r1", "predictions", tmp_path / "predictions", max_bytes=100)
     assert fetched.value.status_code == 200
     assert not (tmp_path / "predictions").exists()
+
+
+# events ------------------------------------------------------------------------------
+def test_events_replay_then_stream_live(env: EnvClient, ctx: Context) -> None:
+    for i in range(3):
+        ctx.events.append("test.event", payload={"i": i})
+    base = ctx.events.last_sequence()
+
+    async def scenario() -> list[Event]:
+        agen = env.events(base - 2)
+        out: list[Event] = []
+        async with contextlib.aclosing(agen):
+            async for event in agen:
+                out.append(event)
+                if len(out) == 2:
+                    await asyncio.to_thread(ctx.events.append, "test.live")
+                if len(out) == 3:
+                    break
+        return out
+
+    events = asyncio.run(asyncio.wait_for(scenario(), 10))
+    assert [e.sequence for e in events] == [base - 1, base, base + 1]
+    assert [e.type for e in events] == ["test.event", "test.event", "test.live"]
+    assert events[0].payload == {"i": 1}
+
+
+def test_events_drop_duplicates_and_end_on_close() -> None:
+    received: list[dict[str, Any]] = []
+
+    async def handler(ws: ServerConnection) -> None:
+        received.append(json.loads(await ws.recv()))
+        for seq in (4, 5, 5, 3, 6):
+            await ws.send(json.dumps({"type": "event", "event": _event(seq)}))
+        await ws.send(json.dumps({"type": "ready", "last_sequence": 6}))
+        await ws.close()
+
+    async def scenario() -> list[int]:
+        async with fake_ws(handler) as url:
+            client = EnvClient(url, timeout=5)
+            return [e.sequence async for e in client.events(3)]
+
+    assert asyncio.run(asyncio.wait_for(scenario(), 10)) == [4, 5, 6]
+    assert received == [{"type": "subscribe", "after_sequence": 3}]
+
+
+def test_events_error_message_raises() -> None:
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.send(json.dumps({"type": "error", "error": "first message must be subscribe"}))
+        await ws.close()
+
+    async def scenario() -> None:
+        async with fake_ws(handler) as url:
+            async for _ in EnvClient(url, timeout=5).events(0):
+                pass
+
+    with pytest.raises(EnvRequestError, match="first message must be subscribe"):
+        asyncio.run(asyncio.wait_for(scenario(), 10))
+
+
+def test_events_refused_handshake_keeps_the_status() -> None:
+    def refuse(conn: ServerConnection, request: Request) -> Response:
+        return conn.respond(HTTPStatus.FORBIDDEN, "Cross-origin request rejected\n")
+
+    async def never(ws: ServerConnection) -> None:
+        await ws.close()
+
+    async def scenario() -> None:
+        async with fake_ws(never, process_request=refuse) as url:
+            async for _ in EnvClient(url, timeout=5).events(0):
+                pass
+
+    with pytest.raises(EnvRequestError) as err:
+        asyncio.run(asyncio.wait_for(scenario(), 10))
+    assert err.value.status_code == 403
+    assert not isinstance(err.value, EnvUnreachableError)
+
+
+def test_events_unreachable_raises() -> None:
+    async def scenario() -> None:
+        async for _ in EnvClient(f"http://127.0.0.1:{free_port()}", timeout=2).events(0):
+            pass
+
+    with pytest.raises(EnvUnreachableError):
+        asyncio.run(scenario())
+
+
+def test_closed_subscription_does_not_hold_the_server(home: Path, ctx: Context) -> None:
+    ctx.events.append("test.event")
+    with live_server(home) as url:
+        events = asyncio.run(_take(EnvClient(url, timeout=5).events(0), 1))
+        assert [e.type for e in events] == ["test.event"]
+        stopping = time.monotonic()
+    assert time.monotonic() - stopping < 5  # uvicorn waits for open WebSocket handlers

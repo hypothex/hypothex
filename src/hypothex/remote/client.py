@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import AsyncGenerator
 from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import Any
@@ -19,12 +20,17 @@ from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, ValidationError
+from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
 from hypothex.core.environment import EnvironmentDescriptor
 from hypothex.core.errors import HypothexError
+from hypothex.core.events import Event
 
 DIR_HEADER = "X-Hypothex-Dir"
 SIZE_HEADER = "X-Hypothex-Size"
+WS_PATH = "/api/v1/ws"
+WS_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 FILE_CHUNK_BYTES = 64 * 1024
 
 
@@ -176,8 +182,8 @@ class EnvClient:
     Examples
     --------
     >>> client = EnvClient("http://127.0.0.1:7777/", token="t0k")
-    >>> client.base_url, client.auth_headers()
-    ('http://127.0.0.1:7777', {'Authorization': 'Bearer t0k'})
+    >>> client.base_url, client.ws_url
+    ('http://127.0.0.1:7777', 'ws://127.0.0.1:7777/api/v1/ws')
     >>> client.close()
     """
 
@@ -198,6 +204,12 @@ class EnvClient:
         dict of str to str
         """
         return {"Authorization": f"Bearer {self._token}"} if self._token else {}
+
+    @property
+    def ws_url(self) -> str:
+        """URL of the server's event WebSocket (``ws://`` or ``wss://``)."""
+        scheme, rest = self.base_url.split("://", 1)
+        return f"{'wss' if scheme == 'https' else 'ws'}://{rest}{WS_PATH}"
 
     def close(self) -> None:
         """Close the HTTP connection pool."""
@@ -443,3 +455,61 @@ class EnvClient:
         finally:
             if not done:
                 Path(tmp_name).unlink(missing_ok=True)
+
+    async def events(self, after_sequence: int) -> AsyncGenerator[Event, None]:
+        """
+        Subscribe to the server's event log and yield events in sequence order.
+
+        The server first replays every event after ``after_sequence``, then streams
+        live ones. Events at or below the last yielded sequence are dropped, so a
+        replay overlap never yields a duplicate. The iterator ends when the server
+        closes the connection or the connection drops; the caller reconnects with
+        the last sequence it saw. Close it early with ``contextlib.aclosing``.
+
+        Parameters
+        ----------
+        after_sequence : int
+            Last sequence the caller already has; ``0`` replays everything.
+
+        Yields
+        ------
+        Event
+
+        Raises
+        ------
+        EnvUnreachableError
+            The WebSocket could not be opened.
+        EnvRequestError
+            The server refused the handshake or sent an ``error`` message.
+        """
+        try:
+            ws = await connect(
+                self.ws_url,
+                open_timeout=self.timeout,
+                max_size=WS_MAX_MESSAGE_BYTES,
+                additional_headers=self.auth_headers(),
+            )
+        except InvalidStatus as exc:
+            status = exc.response.status_code
+            raise EnvRequestError(
+                f"{self.ws_url} refused the subscription: HTTP {status}", status_code=status
+            ) from exc
+        except (OSError, TimeoutError, InvalidHandshake) as exc:
+            raise self._unreachable(exc) from exc
+        last = after_sequence
+        async with ws:
+            try:
+                await ws.send(json.dumps({"type": "subscribe", "after_sequence": after_sequence}))
+                async for raw in ws:
+                    msg = json.loads(raw)
+                    if msg.get("type") == "error":
+                        raise EnvRequestError(f"{self.ws_url}: {msg.get('error')}")
+                    if msg.get("type") != "event":
+                        continue  # "ready" and future message types
+                    event = Event.model_validate(msg["event"])
+                    if event.sequence <= last:
+                        continue
+                    last = event.sequence
+                    yield event
+            except ConnectionClosed:
+                return

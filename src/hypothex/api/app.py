@@ -171,6 +171,33 @@ class ViewQueryBody(BaseModel):
     panel: PanelSpec | None = None
 
 
+async def client_left(ws: WebSocket, seconds: float) -> bool:
+    """
+    Wait up to ``seconds`` for a client message; tell whether the client disconnected.
+
+    The event stream polls the log while idle. Waiting on ``receive`` instead of
+    sleeping lets it notice a closed subscription at once, so a hub that reconnects
+    never leaves a polling task behind, and server shutdown is not held up.
+
+    Parameters
+    ----------
+    ws : WebSocket
+        Accepted WebSocket.
+    seconds : float
+        Longest wait.
+
+    Returns
+    -------
+    bool
+        ``True`` when the client disconnected; ``False`` on timeout or any other message.
+    """
+    try:
+        message = await asyncio.wait_for(ws.receive(), seconds)
+    except TimeoutError:
+        return False
+    return message["type"] == "websocket.disconnect"
+
+
 async def _repair_loop(ctx: Context) -> None:
     """Mark orphaned runs lost every ``REPAIR_INTERVAL_SECONDS``."""
     while True:
@@ -782,7 +809,8 @@ def create_app(
                     if not ready:
                         await ws.send_json({"type": "ready", "last_sequence": last})
                         ready = True
-                    await asyncio.sleep(WS_POLL_SECONDS)
+                    if await client_left(ws, WS_POLL_SECONDS):
+                        return
         except WebSocketDisconnect:
             return
 

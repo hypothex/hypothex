@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Fake ``squeue`` for tests; state and behaviour live in _fakeslurm.py."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _fakeslurm import squeue  # noqa: E402
+
+raise SystemExit(squeue(sys.argv[1:]))

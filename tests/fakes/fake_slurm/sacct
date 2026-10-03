@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Fake ``sacct`` for tests; state and behaviour live in _fakeslurm.py."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _fakeslurm import sacct  # noqa: E402
+
+raise SystemExit(sacct(sys.argv[1:]))

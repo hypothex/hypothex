@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Fake ``scancel`` for tests; state and behaviour live in _fakeslurm.py."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _fakeslurm import scancel  # noqa: E402
+
+raise SystemExit(scancel(sys.argv[1:]))

@@ -13,6 +13,7 @@ from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.execution import (
+    QUEUE_FILE,
     STOP_MARKER,
     SUPERVISOR_PID_FILE,
     TERM_GRACE_SECONDS,
@@ -25,6 +26,7 @@ from hypothex.core.execution import (
 )
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gitinfo import capture_diff, create_worktree, head_commit
+from hypothex.core.gpus import free_gpus, gpu_status
 from hypothex.core.ids import utcnow
 from hypothex.core.records import (
     ACTIVE_STATUSES,
@@ -33,6 +35,7 @@ from hypothex.core.records import (
     RunRecord,
     RunStatus,
 )
+from hypothex.core.scheduler import Scheduler, assign_gpus, scheduler_lock
 
 QUEUED_GRACE_SECONDS = 60.0
 WAIT_REPAIR_SECONDS = 5.0
@@ -40,7 +43,11 @@ WAIT_REPAIR_SECONDS = 5.0
 
 def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
     """
-    Create a run and execute it in a detached supervisor process.
+    Create a run and execute it in a detached supervisor process, or queue it.
+
+    With ``req.queue`` the run waits in this host's GPU queue; the scheduler
+    (``hx serve --kind ssh``) starts it once ``req.gpus`` GPUs are free
+    (spec 8A.5). Without it, ``req.gpus > 0`` takes the lowest free GPUs now.
 
     Parameters
     ----------
@@ -50,11 +57,73 @@ def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
     Returns
     -------
     RunRecord
-        The run as recorded right after launch.
+        The run as recorded right after launch (``queued``; with
+        ``executor.queue_position`` when it waits in the queue).
+
+    Raises
+    ------
+    RunError
+        Invalid request, more GPUs than this host has, or (without
+        ``req.queue``) fewer free GPUs than ``req.gpus``: nothing is created.
+        GPUs taken while the run was prepared, or a supervisor that could not
+        be started: the run is created and marked ``failed``.
     """
+    if req.queue:
+        record = prepare_run(ctx, req)
+        try:  # the only place a run joins the queue: marker, FIFO place, position at once
+            Scheduler(ctx).enqueue(record.run_id)
+        except RunError as exc:
+            ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": str(exc)})
+            raise
+        return ctx.find_record(record.run_id)
+    if req.gpus > 0:
+        with scheduler_lock(ctx):  # early error only; released before the slow part
+            gpus = gpu_status(ctx)
+            free = free_gpus(gpus)
+            # more than the host has at all: prepare_run raises the clearer error
+            if len(free) < req.gpus <= len(gpus):
+                raise RunError(
+                    f"{req.gpus} GPUs requested; {len(free)} of {len(gpus)} free; "
+                    "add --queue to wait for them"
+                )
+        # git info, capture_env, dataset fingerprints: never under the host-wide lock
+        record = prepare_run(ctx, req)
+        with scheduler_lock(ctx):
+            gpus = gpu_status(ctx)  # a fresh nvidia-smi: sees processes started meanwhile
+            free = free_gpus(gpus)
+            if len(free) < req.gpus:
+                message = (
+                    f"{req.gpus} GPUs requested; {len(free)} of {len(gpus)} free now "
+                    "(taken while the run was prepared); add --queue to wait for them"
+                )
+                ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": message})
+                raise RunError(message)
+            chosen = free[: req.gpus]
+            record = ctx.update_run(
+                record.run_id, "run.gpus_assigned", assign_gpus(chosen), {"gpus": chosen}
+            )
+            _start_supervisor(ctx, record)  # under the lock: GPUs never wait without one
+        return ctx.find_record(record.run_id)
     record = prepare_run(ctx, req)
-    spawn_supervisor(ctx, record)
+    _start_supervisor(ctx, record)
     return ctx.find_record(record.run_id)
+
+
+def _fail_unstarted(r: RunRecord) -> RunRecord:
+    """Mark a prepared run that never started as failed (frees any GPUs it held)."""
+    if r.status in TERMINAL_STATUSES:
+        return r
+    return r.model_copy(update={"status": RunStatus.FAILED, "ended_at": utcnow()})
+
+
+def _start_supervisor(ctx: Context, record: RunRecord) -> None:
+    """Spawn the run's supervisor; a start that never committed fails the run."""
+    try:
+        spawn_supervisor(ctx, record)
+    except OSError as exc:  # nothing will execute it (Task 18), so its GPUs go back
+        message = f"could not start the supervisor: {exc}"
+        ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": message})
+        raise RunError(message) from exc
 
 
 def wait_for_run(
@@ -125,6 +194,31 @@ def _mark(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
     return mutate
 
 
+def _scheduler_held(run_dir: Path) -> bool:
+    """True when a queued run waits in the GPU queue (no supervisor yet)."""
+    return (run_dir / QUEUE_FILE).is_file() and not (run_dir / SUPERVISOR_PID_FILE).is_file()
+
+
+def _unqueue(r: RunRecord) -> RunRecord:
+    if r.status in TERMINAL_STATUSES:
+        return r
+    executor = r.executor.model_copy(update={"queue_position": None})
+    return r.model_copy(
+        update={"status": RunStatus.KILLED, "ended_at": utcnow(), "executor": executor}
+    )
+
+
+def _remove_from_queue(ctx: Context, run_id: str, run_dir: Path) -> RunRecord | None:
+    """Kill a run still waiting in the GPU queue; None if the scheduler started it."""
+    with scheduler_lock(ctx):
+        if not _scheduler_held(run_dir):
+            return None
+        (run_dir / QUEUE_FILE).unlink()
+        killed = ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "removed from queue"})
+    Scheduler(ctx).refresh_positions()
+    return killed
+
+
 def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) -> RunRecord:
     """
     Stop a queued or running run; it ends as ``killed``.
@@ -152,6 +246,10 @@ def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) ->
             f"run {run_id} is {record.status.value}; only queued or running runs can be stopped"
         )
     run_dir = ctx.run_dir(record)
+    if record.status == RunStatus.QUEUED and _scheduler_held(run_dir):
+        removed = _remove_from_queue(ctx, run_id, run_dir)
+        if removed is not None:
+            return removed
     atomic_write_text(run_dir / STOP_MARKER, utcnow().isoformat())
     child = record.executor.child_pid
     if record.status == RunStatus.RUNNING and child is not None and process_alive(child, None):
@@ -358,7 +456,8 @@ def repair_runs(ctx: Context) -> list[RunRecord]:
     Mark this environment's orphaned queued/running runs as ``lost``.
 
     A run is orphaned when its supervisor is gone (queued runs get a
-    ``QUEUED_GRACE_SECONDS`` grace period). An orphaned child process is
+    ``QUEUED_GRACE_SECONDS`` grace period). Runs waiting in the GPU queue
+    have no supervisor yet and stay queued. An orphaned child process is
     terminated so it does not run unrecorded.
 
     Parameters
@@ -393,7 +492,10 @@ def _repair_one(ctx: Context, current: RunRecord) -> RunRecord | None:
     """Mark one active run of this environment lost if its supervisor is gone."""
     if current.environment_id != ctx.descriptor.environment_id:
         return None
-    if _supervisor_alive(ctx.run_dir(current), current):
+    run_dir = ctx.run_dir(current)
+    if current.status == RunStatus.QUEUED and _scheduler_held(run_dir):
+        return None  # waiting for GPUs: the scheduler owns it, not a supervisor
+    if _supervisor_alive(run_dir, current):
         return None
     age = (utcnow() - current.created_at).total_seconds()
     if current.status == RunStatus.QUEUED and age < QUEUED_GRACE_SECONDS:

@@ -15,7 +15,7 @@ import yaml
 from hypothex.core import execution
 from hypothex.core import scheduler as scheduler_module
 from hypothex.core.context import Context
-from hypothex.core.control import wait_for_run
+from hypothex.core.control import launch_run, repair_runs, stop_run, wait_for_run
 from hypothex.core.errors import RunError
 from hypothex.core.execution import (
     EXECUTION_CLAIM,
@@ -25,6 +25,7 @@ from hypothex.core.execution import (
     prepare_run,
 )
 from hypothex.core.gpus import free_gpus, gpu_status
+from hypothex.core.ids import utcnow
 from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus
 from hypothex.core.scheduler import Scheduler, run_scheduler_loop
 from tests.factories import git, make_record, write_toy_project
@@ -698,3 +699,204 @@ def test_a_launch_event_that_fails_after_the_spawn_still_counts_as_started(
     assert not (ctx.run_dir(ctx.find_record(rid)) / QUEUE_FILE).exists()
     types = [e.type for e in ctx.events.since(0) if e.run_id == rid]
     assert "run.failed" not in types
+
+
+# control: queued and GPU launches, stop, repair -----------------------------------------
+def dead_pid() -> int:
+    proc = subprocess.Popen([PY, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def age_and_orphan(ctx: Context, run_id: str) -> None:
+    """Make a queued run look 30 min old with a launcher that has exited."""
+    gone = dead_pid()
+
+    def mutate(r: RunRecord) -> RunRecord:
+        executor = r.executor.model_copy(update={"pid": gone, "pid_create_time": None})
+        return r.model_copy(
+            update={"created_at": utcnow() - timedelta(minutes=30), "executor": executor}
+        )
+
+    ctx.update_run(run_id, "run.test_aged", mutate)
+
+
+def test_launch_with_queue_waits_for_the_scheduler(
+    ctx: Context, toy_repo: Path, gpus: SetGpus
+) -> None:
+    gpus([{"index": 0, "external": True}, {"index": 1}])
+    rec = launch_run(ctx, RunRequest(repo=toy_repo, command=cmd(CUDA), gpus=1, queue=True))
+    assert rec.status == RunStatus.QUEUED and rec.executor.queue_position == 1
+    assert not (ctx.run_dir(rec) / "supervisor.pid").exists()
+    assert Scheduler(ctx).tick() == [rec.run_id]
+    assert wait_for_run(ctx, rec.run_id, timeout=60).status == RunStatus.FINISHED
+    assert stdout_of(ctx, rec.run_id) == "1"
+
+
+def test_launch_with_gpus_takes_free_gpus_now(ctx: Context, toy_repo: Path, gpus: SetGpus) -> None:
+    gpus([{"index": 0, "external": True}, {"index": 1}, {"index": 2}])
+    rec = launch_run(ctx, RunRequest(repo=toy_repo, command=cmd(CUDA), gpus=2))
+    assert rec.executor.gpus == [1, 2]
+    types = [e.type for e in ctx.events.since(0) if e.run_id == rec.run_id]
+    assert types[0] == "run.created"
+    assert types.index("run.gpus_assigned") < types.index("run.launched")
+    assert wait_for_run(ctx, rec.run_id, timeout=60).status == RunStatus.FINISHED
+    assert stdout_of(ctx, rec.run_id) == "1,2"
+
+
+def test_launch_with_too_few_gpus_fails_before_creating_anything(
+    ctx: Context, toy_repo: Path, gpus: SetGpus
+) -> None:
+    gpus([{"index": 0, "external": True}, {"index": 1}, {"index": 2}])
+    with pytest.raises(RunError, match="3 GPUs requested; 2 of 3 free; add --queue"):
+        launch_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), gpus=3))
+    with pytest.raises(RunError, match="asked for 4 GPUs; this host has 3"):
+        launch_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), gpus=4))
+    with pytest.raises(RunError, match="asked for 4 GPUs; this host has 3"):
+        launch_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), gpus=4, queue=True))
+    assert ctx.store.list_run_ids() == {}
+
+
+def test_stop_removes_a_queued_run_from_the_queue(
+    ctx: Context, toy_repo: Path, gpus: SetGpus
+) -> None:
+    gpus([{"index": 0, "external": True}])
+    first = launch_run(ctx, RunRequest(repo=toy_repo, command=cmd(CUDA), gpus=1, queue=True))
+    second = launch_run(ctx, RunRequest(repo=toy_repo, command=cmd(CUDA), gpus=1, queue=True))
+    assert ctx.find_record(second.run_id).executor.queue_position == 2
+    start = time.monotonic()
+    stopped = stop_run(ctx, first.run_id)
+    assert time.monotonic() - start < 2
+    assert stopped.status == RunStatus.KILLED and stopped.executor.queue_position is None
+    assert not (ctx.run_dir(stopped) / QUEUE_FILE).exists()
+    killed = [e for e in ctx.events.since(0) if e.run_id == first.run_id and e.type == "run.killed"]
+    assert [e.payload["reason"] for e in killed] == ["removed from queue"]
+    sched = Scheduler(ctx)
+    assert sched.positions() == {second.run_id: 1}
+    assert ctx.find_record(second.run_id).executor.queue_position == 1
+    gpus([{"index": 0}])
+    assert sched.tick() == [second.run_id]
+    assert wait_for_run(ctx, second.run_id, timeout=60).status == RunStatus.FINISHED
+    assert stdout_of(ctx, second.run_id) == "0"
+
+
+def test_startup_repair_keeps_queued_runs_queued(
+    ctx: Context, toy_repo: Path, gpus: SetGpus
+) -> None:
+    gpus([{"index": 0, "external": True}])
+    waiting = launch_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), gpus=1, queue=True))
+    age_and_orphan(ctx, waiting.run_id)
+    # the same state without the queue marker is an orphan and is lost
+    orphan = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    age_and_orphan(ctx, orphan.run_id)
+    assert [r.run_id for r in repair_runs(ctx)] == [orphan.run_id]
+    after = ctx.find_record(waiting.run_id)
+    assert after.status == RunStatus.QUEUED and after.executor.queue_position == 1
+    assert Scheduler(ctx).positions() == {waiting.run_id: 1}
+
+
+def test_gpu_launch_prepares_the_run_without_holding_the_scheduler_lock(
+    ctx: Context, toy_repo: Path, gpus: SetGpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import control
+    from hypothex.core.scheduler import scheduler_lock
+
+    gpus([{"index": 0}, {"index": 1}])
+    inside = threading.Event()
+    release = threading.Event()
+    real = control.prepare_run
+
+    def slow_prepare(c: Context, req: RunRequest) -> RunRecord:
+        inside.set()
+        assert release.wait(10)
+        return real(c, req)
+
+    monkeypatch.setattr(control, "prepare_run", slow_prepare)
+    done: list[RunRecord] = []
+    worker = threading.Thread(
+        target=lambda: done.append(
+            launch_run(ctx, RunRequest(repo=toy_repo, command=cmd(CUDA), gpus=1))
+        )
+    )
+    worker.start()
+    assert inside.wait(10)
+    took = threading.Event()
+
+    def grab() -> None:
+        with scheduler_lock(ctx):  # a tick or an enqueue while the run is prepared
+            took.set()
+
+    grabber = threading.Thread(target=grab)
+    grabber.start()
+    assert took.wait(5), "scheduler_lock was held during prepare_run"
+    release.set()
+    worker.join(30)
+    grabber.join(5)
+    assert done[0].executor.gpus == [0]
+    assert wait_for_run(ctx, done[0].run_id, timeout=60).status == RunStatus.FINISHED
+
+
+def test_gpus_taken_while_preparing_fail_the_new_run(
+    ctx: Context, toy_repo: Path, gpus: SetGpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import control
+
+    gpus([{"index": 0}])
+    real = control.prepare_run
+
+    def prepare_then_lose_the_gpu(c: Context, req: RunRequest) -> RunRecord:
+        record = real(c, req)
+        gpus([{"index": 0, "external": True}])  # another user's process took GPU 0
+        return record
+
+    monkeypatch.setattr(control, "prepare_run", prepare_then_lose_the_gpu)
+    with pytest.raises(RunError, match=r"1 GPUs requested; 0 of 1 free now .*add --queue"):
+        launch_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), gpus=1))
+    [run_id] = list(ctx.index.run_ids())
+    failed = ctx.find_record(run_id)
+    assert failed.status == RunStatus.FAILED and failed.executor.gpus == []
+    assert not (ctx.run_dir(failed) / "supervisor.pid").exists()
+    reasons = [e.payload["reason"] for e in ctx.events.since(0) if e.type == "run.failed"]
+    assert reasons and "taken while the run was prepared" in reasons[0]
+
+
+def test_a_tick_between_prepare_and_enqueue_cannot_start_the_run(
+    ctx: Context, toy_repo: Path, gpus: SetGpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import control
+
+    gpus([{"index": 0}])
+    real = control.prepare_run
+
+    def prepare_then_tick(c: Context, req: RunRequest) -> RunRecord:
+        record = real(c, req)
+        assert Scheduler(c).tick() == []  # the scheduler loop runs right here
+        return record
+
+    monkeypatch.setattr(control, "prepare_run", prepare_then_tick)
+    rec = launch_run(ctx, RunRequest(repo=toy_repo, command=cmd(CUDA), gpus=1, queue=True))
+    monkeypatch.setattr(control, "prepare_run", real)
+    assert rec.status == RunStatus.QUEUED and rec.executor.queue_position == 1
+    assert not (ctx.run_dir(rec) / "supervisor.pid").exists()
+    types = [e.type for e in ctx.events.since(0) if e.run_id == rec.run_id]
+    assert types.count("run.enqueued") == 1 and "run.launched" not in types
+    assert Scheduler(ctx).tick() == [rec.run_id]
+    assert wait_for_run(ctx, rec.run_id, timeout=60).status == RunStatus.FINISHED
+
+
+def test_direct_gpu_launch_whose_spawn_fails_frees_the_gpus(
+    ctx: Context, toy_repo: Path, gpus: SetGpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import control
+
+    gpus([{"index": 0}])
+
+    def broken(c: Context, r: RunRecord) -> int:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(control, "spawn_supervisor", broken)
+    with pytest.raises(RunError, match="could not start the supervisor"):
+        launch_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), gpus=1))
+    [run_id] = list(ctx.index.run_ids())
+    assert ctx.find_record(run_id).status == RunStatus.FAILED
+    assert free_gpus(gpu_status(ctx)) == [0]

@@ -10,7 +10,7 @@ from hypothex.core.context import Context
 from hypothex.core.headlines import overview_headline
 from hypothex.core.ids import utcnow
 from hypothex.core.overview import build_overview
-from hypothex.core.records import GitInfo, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.records import CostTotals, GitInfo, RunRecord, RunStatus, ScoreRecord
 from tests.factories import make_record
 
 # Wilson 95% interval for 4/4 successes: lower = n / (n + z^2) = 4 / (4 + 1.959964^2)
@@ -337,3 +337,28 @@ def test_empty_home(ctx: Context) -> None:
     summary = build_overview(ctx)
     assert summary.timeline == [] and summary.ideas == [] and summary.projects == []
     assert summary.counts["total"] == 0 and summary.running == []
+
+
+def test_overview_sums_cost_in_the_window_and_today(ctx: Context, toy_repo: Path) -> None:
+    now = utcnow()
+    _run(
+        ctx,
+        toy_repo,
+        "c1",
+        ago=timedelta(minutes=30),
+        now=now,
+        ended_at=now,
+        cost=CostTotals(gpu_usd=1.0, api_usd=0.5, total_usd=1.5),
+    )
+    _run(
+        ctx,
+        toy_repo,
+        "c2",
+        ago=timedelta(days=3),
+        now=now,
+        ended_at=now - timedelta(days=3),
+        cost=CostTotals(total_usd=9.0),
+    )
+    summary = build_overview(ctx)
+    assert summary.cost_usd == 1.5  # c2 was created before the 24 h window
+    assert summary.cost_today_usd == 1.5

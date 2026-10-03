@@ -5,7 +5,15 @@ from pathlib import Path
 import pytest
 
 from hypothex.core.context import Context
-from hypothex.core.cost import billed_gpus, compute_cost, price_record, wall_hours
+from hypothex.core.cost import (
+    add_costs,
+    billed_gpus,
+    compute_cost,
+    cost_since,
+    price_record,
+    today_start,
+    wall_hours,
+)
 from hypothex.core.execution import RunRequest, execute_run, prepare_run
 from hypothex.core.records import CostTotals, ExecutorInfo, RunRecord, RunStatus, UsageTotals
 from tests.factories import make_record
@@ -189,3 +197,37 @@ def test_finish_keeps_scheduler_executor_and_bills_its_gpus(ctx: Context, toy_re
     wall = (done.ended_at - done.started_at).total_seconds() / 3600
     assert done.cost is not None and done.cost.gpu_hours == round(wall * 2, 6) > 0
     assert done.cost.gpu_usd == 0.0 and done.cost.total_usd == 0.0
+
+
+def test_add_costs_sums_fields_and_is_none_without_costs() -> None:
+    total = add_costs(
+        [
+            CostTotals(gpu_hours=1.0, gpu_usd=2.0, total_usd=2.0),
+            None,
+            CostTotals(gpu_hours=0.5, gpu_usd=1.0, api_usd=0.25, total_usd=1.25),
+        ]
+    )
+    assert total == CostTotals(gpu_hours=1.5, gpu_usd=3.0, api_usd=0.25, total_usd=3.25)
+    assert add_costs([]) is None and add_costs([None, None]) is None
+
+
+def test_today_start_is_local_midnight() -> None:
+    start = today_start()
+    now = datetime.now().astimezone()
+    assert start.tzinfo is not None
+    assert (start.hour, start.minute, start.second, start.microsecond) == (0, 0, 0, 0)
+    assert start.date() == now.date()
+    assert start <= now
+
+
+def test_cost_since_counts_runs_ended_at_or_after_the_moment() -> None:
+    since = START
+    runs = [
+        make_record(cost=CostTotals(total_usd=1.23456), ended_at=since),
+        make_record(cost=CostTotals(total_usd=2.0), ended_at=since + timedelta(hours=1)),
+        make_record(cost=CostTotals(total_usd=50.0), ended_at=since - timedelta(seconds=1)),
+        make_record(cost=CostTotals(total_usd=70.0), ended_at=None),
+        make_record(cost=None, ended_at=since + timedelta(hours=2)),
+    ]
+    assert cost_since(runs, since) == 3.2346
+    assert cost_since([], since) == 0.0

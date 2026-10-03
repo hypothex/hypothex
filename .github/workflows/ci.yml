@@ -67,3 +67,18 @@ jobs:
             ui/e2e/.report
             ui/e2e/.results
           retention-days: 7
+
+  docker:
+    # tests/docker: a throwaway sshd container and a small SLURM cluster (never real hosts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HYPOTHEX_REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-groups
+      - run: docker version && docker compose version
+      - run: uv run pytest -m docker -v -rs --durations=10

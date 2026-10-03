@@ -42,6 +42,7 @@ from hypothex.core import control
 from hypothex.core import queries as q
 from hypothex.core.config import load_project_config, parse_metric_version
 from hypothex.core.context import Context
+from hypothex.core.cost import cost_since, today_start
 from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.events import CommandInterruptedError
@@ -785,19 +786,6 @@ def environment_runs(ctx: Context, environment_id: str) -> list[RunRecord]:
         return [RunRecord.model_validate_json(j) for j in session.scalars(stmt)]
 
 
-def _today_start() -> datetime:
-    return datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def _cost_since(runs: list[RunRecord], since: datetime) -> float:
-    total = sum(
-        r.cost.total_usd
-        for r in runs
-        if r.cost is not None and r.ended_at is not None and r.ended_at >= since
-    )
-    return round(total, 4)
-
-
 def host_rows(
     ctx: Context, manager: HubManager, gpu_cache: GpuCache | None = None
 ) -> list[dict[str, Any]]:
@@ -818,10 +806,10 @@ def host_rows(
     Returns
     -------
     list of dict
-        ``{name, kind, state, gpus, queue, slurm, cost_today_usd, projects,
-        stale_banner_hours}``.
+        ``{name, kind, state, gpus, queue, slurm, cost_today_usd, usd_per_gpu_hour,
+        projects, stale_banner_hours}``.
     """
-    since = _today_start()
+    since = today_start()
     eid = ctx.descriptor.environment_id
     local_runs = environment_runs(ctx, eid)
     local_state = HostState(
@@ -834,6 +822,10 @@ def host_rows(
         hx_version=__version__,
         last_sequence=ctx.events.last_sequence(),
     )
+    local_rate = next(
+        (s.usd_per_gpu_hour for s in manager.hosts.environments.values() if s.route == "local"),
+        None,
+    )
     seen_gpus = gpu_cache.get() if gpu_cache is not None else None
     rows: list[dict[str, Any]] = [
         {
@@ -843,7 +835,8 @@ def host_rows(
             "gpus": [g.model_dump(mode="json") for g in gpu_status(ctx, seen_gpus)],
             "queue": sum(1 for r in local_runs if r.status == RunStatus.QUEUED),
             "slurm": None,
-            "cost_today_usd": _cost_since(local_runs, since),
+            "cost_today_usd": cost_since(local_runs, since),
+            "usd_per_gpu_hour": local_rate,
             "projects": sorted(e.project for e in ctx.index.list_projects()),
             "stale_banner_hours": manager.hosts.stale_banner_hours,
         }
@@ -882,7 +875,8 @@ def host_rows(
                 "gpus": gpus,
                 "queue": queue,
                 "slurm": slurm,
-                "cost_today_usd": _cost_since(runs, since),
+                "cost_today_usd": cost_since(runs, since),
+                "usd_per_gpu_hour": spec.usd_per_gpu_hour,
                 "projects": sorted(spec.projects),
                 "stale_banner_hours": manager.hosts.stale_banner_hours,
             }
@@ -1545,6 +1539,7 @@ def create_app(
     auth_token: str | None = None,
     hub: bool = True,
     hub_url: str | None = None,
+    lifespan_context: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
 ) -> FastAPI:
     """
     Build the FastAPI application.
@@ -1588,6 +1583,11 @@ def create_app(
     hub_url : str, optional
         This server's own URL, given to the mounted MCP server so its remote tools
         call this hub (``hx serve`` passes it).
+    lifespan_context : callable, optional
+        Returns a context manager entered when the server starts (before the
+        hub connects its hosts) and exited when it stops (after the hub
+        stopped), in the ASGI lifespan: inside uvicorn's signal handling, so a
+        SIGTERM runs its cleanup too. ``hx serve`` passes the demo hosts.
 
     Returns
     -------
@@ -1652,10 +1652,23 @@ def create_app(
                 for loop in loops:
                     await asyncio.to_thread(loop.join, 10)
 
+    @asynccontextmanager
+    async def lifespan_with_context(app_: FastAPI) -> AsyncIterator[None]:
+        # uvicorn re-raises SIGTERM after its shutdown, which skips any `with` around
+        # it; the lifespan's own shutdown always runs first
+        with contextlib.ExitStack() as extra:
+            if lifespan_context is not None:
+                await asyncio.to_thread(extra.enter_context, lifespan_context())
+            try:
+                async with lifespan(app_):
+                    yield
+            finally:
+                await asyncio.to_thread(extra.close)
+
     app = FastAPI(
         title="Hypothex",
         version=__version__,
-        lifespan=lifespan,
+        lifespan=lifespan_with_context,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
     )

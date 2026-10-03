@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from datetime import datetime
+
 from hypothex.core.records import TERMINAL_STATUSES, CostTotals, RunRecord
 
 COST_DECIMALS = 6
@@ -134,3 +137,100 @@ def price_record(record: RunRecord, usd_per_gpu_hour: float | None) -> RunRecord
     if record.status not in TERMINAL_STATUSES:
         return record
     return record.model_copy(update={"cost": compute_cost(record, usd_per_gpu_hour)})
+
+
+def add_costs(costs: Iterable[CostTotals | None]) -> CostTotals | None:
+    """
+    Sum cost totals field by field (a seed group, a day, a sweep).
+
+    Parameters
+    ----------
+    costs : iterable of CostTotals or None
+        Costs to add; None entries (runs without a cost yet) are skipped.
+
+    Returns
+    -------
+    CostTotals or None
+        The sum, each value rounded to 6 decimals; None when no cost was given.
+
+    Examples
+    --------
+    >>> add_costs([CostTotals(gpu_usd=1.0, total_usd=1.0), None, CostTotals(api_usd=0.5,
+    ...     total_usd=0.5)]).total_usd
+    1.5
+    >>> add_costs([None]) is None
+    True
+    """
+    present = [c for c in costs if c is not None]
+    if not present:
+        return None
+    return CostTotals(
+        gpu_hours=round(sum(c.gpu_hours for c in present), 6),
+        gpu_usd=round(sum(c.gpu_usd for c in present), 6),
+        api_usd=round(sum(c.api_usd for c in present), 6),
+        total_usd=round(sum(c.total_usd for c in present), 6),
+    )
+
+
+def today_start() -> datetime:
+    """
+    Return local midnight today, as an aware datetime.
+
+    "Today's cost" counts runs that ended at or after this moment. Host rows and
+    the Overview both use it, so their ``cost_today_usd`` values agree.
+
+    Returns
+    -------
+    datetime
+        Today at 00:00 in the machine's local time zone.
+
+    Examples
+    --------
+    >>> start = today_start()
+    >>> (start.hour, start.minute, start.second, start.microsecond)
+    (0, 0, 0, 0)
+    >>> start.tzinfo is not None
+    True
+    """
+    return datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def cost_since(runs: Iterable[RunRecord], since: datetime) -> float:
+    """
+    Sum ``cost.total_usd`` of the runs that ended at or after a moment.
+
+    Runs with no cost or no ``ended_at`` are skipped. A run counts on the day it
+    ended, however long ago it started.
+
+    Parameters
+    ----------
+    runs : iterable of RunRecord
+        Runs to sum.
+    since : datetime
+        Aware start of the period (normally ``today_start()``).
+
+    Returns
+    -------
+    float
+        Total USD, rounded to 4 decimals; 0.0 when no run matches.
+
+    Examples
+    --------
+    >>> from datetime import UTC, datetime
+    >>> since = datetime(2026, 10, 3, tzinfo=UTC)
+    >>> runs = [
+    ...     RunRecord.model_construct(cost=CostTotals(total_usd=1.25),
+    ...         ended_at=datetime(2026, 10, 3, 9, tzinfo=UTC)),
+    ...     RunRecord.model_construct(cost=CostTotals(total_usd=9.0),
+    ...         ended_at=datetime(2026, 10, 2, 23, tzinfo=UTC)),
+    ...     RunRecord.model_construct(cost=None, ended_at=datetime(2026, 10, 3, tzinfo=UTC)),
+    ... ]
+    >>> cost_since(runs, since)
+    1.25
+    """
+    total = sum(
+        r.cost.total_usd
+        for r in runs
+        if r.cost is not None and r.ended_at is not None and r.ended_at >= since
+    )
+    return round(total, 4)

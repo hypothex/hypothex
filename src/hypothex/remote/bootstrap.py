@@ -90,8 +90,9 @@ class ServerInfo(BaseModel):
     protocol_version : int
         Protocol version from the server's descriptor.
     token : str or None
-        Bearer token the env server requires (``Authorization: Bearer``); None
-        for a server without one. Kept out of ``model_dump`` and ``repr`` so it
+        Bearer token given to the server at start (``HYPOTHEX_SERVE_TOKEN``);
+        the hub sends it as ``Authorization: Bearer``. None for a server
+        without one. Kept out of ``model_dump`` and ``repr`` so it
         is never printed (``hx hosts add --json``).
     """
 

@@ -393,6 +393,11 @@ def test_render_sbatch_defaults_and_zero_gpus(tmp_path: Path) -> None:
         (SlurmDefaults(extra=["--req"]), "sets --requeue"),
         (SlurmDefaults(extra=["--no-requeue"]), "sets --no-requeue"),
         (SlurmDefaults(extra=["--no-req"]), "sets --no-requeue"),
+        # each array task after the first would rerun the same run and hit its claim
+        (SlurmDefaults(extra=["--array=1-3"]), "sets --array"),
+        (SlurmDefaults(extra=["--arr=0-9"]), "sets --array"),
+        (SlurmDefaults(extra=["-a1-3"]), "sets --array"),
+        (SlurmDefaults(extra=["-a"]), "sets --array"),
     ],
 )
 def test_render_sbatch_rejects_unsafe_settings(
@@ -406,6 +411,12 @@ def test_render_sbatch_keeps_options_that_do_not_touch_requeue(tmp_path: Path) -
     defaults = SlurmDefaults(extra=["--reservation=lab", "--nodes=1", "--no-kill"])
     script = render_sbatch(make_record("r1"), defaults, tmp_path / "hx")
     assert "#SBATCH --reservation=lab\n" in script and "#SBATCH --no-kill\n" in script
+
+
+def test_render_sbatch_keeps_options_that_do_not_touch_array(tmp_path: Path) -> None:
+    defaults = SlurmDefaults(extra=["--account=lab", "--acctg-freq=30", "-A", "-Alab"])
+    script = render_sbatch(make_record("r1"), defaults, tmp_path / "hx")
+    assert "#SBATCH --acctg-freq=30\n" in script and "#SBATCH -Alab\n" in script
 
 
 def test_fake_sbatch_records_flag_directives(slurm: FakeSlurm) -> None:

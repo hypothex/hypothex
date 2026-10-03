@@ -175,7 +175,8 @@ def validate_defaults(defaults: SlurmDefaults) -> None:
         (``sbatch_option_problem``: ``--job-name``, ``--comment``,
         ``--output``, ``--error``, ``--chdir``, ``--wrap``, in any form; and
         here also ``--requeue`` / ``--no-requeue`` or an abbreviation of them,
-        see ``REQUEUE_OPTIONS``).
+        see ``REQUEUE_OPTIONS``, and ``--array`` / ``-a`` in any form, see
+        ``ARRAY_OPTION``).
 
     Examples
     --------
@@ -187,7 +188,7 @@ def validate_defaults(defaults: SlurmDefaults) -> None:
     if defaults.account is not None:
         _safe("account", defaults.account)
     for item in defaults.extra:
-        problem = sbatch_option_problem(item) or _requeue_problem(item)
+        problem = sbatch_option_problem(item) or _requeue_problem(item) or _array_problem(item)
         if problem is not None:
             raise SlurmError(f"slurm extra option {problem}")
 
@@ -212,6 +213,31 @@ def _requeue_problem(item: str) -> str | None:
     return (
         f"{item!r} sets --{taken}, which Hypothex sets itself "
         "(every job is --no-requeue: a second attempt cannot run the same run)"
+    )
+
+
+ARRAY_OPTION = "array"
+"""The sbatch option (short ``-a``) that makes a job array; ``extra`` may not set it.
+
+Every task of an array runs the batch script, so each task after the first
+would run ``hx run --child`` for the same run, find it already claimed, and
+fail: one run is one job.
+"""
+ARRAY_SHORT = "a"
+
+
+def _array_problem(item: str) -> str | None:
+    """Why ``item`` makes a job array (``--array=1-3``, ``--arr=0-9``, ``-a1-3``), or None."""
+    if item.startswith("--"):
+        name = item[2:].split("=", 1)[0]
+        taken = bool(name) and ARRAY_OPTION.startswith(name)
+    else:
+        taken = item.startswith(f"-{ARRAY_SHORT}")
+    if not taken:
+        return None
+    return (
+        f"{item!r} sets --{ARRAY_OPTION}, which Hypothex cannot run "
+        "(each array task would run the same run again)"
     )
 
 

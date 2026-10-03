@@ -45,9 +45,10 @@ from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import reserved_run_path
 from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_panel
-from hypothex.core.records import RunStatus
+from hypothex.core.records import RunRecord, RunStatus
 from hypothex.core.scheduler import Scheduler, run_scheduler_loop
 from hypothex.core.slurm import SlurmPoller, comment_accounting, require_flock
+from hypothex.core.sweeps import mark_sweep, stop_if_queued
 from hypothex.core.views import PanelData, PanelSpec, ViewSpec
 from hypothex.mcp.server import (
     ViewValidationError,
@@ -61,6 +62,7 @@ from hypothex.mcp.server import (
     view_document,
 )
 from hypothex.remote.client import DIR_HEADER, SIZE_HEADER
+from hypothex.remote.config import SlurmDefaults
 
 log = logging.getLogger(__name__)
 
@@ -120,10 +122,9 @@ class ActionBody(BaseModel):
     created_by: str = "api"
 
 
-class LaunchBody(ActionBody):
-    """Body of ``POST /api/v1/runs``."""
+class RunFields(ActionBody):
+    """Fields of a launch, shared by env servers and the hub's host launches."""
 
-    repo: str
     task: str | None = None
     stage: str | None = None
     command: list[str] | None = None
@@ -132,6 +133,24 @@ class LaunchBody(ActionBody):
     tags: list[str] = Field(default_factory=list)
     params: dict[str, str] = Field(default_factory=dict)
     vars: dict[str, str] = Field(default_factory=dict)
+    gpus: int = Field(0, ge=0)
+    queue: bool = False
+    slurm: SlurmDefaults | None = None
+    commit: str | None = None
+    diff: str | None = None
+    sweep_id: str | None = None
+
+
+class LaunchBody(RunFields):
+    """Body of ``POST /api/v1/runs``: start a run in this environment."""
+
+    repo: str
+
+
+class StopBody(ActionBody):
+    """Body of ``POST /api/v1/runs/{id}/stop``; ``only_queued`` leaves started runs alone."""
+
+    only_queued: bool = False
 
 
 class SubscribeMessage(BaseModel):
@@ -229,6 +248,70 @@ async def _repair_loop(ctx: Context) -> None:
             await asyncio.to_thread(control.repair_runs, ctx)
         except Exception:  # noqa: BLE001 - keep the server alive
             log.exception("run repair failed")
+
+
+def run_request(body: RunFields, repo: str) -> RunRequest:
+    """
+    Turn a launch body into a ``RunRequest`` for ``repo``.
+
+    Parameters
+    ----------
+    body : RunFields
+        Launch fields.
+    repo : str
+        Project checkout on this machine.
+
+    Returns
+    -------
+    RunRequest
+
+    Raises
+    ------
+    RunError
+        If an agent (``created_by: agent:*``) gives no hypothesis.
+    """
+    require_agent_hypothesis(body.created_by, body.hypothesis)
+    return RunRequest(
+        repo=Path(repo),
+        command=body.command,
+        stage=body.stage,
+        task=body.task,
+        hypothesis=body.hypothesis,
+        seed=body.seed,
+        tags=body.tags,
+        params=body.params,
+        vars=body.vars,
+        created_by=body.created_by,
+        gpus=body.gpus,
+        queue=body.queue,
+        slurm=body.slurm,
+        commit=body.commit,
+        diff=body.diff,
+    )
+
+
+def launch_here(ctx: Context, body: RunFields, repo: str) -> RunRecord:
+    """
+    Launch a run in this environment and record its sweep.
+
+    Parameters
+    ----------
+    ctx : Context
+        Context of this environment.
+    body : RunFields
+        Launch fields; ``sweep_id`` marks the new run as a sweep member.
+    repo : str
+        Project checkout on this machine.
+
+    Returns
+    -------
+    RunRecord
+        The launched run (with ``sweep_id`` set when given).
+    """
+    record = control.launch_run(ctx, run_request(body, repo))
+    if body.sweep_id is not None:
+        record = mark_sweep(ctx, record.run_id, body.sweep_id)
+    return record
 
 
 def _run_view(kind: str) -> list[PanelSpec]:
@@ -833,20 +916,7 @@ def create_app(
 
     @app.post("/api/v1/runs")
     def launch(body: LaunchBody) -> dict[str, Any]:
-        require_agent_hypothesis(body.created_by, body.hypothesis)
-        req = RunRequest(
-            repo=Path(body.repo),
-            command=body.command,
-            stage=body.stage,
-            task=body.task,
-            hypothesis=body.hypothesis,
-            seed=body.seed,
-            tags=body.tags,
-            params=body.params,
-            vars=body.vars,
-            created_by=body.created_by,
-        )
-        return once(body, lambda: control.launch_run(ctx, req))
+        return once(body, lambda: launch_here(ctx, body, body.repo))
 
     @app.get("/api/v1/runs/{run_id}")
     def run_detail(run_id: str) -> dict[str, Any]:
@@ -918,7 +988,9 @@ def create_app(
         return once(body, lambda: reeval(ctx, run_id=run_id, metric=body.metric, force=body.force))
 
     @app.post("/api/v1/runs/{run_id}/stop")
-    def run_stop(run_id: str, body: ActionBody) -> dict[str, Any]:
+    def run_stop(run_id: str, body: StopBody) -> dict[str, Any]:
+        if body.only_queued:
+            return once(body, lambda: stop_if_queued(ctx, run_id))
         return once(body, lambda: control.stop_run(ctx, run_id))
 
     @app.post("/api/v1/runs/{run_id}/tags")

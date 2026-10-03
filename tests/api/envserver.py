@@ -168,3 +168,31 @@ def write_fake_scp(folder: Path) -> Path:
     path.write_text(f'#!/bin/sh\n{env} exec {shlex.quote(sys.executable)} {script} "$@"\n')
     path.chmod(0o755)
     return path
+
+
+@contextmanager
+def env_server(
+    home: Path, *, kind: str | None = "ssh", background: bool = False
+) -> Iterator[tuple[str, Context]]:
+    """
+    Run an env server for ``home`` in a thread.
+
+    Parameters
+    ----------
+    home : Path
+        The fake host's Hypothex home.
+    kind : str or None
+        Descriptor kind (``ssh``, ``slurm``).
+    background : bool
+        Run the repair and scheduler loops.
+
+    Yields
+    ------
+    tuple of (str, Context)
+        Base URL and a context on the same home.
+    """
+    from hypothex.api.app import create_app
+
+    ctx = Context.open(home)
+    with serve_app(create_app(home, background_repair=background, kind=kind)) as url:
+        yield url, ctx

@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -10,7 +11,7 @@ from hypothex.core.context import Context
 from hypothex.core.sweeps import list_sweeps
 from hypothex.mcp.server import MCPServer, _text
 from tests.api.envserver import remote_hub, serve_app, wait_until
-from tests.factories import PREDS_075, seed_finished_run
+from tests.factories import PREDS_075, git, seed_finished_run, write_toy_project
 from tests.mcp.test_server import call
 
 PY = sys.executable
@@ -151,6 +152,43 @@ def test_remote_sweep_and_pull_tools(
         err, pulled = call(home, "pull_artifact", {"run_id": "e1", "artifact": rel})
         assert not err
         assert Path(pulled["local_path"]).read_text() == (r.env.run_dir(record) / rel).read_text()
+
+
+def test_remote_sweep_sends_the_client_checkout(
+    home: Path, ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hypothex.mcp.server as server_mod
+
+    sent: list[dict[str, Any]] = []
+
+    def record_hub(method: str, path: str, body: dict[str, Any], **kwargs: Any) -> Any:
+        sent.append(body)
+        return {"ok": True}
+
+    monkeypatch.setattr(server_mod, "hub_call", record_hub)
+    ctx.register_project(toy_repo)
+    (toy_repo / "data" / "test.jsonl").write_text("{}\n")  # an uncommitted change
+    base = {
+        "project": "toy",
+        "command": SWEEP_CMD,
+        "hypothesis": "remote",
+        "grid": {"x": ["1"]},
+        "seeds": [1],
+        "host": "gpu1",
+    }
+    head = git(toy_repo, "rev-parse", "HEAD")
+    err, _ = call(home, "launch_sweep", base)  # the registered checkout of the project
+    assert not err
+    assert sent[-1]["commit"] == head and "test.jsonl" in sent[-1]["diff"]
+    err, _ = call(home, "launch_sweep", {**base, "repo": str(toy_repo)})  # an explicit checkout
+    assert not err and sent[-1]["commit"] == head
+    other = write_toy_project(tmp_path / "other")
+    (other / "hypothex.yaml").write_text(
+        (other / "hypothex.yaml").read_text().replace("project: toy", "project: other")
+    )
+    err, message = call(home, "launch_sweep", {**base, "repo": str(other)})
+    assert err and "not 'toy'" in message
+    assert len(sent) == 2
 
 
 def test_mutation_tools_send_host_runs_through_the_hub(

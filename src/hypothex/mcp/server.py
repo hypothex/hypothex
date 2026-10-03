@@ -778,6 +778,48 @@ def client_checkout(root: Path) -> tuple[dict[str, str | None], list[str]]:
     return fields, untracked
 
 
+def sweep_checkout(ctx: Context, project: str, repo: str | None) -> dict[str, str | None]:
+    """
+    The ``commit`` and ``diff`` of the client's checkout of ``project``, for a host sweep.
+
+    Like ``launch_run(host=)``, a host sweep sends the client's code, not a path:
+    the hub may be another machine (spec 5.2), and without these it runs the
+    hub's or host's mapped checkout (8A.4).
+
+    Parameters
+    ----------
+    ctx : Context
+        The client's store; its registered checkout of ``project`` is the default.
+    project : str
+        The sweep's project.
+    repo : str, optional
+        The checkout to send; default the registered repo of ``project``.
+
+    Returns
+    -------
+    dict
+        ``{commit, diff}``; empty when no checkout of ``project`` is here.
+
+    Raises
+    ------
+    ConfigError
+        If ``repo`` holds another project.
+    """
+    if repo is not None:
+        root = Path(repo)
+    else:
+        try:
+            root = Path(ctx.store.load_project(project).repo)
+        except StoreError:
+            return {}
+        if not root.is_dir():
+            return {}  # a project copied from a host: its mapped checkout runs
+    fields, _ = client_checkout(root)
+    if fields["project"] != project:
+        raise ConfigError(f"{root} holds project {fields['project']!r}, not {project!r}")
+    return {"commit": fields["commit"], "diff": fields["diff"]}
+
+
 def sweep_summary(
     ctx: Context,
     sweep_id: str,
@@ -1230,18 +1272,22 @@ def build_server(
         gpus: int = 0,
         queue: bool = False,
         agent: str = "mcp",
+        repo: str | None = None,
     ) -> dict[str, Any]:
         """
         Start a sweep: one run per grid combination (plus `random` samples from
         `ranges`, e.g. {"lr": "1e-5:1e-3:log"}) and seed. The command must use every
-        param as {name}; {seed} is optional. host=None runs here; a host name runs there.
-        Returns the summary: spec (with run_ids), counts, cells, best, total_usd.
+        param as {name}; {seed} is optional. host=None runs here; a host name runs there
+        with this checkout's commit and uncommitted diff (repo, default the project's
+        registered checkout). Returns the summary: spec (with run_ids), counts, cells,
+        best, total_usd.
         """
         require_agent_hypothesis(f"agent:{agent}", hypothesis)
         params = [SweepParam(name=k, values=[_text(v) for v in vs]) for k, vs in grid.items()]
         params += parse_ranges([f"{k}={v}" for k, v in (ranges or {}).items()])
         if is_remote(host):
             body = {
+                **sweep_checkout(ctx(), project, repo),  # never a path: the hub may be elsewhere
                 "project": project,
                 "task": task,
                 "host": host,
@@ -1268,6 +1314,7 @@ def build_server(
             gpus=gpus,
             queue=queue,
             created_by=f"agent:{agent}",
+            repo=Path(repo) if repo is not None else None,
         )
         return dump(summary)
 

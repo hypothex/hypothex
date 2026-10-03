@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import os
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,7 @@ from hypothex.core.execution import RunRequest
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.records import RunStatus
 from hypothex.core.store import ProjectEntry
-from hypothex.core.sweeps import SweepParam, SweepSpec, load_sweep, sweep_path
+from hypothex.core.sweeps import SweepParam, SweepSpec, load_sweep, summarize_sweep, sweep_path
 from hypothex.core.views import PanelSpec, ValidationIssue, ViewInfo, ViewSpec
 from hypothex.remote.config import HostSpec
 from hypothex.remote.ssh import SshTarget
@@ -655,6 +656,122 @@ def find_sweep(ctx: Context, sweep_id: str, project: str | None = None) -> Sweep
     if len(found) > 1:
         raise ConfigError(f"sweep {sweep_id} exists in {', '.join(found)}; pass --project")
     return load_sweep(ctx.layout, found[0], sweep_id)
+
+
+def acts_through_hub(ctx: Context, run_id: str) -> bool:
+    """
+    Tell whether a mutation of ``run_id`` must go through the hub.
+
+    True for a run of another environment (mirrored from a host, which owns its
+    processes, job, and files) and for a run this store does not have (a CLI or
+    MCP client on another machine than the hub).
+
+    Parameters
+    ----------
+    ctx : Context
+    run_id : str
+
+    Returns
+    -------
+    bool
+    """
+    try:
+        record = ctx.find_record(run_id)
+    except StoreError:
+        return True
+    return record.environment_id != ctx.descriptor.environment_id
+
+
+def client_checkout(root: Path) -> tuple[dict[str, str | None], list[str]]:
+    """
+    The project, HEAD, and uncommitted diff of a checkout here, for a host launch.
+
+    A client sends these instead of its repo path (the hub may be another
+    machine, spec 5.2); the host fetches ``commit`` and applies ``diff`` (8A.4).
+
+    Parameters
+    ----------
+    root : Path
+        The project checkout.
+
+    Returns
+    -------
+    tuple of (dict, list of str)
+        ``{project, commit, diff}`` and the untracked files ``git diff HEAD`` leaves out.
+    """
+    from hypothex.api.app import local_diff  # lazy: hypothex.api.app imports this module
+    from hypothex.core.gitinfo import head_commit
+
+    commit = head_commit(root)
+    untracked: list[str] = []
+    if commit is not None:
+        out = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"],
+            capture_output=True,
+            text=True,
+        )
+        untracked = out.stdout.splitlines() if out.returncode == 0 else []
+    fields: dict[str, str | None] = {
+        "project": load_project_config(root).project,
+        "commit": commit,
+        "diff": local_diff(str(root)) if commit is not None else None,
+    }
+    return fields, untracked
+
+
+def sweep_summary(
+    ctx: Context, sweep_id: str, project: str | None = None, *, url: str | None = None
+) -> dict[str, Any]:
+    """
+    A sweep's summary from this store, else from the hub.
+
+    A sweep made through the hub from another machine has its file only on the hub.
+
+    Parameters
+    ----------
+    ctx : Context
+    sweep_id : str
+    project : str, optional
+    url : str, optional
+        Hub URL (default ``hub_url()``).
+
+    Returns
+    -------
+    dict
+        ``SweepSummary`` as JSON.
+    """
+    try:
+        spec = find_sweep(ctx, sweep_id, project)
+    except StoreError:
+        path = f"/api/v1/sweeps/{project}/{sweep_id}" if project else f"/api/v1/sweeps/{sweep_id}"
+        return hub_call("GET", path, url=url)
+    return to_jsonable(summarize_sweep(ctx, spec.project, spec.id))
+
+
+def locate_sweep(
+    ctx: Context, sweep_id: str, project: str | None = None, *, url: str | None = None
+) -> tuple[SweepSpec, bool]:
+    """
+    Find a sweep's spec here, else on the hub.
+
+    Parameters
+    ----------
+    ctx : Context
+    sweep_id : str
+    project : str, optional
+    url : str, optional
+        Hub URL (default ``hub_url()``).
+
+    Returns
+    -------
+    tuple of (SweepSpec, bool)
+        The spec and whether its file is in this store (False: act through the hub).
+    """
+    try:
+        return find_sweep(ctx, sweep_id, project), True
+    except StoreError:
+        summary = sweep_summary(ctx, sweep_id, project, url=url)
+        return SweepSpec.model_validate(summary["spec"]), False
 
 
 def _expose_errors(fn: Callable[..., Any]) -> Callable[..., Any]:

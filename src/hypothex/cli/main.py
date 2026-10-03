@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING, Annotated, Any, cast, get_args
 import typer
 import yaml
 from pydantic import ValidationError
+from typer.core import TyperGroup
 
 from hypothex._version import __version__
 from hypothex.core import queries as q
@@ -25,17 +27,19 @@ from hypothex.core.config import (
     CONFIG_FILENAME,
     TaskKind,
     find_repo_root,
+    load_project_config,
     parse_metric_version,
     starter_config,
 )
 from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
 from hypothex.core.environment import load_descriptor
-from hypothex.core.errors import ConfigError, HypothexError, RunError
+from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
 from hypothex.core.evaluation import reeval, validate_project
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gitinfo import git_state_label
+from hypothex.core.ids import new_command_id
 from hypothex.core.index import rebuild_index
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import Layout, default_home
@@ -286,6 +290,32 @@ ParamOpt = Annotated[list[str] | None, typer.Option("--param", help="name=value 
 VarOpt = Annotated[list[str] | None, typer.Option("--var", help="Template var name=value.")]
 StageOpt = Annotated[str | None, typer.Option("--stage", help="Run a stage from hypothex.yaml.")]
 RepoOpt = Annotated[Path | None, typer.Option("--repo", help="Project repo (default: cwd).")]
+HostOpt = Annotated[
+    str | None, typer.Option("--host", help="Run on this host (`hx hosts list`); default here.")
+]
+GpusOpt = Annotated[int, typer.Option("--gpus", min=0, help="GPUs for each run.")]
+QueueOpt = Annotated[bool, typer.Option("--queue", help="Wait in the host's queue for GPUs.")]
+REMOTE_POLL_SECONDS = 2.0
+
+
+class _SweepGroup(TyperGroup):
+    """``hx sweep -t T --grid ... -- CMD`` creates; ``hx sweep show|cancel|extend ID`` act."""
+
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:  # typer vendors click
+        if args and args[0] not in self.commands and args[0] != "--help":
+            args = ["create", *args]
+        return super().parse_args(ctx, args)
+
+
+sweep_app = typer.Typer(
+    cls=_SweepGroup,
+    no_args_is_help=True,
+    help=(
+        "Sweeps: every grid combination x seed, launched as one group. Start one with "
+        "`hx sweep -t T -H WHY --grid lr=1e-4,3e-4 --seeds 3 -- CMD '{lr}' '{seed}'`."
+    ),
+)
+app.add_typer(sweep_app, name="sweep")
 
 
 def _hub(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
@@ -302,6 +332,109 @@ def _hub_try(method: str, path: str, body: dict[str, Any] | None = None) -> Any 
         return hub_call(method, path, body)
     except HubUnavailableError:
         return None
+
+
+def _client_checkout(root: Path) -> dict[str, str | None]:
+    """
+    The project, HEAD, and uncommitted diff of the checkout here, for a host launch.
+
+    The hub may be another machine (spec 5.2), so the CLI sends these instead of
+    its repo path; the host fetches ``commit`` and applies ``diff`` (spec 8A.4).
+    Untracked files are not part of ``git diff HEAD``; a warning names them.
+    """
+    from hypothex.mcp.server import client_checkout
+
+    fields, untracked = client_checkout(root)
+    if untracked:
+        names = ", ".join(untracked[:5]) + (" ..." if len(untracked) > 5 else "")
+        typer.secho(
+            f"warning: {len(untracked)} untracked file(s) are not sent to the host "
+            f"(git add them first): {names}",
+            fg="yellow",
+            err=True,
+        )
+    return fields
+
+
+def _through_hub(run_id: str, action: str, body: dict[str, Any]) -> Any | None:
+    """
+    Send a mutation of another environment's run through the hub; None for this machine's.
+
+    The hub forwards it to the run's host with the same command id (Task 45). A run of
+    this machine (or of an environment no host serves, on a hub without that run) acts
+    here as in phase 1.
+    """
+    from hypothex.mcp.server import acts_through_hub
+
+    if not acts_through_hub(_ctx(), run_id):
+        return None
+    full = {**body, "command_id": new_command_id(), "created_by": _created_by()}
+    return _hub("POST", f"/api/v1/runs/{run_id}/{action}", full)
+
+
+def _launch_remote(
+    host: str, req: RunRequest, *, gpus: int, queue: bool, slurm: dict[str, str]
+) -> RunRecord:
+    if req.config_path is not None:
+        raise RunError("--config is not sent to hosts; commit the file and pass it with --var")
+    body = {
+        **_client_checkout(req.repo),
+        "task": req.task,
+        "stage": req.stage,
+        "command": req.command,
+        "hypothesis": req.hypothesis,
+        "seed": req.seed,
+        "tags": req.tags,
+        "params": req.params,
+        "vars": req.vars,
+        "gpus": gpus,
+        "queue": queue,
+        "slurm": slurm or None,
+        "created_by": req.created_by,
+        "command_id": new_command_id(),
+    }
+    return RunRecord.model_validate(_hub("POST", f"/api/v1/hosts/{host}/runs", body))
+
+
+def _wait_remote(run_id: str) -> RunRecord:
+    deadline = time.monotonic() + WAIT_FOREVER
+    while time.monotonic() < deadline:
+        with contextlib.suppress(StoreError):  # 404 until the hub has mirrored the run
+            record = RunRecord.model_validate(_hub("GET", f"/api/v1/runs/{run_id}")["record"])
+            if record.status in TERMINAL_STATUSES:
+                return record
+        time.sleep(REMOTE_POLL_SECONDS)
+    raise RunError(f"run {run_id} did not end")
+
+
+def _sweep_out(summary: dict[str, Any], as_json: bool) -> None:
+    if as_json:
+        _print_json(summary)
+        return
+    spec = summary["spec"]
+    typer.secho(
+        f"{spec['id']}  {spec['project']}/{spec['task'] or 'exploratory'}  "
+        f"on {spec['host'] or 'local'}",
+        bold=True,
+    )
+    typer.echo(summary["headline"])
+    counts = "  ".join(f"{k} {v}" for k, v in summary["counts"].items())
+    typer.echo(f"{counts}  cost ${summary['total_usd']:.2f}")
+    names = [p["name"] for p in spec["grid"]]
+    best = summary.get("best") or {}
+    rows = []
+    for cell in summary["cells"]:
+        mean, lo, hi = cell.get("mean"), cell.get("lo"), cell.get("hi")
+        rows.append(
+            [
+                *(cell["params"].get(n) for n in names),
+                cell["n"],
+                None if mean is None else f"{mean:.4f}",
+                None if lo is None or hi is None else f"[{lo:.4f}, {hi:.4f}]",
+                "best" if best and best.get("params") == cell["params"] else None,
+            ]
+        )
+    _table([*names, "n", "mean", "95% CI", ""], rows)
 
 
 def _hosts() -> tuple[Context, EnvironmentsFile]:
@@ -610,10 +743,18 @@ def launch(
     var: VarOpt = None,
     stage: StageOpt = None,
     repo: RepoOpt = None,
+    host: HostOpt = None,
+    gpus: GpusOpt = 0,
+    queue: QueueOpt = False,
+    partition: Annotated[str | None, typer.Option(help="SLURM partition.")] = None,
+    time_limit: Annotated[
+        str | None, typer.Option("--time", help="SLURM time limit, e.g. 04:00:00.")
+    ] = None,
+    account: Annotated[str | None, typer.Option(help="SLURM account.")] = None,
     wait: Annotated[bool, typer.Option(help="Block until the run ends.")] = False,
     as_json: JsonFlag = False,
 ) -> None:
-    """Start a run in the background (same options as `hx run`)."""
+    """Start a run in the background, here or on a host (same options as `hx run`)."""
     req = _request(
         ctx.args,
         task=task,
@@ -627,8 +768,30 @@ def launch(
         repo=repo,
         interactive=not as_json,
     )
+    slurm = {
+        k: v
+        for k, v in {"partition": partition, "time": time_limit, "account": account}.items()
+        if v is not None
+    }
+    remote = False
+    if host is not None:
+        from hypothex.mcp.server import is_remote
+
+        remote = is_remote(host)
+    if remote:
+        record = _launch_remote(str(host), req, gpus=gpus, queue=queue, slurm=slurm)
+        _warn_seed(record)
+        if wait:
+            _finish(_wait_remote(record.run_id), as_json)
+        elif as_json:
+            _print_json(record)
+        else:
+            typer.echo(f"launched {record.run_id} on {host}; follow with `hx show {record.run_id}`")
+        return
+    if slurm:
+        raise RunError("--partition, --time, and --account need --host <slurm host>")
     c = _ctx()
-    record = launch_run(c, req)
+    record = launch_run(c, dataclasses.replace(req, gpus=gpus, queue=queue))
     _warn_seed(record)
     if wait:
         record = wait_for_run(c, record.run_id, timeout=WAIT_FOREVER)
@@ -658,9 +821,21 @@ def _emit(obj: Any, as_json: bool, text: str) -> None:
         typer.echo(text)
 
 
+def _not_foreground(run_id: str, foreground: bool) -> None:
+    if foreground:
+        raise RunError(f"run {run_id} runs on its host; drop --foreground")
+
+
 @app.command("rerun")
 def rerun_cmd(run_id: str, foreground: ForegroundOpt = False, as_json: JsonFlag = False) -> None:
     """Rerun with the same command, commit, config, and seed."""
+    from hypothex.mcp.server import acts_through_hub
+
+    if acts_through_hub(_ctx(), run_id):
+        _not_foreground(run_id, foreground)
+        out = _through_hub(run_id, "rerun", {})
+        _started(RunRecord.model_validate(out), False, as_json)
+        return
     record = rerun(
         _ctx(),
         run_id,
@@ -680,6 +855,13 @@ def reinfer_cmd(
     as_json: JsonFlag = False,
 ) -> None:
     """Run the `infer` stage again with this run's checkpoint."""
+    from hypothex.mcp.server import acts_through_hub
+
+    if acts_through_hub(_ctx(), run_id):
+        _not_foreground(run_id, foreground)
+        out = _through_hub(run_id, "reinfer", {"checkpoint": checkpoint})
+        _started(RunRecord.model_validate(out), False, as_json)
+        return
     record = reinfer(
         _ctx(),
         run_id,
@@ -702,7 +884,17 @@ def reeval_cmd(
     as_json: JsonFlag = False,
 ) -> None:
     """Re-score saved predictions with the current metric versions."""
+    from hypothex.mcp.server import acts_through_hub
+
     c = _ctx()
+    if run_id is not None and acts_through_hub(c, run_id):
+        body = {"metric": metric, "force": force, "command_id": new_command_id()}
+        out = _hub("POST", f"/api/v1/runs/{run_id}/reeval", {**body, "created_by": _created_by()})
+        if as_json:
+            _print_json(out)
+        else:
+            typer.echo(f"evaluated {len(out['evaluated'])}, skipped {len(out['skipped'])}")
+        return
     if run_id is not None:
         report = reeval(c, run_id=run_id, metric=metric, force=force)
     elif task is not None:
@@ -723,7 +915,8 @@ def reeval_cmd(
 @app.command()
 def stop(run_id: str, as_json: JsonFlag = False) -> None:
     """Stop a queued or running run."""
-    record = stop_run(_ctx(), run_id)
+    out = _through_hub(run_id, "stop", {})
+    record = RunRecord.model_validate(out) if out is not None else stop_run(_ctx(), run_id)
     _emit(record, as_json, f"{record.run_id} {record.status.value}")
 
 
@@ -830,7 +1023,12 @@ def tag(
     as_json: JsonFlag = False,
 ) -> None:
     """Add or remove tags."""
-    record = q.tag_run(_ctx(), run_id, add or [], remove or [])
+    out = _through_hub(run_id, "tags", {"add": add or [], "remove": remove or []})
+    record = (
+        RunRecord.model_validate(out)
+        if out is not None
+        else q.tag_run(_ctx(), run_id, add or [], remove or [])
+    )
     _emit(record, as_json, ", ".join(record.tags) or "(no tags)")
 
 
@@ -840,14 +1038,16 @@ OffFlag = Annotated[bool, typer.Option("--off", help="Undo.")]
 @app.command()
 def star(run_id: str, off: OffFlag = False, as_json: JsonFlag = False) -> None:
     """Star (or --off unstar) a run."""
-    record = q.star_run(_ctx(), run_id, on=not off)
+    out = _through_hub(run_id, "star", {"on": not off})
+    record = RunRecord.model_validate(out) if out else q.star_run(_ctx(), run_id, on=not off)
     _emit(record, as_json, f"starred={record.starred}")
 
 
 @app.command()
 def archive(run_id: str, off: OffFlag = False, as_json: JsonFlag = False) -> None:
     """Archive (hide) or --off unarchive a run."""
-    record = q.archive_run(_ctx(), run_id, on=not off)
+    out = _through_hub(run_id, "archive", {"on": not off})
+    record = RunRecord.model_validate(out) if out else q.archive_run(_ctx(), run_id, on=not off)
     _emit(record, as_json, f"archived={record.archived}")
 
 
@@ -859,8 +1059,172 @@ def note(
     as_json: JsonFlag = False,
 ) -> None:
     """Add a note to a run."""
-    q.add_note(_ctx(), run_id, text, author or _created_by())
+    if _through_hub(run_id, "notes", {"text": text, "author": author or _created_by()}) is None:
+        q.add_note(_ctx(), run_id, text, author or _created_by())
     _emit({"ok": True}, as_json, "noted")
+
+
+# sweeps ---------------------------------------------------------------------------
+@sweep_app.command("create", context_settings=RUN_SETTINGS)
+def sweep_create(
+    ctx: typer.Context,
+    task: TaskOpt = None,
+    hypothesis: HypOpt = None,
+    grid: Annotated[
+        list[str] | None, typer.Option("--grid", help="name=v1,v2 (repeatable).")
+    ] = None,
+    random_n: Annotated[
+        int | None, typer.Option("--random", min=1, help="Random samples from --param ranges.")
+    ] = None,
+    ranges: Annotated[
+        list[str] | None,
+        typer.Option("--param", help="name=low:high[:log], sampled by --random (repeatable)."),
+    ] = None,
+    seeds: Annotated[
+        str, typer.Option("--seeds", help="A count (3 means 1,2,3) or a list (1,2,5).")
+    ] = "3",
+    host: HostOpt = None,
+    gpus: GpusOpt = 0,
+    queue: QueueOpt = False,
+    repo: RepoOpt = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Start a sweep (default subcommand): every combination x seed, tagged with the sweep."""
+    from hypothex.core.sweeps import launch_sweep
+    from hypothex.mcp.server import is_remote, parse_grid, parse_ranges, parse_seeds
+
+    root = (repo or find_repo_root(Path.cwd())).resolve()
+    project = load_project_config(root).project
+    params = parse_grid(grid or []) + parse_ranges(ranges or [])
+    if not params:
+        raise RunError("give at least one --grid name=v1,v2 (or --random N with --param)")
+    seed_list = parse_seeds(seeds)
+    argv = list(ctx.args)
+    if not argv:
+        raise RunError("give the command after `--`")
+    if is_remote(host):
+        body = {
+            **_client_checkout(root),
+            "project": project,
+            "task": task,
+            "host": host,
+            "grid": [p.model_dump(mode="json") for p in params],
+            "random": random_n,
+            "seeds": seed_list,
+            "command": argv,
+            "hypothesis": hypothesis or "",
+            "gpus": gpus,
+            "queue": queue,
+            "created_by": _created_by(),
+            "command_id": new_command_id(),
+        }
+        _sweep_out(_hub("POST", "/api/v1/sweeps", body), as_json)
+        return
+    c = _ctx()
+    c.register_project(root)
+    summary = launch_sweep(
+        c,
+        project=project,
+        task=task,
+        grid=params,
+        random=random_n,
+        seeds=seed_list,
+        command=argv,
+        hypothesis=hypothesis or "",
+        gpus=gpus,
+        queue=queue,
+        created_by=_created_by(),
+        repo=root,
+    )
+    _sweep_out(to_jsonable(summary), as_json)
+
+
+@sweep_app.command("show")
+def sweep_show(sweep_id: str, project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
+    """Show a sweep: progress, params x primary metric, best cell, cost."""
+    from hypothex.mcp.server import sweep_summary
+
+    _sweep_out(sweep_summary(_ctx(), sweep_id, project), as_json)
+
+
+@sweep_app.command("cancel")
+def sweep_cancel(sweep_id: str, project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
+    """Stop the sweep's queued runs; running runs keep going."""
+    from hypothex.core.sweeps import cancel_queued
+    from hypothex.mcp.server import is_remote, locate_sweep
+
+    c = _ctx()
+    spec, here = locate_sweep(c, sweep_id, project)
+    if is_remote(spec.host) or not here:
+        body = {"command_id": new_command_id(), "created_by": _created_by()}
+        summary = _hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/cancel_queued", body)
+    else:
+        summary = to_jsonable(cancel_queued(c, spec.project, spec.id))
+    _sweep_out(summary, as_json)
+
+
+@sweep_app.command("extend")
+def sweep_extend(
+    sweep_id: str,
+    seeds: Annotated[str, typer.Option("--seeds", help="Seeds to add, e.g. 4,5.")],
+    project: ProjectOpt = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Add runs for every combination x the new seeds."""
+    from hypothex.core.sweeps import extend_sweep
+    from hypothex.mcp.server import is_remote, locate_sweep, parse_seeds
+
+    c = _ctx()
+    spec, here = locate_sweep(c, sweep_id, project)
+    seed_list = parse_seeds(seeds, count_ok=False)
+    if is_remote(spec.host) or not here:
+        body = {"seeds": seed_list, "command_id": new_command_id(), "created_by": _created_by()}
+        summary = _hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/extend", body)
+    else:
+        summary = to_jsonable(extend_sweep(c, spec.project, spec.id, seed_list))
+    _sweep_out(summary, as_json)
+
+
+@app.command("sweeps")
+def sweeps_cmd(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
+    """List sweeps, newest first."""
+    from hypothex.core.sweeps import list_sweeps
+
+    c = _ctx()
+    projects = [project] if project else [e.project for e in c.store.list_projects()]
+    rows: list[dict[str, Any]] = [{"project": p, **s} for p in projects for s in list_sweeps(c, p)]
+    rows.sort(key=lambda s: s["created_at"], reverse=True)
+    if as_json:
+        _print_json(rows)
+        return
+    _table(
+        ["sweep", "project", "created", "runs", "best"],
+        [
+            [
+                s["id"],
+                s["project"],
+                s["created_at"].strftime("%Y-%m-%d %H:%M"),
+                s["n_runs"],
+                None if s["best"] is None else json.dumps(s["best"].get("params"))[:40],
+            ]
+            for s in rows
+        ],
+    )
+
+
+@app.command()
+def pull(
+    run_id: str,
+    artifact: Annotated[
+        str,
+        typer.Option(help="Artifact kind (latest of it), artifact path, or run-folder path."),
+    ] = "checkpoint",
+    as_json: JsonFlag = False,
+) -> None:
+    """Copy a big file of a remote run to this machine, through the hub."""
+    body = {"artifact": artifact, "command_id": new_command_id(), "created_by": _created_by()}
+    out = _hub("POST", f"/api/v1/runs/{run_id}/pull", body)
+    _emit(out, as_json, out["local_path"])
 
 
 # views ----------------------------------------------------------------------------

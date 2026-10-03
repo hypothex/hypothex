@@ -262,7 +262,9 @@ function assignName(
  *     `meta.metrics` order (else first-seen), system metrics after the model's and
  *     learning-rate rows last, and per-row scales. Points of a
  *     spiked run within {@link SPIKE_WINDOW} of the axis after the spike are left
- *     out of the y-domain so one spike does not flatten every other line.
+ *     out of the y-domain so one spike does not flatten every other line. The
+ *     shared step axis reaches the last `nonfinite` event of a drawn run, so a
+ *     NaN after a run's last finite point stays on the chart.
  */
 export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | undefined): CurvesModel {
   const metaGroups = Array.isArray(meta?.groups) ? (meta.groups as GroupJson[]) : [];
@@ -306,7 +308,11 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
       at(a) - at(b),
   );
   const shared = names.filter((n) => !ownAxis.includes(n));
-  const maxStep = Math.max(0, ...shared.map((n) => rowMax[n] ?? 0));
+  // a run that diverged and never logged again has its NaN past its last finite point
+  const nanSteps = events
+    .filter((e) => e.kind === "nonfinite" && runGroup.has(e.run_id) && Number.isFinite(e.step))
+    .map((e) => e.step);
+  const maxStep = Math.max(0, ...shared.map((n) => rowMax[n] ?? 0), ...nanSteps);
 
   const cells = new Map<string, Cell>();
   for (const series of byRun.values()) {
@@ -602,6 +608,8 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
                   .map((e) => {
                     const rs = cell?.runs.find((x) => x.run_id === e.run_id);
                     if (e.kind === "spike" || e.kind === "nonfinite") {
+                      // an own-axis row's steps stop at its own last step: a later NaN is not on it
+                      if (own(r.name) && e.step > rowStepMax(r.name)) return null;
                       const nan = e.kind === "nonfinite";
                       const ex = xr.at(e.step);
                       const after = nan ? undefined : rs?.points.find((p) => p[0] >= e.step);

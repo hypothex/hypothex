@@ -221,6 +221,26 @@ describe("Curves panel", () => {
     ]);
   });
 
+  test("a non-finite value after the last finite point stays on the chart", () => {
+    const meta = { ...META, events: [{ run_id: "b1", step: 9000, kind: "nonfinite" }] };
+    expect(buildCurves(points(), meta).maxStep).toBe(9000);
+    // an event of a run with no points (not drawn) never stretches the axis
+    const ghost = { ...META, events: [{ run_id: "zz", step: 9000, kind: "nonfinite" }] };
+    expect(buildCurves(points(), ghost).maxStep).toBe(1000);
+    const { container } = render(<Curves result={result(points(), meta)} />);
+    const base = container.querySelector('.curve-col[data-group="base"]') as Element;
+    const xs = [...base.querySelectorAll(".event.nonfinite line.ev")].map((l) => Number(l.getAttribute("x1")));
+    expect(xs.length).toBeGreaterThan(0);
+    // the NaN sits at the right end of the base column, never past it
+    const hit = container.querySelector('rect.hit[data-hit="base"]') as Element;
+    const x0 = Number(hit.getAttribute("x"));
+    const w = Number(hit.getAttribute("width"));
+    for (const x of xs) {
+      expect(x).toBeGreaterThan(x0 + 0.9 * w);
+      expect(x).toBeLessThanOrEqual(x0 + w + 0.5);
+    }
+  });
+
   test("hover shows every seed and the mean at the nearest step", () => {
     const { container } = render(<Curves result={result()} />);
     // Fallback width 960: colW = (960 - 104 - 36) / 2 = 410; step 300 sits at 104 + 0.3 * 410 = 227.

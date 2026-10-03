@@ -59,3 +59,7 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not docker'"
+markers = [
+  "docker: integration test against throwaway Docker containers (sshd, SLURM); run with -m docker",
+]

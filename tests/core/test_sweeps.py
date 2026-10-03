@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+import hypothex.core.sweeps as sweeps_module
 from hypothex.core.context import Context
 from hypothex.core.control import wait_for_run
 from hypothex.core.errors import RunError, StoreError
@@ -878,6 +880,47 @@ def test_a_retried_launch_resumes_the_same_sweep(ctx: Context, toy_repo: Path) -
     other_args: dict[str, Any] = {**args, "command_id": "cmd-2"}
     other = launch_sweep(ctx, **other_args)  # another command: new sweep
     assert other.spec.id != first["id"]
+
+
+def test_concurrent_launches_with_one_command_id_make_one_sweep(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # two calls with the same command id race: both must end on one sweep and one run set
+    ctx.register_project(toy_repo)
+    fake = FakeLauncher(ctx)
+    real_new_id = sweeps_module.new_sweep_id
+
+    def slow_new_id(layout: Any, project: str) -> str:
+        time.sleep(0.3)  # the other call reads the (absent) claim meanwhile
+        return real_new_id(layout, project)
+
+    monkeypatch.setattr(sweeps_module, "new_sweep_id", slow_new_id)
+    args: dict[str, Any] = {
+        "project": "toy",
+        "grid": [LR],
+        "seeds": [1],
+        "command": ["python", "train.py", "{lr}"],
+        "launch": fake,
+        "command_id": "cmd-race",
+    }
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def call() -> None:
+        try:
+            results.append(launch_sweep(ctx, **args).spec.id)
+        except BaseException as exc:  # noqa: BLE001 - reported by the assert below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=call) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert errors == []
+    assert len(set(results)) == 1
+    assert [s["id"] for s in list_sweeps(ctx, "toy")] == results[:1]
+    assert len(fake.requests) == 2  # one run per cell, never twice
 
 
 def test_a_run_whose_answer_was_lost_is_never_started_twice(ctx: Context, toy_repo: Path) -> None:

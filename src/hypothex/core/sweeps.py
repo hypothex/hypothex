@@ -1022,6 +1022,28 @@ def _claimed_sweep(layout: Layout, project: str, command_id: str | None) -> str 
     return str(data["sweep_id"])
 
 
+@contextmanager
+def _command_lock(layout: Layout, project: str, command_id: str | None) -> Iterator[None]:
+    """
+    Hold an exclusive cross-process lock on one launch command id.
+
+    Calls with the same ``command_id`` then read, reserve, and publish its
+    sweep one at a time, so a race never makes two sweeps for one command.
+    No ``command_id`` means nothing to share: no lock.
+    """
+    if command_id is None:
+        yield
+        return
+    path = _command_file(layout, project, command_id).with_suffix(".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
 def _claim_sweep(layout: Layout, project: str, command_id: str | None, sweep_id: str) -> None:
     """Record, before any run starts, that ``command_id`` created ``sweep_id``."""
     if command_id is None:
@@ -1161,33 +1183,38 @@ def launch_sweep(
         raise SweepError(f"invalid sweep: {_brief(exc)}") from exc
     _check_launchable(draft)
     repo_path = _resolve_repo(ctx, project, task, repo, remote=launch is not None)
-    claimed = _claimed_sweep(ctx.layout, project, command_id)
-    spec = draft.model_copy(update={"id": claimed or new_sweep_id(ctx.layout, project)})
     started: list[str] = []
-    with _sweep_lock(ctx.layout, project, spec.id):
-        if claimed is not None and sweep_path(ctx.layout, project, spec.id).is_file():
-            spec = load_sweep(ctx.layout, project, spec.id)  # a retry: the stored definition
-        else:
-            save_sweep(ctx.layout, spec)
-            _claim_sweep(ctx.layout, project, command_id, spec.id)  # before any run starts
-        requests = _requests(
-            spec,
-            spec.seeds,
-            repo_path,
-            owner=ctx.descriptor.environment_id,
-            hypothesis=hypothesis,
-            gpus=gpus,
-            queue=queue,
-        )
-        requested: list[str] = []
-        try:
-            _issue(ctx, spec, launch or _local_launcher(ctx, spec.id), requests, started, requested)
-        except BaseException:
-            # once a request went out its outcome is unknown (an accepted run whose answer
-            # was lost): the definition stays. Only a failure before any request removes it.
-            if not requested and claimed is None:
-                sweep_path(ctx.layout, project, spec.id).unlink(missing_ok=True)
-            raise
+    # one command id at a time: its claim lookup, id reservation, and claim are one step,
+    # so two racing calls never make two sweeps (and two run sets) for one command
+    with _command_lock(ctx.layout, project, command_id):
+        claimed = _claimed_sweep(ctx.layout, project, command_id)
+        spec = draft.model_copy(update={"id": claimed or new_sweep_id(ctx.layout, project)})
+        with _sweep_lock(ctx.layout, project, spec.id):
+            if claimed is not None and sweep_path(ctx.layout, project, spec.id).is_file():
+                spec = load_sweep(ctx.layout, project, spec.id)  # a retry: the stored definition
+            else:
+                save_sweep(ctx.layout, spec)
+                _claim_sweep(ctx.layout, project, command_id, spec.id)  # before any run starts
+            requests = _requests(
+                spec,
+                spec.seeds,
+                repo_path,
+                owner=ctx.descriptor.environment_id,
+                hypothesis=hypothesis,
+                gpus=gpus,
+                queue=queue,
+            )
+            requested: list[str] = []
+            try:
+                _issue(
+                    ctx, spec, launch or _local_launcher(ctx, spec.id), requests, started, requested
+                )
+            except BaseException:
+                # once a request went out its outcome is unknown (an accepted run whose answer
+                # was lost): the definition stays. Only a failure before any request removes it.
+                if not requested and claimed is None:
+                    sweep_path(ctx.layout, project, spec.id).unlink(missing_ok=True)
+                raise
     return summarize_sweep(ctx, project, spec.id)
 
 

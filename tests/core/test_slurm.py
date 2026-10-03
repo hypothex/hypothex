@@ -51,7 +51,7 @@ from hypothex.core.slurm import (
     track_slurm_run,
 )
 from hypothex.remote.config import SlurmDefaults
-from tests.factories import make_record
+from tests.factories import git, make_record
 
 FAKE_SLURM = Path(__file__).resolve().parents[1] / "fakes" / "fake_slurm"
 PY = sys.executable
@@ -1806,3 +1806,81 @@ def test_slurm_server_reports_comment_accounting_per_start(home: Path, slurm: Fa
         wait_until(lambda: client.get("/api/v1/slurm").json() == {"comment_accounting": False})
     with TestClient(create_app(home, kind="ssh"), base_url=base) as client:
         assert client.get("/api/v1/slurm").json() == {"comment_accounting": None}
+
+
+# pinned runs: the worktree goes once the login node published the end --------------------
+WRITE_PREDS = (
+    "import json, os; d = os.environ['HYPOTHEX_RUN_DIR']; "
+    "open(d + '/predictions/predictions.jsonl', 'w').write(''.join("
+    "json.dumps(dict(id='ex-' + str(i), prediction=i % 2)) + chr(10) for i in range(4)))"
+)
+
+
+def _pinned_slurm_run(ctx: Context, toy_repo: Path, code: str, **kw: Any) -> RunRecord:
+    (toy_repo / "marker.txt").write_text("old")
+    git(toy_repo, "add", "marker.txt")
+    git(toy_repo, "commit", "-qm", "marker old")
+    old = git(toy_repo, "rev-parse", "HEAD")
+    (toy_repo / "marker.txt").write_text("new")
+    git(toy_repo, "commit", "-qam", "marker new")
+    req = RunRequest(
+        repo=toy_repo,
+        command=[PY, "-c", code],
+        commit=old,
+        slurm=SlurmDefaults(gpus=0),
+        **kw,
+    )
+    record = control.launch_run(ctx, req)
+    assert Path(record.cwd).is_relative_to(ctx.layout.worktrees_dir("toy"))
+    assert Path(record.cwd).is_dir()
+    return record
+
+
+def _worktrees(ctx: Context) -> list[Path]:
+    folder = ctx.layout.worktrees_dir("toy")
+    return sorted(folder.iterdir()) if folder.is_dir() else []
+
+
+def test_a_pinned_slurm_run_s_worktree_is_removed_after_reconcile_publishes(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    slurm.set(mode="run")
+    record = _pinned_slurm_run(ctx, toy_repo, WRITE_PREDS, task="toy-acc")
+    done = control.wait_for_run(ctx, record.run_id, timeout=60)
+    assert done.status == RunStatus.FINISHED
+    # the node never scores, so it keeps the checkout the login node scores from
+    assert len(_worktrees(ctx)) == 1
+    reconcile(ctx)
+    scores = ctx.store.read_scores("toy", record.run_id)
+    assert [s.value for s in scores if s.metric == "accuracy"] == [0.75]
+    assert _worktrees(ctx) == []
+    assert git(toy_repo, "worktree", "list", "--porcelain").count("worktree ") == 1
+
+
+def test_a_lost_pinned_slurm_run_s_worktree_is_removed(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    record = _pinned_slurm_run(ctx, toy_repo, "pass")
+    state = slurm.state()
+    state["jobs"]["1000"].update(in_queue=False, in_sacct=False)
+    slurm.save(state)
+    assert [r.status for r in reconcile(ctx)] == [RunStatus.LOST]
+    assert ctx.find_record(record.run_id).status == RunStatus.LOST
+    assert _worktrees(ctx) == []
+
+
+def test_a_stopped_pinned_slurm_run_s_worktree_is_removed(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    record = _pinned_slurm_run(ctx, toy_repo, "pass")
+    assert control.stop_run(ctx, record.run_id).status == RunStatus.KILLED
+    assert _worktrees(ctx) == []
+
+
+def test_a_rejected_pinned_slurm_run_s_worktree_is_removed(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    slurm.set(fail={"sbatch": "sbatch: error: invalid partition specified: nope"})
+    with pytest.raises(RunError, match="invalid partition"):
+        _pinned_slurm_run(ctx, toy_repo, "pass")
+    assert _worktrees(ctx) == []

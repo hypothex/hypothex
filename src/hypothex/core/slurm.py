@@ -40,7 +40,13 @@ from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, HypothexError, RunError, RunNotFoundError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.events import EventLog
-from hypothex.core.execution import STOP_MARKER, execute_run, process_alive, process_create_time
+from hypothex.core.execution import (
+    STOP_MARKER,
+    execute_run,
+    process_alive,
+    process_create_time,
+    release_worktree,
+)
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.ids import utcnow
 from hypothex.core.index import Index
@@ -950,8 +956,10 @@ def run_child(
     ``CUDA_VISIBLE_DEVICES`` (else ``gpus_requested`` indices) and records
     them in ``executor`` for the whole run. Uses a :class:`NodeContext`: no
     SQLite file is opened on the compute node. Scoring is left to the login
-    node. At the end the exit record ``exit.json`` (``status``,
-    ``exit_code``, ``ended_at``) is written next to ``run.yaml``.
+    node, so the git worktree of a pinned run is kept here; the login node
+    removes it once it published the end (``sync_node_run``). At the end the
+    exit record ``exit.json`` (``status``, ``exit_code``, ``ended_at``) is
+    written next to ``run.yaml``.
 
     Parameters
     ----------
@@ -1187,9 +1195,11 @@ def _end_if_active(
 def _fail_submission(ctx: Context, record: RunRecord, exc: SlurmError) -> RunError:
     """SLURM rejected the job for sure: fail the run and forget the intent."""
     with _publish_lock(ctx.run_dir(record)):
-        _end_if_active(
+        failed = _end_if_active(
             ctx, record.run_id, "run.failed", _end(RunStatus.FAILED), {"reason": f"sbatch: {exc}"}
         )
+        if failed is not None:  # no job ever ran in the checkout
+            release_worktree(ctx, failed)
         _drop_intent(ctx.layout, record.run_id)
     return RunError(f"could not submit run {record.run_id} to SLURM: {exc}")
 
@@ -1493,7 +1503,8 @@ def sync_node_run(ctx: Context, current: RunRecord) -> RunRecord | None:
 
     The node never opens ``index.db`` or ``events.db`` (Task 27). Here the env
     server emits the event for the node's new status, updates the index and
-    the metric points, and scores a finished task run. All of it happens
+    the metric points, scores a finished task run, and then removes the git
+    worktree of an ended pinned run (``release_worktree``). All of it happens
     under the run's publication lock, with ``run.yaml`` and the outbox cursor
     (``published``: the status the login node last published, whatever the
     index shows) read again under it, so two threads never publish one
@@ -1554,6 +1565,8 @@ def _sync_node_run(ctx: Context, current: RunRecord) -> RunRecord | None:
             evaluate_run(ctx, current.run_id)  # the node never scores (auto_evaluate=False)
         except HypothexError as exc:
             ctx.emit("run.eval_skipped", current, {"reason": str(exc)[:500]})
+    if current.status in TERMINAL_STATUSES:
+        release_worktree(ctx, current)  # after scoring, which reads the checkout
     if changed or current.status in TERMINAL_STATUSES:
         mark_published(ctx.layout, current)  # last: a crash before it publishes again
     return current if changed else None
@@ -1650,6 +1663,8 @@ def _resolve_intent(ctx: Context, entry: dict[str, Any], current: RunRecord) -> 
         )
         if failed is None:  # the node ended it first: publish that end, never drop it unseen
             failed = _publish_node_end(ctx, run_id)
+        else:  # SLURM never took the job, so nothing ran in the checkout
+            release_worktree(ctx, failed)
         _drop_intent(ctx.layout, run_id)  # after the end: a crash in between only repeats it
     return failed
 
@@ -1826,6 +1841,7 @@ def _reconcile_job(
         )
         if lost is None:  # the node's end arrived first: publish it, never "lost"
             return _publish_node_end(ctx, current.run_id)
+        release_worktree(ctx, lost)
         mark_published(ctx.layout, lost)  # acknowledged after the event of this end
     return lost
 
@@ -1886,6 +1902,7 @@ def stop_slurm_run(ctx: Context, record: RunRecord, *, grace: float) -> RunRecor
         )
         if killed is None:  # the node's end came first: publish that end, not `killed`
             return _publish_node_end(ctx, record.run_id)
+        release_worktree(ctx, killed)
         mark_published(ctx.layout, killed)
     return killed
 

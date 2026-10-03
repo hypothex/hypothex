@@ -40,10 +40,10 @@ from hypothex.core.index import index_run
 from hypothex.core.layout import HX_DIR, reserved_run_path
 from hypothex.core.records import ACTIVE_STATUSES, Artifact, RunRecord
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
-from hypothex.remote.bootstrap import BootstrapError
+from hypothex.remote.bootstrap import BootstrapError, ensure_server
 from hypothex.remote.client import EnvClient, EnvRequestError, RemoteFile
 from hypothex.remote.config import EnvironmentsFile, HostKind, HostSpec
-from hypothex.remote.ssh import Tunnel
+from hypothex.remote.ssh import SshTarget, Tunnel
 
 log = logging.getLogger(__name__)
 
@@ -1122,7 +1122,23 @@ class Hub:
             if not spec.url:
                 raise BootstrapError(f"host {sup.name!r} has route url but no url")
             return spec.url.rstrip("/")
-        raise BootstrapError(f"host {sup.name!r}: route {spec.route} is not supported yet")
+        if not spec.ssh_alias:
+            raise BootstrapError(f"host {sup.name!r} has route ssh but no ssh_alias")
+        target = SshTarget(alias=spec.ssh_alias)  # ssh/scp from $HYPOTHEX_SSH/$HYPOTHEX_SCP
+        if sup.state.state != "stale":
+            self._set(sup, "bootstrapping")
+        info = await self._shielded(sup, lambda: ensure_server(target, spec.home, kind=spec.kind))
+        if info.protocol_version != PROTOCOL_VERSION:
+            raise _UpgradeRequiredError(
+                f"upgrade hx on {sup.name}: protocol {info.protocol_version}, "
+                f"hub speaks {PROTOCOL_VERSION}"
+            )
+        tunnel = Tunnel(target, info.port)
+        sup.tunnel = tunnel
+        sup.token = info.token  # the env server's bearer token, read from server.json over ssh
+        # tracked: a disconnect waits for start() before the session's cleanup stops it
+        await self._shielded(sup, tunnel.start)
+        return f"http://127.0.0.1:{tunnel.local_port}"
 
     def _close_route(self, sup: _Supervisor) -> None:
         tunnel, sup.tunnel = sup.tunnel, None

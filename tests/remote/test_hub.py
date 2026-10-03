@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import sqlite3
@@ -40,6 +41,7 @@ from hypothex.core.records import (
     RunStatus,
     ScoreRecord,
 )
+from hypothex.remote.bootstrap import BootstrapError, ServerInfo
 from hypothex.remote.client import EnvUnreachableError, RemoteFile
 from hypothex.remote.config import EnvironmentsFile, HostSpec
 from hypothex.remote.hub import (
@@ -1723,3 +1725,216 @@ def test_hub_start_reindexes_a_run_a_crash_left_half_indexed(
     asyncio.run(main())
     assert [s.value for s in hub_ctx.index.scores_for(["r1"])["r1"]] == [0.75]
     assert not (hub_ctx.layout.run_dir("toy", "r1") / hub_mod.INDEX_PENDING).exists()
+
+
+# hub supervisors over route: ssh (fake bootstrap + fake tunnel) -----------------------
+
+
+class FakeTunnel:
+    """Stands in for ``ssh -N -L``: the in-process server already listens on the port."""
+
+    instances: list[FakeTunnel] = []
+
+    def __init__(self, target: Any, remote_port: int, local_port: int | None = None) -> None:
+        self.target = target
+        self.local_port = remote_port
+        self.started = self.stopped = self.dead = False
+        FakeTunnel.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    def alive(self) -> bool:
+        return not self.dead
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+@pytest.fixture
+def fake_ssh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tuple[str, str, str]]:
+    FakeTunnel.instances = []
+    monkeypatch.setattr(hub_mod, "Tunnel", FakeTunnel)
+    monkeypatch.setenv("HYPOTHEX_SSH", str(tmp_path / "bin" / "fake-ssh"))
+    return []
+
+
+def ssh_hosts() -> EnvironmentsFile:
+    return EnvironmentsFile(environments={"gpu1": HostSpec(route="ssh", ssh_alias="gpu1")})
+
+
+def test_ssh_route_bootstraps_tunnels_and_mirrors(
+    tmp_path: Path,
+    servers: tuple[EnvServer, EnvServer],
+    fake_ssh: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a, _ = servers
+    seed_run(a.ctx, "a-1")
+
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        assert kind == "ssh"
+        fake_ssh.append((target.alias, home, target.ssh_bin))
+        return ServerInfo(
+            pid=1,
+            port=a.port,
+            managed=True,
+            hx_version=__version__,
+            protocol_version=PROTOCOL_VERSION,
+            token="t0k",
+        )
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, ssh_hosts()))
+        await hub.start()
+        try:
+            await until(lambda: hub.state("gpu1").last_sequence == 2)
+            assert hub.state("gpu1").local_port == a.port
+            # the env server's token (from server.json over ssh) goes on every request
+            assert hub.client("gpu1").auth_headers() == {"Authorization": "Bearer t0k"}
+            assert fake_ssh == [("gpu1", "~/.hypothex", str(tmp_path / "bin" / "fake-ssh"))]
+            FakeTunnel.instances[0].dead = True  # the ssh -L process died
+            await until(lambda: len(fake_ssh) == 2 and hub.state("gpu1").state == "connected")
+            assert FakeTunnel.instances[0].stopped
+            assert FakeTunnel.instances[1].started
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert FakeTunnel.instances[1].stopped
+    assert hub_ctx.index.get_run("a-1") is not None
+    states = [e.payload["state"] for e in hub_ctx.events.since(0) if e.type == "host.state"]
+    assert states[:2] == ["bootstrapping", "connected"]
+
+
+def test_ssh_bootstrap_failure_is_error_and_retried(
+    tmp_path: Path, fake_ssh: list[tuple[str, str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        fake_ssh.append((target.alias, home, target.ssh_bin))
+        raise BootstrapError("uv is missing on gpu1 and the installer has no network")
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+
+    async def main() -> None:
+        hub = fast(Hub(Context.open(tmp_path / "hub"), ssh_hosts()))
+        await hub.start()
+        try:
+            await until(lambda: len(fake_ssh) >= 3)
+            state = hub.state("gpu1")
+            assert state.state in ("error", "bootstrapping")
+            await until(lambda: hub.state("gpu1").state == "error")
+            assert hub.state("gpu1").message.startswith("retry in ")
+            assert hub.state("gpu1").message.endswith(
+                "uv is missing on gpu1 and the installer has no network"
+            )
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert FakeTunnel.instances == []
+
+
+def test_ssh_server_with_old_protocol_needs_upgrade(
+    tmp_path: Path, fake_ssh: list[tuple[str, str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        fake_ssh.append((target.alias, home, target.ssh_bin))
+        return ServerInfo(pid=1, port=1, managed=True, hx_version="0.0.1", protocol_version=0)
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+
+    async def main() -> None:
+        hub = fast(Hub(Context.open(tmp_path / "hub"), ssh_hosts()))
+        await hub.start()
+        try:
+            await until(lambda: hub.state("gpu1").state == "upgrade")
+            await asyncio.sleep(0.5)
+            assert len(fake_ssh) == 1
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert FakeTunnel.instances == []
+
+
+def test_disconnect_during_tunnel_start_leaves_no_tunnel(
+    tmp_path: Path,
+    servers: tuple[EnvServer, EnvServer],
+    fake_ssh: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a, _ = servers
+    order: list[str] = []
+    entered = threading.Event()
+
+    class SlowTunnel(FakeTunnel):
+        def start(self) -> None:
+            entered.set()
+            time.sleep(0.5)  # ssh -N -L is still coming up when the user disconnects
+            order.append("start")
+
+        def stop(self) -> None:
+            order.append("stop")
+            super().stop()
+
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        return ServerInfo(
+            pid=1, port=a.port, managed=True, hx_version=__version__,
+            protocol_version=PROTOCOL_VERSION,
+        )  # fmt: skip
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+    monkeypatch.setattr(hub_mod, "Tunnel", SlowTunnel)
+
+    async def main() -> None:
+        hub = fast(Hub(Context.open(tmp_path / "hub"), ssh_hosts()))
+        await hub.start()
+        try:
+            await asyncio.to_thread(entered.wait, 10)
+            state = await hub.disconnect("gpu1")
+            assert state.state == "disabled"
+            assert order == ["start", "stop"]  # started before the cleanup, then stopped
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert order == ["start", "stop"]
+
+
+def test_the_token_never_reaches_states_events_or_logs(
+    tmp_path: Path,
+    fake_ssh: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "5ec2e7" * 8
+
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        fake_ssh.append((target.alias, home, target.ssh_bin))
+        return ServerInfo(
+            pid=1, port=1, managed=True, hx_version=__version__,
+            protocol_version=PROTOCOL_VERSION, token=sentinel,
+        )  # fmt: skip  # port 1: nothing answers, so the session fails and retries
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+    caplog.set_level(logging.DEBUG)
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, ssh_hosts()))
+        await hub.start()
+        try:
+            await until(lambda: len(fake_ssh) >= 3)
+            seen = json.dumps([s.model_dump(mode="json") for s in hub.states()])
+            assert sentinel not in seen and sentinel not in repr(hub.states())
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    events = json.dumps([e.payload for e in hub_ctx.events.since(0, 100_000)])
+    assert sentinel not in events
+    assert sentinel not in caplog.text

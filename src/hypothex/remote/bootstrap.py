@@ -1,0 +1,233 @@
+"""
+Bootstrap ``hx`` on a remote host over the user's own ``ssh``.
+
+Four steps, each a POSIX ``sh`` script from ``hypothex/remote/scripts`` run with
+:func:`hypothex.remote.ssh.run_remote`: probe the host, build and copy this
+package's wheel, install it with ``uv tool install`` under ``<home>/runtime``,
+and start (or reuse) ``hx serve`` bound to ``127.0.0.1``.
+
+Scripts report results as stdout lines ``HX:<key>=<value>`` (``HX:log=`` may
+repeat, ``HX:error=`` means failure); any other output, such as a login banner,
+is ignored.
+"""
+
+from __future__ import annotations
+
+import re
+import shlex
+from importlib import resources
+
+from pydantic import BaseModel, Field
+
+from hypothex.core.errors import HypothexError
+from hypothex.remote.ssh import SshTarget, run_remote
+
+_PREFIX = "HX:"
+_PARAM = re.compile(r"^HX_[A-Z_]+$")
+
+
+class BootstrapError(HypothexError):
+    """Probing, installing, or starting ``hx`` on a remote host failed."""
+
+
+class ProbeResult(BaseModel):
+    """
+    Facts about a remote host, from the ``probe`` script.
+
+    Parameters
+    ----------
+    os : str
+        Lower-case ``uname -s``, e.g. ``"linux"``.
+    arch : str
+        ``uname -m``, e.g. ``"x86_64"``.
+    python : str or None
+        Version of the first Python >= 3.11 on ``PATH``, else None.
+    uv : str or None
+        ``uv`` version (``PATH``, ``~/.local/bin``, or ``~/.cargo/bin``), else None.
+    gpus : int
+        Number of ``GPU`` lines from ``nvidia-smi -L``; 0 without ``nvidia-smi``.
+    slurm : str or None
+        SLURM version from ``sbatch --version``, else None.
+    home : str
+        Absolute Hypothex home on the host (``~`` expanded).
+    """
+
+    os: str
+    arch: str
+    python: str | None
+    uv: str | None
+    gpus: int
+    slurm: str | None
+    home: str
+
+
+class ServerInfo(BaseModel):
+    """
+    One env server, as recorded in ``<home>/serve/server.json``.
+
+    Parameters
+    ----------
+    pid : int
+        Process id on the host.
+    port : int
+        Port on the host's ``127.0.0.1``.
+    managed : bool
+        True when Hypothex started it (and so may stop it).
+    hx_version : str
+        Version from the server's descriptor.
+    protocol_version : int
+        Protocol version from the server's descriptor.
+    token : str or None
+        Bearer token the env server requires (``Authorization: Bearer``); None
+        for a server without one. Kept out of ``model_dump`` and ``repr`` so it
+        is never printed (``hx hosts add --json``).
+    """
+
+    pid: int
+    port: int
+    managed: bool
+    hx_version: str
+    protocol_version: int
+    token: str | None = Field(default=None, repr=False, exclude=True)
+
+
+def _load_scripts() -> dict[str, str]:
+    folder = resources.files("hypothex.remote") / "scripts"
+    common = (folder / "common.sh").read_text(encoding="utf-8")
+    scripts: dict[str, str] = {}
+    for entry in sorted(folder.iterdir(), key=lambda e: e.name):
+        if entry.name.endswith(".sh") and entry.name != "common.sh":
+            scripts[entry.name[: -len(".sh")]] = common + entry.read_text(encoding="utf-8")
+    return scripts
+
+
+BOOTSTRAP_SCRIPTS: dict[str, str] = _load_scripts()
+"""Script name -> full POSIX ``sh`` text (``common.sh`` prelude + body)."""
+
+
+def _render(name: str, **params: str) -> str:
+    """
+    Return script ``name`` with shell-quoted ``HX_*`` assignments in front.
+
+    Parameters
+    ----------
+    name : str
+        A key of :data:`BOOTSTRAP_SCRIPTS`.
+    **params : str
+        Variables such as ``HX_HOME``; names must match ``HX_[A-Z_]+``.
+
+    Returns
+    -------
+    str
+        Script text ready for ``sh -s``.
+
+    Examples
+    --------
+    >>> _render("probe", HX_HOME="~/.hypothex").splitlines()[0]
+    "HX_HOME='~/.hypothex'"
+    """
+    lines = []
+    for key, value in params.items():
+        if not _PARAM.match(key):
+            raise ValueError(f"bad script parameter name {key!r}")
+        lines.append(f"{key}={shlex.quote(value)}")
+    return "\n".join(lines) + "\n" + BOOTSTRAP_SCRIPTS[name]
+
+
+def _parse_output(text: str) -> tuple[dict[str, str], list[str]]:
+    """
+    Split script stdout into ``HX:key=value`` results and ``HX:log=`` lines.
+
+    Parameters
+    ----------
+    text : str
+        Script stdout; lines without the ``HX:`` prefix are ignored.
+
+    Returns
+    -------
+    tuple of (dict of str to str, list of str)
+        Results (last value wins) and log lines in order.
+
+    Examples
+    --------
+    >>> _parse_output("Welcome!\\nHX:os=linux\\nHX:log=a\\nHX:log=b\\n")
+    ({'os': 'linux'}, ['a', 'b'])
+    """
+    values: dict[str, str] = {}
+    logs: list[str] = []
+    for line in text.splitlines():
+        if not line.startswith(_PREFIX):
+            continue
+        key, sep, value = line[len(_PREFIX) :].partition("=")
+        if not sep:
+            continue
+        if key == "log":
+            logs.append(value)
+        else:
+            values[key] = value
+    return values, logs
+
+
+def _run_script(
+    target: SshTarget, name: str, *, timeout: float = 120, **params: str
+) -> tuple[dict[str, str], list[str]]:
+    """
+    Run one bootstrap script on ``target`` and return its parsed output.
+
+    Raises
+    ------
+    BootstrapError
+        The script exited non-zero or reported ``HX:error=``; the message
+        carries the error and any ``HX:log=`` lines.
+    """
+    proc = run_remote(target, _render(name, **params), timeout=timeout)
+    values, logs = _parse_output(proc.stdout.decode("utf-8", "replace"))
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", "replace").strip().splitlines()[-20:]
+        raise BootstrapError(
+            "\n".join([f"{target.alias}: {name} script exited {proc.returncode}", *stderr, *logs])
+        )
+    if "error" in values:
+        raise BootstrapError("\n".join([f"{target.alias}: {values['error']}", *logs]))
+    return values, logs
+
+
+def probe(target: SshTarget, home: str) -> ProbeResult:
+    """
+    Report OS, arch, Python, uv, GPUs, and SLURM on a host.
+
+    Parameters
+    ----------
+    target : SshTarget
+        Host to probe.
+    home : str
+        Hypothex home on the host; ``~`` is expanded there.
+
+    Returns
+    -------
+    ProbeResult
+        The host's facts; ``home`` is absolute.
+
+    Raises
+    ------
+    BootstrapError
+        The probe script failed.
+
+    Examples
+    --------
+    >>> probe(SshTarget(alias="gpu1"), "~/.hypothex").gpus  # doctest: +SKIP
+    4
+    """
+    values, _ = _run_script(target, "probe", HX_HOME=home)
+    try:
+        return ProbeResult(
+            os=values["os"],
+            arch=values["arch"],
+            python=values.get("python") or None,
+            uv=values.get("uv") or None,
+            gpus=int(values.get("gpus") or 0),
+            slurm=values.get("slurm") or None,
+            home=values["home"],
+        )
+    except (KeyError, ValueError) as exc:
+        raise BootstrapError(f"{target.alias}: probe output is incomplete: {exc}") from exc

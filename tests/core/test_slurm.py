@@ -188,3 +188,62 @@ def test_fake_sbatch_can_die_by_a_signal_after_accepting(slurm: FakeSlurm) -> No
     out = sh("sbatch", "--parsable", "--comment=hx-r1-sig", stdin="#!/bin/bash\ntrue\n")
     assert (out.returncode, out.stdout) == (-9, "")
     assert slurm.job("1000")["comment"] == "hx-r1-sig"  # SLURM had taken it
+
+
+def test_fake_sbatch_reads_options_from_the_command_line(slurm: FakeSlurm, tmp_path: Path) -> None:
+    out = sh(
+        "sbatch",
+        "--parsable",
+        "--comment",
+        "hx-r1-ab12",
+        "--job-name=hx-r1",
+        f"--output={tmp_path}/slurm-%j.out",
+        "--time=00:10:00",
+        "--gpus=2",
+        "--partition=gpu",
+        "--account=lab",
+        "--qos=high",
+        stdin="#!/bin/bash\n#SBATCH --job-name=ignored\ntrue\n",
+    )
+    assert out.stdout == "1000\n"
+    job = slurm.job("1000")
+    assert (job["name"], job["comment"], job["gpus"]) == ("hx-r1", "hx-r1-ab12", 2)
+    assert job["output"] == f"{tmp_path}/slurm-%j.out"
+    assert job["directives"]["qos"] == "high"
+    assert job["directives"]["partition"] == "gpu"
+    assert slurm.job("1000")["script"].endswith("true\n")
+
+
+def test_fake_sbatch_takes_a_script_file_and_refuses_unknown_arguments(
+    slurm: FakeSlurm, tmp_path: Path
+) -> None:
+    script = tmp_path / "job.sh"
+    script.write_text("#!/bin/bash\n#SBATCH --job-name=from-file\ntrue\n")
+    assert sh("sbatch", "--parsable", str(script)).stdout == "1000\n"
+    assert slurm.job("1000")["name"] == "from-file"
+    for bad in (["--wrap", "true"], ["-Z"], [str(script), str(script)], ["--comment"]):
+        result = sh("sbatch", *bad)
+        assert result.returncode == 2, bad
+        assert "unsupported arguments" in result.stderr
+    assert list(slurm.state()["jobs"]) == ["1000"]
+
+
+def test_fake_scancel_by_state_cancels_every_pending_job(slurm: FakeSlurm) -> None:
+    slurm.add_job("1", "PENDING")
+    slurm.add_job("2", "PENDING", name="other")
+    slurm.add_job("3", "RUNNING", node="fake-node1")
+    assert sh("scancel", "--state=PENDING", "--name=job-1").returncode == 0
+    assert (slurm.job("1")["state"], slurm.job("2")["state"]) == ("CANCELLED", "PENDING")
+    assert sh("scancel", "--state", "PENDING").returncode == 0
+    assert (slurm.job("2")["state"], slurm.job("2")["exit"]) == ("CANCELLED", "0:15")
+    assert (slurm.job("3")["state"], slurm.job("3")["in_queue"]) == ("RUNNING", True)
+    assert sh("scancel", "--state=PENDING").returncode == 0  # nothing left: not an error
+
+
+def test_fake_scancel_refuses_unknown_arguments(slurm: FakeSlurm) -> None:
+    slurm.add_job("1", "PENDING")
+    for bad in ([], ["--signal=KILL", "1"], ["-Q", "1"], ["--state"]):
+        result = sh("scancel", *bad)
+        assert result.returncode == 2, bad
+        assert "unsupported arguments" in result.stderr
+    assert slurm.job("1")["state"] == "PENDING"

@@ -91,16 +91,70 @@ def _option(argv: list[str], name: str) -> str | None:
     return None
 
 
+# sbatch options that take a value, as (long name, short name). Both ``--name=value``
+# and ``--name value`` work for these. Any other ``--name=value`` is kept as given.
+_SBATCH_VALUE_OPTIONS = {
+    "--job-name": "-J",
+    "--output": "-o",
+    "--comment": "",
+    "--time": "-t",
+    "--gpus": "-G",
+    "--partition": "-p",
+    "--account": "-A",
+}
+
+
+def _parse_sbatch(argv: list[str]) -> tuple[dict[str, str], bool, list[str]] | None:
+    """Split sbatch argv into (options, parsable, files); None when an argument is unsupported."""
+    shorts = {short: long for long, short in _SBATCH_VALUE_OPTIONS.items() if short}
+    options: dict[str, str] = {}
+    files: list[str] = []
+    parsable = False
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        i += 1
+        if arg == "--parsable":
+            parsable = True
+        elif arg.startswith("--") and "=" in arg:
+            key, value = arg[2:].split("=", 1)
+            options[key] = value
+        elif arg in _SBATCH_VALUE_OPTIONS or arg in shorts:
+            if i >= len(argv):
+                return None
+            options[(arg if arg.startswith("--") else shorts[arg])[2:]] = argv[i]
+            i += 1
+        elif arg.startswith("-"):
+            return None
+        else:
+            files.append(arg)
+    if len(files) > 1:
+        return None
+    return options, parsable, files
+
+
 def sbatch(argv: list[str]) -> int:
-    """Fake ``sbatch [--parsable] [--comment=C] [script]``: queue a job (stdin or file)."""
+    """
+    Fake ``sbatch``: queue a job. Exit 2 on any argument it does not support.
+
+    Supported: ``--parsable``; ``--job-name``, ``--output``, ``--comment``, ``--time``,
+    ``--gpus``, ``--partition``, ``--account`` (``--opt=v`` or ``--opt v``, short forms
+    ``-J -o -t -G -p -A``); any other ``--opt=v``; at most one script file (stdin when none).
+    Command-line options override ``#SBATCH`` lines, as in SLURM.
+    """
     _begin("sbatch", argv)
-    files = [a for a in argv if not a.startswith("-")]
+    parsed = _parse_sbatch(argv)
+    if parsed is None:
+        sys.stderr.write(f"fake sbatch: unsupported arguments {argv}\n")
+        return 2
+    options, parsable, files = parsed
     script = Path(files[0]).read_text() if files else sys.stdin.read()
     directives: dict[str, str] = {}
     for line in script.splitlines():
         match = _DIRECTIVE.match(line.strip())
         if match:
             directives[match.group(1)] = match.group(2)
+    directives.update(options)
     with locked_state() as state:
         job_id = str(state["next_id"])
         state["next_id"] += 1
@@ -111,9 +165,9 @@ def sbatch(argv: list[str]) -> int:
             "in_queue": True,
             "in_sacct": True,
             "name": directives.get("job-name", "sbatch"),
-            "comment": _option(argv, "--comment") or directives.get("comment", ""),
+            "comment": directives.get("comment", ""),
             "output": directives.get("output", os.path.join(os.getcwd(), "slurm-%j.out")),
-            "gpus": int(directives.get("gpus", "0")),
+            "gpus": int(directives.get("gpus", "0").split(":")[-1]),
             "directives": directives,
             "script": script,
             "cwd": os.getcwd(),
@@ -133,7 +187,7 @@ def sbatch(argv: list[str]) -> int:
     if die_by:  # accepted, but the caller never hears the job id
         sys.stdout.flush()
         os.kill(os.getpid(), getattr(signal, f"SIG{die_by}"))
-    print(job_id if "--parsable" in argv else f"Submitted batch job {job_id}")
+    print(job_id if parsable else f"Submitted batch job {job_id}")
     return 0
 
 
@@ -172,17 +226,73 @@ def runjob(job_id: str) -> int:
     return 0
 
 
+def _parse_scancel(argv: list[str]) -> tuple[dict[str, str], list[str]] | None:
+    """Split scancel argv into (filters, job ids); None when an argument is unsupported."""
+    filters: dict[str, str] = {}
+    ids: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        i += 1
+        if arg.startswith("--"):
+            key, sep, value = arg[2:].partition("=")
+            if key not in ("state", "user", "name"):
+                return None
+            if not sep:
+                if i >= len(argv):
+                    return None
+                value = argv[i]
+                i += 1
+            filters[key] = value
+        elif arg.startswith("-"):
+            return None
+        else:
+            ids.append(arg)
+    if not ids and not filters:
+        return None
+    return filters, ids
+
+
 def scancel(argv: list[str]) -> int:
-    """Fake ``scancel <id>...``: cancel queued jobs, SIGTERM running ones."""
+    """
+    Fake ``scancel``: cancel queued jobs, SIGTERM running ones. Exit 2 on unsupported arguments.
+
+    Supported: ``<id>...`` and the filters ``--state=S[,S]``, ``--user=U``, ``--name=N``
+    (``--opt=v`` or ``--opt v``). With filters and no ids, every queued job that matches is
+    cancelled (none matching is not an error). With ids, an unknown or finished id fails.
+    At least one id or filter is required.
+    """
     _begin("scancel", argv)
+    parsed = _parse_scancel(argv)
+    if parsed is None:
+        sys.stderr.write(f"fake scancel: unsupported arguments {argv}\n")
+        return 2
+    filters, ids = parsed
+    states = {s.upper() for s in filters["state"].split(",")} if "state" in filters else None
     with locked_state() as state:
-        for job_id in [a for a in argv if not a.startswith("-")]:
+        strict = bool(ids)
+        if not ids:
+            ids = [job_id for job_id, job in state["jobs"].items() if job["in_queue"]]
+        for job_id in ids:
             job = state["jobs"].get(job_id)
             if job is None or not job["in_queue"]:
-                sys.stderr.write(
-                    f"scancel: error: Kill job error on job id {job_id}: Invalid job id specified\n"
+                if strict:
+                    sys.stderr.write(
+                        f"scancel: error: Kill job error on job id {job_id}: "
+                        "Invalid job id specified\n"
+                    )
+                    return 1
+                continue
+            if (
+                (states is not None and job["state"] not in states)
+                or ("name" in filters and job["name"] != filters["name"])
+                or (
+                    "user" in filters
+                    and state["user"] is not None
+                    and filters["user"] != state["user"]
                 )
-                return 1
+            ):
+                continue
             job.update(state="CANCELLED", exit="0:15", in_queue=False)
             if job.get("pgid"):
                 with contextlib.suppress(ProcessLookupError, PermissionError):

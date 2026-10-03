@@ -3,6 +3,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from hypothex.core.config import ProjectConfig
 from hypothex.core.fsutil import append_jsonl
@@ -213,3 +214,20 @@ def test_repair_index_gaps(tmp_path: Path) -> None:
     assert repair_index_gaps(idx, store) == ["r1", "r2"]
     assert repair_index_gaps(idx, store) == []
     assert idx.get_project("toy") is not None
+
+
+def test_schema_version_is_none_only_for_a_missing_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    idx = Index(tmp_path / "i.db")
+    assert idx.schema_version() is None  # new file: tables, but no rebuild yet
+    with sqlite3.connect(idx.path) as conn:
+        conn.execute("DROP TABLE meta")
+    assert idx.schema_version() is None
+
+    def locked(key: str) -> None:
+        raise OperationalError("SELECT", {}, sqlite3.OperationalError("database is locked"))
+
+    monkeypatch.setattr(idx, "get_meta", locked)
+    with pytest.raises(OperationalError):
+        idx.schema_version()  # a busy index is not mistaken for a new one

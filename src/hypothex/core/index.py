@@ -331,8 +331,10 @@ class Index:
         """
         try:
             return self.get_meta("schema_version")
-        except OperationalError:  # a new file: no meta table yet
-            return None
+        except OperationalError as exc:
+            if "no such table" in str(exc.orig):  # a new file: no meta table yet
+                return None
+            raise
 
     def _ensure_schema(self) -> bool:
         """Create the tables of a new file; True when the caller must rebuild."""
@@ -1213,11 +1215,19 @@ def _swap_in(index: Index, store: RunStore, fresh: Path, since: int) -> None:
         conn.close()
 
 
-def _rebuild_locked(index: Index, store: RunStore) -> int:
+def _generation_or_zero(index: Index) -> int:
+    """The index generation; 0 for a file with no meta table."""
     try:
-        since = index.generation()  # read before the scan: later writes are caught up
-    except OperationalError:  # a file with no meta table
-        since = 0
+        return index.generation()
+    except OperationalError as exc:
+        if "no such table" in str(exc.orig):
+            return 0
+        raise
+
+
+def _rebuild_locked(index: Index, store: RunStore) -> int:
+    # read before the scan: every write after it is caught up in _swap_in
+    since = _generation_or_zero(index)
     fresh = index.path.with_name(index.path.name + ".tmp")
     try:
         count = _build_fresh(fresh, store)

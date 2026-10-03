@@ -104,8 +104,8 @@ the event ``run.submitting``. The job is submitted with ``sbatch --parsable`` an
 - **Outcome unknown** (a timeout, a signal, a garbled answer): the run stays
   ``queued`` and gets the event ``run.submit_unknown``. On each poll the env server
   looks for a job with that comment in ``squeue`` and ``sacct``. When it finds one, it
-  records the job. When both commands answer without it, and 5 minutes have passed since the intent,
-  the run fails.
+  records the job. When both commands answer without it, 5 minutes have passed since the intent,
+  and the ``sbatch`` call has ended, the run fails.
 
 ``sacct`` can find a job by its comment only when the cluster's accounting stores job
 comments (``AccountingStoreFlags`` contains ``job_comment``; older SLURM:

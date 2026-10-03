@@ -233,7 +233,7 @@ What the hub copies
 The hub copies each run's small files: ``run.yaml``, ``scores.jsonl``,
 ``metrics.jsonl``, ``notes.md``, ``usage.jsonl``, ``config.yaml``, ``git.diff``,
 ``git.stat``, and the folders ``predictions``, ``traces``, ``samples``, ``env``, and
-``logs``. Each file can be up to 200 MB; of each log, the hub keeps the last 8 MiB.
+``logs``. Each file can be up to 200 MiB; of each log, the hub keeps the last 8 MiB.
 Checkpoints and other artifacts stay on the host; the hub shows them with the host's
 name. Copy one when you need it:
 

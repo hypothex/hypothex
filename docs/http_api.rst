@@ -42,7 +42,8 @@ Hosts (hub)
        ``{pending, running, comment_accounting}`` for a SLURM host, else ``null``.
    * - ``POST /api/v1/hosts/reload``
      - ``{command_id?}``. Reads ``environments.yaml`` again and answers the host
-       rows. ``hx hosts add``, ``map``, and ``rm`` call it.
+       rows. ``hx hosts map`` and ``rm`` call it; ``hx hosts add`` calls ``connect``, which
+       also re-reads the file.
    * - ``POST /api/v1/hosts/{host}/connect``
      - ``{command_id?}``. Answers the host state.
    * - ``POST /api/v1/hosts/{host}/disconnect``
@@ -81,8 +82,8 @@ Runs
      - Launch here: ``repo`` plus the launch fields, ``gpus``, ``queue``. Answers the
        run record.
    * - ``GET /api/v1/runs/{id}``
-     - Everything about a run, plus ``host_state`` (the state of its host; ``null``
-       for a run of the hub).
+     - Everything about a run, plus ``host_state`` (the state name of its host,
+       such as ``"connected"``; ``null`` for a run of the hub).
    * - ``GET /api/v1/runs/{id}/metrics``, ``/traces``, ``/traces/{example_id}``,
        ``/logs``, ``/predictions``
      - The run's metrics, traces, log tail (``stream``, ``offset``), and predictions

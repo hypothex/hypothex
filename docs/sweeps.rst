@@ -101,7 +101,8 @@ Change a sweep
 ``extend`` is safe to repeat: seeds that are already in the sweep start only the runs
 that are missing. If a host drops during a launch, the sweep keeps the runs that
 started; ``hx sweep extend`` with the same seeds then starts only the missing ones.
-``--seeds 4`` adds seed 4 (here a single number is a seed, not a count).
+``--seeds`` is required for ``extend``. ``--seeds 4`` adds seed 4 (here a single number
+is a seed, not a count).
 
 ``cancel`` stops the runs that wait in the queue; they end as ``killed``.
 

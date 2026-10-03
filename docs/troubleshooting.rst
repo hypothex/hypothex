@@ -149,7 +149,7 @@ Remote runs
    Big files stay on the host. Copy one with ``hx pull RUN_ID --artifact checkpoint``.
 
 **A file of a remote run is missing on the hub**
-   The hub copies files up to 200 MB (and the last 8 MiB of each log). Larger files
+   The hub copies files up to 200 MiB (and the last 8 MiB of each log). Larger files
    stay on the host; copy one with ``hx pull RUN_ID --artifact PATH``.
 
 Sweeps

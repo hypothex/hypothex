@@ -561,6 +561,34 @@ def test_curves_rows_spikes_kills_and_checkpoints(ctx: Context, toy_repo: Path) 
     assert result.meta["x"] == "step"
 
 
+def test_curves_nonfinite_markers_become_events(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "c1", seed=1)
+    _jsonl(
+        ctx.run_dir(rec) / "metrics.jsonl",
+        [{"name": "train/loss", "step": s, "value": 1.0} for s in range(5)],
+    )
+    _jsonl(
+        ctx.run_dir(rec) / "metrics_nonfinite.jsonl",
+        [
+            {"name": "train/loss", "step": 9000, "value": "nan", "t": 1.0},
+            {"name": "val/loss", "step": 9000, "value": "inf", "t": 1.0},  # same step: one event
+            {"name": "other", "step": 3, "value": "-inf", "t": 1.0},  # not a shown metric
+            {"name": "train/loss", "step": 4, "value": 1.0},  # malformed: skipped
+        ],
+    )
+    panel = _panel("curves", data={"metrics": ["train/loss", "val/loss"]})
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert result.meta["events"] == [
+        {"run_id": "c1", "step": 9000, "kind": "nonfinite", "label": "NaN 9k"},
+    ]
+    # no metric list: every name counts
+    result = query_panel(ctx, "toy", "toy-acc", _panel("curves"))
+    assert [(e["step"], e["kind"]) for e in result.meta["events"]] == [
+        (3, "nonfinite"),
+        (9000, "nonfinite"),
+    ]
+
+
 def test_curves_loss_checkpoint_best_is_minimum(ctx: Context, toy_repo: Path) -> None:
     rec = _run(ctx, toy_repo, "c1")
     _jsonl(

@@ -268,3 +268,19 @@ def test_log_skips_non_finite_values_with_a_warning(run_env: Path) -> None:
         ("acc", 0, 0.5),
         ("loss", 2, 0.25),
     ]
+
+
+def test_log_records_non_finite_values_as_divergence_markers(run_env: Path) -> None:
+    run = hx.current()
+    with pytest.warns(RuntimeWarning):
+        run.log({"loss": float("nan"), "acc": 0.5})
+    with pytest.warns(RuntimeWarning):
+        run.log({"loss": float("inf"), "grad": float("-inf")}, step=7)
+    rows = _lines(run_env / "metrics_nonfinite.jsonl")
+    assert [(r["name"], r["step"], r["value"]) for r in rows] == [
+        ("loss", 0, "nan"),
+        ("loss", 7, "inf"),
+        ("grad", 7, "-inf"),
+    ]
+    assert all(isinstance(r["t"], float) for r in rows)
+    assert len(_lines(run_env / "metrics.jsonl")) == 1  # only acc

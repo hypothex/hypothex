@@ -6,7 +6,7 @@ import shlex
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -238,4 +238,24 @@ class MetricPoint(BaseModel):
     name: str
     step: int
     value: float = Field(allow_inf_nan=False)
+    t: float | None = None
+
+
+class NonFiniteMetric(BaseModel):
+    """
+    A ``NaN`` or infinite metric value the SDK did not log; stored in
+    ``metrics_nonfinite.jsonl``.
+
+    It marks where a run diverged; the curves panel shows it as a
+    ``nonfinite`` event.
+
+    Examples
+    --------
+    >>> NonFiniteMetric(name="loss", step=9000, value="nan").value
+    'nan'
+    """
+
+    name: str
+    step: int
+    value: Literal["nan", "inf", "-inf"]
     t: float | None = None

@@ -762,8 +762,35 @@ def short_step(x: float) -> str:
 
 
 def _event(run_id: str, x: float, kind: str) -> dict[str, Any]:
-    """A curves event with its short label, e.g. ``spike 9k`` or ``killed 14k``."""
-    return {"run_id": run_id, "step": x, "kind": kind, "label": f"{kind} {short_step(x)}"}
+    """
+    A curves event with its short label, e.g. ``spike 9k``, ``killed 14k``, or
+    ``NaN 9k`` (kind ``nonfinite``).
+    """
+    text = "NaN" if kind == "nonfinite" else kind
+    return {"run_id": run_id, "step": x, "kind": kind, "label": f"{text} {short_step(x)}"}
+
+
+def _nonfinite_xs(
+    scope: _Scope,
+    run: RunRecord,
+    wanted: list[str] | None,
+    x_name: str,
+    x_of: dict[int, float] | None,
+) -> list[float]:
+    """
+    Distinct x of the run's recorded ``NaN`` / infinite values, sorted.
+
+    Only names the panel shows count (all but the step metric when ``wanted`` is
+    ``None``); a step with no ``step_metric`` value is dropped, like a curve point.
+    """
+    xs: set[float] = set()
+    for p in scope.ctx.store.read_nonfinite_points(run.project, run.run_id):
+        if (p.name not in wanted) if wanted is not None else p.name == x_name:
+            continue
+        x = p.step if x_of is None else x_of.get(p.step)
+        if x is not None:
+            xs.add(x)
+    return sorted(xs)
 
 
 def _checkpoints(scope: _Scope, run: RunRecord) -> list[Artifact]:
@@ -828,6 +855,8 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
                 spike_ranges += _spike_ranges(series, x_of)
         for start, _ in _merge_ranges(spike_ranges):
             run_events.append(_event(run.run_id, start, "spike"))
+        for x in _nonfinite_xs(scope, run, wanted, x_name, x_of):
+            run_events.append(_event(run.run_id, x, "nonfinite"))
         if run.status in (RunStatus.KILLED, RunStatus.FAILED) and last_x is not None:
             run_events.append(_event(run.run_id, last_x, run.status.value))
         events.extend(sorted(run_events, key=lambda e: e["step"]))

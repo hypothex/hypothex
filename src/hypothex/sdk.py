@@ -116,9 +116,12 @@ class Run:
         """
         Log metric values; each name gets its own auto-incrementing step.
 
-        A ``NaN`` or infinite value (a diverged loss) is not written: it gives a
-        ``RuntimeWarning`` and its step is used up, so later values keep their
-        steps. Training goes on.
+        A ``NaN`` or infinite value (a diverged loss) is not written to
+        ``metrics.jsonl``: it gives a ``RuntimeWarning`` and its step is used up,
+        so later values keep their steps. Training goes on. The divergence is
+        recorded in ``metrics_nonfinite.jsonl`` as ``{name, step, value, t}``
+        with ``value`` one of ``"nan"``, ``"inf"``, ``"-inf"``; the curves panel
+        marks it.
 
         Parameters
         ----------
@@ -141,6 +144,10 @@ class Run:
                     f"hypothex: metric {name!r} at step {s} is {number}; not logged",
                     RuntimeWarning,
                     stacklevel=2,
+                )
+                append_jsonl(
+                    self.run_dir / "metrics_nonfinite.jsonl",
+                    {"name": name, "step": s, "value": str(number), "t": now},
                 )
                 continue
             append_jsonl(

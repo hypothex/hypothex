@@ -3,7 +3,9 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_DRAFT,
   type LaunchDraft,
+  CONFIG_ERROR,
   NO_SEED_WARNING,
+  SEED_HISTORY_CUT,
   TIME_ERROR,
   checkDraft,
   launchDefaults,
@@ -49,6 +51,14 @@ describe("launchDefaults", () => {
       draft: { command: "python train.py --lr 3e-4 --seed {seed}", seeds: "4, 5, 6" },
       carry: { params: { lr: "3e-4" }, vars: { config: "configs/aug.yaml" } },
     });
+  });
+
+  test("a cut run history proposes no seeds: an older run may hold any of them", () => {
+    const template = makeRecord({ run_id: "r3", seed: 3, config_hash: "sha256:aaaa" });
+    const defaults = launchDefaults(template, [], false);
+    expect(defaults.draft.seeds).toBe("");
+    expect(defaults.seedsNote).toBe(SEED_HISTORY_CUT);
+    expect(launchDefaults(template, [], true).seedsNote).toBeUndefined();
   });
 
   test("falls back to the rendered command when the template is empty", () => {
@@ -143,6 +153,16 @@ describe("checkDraft", () => {
     expect(retry.blockers).toEqual([]);
     expect([retry.seeds, retry.pending]).toEqual([[4, 5], [5]]);
     expect(retry.plan).toEqual({ now: 1, queued: 0, blocked: 0, cvd: [1], firstPos: null });
+  });
+
+  test("{config} without a config var blocks: hx --config files are not sent with a launch", () => {
+    const cmd = "python train.py --config {config} --seed {seed}";
+    const c = checkDraft({ ...OK, command: cmd }, G1, PROJECT);
+    expect(c.commandError).toBe(CONFIG_ERROR);
+    expect(c.blockers).toEqual([`command: ${CONFIG_ERROR}`]);
+    // a template run that set the config as a var carries it: the slot fills
+    const carried = checkDraft({ ...OK, command: cmd }, G1, PROJECT, Date.now(), [], { config: "configs/aug.yaml" });
+    expect(carried.blockers).toEqual([]);
   });
 
   test("warnings: no {seed} with several seeds, and shell operators", () => {

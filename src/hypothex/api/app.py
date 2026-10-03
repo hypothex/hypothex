@@ -996,7 +996,9 @@ def local_diff(repo: str | None) -> str | None:
 
 def _slurm_for(host: str, spec: HostSpec, body: RunFields) -> dict[str, Any] | None:
     if spec.kind != "slurm":
-        if body.slurm is not None:
+        # `slurm.gpus` alone is harmless (``body.gpus`` rules here): `hx launch --gpus N`
+        # sends it to every host, as it cannot tell a SLURM host's default from an explicit N
+        if body.slurm is not None and body.slurm.model_fields_set - {"gpus"}:
             raise RunError(f"host {host} is not a SLURM host; drop --partition/--time/--account")
         return None
     merged = (spec.slurm or SlurmDefaults()).model_dump()

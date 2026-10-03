@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
 
 import type { RunRecord } from "../../src/api/models";
-import { fetchLaunchHosts, launchRequest, launchSeeds, seedCommandId } from "../../src/launch/launchApi";
+import { ApiError } from "../../src/api/client";
+import { fetchLaunchHosts, launchRequest, launchSeeds, outcomeUnknown, seedCommandId } from "../../src/launch/launchApi";
 import { type LaunchSpec, gpuCells } from "../../src/launch/plan";
 import { makeRecord } from "../pages/fixtures";
 import { type Call, HttpReply, mockApi, restoreFetch } from "../pages/helpers";
@@ -174,6 +175,7 @@ describe("launchSeeds", () => {
     expect(out.records.map((r) => r.seed)).toEqual([4]);
     expect(out.failed?.seed).toBe(5);
     expect(out.failed?.error.message).toBe("asked for 2 GPUs; this host has 1");
+    expect(out.failed?.unknown).toBe(false);
     expect(calls.map(idOf)).toEqual(["base.s4", "base.s5"]);
   });
 
@@ -204,5 +206,24 @@ describe("launchSeeds", () => {
     expect(out.records).toEqual([]);
     expect(out.failed?.seed).toBe(4);
     expect(out.failed?.error.message).toBe("Cannot reach hx serve");
+    // the server may have started seed 4 before the answer was lost
+    expect(out.failed?.unknown).toBe(true);
   });
+});
+
+test("outcomeUnknown: only an answer that says the run was not started is a refusal", () => {
+  const err = (status: number, type: string): ApiError => new ApiError(status, "x", type, [], null);
+  // no answer, a lost forward, an interrupted command: the run may exist
+  expect(outcomeUnknown(new Error("socket closed"))).toBe(true);
+  expect(outcomeUnknown(err(0, "NetworkError"))).toBe(true);
+  expect(outcomeUnknown(err(503, "EnvUnreachableError"))).toBe(true);
+  expect(outcomeUnknown(err(502, "HTTPError"))).toBe(true);
+  expect(outcomeUnknown(err(500, "IndexError"))).toBe(true);
+  expect(outcomeUnknown(err(409, "CommandInterruptedError"))).toBe(true);
+  // refused before anything started
+  expect(outcomeUnknown(err(400, "RunError"))).toBe(false);
+  expect(outcomeUnknown(err(422, "RequestValidationError"))).toBe(false);
+  expect(outcomeUnknown(err(409, "ConflictError"))).toBe(false);
+  // the hub had no connection to the host: nothing was forwarded
+  expect(outcomeUnknown(err(503, "HostUnavailableError"))).toBe(false);
 });

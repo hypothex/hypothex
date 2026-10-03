@@ -374,11 +374,21 @@ export function etaSeconds(runs: readonly RunRecord[], now: number): number | nu
   return left / Math.max(running.length, 1);
 }
 
-/** GPU-hours of a run: its final `cost.gpu_hours`, else wall time so far × GPUs held. */
+/**
+ * GPUs a run is billed for, as the backend's `billed_gpus`: the GPUs it holds; a SLURM run
+ * whose node reported no indices, the GPUs it asked for (SLURM reserved that many).
+ */
+function billedGpus(record: RunRecord): number {
+  const held = (record.executor.gpus ?? []).length;
+  if (held > 0) return held;
+  return record.executor.slurm_job_id ? (record.gpus_requested ?? 0) : 0;
+}
+
+/** GPU-hours of a run: its final `cost.gpu_hours`, else wall time so far × billed GPUs. */
 export function gpuHours(record: RunRecord, now: number): number {
   if (record.cost) return record.cost.gpu_hours;
   const seconds = runSeconds(record, now) ?? 0;
-  return (seconds * (record.executor.gpus ?? []).length) / 3600;
+  return (seconds * billedGpus(record)) / 3600;
 }
 
 /** GPU-hours per host (`hostOf`), in run order; hosts with no GPU time are left out. */

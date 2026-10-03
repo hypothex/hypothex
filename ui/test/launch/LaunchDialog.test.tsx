@@ -3,6 +3,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 
 import type { RunRecord } from "../../src/api/models";
 import { SEED_HINT } from "../../src/launch/command";
+import { CONFIG_ERROR, SEED_HISTORY_CUT } from "../../src/launch/draft";
 import { LaunchDialog, type LaunchDialogProps } from "../../src/launch/LaunchDialog";
 import { makeRecord } from "../pages/fixtures";
 import { type Call, HttpReply, mockApi, mockClipboard, renderWithClient, restoreFetch } from "../pages/helpers";
@@ -237,6 +238,40 @@ describe("seeds and command", () => {
   });
 });
 
+describe("template defaults", () => {
+  test("{config} from a template run's --config blocks Launch until the command names the file", async () => {
+    mockApi(HOSTS);
+    renderDialog({ initial: { command: "python train.py --config {config} --seed {seed}", seeds: "4, 5, 6" } });
+    await ready();
+    typeHypothesis("aug config holds");
+    expect(screen.getByText(`command: ${CONFIG_ERROR}`)).toBeTruthy();
+    expect(launchButton(3).disabled).toBe(true);
+    expect(launchButton(3).title).toBe(`command: ${CONFIG_ERROR}`);
+    fireEvent.change(screen.getByLabelText("Command"), {
+      target: { value: "python train.py --config configs/aug.yaml --seed {seed}" },
+    });
+    expect(launchButton(3).disabled).toBe(false);
+  });
+
+  test("{config} carried as a var fills, so Launch is enabled", async () => {
+    mockApi(HOSTS);
+    renderDialog({
+      initial: { command: "python train.py --config {config} --seed {seed}", seeds: "4, 5, 6" },
+      carry: { params: {}, vars: { config: "configs/aug.yaml" } },
+    });
+    await ready();
+    typeHypothesis("aug config holds");
+    expect(launchButton(3).disabled).toBe(false);
+  });
+
+  test("a seeds note is shown next to the seeds", async () => {
+    mockApi(HOSTS);
+    renderDialog({ initial: { command: CMD, seeds: "" }, seedsNote: SEED_HISTORY_CUT });
+    await ready();
+    expect(screen.getByText(SEED_HISTORY_CUT)).toBeTruthy();
+  });
+});
+
 describe("Copy as CLI", () => {
   test("copies the exact hx launch lines, one per seed", async () => {
     const written = mockClipboard();
@@ -363,7 +398,7 @@ describe("Launch", () => {
     typeHypothesis("two seeds on the hub");
     fireEvent.click(launchButton(2));
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "seed 5: index busy. 1 of 2 launched; Launch sends the other 1.",
+      "seed 5: index busy. 1 of 2 launched; seed 5 may have started: the form is locked and Launch re-sends it under the same id.",
     );
     // the hub now has 1 free GPU and 1 seed to send: Launch stays enabled
     await waitFor(() => expect(gpuLine().textContent).toBe("1 now, CUDA_VISIBLE_DEVICES=1"));
@@ -450,7 +485,9 @@ describe("Launch", () => {
     const calls = mockApi({
       ...HOSTS,
       "GET /api/v1/hosts": [GPU1, DGX, MCCLEARY, GPU2, gpu3],
-      "POST /api/v1/hosts/gpu1/runs": () => new HttpReply(503, { error: "host unreachable", type: "HostError" }),
+      // not connected: the hub forwarded nothing, so nothing started
+      "POST /api/v1/hosts/gpu1/runs": () =>
+        new HttpReply(503, { error: "host unreachable", type: "HostUnavailableError" }),
       "POST /api/v1/hosts/gpu3/runs": (c: Call) => rec(seedOf(c)),
     });
     const { onLaunched } = renderDialog({ initial: { command: CMD, seeds: "4, 5, 6", host: "gpu1" } });
@@ -533,6 +570,91 @@ describe("Launch", () => {
     expect(ids[0]?.endsWith(".s4")).toBe(true);
     expect(ids[1]?.endsWith(".s4")).toBe(true);
     expect(ids[1]).not.toBe(ids[0]);
+  });
+
+  test("a launch whose answer is lost locks the form; Launch re-sends it with the same ids, so no seed starts twice", async () => {
+    const started: number[] = [];
+    const byId = new Map<string, RunRecord>();
+    let drops = 3;
+    const calls = mockApi({
+      ...HOSTS,
+      "POST /api/v1/hosts/gpu1/runs": (c: Call) => {
+        // the server keeps one run per command_id, like the hub's receipts
+        let r = byId.get(idOf(c));
+        if (r === undefined) {
+          r = rec(seedOf(c));
+          byId.set(idOf(c), r);
+          started.push(seedOf(c));
+        }
+        if (seedOf(c) === 4 && drops > 0) {
+          drops -= 1;
+          throw new TypeError("connection reset"); // seed 4 started; its answer is lost
+        }
+        return r;
+      },
+    });
+    const { onLaunched } = renderDialog();
+    await ready();
+    typeHypothesis("beam 10 holds");
+    fireEvent.click(launchButton(3));
+    expect((await screen.findByRole("alert", {}, { timeout: 3000 })).textContent).toBe(
+      "seed 4: Cannot reach hx serve. 0 of 3 launched; seed 4 may have started: the form is locked and Launch re-sends it under the same id.",
+    );
+    // an edit would give seed 4 a new command id and start it a second time
+    const hyp = screen.getByLabelText("Hypothesis") as HTMLInputElement;
+    expect((hyp.closest("fieldset") as HTMLFieldSetElement).disabled).toBe(true);
+    typeHypothesis("beam 10 holds, take 2");
+    expect(hyp.value).toBe("beam 10 holds");
+    fireEvent.click(radio("mccleary"));
+    expect(radio("gpu1").checked).toBe(true);
+    // pasted lines would start seed 4 again too
+    expect((screen.getByRole("button", { name: "Copy as CLI" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(launchButton(3));
+    await waitFor(() => expect(onLaunched).toHaveBeenCalledTimes(1));
+    expect(started).toEqual([4, 5, 6]);
+    const ids = posts(calls).map(idOf);
+    expect(new Set(ids.filter((id) => id.endsWith(".s4"))).size).toBe(1);
+    const [records, host] = onLaunched.mock.calls[0] as [RunRecord[], string];
+    expect(records.map((r) => r.seed)).toEqual([4, 5, 6]);
+    expect(host).toBe("gpu1");
+  });
+
+  test("while seeds are sent, the host and the fields are locked to the launch in progress", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let refuse = true;
+    const calls = mockApi({
+      ...HOSTS,
+      "POST /api/v1/hosts/gpu1/runs": async (c: Call) => {
+        if (seedOf(c) === 4) await gate;
+        if (seedOf(c) === 5 && refuse) {
+          refuse = false;
+          return new HttpReply(400, { error: "runner busy", type: "RunError" });
+        }
+        return rec(seedOf(c));
+      },
+    });
+    const { onLaunched } = renderDialog();
+    await ready();
+    typeHypothesis("beam 10 holds");
+    fireEvent.click(launchButton(3));
+    await screen.findByRole("button", { name: "Launching 0/3" });
+    fireEvent.click(radio("mccleary"));
+    typeHypothesis("changed mid-launch");
+    expect(radio("gpu1").checked).toBe(true);
+    expect((screen.getByLabelText("Hypothesis") as HTMLInputElement).value).toBe("beam 10 holds");
+    release();
+    await screen.findByRole("alert");
+    // seed 4 runs on gpu1, and gpu1 is still the host Launch sends the rest to
+    expect(radio("gpu1").checked).toBe(true);
+    expect(launchButton(2).disabled).toBe(false);
+    fireEvent.click(launchButton(2));
+    await waitFor(() => expect(onLaunched).toHaveBeenCalledTimes(1));
+    expect(posts(calls).every((c) => c.url.endsWith("/api/v1/hosts/gpu1/runs"))).toBe(true);
+    expect(posts(calls).every((c) => (c.body as { hypothesis: string }).hypothesis === "beam 10 holds")).toBe(true);
+    expect((onLaunched.mock.calls[0] as [RunRecord[], string])[1]).toBe("gpu1");
   });
 
   test("Escape, Close and Cancel call onClose", async () => {

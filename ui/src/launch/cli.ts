@@ -17,7 +17,9 @@ export function launchCliLine(spec: LaunchSpec, seed: number): string {
   const parts = ["hx", "launch", "--repo", cliQuote(spec.repo)];
   if (spec.task !== null) parts.push("-t", cliQuote(spec.task));
   if (spec.host.kind !== "hub") parts.push("--host", cliQuote(spec.host.name));
-  if (spec.gpus > 0) parts.push("--gpus", String(spec.gpus));
+  // on SLURM an omitted --gpus keeps the host's default, so 0 GPUs is said out loud, as the
+  // dialog's `slurm.gpus = 0` does; elsewhere 0 is the CLI's own default
+  if (spec.gpus > 0 || spec.host.kind === "slurm") parts.push("--gpus", String(spec.gpus));
   if (spec.host.kind === "ssh" && spec.queue) parts.push("--queue");
   if (spec.host.kind === "slurm" && spec.slurm !== null) {
     parts.push(...slurmFlags(spec.slurm, spec.gpus, ["partition", "time", "account"]));

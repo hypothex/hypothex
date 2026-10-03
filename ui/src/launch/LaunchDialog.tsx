@@ -8,6 +8,8 @@
  * `command_id`, and the attempt id changes only when the form changes, so a double click or
  * a retry after a refused seed never starts a seed twice (spec 5.3). The seeds that did
  * start are remembered and never sent again, even after an edit gives a new attempt id.
+ * The form is locked while seeds are sent, and after a seed whose outcome is unknown (no
+ * answer: it may have started): only a resend under the same ids can settle that seed.
  */
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -58,6 +60,8 @@ export interface LaunchDialogProps {
   initial?: Partial<LaunchDraft>;
   /** Params and vars of the template run, sent with every seed. */
   carry?: Carry;
+  /** A note next to the seeds, e.g. why none is proposed (`LaunchDefaults.seedsNote`). */
+  seedsNote?: string;
   onClose: () => void;
   onLaunched: (records: RunRecord[], host: string) => void;
 }
@@ -73,6 +77,8 @@ const COPY_TEXT: Record<CopyState, string> = {
 interface Failure {
   seed: number;
   message: string;
+  /** The seed may have started: the form stays locked until a resend settles it. */
+  unknown: boolean;
   /** Seeds started by this dialog so far, and seeds still to send. */
   done: number;
   left: number;
@@ -401,6 +407,7 @@ export function LaunchDialog({
   title = "New run",
   initial,
   carry = NO_CARRY,
+  seedsNote,
   onClose,
   onLaunched,
 }: LaunchDialogProps) {
@@ -433,11 +440,19 @@ export function LaunchDialog({
   const host = hosts.data?.find((h) => h.name === draft.host) ?? null;
   // seeds this dialog started already are never sent again, even under a new attempt id, and
   // the GPU plan counts only the rest (the started seeds hold GPUs of their own by now)
-  const check = checkDraft(draft, host, project, now, launched.seeds);
+  const check = checkDraft(draft, host, project, now, launched.seeds, carry.vars);
   const n = check.seeds.length;
   const pending = check.pending;
   const busy = progress !== null;
-  const blocked = check.blockers.length > 0;
+  // an edit gives every seed a new command id: never while seeds are sent, nor while a seed
+  // that may have started waits for its resend
+  const locked = busy || failure?.unknown === true;
+  // the started seeds and the rest must share one host: onLaunched names a single host
+  const blockers =
+    launched.host !== null && draft.host !== launched.host
+      ? [...check.blockers, `seeds started on ${launched.host}: the rest go there`]
+      : check.blockers;
+  const blocked = blockers.length > 0;
   const spec: LaunchSpec | null =
     host === null || check.argv.length === 0
       ? null
@@ -462,6 +477,7 @@ export function LaunchDialog({
   const where = host === null ? "" : `${host.kind === "hub" ? repo : `${project} @ ${host.name}`}${pin}`;
 
   const update: Update = (patch) => {
+    if (inFlight.current || locked) return;
     setDraft((d) => ({ ...d, ...patch }));
     setAttempt(newCommandId());
     setFailure(null);
@@ -478,8 +494,6 @@ export function LaunchDialog({
 
   const launch = async (): Promise<void> => {
     if (inFlight.current || spec === null || blocked || pending.length === 0) return;
-    // the started seeds and the rest must share one host: onLaunched names a single host
-    if (launched.host !== null && spec.host.name !== launched.host) return;
     inFlight.current = true;
     setFailure(null);
     setProgress(0);
@@ -499,6 +513,7 @@ export function LaunchDialog({
       setFailure({
         seed: out.failed.seed,
         message: out.failed.error.message,
+        unknown: out.failed.unknown,
         done: done.seeds.length,
         left: pending.length - out.records.length,
       });
@@ -528,7 +543,7 @@ export function LaunchDialog({
             ×
           </button>
         </div>
-        <div className="dlg-b">
+        <fieldset className="dlg-b" disabled={locked}>
           <div className="fr">
             <span className="lb">Host</span>
             {hosts.error ? (
@@ -565,6 +580,7 @@ export function LaunchDialog({
               />
               <span className="lbl-x">×{n}</span>
               {check.seedsError ? <span className="small bad">{check.seedsError}</span> : null}
+              {seedsNote ? <span className="small warn">{seedsNote}</span> : null}
             </div>
           </div>
           <CommandRow draft={draft} check={check} update={update} where={where} />
@@ -587,18 +603,20 @@ export function LaunchDialog({
               <span className="xn">×{pending.length}</span>
             </div>
           </div>
-        </div>
+        </fieldset>
         {failure ? (
           <p className="err" role="alert">
-            seed {failure.seed}: {failure.message}. {failure.done} of {failure.done + failure.left} launched; Launch
-            sends the other {failure.left}.
+            seed {failure.seed}: {failure.message}. {failure.done} of {failure.done + failure.left} launched;{" "}
+            {failure.unknown
+              ? `seed ${failure.seed} may have started: the form is locked and Launch re-sends it under the same id.`
+              : `Launch sends the other ${failure.left}.`}
           </p>
         ) : null}
         <div className="dlg-f">
           <button
             type="button"
             className="btn"
-            disabled={cli === ""}
+            disabled={cli === "" || locked}
             title={cli || "Needs a host, seeds and a command"}
             onClick={() => void copyCli()}
           >
@@ -614,7 +632,7 @@ export function LaunchDialog({
             type="button"
             className="btn primary"
             disabled={busy || blocked || pending.length === 0}
-            title={blocked ? check.blockers.join("; ") : `Launch ${pending.length} on ${host?.name ?? ""}`}
+            title={blocked ? blockers.join("; ") : `Launch ${pending.length} on ${host?.name ?? ""}`}
             onClick={() => void launch()}
           >
             {progress !== null ? `Launching ${progress}/${pending.length}` : `Launch ${pending.length}`}

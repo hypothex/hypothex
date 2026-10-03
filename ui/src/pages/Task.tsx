@@ -3,22 +3,23 @@
  * preset, custom views, `+ view`), and the active view's panels on a 12-column grid.
  * "New run" opens the Launch dialog (spec 8A.8), prefilled from the best config's latest
  * run: its command template, params and vars, and the next unused seeds of that config.
+ * The template is the one at the click: live leaderboard updates never reset an open dialog.
  */
 import { useQuery } from "@tanstack/react-query";
-import { Fragment, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { RunRecord } from "../api/models";
 import {
   RUN_EVENT_INVALIDATES,
   queryKeys,
+  useAllRuns,
   useLeaderboard,
-  useRuns,
   useTask,
   useView,
   useViewQuery,
   useViews,
 } from "../api/queries";
-import { launchDefaults } from "../launch/draft";
+import { type LaunchDefaults, launchDefaults } from "../launch/draft";
 import { LaunchDialog } from "../launch/LaunchDialog";
 import { shortId } from "./components/format";
 import { AppLink, hrefs } from "./components/links";
@@ -36,12 +37,6 @@ export interface TaskPageProps {
 }
 
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
-
-/**
- * Runs read for the Launch dialog's defaults (used seeds of the template's config). The API
- * default of 200 would miss seeds on a big task and propose seeds that already exist.
- */
-export const TASK_RUNS_LIMIT = 1000;
 
 /** The line under the headline: configs and runs, metric versions, re-eval backlog. */
 export function boardMeta(board: Leaderboard): string[] {
@@ -67,30 +62,49 @@ interface NewRunProps {
   onLaunched: (records: RunRecord[], host: string) => void;
 }
 
-/** Loads the repo path, the template run and the task's runs, then shows the dialog. */
+interface Opened {
+  repo: string;
+  defaults: LaunchDefaults;
+}
+
+/**
+ * Loads the repo path, the template run and every run of the task (not only the newest
+ * page: an older run may hold a seed), then shows the dialog. What it opened with is kept
+ * until the dialog closes: a refetch (each launch invalidates runs) or a failed refetch
+ * must not swap the dialog for a spinner or an error and lose the session in it.
+ */
 function NewRun({ project, task, templateRunId, onClose, onLaunched }: NewRunProps) {
   const detail = useTask(project, task);
-  const runs = useRuns({ project, task, limit: TASK_RUNS_LIMIT });
+  const runs = useAllRuns({ project, task });
   const template = useQuery({
     queryKey: queryKeys.run(templateRunId ?? ""),
     queryFn: ({ signal }) => api.run(templateRunId ?? "", signal),
     enabled: templateRunId !== null,
   });
-  // A failed runs read would propose seeds that already exist; a failed template read
-  // would open a blank dialog without saying so. Both stop here instead.
-  const error = detail.error ?? runs.error ?? template.error;
-  if (error) return <ErrorBox error={error} />;
-  if (detail.data === undefined || runs.isPending || (templateRunId !== null && template.isPending)) {
-    return <Loading />;
+  const opened = useRef<Opened | null>(null);
+  if (opened.current === null) {
+    // A failed runs read would propose seeds that already exist; a failed template read
+    // would open a blank dialog without saying so. Both stop here instead.
+    const error = detail.error ?? runs.error ?? template.error;
+    if (error) return <ErrorBox error={error} />;
+    if (detail.data === undefined || runs.data === undefined || (templateRunId !== null && template.isPending)) {
+      return <Loading />;
+    }
+    const all = runs.data;
+    opened.current = {
+      repo: detail.data.repo,
+      defaults: launchDefaults(template.data?.record ?? null, all.runs, all.complete),
+    };
   }
-  const defaults = launchDefaults(template.data?.record ?? null, runs.data ?? []);
+  const { repo, defaults } = opened.current;
   return (
     <LaunchDialog
       project={project}
       task={task}
-      repo={detail.data.repo}
+      repo={repo}
       initial={defaults.draft}
       carry={defaults.carry}
+      seedsNote={defaults.seedsNote}
       onClose={onClose}
       onLaunched={onLaunched}
     />
@@ -124,7 +138,8 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
     send: (_: void, opts) => api.reevalTask(project, task, {}, opts),
     invalidate: RUN_EVENT_INVALIDATES,
   });
-  const [launching, setLaunching] = useState(false);
+  // the template run at the click (`undefined`: closed); the leaderboard keeps changing
+  const [launching, setLaunching] = useState<string | null | undefined>(undefined);
   const [launched, setLaunched] = useState<LaunchedRuns | null>(null);
 
   const info = views.data?.find((v) => v.name === active) ?? detail.data?.info;
@@ -203,7 +218,7 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
           <button
             type="button"
             className="btn primary"
-            onClick={() => setLaunching(true)}
+            onClick={() => setLaunching(templateRunId)}
             title="Launch runs of this task on any host"
           >
             New run
@@ -222,14 +237,14 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
         <Loading />
       )}
 
-      {launching ? (
+      {launching !== undefined ? (
         <NewRun
           project={project}
           task={task}
-          templateRunId={templateRunId}
-          onClose={() => setLaunching(false)}
+          templateRunId={launching}
+          onClose={() => setLaunching(undefined)}
           onLaunched={(records, host) => {
-            setLaunching(false);
+            setLaunching(undefined);
             setLaunched({ host, records });
           }}
         />

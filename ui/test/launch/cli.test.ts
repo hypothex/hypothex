@@ -65,6 +65,22 @@ test("a SLURM host gets --partition, --time and --account only when filled in, n
   );
 });
 
+test("a SLURM job with 0 GPUs says --gpus 0: an omitted --gpus keeps the host's default", () => {
+  const spec: LaunchSpec = {
+    ...SPEC,
+    host: launchHost({ name: "mccleary", kind: "slurm" }),
+    gpus: 0,
+    slurm: { partition: "", account: "", time: "" },
+  };
+  // the dialog sends slurm.gpus = 0; the pasted line must ask for the same allocation
+  expect(slurmBody(spec.slurm ?? { partition: "", account: "", time: "" }, spec.gpus).gpus).toBe(0);
+  expect(launchCliLine(spec, 4)).toBe(
+    `hx launch --repo /Users/sv/code/rxn-forward -t uspto-forward-top1 --host mccleary --gpus 0 --seed 4 ${TAIL}`,
+  );
+  // off SLURM, 0 GPUs is the CLI's own default: no flag
+  expect(launchCliLine({ ...SPEC, gpus: 0 }, 4)).not.toContain("--gpus");
+});
+
 test("the hub has no --host; params and vars carry over; quotes in the hypothesis survive", () => {
   const spec: LaunchSpec = {
     ...SPEC,

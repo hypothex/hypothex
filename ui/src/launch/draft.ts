@@ -56,10 +56,21 @@ export function pinnedCommit(template: RunRecord | null): string | null {
 export interface LaunchDefaults {
   draft: Partial<LaunchDraft>;
   carry: Carry;
+  /** Why no seeds are proposed (`SEED_HISTORY_CUT`); absent when they are. */
+  seedsNote?: string;
 }
 
 export const NO_SEED_WARNING = "no {seed} in the command: every seed runs the same command";
 export const TIME_ERROR = "time: use h:mm:ss or d-hh:mm:ss";
+export const SEED_HISTORY_CUT = "run history cut short: pick seeds no run of this config used";
+
+/** The slot `hx run --config FILE` fills with the run's copy of FILE. */
+export const CONFIG_SLOT = "{config}";
+/**
+ * A launch sends no config file, so `{config}` fills only from a `config` var: the template
+ * run's `--config` copy stays in that run's folder.
+ */
+export const CONFIG_ERROR = "{config} has no value (a --config file is not sent); write the file's path there";
 
 /** Characters an `#SBATCH` value may hold (the backend's `_SAFE_VALUE`, checked in `validate_defaults`). */
 export const SLURM_VALUE = /^[A-Za-z0-9_.:+@\/,-]*$/;
@@ -72,16 +83,21 @@ export function slurmValueError(field: "partition" | "account"): string {
 /**
  * Defaults from a template run (the best config's latest run): its command template, its
  * params and vars, and the next three seeds after every seed used by runs of the same config.
+ * `complete` is false when `runs` is not every run of the task (`AllRuns.complete`): an
+ * older run may hold any seed then, so none is proposed and `seedsNote` says why.
  */
-export function launchDefaults(template: RunRecord | null, runs: readonly RunRecord[]): LaunchDefaults {
+export function launchDefaults(
+  template: RunRecord | null,
+  runs: readonly RunRecord[],
+  complete = true,
+): LaunchDefaults {
   if (template === null) return { draft: { seeds: nextSeeds([]).join(", ") }, carry: NO_CARRY };
   const argv = template.command_template.length > 0 ? template.command_template : template.command;
+  const carry = { params: { ...template.params }, vars: { ...template.vars } };
+  if (!complete) return { draft: { command: shellJoin(argv), seeds: "" }, carry, seedsNote: SEED_HISTORY_CUT };
   const used = runs.filter((r) => r.config_hash === template.config_hash).map((r) => r.seed);
   used.push(template.seed);
-  return {
-    draft: { command: shellJoin(argv), seeds: nextSeeds(used).join(", ") },
-    carry: { params: { ...template.params }, vars: { ...template.vars } },
-  };
+  return { draft: { command: shellJoin(argv), seeds: nextSeeds(used).join(", ") }, carry };
 }
 
 export interface DraftCheck {
@@ -103,6 +119,7 @@ export interface DraftCheck {
 /**
  * Validate the form against the chosen host. `started` are the seeds this dialog launched
  * already: they are never sent again, so the GPU plan (and its blocker) counts only the rest.
+ * `vars` are the template vars sent with the launch (`Carry.vars`).
  */
 export function checkDraft(
   draft: LaunchDraft,
@@ -110,6 +127,7 @@ export function checkDraft(
   project: string,
   now: number = Date.now(),
   started: readonly number[] = [],
+  vars: Readonly<Record<string, string>> = {},
 ): DraftCheck {
   const blockers: string[] = [];
   const warnings: string[] = [];
@@ -122,7 +140,8 @@ export function checkDraft(
   const parsed = parseSeeds(draft.seeds);
   if (parsed.error !== null) blockers.push(`seeds: ${parsed.error}`);
   const split = splitCommand(draft.command);
-  const commandError = split.error ?? (split.argv.length === 0 ? "empty" : null);
+  const noConfig = !("config" in vars) && split.argv.some((a) => a.includes(CONFIG_SLOT));
+  const commandError = split.error ?? (split.argv.length === 0 ? "empty" : noConfig ? CONFIG_ERROR : null);
   if (commandError !== null) blockers.push(`command: ${commandError}`);
   if (!draft.hypothesis.trim()) blockers.push("hypothesis required");
   const slurm = host?.kind === "slurm";

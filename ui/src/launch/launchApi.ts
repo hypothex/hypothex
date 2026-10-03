@@ -7,7 +7,7 @@
  */
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { api } from "../api/client";
+import { ApiError, api } from "../api/client";
 import type {
   GpuInfo,
   HostLaunchRequest,
@@ -94,11 +94,30 @@ export function postLaunch(spec: LaunchSpec, seed: number, commandId: string): P
   return "repo" in body ? api.launch(body, opts) : api.launchOnHost(spec.host.name, body, opts);
 }
 
+/**
+ * True when a failed launch POST may still have started the run: no answer at all, a 5xx
+ * (the hub's forward to the host got no answer, or the host failed after it began), or an
+ * interrupted command (409 `CommandInterruptedError`). Only a 4xx, or the hub's 503
+ * `HostUnavailableError` (no connection, so nothing was forwarded), says nothing started.
+ */
+export function outcomeUnknown(error: Error): boolean {
+  if (!(error instanceof ApiError) || error.status === 0) return true;
+  if (error.type === "CommandInterruptedError") return true;
+  return error.status >= 500 && error.type !== "HostUnavailableError";
+}
+
+export interface LaunchFailure {
+  seed: number;
+  error: Error;
+  /** The server may have started this seed (`outcomeUnknown`): resend it only under its id. */
+  unknown: boolean;
+}
+
 export interface LaunchOutcome {
   /** Runs started (or already started under the same `command_id`), in seed order. */
   records: RunRecord[];
   /** The first seed the server refused or never answered; later seeds were not sent. */
-  failed: { seed: number; error: Error } | null;
+  failed: LaunchFailure | null;
 }
 
 export interface LaunchSeedsOptions {
@@ -127,7 +146,9 @@ export async function launchSeeds(
         break;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        if (!shouldRetry(attempt, error)) return { records, failed: { seed, error } };
+        if (!shouldRetry(attempt, error)) {
+          return { records, failed: { seed, error, unknown: outcomeUnknown(error) } };
+        }
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }

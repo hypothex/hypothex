@@ -76,6 +76,47 @@ def test_launch_on_a_host_sends_diff_slurm_and_gpus(
         assert (req.gpus, req.queue) == (2, True)
 
 
+def test_an_explicit_slurm_gpus_0_overrides_the_host_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[RunRequest] = []
+
+    def fake_launch(c: Context, req: RunRequest) -> RunRecord:
+        seen.append(req)
+        rid = f"fake{len(seen)}"
+        return c.create_run(make_record(rid, environment_id=c.descriptor.environment_id))
+
+    monkeypatch.setattr(control, "launch_run", fake_launch)
+    defaults = SlurmDefaults(partition="gpu", time="04:00:00", gpus=1)
+    with remote_hub(tmp_path, kind="slurm", slurm=defaults) as r:
+        base = {"repo": str(r.hub_repo), "command": ["true"], "hypothesis": "h"}
+        for extra in ({"gpus": 0, "slurm": {"gpus": 0}}, {"gpus": 0}):
+            resp = r.client.post("/api/v1/hosts/gpu1/runs", json={**base, **extra})
+            assert resp.status_code == 200, resp.text
+        assert [req.slurm.gpus if req.slurm else None for req in seen] == [0, 1]
+
+
+def test_slurm_gpus_alone_is_accepted_by_an_ssh_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `hx launch --host H --gpus N` cannot know H's kind, so it always sends slurm.gpus
+    seen: list[RunRequest] = []
+
+    def fake_launch(c: Context, req: RunRequest) -> RunRecord:
+        seen.append(req)
+        return c.create_run(make_record("fake1", environment_id=c.descriptor.environment_id))
+
+    monkeypatch.setattr(control, "launch_run", fake_launch)
+    with remote_hub(tmp_path) as r:
+        body = {"repo": str(r.hub_repo), "command": ["true"], "hypothesis": "h"}
+        resp = r.client.post(
+            "/api/v1/hosts/gpu1/runs", json={**body, "gpus": 2, "slurm": {"gpus": 2}}
+        )
+        assert resp.status_code == 200, resp.text
+        [req] = seen
+        assert (req.slurm, req.gpus) == (None, 2)
+
+
 def test_launch_on_a_host_errors_start_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -194,6 +194,45 @@ describe("TaskPage", () => {
     });
   });
 
+  test("New run reads past the first 1,000 runs: an older seed of the template's config is never proposed", async () => {
+    // the newest 1,000 runs belong to other configs; the template's seed 4 is older
+    const newest = Array.from({ length: 1000 }, (_, i) =>
+      makeRecord({ run_id: `20261001-000000-toy-test-n${i}`, seed: 1, config_hash: "sha256:other" }),
+    );
+    const older = makeRecord({ run_id: "20260901-000000-toy-test-old4", seed: 4 });
+    mockApi({
+      ...newRunRoutes(),
+      [RUNS_URL]: newest,
+      "GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=4000": [...newest, older],
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("5, 6, 7");
+  });
+
+  test("a leaderboard update while the dialog is open keeps the dialog and what was typed", async () => {
+    mockApi(newRunRoutes());
+    const { client } = renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: "svm holds on new seeds" } });
+    // a run event: the best config's latest run is now another run, whose read never ends
+    const board = makeBoard();
+    const [best] = board.rows;
+    if (best === undefined) throw new Error("fixture has no rows");
+    board.rows = [{ ...best, latest_run_id: "20261004-000000-toy-test-new1" }, ...board.rows.slice(1)];
+    client.setQueryData(["leaderboard", "toy-classifier", "toy-test", []], board);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const still = screen.getByRole("dialog", { name: "New run" });
+    expect((within(still).getByLabelText("Hypothesis") as HTMLInputElement).value).toBe("svm holds on new seeds");
+    expect((within(still).getByLabelText("Command") as HTMLTextAreaElement).value).toBe(
+      "python train_eval.py --model svm --seed={seed}",
+    );
+  });
+
   test("New run shows the runs read error instead of a dialog with possibly used seeds", async () => {
     mockApi({
       ...newRunRoutes(),

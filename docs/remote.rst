@@ -102,7 +102,8 @@ Launch on a host
   no other process on it. Queued runs start in order (first fit) with
   ``CUDA_VISIBLE_DEVICES`` set.
 - SLURM hosts submit with ``sbatch`` (``--gpus``, ``--time``, ``--partition``,
-  ``--account``; defaults from the host entry) and check ``squeue``/``sacct`` every
+  ``--account``; defaults from the host entry; ``--gpus 0`` asks for no GPU, while
+  leaving ``--gpus`` out keeps the host's count) and check ``squeue``/``sacct`` every
   30 s. ``hx stop`` runs ``scancel``. A job that disappears without an exit record is
   marked ``lost``. A rerun keeps the run's GPUs and SLURM settings. SLURM runs are
   always submitted: ``hx rerun --foreground`` is refused there. A run targets one host;

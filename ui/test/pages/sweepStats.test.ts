@@ -119,6 +119,20 @@ describe("ETA, GPU-hours and cost", () => {
     expect([fmtGpuHours(11.2), fmtGpuHours(6.2), fmtGpuHours(0)]).toEqual(["11", "6.2", "0.0"]);
   });
 
+  test("gpuHours: a live SLURM run whose node reported no GPU indices counts what it asked for", () => {
+    const b2 = run("b2");
+    const slurm = {
+      ...b2,
+      cost: null,
+      gpus_requested: 4,
+      executor: { ...b2.executor, gpus: [], slurm_job_id: "81234" },
+    };
+    // the backend bills it for gpus_requested (cost.billed_gpus): SLURM reserved that many
+    expect(gpuHours(slurm, NOW)).toBeCloseTo(4 * gpuHours({ ...b2, cost: null, executor: { ...b2.executor, gpus: [0] } }, NOW), 10);
+    // no SLURM job: no GPUs held, none counted
+    expect(gpuHours({ ...slurm, executor: { ...slurm.executor, slurm_job_id: null } }, NOW)).toBe(0);
+  });
+
   test("runUsd: final cost, else API spend so far, else nothing", () => {
     expect(runUsd(run("c2"))).toBe(0.42);
     expect(runUsd(run("a2"))).toBeNull();

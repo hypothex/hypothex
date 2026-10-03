@@ -9,7 +9,7 @@ export const LAUNCH_CSS = `
 .hx-launch .dlg-h h2 { margin: 0; font: 500 24px/1.1 var(--serif); letter-spacing: -.01em; }
 .hx-launch .dlg-h .x { margin-left: auto; border: 0; background: transparent; color: var(--ink-3); font-size: 20px; line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 4px; }
 .hx-launch .dlg-h .x:hover { color: var(--ink); background: var(--paper-2); }
-.hx-launch .dlg-b { padding: 8px 24px 4px; }
+.hx-launch .dlg-b { padding: 8px 24px 4px; margin: 0; border: 0; min-width: 0; }
 .hx-launch .fr { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 0 16px; align-items: baseline; padding: 14px 0; border-top: 1px solid var(--rule-2); }
 .hx-launch .fr:first-child { border-top: 0; }
 .hx-launch .fr > label, .hx-launch .fr > .lb { font-weight: 550; font-size: 14px; color: var(--ink); }

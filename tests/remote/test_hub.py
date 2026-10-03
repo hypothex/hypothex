@@ -363,6 +363,22 @@ def test_mirror_rejects_unsafe_names(
     assert hub.events.since(0) == []
 
 
+@pytest.mark.parametrize(("project", "run_id"), [(".claims", "r1"), ("toy", ".r1")])
+def test_mirror_rejects_a_leading_dot_name(
+    pair: tuple[Context, Context], project: str, run_id: str
+) -> None:
+    hub, remote = pair
+    remote.create_run(
+        make_record(run_id, project=project, environment_id=remote.descriptor.environment_id)
+    )
+    client: Any = FakeClient(remote)
+    mirror_event(hub, client, "gpu1", "env-remote", run_event(remote, run_id))
+    assert not hub.layout.project_dir(project).exists()
+    assert hub.index.run_ids() == set()
+    assert hub.events.since(0) == []
+    assert client.fetched == []
+
+
 def test_mirror_skips_run_deleted_on_host(pair: tuple[Context, Context]) -> None:
     hub, remote = pair
     event = Event(

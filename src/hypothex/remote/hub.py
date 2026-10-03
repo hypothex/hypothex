@@ -82,7 +82,8 @@ PING_INTERVAL_SECONDS = 10.0
 PING_TIMEOUT_SECONDS = 5.0
 REMOTE_FILE_KIND = "remote_file"
 MANIFEST_NAME = ".mirror.json"
-_SAFE_NAME = re.compile(r"[A-Za-z0-9_.-]{1,200}")
+# No leading dot: dot folders are skipped by the cross-project scan, and "." / ".." escape
+_SAFE_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,199}")
 _MESSAGE_LIMIT = 2000
 
 
@@ -216,7 +217,7 @@ def wanted_path(rel: str) -> bool:
 
 
 def _safe_name(name: str | None) -> bool:
-    return name is not None and name not in (".", "..") and _SAFE_NAME.fullmatch(name) is not None
+    return name is not None and _SAFE_NAME.fullmatch(name) is not None
 
 
 def _read_manifest(run_dir: Path) -> dict[str, list[int]]:

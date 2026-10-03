@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -323,6 +324,80 @@ def test_view_list_and_show_with_a_non_utf8_file(
     assert exc.value.code == 1
     err = json.loads(capsys.readouterr().out)
     assert err["type"] == "ConfigError" and "cannot read view file" in err["error"]
+
+
+@pytest.mark.parametrize("command", ["add", "validate"])
+def test_view_add_and_validate_with_a_non_utf8_file(
+    in_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    _run()
+    path = in_repo / "latin.yaml"
+    path.write_bytes("title: café\npanels: []\n".encode("latin-1"))
+    target = ["--file", str(path)] if command == "add" else [str(path)]
+    monkeypatch.setattr(sys, "argv", ["hx", "view", command, "toy-acc", *target, "--json"])
+    with pytest.raises(SystemExit) as exc:
+        cli()
+    assert exc.value.code == 1
+    err = json.loads(capsys.readouterr().out)
+    assert err["type"] == "ConfigError" and "cannot read view file" in err["error"]
+    assert not (in_repo / ".hypothex" / "views" / "toy-acc" / "latin.yaml").exists()
+
+
+class _FakeUvicorn:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def run(self, application: object, **kwargs: object) -> None:
+        self.calls.append({"app": application, **kwargs})
+
+
+@pytest.fixture
+def fake_uvicorn(monkeypatch: pytest.MonkeyPatch) -> _FakeUvicorn:
+    import uvicorn
+
+    fake = _FakeUvicorn()
+    monkeypatch.setattr(uvicorn, "run", fake.run)
+    monkeypatch.delenv("HYPOTHEX_SERVE_TOKEN", raising=False)
+    return fake
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.5", "myhost.example"])
+def test_serve_refuses_a_non_loopback_host_without_a_token(
+    home: Path, fake_uvicorn: _FakeUvicorn, host: str
+) -> None:
+    with pytest.raises(ConfigError) as exc:
+        runner.invoke(app, ["serve", "--host", host], catch_exceptions=False)
+    message = str(exc.value)
+    assert host in message and "HYPOTHEX_SERVE_TOKEN" in message
+    assert "arbitrary commands" in message and "ssh -L" in message
+    assert fake_uvicorn.calls == []
+
+
+def test_serve_on_loopback_needs_no_token(home: Path, fake_uvicorn: _FakeUvicorn) -> None:
+    result = runner.invoke(app, ["serve"], catch_exceptions=False)
+    assert result.exit_code == 0
+    [call] = fake_uvicorn.calls
+    assert call["host"] == "127.0.0.1" and call["port"] == 7777
+
+
+def test_serve_with_a_token_binds_anywhere_and_enforces_it(
+    home: Path, fake_uvicorn: _FakeUvicorn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HYPOTHEX_SERVE_TOKEN", "s3cret")
+    result = runner.invoke(app, ["serve", "--host", "0.0.0.0"], catch_exceptions=False)
+    assert result.exit_code == 0
+    assert "HYPOTHEX_SERVE_TOKEN" not in os.environ  # runs never inherit it
+    [call] = fake_uvicorn.calls
+    assert call["host"] == "0.0.0.0"
+    with TestClient(call["app"], base_url="http://127.0.0.1:7777") as c:  # type: ignore[arg-type]
+        assert c.get("/api/v1/runs").status_code == 401
+        good = {"Authorization": "Bearer s3cret"}
+        assert c.get("/api/v1/runs", headers=good).json() == []
 
 
 def test_show_says_untracked_files_only(in_repo: Path) -> None:

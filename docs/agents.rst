@@ -47,3 +47,7 @@ Start the HTTP/WebSocket server, then connect an MCP client to
 
 With ``hx serve`` running, the OpenAPI docs are at
 ``http://127.0.0.1:7777/api/docs``.
+
+The MCP tools and the HTTP API apply the same rule as the CLI: a launch whose
+``created_by`` is ``agent:<name>`` (``POST /api/v1/runs``; every MCP
+``launch_run``) is rejected without a hypothesis.

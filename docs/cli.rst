@@ -213,6 +213,15 @@ Serve the HTTP/WebSocket API on ``127.0.0.1:7777``, and the UI at
 ``http://127.0.0.1:7777/`` when the package contains a UI build
 (``src/hypothex/ui_dist``; ``cd ui && bun run build`` makes one).
 
+``--host`` other than a loopback address (``127.0.0.1``, ``::1``, ``localhost``)
+is refused unless ``HYPOTHEX_SERVE_TOKEN`` is set, because the API starts
+arbitrary commands. With the token set, every request except the environment
+descriptor needs ``Authorization: Bearer <token>``:
+
+.. code-block:: bash
+
+   HYPOTHEX_SERVE_TOKEN=$(openssl rand -hex 24) hx serve --host 0.0.0.0
+
 .. code-block:: bash
 
    hx mcp

@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import time
 from collections.abc import Iterator
@@ -6,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from mcp import Client
 from starlette.websockets import WebSocketDisconnect
 
 from hypothex.api.app import create_app
@@ -510,3 +512,94 @@ def test_no_ui_build_means_api_only(home: Path, tmp_path: Path) -> None:
     with TestClient(app, base_url="http://127.0.0.1:7777") as c:
         assert c.get("/").status_code == 404
         assert c.get("/api/v1/runs").json() == []
+
+
+@pytest.mark.parametrize("hypothesis", ["", "   "])
+def test_api_refuses_an_agent_launch_without_a_hypothesis(
+    client: TestClient, ctx: Context, toy_repo: Path, hypothesis: str
+) -> None:
+    # the rule reads the request's created_by, not the server process's HYPOTHEX_AGENT
+    body = {
+        "repo": str(toy_repo),
+        "command": [sys.executable, "-c", "print('agent')"],
+        "hypothesis": hypothesis,
+        "created_by": "agent:claude",
+    }
+    resp = client.post("/api/v1/runs", json=body)
+    assert resp.status_code == 400
+    assert resp.json()["type"] == "RunError" and "hypothesis" in resp.json()["error"]
+    assert ctx.index.list_runs() == []
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        {"type": "subscribe", "after_sequence": "abc"},
+        {"type": "subscribe", "after_sequence": None},
+        {"type": "subscribe", "after_sequence": -1},
+        ["subscribe"],
+        "not json",
+    ],
+)
+def test_ws_answers_a_malformed_subscribe_with_an_error_frame(
+    client: TestClient, first: object
+) -> None:
+    with client.websocket_connect(WS_URL) as ws:
+        if isinstance(first, str):
+            ws.send_text(first)
+        else:
+            ws.send_json(first)
+        reply = ws.receive_json()
+        assert reply["type"] == "error" and "subscribe" in reply["error"]
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+
+
+def test_api_errors_keep_the_error_and_type_shape(client: TestClient) -> None:
+    missing = client.get("/api/v1/nope")
+    assert missing.status_code == 404
+    assert missing.json()["error"] == "Not Found" and missing.json()["type"] == "HTTPError"
+    invalid = client.post("/api/v1/runs", json={"command": ["x"]})
+    assert invalid.status_code == 422
+    body = invalid.json()
+    assert body["type"] == "RequestValidationError"
+    assert "repo" in body["error"] and "Field required" in body["error"]
+    assert body["detail"][0]["loc"] == ["body", "repo"]  # kept for older clients
+    wrong_method = client.put("/api/v1/runs")
+    assert wrong_method.status_code == 405 and wrong_method.json()["type"] == "HTTPError"
+
+
+def test_leaderboard_metric_pin_needs_a_version(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    _scored(ctx, toy_repo)
+    url = "/api/v1/tasks/toy/toy-acc/leaderboard"
+    bad = client.get(url, params={"metric": "accuracy"})
+    assert bad.status_code == 400 and bad.json()["type"] == "RunError"
+    assert "name@version" in bad.json()["error"]
+    version = client.get(url).json()["metric_versions"]["accuracy"]
+    ok = client.get(url, params={"metric": f"accuracy@{version}"})
+    assert ok.status_code == 200 and ok.json()["metric_versions"]["accuracy"] == version
+
+
+def test_http_and_mcp_share_one_context(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # one server, one Context: a kind override reaches the MCP tools too
+    opened: list[Context] = []
+    real_open = Context.open
+
+    def counting_open(*args: object, **kwargs: object) -> Context:
+        c = real_open(*args, **kwargs)  # type: ignore[arg-type]
+        opened.append(c)
+        return c
+
+    monkeypatch.setattr(Context, "open", staticmethod(counting_open))
+    app = create_app(home, background_repair=False, kind="ssh")
+    assert app.state.ctx.descriptor.kind == "ssh"
+
+    async def go() -> None:
+        async with Client(app.state.mcp) as mcp_client:
+            result = await mcp_client.call_tool("list_runs", {})
+            assert not result.is_error
+
+    asyncio.run(go())
+    assert opened == [app.state.ctx]

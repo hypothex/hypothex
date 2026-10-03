@@ -14,23 +14,29 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 from starlette.types import Scope
 
 from hypothex._version import __version__
-from hypothex.api.security import OriginGuard, allowed_hosts
+from hypothex.api.security import OriginGuard, TokenGuard, allowed_hosts
 from hypothex.core import control
 from hypothex.core import queries as q
+from hypothex.core.config import parse_metric_version
 from hypothex.core.context import Context
-from hypothex.core.errors import HypothexError, StoreError
+from hypothex.core.errors import HypothexError, RunError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
 from hypothex.core.gpus import GpuInfo, gpu_status, query_gpus
@@ -49,6 +55,7 @@ from hypothex.mcp.server import (
     put_view,
     query_task_view,
     remove_view,
+    require_agent_hypothesis,
     validate_view,
     view_document,
 )
@@ -124,6 +131,13 @@ class LaunchBody(ActionBody):
     tags: list[str] = Field(default_factory=list)
     params: dict[str, str] = Field(default_factory=dict)
     vars: dict[str, str] = Field(default_factory=dict)
+
+
+class SubscribeMessage(BaseModel):
+    """The first WebSocket message: ``{type: subscribe, after_sequence: N}``."""
+
+    type: Literal["subscribe"]
+    after_sequence: int = Field(default=0, ge=0)
 
 
 class ReinferBody(ActionBody):
@@ -553,14 +567,19 @@ def create_app(
     host: str | None = None,
     ui_dir: Path | None = None,
     kind: str | None = None,
+    auth_token: str | None = None,
 ) -> FastAPI:
     """
     Build the FastAPI application.
 
-    Only local requests are served: the ``Host`` header must name a loopback
-    address (or ``host``), else the answer is ``400``; a state-changing request
-    or WebSocket handshake with a foreign ``Origin`` is rejected with ``403``.
-    This blocks DNS-rebinding and cross-site attacks from a browser page.
+    The ``Host`` header must name a loopback address (or ``host``), else the
+    answer is ``400``; a state-changing request or WebSocket handshake with a
+    foreign ``Origin`` is rejected with ``403``. This blocks DNS-rebinding and
+    cross-site attacks from a browser page, but it is not authentication: any
+    other client can send ``Host: localhost``. ``auth_token`` adds that.
+
+    Errors under ``/api/`` are JSON ``{error, type}``: domain errors, ``404``,
+    ``405``, and ``422`` (which keeps FastAPI's ``detail`` list too).
 
     When ``ui_dir`` holds ``index.html`` the UI is served at ``/``; unknown
     non-API paths return ``index.html`` so browser routes survive a reload.
@@ -582,6 +601,10 @@ def create_app(
     kind : str, optional
         Environment kind this server reports: ``local``, ``ssh``, or ``slurm``
         (``hx serve --kind``). Default: the kind saved in ``environment.json``.
+    auth_token : str, optional
+        Require ``Authorization: Bearer <auth_token>`` on every route except the
+        descriptor (``hx serve`` sets it from ``HYPOTHEX_SERVE_TOKEN``; see
+        ``TokenGuard``).
 
     Returns
     -------
@@ -600,7 +623,7 @@ def create_app(
         ctx.descriptor.kind = kind
     if ctx.descriptor.kind == "slurm":
         require_flock(ctx.layout.home)  # every run-state write takes the run lock
-    mcp_server = build_server(home)
+    mcp_server = build_server(context=ctx)  # one Context (and descriptor) for HTTP and MCP
     mcp_http = mcp_server.streamable_http_app(streamable_http_path="/")
 
     @asynccontextmanager
@@ -649,9 +672,12 @@ def create_app(
         openapi_url="/api/openapi.json",
     )
     app.state.ctx = ctx
+    app.state.mcp = mcp_server
     hosts = allowed_hosts(host)
     app.add_middleware(OriginGuard, hosts=hosts)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
+    if auth_token:
+        app.add_middleware(TokenGuard, token=auth_token)  # outermost: checked first
 
     @app.exception_handler(HypothexError)
     async def hypothex_error(_: Request, exc: HypothexError) -> JSONResponse:
@@ -660,6 +686,33 @@ def create_app(
         if isinstance(exc, ViewValidationError):
             content["issues"] = to_jsonable(exc.issues)
         return JSONResponse(status_code=status, content=content)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        if not request.url.path.startswith("/api/"):
+            return await http_exception_handler(request, exc)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": str(exc.detail), "type": "HTTPError"},
+            headers=exc.headers,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> Response:
+        if not request.url.path.startswith("/api/"):
+            return await request_validation_exception_handler(request, exc)
+        problems = exc.errors()
+        first = problems[0] if problems else {}
+        where = ".".join(str(part) for part in first.get("loc", ()))
+        message = str(first.get("msg", "invalid request"))
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": f"{where}: {message}" if where else message,
+                "type": "RequestValidationError",
+                "detail": to_jsonable(problems),
+            },
+        )
 
     def once(body: ActionBody, fn: Callable[[], Any]) -> dict[str, Any]:
         return ctx.events.run_once(body.command_id, lambda: to_jsonable(fn()))
@@ -703,9 +756,10 @@ def create_app(
     ) -> dict[str, Any]:
         versions = {}
         for item in metric or []:
-            name, _, version = item.partition("@")
-            if version:
-                versions[name] = version
+            name, version = parse_metric_version(item)
+            if version is None:
+                raise RunError(f"metric needs name@version, got {item!r}")
+            versions[name] = version
         return to_jsonable(q.get_leaderboard(ctx, task, project, versions or None))
 
     @app.post("/api/v1/tasks/{project}/{task}/reeval")
@@ -771,6 +825,7 @@ def create_app(
 
     @app.post("/api/v1/runs")
     def launch(body: LaunchBody) -> dict[str, Any]:
+        require_agent_hypothesis(body.created_by, body.hypothesis)
         req = RunRequest(
             repo=Path(body.repo),
             command=body.command,
@@ -896,17 +951,24 @@ def create_app(
     async def events_ws(ws: WebSocket) -> None:
         await ws.accept()
         try:
-            msg = await ws.receive_json()
-            if msg.get("type") != "subscribe":
+            first = await ws.receive()
+            if first["type"] == "websocket.disconnect":
+                return
+            try:
+                sub = SubscribeMessage.model_validate_json(
+                    first.get("text") or first.get("bytes") or ""
+                )
+            except ValidationError:
                 await ws.send_json(
                     {
                         "type": "error",
-                        "error": "first message must be {type: subscribe, after_sequence: N}",
+                        "error": "first message must be {type: subscribe, after_sequence: N}"
+                        " with N an integer >= 0",
                     }
                 )
                 await ws.close()
                 return
-            last = int(msg.get("after_sequence", 0))
+            last = sub.after_sequence
             ready = False
             while True:
                 batch = await asyncio.to_thread(ctx.events.since, last, WS_BATCH)

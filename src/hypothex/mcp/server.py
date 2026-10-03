@@ -17,7 +17,7 @@ from hypothex.core import queries as q
 from hypothex.core import views as core_views
 from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
-from hypothex.core.errors import ConfigError, HypothexError, StoreError
+from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
 from hypothex.core.jsonutil import to_jsonable
@@ -333,6 +333,35 @@ def query_task_view(
     return {"panels": to_jsonable(results)}
 
 
+def require_agent_hypothesis(created_by: str, hypothesis: str) -> None:
+    """
+    Refuse an agent launch without a hypothesis (spec: agents must say why).
+
+    The HTTP API and the MCP tools call this with the request's own
+    ``created_by``; the CLI is covered by ``prepare_run``, which checks
+    ``HYPOTHEX_AGENT`` in the launching process.
+
+    Parameters
+    ----------
+    created_by : str
+        Who starts the run; ``agent:<name>`` marks an agent.
+    hypothesis : str
+        Why the run exists.
+
+    Raises
+    ------
+    RunError
+        ``created_by`` names an agent and ``hypothesis`` is blank.
+
+    Examples
+    --------
+    >>> require_agent_hypothesis("human", "")
+    >>> require_agent_hypothesis("agent:claude", "bigger lr helps")
+    """
+    if created_by.startswith("agent:") and not hypothesis.strip():
+        raise RunError("agents must give a hypothesis: why does this run exist?")
+
+
 def _expose_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
     """
     Let expected errors reach the calling agent as readable text.
@@ -364,14 +393,18 @@ def _expose_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-def build_server(home: Path | None = None) -> MCPServer:
+def build_server(home: Path | None = None, *, context: Context | None = None) -> MCPServer:
     """
     Build the Hypothex MCP server.
 
     Parameters
     ----------
     home : Path, optional
-        Hypothex home directory.
+        Hypothex home directory; opened on the first tool call. Ignored when
+        ``context`` is given.
+    context : Context, optional
+        An open context to use instead, so a server that also serves HTTP
+        (``create_app``) answers both from one context and one descriptor.
 
     Returns
     -------
@@ -379,7 +412,7 @@ def build_server(home: Path | None = None) -> MCPServer:
         Run with ``.run()`` for stdio, or mount ``.streamable_http_app()``.
     """
     mcp = MCPServer("hypothex", instructions=INSTRUCTIONS)
-    holder: dict[str, Context] = {}
+    holder: dict[str, Context] = {} if context is None else {"ctx": context}
 
     def ctx() -> Context:
         if "ctx" not in holder:
@@ -468,8 +501,8 @@ def build_server(home: Path | None = None) -> MCPServer:
         {run_dir}, {dataset.path}, ...) or a stage name from hypothex.yaml. A
         hypothesis is required.
         """
-        if not hypothesis.strip():
-            raise ValueError("a hypothesis is required: why does this run exist?")
+        created_by = f"agent:{agent}"
+        require_agent_hypothesis(created_by, hypothesis)
         record = control.launch_run(
             ctx(),
             RunRequest(
@@ -482,7 +515,7 @@ def build_server(home: Path | None = None) -> MCPServer:
                 tags=tags or [],
                 params=params or {},
                 vars=template_vars or {},
-                created_by=f"agent:{agent}",
+                created_by=created_by,
             ),
         )
         return {"run": dump(record), "run_dir": str(ctx().run_dir(record))}

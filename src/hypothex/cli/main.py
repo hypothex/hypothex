@@ -762,6 +762,31 @@ def view_init(
     _emit(out, as_json, f"wrote {out['info']['path']}")
 
 
+def _read_view_file(file: Path) -> str:
+    """
+    Read a view YAML file as UTF-8.
+
+    Parameters
+    ----------
+    file : Path
+        The view file.
+
+    Returns
+    -------
+    str
+        The file's text.
+
+    Raises
+    ------
+    ConfigError
+        The file cannot be read or is not UTF-8 (``hx view show`` says the same).
+    """
+    try:
+        return file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"{file}: cannot read view file: {exc}") from exc
+
+
 @view_app.command("add")
 def view_add(
     task: str,
@@ -775,7 +800,7 @@ def view_add(
     """Validate a view file and save it under .hypothex/views/<task>/."""
     from hypothex.mcp.server import put_view
 
-    out = put_view(_ctx(), task, name or file.stem, file.read_text(encoding="utf-8"), project)
+    out = put_view(_ctx(), task, name or file.stem, _read_view_file(file), project)
     _emit(out, as_json, f"wrote {out['info']['path']}")
 
 
@@ -789,7 +814,7 @@ def view_validate(
     """Check a view file against the task's metrics and fields; save nothing."""
     from hypothex.mcp.server import validate_view
 
-    report = validate_view(_ctx(), task, file.read_text(encoding="utf-8"), project)
+    report = validate_view(_ctx(), task, _read_view_file(file), project)
     if as_json:
         _print_json(report)
     else:
@@ -917,6 +942,49 @@ def resolve_serve_kind(home: Path, kind: str | None) -> str:
     return kind
 
 
+def serve_token(host: str) -> str | None:
+    """
+    Take the bearer token ``hx serve`` requires, and refuse an open network bind.
+
+    The token comes from ``HYPOTHEX_SERVE_TOKEN`` and is removed from the
+    environment at once, so runs started by this server never inherit it.
+
+    Parameters
+    ----------
+    host : str
+        The ``--host`` to bind.
+
+    Returns
+    -------
+    str or None
+        The token, or None when none is set (loopback binds only).
+
+    Raises
+    ------
+    ConfigError
+        ``host`` is not a loopback address and no token is set: the API starts
+        arbitrary commands, and the ``Host``/``Origin`` checks are no defence
+        against a client on the network.
+
+    Examples
+    --------
+    >>> serve_token("127.0.0.1") is None
+    True
+    """
+    from hypothex.api.security import is_loopback_bind
+
+    token = os.environ.pop("HYPOTHEX_SERVE_TOKEN", None) or None
+    if token is None and not is_loopback_bind(host):
+        raise ConfigError(
+            f"refusing to serve on {host!r} without authentication: anyone who can reach "
+            "this address could start arbitrary commands and read run files through the "
+            "API. Set HYPOTHEX_SERVE_TOKEN to require 'Authorization: Bearer <token>', or "
+            "keep --host 127.0.0.1 and reach it through an SSH tunnel "
+            "(ssh -L 7777:127.0.0.1:7777 HOST)"
+        )
+    return token
+
+
 @app.command()
 def serve(
     host: Annotated[str, typer.Option(help="Bind address.")] = "127.0.0.1",
@@ -929,14 +997,22 @@ def serve(
         ),
     ] = None,
 ) -> None:
-    """Serve the HTTP/WebSocket API (and the UI when built)."""
+    """
+    Serve the HTTP/WebSocket API (and the UI when built).
+
+    With ``HYPOTHEX_SERVE_TOKEN`` set, every request except the environment
+    descriptor needs ``Authorization: Bearer <token>``. A non-loopback --host is
+    refused without a token.
+    """
     import uvicorn
 
     from hypothex.api.app import create_app
 
+    token = serve_token(host)
     home = (_state.home or default_home()).expanduser().resolve()
     resolved = resolve_serve_kind(home, kind)
-    uvicorn.run(create_app(home, host=host, kind=resolved), host=host, port=port)
+    application = create_app(home, host=host, kind=resolved, auth_token=token)
+    uvicorn.run(application, host=host, port=port)
 
 
 @app.command()

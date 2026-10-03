@@ -1,6 +1,14 @@
-import pytest
+from collections.abc import Iterator
+from pathlib import Path
 
-from hypothex.api.security import allowed_hosts, origin_allowed
+import pytest
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+from hypothex.api.app import create_app
+from hypothex.api.security import allowed_hosts, is_loopback_bind, origin_allowed
+
+TOKEN = "a1" * 24
 
 
 @pytest.mark.parametrize(
@@ -34,3 +42,57 @@ def test_allowed_hosts(bind: str | None, expected: list[str]) -> None:
 )
 def test_origin_allowed(origin: str, ok: bool) -> None:
     assert origin_allowed(origin, allowed_hosts()) is ok
+
+
+@pytest.mark.parametrize(
+    ("bind", "loopback"),
+    [
+        ("127.0.0.1", True),
+        ("127.0.0.2", True),
+        ("localhost", True),
+        ("::1", True),
+        ("[::1]", True),
+        (" 127.0.0.1 ", True),
+        ("0.0.0.0", False),
+        ("::", False),
+        ("", False),
+        ("10.0.0.5", False),
+        ("fe80::1", False),
+        ("myhost.example", False),
+    ],
+)
+def test_is_loopback_bind(bind: str, loopback: bool) -> None:
+    assert is_loopback_bind(bind) is loopback
+
+
+@pytest.fixture
+def guarded(home: Path) -> Iterator[TestClient]:
+    app = create_app(home, background_repair=False, auth_token=TOKEN)
+    with TestClient(app, base_url="http://127.0.0.1:7777") as c:
+        yield c
+
+
+def test_token_guard_refuses_requests_without_the_token(guarded: TestClient) -> None:
+    missing = guarded.get("/api/v1/runs")
+    assert missing.status_code == 401 and missing.json()["type"] == "AuthError"
+    wrong = guarded.post("/api/v1/runs", json={}, headers={"Authorization": "Bearer nope"})
+    assert wrong.status_code == 401
+    assert guarded.get("/mcp/").status_code == 401
+    good = {"Authorization": f"Bearer {TOKEN}"}
+    assert guarded.get("/api/v1/runs", headers=good).json() == []
+
+
+def test_token_guard_leaves_the_descriptor_open(guarded: TestClient) -> None:
+    body = guarded.get("/.well-known/hypothex/environment").json()
+    assert body["protocol_version"] == 1
+
+
+def test_token_guard_closes_a_websocket_without_the_token(guarded: TestClient) -> None:
+    url = "ws://127.0.0.1:7777/api/v1/ws"
+    with pytest.raises(WebSocketDisconnect) as exc, guarded.websocket_connect(url) as ws:
+        ws.receive_json()
+    assert exc.value.code == 1008
+    good = {"Authorization": f"Bearer {TOKEN}"}
+    with guarded.websocket_connect(url, headers=good) as ws:
+        ws.send_json({"type": "subscribe", "after_sequence": 0})
+        assert ws.receive_json()["type"] == "ready"

@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 from mcp import Client
 from starlette.websockets import WebSocketDisconnect
 
+import hypothex.api.app as app_mod
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
 from hypothex.core.evaluation import evaluate_run
@@ -603,3 +605,24 @@ def test_http_and_mcp_share_one_context(home: Path, monkeypatch: pytest.MonkeyPa
 
     asyncio.run(go())
     assert opened == [app.state.ctx]
+
+
+def test_shutdown_stops_background_threads_when_the_hub_stop_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stopped = threading.Event()
+
+    def fake_scheduler(_ctx: Context, stop: threading.Event, interval: float) -> None:
+        stop.wait(30)
+        stopped.set()
+
+    async def failing_stop(self: app_mod.HubManager) -> None:
+        raise RuntimeError("hub stop failed")
+
+    monkeypatch.setattr(app_mod, "run_scheduler_loop", fake_scheduler)
+    monkeypatch.setattr(app_mod.HubManager, "stop", failing_stop)
+    app = create_app(tmp_path / "home", background_repair=True, hub=False)
+    with pytest.raises(ExceptionGroup) as info, TestClient(app):
+        pass
+    assert info.group_contains(RuntimeError, match="hub stop failed")
+    assert stopped.wait(5)

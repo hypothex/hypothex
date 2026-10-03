@@ -213,4 +213,8 @@ MCP tools
 
 ``list_hosts``, ``launch_run`` (with ``host``, ``gpus``, ``queue``), ``launch_sweep``,
 ``get_sweep``, ``cancel_sweep``, ``extend_sweep``, and ``pull_artifact``. The tools
-that need live hosts call the hub at ``HYPOTHEX_HUB_URL``.
+that need live hosts call the hub at ``HYPOTHEX_HUB_URL``. With ``host``,
+``launch_run`` and ``launch_sweep`` send the commit and uncommitted diff of the
+client's checkout (``launch_run``'s ``repo``; for ``launch_sweep``, ``repo`` or the
+project's registered checkout), so the host runs the client's code, as
+``hx launch --host`` and ``hx sweep --host`` do.

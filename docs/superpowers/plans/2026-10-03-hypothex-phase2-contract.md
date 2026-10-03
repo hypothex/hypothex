@@ -144,7 +144,7 @@ Hub (and env servers where marked *env*):
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
 | GET | `/api/v1/hosts` | | `list[{name, kind: "local" \| HostKind, state: HostState, gpus: list[GpuInfo], queue: int, slurm: {pending, running, comment_accounting: bool\|null}\|null, cost_today_usd: float, usd_per_gpu_hour: float\|null, projects: list[str], stale_banner_hours: float}]` (first row: the hub, `name` and `kind` `"local"`; `stale_banner_hours` is the same on every row; `comment_accounting` false: the cluster's accounting keeps no job comments, so an unknown submission can never be settled; null: not known, the host is not connected) |
-| POST | `/api/v1/hosts/reload` | `{command_id?}` | the host rows after re-reading `environments.yaml` (`hx hosts add\|map\|rm` call it) |
+| POST | `/api/v1/hosts/reload` | `{command_id?}` | the host rows after re-reading `environments.yaml` (`hx hosts map\|rm` call it; `hx hosts add\|upgrade` call `/api/v1/hosts/{host}/connect`, which also re-reads `environments.yaml` and starts the new host) |
 | POST | `/api/v1/hosts/{host}/connect` / `/disconnect` | `{command_id?}` | `HostState` |
 | POST | `/api/v1/hosts/{host}/runs` | launch body + `{gpus, queue, slurm?: SlurmDefaults, project?, commit?, diff?}`; the project by name (a `repo` path is used only when it is a folder on the hub); without `commit` the hub pins its own checkout's HEAD (and sends its uncommitted diff); with `commit` the body's `diff` (none for a clean run) | run record (forwarded) |
 | GET | `/api/v1/runs` | phase 1 filters + `environment_id?`; `limit` is never capped below the request | `list[RunRecord]` |

@@ -131,6 +131,19 @@ export function runState(
   return status;
 }
 
+/**
+ * A duration in seconds: `42s`, `4m`, `1h 30m`. Negative durations are 0.
+ *
+ * The run page's wait times use it (`fmtWait`). The stale age in `stateText` uses
+ * `fmtAgeMs` instead, so it reads the same as the host row.
+ */
+export function fmtAge(seconds: number): string {
+  const s = Math.max(0, seconds);
+  if (s < 60) return `${Math.floor(s)}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+
 /** The runs table's state text (stale age as the host row prints it): `stale 4m`, `queued, pos 2`, `queued, job 48211`, `running, c0412`, `failed, exit 1`. */
 export function stateText(
   record: RunRecord,

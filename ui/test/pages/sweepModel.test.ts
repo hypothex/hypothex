@@ -4,6 +4,7 @@ import {
   type SweepCellRow,
   cellLabel,
   cellTip,
+  fmtAge,
   gridLabel,
   heatAxes,
   heatLevel,
@@ -137,6 +138,16 @@ describe("run state", () => {
     expect(stateText(r, "stale", since(5_400_000), NOW)).toBe("stale 1h");
     expect(stateText(r, "stale", since(172_800_000), NOW)).toBe("stale 2d");
     expect(stateText(r, "stale", since(-5_000), NOW)).toBe("stale 0s");
+  });
+
+  test("fmtAge prints a duration in seconds as seconds, minutes, or hours and minutes", () => {
+    expect([fmtAge(42), fmtAge(240), fmtAge(5400), fmtAge(6720), fmtAge(-5)]).toEqual([
+      "42s",
+      "4m",
+      "1h 30m",
+      "1h 52m",
+      "0s",
+    ]);
   });
 });
 

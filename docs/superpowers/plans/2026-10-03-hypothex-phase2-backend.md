@@ -1807,7 +1807,7 @@ This part builds `hypothex.remote.ssh` (`SshError`, `SshTarget`, `run_remote`, `
 - `SshError(HypothexError)`, `SSH_FAILURE_CODE = 255`.
 - `SshTarget(BaseModel)`: `alias: str`, `ssh_bin: str` (default `$HYPOTHEX_SSH` or `"ssh"`), `scp_bin: str` (default `$HYPOTHEX_SCP` or `"scp"`), `connect_timeout: int = 10` (`>= 1`). An alias that is empty, starts with `-`, or has whitespace raises `pydantic.ValidationError` ("invalid ssh alias").
 - `run_remote(target, script, *, timeout=120, input_bytes=None) -> subprocess.CompletedProcess[bytes]`. Without `input_bytes`: `ssh <opts> alias sh -s`, script on stdin. With `input_bytes`: `ssh <opts> alias sh -c '<quoted script>'`, bytes on stdin. A non-zero script exit is returned. Raises `SshError` when `ssh` is missing, on timeout (the whole process group is killed), and on exit 255 (connect/auth failure; the message includes ssh's stderr).
-- `copy_to(target, local, remote_path, *, timeout=300) -> None`: `scp <opts> -s -q -r <local> alias:<remote_path>` (`-s` forces SFTP; the path must match `REMOTE_COPY_PATH`, Task 6); the remote parent directory must exist. `copy_from(target, remote_path, local, *, timeout=600) -> None`: copies into a hidden `.<name>.part` sibling, then renames it over `local`; on failure nothing is left behind.
+- `copy_to(target, local, remote_path, *, timeout=300) -> None`: `scp <opts> -s -q -r <local> alias:<remote_path>` (`-s` forces SFTP; the path must match `REMOTE_COPY_PATH`, Task 6); the remote parent directory must exist. `copy_from(target, remote_path, local, *, work, timeout=600) -> None`: copies into a staging folder under `work` (the hub's `<hub home>/pulls`, on the same filesystem as `local`), then renames it over `local`; on failure nothing is left behind, and the destination folder never holds Hypothex state (Task 6).
 - `Tunnel(target, remote_port, local_port=None)`: `local_port` (a free port when omitted), `argv()`, `start()` (blocking until the local port accepts connections; async callers use `asyncio.to_thread`; a restart after a drop reuses the same `local_port`), `alive()`, `stop()` (idempotent), `stderr_tail()`, context manager.
 - Harness: `tests.fakes.FakeRemote` (`root`, `log_path`, `ssh_bin`, `scp_bin`, `add_host(alias)`, `home(alias)`, `set_down(alias, down)`, `calls(prog=None)`, `target(alias, connect_timeout=10)`), `install_fake_remote(base, monkeypatch)`, `refuse_remote(base, monkeypatch)`, `DEAD_HUB`; fixtures `fake_remote` and autouse `isolate_remote` in `tests/conftest.py`.
 - Fake host semantics: `$HOME` = `<root>/<alias>`; commands run with `/bin/sh -c` in that home; `PATH` = `<home>/.local/bin:` + the test's `PATH`, or exactly `$HYPOTHEX_FAKE_REMOTE_PATH` when set (Part 3 uses it for a bare host); `HYPOTHEX_HOME`, `HYPOTHEX_SSH`, `HYPOTHEX_SCP`, `HYPOTHEX_AGENT` are removed, so a remote `hx` uses `<home>/.hypothex`. An unknown alias exits 255 "Could not resolve hostname"; `<home>/.fake_down` makes the host refuse connections (exit 255) and drops live tunnels within 0.2 s. `-o BatchMode=yes` is required.
@@ -2623,7 +2623,8 @@ git commit -m "feat(remote): ssh transport run_remote and fake ssh test harness"
 
 **Interfaces:**
 - Consumes: `SshTarget`, `SshError`, `_base_options`, `_run`, `_tail` from Task 5 (same module); `fake_remote` fixture (`add_host`, `home`, `calls`, `target`).
-- Produces: `copy_to(target, local, remote_path, *, timeout=300) -> None`, `copy_from(target, remote_path, local, *, timeout=600) -> None`; `tests/fakes/fake_scp.py`; `REMOTE_COPY_PATH` (the shell-safe pattern every remote copy path must match).
+- Produces: `copy_to(target, local, remote_path, *, timeout=300) -> None`, `copy_from(target, remote_path, local, *, work, timeout=600) -> None`; `tests/fakes/fake_scp.py`; `REMOTE_COPY_PATH` (the shell-safe pattern every remote copy path must match); `PULL_RESERVED_PREFIX = ".hx-"` (a destination whose name starts with it is refused).
+- Hypothex's own pull state lives only in `work` (the hub passes `<hub home>/pulls`, Task 46), never next to the destination: `work/stage/` (one staging folder per call), `work/txn/<uuid>.json` (a folder swap's transaction record `{txn, dest}`, `dest` absolute), and `work/backup/<uuid>` (the old folder while it is swapped). Recovery reads only `work/txn/`, so a file in a destination folder, whatever its name or content, is never read or moved by it. `work` must be on the same filesystem as `local` (both are under the hub home).
 - Both copies pass `-s` (force the SFTP protocol), so the remote shell never parses the path, even on OpenSSH 8.7–8.9 where the legacy scp protocol is still the default (the hub's `scp` must be OpenSSH ≥ 8.7, which has `-s`). On top of that, every remote path must match `REMOTE_COPY_PATH` (`~`, `~/…`, `/…`, or relative; characters `[A-Za-z0-9_.+@/=-]` only), must not have a `..` part, and a `copy_from` source must have a file name (not `/`, `~`, or a path ending in `/` or `.`), so `dest` is never `pulled/''` and the whole remote filesystem is never copied.
 
 - [ ] **Step 1: Write the fake scp script**
@@ -2755,7 +2756,7 @@ chmod +x /Users/shreyasv/Desktop/code/research_dash/tests/fakes/fake_scp.py
 
 - [ ] **Step 2: Write the failing tests**
 
-In `tests/remote/test_ssh.py`, replace `import os\nimport time` with `import os\nimport threading\nimport time`, and replace the import line
+In `tests/remote/test_ssh.py`, replace `import os\nimport time` with `import json\nimport os\nimport threading\nimport time\nimport uuid`, and replace the import line
 
 ```python
 from hypothex.remote.ssh import SshError, SshTarget, run_remote
@@ -2771,6 +2772,12 @@ Append at the end of `tests/remote/test_ssh.py` (after two blank lines):
 
 ```python
 # --------------------------------------------------------------------------- copy
+
+
+@pytest.fixture
+def work(tmp_path: Path) -> Path:
+    """The hub's pull work folder (``<hub home>/pulls``), outside every destination."""
+    return tmp_path / "hub-home" / "pulls"
 
 
 def test_copy_to_file_lands_at_remote_path(fake_remote: FakeRemote, tmp_path: Path) -> None:
@@ -2819,21 +2826,23 @@ def test_copy_to_unknown_host_raises(fake_remote: FakeRemote, tmp_path: Path) ->
         copy_to(fake_remote.target("nohost"), src, "~/f.txt")
 
 
-def test_copy_rejects_newline_in_remote_path(fake_remote: FakeRemote, tmp_path: Path) -> None:
+def test_copy_rejects_newline_in_remote_path(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
     fake_remote.add_host("gpu1")
     src = tmp_path / "f.txt"
     src.write_text("x")
     with pytest.raises(SshError, match="invalid remote path"):
         copy_to(fake_remote.target("gpu1"), src, "a\nb")
     with pytest.raises(SshError, match="invalid remote path"):
-        copy_from(fake_remote.target("gpu1"), "", tmp_path / "out")
+        copy_from(fake_remote.target("gpu1"), "", tmp_path / "out", work=work)
 
 
 @pytest.mark.parametrize(
     "remote_path", ["/x;rm -rf ~", "/x $(id)", "/a/`id`", "~/a b", "/a/../etc/passwd", "../up"]
 )
 def test_copy_rejects_shell_and_parent_paths(
-    fake_remote: FakeRemote, tmp_path: Path, remote_path: str
+    fake_remote: FakeRemote, tmp_path: Path, work: Path, remote_path: str
 ) -> None:
     fake_remote.add_host("gpu1")
     src = tmp_path / "f.txt"
@@ -2841,28 +2850,28 @@ def test_copy_rejects_shell_and_parent_paths(
     with pytest.raises(SshError, match="invalid remote path"):
         copy_to(fake_remote.target("gpu1"), src, remote_path)
     with pytest.raises(SshError, match="invalid remote path"):
-        copy_from(fake_remote.target("gpu1"), remote_path, tmp_path / "out")
+        copy_from(fake_remote.target("gpu1"), remote_path, tmp_path / "out", work=work)
     assert fake_remote.calls("scp") == []
 
 
 @pytest.mark.parametrize("remote_path", ["/", "~", "~/", "/scratch/ckpt/", "/scratch/."])
 def test_copy_from_needs_a_file_name(
-    fake_remote: FakeRemote, tmp_path: Path, remote_path: str
+    fake_remote: FakeRemote, tmp_path: Path, work: Path, remote_path: str
 ) -> None:
     fake_remote.add_host("gpu1")
     pulled = tmp_path / "pulled"
     pulled.mkdir()
     (pulled / "keep.txt").write_text("k")
     with pytest.raises(SshError, match="invalid remote path"):
-        copy_from(fake_remote.target("gpu1"), remote_path, pulled / "x")
+        copy_from(fake_remote.target("gpu1"), remote_path, pulled / "x", work=work)
     assert (pulled / "keep.txt").read_text() == "k"
     assert fake_remote.calls("scp") == []
 
 
-def test_copy_from_forces_sftp(fake_remote: FakeRemote, tmp_path: Path) -> None:
+def test_copy_from_forces_sftp(fake_remote: FakeRemote, tmp_path: Path, work: Path) -> None:
     home = fake_remote.add_host("gpu1")
     (home / "f.txt").write_text("x")
-    copy_from(fake_remote.target("gpu1"), "f.txt", tmp_path / "f.txt")
+    copy_from(fake_remote.target("gpu1"), "f.txt", tmp_path / "f.txt", work=work)
     assert "-s" in fake_remote.calls("scp")[-1]
 
 
@@ -2875,27 +2884,31 @@ def test_fake_scp_refuses_paths_outside_fake_root(fake_remote: FakeRemote, tmp_p
     assert not Path("/etc/hypothex-test.txt").exists()
 
 
-def test_copy_from_file_creates_local_parents(fake_remote: FakeRemote, tmp_path: Path) -> None:
+def test_copy_from_file_creates_local_parents(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
     home = fake_remote.add_host("gpu1")
     (home / "ckpt").mkdir()
     (home / "ckpt" / "best.pt").write_bytes(b"\x00weights")
     dest = tmp_path / "store" / "pulled" / "best.pt"
-    copy_from(fake_remote.target("gpu1"), "~/ckpt/best.pt", dest)
+    copy_from(fake_remote.target("gpu1"), "~/ckpt/best.pt", dest, work=work)
     assert dest.read_bytes() == b"\x00weights"
     assert sorted(p.name for p in dest.parent.iterdir()) == ["best.pt"]
 
 
-def test_copy_from_directory(fake_remote: FakeRemote, tmp_path: Path) -> None:
+def test_copy_from_directory(fake_remote: FakeRemote, tmp_path: Path, work: Path) -> None:
     home = fake_remote.add_host("gpu1")
     (home / "run" / "ckpt").mkdir(parents=True)
     (home / "run" / "ckpt" / "model.bin").write_bytes(b"m")
     (home / "run" / "ckpt" / "cfg.json").write_text("{}")
     dest = tmp_path / "pulled" / "ckpt"
-    copy_from(fake_remote.target("gpu1"), "run/ckpt", dest)
+    copy_from(fake_remote.target("gpu1"), "run/ckpt", dest, work=work)
     assert sorted(p.name for p in dest.iterdir()) == ["cfg.json", "model.bin"]
 
 
-def test_copy_from_replaces_existing_file_and_dir(fake_remote: FakeRemote, tmp_path: Path) -> None:
+def test_copy_from_replaces_existing_file_and_dir(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
     home = fake_remote.add_host("gpu1")
     (home / "f.txt").write_text("new")
     (home / "d").mkdir()
@@ -2906,34 +2919,39 @@ def test_copy_from_replaces_existing_file_and_dir(fake_remote: FakeRemote, tmp_p
     dir_dest.mkdir()
     (dir_dest / "stale.txt").write_text("s")
     target = fake_remote.target("gpu1")
-    copy_from(target, "f.txt", file_dest)
-    copy_from(target, "d", dir_dest)
+    copy_from(target, "f.txt", file_dest, work=work)
+    copy_from(target, "d", dir_dest, work=work)
     assert file_dest.read_text() == "new"
     assert sorted(p.name for p in dir_dest.iterdir()) == ["new.txt"]
 
 
-def test_copy_from_missing_remote_leaves_nothing(fake_remote: FakeRemote, tmp_path: Path) -> None:
+def test_copy_from_missing_remote_leaves_nothing(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
     fake_remote.add_host("gpu1")
     out_dir = tmp_path / "out"
     with pytest.raises(SshError, match="No such file or directory"):
-        copy_from(fake_remote.target("gpu1"), "~/nope.pt", out_dir / "nope.pt")
+        copy_from(fake_remote.target("gpu1"), "~/nope.pt", out_dir / "nope.pt", work=work)
     assert list(out_dir.iterdir()) == []
+    assert list((work / "stage").iterdir()) == []
 
 
-def test_copy_from_failure_keeps_the_old_file(fake_remote: FakeRemote, tmp_path: Path) -> None:
+def test_copy_from_failure_keeps_the_old_file(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
     fake_remote.add_host("gpu1")
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     dest = out_dir / "best.pt"
     dest.write_text("old")
     with pytest.raises(SshError):
-        copy_from(fake_remote.target("gpu1"), "~/nope.pt", dest)
+        copy_from(fake_remote.target("gpu1"), "~/nope.pt", dest, work=work)
     assert dest.read_text() == "old"
     assert sorted(p.name for p in out_dir.iterdir()) == ["best.pt"]
 
 
 def test_concurrent_pulls_of_one_file_never_share_a_staging_path(
-    fake_remote: FakeRemote, tmp_path: Path
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
 ) -> None:
     home = fake_remote.add_host("gpu1")
     for i in range(4):
@@ -2943,7 +2961,7 @@ def test_concurrent_pulls_of_one_file_never_share_a_staging_path(
 
     def pull(i: int) -> None:
         try:
-            copy_from(fake_remote.target("gpu1"), f"v{i}.pt", dest)
+            copy_from(fake_remote.target("gpu1"), f"v{i}.pt", dest, work=work)
         except Exception as exc:
             errors.append(exc)
 
@@ -2962,7 +2980,7 @@ class _Crash(BaseException):
 
 
 def test_a_folder_swap_cut_short_is_recovered(
-    fake_remote: FakeRemote, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake_remote: FakeRemote, tmp_path: Path, work: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = fake_remote.add_host("gpu1")
     (home / "d").mkdir()
@@ -2974,28 +2992,30 @@ def test_a_folder_swap_cut_short_is_recovered(
 
     def crash_after_the_old_folder_moved(src: str | Path, dst: str | Path) -> None:
         real(src, dst)
-        if Path(dst).name.startswith(".hx-pull-") and str(dst).endswith(".old"):
+        if Path(dst).parent == work / "backup":
             raise _Crash
 
     target = fake_remote.target("gpu1")
     monkeypatch.setattr(os, "replace", crash_after_the_old_folder_moved)
     with pytest.raises(_Crash):
-        copy_from(target, "d", dest)
+        copy_from(target, "d", dest, work=work)
     monkeypatch.setattr(os, "replace", real)
-    [backup] = dest.parent.glob(".hx-pull-*.old")
-    [record] = dest.parent.glob(".hx-pull-*.json")
+    [backup] = (work / "backup").iterdir()
+    [record] = (work / "txn").iterdir()
     assert not dest.exists() and (backup / "old.txt").is_file()
-    assert record.stem == backup.stem  # the transaction that owns the backup
+    assert list(dest.parent.iterdir()) == []  # nothing of the swap next to the destination
+    assert json.loads(record.read_text()) == {"txn": backup.name, "dest": str(dest)}
     with pytest.raises(SshError):  # the next pull fails, but the old folder comes back
-        copy_from(target, "nope", dest)
+        copy_from(target, "nope", dest, work=work)
     assert sorted(p.name for p in dest.iterdir()) == ["old.txt"]
-    copy_from(target, "d", dest)
+    copy_from(target, "d", dest, work=work)
     assert sorted(p.name for p in dest.iterdir()) == ["new.txt"]
     assert sorted(p.name for p in dest.parent.iterdir()) == ["d"]
+    assert list((work / "txn").iterdir()) == [] and list((work / "backup").iterdir()) == []
 
 
 def test_a_swap_that_crashed_before_its_first_rename_changes_nothing(
-    fake_remote: FakeRemote, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake_remote: FakeRemote, tmp_path: Path, work: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = fake_remote.add_host("gpu1")
     (home / "d").mkdir()
@@ -3011,17 +3031,19 @@ def test_a_swap_that_crashed_before_its_first_rename_changes_nothing(
     target = fake_remote.target("gpu1")
     monkeypatch.setattr(os, "replace", crash_before_any_rename)
     with pytest.raises(_Crash):
-        copy_from(target, "d", dest)
+        copy_from(target, "d", dest, work=work)
     monkeypatch.setattr(os, "replace", real)
     assert sorted(p.name for p in dest.iterdir()) == ["old.txt"]  # the record alone is left
-    assert len(list(dest.parent.glob(".hx-pull-*.json"))) == 1
-    copy_from(target, "d", dest)
+    assert len(list((work / "txn").iterdir())) == 1
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["d"]
+    copy_from(target, "d", dest, work=work)
     assert sorted(p.name for p in dest.iterdir()) == ["new.txt"]
     assert sorted(p.name for p in dest.parent.iterdir()) == ["d"]
+    assert list((work / "txn").iterdir()) == []
 
 
 def test_a_pull_never_touches_files_it_did_not_record(
-    fake_remote: FakeRemote, tmp_path: Path
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
 ) -> None:
     home = fake_remote.add_host("gpu1")
     (home / "best.pt").write_text("new")
@@ -3032,13 +3054,13 @@ def test_a_pull_never_touches_files_it_did_not_record(
     (x / ".best.pt.old").write_text("mine")  # the user's own files, named like backups
     (x / ".d.old").mkdir()
     (x / ".d.old" / "keep.txt").write_text("k")
-    (x / ".hx-pull-0123.old").write_text("also mine")  # a backup name without a record
+    (x / ".hx-pull-0123.old").write_text("also mine")
     target = fake_remote.target("gpu1")
-    copy_from(target, "best.pt", x / "best.pt")  # a new file next to .best.pt.old
-    copy_from(target, "best.pt", x / "best.pt")  # and its replacement
+    copy_from(target, "best.pt", x / "best.pt", work=work)  # a new file next to .best.pt.old
+    copy_from(target, "best.pt", x / "best.pt", work=work)  # and its replacement
     (x / "d").mkdir()
     (x / "d" / "stale.txt").write_text("s")
-    copy_from(target, "d", x / "d")  # a folder swap next to .d.old
+    copy_from(target, "d", x / "d", work=work)  # a folder swap next to .d.old
     assert (x / "best.pt").read_text() == "new"
     assert (x / ".best.pt.old").read_text() == "mine"
     assert (x / ".d.old" / "keep.txt").read_text() == "k"
@@ -3051,6 +3073,51 @@ def test_a_pull_never_touches_files_it_did_not_record(
         "best.pt",
         "d",
     ]
+
+
+def test_recovery_never_reads_a_look_alike_record_in_a_destination(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path
+) -> None:
+    # a downloaded artifact named like a transaction record, with matching fields
+    home = fake_remote.add_host("gpu1")
+    (home / "best.pt").write_text("new")
+    (home / "e").mkdir()
+    (home / "e" / "new.txt").write_text("n")
+    x = tmp_path / "x"
+    (x / "e").mkdir(parents=True)
+    (x / "e" / "old.txt").write_text("o")
+    (x / "kept").mkdir()
+    looks: dict[str, str] = {}
+    for dest in ("gone", "kept"):  # its dest missing (would be restored), present (deleted)
+        txn = uuid.uuid4().hex
+        fields = {"txn": txn, "dest": str(x / dest), "backup": f".hx-pull-{txn}.old"}
+        (x / f".hx-pull-{txn}.json").write_text(json.dumps(fields))
+        (x / f".hx-pull-{txn}.old").mkdir()
+        (x / f".hx-pull-{txn}.old" / "mine.txt").write_text(dest)
+        looks[dest] = txn
+    before = sorted(p.name for p in x.iterdir())
+    target = fake_remote.target("gpu1")
+    copy_from(target, "best.pt", x / "best.pt", work=work)
+    copy_from(target, "e", x / "e", work=work)  # a folder swap in the same folder
+    assert sorted(p.name for p in x.iterdir()) == sorted([*before, "best.pt"])
+    for dest, txn in looks.items():
+        assert (x / f".hx-pull-{txn}.old" / "mine.txt").read_text() == dest
+        assert json.loads((x / f".hx-pull-{txn}.json").read_text())["txn"] == txn
+    assert not (x / "gone").exists() and list((x / "kept").iterdir()) == []
+    assert sorted(p.name for p in (x / "e").iterdir()) == ["new.txt"]
+    assert list((work / "txn").iterdir()) == [] and list((work / "backup").iterdir()) == []
+
+
+@pytest.mark.parametrize("name", [".hx-pull-0123456789abcdef0123456789abcdef.json", ".hx-x"])
+def test_a_pull_into_a_reserved_name_is_refused(
+    fake_remote: FakeRemote, tmp_path: Path, work: Path, name: str
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "f.txt").write_text("x")
+    with pytest.raises(SshError, match="reserved"):
+        copy_from(fake_remote.target("gpu1"), "f.txt", tmp_path / "x" / name, work=work)
+    assert not (tmp_path / "x").exists()
+    assert fake_remote.calls("scp") == []
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -3150,24 +3217,32 @@ def _remove(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def copy_from(target: SshTarget, remote_path: str, local: Path, *, timeout: float = 600) -> None:
+PULL_RESERVED_PREFIX = ".hx-"
+"""A pull never writes a destination whose name starts with this (reserved for Hypothex)."""
+_TXN_NAME = re.compile(r"[0-9a-f]{32}")
+
+
+def copy_from(
+    target: SshTarget, remote_path: str, local: Path, *, work: Path, timeout: float = 600
+) -> None:
     """
     Copy a remote file or directory to ``local`` with ``scp -s -r`` (SFTP).
 
     ``remote_path`` must be shell-safe, have no ``..`` part, and name a file
-    or directory (not ``/``, ``~``, or a path ending in ``/``). The copy lands
-    in a unique hidden ``.<name>.*.part`` staging folder next to ``local`` and
-    is renamed into place only on success, so ``local`` is never left
+    or directory (not ``/``, ``~``, or a path ending in ``/``); ``local``'s
+    name must not start with ``.hx-``. Hypothex's own state lives only in
+    ``work`` (the hub passes ``<hub home>/pulls``), never next to ``local``:
+    the copy lands in a unique staging folder ``work/stage/pull-*`` and is
+    renamed into place only on success, so ``local`` is never left
     half-written and concurrent pulls never share a staging path. An existing
     file is replaced atomically (``os.replace``). An existing folder cannot be
-    renamed over, so it is moved aside to a unique owned name
-    ``.hx-pull-<uuid>.old`` next to ``local``, recorded first in the
-    transaction file ``.hx-pull-<uuid>.json``, and removed only once the new
-    one is in place. A swap cut short (a crash) is finished or undone by the
-    next ``copy_from`` into that folder, which acts only on recorded
-    transactions and only on the names they record: no file is ever claimed
-    because of its name. Installs into one folder are serialized (``flock`` on
-    the folder).
+    renamed over, so the swap is first recorded in ``work/txn/<uuid>.json``
+    (``{txn, dest}``), the old folder is moved to ``work/backup/<uuid>``, and
+    it is removed only once the new one is in place. A swap cut short (a
+    crash) is finished or undone by the next ``copy_from``, which reads only
+    the records in ``work/txn``: no file in any destination folder is ever
+    read or moved by recovery, whatever its name. Installs are serialized
+    (``flock`` on ``work/txn``).
 
     Parameters
     ----------
@@ -3178,26 +3253,35 @@ def copy_from(target: SshTarget, remote_path: str, local: Path, *, timeout: floa
         remote home.
     local : Path
         Destination path. Parent directories are created.
+    work : Path
+        Folder for pull state (``stage/``, ``txn/``, ``backup/``); must be on
+        the same filesystem as ``local``.
     timeout : float
         Seconds before ``scp`` is killed.
 
     Raises
     ------
     SshError
-        ``remote_path`` is refused, ``scp`` failed (for example the remote
-        path is missing), or the call timed out.
+        ``remote_path`` is refused, ``local``'s name is reserved, ``scp``
+        failed (for example the remote path is missing), or the call timed out.
 
     Examples
     --------
-    >>> dest = Path("pulled/best.pt")
-    >>> copy_from(SshTarget(alias="gpu1"), "~/ckpt/best.pt", dest)  # doctest: +SKIP
+    >>> dest, work = Path("pulled/best.pt"), Path("pulls")
+    >>> copy_from(SshTarget(alias="gpu1"), "~/ckpt/best.pt", dest, work=work)  # doctest: +SKIP
     """
     _check_remote_path(remote_path, source=True)
+    if local.name.startswith(PULL_RESERVED_PREFIX):
+        raise SshError(
+            f"invalid destination {local.name!r}: names starting with "
+            f"{PULL_RESERVED_PREFIX!r} are reserved"
+        )
+    txn_dir, _, stage_dir = _pull_dirs(work)
     local.parent.mkdir(parents=True, exist_ok=True)
-    with _install_lock(local):
-        _recover_swaps(local.parent)  # a recorded swap was cut short: finish or undo it
+    with _install_lock(txn_dir):
+        _recover_swaps(work)  # a recorded swap was cut short: finish or undo it
     # A unique staging folder per call: two pulls of one file never share it.
-    stage = Path(tempfile.mkdtemp(prefix=f".{local.name}.", suffix=".part", dir=local.parent))
+    stage = Path(tempfile.mkdtemp(prefix="pull-", dir=stage_dir))
     part = stage / local.name
     argv = [target.scp_bin, *_base_options(target), "-s", "-q", "-r"]
     argv += [f"{target.alias}:{remote_path}", str(part)]
@@ -3208,30 +3292,28 @@ def copy_from(target: SshTarget, remote_path: str, local: Path, *, timeout: floa
                 f"scp {target.alias}:{remote_path} -> {local} failed "
                 f"(exit {res.returncode}): {_tail(res.stderr)}"
             )
-        _install(part, local)
+        _install(part, local, work)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
 
-PULL_TXN_PREFIX = ".hx-pull-"
-"""Owned names of a folder swap next to its destination: ``.hx-pull-<uuid>.old`` (the
-old folder) and ``.hx-pull-<uuid>.json`` (the transaction record, written first)."""
-_TXN_RECORD = re.compile(r"\.hx-pull-([0-9a-f]{32})\.json")
+def _pull_dirs(work: Path) -> tuple[Path, Path, Path]:
+    """``(txn, backup, stage)`` folders under ``work``, created when missing."""
+    dirs = (work / "txn", work / "backup", work / "stage")
+    for folder in dirs:
+        folder.mkdir(parents=True, exist_ok=True)
+    return dirs
 
 
 @contextmanager
-def _install_lock(local: Path) -> Iterator[None]:
-    """Serialize installs into ``local``'s folder (``flock`` on the folder: no lock file)."""
-    fd = os.open(local.parent, os.O_RDONLY)
+def _install_lock(folder: Path) -> Iterator[None]:
+    """Serialize pull installs (``flock`` on ``folder``: no lock file)."""
+    fd = os.open(folder, os.O_RDONLY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         os.close(fd)  # closing drops the lock
-
-
-def _plain_name(name: object) -> bool:
-    return isinstance(name, str) and name not in ("", ".", "..") and "/" not in name
 
 
 def _write_record(path: Path, data: dict[str, str]) -> None:
@@ -3244,32 +3326,30 @@ def _write_record(path: Path, data: dict[str, str]) -> None:
         os.close(fd)
 
 
-def _recover_swaps(folder: Path) -> None:
+def _recover_swaps(work: Path) -> None:
     """
-    Finish or undo folder swaps cut short in ``folder`` (install lock held).
+    Finish or undo folder swaps cut short (install lock held).
 
-    Only transactions recorded in ``.hx-pull-<uuid>.json`` are acted on, and
-    only on the two names each record holds (its destination and its own
-    ``.hx-pull-<uuid>.old``). An unreadable record is left alone: it was cut
-    short while being written, before anything was moved.
+    Only the records in ``work/txn/<uuid>.json`` are read, and each acts only
+    on its own absolute ``dest`` and ``work/backup/<uuid>``. A record that is
+    unreadable or whose ``txn`` is not its own name is left alone (a record is
+    complete and fsynced before anything moves).
     """
-    for record in sorted(folder.glob(f"{PULL_TXN_PREFIX}*.json")):
-        match = _TXN_RECORD.fullmatch(record.name)
-        if match is None:
+    txn_dir, backup_dir, _ = _pull_dirs(work)
+    for record in sorted(txn_dir.glob("*.json")):
+        txn = record.stem
+        if _TXN_NAME.fullmatch(txn) is None:
             continue
-        txn = match.group(1)
         try:
             data = json.loads(record.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or data.get("txn") != txn:
             continue
-        dest, backup = data.get("dest"), data.get("backup")
-        if data.get("txn") != txn or backup != f"{PULL_TXN_PREFIX}{txn}.old":
+        dest = data.get("dest")
+        if not isinstance(dest, str) or not Path(dest).is_absolute():
             continue
-        if not _plain_name(dest):
-            continue
-        dest_path, backup_path = folder / str(dest), folder / str(backup)
+        dest_path, backup_path = Path(dest), backup_dir / txn
         if backup_path.exists() or backup_path.is_symlink():
             if dest_path.exists() or dest_path.is_symlink():
                 _remove(backup_path)  # the new folder is in: only the cleanup was missed
@@ -3278,17 +3358,18 @@ def _recover_swaps(folder: Path) -> None:
         record.unlink(missing_ok=True)
 
 
-def _install(part: Path, local: Path) -> None:
+def _install(part: Path, local: Path, work: Path) -> None:
     """Move ``part`` to ``local``; an existing ``local`` is never lost, even by a crash."""
-    with _install_lock(local):
-        _recover_swaps(local.parent)
+    txn_dir, backup_dir, _ = _pull_dirs(work)
+    with _install_lock(txn_dir):
+        _recover_swaps(work)
         if part.is_dir() and local.is_dir() and not local.is_symlink():
             # os.replace cannot overwrite a non-empty folder: record the swap, move the old
-            # folder to its owned backup name, then swap (_recover_swaps reads the record)
+            # folder to work/backup/<txn>, then swap (_recover_swaps reads the record)
             txn = uuid.uuid4().hex
-            backup = local.with_name(f"{PULL_TXN_PREFIX}{txn}.old")
-            record = local.with_name(f"{PULL_TXN_PREFIX}{txn}.json")
-            _write_record(record, {"txn": txn, "dest": local.name, "backup": backup.name})
+            backup = backup_dir / txn
+            record = txn_dir / f"{txn}.json"
+            _write_record(record, {"txn": txn, "dest": str(local.absolute())})
             os.replace(local, backup)
             try:
                 os.replace(part, local)
@@ -3307,7 +3388,7 @@ def _install(part: Path, local: Path) -> None:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_ssh.py -q`
-Expected: `43 passed`.
+Expected: `46 passed`.
 
 - [ ] **Step 6: Lint, format, type-check, full suite**
 
@@ -3344,11 +3425,13 @@ In `tests/remote/test_ssh.py`, replace the import block (from the first line thr
 ```python
 import functools
 import http.server
+import json
 import os
 import socket
 import socketserver
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -3740,12 +3823,12 @@ class Tunnel:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_ssh.py -q`
-Expected: `52 passed` in under 15 s.
+Expected: `55 passed` in under 15 s.
 
 - [ ] **Step 5: Check for flakiness**
 
 Run: `for i in 1 2 3 4 5; do uv run pytest tests/remote/test_ssh.py -q | tail -1; done`
-Expected: `52 passed` five times.
+Expected: `55 passed` five times.
 
 - [ ] **Step 6: Lint, format, type-check, full suite**
 
@@ -6494,13 +6577,15 @@ git commit -m "feat(remote): env client for descriptor and JSON requests"
 
 **Files:**
 - Modify: `src/hypothex/api/app.py` (imports, constants, new module-level helpers after `_run_view`, one call in `create_app`)
+- Modify: `src/hypothex/core/layout.py` (append `HX_DIR`, `reserved_run_path`)
 - Test: `tests/api/test_env_routes.py`
 
 **Interfaces:**
 - Consumes: `DIR_HEADER`, `SIZE_HEADER` from `hypothex.remote.client` (Task 13); `Context.find_record`, `Context.run_dir`; `StoreError` (the existing handler answers it with 404).
+- Produces (`hypothex.core.layout`): `HX_DIR = ".hx"`, the reserved folder in every run folder for Hypothex's own state (`.hx/mirror-skips.json`, Task 34), and `reserved_run_path(rel_path) -> bool` (True when the first component, after empty and `.` parts, is `.hx`). No remote or artifact path can address it: this route refuses it (404) and the hub mirror never fetches it (Task 34).
 - Produces (`hypothex.api.app`):
   - `FILE_MAX_BYTES = 200 * 1024 * 1024`, `FILE_CHUNK_BYTES = 64 * 1024`.
-  - `open_run_path(store: Path, run_dir: Path, rel_path: str) -> int` (an open descriptor; raises `StoreError`). Path safety works on descriptors, not on paths checked first and opened later: the walk starts at a descriptor of the store root (the one trusted path) and opens every name below it, the run folder's own `<project>/runs/<run_id>` included, relative to its parent folder's descriptor with `O_NOFOLLOW` (`O_DIRECTORY` for the folders down to the run folder). So a run folder, or any folder in it, replaced by a symlink before or during the request cannot lead outside. Symlinks are never followed or listed (Hypothex never writes them into the store).
+  - `open_run_path(store: Path, run_dir: Path, rel_path: str) -> int` (an open descriptor; raises `StoreError`, also for any path in the reserved `.hx/` folder). Path safety works on descriptors, not on paths checked first and opened later: the walk starts at a descriptor of the store root (the one trusted path) and opens every name below it, the run folder's own `<project>/runs/<run_id>` included, relative to its parent folder's descriptor with `O_NOFOLLOW` (`O_DIRECTORY` for the folders down to the run folder). So a run folder, or any folder in it, replaced by a symlink before or during the request cannot lead outside. Symlinks are never followed or listed (Hypothex never writes them into the store).
   - `list_run_files(dir_fd: int, prefix: str = "") -> list[dict[str, Any]]` (`[{"path", "size", "mtime_ns"}]`, walked through folder descriptors; the hub mirror compares `[size, mtime_ns]` to skip unchanged files, Task 34).
   - `read_span(fd: int, start: int, length: int) -> Iterator[bytes]` (closes `fd`).
   - `file_response(fd: int, rel_path: str, *, max_bytes: int, tail: bool) -> Response` (takes ownership of `fd`).
@@ -6715,6 +6800,18 @@ def test_fifo_is_404_and_does_not_hang(client: TestClient, run_dir: Path) -> Non
     assert resp.status_code == 404 and "not a regular file" in resp.json()["error"]
 
 
+def test_the_reserved_hx_folder_is_never_served(client: TestClient, run_dir: Path) -> None:
+    hx = run_dir / ".hx"
+    hx.mkdir()
+    (hx / "mirror-skips.json").write_text('{"notes.md": {"reason": "too big"}}')
+    for path in (".hx/mirror-skips.json", ".hx", ".hx/", "%2Ehx/mirror-skips.json"):
+        resp = client.get(f"{FILES}/{path}")
+        assert resp.status_code == 404, path
+        assert "reserved" in resp.json()["error"] and "too big" not in resp.text
+    listed = [item["path"] for item in client.get(f"{FILES}/").json()]
+    assert not any(p.startswith(".hx") for p in listed)
+
+
 def test_read_span_stops_at_the_length_fixed_at_start(tmp_path: Path) -> None:
     log = tmp_path / "grow.log"
     log.write_bytes(b"abcdef")
@@ -6743,6 +6840,7 @@ import stat
 from collections.abc import Iterator          # add to the existing collections.abc import
 from pathlib import PurePosixPath             # add to the existing pathlib import
 from fastapi.responses import StreamingResponse   # add to the existing fastapi.responses import
+from hypothex.core.layout import reserved_run_path
 from hypothex.remote.client import DIR_HEADER, SIZE_HEADER
 ```
 
@@ -6757,6 +6855,41 @@ _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 ```
 
 Then run `uv run ruff check --fix src/hypothex/api/app.py` to sort the import block.
+
+Append to the end of `src/hypothex/core/layout.py` (after two blank lines):
+
+```python
+HX_DIR = ".hx"
+"""Reserved folder in every run folder for Hypothex's own state (``.hx/mirror-skips.json``).
+
+No remote or artifact path may address it: the env files route refuses it and the hub
+mirror never fetches a host path in it (:func:`reserved_run_path`)."""
+
+
+def reserved_run_path(rel_path: str) -> bool:
+    """
+    Return True when a run-relative path is inside the reserved ``.hx`` folder.
+
+    Parameters
+    ----------
+    rel_path : str
+        ``/``-separated path relative to a run folder.
+
+    Returns
+    -------
+    bool
+        True when its first component (after empty and ``.`` parts) is ``.hx``.
+
+    Examples
+    --------
+    >>> reserved_run_path(".hx/mirror-skips.json"), reserved_run_path("./.hx")
+    (True, True)
+    >>> reserved_run_path("predictions/.hx"), reserved_run_path("predictions/x.skipped")
+    (False, False)
+    """
+    parts = [part for part in rel_path.split("/") if part not in ("", ".")]
+    return bool(parts) and parts[0] == HX_DIR
+```
 
 - [ ] **Step 4: Add the helpers and the route**
 
@@ -6796,8 +6929,8 @@ def open_run_path(store: Path, run_dir: Path, rel_path: str) -> int:
     ------
     StoreError
         The path is absolute, has ``..`` or a symlink (in the run folder or on
-        the way to it), leaves the run folder, or does not exist (all answered
-        with ``404``).
+        the way to it), leaves the run folder, is in the reserved ``.hx/``
+        folder, or does not exist (all answered with ``404``).
 
     Examples
     --------
@@ -6809,6 +6942,8 @@ def open_run_path(store: Path, run_dir: Path, rel_path: str) -> int:
     pure = PurePosixPath(rel_path)
     if pure.is_absolute() or ".." in pure.parts or "\x00" in rel_path:
         raise StoreError(f"{rel_path!r} is outside the run folder")
+    if reserved_run_path(rel_path):  # Hypothex's own state: never served to anyone
+        raise StoreError(f"{rel_path!r} is reserved for Hypothex")
     try:
         to_run = run_dir.relative_to(store).parts
     except ValueError:
@@ -7005,7 +7140,7 @@ In `create_app`, directly before the line `    app.mount("/mcp", mcp_http)`, add
 - [ ] **Step 5: Run the tests, the existing API tests, lint, and type check**
 
 Run: `uv run pytest tests/api -v`
-Expected: all pass; `tests/api/test_env_routes.py` reports `14 passed`.
+Expected: all pass; `tests/api/test_env_routes.py` reports `15 passed`.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src/hypothex/api tests/api/test_env_routes.py`
 Expected: `All checks passed!`, already formatted, `All checks passed!`.
@@ -7013,7 +7148,7 @@ Expected: `All checks passed!`, already formatted, `All checks passed!`.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/hypothex/api/app.py tests/api/test_env_routes.py
+git add src/hypothex/api/app.py src/hypothex/core/layout.py tests/api/test_env_routes.py
 git commit -m "feat(api): env route for run files with size limit and path safety"
 ```
 
@@ -11464,7 +11599,7 @@ At the end of `register_env_routes` (after the `run_file` route), add:
 - [ ] **Step 4: Run the tests, lint, and type check**
 
 Run: `uv run pytest tests/api -v`
-Expected: all pass; `tests/api/test_env_routes.py` reports `19 passed`.
+Expected: all pass; `tests/api/test_env_routes.py` reports `20 passed`.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src/hypothex/api tests/api/test_env_routes.py`
 Expected: `All checks passed!`, already formatted, `All checks passed!`.
@@ -16986,11 +17121,13 @@ git commit -m "feat(remote): hub host state, reconnect backoff, and mirror path 
   - `RunStore.write_record`, `RunStore.read_record`; `run_lock`.
   - `index_run(index, store, record)`.
   - `read_yaml`, `atomic_write_text`.
+  - `HX_DIR`, `reserved_run_path` (Task 14, `hypothex.core.layout`).
 - Produces:
   - `mirror_run(ctx: Context, client: EnvClient, host: str, environment_id: str, project: str, run_id: str, *, usd_per_gpu_hour: float | None = None) -> tuple[RunRecord, bool] | None`.
   - `mirror_event(ctx: Context, client: EnvClient, host: str, environment_id: str, event: Event, *, usd_per_gpu_hour: float | None = None) -> None` (contract signature plus one optional keyword: the host's price, used to fill `RunRecord.cost`). It emits `mirror.run_updated` with payload `{"host", "environment_id", "original_type", "remote_sequence", "status"}` plus `"reason"` when the host's event carried one (`run.lost`, `run.killed`, `run.failed`: for example a SLURM `NODE_FAIL`), so the UI can show why a run ended.
   - private `_emit_mirror(ctx, host, environment_id, record, original_type, remote_sequence, *, reason=None)` and `_reason(event) -> str | None`, which Task 35 uses.
-  - Constants `LOG_TAIL_BYTES = 8 * 1024 * 1024` (spec 5.3: logs are mirrored as tails, fetched whole), `CLAIMS_DIR = ".claims"` (`<store>/.claims/<run_id>.json`, the hub-wide owner of a mirrored run id), `INDEX_PENDING = ".mirror-index-pending"`, and `SKIPPED_SUFFIX = ".skipped"` (`<file>.skipped`: `{reason, size, max_bytes}` in place of a file the hub does not hold).
+  - Constants `LOG_TAIL_BYTES = 8 * 1024 * 1024` (spec 5.3: logs are mirrored as tails, fetched whole), `CLAIMS_DIR = ".claims"` (`<store>/.claims/<run_id>.json`, the hub-wide owner of a mirrored run id), `INDEX_PENDING = ".mirror-index-pending"`, and `SKIPS_FILE = ".hx/mirror-skips.json"` (`<run_dir>/.hx/mirror-skips.json`: `{path: {reason, size, max_bytes}}` for every listed file the hub does not hold; `.hx/` is the reserved folder of Task 14, so no remote file can collide with it: a host file named `predictions/x.skipped` is mirrored like any other file).
+  - The mirror refuses every host path in `.hx/` (`reserved_run_path`, Task 14), even one the allow-list would take, so the hub never fetches or overwrites its own state from a host.
   - `reindex_pending(ctx: Context) -> list[str]`: at hub start (`Hub.start`, Task 35), re-index every mirrored run whose folder still has `.mirror-index-pending` (a mirror cut short), then remove the marker; returns their run ids.
   - `ProjectEntry.remote_host: str | None = None` (set on a project the hub copied from a host) and `RunStore.save_project(entry: ProjectEntry) -> None` (atomic write of `project.json`).
   - Env route `GET /api/v1/projects/{project}/entry` → the host's `ProjectEntry` JSON (404 for an unknown project).
@@ -17003,13 +17140,13 @@ What `mirror_run` does, in order. Nothing in the hub's run folder changes until 
 4. Checks that `run.yaml` names the same run.
 5. Copies the project's `ProjectEntry` from the host when the hub does not know the project (spec 5.2: the hub holds the cross-project index). The copy has `remote_host` set, so tasks, leaderboards, and sweep stats work for a project registered only on the host; a later `hx register` of a hub checkout replaces it. A host without the route (or an error) is logged and skipped.
 6. Lists the run's files (`EnvClient.list_files`).
-7. Fetches every wanted file whose `[size, mtime_ns]` differs from `.mirror.json`, whole, into the staging folder: `logs/*` as a tail of at most `LOG_TAIL_BYTES` (spec 5.3, 8A.3; a log is never a `remote_file`), any other file up to `MIRROR_MAX_BYTES`. A changed file is fetched again whole (a growing `metrics.jsonl` costs its size per refresh, a log at most 8 MiB). A dropped connection raises before anything is installed. A listed file the host does not serve (`fetch_file` False: a 404 because it was deleted after the listing, or a 413 because it grew past the limit) makes the mirror list the run again, once: still missing, its local copy is deleted (and its manifest entry dropped); now too big, it becomes a skipped file (step 8); listed and small, it is fetched once more, and a second refusal makes it a skipped file too (`reason: "not served"`). So no stale copy of a listed file the mirror could not fetch ever stays next to newer files.
-8. Records each too-big non-log file as a `remote_file` artifact; a skipped file's local copy is deleted and a small `<file>.skipped` marker (`{reason, size, max_bytes}`) takes its place. A file fetched again later replaces the marker.
+7. Fetches every wanted file (never a path in the reserved `.hx/` folder) whose `[size, mtime_ns]` differs from `.mirror.json`, whole, into the staging folder: `logs/*` as a tail of at most `LOG_TAIL_BYTES` (spec 5.3, 8A.3; a log is never a `remote_file`), any other file up to `MIRROR_MAX_BYTES`. A changed file is fetched again whole (a growing `metrics.jsonl` costs its size per refresh, a log at most 8 MiB). A dropped connection raises before anything is installed. A listed file the host does not serve (`fetch_file` False: a 404 because it was deleted after the listing, or a 413 because it grew past the limit) makes the mirror list the run again, once: still missing, its local copy is deleted (and its manifest entry dropped); now too big, it becomes a skipped file (step 8); listed and small, it is fetched once more, and a second refusal makes it a skipped file too (`reason: "not served"`). So no stale copy of a listed file the mirror could not fetch ever stays next to newer files.
+8. Records each too-big non-log file as a `remote_file` artifact; a skipped file's local copy is deleted and its entry (`{reason, size, max_bytes}`) is written to `<run_dir>/.hx/mirror-skips.json`, never next to the file. The skips file lists exactly this mirror's skipped files (a skipped file is never in `.mirror.json`, so every mirror decides it again); it is removed when nothing is skipped.
 9. Gives the host's own artifacts (`host: "local"` on the host) the host's name, so the hub never shows a host checkpoint as a local file.
 10. Claims the run id hub-wide before any install (`_claim`): under the shared claim lock (`<store>/.claims/.lock`) it checks step 2 again and writes `<store>/.claims/<run_id>.json` (`{project, environment_id}`). The claim outlives a failed install or index, so a second host or project can never take the id, even when the first one's index never finished; two mirrors that both passed step 2 cannot both win.
 11. Under `run_lock`, installs in one pass (`_install`):
    - first writes `.mirror-index-pending` durably (fsync of the marker and the folder), before the first change to the live folder, and notes whether it was already there (a mirror cut short) or the run is not indexed yet;
-   - each staged file replaces its local copy with one `os.replace` (skipped when the bytes are equal); installing the same whole file twice changes nothing, so a mirror cut short anywhere is repaired by the next one; then the deletions and `.skipped` markers of step 7;
+   - each staged file replaces its local copy with one `os.replace` (skipped when the bytes are equal); installing the same whole file twice changes nothing, so a mirror cut short anywhere is repaired by the next one; then the deletions of step 7 and `.hx/mirror-skips.json` of step 8;
    - writes `run.yaml` (with the host's `environment_id`) after the files, so a terminal status never shows next to stale predictions;
    - calls `index_run` when something changed, the marker was already there, or the run is not indexed yet: a replay that finds the marker always re-indexes, whatever it fetched;
    - writes `.mirror.json`, then removes the marker last: after any failure the next mirror fetches the same files again and re-indexes. A crash at any step leaves the marker, and `reindex_pending` repairs the index at the next hub start even when no new event ever comes for the run.
@@ -17567,7 +17704,7 @@ def test_a_file_deleted_after_the_listing_is_deleted_here(pair: tuple[Context, C
     assert "notes.md" not in json.loads((local / hub_mod.MANIFEST_NAME).read_text())
 
 
-def test_a_file_that_grew_too_big_leaves_a_skipped_marker(
+def test_a_file_that_grew_too_big_is_recorded_as_skipped(
     pair: tuple[Context, Context], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hub, remote = pair
@@ -17575,24 +17712,73 @@ def test_a_file_that_grew_too_big_leaves_a_skipped_marker(
     record = seed_run(remote, "r1", status=RunStatus.RUNNING)
     preds = remote.run_dir(record) / "predictions" / "predictions.jsonl"
     hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
-    local = hub.layout.run_dir("toy", "r1") / "predictions" / "predictions.jsonl"
-    assert local.is_file()
+    run = hub.layout.run_dir("toy", "r1")
+    local = run / "predictions" / "predictions.jsonl"
+    skips = run / hub_mod.SKIPS_FILE
+    assert local.is_file() and not skips.exists()
     preds.write_text("x" * 500 + "\n")  # small when listed ...
     listing = FakeClient(remote).list_files("r1")
     preds.write_bytes(b"y" * 5000)  # ... too big when fetched: 413
     client = StaleListing(remote, listing)
     hub_mod.mirror_run(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
-    marker = local.with_name("predictions.jsonl.skipped")
     assert not local.exists()
-    assert json.loads(marker.read_text()) == {"reason": "too big", "size": 5000, "max_bytes": 2000}
+    assert not local.with_name("predictions.jsonl.skipped").exists()  # nothing next to it
+    assert json.loads(skips.read_text()) == {
+        "predictions/predictions.jsonl": {"reason": "too big", "size": 5000, "max_bytes": 2000}
+    }
     assert hub.find_record("r1").artifacts == [
         Artifact(kind="remote_file", path="predictions/predictions.jsonl", host="gpu1", size=5000)
     ]
     hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
-    assert not local.exists() and marker.is_file()  # a fresh listing agrees
+    assert not local.exists()  # a fresh listing agrees
+    assert list(json.loads(skips.read_text())) == ["predictions/predictions.jsonl"]
     preds.write_text('{"id": "e1", "prediction": "small again"}\n')
     hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
-    assert local.read_bytes() == preds.read_bytes() and not marker.exists()
+    assert local.read_bytes() == preds.read_bytes() and not skips.exists()
+
+
+def test_a_host_file_named_like_a_marker_is_an_ordinary_file(
+    pair: tuple[Context, Context], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the host has predictions/x (it grows too big) and its own predictions/x.skipped
+    hub, remote = pair
+    monkeypatch.setattr(hub_mod, "MIRROR_MAX_BYTES", 2000)
+    record = seed_run(remote, "r1", status=RunStatus.RUNNING)
+    preds = remote.run_dir(record) / "predictions"
+    (preds / "x").write_text("small\n")
+    (preds / "x.skipped").write_text('{"note": "the user\'s own file"}\n')
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    run = hub.layout.run_dir("toy", "r1")
+    assert (run / "predictions" / "x").read_text() == "small\n"
+    (preds / "x").write_bytes(b"y" * 5000)  # too big now: the stale copy here must go
+    for _ in range(2):  # two repeated mirrors
+        hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+        assert not (run / "predictions" / "x").exists()
+        mirrored = (run / "predictions" / "x.skipped").read_bytes()
+        assert mirrored == (preds / "x.skipped").read_bytes()  # intact, never a marker
+        skips = json.loads((run / hub_mod.SKIPS_FILE).read_text())
+        assert skips == {"predictions/x": {"reason": "too big", "size": 5000, "max_bytes": 2000}}
+        manifest = json.loads((run / hub_mod.MANIFEST_NAME).read_text())
+        assert "predictions/x" not in manifest and "predictions/x.skipped" in manifest
+
+
+def test_the_mirror_never_fetches_the_reserved_folder(
+    pair: tuple[Context, Context], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # refused even if the allow-list took it: the hub never takes its own state from a host
+    hub, remote = pair
+    monkeypatch.setattr(hub_mod, "MIRROR_DIRS", (*hub_mod.MIRROR_DIRS, ".hx"))
+    record = seed_run(remote, "r1")
+    planted = remote.run_dir(record) / ".hx" / "mirror-skips.json"
+    planted.parent.mkdir()
+    planted.write_text('{"scores.jsonl": {"reason": "planted"}}')
+    client = FakeClient(remote)
+    hub_mod.mirror_run(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    run = hub.layout.run_dir("toy", "r1")
+    assert ".hx/mirror-skips.json" in [f.path for f in client.list_files("r1")]
+    assert not any(p.startswith(".hx") for p in client.fetched)
+    assert not (run / ".hx").exists() and (run / "scores.jsonl").is_file()
+    assert ".hx/mirror-skips.json" not in json.loads((run / hub_mod.MANIFEST_NAME).read_text())
 
 
 def test_a_listed_file_never_served_leaves_no_stale_copy(pair: tuple[Context, Context]) -> None:
@@ -17612,9 +17798,9 @@ def test_a_listed_file_never_served_leaves_no_stale_copy(pair: tuple[Context, Co
             return super().fetch_file(run_id, rel_path, dest, max_bytes=max_bytes, tail=tail)
 
     hub_mod.mirror_run(hub, Refusing(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
-    local = hub.layout.run_dir("toy", "r1") / "notes.md"
-    assert not local.exists()
-    note = json.loads(local.with_name("notes.md.skipped").read_text())
+    run = hub.layout.run_dir("toy", "r1")
+    assert not (run / "notes.md").exists()
+    note = json.loads((run / hub_mod.SKIPS_FILE).read_text())["notes.md"]
     assert note["reason"] == "not served" and note["size"] == notes.stat().st_size
 
 
@@ -17736,6 +17922,7 @@ from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.events import Event
 from hypothex.core.fsutil import atomic_write_text, read_yaml
 from hypothex.core.index import index_run
+from hypothex.core.layout import HX_DIR, reserved_run_path
 from hypothex.core.records import Artifact, RunRecord
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
 from hypothex.remote.client import EnvClient, RemoteFile
@@ -17752,8 +17939,9 @@ CLAIMS_DIR = ".claims"
 INDEX_PENDING = ".mirror-index-pending"
 """Written (durably) before a mirror first changes a run folder and removed after its index
 and manifest; seen again (a replay, or the next hub start), the index is redone."""
-SKIPPED_SUFFIX = ".skipped"
-"""``<file>.skipped``: ``{reason, size, max_bytes}`` in place of a file the hub does not hold."""
+SKIPS_FILE = f"{HX_DIR}/mirror-skips.json"
+"""``<run_dir>/.hx/mirror-skips.json``: ``{path: {reason, size, max_bytes}}`` for every listed file
+the hub does not hold. ``.hx/`` is reserved (``reserved_run_path``): no host path can address it."""
 ```
 
 In `src/hypothex/core/store.py`, add one field at the end of `class ProjectEntry`:
@@ -17992,7 +18180,9 @@ def mirror_run(
         skipped: dict[str, dict[str, object]] = {}
         unfetched: list[RemoteFile] = []
         for entry in client.list_files(run_id):
-            if entry.path == "run.yaml" or not wanted_path(entry.path):
+            if entry.path == "run.yaml" or reserved_run_path(entry.path):
+                continue  # .hx/ holds the hub's own state: never taken from a host
+            if not wanted_path(entry.path):
                 continue
             if _too_big(entry):
                 remote_only.append(_remote_artifact(entry, host))
@@ -18106,7 +18296,8 @@ def _install(
     mirror (or ``reindex_pending`` at hub start) re-indexes. Every file
     replaces its local copy whole (``os.replace``), so installing the same
     bytes again changes nothing. Files the host no longer serves are deleted
-    (``gone``) or replaced by a ``<file>.skipped`` marker (``skipped``).
+    (``gone``); skipped files are deleted too and listed in
+    ``.hx/mirror-skips.json`` (``skipped``), never marked next to the file.
 
     Returns
     -------
@@ -18123,23 +18314,11 @@ def _install(
             dst.parent.mkdir(parents=True, exist_ok=True)
             os.replace(path, dst)
             changed = True
-        changed |= _drop_local(dst.with_name(dst.name + SKIPPED_SUFFIX))
         manifest[entry.path] = [entry.size, entry.mtime_ns]
-    for rel in gone:
-        dst = run_dir / rel
-        changed |= _drop_local(dst)
-        changed |= _drop_local(dst.with_name(dst.name + SKIPPED_SUFFIX))
+    for rel in [*gone, *skipped]:
+        changed |= _drop_local(run_dir / rel)  # no stale copy of a file the hub does not hold
         manifest.pop(rel, None)
-    for rel, note in skipped.items():
-        dst = run_dir / rel
-        changed |= _drop_local(dst)
-        marker = dst.with_name(dst.name + SKIPPED_SUFFIX)
-        text = json.dumps(note, sort_keys=True)
-        if not (marker.is_file() and marker.read_text(encoding="utf-8") == text):
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(marker, text)
-            changed = True
-        manifest.pop(rel, None)
+    changed |= _write_skips(run_dir, skipped)
     if _read_local(ctx, record.project, record.run_id) != record:
         ctx.store.write_record(record)  # after the files: never terminal next to stale files
         changed = True
@@ -18148,6 +18327,30 @@ def _install(
     atomic_write_text(run_dir / MANIFEST_NAME, json.dumps(manifest, sort_keys=True))
     pending.unlink()  # last: the whole install is acknowledged
     return changed
+
+
+def _write_skips(run_dir: Path, skipped: dict[str, dict[str, object]]) -> bool:
+    """
+    Make ``.hx/mirror-skips.json`` list exactly this mirror's skipped files.
+
+    A skipped file is never in ``.mirror.json``, so every mirror decides it
+    again and the list is complete each time; with nothing skipped the file is
+    removed. Returns whether the file changed.
+    """
+    path = run_dir / SKIPS_FILE
+    text = json.dumps(skipped, sort_keys=True) if skipped else None
+    try:
+        old: str | None = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        old = None
+    if old == text:
+        return False
+    if text is None:
+        path.unlink()
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, text)
+    return True
 
 
 def reindex_pending(ctx: Context) -> list[str]:
@@ -18277,7 +18480,7 @@ def mirror_event(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_hub.py -v`
-Expected: 56 passed.
+Expected: 58 passed.
 
 Run: `uv run pytest tests/api tests/core -q`
 Expected: all pass (`ProjectEntry.remote_host` defaults to None, so phase 1 `project.json` files still load).
@@ -19119,6 +19322,7 @@ from hypothex.core.events import Event
 from hypothex.core.fsutil import atomic_write_text, read_yaml
 from hypothex.core.ids import utcnow
 from hypothex.core.index import index_run
+from hypothex.core.layout import HX_DIR, reserved_run_path
 from hypothex.core.records import ACTIVE_STATUSES, Artifact, RunRecord
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
 from hypothex.remote.bootstrap import BootstrapError
@@ -19688,7 +19892,7 @@ class Hub:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_hub.py -v`
-Expected: 74 passed in about 32 s. When an env server stops with an open WebSocket, uvicorn logs a `CancelledError ... timeout graceful shutdown exceeded` traceback. This is expected; the tests still pass.
+Expected: 76 passed in about 32 s. When an env server stops with an open WebSocket, uvicorn logs a `CancelledError ... timeout graceful shutdown exceeded` traceback. This is expected; the tests still pass.
 
 Run: `uv run python -m doctest src/hypothex/remote/hub.py && uv run ruff check src/hypothex/remote/hub.py tests/remote/test_hub.py && uv run ruff format --check src/hypothex/remote/hub.py tests/remote/test_hub.py && uv run ty check src/hypothex/remote/hub.py`
 Expected: clean.
@@ -20038,6 +20242,7 @@ from hypothex.core.events import Event
 from hypothex.core.fsutil import atomic_write_text, read_yaml
 from hypothex.core.ids import utcnow
 from hypothex.core.index import index_run
+from hypothex.core.layout import HX_DIR, reserved_run_path
 from hypothex.core.records import ACTIVE_STATUSES, Artifact, RunRecord
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
 from hypothex.remote.bootstrap import BootstrapError, ensure_server
@@ -20091,7 +20296,7 @@ with:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_hub.py -v`
-Expected: 79 passed in about 35 s.
+Expected: 81 passed in about 35 s.
 
 Run: `uv run python -m doctest src/hypothex/remote/hub.py && uv run ruff check src/hypothex/remote/hub.py src/hypothex/core/index.py tests/remote/test_hub.py && uv run ruff format --check src/hypothex/remote/hub.py src/hypothex/core/index.py tests/remote/test_hub.py && uv run ty check src/hypothex/remote/hub.py src/hypothex/core/index.py`
 Expected: clean.
@@ -25722,12 +25927,12 @@ git commit -m "feat(api): launch on a host and forward remote run actions with t
 - Consumes: the sweep engine `launch_sweep`, `extend_sweep`, `cancel_queued`, `list_sweeps`, `summarize_sweep`, `Launcher`, `parse_sweep_tag`, `SweepParam`, `SweepSpec`, `SweepSummary` (Tasks 37–41); `find_sweep`, `ssh_target`, `is_remote` (Task 42); `launch_on_host`, `remote_checkout`, `HostLaunchBody` (Task 45); `HubManager` (Task 44); `copy_from` (Task 6); `EnvClient.fetch_file` (Task 15); `Artifact` (records).
 - Each forwarded sweep run carries the deterministic command id the engine gives it (`run_command_id`, Task 40), so the host's receipts turn any repeat (a retried launch or extend, a run whose answer was lost, a run not mirrored yet) into the run that already exists. A remote run learns its sweep id from its `sweep:<owner8>:<id>` tag (`parse_sweep_tag`); the owner is the hub, so another hub's runs of a sweep with the same id are never counted. `POST /api/v1/sweeps` passes its `command_id` to `launch_sweep`, so a retry after a partial failure resumes the same sweep id (Task 40). The summary a host sweep route returns waits (up to `MIRROR_WAIT_SECONDS`) until the runs this call started are mirrored, since membership is derived from indexed runs.
 - Produces (in `hypothex.api.app`):
-  - `MIRROR_WAIT_SECONDS = 10.0`, `PULL_MAX_BYTES = 64 * 1024**3`
+  - `MIRROR_WAIT_SECONDS = 10.0`, `PULL_MAX_BYTES = 64 * 1024**3`, `PULL_WORK_DIR = "pulls"` (`<hub home>/pulls`: `copy_from`'s staging, transaction records `txn/<uuid>.json`, and backups `backup/<uuid>`, outside every artifact-addressable folder; Task 6)
   - `class SweepBody(ActionBody)`: `project`, `task`, `host`, `grid: list[SweepParam]`, `random`, `seeds` (≥1), `command` (≥1), `hypothesis`, `gpus`, `queue`, `commit`, `diff` (the last two are optional and additive: `hx sweep --host` sends the client checkout's commit and diff, so a hub without that checkout runs the client's code); `class SeedsBody(ActionBody)`: `seeds`; `class PullBody(ActionBody)`: `artifact: str = "checkpoint"`
   - Every run of a host sweep is pinned to one commit (spec 8A.4): the client's `commit` when sent, else the hub checkout's HEAD, read once per launch so all runs of one call run the same code.
   - `await_mirrored(ctx, run_ids, timeout=MIRROR_WAIT_SECONDS) -> None`
   - `PULL_REMOTE_PATH = re.compile(r"^/[A-Za-z0-9_.+@/=-]+$")`
-  - `pull_artifact(ctx, manager, run_id, artifact) -> Path`: artifact kind (latest of that kind) or path; a relative path is a file in the remote run folder (fetched over HTTP, any route; `..` refused); an absolute path is copied with `scp -s` (route `ssh` only) into `<hub run dir>/pulled/`, and only when it is the path of one of the run's own artifacts, matches `PULL_REMOTE_PATH`, has no `..` part, and has a file name. A user, an agent (MCP `pull_artifact`), or a tampered mirrored `run.yaml` can therefore never pass a shell string or `/` to `scp`. A mirrored run whose host is no longer configured raises `HostUnavailableError` (503) instead of returning a host path as if it were local.
+  - `pull_artifact(ctx, manager, run_id, artifact) -> Path`: artifact kind (latest of that kind) or path; a relative path is a file in the remote run folder (fetched over HTTP, any route; `..` refused); an absolute path is copied with `scp -s` (route `ssh` only) into `<hub run dir>/pulled/`, and only when it is the path of one of the run's own artifacts, matches `PULL_REMOTE_PATH`, has no `..` part, and has a file name. A destination whose name starts with `.hx-` (`PULL_RESERVED_PREFIX`) is refused on both paths. `copy_from` keeps its state in `<hub home>/pulls` (`work=`), so `pulled/` never holds Hypothex state and crash recovery reads only the hub home's records. A user, an agent (MCP `pull_artifact`), or a tampered mirrored `run.yaml` can therefore never pass a shell string or `/` to `scp`. A mirrored run whose host is no longer configured raises `HostUnavailableError` (503) instead of returning a host path as if it were local.
   - HTTP (contract 2): `POST /api/v1/sweeps` → `SweepSummary`; `GET /api/v1/sweeps/{project}/{id}` → `SweepSummary`; `GET /api/v1/sweeps/{id}` → `SweepSummary` (additive: finds the sweep in any project, for a CLI or MCP client on another machine that knows only the id, Tasks 49, 50); `GET /api/v1/projects/{project}/sweeps` → `[{id, created_at, n_runs, best}]`; `POST /api/v1/sweeps/{project}/{id}/cancel_queued` → `SweepSummary`; `POST /api/v1/sweeps/{project}/{id}/extend` `{seeds}` → `SweepSummary`; `POST /api/v1/runs/{id}/pull` `{artifact}` → `{local_path}`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -25957,12 +26162,38 @@ def test_pull_a_checkpoint_over_scp(
     local = Path(out["local_path"])
     assert local == ctx.layout.run_dir("toy", "b1") / "pulled" / "step_000100.pt"
     assert local.read_bytes() == b"weights"
+    assert sorted(p.name for p in local.parent.iterdir()) == ["step_000100.pt"]  # no pull state
+    assert list((home / "pulls" / "txn").iterdir()) == []  # the records live in the hub home
+
+
+@pytest.mark.parametrize(
+    "path", ["/scratch/.hx-pull-0123456789abcdef0123456789abcdef.json", "/scratch/.hx-x"]
+)
+def test_pull_refuses_a_reserved_destination_name(
+    home: Path,
+    ctx: Context,
+    toy_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    ctx.register_project(toy_repo)
+    _box_run(ctx, home, "b5", path)
+    monkeypatch.setenv("HYPOTHEX_SCP", str(write_fake_scp(tmp_path)))
+    monkeypatch.setattr(
+        HubManager, "host_for_environment", lambda self, eid: "box" if eid == "env-box" else None
+    )
+    app = create_app(home, background_repair=False, hub=False)
+    with TestClient(app, base_url=BASE) as client:
+        bad = client.post("/api/v1/runs/b5/pull", json={"artifact": "checkpoint"})
+    assert bad.status_code == 400 and "reserved" in bad.json()["error"]
+    assert not (ctx.layout.run_dir("toy", "b5") / "pulled").exists()
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/api/test_sweeps_pull.py -q`
-Expected: `15 failed` — the sweep and pull routes answer 404/405.
+Expected: `18 failed` — the sweep and pull routes answer 404/405.
 
 - [ ] **Step 3: Implement**
 
@@ -25987,7 +26218,7 @@ from hypothex.core.sweeps import (
     stop_if_queued,
     summarize_sweep,
 )
-from hypothex.remote.ssh import SshError, copy_from
+from hypothex.remote.ssh import PULL_RESERVED_PREFIX, SshError, copy_from
 ```
 
 (merge `PurePosixPath` into the existing `pathlib` import, `Artifact` into the existing `records` import, and the `sweeps` names into the import Task 43 added), and add to the `hypothex.mcp.server` import list: `find_sweep, ssh_target`.
@@ -25999,6 +26230,8 @@ MIRROR_WAIT_SECONDS = 10.0
 PULL_MAX_BYTES = 64 * 1024**3
 PULL_REMOTE_PATH = re.compile(r"^/[A-Za-z0-9_.+@/=-]+$")
 """An absolute host path that ``pull`` may hand to ``scp``: shell-safe characters only."""
+PULL_WORK_DIR = "pulls"
+"""``<hub home>/pulls``: ``copy_from``'s staging, transaction records, and backups (Task 6)."""
 ```
 
 (add `import re` to the module imports if Task 44 has not.)
@@ -26087,7 +26320,8 @@ def pull_artifact(ctx: Context, manager: HubManager, run_id: str, artifact: str)
     RunError
         Unknown artifact, a path outside the run folder, a missing file, an
         absolute path that is not one of the run's artifacts or is not
-        shell-safe, or an absolute path on a host that is not reached over ssh.
+        shell-safe, a destination name starting with ``.hx-``, or an absolute
+        path on a host that is not reached over ssh.
     HostUnavailableError
         The run is mirrored from a host that is no longer configured.
     """
@@ -26107,6 +26341,10 @@ def pull_artifact(ctx: Context, manager: HubManager, run_id: str, artifact: str)
     if match is None and artifact.startswith("/"):
         raise RunError(f"{artifact!r} is not an artifact of run {run_id}")
     remote_path = match.path if match is not None else artifact
+    if PurePosixPath(remote_path).name.startswith(PULL_RESERVED_PREFIX):
+        raise RunError(
+            f"{remote_path!r}: names starting with {PULL_RESERVED_PREFIX!r} are reserved"
+        )
     if not remote_path.startswith("/"):
         rel = PurePosixPath(remote_path)
         if ".." in rel.parts:
@@ -26131,8 +26369,9 @@ def pull_artifact(ctx: Context, manager: HubManager, run_id: str, artifact: str)
         )
     dest = pulled / name
     dest.parent.mkdir(parents=True, exist_ok=True)
+    work = ctx.layout.home / PULL_WORK_DIR  # pull state never lives next to `dest`
     try:
-        copy_from(ssh_target(spec), remote_path, dest)  # scp -s: SFTP, no remote shell
+        copy_from(ssh_target(spec), remote_path, dest, work=work)  # scp -s: no remote shell
     except SshError as exc:
         raise RunError(str(exc)) from exc
     return dest
@@ -26304,7 +26543,7 @@ Add a sweeps section after the run routes (before `# compare & datasets`):
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/api/test_sweeps_pull.py -q`
-Expected: `16 passed`.
+Expected: `18 passed`.
 
 - [ ] **Step 5: Lint, format, type-check, full suite**
 
@@ -32800,7 +33039,7 @@ Inputs: part files B1–B10 (`.superpowers/plan-parts/p2/`), the contract, and s
 - Mirror bandwidth: `logs/*` tails (8 MiB), `offset` appends for append-only files (Tasks 14, 15, 34), one mirror per run per replay batch (Task 35).
 - Hub lifecycle: one `Hub` for the server's life; `HubManager` changes one host through `Hub.add_host`/`remove_host`/`connect` (Tasks 35, 44); `Hub.stop` waits for shielded threads (Task 35); `Index.set_cursor` is monotonic (Task 32); sessions close their `EnvClient`s (Task 35); disconnected hosts persist in `<home>/hosts_disabled.json`; a bad `environments.yaml` no longer stops `hx serve` (Task 44).
 - Runs of environments no host serves: stop/rerun/reinfer/reeval answer 503 (`forward(remote_only=True)`), `stop_run` never signals another environment's pid (Task 45); `pull` of such a run is 503 (Task 46).
-- `pull` safety: `copy_to`/`copy_from` use `scp -s` and refuse unsafe paths, `..`, and paths without a file name (Task 6); `pull_artifact` copies an absolute path only when it is one of the run's artifacts and matches `^/[A-Za-z0-9_.+@/=-]+$` (Task 46).
+- `pull` safety: `copy_to`/`copy_from` use `scp -s` and refuse unsafe paths, `..`, paths without a file name, and destinations named `.hx-*`; their state lives in `<hub home>/pulls`, never next to the destination (Task 6); `pull_artifact` copies an absolute path only when it is one of the run's artifacts and matches `^/[A-Za-z0-9_.+@/=-]+$` (Task 46).
 - `hx_lock`: stale locks are broken only under `DIR.break` after re-reading the owner, by rename (Task 8); new test Task 11 `test_two_hubs_break_a_dead_lock_once`.
 - GPU launch without the host lock during `prepare_run`; GPUs taken meanwhile fail the new run (Task 21).
 - Reruns keep `gpus_requested` (queued when > 0) and the run's saved SLURM settings (`slurm.json`); env servers remember the last `slurm` block a launch sent (`slurm_defaults.json`) (Task 28).
@@ -32881,3 +33120,11 @@ Verified in a scratch worktree of `phase-2` (HEAD `67866f9`), built from this pl
 - Also: the contract's files-route row no longer lists `offset` (dropped in round 2); Task 26 commits `tests/conftest.py`.
 
 Verified in a scratch worktree of `phase-2` (HEAD `ab4c88f`), built from this plan with scripts (no Docker, no real host, `~/.ssh` untouched): Tasks 1–51 applied in order, then `uv run ruff format` + `ruff check --fix` (import merging and the line wrapping of code the round 2 build also rewrapped; every block this round added or changed is already formatted), `ruff check` clean, `ruff format --check` clean, `ty check src` clean, `uv run pytest -q`: `1227 passed, 3 skipped` (round 2: 1169 passed; +58 new tests; the skips are the three `flock`-mode lock tests on macOS). Per file: `test_config.py` 87, `test_ssh.py` 52, `test_slurm.py` 103, `test_hub.py` 79, `test_sweeps.py` 90, `test_hosts.py` 11. Not executed here: Tasks 52–59 (docs, Docker, cost on leaderboards); this round changed Task 52's docs text and Task 56's `slurm.conf` by one line.
+
+**Review round 4.** Codex review 4 (two blockers, one note) and the controller ruling: Hypothex-internal state lives in reserved locations that remote and artifact paths can never address. Superseded code and tests are removed, not kept beside the new ones:
+
+- 1 (mirror skip markers in the mirrored tree): the `<file>.skipped` markers and `SKIPPED_SUFFIX` are gone. `HX_DIR = ".hx"` and `reserved_run_path` (Task 14, `hypothex.core.layout`) name the reserved run-folder folder; the env files route answers 404 for any path whose first component is `.hx` (`open_run_path`), and `mirror_run` skips every listed `.hx/` path before the allow-list (Task 34; Tasks 35 and 36 carry the import in their `hub.py` import blocks). Skips are written to `<run_dir>/.hx/mirror-skips.json` (`SKIPS_FILE`, `_write_skips`): exactly this mirror's skipped files, removed when none. A host file named `predictions/x.skipped` is now an ordinary mirrored file. Tests: Task 14 `test_the_reserved_hx_folder_is_never_served`; Task 34 `test_a_host_file_named_like_a_marker_is_an_ordinary_file` (host `predictions/x` grows too big next to a normal `predictions/x.skipped`; across two repeated mirrors `x.skipped` stays intact and in `.mirror.json`, the skip is in `.hx/mirror-skips.json`, `x`'s stale copy is gone; the old code overwrote `x.skipped` with its marker) and `test_the_mirror_never_fetches_the_reserved_folder` (refused even with `.hx` on the allow-list); the two round 3 skip tests now read `.hx/mirror-skips.json` (`test_a_file_that_grew_too_big_is_recorded_as_skipped`, `test_a_listed_file_never_served_leaves_no_stale_copy`).
+- 2 (pull records next to the destination): `copy_from(..., work=)` (Task 6) keeps all of its state under `work`, which the hub sets to `<hub home>/pulls` (`PULL_WORK_DIR`, Task 46): staging `stage/pull-*`, transaction records `txn/<uuid>.json` (`{txn, dest}`, `dest` absolute, `O_EXCL`, fsync), backups `backup/<uuid>`. `_recover_swaps(work)` reads only `work/txn/`; `PULL_TXN_PREFIX`, `_TXN_RECORD`, and `_plain_name` are gone, and the destination folder never holds Hypothex state (not even a staging folder). `copy_from` refuses a destination named `.hx-*` (`PULL_RESERVED_PREFIX`), and `pull_artifact` refuses such a name on both its HTTP and scp paths (400). Tests: Task 6 `test_recovery_never_reads_a_look_alike_record_in_a_destination` (two downloaded `.hx-pull-<32hex>.json` files with matching fields and their `.old` folders, one whose `dest` is missing and one whose `dest` exists, survive a file pull and a folder swap in that folder), `test_a_pull_into_a_reserved_name_is_refused` (2 cases); the crash tests now find the record and backup in `work/txn` and `work/backup` and still recover (`test_a_folder_swap_cut_short_is_recovered`, `test_a_swap_that_crashed_before_its_first_rename_changes_nothing`); every `copy_from` test passes `work`. Task 46 `test_pull_refuses_a_reserved_destination_name` (2 cases), and `test_pull_a_checkpoint_over_scp` checks `pulled/` holds only the file and `<hub home>/pulls/txn` is empty. Task 46 Step 2 now says `18 failed` (it said 15 for 16 tests).
+- Note (frontend plan): the run page's sweep crumb links only when the record's `sweep:<owner8>:<id>` tag names this hub (`sweepCrumb`, frontend Tasks 23 and 27); other runs show the sweep id as plain text. Contract: "Changes after review round 4".
+
+Verified in a scratch worktree of `phase-2` (HEAD `0c4c31f`), built from this plan with the round 3 scripts (two updated for the new Task 6 import line and Task 14's `layout.py` block; no Docker, no real host, `~/.ssh` untouched): Tasks 1–51 applied in order, then `uv run ruff format` + `ruff check --fix` (the same import merging and line wrapping as round 3; every block this round added or changed is already formatted), `ruff check` clean, `ruff format --check` clean, `ty check src` clean, `uv run pytest -q`: `1235 passed, 3 skipped` (round 3: 1227; +8 new tests; the skips are the three `flock`-mode lock tests on macOS). Per file: `test_ssh.py` 55, `test_env_routes.py` 20, `test_hub.py` 81, `test_sweeps_pull.py` 18. Frontend: a scratch copy of `ui/` with the frontend plan applied, `tsc --noEmit` clean (src and e2e), `bun test` 716 pass (+2: `remote.test.ts` 14, `RunRemote.test.tsx` 9) and the same 2 failures as before this change (the `tokens.css` mockup copy and the generated `types.ts` header, which the scratch copy cannot reproduce). Not executed here: Tasks 52–59.

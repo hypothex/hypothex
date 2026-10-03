@@ -11375,6 +11375,7 @@ What Task 28's specs rely on:
   - `interface LostReason { title: string; tooltip: string; parts: string[] }`, `lostReason(record: RunRecord, reason?: string | null): LostReason` (`reason`: the `run.lost` event's reason when the tab saw it, `useLostReason` from Task 4; it comes first in `parts`; without it the words stay neutral)
   - `stateTitle(label: string, phase: RunPhase, record: RunRecord, host: HostRow | null): string | null`
   - `sweepHref(project: string, sweepId: string): string` (re-export from `SweepModel`), `costNote(cost: CostTotals): string`
+  - `interface SweepCrumb { id: string; href: string | null; why: string | null }`, `SWEEP_OWNER_CHARS = 8`, `sweepCrumb(record: Pick<RunRecord, "project" | "sweep_id" | "tags">, hubEnvironmentId: string | null): SweepCrumb | null` (the run page's sweep crumb: a link only when the run's owner-qualified tag `sweep:<owner8>:<sweep_id>` names this hub, `owner8` = the first 8 characters of the hub's environment id; a run of another hub's sweep (a shared host) or without the tag gets the id as plain text with `why` for the tooltip; while the hub's id is unknown, plain text and `why` null; null for a run outside a sweep)
 - Produces (in `ui/test/pages/remoteFixtures.ts`, used by Tasks 24-27): `NOW`, `GPU1`, `MCCLEARY`, `DGX`, `QUEUED_ID`, `RUNNING_ID`, `STALE_ID`, `LOST_ID`, `PENDING_ID`, `queuedRecord`, `runningRecord`, `staleRecord`, `lostRecord`, `pendingRecord`, `remoteDetail`.
 
 - [ ] **Step 1: Write the shared test fixtures**
@@ -11550,6 +11551,7 @@ import {
   secondsSince,
   shortGpuName,
   stateTitle,
+  sweepCrumb,
   sweepHref,
   visibleDevices,
 } from "../../src/pages/components/remote";
@@ -11700,6 +11702,25 @@ test("sweepHref encodes; costNote shows GPU hours and API dollars", () => {
   expect(sweepHref("my proj", "s-7f3a")).toBe("/s/my%20proj/s-7f3a");
   expect(costNote(COST)).toBe("3.50 GPU h, API $0.42");
 });
+
+test("sweepCrumb links only a sweep this hub owns (its owner-qualified tag)", () => {
+  const hub = "0a1b2c3d4e5f60718293a4b5c6d7e8f9";
+  const mine = lostRecord({ tags: ["best", "sweep:0a1b2c3d:s-7f3a"] });
+  expect(sweepCrumb(mine, hub)).toEqual({ id: "s-7f3a", href: "/s/toy-classifier/s-7f3a", why: null });
+  // a shared host: another hub launched this sweep, so this hub has no page for it
+  expect(sweepCrumb(lostRecord({ tags: ["sweep:ffffffff:s-7f3a"] }), hub)).toEqual({
+    id: "s-7f3a",
+    href: null,
+    why: "sweep of another hub (ffffffff)",
+  });
+  // only the tag of the run's own sweep id counts; none at all is plain text too
+  const other = { id: "s-7f3a", href: null, why: "no sweep tag on this run" };
+  expect(sweepCrumb(lostRecord({ tags: ["sweep:0a1b2c3d:s-0000"] }), hub)).toEqual(other);
+  expect(sweepCrumb(lostRecord({ tags: [] }), hub)).toEqual(other);
+  // the hub's id not known yet (descriptor loading or failed): plain text, no reason
+  expect(sweepCrumb(mine, null)).toEqual({ id: "s-7f3a", href: null, why: null });
+  expect(sweepCrumb(runningRecord(), hub)).toBeNull();
+});
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -11721,6 +11742,7 @@ Create `ui/src/pages/components/remote.ts`:
  */
 import { fmtClock, fmtTime, fmtUsd, parseTime } from "./format";
 import { hostRowForRun } from "./HostsPanel";
+import { sweepHref } from "./SweepModel";
 import type { CostTotals, GpuInfo, HostRow, RunDetail, RunRecord } from "./types";
 
 /**
@@ -11872,12 +11894,54 @@ export { sweepHref } from "./SweepModel";
 export function costNote(cost: CostTotals): string {
   return `${cost.gpu_hours.toFixed(2)} GPU h, API ${fmtUsd(cost.api_usd)}`;
 }
+
+/** Characters of the hub's environment id a sweep tag names (the backend's `SWEEP_OWNER_CHARS`). */
+export const SWEEP_OWNER_CHARS = 8;
+const OWNED_SWEEP_TAG = /^sweep:([^:]+):(.+)$/;
+
+/** The run page's sweep crumb. */
+export interface SweepCrumb {
+  id: string;
+  /** `/s/<project>/<id>` when this hub owns the sweep; null: plain text. */
+  href: string | null;
+  /** Why there is no link (the tooltip); null with a link or while the hub's id is unknown. */
+  why: string | null;
+}
+
+/**
+ * The crumb for a run's sweep. Sweep ids are per hub, and one host can serve two hubs, so
+ * the link is made only when the run's owner-qualified tag `sweep:<owner8>:<sweep_id>`
+ * names this hub (`owner8`: the first 8 characters of its environment id). A run of another
+ * hub's sweep, or one without that tag, shows the id as plain text: this hub has no such
+ * sweep page, or a different sweep under the same id.
+ */
+export function sweepCrumb(
+  record: Pick<RunRecord, "project" | "sweep_id" | "tags">,
+  hubEnvironmentId: string | null,
+): SweepCrumb | null {
+  const id = record.sweep_id;
+  if (!id) return null;
+  if (hubEnvironmentId === null) return { id, href: null, why: null };
+  let owner: string | null = null;
+  for (const tag of record.tags) {
+    const m = OWNED_SWEEP_TAG.exec(tag);
+    if (m && m[2] === id) {
+      owner = m[1] ?? null;
+      break;
+    }
+  }
+  if (owner === null) return { id, href: null, why: "no sweep tag on this run" };
+  if (owner !== hubEnvironmentId.slice(0, SWEEP_OWNER_CHARS)) {
+    return { id, href: null, why: `sweep of another hub (${owner})` };
+  }
+  return { id, href: sweepHref(record.project, id), why: null };
+}
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `bun test test/pages/remote.test.ts && bun run typecheck`
-Expected: `13 pass`, `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `14 pass`, `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 6: Commit (repo root)**
 
@@ -13290,8 +13354,8 @@ git commit -m "feat(ui): run actions for queued, stale and lost remote runs"
 - Test: `ui/test/pages/RunRemote.test.tsx`
 
 **Interfaces:**
-- Consumes: everything from Tasks 23-26 (`runPhase`, `runHostRow`, `hostLabel`, `queuedRunsQuery`, `queueRows`); `useHosts(refetchMs, enabled)`, `useAllRuns(query, enabled)`, `HOSTS_REFETCH_MS` (Task 3); `useLostReason`, and `noteLostReasons`/`clearLostReasons` in the test (Task 4).
-- Produces: `RunPage` (same props as phase 1b: `{ runId, log?, example? }`). Regions in order: `[log]`, `Queue` (queued only), kind panels (not while queued or pending), `Where`, `Placement` (remote only: `host_state` not null), `Scores`, `Notes`. Crumb links the run's sweep (`sweep <id>` → `/s/<project>/<id>`). `GET /api/v1/hosts` (through `useHosts`, so a failed refetch keeps the last list) only for remote runs; the host row is matched by `environment_id`; the queued runs of the run's environment (`useAllRuns(queuedRunsQuery(environment_id))`, complete, with the page's own run kept by `queueRows`) only for queued runs.
+- Consumes: everything from Tasks 23-26 (`runPhase`, `runHostRow`, `hostLabel`, `sweepCrumb`, `queuedRunsQuery`, `queueRows`); `api.environment()` (exists); `useHosts(refetchMs, enabled)`, `useAllRuns(query, enabled)`, `HOSTS_REFETCH_MS` (Task 3); `useLostReason`, and `noteLostReasons`/`clearLostReasons` in the test (Task 4).
+- Produces: `RunPage` (same props as phase 1b: `{ runId, log?, example? }`). Regions in order: `[log]`, `Queue` (queued only), kind panels (not while queued or pending), `Where`, `Placement` (remote only: `host_state` not null), `Scores`, `Notes`. Crumb shows the run's sweep (`sweepCrumb`, Task 23): a link `sweep <id>` → `/s/<project>/<id>` only when the run's tag `sweep:<owner8>:<id>` names this hub (`owner8` = the first 8 characters of the hub's environment id, from `api.environment()`, key `["environment"]`, read only for a run with a `sweep_id`); a run of another hub's sweep shows `sweep <id>` as plain text with the reason as its tooltip. `GET /api/v1/hosts` (through `useHosts`, so a failed refetch keeps the last list) only for remote runs; the host row is matched by `environment_id`; the queued runs of the run's environment (`useAllRuns(queuedRunsQuery(environment_id))`, complete, with the page's own run kept by `queueRows`) only for queued runs.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -13330,6 +13394,9 @@ afterEach(() => {
 
 const registry = fakeRegistry(["curves"]);
 const HOSTS_ROUTE = "GET /api/v1/hosts";
+const ENV_ROUTE = "GET /.well-known/hypothex/environment";
+/** This hub's descriptor: its id starts with `0a1b2c3d`, the owner in `sweep:0a1b2c3d:s-7f3a`. */
+const HUB_ENV = { environment_id: "0a1b2c3d4e5f60718293a4b5c6d7e8f9", label: "hub", hx_version: "0.5.0" };
 const QUEUE_URL = "/api/v1/runs?status=queued&environment_id=env-gpu1&limit=1000";
 const QUEUE_ROUTE = `GET ${QUEUE_URL}`;
 
@@ -13458,17 +13525,30 @@ test("opened while the hosts list fails: stale, the machine's hostname, Reconnec
 });
 
 test("a lost SLURM run: reason bar, cost, sweep link, Rerun first", async () => {
-  mockApi({ [`GET /api/v1/runs/${LOST_ID}`]: remoteDetail(lostRecord()), [HOSTS_ROUTE]: HOSTS });
+  const record = lostRecord({ tags: ["sweep:0a1b2c3d:s-7f3a"] });
+  mockApi({ [`GET /api/v1/runs/${LOST_ID}`]: remoteDetail(record), [HOSTS_ROUTE]: HOSTS, [ENV_ROUTE]: HUB_ENV });
   renderWithClient(<RunPage runId={LOST_ID} />, { registry });
   expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("aug long run seed 2: lost at 02:14");
   expect(screen.getByRole("status").querySelector("b")?.textContent).toBe("SLURM job 4471023 lost");
   expect(statValues()).toEqual(["52m 27s", "$2.17"]);
   expect(regionNames()).toEqual(["a Where", "b Placement", "c Scores", "d Notes"]);
-  expect(screen.getByRole("link", { name: "sweep s-7f3a" }).getAttribute("href")).toBe("/s/toy-classifier/s-7f3a");
+  const link = await screen.findByRole("link", { name: "sweep s-7f3a" });
+  expect(link.getAttribute("href")).toBe("/s/toy-classifier/s-7f3a");
   expect(screen.getByRole("button", { name: "Rerun" }).className).toBe("btn primary");
   await waitFor(() =>
     expect(screen.getByRole("region", { name: "b Placement" }).textContent).toContain("r814u05n01"),
   );
+});
+
+test("a run of another hub's sweep names the sweep without a link", async () => {
+  // a host shared by two hubs: the run's tag names the other hub (ffffffff), whose sweep
+  // s-7f3a this hub has no page for (or has a different sweep under that id)
+  const record = lostRecord({ tags: ["sweep:ffffffff:s-7f3a"] });
+  mockApi({ [`GET /api/v1/runs/${LOST_ID}`]: remoteDetail(record), [HOSTS_ROUTE]: HOSTS, [ENV_ROUTE]: HUB_ENV });
+  renderWithClient(<RunPage runId={LOST_ID} />, { registry });
+  const crumb = await screen.findByTitle("sweep of another hub (ffffffff)");
+  expect(crumb.textContent).toBe("sweep s-7f3a");
+  expect(screen.queryByRole("link", { name: "sweep s-7f3a" })).toBeNull();
 });
 
 test("a lost run shows the reason its mirrored run.lost event carried", async () => {
@@ -13495,7 +13575,7 @@ test("a lost run shows the reason its mirrored run.lost event carried", async ()
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `bun test test/pages/RunRemote.test.tsx`
-Expected: FAIL, 8 fail. The first queued test reports the h1 as `lr 1e-3 with beam 1` instead of `lr 1e-3 with beam 1: queued 2nd on gpu1`; the long-queue test times out in `waitFor` (no `.queue-t` rows: the phase 1b page has no Queue panel); the running test fails on the stat values (`["1h 52m"]`); the three stale tests and the two lost tests fail on their titles.
+Expected: FAIL, 9 fail. The first queued test reports the h1 as `lr 1e-3 with beam 1` instead of `lr 1e-3 with beam 1: queued 2nd on gpu1`; the long-queue test times out in `waitFor` (no `.queue-t` rows: the phase 1b page has no Queue panel); the running test fails on the stat values (`["1h 52m"]`); the three stale tests and the two lost tests fail on their titles; the other hub's sweep test finds no crumb with that title (the phase 1b page has no sweep crumb).
 
 - [ ] **Step 3: Rewrite `Run.tsx`**
 
@@ -13522,7 +13602,7 @@ import { Notes } from "./components/Notes";
 import { Placement, placementRows } from "./components/Placement";
 import { ErrorBox, Loading } from "./components/QueryState";
 import { QueuePanel, queueRows, queuedRunsQuery } from "./components/QueuePanel";
-import { hostLabel, runHostRow, runPhase, stateTitle, sweepHref } from "./components/remote";
+import { hostLabel, runHostRow, runPhase, stateTitle, sweepCrumb } from "./components/remote";
 import { remoteStats } from "./components/remoteStats";
 import { RemoteStyles } from "./components/remoteStyles";
 import { RunActions } from "./components/RunActions";
@@ -13578,6 +13658,14 @@ export function RunPage({ runId, log, example }: RunPageProps) {
   const hosts = useHosts(HOSTS_REFETCH_MS, remote);
   // the whole queue of the run's host (every page), never the newest page of all hosts
   const queued = useAllRuns(queuedRunsQuery(record?.environment_id ?? ""), phase === "queued");
+  // the hub's descriptor (the Overview's key): its id says whose sweep a run's tag names
+  const hubEnv = useQuery({
+    queryKey: ["environment"],
+    enabled: Boolean(record?.sweep_id),
+    queryFn: ({ signal }) => api.environment(signal),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const hubEnvId = hubEnv.data?.environment_id;
 
   if (run.error) {
     return (
@@ -13612,6 +13700,7 @@ export function RunPage({ runId, log, example }: RunPageProps) {
     ? remoteStats(record, phase, host, now)
     : [...runStats(detail, primary, row, now), ...remoteStats(record, phase, host, now)];
   const showKind = hasTask && !waiting;
+  const sweep = sweepCrumb(record, typeof hubEnvId === "string" ? hubEnvId : null);
 
   let next = 0;
   const logLetter = stream ? panelLetter(next++) : "";
@@ -13636,9 +13725,13 @@ export function RunPage({ runId, log, example }: RunPageProps) {
             <span className="sep">/</span>
           </>
         ) : null}
-        {record.sweep_id ? (
+        {sweep ? (
           <>
-            <AppLink href={sweepHref(project, record.sweep_id)}>{`sweep ${record.sweep_id}`}</AppLink>
+            {sweep.href ? (
+              <AppLink href={sweep.href}>{`sweep ${sweep.id}`}</AppLink>
+            ) : (
+              <span title={sweep.why ?? undefined}>{`sweep ${sweep.id}`}</span>
+            )}
             <span className="sep">/</span>
           </>
         ) : null}
@@ -13728,7 +13821,7 @@ export function RunPage({ runId, log, example }: RunPageProps) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/pages/RunRemote.test.tsx test/pages/Run.test.tsx && bun run typecheck`
-Expected: `RunRemote.test.tsx` 8 pass; `Run.test.tsx` (phase 1b, unchanged) passes; `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `RunRemote.test.tsx` 9 pass; `Run.test.tsx` (phase 1b, unchanged) passes; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Run the whole unit suite**
 
@@ -14926,7 +15019,7 @@ This plan was assembled from five group drafts (F1–F5, now Groups 1–5). Wher
 8. **Missing contract piece: "Rerun sweep".** Contract 4 opens the Launch dialog from the Task page "New run" and from a sweep page "Rerun sweep"; no draft built the second. Task 22 adds it: `Rerun sweep` in the sweep actions opens the dialog prefilled from the best cell's latest run (its template, params and vars, GPUs per run, the sweep's host, the next seeds).
 9. **Sweep links.** Group 4 flagged that `isAppPath` did not accept `/s/`, so plain sweep links inside panel bodies would reload the page. Task 21 adds `s` to it, with its test. A "Sweep" tab in the header (`screenOf`, recent targets) is left out: contract 4 does not list it (follow-up).
 10. **Real hosts.** Group 2's visual check ran `uv run hx demo --with-hosts` in the default home and no `hx serve`: it would have written into `~/.hypothex`, and a hub started there would connect to the hosts in the user's own `environments.yaml`. Task 7 Step 5 now uses `/tmp/hx-f2`, `HYPOTHEX_SSH=false HYPOTHEX_SCP=false`, a random port and `HX_API` (after an identity check). Task 2's type generation also sets `HYPOTHEX_SSH=false HYPOTHEX_SCP=false` on its empty temp home. Every such step passes `--home` and the SSH variables inline on the `hx` command line and runs as one shell command (an earlier `export` does not survive between agent shell calls), and waits are bounded. Playwright never reuses a server on either port, every test checks the hub's identity first, and `serve-demo.ts` stops the hub before the rest of its process group (Task 28).
-11. **Review Focus tests and counts.** Task 2 `27 pass` (gpus/queue test; `createSweep` test dropped with the function); Task 3 `18 pass` (`keepLastKnown`, `fetchAllRuns`); Task 4 `77 pass` in `test/api` (client and types 27, events 24 + 5 = 29, queries 18, lostReasons 3); Task 5 `19 pass`, Task 6 `28 pass` (host matching, `remoteRows`, `longStale`, `staleBannerHours`); Task 7 `7 pass` (hub-only row, banner, banner threshold, cost today); Task 9 `16 pass` (two hubs test: bootstrapping with no message, then `error` with the lock message; `stateReason` appends `HostState.message` to `installing hx on <host>`); Task 10 `20 pass` (SLURM values, pinned commit, partial retry); Task 11 `12 pass` (blank SLURM body, stale carry, project not path); Task 12 dialog `20 pass` (partial-retry preview and CLI) and `test/launch` total `83`; Tasks 14–21 add 70 sweep tests (sweepModel 18, sweepStats 14, sweepTable 6, sweepRuns 5); Task 21 `31 pass` for page, router, links and Task page; Task 23 `13 pass` (run.lost reason); Task 24 `8 pass` (clock test) plus one leaderboard cost test; Task 25 `19 pass` (banner with the reason); Task 26 `6 pass`; Task 27 `8 pass` (two tunnel tests, long queue, lost reason from the event stream).
+11. **Review Focus tests and counts.** Task 2 `27 pass` (gpus/queue test; `createSweep` test dropped with the function); Task 3 `18 pass` (`keepLastKnown`, `fetchAllRuns`); Task 4 `77 pass` in `test/api` (client and types 27, events 24 + 5 = 29, queries 18, lostReasons 3); Task 5 `19 pass`, Task 6 `28 pass` (host matching, `remoteRows`, `longStale`, `staleBannerHours`); Task 7 `7 pass` (hub-only row, banner, banner threshold, cost today); Task 9 `16 pass` (two hubs test: bootstrapping with no message, then `error` with the lock message; `stateReason` appends `HostState.message` to `installing hx on <host>`); Task 10 `20 pass` (SLURM values, pinned commit, partial retry); Task 11 `12 pass` (blank SLURM body, stale carry, project not path); Task 12 dialog `20 pass` (partial-retry preview and CLI) and `test/launch` total `83`; Tasks 14–21 add 70 sweep tests (sweepModel 18, sweepStats 14, sweepTable 6, sweepRuns 5); Task 21 `31 pass` for page, router, links and Task page; Task 23 `14 pass` (run.lost reason; sweep crumb owner, review round 4); Task 24 `8 pass` (clock test) plus one leaderboard cost test; Task 25 `19 pass` (banner with the reason); Task 26 `6 pass`; Task 27 `9 pass` (two tunnel tests, long queue, lost reason from the event stream, another hub's sweep).
 12. **Docs.** No draft updated `docs/ui.rst`; Task 29 documents the Hosts panel, Launch dialog, Sweep page and remote run states, and how the `hosts-*` e2e projects stay away from real hosts, with a test in `tests/test_docs_ui.py`.
 13. **Known gaps outside the contract** (follow-ups, not built): the mockup's SLURM "oldest pending" and "fair-share", bootstrap step bar, run-page `est. start`, `Move up`, `Move host`, `Mark lost` and `Resume` have no contract route or field; `api.pull` (Task 2) has no UI because contract 4 lists none; the stale bar shows `HostState.message` instead of the mockup's retry count. `POST /api/v1/sweeps` and `POST /api/v1/hosts/{host}/disconnect` have no client function (no screen uses them; the `types.ts` test still checks the routes). The Launch dialog's SLURM fields start blank (blank = the host's defaults) instead of prefilled from `SlurmDefaults`, which `HostRow` does not carry.
 14. **Event names.** Group 1's tests used `host.state_changed`; the backend plan emits `host.state`. The tests now use `host.state`; `keysForEvent` maps every `host.*` type the same way, as contract 4 says.
@@ -14935,3 +15028,4 @@ This plan was assembled from five group drafts (F1–F5, now Groups 1–5). Wher
 17. **Codex review 1 (frontend items).** Item 3 / isolation: both Playwright web servers use `reuseExistingServer: false`; `serve-demo.ts` writes a fresh `environment.json` (new `environment_id`, label `hx-e2e-demo` / `hx-e2e-hosts`) and an auto fixture checks the hub's descriptor against it before every test, so `live.spec.ts` notes and `launch.spec.ts` launches cannot reach another server (Task 28). Shutdown order (non-blocking note): Playwright sends SIGTERM (`gracefulShutdown`); `serve-demo.ts` runs the venv's `hx` directly, signals the hub alone, waits for its HTTP cleanup of demo runs and fake hosts, and only then SIGKILLs the group; `e2e/shutdown-check.ts` is the focused regression (Task 28). Item 10: the gpus/queue client test mocks gpu1's three GPUs (`HOSTS[1]`), not the hub row's none (Task 2). Item 27: host launches send `project` and never a path (`HostLaunchRequest { project }`), the hub launch keeps its own `repo`; `commit` is pinned only by Rerun sweep from a clean template run (`pinnedCommit`), otherwise the hub pins its checkout's HEAD and diff; the dialog never sends a `diff` (Tasks 1, 2, 9–12, 22). Item 31: seed dots come from the cell's own runs only: the group row's values when every run of that row is in the cell, else none (Task 14). Item 32: the queue panel reads the whole queue of the run's environment (`useAllRuns({status: "queued", environment_id})`, limits 1000, 4000, … while a page is full) and keeps the page's own run (`queueRows(..., current)`); the sweep page reads its runs the same way (Tasks 3, 21, 25, 27). The hub's `/api/v1/runs` must accept `environment_id` for the filter to save transfer; the client also filters by environment, so rows are right either way. Item 33: models carry `HostRow.usd_per_gpu_hour`, `HostRow.stale_banner_hours`, `LeaderboardRow.cost`, `OverviewSummary.cost_usd` / `cost_today_usd` (Task 1); the leaderboard shows each group's cost (Task 24), the Overview's cost today prefers `cost_today_usd` (Task 7). Ruling R1: the banner threshold is `stale_banner_hours` from the `GET /api/v1/hosts` rows (`staleBannerHours`, default 24), not a fixed 24 h (Tasks 5, 7). Non-blocking notes: a partial retry needs free GPUs only for the seeds not started (`checkDraft(..., started)`, Tasks 10, 12); the params table's default sort follows a lower-is-better direction that arrives after the first render (Task 17); the lost bar uses neutral words (`SLURM job N lost`, `run lost`) and points to the `run.lost` event (Task 23).
 18. **Codex review 2 (frontend items) and coordinator follow-ups.** Item 2 / ruling S1: no step or check uses a fixed port any more. `ui/e2e/paths.ts` asks the OS for a free port per run (`freePort`; the Playwright runner passes both ports to its workers and web servers in `HX_E2E_PORT` / `HX_E2E_HOSTS_PORT`); `shutdown-check.ts` picks its own, wipes its home first, verifies the hub's identity (`readIdentity` + `answersAs`) before it reads `/api/v1/hosts` or `/api/v1/runs` (`getJson` refuses until then), and fails at once when `serve-demo.ts` cannot start or exits (`serve-demo.ts` itself exits on a spawn `error`, a failed `hx demo` or an early hub exit). Task 2's type generation and the visual checks of Tasks 7 and 27 bind port 0 through `uv run python`, write the temp home's identity first, and touch the hub only after `/.well-known/hypothex/environment` answers with it (Task 2 also stops waiting when `hx serve` exits, and kills only its own server by its unique home). Item 15 / ruling S9: the UI side keeps SIGTERM to the hub alone; the hub's ASGI lifespan shutdown (backend) stops the demo runs and fake hosts inside uvicorn's signal handling; `shutdown-check.ts` sends the real SIGTERM and keeps the ordering regression, plus a child-start-failure demonstration (Task 28 Step 11). Ruling S8: `SweepSpec` has no `run_ids`; `SweepSummary.run_ids` is the membership the backend derives from the `sweep:<id>` tags, and the sweep page orders its runs by it (Tasks 1, 14, 15, 21, 28). Coordinator (a): after a partial launch the preview, its `×N`, the summary and `Copy as CLI` cover only the seeds not launched (Task 12). Coordinator (b): `ui/src/api/lostReasons.ts` keeps the `reason` of `run.lost` events (and of `mirror.run_updated` with `original_type: "run.lost"`) seen on the event stream; the lost bar shows it first, else the neutral words (Tasks 4, 23, 25, 27, 29). Backend dependency: the backend plan's `mirror.run_updated` payload is `{host, environment_id, original_type, remote_sequence, status}`; it must also copy the original event's `reason` for a mirrored `run.lost`, or remote lost runs (all SLURM losses) always show the neutral words.
 19. **Backend review round 3 (shape changes only).** Sweep runs are tagged `sweep:<owner8>:<id>` (the hub's environment id prefix, so two hubs' sweeps with one id never mix): `SweepSummary.tag` carries the tag, `sweepRunsQuery(project, tag)` takes it, and the sweep page starts its runs query once the summary is loaded (Tasks 1, 14, 21, 22; fixtures `SWEEP_TAG`, mocked run URLs). Host rows add `slurm.comment_accounting?: boolean | null` (Task 1 `HostRow` type only; no screen shows it yet).
+20. **Backend review round 4 (note).** The run page's sweep crumb follows the owner-qualified tag: `sweepCrumb` (Task 23) reads `sweep:<owner8>:<sweep_id>` from the record's tags and links `/s/<project>/<id>` only when `owner8` is the first 8 characters of this hub's environment id (`api.environment()`, key `["environment"]`, fetched only for a run with a `sweep_id`, Task 27). A run of another hub's sweep (a host shared by two hubs) or a run without the tag shows `sweep <id>` as plain text with the reason as its tooltip, so the crumb never opens this hub's page of a different sweep with the same id. Tests: Task 23 `sweepCrumb links only a sweep this hub owns`, Task 27 `a run of another hub's sweep names the sweep without a link` (the lost-run link test now gives its record the hub's tag and mocks the descriptor).

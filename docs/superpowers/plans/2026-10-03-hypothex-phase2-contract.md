@@ -20,7 +20,7 @@ class HostSpec(BaseModel, extra="forbid"):
     usd_per_gpu_hour: float | None = Field(None, ge=0, allow_inf_nan=False)
     slurm: SlurmDefaults | None = None    # required when kind=slurm
     projects: dict[str, str] = {}         # project -> repo path on the host
-class EnvironmentsFile(BaseModel, extra="forbid"): environments: dict[str, HostSpec] = {}
+class EnvironmentsFile(BaseModel, extra="forbid"): stale_banner_hours: float = 24; environments: dict[str, HostSpec] = {}   # banner after this many hours stale (spec 5.6)
 HOST_NAME = r"^[a-z0-9][a-z0-9_-]{0,31}$"     # "local" reserved for the hub
 def environments_path(layout: Layout) -> Path: ...          # <home>/environments.yaml
 def load_hosts(layout: Layout) -> EnvironmentsFile: ...     # missing file -> empty; uses config.scan_yaml + has_cycle guards
@@ -140,15 +140,18 @@ Hub (and env servers where marked *env*):
 
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
-| GET | `/api/v1/hosts` | | `list[{name, kind: "local" \| HostKind, state: HostState, gpus: list[GpuInfo], queue: int, slurm: {pending, running}\|null, cost_today_usd: float, usd_per_gpu_hour: float\|null, projects: list[str]}]` (first row: the hub, `name` and `kind` `"local"`) |
+| GET | `/api/v1/hosts` | | `list[{name, kind: "local" \| HostKind, state: HostState, gpus: list[GpuInfo], queue: int, slurm: {pending, running}\|null, cost_today_usd: float, usd_per_gpu_hour: float\|null, projects: list[str], stale_banner_hours: float}]` (first row: the hub, `name` and `kind` `"local"`; `stale_banner_hours` is the same on every row) |
+| POST | `/api/v1/hosts/reload` | `{command_id?}` | the host rows after re-reading `environments.yaml` (`hx hosts add\|map\|rm` call it) |
 | POST | `/api/v1/hosts/{host}/connect` / `/disconnect` | `{command_id?}` | `HostState` |
-| POST | `/api/v1/hosts/{host}/runs` | launch body + `{gpus, queue, slurm?: SlurmDefaults, project?, commit?, diff?}` | run record (forwarded) |
+| POST | `/api/v1/hosts/{host}/runs` | launch body + `{gpus, queue, slurm?: SlurmDefaults, project?, commit?, diff?}`; the project by name (a `repo` path is used only when it is a folder on the hub); without `commit` the hub pins its own checkout's HEAD (and sends its uncommitted diff); with `commit` the body's `diff` (none for a clean run) | run record (forwarded) |
+| GET | `/api/v1/runs` | phase 1 filters + `environment_id?`; `limit` is never capped below the request | `list[RunRecord]` |
 | GET | `/api/v1/runs/{id}/files/{path:path}` *env* | `max_bytes`, `tail?`, `offset?` | file bytes; 404 / 413 |
 | GET | `/api/v1/projects/{project}/entry` *env* | | the host's `ProjectEntry` (the hub copies a host-only project) |
 | GET | `/api/v1/gpus` *env* | | `list[GpuInfo]` |
 | GET | `/api/v1/queue` *env* | | `[{run_id, position, gpus_requested}]` |
 | POST | `/api/v1/sweeps` | `{project, task?, host?, grid, random?, seeds, command, hypothesis, gpus?, queue?, commit?, diff?, command_id?}` | `SweepSummary` |
 | GET | `/api/v1/sweeps/{project}/{id}` | | `SweepSummary` |
+| GET | `/api/v1/sweeps/{id}` | | `SweepSummary` (any project; for clients on another machine) |
 | GET | `/api/v1/projects/{project}/sweeps` | | `list[{id, created_at, n_runs, best}]` |
 | POST | `/api/v1/sweeps/{project}/{id}/cancel_queued` | `{command_id?}` | `SweepSummary` (queued runs of the sweep stopped as `killed`) |
 | POST | `/api/v1/sweeps/{project}/{id}/extend` | `{seeds: list[int], command_id?}` | `SweepSummary` (adds runs for every param combination × new seeds) |
@@ -184,3 +187,7 @@ Additions in `ui/` (same stack and rules as phase 1b):
 ## Changes after the backend plan review (2026-10-03)
 
 All additive; nothing was renamed. `ServerInfo.token` and `EnvClient(token=)` (env-server auth on shared hosts); `EnvClient.fetch_file(tail=, offset=)` and the files route's `tail`/`offset` (log tails, append-only mirroring); `HostState.kind` and host rows accept `"local"` (the hub's own row); host rows add `usd_per_gpu_hour`; leaderboard rows add `cost`, the Overview adds `cost_usd`/`cost_today_usd` (spec 8A.7); `Hub.add_host`/`remove_host`; the host launch and sweep bodies take `commit` (and `project`/`diff`); env route `GET /api/v1/projects/{project}/entry`; `prepare_run` takes `commit`. The frontend plan's "known gaps" for `$/GPU-h` and leaderboard cost are now served by the backend.
+
+## Changes after review round 1 (2026-10-03)
+
+Additive unless noted. `EnvironmentsFile.stale_banner_hours` (default 24) and `stale_banner_hours` on every `GET /api/v1/hosts` row (spec 5.6 banner); `POST /api/v1/hosts/reload`; `GET /api/v1/runs?environment_id=` with no cap below the requested `limit`; `GET /api/v1/sweeps/{id}`; `POST /api/v1/hosts/{host}/runs` takes the project by name and an optional `commit` (no path, no diff needed from the UI). Spec 5.7: `--hosts a,b` (a queue across hosts) is dropped; a run targets one host (a scope change, not an addition). Backend-only additions the frontend does not use: `submit(..., comment=)`, `find_submitted`, `launch_sweep(..., command_id=)`, `EventLog.append_once`, `Index.list_runs(environment_id=)`. A foreground (`--foreground`) rerun or reinfer on a SLURM host is refused ("SLURM runs are always submitted; drop --foreground"); a SLURM host's home must support `flock` (the env server refuses to start without it).

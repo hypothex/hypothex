@@ -345,13 +345,15 @@ Env servers know their own run status exactly. The hub marks an environment
 `unreachable` when its supervisor cannot reconnect; runs on it show `status (stale)`, not
 `lost`. A run is `lost` only when the env server itself decides so (startup repair or
 SLURM job vanished without exit record). If an env server is unreachable for > 24 h
-(configurable), the hub shows a banner, still not `lost`.
+(configurable: `stale_banner_hours` at the top of `environments.yaml`, default 24, served
+on every `GET /api/v1/hosts` row), the hub shows a banner, still not `lost`.
 
 ### 5.7 Queue and sweeps (phase 2)
 
 - `hx launch --queue` puts the run in `queue`. The daemon starts it when the target host
-  (or any host in `--hosts a,b`) has free GPUs (from `nvidia-smi` for SSH hosts;
-  SLURM hosts use SLURM's own queue, so Hypothex just submits).
+  has free GPUs (from `nvidia-smi` for SSH hosts; SLURM hosts use SLURM's own queue, so
+  Hypothex just submits). A run targets exactly one host: there is no queue across hosts
+  (`--hosts a,b` was dropped on 2026-10-03; launch on each host you want to use).
 - `hx sweep --task T --grid lr=1e-4,3e-4 --grid beam=10,20 --seeds 3 -- <stage or cmd>`
   creates a sweep and queues its runs. UI shows the sweep as a group with its best config.
 

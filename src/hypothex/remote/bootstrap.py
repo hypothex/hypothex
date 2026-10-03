@@ -141,7 +141,7 @@ def _render(name: str, **params: str) -> str:
     """
     lines = []
     for key, value in params.items():
-        if not _PARAM.match(key):
+        if not _PARAM.fullmatch(key):
             raise ValueError(f"bad script parameter name {key!r}")
         lines.append(f"{key}={shlex.quote(value)}")
     return "\n".join(lines) + "\n" + BOOTSTRAP_SCRIPTS[name]

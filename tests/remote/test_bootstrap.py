@@ -872,3 +872,24 @@ def test_two_hubs_starting_one_host_share_one_server(
     leftovers = sorted(p.name for p in (host.hx_home / "serve").iterdir() if "lock" in p.name)
     assert leftovers == ([".lock"] if lock_tool == "python3" else [])  # an OS lock file stays
     assert not (host.hx_home / "serve" / ".lock").is_dir()
+
+
+# ------------------------------------------------------------------------ end to end
+def test_bootstrap_end_to_end(host: FakeHost, wheel: Path, uv_env: str, servers: list[int]) -> None:
+    from hypothex import __version__
+
+    host.add_tool("python3", f'exec {PY} "$@"\n')
+    host.add_tool("uv", f'exec {uv_env} "$@"\n')
+    facts = probe(host.target, "~/.hypothex")
+    assert facts.uv is not None and facts.python is not None
+    bs.install(host.target, facts.home, wheel)
+    info = bs.ensure_server(host.target, facts.home)
+    # The server runs the installed tool, not this checkout.
+    cmd = subprocess.run(
+        ["ps", "-o", "command=", "-p", str(info.pid)], capture_output=True, text=True
+    )
+    assert str(host.hx_home / "runtime") in cmd.stdout
+    assert _descriptor(info.port)["hx_version"] == __version__
+    # uvicorn's "Uvicorn running on" line before Task 47, "hx serve on" after it
+    assert f"http://127.0.0.1:{info.port}" in bs.server_logs(host.target, facts.home)
+    assert bs.stop_server(host.target, facts.home) is True

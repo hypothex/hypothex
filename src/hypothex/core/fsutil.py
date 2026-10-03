@@ -30,6 +30,41 @@ def atomic_write_text(path: Path, text: str) -> None:
     atomic_write_bytes(path, text.encode("utf-8"))
 
 
+TEMP_NAME_KEEP = 200
+"""Most bytes of a file name kept in its temp file's name (the rest is cut)."""
+
+
+def temp_prefix(name: str) -> str:
+    """
+    Return a ``tempfile.mkstemp`` prefix for a hidden temp file next to ``name``.
+
+    The prefix is ``.<name>.`` with ``name`` cut to ``TEMP_NAME_KEEP`` bytes, so
+    the prefix, mkstemp's 8 random characters and a short suffix stay within
+    the 255-byte name limit even when ``name`` itself uses all of it.
+
+    Parameters
+    ----------
+    name : str
+        Name of the file the temp file will replace.
+
+    Returns
+    -------
+    str
+        The prefix, at most ``TEMP_NAME_KEEP + 2`` bytes.
+
+    Examples
+    --------
+    >>> temp_prefix("a.jsonl")
+    '.a.jsonl.'
+    >>> len(temp_prefix("x" * 255))
+    202
+    """
+    keep = name[:TEMP_NAME_KEEP]
+    while len(os.fsencode(keep)) > TEMP_NAME_KEEP:
+        keep = keep[:-1]
+    return f".{keep}."
+
+
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     """
     Write bytes so readers never see a partial file.
@@ -50,7 +85,7 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     b'caf\xe9'
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=temp_prefix(path.name), suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)

@@ -52,7 +52,7 @@ from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.execution import process_alive
 from hypothex.core.fsutil import atomic_write_text
-from hypothex.core.ids import new_run_id, utcnow
+from hypothex.core.ids import new_command_id, new_run_id, utcnow
 from hypothex.core.layout import Layout
 from hypothex.core.records import (
     DatasetRef,
@@ -2511,11 +2511,11 @@ def _launch_live_runs(
     """
     gpu = next(h for h in hosts if h.fake_gpus)
     url = urls[gpu.name]
-    active = [
-        run
-        for status in ("queued", "running")
-        for run in httpx.get(f"{url}/api/v1/runs", params={"status": status}, timeout=30).json()
-    ]
+    active: list[Any] = []
+    for status in ("queued", "running"):
+        listed = httpx.get(f"{url}/api/v1/runs", params={"status": status}, timeout=30)
+        listed.raise_for_status()  # an error body must not read as "active runs"
+        active.extend(listed.json())
     if active:
         return
     project, task = DEMO_TASKS["training"]
@@ -2528,11 +2528,15 @@ def _launch_live_runs(
         if state in ("r", "q")
     ]
     cells.sort(key=lambda cell: cell[3] != "r")
+    # one command id per cell of this start; a later start (after the forget) gets new
+    # ones, so a receipt never hands back a run that was deleted
+    start = new_command_id()
     for lr, beam, seed, _ in cells:
         params = {"lr": lr, "beam": beam}
         resp = httpx.post(
             f"{url}/api/v1/runs",
             json={
+                "command_id": f"demo-{start}-lr{lr}-beam{beam}-seed{seed}",
                 "repo": gpu.repo,
                 "task": task,
                 "command": _SWEEP_COMMAND,
@@ -2593,7 +2597,11 @@ def _stop_runs(url: str, run_ids: list[str]) -> None:
 
     def stop(run_id: str) -> None:
         with contextlib.suppress(httpx.HTTPError):
-            httpx.post(f"{url}/api/v1/runs/{run_id}/stop", json={"created_by": "demo"}, timeout=60)
+            httpx.post(
+                f"{url}/api/v1/runs/{run_id}/stop",
+                json={"created_by": "demo", "command_id": f"demo-stop-{run_id}"},
+                timeout=60,
+            )
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(stop, run_ids))

@@ -81,8 +81,15 @@ describe("queryKeys", () => {
       queryKeys.overview(),
       queryKeys.viewQuery("toy", "acc", { name: "overview" }),
       queryKeys.compareExamples("r1", "r2", "accuracy"),
+      queryKeys.sweep("toy", "s-7f3a"),
+      queryKeys.projectSweeps("toy"),
     ];
-    const miss = [queryKeys.views("toy", "acc"), queryKeys.view("toy", "acc", "route"), queryKeys.projects()];
+    const miss = [
+      queryKeys.views("toy", "acc"),
+      queryKeys.view("toy", "acc", "route"),
+      queryKeys.projects(),
+      queryKeys.hosts(),
+    ];
     for (const key of [...hit, ...miss]) qc.setQueryData(key, { seeded: true });
     await Promise.all(RUN_EVENT_INVALIDATES.map((queryKey) => qc.invalidateQueries({ queryKey })));
     expect(hit.map((k) => invalidated(qc, k))).toEqual(hit.map(() => true));

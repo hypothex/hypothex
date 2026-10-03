@@ -13,6 +13,7 @@ import {
   LiveUpdates,
   keysForEvent,
   keysForEvents,
+  MIRROR_RUN_UPDATED,
   readSequence,
   SEQUENCE_KEY,
   type SocketLike,
@@ -170,6 +171,7 @@ describe("keysForEvent", () => {
       ["leaderboard", "toy"],
       ["views", "query", "toy"],
       ["compareExamples"],
+      ["sweeps", "toy"],
     ]);
   });
 
@@ -182,6 +184,50 @@ describe("keysForEvent", () => {
       ["leaderboard"],
       ["views", "query"],
       ["compareExamples"],
+      ["sweeps"],
+    ]);
+  });
+
+  test("a mirrored remote run event refreshes that run, its project, and the hosts list", () => {
+    expect(keysForEvent(ev(1, MIRROR_RUN_UPDATED, "toy", "r9"))).toEqual([
+      ["overview"],
+      ["tasks"],
+      ["task", "toy"],
+      ["runs"],
+      ["run", "r9"],
+      ["leaderboard", "toy"],
+      ["views", "query", "toy"],
+      ["compareExamples"],
+      ["sweeps", "toy"],
+      ["hosts"],
+    ]);
+  });
+
+  test("a host event refreshes hosts and every page that shows host state", () => {
+    expect(keysForEvent(ev(1, "host.state", null, null))).toEqual([
+      ["hosts"],
+      ["overview"],
+      ["runs"],
+      ["run"],
+      ["sweeps"],
+    ]);
+  });
+
+  test("other mirror events invalidate nothing", () => {
+    expect(MIRROR_RUN_UPDATED).toBe("mirror.run_updated");
+    expect(keysForEvent(ev(1, "mirror.cursor_saved", null, null))).toEqual([]);
+  });
+
+  test("a burst of mirror events after hours offline invalidates each key once", () => {
+    // Runs finished while the hub was offline; on reconnect it replays 300 mirror events for 3 runs.
+    const burst = Array.from({ length: 300 }, (_, i) => ev(i + 1, MIRROR_RUN_UPDATED, "toy", `r${i % 3}`));
+    const keys = keysForEvents(burst);
+    expect(keys).toHaveLength(12);
+    expect(keys.filter((k) => k[0] === "hosts")).toEqual([["hosts"]]);
+    expect(keys.filter((k) => k[0] === "run")).toEqual([
+      ["run", "r0"],
+      ["run", "r1"],
+      ["run", "r2"],
     ]);
   });
 
@@ -204,6 +250,7 @@ describe("keysForEvent", () => {
       ["leaderboard", "toy"],
       ["views", "query", "toy"],
       ["compareExamples"],
+      ["sweeps", "toy"],
       ["run", "r2"],
     ]);
   });
@@ -221,10 +268,14 @@ describe("keysForEvent", () => {
       queryKeys.leaderboard("toy", "acc"),
       queryKeys.viewQuery("toy", "acc", { name: "overview" }),
       queryKeys.compareExamples("r0", "r1", "accuracy"),
+      queryKeys.sweep("toy", "s-7f3a"),
+      queryKeys.projectSweeps("toy"),
     ];
     const miss = [
       queryKeys.run("r2"),
       queryKeys.leaderboard("other", "acc"),
+      queryKeys.sweep("other", "s-1"),
+      queryKeys.hosts(),
       queryKeys.views("toy", "acc"),
       queryKeys.view("toy", "acc", "route"),
       queryKeys.taskKind("toy", "acc"),
@@ -232,6 +283,34 @@ describe("keysForEvent", () => {
     ];
     for (const key of [...hit, ...miss]) client.setQueryData(key, { seeded: true });
     invalidateForEvents(client, [ev(1, "run.note_added", "toy", "r1")]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const invalidated = (key: readonly unknown[]) => client.getQueryState(key)?.isInvalidated;
+    expect(hit.map(invalidated)).toEqual(hit.map(() => true));
+    expect(miss.map(invalidated)).toEqual(miss.map(() => false));
+  });
+  test("mirror and host events refresh remote run pages and hosts, not scores of other projects", async () => {
+    const client = new QueryClient();
+    const hit = [
+      queryKeys.hosts(),
+      queryKeys.overview(),
+      queryKeys.runs({ project: "toy" }),
+      queryKeys.run("r9"),
+      queryKeys.run("r2"),
+      queryKeys.leaderboard("toy", "acc"),
+      queryKeys.sweep("toy", "s-7f3a"),
+      queryKeys.sweep("other", "s-1"),
+    ];
+    const miss = [
+      queryKeys.leaderboard("other", "acc"),
+      queryKeys.views("toy", "acc"),
+      queryKeys.view("toy", "acc", "route"),
+      queryKeys.projects(),
+    ];
+    for (const key of [...hit, ...miss]) client.setQueryData(key, { seeded: true });
+    invalidateForEvents(client, [
+      ev(1, MIRROR_RUN_UPDATED, "toy", "r9"),
+      ev(2, "host.state", null, null),
+    ]);
     await new Promise((resolve) => setTimeout(resolve, 0));
     const invalidated = (key: readonly unknown[]) => client.getQueryState(key)?.isInvalidated;
     expect(hit.map(invalidated)).toEqual(hit.map(() => true));
@@ -524,6 +603,7 @@ describe("useEventStream", () => {
       { queryKey: ["leaderboard", "toy"] },
       { queryKey: ["views", "query", "toy"] },
       { queryKey: ["compareExamples"] },
+      { queryKey: ["sweeps", "toy"] },
     ]);
 
     unmount();

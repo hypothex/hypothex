@@ -48,9 +48,10 @@ export const queryKeys = {
 
 /**
  * Key families a `run.*` event or a run action can change (contract section 4: runs,
- * leaderboard, overview, views/query; plus the task summary, run detail and example
- * comparisons that read the same runs). View lists, view documents and `/kind` are never
- * in this list, so an open editor is not reloaded under the user.
+ * leaderboard, overview, views/query; plus the task summary, run detail, example
+ * comparisons and sweeps that read the same runs). View lists, view documents and `/kind`
+ * are never in this list, so an open editor is not reloaded under the user. The hosts list
+ * is not either: a hub run does not change a remote host.
  */
 export const RUN_EVENT_INVALIDATES: readonly QueryKey[] = [
   ["overview"],
@@ -61,6 +62,7 @@ export const RUN_EVENT_INVALIDATES: readonly QueryKey[] = [
   ["leaderboard"],
   ["views", "query"],
   ["compareExamples"],
+  ["sweeps"],
 ];
 
 /**

@@ -1,12 +1,15 @@
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 from pathlib import Path
 
 import httpx
+import pytest
 
+from hypothex.cli import main as cli_main
 from tests.api.envserver import wait_until
 
 HX = [sys.executable, "-m", "hypothex.cli.main"]
@@ -172,3 +175,29 @@ def test_serve_replaces_the_record_of_a_dead_server(tmp_path: Path) -> None:
     finally:
         proc.terminate()
         proc.wait(timeout=30)
+
+
+def test_write_private_ignores_a_stale_tmp_mode(tmp_path: Path) -> None:
+    path = tmp_path / "serve" / "server.json"
+    path.parent.mkdir()
+    stale = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    stale.write_text("old")
+    stale.chmod(0o644)
+    cli_main._write_private(path, '{"token": "t"}')
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert path.read_text() == '{"token": "t"}'
+
+
+def test_write_private_removes_its_tmp_when_the_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "serve" / "server.json"
+
+    def failing_replace(src: object, dst: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli_main.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="disk full"):
+        cli_main._write_private(path, "{}")
+    assert not path.with_name(f".{path.name}.{os.getpid()}.tmp").exists()
+    assert not path.exists()

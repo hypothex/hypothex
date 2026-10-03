@@ -15,12 +15,15 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import IO, Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -403,3 +406,167 @@ def _install(part: Path, local: Path, work: Path) -> None:
         if part.is_dir() and (local.exists() or local.is_symlink()):
             _remove(local)  # a folder replacing a file: no atomic swap exists for this case
         os.replace(part, local)  # atomic for a file over a file or a symlink
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _port_open(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+class Tunnel:
+    """
+    One ``ssh -N -L`` port forward from ``127.0.0.1:local_port`` on this
+    machine to ``127.0.0.1:remote_port`` on the host.
+
+    :meth:`start` blocks until the local port accepts connections, so callers
+    in async code should run it in a thread.
+
+    Parameters
+    ----------
+    target : SshTarget
+        Host to tunnel to.
+    remote_port : int
+        Port on the host (the env server binds to 127.0.0.1 there).
+    local_port : int, optional
+        Local port; a free one is picked when omitted.
+
+    Examples
+    --------
+    >>> tunnel = Tunnel(SshTarget(alias="gpu1"), remote_port=40123)  # doctest: +SKIP
+    >>> tunnel.start()  # doctest: +SKIP
+    >>> f"http://127.0.0.1:{tunnel.local_port}"  # doctest: +SKIP
+    'http://127.0.0.1:52011'
+    >>> tunnel.stop()  # doctest: +SKIP
+    """
+
+    def __init__(self, target: SshTarget, remote_port: int, local_port: int | None = None) -> None:
+        self.target = target
+        self.remote_port = remote_port
+        self.local_port: int = local_port if local_port is not None else _free_port()
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._stderr: IO[bytes] | None = None
+
+    def argv(self) -> list[str]:
+        """
+        Return the ``ssh`` command line this tunnel runs.
+
+        Returns
+        -------
+        list of str
+            ``ssh -N -o ExitOnForwardFailure=yes ... -L 127.0.0.1:L:127.0.0.1:R alias``.
+        """
+        forward = f"127.0.0.1:{self.local_port}:127.0.0.1:{self.remote_port}"
+        return [
+            self.target.ssh_bin,
+            "-N",
+            *_base_options(self.target),
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-L",
+            forward,
+            self.target.alias,
+        ]
+
+    def start(self) -> None:
+        """
+        Start the tunnel and wait until the local port accepts connections.
+
+        Does nothing when the tunnel is already alive.
+
+        Raises
+        ------
+        SshError
+            The local port is taken, ``ssh`` is missing, ``ssh`` exited (bad
+            alias, unreachable host, forward refused), or the port did not
+            open within ``connect_timeout + 5`` seconds.
+        """
+        if self.alive():
+            return
+        self._close()
+        if _port_open(self.local_port):
+            raise SshError(f"local port {self.local_port} is already in use")
+        # Held open for the tunnel's lifetime (a pipe could fill and block ssh).
+        self._stderr = tempfile.TemporaryFile()  # noqa: SIM115
+        try:
+            self._proc = subprocess.Popen(
+                self.argv(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=self._stderr,
+            )
+        except FileNotFoundError as exc:
+            self._close()
+            raise SshError(f"{self.target.ssh_bin} not found; is OpenSSH installed?") from exc
+        deadline = time.monotonic() + self.target.connect_timeout + 5
+        while time.monotonic() < deadline:
+            code = self._proc.poll()
+            if code is not None:
+                message = self.stderr_tail()
+                self._close()
+                raise SshError(
+                    f"tunnel to {self.target.alias} exited {code} before it was ready: {message}"
+                )
+            if _port_open(self.local_port) and self._proc.poll() is None:
+                return
+            time.sleep(0.05)
+        self.stop()
+        raise SshError(f"tunnel to {self.target.alias} did not open port {self.local_port} in time")
+
+    def alive(self) -> bool:
+        """
+        Tell whether the ``ssh`` process is still running.
+
+        Returns
+        -------
+        bool
+            ``True`` while the tunnel process runs.
+        """
+        return self._proc is not None and self._proc.poll() is None
+
+    def stderr_tail(self) -> str:
+        """
+        Return the last part of what ``ssh`` wrote to stderr.
+
+        Returns
+        -------
+        str
+            Up to 2000 characters; ``""`` before :meth:`start`.
+        """
+        if self._stderr is None:
+            return ""
+        self._stderr.seek(0)
+        return _tail(self._stderr.read())
+
+    def stop(self) -> None:
+        """Stop the tunnel (SIGTERM, then SIGKILL after 5 s). Safe to call twice."""
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        self._close()
+
+    def _close(self) -> None:
+        if self._stderr is not None:
+            self._stderr.close()
+            self._stderr = None
+        self._proc = None
+
+    def __enter__(self) -> Tunnel:
+        self.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.stop()

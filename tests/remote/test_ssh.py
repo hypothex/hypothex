@@ -1,14 +1,28 @@
+import functools
+import http.server
 import json
 import os
+import socket
+import socketserver
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
-from hypothex.remote.ssh import SshError, SshTarget, copy_from, copy_to, run_remote
+from hypothex.remote.ssh import (
+    SshError,
+    SshTarget,
+    Tunnel,
+    _free_port,
+    copy_from,
+    copy_to,
+    run_remote,
+)
 from tests.fakes import DEAD_HUB, FakeRemote
 
 # --------------------------------------------------------------------------- isolation
@@ -480,3 +494,168 @@ def test_a_pull_into_a_reserved_name_is_refused(
         copy_from(fake_remote.target("gpu1"), "f.txt", tmp_path / "x" / name, work=work)
     assert not (tmp_path / "x").exists()
     assert fake_remote.calls("scp") == []
+
+
+# --------------------------------------------------------------------------- tunnel
+
+
+class _Echo(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        while data := self.request.recv(65536):
+            self.request.sendall(data)
+
+
+@pytest.fixture
+def echo_port() -> Iterator[int]:
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _Echo)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield int(server.server_address[1])
+    server.shutdown()
+    server.server_close()
+
+
+def _roundtrip(port: int, payload: bytes) -> bytes:
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(payload)
+        sock.shutdown(socket.SHUT_WR)
+        chunks = []
+        while chunk := sock.recv(65536):
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _refused(port: int) -> bool:
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+    except OSError:
+        return True
+    return False
+
+
+def test_tunnel_forwards_bytes_both_ways(fake_remote: FakeRemote, echo_port: int) -> None:
+    fake_remote.add_host("gpu1")
+    payload = os.urandom(1024 * 1024)
+    with Tunnel(fake_remote.target("gpu1"), remote_port=echo_port) as tunnel:
+        assert tunnel.alive()
+        assert tunnel.local_port != echo_port
+        assert _roundtrip(tunnel.local_port, payload) == payload
+        assert _roundtrip(tunnel.local_port, b"second") == b"second"
+
+
+def test_tunnel_carries_http(fake_remote: FakeRemote, tmp_path: Path) -> None:
+    fake_remote.add_host("gpu1")
+    (tmp_path / "www").mkdir()
+    (tmp_path / "www" / "descriptor.json").write_text('{"kind": "ssh"}')
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    handler = functools.partial(Quiet, directory=str(tmp_path / "www"))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with Tunnel(fake_remote.target("gpu1"), remote_port=server.server_address[1]) as tunnel:
+            for _ in range(3):
+                res = httpx.get(f"http://127.0.0.1:{tunnel.local_port}/descriptor.json")
+                assert (res.status_code, res.json()) == (200, {"kind": "ssh"})
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_tunnel_command_line(fake_remote: FakeRemote) -> None:
+    fake_remote.add_host("gpu1")
+    tunnel = Tunnel(
+        fake_remote.target("gpu1", connect_timeout=4), remote_port=40123, local_port=51000
+    )
+    expected = [
+        "-N",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=4",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-L",
+        "127.0.0.1:51000:127.0.0.1:40123",
+        "gpu1",
+    ]
+    assert tunnel.argv() == [fake_remote.ssh_bin, *expected]
+
+
+def test_tunnel_stop_closes_port_and_is_idempotent(fake_remote: FakeRemote, echo_port: int) -> None:
+    fake_remote.add_host("gpu1")
+    tunnel = Tunnel(fake_remote.target("gpu1"), remote_port=echo_port)
+    tunnel.start()
+    tunnel.start()
+    assert len(fake_remote.calls("ssh")) == 1
+    tunnel.stop()
+    tunnel.stop()
+    assert not tunnel.alive()
+    assert _refused(tunnel.local_port)
+
+
+def test_tunnel_local_port_in_use_raises(fake_remote: FakeRemote, echo_port: int) -> None:
+    fake_remote.add_host("gpu1")
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen(1)
+        port = int(busy.getsockname()[1])
+        tunnel = Tunnel(fake_remote.target("gpu1"), remote_port=echo_port, local_port=port)
+        with pytest.raises(SshError, match=f"local port {port} is already in use"):
+            tunnel.start()
+    assert fake_remote.calls("ssh") == []
+
+
+def test_tunnel_unknown_host_raises_with_ssh_message(fake_remote: FakeRemote) -> None:
+    tunnel = Tunnel(fake_remote.target("nohost"), remote_port=40123)
+    with pytest.raises(SshError, match="exited 255.*Could not resolve hostname nohost"):
+        tunnel.start()
+    assert not tunnel.alive()
+
+
+def test_tunnel_dies_when_host_drops_and_restarts_on_same_port(
+    fake_remote: FakeRemote, echo_port: int
+) -> None:
+    fake_remote.add_host("gpu1")
+    tunnel = Tunnel(fake_remote.target("gpu1"), remote_port=echo_port)
+    tunnel.start()
+    port = tunnel.local_port
+    fake_remote.set_down("gpu1", True)
+    deadline = time.monotonic() + 3
+    while tunnel.alive() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not tunnel.alive()
+    assert "closed by remote host" in tunnel.stderr_tail()
+    with pytest.raises(SshError, match="Connection refused"):
+        tunnel.start()
+    fake_remote.set_down("gpu1", False)
+    tunnel.start()
+    try:
+        assert tunnel.local_port == port
+        assert _roundtrip(port, b"back") == b"back"
+    finally:
+        tunnel.stop()
+
+
+def test_tunnel_to_closed_remote_port_drops_connections(fake_remote: FakeRemote) -> None:
+    fake_remote.add_host("gpu1")
+    with Tunnel(fake_remote.target("gpu1"), remote_port=_free_port()) as tunnel:
+        try:
+            echoed = _roundtrip(tunnel.local_port, b"hello")
+        except ConnectionError:  # reset instead of a clean close; both mean "dropped"
+            echoed = b""
+        assert echoed == b""
+        assert tunnel.alive()
+
+
+def test_tunnel_missing_ssh_binary_raises(tmp_path: Path) -> None:
+    target = SshTarget(alias="gpu1", ssh_bin=str(tmp_path / "no-ssh"))
+    with pytest.raises(SshError, match="not found"):
+        Tunnel(target, remote_port=40123).start()

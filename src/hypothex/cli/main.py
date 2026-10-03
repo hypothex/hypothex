@@ -1611,6 +1611,7 @@ def serve(
 
     from hypothex.api.app import create_app
     from hypothex.core.environment import PROTOCOL_VERSION
+    from hypothex.demo import demo_hosts_running
     from hypothex.remote.bootstrap import ServerInfo
 
     home = _home_path()
@@ -1638,9 +1639,22 @@ def serve(
                 finally:
                     _drop_server_file(home, info.pid)
 
+    @contextmanager
+    def demo_hosts() -> Iterator[None]:
+        # entered and left by the app's lifespan, so SIGTERM stops the demo hosts too
+        with demo_hosts_running(home) as live:
+            if live:
+                typer.secho(f"demo hosts up; {len(live)} sweep runs launched on gpu1", err=True)
+            yield
+
     with _server_file(home, info):
         application = create_app(
-            home, host=host, kind=resolved, auth_token=token, hub_url=_url(host, bound)
+            home,
+            host=host,
+            kind=resolved,
+            auth_token=token,
+            hub_url=_url(host, bound),
+            lifespan_context=demo_hosts,
         )
         typer.secho(f"hx serve on {_url(host, bound)}", err=True)
         # the socket is bound already: uvicorn logs no "running on" line for it, so
@@ -1874,10 +1888,18 @@ def demo(
         list[str] | None,
         typer.Option("--kinds", help="Kinds to seed (repeat or comma-separate; default: all)."),
     ] = None,
+    with_hosts: Annotated[
+        bool,
+        typer.Option(
+            "--with-hosts",
+            help="Also seed fake hosts (8-GPU SSH box, SLURM cluster), a queue, and a "
+            "sweep; `hx serve` starts them.",
+        ),
+    ] = False,
     as_json: JsonFlag = False,
 ) -> None:
     """Seed demo projects and runs into an empty home (UI tests, docs screenshots)."""
-    from hypothex.demo import seed_demo
+    from hypothex.demo import DEMO_TASKS, seed_demo, seed_demo_hosts
 
     known = get_args(TaskKind)
     chosen = [k.strip() for item in kinds or [] for k in item.split(",") if k.strip()]
@@ -1898,8 +1920,18 @@ def demo(
             f"{home} already has projects ({', '.join(theirs)}); seed the demo into an "
             "empty home instead: hx --home /tmp/hx-demo demo"
         )
-    made = seed_demo(home, cast("list[TaskKind]", chosen or list(known)))
-    _emit(made, as_json, "\n".join(f"{kind}: {ref}" for kind, ref in made.items()))
+    selected = cast("list[TaskKind]", chosen or list(known))
+    if with_hosts and "training" not in selected:
+        try:
+            _ctx().store.load_project(DEMO_TASKS["training"][0])
+        except StoreError as exc:
+            raise ConfigError("--with-hosts needs the training demo; add --kinds training") from exc
+    made: dict[str, Any] = dict(seed_demo(home, selected))
+    text = "\n".join(f"{kind}: {ref}" for kind, ref in made.items())
+    if with_hosts:
+        made["hosts"] = seed_demo_hosts(home)
+        text += "\nhosts: gpu1 (8 GPUs), cluster (SLURM); `hx serve` starts them"
+    _emit(made, as_json, text)
 
 
 def cli() -> None:

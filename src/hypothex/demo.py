@@ -8,6 +8,10 @@ layout. Nothing is executed: no training, no metric worker, no git.
 
 Used by UI tests, Playwright, and docs screenshots.
 
+``seed_demo_hosts`` adds two fake hosts (an 8-GPU SSH box and a SLURM cluster) as
+separate homes under ``<home>/demo-hosts/``; ``demo_hosts_running`` (used by
+``hx serve``) starts them and fills the GPU queue. Nothing reaches a real host.
+
 Examples
 --------
 >>> import pathlib, tempfile
@@ -18,29 +22,51 @@ Examples
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
+import os
+import shutil
 import struct
-from collections.abc import Callable, Iterable, Sequence
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
+from pydantic import BaseModel
 
-from hypothex.core.config import TaskKind
+from hypothex.core.config import TaskKind, render_template
 from hypothex.core.context import Context
-from hypothex.core.errors import StoreError
+from hypothex.core.cost import compute_cost
+from hypothex.core.environment import load_descriptor
+from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.ids import new_run_id, utcnow
-from hypothex.core.records import DatasetRef, GitInfo, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.layout import Layout
+from hypothex.core.records import (
+    DatasetRef,
+    ExecutorInfo,
+    GitInfo,
+    RunRecord,
+    RunStatus,
+    ScoreRecord,
+)
 from hypothex.core.seeds import config_hash, run_fingerprint
 from hypothex.core.stats import quantile
 from hypothex.core.store import sum_usage
+from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep, sweep_tag
 from hypothex.core.views import save_view
+from hypothex.remote.config import HostSpec, SlurmDefaults, load_hosts, save_hosts
 from hypothex.sdk import Run
 
 KINDS: tuple[TaskKind, ...] = (
@@ -1997,3 +2023,584 @@ def seed_demo(home: Path, kinds: Iterable[TaskKind] = KINDS) -> dict[str, str]:
     """
     anchor = utcnow().replace(minute=0, second=0, microsecond=0)
     return _seed_demo(home, kinds, anchor)
+
+
+# --------------------------------------------------------------------- fake hosts
+DEMO_HOSTS_DIR = "demo-hosts"
+DEMO_HOSTS_FILE = "hosts.json"
+DEMO_SWEEP_ID = "s-7f3a"
+DEMO_SLEEP_ENV = "HX_DEMO_SLEEP"
+_PLACEHOLDER_URL = "http://127.0.0.1:9"  # `hx serve` rewrites it when it starts the hosts
+_DEMO_GPU_RATE = 1.10
+_DEMO_SLURM_RATE = 0.50
+_SWEEP_HYPOTHESIS = "lr x beam: find the best beam width for each learning rate"
+_SWEEP_COMMAND = [
+    "python", "train.py", "--config", "configs/aug.yaml",
+    "--lr", "{lr}", "--beam", "{beam}", "--seed", "{seed}",
+]  # fmt: skip
+_LONG_COMMAND = [
+    "python", "train.py", "--config", "configs/aug.yaml", "--steps", "40000", "--seed", "{seed}",
+]  # fmt: skip
+_SWEEP_LRS = ("1e-4", "3e-4", "1e-3")
+_SWEEP_BEAMS = ("1", "5", "10")
+# phase2/data.js `grid`: per (lr, beam), seeds 1..3 as (state, top-1). "f" finished and
+# "x" failed are seeded on gpu1; "r" and "q" are launched live by `hx serve`.
+_SWEEP_GRID: dict[tuple[str, str], tuple[tuple[str, float | None], ...]] = {
+    ("1e-4", "1"): (("f", 0.8917), ("f", 0.8931), ("f", 0.8915)),
+    ("1e-4", "5"): (("f", 0.8979), ("f", 0.8992), ("f", 0.8990)),
+    ("1e-4", "10"): (("f", 0.8996), ("r", None), ("q", None)),
+    ("3e-4", "1"): (("f", 0.9046), ("f", 0.9031), ("f", 0.9052)),
+    ("3e-4", "5"): (("f", 0.9101), ("f", 0.9117), ("f", 0.9106)),
+    ("3e-4", "10"): (("f", 0.9118), ("f", 0.9130), ("f", 0.9115)),
+    ("1e-3", "1"): (("f", 0.8806), ("f", 0.8829), ("q", None)),
+    ("1e-3", "5"): (("f", 0.8871), ("r", None), ("q", None)),
+    ("1e-3", "10"): (("f", 0.8880), ("r", None), ("x", None)),
+}
+_TRAIN_PY = '''"""Demo stand-in for train.py: sleeps so the run stays running."""
+import os
+import time
+
+time.sleep(float(os.environ.get("HX_DEMO_SLEEP", "900")))
+'''
+_FAKE_SLURM = {
+    "sbatch": (
+        "#!/bin/sh\n"
+        "# demo stand-in: accept the job, print an id, run nothing\n"
+        'f="$(dirname "$0")/.jobid"\n'
+        'n=$(cat "$f" 2>/dev/null || echo 48213000)\n'
+        "n=$((n + 1))\n"
+        'echo "$n" > "$f"\n'
+        'echo "$n"\n'
+    ),
+    "squeue": "#!/bin/sh\n# demo stand-in: the queue is empty\nexit 0\n",
+    "sacct": "#!/bin/sh\n# demo stand-in: no accounting records\nexit 0\n",
+    "scancel": "#!/bin/sh\nexit 0\n",
+    "scontrol": (
+        "#!/bin/sh\n# demo stand-in: accounting keeps job comments\n"
+        'echo "AccountingStoreFlags    = job_comment"\n'
+    ),
+}
+
+
+class _DemoHost(BaseModel):
+    """One fake host, as listed in ``<home>/demo-hosts/hosts.json``."""
+
+    name: str
+    kind: str
+    home: str
+    repo: str
+    fake_gpus: str | None = None
+    bin: str | None = None
+
+
+def _fake_gpu_rows() -> list[dict[str, Any]]:
+    """
+    Eight A100s for gpu1; GPUs 3 and 7 are busy with other users' processes.
+
+    Returns
+    -------
+    list of dict
+        ``GpuInfo`` objects as JSON.
+    """
+    outside = {3: (63.0, 33600), 7: (9.0, 14700)}
+    return [
+        {
+            "index": i,
+            "name": "NVIDIA A100 80GB",
+            "util": outside.get(i, (0.0, 0))[0],
+            "mem_used_mb": outside.get(i, (0.0, 0))[1],
+            "mem_total_mb": 81920,
+            "external": i in outside,
+            "run_id": None,
+        }
+        for i in range(8)
+    ]
+
+
+def _demo_host_home(root: Path, name: str, hub_repo: Path) -> tuple[Context, Path]:
+    """
+    Create a fake host's home (labelled ``name``) with a copy of the demo repo.
+
+    Parameters
+    ----------
+    root : Path
+        ``<hub home>/demo-hosts``.
+    name : str
+        Host name; also the environment label.
+    hub_repo : Path
+        The hub's demo repo to copy (plus a sleeping ``train.py``).
+
+    Returns
+    -------
+    tuple of (Context, Path)
+        The host's context and its checkout.
+    """
+    home = root / name
+    ctx = Context.open(home)
+    identity = json.loads(ctx.layout.environment_json.read_text(encoding="utf-8"))
+    identity["label"] = name
+    atomic_write_text(ctx.layout.environment_json, json.dumps(identity, indent=2))
+    ctx = Context.open(home)
+    repo = home / "repos" / hub_repo.name
+    shutil.copytree(hub_repo, repo)
+    atomic_write_text(repo / "train.py", _TRAIN_PY)
+    ctx.register_project(repo)
+    return ctx, repo
+
+
+def _host_run(
+    ctx: Context,
+    *,
+    repo: Path,
+    host: str,
+    kind: str,
+    command_template: list[str],
+    params: dict[str, str],
+    seed: int,
+    created_at: datetime,
+    minutes: int,
+    status: RunStatus,
+    exit_code: int | None,
+    hypothesis: str,
+    created_by: str,
+    rate: float,
+    sweep_id: str | None = None,
+    sweep_owner: str = "",
+    slurm_job: str | None = None,
+    node: str | None = None,
+) -> RunRecord:
+    """
+    Create one finished-state run on a fake host (2 GPUs, cost filled in).
+
+    Returns
+    -------
+    RunRecord
+        The created record.
+    """
+    project, task = DEMO_TASKS["training"]
+    digest = hashlib.sha256(f"{host}|{sorted(params.items())}|{seed}".encode()).hexdigest()[:4]
+    run_id = new_run_id(task, now=created_at).rsplit("-", 1)[0] + f"-{digest}"
+    values = {**params, "seed": str(seed)}
+    fingerprint = run_fingerprint(
+        command_template=command_template,
+        stage=None,
+        user_config=None,
+        params=params,
+        vars=params,
+    )
+    record = RunRecord(
+        run_id=run_id,
+        project=project,
+        task=task,
+        hypothesis=hypothesis,
+        command=[render_template(part, values) for part in command_template],
+        command_template=list(command_template),
+        vars=dict(params),
+        params=dict(params),
+        cwd=str(repo),
+        environment_id=ctx.descriptor.environment_id,
+        host=host,
+        executor=ExecutorInfo(type=kind, host=host, gpus=[0, 1], slurm_job_id=slurm_job, node=node),
+        git=GitInfo(commit="b82f04c", branch="main"),
+        seed=seed,
+        config_hash=config_hash(fingerprint),
+        status=status,
+        created_at=created_at,
+        started_at=created_at,
+        ended_at=created_at + timedelta(minutes=minutes),
+        exit_code=exit_code,
+        tags=[sweep_tag(sweep_owner, sweep_id)] if sweep_id else [],
+        created_by=created_by,
+        sweep_id=sweep_id,
+        gpus_requested=2,
+    )
+    return ctx.create_run(record.model_copy(update={"cost": compute_cost(record, rate)}))
+
+
+def _score(ctx: Context, record: RunRecord, value: float) -> None:
+    ctx.add_score(
+        record,
+        ScoreRecord(
+            metric="top1",
+            version="v1",
+            key="value",
+            value=value,
+            created_at=record.ended_at or record.created_at,
+        ),
+    )
+
+
+def _seed_gpu1_sweep(ctx: Context, repo: Path, anchor: datetime, owner: str) -> list[str]:
+    """Seed the sweep's finished and failed cells on gpu1 (tagged for ``owner``, the hub)."""
+    start = anchor - timedelta(hours=5, minutes=20)
+    run_ids: list[str] = []
+    for (lr, beam), runs in _SWEEP_GRID.items():
+        for seed, (state, score) in enumerate(runs, 1):
+            if state not in ("f", "x"):
+                continue
+            failed = state == "x"
+            record = _host_run(
+                ctx,
+                repo=repo,
+                host="gpu1",
+                kind="ssh",
+                command_template=_SWEEP_COMMAND,
+                params={"lr": lr, "beam": beam},
+                seed=seed,
+                created_at=start + timedelta(minutes=4 * len(run_ids)),
+                minutes=7 if failed else 48,
+                status=RunStatus.FAILED if failed else RunStatus.FINISHED,
+                exit_code=1 if failed else 0,
+                hypothesis=_SWEEP_HYPOTHESIS,
+                created_by="agent:tuner",
+                rate=_DEMO_GPU_RATE,
+                sweep_id=DEMO_SWEEP_ID,
+                sweep_owner=owner,
+            )
+            if failed:
+                atomic_write_text(
+                    ctx.run_dir(record) / "logs" / "stderr.log", "loss is NaN at step 3100\n"
+                )
+            if score is not None:
+                _score(ctx, record, score)
+            run_ids.append(record.run_id)
+    return run_ids
+
+
+def _seed_cluster_runs(ctx: Context, repo: Path, anchor: datetime) -> list[str]:
+    """Seed two SLURM runs on cluster: one finished, one lost to a node failure."""
+    common: dict[str, Any] = {
+        "repo": repo,
+        "host": "cluster",
+        "kind": "slurm",
+        "command_template": _LONG_COMMAND,
+        "params": {},
+        "hypothesis": "40k steps lifts +aug past 0.915 top-1",
+        "created_by": "human:shreyas",
+        "rate": _DEMO_SLURM_RATE,
+    }
+    done = _host_run(
+        ctx,
+        seed=1,
+        created_at=anchor - timedelta(hours=13),
+        minutes=470,
+        status=RunStatus.FINISHED,
+        exit_code=0,
+        slurm_job="48213077",
+        node="r209u14n01",
+        **common,
+    )
+    _score(ctx, done, 0.9142)
+    lost = _host_run(
+        ctx,
+        seed=2,
+        created_at=anchor - timedelta(hours=12, minutes=40),
+        minutes=52,
+        status=RunStatus.LOST,
+        exit_code=None,
+        slurm_job="48211932",
+        node="r208u06n02",
+        **common,
+    )
+    atomic_write_text(
+        ctx.run_dir(lost) / "logs" / "stderr.log",
+        "slurmstepd: error: *** JOB 48211932 ON r208u06n02 CANCELLED DUE TO NODE FAILURE ***\n",
+    )
+    return [done.run_id, lost.run_id]
+
+
+def seed_demo_hosts(home: Path) -> dict[str, str]:
+    """
+    Seed two fake hosts and a sweep next to the training demo.
+
+    ``gpu1`` (SSH kind, 8 fake A100s, $1.10/GPU-hour) holds 21 seeded runs of the
+    ``lr x beam`` sweep ``s-7f3a``; ``cluster`` (SLURM kind, $0.50/GPU-hour) holds a
+    finished and a lost run. The hub gets ``route: url`` entries for both and the
+    sweep spec; ``hx serve`` starts the hosts (``demo_hosts_running``).
+
+    Parameters
+    ----------
+    home : Path
+        The hub's home; must already hold the training demo.
+
+    Returns
+    -------
+    dict of str to str
+        ``{"gpu1": <home>, "cluster": <home>, "sweep": "rxn-forward/s-7f3a"}``.
+
+    Raises
+    ------
+    ConfigError
+        If the training demo is missing.
+    StoreError
+        If the fake hosts already exist.
+
+    Examples
+    --------
+    >>> import pathlib, tempfile
+    >>> home = pathlib.Path(tempfile.mkdtemp())
+    >>> _ = seed_demo(home, kinds=["training"])
+    >>> sorted(seed_demo_hosts(home))
+    ['cluster', 'gpu1', 'sweep']
+    """
+    home = home.expanduser().resolve()
+    hub = Context.open(home)
+    project, task = DEMO_TASKS["training"]
+    try:
+        entry = hub.store.load_project(project)
+    except StoreError as exc:
+        raise ConfigError(
+            f"--with-hosts needs the training demo ({project}); add --kinds training"
+        ) from exc
+    root = home / DEMO_HOSTS_DIR
+    if root.exists():
+        raise StoreError(f"demo hosts already exist in {root}; seed into an empty HYPOTHEX_HOME")
+    anchor = utcnow().replace(minute=0, second=0, microsecond=0)
+    gpu_ctx, gpu_repo = _demo_host_home(root, "gpu1", Path(entry.repo))
+    slurm_ctx, slurm_repo = _demo_host_home(root, "cluster", Path(entry.repo))
+    fake_gpus = root / "gpu1-gpus.json"
+    atomic_write_text(fake_gpus, json.dumps(_fake_gpu_rows(), indent=2))
+    bin_dir = root / "cluster-bin"
+    for name, text in _FAKE_SLURM.items():
+        atomic_write_text(bin_dir / name, text)
+        (bin_dir / name).chmod(0o755)
+    owner = hub.descriptor.environment_id  # the hub owns the sweep: its tag names the hub
+    _seed_gpu1_sweep(gpu_ctx, gpu_repo, anchor, owner)  # tagged: the sweep's members
+    _seed_cluster_runs(slurm_ctx, slurm_repo, anchor)
+    save_sweep(
+        hub.layout,
+        SweepSpec(
+            id=DEMO_SWEEP_ID,
+            project=project,
+            task=task,
+            host="gpu1",
+            grid=[
+                SweepParam(name="lr", values=list(_SWEEP_LRS)),
+                SweepParam(name="beam", values=list(_SWEEP_BEAMS)),
+            ],
+            random=None,
+            seeds=[1, 2, 3],
+            command_template=list(_SWEEP_COMMAND),
+            created_by="agent:tuner",
+            created_at=anchor - timedelta(hours=5, minutes=20),
+        ),
+    )
+    hosts = load_hosts(hub.layout)
+    environments = {
+        **hosts.environments,
+        "gpu1": HostSpec(
+            route="url",
+            url=_PLACEHOLDER_URL,
+            kind="ssh",
+            usd_per_gpu_hour=_DEMO_GPU_RATE,
+            projects={project: str(gpu_repo)},
+        ),
+        "cluster": HostSpec(
+            route="url",
+            url=_PLACEHOLDER_URL,
+            kind="slurm",
+            usd_per_gpu_hour=_DEMO_SLURM_RATE,
+            slurm=SlurmDefaults(partition="gpu", time="08:00:00", gpus=2),
+            projects={project: str(slurm_repo)},
+        ),
+    }
+    save_hosts(hub.layout, hosts.model_copy(update={"environments": environments}))
+    marker = [
+        _DemoHost(
+            name="gpu1",
+            kind="ssh",
+            home=str(gpu_ctx.layout.home),
+            repo=str(gpu_repo),
+            fake_gpus=str(fake_gpus),
+        ),
+        _DemoHost(
+            name="cluster",
+            kind="slurm",
+            home=str(slurm_ctx.layout.home),
+            repo=str(slurm_repo),
+            bin=str(bin_dir),
+        ),
+    ]
+    atomic_write_text(
+        root / DEMO_HOSTS_FILE, json.dumps([h.model_dump() for h in marker], indent=2)
+    )
+    return {
+        "gpu1": str(gpu_ctx.layout.home),
+        "cluster": str(slurm_ctx.layout.home),
+        "sweep": f"{project}/{DEMO_SWEEP_ID}",
+    }
+
+
+def _start_demo_host(host: _DemoHost) -> subprocess.Popen[bytes]:
+    """Start ``hx serve --kind <kind> --port 0 --no-auth`` for one fake host."""
+    env = {
+        k: v for k, v in os.environ.items() if k not in ("HYPOTHEX_FAKE_GPUS", "HYPOTHEX_HUB_URL")
+    }
+    env["HYPOTHEX_HOME"] = host.home
+    path = [str(Path(sys.executable).parent), env.get("PATH", "")]
+    if host.bin:
+        path.insert(0, host.bin)
+    env["PATH"] = os.pathsep.join(path)
+    if host.fake_gpus:
+        env["HYPOTHEX_FAKE_GPUS"] = host.fake_gpus
+    serve_dir = Path(host.home) / "serve"
+    serve_dir.mkdir(parents=True, exist_ok=True)
+    (serve_dir / "server.json").unlink(missing_ok=True)
+    # --no-auth: the hub reaches these fake hosts by `route: url`, which carries no token
+    argv = [
+        sys.executable, "-m", "hypothex.cli.main", "--home", host.home,
+        "serve", "--host", "127.0.0.1", "--port", "0", "--kind", host.kind, "--no-auth",
+    ]  # fmt: skip
+    with (serve_dir / "demo-host.log").open("ab") as log:
+        return subprocess.Popen(
+            argv, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT
+        )
+
+
+def _wait_demo_host(host: _DemoHost, proc: subprocess.Popen[bytes], timeout: float) -> str:
+    """Wait for a fake host's ``server.json`` and descriptor; return its URL."""
+    serve_dir = Path(host.home) / "serve"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            log = serve_dir / "demo-host.log"
+            tail = (
+                log.read_text(encoding="utf-8", errors="replace")[-2000:] if log.is_file() else ""
+            )
+            raise StoreError(f"demo host {host.name} exited with {proc.returncode}:\n{tail}")
+        with contextlib.suppress(OSError, ValueError, KeyError, httpx.HTTPError):
+            info = json.loads((serve_dir / "server.json").read_text(encoding="utf-8"))
+            if info["pid"] == proc.pid:
+                url = f"http://127.0.0.1:{info['port']}"
+                resp = httpx.get(f"{url}/.well-known/hypothex/environment", timeout=2)
+                if resp.status_code == 200:
+                    return url
+        time.sleep(0.1)
+    raise StoreError(f"demo host {host.name} did not start in {timeout:.0f}s")
+
+
+def _point_hub_at(home: Path, urls: dict[str, str]) -> None:
+    """Rewrite the fake hosts' URLs in the hub's ``environments.yaml``."""
+    layout = Layout(home.expanduser().resolve())
+    hosts = load_hosts(layout)
+    environments = {
+        n: s.model_copy(update={"url": urls[n]}) if n in urls else s
+        for n, s in hosts.environments.items()
+    }
+    save_hosts(layout, hosts.model_copy(update={"environments": environments}))
+
+
+def _launch_live_runs(home: Path, hosts: list[_DemoHost], urls: dict[str, str]) -> list[str]:
+    """
+    Launch the sweep's running and queued cells on gpu1 (unless it already has active runs).
+
+    Running cells go first, so the FIFO scheduler gives them the 6 free GPUs.
+    """
+    gpu = next(h for h in hosts if h.fake_gpus)
+    url = urls[gpu.name]
+    active = [
+        run
+        for status in ("queued", "running")
+        for run in httpx.get(f"{url}/api/v1/runs", params={"status": status}, timeout=30).json()
+    ]
+    if active:
+        return []
+    project, task = DEMO_TASKS["training"]
+    hub_id = load_descriptor(Layout(home.expanduser().resolve())).environment_id
+    tag = sweep_tag(hub_id, DEMO_SWEEP_ID)  # the hub owns the sweep
+    cells = [
+        (lr, beam, seed, state)
+        for (lr, beam), runs in _SWEEP_GRID.items()
+        for seed, (state, _) in enumerate(runs, 1)
+        if state in ("r", "q")
+    ]
+    cells.sort(key=lambda cell: cell[3] != "r")
+    run_ids: list[str] = []
+    for lr, beam, seed, _ in cells:
+        params = {"lr": lr, "beam": beam}
+        resp = httpx.post(
+            f"{url}/api/v1/runs",
+            json={
+                "repo": gpu.repo,
+                "task": task,
+                "command": _SWEEP_COMMAND,
+                "hypothesis": _SWEEP_HYPOTHESIS,
+                "seed": seed,
+                "params": params,
+                "vars": params,
+                "tags": [tag],
+                "gpus": 2,
+                "queue": True,
+                "sweep_id": DEMO_SWEEP_ID,
+                "created_by": "agent:tuner",
+            },
+            timeout=120,
+        )
+        if resp.status_code >= 400:
+            raise StoreError(f"demo host {gpu.name} refused a run: {resp.text[:300]}")
+        run_ids.append(resp.json()["run_id"])
+    return run_ids  # tagged for the hub: it counts them once they are mirrored
+
+
+def _stop_runs(url: str, run_ids: list[str]) -> None:
+    """Stop the live demo runs (best effort, in parallel)."""
+
+    def stop(run_id: str) -> None:
+        with contextlib.suppress(httpx.HTTPError):
+            httpx.post(f"{url}/api/v1/runs/{run_id}/stop", json={"created_by": "demo"}, timeout=60)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(stop, run_ids))
+
+
+@contextmanager
+def demo_hosts_running(home: Path, *, ready_timeout: float = 60.0) -> Iterator[list[str]]:
+    """
+    Run the fake hosts of ``hx demo --with-hosts`` while the hub runs.
+
+    Without ``<home>/demo-hosts/hosts.json`` this does nothing. Otherwise it starts
+    one ``hx serve --kind ...`` process per fake host (gpu1 with fake GPUs, cluster
+    with fake SLURM commands on ``PATH``), points the hub's ``environments.yaml`` at
+    their ports, and, when gpu1 has no active runs, launches the sweep's 3 running
+    and 3 queued cells there. On exit it stops those runs and the processes.
+
+    Parameters
+    ----------
+    home : Path
+        The hub's home.
+    ready_timeout : float
+        Seconds to wait for each fake host.
+
+    Yields
+    ------
+    list of str
+        Run ids launched on gpu1 (empty when gpu1 already had active runs).
+    """
+    marker = home / DEMO_HOSTS_DIR / DEMO_HOSTS_FILE
+    if not marker.is_file():
+        yield []
+        return
+    hosts = [_DemoHost.model_validate(h) for h in json.loads(marker.read_text(encoding="utf-8"))]
+    procs: list[subprocess.Popen[bytes]] = []
+    urls: dict[str, str] = {}
+    started: list[str] = []
+    try:
+        for host in hosts:
+            procs.append(_start_demo_host(host))
+        for host, proc in zip(hosts, procs, strict=True):
+            urls[host.name] = _wait_demo_host(host, proc, ready_timeout)
+        _point_hub_at(home, urls)
+        started = _launch_live_runs(home, hosts, urls)
+        yield started
+    finally:
+        gpu = next((h for h in hosts if h.fake_gpus), None)
+        if gpu is not None and gpu.name in urls and started:
+            _stop_runs(urls[gpu.name], started)
+        for proc in procs:
+            proc.terminate()
+        for proc in procs:
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()

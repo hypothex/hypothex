@@ -1,32 +1,43 @@
+import json
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
+from typer.testing import CliRunner
 
-from hypothex.api.app import _run_view
+from hypothex.api.app import _run_view, create_app
+from hypothex.cli.main import app as cli_app
 from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.control import repair_runs
-from hypothex.core.errors import StoreError
+from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.fsutil import read_jsonl
 from hypothex.core.ids import utcnow
 from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_view
 from hypothex.core.records import RunRecord, RunStatus
+from hypothex.core.sweeps import load_sweep
 from hypothex.core.views import ViewSpec, get_view
 from hypothex.demo import (
     _SEEDERS,
     DEMO_EPOCH,
+    DEMO_HOSTS_DIR,
+    DEMO_SWEEP_ID,
     DEMO_TASKS,
     _fixed,
     _js_round,
     _mulberry32,
     _seed_demo,
+    demo_hosts_running,
     seed_demo,
+    seed_demo_hosts,
 )
+from hypothex.remote.config import load_hosts
+from tests.api.envserver import wait_until
 
 REFS = {
     "generic": "toy-classifier/toy-test",
@@ -466,3 +477,172 @@ def test_every_kind_run_view_queries_cleanly(dctx: Context) -> None:
         if kind in ("agent_eval", "agent_iteration"):
             (tokens,) = [r for r in results if r.title == "tokens per turn"]
             assert tokens.meta["columns"] == ["turn", "tokens_in", "tokens_out", "seconds"]
+
+
+runner = CliRunner()
+
+
+@pytest.fixture(scope="module")
+def hosts_home(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A hub home with the training demo and the fake hosts (seeded, not started)."""
+    home = tmp_path_factory.mktemp("demo-hosts")
+    seed_demo(home, ["training"])
+    seed_demo_hosts(home)
+    return home
+
+
+def test_seed_demo_hosts_writes_hosts_runs_and_the_sweep(hosts_home: Path) -> None:
+    hub = Context.open(hosts_home)
+    hosts = load_hosts(hub.layout).environments
+    assert set(hosts) == {"gpu1", "cluster"}
+    assert (hosts["gpu1"].route, hosts["gpu1"].kind, hosts["cluster"].kind) == (
+        "url",
+        "ssh",
+        "slurm",
+    )
+    assert hosts["cluster"].slurm is not None and hosts["cluster"].slurm.partition == "gpu"
+    assert hosts["gpu1"].usd_per_gpu_hour == 1.10
+    gpu_repo = Path(hosts["gpu1"].projects["rxn-forward"])
+    assert (gpu_repo / "train.py").is_file() and (gpu_repo / "hypothex.yaml").is_file()
+    gpu = Context.open(hosts_home / DEMO_HOSTS_DIR / "gpu1")
+    assert gpu.descriptor.label == "gpu1"
+    runs = gpu.index.list_runs(limit=None)
+    assert Counter(r.status for r in runs) == {RunStatus.FINISHED: 20, RunStatus.FAILED: 1}
+    assert {r.sweep_id for r in runs} == {DEMO_SWEEP_ID}
+    best = next(r for r in runs if r.params == {"lr": "3e-4", "beam": "10"} and r.seed == 2)
+    assert best.command == [
+        "python", "train.py", "--config", "configs/aug.yaml",
+        "--lr", "3e-4", "--beam", "10", "--seed", "2",
+    ]  # fmt: skip
+    assert best.executor.gpus == [0, 1] and best.cost is not None
+    assert best.cost.gpu_hours == pytest.approx(1.6)
+    assert best.cost.gpu_usd == pytest.approx(1.76)
+    assert gpu.store.read_scores("rxn-forward", best.run_id)[0].value == 0.9130
+    cluster = Context.open(hosts_home / DEMO_HOSTS_DIR / "cluster")
+    lost = next(r for r in cluster.index.list_runs(limit=None) if r.status == RunStatus.LOST)
+    assert (lost.executor.slurm_job_id, lost.executor.node) == ("48211932", "r208u06n02")
+    spec = load_sweep(hub.layout, "rxn-forward", DEMO_SWEEP_ID)
+    assert spec.host == "gpu1" and spec.seeds == [1, 2, 3]
+    tag = f"sweep:{hub.descriptor.environment_id[:8]}:{DEMO_SWEEP_ID}"  # the hub owns it
+    members = gpu.index.list_runs(tag=tag, include_archived=True, limit=None)
+    assert len(members) == 21
+    assert [p.name for p in spec.grid] == ["lr", "beam"]
+    gpus = json.loads((hosts_home / DEMO_HOSTS_DIR / "gpu1-gpus.json").read_text())
+    assert len(gpus) == 8 and [g["index"] for g in gpus if g["external"]] == [3, 7]
+
+
+def test_seed_demo_hosts_refuses_twice_and_needs_training(hosts_home: Path, tmp_path: Path) -> None:
+    with pytest.raises(StoreError, match="demo hosts already exist"):
+        seed_demo_hosts(hosts_home)
+    other = tmp_path / "other"
+    seed_demo(other, ["generic"])
+    with pytest.raises(ConfigError, match="--kinds training"):
+        seed_demo_hosts(other)
+
+
+def test_demo_hosts_running_does_nothing_without_the_marker(tmp_path: Path) -> None:
+    with demo_hosts_running(tmp_path) as started:
+        assert started == []
+
+
+def test_cli_demo_with_hosts(home: Path) -> None:
+    result = runner.invoke(
+        cli_app, ["demo", "--kinds", "training", "--with-hosts", "--json"], catch_exceptions=False
+    )
+    out = json.loads(result.stdout)
+    assert out["training"] == "rxn-forward/uspto-forward-top1"
+    assert set(out["hosts"]) == {"gpu1", "cluster", "sweep"}
+    with pytest.raises(ConfigError, match="--kinds training"):
+        runner.invoke(
+            cli_app,
+            ["--home", str(home.parent / "other"), "demo", "--kinds", "generic", "--with-hosts"],
+            catch_exceptions=False,
+        )
+
+
+def test_demo_hosts_serve_connected_hosts_a_queue_and_a_sweep(tmp_path: Path) -> None:
+    home = tmp_path / "hub"
+    seed_demo(home, ["training"])
+    seed_demo_hosts(home)
+    with demo_hosts_running(home) as started:
+        assert len(started) == 6
+        app = create_app(home, background_repair=False)
+        with TestClient(app, base_url="http://127.0.0.1:7777") as client:
+
+            def rows() -> dict[str, dict]:
+                return {r["name"]: r for r in client.get("/api/v1/hosts").json()}
+
+            wait_until(
+                lambda: (
+                    {n: r["state"]["state"] for n, r in rows().items()}
+                    == {"local": "connected", "gpu1": "connected", "cluster": "connected"}
+                ),
+                timeout=60,
+            )
+            current = rows()
+            assert len(current["gpu1"]["gpus"]) == 8
+            assert current["cluster"]["slurm"] == {
+                "pending": 0,
+                "running": 0,
+                "comment_accounting": True,
+            }
+            wait_until(lambda: rows()["gpu1"]["queue"] == 3, timeout=60)
+
+            def summary() -> dict:
+                return client.get(f"/api/v1/sweeps/rxn-forward/{DEMO_SWEEP_ID}").json()
+
+            # 21 seeded + 6 live runs, all tagged for the hub, members once mirrored
+            wait_until(lambda: summary()["counts"]["total"] == 27, timeout=60)
+            assert set(started) <= set(summary()["run_ids"])
+
+
+def test_sigterm_to_hx_serve_stops_the_demo_hosts(tmp_path: Path) -> None:
+    # a real SIGTERM to a real `hx serve`: uvicorn re-raises it after its shutdown,
+    # so the cleanup must run in the app's lifespan, not in a `with` around uvicorn
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    from hypothex.core.execution import process_alive
+
+    home = tmp_path / "hub"
+    seed_demo(home, ["training"])
+    seed_demo_hosts(home)
+    log = (tmp_path / "serve.log").open("wb")
+    hub = subprocess.Popen(
+        [sys.executable, "-m", "hypothex.cli.main", "--home", str(home), "serve", "--port", "0"],
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        files = [
+            home / DEMO_HOSTS_DIR / name / "serve" / "server.json" for name in ("gpu1", "cluster")
+        ]
+
+        def host_pids() -> list[int]:
+            pids = []
+            for path in files:
+                try:
+                    pids.append(json.loads(path.read_text())["pid"])
+                except (OSError, ValueError, KeyError):
+                    return []
+            return pids
+
+        hub_file = home / "serve" / "server.json"
+        wait_until(lambda: len(host_pids()) == 2 and hub_file.is_file(), timeout=90)
+        pids = host_pids()
+        assert all(process_alive(pid, None) for pid in pids)
+        hub.send_signal(signal.SIGTERM)
+        assert hub.wait(timeout=90) in (-signal.SIGTERM, 0)
+        wait_until(lambda: not any(process_alive(pid, None) for pid in pids), timeout=30)
+        assert not hub_file.exists()
+    finally:
+        if hub.poll() is None:
+            hub.kill()
+            hub.wait()
+        for pid in host_pids():
+            if process_alive(pid, None):
+                os.kill(pid, signal.SIGKILL)
+        log.close()

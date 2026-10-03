@@ -1545,6 +1545,7 @@ def create_app(
     auth_token: str | None = None,
     hub: bool = True,
     hub_url: str | None = None,
+    lifespan_context: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
 ) -> FastAPI:
     """
     Build the FastAPI application.
@@ -1588,6 +1589,11 @@ def create_app(
     hub_url : str, optional
         This server's own URL, given to the mounted MCP server so its remote tools
         call this hub (``hx serve`` passes it).
+    lifespan_context : callable, optional
+        Returns a context manager entered when the server starts (before the
+        hub connects its hosts) and exited when it stops (after the hub
+        stopped), in the ASGI lifespan: inside uvicorn's signal handling, so a
+        SIGTERM runs its cleanup too. ``hx serve`` passes the demo hosts.
 
     Returns
     -------
@@ -1652,10 +1658,23 @@ def create_app(
                 for loop in loops:
                     await asyncio.to_thread(loop.join, 10)
 
+    @asynccontextmanager
+    async def lifespan_with_context(app_: FastAPI) -> AsyncIterator[None]:
+        # uvicorn re-raises SIGTERM after its shutdown, which skips any `with` around
+        # it; the lifespan's own shutdown always runs first
+        with contextlib.ExitStack() as extra:
+            if lifespan_context is not None:
+                await asyncio.to_thread(extra.enter_context, lifespan_context())
+            try:
+                async with lifespan(app_):
+                    yield
+            finally:
+                await asyncio.to_thread(extra.close)
+
     app = FastAPI(
         title="Hypothex",
         version=__version__,
-        lifespan=lifespan,
+        lifespan=lifespan_with_context,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
     )

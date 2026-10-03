@@ -92,6 +92,10 @@ class OverviewSummary(BaseModel):
     running: list[RunRecord]
     failures: list[FailureRow]
     projects: list[ProjectRow]
+    cost_usd: float = 0.0
+    """Sum of ``cost.total_usd`` of the runs created in the window (spec 8A.7)."""
+    cost_today_usd: float = 0.0
+    """Sum of ``cost.total_usd`` of the runs that ended since local midnight."""
 
 
 def _short_label(record: RunRecord) -> str:
@@ -239,7 +243,8 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
         failed and lost runs created in the window (archived too), newest first.
         ``counts`` has ``total``, one key per status, ``archived``, ``agent``,
         and ``human`` for runs in the window, except ``running`` and ``queued``,
-        which count the current active runs.
+        which count the current active runs. ``cost_usd`` sums the cost of runs in the
+        window, ``cost_today_usd`` of runs that ended today.
 
     Examples
     --------
@@ -340,6 +345,13 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
     counts["agent"] = sum(1 for r in window if r.created_by.startswith("agent"))
     counts["human"] = counts["total"] - counts["agent"]
 
+    today = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    cost_usd = sum(r.cost.total_usd for r in window if r.cost is not None)
+    cost_today_usd = sum(
+        r.cost.total_usd
+        for r in everything
+        if r.cost is not None and r.ended_at is not None and r.ended_at >= today
+    )
     summary = OverviewSummary(
         headline="",
         counts=counts,
@@ -348,6 +360,8 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
         running=running,
         failures=failures,
         projects=projects,
+        cost_usd=round(cost_usd, 4),
+        cost_today_usd=round(cost_today_usd, 4),
     )
     summary.headline = overview_headline(summary, board=_focus_board(ideas, boards))
     return summary

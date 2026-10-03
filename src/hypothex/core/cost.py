@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from hypothex.core.records import TERMINAL_STATUSES, CostTotals, RunRecord
 
 COST_DECIMALS = 6
@@ -134,3 +136,36 @@ def price_record(record: RunRecord, usd_per_gpu_hour: float | None) -> RunRecord
     if record.status not in TERMINAL_STATUSES:
         return record
     return record.model_copy(update={"cost": compute_cost(record, usd_per_gpu_hour)})
+
+
+def add_costs(costs: Iterable[CostTotals | None]) -> CostTotals | None:
+    """
+    Sum cost totals field by field (a seed group, a day, a sweep).
+
+    Parameters
+    ----------
+    costs : iterable of CostTotals or None
+        Costs to add; None entries (runs without a cost yet) are skipped.
+
+    Returns
+    -------
+    CostTotals or None
+        The sum, each value rounded to 6 decimals; None when no cost was given.
+
+    Examples
+    --------
+    >>> add_costs([CostTotals(gpu_usd=1.0, total_usd=1.0), None, CostTotals(api_usd=0.5,
+    ...     total_usd=0.5)]).total_usd
+    1.5
+    >>> add_costs([None]) is None
+    True
+    """
+    present = [c for c in costs if c is not None]
+    if not present:
+        return None
+    return CostTotals(
+        gpu_hours=round(sum(c.gpu_hours for c in present), 6),
+        gpu_usd=round(sum(c.gpu_usd for c in present), 6),
+        api_usd=round(sum(c.api_usd for c in present), 6),
+        total_usd=round(sum(c.total_usd for c in present), 6),
+    )

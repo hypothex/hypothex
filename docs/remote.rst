@@ -119,6 +119,8 @@ Launch on a host
   answer ``503`` instead of acting on the hub's copy.
 - Cost: ``gpu_hours = wall time x GPUs`` and ``usd = gpu_hours x usd_per_gpu_hour``,
   plus API cost from ``usage.jsonl``.
+- Leaderboard rows (each seed group), sweeps, and the Overview (the window and
+  today) show what the runs cost; ``hx hosts status --json`` shows each host's rate.
 
 Sweeps
 ------

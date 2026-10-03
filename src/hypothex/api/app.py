@@ -818,8 +818,8 @@ def host_rows(
     Returns
     -------
     list of dict
-        ``{name, kind, state, gpus, queue, slurm, cost_today_usd, projects,
-        stale_banner_hours}``.
+        ``{name, kind, state, gpus, queue, slurm, cost_today_usd, usd_per_gpu_hour,
+        projects, stale_banner_hours}``.
     """
     since = _today_start()
     eid = ctx.descriptor.environment_id
@@ -834,6 +834,10 @@ def host_rows(
         hx_version=__version__,
         last_sequence=ctx.events.last_sequence(),
     )
+    local_rate = next(
+        (s.usd_per_gpu_hour for s in manager.hosts.environments.values() if s.route == "local"),
+        None,
+    )
     seen_gpus = gpu_cache.get() if gpu_cache is not None else None
     rows: list[dict[str, Any]] = [
         {
@@ -844,6 +848,7 @@ def host_rows(
             "queue": sum(1 for r in local_runs if r.status == RunStatus.QUEUED),
             "slurm": None,
             "cost_today_usd": _cost_since(local_runs, since),
+            "usd_per_gpu_hour": local_rate,
             "projects": sorted(e.project for e in ctx.index.list_projects()),
             "stale_banner_hours": manager.hosts.stale_banner_hours,
         }
@@ -883,6 +888,7 @@ def host_rows(
                 "queue": queue,
                 "slurm": slurm,
                 "cost_today_usd": _cost_since(runs, since),
+                "usd_per_gpu_hour": spec.usd_per_gpu_hour,
                 "projects": sorted(spec.projects),
                 "stale_banner_hours": manager.hosts.stale_banner_hours,
             }

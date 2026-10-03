@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from hypothex.core import stats
 from hypothex.core.config import ProjectConfig, TaskKind, TaskSpec, parse_metric_key
+from hypothex.core.cost import add_costs
 from hypothex.core.headlines import (
     ValueFormat,
     metric_unit,
@@ -22,7 +23,7 @@ from hypothex.core.headlines import (
     task_stat_strip,
     value_format,
 )
-from hypothex.core.records import RunRecord, RunStatus, ScoreRecord, UsageTotals
+from hypothex.core.records import CostTotals, RunRecord, RunStatus, ScoreRecord, UsageTotals
 from hypothex.core.seeds import Stats, intervals_overlap, summarize
 
 PerExample = dict[str, dict[str, dict[str, Any]]]
@@ -79,6 +80,8 @@ class LeaderboardRow(BaseModel):
     vs_best: VersusBest | None
     created_by: list[str]
     usage: UsageTotals | None
+    cost: CostTotals | None = None
+    """Sum of the member runs' ``cost`` (spec 8A.7); None when no run has one yet."""
 
 
 class Leaderboard(BaseModel):
@@ -455,6 +458,7 @@ def _make_row(
         vs_best=None,
         created_by=sorted({m.created_by for m in members}),
         usage=_sum_usage(members),
+        cost=add_costs(m.cost for m in members),
     )
 
 

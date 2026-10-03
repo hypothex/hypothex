@@ -38,6 +38,7 @@ def test_hosts_lists_the_hub_then_each_host(
         assert [g["index"] for g in gpu1["gpus"] if g["external"]] == [3]
         assert (gpu1["queue"], gpu1["slurm"], gpu1["cost_today_usd"]) == (0, None, 0.0)
         assert gpu1["projects"] == ["toy"]
+        assert gpu1["usd_per_gpu_hour"] == 2.0 and local["usd_per_gpu_hour"] is None
 
 
 def test_disconnect_and_connect(tmp_path: Path) -> None:

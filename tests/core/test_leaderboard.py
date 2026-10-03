@@ -7,7 +7,14 @@ from hypothex.core import stats
 from hypothex.core.config import ProjectConfig
 from hypothex.core.ids import utcnow
 from hypothex.core.leaderboard import build_leaderboard, group_label, pick_field
-from hypothex.core.records import GitInfo, RunRecord, RunStatus, ScoreRecord, UsageTotals
+from hypothex.core.records import (
+    CostTotals,
+    GitInfo,
+    RunRecord,
+    RunStatus,
+    ScoreRecord,
+    UsageTotals,
+)
 from hypothex.core.sources import group_labels
 from tests.factories import make_record
 
@@ -499,3 +506,26 @@ def test_board_carries_unit_value_format_and_relative_deltas() -> None:
     runs = [krun("a", "aaaa"), krun("b", "bbbb", minute=1)]
     board = build_leaderboard("toy", "t", KINDS, runs, {"a": acc(0.9), "b": acc(0.6)})
     assert (board.unit, board.value_format) == ("", "fraction")
+
+
+def test_rows_sum_the_cost_of_their_runs() -> None:
+    def costed(rid: str, group: str, minute: int, cost: CostTotals | None) -> RunRecord:
+        return make_record(
+            rid,
+            task="t",
+            status=RunStatus.FINISHED,
+            config_hash=f"sha256:{group}",
+            git=GitInfo(commit="c1"),
+            created_at=T0 + timedelta(minutes=minute),
+            cost=cost,
+        )
+
+    runs = [
+        costed("c0", "c", 0, CostTotals(gpu_hours=1.0, gpu_usd=2.0, total_usd=2.0)),
+        costed("c1", "c", 1, CostTotals(gpu_hours=0.5, gpu_usd=1.0, api_usd=0.25, total_usd=1.25)),
+        costed("d0", "d", 2, None),
+    ]
+    scores = {"c0": [score("acc", 0.9)], "c1": [score("acc", 0.8)], "d0": [score("acc", 0.5)]}
+    best, other = build_leaderboard("toy", "t", CFG, runs, scores).rows
+    assert best.cost == CostTotals(gpu_hours=1.5, gpu_usd=3.0, api_usd=0.25, total_usd=3.25)
+    assert other.cost is None

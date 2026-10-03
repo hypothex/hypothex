@@ -300,6 +300,34 @@ def test_events_error_message_raises() -> None:
         asyncio.run(asyncio.wait_for(scenario(), 10))
 
 
+@pytest.mark.parametrize(
+    "frame",
+    [
+        "<html>proxy page</html>",
+        "[1, 2]",
+        "null",
+        json.dumps({"type": "event"}),
+        json.dumps({"type": "event", "event": {"sequence": "x"}}),
+        json.dumps({"type": "event", "event": "nope"}),
+    ],
+    ids=["not-json", "not-an-object", "null", "no-event-key", "bad-event-body", "event-not-object"],
+)
+def test_events_bad_frame_raises_env_request_error(frame: str) -> None:
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.send(frame)
+        await ws.close()
+
+    async def scenario() -> None:
+        async with fake_ws(handler) as url:
+            async for _ in EnvClient(url, timeout=5).events(0):
+                pass
+
+    with pytest.raises(EnvRequestError, match="invalid message") as err:
+        asyncio.run(asyncio.wait_for(scenario(), 10))
+    assert not isinstance(err.value, EnvUnreachableError)
+
+
 def test_events_refused_handshake_keeps_the_status() -> None:
     def refuse(conn: ServerConnection, request: Request) -> Response:
         return conn.respond(HTTPStatus.FORBIDDEN, "Cross-origin request rejected\n")

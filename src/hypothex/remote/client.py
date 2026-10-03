@@ -480,7 +480,8 @@ class EnvClient:
         EnvUnreachableError
             The WebSocket could not be opened.
         EnvRequestError
-            The server refused the handshake or sent an ``error`` message.
+            The server refused the handshake, sent an ``error`` message, or sent a
+            frame that is not a valid event message.
         """
         try:
             ws = await connect(
@@ -501,12 +502,21 @@ class EnvClient:
             try:
                 await ws.send(json.dumps({"type": "subscribe", "after_sequence": after_sequence}))
                 async for raw in ws:
-                    msg = json.loads(raw)
-                    if msg.get("type") == "error":
-                        raise EnvRequestError(f"{self.ws_url}: {msg.get('error')}")
-                    if msg.get("type") != "event":
+                    try:
+                        msg = json.loads(raw)
+                        kind = msg.get("type")
+                        if kind == "error":
+                            error = msg.get("error")
+                        elif kind == "event":
+                            event = Event.model_validate(msg["event"])
+                    except (ValueError, KeyError, AttributeError, ValidationError) as exc:
+                        raise EnvRequestError(
+                            f"{self.ws_url} sent an invalid message: {exc}"
+                        ) from exc
+                    if kind == "error":
+                        raise EnvRequestError(f"{self.ws_url}: {error}")
+                    if kind != "event":
                         continue  # "ready" and future message types
-                    event = Event.model_validate(msg["event"])
                     if event.sequence <= last:
                         continue
                     last = event.sequence

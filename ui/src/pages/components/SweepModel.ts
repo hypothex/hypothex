@@ -6,8 +6,20 @@
  * running run on a host that is not connected is shown `stale`: derived here, never stored.
  * Runs are matched to hosts by `environment_id` (`hostRowForRun`), never `executor.host`.
  */
-import type { HostRow, Leaderboard, RunRecord, RunStatus, SweepSpec } from "../../api/models";
-import { DASH, fmtScore, isNum, parseTime } from "./format";
+import type { HostRow, Leaderboard, RunRecord, RunStatus, StatItem, SweepSpec } from "../../api/models";
+import { cliQuote } from "../../launch/cli";
+import {
+  DASH,
+  fmtDuration,
+  fmtInterval,
+  fmtScore,
+  fmtScoreUnit,
+  fmtUsd,
+  isNum,
+  parseTime,
+  runSeconds,
+  shortId,
+} from "./format";
 import { fmtAgeMs, hostRowForRun } from "./HostsPanel";
 
 // ------------------------------------------------------------------------------- cells
@@ -284,4 +296,261 @@ export function hostsOf(runs: readonly RunRecord[], hosts: readonly HostRow[] | 
 /** In-app link to a sweep page. */
 export function sweepHref(project: string, sweepId: string): string {
   return `/s/${encodeURIComponent(project)}/${encodeURIComponent(sweepId)}`;
+}
+
+// ---------------------------------------------------------------------- actions
+/** Most seeds one Add seeds click may add per cell. */
+export const MAX_NEW_SEEDS = 20;
+
+/**
+ * `--seeds` text. A single number is a count to the CLI (`--seeds 5` means 1 to 5), so one
+ * seed other than 1 is written as the one-element list `5,`.
+ */
+function seedsArg(seeds: readonly number[]): string {
+  const [only] = seeds;
+  return seeds.length === 1 && only !== 1 ? `${only},` : seeds.join(",");
+}
+
+/**
+ * The `hx sweep` command that launches the same sweep (spec 8A.6).
+ *
+ * `--gpus` and `-H` come from the sweep's runs; `--queue` is added when any run is or was
+ * queued on a host. Every argument goes through `cliQuote` (as in the Launch dialog), so
+ * `{lr}` or `--x={1,2}` is quoted and the shell neither drops nor brace-expands it.
+ */
+export function sweepCli(spec: SweepSpec, runs: readonly RunRecord[]): string {
+  const argv = ["hx", "sweep"];
+  if (spec.task) argv.push("-t", spec.task);
+  for (const p of spec.grid) if (p.values) argv.push("--grid", `${p.name}=${p.values.join(",")}`);
+  if (spec.random != null) {
+    argv.push("--random", String(spec.random));
+    for (const p of spec.grid) {
+      if (!p.values) argv.push("--param", `${p.name}=${p.low ?? ""}:${p.high ?? ""}${p.log ? ":log" : ""}`);
+    }
+  }
+  argv.push("--seeds", seedsArg(spec.seeds));
+  if (spec.host) argv.push("--host", spec.host);
+  const gpus = runs.find((r) => (r.gpus_requested ?? 0) > 0)?.gpus_requested ?? 0;
+  if (gpus > 0) argv.push("--gpus", String(gpus));
+  if (runs.some((r) => r.status === "queued" || r.executor.queue_position != null)) argv.push("--queue");
+  const hypothesis = runs.map((r) => r.hypothesis.trim()).find((h) => h !== "");
+  if (hypothesis) argv.push("-H", hypothesis);
+  return `${argv.map(cliQuote).join(" ")} -- ${spec.command_template.map(cliQuote).join(" ")}`;
+}
+
+/** `count` new seeds after the largest seed in use (`[1, 2]`, 2 → `[3, 4]`): the Launch dialog's helper. */
+export { nextSeeds } from "../../launch/seeds";
+
+/** A whole number from 1 to `MAX_NEW_SEEDS`, else null. */
+export function parseSeedCount(text: string): number | null {
+  const t = text.trim();
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number(t);
+  return n >= 1 && n <= MAX_NEW_SEEDS ? n : null;
+}
+
+// ------------------------------------------------------------------ time and cost
+function median(xs: readonly number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 1 ? (s[mid] ?? 0) : ((s[mid - 1] ?? 0) + (s[mid] ?? 0)) / 2;
+}
+
+/**
+ * Seconds until the sweep is done: median finished run time × (queued runs + time left
+ * of running runs) ÷ runs running now. Null without a finished run or with nothing left.
+ */
+export function etaSeconds(runs: readonly RunRecord[], now: number): number | null {
+  const done = runs
+    .filter((r) => r.status === "finished")
+    .map((r) => runSeconds(r, now))
+    .filter(isNum);
+  const running = runs.filter((r) => r.status === "running");
+  const queued = runs.filter((r) => r.status === "queued").length;
+  if (done.length === 0 || running.length + queued === 0) return null;
+  const typical = median(done);
+  const left =
+    queued * typical + running.reduce((s, r) => s + Math.max(0, typical - (runSeconds(r, now) ?? 0)), 0);
+  return left / Math.max(running.length, 1);
+}
+
+/** GPU-hours of a run: its final `cost.gpu_hours`, else wall time so far × GPUs held. */
+export function gpuHours(record: RunRecord, now: number): number {
+  if (record.cost) return record.cost.gpu_hours;
+  const seconds = runSeconds(record, now) ?? 0;
+  return (seconds * (record.executor.gpus ?? []).length) / 3600;
+}
+
+/** GPU-hours per host (`hostOf`), in run order; hosts with no GPU time are left out. */
+export function gpuHoursByHost(
+  runs: readonly RunRecord[],
+  now: number,
+  hosts: readonly HostRow[] | undefined,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const r of runs) {
+    const h = gpuHours(r, now);
+    const host = hostOf(r, hosts);
+    if (h > 0) out.set(host, (out.get(host) ?? 0) + h);
+  }
+  return out;
+}
+
+/** `6.2` below 10, `102` from 10. */
+export function fmtGpuHours(hours: number): string {
+  return hours < 10 ? hours.toFixed(1) : hours.toFixed(0);
+}
+
+/** A run's dollars: final `cost.total_usd`, else API spend so far, else null. */
+export function runUsd(record: RunRecord): number | null {
+  if (record.cost) return record.cost.total_usd;
+  return record.usage && record.usage.usd > 0 ? record.usage.usd : null;
+}
+
+// ----------------------------------------------------------------------- progress
+/** Progress segment: finished, running, queued, failed or lost, killed, not indexed yet. */
+export type ProgressKind = "f" | "r" | "q" | "x" | "k" | "n";
+
+function progressParts(counts: Readonly<Record<string, number>>): [ProgressKind, number][] {
+  const c = (k: string): number => counts[k] ?? 0;
+  const parts: [ProgressKind, number][] = [
+    ["f", c("finished")],
+    ["r", c("running")],
+    ["q", c("queued")],
+    ["x", c("failed") + c("lost")],
+    ["k", c("killed")],
+  ];
+  const known = parts.reduce((s, [, n]) => s + n, 0);
+  parts.push(["n", Math.max(0, c("total") - known)]);
+  return parts;
+}
+
+/** One segment per run, in the order finished, running, queued, failed, killed, pending. */
+export function progressSegments(counts: Readonly<Record<string, number>>): ProgressKind[] {
+  return progressParts(counts).flatMap(([kind, n]) => Array.from({ length: n }, () => kind));
+}
+
+const PROGRESS_WORD: Record<ProgressKind, string> = {
+  f: "finished",
+  r: "running",
+  q: "queued",
+  x: "failed",
+  k: "killed",
+  n: "pending",
+};
+
+/** `5 finished, 1 running, 1 queued, 1 failed` (+ killed and pending when present). */
+export function progressLabel(counts: Readonly<Record<string, number>>): string {
+  return progressParts(counts)
+    .filter(([kind, n]) => n > 0 || kind === "f" || kind === "r" || kind === "q" || kind === "x")
+    .map(([kind, n]) => `${n} ${PROGRESS_WORD[kind]}`)
+    .join(", ");
+}
+
+// --------------------------------------------------------------------------- sort
+/** Sort column (a param name, `n` or `mean`) and direction. */
+export interface SortState {
+  key: string;
+  dir: "asc" | "desc";
+}
+
+/** Best cell first: by mean, descending when higher is better. */
+export function defaultSort(higherIsBetter: boolean): SortState {
+  return { key: "mean", dir: higherIsBetter ? "desc" : "asc" };
+}
+
+/** Clicking the active column flips it; another column starts ascending (`mean`: best first). */
+export function nextSort(prev: SortState, key: string, higherIsBetter: boolean): SortState {
+  if (prev.key === key) return { key, dir: prev.dir === "asc" ? "desc" : "asc" };
+  return key === "mean" ? defaultSort(higherIsBetter) : { key, dir: "asc" };
+}
+
+const NUMERIC = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i;
+
+function sortValue(cell: SweepCellRow, key: string): number | string | null {
+  if (key === "mean") return cell.mean;
+  if (key === "n") return cell.n;
+  const v = cell.params[key];
+  if (v === undefined) return null;
+  return NUMERIC.test(v.trim()) ? Number(v) : v;
+}
+
+/** Cells sorted by `sort`; numbers (also `1e-4`-style params) compare as numbers, gaps last. */
+export function sortCells(cells: readonly SweepCellRow[], sort: SortState): SweepCellRow[] {
+  const sign = sort.dir === "asc" ? 1 : -1;
+  return cells
+    .map((cell, i) => ({ cell, i, v: sortValue(cell, sort.key) }))
+    .sort((a, b) => {
+      if (a.v === null || b.v === null) return a.v === b.v ? a.i - b.i : a.v === null ? 1 : -1;
+      const d =
+        typeof a.v === "number" && typeof b.v === "number" ? a.v - b.v : String(a.v).localeCompare(String(b.v));
+      return d !== 0 ? sign * d : a.i - b.i;
+    })
+    .map((x) => x.cell);
+}
+
+// -------------------------------------------------------------------------- stats
+/** Inputs of the sweep stat strip. */
+export interface SweepStatsInput {
+  counts: Readonly<Record<string, number>>;
+  totalUsd: number;
+  best: SweepCellRow | null;
+  names: readonly string[];
+  metric: string;
+  unit: string;
+  /** The sweep's runs, in launch order. */
+  runs: readonly RunRecord[];
+  /** `GET /api/v1/hosts`, to name each run's host (undefined while it loads or fails). */
+  hosts: readonly HostRow[] | undefined;
+  now: number;
+}
+
+const failLine = (r: RunRecord): string =>
+  `${shortId(r.run_id)} ${r.status}${r.exit_code !== null ? `, exit ${r.exit_code}` : ""}`;
+
+/** Stat strip: best, 95% CI, finished / total, running, queued, failed, cost with GPU-h, ETA. */
+export function sweepStats(input: SweepStatsInput): StatItem[] {
+  const { counts, names, metric, unit, runs, hosts, now } = input;
+  const c = (k: string): number => counts[k] ?? 0;
+  const hours = gpuHoursByHost(runs, now, hosts);
+  const total = [...hours.values()].reduce((s, h) => s + h, 0);
+  const failed = runs.filter((r) => r.status === "failed" || r.status === "lost");
+  const eta = etaSeconds(runs, now);
+  const best = input.best !== null && input.best.mean !== null ? input.best : null;
+  const seeds = (n: number): string => `${n} seed${n === 1 ? "" : "s"}`;
+  return [
+    {
+      label: `best ${metric}`,
+      value: best ? fmtScoreUnit(best.mean, unit) : DASH,
+      tooltip: best
+        ? `Mean ${metric} of ${paramsText(best.params, names)} over ${seeds(best.n)}`
+        : "No scored runs yet",
+    },
+    {
+      label: "95% CI",
+      value: best && best.lo !== null && best.hi !== null ? fmtInterval(best.lo, best.hi) : DASH,
+      tooltip: "Best cell: test-set 95% interval, or over seeds without per-example scores",
+    },
+    { label: "finished", value: String(c("finished")), unit: `/ ${c("total")}`, tooltip: "Runs finished" },
+    { label: "running", value: String(c("running")), tooltip: "Runs running now" },
+    { label: "queued", value: String(c("queued")), tooltip: "Runs waiting in a host queue" },
+    {
+      label: "failed",
+      value: String(c("failed") + c("lost")),
+      tooltip: failed.length > 0 ? failed.map(failLine).join("\n") : "No failed runs",
+    },
+    {
+      label: `cost, ${fmtGpuHours(total)} GPU-h`,
+      value: input.totalUsd > 0 ? fmtUsd(input.totalUsd) : "$0",
+      tooltip:
+        hours.size > 0
+          ? [...hours].map(([host, h]) => `${host} ${fmtGpuHours(h)} GPU-h`).join("\n")
+          : "No GPU time yet",
+    },
+    {
+      label: "ETA",
+      value: eta === null ? DASH : fmtDuration(eta),
+      tooltip: "Median finished run time × runs left ÷ runs running",
+    },
+  ];
 }

@@ -501,7 +501,7 @@ function renderStorage(state) {
   const largest = S.largest.map(it => `<tr><td><a class="p" href="#run">${short(it.run)}</a></td><td>${esc(it.host)}</td><td>${it.kind}</td><td class="path"><span class="p" title="${esc(it.path)}">${esc(tail(it.path))}</span></td><td class="r">${bytes3(it.bytes)}</td><td class="r">${it.age}</td><td>${it.starred ? `<span title="starred: never cleaned">★</span>` : ""}${it.archived ? ` <span class="tag" style="font-size:11.5px">archived</span>` : ""}</td></tr>`).join("");
   const P = S.plan;
   const planned = state !== "start";
-  const plan = planned ? `<div class="planline"><b>${bytes1(P.total)}</b><span>${P.files} files</span><span>${P.hosts.length} hosts</span><span class="mono">${P.plan_id}</span><span class="small" title="Apply before this, or dry run again">until ${P.expires}</span></div>
+  const plan = planned ? `<div class="planline"><b>${bytes1(P.total)}</b><span>${P.files} paths</span><span>${P.hosts.length} hosts</span><span class="mono">${P.plan_id}</span><span class="small" title="Apply before this, or dry run again">until ${P.expires}</span></div>
     <table class="tbl"><thead><tr><th>run</th><th>host</th><th>path</th><th class="r">bytes</th><th>reason</th></tr></thead><tbody>
     ${P.items.map(i => `<tr><td><span class="p">${short(i.run)}</span></td><td>${esc(i.host)}</td><td class="path"><span class="p" title="${esc(i.path)}">${esc(tail(i.path))}</span></td><td class="r">${bytes3(i.bytes)}</td><td class="dim">${esc(i.reason)}</td></tr>`).join("")}
     <tr class="more"><td colspan="3">+ ${P.more.n} more</td><td class="r">${bytes3(P.more.bytes)}</td><td></td></tr>
@@ -526,7 +526,7 @@ function renderStorage(state) {
   if (state === "confirm") {
     $("#ovl").hidden = false;
     $("#ovl").innerHTML = `<div class="dlg" role="dialog" aria-label="Confirm delete"><div class="dlg-h"><h2>delete ${bytes1(P.total)}</h2></div>
-      <div class="dlg-b"><div>${P.files} files · ${P.hosts.length} hosts · <span class="mono">${P.plan_id}</span></div>
+      <div class="dlg-b"><div>${P.files} paths · ${P.hosts.length} hosts · <span class="mono">${P.plan_id}</span></div>
       <div class="row"><span>type</span><b class="mono">412.3</b><input class="in w-m" value="412.3" aria-label="Confirm size in GB"><span>GB</span></div></div>
       <div class="dlg-f"><span class="small">2 refused · not deleted</span><span class="sp"></span><button class="btn" type="button">cancel</button><button class="btn danger" type="button">delete</button></div></div>`;
   }

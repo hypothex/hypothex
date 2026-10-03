@@ -8,7 +8,7 @@
  */
 import type { HostRow, Leaderboard, RunRecord, RunStatus, SweepSpec } from "../../api/models";
 import { DASH, fmtScore, isNum, parseTime } from "./format";
-import { hostRowForRun } from "./HostsPanel";
+import { fmtAgeMs, hostRowForRun } from "./HostsPanel";
 
 // ------------------------------------------------------------------------------- cells
 /** A run of a cell, as the summary lists it. `status` is null when the server sent none. */
@@ -131,15 +131,7 @@ export function runState(
   return status;
 }
 
-/** A short age: `42s`, `4m`, `1h 30m`. Negative ages are 0. */
-export function fmtAge(seconds: number): string {
-  const s = Math.max(0, seconds);
-  if (s < 60) return `${Math.floor(s)}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
-}
-
-/** The runs table's state text: `stale 4m`, `queued, pos 2`, `queued, job 48211`, `running, c0412`, `failed, exit 1`. */
+/** The runs table's state text (stale age as the host row prints it): `stale 4m`, `queued, pos 2`, `queued, job 48211`, `running, c0412`, `failed, exit 1`. */
 export function stateText(
   record: RunRecord,
   state: RunGlyphState,
@@ -151,7 +143,7 @@ export function stateText(
     case "stale": {
       const since = stale.get(record.environment_id);
       const t = since === undefined ? Number.NaN : parseTime(since);
-      return Number.isNaN(t) ? "stale" : `stale ${fmtAge((now - t) / 1000)}`;
+      return Number.isNaN(t) ? "stale" : `stale ${fmtAgeMs(now - t)}`;
     }
     case "queued":
       if (ex.queue_position != null) return `queued, pos ${ex.queue_position}`;

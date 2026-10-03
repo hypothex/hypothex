@@ -4,7 +4,6 @@ import {
   type SweepCellRow,
   cellLabel,
   cellTip,
-  fmtAge,
   gridLabel,
   heatAxes,
   heatLevel,
@@ -25,6 +24,7 @@ import {
   sweepHref,
 } from "../../src/pages/components/SweepModel";
 import { CELL_D, HOSTS, NOW, RAW_CELLS, RUNS, STALE, makeSummary, makeSweepBoard, rid, run } from "./sweepFixtures";
+import { fmtAgeMs } from "../../src/pages/components/HostsPanel";
 
 const SPEC: SweepSpec = makeSummary().spec;
 const NAMES = ["lr", "beam"];
@@ -130,8 +130,13 @@ describe("run state", () => {
     expect(stateText({ ...run("a2"), environment_id: "env-dgx" }, "stale", STALE, NOW)).toBe("stale 4m");
   });
 
-  test("fmtAge", () => {
-    expect([fmtAge(42), fmtAge(240), fmtAge(5400), fmtAge(-5)]).toEqual(["42s", "4m", "1h 30m", "0s"]);
+  test("the stale age uses the host row's short age: 90 min reads 1h, 2 days read 2d", () => {
+    const since = (ms: number): Map<string, string> => new Map([["env-dgx", new Date(NOW - ms).toISOString()]]);
+    const r = { ...run("a2"), environment_id: "env-dgx" };
+    expect(stateText(r, "stale", since(5_400_000), NOW)).toBe(`stale ${fmtAgeMs(5_400_000)}`);
+    expect(stateText(r, "stale", since(5_400_000), NOW)).toBe("stale 1h");
+    expect(stateText(r, "stale", since(172_800_000), NOW)).toBe("stale 2d");
+    expect(stateText(r, "stale", since(-5_000), NOW)).toBe("stale 0s");
   });
 });
 

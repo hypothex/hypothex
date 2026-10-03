@@ -126,6 +126,39 @@ def _local_parts(entry: str, base: PurePosixPath) -> tuple[str, ...] | None:
     return path.parts[len(base.parts) :]
 
 
+def _parse_listing(raw: bytes, url: str, status_code: int) -> list[RemoteFile]:
+    """
+    Decode a folder-listing answer into :class:`RemoteFile` objects.
+
+    Parameters
+    ----------
+    raw : bytes
+        Body of the 200 answer.
+    url : str
+        Request path, for the error text.
+    status_code : int
+        HTTP status of the answer.
+
+    Returns
+    -------
+    list of RemoteFile
+
+    Raises
+    ------
+    EnvRequestError
+        The body is not JSON, is not a list, or has entries of the wrong shape.
+    """
+    try:
+        body = json.loads(raw)
+        if not isinstance(body, list):
+            raise ValueError(f"expected a list, got {type(body).__name__}")
+        return [RemoteFile.model_validate(item) for item in body]
+    except (ValueError, ValidationError) as exc:
+        raise EnvRequestError(
+            f"GET {url} -> {status_code}: invalid folder listing: {exc}", status_code=status_code
+        ) from exc
+
+
 class EnvClient:
     """
     Client for one env server's HTTP and WebSocket API.
@@ -296,8 +329,10 @@ class EnvClient:
         Raises
         ------
         EnvRequestError
-            The run or folder does not exist (``status_code == 404``) or
-            ``rel_dir`` is a file.
+            The run or folder does not exist (``status_code == 404``),
+            ``rel_dir`` is a file, or the listing is not valid.
+        EnvUnreachableError
+            The server cannot be reached.
         """
         url = self._file_url(run_id, rel_dir)
         try:
@@ -308,7 +343,7 @@ class EnvClient:
             raise EnvRequestError(f"{rel_dir!r} of run {run_id} is a file, not a folder")
         if resp.is_error:
             raise _error_from(resp, f"GET {url}")
-        return [RemoteFile.model_validate(item) for item in resp.json()]
+        return _parse_listing(resp.content, url, resp.status_code)
 
     def fetch_file(
         self,
@@ -352,7 +387,8 @@ class EnvClient:
         EnvUnreachableError
             The connection failed or dropped mid-transfer (``dest`` is unchanged).
         EnvRequestError
-            The server answered with an error other than 404/413.
+            The server answered with an error other than 404/413, or sent an
+            invalid folder listing.
 
         Examples
         --------
@@ -371,7 +407,7 @@ class EnvClient:
                     raise _error_from(resp, f"GET {url}")
                 if not resp.headers.get(DIR_HEADER):
                     return self._write_stream(resp, dest, max_bytes)
-                listing = [RemoteFile.model_validate(item) for item in json.loads(resp.read())]
+                listing = _parse_listing(resp.read(), url, resp.status_code)
         except httpx.TransportError as exc:
             raise self._unreachable(exc) from exc
         base = PurePosixPath(rel_path)

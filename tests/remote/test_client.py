@@ -178,3 +178,23 @@ def test_dropped_transfer_leaves_no_partial_file(tmp_path: Path) -> None:
     with pytest.raises(EnvUnreachableError):
         client.fetch_file("r1", "scores.jsonl", dest, max_bytes=100)
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [b"<html>proxy page</html>", b'{"path": "a", "size": 1}', b'[{"path": "a"}]', b"null"],
+    ids=["not-json", "not-a-list", "wrong-shape", "null"],
+)
+def test_bad_listing_raises_env_request_error(tmp_path: Path, answer: bytes) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=answer, headers={"X-Hypothex-Dir": "1"})
+
+    client = EnvClient("http://fake-host")
+    client._http = httpx.Client(base_url="http://fake-host", transport=httpx.MockTransport(handler))
+    with pytest.raises(EnvRequestError) as listed:
+        client.list_files("r1", "predictions")
+    assert listed.value.status_code == 200
+    with pytest.raises(EnvRequestError) as fetched:
+        client.fetch_file("r1", "predictions", tmp_path / "predictions", max_bytes=100)
+    assert fetched.value.status_code == 200
+    assert not (tmp_path / "predictions").exists()

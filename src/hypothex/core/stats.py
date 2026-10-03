@@ -143,7 +143,10 @@ def quantile(values: Sequence[float], q: float) -> float:
     """
     Quantile with linear interpolation (numpy's default ``"linear"`` method).
 
-    NaN values are ignored.
+    NaN values are ignored. The result always lies between the two values it
+    interpolates: equal neighbours give that value (``inf`` for two ``inf``),
+    and a gap too wide for a float (``-1e308`` to ``1e308``) does not overflow.
+    Only a step from ``-inf`` to ``inf`` gives NaN.
 
     Parameters
     ----------
@@ -176,7 +179,13 @@ def quantile(values: Sequence[float], q: float) -> float:
     lo = math.floor(h)
     if lo + 1 >= len(xs):
         return xs[-1]
-    return xs[lo] + (h - lo) * (xs[lo + 1] - xs[lo])
+    a, b, frac = xs[lo], xs[lo + 1], h - lo
+    if frac == 0.0 or a == b:
+        return a  # also inf for two equal infinities, where the step below gives NaN
+    gap = b - a
+    if math.isfinite(gap):
+        return a + frac * gap
+    return a * (1.0 - frac) + b * frac  # the gap overflowed, or one side is infinite
 
 
 def bootstrap_mean_interval(
@@ -501,7 +510,10 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
     """
     Two-sided Welch t-test p-value for a difference in means.
 
-    NaN values are ignored. Degrees of freedom follow Welch-Satterthwaite.
+    NaN values are ignored. Degrees of freedom follow Welch-Satterthwaite. The
+    samples are scaled by powers of two (exact, and neither t nor the degrees of
+    freedom change), so values near the float limits never overflow and a tiny
+    spread never underflows to zero variance.
 
     Parameters
     ----------
@@ -511,8 +523,8 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
     Returns
     -------
     float or None
-        The p-value, or None when either sample has fewer than 2 values or
-        both samples have zero variance.
+        The p-value, or None when either sample has fewer than 2 values,
+        both samples have zero variance, or a value is infinite.
 
     Examples
     --------
@@ -523,13 +535,35 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
     ys = _clean(b)
     if len(xs) < 2 or len(ys) < 2:
         return None
+    if not all(math.isfinite(v) for v in (*xs, *ys)):
+        return None  # an infinite mean or variance has no t statistic
+    # t and df do not change when every value is multiplied by one factor, and a
+    # power of two multiplies exactly. Values in [-1, 1] cannot overflow a sum or
+    # a square; deviations scaled up to [-1, 1] cannot underflow when squared.
+    xs, ys = _pow2_normalize(xs, ys)
     na, nb = len(xs), len(ys)
     ma, mb = sum(xs) / na, sum(ys) / nb
-    va = sum((x - ma) ** 2 for x in xs) / (na - 1)
-    vb = sum((y - mb) ** 2 for y in ys) / (nb - 1)
-    if va == 0.0 and vb == 0.0:
-        return None
+    dx = [x - ma for x in xs]
+    dy = [y - mb for y in ys]
+    spread = max(abs(d) for d in (*dx, *dy))
+    if spread == 0.0:
+        return None  # both samples are constant
+    _, exp = math.frexp(spread)
+    dx = [math.ldexp(d, -exp) for d in dx]
+    dy = [math.ldexp(d, -exp) for d in dy]
+    va = sum(d * d for d in dx) / (na - 1)
+    vb = sum(d * d for d in dy) / (nb - 1)
     sa, sb = va / na, vb / nb
-    t = (ma - mb) / math.sqrt(sa + sb)
+    u = (ma - mb) / math.sqrt(sa + sb)  # t times 2**exp
+    t = math.inf if math.frexp(u)[1] - exp > 1024 else math.ldexp(u, -exp)
     df = (sa + sb) ** 2 / (sa * sa / (na - 1) + sb * sb / (nb - 1))
     return _t_two_sided_p(t, df)
+
+
+def _pow2_normalize(*samples: list[float]) -> list[list[float]]:
+    """Scale finite samples by one power of two so the largest magnitude is in ``[0.5, 1)``."""
+    biggest = max((abs(v) for s in samples for v in s), default=0.0)
+    if biggest == 0.0:
+        return [list(s) for s in samples]
+    _, exp = math.frexp(biggest)
+    return [[math.ldexp(v, -exp) for v in s] for s in samples]

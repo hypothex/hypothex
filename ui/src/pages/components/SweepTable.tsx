@@ -11,6 +11,8 @@ import {
   type RunGlyphState,
   type SortState,
   type SweepCellRow,
+  SORT_MEAN,
+  SORT_N,
   defaultSort,
   nextSort,
   sameParams,
@@ -65,8 +67,8 @@ export function SweepTable({
       <thead>
         <tr>
           {names.map((n) => header(n, n, false))}
-          {header("n", "n", true)}
-          {header("mean", metric, true)}
+          {header(SORT_N, "n", true)}
+          {header(SORT_MEAN, metric, true)}
           <th className="r">95% CI</th>
           <th>runs</th>
         </tr>

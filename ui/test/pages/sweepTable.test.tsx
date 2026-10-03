@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { parseCell, parseCells } from "../../src/pages/components/SweepModel";
 import { SweepTable, type SweepTableProps } from "../../src/pages/components/SweepTable";
@@ -103,6 +103,46 @@ describe("SweepTable", () => {
     fireEvent.click(screen.getByRole("button", { name: /^lr/ }));
     rerender(<SweepTable {...props} higherIsBetter />);
     expect(firstColumn()).toEqual(["3e-5", "1e-4", "3e-4", "1e-3"]);
+  });
+
+  test("params named n and mean keep their own sort keys apart from the built-in columns", () => {
+    const cell = (n: string, mean: string, scored: number, score: number): unknown => ({
+      params: { n, mean },
+      group_id: `g-${n}-${mean}`,
+      n: scored,
+      mean: score,
+      lo: null,
+      hi: null,
+      std: null,
+      run_ids: [],
+      runs: [],
+    });
+    const raws = [cell("3", "b", 1, 0.5), cell("1", "c", 3, 0.9), cell("2", "a", 2, 0.7)];
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderTable({ names: ["n", "mean"], cells: parseCells(raws), best: parseCell(raws[1]), maxSeeds: 3 });
+      // React warns on duplicate <th> keys; there must be none
+      expect(errors.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("same key"))).toEqual([]);
+    } finally {
+      errors.mockRestore();
+    }
+    const heads = (): HTMLElement[] => [...document.querySelectorAll("thead th")] as HTMLElement[];
+    const click = (i: number): void => {
+      fireEvent.click(heads()[i]?.querySelector("button") as HTMLElement);
+    };
+    const sorted = (): (string | null)[] => heads().map((th) => th.getAttribute("aria-sort"));
+    // columns: param n, param mean, built-in n, top1, CI, runs
+    expect(firstColumn()).toEqual(["1", "2", "3"]);
+    expect(sorted()).toEqual([null, null, null, "descending", null, null]);
+    click(0);
+    expect(firstColumn()).toEqual(["1", "2", "3"]);
+    expect(sorted()).toEqual(["ascending", null, null, null, null, null]);
+    click(1);
+    expect(firstColumn()).toEqual(["2", "3", "1"]);
+    expect(sorted()).toEqual([null, "ascending", null, null, null, null]);
+    click(2);
+    expect(firstColumn()).toEqual(["3", "2", "1"]);
+    expect(sorted()).toEqual([null, null, "ascending", null, null, null]);
   });
 
   test("an unscored cell shows dashes and its queued run", () => {

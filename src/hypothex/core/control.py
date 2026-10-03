@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +16,7 @@ from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError, RunNotFoundError
 from hypothex.core.execution import (
+    EXECUTION_CLAIM,
     QUEUE_FILE,
     STOP_MARKER,
     SUPERVISOR_PID_FILE,
@@ -278,6 +280,45 @@ def _remove_from_queue(ctx: Context, run_id: str, run_dir: Path) -> RunRecord | 
         killed = ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "removed from queue"})
     Scheduler(ctx).refresh_positions()
     return killed
+
+
+def cancel_if_queued(ctx: Context, run_id: str) -> RunRecord:
+    """
+    Stop a run only if it has not started; a started run is returned unchanged.
+
+    One conditional step, never a status check followed by an unconditional
+    stop: a run waiting in the GPU queue is removed under the scheduler lock;
+    any other queued run is cancelled by taking its execution claim first
+    (``execute_run`` refuses a claimed run), so a supervisor on its way never
+    runs it; a SLURM job is cancelled only while it is still pending.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    run_id : str
+        Run id.
+
+    Returns
+    -------
+    RunRecord
+        ``killed`` when the run was cancelled before it started, else as it is.
+    """
+    record = ctx.find_record(run_id)
+    if record.status != RunStatus.QUEUED:
+        return record
+    if record.executor.type == slurm.SLURM_EXECUTOR:
+        return slurm.cancel_if_pending(ctx, record)
+    run_dir = ctx.run_dir(record)
+    if _scheduler_held(run_dir):
+        removed = _remove_from_queue(ctx, run_id, run_dir)
+        if removed is not None:
+            return removed
+    try:  # a supervisor (or the scheduler, just now) may be on its way: claim first
+        os.close(os.open(run_dir / EXECUTION_CLAIM, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+    except FileExistsError:
+        return ctx.find_record(run_id)  # it started: leave it alone
+    return ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "cancelled while queued"})
 
 
 def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) -> RunRecord:

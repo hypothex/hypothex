@@ -2109,3 +2109,50 @@ class SlurmPoller:
                 return False
         self._thread = None
         return True
+
+
+def cancel_if_pending(ctx: Context, record: RunRecord) -> RunRecord:
+    """
+    Cancel a SLURM run only while its job is still pending (``scancel --state=PENDING``).
+
+    The controller applies the state filter, so a job that started a moment
+    ago is never cancelled. The run is marked ``killed`` only when SLURM then
+    shows the job ``CANCELLED``.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    record : RunRecord
+        A queued SLURM run.
+
+    Returns
+    -------
+    RunRecord
+        ``killed``, or the run unchanged (its job started, or its job id is not
+        recorded yet: ``reconcile`` handles that one first).
+    """
+    job_id = record.executor.slurm_job_id
+    if job_id is None:
+        return record
+    try:
+        _run(["scancel", "--state=PENDING", job_id])
+    except SlurmError as exc:
+        log.info("scancel --state=PENDING %s: %s", job_id, exc)
+        return ctx.find_record(record.run_id)
+    job = poll([job_id]).get(job_id)
+    if job is None or not job.state.startswith("CANCELLED"):
+        return ctx.find_record(record.run_id)  # it started: leave it to run
+    with _publish_lock(ctx.run_dir(record)):  # the poller may publish this run right now
+        killed = _end_if_active(
+            ctx,
+            record.run_id,
+            "run.killed",
+            _end(RunStatus.KILLED),
+            {"reason": "cancelled while queued", "slurm_job_id": job_id},
+        )
+        if killed is None:  # the node's end came first: publish that end, not `killed`
+            return _publish_node_end(ctx, record.run_id)
+        release_worktree(ctx, killed)
+        mark_published(ctx.layout, killed)
+    return killed

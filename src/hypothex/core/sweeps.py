@@ -29,8 +29,8 @@ from hypothex.core.config import (
     template_fields,
 )
 from hypothex.core.context import Context
-from hypothex.core.control import launch_run
-from hypothex.core.errors import HypothexError, StoreError
+from hypothex.core.control import cancel_if_queued, launch_run
+from hypothex.core.errors import HypothexError, RunError, StoreError
 from hypothex.core.execution import RunRequest
 from hypothex.core.fsutil import atomic_write_text, read_yaml, write_yaml
 from hypothex.core.headlines import NO_RUNS, fmt_metric, fmt_metric_delta, fmt_p
@@ -1189,3 +1189,156 @@ def launch_sweep(
                 sweep_path(ctx.layout, project, spec.id).unlink(missing_ok=True)
             raise
     return summarize_sweep(ctx, project, spec.id)
+
+
+# cancel and extend -------------------------------------------------------------------
+def stop_if_queued(ctx: Context, run_id: str) -> RunRecord:
+    """
+    Stop a run only while it is still queued.
+
+    "Cancel queued" uses this, so a run that the scheduler started a moment ago
+    keeps running.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    run_id : str
+        Run id.
+
+    Returns
+    -------
+    RunRecord
+        The run's record: ``killed`` if it was queued, else unchanged.
+    """
+    return cancel_if_queued(ctx, run_id)  # one conditional step: never a check, then a stop
+
+
+def cancel_queued(
+    ctx: Context,
+    project: str,
+    sweep_id: str,
+    *,
+    stop: Callable[[str], object] | None = None,
+) -> SweepSummary:
+    """
+    Stop every queued run of a sweep; running and finished runs are left alone.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    project : str
+        Project name.
+    sweep_id : str
+        Sweep id.
+    stop : callable, optional
+        ``run_id -> Any``; default ``stop_if_queued`` here (queued runs end
+        ``killed``). The hub passes a forwarder for runs on remote hosts.
+
+    Returns
+    -------
+    SweepSummary
+        The sweep after the stops.
+
+    Raises
+    ------
+    StoreError
+        If the sweep does not exist.
+    """
+    spec = load_sweep(ctx.layout, project, sweep_id)
+    do_stop = stop or (lambda run_id: stop_if_queued(ctx, run_id))
+    for record in sweep_runs(ctx, spec):
+        if record.status != RunStatus.QUEUED:
+            continue
+        try:
+            do_stop(record.run_id)
+        except RunError as exc:  # ended or started between the read and the stop
+            log.info("not stopping %s: %s", record.run_id, exc)
+    return summarize_sweep(ctx, project, sweep_id)
+
+
+def extend_sweep(
+    ctx: Context,
+    project: str,
+    sweep_id: str,
+    seeds: list[int],
+    *,
+    repo: Path | None = None,
+    gpus: int | None = None,
+    queue: bool | None = None,
+    hypothesis: str | None = None,
+    launch: Launcher | None = None,
+) -> SweepSummary:
+    """
+    Add seeds to a sweep: one new run per param combination and new seed.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    project : str
+        Project name.
+    sweep_id : str
+        Sweep id.
+    seeds : list of int
+        Seeds to add. Seeds already in the sweep are fine: only missing runs
+        are issued (an extend that failed midway is resumed this way).
+    repo : Path, optional
+        Project repo; default the registered repo.
+    gpus : int, optional
+        GPUs per run; default the sweep's first run's ``gpus_requested`` (else 0).
+    queue : bool, optional
+        Queue the runs; default True when ``gpus > 0``.
+    hypothesis : str, optional
+        Default the sweep's first run's hypothesis.
+    launch : callable, optional
+        ``(RunRequest, command id) -> RunRecord``; default launches here with
+        ``launch_run``, once per command id.
+
+    Returns
+    -------
+    SweepSummary
+        The grown sweep.
+
+    Raises
+    ------
+    SweepError
+        No seeds, or the sweep would grow past ``MAX_SWEEP_RUNS``.
+    StoreError
+        If the sweep does not exist.
+
+    Examples
+    --------
+    >>> extend_sweep(ctx, "toy", "s-0001", [2, 3]).spec.seeds  # doctest: +SKIP
+    [1, 2, 3]
+    """
+    new = list(dict.fromkeys(seeds))
+    if not new:
+        raise SweepError("give at least one seed")
+    with _sweep_lock(ctx.layout, project, sweep_id):
+        spec = load_sweep(ctx.layout, project, sweep_id)
+        grown = spec.model_copy(
+            update={"seeds": [*spec.seeds, *[s for s in new if s not in spec.seeds]]}
+        )
+        _check_launchable(grown)
+        runs = sweep_runs(ctx, spec)
+        first = runs[0] if runs else None
+        n_gpus = gpus if gpus is not None else (first.gpus_requested if first else 0)
+        if n_gpus < 0:
+            raise SweepError("gpus must be 0 or more")
+        if hypothesis is None:
+            hypothesis = first.hypothesis if first else ""
+        repo_path = _resolve_repo(ctx, project, spec.task, repo, remote=launch is not None)
+        save_sweep(ctx.layout, grown)  # the definition first: a retry knows every seed
+        requests = _requests(
+            grown,
+            grown.seeds,
+            repo_path,
+            owner=ctx.descriptor.environment_id,
+            hypothesis=hypothesis,
+            gpus=n_gpus,
+            queue=queue if queue is not None else n_gpus > 0,
+        )
+        _issue(ctx, grown, launch or _local_launcher(ctx, sweep_id), requests, [])
+    return summarize_sweep(ctx, project, sweep_id)

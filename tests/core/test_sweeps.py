@@ -25,13 +25,16 @@ from hypothex.core.records import (
     ScoreRecord,
     UsageTotals,
 )
+from hypothex.core.scheduler import Scheduler
 from hypothex.core.seeds import config_hash
 from hypothex.core.sweeps import (
     MAX_SWEEP_RUNS,
     SweepError,
     SweepParam,
     SweepSpec,
+    cancel_queued,
     expand,
+    extend_sweep,
     launch_sweep,
     list_sweeps,
     load_sweep,
@@ -40,6 +43,7 @@ from hypothex.core.sweeps import (
     planned_runs,
     run_command_id,
     save_sweep,
+    stop_if_queued,
     summarize_sweep,
     sweep_combos,
     sweep_path,
@@ -917,3 +921,219 @@ def test_each_sweep_run_has_one_command_id_on_every_launch(ctx: Context, toy_rep
         run_command_id(env, "toy", sid, {"lr": "3e-4"}, 1),
     ]
     assert run_command_id(env, "toy", sid, {"lr": "1e-4"}, 2) not in fake.command_ids
+
+
+# --------------------------------------------------------------------------- Task 41 cancel/extend
+def test_cancel_queued_stops_only_queued_runs(ctx: Context, toy_sweep: SweepSpec) -> None:
+    stopped: list[str] = []
+
+    def stop(run_id: str) -> None:
+        stopped.append(run_id)
+        ctx.update_run(
+            run_id, "run.killed", lambda r: r.model_copy(update={"status": RunStatus.KILLED})
+        )
+
+    summary = cancel_queued(ctx, "toy", "s-0001", stop=stop)
+    assert stopped == ["c2"]
+    assert summary.counts["killed"] == 1
+    assert summary.counts["queued"] == 0
+    assert summary.counts["running"] == 1
+
+
+def test_cancel_queued_default_stop_marks_killed(ctx: Context, toy_sweep: SweepSpec) -> None:
+    summary = cancel_queued(ctx, "toy", "s-0001")
+    assert ctx.find_record("c2").status == RunStatus.KILLED
+    assert ctx.find_record("c1").status == RunStatus.RUNNING
+    assert summary.counts["killed"] == 1
+
+
+def test_cancel_queued_skips_runs_that_already_ended(ctx: Context, toy_sweep: SweepSpec) -> None:
+    def stop(run_id: str) -> None:
+        raise RunError(f"run {run_id} is finished")
+
+    summary = cancel_queued(ctx, "toy", "s-0001", stop=stop)
+    assert summary.counts["queued"] == 1
+
+
+def test_cancel_unknown_sweep(ctx: Context) -> None:
+    with pytest.raises(StoreError, match="unknown sweep"):
+        cancel_queued(ctx, "toy", "s-dead")
+
+
+def test_stop_if_queued_leaves_running_runs_alone(ctx: Context) -> None:
+    mine = ctx.descriptor.environment_id  # a run of another environment is refused (Task 45)
+    ctx.create_run(make_record("q1", status=RunStatus.QUEUED, environment_id=mine))
+    ctx.create_run(make_record("u1", status=RunStatus.RUNNING, environment_id=mine))
+    assert stop_if_queued(ctx, "u1").status == RunStatus.RUNNING
+    assert stop_if_queued(ctx, "q1").status == RunStatus.KILLED
+
+
+def launched(ctx: Context, toy_repo: Path, fake: FakeLauncher, **kwargs: Any) -> str:
+    ctx.register_project(toy_repo)
+    args: dict[str, Any] = {
+        "project": "toy",
+        "task": "toy-acc",
+        "grid": [LR],
+        "seeds": [1],
+        "command": CMD[:4],
+        "hypothesis": "lr matters",
+        "gpus": 2,
+        "queue": True,
+        "launch": fake,
+    }
+    args.update(kwargs)
+    return launch_sweep(ctx, **args).spec.id
+
+
+def test_extend_adds_every_cell_for_each_new_seed(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    summary = extend_sweep(ctx, "toy", sid, [2, 3, 2], launch=fake)
+    assert summary.spec.seeds == [1, 2, 3]
+    assert summary.run_ids == ["r01", "r02", "r03", "r04", "r05", "r06"]
+    assert summary.counts["total"] == 6
+    new = fake.requests[2:]
+    assert [(r.seed, r.params["lr"]) for r in new] == [
+        (2, "1e-4"),
+        (2, "3e-4"),
+        (3, "1e-4"),
+        (3, "3e-4"),
+    ]
+    # gpus, queue, and hypothesis follow the sweep's first run
+    assert all((r.gpus, r.queue, r.hypothesis) == (2, True, "lr matters") for r in new)
+    assert all(r.tags == [sweep_tag(ctx.descriptor.environment_id, sid)] for r in new)
+    assert load_sweep(ctx.layout, "toy", sid).seeds == [1, 2, 3]
+
+
+def test_extend_explicit_gpus_and_queue_win(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    extend_sweep(ctx, "toy", sid, [5], gpus=0, launch=fake)
+    assert [(r.gpus, r.queue) for r in fake.requests[2:]] == [(0, False), (0, False)]
+
+
+def test_extend_random_sweep_reuses_its_samples(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(
+        ctx,
+        toy_repo,
+        fake,
+        grid=[SweepParam(name="lr", low=1e-5, high=1e-2, log=True)],
+        random=3,
+    )
+    extend_sweep(ctx, "toy", sid, [2], launch=fake)
+    first = [r.params for r in fake.requests[:3]]
+    assert [r.params for r in fake.requests[3:]] == first
+    summary = summarize_sweep(ctx, "toy", sid)
+    assert len(summary.cells) == 3
+    assert all(len(c["run_ids"]) == 2 for c in summary.cells)
+
+
+def test_extend_needs_a_seed(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    with pytest.raises(SweepError, match="at least one seed"):
+        extend_sweep(ctx, "toy", sid, [], launch=fake)
+    assert len(fake.requests) == 2
+    assert load_sweep(ctx.layout, "toy", sid).seeds == [1]
+
+
+def test_extend_with_seeds_it_has_issues_only_what_is_missing(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    same = extend_sweep(ctx, "toy", sid, [1], launch=fake)  # seed 1 is complete
+    assert len(fake.requests) == 2 and same.counts["total"] == 2
+    grown = extend_sweep(ctx, "toy", sid, [1, 4], launch=fake)
+    assert [(r.seed, r.params["lr"]) for r in fake.requests[2:]] == [(4, "1e-4"), (4, "3e-4")]
+    assert grown.spec.seeds == [1, 4]
+
+
+def test_extend_refuses_to_grow_past_the_limit(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    with pytest.raises(SweepError, match="the limit is 1000"):
+        extend_sweep(ctx, "toy", sid, list(range(2, 502)), launch=fake)
+
+
+def test_extend_partial_failure_then_retry_launches_only_missing_runs(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # extending [2, 3]: seed 2 completes, seed 3 half; the same request again resumes it
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    fake.fail_at = 5  # 2 original runs + both of seed 2 + one of seed 3, then fail
+    with pytest.raises(RunError):
+        extend_sweep(ctx, "toy", sid, [2, 3], launch=fake)
+    assert load_sweep(ctx.layout, "toy", sid).seeds == [1, 2, 3]  # the definition came first
+    assert summarize_sweep(ctx, "toy", sid).run_ids == ["r01", "r02", "r03", "r04", "r05"]
+    fake.fail_at = None
+    grown = extend_sweep(ctx, "toy", sid, [2, 3], launch=fake)
+    assert [(r.seed, r.params["lr"]) for r in fake.requests[5:]] == [(3, "3e-4")]
+    assert grown.spec.seeds == [1, 2, 3]
+    assert grown.run_ids == ["r01", "r02", "r03", "r04", "r05", "r06"]
+
+
+def test_extend_while_runs_wait_in_the_queue(
+    ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review Focus: more seeds while the first runs still wait for GPUs.
+    fake_gpus = tmp_path / "gpus.json"
+    fake_gpus.write_text('[{"index": 0, "external": true}]')  # busy: nothing can start
+    monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(fake_gpus))
+    ctx.register_project(toy_repo)
+    command = [sys.executable, "-c", "print('{lr}')"]
+    first = launch_sweep(
+        ctx, project="toy", grid=[LR], seeds=[1], command=command, gpus=1, queue=True
+    )
+    sid = first.spec.id
+    grown = extend_sweep(ctx, "toy", sid, [2])
+    assert (grown.counts["queued"], grown.counts["total"]) == (4, 4)
+    positions = Scheduler(ctx).positions()
+    # the new seed's runs join the queue behind the runs that were already waiting
+    assert [positions[run_id] for run_id in grown.run_ids] == [1, 2, 3, 4]
+    cancelled = cancel_queued(ctx, "toy", sid)
+    assert (cancelled.counts["killed"], cancelled.counts["queued"]) == (4, 0)
+    assert Scheduler(ctx).positions() == {}
+
+
+def test_cancel_queued_never_kills_a_run_the_scheduler_just_started(
+    ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import control
+    from hypothex.core.scheduler import Scheduler
+
+    fake_gpus = tmp_path / "gpus.json"
+    fake_gpus.write_text('[{"index": 0}]')
+    monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(fake_gpus))
+    out = tmp_path / "ran.txt"
+    code = f"import time; time.sleep(1); open({str(out)!r}, 'a').write('x')"
+    req = RunRequest(repo=toy_repo, command=[sys.executable, "-c", code], gpus=1, queue=True)
+    rec = control.launch_run(ctx, req)
+    real = control._remove_from_queue
+
+    def scheduler_wins(c: Context, run_id: str, run_dir: Path) -> RunRecord | None:
+        assert Scheduler(c).tick() == [run_id]  # the scheduler takes the lock first
+        wait_for_run(c, run_id, timeout=60, statuses=frozenset({RunStatus.RUNNING}))
+        return real(c, run_id, run_dir)
+
+    monkeypatch.setattr(control, "_remove_from_queue", scheduler_wins)
+    assert stop_if_queued(ctx, rec.run_id).status == RunStatus.RUNNING
+    assert wait_for_run(ctx, rec.run_id, timeout=60).status == RunStatus.FINISHED
+    assert out.read_text() == "x"
+
+
+def test_cancel_takes_the_claim_so_a_supervisor_on_its_way_never_runs(
+    ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    import psutil
+
+    from hypothex.core.execution import prepare_run, spawn_supervisor
+
+    out = tmp_path / "ran.txt"
+    code = f"open({str(out)!r}, 'w').write('x')"
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=[sys.executable, "-c", code]))
+    assert stop_if_queued(ctx, rec.run_id).status == RunStatus.KILLED
+    pid = spawn_supervisor(ctx, ctx.find_record(rec.run_id))  # it was already starting
+    psutil.Process(pid).wait(timeout=60)
+    assert not out.exists()
+    assert ctx.find_record(rec.run_id).status == RunStatus.KILLED

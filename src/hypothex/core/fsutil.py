@@ -15,6 +15,11 @@ import yaml
 
 from hypothex.core.ids import utcnow
 
+# libyaml's C loader and dumper parse about 7x faster than the pure-Python ones
+# and give the same data; fall back to the pure ones when PyYAML has no libyaml.
+_YAML_LOADER: type[yaml.SafeLoader] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+_YAML_DUMPER: type[yaml.SafeDumper] = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
+
 
 def atomic_write_text(path: Path, text: str) -> None:
     """
@@ -63,13 +68,16 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
 
 
 def write_yaml(path: Path, data: dict[str, Any]) -> None:
-    """Atomically write a mapping as YAML, keeping key order."""
-    atomic_write_text(path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+    """Atomically write a mapping as YAML, keeping key order (libyaml when present)."""
+    text = yaml.dump(data, Dumper=_YAML_DUMPER, sort_keys=False, allow_unicode=True)
+    atomic_write_text(path, text)
 
 
 def read_yaml(path: Path) -> dict[str, Any]:
     """
     Read a YAML file whose top level is a mapping.
+
+    Uses libyaml's safe loader when PyYAML has it (same data, about 7x faster).
 
     Returns
     -------
@@ -81,7 +89,7 @@ def read_yaml(path: Path) -> dict[str, Any]:
     ValueError
         If the top level is not a mapping.
     """
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data = yaml.load(path.read_text(encoding="utf-8"), Loader=_YAML_LOADER)
     if data is None:
         return {}
     if not isinstance(data, dict):

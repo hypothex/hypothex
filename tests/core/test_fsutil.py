@@ -2,7 +2,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 
+from hypothex.core import fsutil
 from hypothex.core.fsutil import (
     append_jsonl,
     append_note_file,
@@ -61,6 +63,30 @@ def test_yaml_roundtrip_and_errors(tmp_path: Path) -> None:
     assert read_yaml(path) == {}
     path.write_text("- 1\n- 2\n")
     with pytest.raises(ValueError, match="mapping"):
+        read_yaml(path)
+
+
+@pytest.mark.skipif(not yaml.__with_libyaml__, reason="PyYAML built without libyaml")
+def test_yaml_uses_libyaml_when_present() -> None:
+    assert fsutil._YAML_LOADER is yaml.CSafeLoader
+    assert fsutil._YAML_DUMPER is yaml.CSafeDumper
+
+
+def test_yaml_c_and_pure_paths_agree_and_stay_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = {"name": "café 日本", "n": None, "ok": True, "f": 1.5e-7, "list": [1, "a\tb"]}
+    path = tmp_path / "x.yaml"
+    write_yaml(path, data)
+    fast = read_yaml(path)
+    monkeypatch.setattr(fsutil, "_YAML_LOADER", yaml.SafeLoader)
+    monkeypatch.setattr(fsutil, "_YAML_DUMPER", yaml.SafeDumper)
+    assert read_yaml(path) == fast == data
+    write_yaml(path, data)
+    assert read_yaml(path) == data
+    monkeypatch.undo()
+    path.write_text("x: !!python/object/apply:os.getcwd []\n")
+    with pytest.raises(yaml.YAMLError):
         read_yaml(path)
 
 

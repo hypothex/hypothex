@@ -1,5 +1,6 @@
 """Property tests for ``hypothex.core.stats`` against scipy and numpy oracles."""
 
+import decimal
 import math
 import sys
 from fractions import Fraction
@@ -281,6 +282,7 @@ def test_paired_bootstrap_detects_a_uniform_shift(a: list[float], shift: float) 
     st.lists(moderate, min_size=2, max_size=15),
     st.lists(moderate, min_size=2, max_size=15),
 )
+@example([0.0, 0.0], [699050.9501341588] * 3)
 def test_welch_matches_scipy(a: list[float], b: list[float]) -> None:
     p = welch_p(a, b)
     if len(set(a)) == 1 and len(set(b)) == 1:
@@ -322,6 +324,41 @@ def test_welch_never_raises_is_symmetric_and_scale_free(
     exact = all(normal(x) and normal(s) for x, s in zip(a + b, scaled_a + scaled_b, strict=True))
     if exact:
         assert welch_p(scaled_a, scaled_b) == p
+
+
+def _exact_welch_p(a: list[float], b: list[float]) -> float:
+    """Welch p from t and df worked out in exact rationals, then scipy's t tail."""
+    fa, fb = [Fraction(x) for x in a], [Fraction(y) for y in b]
+    ma, mb = sum(fa) / len(fa), sum(fb) / len(fb)
+    sa = sum((x - ma) ** 2 for x in fa) / (len(fa) - 1) / len(fa)
+    sb = sum((y - mb) ** 2 for y in fb) / (len(fb) - 1) / len(fb)
+    t2 = (ma - mb) ** 2 / (sa + sb)
+    df = (sa + sb) ** 2 / (sa**2 / (len(fa) - 1) + sb**2 / (len(fb) - 1))
+    with decimal.localcontext() as ctx:
+        ctx.prec = 40
+        t = float((decimal.Decimal(t2.numerator) / decimal.Decimal(t2.denominator)).sqrt())
+    return 0.0 if math.isinf(t) else float(2.0 * sps.t.sf(t, float(df)))
+
+
+@FAST
+@given(
+    st.lists(st.integers(-1000, 1000), min_size=2, max_size=8),
+    st.lists(st.integers(-1000, 1000), min_size=2, max_size=8),
+    st.integers(-1000, 1000),
+    st.integers(-1000, 1000),
+)
+@example([0, 1], [1, 1], -232, 997)  # a spread of ~1e-70 next to values of ~1e300
+def test_welch_on_two_unrelated_scales_matches_exact_arithmetic(
+    ia: list[int], ib: list[int], ka: int, kb: int
+) -> None:
+    # every value is an int times a power of two: exact, normal and finite
+    a, b = [math.ldexp(i, ka) for i in ia], [math.ldexp(i, kb) for i in ib]
+    p = welch_p(a, b)
+    if len(set(a)) == 1 and len(set(b)) == 1:
+        assert p is None
+        return
+    assert p is not None
+    assert p == pytest.approx(_exact_welch_p(a, b), rel=1e-6, abs=1e-280)
 
 
 @FAST
@@ -408,3 +445,7 @@ def test_regression_welch_near_the_float_limits() -> None:
     assert welch_p([0.0, 1e-160], [5.0, 5.0]) == pytest.approx(0.0, abs=1e-12)  # ZeroDivision
     assert welch_p([math.inf, 1.0], [0.0, 1.0]) is None  # was 1.0
     assert welch_p([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]) == pytest.approx(0.021312, abs=1e-6)
+    # a constant whose sum / n rounds off by an ulp is still constant (was 1.4e-32)
+    assert welch_p([0.0, 0.0], [699050.9501341588] * 3) is None
+    # one shared scale underflowed the small sample's spread to 0 (gave None)
+    assert welch_p([0.0, 1e-70], [1e300, 1e300]) == 0.0

@@ -157,10 +157,40 @@ def test_config_hash_keeps_nested_seeds(cfg: dict[str, Any], s1: Any, s2: Any) -
     )
 
 
+def _typed(value: Any) -> Any:
+    """Oracle: a value with every key's type kept and mappings in a fixed order."""
+    if isinstance(value, dict):
+        pairs = (((type(k).__name__, repr(k)), _typed(v)) for k, v in value.items())
+        return ("map", tuple(sorted(pairs)))
+    if isinstance(value, list):
+        return ("list", tuple(_typed(v) for v in value))
+    return (type(value).__name__, repr(value))
+
+
+@FAST
+@given(
+    st.dictionaries(any_key, mixed_keyed, max_size=4),
+    st.dictionaries(any_key, mixed_keyed, max_size=4),
+)
+@example({1: 64, "1": 128}, {1: 128, "1": 64})
+def test_config_hash_tells_mixed_key_configs_apart(a: dict[Any, Any], b: dict[Any, Any]) -> None:
+    # an int and a str key at the top force both through the canonical fallback
+    a, b = {**a, 0: "m", "m": 0}, {**b, 0: "m", "m": 0}
+    a.pop("seed", None)
+    b.pop("seed", None)
+    assume(_typed(a) != _typed(b))
+    assert config_hash(a) != config_hash(b)
+
+
 def test_regression_config_hash_mixed_keys() -> None:
     # was TypeError: '<' not supported between instances of 'str' and 'int'
     assert config_hash({"layers": {1: 64, "out": 10}}) != config_hash({"layers": {1: 64}})
     assert config_hash({dt.date(2026, 1, 1): "x"}).startswith("sha256:")
+    # 1 and "1" are different keys: swapping their values is a different config
+    assert config_hash({"layers": {1: 64, "1": 128}}) != config_hash({"layers": {1: 128, "1": 64}})
+    assert config_hash({"d": {dt.date(2026, 1, 1): 1, "2026-01-01": 2}}) != config_hash(
+        {"d": {dt.date(2026, 1, 1): 2, "2026-01-01": 1}}
+    )
 
 
 # safe_stem ------------------------------------------------------------------------------
@@ -169,6 +199,7 @@ names = st.one_of(
     st.sampled_from([".", "..", ".hidden", "../x", "a/../../b", "/abs", "-", "\x00", "a\\b"]),
     st.text(alphabet="./\\-_ab", min_size=1, max_size=12),
     st.text(min_size=190, max_size=400),
+    st.text(alphabet="ab_-.", min_size=230, max_size=260),  # around the length limit
 )
 
 
@@ -178,8 +209,7 @@ names = st.one_of(
 @example("x" * 300)
 def test_safe_stem_stays_in_its_folder(name: str) -> None:
     stem = safe_stem(name)
-    assert stem and stem not in (".", "..")
-    assert not stem.startswith(".")
+    assert stem
     assert re.fullmatch(r"[A-Za-z0-9_.-]+", stem)
     assert len(f"{stem}.jsonl".encode()) <= 255
     parent = PurePosixPath("/runs/r1/traces")
@@ -200,15 +230,38 @@ def test_safe_stem_unchanged_or_hashed(a: str, b: str) -> None:
         assert hashed.fullmatch(sa)
 
 
+def _old_safe_stem(name: str) -> str:
+    """``safe_stem`` before the length cut, as stored files were named."""
+    stem = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+    if stem == name and not re.search(r"-[0-9a-f]{8}\Z", name):
+        return stem
+    return f"{stem}-{hashlib.sha1(name.encode('utf-8')).hexdigest()[:8]}"
+
+
+@settings(max_examples=150, deadline=None)
+@given(names)
+@example("y" * 249)
+@example("y/" * 120)  # sanitised 240 + hash = 249
+def test_safe_stem_keeps_every_name_that_fit_before(name: str) -> None:
+    # traces and samples already on disk must keep their file names
+    try:
+        old = _old_safe_stem(name)
+    except UnicodeEncodeError:
+        return  # lone surrogates could never be written
+    if len(f"{old}.jsonl".encode()) <= 255:
+        assert safe_stem(name) == old
+
+
 def test_safe_stem_rejects_empty() -> None:
     with pytest.raises(ValueError):
         safe_stem("")
 
 
-def test_regression_safe_stem_hidden_long_and_surrogate_names() -> None:
-    assert safe_stem(".x").startswith("_x-")  # was ".x" (a hidden file)
-    assert safe_stem("..").startswith("_.-")  # was ".."
-    assert len(safe_stem("y" * 300)) == MAX_STEM + 9  # was 300 chars (ENAMETOOLONG)
+def test_regression_safe_stem_long_and_surrogate_names() -> None:
+    assert len(safe_stem("y" * 300)) == MAX_STEM  # was 300 chars (ENAMETOOLONG)
+    assert len(safe_stem("y/" * 200)) == MAX_STEM  # was 409 chars
+    assert safe_stem("y" * MAX_STEM) == "y" * MAX_STEM  # fits: unchanged
+    assert safe_stem(".x") == ".x"  # names that worked keep their stem
     assert safe_stem("\ud800").startswith("_-")  # was UnicodeEncodeError
     assert safe_stem("a_b") == "a_b"  # plain names keep their stem
 

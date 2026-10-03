@@ -518,10 +518,10 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
     """
     Two-sided Welch t-test p-value for a difference in means.
 
-    NaN values are ignored. Degrees of freedom follow Welch-Satterthwaite. The
-    samples are scaled by powers of two (exact, and neither t nor the degrees of
-    freedom change), so values near the float limits never overflow and a tiny
-    spread never underflows to zero variance.
+    NaN values are ignored. Degrees of freedom follow Welch-Satterthwaite. Each
+    sample is scaled by its own power of two (exact), so values near the float
+    limits never overflow and a tiny spread never underflows to zero variance,
+    even next to a sample of a very different size.
 
     Parameters
     ----------
@@ -545,33 +545,44 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
         return None
     if not all(math.isfinite(v) for v in (*xs, *ys)):
         return None  # an infinite mean or variance has no t statistic
-    # t and df do not change when every value is multiplied by one factor, and a
-    # power of two multiplies exactly. Values in [-1, 1] cannot overflow a sum or
-    # a square; deviations scaled up to [-1, 1] cannot underflow when squared.
-    xs, ys = _pow2_normalize(xs, ys)
-    na, nb = len(xs), len(ys)
-    ma, mb = sum(xs) / na, sum(ys) / nb
-    dx = [x - ma for x in xs]
-    dy = [y - mb for y in ys]
-    spread = max(abs(d) for d in (*dx, *dy))
-    if spread == 0.0:
+    # Each sample is scaled by its own power of two (exact), so its sum, squares
+    # and deviations neither overflow nor underflow, whatever the other sample's
+    # scale. The variances and the mean difference are then put on one scale.
+    ma, va, ea = _scaled_moments(xs)
+    mb, vb, eb = _scaled_moments(ys)
+    if va == 0.0 and vb == 0.0:
         return None  # both samples are constant
-    _, exp = math.frexp(spread)
-    dx = [math.ldexp(d, -exp) for d in dx]
-    dy = [math.ldexp(d, -exp) for d in dy]
-    va = sum(d * d for d in dx) / (na - 1)
-    vb = sum(d * d for d in dy) / (nb - 1)
-    sa, sb = va / na, vb / nb
-    u = (ma - mb) / math.sqrt(sa + sb)  # t times 2**exp
-    t = math.inf if math.frexp(u)[1] - exp > 1024 else math.ldexp(u, -exp)
+    na, nb = len(xs), len(ys)
+    wa, wb = va / na, vb / nb  # var/n of each sample is w * 4**e
+    f = max(math.frexp(w)[1] + 2 * e for w, e in ((wa, ea), (wb, eb)) if w > 0.0)
+    f += f % 2  # even, so the square root of 2**f is exact
+    sa, sb = math.ldexp(wa, 2 * ea - f), math.ldexp(wb, 2 * eb - f)  # larger in [0.25, 1)
+    g = max(ea, eb)
+    diff = math.ldexp(ma, ea - g) - math.ldexp(mb, eb - g)  # (mean_a - mean_b) / 2**g
+    u = diff / math.sqrt(sa + sb)  # t / 2**shift, |u| <= 4
+    shift = g - f // 2
+    if u == 0.0:
+        t = 0.0
+    elif math.frexp(u)[1] + shift > 1024:
+        t = math.copysign(math.inf, u)  # beyond the largest float
+    else:
+        t = math.ldexp(u, shift)
     df = (sa + sb) ** 2 / (sa * sa / (na - 1) + sb * sb / (nb - 1))
     return _t_two_sided_p(t, df)
 
 
-def _pow2_normalize(*samples: list[float]) -> list[list[float]]:
-    """Scale finite samples by one power of two so the largest magnitude is in ``[0.5, 1)``."""
-    biggest = max((abs(v) for s in samples for v in s), default=0.0)
-    if biggest == 0.0:
-        return [list(s) for s in samples]
-    _, exp = math.frexp(biggest)
-    return [[math.ldexp(v, -exp) for v in s] for s in samples]
+def _scaled_moments(xs: list[float]) -> tuple[float, float, int]:
+    """
+    Mean and sample variance of finite ``xs``, scaled by a power of two.
+
+    Returns ``(m, v, e)`` with mean ``m * 2**e`` and variance ``v * 4**e``,
+    where ``2**e`` is the power of two just above the largest magnitude.
+    """
+    biggest = max(abs(x) for x in xs)
+    e = math.frexp(biggest)[1] if biggest else 0
+    ys = [math.ldexp(x, -e) for x in xs]
+    if all(y == ys[0] for y in ys):
+        return ys[0], 0.0, e  # sum / n can miss a constant by an ulp
+    m = sum(ys) / len(ys)
+    v = sum((y - m) ** 2 for y in ys) / (len(ys) - 1)
+    return m, v, e

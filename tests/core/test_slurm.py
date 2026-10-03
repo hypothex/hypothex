@@ -1,6 +1,8 @@
 import json
 import os
+import shlex
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -8,7 +10,15 @@ from typing import Any
 
 import pytest
 
+from hypothex.core.slurm import (
+    SlurmError,
+    render_sbatch,
+)
+from hypothex.remote.config import SlurmDefaults
+from tests.factories import make_record
+
 FAKE_SLURM = Path(__file__).resolve().parents[1] / "fakes" / "fake_slurm"
+PY = sys.executable
 
 
 class FakeSlurm:
@@ -247,3 +257,75 @@ def test_fake_scancel_refuses_unknown_arguments(slurm: FakeSlurm) -> None:
         assert result.returncode == 2, bad
         assert "unsupported arguments" in result.stderr
     assert slurm.job("1")["state"] == "PENDING"
+
+
+# render_sbatch ---------------------------------------------------------------------
+def test_render_sbatch_exact_directives(tmp_path: Path) -> None:
+    home = tmp_path / "hx"
+    record = make_record("r1", project="toy", gpus_requested=2)
+    defaults = SlurmDefaults(
+        partition="gpu",
+        account="lab",
+        time="08:00:00",
+        gpus=1,
+        extra=["--mem=32G", "--constraint=a100"],
+    )
+    child = shlex.join([PY, "-m", "hypothex.cli.main", "--home", str(home), "run", "--child", "r1"])
+    assert render_sbatch(record, defaults, home) == (
+        "#!/bin/bash\n"
+        "#SBATCH --job-name=hx-r1\n"
+        f"#SBATCH --output={home}/store/toy/runs/r1/logs/slurm-%j.out\n"
+        "#SBATCH --time=08:00:00\n"
+        "#SBATCH --gpus=2\n"
+        "#SBATCH --partition=gpu\n"
+        "#SBATCH --account=lab\n"
+        "#SBATCH --mem=32G\n"
+        "#SBATCH --constraint=a100\n"
+        "\n"
+        f"exec {child}\n"
+    )
+
+
+def test_render_sbatch_defaults_and_zero_gpus(tmp_path: Path) -> None:
+    home = tmp_path / "hx"
+    lines = render_sbatch(make_record("r1"), SlurmDefaults(), home).splitlines()
+    assert lines[1:5] == [
+        "#SBATCH --job-name=hx-r1",
+        f"#SBATCH --output={home}/store/toy/runs/r1/logs/slurm-%j.out",
+        "#SBATCH --time=02:00:00",
+        "#SBATCH --gpus=1",
+    ]
+    assert lines[5] == ""
+    cpu = render_sbatch(make_record("r1"), SlurmDefaults(gpus=0), home)
+    assert "--gpus" not in cpu
+
+
+# SlurmDefaults already refuses these (Task 2). model_construct skips that check, so
+# these cases test render_sbatch's own guard (settings can also arrive merged from dicts).
+@pytest.mark.parametrize(
+    ("defaults", "message"),
+    [
+        (SlurmDefaults.model_construct(extra=["--mem=32G\nrm -rf ~"]), "exactly one option"),
+        (SlurmDefaults.model_construct(extra=["mem=32G"]), "not an sbatch option"),
+        (SlurmDefaults.model_construct(extra=["--job-name=x"]), "sets --job-name"),
+        (SlurmDefaults.model_construct(extra=["--comm=x"]), "sets --comment"),
+        (SlurmDefaults.model_construct(extra=["-Jx"]), "sets --job-name"),
+        (
+            SlurmDefaults.model_construct(extra=["--qos=normal --output=/tmp/x --job-name=c"]),
+            "exactly one option",
+        ),
+        (SlurmDefaults.model_construct(partition="gpu; rm"), "partition 'gpu; rm'"),
+        (SlurmDefaults.model_construct(account="lab\n#SBATCH --qos=high"), "account"),
+        (SlurmDefaults.model_construct(time="2 hours"), "time '2 hours'"),
+    ],
+)
+def test_render_sbatch_rejects_unsafe_settings(
+    tmp_path: Path, defaults: SlurmDefaults, message: str
+) -> None:
+    with pytest.raises(SlurmError, match=message):
+        render_sbatch(make_record("r1"), defaults, tmp_path / "hx")
+
+
+def test_render_sbatch_rejects_home_with_spaces(tmp_path: Path) -> None:
+    with pytest.raises(SlurmError, match="whitespace"):
+        render_sbatch(make_record("r1"), SlurmDefaults(), tmp_path / "my home")

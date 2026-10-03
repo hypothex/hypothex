@@ -8,6 +8,7 @@ import errno
 import json
 import logging
 import os
+import re
 import stat
 import threading
 import time
@@ -54,21 +55,36 @@ from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import reserved_run_path
 from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_panel
-from hypothex.core.records import RunRecord, RunStatus
+from hypothex.core.records import Artifact, RunRecord, RunStatus
 from hypothex.core.scheduler import Scheduler, run_scheduler_loop
 from hypothex.core.slurm import SlurmPoller, comment_accounting, require_flock
-from hypothex.core.sweeps import mark_sweep, stop_if_queued
+from hypothex.core.sweeps import (
+    Launcher,
+    SweepParam,
+    SweepSpec,
+    SweepSummary,
+    cancel_queued,
+    extend_sweep,
+    launch_sweep,
+    list_sweeps,
+    mark_sweep,
+    parse_sweep_tag,
+    stop_if_queued,
+    summarize_sweep,
+)
 from hypothex.core.views import PanelData, PanelSpec, ViewSpec
 from hypothex.mcp.server import (
     LOCAL_HOST,
     ViewValidationError,
     build_server,
+    find_sweep,
     is_remote,
     list_task_views,
     put_view,
     query_task_view,
     remove_view,
     require_agent_hypothesis,
+    ssh_target,
     validate_view,
     view_document,
 )
@@ -81,6 +97,7 @@ from hypothex.remote.client import (
 )
 from hypothex.remote.config import EnvironmentsFile, HostSpec, SlurmDefaults, load_hosts
 from hypothex.remote.hub import HostState, HostUnavailableError, Hub
+from hypothex.remote.ssh import SshError, copy_from
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +105,14 @@ REPAIR_INTERVAL_SECONDS = 30.0
 SCHEDULER_INTERVAL_SECONDS = 5.0
 ENV_KINDS = ("local", "ssh", "slurm")
 COST_WINDOW_DAYS = 7
+MIRROR_WAIT_SECONDS = 10.0
+PULL_MAX_BYTES = 64 * 1024**3
+PULL_REMOTE_PATH = re.compile(r"^/[A-Za-z0-9_.+@/=-]+$")
+"""An absolute host path that ``pull`` may hand to ``scp``: shell-safe characters only."""
+PULL_RESERVED_PREFIX = ".hx-"
+"""``pull`` refuses a destination whose name starts with this (contract: 400)."""
+PULL_WORK_DIR = "pulls"
+"""``<hub home>/pulls``: ``copy_from``'s staging, transaction records, and backups (Task 6)."""
 WS_POLL_SECONDS = 0.5
 WS_BATCH = 500
 UI_DIST = Path(__file__).resolve().parent.parent / "ui_dist"
@@ -183,6 +208,40 @@ class HostLaunchBody(RunFields):
 
     repo: str | None = None
     project: str | None = None
+
+
+class SweepBody(ActionBody):
+    """
+    Body of ``POST /api/v1/sweeps``.
+
+    ``commit`` and ``diff`` are optional: ``hx sweep --host`` sends the client
+    checkout's commit and diff, so a hub without that checkout runs the client's code.
+    """
+
+    project: str
+    task: str | None = None
+    host: str | None = None
+    grid: list[SweepParam]
+    random: int | None = Field(None, ge=1)
+    seeds: list[int] = Field(min_length=1)
+    command: list[str] = Field(min_length=1)
+    hypothesis: str
+    gpus: int = Field(0, ge=0)
+    queue: bool = False
+    commit: str | None = None
+    diff: str | None = None
+
+
+class SeedsBody(ActionBody):
+    """Body of ``POST /api/v1/sweeps/{project}/{id}/extend``."""
+
+    seeds: list[int] = Field(min_length=1)
+
+
+class PullBody(ActionBody):
+    """Body of ``POST /api/v1/runs/{id}/pull``: an artifact kind or a path."""
+
+    artifact: str = "checkpoint"
 
 
 class SubscribeMessage(BaseModel):
@@ -983,6 +1042,132 @@ def launch_on_host(
     return manager.client(host).post_json("/api/v1/runs", payload)
 
 
+def await_mirrored(ctx: Context, run_ids: list[str], timeout: float = MIRROR_WAIT_SECONDS) -> None:
+    """
+    Wait until the hub's index has every run (the mirror copies them from the host).
+
+    Parameters
+    ----------
+    ctx : Context
+        Hub context.
+    run_ids : list of str
+        Runs to wait for.
+    timeout : float
+        Seconds; after that the caller goes on with what is mirrored.
+
+    Examples
+    --------
+    >>> await_mirrored(ctx, ["r1", "r2"], timeout=5)  # doctest: +SKIP
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        known = ctx.index.run_ids()
+        if all(r in known for r in run_ids):
+            return
+        time.sleep(0.2)
+
+
+def _find_artifact(artifacts: list[Artifact], wanted: str) -> Artifact | None:
+    for artifact in reversed(artifacts):
+        if wanted in (artifact.kind, artifact.path):
+            return artifact
+    return None
+
+
+def pull_artifact(ctx: Context, manager: HubManager, run_id: str, artifact: str) -> Path:
+    """
+    Copy one big file of a remote run to the hub, into ``<run dir>/pulled/``.
+
+    A relative path is a file in the run folder on the host, fetched over HTTP
+    (any route). An absolute path is copied with ``scp -s`` (route ``ssh``
+    only), and only when it is one of the run's own artifacts and is shell-safe
+    (``PULL_REMOTE_PATH``, no ``..``, a file name). ``copy_from`` keeps its
+    state in ``<hub home>/pulls``, so ``pulled/`` never holds Hypothex state.
+
+    Parameters
+    ----------
+    ctx : Context
+        Hub context.
+    manager : HubManager
+        The hub's host connections.
+    run_id : str
+        Run id.
+    artifact : str
+        An artifact kind (the latest of that kind, e.g. ``checkpoint``), an
+        artifact path, or a path relative to the run folder on the host.
+
+    Returns
+    -------
+    Path
+        The local copy (for a local run: the artifact's own path).
+
+    Raises
+    ------
+    RunError
+        Unknown artifact, a path outside the run folder, a missing file, an
+        absolute path that is not one of the run's artifacts or is not
+        shell-safe, a destination name starting with ``.hx-``, or an absolute
+        path on a host that is not reached over ssh.
+    HostUnavailableError
+        The run is mirrored from a host that is no longer configured.
+
+    Examples
+    --------
+    >>> pull_artifact(ctx, manager, "r1", "checkpoint")  # doctest: +SKIP
+    PosixPath('.../toy/runs/r1/pulled/step_000100.pt')
+    """
+    record = ctx.find_record(run_id)
+    match = _find_artifact(record.artifacts, artifact)
+    host = manager.host_for_environment(record.environment_id)
+    if host is None:
+        if record.environment_id != ctx.descriptor.environment_id:
+            raise HostUnavailableError(
+                f"run {run_id} belongs to environment {record.environment_id}, "
+                "which no configured host serves"
+            )
+        if match is None:
+            raise RunError(f"run {run_id} is local and has no artifact {artifact!r}")
+        return Path(match.path)
+    pulled = ctx.run_dir(record) / "pulled"
+    if match is None and artifact.startswith("/"):
+        raise RunError(f"{artifact!r} is not an artifact of run {run_id}")
+    remote_path = match.path if match is not None else artifact
+    if PurePosixPath(remote_path).name.startswith(PULL_RESERVED_PREFIX):
+        raise RunError(
+            f"{remote_path!r}: names starting with {PULL_RESERVED_PREFIX!r} are reserved"
+        )
+    if not remote_path.startswith("/"):
+        rel = PurePosixPath(remote_path)
+        if ".." in rel.parts:
+            raise RunError(f"{artifact!r} is outside the run folder")
+        dest = pulled / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not manager.client(host).fetch_file(run_id, str(rel), dest, max_bytes=PULL_MAX_BYTES):
+            raise RunError(f"{artifact} is not in run {run_id} on {host} (or is too large)")
+        return dest
+    name = PurePosixPath(remote_path).name
+    if (
+        not PULL_REMOTE_PATH.fullmatch(remote_path)
+        or ".." in remote_path.split("/")
+        or remote_path.endswith("/")
+        or name in ("", ".")
+    ):
+        raise RunError(f"invalid remote path {remote_path!r} for run {run_id}")
+    spec = load_hosts(ctx.layout).environments.get(host)
+    if spec is None or spec.route != "ssh":
+        raise RunError(
+            f"host {host} is not reached over ssh; pulling {remote_path} needs route ssh"
+        )
+    dest = pulled / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    work = ctx.layout.home / PULL_WORK_DIR  # pull state never lives next to `dest`
+    try:
+        copy_from(ssh_target(spec), remote_path, dest, work=work)  # scp -s: no remote shell
+    except SshError as exc:
+        raise RunError(str(exc)) from exc
+    return dest
+
+
 def _run_view(kind: str) -> list[PanelSpec]:
     """
     Run-detail panels for a task kind (spec section 8.4); the UI fills in the run.
@@ -1527,6 +1712,82 @@ def create_app(
 
         return once(body, act)
 
+    def launcher_for(
+        host: str | None,
+        launched: list[str],
+        *,
+        project: str,
+        commit: str | None = None,
+        diff: str | None = None,
+    ) -> Launcher | None:
+        # None: the sweep engine launches here; a host name: forward each run to it.
+        # `launched` collects the run ids the host answers with (settled() waits for them)
+        if not is_remote(host):
+            return None
+        target = str(host)
+        pinned: dict[str, str | None] = {}
+
+        def launch(req: RunRequest, run_command_id: str) -> RunRecord:
+            parsed = [p for p in map(parse_sweep_tag, req.tags) if p is not None]
+            sweep_id = parsed[0][1] if parsed else None
+            local = req.repo.is_dir()  # False for a project copied from a host
+            if "commit" not in pinned:
+                # spec 8A.4: one commit for every run of this call; the host fetches it
+                head = head_commit(req.repo) if local else None
+                pinned["commit"] = commit or head
+                # the client's diff, else the hub checkout's, taken against that commit
+                if commit is not None:
+                    pinned["diff"] = diff
+                else:
+                    pinned["diff"] = local_diff(str(req.repo)) if local else None
+            body = HostLaunchBody(
+                repo=str(req.repo) if local else None,
+                project=project,
+                commit=pinned["commit"],
+                diff=pinned["diff"],
+                task=req.task,
+                command=req.command,
+                hypothesis=req.hypothesis,
+                seed=req.seed,
+                tags=req.tags,
+                params=req.params,
+                vars=req.vars,
+                gpus=req.gpus,
+                queue=req.queue,
+                sweep_id=sweep_id,
+                created_by=req.created_by,
+                command_id=run_command_id,  # the host's receipt makes a repeat the same run
+            )
+            record = RunRecord.model_validate(launch_on_host(ctx, manager, target, body))
+            launched.append(record.run_id)
+            return record
+
+        return launch
+
+    def stopper_for(host: str | None, command_id: str | None) -> Callable[[str], object] | None:
+        # None: stop_if_queued here; a host name: an only_queued stop on that host
+        if not is_remote(host):
+            return None
+        target = str(host)
+
+        def stop(run_id: str) -> None:
+            manager.client(target).post_json(
+                f"/api/v1/runs/{run_id}/stop",
+                {
+                    "command_id": f"{command_id}:{run_id}" if command_id else None,
+                    "only_queued": True,
+                    "created_by": "hub",
+                },
+            )
+
+        return stop
+
+    def settled(spec: SweepSpec, launched: list[str]) -> SweepSummary:
+        # members are indexed runs: wait until this call's remote runs are mirrored
+        if is_remote(spec.host):
+            await_mirrored(ctx, launched)
+        return summarize_sweep(ctx, spec.project, spec.id)
+
     # environment -----------------------------------------------------------------
     @app.get("/.well-known/hypothex/environment")
     def environment() -> dict[str, Any]:
@@ -1781,6 +2042,83 @@ def create_app(
             return {"ok": True}
 
         return forward(run_id, "notes", body, act)
+
+    # sweeps --------------------------------------------------------------------------
+    @app.post("/api/v1/sweeps")
+    def sweep_create(body: SweepBody) -> dict[str, Any]:
+        def act() -> SweepSummary:
+            remote = is_remote(body.host)
+            if remote:
+                remote_checkout(ctx, str(body.host), body.project)  # unknown host or no map
+            launched: list[str] = []
+            summary = launch_sweep(
+                ctx,
+                project=body.project,
+                task=body.task,
+                host=body.host if remote else None,
+                grid=body.grid,
+                random=body.random,
+                seeds=body.seeds,
+                command=body.command,
+                hypothesis=body.hypothesis,
+                gpus=body.gpus,
+                queue=body.queue,
+                created_by=body.created_by,
+                launch=launcher_for(
+                    body.host,
+                    launched,
+                    project=body.project,
+                    commit=body.commit,
+                    diff=body.diff,
+                ),
+                command_id=body.command_id,  # a retry resumes this sweep (Task 40)
+            )
+            return settled(summary.spec, launched)
+
+        return once(body, act)
+
+    @app.get("/api/v1/sweeps/{sweep_id}")
+    def sweep_get_by_id(sweep_id: str) -> dict[str, Any]:
+        # a client on another machine knows the id, not the hub's store
+        spec = find_sweep(ctx, sweep_id)
+        return to_jsonable(summarize_sweep(ctx, spec.project, spec.id))
+
+    @app.get("/api/v1/sweeps/{project}/{sweep_id}")
+    def sweep_get(project: str, sweep_id: str) -> dict[str, Any]:
+        spec = find_sweep(ctx, sweep_id, project)
+        return to_jsonable(summarize_sweep(ctx, spec.project, spec.id))
+
+    @app.get("/api/v1/projects/{project}/sweeps")
+    def project_sweeps(project: str) -> list[dict[str, Any]]:
+        return to_jsonable(list_sweeps(ctx, project))
+
+    @app.post("/api/v1/sweeps/{project}/{sweep_id}/cancel_queued")
+    def sweep_cancel(project: str, sweep_id: str, body: ActionBody | None = None) -> dict[str, Any]:
+        action = body or ActionBody()
+
+        def act() -> SweepSummary:
+            spec = find_sweep(ctx, sweep_id, project)
+            stop = stopper_for(spec.host, action.command_id)
+            return cancel_queued(ctx, spec.project, spec.id, stop=stop)
+
+        return once(action, act)
+
+    @app.post("/api/v1/sweeps/{project}/{sweep_id}/extend")
+    def sweep_extend(project: str, sweep_id: str, body: SeedsBody) -> dict[str, Any]:
+        def act() -> SweepSummary:
+            spec = find_sweep(ctx, sweep_id, project)
+            launched: list[str] = []
+            launch = launcher_for(spec.host, launched, project=spec.project)
+            more = extend_sweep(ctx, spec.project, spec.id, body.seeds, launch=launch)
+            return settled(more.spec, launched)
+
+        return once(body, act)
+
+    @app.post("/api/v1/runs/{run_id}/pull")
+    def run_pull(run_id: str, body: PullBody) -> dict[str, Any]:
+        return once(
+            body, lambda: {"local_path": str(pull_artifact(ctx, manager, run_id, body.artifact))}
+        )
 
     # compare & datasets ----------------------------------------------------------------
     @app.get("/api/v1/compare")

@@ -2454,9 +2454,15 @@ def _start_demo_host(host: _DemoHost) -> subprocess.Popen[bytes]:
         sys.executable, "-m", "hypothex.cli.main", "--home", host.home,
         "serve", "--host", "127.0.0.1", "--port", "0", "--kind", host.kind, "--no-auth",
     ]  # fmt: skip
+    # own session: Ctrl-C on `hx serve` must not reach these hosts before the hub stops their runs
     with (serve_dir / "demo-host.log").open("ab") as log:
         return subprocess.Popen(
-            argv, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT
+            argv,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
 
 
@@ -2493,11 +2499,15 @@ def _point_hub_at(home: Path, urls: dict[str, str]) -> None:
     save_hosts(layout, hosts.model_copy(update={"environments": environments}))
 
 
-def _launch_live_runs(home: Path, hosts: list[_DemoHost], urls: dict[str, str]) -> list[str]:
+def _launch_live_runs(
+    home: Path, hosts: list[_DemoHost], urls: dict[str, str], run_ids: list[str]
+) -> None:
     """
     Launch the sweep's running and queued cells on gpu1 (unless it already has active runs).
 
-    Running cells go first, so the FIFO scheduler gives them the 6 free GPUs.
+    Running cells go first, so the FIFO scheduler gives them the 6 free GPUs. Each
+    launched id is appended to ``run_ids`` at once, so the caller can stop the runs
+    that started even when a later launch fails.
     """
     gpu = next(h for h in hosts if h.fake_gpus)
     url = urls[gpu.name]
@@ -2507,7 +2517,7 @@ def _launch_live_runs(home: Path, hosts: list[_DemoHost], urls: dict[str, str]) 
         for run in httpx.get(f"{url}/api/v1/runs", params={"status": status}, timeout=30).json()
     ]
     if active:
-        return []
+        return
     project, task = DEMO_TASKS["training"]
     hub_id = load_descriptor(Layout(home.expanduser().resolve())).environment_id
     tag = sweep_tag(hub_id, DEMO_SWEEP_ID)  # the hub owns the sweep
@@ -2518,7 +2528,6 @@ def _launch_live_runs(home: Path, hosts: list[_DemoHost], urls: dict[str, str]) 
         if state in ("r", "q")
     ]
     cells.sort(key=lambda cell: cell[3] != "r")
-    run_ids: list[str] = []
     for lr, beam, seed, _ in cells:
         params = {"lr": lr, "beam": beam}
         resp = httpx.post(
@@ -2544,7 +2553,7 @@ def _launch_live_runs(home: Path, hosts: list[_DemoHost], urls: dict[str, str]) 
         run_ids.append(resp.json()["run_id"])
         # recorded run by run, so even a start cut short is forgotten next time
         atomic_write_text(home / DEMO_HOSTS_DIR / _LIVE_RUNS_FILE, json.dumps(run_ids))
-    return run_ids  # tagged for the hub: it counts them once they are mirrored
+    # tagged for the hub: it counts them once they are mirrored
 
 
 def _serving(host: _DemoHost) -> bool:
@@ -2640,7 +2649,7 @@ def demo_hosts_running(home: Path, *, ready_timeout: float = 60.0) -> Iterator[l
         for host, proc in zip(hosts, procs, strict=True):
             urls[host.name] = _wait_demo_host(host, proc, ready_timeout)
         _point_hub_at(home, urls)
-        started = _launch_live_runs(home, hosts, urls)
+        _launch_live_runs(home, hosts, urls, started)
         yield started
     finally:
         if gpu is not None and gpu.name in urls and started:

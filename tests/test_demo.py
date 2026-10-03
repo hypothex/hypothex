@@ -711,3 +711,66 @@ def test_restarting_the_demo_hosts_keeps_the_sweep_at_27(
             assert ctx.index.get_run(run_id) is None
             assert not ctx.layout.run_dir("rxn-forward", run_id).exists()
     assert len(Context.open(gpu_home).index.list_runs(limit=None)) == 21
+
+
+def test_demo_hosts_run_in_their_own_session(tmp_path: Path) -> None:
+    # Ctrl-C reaches the whole foreground process group; the fake hosts must not get
+    # it, so the hub can still stop their runs before it terminates them
+    import os
+
+    import hypothex.demo as demo
+
+    home = tmp_path / "hub"
+    seed_demo(home, ["training"])
+    seed_demo_hosts(home)
+    marker = home / DEMO_HOSTS_DIR / demo.DEMO_HOSTS_FILE
+    host = next(
+        demo._DemoHost.model_validate(h)
+        for h in json.loads(marker.read_text())
+        if h["name"] == "cluster"
+    )
+    proc = demo._start_demo_host(host)
+    try:
+        demo._wait_demo_host(host, proc, 60)
+        assert os.getsid(proc.pid) != os.getsid(0)
+        assert os.getpgid(proc.pid) != os.getpgid(0)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=15)
+
+
+def test_runs_launched_before_a_failed_launch_are_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    import hypothex.demo as demo
+
+    home = tmp_path / "hub"
+    seed_demo(home, ["training"])
+    seed_demo_hosts(home)
+    real_post = httpx.post
+    launched: list[str] = []
+
+    def flaky_post(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        if url.endswith("/api/v1/runs"):
+            if launched:
+                raise httpx.ReadTimeout("injected")
+            resp = real_post(url, *args, **kwargs)
+            launched.append(resp.json()["run_id"])
+            return resp
+        return real_post(url, *args, **kwargs)
+
+    stopped: list[str] = []
+    real_stop = demo._stop_runs
+
+    def record_stop(url: str, run_ids: list[str]) -> None:
+        stopped.extend(run_ids)
+        real_stop(url, run_ids)
+
+    monkeypatch.setattr(httpx, "post", flaky_post)
+    monkeypatch.setattr(demo, "_stop_runs", record_stop)
+    with pytest.raises(httpx.ReadTimeout), demo_hosts_running(home):
+        pass
+    assert len(launched) == 1
+    assert stopped == launched

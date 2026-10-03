@@ -145,6 +145,10 @@ function PaletteDialog({ onClose, onToast }: { onClose: () => void; onToast: (ms
     } else if (e.key === "Enter") {
       e.preventDefault();
       runItem(sel);
+    } else if (e.key === "Tab") {
+      // Modal: the input is the dialog's only tab stop, so Tab must not leave it.
+      e.preventDefault();
+      input.current?.focus();
     }
   };
 
@@ -192,6 +196,10 @@ function PaletteDialog({ onClose, onToast }: { onClose: () => void; onToast: (ms
           className="pal-in"
           placeholder="Find a run, task, path or command"
           autoComplete="off"
+          role="combobox"
+          aria-label="Find a run, task, path or command"
+          aria-expanded="true"
+          aria-autocomplete="list"
           aria-controls="palList"
           aria-activedescendant={items.length ? `po${sel}` : undefined}
           value={query}

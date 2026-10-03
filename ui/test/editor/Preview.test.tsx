@@ -109,6 +109,33 @@ describe("Preview", () => {
     expect(onSelect).toHaveBeenCalledWith(0);
   });
 
+  test("each panel has a select button with a pressed state for the keyboard", () => {
+    const onSelect = mock((_i: number) => {});
+    render(
+      <Preview
+        results={RESULTS}
+        layouts={LAYOUTS}
+        selected={2}
+        problems={{}}
+        stale={false}
+        renderPanel={(r) => <p>{`${r.type} body`}</p>}
+        onSelect={onSelect}
+      />,
+    );
+    const pressed = screen.getAllByRole("button").map((b) => [b.textContent, b.getAttribute("aria-pressed")]);
+    expect(pressed).toEqual([
+      ["aBest config12/12", "false"],
+      ["bLength vs time5/12", "false"],
+      ["cNote7/12", "true"],
+    ]);
+    // The button is the one tab stop per panel; the region is not focusable itself.
+    expect(screen.getByRole("region", { name: "Note" }).hasAttribute("tabindex")).toBe(false);
+    const second = screen.getByRole("button", { name: /Length vs time/ }) as HTMLButtonElement;
+    expect(second.type).toBe("button");
+    fireEvent.click(second);
+    expect(onSelect.mock.calls).toEqual([[1]]);
+  });
+
   test("replaces a panel with its validation problem and marks a stale preview", () => {
     const { container } = render(
       <Preview

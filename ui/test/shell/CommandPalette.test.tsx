@@ -165,6 +165,24 @@ describe("CommandPalette", () => {
     expect(document.activeElement?.id).toBe("findBtn");
   });
 
+  test("the input is a named combobox for the list, and Tab stays inside the dialog", async () => {
+    renderApp("/");
+    await screen.findByRole("button", { name: /Find a run, task or path/ });
+    const dialog = await openWithShortcut();
+    const input = screen.getByRole("combobox", { name: "Find a run, task, path or command" });
+    expect(input.getAttribute("aria-expanded")).toBe("true");
+    expect(input.getAttribute("aria-controls")).toBe(screen.getByRole("listbox").id);
+    expect(input.getAttribute("aria-autocomplete")).toBe("list");
+    expect(fireEvent.keyDown(input, { key: "Tab" })).toBe(false);
+    expect(fireEvent.keyDown(input, { key: "Tab", shiftKey: true })).toBe(false);
+    // Focus lost (a click on the box) comes back to the input on Tab.
+    input.blur();
+    expect(document.activeElement).not.toBe(input);
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(document.activeElement).toBe(input);
+    expect(screen.getByRole("dialog")).toBe(dialog);
+  });
+
   test("typing filters, Enter opens the selected task", async () => {
     const { router } = renderApp("/");
     await screen.findByRole("button", { name: /Find a run, task or path/ });

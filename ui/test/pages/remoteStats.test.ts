@@ -103,3 +103,15 @@ test("runStats shows the run's cost once, with what it is made of in the tooltip
   const old = runStats(makeDetail({ usage }), null, null);
   expect(old.find((s) => s.label === "cost")).toEqual({ label: "cost", value: "$0.25", tooltip: "13 calls" });
 });
+
+test("runStats shows no cost for an all-zero cost, and `—` for GPU hours with no rate", () => {
+  const zero = { gpu_hours: 0, gpu_usd: 0, api_usd: 0, total_usd: 0 };
+  expect(runStats(makeDetail({ cost: zero }), null, null).map((s) => s.label)).toEqual(["wall"]);
+  // usage with zero dollars: the phase 1b usage cost, not the zero cost
+  const usage = { tokens_in: 10, tokens_out: 2, usd: 0, seconds: 1, calls: 1 };
+  const withUsage = runStats(makeDetail({ usage, cost: zero }), null, null);
+  expect(withUsage.find((s) => s.label === "cost")).toEqual({ label: "cost", value: "$0.000", tooltip: "1 calls" });
+  const unpriced = { gpu_hours: 1.5, gpu_usd: 0, api_usd: 0.42, total_usd: 0.42 };
+  const stat = runStats(makeDetail({ cost: unpriced }), null, null).find((s) => s.label === "cost");
+  expect(stat).toEqual({ label: "cost", value: "—", tooltip: "1.50 GPU h, API $0.42, no GPU rate for this host" });
+});

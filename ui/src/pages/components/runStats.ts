@@ -52,14 +52,24 @@ export function runStats(
   const seconds = runSeconds(record, now);
   if (seconds !== null) out.push({ label: "wall", value: fmtDuration(seconds) });
   const usage = record.usage;
-  const cost = record.cost ?? null;
+  // an all-zero cost (a hub or CPU run with no usage) is no cost: no stat, as before 8A.7
+  const c = record.cost ?? null;
+  const cost = c && (c.total_usd > 0 || c.gpu_hours > 0) ? c : null;
   if (usage) {
     out.push({ label: "tokens in", value: fmtCount(usage.tokens_in) });
     out.push({ label: "tokens out", value: fmtCount(usage.tokens_out) });
     if (!cost) out.push({ label: "cost", value: fmtUsd(usage.usd), tooltip: `${usage.calls} calls` });
   }
   // spec 8A.7: GPU hours × rate + API dollars, set when the run ends
-  if (cost) out.push({ label: "cost", value: fmtUsd(cost.total_usd), tooltip: costNote(cost) });
+  // GPU hours with no GPU dollars: the host has no rate, so the total is unknown (`—`)
+  if (cost) {
+    const unpriced = cost.gpu_hours > 0 && cost.gpu_usd === 0;
+    out.push({
+      label: "cost",
+      value: unpriced ? "—" : fmtUsd(cost.total_usd),
+      tooltip: unpriced ? `${costNote(cost)}, no GPU rate for this host` : costNote(cost),
+    });
+  }
   if (record.exit_code !== null && record.exit_code !== 0) {
     out.push({ label: "exit", value: String(record.exit_code) });
   }

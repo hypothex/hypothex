@@ -1267,12 +1267,32 @@ def run_slurm_settings(run_dir: Path) -> SlurmDefaults | None:
     -------
     SlurmDefaults or None
         ``<run_dir>/slurm.json``, or None for a run that was not submitted to
-        SLURM (or whose file is unreadable).
+        SLURM (no such file).
+
+    Raises
+    ------
+    RunError
+        The file exists but cannot be read or is not valid settings.
     """
+    return _read_settings(run_dir / SLURM_SETTINGS_FILE)
+
+
+def _read_settings(path: Path) -> SlurmDefaults | None:
+    """Read a settings file: None when absent; RunError when present but bad."""
     try:
-        return SlurmDefaults.model_validate_json((run_dir / SLURM_SETTINGS_FILE).read_text())
-    except (OSError, ValueError):
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
+    except OSError as exc:
+        log.warning("cannot read SLURM settings %s: %s", path, exc)
+        raise RunError(f"cannot read SLURM settings {path}: {exc}") from exc
+    try:
+        return SlurmDefaults.model_validate_json(text)
+    except ValueError as exc:
+        log.warning("invalid SLURM settings %s: %s", path, exc)
+        raise RunError(
+            f"invalid SLURM settings in {path}; fix or delete the file: {str(exc)[:300]}"
+        ) from exc
 
 
 def remember_slurm_defaults(layout: Layout, defaults: SlurmDefaults) -> None:
@@ -1301,9 +1321,11 @@ def last_slurm_defaults(layout: Layout) -> SlurmDefaults | None:
     Returns
     -------
     SlurmDefaults or None
-        None when no launch has sent settings yet (or the file is unreadable).
+        None when no launch has sent settings yet (no such file).
+
+    Raises
+    ------
+    RunError
+        The file exists but cannot be read or is not valid settings.
     """
-    try:
-        return SlurmDefaults.model_validate_json((layout.home / LAST_SLURM_DEFAULTS).read_text())
-    except (OSError, ValueError):
-        return None
+    return _read_settings(layout.home / LAST_SLURM_DEFAULTS)

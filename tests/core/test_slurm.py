@@ -36,6 +36,7 @@ from hypothex.core.slurm import (
     render_sbatch,
     require_flock,
     run_child,
+    run_slurm_settings,
     submit,
     submit_run,
 )
@@ -879,6 +880,33 @@ def test_rerun_keeps_the_slurm_settings_and_gpus(
         "lab",
         "2",
     )
+
+
+def test_corrupt_last_defaults_refuse_a_slurm_launch(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx.descriptor = ctx.descriptor.model_copy(update={"kind": "slurm"})
+    (ctx.layout.home / "slurm_defaults.json").write_text("{not json")
+    with caplog.at_level("WARNING"), pytest.raises(RunError, match="invalid SLURM settings"):
+        control.launch_run(ctx, RunRequest(repo=toy_repo, command=[PY, "-c", "pass"]))
+    assert "slurm_defaults.json" in caplog.text
+    assert slurm.calls("sbatch") == []
+    assert ctx.index.list_runs(include_archived=True, limit=None) == []
+
+
+def test_corrupt_run_settings_refuse_a_rerun(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    parent = control.launch_run(ctx, req)
+    (ctx.run_dir(parent) / "slurm.json").write_text("{not json")
+    with pytest.raises(RunError, match="invalid SLURM settings"):
+        control.rerun(ctx, parent.run_id)
+    assert len(slurm.calls("sbatch")) == 1  # no local run, no second job
+
+
+def test_missing_slurm_settings_are_not_an_error(tmp_path: Path) -> None:
+    assert run_slurm_settings(tmp_path) is None
 
 
 def test_foreground_rerun_on_slurm_is_refused(

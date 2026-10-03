@@ -16817,6 +16817,8 @@ git commit -m "feat(index): add host_cursors table for hub mirror cursors"
 
 ### Task 33: `hub.py` foundations — constants, `HostState`, `Backoff`, `wanted_path`
 
+> **Superseded by the merged code.** `src/hypothex/remote/hub.py` and `tests/remote/test_hub.py` on `main` replace the verbatim code below (for example, the test import block below drops `EventLog`). Do not re-run this task from the plan text; read the merged files instead.
+
 **Files:**
 - Create: `src/hypothex/remote/hub.py`
 - Modify: `tests/remote/test_hub.py` (import block, append tests)
@@ -18499,6 +18501,8 @@ git commit -m "feat(remote): mirror remote runs into the hub store"
 
 ### Task 35: `Hub` supervisors over `route: url` — replay, cursor, stale, upgrade, connect/disconnect, refresh
 
+> **Superseded by the merged code.** `src/hypothex/remote/hub.py` and `tests/remote/test_hub.py` on `main` replace the verbatim code below (it has the old unprotected drain-then-close order and a `gather`-based `_drain`; the merged `_halt`/`_drain` fix both). Do not re-run this task from the plan text; read the merged files instead.
+
 **Files:**
 - Modify: `src/hypothex/remote/hub.py` (import block; append supervisors and `Hub`)
 - Modify: `tests/remote/test_hub.py` (import block; append env-server harness and tests)
@@ -19910,6 +19914,8 @@ git commit -m "feat(remote): hub supervisors with cursor replay, stale detection
 ---
 
 ### Task 36: `route: ssh` — bootstrap and tunnel per supervisor
+
+> **Superseded by the merged code.** `src/hypothex/remote/hub.py` and `tests/remote/test_hub.py` on `main` replace the verbatim code below (same drain-then-close and `_drain` fixes as Task 35). Do not re-run this task from the plan text; read the merged files instead.
 
 **Files:**
 - Modify: `src/hypothex/remote/hub.py` (import block; replace `Hub._open_route`)

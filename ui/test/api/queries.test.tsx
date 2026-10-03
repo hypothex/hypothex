@@ -4,15 +4,26 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { ApiError } from "../../src/api/client";
+import type { ConnState, HostRow, HostState, RunRecord } from "../../src/api/models";
 import {
+  ALL_RUNS_FIRST,
+  ALL_RUNS_MAX,
+  HOST_EVENT_INVALIDATES,
+  HOSTS_REFETCH_MS,
+  REMOTE_RUN_INVALIDATES,
   RUN_EVENT_INVALIDATES,
   createQueryClient,
+  fetchAllRuns,
+  keepLastKnown,
   queryKeys,
   shouldRetry,
   useCompareExamples,
+  useHosts,
   useLeaderboard,
+  useProjectSweeps,
   useRunPredictions,
   useSaveView,
+  useSweep,
   useTask,
   useTaskKind,
   useView,
@@ -20,6 +31,19 @@ import {
 } from "../../src/api/queries";
 import { mockApi } from "../pages/helpers";
 import { mockRoutes } from "./fetch-mock";
+import { HOSTS, SWEEP, SWEEP_LIST } from "./phase2-fixtures";
+
+/** `n` minimal run rows; `fetchAllRuns` only counts them. */
+const rows = (n: number): RunRecord[] =>
+  Array.from({ length: n }, (_, i) => ({ run_id: `r${i}` }) as unknown as RunRecord);
+
+/** A host row as the hub sends it once the host is not connected: no GPUs, queue 0. */
+const gone = (row: HostRow, conn: ConnState, over: Partial<HostState> = {}): HostRow => ({
+  ...row,
+  gpus: [],
+  queue: 0,
+  state: { ...row.state, state: conn, since: "2026-10-03T14:31:00Z", ...over },
+});
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -64,6 +88,54 @@ describe("queryKeys", () => {
     expect(hit.map((k) => invalidated(qc, k))).toEqual(hit.map(() => true));
     expect(miss.map((k) => invalidated(qc, k))).toEqual(miss.map(() => false));
   });
+
+  test("phase 2 keys: one hosts list, sweeps under their project", () => {
+    expect(queryKeys.hosts()).toEqual(["hosts"]);
+    expect(queryKeys.sweep("toy", "s-7f3a")).toEqual(["sweeps", "toy", "detail", "s-7f3a"]);
+    expect(queryKeys.projectSweeps("toy")).toEqual(["sweeps", "toy", "list"]);
+  });
+
+  test("REMOTE_RUN_INVALIDATES is the run families plus the hosts list", () => {
+    expect(REMOTE_RUN_INVALIDATES).toEqual([...RUN_EVENT_INVALIDATES, ["hosts"]]);
+  });
+
+  test("keepLastKnown keeps a stale host's last connected GPUs and queue, nothing else", () => {
+    const [local, gpu1, mccleary] = HOSTS as [HostRow, HostRow, HostRow, HostRow];
+    const next = keepLastKnown([local, gpu1, mccleary], [local, gone(gpu1, "stale"), mccleary]);
+    expect(next[1]?.state.state).toBe("stale");
+    expect([next[1]?.gpus, next[1]?.queue]).toEqual([gpu1.gpus, 3]);
+    expect(next[0]).toBe(local);
+    // still stale on the next poll: the same last known cells stay
+    expect(keepLastKnown(next, [local, gone(gpu1, "stale"), mccleary])[1]?.gpus).toEqual(gpu1.gpus);
+    // other states, no earlier list, or another environment keep the empty row
+    expect(keepLastKnown([gpu1], [gone(gpu1, "error")])[0]?.gpus).toEqual([]);
+    expect(keepLastKnown(undefined, [gone(gpu1, "stale")])[0]?.gpus).toEqual([]);
+    expect(keepLastKnown([gpu1], [gone(gpu1, "stale", { environment_id: "env-new" })])[0]?.queue).toBe(0);
+  });
+
+  test("HOST_EVENT_INVALIDATES hits hosts and host-state readers, not scores or views", async () => {
+    const { qc } = setup();
+    const hit = [
+      queryKeys.hosts(),
+      queryKeys.overview(),
+      queryKeys.runs({ project: "toy" }),
+      queryKeys.run("r1"),
+      queryKeys.sweep("toy", "s-7f3a"),
+      queryKeys.projectSweeps("toy"),
+    ];
+    const miss = [
+      queryKeys.leaderboard("toy", "acc"),
+      queryKeys.tasks(),
+      queryKeys.task("toy", "acc"),
+      queryKeys.viewQuery("toy", "acc", { name: "overview" }),
+      queryKeys.views("toy", "acc"),
+      queryKeys.projects(),
+    ];
+    for (const key of [...hit, ...miss]) qc.setQueryData(key, { seeded: true });
+    await Promise.all(HOST_EVENT_INVALIDATES.map((queryKey) => qc.invalidateQueries({ queryKey })));
+    expect(hit.map((k) => invalidated(qc, k))).toEqual(hit.map(() => true));
+    expect(miss.map((k) => invalidated(qc, k))).toEqual(miss.map(() => false));
+  });
 });
 
 describe("shouldRetry", () => {
@@ -82,6 +154,84 @@ describe("hooks", () => {
     const { result } = renderHook(() => useLeaderboard("toy", "acc"), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.headline).toBe("SVM +0.037 over rf, p = 0.15");
+  });
+
+  test("useHosts polls every 10 s by default", () => {
+    expect(HOSTS_REFETCH_MS).toBe(10_000);
+  });
+
+  test("useHosts loads the hosts and keeps polling them", async () => {
+    const calls = mockRoutes({ "/api/v1/hosts": HOSTS });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useHosts(25), { wrapper });
+    await waitFor(() =>
+      expect(result.current.data?.map((h) => h.name)).toEqual(["local", "gpu1", "mccleary", "dgx"]),
+    );
+    await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(3), { timeout: 1_000 });
+    expect(new Set(calls.map((c) => c.url))).toEqual(new Set(["/api/v1/hosts"]));
+  });
+
+  test("useHosts keeps polling after the hub answers an error", async () => {
+    const calls = mockRoutes({ "/api/v1/hosts": null });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useHosts(25), { wrapper });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(3), { timeout: 1_000 });
+    mockRoutes({ "/api/v1/hosts": HOSTS });
+    await waitFor(() => expect(result.current.data?.length).toBe(4), { timeout: 1_000 });
+  });
+
+  test("useHosts keeps a stale host's last GPUs and queue between polls", async () => {
+    const [local, gpu1] = HOSTS as [HostRow, HostRow];
+    mockRoutes({ "/api/v1/hosts": [local, gpu1] });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useHosts(25), { wrapper });
+    await waitFor(() => expect(result.current.data?.[1]?.gpus.length).toBe(3));
+    mockRoutes({ "/api/v1/hosts": [local, gone(gpu1, "stale")] });
+    await waitFor(() => expect(result.current.data?.[1]?.state.state).toBe("stale"), { timeout: 1_000 });
+    expect([result.current.data?.[1]?.gpus.length, result.current.data?.[1]?.queue]).toEqual([3, 3]);
+  });
+
+  test("useSweep loads one sweep under its project key", async () => {
+    const calls = mockRoutes({ "/api/v1/sweeps/toy/s-7f3a": SWEEP });
+    const { qc, wrapper } = setup();
+    const { result } = renderHook(() => useSweep("toy", "s-7f3a"), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.headline).toBe("lr 3e-4, beam 10: 0.912 [0.911, 0.913], n = 3");
+    expect(qc.getQueryData<typeof SWEEP>(queryKeys.sweep("toy", "s-7f3a"))).toEqual(SWEEP);
+    expect(calls.map((c) => c.url)).toEqual(["/api/v1/sweeps/toy/s-7f3a"]);
+  });
+
+  test("useProjectSweeps lists a project's sweeps", async () => {
+    mockRoutes({ "/api/v1/projects/toy/sweeps": SWEEP_LIST });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useProjectSweeps("toy"), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.map((s) => [s.id, s.n_runs])).toEqual([["s-7f3a", 6]]);
+  });
+
+  test("fetchAllRuns asks for 4x more while a page comes back full, so no run is cut", async () => {
+    const q = "/api/v1/runs?status=queued&environment_id=env-gpu1&limit=";
+    // 1,500 queued runs on one host: the first page (1,000) is full, the second is not
+    const calls = mockRoutes({ [`${q}1000`]: rows(1000), [`${q}4000`]: rows(1500) });
+    const out = await fetchAllRuns({ status: "queued", environment_id: "env-gpu1" });
+    expect([out.runs.length, out.complete]).toEqual([1500, true]);
+    expect(calls.map((c) => c.url)).toEqual([`${q}1000`, `${q}4000`]);
+    expect(queryKeys.allRuns({ status: "queued" })).toEqual(["runs", "all", { status: "queued" }]);
+  });
+
+  test("fetchAllRuns stops at ALL_RUNS_MAX and says the list is cut", async () => {
+    expect([ALL_RUNS_FIRST, ALL_RUNS_MAX]).toEqual([1000, 64_000]);
+    const q = "/api/v1/runs?tag=sweep%3As-1&limit=";
+    const calls = mockRoutes({
+      [`${q}1000`]: rows(1000),
+      [`${q}4000`]: rows(4000),
+      [`${q}16000`]: rows(16000),
+      [`${q}64000`]: rows(64000),
+    });
+    const out = await fetchAllRuns({ tag: "sweep:s-1" });
+    expect([out.runs.length, out.complete]).toEqual([64000, false]);
+    expect(calls).toHaveLength(4);
   });
 
   test("useView stays idle while name is null", async () => {

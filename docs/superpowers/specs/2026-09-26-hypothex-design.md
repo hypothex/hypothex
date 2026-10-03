@@ -685,8 +685,10 @@ the worktree. Missing mapping → clear error naming `hx hosts map`.
 
 `hx sweep -t T --grid k=v1,v2 [--grid ...] [--random N --param k=lo:hi[:log]] --seeds S
 --host H [--queue] -- <cmd with {k} and {seed}>` writes `<store>/<project>/sweeps/<id>.yaml`
-(grid, seeds, host, run ids, created_by) and launches all runs with tag `sweep:<id>` and
-params `k=v`. API `POST /api/v1/sweeps`, `GET /api/v1/sweeps/{id}`; MCP `launch_sweep`,
+(grid, seeds, host, created_by: the definition only) and launches all runs with tag
+`sweep:<id>` and params `k=v`. The sweep's runs are the runs with that tag (derived, never
+stored); each (params, seed) has one deterministic command id, so a retried launch or extend
+issues only the missing runs and never starts one twice. API `POST /api/v1/sweeps`, `GET /api/v1/sweeps/{id}`; MCP `launch_sweep`,
 `get_sweep`. Sweep page `/s/<id>`: headline (best config + score), progress counts,
 params × primary-metric heat table (mean; CI in tooltip), best cell marked, cost total.
 

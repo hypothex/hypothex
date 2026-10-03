@@ -63,7 +63,7 @@ class EnvClient:
     def descriptor(self) -> EnvironmentDescriptor: ...
     def get_json(self, path: str, **params: Any) -> Any: ...
     def post_json(self, path: str, body: dict[str, Any]) -> Any: ...
-    def fetch_file(self, run_id: str, rel_path: str, dest: Path, *, max_bytes: int, tail: bool = False, offset: int = 0) -> bool: ...   # False when skipped (too big / missing); tail = last max_bytes; offset = byte range for append-only files
+    def fetch_file(self, run_id: str, rel_path: str, dest: Path, *, max_bytes: int, tail: bool = False) -> bool: ...   # False when skipped (too big / missing); tail = last max_bytes (log tails); whole files only
     async def events(self, after_sequence: int) -> AsyncIterator[Event]: ...   # WS subscribe, yields events, ends on disconnect
 ```
 Uses `httpx` and `websockets` (or `httpx-ws`; plan picks one, adds it with `uv add`).
@@ -91,7 +91,7 @@ MIRROR_FILES = ("run.yaml", "scores.jsonl", "metrics.jsonl", "notes.md", "usage.
 MIRROR_DIRS = ("predictions", "traces", "samples", "env", "logs")
 MIRROR_MAX_BYTES = 200 * 1024 * 1024
 ```
-Backoff 3/4/8/16 s, reset after 30 s connected. Cursor persisted in the hub index table `host_cursors(host, environment_id, last_sequence)`. Mirror writes go through `RunStore` and `index_run`; mirror events re-emitted as `mirror.run_updated` with the original event type in payload. Hub marks a host `stale` after 60 s without a successful ping; runs on stale hosts are shown stale (derived, never written as status).
+Backoff 3/4/8/16 s, reset after 30 s connected. Cursor persisted in the hub index table `host_cursors(host, environment_id, last_sequence)`. Mirror writes go through `RunStore` and `index_run`: each changed file is fetched whole into a per-run staging folder, and only when every fetch succeeded is the run id claimed hub-wide (`<store>/.claims/<run_id>.json`) and are the files installed in one pass under the run lock (no appends, no byte offsets). Mirror events are re-emitted as `mirror.run_updated` with payload `{host, environment_id, original_type, remote_sequence, status, reason?}`: `original_type` is the host's event type, and `reason` is copied from the host's event when it has one (`run.lost`, `run.killed`, `run.failed`, e.g. a SLURM `NODE_FAIL`). Hub marks a host `stale` after 60 s without a successful ping; runs on stale hosts are shown stale (derived, never written as status).
 
 ### 1.6 Env-server additions (`hypothex.core` on the host)
 
@@ -114,7 +114,8 @@ class Scheduler:
 # hypothex.core.slurm
 class SlurmJob(BaseModel): job_id: str; state: str; node: str | None = None; exit_code: int | None = None
 def render_sbatch(record: RunRecord, defaults: SlurmDefaults, home: Path) -> str: ...
-def submit(script: str, cwd: Path) -> str: ...             # job id; uses `sbatch --parsable`
+def submit(script: str, cwd: Path, *, comment: str | None = None) -> str: ...   # job id; `sbatch --parsable`; SubmitUnknownError when SLURM may have taken the job
+def find_submitted(comment: str) -> tuple[SlurmJob | None, bool]: ...   # by the unique comment only (squeue and sacct); bool = both answered
 def poll(job_ids: list[str]) -> dict[str, SlurmJob]: ...    # squeue then sacct for finished
 def cancel(job_id: str) -> None: ...
 # hypothex.core.cost
@@ -126,13 +127,14 @@ def compute_cost(record: RunRecord, usd_per_gpu_hour: float | None) -> CostTotal
 
 ```python
 class SweepParam(BaseModel): name: str; values: list[str] | None = None; low: float | None = None; high: float | None = None; log: bool = False
-class SweepSpec(BaseModel, extra="forbid"): id: str; project: str; task: str | None; host: str | None; grid: list[SweepParam]; random: int | None = None; seeds: list[int]; command_template: list[str]; created_by: str; created_at: datetime; run_ids: list[str] = []
+class SweepSpec(BaseModel, extra="forbid"): id: str; project: str; task: str | None; host: str | None; grid: list[SweepParam]; random: int | None = None; seeds: list[int]; command_template: list[str]; created_by: str; created_at: datetime   # the definition only: no run ids
 def expand(spec: SweepSpec, rng_seed: int = 0) -> list[dict[str, str]]: ...   # grid product (+ random samples), each dict = params; seeds applied separately
 def save_sweep(layout: Layout, spec: SweepSpec) -> Path: ...    # <store>/<project>/sweeps/<id>.yaml
 def load_sweep(layout: Layout, project: str, sweep_id: str) -> SweepSpec: ...
-class SweepSummary(BaseModel): spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float
+class SweepSummary(BaseModel): spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []   # run_ids derived: indexed runs tagged sweep:<id>, launch order
 def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary: ...   # cells: {params, group_id, n, mean, lo, hi, run_ids}
 ```
+Sweep membership is derived from the `sweep:<id>` tag, never stored. Each (params, seed) has one deterministic command id (`run_command_id`: 16 hex of a SHA-256 over the owning environment, project, sweep id, sorted params, seed); launch, a retried launch, and extend save the definition and issue every missing (params, seed) with it, and command receipts make a repeat the same run.
 
 ## 2. HTTP API additions
 
@@ -191,3 +193,7 @@ All additive; nothing was renamed. `ServerInfo.token` and `EnvClient(token=)` (e
 ## Changes after review round 1 (2026-10-03)
 
 Additive unless noted. `EnvironmentsFile.stale_banner_hours` (default 24) and `stale_banner_hours` on every `GET /api/v1/hosts` row (spec 5.6 banner); `POST /api/v1/hosts/reload`; `GET /api/v1/runs?environment_id=` with no cap below the requested `limit`; `GET /api/v1/sweeps/{id}`; `POST /api/v1/hosts/{host}/runs` takes the project by name and an optional `commit` (no path, no diff needed from the UI). Spec 5.7: `--hosts a,b` (a queue across hosts) is dropped; a run targets one host (a scope change, not an addition). Backend-only additions the frontend does not use: `submit(..., comment=)`, `find_submitted`, `launch_sweep(..., command_id=)`, `EventLog.append_once`, `Index.list_runs(environment_id=)`. A foreground (`--foreground`) rerun or reinfer on a SLURM host is refused ("SLURM runs are always submitted; drop --foreground"); a SLURM host's home must support `flock` (the env server refuses to start without it).
+
+## Changes after review round 2 (2026-10-03)
+
+Not all additive (marked "changed"). Changed: `SweepSpec.run_ids` is removed; `SweepSummary.run_ids` (derived from the `sweep:<id>` tag) replaces it, so API, CLI, and MCP clients read `summary.run_ids`, not `summary.spec.run_ids`. Changed: `EnvClient.fetch_file` and the files route drop `offset` (the mirror fetches whole files). Changed: `find_submitted(comment)` returns `(job, complete)` and matches the comment only. Additive: `mirror.run_updated` carries `reason` when the host's event had one; `SubmitUnknownError`; event `run.submit_unknown`; `SlurmDefaults.extra` refuses `--job-name`, `--comment`, `--output` (and their abbreviations); a stop of a SLURM run whose job id is not known yet is carried out once the job appears; `create_app(..., lifespan_context=)` (the demo hosts of `hx serve` start and stop in the ASGI lifespan, so SIGTERM stops them); `extend` is idempotent (seeds already in the sweep issue only missing runs, never a 400).

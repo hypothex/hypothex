@@ -14,7 +14,7 @@
 
 **Mockups:** `docs/mockups/phase2/` (`index.html`, `shot-overview-*`, `shot-launch-*`, `shot-sweep-*`, `shot-run-{queued,running,stale,lost}-*`).
 
-**Depends on:** phases 1a and 1b on `main`, and the backend plan `docs/superpowers/plans/2026-10-03-hypothex-phase2-backend.md` merged: the section 2 routes in `/api/openapi.json`, `RunDetail.host_state`, `mirror.run_updated` and `host.*` events, `hx demo --with-hosts`, and `docs/remote.rst`.
+**Depends on:** phases 1a and 1b on `main`, and the backend plan `docs/superpowers/plans/2026-10-03-hypothex-phase2-backend.md` merged: the section 2 routes in `/api/openapi.json`, `RunDetail.host_state`, `mirror.run_updated` and `host.*` events (a mirrored `run.lost` carries the original `reason` in its payload), `SweepSummary.run_ids` derived from the `sweep:<id>` tags (ruling S8), the demo cleanup in the hub's ASGI lifespan shutdown (ruling S9), `hx demo --with-hosts`, and `docs/remote.rst`.
 
 ## Global Constraints
 
@@ -30,7 +30,7 @@
 - Stale (contract 1.5, spec 5.6): derived from the hub's host state and never written; a queued or running run on a host that is not `connected` shows `stale` with the time since, never `lost`. Only the env server decides `lost`.
 - Copy (spec 8.1, terse UI): numbers and glyphs, short labels; explanations only in `title` tooltips; every state has its own glyph, never colour alone; monospace only for commands and paths; times in UTC; a missing value is `—` (a not-yet-known cell is `·`).
 - CSS: each new component injects its own `<style data-hx="…">`; every selector is scoped (`.page …`, `.hx-launch …`); colours only through the theme tokens (`var(--ink)`, `var(--fail)`, …), so light and dark both work. `ui/src/pages/components/styles.ts` is not edited.
-- HARD RULE, never touch the user's real hosts: no test or step connects to a real SSH or SLURM host or reads `~/.hypothex`. Unit tests stub `fetch` (`mockApi`, `mockFetch`). Every `hx` a step starts uses a fresh temp home given on its own command line (`uv run hx --home "$H" ...`) and runs with `HYPOTHEX_SSH=false HYPOTHEX_SCP=false` set inline on that same command line, never by an earlier `export`: agent shells do not keep variables from one call to the next, so a separate `export` line can leave `hx serve` on the real `~/.hypothex`, where a phase 2 hub bootstraps the user's real hosts over real ssh. A step block that starts a server is one shell command; run it as one call. Waits are bounded (`for i in $(seq 60)`), never `until` loops. No step runs `ssh`, `scp`, `hx hosts add` or `hx hosts connect`. Playwright never reuses a server it did not start, for either demo hub (`reuseExistingServer: false`), and every test first checks that the hub answers with the identity `serve-demo.ts` wrote into its fresh home (Task 28), so no spec can post to another server.
+- HARD RULE, never touch the user's real hosts: no test or step connects to a real SSH or SLURM host or reads `~/.hypothex`. Unit tests stub `fetch` (`mockApi`, `mockFetch`). Every `hx` a step starts uses a fresh temp home given on its own command line (`uv run hx --home "$H" ...`) and runs with `HYPOTHEX_SSH=false HYPOTHEX_SCP=false` set inline on that same command line, never by an earlier `export`: agent shells do not keep variables from one call to the next, so a separate `export` line can leave `hx serve` on the real `~/.hypothex`, where a phase 2 hub bootstraps the user's real hosts over real ssh. A step block that starts a server is one shell command; run it as one call. Waits are bounded (`for i in $(seq 60)`), never `until` loops. No step runs `ssh`, `scp`, `hx hosts add` or `hx hosts connect`. Playwright never reuses a server it did not start, for either demo hub (`reuseExistingServer: false`), and every test first checks that the hub answers with the identity `serve-demo.ts` wrote into its fresh home (Task 28), so no spec can post to another server. Every port a step or check serves a hub on is asked from the OS for that run, never fixed (controller ruling S1): `freePort()` in `ui/e2e/paths.ts`, or `uv run python -c` binding port 0 in a shell step. Before any host route or mutation, the caller checks that the hub on that port answers `GET /.well-known/hypothex/environment` with the `environment_id` of the fresh home it started, and a child that fails to start (or exits) aborts the step at once instead of waiting it out.
 - Build output: `bun run build` writes `src/hypothex/ui_dist/` (git-ignored); never commit it.
 - Docs: Task 29 updates `docs/ui.rst` and its test (spec rule: every feature ships with docs).
 - Commits: plain conventional commits (`feat(ui): …`, `test(ui): …`, `docs: …`). No `Co-Authored-By` lines and no AI mention in commits or PR text.
@@ -57,6 +57,7 @@ ui/
     api/client.ts                 ROUTES + api.* for hosts, gpus, queue, launch, sweeps, pull     (Task 2)
     api/queries.ts                keys, useHosts (keepLastKnown)/useSweep/useProjectSweeps, fetchAllRuns/useAllRuns, invalidation lists (Tasks 3, 4)
     api/events.ts                 mirror.run_updated and host.* → query keys                      (Task 4)
+    api/lostReasons.ts            run.lost reasons seen on the event stream, by run               (Task 4)
     pages/components/HostsPanel.tsx  host helpers (hostRowForRun, remoteRows, longStale) and the Hosts panel (own CSS) (Tasks 5, 6)
     pages/Overview.tsx            Hosts as panel a; host-aware headline and metaline; stale banner after stale_banner_hours (Task 7)
     launch/seeds.ts command.ts    seed lists; sh-like command split, {seed} slots                  (Task 8)
@@ -81,7 +82,7 @@ ui/
     pages/components/RunActions.tsx  actions by phase (Cancel, Reconnect, Rerun first when lost)    (Task 26)
     pages/Run.tsx                 the run page wired for remote runs                               (Task 27)
   test/
-    api/phase2-fixtures.ts client.test.ts types.test.ts queries.test.tsx events.test.ts           (Tasks 1–4)
+    api/phase2-fixtures.ts client.test.ts types.test.ts queries.test.tsx events.test.ts lostReasons.test.ts  (Tasks 1–4)
     pages/hostFixtures.ts hostsPanel.test.tsx hostsPanelView.test.tsx Overview.test.tsx            (Tasks 5–7)
     launch/fixtures.ts seeds|command|plan|cli|draft|launchApi .test.ts LaunchDialog.test.tsx       (Tasks 8–12)
     pages/Task.test.tsx                                                                            (Tasks 13, 21)
@@ -124,9 +125,9 @@ Gives the UI typed access to every phase 2 hub route and keeps hosts, runs, over
   - `interface HostLaunchRequest extends RunFields { project: string }` (`POST /api/v1/hosts/{host}/runs`: the project by name, never a path on this machine; the hub finds its own checkout and the host's mapped one)
   - Additive contract fields: `LeaderboardRow.cost?: CostTotals | null`, `OverviewSummary.cost_usd?: number`, `OverviewSummary.cost_today_usd?: number`, `RunsQuery.environment_id?: string` (the queue panel's filter, Task 27).
   - `interface SweepParam { name: string; values: string[] | null; low: number | null; high: number | null; log: boolean }`
-  - `interface SweepSpec { id; project; task: string | null; host: string | null; grid: SweepParam[]; random: number | null; seeds: number[]; command_template: string[]; created_by: string; created_at: string; run_ids: string[] }`
+  - `interface SweepSpec { id; project; task: string | null; host: string | null; grid: SweepParam[]; random: number | null; seeds: number[]; command_template: string[]; created_by: string; created_at: string }` (the definition only: no `run_ids`, controller ruling S8)
   - `interface SweepCell { params: Record<string, string>; group_id: string; n: number; mean: number | null; lo: number | null; hi: number | null; run_ids: string[] }`
-  - `interface SweepSummary { spec: SweepSpec; counts: Record<string, number>; cells: SweepCell[]; best: SweepCell | null; headline: string; total_usd: number }`
+  - `interface SweepSummary { spec: SweepSpec; run_ids: string[]; counts: Record<string, number>; cells: SweepCell[]; best: SweepCell | null; headline: string; total_usd: number }` (`run_ids`: the sweep's membership, derived by the backend from the runs tagged `sweep:<id>`, oldest first; ruling S8)
   - `interface SweepListItem { id: string; created_at: string; n_runs: number; best: SweepCell | null }`
   - `interface PullResult { local_path: string }`
   - `interface QueueEntry { run_id: string; position: number; gpus_requested: number }` (`GET /api/v1/queue`)
@@ -342,8 +343,8 @@ export const SWEEP: SweepSummary = {
     command_template: ["python", "train.py", "--lr", "{lr}", "--beam", "{beam}", "--seed", "{seed}"],
     created_by: "agent:tuner",
     created_at: "2026-10-03T09:12:00Z",
-    run_ids: ["r-7e3f", "r-f0a1", "r-66cd", "r-71f2", "r-1d77", "r-c2b9"],
   },
+  run_ids: ["r-7e3f", "r-f0a1", "r-66cd", "r-71f2", "r-1d77", "r-c2b9"],
   counts: { finished: 4, running: 1, queued: 1 },
   cells: [
     BEST_CELL,
@@ -666,7 +667,11 @@ export interface SweepParam {
   log: boolean;
 }
 
-/** `<store>/<project>/sweeps/<id>.yaml`. */
+/**
+ * `<store>/<project>/sweeps/<id>.yaml`: the sweep's definition only. Which runs belong to
+ * the sweep is derived by the backend from the runs tagged `sweep:<id>`
+ * (`SweepSummary.run_ids`), never stored here.
+ */
 export interface SweepSpec {
   id: string;
   project: string;
@@ -678,7 +683,6 @@ export interface SweepSpec {
   command_template: string[];
   created_by: string;
   created_at: string;
-  run_ids: string[];
 }
 
 /** One parameter combination of a sweep: primary-metric mean and 95% CI over its seeds. */
@@ -697,6 +701,12 @@ export interface SweepCell {
 /** `GET /api/v1/sweeps/{project}/{id}` and every sweep action. */
 export interface SweepSummary {
   spec: SweepSpec;
+  /**
+   * The sweep's runs, derived by the backend from the runs tagged `sweep:<id>`, oldest
+   * first (launch order). A run launched by a retry or an extend shows up here as soon as
+   * the hub has it, whether or not the request that started it got its answer.
+   */
+  run_ids: string[];
   /** Runs per status, e.g. `{finished: 4, running: 1, queued: 1}`. */
   counts: Record<string, number>;
   cells: SweepCell[];
@@ -969,25 +979,39 @@ Expected: FAIL. The `phase 2 api` tests fail with `TypeError: api.hosts is not a
 
 - [ ] **Step 3: Regenerate `types.ts` from a hub with no hosts**
 
-From the repo root (`/Users/shreyasv/Desktop/code/research_dash`). Port 7799 avoids a user's own `hx serve` on 7777; the empty temp home has no `environments.yaml`, so the hub connects to no host, and `HYPOTHEX_SSH=false` makes any SSH attempt fail at once.
+From the repo root (`/Users/shreyasv/Desktop/code/research_dash`). The hub gets a port the OS reports free (never a fixed one: a fixed port can belong to an `hx serve` the user left running, and the step would then read, and finally `pkill`, the user's server) and a fresh temp home whose identity the step writes first; it reads `openapi.json` only after the hub on that port answers `/.well-known/hypothex/environment` with that identity. The empty temp home has no `environments.yaml`, so the hub connects to no host, and `HYPOTHEX_SSH=false` makes any SSH attempt fail at once.
 
-Run the whole block as ONE shell command (one Bash call). The temp home is passed with `--home` and the SSH variables are set inline on the `hx serve` line itself, never with a separate `export`: a shell that does not keep variables between calls would otherwise start `hx serve` on the real `~/.hypothex`, and a phase 2 hub there bootstraps the user's real hosts over real ssh. The wait is bounded (30 s), and the block stops the server on every path:
+Run the whole block as ONE shell command (one Bash call). The temp home is passed with `--home` and the SSH variables are set inline on the `hx serve` line itself, never with a separate `export`: a shell that does not keep variables between calls would otherwise start `hx serve` on the real `~/.hypothex`, and a phase 2 hub there bootstraps the user's real hosts over real ssh. The wait is bounded (30 s), it stops at once when `hx serve` exits, and the block stops its own server (by its unique home) on every path:
 
 ```bash
-H="$(mktemp -d)" && \
-HYPOTHEX_SSH=false HYPOTHEX_SCP=false uv run hx --home "$H" serve --port 7799 > /tmp/hx-serve-types.log 2>&1 &
-for i in $(seq 60); do curl -sf http://127.0.0.1:7799/api/openapi.json >/dev/null && break; sleep 0.5; done
-if curl -sf http://127.0.0.1:7799/api/openapi.json >/dev/null; then
-  (cd ui && bunx openapi-typescript http://127.0.0.1:7799/api/openapi.json -o src/api/types.ts)
+H="$(mktemp -d)"
+ID="$(uuidgen | tr -d '-' | tr 'A-Z' 'a-z')"
+P="$(uv run python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+if [ -d "$H" ] && [ -n "$ID" ] && [ -n "$P" ]; then
+  printf '{"environment_id": "%s", "label": "hx-types"}\n' "$ID" > "$H/environment.json"
+  HYPOTHEX_SSH=false HYPOTHEX_SCP=false uv run hx --home "$H" serve --port "$P" > /tmp/hx-serve-types.log 2>&1 &
+  SERVER=$!
+  ok=""
+  for i in $(seq 60); do
+    kill -0 "$SERVER" 2>/dev/null || { echo "hx serve exited at start"; break; }
+    if curl -sf "http://127.0.0.1:$P/.well-known/hypothex/environment" | grep -Fq "\"$ID\""; then ok=1; break; fi
+    sleep 0.5
+  done
+  if [ -n "$ok" ]; then
+    (cd ui && bunx openapi-typescript "http://127.0.0.1:$P/api/openapi.json" -o src/api/types.ts)
+  else
+    echo "no hx serve with the identity of $H on port $P"; tail -20 /tmp/hx-serve-types.log
+  fi
+  kill "$SERVER" 2>/dev/null
+  pkill -f -- "--home $H serve"
 else
-  echo "hx serve did not answer on 7799 within 30 s"; tail -20 /tmp/hx-serve-types.log
+  echo "no temp home, id or free port"
 fi
-pkill -f "serve --port 7799"
 head -4 ui/src/api/types.ts
 grep -oE '"/api/v1/(hosts|sweeps|gpus|queue|projects/\{project\}/sweeps|runs/\{run_id\}/pull)[^"]*"' ui/src/api/types.ts | LC_ALL=C sort -u
 ```
 
-(`pkill -f "serve --port 7799"` matches both `uv run` and the `hx` process it started; the command line is `hx --home <H> serve --port 7799`, so a pattern starting `hx serve` would match nothing.)
+(`pkill -f -- "--home $H serve"` matches only the `uv run` wrapper and the `hx` process of this block's own temp home: their command lines are `uv run hx --home <H> serve --port <P>` and `…/hx --home <H> serve --port <P>`. The shell running the block holds the text `$H` unexpanded, so it never matches itself.)
 
 Expected: the header contains `This file was auto-generated by openapi-typescript.`, and the `grep` prints exactly
 
@@ -1490,8 +1514,9 @@ git commit -m "feat(ui): queries for hosts and sweeps"
 
 **Files:**
 - Modify: `ui/src/api/queries.ts` (`RUN_EVENT_INVALIDATES` and its doc comment, lines 44-59)
-- Modify: `ui/src/api/events.ts` (import line 15; `BY_PROJECT` lines 110-111; `keysForEvent` lines 126-147)
-- Test: `ui/test/api/events.test.ts`, `ui/test/api/queries.test.tsx`
+- Modify: `ui/src/api/events.ts` (import line 15; `BY_PROJECT` lines 110-111; `keysForEvent` lines 126-147; `onEvents` in `useEventStream`)
+- Create: `ui/src/api/lostReasons.ts`
+- Test: `ui/test/api/events.test.ts`, `ui/test/api/queries.test.tsx`, `ui/test/api/lostReasons.test.ts`
 
 **Interfaces:**
 - Consumes: `RUN_EVENT_INVALIDATES`, `REMOTE_RUN_INVALIDATES`, `HOST_EVENT_INVALIDATES`, `queryKeys.hosts/sweep/projectSweeps` (Task 3).
@@ -1499,6 +1524,7 @@ git commit -m "feat(ui): queries for hosts and sweeps"
   - `RUN_EVENT_INVALIDATES` gains `["sweeps"]` (last), so every `run.*` event and every `useAction` that uses it refreshes sweep pages.
   - `MIRROR_RUN_UPDATED = "mirror.run_updated"` exported from `ui/src/api/events.ts`.
   - `keysForEvent(event)`: `run.*` → `RUN_EVENT_INVALIDATES` narrowed (`["run", runId]`, `["task" | "leaderboard" | "sweeps", project]`, `["views", "query", project]`); `mirror.run_updated` → `REMOTE_RUN_INVALIDATES` narrowed the same way (ends with `["hosts"]`); `host.*` → `HOST_EVENT_INVALIDATES` unchanged; other types → `[]`.
+  - `ui/src/api/lostReasons.ts`: `lostReasonOf(event: HxEvent): string | null` (the trimmed `payload.reason` of `run.lost`, or of `mirror.run_updated` with `original_type: "run.lost"`), `noteLostReasons(events)`, `lostReasonFor(runId): string | null`, `useLostReason(runId): string | null`, `clearLostReasons()` (tests). `useEventStream` passes every batch to `noteLostReasons` before invalidating.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1850,16 +1876,238 @@ function narrow(families: readonly QueryKey[], event: HxEvent): QueryKey[] {
 
 The rest of the old loop body (`const id = family.join("/"); ... return keys; }`) stays as it is; it is now the body of `narrow`.
 
-- [ ] **Step 5: Run the api tests, the full suite and the type checker**
+- [ ] **Step 5: Write the failing lost-reason tests**
+
+The env server puts the cause of a lost run in its `run.lost` event (`payload.reason`, e.g. `SLURM ended job 4471023 with NODE_FAIL on r814u05n01; no exit record`); the run detail has no field for it. The app's one event stream hands every batch to a small store, and the run page reads the reason from it (Tasks 23, 25, 27). A hub run's own `run.lost` carries the reason itself; a mirrored one arrives as `mirror.run_updated` with `original_type: "run.lost"` and the same `reason` in its payload. When no such event was seen in this tab (the tab resumed after it, or the payload has no reason), the page keeps the neutral words.
+
+Create `ui/test/api/lostReasons.test.ts`:
+
+```ts
+import { afterEach, describe, expect, test } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, renderHook } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
+
+import { type Clock, type SocketLike, useEventStream } from "../../src/api/events";
+import { clearLostReasons, lostReasonFor, lostReasonOf, noteLostReasons, useLostReason } from "../../src/api/lostReasons";
+import type { HxEvent } from "../../src/api/models";
+
+const NODE_FAIL = "SLURM ended job 4471023 with NODE_FAIL on r814u05n01; no exit record";
+
+function ev(sequence: number, type: string, payload: Record<string, unknown>, run_id: string | null = "r1"): HxEvent {
+  return { sequence, type, project: "toy", run_id, payload, created_at: "2026-10-03T02:14:37Z" };
+}
+
+afterEach(clearLostReasons);
+
+describe("lost reasons", () => {
+  test("lostReasonOf reads run.lost and a mirrored run.lost, nothing else", () => {
+    expect(lostReasonOf(ev(1, "run.lost", { reason: NODE_FAIL, slurm_job_id: "4471023" }))).toBe(NODE_FAIL);
+    expect(
+      lostReasonOf(ev(2, "mirror.run_updated", { original_type: "run.lost", status: "lost", reason: ` ${NODE_FAIL} ` })),
+    ).toBe(NODE_FAIL);
+    // a mirrored event about something else, a reasonless one, a blank one, no run id
+    expect(lostReasonOf(ev(3, "mirror.run_updated", { original_type: "run.finished", reason: "x" }))).toBeNull();
+    expect(lostReasonOf(ev(4, "mirror.run_updated", { original_type: "run.lost", status: "lost" }))).toBeNull();
+    expect(lostReasonOf(ev(5, "run.lost", { reason: "   " }))).toBeNull();
+    expect(lostReasonOf(ev(6, "run.lost", { reason: 7 }))).toBeNull();
+    expect(lostReasonOf(ev(7, "run.lost", { reason: NODE_FAIL }, null))).toBeNull();
+    expect(lostReasonOf(ev(8, "run.failed", { reason: NODE_FAIL }))).toBeNull();
+  });
+
+  test("noteLostReasons keeps one reason per run and useLostReason follows it", () => {
+    const { result } = renderHook(() => useLostReason("r1"));
+    expect(result.current).toBeNull();
+    act(() => noteLostReasons([ev(1, "run.started", {}), ev(2, "run.lost", { reason: NODE_FAIL })]));
+    expect(result.current).toBe(NODE_FAIL);
+    expect(lostReasonFor("r2")).toBeNull();
+    // a later event without a reason does not erase it
+    act(() => noteLostReasons([ev(3, "mirror.run_updated", { original_type: "run.lost" })]));
+    expect(result.current).toBe(NODE_FAIL);
+  });
+
+  test("the app's event stream records the reason of a mirrored run.lost", () => {
+    const sockets: StubSocket[] = [];
+    const timers: (() => void)[] = [];
+    const clock: Clock = {
+      setTimeout: (fn) => timers.push(fn),
+      clearTimeout: () => {},
+    };
+    const client = new QueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client }, children);
+    const { unmount } = renderHook(
+      () =>
+        useEventStream({
+          url: "ws://127.0.0.1:1/api/v1/ws",
+          clock,
+          storage: null,
+          createSocket: () => {
+            const socket = new StubSocket();
+            sockets.push(socket);
+            return socket;
+          },
+        }),
+      { wrapper },
+    );
+    const socket = sockets[0];
+    if (!socket) throw new Error("the hook opened no socket");
+    act(() => {
+      socket.readyState = 1;
+      socket.onopen?.(new Event("open"));
+      socket.push({ type: "ready", last_sequence: 0 });
+      socket.push({
+        type: "event",
+        event: ev(1, "mirror.run_updated", { original_type: "run.lost", status: "lost", reason: NODE_FAIL }, "r9"),
+      });
+      // the stream delivers live events in batches after FLUSH_MS: run the pending timers
+      for (const fire of timers.splice(0)) fire();
+    });
+    expect(lostReasonFor("r9")).toBe(NODE_FAIL);
+    unmount();
+  });
+});
+
+/** The part of a WebSocket the stream uses; `push` delivers one server message. */
+class StubSocket implements SocketLike {
+  readyState = 0;
+  onopen: ((ev: Event) => void) | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  onclose: ((ev: CloseEvent) => void) | null = null;
+  onerror: ((ev: Event) => void) | null = null;
+  send(): void {}
+  close(): void {
+    this.readyState = 3;
+  }
+  push(message: unknown): void {
+    this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(message) }));
+  }
+}
+```
+
+- [ ] **Step 6: Run them to verify they fail**
+
+Run: `bun test test/api/lostReasons.test.ts`
+Expected: FAIL with `Cannot find module '../../src/api/lostReasons'`.
+
+- [ ] **Step 7: Keep the reasons of lost runs from the event stream**
+
+Create `ui/src/api/lostReasons.ts`:
+
+```ts
+/**
+ * Why runs were lost, read from the event stream (spec 5.6, 8A.8).
+ *
+ * The env server writes the cause of a lost run into its `run.lost` event
+ * (`payload.reason`); the run detail has no field for it. A hub run's own `run.lost`
+ * carries it; a remote run's arrives as `mirror.run_updated` with
+ * `original_type: "run.lost"` and the same `reason`. `useEventStream` passes every batch to
+ * `noteLostReasons`; the run page reads one run's reason with `useLostReason`. A tab that
+ * resumed after the event never sees it, so callers fall back to neutral words.
+ */
+import { useSyncExternalStore } from "react";
+
+import type { HxEvent } from "./models";
+
+const reasons = new Map<string, string>();
+const listeners = new Set<() => void>();
+
+function changed(): void {
+  for (const listener of listeners) listener();
+}
+
+/**
+ * The reason a `run.lost` event (or a `mirror.run_updated` of one) gives, trimmed; null
+ * for any other event, a missing or blank reason, or an event without a run id. For
+ * `{type: "run.lost", payload: {reason: "SLURM ended job 7 with NODE_FAIL on n2; no exit record"}}`
+ * it is that text.
+ */
+export function lostReasonOf(event: HxEvent): string | null {
+  const payload = event.payload ?? {};
+  const lost =
+    event.type === "run.lost" || (event.type === "mirror.run_updated" && payload.original_type === "run.lost");
+  if (!lost || event.run_id === null) return null;
+  const reason = typeof payload.reason === "string" ? payload.reason.trim() : "";
+  return reason === "" ? null : reason;
+}
+
+/** Remember the reason of every lost-run event in `events`; later reasonless events keep it. */
+export function noteLostReasons(events: readonly HxEvent[]): void {
+  let any = false;
+  for (const event of events) {
+    const reason = lostReasonOf(event);
+    if (reason === null || event.run_id === null || reasons.get(event.run_id) === reason) continue;
+    reasons.set(event.run_id, reason);
+    any = true;
+  }
+  if (any) changed();
+}
+
+/** The reason seen for `runId`, or null. */
+export function lostReasonFor(runId: string): string | null {
+  return reasons.get(runId) ?? null;
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+/** `lostReasonFor(runId)`, re-rendering when a reason for any run arrives. */
+export function useLostReason(runId: string): string | null {
+  return useSyncExternalStore(
+    subscribe,
+    () => lostReasonFor(runId),
+    () => null,
+  );
+}
+
+/** Forget every reason (tests). */
+export function clearLostReasons(): void {
+  reasons.clear();
+  changed();
+}
+```
+
+In `ui/src/api/events.ts`, replace
+
+```ts
+import { HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "./queries";
+```
+
+with
+
+```ts
+import { noteLostReasons } from "./lostReasons";
+import { HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "./queries";
+```
+
+and replace
+
+```ts
+      onEvents: (events) => invalidateForEvents(client, events),
+```
+
+with
+
+```ts
+      onEvents: (events) => {
+        noteLostReasons(events);
+        invalidateForEvents(client, events);
+      },
+```
+
+- [ ] **Step 8: Run the api tests, the full suite and the type checker**
 
 Run: `bun test test/api && bun test && bun run typecheck`
-Expected: `bun test test/api` ends with `74 pass`, `0 fail` (client and types 27, events 24 + 5 = 29, queries 18); the full `bun test` ends with `0 fail` (the run actions and Task page use `RUN_EVENT_INVALIDATES` by reference, so their tests are unchanged); `tsc --noEmit` prints no errors.
+Expected: `bun test test/api` ends with `77 pass`, `0 fail` (client and types 27, events 24 + 5 = 29, queries 18, lostReasons 3); the full `bun test` ends with `0 fail` (the run actions and Task page use `RUN_EVENT_INVALIDATES` by reference, so their tests are unchanged); `tsc --noEmit` prints no errors.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add ui/src/api/queries.ts ui/src/api/events.ts ui/test/api/events.test.ts ui/test/api/queries.test.tsx
-git commit -m "feat(ui): live invalidation for mirror and host events"
+git add ui/src/api/queries.ts ui/src/api/events.ts ui/src/api/lostReasons.ts ui/test/api/events.test.ts ui/test/api/queries.test.tsx ui/test/api/lostReasons.test.ts
+git commit -m "feat(ui): live invalidation for mirror and host events; lost-run reasons"
 ```
 
 ---
@@ -3350,13 +3598,24 @@ Expected: Overview `7 pass`, `0 fail`; the whole suite `0 fail`; `tsc --noEmit` 
 
 - [ ] **Step 5: Look at it against the mockup**
 
-Run, from the repo root, in a first terminal (a fresh temp home and SSH disabled, so the hub can never reach a real host; never run this against `~/.hypothex`). It is one shell command: `--home` and the SSH variables sit on each `hx` command line, never in a separate `export`:
+Run, from the repo root, in a first terminal (a fresh temp home with its own identity, a port the OS reports free, and SSH disabled, so the hub can never reach a real host; never run this against `~/.hypothex`, never on a fixed port). It is one shell command: `--home` and the SSH variables sit on each `hx` command line, never in a separate `export`; it prints the hub's port and identity, then serves:
 
 ```bash
-rm -rf /tmp/hx-f2 && HYPOTHEX_SSH=false HYPOTHEX_SCP=false uv run hx --home /tmp/hx-f2 demo --with-hosts --json && HYPOTHEX_SSH=false HYPOTHEX_SCP=false uv run hx --home /tmp/hx-f2 serve --port 7790
+H=/tmp/hx-f2; rm -rf "$H" && mkdir -p "$H" && ID="$(uuidgen | tr -d '-' | tr 'A-Z' 'a-z')" && \
+printf '{"environment_id": "%s", "label": "hx-visual"}\n' "$ID" > "$H/environment.json" && \
+HYPOTHEX_SSH=false HYPOTHEX_SCP=false uv run hx --home "$H" demo --with-hosts --json > /dev/null && \
+P="$(uv run python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')" && echo "hub port $P, id $ID" && \
+HYPOTHEX_SSH=false HYPOTHEX_SCP=false uv run hx --home "$H" serve --port "$P"
 ```
 
-and in a second terminal `cd ui && HX_API=http://127.0.0.1:7790 bun run dev`. Open the printed URL and compare `/` with `docs/mockups/phase2/shot-overview-light.png` and, after the theme toggle, `shot-overview-dark.png`: column widths, cell height 44 px, stripe colours, dashed free cells, hatched not-hx cells, greyed stale row, `≠` in red.
+In a second terminal, from the repo root, start the dev UI only after the hub on that port proved it is the `/tmp/hx-f2` hub (the dev UI's first page reads `/api/v1/hosts`, a host route):
+
+```bash
+P=<the port the first terminal printed>; ID="$(sed -n 's/.*"environment_id": *"\([^"]*\)".*/\1/p' /tmp/hx-f2/environment.json)"; \
+if [ -n "$ID" ] && curl -sf "http://127.0.0.1:$P/.well-known/hypothex/environment" | grep -Fq "\"$ID\""; then (cd ui && HX_API="http://127.0.0.1:$P" bun run dev); else echo "port $P is not the /tmp/hx-f2 hub: stop"; fi
+```
+
+Open the URL the dev server prints and compare `/` with `docs/mockups/phase2/shot-overview-light.png` and, after the theme toggle, `shot-overview-dark.png`: column widths, cell height 44 px, stripe colours, dashed free cells, hatched not-hx cells, greyed stale row, `≠` in red.
 Expected: same layout as the mockup minus the documented gaps (no SLURM oldest/fair-share; `·` for $/GPU-h on a host without a rate). Fix CSS in `HOSTS_CSS` only.
 
 - [ ] **Step 6: Commit**
@@ -5331,7 +5590,7 @@ git -C /Users/shreyasv/Desktop/code/research_dash commit -m "feat(ui): launch AP
   - `ui/src/launch/styles.ts`: `LAUNCH_CSS: string` (every selector under `.hx-launch`), `LaunchStyles(): ReactElement`.
   - `ui/src/launch/LaunchDialog.tsx`: `interface LaunchDialogProps { project: string; task: string | null; repo: string; commit?: string | null; title?: string; initial?: Partial<LaunchDraft>; carry?: Carry; onClose: () => void; onLaunched: (records: RunRecord[], host: string) => void }`, `LaunchDialog(props)`. The sweep page group opens the same component for "Rerun sweep" with `initial`, `carry` and the template's `commit` (`pinnedCommit`). A pinned commit shows as `@ <short sha>` after the code location under the command.
   - Accessible handles tests and later groups rely on: dialog name = `title`; radiogroup "Host" with one radio per host (`aria-label` = host name); stepper buttons "Fewer GPUs per run"/"More GPUs per run" (SLURM: "... per job") and `<output aria-label="GPUs per run">`; checkbox "wait for GPUs"; textboxes "partition", "time", "account" (all blank by default: blank keeps the host's `SlurmDefaults`), "Seeds", "Command" (textarea), "Hypothesis"; `aria-label="Preview"` code; buttons "Copy as CLI", "Cancel", "Close", "Launch N" (N = seeds not launched yet by this dialog).
-  - Partial launch: when seed 5 of 4, 5, 6 is refused, the dialog keeps seed 4's record, and the next Launch (with the same attempt id, or a new one after an edit) sends only 5 and 6; `onLaunched` gets all three records. The GPU plan and its blocker count only the seeds not started (`checkDraft(..., started)`), so GPUs the started seeds now hold never block the retry.
+  - Partial launch: when seed 5 of 4, 5, 6 is refused, the dialog keeps seed 4's record, and the next Launch (with the same attempt id, or a new one after an edit) sends only 5 and 6; `onLaunched` gets all three records. The GPU plan and its blocker count only the seeds not started (`checkDraft(..., started)`), so GPUs the started seeds now hold never block the retry. The preview, its `×N`, the summary and `Copy as CLI` also cover only the seeds not started (the first of them in the preview): pasting the copied lines after a partial launch never starts a seed twice.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5595,6 +5854,45 @@ describe("Copy as CLI", () => {
         .join("\n"),
     );
     expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
+  });
+
+  test("after a refused seed, the preview and Copy as CLI cover only the seeds not launched", async () => {
+    const written = mockClipboard();
+    let refuse = true;
+    mockApi({
+      ...HOSTS,
+      "POST /api/v1/hosts/gpu1/runs": (c: Call) => {
+        if (seedOf(c) === 5 && refuse) {
+          refuse = false;
+          return new HttpReply(400, { error: "runner busy", type: "RunError" });
+        }
+        return rec(seedOf(c));
+      },
+    });
+    renderDialog();
+    await ready();
+    typeHypothesis("beam 10 holds");
+    expect(screen.getByLabelText("Preview").textContent).toBe(
+      "gpu1: CUDA_VISIBLE_DEVICES=5 python train.py --lr 3e-4 --seed 4",
+    );
+    fireEvent.click(launchButton(3));
+    await screen.findByRole("alert");
+    // seed 4 started: the preview shows seed 5, and the count and the copied lines skip seed 4
+    expect(screen.getByLabelText("Preview").textContent).toBe(
+      "gpu1: CUDA_VISIBLE_DEVICES=5 python train.py --lr 3e-4 --seed 5",
+    );
+    expect(document.querySelector(".hx-launch .prev .xn")?.textContent).toBe("×2");
+    fireEvent.click(screen.getByRole("button", { name: "Copy as CLI" }));
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]).toBe(
+      [5, 6]
+        .map(
+          (s) =>
+            `hx launch --repo ${REPO_PATH} -t ${TASK} --host gpu1 --gpus 1 --queue --seed ${s} -H 'beam 10 holds' -- python train.py --lr 3e-4 --seed '{seed}'`,
+        )
+        .join("\n"),
+    );
+    expect(launchButton(2).disabled).toBe(false);
   });
 
   test("a blocked clipboard says so", async () => {
@@ -6239,8 +6537,9 @@ function CommandRow({ draft, check, update, where }: RowProps & { where: string 
   );
 }
 
+/** The first seed still to launch, as it will run (after a partial launch: the next one not started). */
 function Preview({ host, check }: { host: LaunchHost | null; check: DraftCheck }) {
-  const seed = check.seeds[0];
+  const seed = check.pending[0];
   if (host === null || check.argv.length === 0 || seed === undefined) {
     return (
       <code className="cmd" aria-label="Preview">
@@ -6330,7 +6629,9 @@ export function LaunchDialog({
           params: carry.params,
           vars: carry.vars,
         };
-  const cli = spec !== null && n > 0 ? launchCli(spec, check.seeds) : "";
+  // the preview, Copy as CLI and the summary cover only the seeds Launch would send: after a
+  // partial launch, pasting the started seeds' lines would start them a second time
+  const cli = spec !== null && pending.length > 0 ? launchCli(spec, pending) : "";
   const pin = commit === null ? "" : ` @ ${commit.slice(0, 7)}`;
   const where = host === null ? "" : `${host.kind === "hub" ? repo : `${project} @ ${host.name}`}${pin}`;
 
@@ -6451,7 +6752,7 @@ export function LaunchDialog({
             <span className="lb">Preview</span>
             <div className="prev">
               <Preview host={host} check={check} />
-              <span className="xn">×{n}</span>
+              <span className="xn">×{pending.length}</span>
             </div>
           </div>
         </div>
@@ -6471,7 +6772,9 @@ export function LaunchDialog({
           >
             {COPY_TEXT[copy]}
           </button>
-          <span className="sum small">{host !== null && n > 0 ? launchSummary(host, draft.gpus, n, draft.time) : ""}</span>
+          <span className="sum small">
+            {host !== null && pending.length > 0 ? launchSummary(host, draft.gpus, pending.length, draft.time) : ""}
+          </span>
           <button type="button" className="btn" disabled={busy} onClick={onClose}>
             Cancel
           </button>
@@ -6494,12 +6797,12 @@ export function LaunchDialog({
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cd /Users/shreyasv/Desktop/code/research_dash/ui && bun test test/launch/LaunchDialog.test.tsx`
-Expected: PASS, `19 pass`, `0 fail`.
+Expected: PASS, `20 pass`, `0 fail`.
 
 - [ ] **Step 6: Run every launch test and typecheck**
 
 Run: `cd /Users/shreyasv/Desktop/code/research_dash/ui && bun test test/launch && bun run typecheck`
-Expected: `82 pass`, `0 fail` (seeds and command 15, plan 16, cli and draft 20, launchApi 12, dialog 19); `tsc` exits 0.
+Expected: `83 pass`, `0 fail` (seeds and command 15, plan 16, cli and draft 20, launchApi 12, dialog 20); `tsc` exits 0.
 
 - [ ] **Step 7: Commit**
 
@@ -6999,7 +7302,7 @@ function sweepRun(s: RunSpec): RunRecord {
   };
 }
 
-/** The 8 runs in launch (spec `run_ids`) order. */
+/** The 8 runs in launch (`SweepSummary.run_ids`) order. */
 export const RUNS: RunRecord[] = RUN_SPECS.map(sweepRun);
 
 export function run(tail: string): RunRecord {
@@ -7070,9 +7373,10 @@ export function makeSummary(
       command_template: TEMPLATE,
       created_by: "agent:tuner",
       created_at: "2026-10-03T09:12:00Z",
-      run_ids: ["a1", "b1", "c1", "d1", "a2", "b2", "c2", "d2"].map(rid),
       ...specOver,
     },
+    // membership is derived by the backend from the `sweep:<id>` tags (ruling S8)
+    run_ids: ["a1", "b1", "c1", "d1", "a2", "b2", "c2", "d2"].map(rid),
     counts: { queued: 1, running: 1, finished: 5, failed: 1, killed: 0, lost: 0, total: 8 },
     cells: RAW_CELLS,
     best: CELL_D,
@@ -7382,10 +7686,11 @@ describe("labels", () => {
 
 describe("runs and links", () => {
   test("orderRuns follows the sweep's run ids; hostsOf lists hosts once, in that order", () => {
-    const ordered = orderRuns([...RUNS].reverse(), SPEC.run_ids);
-    expect(ordered.map((r) => r.run_id)).toEqual(SPEC.run_ids);
+    const ids = makeSummary().run_ids;
+    const ordered = orderRuns([...RUNS].reverse(), ids);
+    expect(ordered.map((r) => r.run_id)).toEqual(ids);
     const extra: RunRecord = { ...run("a1"), run_id: "zz-extra" };
-    expect(orderRuns([extra, ...RUNS], SPEC.run_ids).at(-1)?.run_id).toBe("zz-extra");
+    expect(orderRuns([extra, ...RUNS], ids).at(-1)?.run_id).toBe("zz-extra");
     expect(hostsOf(ordered, HOSTS)).toEqual(["gpu1", "dgx"]);
     // without the hosts list: the machines' own hostnames
     expect(hostsOf(ordered, undefined)).toEqual(["sv-a100-01", "dgx-h100-07"]);
@@ -7679,7 +7984,7 @@ export function cellTip(cell: SweepCellRow, names: readonly string[], seeds: rea
 }
 
 // ------------------------------------------------------------------------- runs, links
-/** Runs in the sweep's launch order (`spec.run_ids`); others last, oldest first. */
+/** Runs in the sweep's launch order (`SweepSummary.run_ids`); others last, oldest first. */
 export function orderRuns(runs: readonly RunRecord[], order: readonly string[]): RunRecord[] {
   const at = new Map(order.map((id, i) => [id, i]));
   const pos = (r: RunRecord): number => at.get(r.run_id) ?? order.length;
@@ -7765,7 +8070,7 @@ import { CELL_D, HOSTS, NOW, RUNS, makeSummary, rid, run } from "./sweepFixtures
 
 const SPEC: SweepSpec = makeSummary().spec;
 const COUNTS = makeSummary().counts;
-const ORDERED = orderRuns(RUNS, SPEC.run_ids);
+const ORDERED = orderRuns(RUNS, makeSummary().run_ids);
 const param = (
   name: string,
   values: string[] | null,
@@ -9995,12 +10300,12 @@ describe("SweepPage", () => {
         headline: "No scored runs yet",
         total_usd: 0,
         counts: { queued: 2, running: 0, finished: 0, failed: 0, killed: 0, lost: 0, total: 2 },
+        run_ids: [rid("a1"), rid("c1")],
       },
       {
         task: null,
         grid: [{ name: "lr", values: ["1e-4", "3e-4"], low: null, high: null, log: false }],
         seeds: [1],
-        run_ids: [rid("a1"), rid("c1")],
       },
     );
     const calls = mockApi(routes(summary, []));
@@ -10045,8 +10350,11 @@ describe("SweepPage", () => {
     let current = makeSummary();
     const added = ["a3", "b3", "c3", "d3", "a4", "b4", "c4", "d4"].map(rid);
     const extended = makeSummary(
-      { counts: { queued: 9, running: 1, finished: 5, failed: 1, killed: 0, lost: 0, total: 16 } },
-      { seeds: [1, 2, 3, 4], run_ids: [...makeSummary().spec.run_ids, ...added] },
+      {
+        counts: { queued: 9, running: 1, finished: 5, failed: 1, killed: 0, lost: 0, total: 16 },
+        run_ids: [...makeSummary().run_ids, ...added],
+      },
+      { seeds: [1, 2, 3, 4] },
     );
     const calls = mockApi({
       ...routes(),
@@ -10253,7 +10561,8 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
   const metric = board ? primaryMetricName(board.primary) : "score";
   const version = board?.metric_versions[metric];
   const stale = staleHosts(hosts);
-  const ordered = orderRuns(runs, spec.run_ids);
+  // membership comes from the backend (`summary.run_ids`, derived from the `sweep:<id>` tags)
+  const ordered = orderRuns(runs, summary.run_ids);
   const byId = new Map(ordered.map((r) => [r.run_id, r]));
   const stateOf = (id: string, fallback: RunStatus | null) => runState(byId.get(id), fallback, stale);
   const seedsOf = (c: SweepCellRow): number[] => seedValues(c, board);
@@ -11016,7 +11325,7 @@ git commit -m "feat(ui): rerun sweep opens the launch dialog from the best cell"
 
 ## Group 5: Run page states, cost, end-to-end, docs (Tasks 23–29)
 
-The run page shows where a remote run is and what state it is in: queued (position, GPUs it waits for, the host queue), running on a host (host, `CUDA_VISIBLE_DEVICES`, SLURM job and node, pid), stale (host unreachable since), lost (reason), and the run's cost (spec 5.6, 8A.5, 8A.7, 8A.8). One pure module (`remote.ts`) derives a display phase from the run detail (`record.status`, `executor.*`, `host_state`; `host_state: null` is a hub run, whatever `executor.host` says) plus the short texts for each phase, and finds the run's host row by `environment_id` (`runHostRow`, never `executor.host`, which is the box's own hostname); `remoteStats.ts` gives the stat strip items per phase. `Placement`, `QueuePanel`, `StateBanner` and the extended `StatusLine` draw the parts; `RunActions` picks its buttons by phase; `Run.tsx` wires them, reading `GET /api/v1/hosts` only for remote runs and, only for queued runs, the whole queue of the run's host (`useAllRuns` of `{status: "queued", environment_id}`: `limit=1000`, then larger limits while a page is full; never the newest page of every host's queued runs, which cut long queues off at their head and could leave another host's runs only). Hub runs render exactly as in phase 1b. The `run.lost` reason is in the event payload, not in `RunDetail`, so the lost bar names only what the record says (the SLURM job, node, end time, exit code) in neutral words (`SLURM job 4471023 lost`), never a guessed cause such as "left squeue and sacct": a job lost to `NODE_FAIL` is still in accounting. Playwright gets a second demo server (`bun e2e/serve-demo.ts --with-hosts` on port 7789) and four projects (`hosts-light`, `hosts-dark`, `hosts-light-edit`, `hosts-dark-edit`); Task 29 documents the new screens.
+The run page shows where a remote run is and what state it is in: queued (position, GPUs it waits for, the host queue), running on a host (host, `CUDA_VISIBLE_DEVICES`, SLURM job and node, pid), stale (host unreachable since), lost (reason), and the run's cost (spec 5.6, 8A.5, 8A.7, 8A.8). One pure module (`remote.ts`) derives a display phase from the run detail (`record.status`, `executor.*`, `host_state`; `host_state: null` is a hub run, whatever `executor.host` says) plus the short texts for each phase, and finds the run's host row by `environment_id` (`runHostRow`, never `executor.host`, which is the box's own hostname); `remoteStats.ts` gives the stat strip items per phase. `Placement`, `QueuePanel`, `StateBanner` and the extended `StatusLine` draw the parts; `RunActions` picks its buttons by phase; `Run.tsx` wires them, reading `GET /api/v1/hosts` only for remote runs and, only for queued runs, the whole queue of the run's host (`useAllRuns` of `{status: "queued", environment_id}`: `limit=1000`, then larger limits while a page is full; never the newest page of every host's queued runs, which cut long queues off at their head and could leave another host's runs only). Hub runs render exactly as in phase 1b. The `run.lost` reason is in the event payload, not in `RunDetail`: when this tab's event stream carried it (`useLostReason`, Task 4), the lost bar shows it first (`SLURM ended job 4471023 with NODE_FAIL on r814u05n01; no exit record`); otherwise the bar names only what the record says (the SLURM job, node, end time, exit code) in neutral words (`SLURM job 4471023 lost`), never a guessed cause such as "left squeue and sacct": a job lost to `NODE_FAIL` is still in accounting. Playwright gets a second demo server (`bun e2e/serve-demo.ts --with-hosts`, on a random port like the first) and four projects (`hosts-light`, `hosts-dark`, `hosts-light-edit`, `hosts-dark-edit`); Task 29 documents the new screens.
 
 What Task 28's specs rely on:
 
@@ -11039,7 +11348,7 @@ What Task 28's specs rely on:
   - `hostLabel(record: RunRecord, host: HostRow | null): string` (`host.name`, the hub's name; else the machine's own hostname `record.host`, for texts only: Reconnect needs `host.name`)
   - `ordinal(n: number): string`, `fmtWait(seconds: number): string` (re-export of the sweep page's `fmtAge`: `45s`, `12m`, `1h 52m`), `secondsSince(iso: string, now: number): number | null`
   - `visibleDevices(gpus: readonly number[]): string`, `shortGpuName(name: string): string`, `gpuLabel(count: number, host: HostRow | null, indices?: readonly number[]): string`, `freeGpus(host: HostRow): number`
-  - `interface LostReason { title: string; tooltip: string; parts: string[] }`, `lostReason(record: RunRecord): LostReason`
+  - `interface LostReason { title: string; tooltip: string; parts: string[] }`, `lostReason(record: RunRecord, reason?: string | null): LostReason` (`reason`: the `run.lost` event's reason when the tab saw it, `useLostReason` from Task 4; it comes first in `parts`; without it the words stay neutral)
   - `stateTitle(label: string, phase: RunPhase, record: RunRecord, host: HostRow | null): string | null`
   - `sweepHref(project: string, sweepId: string): string` (re-export from `SweepModel`), `costNote(cost: CostTotals): string`
 - Produces (in `ui/test/pages/remoteFixtures.ts`, used by Tasks 24-27): `NOW`, `GPU1`, `MCCLEARY`, `DGX`, `QUEUED_ID`, `RUNNING_ID`, `STALE_ID`, `LOST_ID`, `PENDING_ID`, `queuedRecord`, `runningRecord`, `staleRecord`, `lostRecord`, `pendingRecord`, `remoteDetail`.
@@ -11351,6 +11660,18 @@ test("lostReason names what the record says, in neutral words, never a guessed c
   expect(lostReason(makeRecord({ status: "lost", ended_at: null, exit_code: 137 })).parts).toEqual(["exit 137"]);
 });
 
+test("lostReason shows the env server's run.lost reason first when it is known", () => {
+  const why = "SLURM ended job 4471023 with NODE_FAIL on r814u05n01; no exit record";
+  expect(lostReason(lostRecord(), why)).toEqual({
+    title: "SLURM job 4471023 lost",
+    tooltip: "Reason from the run's run.lost event.",
+    parts: [why, "r814u05n01", "02:14:37 UTC", "no exit code"],
+  });
+  // a blank or missing reason keeps the neutral words
+  expect(lostReason(lostRecord(), "  ")).toEqual(lostReason(lostRecord()));
+  expect(lostReason(lostRecord(), null)).toEqual(lostReason(lostRecord()));
+});
+
 test("sweepHref encodes; costNote shows GPU hours and API dollars", () => {
   expect(sweepHref("my proj", "s-7f3a")).toBe("/s/my%20proj/s-7f3a");
   expect(costNote(COST)).toBe("3.50 GPU h, API $0.42");
@@ -11474,23 +11795,28 @@ export interface LostReason {
   parts: string[];
 }
 
-/** Where the cause of a lost run is: in its `run.lost` event, not in the run detail. */
+/** Where the cause of a lost run is when this tab has not seen it: in its `run.lost` event. */
 const LOST_TIP = "The env server marked this run lost. Its run.lost event has the reason.";
+/** The tooltip when the reason shown came from that event. */
+const REASON_TIP = "Reason from the run's run.lost event.";
 
 /**
  * What a lost run's record says: the SLURM job, the node, when, and the exit code. The env
- * server's reason is in the `run.lost` event, not in the run detail, so the words stay
+ * server's own reason (`SLURM ended job 4471023 with NODE_FAIL on r814u05n01; no exit
+ * record`) is in the `run.lost` event, not in the run detail: pass it as `reason` when the
+ * tab saw that event (`useLostReason`), and it comes first. Without it the words stay
  * neutral: a job lost to `NODE_FAIL` is still in `sacct`, and a dead supervisor is only one
- * of the causes, so neither is claimed here.
+ * of the causes, so neither is guessed here.
  */
-export function lostReason(record: RunRecord): LostReason {
+export function lostReason(record: RunRecord, reason: string | null = null): LostReason {
   const ex = record.executor;
   const parts: string[] = [];
   if (ex.node) parts.push(ex.node);
   if (record.ended_at) parts.push(fmtTime(record.ended_at));
   parts.push(record.exit_code === null ? "no exit code" : `exit ${record.exit_code}`);
   const title = ex.slurm_job_id ? `SLURM job ${ex.slurm_job_id} lost` : "run lost";
-  return { title, tooltip: LOST_TIP, parts };
+  const why = reason?.trim() ?? "";
+  return why === "" ? { title, tooltip: LOST_TIP, parts } : { title, tooltip: REASON_TIP, parts: [why, ...parts] };
 }
 
 /**
@@ -11527,7 +11853,7 @@ export function costNote(cost: CostTotals): string {
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `bun test test/pages/remote.test.ts && bun run typecheck`
-Expected: `12 pass`, `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `13 pass`, `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 6: Commit (repo root)**
 
@@ -11964,7 +12290,7 @@ git commit -m "feat(ui): remote run stats; run cost; each leaderboard group's co
 - Produces:
   - `interface PlaceRow { key: string; value: string; note?: string; copy?: string; mono?: boolean }`; `placementRows(record, phase, host): PlaceRow[]`; `Placement({ rows }: { rows: PlaceRow[] })`.
   - `queuedRunsQuery(environmentId: string): Omit<RunsQuery, "limit">` (`{ status: "queued", environment_id }`, read through `useAllRuns`, Task 3: the whole queue of that host, not the newest page of every host's queued runs); `interface QueueRow { position: number | null; runId: string; label: string; createdBy: string; gpus: number; waiting: string }`; `queueRows(runs, environmentId, now?, current?): QueueRow[]` (the queued runs of the same environment, i.e. the same host, kept by `environment_id` on the client too, so a hub that ignores the filter still gives the right rows; never matched by `executor.host`; `current`, the page's own queued run, is kept when the list lacks it, e.g. fetched just before it was indexed); `interface GpuCell { index: number; label: string; util: number; kind: "run" | "ext" | "free" }`; `gpuCells(host: HostRow): GpuCell[]`; `QueuePanel({ host, hostName, runId, rows })`.
-  - `StateBanner({ record, phase, host, conn, now? })` (`role="status"`; renders nothing unless stale or lost).
+  - `StateBanner({ record, phase, host, conn, now?, reason? })` (`role="status"`; renders nothing unless stale or lost; `reason`: the `run.lost` event's reason, shown first when given).
   - `placeParts(record, phase, host): string[]`; `StatusLine({ record, phase?, host?, now? })` (defaults keep the phase 1b output). Every part names the host with `hostLabel(record, host)` (Task 23): `host` is the run's hosts row, or null without the hosts list.
   - `REMOTE_CSS: string`, `RemoteStyles()`.
 
@@ -12211,6 +12537,22 @@ describe("status line and state bar", () => {
     expect(bar.querySelector("b")?.getAttribute("title")).toBe(
       "The env server marked this run lost. Its run.lost event has the reason.",
     );
+  });
+
+  test("StateBanner of a lost run shows the run.lost reason first when the tab saw it", () => {
+    const why = "SLURM ended job 4471023 with NODE_FAIL on r814u05n01; no exit record";
+    render(
+      <StateBanner record={lostRecord()} phase="lost" host={MCCLEARY} conn="connected" now={NOW} reason={why} />,
+    );
+    const bar = screen.getByRole("status");
+    expect([...bar.children].map((c) => c.textContent)).toEqual([
+      "SLURM job 4471023 lost",
+      why,
+      "r814u05n01",
+      "02:14:37 UTC",
+      "no exit code",
+    ]);
+    expect(bar.querySelector("b")?.getAttribute("title")).toBe("Reason from the run's run.lost event.");
   });
 
   test("StateBanner draws nothing for a running run", () => {
@@ -12484,9 +12826,11 @@ export interface StateBannerProps {
   host: HostRow | null;
   conn: ConnState | null;
   now?: number;
+  /** The `run.lost` event's reason, when this tab saw it (`useLostReason`). */
+  reason?: string | null;
 }
 
-export function StateBanner({ record, phase, host, conn, now = Date.now() }: StateBannerProps) {
+export function StateBanner({ record, phase, host, conn, now = Date.now(), reason = null }: StateBannerProps) {
   if (phase === "stale") {
     const name = hostLabel(record, host);
     const gone = host ? secondsSince(host.state.since, now) : null;
@@ -12502,7 +12846,7 @@ export function StateBanner({ record, phase, host, conn, now = Date.now() }: Sta
     );
   }
   if (phase === "lost") {
-    const why = lostReason(record);
+    const why = lostReason(record, reason);
     return (
       <div className="state-bar lost" role="status">
         <b title={why.tooltip}>{why.title}</b>
@@ -12645,7 +12989,7 @@ export function RemoteStyles() {
 - [ ] **Step 8: Run the tests to verify they pass**
 
 Run: `bun test test/pages/remoteParts.test.tsx test/pages/runSummary.test.tsx test/pages/Run.test.tsx && bun run typecheck`
-Expected: `remoteParts.test.tsx` 18 pass; the two phase 1b files pass unchanged; `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `remoteParts.test.tsx` 19 pass; the two phase 1b files pass unchanged; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 9: Commit (repo root)**
 
@@ -12922,7 +13266,7 @@ git commit -m "feat(ui): run actions for queued, stale and lost remote runs"
 - Test: `ui/test/pages/RunRemote.test.tsx`
 
 **Interfaces:**
-- Consumes: everything from Tasks 23-26 (`runPhase`, `runHostRow`, `hostLabel`, `queuedRunsQuery`, `queueRows`); `useHosts(refetchMs, enabled)`, `useAllRuns(query, enabled)`, `HOSTS_REFETCH_MS` (Task 3).
+- Consumes: everything from Tasks 23-26 (`runPhase`, `runHostRow`, `hostLabel`, `queuedRunsQuery`, `queueRows`); `useHosts(refetchMs, enabled)`, `useAllRuns(query, enabled)`, `HOSTS_REFETCH_MS` (Task 3); `useLostReason`, and `noteLostReasons`/`clearLostReasons` in the test (Task 4).
 - Produces: `RunPage` (same props as phase 1b: `{ runId, log?, example? }`). Regions in order: `[log]`, `Queue` (queued only), kind panels (not while queued or pending), `Where`, `Placement` (remote only: `host_state` not null), `Scores`, `Notes`. Crumb links the run's sweep (`sweep <id>` → `/s/<project>/<id>`). `GET /api/v1/hosts` (through `useHosts`, so a failed refetch keeps the last list) only for remote runs; the host row is matched by `environment_id`; the queued runs of the run's environment (`useAllRuns(queuedRunsQuery(environment_id))`, complete, with the page's own run kept by `queueRows`) only for queued runs.
 
 - [ ] **Step 1: Write the failing tests**
@@ -12932,6 +13276,7 @@ Create `ui/test/pages/RunRemote.test.tsx`:
 ```tsx
 import { afterEach, beforeEach, expect, setSystemTime, test } from "bun:test";
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { clearLostReasons, noteLostReasons } from "../../src/api/lostReasons";
 import { RunPage } from "../../src/pages/Run";
 import { DGX_STATE, HOSTS } from "../api/phase2-fixtures";
 import { HttpReply, fakeRegistry, mockApi, renderWithClient, restoreFetch } from "./helpers";
@@ -12956,6 +13301,7 @@ afterEach(() => {
   cleanup();
   restoreFetch();
   setSystemTime();
+  clearLostReasons();
 });
 
 const registry = fakeRegistry(["curves"]);
@@ -13100,12 +13446,32 @@ test("a lost SLURM run: reason bar, cost, sweep link, Rerun first", async () => 
     expect(screen.getByRole("region", { name: "b Placement" }).textContent).toContain("r814u05n01"),
   );
 });
+
+test("a lost run shows the reason its mirrored run.lost event carried", async () => {
+  const why = "SLURM ended job 4471023 with NODE_FAIL on r814u05n01; no exit record";
+  noteLostReasons([
+    {
+      sequence: 41,
+      type: "mirror.run_updated",
+      project: "toy-classifier",
+      run_id: LOST_ID,
+      payload: { host: "mccleary", original_type: "run.lost", status: "lost", reason: why },
+      created_at: "2026-10-03T02:14:40Z",
+    },
+  ]);
+  mockApi({ [`GET /api/v1/runs/${LOST_ID}`]: remoteDetail(lostRecord()), [HOSTS_ROUTE]: HOSTS });
+  renderWithClient(<RunPage runId={LOST_ID} />, { registry });
+  await screen.findByRole("heading", { level: 1 });
+  const bar = screen.getByRole("status");
+  expect(bar.querySelector("b")?.textContent).toBe("SLURM job 4471023 lost");
+  expect(bar.querySelector("span")?.textContent).toBe(why);
+});
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `bun test test/pages/RunRemote.test.tsx`
-Expected: FAIL, 7 fail. The first queued test reports the h1 as `lr 1e-3 with beam 1` instead of `lr 1e-3 with beam 1: queued 2nd on gpu1`; the long-queue test times out in `waitFor` (no `.queue-t` rows: the phase 1b page has no Queue panel); the running test fails on the stat values (`["1h 52m"]`); the three stale tests and the lost test fail on their titles.
+Expected: FAIL, 8 fail. The first queued test reports the h1 as `lr 1e-3 with beam 1` instead of `lr 1e-3 with beam 1: queued 2nd on gpu1`; the long-queue test times out in `waitFor` (no `.queue-t` rows: the phase 1b page has no Queue panel); the running test fails on the stat values (`["1h 52m"]`); the three stale tests and the two lost tests fail on their titles.
 
 - [ ] **Step 3: Rewrite `Run.tsx`**
 
@@ -13120,6 +13486,7 @@ Replace the whole of `ui/src/pages/Run.tsx` with:
  */
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
+import { useLostReason } from "../api/lostReasons";
 import { HOSTS_REFETCH_MS, queryKeys, useAllRuns, useHosts, useRun, useRunTraces } from "../api/queries";
 import { Figure, panelLetter } from "./components/Figure";
 import { firstClause, shortId } from "./components/format";
@@ -13161,6 +13528,7 @@ const LONG_TITLE = 60;
 
 export function RunPage({ runId, log, example }: RunPageProps) {
   const run = useRun(runId);
+  const lostWhy = useLostReason(runId);
   const record = run.data?.record;
   const project = record?.project ?? "";
   const task = record?.task ?? "";
@@ -13266,7 +13634,14 @@ export function RunPage({ runId, log, example }: RunPageProps) {
         <RunActions record={record} phase={phase} hostName={host?.name ?? null} />
       </div>
       <StatusLine record={record} phase={phase} host={host} now={now} />
-      <StateBanner record={record} phase={phase} host={host} conn={detail.host_state ?? null} now={now} />
+      <StateBanner
+        record={record}
+        phase={phase}
+        host={host}
+        conn={detail.host_state ?? null}
+        now={now}
+        reason={lostWhy}
+      />
       <StatStrip items={stats} />
       {kind.error ? <ErrorBox error={kind.error} /> : null}
       {stream ? <LogView runId={runId} stream={stream} letter={logLetter} /> : null}
@@ -13329,7 +13704,7 @@ export function RunPage({ runId, log, example }: RunPageProps) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/pages/RunRemote.test.tsx test/pages/Run.test.tsx && bun run typecheck`
-Expected: `RunRemote.test.tsx` 7 pass; `Run.test.tsx` (phase 1b, unchanged) passes; `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `RunRemote.test.tsx` 8 pass; `Run.test.tsx` (phase 1b, unchanged) passes; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Run the whole unit suite**
 
@@ -13341,10 +13716,21 @@ Expected: `0 fail`. The phase 1b page tests (`Run.test.tsx`, `runActions.test.ts
 Run (repo root, in a second terminal; this is the e2e hosts demo from Task 28 and touches no real host). It is one shell command: `--home` and the SSH variables sit on each `hx` command line, never in a separate `export`:
 
 ```bash
-rm -rf /tmp/hx-f5 && HYPOTHEX_SSH=false HYPOTHEX_SCP=false uv run hx --home /tmp/hx-f5 demo --with-hosts --json && (cd ui && bun run build) && HYPOTHEX_SSH=false HYPOTHEX_SCP=false uv run hx --home /tmp/hx-f5 serve --port 7790
+H=/tmp/hx-f5; rm -rf "$H" && mkdir -p "$H" && ID="$(uuidgen | tr -d '-' | tr 'A-Z' 'a-z')" && \
+printf '{"environment_id": "%s", "label": "hx-visual"}\n' "$ID" > "$H/environment.json" && \
+HYPOTHEX_SSH=false HYPOTHEX_SCP=false uv run hx --home "$H" demo --with-hosts --json > /dev/null && (cd ui && bun run build) && \
+P="$(uv run python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')" && echo "hub port $P, id $ID" && \
+HYPOTHEX_SSH=false HYPOTHEX_SCP=false uv run hx --home "$H" serve --port "$P"
 ```
 
-Open `http://127.0.0.1:7790/`, follow a queued run and a running run from the Hosts panel, and toggle the theme. Expected: a queued run shows `… queued Nth on <host>`, the Queue panel with GPU cells, and Placement; a running remote run shows `CUDA_VISIBLE_DEVICES=…` in Placement; nothing is unreadable in dark (state bar, GPU cells, queue row). Stop the server with Ctrl-C.
+In a third terminal, from the repo root, check that the hub on the printed port is the `/tmp/hx-f5` hub before opening any page:
+
+```bash
+P=<the port the second terminal printed>; ID="$(sed -n 's/.*"environment_id": *"\([^"]*\)".*/\1/p' /tmp/hx-f5/environment.json)"; \
+if [ -n "$ID" ] && curl -sf "http://127.0.0.1:$P/.well-known/hypothex/environment" | grep -Fq "\"$ID\""; then echo "open http://127.0.0.1:$P/"; else echo "port $P is not the /tmp/hx-f5 hub: stop"; fi
+```
+
+Open the URL it prints (only after it printed `open …`), follow a queued run and a running run from the Hosts panel, and toggle the theme. Expected: a queued run shows `… queued Nth on <host>`, the Queue panel with GPU cells, and Placement; a running remote run shows `CUDA_VISIBLE_DEVICES=…` in Placement; nothing is unreadable in dark (state bar, GPU cells, queue row). Stop the server with Ctrl-C.
 
 - [ ] **Step 7: Commit (repo root)**
 
@@ -13358,7 +13744,7 @@ git commit -m "feat(ui): run page shows queued, remote, stale and lost states wi
 ### Task 28: Playwright against fake hosts (`hx demo --with-hosts`)
 
 **Files:**
-- Modify: `ui/e2e/paths.ts` (append constants)
+- Modify: `ui/e2e/paths.ts` (whole file: random ports, hosts demo constants, identity helpers)
 - Modify: `ui/e2e/serve-demo.ts` (whole file)
 - Modify: `ui/e2e/fixtures.ts` (imports; the `isolatedHub` auto fixture and `expectIsolatedHub`)
 - Modify: `ui/e2e/.gitignore` (append three lines)
@@ -13370,16 +13756,77 @@ git commit -m "feat(ui): run page shows queued, remote, stale and lost states wi
 - Modify: `ui/README.md` (append a section)
 
 **Interfaces:**
-- Consumes: `test`, `expect`, `expectTheme`, `getJson` from `ui/e2e/fixtures.ts` (exist); the backend plan's `hx demo --with-hosts` (its `hx serve` stops the demo runs through the fake gpu1 server's HTTP API, then the fake hosts, when it gets SIGTERM) and the accessible names of Tasks 5-21 (both listed in this group's intro); the run page from Task 27 (`a Queue`, `… Placement` regions; `queued Nth on <host>` title; `.status` line); `GET /.well-known/hypothex/environment` (`environment_id`, `label`).
-- Produces: `HOSTS_HOME_DIR` (`HX_E2E_HOSTS_HOME` overrides it), `HOSTS_DEMO_FILE`, `HOSTS_PORT`, `DEMO_LABEL = "hx-e2e-demo"`, `HOSTS_DEMO_LABEL = "hx-e2e-hosts"`, `IDENTITY_FILE = "environment.json"`, `SHUTDOWN_WAIT_MS = 60_000` (paths.ts); `expectIsolatedHub(request, baseURL)` and the auto fixture `isolatedHub` (fixtures.ts: before every test body, the hub must answer with the `environment_id` and label of the fresh home `serve-demo.ts` wrote, so no spec, and no POST in `live.spec.ts` or `launch.spec.ts`, ever reaches another server); `connectedHosts(request)`, `remoteHosts(hosts)`, `hostOfRun(hosts, run)` (match by `environment_id`, as the UI does), `firstSweep(request)` and the `*Lite` types (hosts-fixtures.ts); Playwright projects `hosts-light`, `hosts-dark`, `hosts-light-edit`, `hosts-dark-edit`; `bun e2e/shutdown-check.ts` (shutdown-order regression).
-- Isolation: both web servers use `reuseExistingServer: false` (an `hx serve` the user left on 7788 or 7789 may run on the real `~/.hypothex`; a busy port now fails the run at start), and `serve-demo.ts` writes the fresh home's identity (`environment.json` with a new `environment_id` and the demo label) before seeding, so the specs can tell their own hub from any other.
-- Shutdown order: Playwright stops each web server with `gracefulShutdown: { signal: "SIGTERM", timeout: 90_000 }` (without it, Playwright SIGKILLs the process group and `serve-demo.ts` cannot clean up). `serve-demo.ts` runs the venv's `hx` itself (no `uv run` wrapper between it and the signal) in its own process group, forwards SIGTERM to the hub process only, and waits up to `SHUTDOWN_WAIT_MS` for it to exit: the hub first stops the demo runs over the fake gpu1 server's HTTP API, then terminates the fake hosts. Only after the hub has exited, or the wait ran out, does it SIGKILL whatever is left in the group. Signalling the whole group first would kill the fake env servers before the hub's HTTP cleanup and orphan the demo runs' supervisors, which run in their own sessions.
+- Consumes: `test`, `expect`, `expectTheme`, `getJson` from `ui/e2e/fixtures.ts` (exist); the backend plan's `hx demo --with-hosts` (on SIGTERM, the hub's ASGI lifespan shutdown, run inside uvicorn's signal handling, stops the demo runs through the fake gpu1 server's HTTP API, then the fake hosts; ruling S9) and the accessible names of Tasks 5-21 (both listed in this group's intro); the run page from Task 27 (`a Queue`, `… Placement` regions; `queued Nth on <host>` title; `.status` line); `GET /.well-known/hypothex/environment` (`environment_id`, `label`).
+- Produces: `freePort()`, `PORT` and `HOSTS_PORT` (random per run, never fixed: picked by the first process that loads paths.ts and passed on in `HX_E2E_PORT` / `HX_E2E_HOSTS_PORT`), `HOSTS_HOME_DIR` (`HX_E2E_HOSTS_HOME` overrides it), `HOSTS_DEMO_FILE`, `DEMO_LABEL = "hx-e2e-demo"`, `HOSTS_DEMO_LABEL = "hx-e2e-hosts"`, `IDENTITY_FILE = "environment.json"`, `IDENTITY_ROUTE`, `SHUTDOWN_WAIT_MS = 60_000`, `interface Identity`, `readIdentity(home)`, `answersAs(base, identity)` (paths.ts); `expectIsolatedHub(request, baseURL)` and the auto fixture `isolatedHub` (fixtures.ts: before every test body, the hub must answer with the `environment_id` and label of the fresh home `serve-demo.ts` wrote, so no spec, and no POST in `live.spec.ts` or `launch.spec.ts`, ever reaches another server); `connectedHosts(request)`, `remoteHosts(hosts)`, `hostOfRun(hosts, run)` (match by `environment_id`, as the UI does), `firstSweep(request)` and the `*Lite` types (hosts-fixtures.ts); Playwright projects `hosts-light`, `hosts-dark`, `hosts-light-edit`, `hosts-dark-edit`; `bun e2e/shutdown-check.ts` (shutdown-order regression on its own random port; it verifies the hub's identity before any host or run route and fails at once if `serve-demo.ts` cannot start).
+- Isolation (controller ruling S1): every port a demo hub uses is random per run (the OS's free port), never fixed, so no check can land on an `hx serve` the user left running on the real `~/.hypothex`. Both web servers use `reuseExistingServer: false`, and `serve-demo.ts` writes the fresh home's identity (`environment.json` with a new `environment_id` and the demo label) before seeding; every Playwright test (`isolatedHub`) and the shutdown check compare the hub's `GET /.well-known/hypothex/environment` with it before any host route or mutation. A child that fails to start ends `serve-demo.ts` at once, which stops Playwright and the check at once.
+- Shutdown order (ruling S9): Playwright stops each web server with `gracefulShutdown: { signal: "SIGTERM", timeout: 90_000 }` (without it, Playwright SIGKILLs the process group and `serve-demo.ts` cannot clean up). `serve-demo.ts` runs the venv's `hx` itself (no `uv run` wrapper between it and the signal) in its own process group, forwards SIGTERM to the hub process only, and waits up to `SHUTDOWN_WAIT_MS` for it to exit. Nothing else is needed from the UI side: the hub's ASGI lifespan shutdown, which uvicorn runs on that SIGTERM before it exits, first stops the demo runs over the fake gpu1 server's HTTP API, then terminates the fake hosts. Only after the hub has exited, or the wait ran out, does `serve-demo.ts` SIGKILL whatever is left in the group. Signalling the whole group first would kill the fake env servers before the hub's cleanup and orphan the demo runs' supervisors, which run in their own sessions; `shutdown-check.ts` keeps that ordering regression.
 
-- [ ] **Step 1: Add the paths and ignore the new demo files**
+- [ ] **Step 1: Random ports, the hosts demo paths, and the identity helpers**
 
-Append to `ui/e2e/paths.ts`:
+Every port a demo hub listens on is asked from the OS for each run, never fixed (controller ruling S1): a fixed port (7788, 7789, …) can belong to an `hx serve` the user left running on the real `~/.hypothex`, and a check that talks to it would query, or post to, the user's real hosts. The Playwright runner picks both ports when it loads the config and hands them to its workers and web servers through the environment; `shutdown-check.ts` picks its own.
+
+Replace the whole of `ui/e2e/paths.ts` with:
 
 ```ts
+/** Paths and constants shared by the Playwright config, the demo server, and the specs. */
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const E2E_DIR = fileURLToPath(new URL(".", import.meta.url));
+/** Fresh Hypothex home, wiped and re-seeded on every server start. */
+export const HOME_DIR = join(E2E_DIR, ".home");
+/** `hx demo --json` output: `{kind: "project/task"}`. */
+export const DEMO_FILE = join(E2E_DIR, ".demo.json");
+export const REPO_ROOT = resolve(E2E_DIR, "..", "..");
+export const UI_DIST_INDEX = join(REPO_ROOT, "src", "hypothex", "ui_dist", "index.html");
+
+/** Run by `node -e` or `bun -e`: bind port 0 on 127.0.0.1, print the port the OS gave, close. */
+const FREE_PORT_JS =
+  "const s = require('node:net').createServer(); s.listen(0, '127.0.0.1', () => { console.log(s.address().port); s.close(); });";
+
+/**
+ * A TCP port the OS reports free on 127.0.0.1. A child process does the bind, so this
+ * stays synchronous (the Playwright config cannot await).
+ */
+export function freePort(): number {
+  const out = spawnSync(process.execPath, ["-e", FREE_PORT_JS], { encoding: "utf8" });
+  const port = Number(out.stdout?.trim());
+  if (out.status !== 0 || !Number.isInteger(port) || port <= 0) {
+    throw new Error(`no free port from the OS: ${out.error?.message ?? out.stderr ?? "no output"}`);
+  }
+  return port;
+}
+
+/**
+ * This run's port for `name`. The first process that loads this file (the Playwright
+ * runner, or `shutdown-check.ts`) asks the OS for a free port and writes it into its own
+ * environment; every child inherits it, so Playwright's workers and both `serve-demo.ts`
+ * web servers agree on it. Only this file sets these variables; there is no fixed default.
+ */
+function runPort(name: string): number {
+  const given = Number(process.env[name] ?? "");
+  if (Number.isInteger(given) && given > 0) return given;
+  const port = freePort();
+  process.env[name] = String(port);
+  return port;
+}
+
+/** Port of the `hx demo` hub (projects light, dark, light-edit, dark-edit). */
+export const PORT = runPort("HX_E2E_PORT");
+/** Port of the `hx demo --with-hosts` hub (projects hosts-*). */
+export const HOSTS_PORT = runPort("HX_E2E_HOSTS_PORT");
+
+export const KINDS = [
+  "generic",
+  "training",
+  "agent_eval",
+  "agent_iteration",
+  "system_bench",
+] as const;
+export type Kind = (typeof KINDS)[number];
+
 /**
  * Hub home for the `hx demo --with-hosts` server (fake remote hosts), wiped on every start.
  * `HX_E2E_HOSTS_HOME` moves it (the shutdown check uses its own home).
@@ -13387,10 +13834,9 @@ Append to `ui/e2e/paths.ts`:
 export const HOSTS_HOME_DIR = process.env.HX_E2E_HOSTS_HOME ?? join(E2E_DIR, ".home-hosts");
 /** `hx demo --with-hosts --json` output. */
 export const HOSTS_DEMO_FILE = join(E2E_DIR, ".demo-hosts.json");
-export const HOSTS_PORT = Number(process.env.HX_E2E_HOSTS_PORT ?? "7789");
 /**
  * Labels `serve-demo.ts` writes into each fresh demo home's `environment.json`, with a new
- * `environment_id`; every spec checks both on the hub before it runs (`expectIsolatedHub`).
+ * `environment_id`; every check compares both with the hub's answer before it uses the hub.
  */
 export const DEMO_LABEL = "hx-e2e-demo";
 export const HOSTS_DEMO_LABEL = "hx-e2e-hosts";
@@ -13398,6 +13844,42 @@ export const HOSTS_DEMO_LABEL = "hx-e2e-hosts";
 export const IDENTITY_FILE = "environment.json";
 /** How long `serve-demo.ts` waits for `hx serve` to clean up after SIGTERM before SIGKILL. */
 export const SHUTDOWN_WAIT_MS = 60_000;
+/** The route every Hypothex server answers without a token: its environment identity. */
+export const IDENTITY_ROUTE = "/.well-known/hypothex/environment";
+
+/** A demo home's identity: the two keys `serve-demo.ts` writes and the hub serves. */
+export interface Identity {
+  environment_id: string;
+  label: string;
+}
+
+/** The identity `serve-demo.ts` wrote into `home`, or null while there is none. */
+export function readIdentity(home: string): Identity | null {
+  const file = join(home, IDENTITY_FILE);
+  if (!existsSync(file)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<Identity>;
+    if (typeof raw.environment_id !== "string" || typeof raw.label !== "string") return null;
+    return { environment_id: raw.environment_id, label: raw.label };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the server at `base` answers `IDENTITY_ROUTE` with exactly `want`. Any other
+ * server (an `hx serve` on the real `~/.hypothex`), no server, or an error gives false.
+ */
+export async function answersAs(base: string, want: Identity): Promise<boolean> {
+  try {
+    const response = await fetch(`${base}${IDENTITY_ROUTE}`, { signal: AbortSignal.timeout(2_000) });
+    if (!response.ok) return false;
+    const got = (await response.json()) as Partial<Identity>;
+    return got.environment_id === want.environment_id && got.label === want.label;
+  } catch {
+    return false;
+  }
+}
 ```
 
 Append to `ui/e2e/.gitignore`:
@@ -13424,15 +13906,20 @@ Replace the whole of `ui/e2e/serve-demo.ts` with:
  * label `HOSTS_DEMO_LABEL`, output in `e2e/.demo-hosts.json`, served on `HOSTS_PORT`. Its
  * hosts are fake (env servers on this machine reached by `route: url`). `HYPOTHEX_SSH` and
  * `HYPOTHEX_SCP` are `false` for both servers, so nothing started here can open a real SSH
- * connection.
+ * connection. `PORT` and `HOSTS_PORT` are the run's random ports (`e2e/paths.ts`).
+ *
+ * A child that cannot start (no `uv`, no venv `hx`, `hx demo` failing, `hx serve` not
+ * spawning or exiting, e.g. on a taken port) ends this script at once with exit code 1 or
+ * the child's code, so Playwright and `shutdown-check.ts` stop waiting immediately.
  *
  * Shutdown order: Playwright sends SIGTERM to this script's process group
  * (`gracefulShutdown`). `hx serve` runs in its own group (`detached`), so it does not get
  * that signal; this script forwards SIGTERM to the hub process alone and waits for it to
- * exit. The hub stops the demo runs over the fake gpu1 server's HTTP API, then the fake
- * hosts. Only then (or after `SHUTDOWN_WAIT_MS`) is the rest of the group SIGKILLed.
- * Killing the group first would take the fake hosts down before that HTTP cleanup and
- * orphan the demo runs' supervisors.
+ * exit. The hub's ASGI lifespan shutdown, which uvicorn runs on that SIGTERM before it
+ * exits (the backend plan, ruling S9), stops the demo runs over the fake gpu1 server's
+ * HTTP API, then the fake hosts. Only then (or after `SHUTDOWN_WAIT_MS`) is the rest of the
+ * group SIGKILLed. Killing the group first would take the fake hosts down before that
+ * cleanup and orphan the demo runs' supervisors.
  */
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -13472,7 +13959,7 @@ function venvHx(): string {
     ["run", "--project", REPO_ROOT, "python", "-c", "import os, sys; print(os.path.join(os.path.dirname(sys.executable), 'hx'))"],
     { cwd: REPO_ROOT, encoding: "utf8", env, stdio: ["ignore", "pipe", "inherit"] },
   );
-  const path = found.stdout.trim();
+  const path = (found.stdout ?? "").trim();
   if (found.status !== 0 || !existsSync(path)) {
     console.error(`cannot find the venv's hx (uv run exited ${found.status}, got "${path}")`);
     process.exit(1);
@@ -13497,7 +13984,8 @@ const seeded = spawnSync(hx, ["--home", home, ...demoArgs], {
   stdio: ["ignore", "pipe", "inherit"],
 });
 if (seeded.status !== 0) {
-  console.error(`hx ${demoArgs.join(" ")} failed with exit code ${seeded.status}`);
+  const why = seeded.error ? seeded.error.message : `exit code ${seeded.status}`;
+  console.error(`hx ${demoArgs.join(" ")} failed: ${why}`);
   process.exit(1);
 }
 writeFileSync(demoFile, seeded.stdout);
@@ -13507,6 +13995,11 @@ const server: ChildProcess = spawn(hx, ["--home", home, "serve", "--port", Strin
   env,
   stdio: "inherit",
   detached: true,
+});
+// the hub could not be spawned at all: stop now, nothing else will ever answer on the port
+server.on("error", (err) => {
+  console.error(`hx serve did not start: ${err.message}`);
+  process.exit(1);
 });
 let exited = server.exitCode !== null;
 server.on("exit", () => {
@@ -13524,7 +14017,7 @@ function killGroup(): void {
 }
 
 let stopping = false;
-/** SIGTERM the hub alone, wait for its HTTP cleanup and exit, then clear the group. */
+/** SIGTERM the hub alone, wait for its lifespan cleanup and exit, then clear the group. */
 async function stop(): Promise<void> {
   if (stopping) return;
   stopping = true;
@@ -13543,7 +14036,7 @@ async function stop(): Promise<void> {
 }
 process.on("SIGINT", () => void stop());
 process.on("SIGTERM", () => void stop());
-// the hub ended by itself (crash or Ctrl-C): clear what it left, keep its exit code
+// the hub ended by itself (failed start, crash or Ctrl-C): clear what it left, keep its exit code
 server.on("exit", (code) => {
   if (stopping) return;
   killGroup();
@@ -13565,7 +14058,6 @@ with
 
 ```ts
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { type APIRequestContext, test as base, expect, type Page } from "@playwright/test";
 import {
   DEMO_FILE,
@@ -13575,8 +14067,10 @@ import {
   HOSTS_HOME_DIR,
   HOSTS_PORT,
   IDENTITY_FILE,
+  IDENTITY_ROUTE,
   type Kind,
   PORT,
+  readIdentity,
 } from "./paths";
 ```
 
@@ -13596,7 +14090,10 @@ interface Fixtures {
   isolatedHub: void;
 }
 
-/** The hubs this suite starts itself: base URL → the fresh home and the label it wrote. */
+/**
+ * The hubs this suite starts itself: base URL → the fresh home and the label it wrote.
+ * `PORT` and `HOSTS_PORT` are this run's random ports (every worker reads the same ones).
+ */
 const OWN_HUBS: Record<string, { home: string; label: string }> = {
   [`http://127.0.0.1:${PORT}`]: { home: HOME_DIR, label: DEMO_LABEL },
   [`http://127.0.0.1:${HOSTS_PORT}`]: { home: HOSTS_HOME_DIR, label: HOSTS_DEMO_LABEL },
@@ -13605,22 +14102,19 @@ const OWN_HUBS: Record<string, { home: string; label: string }> = {
 /**
  * Fail unless `baseURL` is a demo hub this run started: it must answer with the
  * `environment_id` and label that `serve-demo.ts` wrote into its fresh home. Any other
- * server (an `hx serve` the user left on the port, possibly on the real `~/.hypothex`)
- * fails here, before a spec posts a note or launches a run through it.
+ * server (an `hx serve` the user left running, possibly on the real `~/.hypothex`) fails
+ * here, before a spec reads a host route, posts a note or launches a run through it.
  */
 export async function expectIsolatedHub(request: APIRequestContext, baseURL: string | undefined): Promise<void> {
   const own = baseURL === undefined ? undefined : OWN_HUBS[baseURL];
   if (own === undefined) throw new Error(`${baseURL ?? "no baseURL"} is not a demo hub this run started`);
-  const wanted = JSON.parse(readFileSync(join(own.home, IDENTITY_FILE), "utf8")) as {
-    environment_id: string;
-    label: string;
-  };
-  expect(wanted.label, `${own.home}/${IDENTITY_FILE} was not written by serve-demo.ts`).toBe(own.label);
-  const response = await request.get("/.well-known/hypothex/environment");
-  expect(response.status(), `GET ${baseURL}/.well-known/hypothex/environment`).toBe(200);
+  const wanted = readIdentity(own.home);
+  expect(wanted?.label, `${own.home}/${IDENTITY_FILE} was not written by serve-demo.ts`).toBe(own.label);
+  const response = await request.get(IDENTITY_ROUTE);
+  expect(response.status(), `GET ${baseURL}${IDENTITY_ROUTE}`).toBe(200);
   const got = (await response.json()) as { environment_id: string; label: string };
   expect([got.environment_id, got.label], `${baseURL} is not the isolated demo hub`).toEqual([
-    wanted.environment_id,
+    wanted?.environment_id,
     own.label,
   ]);
 }
@@ -13654,7 +14148,9 @@ Replace the whole of `ui/playwright.config.ts` with:
 ```ts
 import { defineConfig, devices } from "@playwright/test";
 import type { ThemeOptions } from "./e2e/fixtures";
-import { HOSTS_PORT, PORT } from "./e2e/paths";
+// Loading paths.ts picks this run's two free ports and puts them in process.env, which the
+// workers and both web servers inherit (never a fixed port, ruling S1).
+import { HOSTS_PORT, IDENTITY_ROUTE, PORT } from "./e2e/paths";
 
 const WRITES = /(editor|live)\.spec\.ts$/;
 /** Specs against the `hx demo --with-hosts` hub; `launch` starts runs, so it runs last. */
@@ -13662,8 +14158,9 @@ const HOSTS_READS = /hosts\.spec\.ts$/;
 const HOSTS_WRITES = /launch\.spec\.ts$/;
 const HOSTS_URL = `http://127.0.0.1:${HOSTS_PORT}`;
 /**
- * SIGTERM, then SIGKILL after 90 s: `serve-demo.ts` needs the SIGTERM to stop `hx serve` in
- * order (its own wait is 60 s). Without this Playwright SIGKILLs the group at once.
+ * SIGTERM, then SIGKILL after 90 s: `serve-demo.ts` forwards the SIGTERM to `hx serve`,
+ * whose lifespan shutdown stops the demo runs and fake hosts (its own wait is 60 s).
+ * Without this Playwright SIGKILLs the group at once.
  */
 const GRACEFUL = { signal: "SIGTERM", timeout: 90_000 } as const;
 
@@ -13733,14 +14230,15 @@ export default defineConfig<ThemeOptions>({
       use: { ...devices["Desktop Chrome"], baseURL: HOSTS_URL, colorScheme: "dark", theme: "dark" },
     },
   ],
-  // Never reuse a server on either port: an `hx serve` the user left there may run on the
-  // real ~/.hypothex, and live.spec.ts posts notes (forwarded to real hosts in phase 2) and
-  // launch.spec.ts starts runs. A busy port makes Playwright fail at start instead, and every
-  // test checks the hub's identity first (`isolatedHub` in e2e/fixtures.ts).
+  // Both ports are random per run. Never reuse a server that answers on one anyway: an
+  // `hx serve` there may run on the real ~/.hypothex, and live.spec.ts posts notes
+  // (forwarded to real hosts in phase 2) and launch.spec.ts starts runs. Playwright fails at
+  // start instead, a web server whose command exits stops the run at once, and every test
+  // checks the hub's identity first (`isolatedHub` in e2e/fixtures.ts).
   webServer: [
     {
       command: "bun e2e/serve-demo.ts",
-      url: `http://127.0.0.1:${PORT}/.well-known/hypothex/environment`,
+      url: `http://127.0.0.1:${PORT}${IDENTITY_ROUTE}`,
       reuseExistingServer: false,
       gracefulShutdown: GRACEFUL,
       timeout: 180_000,
@@ -13749,7 +14247,7 @@ export default defineConfig<ThemeOptions>({
     },
     {
       command: "bun e2e/serve-demo.ts --with-hosts",
-      url: `${HOSTS_URL}/.well-known/hypothex/environment`,
+      url: `${HOSTS_URL}${IDENTITY_ROUTE}`,
       reuseExistingServer: false,
       gracefulShutdown: GRACEFUL,
       timeout: 180_000,
@@ -13806,7 +14304,9 @@ export interface SweepItemLite {
 }
 export interface SweepLite {
   headline: string;
-  spec: { id: string; project: string; run_ids: string[] };
+  /** The sweep's runs, derived by the hub from the `sweep:<id>` tags (not in the spec). */
+  run_ids: string[];
+  spec: { id: string; project: string };
 }
 
 /** `/api/v1/hosts` once every host is connected (the hub connects to them at start). */
@@ -13890,7 +14390,7 @@ test("the sweep page renders the demo sweep", async ({ page, request, theme }) =
   const path = `${encodeURIComponent(project)}/${encodeURIComponent(id)}`;
   const summary = await getJson<SweepLite>(request, `/api/v1/sweeps/${path}`);
   expect(summary.spec.id).toBe(id);
-  expect(summary.spec.run_ids.length).toBeGreaterThan(0);
+  expect(summary.run_ids.length).toBeGreaterThan(0);
 
   await page.goto(`/s/${path}`);
   await expectTheme(page, theme);
@@ -14006,19 +14506,25 @@ Create `ui/e2e/shutdown-check.ts`:
  * Regression check for the shutdown order of `serve-demo.ts --with-hosts`. Run it alone,
  * never next to Playwright: `bun e2e/shutdown-check.ts` (from ui/, after `bun run build`).
  *
- * It starts the hosts demo on its own port (7791) and home (`e2e/.home-shutdown`), waits
- * until the fake hosts are connected and the demo runs run on a fake host, then sends
- * SIGTERM to the web server's process group, as Playwright's `gracefulShutdown` does. It
- * fails if any process of that home is left afterwards: the hub, a fake host's `hx serve`,
- * or a demo run's supervisor (its `--home` lies under the demo home). Killing the fake hosts
- * before the hub's HTTP cleanup leaves exactly those supervisors behind.
+ * It starts the hosts demo on a port the OS reports free (never a fixed one) and its own
+ * home (`e2e/.home-shutdown`, wiped first). Before it reads any host or run route it waits
+ * until the hub on that port answers with the identity `serve-demo.ts` wrote into that home,
+ * so it can never query another `hx serve` (one on the real `~/.hypothex` would list the
+ * user's real hosts). If `serve-demo.ts` cannot start or exits while it waits, it fails at
+ * once. Then it waits until the fake hosts are connected and a demo run runs on one, and
+ * sends SIGTERM to the web server's process group, as Playwright's `gracefulShutdown` does.
+ * `serve-demo.ts` forwards it to the hub alone; the hub's ASGI lifespan shutdown stops the
+ * demo runs, then the fake hosts. The check fails if any process of that home is left
+ * afterwards: the hub, a fake host's `hx serve`, or a demo run's supervisor (its `--home`
+ * lies under the demo home). Killing the fake hosts before the hub's cleanup leaves exactly
+ * those supervisors behind.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { E2E_DIR, SHUTDOWN_WAIT_MS } from "./paths";
+import { answersAs, E2E_DIR, freePort, HOSTS_DEMO_LABEL, type Identity, readIdentity, SHUTDOWN_WAIT_MS } from "./paths";
 
-const PORT = 7791;
+const PORT = freePort();
 const HOME = join(E2E_DIR, ".home-shutdown");
 const BASE = `http://127.0.0.1:${PORT}`;
 
@@ -14027,23 +14533,50 @@ interface HostLite {
   state: { state: string; environment_id: string | null };
 }
 
+// a stale identity file of an earlier check must never vouch for another server
+rmSync(HOME, { recursive: true, force: true });
+
+const child = spawn("bun", ["e2e/serve-demo.ts", "--with-hosts"], {
+  env: { ...process.env, HX_E2E_HOSTS_PORT: String(PORT), HX_E2E_HOSTS_HOME: HOME },
+  stdio: "inherit",
+  detached: true,
+});
+let startError: Error | null = null;
+child.on("error", (err) => {
+  startError = err;
+});
+const ended = (): boolean => startError !== null || child.exitCode !== null || child.signalCode !== null;
+
+/** Throw at once when `serve-demo.ts` failed to start or has exited: nothing will answer. */
+function stillUp(what: string): void {
+  if (startError !== null) throw new Error(`serve-demo.ts did not start (${startError.message}); was waiting for ${what}`);
+  if (ended()) {
+    throw new Error(`serve-demo.ts exited (code ${child.exitCode}, signal ${child.signalCode}); was waiting for ${what}`);
+  }
+}
+
+/** Poll `ok` every 500 ms until it holds, or throw after `ms`; `live` also requires the demo to run. */
+async function waitUntil(what: string, ok: () => Promise<boolean> | boolean, ms: number, live = true): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (live) stillUp(what);
+    if (await ok()) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`timed out after ${ms} ms waiting for ${what}`);
+}
+
+/** Set once the hub on `PORT` proved it serves `HOME`; no other route is read before. */
+let verified: Identity | null = null;
+
 async function getJson<T>(path: string): Promise<T | null> {
+  if (verified === null) throw new Error(`refusing GET ${path}: the hub on ${PORT} is not verified yet`);
   try {
     const response = await fetch(`${BASE}${path}`);
     return response.ok ? ((await response.json()) as T) : null;
   } catch {
     return null;
   }
-}
-
-/** Poll `ok` every 500 ms until it holds, or throw after `ms`. */
-async function waitUntil(what: string, ok: () => Promise<boolean> | boolean, ms: number): Promise<void> {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (await ok()) return;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  throw new Error(`timed out after ${ms} ms waiting for ${what}`);
 }
 
 /**
@@ -14056,15 +14589,18 @@ function leftovers(): string[] {
   return out.stdout.split("\n").filter((line) => line.includes(HOME));
 }
 
-const child = spawn("bun", ["e2e/serve-demo.ts", "--with-hosts"], {
-  env: { ...process.env, HX_E2E_HOSTS_PORT: String(PORT), HX_E2E_HOSTS_HOME: HOME },
-  stdio: "inherit",
-  detached: true,
-});
-const ended = (): boolean => child.exitCode !== null || child.signalCode !== null;
-
 let failure: string | null = null;
 try {
+  await waitUntil(
+    `the hub on ${PORT} to answer with the identity of ${HOME}`,
+    async () => {
+      const want = readIdentity(HOME);
+      if (want === null || want.label !== HOSTS_DEMO_LABEL || !(await answersAs(BASE, want))) return false;
+      verified = want;
+      return true;
+    },
+    180_000,
+  );
   let remote: HostLite[] = [];
   await waitUntil(
     "the fake hosts to connect",
@@ -14090,7 +14626,7 @@ try {
   }
   // what Playwright's gracefulShutdown does: SIGTERM to the web server's process group
   process.kill(-(child.pid as number), "SIGTERM");
-  await waitUntil("serve-demo.ts to exit", ended, SHUTDOWN_WAIT_MS + 30_000);
+  await waitUntil("serve-demo.ts to exit", ended, SHUTDOWN_WAIT_MS + 30_000, false);
   // a stopped supervisor writes its record and exits; give it a moment
   await new Promise((resolve) => setTimeout(resolve, 3_000));
   const left = leftovers();
@@ -14123,7 +14659,7 @@ Expected: no output from either.
 - [ ] **Step 10: Run the hosts projects (they fail until the backend demo and the pages of Tasks 5-21 exist)**
 
 Run: `bun run build && bunx playwright test --project=hosts-light --project=hosts-dark --project=hosts-light-edit --project=hosts-dark-edit`
-Expected: `10 passed` (4 read specs × 2 themes, 1 launch spec × 2 themes). Both web servers start; the hosts server log shows `hx serve` on 7789 and no `ssh` process is started (`HYPOTHEX_SSH=false`). If Playwright stops at start with a port-in-use error on 7788 or 7789, another `hx serve` is there: stop it (never point the specs at it, and never set `reuseExistingServer`). If every test fails in the `isolatedHub` fixture with `… is not the isolated demo hub`, the server on that port is not the one `serve-demo.ts` just seeded: find and stop it.
+Expected: `10 passed` (4 read specs × 2 themes, 1 launch spec × 2 themes). Both web servers start, each on a random port (the log shows `hx serve` with `--port <random>`), and no `ssh` process is started (`HYPOTHEX_SSH=false`). If Playwright stops at start because a web server exited, read its log (a failed `hx demo`, a missing build, a port taken between the pick and the bind): it is never retried against another server. If every test fails in the `isolatedHub` fixture with `… is not the isolated demo hub`, the server on that port is not the one `serve-demo.ts` just seeded: find and stop it (never set `reuseExistingServer`, never pin a port).
 
 If a spec fails with `hx demo --with-hosts has no …`, the backend plan's demo is missing that piece of contract section 5; fix the demo, not the spec.
 
@@ -14135,7 +14671,11 @@ Expected: `none`. (The `[.]` keeps the pattern from matching the shell that runs
 - [ ] **Step 11: Check the shutdown order on its own**
 
 Run: `bun run build && bun e2e/shutdown-check.ts`
-Expected: last line `shutdown-check ok: the hub stopped its demo runs and fake hosts; nothing of the demo home is left`, exit 0. To see that it catches the bug, temporarily change `stop()` in `serve-demo.ts` to start with `killGroup()` (the whole group at once, fake hosts included): the check then exits 1 with `left running after the stop:` and a `hypothex.core.supervisor` line. Put `stop()` back and run the check again (exit 0).
+Expected: last line `shutdown-check ok: the hub stopped its demo runs and fake hosts; nothing of the demo home is left`, exit 0. This sends a real SIGTERM to the hub, so it is the regression for the backend's lifespan cleanup too.
+
+To see that it catches the ordering bug, temporarily change `stop()` in `serve-demo.ts` to start with `killGroup()` (the whole group at once, fake hosts included): the check then exits 1 with `left running after the stop:` and a `hypothex.core.supervisor` line. Put `stop()` back.
+
+To see that it aborts at once when a child fails to start, temporarily make `venvHx()` in `serve-demo.ts` return `"/nonexistent/hx"`: the check exits 1 within a few seconds (not after its 180 s wait) with `serve-demo.ts exited (code 1, signal null); was waiting for the hub on <port> to answer with the identity of …`, and it never reads `/api/v1/hosts`. Put `venvHx()` back and run the check again (exit 0).
 
 - [ ] **Step 12: Run the whole e2e suite**
 
@@ -14153,26 +14693,27 @@ Append to `ui/README.md`:
 `bun run e2e` builds the UI and runs Playwright against two demo hubs that it starts
 itself (`e2e/serve-demo.ts`):
 
-- port 7788 (`HX_E2E_PORT`): `hx demo`, every task kind; projects `light`, `dark`,
-  `light-edit`, `dark-edit`.
-- port 7789 (`HX_E2E_HOSTS_PORT`): `hx demo --with-hosts`, fake remote hosts with GPUs, a
-  queue, a SLURM host and a sweep; projects `hosts-light`, `hosts-dark`, `hosts-light-edit`,
-  `hosts-dark-edit`.
+- `hx demo`, every task kind; projects `light`, `dark`, `light-edit`, `dark-edit`.
+- `hx demo --with-hosts`, fake remote hosts with GPUs, a queue, a SLURM host and a sweep;
+  projects `hosts-light`, `hosts-dark`, `hosts-light-edit`, `hosts-dark-edit`.
 
-Both servers run with `HYPOTHEX_SSH=false` and `HYPOTHEX_SCP=false`, so no test can reach a
-real host. Neither is ever reused from an earlier `hx serve` on its port (that one could run
-on your real `~/.hypothex`): stop anything on 7788 and 7789 first. Every test first checks
-that the hub answers with the identity `serve-demo.ts` wrote into its fresh home
-(`environment.json`, labels `hx-e2e-demo` and `hx-e2e-hosts`), so a note or a launch can
-never reach another server. Run one group with `--project`:
+Each listens on a port the OS reports free for that run (never a fixed port, so a test can
+never land on an `hx serve` you left running on your real `~/.hypothex`). Both run with
+`HYPOTHEX_SSH=false` and `HYPOTHEX_SCP=false`, so no test can reach a real host, and
+neither is ever reused from a server that already answers. Every test first checks that the
+hub answers with the identity `serve-demo.ts` wrote into its fresh home (`environment.json`,
+labels `hx-e2e-demo` and `hx-e2e-hosts`), so no host route, note or launch can reach
+another server. If a demo server cannot start, the run stops at once. Run one group with
+`--project`:
 
 ```bash
 bun run build && bunx playwright test --project=hosts-light --project=hosts-dark
 ```
 
-On stop, `serve-demo.ts` sends SIGTERM to the hub alone and waits for it: the hub stops
-the demo runs on its fake hosts, then the fake hosts. `bun e2e/shutdown-check.ts` checks
-that order on its own port (7791) and fails if any demo process is left.
+On stop, `serve-demo.ts` sends SIGTERM to the hub alone and waits for it: the hub's
+shutdown stops the demo runs on its fake hosts, then the fake hosts. `bun e2e/shutdown-check.ts`
+checks that order on its own random port, after it has verified the hub's identity, and
+fails if any demo process is left.
 ````
 
 - [ ] **Step 14: Commit (repo root)**
@@ -14220,9 +14761,11 @@ def test_ui_page_covers_phase2_screens() -> None:
         "GPU-h",
         ":doc:`remote`",
         "hx demo --with-hosts",
-        "HX_E2E_HOSTS_PORT",
+        "free port",
         "HYPOTHEX_SSH=false",
         "environment.json",
+        "run.lost",
+        "shutdown-check.ts",
     ):
         assert text in page, text
 ```
@@ -14281,7 +14824,8 @@ with
   preview shows the first seed's command as it will run. ``Copy as CLI`` copies the same
   ``hx launch`` lines. ``Launch N`` starts one run per seed; a double click still starts
   each seed once, and after a refused seed ``Launch`` sends only the seeds that did not
-  start (and needs free GPUs only for those). A launch on a host names the project; the
+  start (and needs free GPUs only for those); the preview and ``Copy as CLI`` then show
+  only those seeds too, so pasted lines never start a seed twice. A launch on a host names the project; the
   hub pins the code (its checkout's commit and uncommitted diff), and ``Rerun sweep`` pins
   the template run's commit when that run had no uncommitted changes.
 - **Sweep** (``/s/<project>/<sweep_id>``): the best cell and its score as the headline,
@@ -14296,9 +14840,9 @@ with
   tail; ``?example=<id>`` picks a traced example on agent tasks. A run on a host also
   shows where it runs (host, ``CUDA_VISIBLE_DEVICES``, SLURM job and node), its place in
   the host queue while it waits, ``stale`` with the time since the hub last heard from the
-  host (never ``lost``: only the host decides that), what the record says when it is
-  lost (job, node, end time, exit code; the cause is in its ``run.lost`` event), and its
-  cost. The Queue panel lists the host's whole queue.
+  host (never ``lost``: only the host decides that), why it was lost (the reason
+  from its ``run.lost`` event when the page saw that event, else what the record says: job,
+  node, end time, exit code), and its cost. The Queue panel lists the host's whole queue.
 ```
 
 Then replace
@@ -14313,16 +14857,18 @@ with
 
 ```rst
 ``bunx playwright test`` seeds a fresh demo home in ``ui/e2e/.home`` with ``hx demo``
-and serves it with ``hx serve`` on port 7788 (``HX_E2E_PORT`` changes it), so it never
-touches your own ``~/.hypothex``.
+and serves it with ``hx serve`` on a free port the OS picks for that run (never a fixed
+port, so it can never meet an ``hx serve`` you left running), so it never touches your own
+``~/.hypothex``.
 
 The ``hosts-*`` projects run against a second demo hub, seeded in ``ui/e2e/.home-hosts``
-with ``hx demo --with-hosts`` (fake hosts that run on this machine) and served on port
-7789 (``HX_E2E_HOSTS_PORT`` changes it). Both demo servers run with
-``HYPOTHEX_SSH=false`` and ``HYPOTHEX_SCP=false``, so no test can reach a real host.
-Playwright never reuses a server already on either port, and every test first checks that
-the hub answers with the identity written into its fresh home (``environment.json``), so
-no note or launch can reach another server.
+with ``hx demo --with-hosts`` (fake hosts that run on this machine), on its own free port.
+Both demo servers run with ``HYPOTHEX_SSH=false`` and ``HYPOTHEX_SCP=false``, so no test
+can reach a real host. Playwright never reuses a server that already answers, stops at once
+when a demo server cannot start, and every test first checks that the hub answers with the
+identity written into its fresh home (``environment.json``), so no host route, note or
+launch can reach another server. ``bun e2e/shutdown-check.ts`` stops the hosts demo with
+SIGTERM, as Playwright does, and fails if a demo run or fake host is left running.
 ```
 
 - [ ] **Step 4: Run the docs tests and build the docs**
@@ -14355,11 +14901,12 @@ This plan was assembled from five group drafts (F1–F5, now Groups 1–5). Wher
 7. **Kept apart on purpose.** Three GPU-cell derivations with different jobs: `gpuCells` in `HostsPanel.tsx` (one cell per run over adjacent GPUs, coloured by launcher), in `launch/plan.ts` (a per-GPU mini map with `stale` and `none`), and in `QueuePanel.tsx` (per GPU with a short label). Two `freeGpus` (indices for `CUDA_VISIBLE_DEVICES` planning in Task 9; a count for the run page in Task 23), two `shortGpuName` (`A100` for the dense hosts grid in Task 5; `A100 80GB PCIe` on the run page in Task 23), Group 2's `fmtMoney` (whole dollars from $10, for daily totals) next to phase 1b `fmtUsd` (cents, for one run), and `ago` in `launch/plan.ts`. Different outputs, each pinned by its own tests.
 8. **Missing contract piece: "Rerun sweep".** Contract 4 opens the Launch dialog from the Task page "New run" and from a sweep page "Rerun sweep"; no draft built the second. Task 22 adds it: `Rerun sweep` in the sweep actions opens the dialog prefilled from the best cell's latest run (its template, params and vars, GPUs per run, the sweep's host, the next seeds).
 9. **Sweep links.** Group 4 flagged that `isAppPath` did not accept `/s/`, so plain sweep links inside panel bodies would reload the page. Task 21 adds `s` to it, with its test. A "Sweep" tab in the header (`screenOf`, recent targets) is left out: contract 4 does not list it (follow-up).
-10. **Real hosts.** Group 2's visual check ran `uv run hx demo --with-hosts` in the default home and no `hx serve`: it would have written into `~/.hypothex`, and a hub started there would connect to the hosts in the user's own `environments.yaml`. Task 7 Step 5 now uses `/tmp/hx-f2`, `HYPOTHEX_SSH=false HYPOTHEX_SCP=false`, port 7790 and `HX_API`. Task 2's type generation also sets `HYPOTHEX_SSH=false HYPOTHEX_SCP=false` on its empty temp home. Every such step passes `--home` and the SSH variables inline on the `hx` command line and runs as one shell command (an earlier `export` does not survive between agent shell calls), and waits are bounded. Playwright never reuses a server on either port, every test checks the hub's identity first, and `serve-demo.ts` stops the hub before the rest of its process group (Task 28).
-11. **Review Focus tests and counts.** Task 2 `27 pass` (gpus/queue test; `createSweep` test dropped with the function); Task 3 `18 pass` (`keepLastKnown`, `fetchAllRuns`); Task 4 `74 pass` in `test/api` (client and types 27, events 24 + 5 = 29, queries 18); Task 5 `19 pass`, Task 6 `28 pass` (host matching, `remoteRows`, `longStale`, `staleBannerHours`); Task 7 `7 pass` (hub-only row, banner, banner threshold, cost today); Task 9 `16 pass` (two hubs test: bootstrapping with no message, then `error` with the lock message; `stateReason` appends `HostState.message` to `installing hx on <host>`); Task 10 `20 pass` (SLURM values, pinned commit, partial retry); Task 11 `12 pass` (blank SLURM body, stale carry, project not path); Task 12 dialog `19 pass` and `test/launch` total `82`; Tasks 14–21 add 70 sweep tests (sweepModel 18, sweepStats 14, sweepTable 6, sweepRuns 5); Task 21 `31 pass` for page, router, links and Task page; Task 23 `12 pass`; Task 24 `8 pass` (clock test) plus one leaderboard cost test; Task 25 `18 pass`; Task 26 `6 pass`; Task 27 `7 pass` (two tunnel tests, long queue).
+10. **Real hosts.** Group 2's visual check ran `uv run hx demo --with-hosts` in the default home and no `hx serve`: it would have written into `~/.hypothex`, and a hub started there would connect to the hosts in the user's own `environments.yaml`. Task 7 Step 5 now uses `/tmp/hx-f2`, `HYPOTHEX_SSH=false HYPOTHEX_SCP=false`, a random port and `HX_API` (after an identity check). Task 2's type generation also sets `HYPOTHEX_SSH=false HYPOTHEX_SCP=false` on its empty temp home. Every such step passes `--home` and the SSH variables inline on the `hx` command line and runs as one shell command (an earlier `export` does not survive between agent shell calls), and waits are bounded. Playwright never reuses a server on either port, every test checks the hub's identity first, and `serve-demo.ts` stops the hub before the rest of its process group (Task 28).
+11. **Review Focus tests and counts.** Task 2 `27 pass` (gpus/queue test; `createSweep` test dropped with the function); Task 3 `18 pass` (`keepLastKnown`, `fetchAllRuns`); Task 4 `77 pass` in `test/api` (client and types 27, events 24 + 5 = 29, queries 18, lostReasons 3); Task 5 `19 pass`, Task 6 `28 pass` (host matching, `remoteRows`, `longStale`, `staleBannerHours`); Task 7 `7 pass` (hub-only row, banner, banner threshold, cost today); Task 9 `16 pass` (two hubs test: bootstrapping with no message, then `error` with the lock message; `stateReason` appends `HostState.message` to `installing hx on <host>`); Task 10 `20 pass` (SLURM values, pinned commit, partial retry); Task 11 `12 pass` (blank SLURM body, stale carry, project not path); Task 12 dialog `20 pass` (partial-retry preview and CLI) and `test/launch` total `83`; Tasks 14–21 add 70 sweep tests (sweepModel 18, sweepStats 14, sweepTable 6, sweepRuns 5); Task 21 `31 pass` for page, router, links and Task page; Task 23 `13 pass` (run.lost reason); Task 24 `8 pass` (clock test) plus one leaderboard cost test; Task 25 `19 pass` (banner with the reason); Task 26 `6 pass`; Task 27 `8 pass` (two tunnel tests, long queue, lost reason from the event stream).
 12. **Docs.** No draft updated `docs/ui.rst`; Task 29 documents the Hosts panel, Launch dialog, Sweep page and remote run states, and how the `hosts-*` e2e projects stay away from real hosts, with a test in `tests/test_docs_ui.py`.
 13. **Known gaps outside the contract** (follow-ups, not built): the mockup's SLURM "oldest pending" and "fair-share", bootstrap step bar, run-page `est. start`, `Move up`, `Move host`, `Mark lost` and `Resume` have no contract route or field; `api.pull` (Task 2) has no UI because contract 4 lists none; the stale bar shows `HostState.message` instead of the mockup's retry count. `POST /api/v1/sweeps` and `POST /api/v1/hosts/{host}/disconnect` have no client function (no screen uses them; the `types.ts` test still checks the routes). The Launch dialog's SLURM fields start blank (blank = the host's defaults) instead of prefilled from `SlurmDefaults`, which `HostRow` does not carry.
 14. **Event names.** Group 1's tests used `host.state_changed`; the backend plan emits `host.state`. The tests now use `host.state`; `keysForEvent` maps every `host.*` type the same way, as contract 4 says.
 15. **Host identity and stale data (review fixes).** The backend writes `executor.host = socket.gethostname()` on every run (hub runs too) and the mirror keeps it, so it is neither the hub's host name nor a hub/remote flag. Runs are matched to hosts by `environment_id` (`hostRowForRun`, Task 5; `hostOf` Task 14; `runHostRow` Task 23; `queueRows` Task 25), a run detail with `host_state: null` is a hub run (`runPhase`), Reconnect posts the matched row's name, and every unit fixture gives `executor.host` a machine hostname that differs from the host name, so a regression to `executor.host` fails the tests (the demo uses label = host name, so the e2e could not catch it). The hub's own `local` row is always first in `GET /api/v1/hosts` and is left out of the hosts headline switch and host count. The hub sends no GPUs or queue for a host that is not connected, so `useHosts` and the Launch dialog keep a stale host's last connected cells (`keepLastKnown`); fixtures fed to mocked APIs are shaped as the hub sends them. A queued or running run on any host that is not connected is stale on the sweep page too (`staleHosts` keyed by environment, every state but `connected`). No contract change was needed.
 16. **Removed text.** Per-group headers, constraints, review-focus lists, file lists, "consumed from" tables and self-review notes were replaced by the global sections and the group intros; every test they named is still in its task. Group references were rewritten to task numbers and backend group names (`B5`, `B8`, `B9`) to "the backend plan".
 17. **Codex review 1 (frontend items).** Item 3 / isolation: both Playwright web servers use `reuseExistingServer: false`; `serve-demo.ts` writes a fresh `environment.json` (new `environment_id`, label `hx-e2e-demo` / `hx-e2e-hosts`) and an auto fixture checks the hub's descriptor against it before every test, so `live.spec.ts` notes and `launch.spec.ts` launches cannot reach another server (Task 28). Shutdown order (non-blocking note): Playwright sends SIGTERM (`gracefulShutdown`); `serve-demo.ts` runs the venv's `hx` directly, signals the hub alone, waits for its HTTP cleanup of demo runs and fake hosts, and only then SIGKILLs the group; `e2e/shutdown-check.ts` is the focused regression (Task 28). Item 10: the gpus/queue client test mocks gpu1's three GPUs (`HOSTS[1]`), not the hub row's none (Task 2). Item 27: host launches send `project` and never a path (`HostLaunchRequest { project }`), the hub launch keeps its own `repo`; `commit` is pinned only by Rerun sweep from a clean template run (`pinnedCommit`), otherwise the hub pins its checkout's HEAD and diff; the dialog never sends a `diff` (Tasks 1, 2, 9–12, 22). Item 31: seed dots come from the cell's own runs only: the group row's values when every run of that row is in the cell, else none (Task 14). Item 32: the queue panel reads the whole queue of the run's environment (`useAllRuns({status: "queued", environment_id})`, limits 1000, 4000, … while a page is full) and keeps the page's own run (`queueRows(..., current)`); the sweep page reads its runs the same way (Tasks 3, 21, 25, 27). The hub's `/api/v1/runs` must accept `environment_id` for the filter to save transfer; the client also filters by environment, so rows are right either way. Item 33: models carry `HostRow.usd_per_gpu_hour`, `HostRow.stale_banner_hours`, `LeaderboardRow.cost`, `OverviewSummary.cost_usd` / `cost_today_usd` (Task 1); the leaderboard shows each group's cost (Task 24), the Overview's cost today prefers `cost_today_usd` (Task 7). Ruling R1: the banner threshold is `stale_banner_hours` from the `GET /api/v1/hosts` rows (`staleBannerHours`, default 24), not a fixed 24 h (Tasks 5, 7). Non-blocking notes: a partial retry needs free GPUs only for the seeds not started (`checkDraft(..., started)`, Tasks 10, 12); the params table's default sort follows a lower-is-better direction that arrives after the first render (Task 17); the lost bar uses neutral words (`SLURM job N lost`, `run lost`) and points to the `run.lost` event (Task 23).
+18. **Codex review 2 (frontend items) and coordinator follow-ups.** Item 2 / ruling S1: no step or check uses a fixed port any more. `ui/e2e/paths.ts` asks the OS for a free port per run (`freePort`; the Playwright runner passes both ports to its workers and web servers in `HX_E2E_PORT` / `HX_E2E_HOSTS_PORT`); `shutdown-check.ts` picks its own, wipes its home first, verifies the hub's identity (`readIdentity` + `answersAs`) before it reads `/api/v1/hosts` or `/api/v1/runs` (`getJson` refuses until then), and fails at once when `serve-demo.ts` cannot start or exits (`serve-demo.ts` itself exits on a spawn `error`, a failed `hx demo` or an early hub exit). Task 2's type generation and the visual checks of Tasks 7 and 27 bind port 0 through `uv run python`, write the temp home's identity first, and touch the hub only after `/.well-known/hypothex/environment` answers with it (Task 2 also stops waiting when `hx serve` exits, and kills only its own server by its unique home). Item 15 / ruling S9: the UI side keeps SIGTERM to the hub alone; the hub's ASGI lifespan shutdown (backend) stops the demo runs and fake hosts inside uvicorn's signal handling; `shutdown-check.ts` sends the real SIGTERM and keeps the ordering regression, plus a child-start-failure demonstration (Task 28 Step 11). Ruling S8: `SweepSpec` has no `run_ids`; `SweepSummary.run_ids` is the membership the backend derives from the `sweep:<id>` tags, and the sweep page orders its runs by it (Tasks 1, 14, 15, 21, 28). Coordinator (a): after a partial launch the preview, its `×N`, the summary and `Copy as CLI` cover only the seeds not launched (Task 12). Coordinator (b): `ui/src/api/lostReasons.ts` keeps the `reason` of `run.lost` events (and of `mirror.run_updated` with `original_type: "run.lost"`) seen on the event stream; the lost bar shows it first, else the neutral words (Tasks 4, 23, 25, 27, 29). Backend dependency: the backend plan's `mirror.run_updated` payload is `{host, environment_id, original_type, remote_sequence, status}`; it must also copy the original event's `reason` for a mirrored `run.lost`, or remote lost runs (all SLURM losses) always show the neutral words.

@@ -10,22 +10,22 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-26-hypothex-design.md`, sections 5.2–5.7 and **8A** (read 8A.1–8A.9 before starting; 5.3 for events, replay, idempotent commands, and startup repair).
 
-**Contract:** `docs/superpowers/plans/2026-10-03-hypothex-phase2-contract.md`, sections 1–3 and 5. Every name, field, and route listed there is exact. This plan adds private helpers and a few public helpers (each task's Interfaces lists them) and optional keyword arguments and fields (`ensure_server(..., kind=)`, `mirror_run`/`mirror_event(..., usd_per_gpu_hour=)`, and the additive changes listed at the end of the contract: `ServerInfo.token`, `EnvClient(token=)`, `fetch_file(tail=, offset=)`, `HostState.kind` accepting `"local"`, `Hub.add_host`/`remove_host`, `usd_per_gpu_hour` on host rows, `cost` on leaderboard rows and the Overview, `commit` on launch bodies, `GET /api/v1/projects/{project}/entry`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the parts disagreed and how it was resolved.
+**Contract:** `docs/superpowers/plans/2026-10-03-hypothex-phase2-contract.md`, sections 1–3 and 5. Every name, field, and route listed there is exact. This plan adds private helpers and a few public helpers (each task's Interfaces lists them) and optional keyword arguments and fields (`ensure_server(..., kind=)`, `mirror_run`/`mirror_event(..., usd_per_gpu_hour=)`, and the additive changes listed at the end of the contract: `ServerInfo.token`, `EnvClient(token=)`, `fetch_file(tail=)`, `HostState.kind` accepting `"local"`, `Hub.add_host`/`remove_host`, `usd_per_gpu_hour` on host rows, `cost` on leaderboard rows and the Overview, `commit` on launch bodies, `GET /api/v1/projects/{project}/entry`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the parts disagreed and how it was resolved.
 
 **Mockups:** `docs/mockups/phase2/` (numbers for the demo hosts). **Frontend:** `docs/superpowers/plans/2026-10-03-hypothex-phase2-frontend.md` (contract section 4) starts after this plan is merged and uses `hx demo --with-hosts` for fixtures.
 
 ## Global Constraints
 
-- **NEVER touch the user's real hosts.** No step or test connects to a real SSH host, SLURM cluster, or the user's running hub. Tests use the fake `ssh`/`scp` in `tests/fakes/` (through `HYPOTHEX_SSH`/`HYPOTHEX_SCP`), fake SLURM commands on `PATH` (`HYPOTHEX_FAKE_SLURM_STATE`), fake GPUs (`HYPOTHEX_FAKE_GPUS=<json file>` or a fake `nvidia-smi`), in-process env servers on random 127.0.0.1 ports (`route: url`), and Docker containers (marker `docker`, deselected by default, skipped when Docker is unavailable). The autouse fixture `isolate_remote` (Task 1 Step 0, the first step of the plan, so every later red step runs under it) gives every test, `docker` tests included, `HYPOTHEX_HUB_URL=http://127.0.0.1:9` (dead), an `ssh`/`scp` that always exits 255, no `HYPOTHEX_FAKE_GPUS`, and refusing stubs of `nvidia-smi` and the SLURM commands at the front of `PATH`; `environment.count_gpus()` reads GPUs through `hypothex.core.gpus.query_gpus` (Task 17), so it sees only fakes too. Fixtures that need a working tool (the fakes, the Docker wrappers) override these afterwards. The fake `scp` refuses absolute remote paths outside its fake root. Docker tests use throwaway keys and `ssh -F <temp config>`; `~/.ssh` is never read or written.
+- **NEVER touch the user's real hosts.** No step or test connects to a real SSH host, SLURM cluster, or the user's running hub. Tests use the fake `ssh`/`scp` in `tests/fakes/` (through `HYPOTHEX_SSH`/`HYPOTHEX_SCP`), fake SLURM commands on `PATH` (`HYPOTHEX_FAKE_SLURM_STATE`), fake GPUs (`HYPOTHEX_FAKE_GPUS=<json file>` or a fake `nvidia-smi`), in-process env servers on random 127.0.0.1 ports (`route: url`), and Docker containers (marker `docker`, deselected by default, skipped when Docker is unavailable). The session hook `pytest_configure` and the autouse fixture `isolate_remote` in `tests/conftest.py` (Task 1 Step 0, the first step of the plan, so every later red step runs under it) give the whole session (module- and session-scoped fixtures included, which run before any per-test fixture) and again every test, `docker` tests included, `HYPOTHEX_HUB_URL=http://127.0.0.1:9` (dead), an `ssh`/`scp` that always exits 255, no `HYPOTHEX_FAKE_GPUS`, and refusing stubs of `nvidia-smi` and the SLURM commands at the front of `PATH`; `environment.count_gpus()` reads GPUs through `hypothex.core.gpus.query_gpus` (Task 17), so it sees only fakes too. Fixtures that need a working tool (the fakes, the Docker wrappers) override these afterwards. The fake `scp` refuses absolute remote paths outside its fake root. Docker tests use throwaway keys and `ssh -F <temp config>`; `~/.ssh` is never read or written.
 - Python `>=3.11`. Package manager **uv** only (`uv add`, `uv run`, `uv sync`); never pip. The UI uses **Bun** (frontend plan).
 - Lint and format with **ruff** (line length 100, rules `E F I B UP SIM`), types with **ty**, tests with **pytest** in `tests/` mirroring `src/`. Every task ends with its tests green and `ruff check`, `ruff format --check`, `ty check` clean.
 - Every public function has type annotations and a numpydoc docstring (summary, Parameters, Returns, Raises where any, Examples where they help).
 - Contract names, fields, row keys, and routes are exact. Phase 1 routes and commands keep working. API errors keep the `{error, type}` shape; a host's error answer keeps its status; an unreachable host is `503`.
 - Env servers bind to `127.0.0.1` only, and an env server (`hx serve --kind ssh|slurm`) requires a per-start bearer token on every route except the public descriptor `/.well-known/hypothex/environment`: on a shared GPU box or a SLURM login node any local user can reach a loopback port, so the port alone must not let them launch commands or read run files. The token is random (start script: 24 bytes of `/dev/urandom`), passed to `hx serve` in `HYPOTHEX_SERVE_TOKEN` (never on the command line), and stored only in `<home>/serve/server.json` (mode 0600, folder 0700); the hub reads it over ssh (`ensure_server` → `ServerInfo.token`) and sends `Authorization: Bearer <token>` (`EnvClient(..., token=)`). The hub's own `hx serve` (the browser UI) keeps phase 1's `OriginGuard` and no token; full multi-user auth stays in phase 3.
 - SSH options are always `-o BatchMode=yes -o ConnectTimeout=N -o ServerAliveInterval=15 -o ServerAliveCountMax=3`; tunnels add `-N -o ExitOnForwardFailure=yes -L 127.0.0.1:<local>:127.0.0.1:<remote>`. `ssh_alias` never starts with `-` and has no whitespace.
-- Bootstrap: the wheel is built with `uv build --wheel` from a source checkout, or, for an installed hub, downloaded as this exact release from the package index (`uv tool run --from pip pip download hypothex==<version> --no-deps`; failure says "run hx from a source checkout or publish this version"), cached by version (plus a source digest for a checkout), copied to `<home>/runtime/wheels/`, installed with `uv tool install --force` under `<home>/runtime` inside the lock dir `<home>/runtime/.lock`; uv is installed into `~/.local/bin` when missing. The server is reused when `<home>/serve/server.json` (`pid, port, managed, hx_version, protocol_version, hostname, token`) names a live server on this host whose descriptor answers with this home's `environment_id` (from `<home>/environment.json`; a recycled port owned by another user never matches), else started as `nohup hx serve --host 127.0.0.1 --port 0 [--kind K]` with a fresh token in `HYPOTHEX_SERVE_TOKEN`; a failed start returns the last 80 log lines. The lock dir is broken atomically (`hx_break_lock`, Task 8), so two hubs never both hold it. The hub only stops servers it started (`managed`).
+- Bootstrap: the wheel is built with `uv build --wheel` from a source checkout, or, for an installed hub, downloaded as this exact release from the package index (`uv tool run --from pip pip download hypothex==<version> --no-deps`; failure says "run hx from a source checkout or publish this version"), cached by version (plus a source digest for a checkout), copied to `<home>/runtime/wheels/`, installed with `uv tool install --force` under `<home>/runtime` inside the lock dir `<home>/runtime/.lock`; uv is installed into `~/.local/bin` when missing. The server is reused when `<home>/serve/server.json` (`pid, port, managed, hx_version, protocol_version, hostname, token`) names a live server on this host whose descriptor answers with this home's `environment_id` (from `<home>/environment.json`; a recycled port owned by another user never matches), else started as `nohup hx serve --host 127.0.0.1 --port 0 [--kind K]` with a fresh token in `HYPOTHEX_SERVE_TOKEN`; a failed start returns the last 80 log lines. The lock is an OS lock where the host can take one (`flock`, else `python3` `fcntl`): the OS drops it when its holder dies, so it is never broken or stolen; only a host without either falls back to a mkdir lock that is broken only for a provably dead owner on the same host (Task 8). The hub only stops servers it started (`managed`).
 - Hub timing: reconnect backoff `3/4/8/16 s`, reset after `30 s` connected; ping every `10 s`; a host is `stale` after `60 s` without a successful ping. `stale` is derived at read time and never written to a run; only an env server marks its own runs `lost`.
-- Mirror: `MIRROR_FILES = ("run.yaml", "scores.jsonl", "metrics.jsonl", "notes.md", "usage.jsonl", "config.yaml", "git.diff", "git.stat")`, `MIRROR_DIRS = ("predictions", "traces", "samples", "env", "logs")`, `MIRROR_MAX_BYTES = 200 * 1024 * 1024`. Bigger files stay on the host as `remote_file` artifacts. `logs/*` are tails of at most `LOG_TAIL_BYTES = 8 MiB` (spec 5.3); append-only files (`logs/*`, `*.jsonl`) that only grew are fetched from their old end (`offset`), never whole again. A replay mirrors each run once per batch of events. A project the hub does not know is copied from the host (`ProjectEntry.remote_host`). Host artifacts recorded as `local` get the host's name. Cursor table `host_cursors(host, environment_id, last_sequence)`. Re-emitted event `mirror.run_updated` (payload `{host, environment_id, original_type, remote_sequence, status}`), written once per `(host, environment_id, remote_sequence)` (`EventLog.append_once`). One mirror of a run id at a time across hosts (`<home>/mirror-claims/<run_id>`); an index that failed half-way is redone on the next mirror. Authentication failures (401/403) stop retrying until `connect`.
+- Mirror: `MIRROR_FILES = ("run.yaml", "scores.jsonl", "metrics.jsonl", "notes.md", "usage.jsonl", "config.yaml", "git.diff", "git.stat")`, `MIRROR_DIRS = ("predictions", "traces", "samples", "env", "logs")`, `MIRROR_MAX_BYTES = 200 * 1024 * 1024`. Bigger files stay on the host as `remote_file` artifacts. `logs/*` are tails of at most `LOG_TAIL_BYTES = 8 MiB` (spec 5.3). Every changed file is fetched whole into a per-run staging folder; only when all fetches of a mirror succeeded are the files installed, in one pass of whole-file renames under the run lock (no appends, no byte offsets), with `run.yaml` after the files and `.mirror.json` last. A replay mirrors each run once per batch of events. A project the hub does not know is copied from the host (`ProjectEntry.remote_host`). Host artifacts recorded as `local` get the host's name. Cursor table `host_cursors(host, environment_id, last_sequence)`. Re-emitted event `mirror.run_updated` (payload `{host, environment_id, original_type, remote_sequence, status}`, plus `reason` when the host's event has one), written once per `(host, environment_id, remote_sequence)` (`EventLog.append_once`). A mirrored run id is claimed hub-wide before anything is installed (`<store>/.claims/<run_id>.json`, written under one shared lock and checked against every project), so no other project or environment takes it, even after a failed install; an index that failed half-way is redone on the next mirror. Authentication failures (401/403) stop retrying until `connect`.
 - GPUs: `nvidia-smi` at most every `10 s` (`GPU_CACHE_SECONDS`). A GPU is free when no hx run of this environment holds it and `nvidia-smi --query-compute-apps` shows no process on it; when that query fails, every GPU counts as busy. The scheduler starts queued runs FIFO, first fit, every `5 s`, with `CUDA_VISIBLE_DEVICES` set to the assigned indices. Only `Scheduler.enqueue` writes `queue.json`; a start is "assign GPUs, write `supervisor.pid` (the commit), delete `queue.json`" under the scheduler lock, a crashed start is repaired on the next tick, and `execution.claim` lets a run execute once.
 - SLURM: `sbatch --parsable --comment=hx-<run_id>-<nonce>` with `--job-name=hx-<run_id>`, `--output=<run_dir>/logs/slurm-%j.out`, `--time`, `--gpus` (left out when 0), `--partition`, `--account`, then `extra`; the submission intent (comment, submitter) is written to `<home>/slurm/outbox/` before `sbatch`; the job runs `hx run --child <run_id>`; `squeue`/`sacct` every `30 s` over the outbox; `stop` → `scancel`, "cancel queued" → `scancel --state=PENDING`; a job gone without an exit record → `lost` after two polls in a row; a foreground SLURM run is refused; the home must support `flock`.
 - Cost (spec 8A.7): `gpu_hours = wall × len(executor.gpus)`; `gpu_usd = gpu_hours × usd_per_gpu_hour`; `total_usd = gpu_usd + usage.usd`; each value rounded to 6 decimals; a negative wall time counts as 0. Env servers fill `cost` with no rate; the hub prices mirrored runs with the host's `usd_per_gpu_hour`.
@@ -127,7 +127,7 @@ Contract 1.1, 1.6 (records and cost). Spec 8A.1, 8A.5, 8A.7.
 
 **Files:**
 - Create (Step 0, before anything else): `tests/fakes/__init__.py` (isolation helpers only; Task 5 adds the fake ssh harness), `tests/test_isolation.py`
-- Modify (Step 0): `tests/conftest.py` (one import line; the autouse fixture `isolate_remote` at the end)
+- Modify (Step 0): `tests/conftest.py` (imports; the session hook `pytest_configure` and the autouse fixture `isolate_remote` at the end)
 - Modify: `src/hypothex/core/records.py` (imports; `ExecutorInfo` at lines 94-100; end of `RunRecord` fields after `usage` at line 137)
 - Test: `tests/core/test_records_phase2.py`
 
@@ -137,11 +137,11 @@ Contract 1.1, 1.6 (records and cost). Spec 8A.1, 8A.5, 8A.7.
   - `ExecutorInfo.host: str | None = None`, `ExecutorInfo.gpus: list[int] = []` (each `>= 0`), `ExecutorInfo.slurm_job_id: str | None = None`, `ExecutorInfo.node: str | None = None`, `ExecutorInfo.queue_position: int | None = None` (`>= 1`, 1-based).
   - `class CostTotals(BaseModel): gpu_hours: float = 0.0; gpu_usd: float = 0.0; api_usd: float = 0.0; total_usd: float = 0.0`.
   - `RunRecord.cost: CostTotals | None = None`, `RunRecord.sweep_id: str | None = None`, `RunRecord.gpus_requested: int = 0` (`>= 0`).
-  - Test isolation (Step 0, used by every later task, red steps included): `tests.fakes.DEAD_HUB`, `tests.fakes.REFUSED_TOOLS`, `tests.fakes.REFUSED_EXIT`, `tests.fakes.refuse_remote(base, monkeypatch)`, `tests.fakes.refuse_host_tools(base, monkeypatch)`, and the autouse fixture `isolate_remote` in `tests/conftest.py`.
+  - Test isolation (Step 0, used by every later task, red steps included): `tests.fakes.DEAD_HUB`, `tests.fakes.REFUSED_TOOLS`, `tests.fakes.REFUSED_EXIT`, `tests.fakes.refuse_remote(base, monkeypatch)`, `tests.fakes.refuse_host_tools(base, monkeypatch)`; in `tests/conftest.py` the session hook `pytest_configure` (the fail-closed baseline for the whole run, set before any test module is imported and before any session- or module-scoped fixture runs) and the autouse fixture `isolate_remote` (the same values again for every test, undone after it, so a test's own overrides never leak).
 
 - [ ] **Step 0: Install the fail-closed test isolation first (HARD RULE)**
 
-Phase 1 code already runs `nvidia-smi` (`environment.count_gpus()` from every `Context.open`, and `envcapture` at every run start), and Parts 5-6 add `nvidia-smi` queries and SLURM commands. So before any phase 2 test or red step exists, every test gets: a dead `HYPOTHEX_HUB_URL`, `HYPOTHEX_SSH`/`HYPOTHEX_SCP` pointing at a script that always exits 255, no `HYPOTHEX_FAKE_GPUS`, and a folder at the front of `PATH` whose `nvidia-smi` and SLURM commands (`sbatch`, `squeue`, `sacct`, `scancel`, `sinfo`, `scontrol`, `srun`, `salloc`) refuse to run (exit 99, "blocked" on stderr). Tests that need fakes put their own folder in front of it afterwards (autouse fixtures run before the test's other fixtures), so a test that forgets fails closed and never reaches the machine's real tools. `ssh`/`scp` are not shadowed on `PATH`: code reaches them only through `HYPOTHEX_SSH`/`HYPOTHEX_SCP`, and the Docker harness (Task 53) resolves the real `ssh` with `shutil.which` for its isolated wrappers.
+Phase 1 code already runs `nvidia-smi` (`environment.count_gpus()` from every `Context.open`, and `envcapture` at every run start), and Parts 5-6 add `nvidia-smi` queries and SLURM commands. Module- and session-scoped fixtures run before any function-scoped autouse fixture (phase 1's `demo_home` in `tests/test_demo.py` opens a `Context`, so it queries GPUs), so a per-test fixture alone starts too late. The baseline is therefore installed for the whole session in `pytest_configure`, which pytest calls after it imports the root `conftest.py` and before it collects (imports) any test module or runs any fixture; `isolate_remote` repeats it per test. So before any phase 2 test or red step exists, every test and every fixture gets: a dead `HYPOTHEX_HUB_URL`, `HYPOTHEX_SSH`/`HYPOTHEX_SCP` pointing at a script that always exits 255, no `HYPOTHEX_FAKE_GPUS`, and a folder at the front of `PATH` whose `nvidia-smi` and SLURM commands (`sbatch`, `squeue`, `sacct`, `scancel`, `sinfo`, `scontrol`, `srun`, `salloc`) refuse to run (exit 99, "blocked" on stderr). Tests that need fakes put their own folder in front of it afterwards (autouse fixtures run before the test's other fixtures), so a test that forgets fails closed and never reaches the machine's real tools. `ssh`/`scp` are not shadowed on `PATH`: code reaches them only through `HYPOTHEX_SSH`/`HYPOTHEX_SCP`, and the Docker harness (Task 53) resolves the real `ssh` with `shutil.which` for its isolated wrappers.
 
 Create `tests/fakes/__init__.py`:
 
@@ -221,7 +221,7 @@ def refuse_host_tools(base: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return folder
 ```
 
-In `tests/conftest.py`, add this import right after `from tests.factories import write_toy_project`:
+In `tests/conftest.py`, add these imports: `import shutil` and `import tempfile` to the standard-library imports, and this line right after `from tests.factories import write_toy_project`:
 
 ```python
 from tests.fakes import DEAD_HUB, refuse_host_tools, refuse_remote
@@ -230,6 +230,25 @@ from tests.fakes import DEAD_HUB, refuse_host_tools, refuse_remote
 Append at the end of `tests/conftest.py`:
 
 ```python
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """
+    Install the fail-closed baseline for the whole session (HARD RULE).
+
+    pytest calls this before it imports any test module and before any
+    session- or module-scoped fixture runs, so even those never see the
+    user's hub, ``ssh``, ``nvidia-smi``, or SLURM. The values stay for the
+    whole run (this ``MonkeyPatch`` is never undone); ``isolate_remote``
+    sets them again for every test.
+    """
+    base = Path(tempfile.mkdtemp(prefix="hx-test-isolation-"))
+    config.add_cleanup(lambda: shutil.rmtree(base, ignore_errors=True))
+    session = pytest.MonkeyPatch()
+    session.setenv("HYPOTHEX_HUB_URL", DEAD_HUB)
+    session.delenv("HYPOTHEX_FAKE_GPUS", raising=False)
+    refuse_remote(base / "no-ssh", session)
+    refuse_host_tools(base, session)
 
 
 @pytest.fixture(scope="session")
@@ -242,9 +261,12 @@ def isolate_remote(_isolation_bin: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     """
     Keep every test away from real hosts, a real hub, real GPUs, and real SLURM.
 
-    ``HYPOTHEX_HUB_URL`` points at a dead port, ``HYPOTHEX_SSH``/``HYPOTHEX_SCP``
-    at a script that always fails, and ``nvidia-smi`` plus the SLURM commands on
-    ``PATH`` at stubs that refuse to run, for every test (``docker`` tests too).
+    The session baseline (``pytest_configure``) already holds these values;
+    this fixture sets them again per test (undone afterwards), so one test's
+    overrides never leak into the next. ``HYPOTHEX_HUB_URL`` points at a dead
+    port, ``HYPOTHEX_SSH``/``HYPOTHEX_SCP`` at a script that always fails, and
+    ``nvidia-smi`` plus the SLURM commands on ``PATH`` at stubs that refuse to
+    run, for every test (``docker`` tests too).
     Fixtures that need fakes (``fake_remote``, fake GPUs, fake SLURM) or the
     Docker wrappers (``tests/docker/conftest.py``) set their own values
     afterwards, so one that forgets fails closed instead of using the real tool.
@@ -269,6 +291,29 @@ from hypothex.core.environment import count_gpus
 from tests.fakes import DEAD_HUB, REFUSED_EXIT, REFUSED_TOOLS
 
 
+@pytest.fixture(scope="module")
+def module_env() -> dict[str, str | None]:
+    """What a module-scoped fixture sees: it runs before the per-test ``isolate_remote``."""
+    return {
+        "hub": os.environ.get("HYPOTHEX_HUB_URL"),
+        "fake_gpus": os.environ.get("HYPOTHEX_FAKE_GPUS"),
+        "ssh": os.environ.get("HYPOTHEX_SSH"),
+        "nvidia-smi": shutil.which("nvidia-smi"),
+        "sbatch": shutil.which("sbatch"),
+    }
+
+
+def test_module_fixtures_already_run_fail_closed(module_env: dict[str, str | None]) -> None:
+    # the session baseline (pytest_configure) covers fixtures that start before any test
+    assert module_env["hub"] == DEAD_HUB and module_env["fake_gpus"] is None
+    for tool in ("nvidia-smi", "sbatch"):
+        found = module_env[tool]
+        assert found is not None and "refused-tools" in found, tool
+    ssh = module_env["ssh"]
+    assert ssh is not None
+    assert subprocess.run([ssh, "gpu1", "true"], capture_output=True).returncode == 255
+
+
 @pytest.mark.parametrize("tool", REFUSED_TOOLS)
 def test_real_gpu_and_slurm_tools_are_blocked(tool: str) -> None:
     found = shutil.which(tool)
@@ -291,7 +336,7 @@ def test_gpu_count_and_context_never_reach_a_real_nvidia_smi(ctx: Context) -> No
 ```
 
 Run: `uv run pytest tests/test_isolation.py -q`
-Expected: `11 passed` (9 tools, 2 more).
+Expected: `12 passed` (9 tools, 3 more).
 
 Run: `uv run pytest -q`
 Expected: all tests pass (phase 1 tests now see the refusing `nvidia-smi`; none needs a real one).
@@ -515,7 +560,7 @@ git commit -m "feat(records): executor host/gpus/slurm fields, cost totals, swee
 - Consumes: `hypothex.core.config.NAME_PATTERN`, `YAML_CYCLE`, `scan_yaml(text) -> YamlScan`, `has_cycle(data) -> bool`; `hypothex.core.errors.ConfigError`; `hypothex.core.fsutil.read_yaml`, `write_yaml`; `hypothex.core.layout.Layout`.
 - Produces (used by ssh, bootstrap, hub, slurm, CLI, API, demo groups):
   - `HostKind = Literal["ssh", "slurm"]`, `Route = Literal["ssh", "url", "local"]`.
-  - `class SlurmDefaults(BaseModel)` (extra forbidden): `partition: str | None = None`, `account: str | None = None`, `time: str = "02:00:00"`, `gpus: int = 1`, `extra: list[str] = []`. Each `extra` item is one `--name` or `--name=value` option with no newline.
+  - `class SlurmDefaults(BaseModel)` (extra forbidden): `partition: str | None = None`, `account: str | None = None`, `time: str = "02:00:00"`, `gpus: int = 1`, `extra: list[str] = []`. Each `extra` item is one `--name` or `--name=value` option with no newline, and never one of `RESERVED_SBATCH_OPTIONS = ("job-name", "comment", "output")` or an abbreviation of one (sbatch accepts unique prefixes such as `--job=`): Hypothex sets those itself, and the job's identity must stay its own (SLURM recovery matches the `--comment`, Task 26).
   - `class HostSpec(BaseModel)` (extra forbidden): `route: Route`, `kind: HostKind = "ssh"`, `ssh_alias: str | None`, `url: str | None`, `home: str = "~/.hypothex"`, `usd_per_gpu_hour: float | None` (finite, `>= 0`), `slurm: SlurmDefaults | None`, `projects: dict[str, str]`. Rules: `route=ssh` needs `ssh_alias`; `route=url` needs `url` (`http(s)://`); `kind=slurm` needs `slurm`, other kinds must not have it; project names match `NAME_PATTERN`; `home` and project paths match `REMOTE_PATH` (absolute or `~`-relative, characters `[A-Za-z0-9_.+@/-]` only, so later groups can put them in POSIX scripts).
   - `class EnvironmentsFile(BaseModel)` (extra forbidden): `stale_banner_hours: float = 24` (> 0, finite: spec 5.6's "unreachable for more than 24 h (configurable)" banner; every `GET /api/v1/hosts` row carries it, Task 44); `environments: dict[str, HostSpec] = {}`; names match `HOST_NAME`; `local` is reserved (`RESERVED_HOST_NAMES`).
   - Constants: `HOST_NAME = r"^[a-z0-9][a-z0-9_-]{0,31}$"`, `RESERVED_HOST_NAMES`, `ENVIRONMENTS_FILENAME = "environments.yaml"`, `SSH_ALIAS`, `REMOTE_PATH`, `SLURM_NAME`, `SLURM_TIME`, `SBATCH_OPTION`.
@@ -722,6 +767,14 @@ def test_slurm_extra_is_one_option_per_line() -> None:
             SlurmDefaults(extra=[bad])
 
 
+@pytest.mark.parametrize(
+    "item", ["--job-name=custom", "--job=custom", "--comment=x", "--output=/tmp/o", "--out=/tmp/o"]
+)
+def test_slurm_extra_cannot_set_the_job_identity(item: str) -> None:
+    with pytest.raises(ValidationError, match="set by Hypothex"):
+        SlurmDefaults(extra=[item])
+
+
 def test_slurm_partition_and_gpus_rules() -> None:
     assert SlurmDefaults(partition="gpu,gpu-long", gpus=0).gpus == 0
     with pytest.raises(ValidationError):
@@ -867,6 +920,24 @@ REMOTE_PATH = r"^(~|~/[A-Za-z0-9_.+@/-]*|/[A-Za-z0-9_.+@/-]*)$"
 SLURM_NAME = r"^[A-Za-z0-9_][A-Za-z0-9_.,-]*$"
 SLURM_TIME = r"^(\d+-)?\d+(:\d{2}){0,2}$"
 SBATCH_OPTION = r"^--[A-Za-z][A-Za-z0-9-]*(=[^\r\n]*)?$"
+RESERVED_SBATCH_OPTIONS = ("job-name", "comment", "output")
+"""``sbatch`` options Hypothex sets itself: the job's identity and its log file."""
+
+
+def reserved_sbatch_option(item: str) -> str | None:
+    """
+    Return the reserved option an ``extra`` item would set, or None.
+
+    sbatch accepts any unique prefix of a long option, so ``--job=x`` is
+    ``--job-name=x``.
+
+    Examples
+    --------
+    >>> reserved_sbatch_option("--job=x"), reserved_sbatch_option("--qos=high")
+    ('job-name', None)
+    """
+    name = item.removeprefix("--").split("=", 1)[0]
+    return next((r for r in RESERVED_SBATCH_OPTIONS if name and r.startswith(name)), None)
 
 
 class SlurmDefaults(BaseModel):
@@ -890,6 +961,15 @@ class SlurmDefaults(BaseModel):
     time: str = Field(default="02:00:00", pattern=SLURM_TIME)
     gpus: int = Field(default=1, ge=0)
     extra: list[Annotated[str, Field(pattern=SBATCH_OPTION)]] = Field(default_factory=list)
+
+    @field_validator("extra")
+    @classmethod
+    def _keep_the_job_identity(cls, extra: list[str]) -> list[str]:
+        for item in extra:
+            taken = reserved_sbatch_option(item)
+            if taken is not None:
+                raise ValueError(f"{item!r}: --{taken} is set by Hypothex (it identifies the job)")
+        return extra
 
 
 class HostSpec(BaseModel):
@@ -1078,7 +1158,7 @@ Notes for the implementer:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_config.py -v`
-Expected: `64 passed`.
+Expected: `69 passed`.
 
 Run: `uv run python -m doctest src/hypothex/remote/config.py && uv run ruff check src/hypothex/remote tests/remote && uv run ruff format --check src/hypothex/remote tests/remote`
 Expected: no doctest output, `All checks passed!`, `4 files already formatted`.
@@ -2787,6 +2867,40 @@ def test_concurrent_pulls_of_one_file_never_share_a_staging_path(
     assert errors == []
     assert dest.read_text() in {f"v{i}" * 50_000 for i in range(4)}
     assert sorted(p.name for p in dest.parent.iterdir()) == ["best.pt"]
+
+
+class _Crash(BaseException):
+    """The process dies right here (nothing on the way catches it)."""
+
+
+def test_a_folder_swap_cut_short_is_recovered(
+    fake_remote: FakeRemote, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "d").mkdir()
+    (home / "d" / "new.txt").write_text("n")
+    dest = tmp_path / "out" / "d"
+    dest.mkdir(parents=True)
+    (dest / "old.txt").write_text("o")
+    real = os.replace
+
+    def crash_after_the_old_folder_moved(src: str | Path, dst: str | Path) -> None:
+        real(src, dst)
+        if str(dst).endswith(".d.old"):
+            raise _Crash
+
+    target = fake_remote.target("gpu1")
+    monkeypatch.setattr(os, "replace", crash_after_the_old_folder_moved)
+    with pytest.raises(_Crash):
+        copy_from(target, "d", dest)
+    monkeypatch.setattr(os, "replace", real)
+    assert not dest.exists() and (dest.parent / ".d.old" / "old.txt").is_file()
+    with pytest.raises(SshError):  # the next pull fails, but the old folder comes back
+        copy_from(target, "nope", dest)
+    assert sorted(p.name for p in dest.iterdir()) == ["old.txt"]
+    copy_from(target, "d", dest)
+    assert sorted(p.name for p in dest.iterdir()) == ["new.txt"]
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["d"]
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -2801,6 +2915,7 @@ In `src/hypothex/remote/ssh.py`, replace the import block (from `from __future__
 ```python
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shlex
@@ -2808,6 +2923,8 @@ import shutil
 import signal
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator
@@ -2890,8 +3007,12 @@ def copy_from(target: SshTarget, remote_path: str, local: Path, *, timeout: floa
     in a unique hidden ``.<name>.*.part`` staging folder next to ``local`` and
     is renamed into place only on success, so ``local`` is never left
     half-written and concurrent pulls never share a staging path. An existing
-    file is replaced atomically (``os.replace``); an existing folder is moved
-    aside first and put back if the swap fails.
+    file is replaced atomically (``os.replace``). An existing folder cannot be
+    renamed over, so it is renamed aside to ``.<name>.old`` next to ``local``
+    first and removed only once the new one is in place; a swap cut short
+    between its two renames (a crash) is undone by the next ``copy_from`` to
+    the same path. Installs into one folder are serialized (``flock`` on the
+    folder).
 
     Parameters
     ----------
@@ -2918,6 +3039,8 @@ def copy_from(target: SshTarget, remote_path: str, local: Path, *, timeout: floa
     """
     _check_remote_path(remote_path, source=True)
     local.parent.mkdir(parents=True, exist_ok=True)
+    with _install_lock(local):
+        _recover_aside(local)  # an earlier swap was cut short: put the old folder back
     # A unique staging folder per call: two pulls of one file never share it.
     stage = Path(tempfile.mkdtemp(prefix=f".{local.name}.", suffix=".part", dir=local.parent))
     part = stage / local.name
@@ -2930,33 +3053,62 @@ def copy_from(target: SshTarget, remote_path: str, local: Path, *, timeout: floa
                 f"scp {target.alias}:{remote_path} -> {local} failed "
                 f"(exit {res.returncode}): {_tail(res.stderr)}"
             )
-        _install(part, local, stage)
+        _install(part, local)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
 
-def _install(part: Path, local: Path, stage: Path) -> None:
-    """Move ``part`` to ``local``; an existing ``local`` is never deleted before the swap."""
-    if part.is_dir() and local.is_dir() and not local.is_symlink():
-        # os.replace cannot overwrite a non-empty folder: move the old one aside
-        # inside the staging folder, and put it back if the swap fails.
-        old = stage / ".old"
-        os.replace(local, old)
-        try:
-            os.replace(part, local)
-        except OSError:
-            os.replace(old, local)
-            raise
+def _aside(local: Path) -> Path:
+    return local.with_name(f".{local.name}.old")
+
+
+@contextmanager
+def _install_lock(local: Path) -> Iterator[None]:
+    """Serialize installs into ``local``'s folder (``flock`` on the folder: no lock file)."""
+    fd = os.open(local.parent, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing drops the lock
+
+
+def _recover_aside(local: Path) -> None:
+    """Finish or undo a folder swap cut short between its two renames (lock held)."""
+    aside = _aside(local)
+    if not (aside.exists() or aside.is_symlink()):
         return
-    if part.is_dir() and (local.exists() or local.is_symlink()):
-        _remove(local)  # a folder replacing a file: no atomic swap exists for this case
-    os.replace(part, local)  # atomic for a file over a file or a symlink
+    if local.exists() or local.is_symlink():
+        _remove(aside)  # the new folder is in: only the cleanup was missed
+    else:
+        os.replace(aside, local)  # the old folder never got its successor: put it back
+
+
+def _install(part: Path, local: Path) -> None:
+    """Move ``part`` to ``local``; an existing ``local`` is never lost, even by a crash."""
+    with _install_lock(local):
+        _recover_aside(local)
+        if part.is_dir() and local.is_dir() and not local.is_symlink():
+            # os.replace cannot overwrite a non-empty folder: rename the old one aside
+            # (next to it, where _recover_aside finds it after a crash), then swap
+            aside = _aside(local)
+            os.replace(local, aside)
+            try:
+                os.replace(part, local)
+            except OSError:
+                os.replace(aside, local)
+                raise
+            _remove(aside)
+            return
+        if part.is_dir() and (local.exists() or local.is_symlink()):
+            _remove(local)  # a folder replacing a file: no atomic swap exists for this case
+        os.replace(part, local)  # atomic for a file over a file or a symlink
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_ssh.py -q`
-Expected: `40 passed`.
+Expected: `41 passed`.
 
 - [ ] **Step 6: Lint, format, type-check, full suite**
 
@@ -3197,6 +3349,7 @@ In `src/hypothex/remote/ssh.py`, replace the import block (from `from __future__
 ```python
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shlex
@@ -3206,6 +3359,8 @@ import socket
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any
 
@@ -3384,12 +3539,12 @@ class Tunnel:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_ssh.py -q`
-Expected: `49 passed` in under 15 s.
+Expected: `50 passed` in under 15 s.
 
 - [ ] **Step 5: Check for flakiness**
 
 Run: `for i in 1 2 3 4 5; do uv run pytest tests/remote/test_ssh.py -q | tail -1; done`
-Expected: `49 passed` five times.
+Expected: `50 passed` five times.
 
 - [ ] **Step 6: Lint, format, type-check, full suite**
 
@@ -3420,7 +3575,7 @@ Each bootstrap step is a POSIX `sh` script shipped as package data in `src/hypot
 - Additions beyond contract 1.3 (new names, nothing renamed): `stop_server(target, home) -> bool` (stops only `managed` servers), `server_logs(target, home, lines=80) -> str`, and the keyword `ensure_server(..., kind=None)` (passed to a server it starts as `hx serve --kind`).
 - `<home>/serve/server.json` is one JSON object with the keys `pid, port, managed, hx_version, protocol_version, hostname, token` (plus `pid_start` when `start.sh` wrote it). `hx serve` writes it with its own pid, the bound port, and `managed: false` before it serves (Task 47); `start.sh` rewrites it with `managed: true` and `pid_start` once the descriptor answers.
 - `start.sh` reads a new server's port from the `server.json` whose `pid` is the process it started (Task 47's `hx serve`; uvicorn on a pre-bound socket logs no "Uvicorn running on" line). Only for an `hx serve` that writes no `server.json` (phase 1's, used by Tasks 11-12 before Task 47) does it fall back to uvicorn's `Uvicorn running on http://127.0.0.1:<port>` log line.
-- Host-side knobs read from the host environment (tests set them): `HX_LOCK_WAIT` (seconds to wait for a lock dir, default 300), `HX_START_WAIT` (seconds to wait for readiness, default 30).
+- Host-side knobs read from the host environment (tests set them): `HX_LOCK_WAIT` (seconds to wait for a lock, default 300), `HX_START_WAIT` (seconds to wait for readiness, default 30).
 
 ---
 
@@ -3441,9 +3596,9 @@ Each bootstrap step is a POSIX `sh` script shipped as package data in `src/hypot
   - `BOOTSTRAP_SCRIPTS: dict[str, str]` (script name -> `common.sh` + body; every `scripts/*.sh` except `common.sh`; later tasks add files and the dict grows to `probe, install, start, stop, logs`)
   - `def probe(target: SshTarget, home: str) -> ProbeResult`
   - private: `_render(name: str, **params: str) -> str`, `_parse_output(text: str) -> tuple[dict[str, str], list[str]]`, `_run_script(target, name, *, timeout=120, **params) -> tuple[dict[str, str], list[str]]`
-  - shell helpers in `common.sh` used by later scripts: `hx_fail MSG [LOGFILE [LINES]]`, `hx_expand_home`, `hx_sleep`, `hx_alive PID`, `hx_pid_start PID`, `hx_same_proc PID START`, `hx_lock DIR`, `hx_unlock`, `hx_lock_stale DIR OWNER`, `hx_break_lock DIR SEEN`, `hx_find_uv`, `hx_get URL`, `hx_json_str JSON KEY`, `hx_json_num JSON KEY`
+  - shell helpers in `common.sh` used by later scripts: `hx_fail MSG [LOGFILE [LINES]]`, `hx_expand_home`, `hx_sleep`, `hx_alive PID`, `hx_pid_start PID`, `hx_same_proc PID START`, `hx_lock PATH`, `hx_unlock`, `hx_owner_dead OWNER`, `hx_mkdir_lock DIR`, `hx_find_uv`, `hx_get URL`, `hx_json_str JSON KEY`, `hx_json_num JSON KEY`; `hx_lock` sets `HX_LOCK_MODE` (`flock`, `python3`, or `mkdir`).
   - `hx_pid_start PID` names a process's birth (`/proc/PID/stat` field 22 on Linux, `ps -o lstart=` elsewhere), so a pid the OS reused for another process never passes for the recorded one (`hx_same_proc`).
-  - `hx_lock` is a renewed lease that is never stolen from a live holder. The holder writes `DIR/owner` = `host|pid|birth` and a background renewer touches `DIR/lease` every `HX_LOCK_RENEW` seconds (default 20) while the holder runs and still owns the lock. A waiter breaks the lock only when `hx_lock_stale` says the holder is gone: on the same host, the owner pid is dead or has another birth (a live holder is never broken, however long it holds); on another host (a shared home), the lease has not been renewed for `HX_LOCK_LEASE_MIN` minutes (default 2). `hx_break_lock` re-reads the owner and re-checks staleness under a second lock dir `DIR.break` and removes the lock by renaming it (`mv DIR DIR.stale.$$`), so two waiters never both break it and a lock taken or renewed in between is never removed. The EXIT trap (`hx_unlock`) stops the renewer and removes the lock only while `DIR/owner` is still this holder's, so a holder whose lease was broken never deletes its successor's lock.
+  - `hx_lock PATH` is an OS lock whenever the host can take one, so there is no lease, no renewal, and no stealing: the OS releases it when its holder dies. With `flock` (util-linux) on `PATH` it is `flock` on the file `PATH`; else, with `python3`, `fcntl.flock` on that file. In both cases a small helper process (`sh` with `flock -w`, or `python3 -c "$HX_PY_LOCK"`) takes and holds the lock and exits as soon as the script's process is gone (it polls every 0.2 s), so a killed script frees the lock within a moment, and no child the script starts (such as `hx serve`) ever inherits it. Only a host with neither tool falls back to `hx_mkdir_lock`: `mkdir PATH` with `PATH/owner` = `host|pid|birth`, broken only when `hx_owner_dead` proves the owner ran on this host and is gone (dead pid, or the pid now has another birth), and only under `PATH.break` after reading the owner again. A live owner, an owner on another host (a shared home: it cannot be checked), or a lock with no owner line is never broken: after `HX_LOCK_WAIT` seconds the script fails with `lock PATH is held by ...; ... remove PATH if no hx runs there`. A leftover lock folder makes a host with `flock`/`python3` use the mkdir protocol too, so the two kinds never both hold one lock (a home shared by machines without `flock` and `python3` should have one of them on every machine). The EXIT trap (`hx_unlock`) stops the helper, or removes the mkdir lock, which no one else can have taken while its owner lived.
   - test harness in `tests/remote/test_bootstrap.py`: `FakeHost` (`remote_home`, `fakebin`, `target`, `log`, `hx_home`, `add_tool(name, body)`, `calls()`), fixture `host`, helper `_write_exec(path, text)`, constant `PY`. The fixture uses the shared fake `ssh`/`scp` of Part 2 (one fake host `gpu1`) and sets `HYPOTHEX_FAKE_REMOTE_PATH` so the host's `PATH` holds only the test's tools.
 
 - [ ] **Step 1: Check prerequisites**
@@ -3635,18 +3790,54 @@ def _birth(pid: int) -> str:
     return _sh(f"hx_pid_start {pid}").stdout.strip()
 
 
-def _held_lock(lock: Path, owner: str, *, lease_age: float | None = None, age: float = 0) -> None:
-    """A lock dir as another process left it: owner line, optional lease, both aged."""
+def _held_lock(lock: Path, owner: str, *, age: float = 0) -> None:
+    """A mkdir lock as another process left it: the owner line, aged ``age`` seconds."""
     lock.mkdir(parents=True)
     (lock / "owner").write_text(owner + "\n")
-    if lease_age is not None:
-        (lock / "lease").touch()
-        os.utime(lock / "lease", (time.time() - lease_age, time.time() - lease_age))
     os.utime(lock, (time.time() - age, time.time() - age))
 
 
-def _take(lock: Path) -> str:
-    return _sh(f'hx_lock "{lock}"\necho "HX:owner=$(cat "{lock}/owner")"', HX_LOCK_WAIT="1").stdout
+LOCK_TOOLS = ("sh", "hostname", "ps", "sleep", "cat", "mkdir", "rm", "rmdir", "sed", "cut", "tr")
+LOCK_MODES = ("flock", "python3", "mkdir")
+
+
+def _lock_path(tmp_path: Path, mode: str) -> str:
+    """A ``PATH`` with the tools common.sh needs, plus ``flock`` or ``python3`` for ``mode``."""
+    folder = tmp_path / f"lockbin-{mode}"
+    folder.mkdir(exist_ok=True)
+    tools = {name: shutil.which(name) for name in LOCK_TOOLS}
+    if mode == "flock":
+        tools["flock"] = shutil.which("flock")
+    elif mode == "python3":
+        tools["python3"] = PY
+    for name, found in tools.items():
+        if found is None:
+            pytest.skip(f"{name} not found on this machine")
+        link = folder / name
+        if not link.exists():
+            link.symlink_to(found)
+    return str(folder)
+
+
+def _take(lock: Path, path: str | None = None, wait: str = "1") -> str:
+    env = {"HX_LOCK_WAIT": wait, **({"PATH": path} if path else {})}
+    return _sh(f'hx_lock "{lock}"\necho "HX:mode=$HX_LOCK_MODE"', **env).stdout
+
+
+def _hold(lock: Path, path: str, *, seconds: int, exec_sleep: bool) -> subprocess.Popen[str]:
+    """A script that takes the lock, says so, then sleeps (``exec``: no EXIT trap ever runs)."""
+    sleep = f"exec sleep {seconds}" if exec_sleep else f"sleep {seconds}"
+    script = (
+        COMMON_SH.read_text(encoding="utf-8")
+        + f'\nhx_lock "{lock}"\necho "HX:held=$HX_LOCK_MODE"\n{sleep}\n'
+    )
+    proc = subprocess.Popen(
+        ["sh", "-c", script], stdout=subprocess.PIPE, text=True, env={**os.environ, "PATH": path}
+    )
+    assert proc.stdout is not None
+    line = proc.stdout.readline()
+    assert line.startswith("HX:held="), line
+    return proc
 
 
 def test_pid_start_tells_a_recycled_pid_apart() -> None:
@@ -3657,69 +3848,68 @@ def test_pid_start_tells_a_recycled_pid_apart() -> None:
     assert other.stdout == "other\n"
 
 
-def test_lock_of_a_dead_owner_on_this_host_is_broken(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", LOCK_MODES)
+def test_lock_picks_flock_then_python3_then_mkdir(tmp_path: Path, mode: str) -> None:
+    assert f"HX:mode={mode}\n" in _take(tmp_path / "L", _lock_path(tmp_path, mode))
+
+
+@pytest.mark.parametrize("mode", LOCK_MODES)
+def test_a_held_lock_excludes_others_and_is_released_on_exit(tmp_path: Path, mode: str) -> None:
+    path = _lock_path(tmp_path, mode)
+    lock = tmp_path / "L"
+    holder = _hold(lock, path, seconds=3, exec_sleep=False)
+    try:
+        out = _take(lock, path)
+        assert "HX:error=lock" in out and str(lock) in out
+    finally:
+        holder.wait(timeout=30)
+    assert f"HX:mode={mode}" in _take(lock, path, wait="5")
+    assert not lock.is_dir()  # a mkdir lock is removed by the EXIT trap
+
+
+@pytest.mark.parametrize("mode", ["flock", "python3"])
+def test_an_os_lock_is_released_when_its_holder_is_killed(tmp_path: Path, mode: str) -> None:
+    path = _lock_path(tmp_path, mode)
+    lock = tmp_path / "L"
+    holder = _hold(lock, path, seconds=60, exec_sleep=True)
+    holder.kill()  # SIGKILL: no trap runs; the OS lock still goes with its holder
+    holder.wait()
+    start = time.monotonic()
+    assert f"HX:mode={mode}" in _take(lock, path, wait="10")
+    assert time.monotonic() - start < 5
+
+
+def test_mkdir_lock_of_a_dead_owner_on_this_host_is_broken(tmp_path: Path) -> None:
     dead = subprocess.Popen(["true"])
     dead.wait()
     lock = tmp_path / "L"
     _held_lock(lock, f"{_hostname()}|{dead.pid}|")
-    assert f"HX:owner={_hostname()}|" in _take(lock)
+    assert "HX:mode=mkdir" in _take(lock, _lock_path(tmp_path, "mkdir"))
     assert not lock.exists()  # released when the script exits
 
 
-def test_live_owner_on_this_host_is_never_broken(tmp_path: Path) -> None:
+def test_mkdir_lock_of_a_recycled_pid_is_broken(tmp_path: Path) -> None:
+    lock = tmp_path / "L"
+    _held_lock(lock, f"{_hostname()}|{os.getpid()}|Mon Jan 1 00:00:00 2001")
+    assert "HX:mode=mkdir" in _take(lock, _lock_path(tmp_path, "mkdir"))
+
+
+def test_mkdir_lock_of_a_live_owner_is_never_broken(tmp_path: Path) -> None:
     lock = tmp_path / "L"
     owner = f"{_hostname()}|{os.getpid()}|{_birth(os.getpid())}"
     _held_lock(lock, owner, age=3600)  # held for an hour: still alive, still its lock
-    out = _take(lock)
+    out = _take(lock, _lock_path(tmp_path, "mkdir"))
     assert "HX:error=lock" in out and "waited 1s" in out
     assert (lock / "owner").read_text().strip() == owner
 
 
-def test_lock_of_a_recycled_pid_is_broken(tmp_path: Path) -> None:
+def test_mkdir_lock_of_another_host_is_never_broken(tmp_path: Path) -> None:
+    # a shared home: another login node's owner cannot be checked, however old its lock
     lock = tmp_path / "L"
-    _held_lock(lock, f"{_hostname()}|{os.getpid()}|Mon Jan 1 00:00:00 2001")
-    assert f"HX:owner={_hostname()}|" in _take(lock)
-
-
-def test_other_hosts_lock_with_a_fresh_lease_is_never_stolen(tmp_path: Path) -> None:
-    # a 15-minute install on another login node of a shared home: old dir, fresh lease
-    lock = tmp_path / "L"
-    _held_lock(lock, "login2|4242|x", lease_age=0, age=3600)
-    assert "HX:error=lock" in _take(lock)
+    _held_lock(lock, "login2|4242|x", age=86400)
+    out = _take(lock, _lock_path(tmp_path, "mkdir"))
+    assert "HX:error=lock" in out and f"remove {lock}" in out
     assert (lock / "owner").read_text().strip() == "login2|4242|x"
-
-
-def test_other_hosts_lock_with_an_expired_lease_is_broken(tmp_path: Path) -> None:
-    lock = tmp_path / "L"
-    _held_lock(lock, "login2|4242|x", lease_age=3600, age=3600)
-    assert f"HX:owner={_hostname()}|" in _take(lock)
-
-
-def test_holder_renews_its_lease(tmp_path: Path) -> None:
-    lock = tmp_path / "L"
-    script = COMMON_SH.read_text(encoding="utf-8") + f'\nhx_lock "{lock}"\nsleep 4\n'
-    holder = subprocess.Popen(["sh", "-c", script], env={**os.environ, "HX_LOCK_RENEW": "1"})
-    try:
-        lease = lock / "lease"
-        deadline = time.monotonic() + 3
-        while not lease.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        os.utime(lease, (time.time() - 3600, time.time() - 3600))
-        deadline = time.monotonic() + 3
-        while time.time() - lease.stat().st_mtime > 60 and time.monotonic() < deadline:
-            time.sleep(0.1)
-        assert time.time() - lease.stat().st_mtime < 60
-    finally:
-        holder.wait(timeout=30)
-    assert not lock.exists()
-
-
-def test_holder_whose_lock_was_taken_over_leaves_the_new_lock(tmp_path: Path) -> None:
-    # its lease was broken while it was frozen; another host took the lock since
-    lock = tmp_path / "L"
-    out = _sh(f'hx_lock "{lock}"\necho "login2|9|y" >"{lock}/owner"\necho HX:done=1')
-    assert "HX:done=1" in out.stdout
-    assert (lock / "owner").read_text().strip() == "login2|9|y"
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -3784,97 +3974,129 @@ hx_same_proc() {
     [ -z "$2" ] || [ "$(hx_pid_start "$1")" = "$2" ]
 }
 
-hx_lock_stale() {
-    # hx_lock_stale DIR OWNER: true when the lock's holder is gone. OWNER is
-    # "host|pid|birth". On this host the holder is checked directly and a live
-    # holder is never stale. Another host's holder (shared FS) cannot be checked,
-    # so its lease must have gone unrenewed for HX_LOCK_LEASE_MIN minutes (default 2;
-    # holders renew it every HX_LOCK_RENEW seconds, default 20).
-    _hx_oh=${2%%|*}
-    _hx_or=${2#*|}
-    if [ -n "$2" ] && [ "$_hx_oh" = "$(hostname 2>/dev/null || echo unknown)" ]; then
-        ! hx_same_proc "${_hx_or%%|*}" "${_hx_or#*|}"
-        return
-    fi
-    _hx_m=${HX_LOCK_LEASE_MIN:-2}
-    if [ -e "$1/lease" ]; then
-        [ -n "$(find "$1/lease" -mmin +"$_hx_m" 2>/dev/null)" ]
-    else
-        [ -n "$(find "$1" -prune -mmin +"$_hx_m" 2>/dev/null)" ]
-    fi
+hx_owner_dead() {
+    # hx_owner_dead OWNER: true only when OWNER ("host|pid|birth") ran on this host
+    # and that process is gone, or its pid now names a process with another birth.
+    # An empty owner, or one on another host (a shared home), cannot be checked:
+    # it is never dead.
+    [ -n "$1" ] || return 1
+    _hx_oh=${1%%|*}
+    _hx_or=${1#*|}
+    [ "$_hx_oh" = "$(hostname 2>/dev/null || echo unknown)" ] || return 1
+    ! hx_same_proc "${_hx_or%%|*}" "${_hx_or#*|}"
 }
 
-hx_break_lock() {
-    # hx_break_lock DIR SEEN: remove the lock DIR only if its owner is still SEEN
-    # and still stale. The check and the removal run under DIR.break, and the
-    # removal is a rename, so two waiters never both break it and a lock someone
-    # just took (or renewed) is never removed. Returns 0 when it broke DIR.
-    _hx_b="$1.break"
-    if ! mkdir "$_hx_b" 2>/dev/null; then
-        if [ -n "$(find "$_hx_b" -prune -mmin +1 2>/dev/null)" ]; then
-            rmdir "$_hx_b" 2>/dev/null || true # a breaker died in the middle
-        fi
-        return 1
-    fi
-    _hx_broke=1
-    if [ "$(cat "$1/owner" 2>/dev/null || true)" = "$2" ] && hx_lock_stale "$1" "$2" &&
-        mv "$1" "$1.stale.$$" 2>/dev/null; then
-        rm -rf "$1.stale.$$"
-        _hx_broke=0
-    fi
-    rmdir "$_hx_b" 2>/dev/null || true
-    return "$_hx_broke"
-}
+# Lock helpers (one process each). Arguments: PATH OKFLAG PARENT_PID WAIT_SECONDS.
+# Each takes the lock, creates OKFLAG, and holds the lock until PARENT_PID is gone.
+# Exit 1: the lock stayed busy for WAIT_SECONDS; any other exit: it could not lock.
+HX_FLOCK_HOLD='exec 9>>"$1" || exit 2
+flock -w "$4" 9 || exit "$(( $? == 1 ? 1 : 2 ))"
+: >"$2"
+while kill -0 "$3" 2>/dev/null; do sleep 0.2 9>&- 2>/dev/null || sleep 1 9>&-; done'
+HX_PY_LOCK='import fcntl, os, sys, time
+path, flag, parent, limit = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+deadline = time.monotonic() + limit
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            sys.exit(1)
+        time.sleep(0.2)
+    except OSError:
+        sys.exit(2)
+open(flag, "w").close()
+while os.getppid() == parent:
+    time.sleep(0.2)'
 
 hx_unlock() {
-    # Release the lock taken by hx_lock, only if it is still ours: a holder whose
-    # lease was broken never removes the lock of the process that took it next.
-    if [ -n "${HX_RENEWER:-}" ]; then
-        kill "$HX_RENEWER" 2>/dev/null
-        wait "$HX_RENEWER" 2>/dev/null
+    # Release the lock taken by hx_lock (EXIT trap): stop the OS-lock helper, or
+    # remove the mkdir lock (no one can have broken it while its owner lived).
+    if [ -n "${HX_LOCKER:-}" ]; then
+        kill "$HX_LOCKER" 2>/dev/null
+        wait "$HX_LOCKER" 2>/dev/null
+        HX_LOCKER=""
     fi
-    if [ -n "${HX_HELD_LOCK:-}" ] &&
-        [ "$(cat "$HX_HELD_LOCK/owner" 2>/dev/null || true)" = "$HX_LOCK_TOKEN" ] &&
-        mv "$HX_HELD_LOCK" "$HX_HELD_LOCK.free.$$" 2>/dev/null; then
-        rm -rf "$HX_HELD_LOCK.free.$$"
+    if [ -n "${HX_HELD_LOCK:-}" ]; then
+        rm -rf "$HX_HELD_LOCK"
+        HX_HELD_LOCK=""
     fi
-    HX_HELD_LOCK=""
 }
 
-hx_lock() {
-    # hx_lock DIR: take a mkdir lock held until the script exits. The holder
-    # writes DIR/owner ("host|pid|birth") and renews DIR/lease in the background.
-    # A waiter breaks the lock only when hx_lock_stale says the holder is gone.
-    _hx_lock=$1
+hx_mkdir_lock() {
+    # hx_mkdir_lock DIR: the fallback on a host without flock and python3. DIR/owner
+    # is "host|pid|birth". A waiter breaks the lock only when hx_owner_dead proves
+    # its owner gone, and only under DIR.break after reading the owner again, so
+    # two waiters never both break it and a lock someone just took is never removed.
+    # A live owner, another host's owner, or a lock without an owner line is never
+    # broken: after HX_LOCK_WAIT seconds the script fails and names DIR.
     _hx_waited=0
-    _hx_limit=${HX_LOCK_WAIT:-300}
     _hx_token="$(hostname 2>/dev/null || echo unknown)|$$|$(hx_pid_start $$)"
-    while ! mkdir "$_hx_lock" 2>/dev/null; do
-        _hx_owner=$(cat "$_hx_lock/owner" 2>/dev/null || true)
-        if hx_lock_stale "$_hx_lock" "$_hx_owner" &&
-            hx_break_lock "$_hx_lock" "$_hx_owner"; then
+    while ! mkdir "$1" 2>/dev/null; do
+        _hx_owner=$(cat "$1/owner" 2>/dev/null || true)
+        if hx_owner_dead "$_hx_owner" && mkdir "$1.break" 2>/dev/null; then
+            if [ "$(cat "$1/owner" 2>/dev/null || true)" = "$_hx_owner" ]; then
+                rm -rf "$1"
+            fi
+            rmdir "$1.break" 2>/dev/null || true
             continue
         fi
         if [ "$_hx_waited" -ge "$_hx_limit" ]; then
-            hx_fail "lock $_hx_lock is held by ${_hx_owner:-an unknown process}; waited ${_hx_limit}s"
+            hx_fail "lock $1 is held by ${_hx_owner:-an unknown process}; waited ${_hx_limit}s (it is broken only when its owner ran on this host and is gone; remove $1 if no hx runs there)"
         fi
         sleep 1
         _hx_waited=$((_hx_waited + 1))
     done
-    : >"$_hx_lock/lease"
-    echo "$_hx_token" >"$_hx_lock/owner"
-    HX_HELD_LOCK=$_hx_lock
-    HX_LOCK_TOKEN=$_hx_token
-    trap 'hx_unlock' EXIT
-    _hx_parent=$$
-    (
-        while kill -0 "$_hx_parent" 2>/dev/null &&
-            [ "$(cat "$_hx_lock/owner" 2>/dev/null || true)" = "$_hx_token" ]; do
-            touch "$_hx_lock/lease" 2>/dev/null
-            sleep "${HX_LOCK_RENEW:-20}"
+    echo "$_hx_token" >"$1/owner"
+    HX_HELD_LOCK=$1
+}
+
+hx_lock() {
+    # hx_lock PATH: an exclusive lock held until the script exits (EXIT trap). With
+    # flock(1), else python3, an OS lock on the file PATH, held by a helper process
+    # that exits with this script: the OS drops the lock when its holder dies, so it
+    # is never broken or stolen. Without either tool (or while a mkdir lock folder
+    # is at PATH): hx_mkdir_lock. Sets HX_LOCK_MODE.
+    _hx_limit=${HX_LOCK_WAIT:-300}
+    if [ -d "$1" ]; then
+        HX_LOCK_MODE=mkdir
+    elif command -v flock >/dev/null 2>&1; then
+        HX_LOCK_MODE=flock
+    elif command -v python3 >/dev/null 2>&1; then
+        HX_LOCK_MODE=python3
+    else
+        HX_LOCK_MODE=mkdir
+    fi
+    if [ "$HX_LOCK_MODE" = mkdir ]; then
+        hx_mkdir_lock "$1"
+    else
+        _hx_ok="$1.ok.$$"
+        rm -f "$_hx_ok"
+        if [ "$HX_LOCK_MODE" = flock ]; then
+            sh -c "$HX_FLOCK_HOLD" hx-lock "$1" "$_hx_ok" "$$" "$_hx_limit" \
+                </dev/null >/dev/null 2>&1 &
+        else
+            python3 -c "$HX_PY_LOCK" "$1" "$_hx_ok" "$$" "$_hx_limit" \
+                </dev/null >/dev/null 2>&1 &
+        fi
+        HX_LOCKER=$!
+        while [ ! -e "$_hx_ok" ]; do
+            if ! hx_alive "$HX_LOCKER"; then
+                wait "$HX_LOCKER"
+                _hx_rc=$?
+                HX_LOCKER=""
+                if [ "$_hx_rc" = 1 ]; then
+                    hx_fail "lock $1 is held by another hx process; waited ${_hx_limit}s"
+                fi
+                hx_fail "cannot lock $1 with $HX_LOCK_MODE (exit $_hx_rc); does this filesystem support locks?"
+            fi
+            hx_sleep
         done
-    ) </dev/null >/dev/null 2>&1 &
-    HX_RENEWER=$!
+        rm -f "$_hx_ok"
+    fi
+    trap 'hx_unlock' EXIT
 }
 
 hx_find_uv() {
@@ -4198,7 +4420,7 @@ def probe(target: SshTarget, home: str) -> ProbeResult:
 - [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_bootstrap.py -v`
-Expected: 15 passed (`test_parse_output_ignores_banner_noise`, `test_render_quotes_parameters`, `test_scripts_are_valid_posix_sh`, `test_probe_reports_tools`, `test_probe_bare_host`, `test_probe_finds_uv_off_path`, `test_probe_script_crash_is_bootstrap_error`, and the eight lock tests).
+Expected: 20 passed (`test_parse_output_ignores_banner_noise`, `test_render_quotes_parameters`, `test_scripts_are_valid_posix_sh`, `test_probe_reports_tools`, `test_probe_bare_host`, `test_probe_finds_uv_off_path`, `test_probe_script_crash_is_bootstrap_error`, and the thirteen lock tests); on a machine without `flock` (macOS) `17 passed, 3 skipped`.
 
 - [ ] **Step 8: Lint and type check**
 
@@ -4563,7 +4785,7 @@ def build_wheel(cache_dir: Path) -> Path:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_bootstrap.py -v`
-Expected: 22 passed. The wheel contains `hypothex/remote/scripts/common.sh` and `probe.sh` (hatch ships every file under `src/hypothex`, so no `pyproject.toml` change is needed).
+Expected: 27 passed (`24 passed, 3 skipped` without `flock`). The wheel contains `hypothex/remote/scripts/common.sh` and `probe.sh` (hatch ships every file under `src/hypothex`, so no `pyproject.toml` change is needed).
 
 - [ ] **Step 6: Lint and type check**
 
@@ -4588,7 +4810,7 @@ git commit -m "feat(remote): build the hub wheel once per version and source dig
 
 **Interfaces:**
 - Consumes: `_run_script`, `BootstrapError` (Task 8); `build_wheel` and test fixture `wheel` (Task 9); `hypothex.remote.ssh.copy_to(target, local, remote_path, *, timeout)` (Part 2); `common.sh` helpers `hx_lock`, `hx_find_uv`, `hx_fail`, `hx_expand_home`.
-- Produces: `def install(target: SshTarget, home: str, wheel: Path) -> None`. Host layout after install: `<home>/runtime/wheels/<wheel>`, `<home>/runtime/tools/hypothex/` (tool venv), `<home>/runtime/bin/hx` (entry point, used by Task 11), `<home>/runtime/install.log`, lock dir `<home>/runtime/.lock` (owner file `<hostname>|<pid>|<birth>`, renewed `lease`; Task 8). Test fixture `uv_env` (returns the real `uv` path; sets `UV_CACHE_DIR`, `UV_OFFLINE=1`, `UV_PYTHON`), helper `_installed_version(host)` (`_hostname()` is Task 8's).
+- Produces: `def install(target: SshTarget, home: str, wheel: Path) -> None`. Host layout after install: `<home>/runtime/wheels/<wheel>`, `<home>/runtime/tools/hypothex/` (tool venv), `<home>/runtime/bin/hx` (entry point, used by Task 11), `<home>/runtime/install.log`, lock `<home>/runtime/.lock` (`hx_lock`, Task 8: an OS lock file with `flock`/`python3`, else a mkdir lock with owner file `<hostname>|<pid>|<birth>`). Test fixture `uv_env` (returns the real `uv` path; sets `UV_CACHE_DIR`, `UV_OFFLINE=1`, `UV_PYTHON`), helper `_installed_version(host)` (`_hostname()` is Task 8's).
 
 Flow: `install.sh` runs twice. `HX_STEP=prepare` makes `<home>/runtime/wheels` and prints the absolute home. Python then copies the wheel with `scp` to a temporary name `<wheel>.part-<8 hex>` (so a half-copied file is never installed). `HX_STEP=install` takes the lock, renames the upload into place, finds uv (or installs it with the official installer into `~/.local/bin`), runs `uv tool install --force`, and prints `hx --version`. Python checks that version equals the wheel's.
 
@@ -4868,7 +5090,7 @@ def install(target: SshTarget, home: str, wheel: Path) -> None:
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_bootstrap.py -v`
-Expected: 29 passed (about 15 s; each real install takes 1-3 s from the local uv cache).
+Expected: 34 passed (`31 passed, 3 skipped` without `flock`) (about 15 s; each real install takes 1-3 s from the local uv cache).
 
 - [ ] **Step 7: Lint and type check**
 
@@ -5261,10 +5483,15 @@ def test_two_hubs_break_a_dead_lock_once(host: FakeHost, servers: list[int]) -> 
     assert leftovers == []  # no .lock, .lock.break, or .lock.stale.* left behind
 
 
-def test_two_hubs_starting_one_host_share_one_server(host: FakeHost, servers: list[int]) -> None:
+@pytest.mark.parametrize("lock_tool", ["mkdir", "python3"])
+def test_two_hubs_starting_one_host_share_one_server(
+    host: FakeHost, servers: list[int], lock_tool: str
+) -> None:
     # Review Focus: a laptop and a desktop hub bootstrap the same host at the same time.
     from concurrent.futures import ThreadPoolExecutor
 
+    if lock_tool == "python3":  # the host can take an OS lock (fcntl) instead of mkdir
+        host.add_tool("python3", f'exec {PY} "$@"\n')
     _install_source_hx(host)
     with ThreadPoolExecutor(max_workers=2) as pool:
         infos = list(pool.map(lambda _: bs.ensure_server(host.target, "~/.hypothex"), range(2)))
@@ -5272,7 +5499,9 @@ def test_two_hubs_starting_one_host_share_one_server(host: FakeHost, servers: li
     assert _alive(infos[0].pid)
     recorded = json.loads((host.hx_home / "serve" / "server.json").read_text())
     assert recorded["pid"] == infos[0].pid
-    assert not (host.hx_home / "serve" / ".lock").exists()
+    leftovers = sorted(p.name for p in (host.hx_home / "serve").iterdir() if "lock" in p.name)
+    assert leftovers == ([".lock"] if lock_tool == "python3" else [])  # an OS lock file stays
+    assert not (host.hx_home / "serve" / ".lock").is_dir()
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -5573,7 +5802,7 @@ def server_logs(target: SshTarget, home: str, lines: int = 80) -> str:
 - [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_bootstrap.py -v`
-Expected: 48 passed (about 30 s).
+Expected: 54 passed (about 30 s; `51 passed, 3 skipped` without `flock`).
 
 - [ ] **Step 8: Check no server is left running**
 
@@ -5641,7 +5870,7 @@ Expected: 1 passed (about 6 s).
 Debian and Ubuntu hosts run `sh` as `dash`, which is stricter than macOS `sh`. Run the file once with the fake host's `sh` pointed at `dash` (skip this step when `command -v dash` prints nothing):
 
 Run: `sed 's|found = shutil.which(name)|found = shutil.which("dash") if name == "sh" else shutil.which(name)|; s|\["sh", "-c", script\]|["dash", "-c", script]|' tests/remote/test_bootstrap.py > tests/remote/test_bootstrap_dash_tmp.py && uv run pytest tests/remote/test_bootstrap_dash_tmp.py -q; rm tests/remote/test_bootstrap_dash_tmp.py`
-Expected: `49 passed` (the lock tests of Task 8 run under `dash` too).
+Expected: `55 passed` (`52 passed, 3 skipped` without `flock`; the lock tests of Task 8 run under `dash` too).
 
 - [ ] **Step 4: Full suite, lint, types**
 
@@ -6070,12 +6299,12 @@ git commit -m "feat(remote): env client for descriptor and JSON requests"
 - Consumes: `DIR_HEADER`, `SIZE_HEADER` from `hypothex.remote.client` (Task 13); `Context.find_record`, `Context.run_dir`; `StoreError` (the existing handler answers it with 404).
 - Produces (`hypothex.api.app`):
   - `FILE_MAX_BYTES = 200 * 1024 * 1024`, `FILE_CHUNK_BYTES = 64 * 1024`.
-  - `open_run_path(run_dir: Path, rel_path: str) -> int` (an open descriptor; raises `StoreError`). Path safety works on descriptors, not on paths checked first and opened later: each name is opened relative to its parent folder's descriptor with `O_NOFOLLOW`, so a folder swapped for a symlink between the check and the read cannot lead outside. Symlinks are never followed or listed (Hypothex never writes them into run folders).
+  - `open_run_path(store: Path, run_dir: Path, rel_path: str) -> int` (an open descriptor; raises `StoreError`). Path safety works on descriptors, not on paths checked first and opened later: the walk starts at a descriptor of the store root (the one trusted path) and opens every name below it, the run folder's own `<project>/runs/<run_id>` included, relative to its parent folder's descriptor with `O_NOFOLLOW` (`O_DIRECTORY` for the folders down to the run folder). So a run folder, or any folder in it, replaced by a symlink before or during the request cannot lead outside. Symlinks are never followed or listed (Hypothex never writes them into the store).
   - `list_run_files(dir_fd: int, prefix: str = "") -> list[dict[str, Any]]` (`[{"path", "size", "mtime_ns"}]`, walked through folder descriptors; the hub mirror compares `[size, mtime_ns]` to skip unchanged files, Task 34).
   - `read_span(fd: int, start: int, length: int) -> Iterator[bytes]` (closes `fd`).
-  - `file_response(fd: int, rel_path: str, *, max_bytes: int, tail: bool, offset: int = 0) -> Response` (takes ownership of `fd`).
+  - `file_response(fd: int, rel_path: str, *, max_bytes: int, tail: bool) -> Response` (takes ownership of `fd`).
   - `register_env_routes(app: FastAPI, ctx: Context) -> None`; Task 23 adds the GPU and queue routes to it.
-  - HTTP: `GET /api/v1/runs/{run_id}/files/{path:path}?max_bytes=N&tail=bool&offset=N`. Answers: 200 bytes; 200 JSON listing with `X-Hypothex-Dir: 1`; 404 `StoreError`/`RunNotFoundError`; 413 `FileTooLargeError`; 422 for `max_bytes < 0` or `offset < 0`. With `offset > 0` the answer is the byte range `[offset, min(size, offset + max_bytes))` (empty past the end, never 413), so the hub mirror appends only the new bytes of append-only files (Task 34); `X-Hypothex-Size` is always the full size.
+  - HTTP: `GET /api/v1/runs/{run_id}/files/{path:path}?max_bytes=N&tail=bool`. Answers: 200 bytes; 200 JSON listing with `X-Hypothex-Dir: 1`; 404 `StoreError`/`RunNotFoundError`; 413 `FileTooLargeError`; 422 for `max_bytes < 0`. `X-Hypothex-Size` is always the full size. (No byte ranges: the hub mirror fetches whole files, Task 34.)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6144,15 +6373,6 @@ def test_max_bytes_gives_413_or_the_tail(client: TestClient, run_dir: Path) -> N
     assert tail.status_code == 200 and tail.content == b"6789"
     assert tail.headers["x-hypothex-size"] == "10"
     assert client.get(f"{FILES}/logs/stdout.log", params={"max_bytes": -1}).status_code == 422
-    # offset: a byte range for append-only files; never 413, empty past the end
-    span = client.get(f"{FILES}/logs/stdout.log", params={"offset": 6})
-    assert span.status_code == 200 and span.content == b"6789"
-    assert span.headers["x-hypothex-size"] == "10"
-    capped = client.get(f"{FILES}/logs/stdout.log", params={"offset": 2, "max_bytes": 3})
-    assert capped.status_code == 200 and capped.content == b"234"
-    past = client.get(f"{FILES}/logs/stdout.log", params={"offset": 99})
-    assert past.status_code == 200 and past.content == b""
-    assert client.get(f"{FILES}/logs/stdout.log", params={"offset": -1}).status_code == 422
 
 
 def test_missing_file_and_missing_run_are_404(client: TestClient, run_dir: Path) -> None:
@@ -6227,35 +6447,65 @@ def test_symlinks_cannot_escape_the_run_folder(
     assert not any(p.startswith(("leak", "loop", "alias")) for p in listed)
 
 
-def test_a_folder_swapped_for_a_symlink_mid_request_cannot_escape(
-    client: TestClient, run_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _outside_copy(run_dir: Path, outside: Path) -> None:
+    """A look-alike run folder outside the store: the real run.yaml plus a secret."""
+    (outside / "traces").mkdir(parents=True)
+    (outside / "run.yaml").write_bytes((run_dir / "run.yaml").read_bytes())
+    (outside / "secret.txt").write_text("TOPSECRET")
+    (outside / "traces" / "x.txt").write_text("TOPSECRET")
+
+
+def test_a_run_folder_replaced_by_a_symlink_is_refused(
+    client: TestClient, run_dir: Path, tmp_path: Path
 ) -> None:
-    # traces/ becomes a link to outside after the route checked the path, before it reads
+    # the run root itself is the link: the walk from the store root never follows it
     outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "x.txt").write_text("TOPSECRET")
+    _outside_copy(run_dir, outside)
+    run_dir.rename(run_dir.with_name("r1.old"))
+    run_dir.symlink_to(outside, target_is_directory=True)
+    for path in ("secret.txt", "run.yaml", "traces/x.txt", ""):
+        resp = client.get(f"{FILES}/{path}")
+        assert resp.status_code == 404, path
+        assert "TOPSECRET" not in resp.text
+
+
+@pytest.mark.parametrize("swapped", ["traces", "run root"])
+def test_a_folder_swapped_for_a_symlink_mid_request_cannot_escape(
+    client: TestClient,
+    run_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swapped: str,
+) -> None:
+    # the folder becomes a link to outside after every earlier check, right before
+    # the walk opens it
+    outside = tmp_path / "outside"
+    _outside_copy(run_dir, outside)
     traces = run_dir / "traces"
     traces.mkdir()
     (traces / "x.txt").write_text("inside")
+    victim, target = (traces, outside / "traces") if swapped == "traces" else (run_dir, outside)
     real_open = os.open
-    inside = os.path.realpath(run_dir)
-    swapped: list[str] = []
+    done: list[str] = []
 
     def open_then_swap(path: Any, flags: int, mode: int = 0o777, *, dir_fd: Any = None) -> int:
-        if not swapped and dir_fd is None and os.path.realpath(path).startswith(inside):
-            swapped.append(str(path))  # the first open of anything in the run folder
-            traces.rename(run_dir / "traces.old")
-            traces.symlink_to(outside, target_is_directory=True)
+        if not done and dir_fd is not None and str(path) == victim.name:
+            done.append(str(path))
+            victim.rename(victim.with_name(victim.name + ".old"))
+            victim.symlink_to(target, target_is_directory=True)
         return real_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "open", open_then_swap)
     resp = client.get(f"{FILES}/traces/x.txt")
     monkeypatch.setattr(os, "open", real_open)  # not undo(): that would drop the isolation too
-    assert swapped
+    assert done
     assert resp.status_code == 404 and "TOPSECRET" not in resp.text
     listing = client.get(f"{FILES}/")
     assert "TOPSECRET" not in listing.text
-    assert not any(item["path"].startswith("traces/") for item in listing.json())
+    if swapped == "traces":
+        assert not any(item["path"].startswith("traces/") for item in listing.json())
+    else:
+        assert listing.status_code == 404
 
 
 def test_fifo_is_404_and_does_not_hang(client: TestClient, run_dir: Path) -> None:
@@ -6315,19 +6565,23 @@ In `src/hypothex/api/app.py`, find the last line of `_run_view`:
 ```python
 
 
-def open_run_path(run_dir: Path, rel_path: str) -> int:
+def open_run_path(store: Path, run_dir: Path, rel_path: str) -> int:
     """
     Open ``rel_path`` inside a run folder one name at a time and return its fd.
 
-    Each name is opened relative to the descriptor of the folder above it with
-    ``O_NOFOLLOW``, so no symlink is ever followed: a link, or a folder swapped
-    for a link while the request runs, is refused like ``../``. Hypothex never
-    writes symlinks into run folders.
+    The walk starts at a descriptor of the store root, the one trusted path.
+    Every name below it, the run folder's own ``<project>/runs/<run_id>``
+    included, is opened relative to the descriptor of the folder above it with
+    ``O_NOFOLLOW``, so no symlink is ever followed: a link, a run folder
+    replaced by a link, or a folder swapped for a link while the request runs,
+    is refused like ``../``. Hypothex never writes symlinks into the store.
 
     Parameters
     ----------
+    store : Path
+        The store root (``Layout.store``).
     run_dir : Path
-        The run folder.
+        The run folder, below ``store``.
     rel_path : str
         Path relative to the run folder (``/``-separated); ``""`` is the folder itself.
 
@@ -6340,12 +6594,13 @@ def open_run_path(run_dir: Path, rel_path: str) -> int:
     Raises
     ------
     StoreError
-        The path is absolute, has ``..`` or a symlink, leaves the run folder, or
-        does not exist (all answered with ``404``).
+        The path is absolute, has ``..`` or a symlink (in the run folder or on
+        the way to it), leaves the run folder, or does not exist (all answered
+        with ``404``).
 
     Examples
     --------
-    >>> open_run_path(Path("/tmp"), "../etc/passwd")
+    >>> open_run_path(Path("/tmp"), Path("/tmp/r1"), "../etc/passwd")
     Traceback (most recent call last):
     ...
     hypothex.core.errors.StoreError: '../etc/passwd' is outside the run folder
@@ -6354,14 +6609,19 @@ def open_run_path(run_dir: Path, rel_path: str) -> int:
     if pure.is_absolute() or ".." in pure.parts or "\x00" in rel_path:
         raise StoreError(f"{rel_path!r} is outside the run folder")
     try:
-        fd = os.open(run_dir, _OPEN_FLAGS | _DIRECTORY)
+        to_run = run_dir.relative_to(store).parts
+    except ValueError:
+        raise StoreError(f"run folder {run_dir} is outside the store") from None
+    try:
+        fd = os.open(store, _OPEN_FLAGS | _DIRECTORY)
     except OSError as exc:
-        raise StoreError(f"cannot open the run folder: {exc.strerror}") from None
-    for part in pure.parts:
+        raise StoreError(f"cannot open the store: {exc.strerror}") from None
+    for i, part in enumerate((*to_run, *pure.parts)):
+        folder = _DIRECTORY if i < len(to_run) else 0  # down to the run folder: folders only
         try:
             if not stat.S_ISDIR(os.fstat(fd).st_mode):
                 raise StoreError(f"run folder has no {rel_path!r}")
-            child = os.open(part, _OPEN_FLAGS | _NOFOLLOW, dir_fd=fd)
+            child = os.open(part, _OPEN_FLAGS | _NOFOLLOW | folder, dir_fd=fd)
         except OSError as exc:
             if exc.errno in (errno.ELOOP, errno.EMLINK):  # O_NOFOLLOW met a symlink
                 raise StoreError(f"{rel_path!r} is outside the run folder") from None
@@ -6452,11 +6712,9 @@ def read_span(fd: int, start: int, length: int) -> Iterator[bytes]:
         os.close(fd)
 
 
-def file_response(
-    fd: int, rel_path: str, *, max_bytes: int, tail: bool, offset: int = 0
-) -> Response:
+def file_response(fd: int, rel_path: str, *, max_bytes: int, tail: bool) -> Response:
     """
-    Answer a run-file request: the bytes, the last ``max_bytes`` bytes, a range, or ``413``.
+    Answer a run-file request: the bytes, the last ``max_bytes`` bytes, or ``413``.
 
     Parameters
     ----------
@@ -6469,9 +6727,6 @@ def file_response(
         Largest body to send.
     tail : bool
         Send the last ``max_bytes`` bytes of a bigger file instead of ``413``.
-    offset : int
-        When above 0, send the range ``[offset, min(size, offset + max_bytes))``
-        (empty past the end, never ``413``); the hub appends it to its copy.
 
     Returns
     -------
@@ -6490,10 +6745,7 @@ def file_response(
         raise StoreError(f"{rel_path!r} is not a regular file")
     size = info.st_size
     start, length = 0, size
-    if offset > 0:
-        start = min(offset, size)
-        length = min(size - start, max_bytes)
-    elif size > max_bytes:
+    if size > max_bytes:
         if not tail:
             os.close(fd)
             return JSONResponse(
@@ -6530,10 +6782,9 @@ def register_env_routes(app: FastAPI, ctx: Context) -> None:
         path: str,
         max_bytes: Annotated[int, Query(ge=0)] = FILE_MAX_BYTES,
         tail: bool = False,
-        offset: Annotated[int, Query(ge=0)] = 0,
     ) -> Response:
         run_dir = ctx.run_dir(ctx.find_record(run_id))
-        fd = open_run_path(run_dir, path)
+        fd = open_run_path(ctx.layout.store, run_dir, path)
         if stat.S_ISDIR(os.fstat(fd).st_mode):
             rel = "/".join(PurePosixPath(path).parts)
             try:
@@ -6541,7 +6792,7 @@ def register_env_routes(app: FastAPI, ctx: Context) -> None:
             finally:
                 os.close(fd)
             return JSONResponse(listing, headers={DIR_HEADER: "1"})
-        return file_response(fd, path, max_bytes=max_bytes, tail=tail, offset=offset)
+        return file_response(fd, path, max_bytes=max_bytes, tail=tail)
 ```
 
 In `create_app`, directly before the line `    app.mount("/mcp", mcp_http)`, add:
@@ -6553,7 +6804,7 @@ In `create_app`, directly before the line `    app.mount("/mcp", mcp_http)`, add
 - [ ] **Step 5: Run the tests, the existing API tests, lint, and type check**
 
 Run: `uv run pytest tests/api -v`
-Expected: all pass; `tests/api/test_env_routes.py` reports `12 passed`.
+Expected: all pass; `tests/api/test_env_routes.py` reports `14 passed`.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src/hypothex/api tests/api/test_env_routes.py`
 Expected: `All checks passed!`, already formatted, `All checks passed!`.
@@ -6579,7 +6830,7 @@ git commit -m "feat(api): env route for run files with size limit and path safet
   - `FILE_CHUNK_BYTES = 64 * 1024`.
   - `class RemoteFile(BaseModel)`: `path: str`, `size: int`, `mtime_ns: int = 0`.
   - `EnvClient.list_files(run_id: str, rel_dir: str = "") -> list[RemoteFile]`. Raises `EnvRequestError`: 404 when the folder is missing, or the message "is a file, not a folder".
-  - `EnvClient.fetch_file(run_id: str, rel_path: str, dest: Path, *, max_bytes: int, tail: bool = False, offset: int = 0) -> bool`. `False` = skipped (missing / too big). Folder → recursive fetch under `dest`. Atomic writes. With `offset > 0`, `dest` receives the byte range `[offset, offset + max_bytes)` (the mirror's append path, Task 34). Raises `EnvUnreachableError` on transport failure. (`tail` and `offset` are additive keywords on the contract signature.)
+  - `EnvClient.fetch_file(run_id: str, rel_path: str, dest: Path, *, max_bytes: int, tail: bool = False) -> bool`. `False` = skipped (missing / too big). Folder → recursive fetch under `dest`. Atomic writes. Raises `EnvUnreachableError` on transport failure. (`tail` is an additive keyword on the contract signature.)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6616,9 +6867,6 @@ def test_fetch_file_writes_whole_file_or_nothing(
     assert (out / "stdout.log").read_bytes() == b"old"
     tail = env.fetch_file("r1", "logs/stdout.log", out / "stdout.log", max_bytes=4, tail=True)
     assert tail is True and (out / "stdout.log").read_bytes() == b"6789"
-    span = env.fetch_file("r1", "logs/stdout.log", out / "new.part", max_bytes=3, offset=5)
-    assert span is True and (out / "new.part").read_bytes() == b"567"
-    (out / "new.part").unlink()
     assert sorted(p.name for p in out.iterdir()) == ["run.yaml", "stdout.log", "t.jsonl"]
 
 
@@ -6806,7 +7054,6 @@ At the end of the class (after `post_json`), add:
         *,
         max_bytes: int,
         tail: bool = False,
-        offset: int = 0,
     ) -> bool:
         """
         Copy one run file (or every file of a run folder) to ``dest``.
@@ -6829,9 +7076,6 @@ At the end of the class (after `post_json`), add:
         tail : bool
             For a file over ``max_bytes``, copy its last ``max_bytes`` bytes instead
             of skipping it (for log tails).
-        offset : int
-            When above 0, write only the byte range ``[offset, offset + max_bytes)``
-            of a file to ``dest`` (the mirror appends it to its copy).
 
         Returns
         -------
@@ -6854,8 +7098,6 @@ At the end of the class (after `post_json`), add:
         """
         url = self._file_url(run_id, rel_path)
         params: dict[str, Any] = {"max_bytes": max_bytes, "tail": tail}
-        if offset > 0:
-            params["offset"] = offset
         try:
             with self._http.stream("GET", url, params=params) as resp:
                 if resp.status_code in (404, 413):
@@ -7842,7 +8084,7 @@ git commit -m "feat(core): gpu inventory from nvidia-smi with held/free status"
 - Modify: `src/hypothex/core/execution.py` (imports, constants, `RunRequest`, `prepare_run`, `execute_run` (`CUDA_VISIBLE_DEVICES` only; Task 4 already keeps the executor fields), new `write_queue_marker`, `spawn_supervisor`)
 - Modify: `src/hypothex/core/control.py` (imports, `launch_run` uses `spawn_supervisor`; `SUPERVISOR_PID_FILE` now comes from `execution`)
 - Modify: `src/hypothex/core/supervisor.py` (waits for `supervisor.pid` to name it before it executes)
-- Test: `tests/core/test_scheduler.py` (create)
+- Test: `tests/core/test_scheduler.py` (create); `tests/core/test_control.py` (`_launch_running` waits for the gate)
 
 **Interfaces:**
 - Consumes: `gpus.query_gpus` (Task 17); `ExecutorInfo.host/gpus/queue_position`, `RunRecord.gpus_requested` (Task 1); `SlurmDefaults` (Task 2); `compute_cost` and the executor-keeping `execute_run` (Task 4).
@@ -7855,6 +8097,7 @@ git commit -m "feat(core): gpu inventory from nvidia-smi with held/free status"
   - `hypothex.core.supervisor`: `SUPERVISOR_WAIT_SECONDS = 30.0` (env `HYPOTHEX_SUPERVISOR_WAIT` overrides it), `owns_run(run_dir: Path, wait: float) -> bool`. The supervisor executes the run only once `supervisor.pid` names its own pid; otherwise it exits 1 without touching the run, so a supervisor whose spawner failed before the commit never runs anything.
   - `prepare_run`: rejects `gpus < 0` (`"gpus must be 0 or more, got N"`) and, unless `req.slurm` is set (SLURM allocates GPUs on the compute node), `gpus > len(query_gpus())` (`"asked for N GPUs; this host has T"`) before creating anything; records `gpus_requested` and `executor.host = ctx.descriptor.label`. It never writes `queue.json`: `req.queue` is acted on by `launch_run` (Task 21), which calls `Scheduler.enqueue`, so a run joins the queue, gets its FIFO place, and gets its position in one step under the scheduler lock, and no scheduler tick can start it before that.
   - `execute_run`: sets `CUDA_VISIBLE_DEVICES="1,3"` for `executor.gpus == [1, 3]` (the executor fields themselves are kept since Task 4).
+  - Gated spawn, `GATE_EXIT = 97`, `GATE_ARGV = ("sh", "-c", 'IFS= read -r _ || exit 97; exec "$@"', "hx-gate")`, private `_open_gate(proc)`: `execute_run` starts the command as `[*GATE_ARGV, *command]` with its stdin a pipe. The command runs only after the supervisor has saved `child_pid` (`run.started`; the GPUs are already recorded by the scheduler or launcher) and written `go\n` to that pipe. If the supervisor dies before that, the pipe closes, the gate reads end-of-file and exits 97 without running anything, so repair can release the run's GPUs: no workload ever runs without a recorded owner. After `go` the command's stdin is the closed pipe (end of file at once, as `DEVNULL` was).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -8007,6 +8250,79 @@ def test_execute_run_sets_cuda_visible_devices_and_keeps_gpus(
     assert done.executor.pid == os.getpid() and done.executor.child_pid is not None
 
 
+GATE_CRASH = """
+import os
+import sys
+from pathlib import Path
+
+from hypothex.core import execution
+from hypothex.core.context import Context
+
+home, run_id, point = sys.argv[1:4]
+if point == "before_go":
+    execution._open_gate = lambda proc: os._exit(9)  # child_pid is saved; no "go" yet
+else:
+    real = Context.update_run
+
+    def update_run(self, rid, event_type, *args, **kwargs):
+        if event_type == "run.started":
+            os._exit(9)  # killed right after the spawn, before child_pid is saved
+        return real(self, rid, event_type, *args, **kwargs)
+
+    Context.update_run = update_run
+execution.execute_run(Context.open(Path(home)), run_id)
+"""
+
+
+@pytest.mark.parametrize("point", ["before_child_pid", "before_go"])
+def test_a_supervisor_killed_before_the_gate_opens_runs_nothing(
+    ctx: Context,
+    toy_repo: Path,
+    tmp_path: Path,
+    gpus: SetGpus,
+    monkeypatch: pytest.MonkeyPatch,
+    point: str,
+) -> None:
+    import subprocess
+    import time
+
+    import psutil
+
+    from hypothex.core import control
+    from hypothex.core.execution import SUPERVISOR_PID_FILE
+    from hypothex.core.gpus import held_gpus
+
+    gpus(FOUR_GPUS)
+    out = tmp_path / "ran.txt"
+    rec = prepare_run(
+        ctx, RunRequest(repo=toy_repo, command=cmd(f"open({str(out)!r}, 'w')"), gpus=1)
+    )
+    ctx.update_run(rec.run_id, "run.gpus_assigned", with_gpus([0]), {"gpus": [0]})
+    supervisor = subprocess.Popen([PY, "-c", GATE_CRASH, str(ctx.layout.home), rec.run_id, point])
+    pid_file = ctx.run_dir(rec) / SUPERVISOR_PID_FILE  # as spawn_supervisor writes it
+    pid_file.write_text(json.dumps({"pid": supervisor.pid, "create_time": None}))
+    assert supervisor.wait(timeout=60) == 9
+
+    def gated() -> list[psutil.Process]:
+        found = []
+        for proc in psutil.process_iter(["cmdline"]):
+            if str(out) in " ".join(proc.info["cmdline"] or []):
+                found.append(proc)
+        return found
+
+    deadline = time.monotonic() + 10
+    while gated() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert gated() == []  # the gate read end-of-file and exited 97
+    assert not out.exists()  # the command never ran
+    assert held_gpus(ctx) == {0: rec.run_id}  # reserved until repair
+    monkeypatch.setattr(control, "QUEUED_GRACE_SECONDS", 0.0)
+    assert [r.run_id for r in control.repair_runs(ctx)] == [rec.run_id]
+    assert ctx.find_record(rec.run_id).status == RunStatus.LOST
+    assert held_gpus(ctx) == {}  # released safely: nothing runs on GPU 0
+    assert not out.exists()
+
+
 def test_execute_run_without_gpus_leaves_cuda_visible_devices_alone(
     ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8079,6 +8395,9 @@ TERM_GRACE_SECONDS = 10.0
 SUPERVISOR_PID_FILE = "supervisor.pid"
 QUEUE_FILE = "queue.json"
 EXECUTION_CLAIM = "execution.claim"
+GATE_EXIT = 97
+GATE_ARGV = ("sh", "-c", 'IFS= read -r _ || exit 97; exec "$@"', "hx-gate")
+"""Run commands behind this gate: they start only after the supervisor writes ``go``."""
 ```
 
 Replace the whole `RunRequest` dataclass with:
@@ -8122,7 +8441,7 @@ class RunRequest:
     diff: str | None = None
 ```
 
-Add these two functions directly above `def prepare_run(`:
+Add these functions directly above `def prepare_run(`:
 
 ```python
 def write_queue_marker(run_dir: Path) -> None:
@@ -8194,6 +8513,22 @@ def spawn_supervisor(ctx: Context, record: RunRecord) -> int:
         raise
     ctx.emit("run.launched", record, {"supervisor_pid": proc.pid})
     return proc.pid
+
+
+def _open_gate(proc: subprocess.Popen[bytes]) -> None:
+    """
+    Let a gated command start: write ``go`` to its stdin, then close the pipe.
+
+    Called only after the run's ``child_pid`` is saved. If the supervisor dies
+    before this, the pipe closes unwritten and the gate exits ``GATE_EXIT``
+    without running the command.
+    """
+    assert proc.stdin is not None
+    with contextlib.suppress(BrokenPipeError):  # the gate already died (killed by a stop)
+        proc.stdin.write(b"go\n")
+        proc.stdin.flush()
+    with contextlib.suppress(BrokenPipeError):
+        proc.stdin.close()
 ```
 
 In `prepare_run`, update the docstring's Raises section to:
@@ -8291,6 +8626,81 @@ with:
         env["HYPOTHEX_SEED"] = str(record.seed)
     if record.executor.gpus:
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in record.executor.gpus)
+```
+
+Still in `execute_run`, start the command behind the gate. Replace:
+
+```python
+            proc = subprocess.Popen(
+                record.command,
+                cwd=record.cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+```
+
+with:
+
+```python
+            proc = subprocess.Popen(
+                [*GATE_ARGV, *record.command],  # waits for "go": nothing runs unowned
+                cwd=record.cwd,
+                env=env,
+                stdin=subprocess.PIPE,
+```
+
+and open the gate only once `child_pid` is saved. Replace:
+
+```python
+        started = me.model_copy(update={"child_pid": proc.pid})
+        ctx.update_run(
+            run_id,
+            "run.started",
+            lambda r: r.model_copy(
+                update={"status": RunStatus.RUNNING, "started_at": utcnow(), "executor": started}
+            ),
+        )
+```
+
+with:
+
+```python
+        started = me.model_copy(update={"child_pid": proc.pid})
+        try:
+            ctx.update_run(
+                run_id,
+                "run.started",
+                lambda r: r.model_copy(
+                    update={
+                        "status": RunStatus.RUNNING,
+                        "started_at": utcnow(),
+                        "executor": started,
+                    }
+                ),
+            )
+        except BaseException:
+            assert proc.stdin is not None
+            proc.stdin.close()  # never opened: the gate exits without running the command
+            proc.wait()
+            raise
+        _open_gate(proc)  # child_pid is saved: only now may the command run
+```
+
+Phase 1's `tests/core/test_control.py` kills a supervisor right after it sees `running` and expects the command (which prints `ready`) to live on as an orphan. `running` is now saved just before the gate opens, so its helper waits until the command has printed `ready` (a print into the pipe of a supervisor that is already dead would end it). In `_launch_running`, replace:
+
+```python
+    assert running.executor.pid == info["pid"] and running.executor.child_pid is not None
+    return rec.run_id, info["pid"]
+```
+
+with:
+
+```python
+    assert running.executor.pid == info["pid"] and running.executor.child_pid is not None
+    log = ctx.run_dir(running) / "logs" / "stdout.log"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and "ready" not in (log.read_text() if log.exists() else ""):
+        time.sleep(0.01)  # `running` is saved just before the gate opens (gated spawn)
+    return rec.run_id, info["pid"]
 ```
 
 - [ ] **Step 4: Use `spawn_supervisor` in `control.py`**
@@ -8448,7 +8858,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_scheduler.py tests/core/test_execution.py tests/core/test_control.py -q`
-Expected: all pass. `test_scheduler.py` contributes `7 passed`. The phase 1 control tests (background launch, stop, repair) still pass because `launch_run` behaves as before.
+Expected: all pass. `test_scheduler.py` contributes `9 passed`. The phase 1 control tests (background launch, stop, repair) still pass because `launch_run` behaves as before.
 
 Run: `uv run ruff check src/hypothex/core tests/core && uv run ruff format --check src/hypothex/core tests/core`
 Expected: `All checks passed!`, and no file reported as needing a reformat.
@@ -8456,8 +8866,8 @@ Expected: `All checks passed!`, and no file reported as needing a reformat.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/hypothex/core/execution.py src/hypothex/core/control.py src/hypothex/core/supervisor.py tests/core/test_scheduler.py
-git commit -m "feat(core): gpus/queue launch options, CUDA_VISIBLE_DEVICES, shared supervisor spawn"
+git add src/hypothex/core/execution.py src/hypothex/core/control.py src/hypothex/core/supervisor.py tests/core/test_scheduler.py tests/core/test_control.py
+git commit -m "feat(core): gpus/queue launch options, CUDA_VISIBLE_DEVICES, gated supervisor spawn"
 ```
 
 ---
@@ -9049,7 +9459,7 @@ def _prepare_in(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_scheduler.py tests/core/test_execution.py tests/core/test_control.py -q`
-Expected: all pass; `test_scheduler.py` now contributes `23 passed`.
+Expected: all pass; `test_scheduler.py` now contributes `25 passed`.
 
 Run: `uv run ruff check src/hypothex/core tests/core && uv run ruff format --check src/hypothex/core tests/core`
 Expected: `All checks passed!`, and no file reported as needing a reformat.
@@ -9327,6 +9737,20 @@ def test_crash_after_spawn_never_starts_the_run_twice(
     assert (ctx.run_dir(ctx.find_record(rid)) / EXECUTION_CLAIM).is_file()
 
 
+def test_a_tick_removes_the_queue_marker_of_a_run_that_ended(
+    ctx: Context, toy_repo: Path, gpus: SetGpus
+) -> None:
+    # killed while it waited, but its queue.json stayed (a crash before the removal)
+    gpus([{"index": 0, "external": True}])  # busy: nothing starts
+    rid = queue_run(ctx, toy_repo, 1)
+    marker = ctx.run_dir(ctx.find_record(rid)) / QUEUE_FILE
+    ctx.update_run(rid, "run.killed", lambda r: r.model_copy(update={"status": RunStatus.KILLED}))
+    assert marker.is_file()
+    assert Scheduler(ctx).tick() == []
+    assert not marker.exists()
+    assert Scheduler(ctx).positions() == {}
+
+
 def test_a_start_that_never_committed_frees_the_gpus_and_runs_nothing(
     ctx: Context, toy_repo: Path, gpus: SetGpus, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -9384,7 +9808,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from hypothex.core.context import Context
-from hypothex.core.errors import RunError
+from hypothex.core.errors import HypothexError, RunError
 from hypothex.core.execution import (
     QUEUE_FILE,
     SUPERVISOR_PID_FILE,
@@ -9394,7 +9818,7 @@ from hypothex.core.execution import (
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gpus import free_gpus, gpu_status, query_gpus
 from hypothex.core.ids import utcnow
-from hypothex.core.records import ACTIVE_STATUSES, TERMINAL_STATUSES, RunRecord, RunStatus
+from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
 from hypothex.core.store import dir_lock
 
 SCHEDULER_INTERVAL_SECONDS = 5.0
@@ -9537,21 +9961,28 @@ class Scheduler:
         start of a tick, an active run with ``queue.json`` and ``supervisor.pid``
         was started (its marker is deleted; it is never spawned again), and a
         waiting run with GPUs but no ``supervisor.pid`` was never started (its
-        GPUs are released and it keeps its place in the queue).
+        GPUs are released and it keeps its place in the queue). The markers
+        are found on disk, not through the index's active runs, so a run that
+        ended while it waited (killed, failed, or a crash between its end and
+        the marker's removal) never keeps a stale ``queue.json``.
         """
         mine = self.ctx.descriptor.environment_id
-        for status in sorted(ACTIVE_STATUSES):
-            runs = self.ctx.index.list_runs(status=status, include_archived=True, limit=None)
-            for record in runs:
-                run_dir = self.ctx.run_dir(record)
-                if record.environment_id != mine or not (run_dir / QUEUE_FILE).is_file():
-                    continue
-                if (run_dir / SUPERVISOR_PID_FILE).is_file() or record.status != RunStatus.QUEUED:
-                    (run_dir / QUEUE_FILE).unlink(missing_ok=True)
-                elif record.executor.gpus:
-                    self.ctx.update_run(
-                        record.run_id, "run.gpus_released", _release_gpus, {"gpus": []}
-                    )
+        for marker in sorted(self.ctx.layout.store.glob(f"*/runs/*/{QUEUE_FILE}")):
+            run_dir = marker.parent
+            try:
+                record = self.ctx.store.read_record(run_dir.parent.parent.name, run_dir.name)
+            except HypothexError:
+                continue
+            if record.environment_id != mine:
+                continue
+            started = (run_dir / SUPERVISOR_PID_FILE).is_file()
+            if started or record.status != RunStatus.QUEUED:
+                # started (never spawned again), or ended while it waited
+                marker.unlink(missing_ok=True)
+            elif record.executor.gpus:
+                self.ctx.update_run(
+                    record.run_id, "run.gpus_released", _release_gpus, {"gpus": []}
+                )
 
     def _keep_fifo(self, record: RunRecord, run_dir: Path) -> None:
         """
@@ -9688,7 +10119,7 @@ def run_scheduler_loop(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_scheduler.py -q`
-Expected: `34 passed`
+Expected: `37 passed`
 
 Run: `uv run ruff check src/hypothex/core tests/core && uv run ruff format --check src/hypothex/core tests/core`
 Expected: `All checks passed!`, and no file reported as needing a reformat.
@@ -10177,7 +10608,7 @@ Update the `repair_runs` docstring summary paragraph to:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_scheduler.py tests/core/test_control.py tests/core/test_execution.py -q`
-Expected: all pass; `test_scheduler.py` contributes `43 passed`.
+Expected: all pass; `test_scheduler.py` contributes `46 passed`.
 
 Run: `uv run ruff check src/hypothex/core tests/core && uv run ruff format --check src/hypothex/core tests/core`
 Expected: `All checks passed!`, and no file reported as needing a reformat.
@@ -10580,7 +11011,7 @@ def serve(
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_scheduler.py tests/core/test_context.py tests/api tests/cli/test_cli.py -q`
-Expected: all pass; `test_scheduler.py` contributes `47 passed`.
+Expected: all pass; `test_scheduler.py` contributes `50 passed`.
 
 - [ ] **Step 7: Run the whole suite and the static checks**
 
@@ -10832,7 +11263,7 @@ At the end of `register_env_routes` (after the `run_file` route), add:
 - [ ] **Step 4: Run the tests, lint, and type check**
 
 Run: `uv run pytest tests/api -v`
-Expected: all pass; `tests/api/test_env_routes.py` reports `17 passed`.
+Expected: all pass; `tests/api/test_env_routes.py` reports `19 passed`.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src/hypothex/api tests/api/test_env_routes.py`
 Expected: `All checks passed!`, already formatted, `All checks passed!`.
@@ -10856,13 +11287,15 @@ An env server on a SLURM login node submits each run as one `sbatch` job; the jo
 - **The job command** is `<sys.executable> -m hypothex.cli.main --home <home> run --child <run_id>`: `hx run --child` without depending on `PATH` on the compute node (the shared filesystem makes the login node's Python visible there).
 - **Only the env server process opens the SQLite files.** SQLite in WAL mode (`index.db`, `events.db`) does not work across hosts on NFS, Lustre, or GPFS. So `hx run --child` on the compute node never calls `Context.open`: it uses `NodeContext` (Task 27), which writes only run-folder files (atomic `run.yaml`, `logs/`, `metrics.jsonl`, and the exit record `exit.json`) under the run lock, and never scores (the login node does).
 - **The home must support `flock`.** Every run-state write takes the run lock (`fcntl.flock`). Some shared filesystems refuse it (Lustre without `-o flock` answers `ENOSYS`). There is no partial no-flock mode: an env server of kind `slurm` probes its home (`require_flock`, Task 27) and refuses to start, so `hx hosts add --slurm` fails with a message that names the fix and adds nothing.
-- **Submission is crash-safe (intent first).** Before `sbatch`, `submit_run` (Task 28) marks the run as a SLURM run (`run.submitting`, `executor.type="slurm"`) and writes its intent to the SLURM outbox `<home>/slurm/outbox/<run_id>.json`: a unique `--comment hx-<run_id>-<nonce>` and the submitting process (pid and start time). `sbatch` gets that comment. If the process dies after `sbatch` accepted the job but before the job id was recorded, `reconcile` finds the job by name and comment (`find_submitted`, Task 26) and records it; if the submitter is dead and SLURM has no such job, `sbatch` never accepted it and the run is `failed`.
+- **Submission intent states (no outcome is ever guessed).** Before `sbatch`, `submit_run` (Task 28) marks the run as a SLURM run (`run.submitting`, `executor.type="slurm"`) and writes its intent to the SLURM outbox `<home>/slurm/outbox/<run_id>.json`: state `pending`, a unique `--comment hx-<run_id>-<nonce>`, the submitting process (pid and start time), and `intent_at`. `sbatch` gets that comment. Then `pending` → `submitted` (the job id) or `unknown` (a timeout, a communication error, or no job id: SLURM may have taken the job). Only a clear rejection fails the run at once. A `pending` intent whose submitter died, or an `unknown` one, is resolved only by its comment (`find_submitted`, Task 26: `squeue` and `sacct`, each filtered by the comment, never by job name alone): a job is recorded; the run fails only when both commands answered without such a job and `SUBMIT_SETTLE_SECONDS` (300) passed since the intent. `--job-name`, `--comment`, and `--output` are reserved: `extra` can never set them (Tasks 2, 25).
+- **A stop never races a submission.** A stop before the job id is known sets `cancel_requested` in the intent under the outbox lock that recording a job id also takes; whichever learns the job id (`submit_run` when `sbatch` answers, or `reconcile` when it finds the job) cancels it, and the intent stays until the job is cancelled or proven absent (Task 30).
+- **Terminal publication is conditional.** Every end the login node writes on a SLURM run (`lost`, `killed`, `failed`, an applied `exit.json`) goes through `_end_if_active` (Task 28): under the run lock, a run the node already ended gets no write and no event, and the node's actual end is published instead (`sync_node_run`). An outbox entry is acknowledged (removed) only after the event of the run's actual terminal status.
 - **Node changes are published from an outbox, not from the index status.** The outbox entry also holds the last status the login node published for the run. `reconcile` walks the outbox (not the index's active runs), so a job that finished before its submission was recorded, or a terminal `run.yaml` that another login-node write indexed first, still gets its `run.finished` (or `failed`/`killed`) event and its scores. The entry is removed once a terminal status is published (at least once: a crash between the event and the outbox write repeats the event, which the mirror and scoring tolerate). The login node's `reconcile` / `SlurmPoller` (Tasks 29, 31) reads the node's `run.yaml` changes and emits `run.started` / `run.finished` / `run.failed` / `run.killed`, updates the index and metric points, and scores finished task runs (`sync_node_run`). The Docker cluster shares one kernel, so no test can show the cross-host SQLite failure; the test for this rule checks that the node never constructs `Index` or `EventLog`.
 - **Node-side executor fields.** `execute_run` keeps the executor fields recorded before start (Task 4: `type="slurm"`, the job id, `host`). The node name (`SLURMD_NODENAME`) and the GPU indices (`CUDA_VISIBLE_DEVICES`, else `range(gpus_requested)`) are known only on the node, so `NodeContext.update_run` sets them on every update. Cost uses `len(executor.gpus)`, so SLURM runs must have them.
 - **SLURM settings stay with the run.** `submit_run` saves the effective `SlurmDefaults` as `<run_dir>/slurm.json`; `rerun` and `reinfer` reuse them (and the parent's `gpus_requested`). An env server never sees the hub's `slurm:` block, so it remembers the last settings a launch sent (`<home>/slurm_defaults.json`) and uses them for a launch without `slurm`; the hub always sends its block (Task 45).
 - **SLURM settings are checked twice.** `SlurmDefaults` refuses unsafe values when it is built (Task 2); `validate_defaults` checks again before a run is created, because settings can also arrive merged from dicts or built with `model_construct`. A run folder path with whitespace is refused (an `#SBATCH --output` line cannot hold it).
 - **`sbatch` failure after the run exists** marks the run `failed` (`run.failed`, reason `sbatch: ...`) and raises `RunError`. The script is kept at `<run_dir>/slurm.sbatch`.
-- **New event types:** `run.submitted` (`{slurm_job_id}`) and `run.slurm_state` (`{slurm_job_id, slurm_state, node}`). `run.lost` from SLURM carries `{reason, slurm_job_id, slurm_state}`.
+- **New event types:** `run.submitted` (`{slurm_job_id}`), `run.submit_unknown` (`{reason, comment}`), and `run.slurm_state` (`{slurm_job_id, slurm_state, node}`). `run.lost` from SLURM carries `{reason, slurm_job_id, slurm_state}`; the reason names SLURM's end state (for example `NODE_FAIL`) whenever `sacct` gave one at either of the two polls, else neutral wording ("left the queue; SLURM reports no end state for it").
 - **`poll` uses `squeue --user=<me>`, not `squeue -j`** (which exits non-zero on some versions once a job left the queue). Jobs not in the queue go to `sacct -X`. A failing `sacct` counts as "no record"; a failing `squeue` raises `SlurmError` and nothing changes. A terminal state that `squeue` still shows counts as ended.
 - **Two-poll rule.** `SlurmPoller` marks a run lost only when two polls in a row find its job gone and the run has no exit record (a shared filesystem can show the node's final `run.yaml` late).
 - **SLURM runs bypass the host GPU queue.** The SLURM branch is the first thing in `launch_run`; it drops `req.queue` (no `queue.json`), because SLURM's own queue holds the job (spec 5.7).
@@ -10882,7 +11315,7 @@ An env server on a SLURM login node submits each run as one `sbatch` job; the jo
 - Produces (used by every later Part 6 task, and free for other groups such as the demo with fake hosts):
   - Executables `sbatch`, `squeue`, `sacct`, `scancel` in `tests/fakes/fake_slurm/`. State file path from env `HYPOTHEX_FAKE_SLURM_STATE`.
   - State JSON: `{"next_id": 1000, "mode": "hold" | "run", "user": str | null, "fail": {cmd: stderr message}, "jobs": {id: {"state", "node", "exit" ("rc:signal"), "in_queue", "in_sacct", "name", "comment", "output", "gpus", "directives", "script", "cwd", "pgid"}}, "calls": [[cmd, *argv], ...]}`.
-  - Supported argv (anything else exits 2): `sbatch [--parsable] [--comment=C] [file]` (script from stdin when no file), `squeue --noheader [--user=U] [--name=N] --format=%i|%T|%N` (or `%i|%T|%N|%k`, `%k` = comment), `sacct -X --noheader --parsable2 --format=JobID,State,ExitCode,NodeList (--jobs=a,b | --name=N) [--starttime=...]`, `scancel <id>...`.
+  - Supported argv (anything else exits 2): `sbatch [--parsable] [--comment=C] [file]` (script from stdin when no file), `squeue --noheader [--user=U] [--name=N] --format=%i|%T|%N` (or `%i|%T|%N|%k`, `%k` = comment), `sacct -X --noheader --parsable2 --format=JobID,State,ExitCode,NodeList[,Comment] [--jobs=a,b | --name=N] [--starttime=...]` (no `--jobs`/`--name`: every job), `scancel <id>...`.
   - In `mode: run`, `sbatch` starts the job at once on node `fake-node1` with `SLURM_JOB_ID`, `SLURMD_NODENAME`, and `CUDA_VISIBLE_DEVICES=0..gpus-1`, writes output to `--output` (with `%j` replaced), and sets `COMPLETED`/`FAILED` and `exit` when the script ends. `scancel` of a running job sends SIGTERM to the job's process group.
   - Test helpers in `tests/core/test_slurm.py`: `FakeSlurm` (`state()`, `save()`, `set(**fields)`, `add_job(job_id, state, *, node, exit, in_queue, in_sacct)`, `job(id)`, `calls(cmd)`), fixture `slurm`, `wait_until(predicate, timeout)`, `sh(*argv, stdin)`.
 
@@ -10939,6 +11372,8 @@ class FakeSlurm:
         exit: str = "0:0",
         in_queue: bool = True,
         in_sacct: bool = True,
+        name: str | None = None,
+        comment: str = "",
     ) -> None:
         current = self.state()
         current["jobs"][job_id] = {
@@ -10947,7 +11382,8 @@ class FakeSlurm:
             "exit": exit,
             "in_queue": in_queue,
             "in_sacct": in_sacct,
-            "name": f"job-{job_id}",
+            "name": name or f"job-{job_id}",
+            "comment": comment,
             "output": "/dev/null",
             "gpus": 0,
             "directives": {},
@@ -11054,11 +11490,12 @@ def test_fake_slurm_finds_jobs_by_name_and_comment(slurm: FakeSlurm) -> None:
         "-X",
         "--noheader",
         "--parsable2",
-        "--format=JobID,State,ExitCode,NodeList",
-        "--name=hx-r1",
+        "--format=JobID,State,ExitCode,NodeList,Comment",
         "--starttime=now-7days",
     )
-    assert acct.stdout == "1000|CANCELLED|0:15|None assigned\n"
+    assert acct.stdout == (
+        "1000|CANCELLED|0:15|None assigned|hx-r1-ab12\n1001|PENDING|0:0|None assigned|\n"
+    )
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -11274,26 +11711,31 @@ def squeue(argv: list[str]) -> int:
 
 
 def sacct(argv: list[str]) -> int:
-    """Fake ``sacct -X --noheader --parsable2 --format=... (--jobs=a,b | --name=N)``: rows."""
+    """Fake ``sacct -X --noheader --parsable2 --format=...[,Comment] [--jobs=a,b | --name=N]``."""
     _begin("sacct", argv)
+    fmt = _option(argv, "--format")
     if not {"-X", "--noheader", "--parsable2"} <= set(argv) or (
-        _option(argv, "--format") != SACCT_FORMAT
+        fmt not in (SACCT_FORMAT, SACCT_FORMAT + ",Comment")
     ):
         sys.stderr.write(f"fake sacct: unsupported arguments {argv}\n")
         return 2
     with locked_state() as state:
         jobs = state["jobs"]
+    ordered = [job_id for job_id, _ in sorted(jobs.items(), key=lambda kv: int(kv[0]))]
     name = _option(argv, "--name")
+    listed = _option(argv, "--jobs")
     if name is not None:
-        ordered = sorted(jobs.items(), key=lambda kv: int(kv[0]))
-        wanted = [job_id for job_id, job in ordered if job["name"] == name]
+        wanted = [job_id for job_id in ordered if jobs[job_id]["name"] == name]
+    elif listed is not None:
+        wanted = listed.split(",")
     else:
-        wanted = (_option(argv, "--jobs") or "").split(",")
+        wanted = ordered  # no filter: every job (of the --starttime window)
     for job_id in wanted:
         job = jobs.get(job_id)
         if job is None or not job["in_sacct"]:
             continue
-        print(f"{job_id}|{job['state']}|{job['exit']}|{job['node'] or 'None assigned'}")
+        row = f"{job_id}|{job['state']}|{job['exit']}|{job['node'] or 'None assigned'}"
+        print(row + f"|{job.get('comment', '')}" if fmt.endswith(",Comment") else row)
     return 0
 
 
@@ -11483,6 +11925,8 @@ def test_render_sbatch_defaults_and_zero_gpus(tmp_path: Path) -> None:
     [
         (SlurmDefaults.model_construct(extra=["--mem=32G\nrm -rf ~"]), "contains a newline"),
         (SlurmDefaults.model_construct(extra=["mem=32G"]), "must start with '-'"),
+        (SlurmDefaults.model_construct(extra=["--job-name=x"]), "sets --job-name"),
+        (SlurmDefaults.model_construct(extra=["--comm=x"]), "sets --comment"),
         (SlurmDefaults.model_construct(partition="gpu; rm"), "partition 'gpu; rm'"),
         (SlurmDefaults.model_construct(account="lab\n#SBATCH --qos=high"), "account"),
         (SlurmDefaults.model_construct(time="2 hours"), "time '2 hours'"),
@@ -11533,7 +11977,7 @@ from pydantic import BaseModel
 from hypothex.core.errors import HypothexError
 from hypothex.core.layout import Layout
 from hypothex.core.records import RunRecord
-from hypothex.remote.config import SlurmDefaults
+from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
 
 FINISHED_STATES = frozenset(
     {
@@ -11615,7 +12059,8 @@ def validate_defaults(defaults: SlurmDefaults) -> None:
     ------
     SlurmError
         A field holds whitespace or shell characters, or an ``extra`` item
-        holds a newline or does not start with ``-``.
+        holds a newline, does not start with ``-``, or sets one of the
+        options Hypothex reserves (``--job-name``, ``--comment``, ``--output``).
 
     Examples
     --------
@@ -11632,6 +12077,11 @@ def validate_defaults(defaults: SlurmDefaults) -> None:
         if not item.startswith("-"):
             raise SlurmError(
                 f"slurm extra option {item!r} must start with '-' (for example --mem=32G)"
+            )
+        taken = reserved_sbatch_option(item)
+        if taken is not None:
+            raise SlurmError(
+                f"slurm extra option {item!r} sets --{taken}, which Hypothex sets itself"
             )
 
 
@@ -11711,7 +12161,7 @@ def render_sbatch(record: RunRecord, defaults: SlurmDefaults, home: Path) -> str
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py -v`
-Expected: `12 passed`.
+Expected: `14 passed`.
 
 - [ ] **Step 5: Lint and type-check**
 
@@ -11736,12 +12186,12 @@ git commit -m "feat(slurm): render sbatch scripts with validated directives"
 **Interfaces:**
 - Consumes: Task 25 (`SlurmError`, `SlurmJob`, `is_finished`); the fakes from Task 24.
 - Produces (contract 1.6 plus helpers):
-  - `submit(script: str, cwd: Path, *, comment: str | None = None) -> str` — `sbatch --parsable [--comment=C]`, script on stdin; returns the job id. `submit_run` (Task 28) passes a unique `hx-<run_id>-<nonce>` comment, its submission identity.
-  - `find_submitted(run_id: str, comment: str) -> SlurmJob | None` — the job a submission of `run_id` left: `squeue --noheader --user=<me> --name=hx-<run_id> --format=%i|%T|%N|%k` with exactly that comment, else the newest `sacct -X ... --name=hx-<run_id> --starttime=now-7days` row (run ids are unique, so the job name identifies the run once the job left the queue). Raises `SlurmError` when `squeue` fails.
+  - `submit(script: str, cwd: Path, *, comment: str | None = None) -> str` — `sbatch --parsable [--comment=C]`, script on stdin; returns the job id. `submit_run` (Task 28) passes a unique `hx-<run_id>-<nonce>` comment, its submission identity. Two kinds of failure: `SlurmError` when SLURM rejected the job for sure (sbatch missing, or sbatch exited with an error such as an invalid partition), and `SubmitUnknownError(SlurmError)` when SLURM may have accepted it: our timeout (`SlurmTimeout`), a communication error in sbatch's message (`timed out`, `socket`, `connection`, `unable to contact`), or exit 0 without a job id.
+  - `find_submitted(comment: str) -> tuple[SlurmJob | None, bool]` — the job carrying exactly that comment, looked up by comment only, never by job name: `squeue --noheader --user=<me> --format=%i|%T|%N|%k`, then `sacct -X --noheader --parsable2 --format=JobID,State,ExitCode,NodeList,Comment --starttime=now-7days` (newest match). The bool says the answer is complete (both commands answered), so `(None, True)` means SLURM has no such job; a failing `sacct` gives `(None, False)`. Raises `SlurmError` when `squeue` fails.
   - `poll(job_ids: list[str]) -> dict[str, SlurmJob]` — `squeue --noheader --user=<getpass.getuser()> --format=%i|%T|%N`, then `sacct -X --noheader --parsable2 --format=JobID,State,ExitCode,NodeList --jobs=<missing ids>`. Raises `SlurmError` only when `squeue` fails.
   - `cancel(job_id: str) -> None` — `scancel <id>`; raises `SlurmError` on failure.
   - `lost_reason(job_id: str, job: SlurmJob | None) -> str`
-  - Constants `SLURM_COMMAND_TIMEOUT = 60.0`, `SQUEUE_FORMAT`, `SQUEUE_COMMENT_FORMAT = "%i|%T|%N|%k"`, `SACCT_FORMAT`; module logger `log`.
+  - Constants `SLURM_COMMAND_TIMEOUT = 60.0`, `SQUEUE_FORMAT`, `SQUEUE_COMMENT_FORMAT = "%i|%T|%N|%k"`, `SACCT_FORMAT`, `SACCT_COMMENT_FORMAT`; exceptions `SlurmTimeout(SlurmError)`, `SubmitUnknownError(SlurmError)`; module logger `log`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -11764,6 +12214,7 @@ import pytest
 from hypothex.core.slurm import (
     SlurmError,
     SlurmJob,
+    SubmitUnknownError,
     cancel,
     find_submitted,
     is_finished,
@@ -11797,12 +12248,42 @@ def test_submit_passes_the_comment_and_find_submitted_matches_it(
     assert submit(script, tmp_path, comment="hx-r1-aaaa") == "1000"
     assert submit(script, tmp_path, comment="hx-r1-bbbb") == "1001"
     assert slurm.calls("sbatch")[0] == ["--parsable", "--comment=hx-r1-aaaa"]
-    found = find_submitted("r1", "hx-r1-bbbb")
-    assert found is not None and (found.job_id, found.state) == ("1001", "PENDING")
-    assert find_submitted("r2", "hx-r2-cccc") is None
-    cancel("1001")  # left the queue: sacct finds it by job name
-    found = find_submitted("r1", "hx-r1-bbbb")
+    found, complete = find_submitted("hx-r1-bbbb")
+    assert found is not None and (found.job_id, found.state, complete) == ("1001", "PENDING", True)
+    assert find_submitted("hx-r2-cccc") == (None, True)
+    cancel("1001")  # left the queue: sacct finds it by its comment
+    found, _ = find_submitted("hx-r1-bbbb")
     assert found is not None and (found.job_id, found.state) == ("1001", "CANCELLED")
+
+
+def test_find_submitted_never_matches_by_name_alone(slurm: FakeSlurm) -> None:
+    # a job named hx-r1 (extra --job-name, or another submission) with another comment
+    slurm.add_job("1000", "PENDING", name="hx-r1", comment="hx-r1-other")
+    slurm.add_job("1001", "COMPLETED", name="hx-r1", in_queue=False)
+    assert find_submitted("hx-r1-mine") == (None, True)
+
+
+def test_find_submitted_is_incomplete_while_sacct_fails(slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "COMPLETED", name="hx-r1", comment="hx-r1-mine", in_queue=False)
+    slurm.set(fail={"sacct": "sacct: error: Slurm accounting storage is disabled"})
+    assert find_submitted("hx-r1-mine") == (None, False)  # unknown, never "absent"
+
+
+def test_submit_tells_rejection_from_an_unknown_outcome(
+    slurm: FakeSlurm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = "#!/bin/bash\ntrue\n"
+    slurm.set(fail={"sbatch": "sbatch: error: invalid partition specified: nope"})
+    with pytest.raises(SlurmError) as rejected:
+        submit(script, tmp_path)
+    assert not isinstance(rejected.value, SubmitUnknownError)
+    timeout = "sbatch: error: Batch job submission failed: Socket timed out on send/recv operation"
+    slurm.set(fail={"sbatch": timeout})
+    with pytest.raises(SubmitUnknownError, match="Socket timed out"):
+        submit(script, tmp_path)
+    monkeypatch.setattr("hypothex.core.slurm._run", lambda *a, **k: "Submitted?\n")
+    with pytest.raises(SubmitUnknownError, match="not a job id"):
+        submit(script, tmp_path)
 
 
 def test_submit_failure_raises_with_stderr(slurm: FakeSlurm, tmp_path: Path) -> None:
@@ -11878,7 +12359,9 @@ def test_is_finished_and_lost_reason() -> None:
     assert (
         lost_reason("7", failed) == "SLURM ended job 7 with FAILED on n3 (exit 2); no exit record"
     )
-    assert lost_reason("7", None) == "slurm job 7 vanished from squeue and sacct; no exit record"
+    assert lost_reason("7", None) == (
+        "slurm job 7 left the queue; SLURM reports no end state for it; no exit record"
+    )
 
 
 def test_cancel_calls_scancel_and_raises_on_unknown_job(slurm: FakeSlurm) -> None:
@@ -11916,7 +12399,7 @@ from pydantic import BaseModel
 from hypothex.core.errors import HypothexError
 from hypothex.core.layout import Layout
 from hypothex.core.records import RunRecord
-from hypothex.remote.config import SlurmDefaults
+from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
 
 log = logging.getLogger(__name__)
 ```
@@ -11928,12 +12411,25 @@ SLURM_COMMAND_TIMEOUT = 60.0
 SQUEUE_FORMAT = "%i|%T|%N"
 SQUEUE_COMMENT_FORMAT = "%i|%T|%N|%k"
 SACCT_FORMAT = "JobID,State,ExitCode,NodeList"
+SACCT_COMMENT_FORMAT = "JobID,State,ExitCode,NodeList,Comment"
 _NO_NODE = frozenset({"", "None assigned", "(null)", "n/a"})
 ```
 
 Append to the end of the file:
 
 ```python
+class SlurmTimeout(SlurmError):
+    """A SLURM command did not answer within ``SLURM_COMMAND_TIMEOUT``."""
+
+
+class SubmitUnknownError(SlurmError):
+    """``sbatch`` failed in a way that may still have created the job."""
+
+
+_UNSURE = re.compile(r"timed out|timeout|socket|connection|unable to contact", re.IGNORECASE)
+"""sbatch errors after which the controller may still have accepted the job."""
+
+
 def _run(argv: list[str], *, input_text: str | None = None, cwd: Path | None = None) -> str:
     """Run one SLURM command; return stdout or raise ``SlurmError``."""
     if shutil.which(argv[0]) is None:
@@ -11948,7 +12444,7 @@ def _run(argv: list[str], *, input_text: str | None = None, cwd: Path | None = N
             timeout=SLURM_COMMAND_TIMEOUT,
         )
     except subprocess.TimeoutExpired as exc:
-        raise SlurmError(f"{argv[0]} timed out after {SLURM_COMMAND_TIMEOUT:.0f}s") from exc
+        raise SlurmTimeout(f"{argv[0]} timed out after {SLURM_COMMAND_TIMEOUT:.0f}s") from exc
     except OSError as exc:
         raise SlurmError(f"could not run {argv[0]}: {exc}") from exc
     if out.returncode != 0:
@@ -11979,17 +12475,29 @@ def submit(script: str, cwd: Path, *, comment: str | None = None) -> str:
 
     Raises
     ------
+    SubmitUnknownError
+        SLURM may have accepted the job: sbatch timed out, reported a
+        communication error, or printed no job id. Never treat this as a
+        rejection (``reconcile`` looks for the job by its comment).
     SlurmError
-        sbatch is missing, fails, or prints no job id.
+        SLURM did not accept the job: sbatch is missing or reported an error.
     """
     argv = ["sbatch", "--parsable"]
     if comment is not None:
         argv.append(f"--comment={comment}")
-    out = _run(argv, input_text=script, cwd=cwd)
+    try:
+        out = _run(argv, input_text=script, cwd=cwd)
+    except SlurmTimeout as exc:
+        raise SubmitUnknownError(f"{exc}; the job may exist") from exc
+    except SlurmError as exc:
+        detail = str(exc).partition("): ")[2]  # sbatch's own message, not our argv
+        if _UNSURE.search(detail):
+            raise SubmitUnknownError(str(exc)) from exc
+        raise
     lines = out.strip().splitlines()
     job_id = lines[-1].split(";", 1)[0].strip() if lines else ""
     if not job_id.isdigit():
-        raise SlurmError(f"sbatch --parsable printed {out.strip()!r}, not a job id")
+        raise SubmitUnknownError(f"sbatch --parsable printed {out.strip()!r}, not a job id")
     return job_id
 
 
@@ -12079,46 +12587,45 @@ def _sacct_job(line: str) -> SlurmJob | None:
     )
 
 
-def find_submitted(run_id: str, comment: str) -> SlurmJob | None:
+def find_submitted(comment: str) -> tuple[SlurmJob | None, bool]:
     """
-    Find the job that a submission of ``run_id`` left in SLURM, if any.
+    Find the job that carries a submission's unique comment, if SLURM has one.
 
-    ``submit_run`` records its intent (with a unique ``comment``) before it
-    calls ``sbatch``. When it crashed before it recorded the job id, this
-    finds the job: in ``squeue`` by job name ``hx-<run_id>`` and exactly that
-    comment, else (the job already left the queue) the newest ``sacct`` row
-    with that job name (run ids are unique, so the name identifies the run).
+    ``submit_run`` records its intent (with a unique ``hx-<run_id>-<nonce>``
+    comment) before it calls ``sbatch``. When the outcome is unknown (a crash,
+    a timeout), this finds the job: in ``squeue`` (``%k``), else in ``sacct``
+    (``Comment``), each filtered by exactly this comment. A job name alone
+    never identifies a submission.
 
     Parameters
     ----------
-    run_id : str
     comment : str
-        The ``hx-<run_id>-<nonce>`` comment the submission used.
+        The comment the submission used.
 
     Returns
     -------
-    SlurmJob or None
-        None when SLURM has no such job (``sbatch`` never accepted it).
+    tuple of (SlurmJob or None, bool)
+        The job (the newest if several) and whether the answer is complete:
+        True when both commands answered. ``(None, True)`` means SLURM has no
+        such job; ``(None, False)`` means unknown (``sacct`` failed).
 
     Raises
     ------
     SlurmError
         If ``squeue`` fails (then nothing is known).
     """
-    name = f"hx-{run_id}"
     queue = _run(
         [
             "squeue",
             "--noheader",
             f"--user={getpass.getuser()}",
-            f"--name={name}",
             f"--format={SQUEUE_COMMENT_FORMAT}",
         ]
     )
     for line in queue.splitlines():
         parts = line.strip().split("|", 3)
         if len(parts) == 4 and parts[3] == comment:
-            return SlurmJob(job_id=parts[0], state=parts[1], node=_node(parts[2]))
+            return SlurmJob(job_id=parts[0], state=parts[1], node=_node(parts[2])), True
     try:
         acct = _run(
             [
@@ -12126,20 +12633,20 @@ def find_submitted(run_id: str, comment: str) -> SlurmJob | None:
                 "-X",
                 "--noheader",
                 "--parsable2",
-                f"--format={SACCT_FORMAT}",
-                f"--name={name}",
+                f"--format={SACCT_COMMENT_FORMAT}",
                 "--starttime=now-7days",
             ]
         )
     except SlurmError as exc:
-        log.warning("sacct failed; no accounting record for %s: %s", name, exc)
-        return None
+        log.warning("sacct failed; job with comment %s is not known yet: %s", comment, exc)
+        return None, False
     jobs: list[SlurmJob] = []
     for line in acct.splitlines():
-        job = _sacct_job(line)
+        row, _, found = line.strip().rpartition("|")
+        job = _sacct_job(row) if found == comment else None
         if job is not None:
             jobs.append(job)
-    return max(jobs, key=lambda j: int(j.job_id)) if jobs else None
+    return (max(jobs, key=lambda j: int(j.job_id)) if jobs else None), True
 
 
 def cancel(job_id: str) -> None:
@@ -12177,10 +12684,13 @@ def lost_reason(job_id: str, job: SlurmJob | None) -> str:
     >>> lost_reason("7", SlurmJob(job_id="7", state="NODE_FAIL", node="n2"))
     'SLURM ended job 7 with NODE_FAIL on n2; no exit record'
     >>> lost_reason("7", None)
-    'slurm job 7 vanished from squeue and sacct; no exit record'
+    'slurm job 7 left the queue; SLURM reports no end state for it; no exit record'
     """
-    if job is None:
-        return f"slurm job {job_id} vanished from squeue and sacct; no exit record"
+    if job is None:  # neutral: no accounting record (or sacct failed); the cause is not known
+        return (
+            f"slurm job {job_id} left the queue; SLURM reports no end state for it; "
+            "no exit record"
+        )
     where = f" on {job.node}" if job.node else ""
     code = f" (exit {job.exit_code})" if job.exit_code is not None else ""
     return f"SLURM ended job {job_id} with {job.state}{where}{code}; no exit record"
@@ -12189,7 +12699,7 @@ def lost_reason(job_id: str, job: SlurmJob | None) -> str:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py -v`
-Expected: `22 passed`.
+Expected: `27 passed`.
 
 - [ ] **Step 5: Lint and type-check**
 
@@ -12251,6 +12761,7 @@ from hypothex.core.slurm import (
     EXIT_FILE,
     SlurmError,
     SlurmJob,
+    SubmitUnknownError,
     cancel,
     find_submitted,
     flock_supported,
@@ -12426,7 +12937,7 @@ from hypothex.core.index import Index
 from hypothex.core.layout import Layout
 from hypothex.core.records import RunRecord, ScoreRecord
 from hypothex.core.store import RunStore, run_lock
-from hypothex.remote.config import SlurmDefaults
+from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
 ```
 
 Add these constants right below the `_NO_NODE = ...` line:
@@ -12802,7 +13313,7 @@ with:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py tests/cli/test_cli.py -v`
-Expected: `28 passed` in `test_slurm.py`; `tests/cli/test_cli.py` all pass.
+Expected: `33 passed` in `test_slurm.py`; `tests/cli/test_cli.py` all pass.
 
 - [ ] **Step 6: Lint and type-check**
 
@@ -12829,8 +13340,10 @@ git commit -m "feat(slurm): hx run --child executes a submitted run with run-fol
 - Consumes: `prepare_run(ctx, req) -> RunRecord` with `RunRequest.gpus` / `RunRequest.slurm` (contract 1.6); `render_sbatch`, `submit` (Tasks 25–26); `run_child` via `hx run --child` (Task 27); `control.wait_for_run` (phase 1a).
 - Produces:
   - `SBATCH_FILE = "slurm.sbatch"`, `SLURM_SETTINGS_FILE = "slurm.json"`, `LAST_SLURM_DEFAULTS = "slurm_defaults.json"`
-  - `submit_run(ctx: Context, record: RunRecord, defaults: SlurmDefaults) -> RunRecord` — saves the effective settings as `<run_dir>/slurm.json`; records the intent before `sbatch` (outbox entry with a unique comment `hx-<run_id>-<8 hex>` and the submitting pid; `run.submitting {comment}` sets `executor.type="slurm"` and `executor.host`); runs `sbatch --comment=<comment>`; then records `executor.slurm_job_id` (`run.submitted`). On sbatch failure it marks the run `failed` and raises `RunError`.
-  - SLURM outbox (login node only): `OUTBOX_DIR = "slurm/outbox"`, `track_slurm_run(layout: Layout, record: RunRecord, *, comment: str | None = None, submitter: dict[str, Any] | None = None) -> None` (entry `<home>/slurm/outbox/<run_id>.json` = `{run_id, comment, submitter: {pid, create_time}, published: <status>}`), `read_outbox(layout: Layout) -> list[dict[str, Any]]`, `mark_published(layout: Layout, record: RunRecord) -> None` (stores `published = record.status`; removes the entry when the status is terminal). Task 29's `reconcile` walks it.
+  - `submit_run(ctx: Context, record: RunRecord, defaults: SlurmDefaults) -> RunRecord` — saves the effective settings as `<run_dir>/slurm.json`; records the intent before `sbatch` (outbox entry, state `pending`, with a unique comment `hx-<run_id>-<8 hex>` and the submitting process; `run.submitting {comment}` sets `executor.type="slurm"` and `executor.host`); runs `sbatch --comment=<comment>`. Then: a job id → state `submitted` and `executor.slurm_job_id` (`run.submitted`), and a stop that came first (`cancel_requested`) is carried out at once (`scancel`); an unknown outcome (`SubmitUnknownError`) → state `unknown`, event `run.submit_unknown {reason}`, the run stays `queued` and is returned (`reconcile` resolves it); a rejection (`SlurmError`) → the run is `failed`, the intent dropped, `RunError` raised.
+  - SLURM outbox (login node only): `OUTBOX_DIR = "slurm/outbox"`. One entry per tracked run, `<home>/slurm/outbox/<run_id>.json` = `{run_id, state, job_id, comment, submitter: {pid, create_time}, intent_at, cancel_requested, published}`. `state` is the submission intent: `pending` (sbatch may be running) → `submitted` (job id known) or `unknown` (sbatch's outcome is not known). `cancel_requested` is a stop that arrived before the job id was known. `published` is the last status the login node published. Every change goes through the outbox lock (`dir_lock(<home>/slurm/outbox)`). An entry is removed only when its run's terminal status is published, its job is known (`submitted`), and no cancel is pending, or when `reconcile` proved that SLURM never took the job. Helpers: `track_slurm_run(layout: Layout, record: RunRecord, *, comment: str | None = None, submitter: dict[str, Any] | None = None) -> None` (state `submitted` when the record has a job id, else `pending`), `read_outbox(layout: Layout) -> list[dict[str, Any]]`, `mark_published(layout: Layout, record: RunRecord) -> None`, private `_intent`, `_update_intent`, `_drop_intent`, `_record_job`, `_cancel_requested`, `_end_if_active`. Task 29's `reconcile` walks the outbox.
+  - `_end_if_active(ctx, run_id, event_type, mutate, payload) -> RunRecord | None`: the conditional end of a SLURM run. Under the run lock it re-reads `run.yaml`; when the run already ended (the node wrote its end first) it writes and emits nothing and returns None, so no `run.lost` or `run.killed` event ever carries another status. Every terminal transition the login node makes on a SLURM run uses it (`Context.update_run` would emit the requested event even when the mutation kept the node's end).
+  - `SUBMIT_SETTLE_SECONDS = 300.0`: an unknown submission counts as absent only this long after its intent (sbatch retries, a slow controller).
   - `run_slurm_settings(run_dir: Path) -> SlurmDefaults | None` (the run's saved `slurm.json`); `remember_slurm_defaults(layout: Layout, defaults: SlurmDefaults) -> None` and `last_slurm_defaults(layout: Layout) -> SlurmDefaults | None` (`<home>/slurm_defaults.json`: the settings of the last launch that sent them, normally the hub's `slurm:` block).
   - `control.launch_run(ctx, req)`: when `req.slurm` is set (then remembered), or `ctx.descriptor.kind == "slurm"` (then the remembered settings, else `SlurmDefaults()`), validates, prepares, and submits; it never starts a local supervisor for such runs. `rerun` and `reinfer` use this path through `_start`.
   - `control.rerun` / `control.reinfer`: the child request copies `gpus=parent.gpus_requested`, `queue=parent.gpus_requested > 0` (a GPU rerun waits for GPUs instead of starting with none), and `slurm=run_slurm_settings(parent run dir)`. `_start` in the foreground drops `queue` (the run executes right here, so it must not also wait in the host queue), and refuses a SLURM run (`req.slurm` set, or a `slurm` env): `RunError("SLURM runs are always submitted; drop --foreground")` before anything is created. A foreground run would otherwise execute on the login node.
@@ -12866,6 +13379,7 @@ from hypothex.core.slurm import (
     SBATCH_FILE,
     SlurmError,
     SlurmJob,
+    SubmitUnknownError,
     cancel,
     find_submitted,
     flock_supported,
@@ -12948,6 +13462,27 @@ def test_queued_slurm_launch_never_waits_in_the_host_queue(
     record = control.launch_run(ctx, req)
     assert record.executor.slurm_job_id == "1000"
     assert not (ctx.run_dir(record) / "queue.json").exists()
+
+
+def test_an_unknown_sbatch_outcome_keeps_the_run_and_its_intent(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import slurm as slurm_module
+
+    real = slurm_module.submit
+
+    def accepted_then_timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        real(script, cwd, comment=comment)  # the controller took the job ...
+        raise slurm_module.SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", accepted_then_timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    record = control.launch_run(ctx, req)  # ... and no error: it may well run
+    assert record.status == RunStatus.QUEUED and record.executor.slurm_job_id is None
+    entry = json.loads((ctx.layout.home / "slurm" / "outbox" / f"{record.run_id}.json").read_text())
+    assert entry["state"] == "unknown" and entry["comment"] == slurm.job("1000")["comment"]
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id]
+    assert types[-1] == "run.submit_unknown" and "run.failed" not in types
 
 
 def test_submit_run_records_sbatch_failure(ctx: Context, toy_repo: Path, slurm: FakeSlurm) -> None:
@@ -13064,6 +13599,7 @@ In `src/hypothex/core/slurm.py`, replace the import block (from `from __future__
 ```python
 from __future__ import annotations
 
+import contextlib
 import errno
 import fcntl
 import getpass
@@ -13094,8 +13630,8 @@ from hypothex.core.ids import utcnow
 from hypothex.core.index import Index
 from hypothex.core.layout import Layout
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus, ScoreRecord
-from hypothex.core.store import RunStore, run_lock
-from hypothex.remote.config import SlurmDefaults
+from hypothex.core.store import RunStore, dir_lock, run_lock
+from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
 ```
 
 Add these constants right below the `NO_FLOCK_ERRNOS = ...` docstring line:
@@ -13108,6 +13644,8 @@ LAST_SLURM_DEFAULTS = "slurm_defaults.json"
 """``<home>/slurm_defaults.json``: the settings of the last launch that sent them."""
 OUTBOX_DIR = "slurm/outbox"
 """``<home>/slurm/outbox/<run_id>.json``: submission intent and publication cursor."""
+SUBMIT_SETTLE_SECONDS = 300.0
+"""An unknown submission counts as absent only this long after its intent."""
 ```
 
 Append to the end of the file:
@@ -13126,6 +13664,23 @@ def _outbox_path(layout: Layout, run_id: str) -> Path:
     return layout.home / OUTBOX_DIR / f"{run_id}.json"
 
 
+def _outbox_lock(layout: Layout) -> contextlib.AbstractContextManager[None]:
+    return dir_lock(layout.home / OUTBOX_DIR)
+
+
+def _done(entry: dict[str, Any]) -> bool:
+    """An entry can go: terminal status published, job known, no cancel pending."""
+    try:
+        published = RunStatus(entry["published"])
+    except (KeyError, ValueError):
+        return False
+    return (
+        published in TERMINAL_STATUSES
+        and entry.get("state") == "submitted"
+        and not entry.get("cancel_requested")
+    )
+
+
 def track_slurm_run(
     layout: Layout,
     record: RunRecord,
@@ -13136,10 +13691,11 @@ def track_slurm_run(
     """
     Put a SLURM run in this login node's outbox.
 
-    The entry holds the submission identity (``comment``, the submitting
-    process) and ``published``: the last status the login node published as
-    an event. ``reconcile`` walks the outbox, not the index, so nothing the
-    compute node writes is ever skipped (Task 29).
+    The entry holds the submission intent (``state``, ``comment``, the
+    submitting process, ``intent_at``), a stop that came before the job id
+    (``cancel_requested``), and ``published``: the last status the login node
+    published as an event. ``reconcile`` walks the outbox, not the index, so
+    nothing the compute node writes is ever skipped (Task 29).
 
     Parameters
     ----------
@@ -13151,15 +13707,47 @@ def track_slurm_run(
     submitter : dict, optional
         ``{"pid", "create_time"}`` of the process that calls ``sbatch``.
     """
+    job_id = record.executor.slurm_job_id
     entry = {
         "run_id": record.run_id,
+        "state": "submitted" if job_id else "pending",
+        "job_id": job_id,
         "comment": comment,
         "submitter": submitter,
+        "intent_at": utcnow().isoformat(),
+        "cancel_requested": False,
         "published": record.status.value,
     }
-    path = _outbox_path(layout, record.run_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps(entry))
+    with _outbox_lock(layout):
+        atomic_write_text(_outbox_path(layout, record.run_id), json.dumps(entry))
+
+
+def _intent(layout: Layout, run_id: str) -> dict[str, Any] | None:
+    try:
+        entry = json.loads(_outbox_path(layout, run_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
+def _update_intent(layout: Layout, run_id: str, **fields: Any) -> dict[str, Any] | None:
+    """Change an outbox entry under the outbox lock; it is removed once done."""
+    path = _outbox_path(layout, run_id)
+    with _outbox_lock(layout):
+        entry = _intent(layout, run_id)
+        if entry is None:
+            return None
+        entry.update(fields)
+        if _done(entry):
+            path.unlink(missing_ok=True)
+        else:
+            atomic_write_text(path, json.dumps(entry))
+    return entry
+
+
+def _drop_intent(layout: Layout, run_id: str) -> None:
+    with _outbox_lock(layout):
+        _outbox_path(layout, run_id).unlink(missing_ok=True)
 
 
 def read_outbox(layout: Layout) -> list[dict[str, Any]]:
@@ -13191,23 +13779,15 @@ def mark_published(layout: Layout, record: RunRecord) -> None:
     """
     Record that the login node published ``record.status``.
 
-    A terminal status ends the run's outbox entry (it is removed).
+    The entry goes once that status is terminal and the submission is settled
+    (job known, no cancel pending); else ``reconcile`` keeps working on it.
 
     Parameters
     ----------
     layout : Layout
     record : RunRecord
     """
-    path = _outbox_path(layout, record.run_id)
-    if record.status in TERMINAL_STATUSES:
-        path.unlink(missing_ok=True)
-        return
-    try:
-        entry = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    entry["published"] = record.status.value
-    atomic_write_text(path, json.dumps(entry))
+    _update_intent(layout, record.run_id, published=record.status.value)
 
 
 def _as_slurm(host: str) -> Callable[[RunRecord], RunRecord]:
@@ -13230,25 +13810,105 @@ def _with_job(job_id: str) -> Callable[[RunRecord], RunRecord]:
     return mutate
 
 
+def _end_if_active(
+    ctx: Context,
+    run_id: str,
+    event_type: str,
+    mutate: Callable[[RunRecord], RunRecord],
+    payload: dict[str, Any],
+) -> RunRecord | None:
+    """
+    End an active SLURM run and emit ``event_type``; None when it had already ended.
+
+    ``Context.update_run`` emits its event even when ``mutate`` keeps a record
+    that the compute node ended first (a ``run.lost`` carrying ``finished``).
+    Here the check, the write, the event, and the index update happen under
+    the run lock, and nothing is written or emitted for a run that ended: the
+    caller then publishes the node's own end (``sync_node_run``, Task 29).
+    """
+    project = ctx.find_record(run_id).project
+    with run_lock(ctx.layout.run_dir(project, run_id)):
+        current = ctx.store.read_record(project, run_id)
+        if current.status in TERMINAL_STATUSES:
+            return None
+        ended = mutate(current)
+        ctx.store.write_record(ended)
+        ctx.events.append(
+            event_type,
+            project=project,
+            run_id=run_id,
+            payload={"status": ended.status.value, **payload},
+        )
+        ctx.index.upsert_run(ended)
+    return ended
+
+
 def _fail_submission(ctx: Context, record: RunRecord, exc: SlurmError) -> RunError:
-    failed = ctx.update_run(
-        record.run_id, "run.failed", _end(RunStatus.FAILED), {"reason": f"sbatch: {exc}"}
+    """SLURM rejected the job for sure: fail the run and forget the intent."""
+    _end_if_active(
+        ctx, record.run_id, "run.failed", _end(RunStatus.FAILED), {"reason": f"sbatch: {exc}"}
     )
-    mark_published(ctx.layout, failed)
+    _drop_intent(ctx.layout, record.run_id)
     return RunError(f"could not submit run {record.run_id} to SLURM: {exc}")
+
+
+def _cancel_requested(ctx: Context, run_id: str, job_id: str) -> bool:
+    """
+    ``scancel`` a job whose run was stopped before its job id was known.
+
+    Returns True once the job is cancelled or already ended (``cancel_requested``
+    is cleared then); False to try again on the next poll.
+    """
+    try:
+        cancel(job_id)
+    except SlurmError as exc:
+        try:
+            job = poll([job_id]).get(job_id)
+        except SlurmError:
+            return False
+        if job is not None and not is_finished(job):
+            log.warning("run %s: could not cancel slurm job %s yet: %s", run_id, job_id, exc)
+            return False
+    _update_intent(ctx.layout, run_id, cancel_requested=False)
+    return True
+
+
+def _record_job(ctx: Context, run_id: str, job_id: str, *, recovered: bool = False) -> RunRecord:
+    """
+    Record a submission's job id; carry out a stop that arrived before it.
+
+    The intent is updated under the outbox lock, and a stop sets
+    ``cancel_requested`` under the same lock (``stop_slurm_run``, Task 30), so
+    exactly one of them cancels the job.
+    """
+    entry = _update_intent(ctx.layout, run_id, state="submitted", job_id=job_id)
+    payload: dict[str, Any] = {"slurm_job_id": job_id}
+    if recovered:
+        payload["recovered"] = True
+    record = ctx.update_run(run_id, "run.submitted", _with_job(job_id), payload)
+    if entry is not None and entry.get("cancel_requested"):
+        _cancel_requested(ctx, run_id, job_id)
+    return record
 
 
 def submit_run(ctx: Context, record: RunRecord, defaults: SlurmDefaults) -> RunRecord:
     """
     Submit a queued run as a SLURM job and record the job id.
 
-    The intent is written before ``sbatch`` runs: the outbox entry (a unique
-    comment ``hx-<run_id>-<nonce>`` and this process) and ``run.submitting``,
-    which marks the run as a SLURM run. If this process dies after ``sbatch``
-    accepted the job but before the job id is recorded, ``reconcile`` finds
-    the job by name and comment and records it. The script is saved as
-    ``<run_dir>/slurm.sbatch``. The run stays ``queued`` until
-    ``hx run --child`` starts on the node.
+    The intent is written before ``sbatch`` runs: the outbox entry (state
+    ``pending``, a unique comment ``hx-<run_id>-<nonce>``, this process) and
+    ``run.submitting``, which marks the run as a SLURM run. Then:
+
+    - a job id: recorded (``run.submitted``); a stop that came first is
+      carried out now (``scancel``);
+    - an unknown outcome (sbatch timed out, a communication error, no job
+      id): state ``unknown``, event ``run.submit_unknown``, and the run stays
+      ``queued``; ``reconcile`` finds the job by its comment, or fails the run
+      once SLURM provably never took it;
+    - a rejection: the run is ``failed`` and ``RunError`` is raised.
+
+    The script is saved as ``<run_dir>/slurm.sbatch``. The run stays
+    ``queued`` until ``hx run --child`` starts on the node.
 
     Parameters
     ----------
@@ -13260,12 +13920,13 @@ def submit_run(ctx: Context, record: RunRecord, defaults: SlurmDefaults) -> RunR
     Returns
     -------
     RunRecord
-        The run with ``executor.type == "slurm"`` and ``executor.slurm_job_id``.
+        The run with ``executor.type == "slurm"`` (and ``executor.slurm_job_id``
+        unless the outcome is unknown).
 
     Raises
     ------
     RunError
-        sbatch failed; the run is then recorded as ``failed`` with the reason.
+        SLURM rejected the job; the run is then recorded as ``failed``.
     """
     run_dir = ctx.run_dir(record)
     try:
@@ -13283,11 +13944,15 @@ def submit_run(ctx: Context, record: RunRecord, defaults: SlurmDefaults) -> RunR
     )
     try:
         job_id = submit(script, Path(record.cwd), comment=comment)
+    except SubmitUnknownError as exc:
+        # sbatch may have accepted it: never a rejection. reconcile resolves it by comment
+        _update_intent(ctx.layout, record.run_id, state="unknown")
+        current = ctx.find_record(record.run_id)
+        ctx.emit("run.submit_unknown", current, {"reason": str(exc)[:500], "comment": comment})
+        return current
     except SlurmError as exc:
         raise _fail_submission(ctx, record, exc) from exc
-    return ctx.update_run(
-        record.run_id, "run.submitted", _with_job(job_id), {"slurm_job_id": job_id}
-    )
+    return _record_job(ctx, record.run_id, job_id)
 
 
 def run_slurm_settings(run_dir: Path) -> SlurmDefaults | None:
@@ -13470,7 +14135,7 @@ with:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py tests/core/test_control.py -v`
-Expected: `39 passed` in `test_slurm.py` (the end-to-end test takes a few seconds: the fake `sbatch` really runs `hx run --child`); `tests/core/test_control.py` all pass.
+Expected: `45 passed` in `test_slurm.py` (the end-to-end test takes a few seconds: the fake `sbatch` really runs `hx run --child`); `tests/core/test_control.py` all pass.
 
 - [ ] **Step 6: Lint and type-check**
 
@@ -13497,7 +14162,7 @@ git commit -m "feat(slurm): launch_run submits runs to slurm on slurm environmen
 - Consumes: `poll`, `is_finished`, `lost_reason` (Task 26); `SLURM_EXECUTOR` (Task 27); `_end` (Task 28); `ctx.index.list_runs(status=..., include_archived=True, limit=None)`, `ctx.find_record`, `ctx.update_run`.
 - Produces:
   - `sync_node_run(ctx: Context, seen: RunStatus, current: RunRecord) -> RunRecord | None` — the login node publishes what the compute node wrote. `seen` is the outbox's `published` status (never the index's: another login-node write may have indexed the node's terminal `run.yaml` already). When `run.yaml` has a new status it emits `run.started` (running) or `run.<status>` (`{status, exit_code, source: "node"}`), upserts the index, and re-indexes the metric points; a finished task run without scores is scored here (`evaluate_run`; a scoring error emits `run.eval_skipped`); then `mark_published` (Task 28) moves the cursor, or removes the entry for a terminal status. When `exit.json` exists but `run.yaml` is still active, the exit record is applied with `update_run`. Returns the record when it changed.
-  - `reconcile(ctx: Context, *, confirm_gone: set[str] | None = None) -> list[RunRecord]` — walks the SLURM outbox (Task 28), not the index: syncs each tracked run from its folder (`sync_node_run`); a tracked run with no job id yet (its submitter crashed after the intent) is matched with `find_submitted` (job id recorded, `run.submitted {slurm_job_id, recovered: true}`) or, when its submitter is dead and SLURM has no such job, `failed` (`sbatch never accepted job hx-<run_id>`); then compares the rest with SLURM; returns changed runs; emits `run.slurm_state` (node assigned) and `run.lost` (`{reason, slurm_job_id, slurm_state}`); raises `SlurmError` when `squeue` fails, after the folder sync. Entries of other environments or of deleted runs are dropped.
+  - `reconcile(ctx: Context, *, confirm_gone: dict[str, SlurmJob | None] | None = None) -> list[RunRecord]` — walks the SLURM outbox (Task 28), not the index: syncs each tracked run from its folder (`sync_node_run`). A submission whose job id is not known (`pending` whose submitter died, or `unknown`) is resolved only by its comment (`find_submitted`): a job carrying it is recorded (`run.submitted {slurm_job_id, recovered: true}`; a pending cancel is carried out); the run fails (`sbatch never accepted job hx-<run_id>: ...`) and the intent is dropped only when both `squeue` and `sacct` answered without such a job, its submitter is dead, and `SUBMIT_SETTLE_SECONDS` passed since the intent. A job the node already names in `run.yaml` settles the intent too. A `cancel_requested` job is cancelled once known. Then compares the rest with SLURM; returns changed runs; emits `run.slurm_state` (node assigned) and `run.lost` (`{reason, slurm_job_id, slurm_state}`, the reason naming SLURM's end state, such as `NODE_FAIL`, whenever `sacct` gave one at either of the two polls); raises `SlurmError` when `squeue` fails, after the folder sync. Every end it writes goes through `_end_if_active`: when the node's own end arrived first, that end is published instead (`sync_node_run`), and the outbox entry is acknowledged only after the event of the run's actual terminal status. Entries of other environments or of deleted runs are dropped.
   - `control._repair_one` returns `None` for runs with `executor.type == "slurm"` (so `repair_runs`, the API's 30 s repair loop, and `wait_for_run` never mark them lost).
 
 - [ ] **Step 1: Write the failing tests**
@@ -13534,6 +14199,7 @@ from hypothex.core.slurm import (
     SBATCH_FILE,
     SlurmError,
     SlurmJob,
+    SubmitUnknownError,
     cancel,
     find_submitted,
     flock_supported,
@@ -13614,7 +14280,9 @@ def test_reconcile_marks_vanished_job_lost(ctx: Context, slurm: FakeSlurm) -> No
     assert changed[0].ended_at is not None
     last = ctx.events.since(0, limit=10_000)[-1]
     assert last.type == "run.lost"
-    assert last.payload["reason"] == "slurm job 1000 vanished from squeue and sacct; no exit record"
+    assert last.payload["reason"] == (
+        "slurm job 1000 left the queue; SLURM reports no end state for it; no exit record"
+    )
     assert last.payload["slurm_state"] is None
 
 
@@ -13704,23 +14372,101 @@ def test_reconcile_ignores_local_and_foreign_runs(ctx: Context, slurm: FakeSlurm
 
 def test_reconcile_confirm_gone_needs_two_polls(ctx: Context, slurm: FakeSlurm) -> None:
     slurm_run(ctx, "r1", job_id="1000")
-    gone: set[str] = set()
+    gone: dict[str, SlurmJob | None] = {}
     assert reconcile(ctx, confirm_gone=gone) == []
-    assert gone == {"1000"}
+    assert gone == {"1000": None}
     assert ctx.find_record("r1").status == RunStatus.RUNNING
     [lost] = reconcile(ctx, confirm_gone=gone)
     assert lost.status == RunStatus.LOST
-    assert gone == set()
+    assert gone == {}
 
 
 def test_reconcile_confirm_gone_resets_when_job_reappears(ctx: Context, slurm: FakeSlurm) -> None:
     slurm_run(ctx, "r1", job_id="1000")
-    gone: set[str] = set()
+    gone: dict[str, SlurmJob | None] = {}
     reconcile(ctx, confirm_gone=gone)
     slurm.add_job("1000", "RUNNING", node="n1")  # requeued / visible again
     reconcile(ctx, confirm_gone=gone)
-    assert gone == set()
+    assert gone == {}
     assert ctx.find_record("r1").status == RunStatus.RUNNING
+
+
+def test_the_lost_reason_keeps_slurm_s_end_state(ctx: Context, slurm: FakeSlurm) -> None:
+    # NODE_FAIL in sacct at the first poll; sacct is down at the second
+    slurm.add_job("1000", "NODE_FAIL", node="r208u06n02", exit="0:0", in_queue=False)
+    slurm_run(ctx, "r1", job_id="1000")
+    gone: dict[str, SlurmJob | None] = {}
+    assert reconcile(ctx, confirm_gone=gone) == []
+    slurm.set(fail={"sacct": "sacct: error: Slurm accounting storage is disabled"})
+    [lost] = reconcile(ctx, confirm_gone=gone)
+    assert lost.status == RunStatus.LOST
+    last = ctx.events.since(0, limit=10_000)[-1]
+    assert (last.type, last.payload["slurm_state"]) == ("run.lost", "NODE_FAIL")
+    assert last.payload["reason"].startswith("SLURM ended job 1000 with NODE_FAIL on r208u06n02")
+
+
+def test_a_node_that_ends_during_reconcile_is_published_not_lost(
+    ctx: Context, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slurm_run(ctx, "r1", job_id="1000")
+    real = slurm_module.poll
+
+    def poll_then_the_node_finishes(job_ids: list[str]) -> dict[str, SlurmJob]:
+        jobs = real(job_ids)  # gone: the run is about to be marked lost ...
+        done = ctx.find_record("r1").model_copy(update={"status": RunStatus.FINISHED})
+        ctx.store.write_record(done.model_copy(update={"exit_code": 0}))  # ... the node ends
+        return jobs
+
+    monkeypatch.setattr(slurm_module, "poll", poll_then_the_node_finishes)
+    [done] = reconcile(ctx)
+    assert done.status == RunStatus.FINISHED
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
+    assert "run.lost" not in types and types.count("run.finished") == 1
+    assert ctx.events.since(0, limit=10_000)[-1].payload.get("status") != "lost"
+    assert not outbox(ctx, "r1").exists()  # acknowledged after run.finished, not before
+
+
+def test_an_unknown_outcome_is_resolved_by_the_job_s_comment(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = slurm_module.submit
+
+    def accepted_then_timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        real(script, cwd, comment=comment)
+        raise SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", accepted_then_timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    record = control.launch_run(ctx, req)
+    monkeypatch.setattr(slurm_module, "submit", real)
+    [found] = reconcile(ctx)
+    assert (found.status, found.executor.slurm_job_id) == (RunStatus.QUEUED, "1000")
+    assert json.loads(outbox(ctx, record.run_id).read_text())["state"] == "submitted"
+    assert len(slurm.calls("sbatch")) == 1  # never submitted twice
+
+
+def test_an_unknown_outcome_fails_only_when_slurm_provably_never_took_the_job(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    run_id = control.launch_run(ctx, req).run_id
+    assert reconcile(ctx) == []  # too early: the controller may still create it
+    entry = json.loads(outbox(ctx, run_id).read_text())
+    entry["intent_at"] = "2000-01-01T00:00:00+00:00"
+    outbox(ctx, run_id).write_text(json.dumps(entry))
+    slurm.set(fail={"sacct": "sacct: error: Slurm accounting storage is disabled"})
+    assert reconcile(ctx) == []  # sacct did not answer: unknown, never absent
+    assert ctx.find_record(run_id).status == RunStatus.QUEUED
+    slurm.set(fail={})
+    [failed] = reconcile(ctx)
+    assert failed.status == RunStatus.FAILED
+    last = ctx.events.since(0, limit=10_000)[-1]
+    assert last.type == "run.failed" and "sbatch never accepted" in last.payload["reason"]
+    assert not outbox(ctx, run_id).exists()
 
 
 def test_repair_runs_leaves_slurm_runs_to_reconcile(ctx: Context) -> None:
@@ -13789,6 +14535,11 @@ def test_crash_before_sbatch_fails_the_run_once_the_submitter_is_gone(
     entry = json.loads(outbox(ctx, run_id).read_text())
     entry["submitter"] = {"pid": dead_pid(), "create_time": None}  # the env server restarted
     outbox(ctx, run_id).write_text(json.dumps(entry))
+    assert reconcile(ctx) == []  # still inside the settle window: no conclusion yet
+    assert json.loads(outbox(ctx, run_id).read_text())["state"] == "unknown"
+    entry = json.loads(outbox(ctx, run_id).read_text())
+    entry["intent_at"] = "2000-01-01T00:00:00+00:00"
+    outbox(ctx, run_id).write_text(json.dumps(entry))
     [failed] = reconcile(ctx)
     assert failed.status == RunStatus.FAILED
     last = ctx.events.since(0, limit=10_000)[-1]
@@ -13849,6 +14600,7 @@ In `src/hypothex/core/slurm.py`, replace the import block (from `from __future__
 ```python
 from __future__ import annotations
 
+import contextlib
 import errno
 import fcntl
 import getpass
@@ -13887,8 +14639,8 @@ from hypothex.core.records import (
     RunStatus,
     ScoreRecord,
 )
-from hypothex.core.store import RunStore, run_lock
-from hypothex.remote.config import SlurmDefaults
+from hypothex.core.store import RunStore, dir_lock, run_lock
+from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
 ```
 
 Append to the end of the file:
@@ -13946,15 +14698,19 @@ def sync_node_run(ctx: Context, seen: RunStatus, current: RunRecord) -> RunRecor
     if current.status in ACTIVE_STATUSES:
         exit_record = _read_exit(ctx.run_dir(current))
         if exit_record is not None:
-            # run.yaml lost the node's last write (no flock); the exit record wins
+            # run.yaml lost the node's last write; the exit record wins
             status = exit_record["status"]
-            current = ctx.update_run(
+            applied = _end_if_active(
+                ctx,
                 current.run_id,
                 f"run.{status}",
                 _apply_exit(exit_record),
                 {"exit_code": exit_record.get("exit_code"), "source": "exit.json"},
             )
-            seen, changed = current.status, True
+            if applied is not None:
+                current, seen, changed = applied, applied.status, True
+            else:  # ended meanwhile: the terminal record is published below
+                current = ctx.find_record(current.run_id)
     if current.status != seen:
         event = (
             "run.started" if current.status == RunStatus.RUNNING else f"run.{current.status.value}"
@@ -13979,35 +14735,69 @@ def sync_node_run(ctx: Context, seen: RunStatus, current: RunRecord) -> RunRecor
     return current if changed else None
 
 
-def _recover_submission(
+def _published(layout: Layout, current: RunRecord) -> RunStatus:
+    """The status the login node last published for a run (its outbox entry's cursor)."""
+    entry = _intent(layout, current.run_id)
+    try:
+        return RunStatus(entry["published"]) if entry is not None else current.status
+    except (KeyError, ValueError):
+        return current.status
+
+
+def _publish_node_end(ctx: Context, run_id: str) -> RunRecord:
+    """A requested end lost the race with the node: publish the node's own end instead."""
+    current = ctx.find_record(run_id)
+    return sync_node_run(ctx, _published(ctx.layout, current), current) or current
+
+
+def _intent_age(entry: dict[str, Any]) -> float:
+    try:
+        return (utcnow() - datetime.fromisoformat(entry["intent_at"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return float("inf")
+
+
+def _resolve_intent(
     ctx: Context, entry: dict[str, Any], current: RunRecord
 ) -> RunRecord | None:
     """
-    Finish a submission whose process died between the intent and the job id.
+    Settle a submission whose job id is not known, by its comment only.
 
-    The job is looked up by name and comment (``find_submitted``). Without a
-    job, the run fails only once its submitter is dead: a live submitter may
-    still be waiting for ``sbatch``.
+    A job carrying the comment is recorded. The run fails, and the intent is
+    dropped, only when SLURM provably never took the job: both ``squeue`` and
+    ``sacct`` answered without it, its submitter is dead (a ``pending`` one
+    may still be in ``sbatch``), and ``SUBMIT_SETTLE_SECONDS`` passed since
+    the intent. Anything less leaves the intent for the next poll.
     """
+    run_id = current.run_id
     comment = entry.get("comment")
-    job = find_submitted(current.run_id, comment) if comment else None
-    if job is not None:
-        return ctx.update_run(
-            current.run_id,
-            "run.submitted",
-            _with_job(job.job_id),
-            {"slurm_job_id": job.job_id, "recovered": True},
-        )
-    submitter = entry.get("submitter") or {}
-    if process_alive(submitter.get("pid"), submitter.get("create_time")):
+    if not comment:
         return None
-    failed = ctx.update_run(
-        current.run_id,
+    try:
+        job, complete = find_submitted(comment)
+    except SlurmError as exc:
+        log.warning("run %s: squeue failed; submission still unknown: %s", run_id, exc)
+        return None
+    if job is not None:
+        return _record_job(ctx, run_id, job.job_id, recovered=True)
+    if entry.get("state") == "pending":
+        submitter = entry.get("submitter") or {}
+        if process_alive(submitter.get("pid"), submitter.get("create_time")):
+            return None  # sbatch may still answer it
+        entry = _update_intent(ctx.layout, run_id, state="unknown") or entry
+    if not complete or _intent_age(entry) < SUBMIT_SETTLE_SECONDS:
+        return None
+    failed = _end_if_active(
+        ctx,
+        run_id,
         "run.failed",
         _end(RunStatus.FAILED),
-        {"reason": f"submission was interrupted: sbatch never accepted job hx-{current.run_id}"},
+        {
+            "reason": f"sbatch never accepted job hx-{run_id}: "
+            f"no job with comment {comment} in squeue or sacct"
+        },
     )
-    mark_published(ctx.layout, failed)
+    _drop_intent(ctx.layout, run_id)  # after the end: a crash in between only repeats it
     return failed
 
 
@@ -14022,23 +14812,28 @@ def _tracked_slurm_runs(
         try:
             current = ctx.find_record(run_id)
         except HypothexError:  # the run is gone
-            _outbox_path(ctx.layout, run_id).unlink(missing_ok=True)
+            _drop_intent(ctx.layout, run_id)
             continue
         if current.environment_id != ctx.descriptor.environment_id:
-            _outbox_path(ctx.layout, run_id).unlink(missing_ok=True)
+            _drop_intent(ctx.layout, run_id)
             continue
         published = sync_node_run(ctx, RunStatus(entry["published"]), current)
         if published is not None:
             changed.append(published)
             current = published
-        if current.status not in ACTIVE_STATUSES:
-            continue  # the node's exit record is in
-        if current.executor.slurm_job_id is None:
-            recovered = _recover_submission(ctx, entry, current)
-            if recovered is not None:
-                changed.append(recovered)
+        job_id = entry.get("job_id") or current.executor.slurm_job_id
+        if job_id is None:
+            resolved = _resolve_intent(ctx, entry, current)
+            if resolved is not None:
+                changed.append(resolved)
             continue  # tracked from the next poll on
-        found.append((current.executor.slurm_job_id, current))
+        if entry.get("state") != "submitted":  # the node's run.yaml names the job
+            entry = _update_intent(ctx.layout, run_id, state="submitted", job_id=job_id) or entry
+        if entry.get("cancel_requested"):
+            _cancel_requested(ctx, run_id, job_id)
+            continue
+        if current.status in ACTIVE_STATUSES:
+            found.append((job_id, current))
     return sorted(found, key=lambda pair: pair[1].run_id), changed
 
 
@@ -14051,7 +14846,9 @@ def _set_node(node: str) -> Callable[[RunRecord], RunRecord]:
     return mutate
 
 
-def reconcile(ctx: Context, *, confirm_gone: set[str] | None = None) -> list[RunRecord]:
+def reconcile(
+    ctx: Context, *, confirm_gone: dict[str, SlurmJob | None] | None = None
+) -> list[RunRecord]:
     """
     Compare this environment's active SLURM runs with SLURM and fix their state.
 
@@ -14068,11 +14865,12 @@ def reconcile(ctx: Context, *, confirm_gone: set[str] | None = None) -> list[Run
     Parameters
     ----------
     ctx : Context
-    confirm_gone : set of str, optional
-        Job ids seen gone by the previous call. When given, a run is marked
-        lost only on the second call in a row that finds its job gone (this
-        tolerates a shared filesystem that shows the node's final
-        ``run.yaml`` late). The set is updated in place. None marks at once.
+    confirm_gone : dict of str to SlurmJob or None, optional
+        Job ids seen gone by the previous call, with the ``sacct`` record seen
+        then. When given, a run is marked lost only on the second call in a row
+        that finds its job gone (this tolerates a shared filesystem that shows
+        the node's final ``run.yaml`` late), and the lost reason uses whichever
+        poll had SLURM's end state. Updated in place. None marks at once.
 
     Returns
     -------
@@ -14091,11 +14889,12 @@ def reconcile(ctx: Context, *, confirm_gone: set[str] | None = None) -> list[Run
             confirm_gone.clear()
         return changed
     jobs = poll([job_id for job_id, _ in runs])
-    gone_now: set[str] = set()
+    gone_now: dict[str, SlurmJob | None] = {}
     for job_id, record in runs:
         job = jobs.get(job_id)
         current = ctx.find_record(record.run_id)
-        if current.status in TERMINAL_STATUSES:
+        if current.status in TERMINAL_STATUSES:  # the node ended it since the folder sync
+            changed.append(_publish_node_end(ctx, current.run_id))
             continue
         if job is not None and not is_finished(job):
             if job.node is not None and job.node != current.executor.node:
@@ -14109,9 +14908,12 @@ def reconcile(ctx: Context, *, confirm_gone: set[str] | None = None) -> list[Run
                 )
             continue
         if confirm_gone is not None and job_id not in confirm_gone:
-            gone_now.add(job_id)
+            gone_now[job_id] = job
             continue
-        lost = ctx.update_run(
+        if job is None and confirm_gone is not None:
+            job = confirm_gone.get(job_id)  # sacct had the end state at the first poll
+        lost = _end_if_active(
+            ctx,
             current.run_id,
             "run.lost",
             _end(RunStatus.LOST),
@@ -14121,7 +14923,10 @@ def reconcile(ctx: Context, *, confirm_gone: set[str] | None = None) -> list[Run
                 "slurm_state": job.state if job is not None else None,
             },
         )
-        mark_published(ctx.layout, lost)
+        if lost is None:  # the node's end arrived first: publish it, never "lost"
+            changed.append(_publish_node_end(ctx, current.run_id))
+            continue
+        mark_published(ctx.layout, lost)  # acknowledged after the event of this end
         changed.append(lost)
     if confirm_gone is not None:
         confirm_gone.clear()
@@ -14152,7 +14957,7 @@ with:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py tests/core/test_control.py -v`
-Expected: `55 passed` in `test_slurm.py`; `tests/core/test_control.py` all pass.
+Expected: `65 passed` in `test_slurm.py`; `tests/core/test_control.py` all pass.
 
 - [ ] **Step 6: Lint and type-check**
 
@@ -14178,7 +14983,7 @@ git commit -m "feat(slurm): reconcile runs with squeue and sacct; lost when a jo
 **Interfaces:**
 - Consumes: `cancel`, `poll`, `is_finished` (Task 26); `_end` (Task 28); `control.stop_run(ctx, run_id, *, grace)` and `STOP_MARKER` (phase 1a).
 - Produces:
-  - `stop_slurm_run(ctx: Context, record: RunRecord, *, grace: float) -> RunRecord` — `scancel` (a run whose job id was never recorded, Task 29, is first matched to its job with `find_submitted`; with no job at all the stop marker makes a job that SLURM accepts later end `killed` before it starts); writes the stop marker only after `scancel` worked (or the job is already gone); queued → `killed` at once; running → wait up to `grace` s for the node's own `killed`, else mark `killed`; `RunError` when `scancel` fails and the job is still in the queue, and then no stop marker is left behind (a job that later ends normally must not be recorded `killed` by the node).
+  - `stop_slurm_run(ctx: Context, record: RunRecord, *, grace: float) -> RunRecord` — `scancel`. A run whose job id is not known yet (its submission is `pending` or `unknown`, Task 28) is first looked up by its comment (`find_submitted`); with no job yet, the stop sets `cancel_requested` in the intent, under the outbox lock that `_record_job` also takes, so whichever learns the job id cancels it: `submit_run` when `sbatch` answers later, or `reconcile` when it finds the job; the intent stays until that job is cancelled or proven absent. Writes the stop marker only after `scancel` worked, the job is already gone, or the cancel is requested (a job SLURM accepts later then ends `killed` before it starts); queued → `killed` at once; running → wait up to `grace` s for the node's own `killed`, else mark `killed` with `_end_if_active` (when the node's end came first, that end is published and returned instead); `RunError` when `scancel` fails and the job is still in the queue, and then no stop marker is left behind (a job that later ends normally must not be recorded `killed` by the node).
   - `control.stop_run` calls it for `executor.type == "slurm"` before it writes the local stop marker and before any local pid is touched.
 
 - [ ] **Step 1: Write the failing tests**
@@ -14215,6 +15020,7 @@ from hypothex.core.slurm import (
     SBATCH_FILE,
     SlurmError,
     SlurmJob,
+    SubmitUnknownError,
     cancel,
     find_submitted,
     flock_supported,
@@ -14319,6 +15125,68 @@ def test_stop_finds_the_job_a_crashed_submission_left(
     assert stopped.status == RunStatus.KILLED
     assert slurm.calls("scancel") == [["1000"]]
     assert not (ctx.layout.home / "slurm" / "outbox" / f"{run_id}.json").exists()
+
+
+def test_a_stop_during_sbatch_cancels_the_job_sbatch_then_creates(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = slurm_module.submit
+    stopped: list[RunRecord] = []
+
+    def stop_arrives_during_sbatch(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        [run_id] = list(ctx.index.run_ids())
+        stopped.append(control.stop_run(ctx, run_id))  # no job yet: a cancel request
+        return real(script, cwd, comment=comment)  # ... then SLURM accepts the job
+
+    monkeypatch.setattr(slurm_module, "submit", stop_arrives_during_sbatch)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    record = control.launch_run(ctx, req)
+    assert stopped[0].status == RunStatus.KILLED
+    assert slurm.job("1000")["state"] == "CANCELLED"
+    assert slurm.calls("scancel") == [["1000"]]
+    assert ctx.find_record(record.run_id).status == RunStatus.KILLED
+    assert not (ctx.layout.home / "slurm" / "outbox" / f"{record.run_id}.json").exists()
+
+
+def test_a_stop_of_an_unknown_submission_cancels_the_job_reconcile_finds(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    run_id = control.launch_run(ctx, req).run_id
+    assert control.stop_run(ctx, run_id).status == RunStatus.KILLED
+    box = ctx.layout.home / "slurm" / "outbox" / f"{run_id}.json"
+    entry = json.loads(box.read_text())
+    assert entry["cancel_requested"] is True  # kept: the job may still appear
+    # the controller was slow: the job shows up after the stop
+    slurm.add_job("1000", "PENDING", name=f"hx-{run_id}", comment=entry["comment"])
+    reconcile(ctx)
+    assert slurm.job("1000")["state"] == "CANCELLED"
+    assert not box.exists()
+    assert ctx.find_record(run_id).status == RunStatus.KILLED
+
+
+def test_a_stop_racing_the_node_s_end_publishes_the_node_s_end(
+    ctx: Context, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    slurm_run(ctx, "r1", job_id="1000", node="n1")
+    real = slurm_module.cancel
+
+    def cancel_as_the_node_finishes(job_id: str) -> None:
+        real(job_id)
+        done = ctx.find_record("r1").model_copy(update={"status": RunStatus.FINISHED})
+        ctx.store.write_record(done.model_copy(update={"exit_code": 0}))
+
+    monkeypatch.setattr(slurm_module, "cancel", cancel_as_the_node_finishes)
+    ended = control.stop_run(ctx, "r1", grace=0.0)
+    assert ended.status == RunStatus.FINISHED
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
+    assert "run.killed" not in types and types.count("run.finished") == 1
+    assert not (ctx.layout.home / "slurm" / "outbox" / "r1.json").exists()
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -14333,6 +15201,7 @@ In `src/hypothex/core/slurm.py`, replace the import block (from `from __future__
 ```python
 from __future__ import annotations
 
+import contextlib
 import errno
 import fcntl
 import getpass
@@ -14372,8 +15241,8 @@ from hypothex.core.records import (
     RunStatus,
     ScoreRecord,
 )
-from hypothex.core.store import RunStore, run_lock
-from hypothex.remote.config import SlurmDefaults
+from hypothex.core.store import RunStore, dir_lock, run_lock
+from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
 ```
 
 Append to the end of the file:
@@ -14405,11 +15274,7 @@ def stop_slurm_run(ctx: Context, record: RunRecord, *, grace: float) -> RunRecor
     RunError
         scancel failed and the job is still queued or running.
     """
-    job_id = record.executor.slurm_job_id
-    if job_id is None:  # its submitter crashed after sbatch: find the job by name and comment
-        entry = next((e for e in read_outbox(ctx.layout) if e["run_id"] == record.run_id), {})
-        found = find_submitted(record.run_id, entry["comment"]) if entry.get("comment") else None
-        job_id = found.job_id if found is not None else None
+    job_id = record.executor.slurm_job_id or _job_or_cancel_request(ctx, record.run_id)
     if job_id is not None:
         try:
             cancel(job_id)
@@ -14427,16 +15292,55 @@ def stop_slurm_run(ctx: Context, record: RunRecord, *, grace: float) -> RunRecor
         while time.monotonic() < deadline:
             current = ctx.find_record(record.run_id)
             if current.status in TERMINAL_STATUSES:
-                return current
+                return _publish_node_end(ctx, record.run_id)
             time.sleep(0.1)
-    killed = ctx.update_run(
+    killed = _end_if_active(
+        ctx,
         record.run_id,
         "run.killed",
         _end(RunStatus.KILLED),
         {"reason": "stopped", "slurm_job_id": job_id},
     )
+    if killed is None:  # the node's end came first: publish that end, not `killed`
+        return _publish_node_end(ctx, record.run_id)
     mark_published(ctx.layout, killed)
     return killed
+
+
+def _job_or_cancel_request(ctx: Context, run_id: str) -> str | None:
+    """
+    The job of a submission whose id is not recorded yet, or a cancel request.
+
+    The job is looked up by the intent's comment. Without a job, ``cancel_requested``
+    is set under the outbox lock, the same lock ``_record_job`` takes when
+    ``sbatch`` answers or ``reconcile`` finds the job: whichever runs second
+    sees the other's change, so the job that appears later is cancelled.
+    """
+    entry = _intent(ctx.layout, run_id)
+    if entry is None:
+        return None
+    found: SlurmJob | None = None
+    if entry.get("job_id") is None and entry.get("comment"):
+        try:
+            found, _ = find_submitted(entry["comment"])
+        except SlurmError as exc:
+            log.warning("run %s: squeue failed while stopping: %s", run_id, exc)
+    with _outbox_lock(ctx.layout):
+        entry = _intent(ctx.layout, run_id)
+        if entry is None:
+            return None
+        if entry.get("job_id"):
+            return str(entry["job_id"])
+        if found is None:
+            entry["cancel_requested"] = True
+        else:
+            entry.update(state="submitted", job_id=found.job_id)
+        atomic_write_text(_outbox_path(ctx.layout, run_id), json.dumps(entry))
+    if found is None:
+        return None
+    payload = {"slurm_job_id": found.job_id, "recovered": True}
+    ctx.update_run(run_id, "run.submitted", _with_job(found.job_id), payload)
+    return found.job_id
 ```
 
 - [ ] **Step 4: Branch in `stop_run`**
@@ -14464,7 +15368,7 @@ with:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py tests/core/test_control.py -v`
-Expected: `61 passed` in `test_slurm.py`; `tests/core/test_control.py` all pass.
+Expected: `74 passed` in `test_slurm.py`; `tests/core/test_control.py` all pass.
 
 - [ ] **Step 6: Lint and type-check**
 
@@ -14532,6 +15436,7 @@ from hypothex.core.slurm import (
     SlurmError,
     SlurmJob,
     SlurmPoller,
+    SubmitUnknownError,
     cancel,
     find_submitted,
     flock_supported,
@@ -14604,7 +15509,9 @@ def test_poller_stop_keeps_a_busy_thread_owned(
     busy = threading.Event()
     release = threading.Event()
 
-    def hanging(c: Context, *, confirm_gone: set[str] | None = None) -> list[RunRecord]:
+    def hanging(
+        c: Context, *, confirm_gone: dict[str, SlurmJob | None] | None = None
+    ) -> list[RunRecord]:
         busy.set()
         release.wait(30)
         return []
@@ -14645,6 +15552,7 @@ In `src/hypothex/core/slurm.py`, replace the import block (from `from __future__
 ```python
 from __future__ import annotations
 
+import contextlib
 import errno
 import fcntl
 import getpass
@@ -14685,8 +15593,8 @@ from hypothex.core.records import (
     RunStatus,
     ScoreRecord,
 )
-from hypothex.core.store import RunStore, run_lock
-from hypothex.remote.config import SlurmDefaults
+from hypothex.core.store import RunStore, dir_lock, run_lock
+from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
 ```
 
 Add this constant right below the `SBATCH_FILE = "slurm.sbatch"` line:
@@ -14720,7 +15628,7 @@ class SlurmPoller:
     def __init__(self, ctx: Context, interval: float = SLURM_POLL_SECONDS) -> None:
         self.ctx = ctx
         self.interval = interval
-        self._gone: set[str] = set()
+        self._gone: dict[str, SlurmJob | None] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -14844,7 +15752,7 @@ In the `create_app` docstring, replace the `background_repair` entry with:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py -v`
-Expected: `67 passed`.
+Expected: `80 passed`.
 
 - [ ] **Step 6: Run the whole suite, lint, and type-check**
 
@@ -15464,14 +16372,14 @@ git commit -m "feat(remote): hub host state, reconnect backoff, and mirror path 
 ### Task 34: `mirror_event` / `mirror_run` — copy a remote run into the hub store
 
 **Files:**
-- Modify: `src/hypothex/remote/hub.py` (import block; `LOG_TAIL_BYTES`, `APPEND_OVERLAP_BYTES`; append the mirror code)
+- Modify: `src/hypothex/remote/hub.py` (import block; `LOG_TAIL_BYTES`, `CLAIMS_DIR`, `INDEX_PENDING`; append the mirror code)
 - Modify: `src/hypothex/core/store.py` (`ProjectEntry.remote_host`, `RunStore.save_project`)
 - Modify: `src/hypothex/api/app.py` (env route `GET /api/v1/projects/{project}/entry` in `register_env_routes`)
 - Modify: `tests/remote/test_hub.py` (import block; append helpers and tests)
 
 **Interfaces:**
 - Consumes:
-  - `EnvClient.fetch_file(run_id, rel_path, dest, *, max_bytes, tail=False, offset=0) -> bool` (Task 15).
+  - `EnvClient.fetch_file(run_id, rel_path, dest, *, max_bytes, tail=False) -> bool` (Task 15).
   - `EnvClient.list_files(run_id) -> list[RemoteFile]` (`path`, `size`, `mtime_ns`; Tasks 14 and 15).
   - `EnvClient.get_json(path)` (Task 13) for the host's `GET /api/v1/projects/{project}/entry`.
   - `price_record(record, usd_per_gpu_hour)` (Task 3): env servers do not know their price, so the mirror prices each ended run with the host's `usd_per_gpu_hour` before it writes `run.yaml`.
@@ -15481,34 +16389,30 @@ git commit -m "feat(remote): hub host state, reconnect backoff, and mirror path 
   - `read_yaml`, `atomic_write_text`.
 - Produces:
   - `mirror_run(ctx: Context, client: EnvClient, host: str, environment_id: str, project: str, run_id: str, *, usd_per_gpu_hour: float | None = None) -> tuple[RunRecord, bool] | None`.
-  - `mirror_event(ctx: Context, client: EnvClient, host: str, environment_id: str, event: Event, *, usd_per_gpu_hour: float | None = None) -> None` (contract signature plus one optional keyword: the host's price, used to fill `RunRecord.cost`). It emits `mirror.run_updated` with payload `{"host", "environment_id", "original_type", "remote_sequence", "status"}`.
-  - private `_emit_mirror(ctx, host, environment_id, record, original_type, remote_sequence)`, which Task 35 uses.
-  - Constants `LOG_TAIL_BYTES = 8 * 1024 * 1024` (spec 5.3: logs are mirrored as tails) and `APPEND_OVERLAP_BYTES = 64`.
+  - `mirror_event(ctx: Context, client: EnvClient, host: str, environment_id: str, event: Event, *, usd_per_gpu_hour: float | None = None) -> None` (contract signature plus one optional keyword: the host's price, used to fill `RunRecord.cost`). It emits `mirror.run_updated` with payload `{"host", "environment_id", "original_type", "remote_sequence", "status"}` plus `"reason"` when the host's event carried one (`run.lost`, `run.killed`, `run.failed`: for example a SLURM `NODE_FAIL`), so the UI can show why a run ended.
+  - private `_emit_mirror(ctx, host, environment_id, record, original_type, remote_sequence, *, reason=None)` and `_reason(event) -> str | None`, which Task 35 uses.
+  - Constants `LOG_TAIL_BYTES = 8 * 1024 * 1024` (spec 5.3: logs are mirrored as tails, fetched whole), `CLAIMS_DIR = ".claims"` (`<store>/.claims/<run_id>.json`, the hub-wide owner of a mirrored run id), and `INDEX_PENDING = ".mirror-index-pending"`.
   - `ProjectEntry.remote_host: str | None = None` (set on a project the hub copied from a host) and `RunStore.save_project(entry: ProjectEntry) -> None` (atomic write of `project.json`).
   - Env route `GET /api/v1/projects/{project}/entry` → the host's `ProjectEntry` JSON (404 for an unknown project).
 
-What `mirror_run` does, in order:
+What `mirror_run` does, in order. Nothing in the hub's run folder changes until every file of this mirror is fetched, and every install is a whole file: there is no append path and no byte offset, so no crash or failure point can leave a half-updated or duplicated file.
 
 1. Rejects an unsafe `project` or `run_id`. Safe names match `[A-Za-z0-9_.-]{1,200}` and are not `.` or `..`.
-2. Refuses when the hub already has this run id in another project or with another `environment_id`.
-3. Fetches `run.yaml` first. If it is missing, the run is skipped, so a deleted run is never retried forever.
+2. Refuses early when the run id belongs to another project or environment (`_conflict`: the hub-wide claim `<store>/.claims/<run_id>.json`, the index, and every project folder of the store).
+3. Fetches `run.yaml` first into a per-run staging folder (`<home>/.mirror-<run_id>-*`). If it is missing, the run is skipped, so a deleted run is never retried forever.
 4. Checks that `run.yaml` names the same run.
 5. Copies the project's `ProjectEntry` from the host when the hub does not know the project (spec 5.2: the hub holds the cross-project index). The copy has `remote_host` set, so tasks, leaderboards, and sweep stats work for a project registered only on the host; a later `hx register` of a hub checkout replaces it. A host without the route (or an error) is logged and skipped.
 6. Lists the run's files (`EnvClient.list_files`).
-7. Skips each wanted file whose `[size, mtime_ns]` matches `.mirror.json`. Otherwise:
-   - `logs/*`: a tail, at most the last `LOG_TAIL_BYTES` (spec 5.3, 8A.3); a log is never a `remote_file`.
-   - an append-only file (`logs/*`, `*.jsonl`) that only grew: only the new bytes, fetched with `offset` from `APPEND_OVERLAP_BYTES` before the old end. The install checks that overlap; a file that was rewritten instead of appended is fetched whole in the same mirror. A local log copy is cut back to its last `LOG_TAIL_BYTES` after every append.
-   - any other file up to `MIRROR_MAX_BYTES`: whole.
-   So a running run's 100 MB `stdout.log` or growing `metrics.jsonl` costs only its new bytes per refresh, not the whole file every 10 s.
+7. Fetches every wanted file whose `[size, mtime_ns]` differs from `.mirror.json`, whole, into the staging folder: `logs/*` as a tail of at most `LOG_TAIL_BYTES` (spec 5.3, 8A.3; a log is never a `remote_file`), any other file up to `MIRROR_MAX_BYTES`. A changed file is fetched again whole (a growing `metrics.jsonl` costs its size per refresh, a log at most 8 MiB). A dropped connection raises before anything is installed.
 8. Records each too-big non-log file as a `remote_file` artifact.
 9. Gives the host's own artifacts (`host: "local"` on the host) the host's name, so the hub never shows a host checkpoint as a local file.
-10. Takes the run id's mirror claim (`dir_lock(<hub home>/mirror-claims/<run_id>)`), which every host's supervisor shares, and checks step 2 again inside it: run ids are unique across projects in the index, so two hosts that both passed step 2 can never both install the same run id; the second one sees the first one's run and skips.
-11. Under `run_lock` (inside the claim):
-   - moves changed files into place (byte-compare, then `os.replace`), or appends the checked new bytes; a log keeps only its last `LOG_TAIL_BYTES` (never more).
-   - an append whose overlap check fails (the file was rewritten) is fetched whole right away, in the same mirror, so a run that already ended (no more events, no refresh) never keeps a stale copy.
-   - writes `run.yaml` with the host's `environment_id` when it differs.
-   - calls `index_run` when something changed, the run is not indexed yet, or `.mirror-index-pending` is left from an `index_run` that failed (durable retry state: the marker is written before `index_run` and removed after it, so scores and metric points that failed to index are indexed on the next mirror).
-   - updates `.mirror.json` last.
+10. Claims the run id hub-wide before any install (`_claim`): under the shared claim lock (`<store>/.claims/.lock`) it checks step 2 again and writes `<store>/.claims/<run_id>.json` (`{project, environment_id}`). The claim outlives a failed install or index, so a second host or project can never take the id, even when the first one's index never finished; two mirrors that both passed step 2 cannot both win.
+11. Under `run_lock`, installs in one pass (`_install`):
+   - each staged file replaces its local copy with one `os.replace` (skipped when the bytes are equal); installing the same whole file twice changes nothing, so a mirror cut short anywhere is repaired by the next one;
+   - writes `run.yaml` (with the host's `environment_id`) after the files, so a terminal status never shows next to stale predictions;
+   - calls `index_run` when something changed, the run is not indexed yet, or `.mirror-index-pending` is left from an `index_run` that failed (the marker is written before `index_run` and removed after it);
+   - writes `.mirror.json` last: after any failure the next mirror fetches the same files again.
+   The install is a pass of per-file renames, not one rename of the whole folder: the run folder holds its `.lock`, which a folder swap would orphan.
 12. Re-emits `mirror.run_updated` with `EventLog.append_once` keyed by `mirror:<host>:<environment_id>:<remote_sequence>` (Task 32), so a replay after a crash between the event and the cursor write emits nothing twice; the periodic refresh (`remote_sequence` None) uses `append`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -15518,6 +16422,7 @@ In `tests/remote/test_hub.py`, replace the import block with:
 ```python
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -15533,7 +16438,7 @@ from hypothex.core.fsutil import append_jsonl
 from hypothex.core.ids import utcnow
 from hypothex.core.index import SCHEMA_VERSION, Index
 from hypothex.core.records import Artifact, RunRecord, RunStatus, ScoreRecord
-from hypothex.remote.client import RemoteFile
+from hypothex.remote.client import EnvUnreachableError, RemoteFile
 from hypothex.remote.hub import Backoff, mirror_event, wanted_path
 from tests.factories import make_record
 ```
@@ -15567,7 +16472,6 @@ class FakeClient:
     def __init__(self, remote: Context) -> None:
         self.remote = remote
         self.fetched: list[str] = []
-        self.fetched_bytes = 0
 
     def _dir(self, run_id: str) -> Path:
         return self.remote.run_dir(self.remote.find_record(run_id))
@@ -15592,7 +16496,6 @@ class FakeClient:
         *,
         max_bytes: int,
         tail: bool = False,
-        offset: int = 0,
     ) -> bool:
         try:
             src = self._dir(run_id) / rel_path
@@ -15601,16 +16504,13 @@ class FakeClient:
         if not src.is_file():
             return False
         data = src.read_bytes()
-        if offset > 0:
-            data = data[offset : offset + max_bytes]
-        elif len(data) > max_bytes:
+        if len(data) > max_bytes:
             if not tail:
                 return False
             data = data[len(data) - max_bytes :]
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         self.fetched.append(rel_path)
-        self.fetched_bytes += len(data)
         return True
 
     def get_json(self, path: str, **params: Any) -> Any:
@@ -15664,6 +16564,22 @@ def test_mirror_event_copies_small_files_and_indexes(pair: tuple[Context, Contex
         "remote_sequence": 2,
         "status": "finished",
     }
+
+
+def test_mirror_carries_the_reason_a_run_ended(pair: tuple[Context, Context]) -> None:
+    hub, remote = pair
+    seed_run(remote, "r1", status=RunStatus.RUNNING)
+    reason = "SLURM ended job 1000 with NODE_FAIL on n2; no exit record"
+    remote.update_run(
+        "r1",
+        "run.lost",
+        lambda r: r.model_copy(update={"status": RunStatus.LOST}),
+        {"reason": reason, "slurm_state": "NODE_FAIL"},
+    )
+    mirror_event(hub, FakeClient(remote), "gpu1", "env-remote", run_event(remote, "r1"))  # type: ignore[arg-type]
+    [emitted] = [e for e in hub.events.since(0) if e.type == "mirror.run_updated"]
+    assert (emitted.payload["original_type"], emitted.payload["status"]) == ("run.lost", "lost")
+    assert emitted.payload["reason"] == reason
 
 
 def test_mirror_event_skips_unchanged_files(pair: tuple[Context, Context]) -> None:
@@ -15760,9 +16676,7 @@ def test_mirror_skips_run_deleted_on_host(pair: tuple[Context, Context]) -> None
     assert hub.events.since(0) == []
 
 
-def test_mirror_fetches_only_the_new_bytes_of_growing_files(
-    pair: tuple[Context, Context],
-) -> None:
+def test_mirror_fetches_changed_files_whole(pair: tuple[Context, Context]) -> None:
     hub, remote = pair
     record = seed_run(remote, "r1", status=RunStatus.RUNNING)
     run_dir = remote.run_dir(record)
@@ -15770,16 +16684,13 @@ def test_mirror_fetches_only_the_new_bytes_of_growing_files(
         append_jsonl(run_dir / "metrics.jsonl", {"name": "loss", "step": step, "value": 1.0})
     (run_dir / "logs" / "stdout.log").write_bytes(b"line\n" * 20_000)
     client = FakeClient(remote)
-    mirror = hub_mod.mirror_run
-    mirror(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    hub_mod.mirror_run(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
     append_jsonl(run_dir / "metrics.jsonl", {"name": "loss", "step": 200, "value": 0.5})
     with (run_dir / "logs" / "stdout.log").open("ab") as fh:
         fh.write(b"new line\n")
-    client.fetched_bytes = 0
-    mirror(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
-    run_yaml = (run_dir / "run.yaml").stat().st_size
-    new = len(b"new line\n") + len(b'{"name": "loss", "step": 200, "value": 0.5}\n')
-    assert client.fetched_bytes <= run_yaml + new + 2 * hub_mod.APPEND_OVERLAP_BYTES
+    client.fetched.clear()
+    hub_mod.mirror_run(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert sorted(client.fetched) == ["logs/stdout.log", "metrics.jsonl", "run.yaml"]
     local = hub.layout.run_dir("toy", "r1")
     for rel in ("metrics.jsonl", "logs/stdout.log"):
         assert (local / rel).read_bytes() == (run_dir / rel).read_bytes(), rel
@@ -15896,6 +16807,102 @@ def test_a_failed_index_is_retried_on_the_next_mirror(
     assert not (hub.layout.run_dir("toy", "r1") / ".mirror-index-pending").exists()
 
 
+def test_an_index_failure_after_growth_never_duplicates_bytes(
+    pair: tuple[Context, Context], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 100 identical bytes, then 10 more: a retried install must never add them twice
+    hub, remote = pair
+    record = seed_run(remote, "r1", status=RunStatus.RUNNING)
+    log = remote.run_dir(record) / "logs" / "stdout.log"
+    log.write_bytes(b"a" * 100)
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    with log.open("ab") as fh:
+        fh.write(b"a" * 10)
+    real = hub_mod.index_run
+
+    def crash(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("disk I/O error")
+
+    monkeypatch.setattr(hub_mod, "index_run", crash)
+    with pytest.raises(RuntimeError):
+        hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    monkeypatch.setattr(hub_mod, "index_run", real)
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    local = hub.layout.run_dir("toy", "r1")
+    assert (local / "logs" / "stdout.log").read_bytes() == b"a" * 110
+    manifest = json.loads((local / hub_mod.MANIFEST_NAME).read_text())
+    assert manifest["logs/stdout.log"][0] == 110
+    assert not (local / hub_mod.INDEX_PENDING).exists()
+
+
+class FailingClient(FakeClient):
+    """The tunnel drops when the mirror asks for one file."""
+
+    def __init__(self, remote: Context, fail_on: str) -> None:
+        super().__init__(remote)
+        self.fail_on = fail_on
+
+    def fetch_file(
+        self, run_id: str, rel_path: str, dest: Path, *, max_bytes: int, tail: bool = False
+    ) -> bool:
+        if rel_path == self.fail_on:
+            raise EnvUnreachableError("cannot reach http://127.0.0.1:1: connection reset")
+        return super().fetch_file(run_id, rel_path, dest, max_bytes=max_bytes, tail=tail)
+
+
+def test_a_failed_fetch_installs_nothing(pair: tuple[Context, Context]) -> None:
+    # the host rewrote its predictions and ended the run; the tunnel drops mid-mirror
+    hub, remote = pair
+    record = seed_run(remote, "r1", status=RunStatus.RUNNING)
+    preds = remote.run_dir(record) / "predictions" / "predictions.jsonl"
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    old = preds.read_bytes()
+    preds.write_text('{"id": "e1", "prediction": "rewritten"}\n')
+    remote.update_run(
+        "r1", "run.finished", lambda r: r.model_copy(update={"status": RunStatus.FINISHED})
+    )
+    dropping = FailingClient(remote, "predictions/predictions.jsonl")
+    with pytest.raises(EnvUnreachableError):
+        hub_mod.mirror_run(hub, dropping, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    local = hub.layout.run_dir("toy", "r1")
+    assert hub.find_record("r1").status == RunStatus.RUNNING  # no terminal run.yaml yet
+    indexed = hub.index.get_run("r1")
+    assert indexed is not None and indexed.status == RunStatus.RUNNING
+    assert (local / "predictions" / "predictions.jsonl").read_bytes() == old
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert hub.find_record("r1").status == RunStatus.FINISHED
+    assert (local / "predictions" / "predictions.jsonl").read_bytes() == preds.read_bytes()
+
+
+def test_a_claimed_run_id_stays_owned_after_a_failed_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # host A writes project toy's run folder and fails to index; host B has project other
+    hub = Context.open(tmp_path / "hub")
+    remote_a = Context.open(tmp_path / "remote-a")
+    remote_b = Context.open(tmp_path / "remote-b")
+    seed_run(remote_a, "r1")
+    remote_b.create_run(
+        make_record("r1", project="other", environment_id=remote_b.descriptor.environment_id)
+    )
+    real = hub_mod.index_run
+
+    def crash(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("disk I/O error")
+
+    monkeypatch.setattr(hub_mod, "index_run", crash)
+    with pytest.raises(RuntimeError):
+        hub_mod.mirror_run(hub, FakeClient(remote_a), "a", "env-a", "toy", "r1")  # type: ignore[arg-type]
+    monkeypatch.setattr(hub_mod, "index_run", real)
+    assert hub.index.get_run("r1") is None  # no index entry: only the claim says who owns it
+    assert hub_mod.mirror_run(hub, FakeClient(remote_b), "b", "env-b", "other", "r1") is None  # type: ignore[arg-type]
+    assert not hub.layout.run_dir("other", "r1").exists()
+    mirrored = hub_mod.mirror_run(hub, FakeClient(remote_a), "a", "env-a", "toy", "r1")  # type: ignore[arg-type]
+    assert mirrored is not None and mirrored[0].environment_id == "env-a"
+    indexed = hub.index.get_run("r1")
+    assert indexed is not None and indexed.project == "toy"
+
+
 def test_two_hosts_never_both_install_one_run_id(tmp_path: Path) -> None:
     hub = Context.open(tmp_path / "hub")
     remotes = [Context.open(tmp_path / f"remote-{i}") for i in (1, 2)]
@@ -15945,9 +16952,7 @@ import json
 import logging
 import os
 import re
-import shutil
 import tempfile
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -15971,11 +16976,9 @@ Add these constants right below `MIRROR_MAX_BYTES = 200 * 1024 * 1024`:
 
 ```python
 LOG_TAIL_BYTES = 8 * 1024 * 1024
-"""Logs are mirrored as tails (spec 5.3, 8A.3): at most the last 8 MiB of each."""
-APPEND_OVERLAP_BYTES = 64
-"""Bytes re-read before the old end of an append-only file, to check it only grew."""
-CLAIMS_DIR = "mirror-claims"
-"""``<hub home>/mirror-claims/<run_id>``: one mirror of a run id at a time, across hosts."""
+"""Logs are mirrored as tails (spec 5.3, 8A.3): at most the last 8 MiB of each, fetched whole."""
+CLAIMS_DIR = ".claims"
+"""``<store>/.claims/<run_id>.json``: the project and environment that own a mirrored run id."""
 INDEX_PENDING = ".mirror-index-pending"
 """Left in a mirrored run folder while ``index_run`` runs; seen again, the index is redone."""
 ```
@@ -16037,8 +17040,43 @@ def _read_local(ctx: Context, project: str, run_id: str) -> RunRecord | None:
         return None
 
 
+def _claim_path(ctx: Context, run_id: str) -> Path:
+    return ctx.layout.store / CLAIMS_DIR / f"{run_id}.json"
+
+
+def _claim_owner(ctx: Context, run_id: str) -> dict[str, str] | None:
+    """The ``{project, environment_id}`` that claimed ``run_id``, or None."""
+    try:
+        data = json.loads(_claim_path(ctx, run_id).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict):  # unreadable: never taken over
+        return {"project": "?", "environment_id": "?"}
+    return {"project": str(data.get("project")), "environment_id": str(data.get("environment_id"))}
+
+
 def _conflict(ctx: Context, environment_id: str, project: str, run_id: str) -> str | None:
-    """Return why a remote run must not be written here, or None."""
+    """
+    Return why a remote run must not be written here, or None.
+
+    Run ids are unique across the hub: the claim, the index, and every
+    project folder of the store are checked, not only this project.
+    """
+    owner = _claim_owner(ctx, run_id)
+    if owner is not None:
+        if owner != {"project": project, "environment_id": environment_id}:
+            return (
+                f"run {run_id} is claimed by environment {owner['environment_id']} "
+                f"in project {owner['project']!r}"
+            )
+        return None
+    store = ctx.layout.store
+    for folder in sorted(store.iterdir()) if store.is_dir() else []:
+        other = folder.name != project and not folder.name.startswith(".")
+        if other and (folder / "runs" / run_id).exists():
+            return f"run {run_id} already exists in project {folder.name!r}"
     indexed = ctx.index.get_run(run_id)
     if indexed is not None and indexed.project != project:
         return f"run {run_id} already exists in project {indexed.project!r}"
@@ -16046,6 +17084,28 @@ def _conflict(ctx: Context, environment_id: str, project: str, run_id: str) -> s
     if local is not None and local.environment_id != environment_id:
         return f"run {run_id} belongs to environment {local.environment_id}"
     return None
+
+
+def _claim(ctx: Context, environment_id: str, project: str, run_id: str) -> str | None:
+    """
+    Claim ``run_id`` hub-wide for this project and environment, before any install.
+
+    Under the shared claim lock the conflict check runs again and, when it
+    passes, ``<store>/.claims/<run_id>.json`` is written. The claim stays when a
+    later install or index fails, so no other project or environment can take
+    the id in between.
+
+    Returns
+    -------
+    str or None
+        Why the run must not be installed here, or None when the claim is ours.
+    """
+    with dir_lock(ctx.layout.store / CLAIMS_DIR):
+        reason = _conflict(ctx, environment_id, project, run_id)
+        if reason is None and _claim_owner(ctx, run_id) is None:
+            owner = {"project": project, "environment_id": environment_id}
+            atomic_write_text(_claim_path(ctx, run_id), json.dumps(owner))
+        return reason
 
 
 def _read_remote_record(path: Path) -> RunRecord | None:
@@ -16079,62 +17139,6 @@ def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) ->
     ctx.index.upsert_project(entry)
 
 
-def _append_only(rel: str) -> bool:
-    return rel.startswith("logs/") or rel.endswith(".jsonl")
-
-
-def _append_start(entry: RemoteFile, previous: list[int] | None, local: Path) -> int | None:
-    """
-    Remote offset to fetch from when an append-only file only grew, else None.
-
-    The fetch starts ``APPEND_OVERLAP_BYTES`` before the old end, so the
-    install can check that those bytes did not change (a rewritten file is
-    fetched whole on the next mirror).
-    """
-    if not _append_only(entry.path) or previous is None or not local.is_file():
-        return None
-    old = previous[0]
-    if entry.size <= old or old < APPEND_OVERLAP_BYTES:
-        return None
-    if entry.path.startswith("logs/") and entry.size - old > LOG_TAIL_BYTES:
-        return None  # more new log than a tail keeps: take a fresh tail
-    return old - APPEND_OVERLAP_BYTES
-
-
-@dataclass
-class _Staged:
-    """One fetched file in the staging folder; ``start`` is set for appended ranges."""
-
-    entry: RemoteFile
-    path: Path
-    start: int | None = None
-
-
-def _keep_tail(path: Path, keep: int) -> None:
-    with path.open("rb") as fh:
-        fh.seek(-keep, os.SEEK_END)
-        data = fh.read()
-    path.write_bytes(data)
-
-
-def _append(dst: Path, new: Path, *, trim: bool) -> bool:  # trim: logs keep only a tail
-    """Append ``new`` (minus its overlap) to ``dst`` atomically; False if the overlap differs."""
-    with dst.open("rb") as fh:
-        fh.seek(-APPEND_OVERLAP_BYTES, os.SEEK_END)
-        old_end = fh.read()
-    tmp = dst.with_name(f".{dst.name}.append")
-    with new.open("rb") as src:
-        if src.read(APPEND_OVERLAP_BYTES) != old_end:
-            return False
-        shutil.copyfile(dst, tmp)
-        with tmp.open("ab") as out:
-            shutil.copyfileobj(src, out)
-    if trim and tmp.stat().st_size > LOG_TAIL_BYTES:
-        _keep_tail(tmp, LOG_TAIL_BYTES)  # the 8 MiB promise holds after every append
-    os.replace(tmp, dst)
-    return True
-
-
 def _hosted(artifacts: list[Artifact], host: str) -> list[Artifact]:
     """Mark the host's own artifacts (``host: local`` there) with the host's name."""
     return [a.model_copy(update={"host": host}) if a.host == "local" else a for a in artifacts]
@@ -16154,14 +17158,14 @@ def mirror_run(
     Copy one remote run's small files into the hub store and index it.
 
     ``run.yaml`` is fetched first; a run without one (deleted on the host) is
-    skipped. Then every listed file that ``wanted_path`` accepts is fetched,
-    except files whose size and mtime match the last mirror (``.mirror.json``)
-    and files larger than ``MIRROR_MAX_BYTES`` (recorded as ``remote_file``
-    artifacts with the host name). ``logs/*`` are tails: at most the last
-    ``LOG_TAIL_BYTES`` (spec 5.3, 8A.3). An append-only file (``logs/*``,
-    ``*.jsonl``) that only grew is fetched from its old end on, not again
-    whole. Files are staged in a temp folder and moved into the run folder
-    under its run lock, then the run is re-indexed. Artifacts the host
+    skipped. Then every listed file that ``wanted_path`` accepts is fetched
+    whole into a per-run staging folder, except files whose size and mtime
+    match the last mirror (``.mirror.json``) and files larger than
+    ``MIRROR_MAX_BYTES`` (recorded as ``remote_file`` artifacts with the host
+    name). ``logs/*`` are tails: at most the last ``LOG_TAIL_BYTES`` (spec
+    5.3, 8A.3). Only when every fetch succeeded is the run id claimed
+    hub-wide (``_claim``) and are the files installed, in one pass under the
+    run lock (``_install``); nothing is ever appended. Artifacts the host
     recorded as ``local`` get the host's name, and an ended run gets its
     ``cost`` at the host's price (``price_record``). A project the hub does
     not know is copied from the host first (``_ensure_project``).
@@ -16198,7 +17202,7 @@ def mirror_run(
         return None
     run_dir = ctx.layout.run_dir(project, run_id)
     ctx.layout.home.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=ctx.layout.home, prefix=".mirror-") as tmp:
+    with tempfile.TemporaryDirectory(dir=ctx.layout.home, prefix=f".mirror-{run_id}-") as tmp:
         staging = Path(tmp)
         if not client.fetch_file(
             run_id, "run.yaml", staging / "run.yaml", max_bytes=MIRROR_MAX_BYTES
@@ -16209,11 +17213,10 @@ def mirror_run(
             log.warning("host %s: run.yaml of %s is unreadable or mismatched", host, run_id)
             return None
         _ensure_project(ctx, client, host, project)
-        listing = client.list_files(run_id)
         manifest = _read_manifest(run_dir)
-        fetched: list[_Staged] = []
+        staged: list[tuple[RemoteFile, Path]] = []
         remote_only: list[Artifact] = []
-        for entry in listing:
+        for entry in client.list_files(run_id):
             if entry.path == "run.yaml" or not wanted_path(entry.path):
                 continue
             is_log = entry.path.startswith("logs/")
@@ -16222,25 +17225,14 @@ def mirror_run(
                     Artifact(kind=REMOTE_FILE_KIND, path=entry.path, host=host, size=entry.size)
                 )
                 continue
-            local = run_dir / entry.path
-            previous = manifest.get(entry.path)
-            if previous == [entry.size, entry.mtime_ns] and local.is_file():
+            unchanged = manifest.get(entry.path) == [entry.size, entry.mtime_ns]
+            if unchanged and (run_dir / entry.path).is_file():
                 continue
             dest = staging / "files" / entry.path
             dest.parent.mkdir(parents=True, exist_ok=True)
-            start = _append_start(entry, previous, local)
-            if start is not None:
-                ok = client.fetch_file(
-                    run_id, entry.path, dest, max_bytes=entry.size - start, offset=start
-                )
-            elif is_log:
-                ok = client.fetch_file(
-                    run_id, entry.path, dest, max_bytes=LOG_TAIL_BYTES, tail=True
-                )
-            else:
-                ok = client.fetch_file(run_id, entry.path, dest, max_bytes=MIRROR_MAX_BYTES)
-            if ok:
-                fetched.append(_Staged(entry, dest, start))
+            limit = LOG_TAIL_BYTES if is_log else MIRROR_MAX_BYTES
+            if client.fetch_file(run_id, entry.path, dest, max_bytes=limit, tail=is_log):
+                staged.append((entry, dest))
         record = price_record(
             record.model_copy(
                 update={
@@ -16250,58 +17242,46 @@ def mirror_run(
             ),
             usd_per_gpu_hour,
         )
-        # one mirror of this run id at a time, whichever host or project: re-check inside
-        with dir_lock(ctx.layout.home / CLAIMS_DIR / run_id):
-            reason = _conflict(ctx, environment_id, project, run_id)
-            if reason is not None:
-                log.warning("host %s: not mirroring: %s", host, reason)
-                return None
-            with run_lock(run_dir):
-                changed, rewritten = _install(ctx, run_dir, fetched, manifest, record)
-            if rewritten:  # rewritten, not appended: fetch them whole now, not on a later event
-                whole: list[_Staged] = []
-                for entry in rewritten:
-                    dest = staging / "whole" / entry.path
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    is_log = entry.path.startswith("logs/")
-                    limit = LOG_TAIL_BYTES if is_log else MIRROR_MAX_BYTES
-                    if client.fetch_file(run_id, entry.path, dest, max_bytes=limit, tail=is_log):
-                        whole.append(_Staged(entry, dest))
-                with run_lock(run_dir):
-                    changed = _install(ctx, run_dir, whole, manifest, record)[0] or changed
+        # every file is here: claim the id hub-wide, then install everything at once
+        reason = _claim(ctx, environment_id, project, run_id)
+        if reason is not None:
+            log.warning("host %s: not mirroring: %s", host, reason)
+            return None
+        with run_lock(run_dir):
+            changed = _install(ctx, run_dir, staged, manifest, record)
     return record, changed
 
 
 def _install(
     ctx: Context,
     run_dir: Path,
-    fetched: list[_Staged],
+    staged: list[tuple[RemoteFile, Path]],
     manifest: dict[str, list[int]],
     record: RunRecord,
-) -> tuple[bool, list[RemoteFile]]:
+) -> bool:
     """
-    Move staged files into place, write run.yaml, re-index; caller holds the run lock.
+    Install fully fetched files, then ``run.yaml``, then re-index; caller holds the run lock.
 
-    Returns whether anything changed, and the append-only files whose overlap
-    check failed (rewritten on the host; the caller fetches them whole).
+    Every file replaces its local copy whole (``os.replace``), so installing the
+    same bytes again changes nothing: a crash or a failed ``index_run`` part-way
+    is repaired by the next mirror, which fetches the same files again
+    (``.mirror.json`` is written last) and finds ``.mirror-index-pending``.
+
+    Returns
+    -------
+    bool
+        Whether any file or the record changed.
     """
     changed = False
-    rewritten: list[RemoteFile] = []
-    for staged in fetched:
-        entry, dst = staged.entry, run_dir / staged.entry.path
-        if staged.start is not None:
-            if not _append(dst, staged.path, trim=entry.path.startswith("logs/")):
-                manifest.pop(entry.path, None)
-                rewritten.append(entry)
-                continue
-            changed = True
-        elif not (dst.is_file() and filecmp.cmp(staged.path, dst, shallow=False)):
+    for entry, path in staged:
+        dst = run_dir / entry.path
+        if not (dst.is_file() and filecmp.cmp(path, dst, shallow=False)):
             dst.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staged.path, dst)
+            os.replace(path, dst)
             changed = True
         manifest[entry.path] = [entry.size, entry.mtime_ns]
     if _read_local(ctx, record.project, record.run_id) != record:
-        ctx.store.write_record(record)
+        ctx.store.write_record(record)  # after the files: never terminal next to stale files
         changed = True
     pending = run_dir / INDEX_PENDING
     if changed or pending.exists() or ctx.index.get_run(record.run_id) is None:
@@ -16309,7 +17289,13 @@ def _install(
         index_run(ctx.index, ctx.store, record)
         pending.unlink()
     atomic_write_text(run_dir / MANIFEST_NAME, json.dumps(manifest, sort_keys=True))
-    return changed, rewritten
+    return changed
+
+
+def _reason(event: Event) -> str | None:
+    """The ``reason`` of a host event (``run.lost``, ``run.killed``, ``run.failed``), if any."""
+    value = event.payload.get("reason") if isinstance(event.payload, dict) else None
+    return str(value) if value is not None else None
 
 
 def _emit_mirror(
@@ -16319,14 +17305,18 @@ def _emit_mirror(
     record: RunRecord,
     original_type: str,
     remote_sequence: int | None,
+    *,
+    reason: str | None = None,
 ) -> None:
-    payload = {
+    payload: dict[str, object] = {
         "host": host,
         "environment_id": environment_id,
         "original_type": original_type,
         "remote_sequence": remote_sequence,
         "status": record.status.value,
     }
+    if reason is not None:
+        payload["reason"] = reason  # why the run ended on the host (e.g. SLURM NODE_FAIL)
     if remote_sequence is None:  # a refresh: no remote event to deduplicate
         ctx.events.append(
             "mirror.run_updated", project=record.project, run_id=record.run_id, payload=payload
@@ -16357,7 +17347,7 @@ def mirror_event(
 
     Events that are not ``run.*`` or carry no project/run id are ignored. The
     re-emitted payload is ``{host, environment_id, original_type, remote_sequence,
-    status}``.
+    status}``, plus ``reason`` when the host's event has one.
 
     Parameters
     ----------
@@ -16387,13 +17377,15 @@ def mirror_event(
     )
     if mirrored is None:
         return
-    _emit_mirror(ctx, host, environment_id, mirrored[0], event.type, event.sequence)
+    _emit_mirror(
+        ctx, host, environment_id, mirrored[0], event.type, event.sequence, reason=_reason(event)
+    )
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_hub.py -v`
-Expected: 39 passed.
+Expected: 43 passed.
 
 Run: `uv run pytest tests/api tests/core -q`
 Expected: all pass (`ProjectEntry.remote_host` defaults to None, so phase 1 `project.json` files still load).
@@ -16472,6 +17464,7 @@ In `tests/remote/test_hub.py`, replace the import block with:
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import sqlite3
 import threading
@@ -17188,7 +18181,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import tempfile
 import threading
 import time
@@ -17675,7 +18667,15 @@ class Hub:
                 key = _run_key(event)
                 record = mirrored.get(key) if key is not None else None
                 if record is not None:
-                    _emit_mirror(self.ctx, sup.name, env_id, record, event.type, event.sequence)
+                    _emit_mirror(
+                        self.ctx,
+                        sup.name,
+                        env_id,
+                        record,
+                        event.type,
+                        event.sequence,
+                        reason=_reason(event),
+                    )
             last = fresh[-1].sequence
             self.ctx.index.set_cursor(sup.name, env_id, last)
             return last
@@ -17758,7 +18758,7 @@ class Hub:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_hub.py -v`
-Expected: 56 passed in about 32 s. When an env server stops with an open WebSocket, uvicorn logs a `CancelledError ... timeout graceful shutdown exceeded` traceback. This is expected; the tests still pass.
+Expected: 60 passed in about 32 s. When an env server stops with an open WebSocket, uvicorn logs a `CancelledError ... timeout graceful shutdown exceeded` traceback. This is expected; the tests still pass.
 
 Run: `uv run python -m doctest src/hypothex/remote/hub.py && uv run ruff check src/hypothex/remote/hub.py tests/remote/test_hub.py && uv run ruff format --check src/hypothex/remote/hub.py tests/remote/test_hub.py && uv run ty check src/hypothex/remote/hub.py`
 Expected: clean.
@@ -18087,7 +19087,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import tempfile
 import threading
 import time
@@ -18161,7 +19160,7 @@ with:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_hub.py -v`
-Expected: 61 passed in about 35 s.
+Expected: 65 passed in about 35 s.
 
 Run: `uv run python -m doctest src/hypothex/remote/hub.py && uv run ruff check src/hypothex/remote/hub.py src/hypothex/core/index.py tests/remote/test_hub.py && uv run ruff format --check src/hypothex/remote/hub.py src/hypothex/core/index.py tests/remote/test_hub.py && uv run ty check src/hypothex/remote/hub.py src/hypothex/core/index.py`
 Expected: clean.
@@ -18182,7 +19181,9 @@ git commit -m "feat(remote): ssh route for hub supervisors via bootstrap and tun
 
 Contract 1.7 and the sweep rows of section 2. Spec 5.7, 8A.6. Mockup `docs/mockups/phase2/shot-sweep-light.png`.
 
-`hypothex.core.sweeps` is the one sweep engine: define a sweep (grid + seeded log/linear random samples × seeds), store it at `<store>/<project>/sweeps/<id>.yaml`, launch its runs tagged `sweep:<id>` with params `k=v`, summarize it (counts, per-cell stats, best cell, headline, total USD), cancel its queued runs, and extend it with seeds. The API, CLI, MCP, and hub call it (spec 7: no logic only in those layers). Starting and stopping a run are injected callables (`launch=`, `stop=`) that default to local `launch_run`/`stop_if_queued`, so the hub forwards the runs of a `host` sweep to the env server without this module knowing about transport. Cell statistics reuse the phase 1b leaderboard (`build_leaderboard`), so sweep numbers match the task page. These tests use only the local store, a fake launcher, local `python -c` runs, and fake GPUs.
+`hypothex.core.sweeps` is the one sweep engine: define a sweep (grid + seeded log/linear random samples × seeds), store its definition at `<store>/<project>/sweeps/<id>.yaml`, launch its runs tagged `sweep:<id>` with params `k=v`, summarize it (counts, per-cell stats, best cell, headline, total USD), cancel its queued runs, and extend it with seeds. The API, CLI, MCP, and hub call it (spec 7: no logic only in those layers). Starting and stopping a run are injected callables (`launch=`, `stop=`) that default to local `launch_run`/`stop_if_queued`, so the hub forwards the runs of a `host` sweep to the env server without this module knowing about transport.
+
+**Run identity is deterministic; membership is derived.** A sweep's runs are the indexed runs tagged `sweep:<id>`; the sweep file holds only the definition (no run ids), and `SweepSummary.run_ids` lists the members. Each (params, seed) of a sweep has one command id, `run_command_id(environment_id, project, sweep_id, params, seed)` = the first 16 hex digits of a SHA-256 over them (the hub's environment id and the project keep ids of two hubs' `s-xxxx` sweeps apart). Launch, a retried launch, and extend all do the same thing: save the definition (the new seeds first), then issue every (params, seed) that has no member yet, with its command id. Command receipts (`EventLog.run_once` here, the env server's receipts for forwarded runs) turn a repeat into the run that already exists, so a run whose launch answer was lost, or that is not mirrored yet, is never started twice and always counts once it is indexed. Cell statistics reuse the phase 1b leaderboard (`build_leaderboard`), so sweep numbers match the task page. These tests use only the local store, a fake launcher, local `python -c` runs, and fake GPUs.
 
 ---
 
@@ -18199,7 +19200,7 @@ Contract 1.7 and the sweep rows of section 2. Spec 5.7, 8A.6. Mockup `docs/mocku
 - Produces:
   - `class SweepError(HypothexError)` — invalid sweep request (API maps it to 400).
   - `class SweepParam(BaseModel)`: `name: str; values: list[str] | None = None; low: float | None = None; high: float | None = None; log: bool = False`; property `is_range -> bool`. Numbers in `values` are coerced to strings.
-  - `class SweepSpec(BaseModel, extra="forbid")`: `id; project; task: str | None; host: str | None; grid: list[SweepParam]; random: int | None = None; seeds: list[int]; command_template: list[str]; created_by: str; created_at: datetime; run_ids: list[str] = []` (contract 1.7, exact).
+  - `class SweepSpec(BaseModel, extra="forbid")`: `id; project; task: str | None; host: str | None; grid: list[SweepParam]; random: int | None = None; seeds: list[int]; command_template: list[str]; created_by: str; created_at: datetime` (contract 1.7, exact; review round 2 removed `run_ids`: membership is derived from the `sweep:<id>` tag, Task 39).
   - `expand(spec: SweepSpec, rng_seed: int = 0) -> list[dict[str, str]]` (contract 1.7).
   - `sweep_combos(spec: SweepSpec) -> list[dict[str, str]]` — `expand` with a seed derived from `spec.id`; launch, extend and summary all use it.
   - `planned_runs(spec: SweepSpec) -> int`; `sweep_tag(sweep_id: str) -> str` (`"sweep:<id>"`).
@@ -18508,10 +19509,11 @@ class SweepParam(BaseModel):
 
 class SweepSpec(BaseModel, extra="forbid"):
     """
-    A sweep as stored in ``<store>/<project>/sweeps/<id>.yaml``.
+    A sweep's definition, as stored in ``<store>/<project>/sweeps/<id>.yaml``.
 
-    ``run_ids`` lists every launched run in launch order; ``seeds`` lists the
-    seeds that have at least one launched run.
+    The file never lists runs: a sweep's runs are the runs tagged
+    ``sweep:<id>`` (``sweep_runs``). ``seeds`` lists every seed the sweep asks
+    for; ``extend_sweep`` adds to it before it launches.
     """
 
     id: str = Field(pattern=SWEEP_ID_PATTERN)
@@ -18524,7 +19526,6 @@ class SweepSpec(BaseModel, extra="forbid"):
     command_template: list[str] = Field(min_length=1)
     created_by: str
     created_at: datetime
-    run_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check(self) -> SweepSpec:
@@ -18772,11 +19773,13 @@ Append to the end of `tests/core/test_sweeps.py` (two blank lines before it):
 ```python
 # --------------------------------------------------------------------------- Task 38 storage
 def test_save_and_load_round_trip(ctx: Context) -> None:
-    spec = spec_of(run_ids=["r1", "r2"])
+    spec = spec_of()
     path = save_sweep(ctx.layout, spec)
     assert path == ctx.layout.store / "toy" / "sweeps" / "s-0001.yaml"
     assert load_sweep(ctx.layout, "toy", "s-0001") == spec
-    assert "run_ids:\n- r1\n- r2\n" in path.read_text()
+    assert "run_ids" not in path.read_text()  # the definition only: members are tagged runs
+    with pytest.raises(ValidationError):
+        spec_of(run_ids=["r1"])
 
 
 def test_load_missing_sweep_is_a_store_error(ctx: Context) -> None:
@@ -19046,13 +20049,13 @@ git commit -m "feat(core): store sweeps under <store>/<project>/sweeps"
   - Phase 1b (exist): `build_leaderboard(project, task, config, runs, scores, versions=None, *, per_example=None) -> Leaderboard`, `Leaderboard.rows: list[LeaderboardRow]` (best first; `group_id`, `run_ids`, `n`, `primary: Stats | None`, `test_interval: NoiseInterval | None`, `vs_best.p`), `queries.primary_examples(ctx, config, task, runs, versions)`, `headlines.NO_RUNS`, `fmt_metric`, `fmt_metric_delta`, `fmt_p`, `Index.list_runs(project=, tag=, include_archived=, limit=)`, `Index.get_run`, `Index.scores_for`
   - Contract 1.6 (records group, earlier): `hypothex.core.records.CostTotals` (`total_usd: float`), `RunRecord.cost: CostTotals | None = None`, `RunRecord.sweep_id: str | None = None`, `RunRecord.gpus_requested: int = 0`
 - Produces:
-  - `class SweepSummary(BaseModel)`: `spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float` (contract 1.7).
+  - `class SweepSummary(BaseModel)`: `spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []` (contract 1.7; `run_ids` is derived: the indexed runs tagged `sweep:<id>`, in launch order).
   - `summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary` (contract 1.7). `counts` has keys `queued, running, finished, failed, killed, lost, total`. Each cell: `{params, group_id, n, mean, lo, hi, run_ids}` (contract) plus `std` and `runs: [{run_id, status, seed}]` for the heat-table glyphs.
-  - `sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]` — indexed runs listed in `spec.run_ids` or tagged `sweep:<id>`, launch order.
+  - `sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]` — the sweep's members: indexed runs tagged `sweep:<id>`, archived ones included, in launch order (`created_at`, then run id).
   - `list_sweeps(ctx: Context, project: str) -> list[dict[str, Any]]` — `[{id, created_at, n_runs, best}]`, newest first (backs `GET /api/v1/projects/{project}/sweeps` and `hx sweeps`).
   - Constant `STATUS_KEYS`.
 
-Cells follow `sweep_combos` order; a cell's stats come from the task leaderboard built over the sweep's runs only (finished, scored, unarchived runs; seed groups by config hash + commit). If a cell's seeds span two commits, the larger seed group wins and every run id is still listed. `lo`/`hi` are the test-set interval (Wilson/bootstrap) when per-example scores exist, else the seed t-interval. The headline names only the params that differ from the runner-up, e.g. `lr 3e-4: 0.820 accuracy, +0.100 over lr 1e-4, p = 0.07`. `total_usd` adds each run's `cost.total_usd`, or its `usage.usd` while the cost is not filled yet. Run ids in `spec.run_ids` that are not indexed yet (remote runs not mirrored) count only in `total`.
+Cells follow `sweep_combos` order; a cell's stats come from the task leaderboard built over the sweep's runs only (finished, scored, unarchived runs; seed groups by config hash + commit). If a cell's seeds span two commits, the larger seed group wins and every run id is still listed. `lo`/`hi` are the test-set interval (Wilson/bootstrap) when per-example scores exist, else the seed t-interval. The headline names only the params that differ from the runner-up, e.g. `lr 3e-4: 0.820 accuracy, +0.100 over lr 1e-4, p = 0.07`. `total_usd` adds each run's `cost.total_usd`, or its `usage.usd` while the cost is not filled yet. A remote run counts once it is mirrored (indexed); `counts["total"]` is the number of members.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -19143,10 +20146,7 @@ def add_run(
 def toy_sweep(ctx: Context, toy_repo: Path) -> SweepSpec:
     """lr 1e-4 / 3e-4 / 1e-3 x seeds 1, 2; 1e-3 still queued/running."""
     ctx.register_project(toy_repo)
-    spec = spec_of(
-        grid=[{"name": "lr", "values": ["1e-4", "3e-4", "1e-3"]}],
-        run_ids=["a1", "b1", "c1", "a2", "b2", "c2"],
-    )
+    spec = spec_of(grid=[{"name": "lr", "values": ["1e-4", "3e-4", "1e-3"]}])
     save_sweep(ctx.layout, spec)
     add_run(ctx, "a1", "1e-4", 1, RunStatus.FINISHED, 0.70, cost_usd=1.25)
     add_run(ctx, "b1", "3e-4", 1, RunStatus.FINISHED, 0.80, cost_usd=1.25)
@@ -19169,6 +20169,7 @@ def test_summary_counts_cells_best_and_cost(ctx: Context, toy_sweep: SweepSpec) 
         "lost": 0,
         "total": 6,
     }
+    assert sorted(summary.run_ids) == ["a1", "a2", "b1", "b2", "c1", "c2"]
     assert [c["params"] for c in summary.cells] == [{"lr": "1e-4"}, {"lr": "3e-4"}, {"lr": "1e-3"}]
     low, high, pending = summary.cells
     assert low["run_ids"] == ["a1", "a2"]
@@ -19241,20 +20242,19 @@ def test_headline_names_only_the_params_that_differ(ctx: Context, toy_repo: Path
 
 def test_summary_without_scores_says_so(ctx: Context, toy_repo: Path) -> None:
     ctx.register_project(toy_repo)
-    save_sweep(ctx.layout, spec_of(run_ids=["q1", "ghost"]))
+    save_sweep(ctx.layout, spec_of())
     add_run(ctx, "q1", "1e-4", 1, RunStatus.QUEUED)
     summary = summarize_sweep(ctx, "toy", "s-0001")
     assert summary.headline == "No scored runs yet"
     assert summary.best is None
-    # "ghost" is launched but not indexed yet (a remote run not mirrored): total only
     assert summary.counts["queued"] == 1
-    assert summary.counts["total"] == 2
+    assert summary.counts["total"] == 1 and summary.run_ids == ["q1"]
     assert summary.total_usd == 0.0
 
 
 def test_summary_without_task_has_no_stats(ctx: Context, toy_repo: Path) -> None:
     ctx.register_project(toy_repo)
-    save_sweep(ctx.layout, spec_of(task=None, run_ids=["a1"]))
+    save_sweep(ctx.layout, spec_of(task=None))
     add_run(ctx, "a1", "1e-4", 1, RunStatus.FINISHED, 0.7)
     summary = summarize_sweep(ctx, "toy", "s-0001")
     assert summary.best is None
@@ -19263,13 +20263,13 @@ def test_summary_without_task_has_no_stats(ctx: Context, toy_repo: Path) -> None
     assert summary.headline == "No scored runs yet"
 
 
-def test_tagged_runs_count_even_when_missing_from_run_ids(ctx: Context, toy_repo: Path) -> None:
+def test_membership_is_the_sweep_tag(ctx: Context, toy_repo: Path) -> None:
     ctx.register_project(toy_repo)
-    save_sweep(ctx.layout, spec_of(run_ids=[]))
+    save_sweep(ctx.layout, spec_of())
     add_run(ctx, "late", "3e-4", 1, RunStatus.FINISHED, 0.9)
     add_run(ctx, "other", "3e-4", 1, RunStatus.FINISHED, 0.1, sweep="s-0002")
     summary = summarize_sweep(ctx, "toy", "s-0001")
-    assert summary.counts["total"] == 1
+    assert summary.counts["total"] == 1 and summary.run_ids == ["late"]
     assert summary.best is not None
     assert summary.best["run_ids"] == ["late"]
 
@@ -19382,11 +20382,16 @@ class SweepSummary(BaseModel):
     best: dict[str, Any] | None
     headline: str
     total_usd: float
+    run_ids: list[str] = Field(default_factory=list)
+    """The sweep's members (runs tagged ``sweep:<id>``), in launch order; derived."""
 
 
 def sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]:
     """
-    Return the indexed runs of a sweep, in launch order.
+    Return the members of a sweep: its indexed runs tagged ``sweep:<id>``.
+
+    Membership is derived, never stored: a run that a host accepted counts as
+    soon as it is mirrored, even when the launch call that started it failed.
 
     Parameters
     ----------
@@ -19398,20 +20403,12 @@ def sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]:
     Returns
     -------
     list of RunRecord
-        Runs listed in ``spec.run_ids`` or tagged ``sweep:<id>``, archived ones
-        included. Ids not indexed yet (a remote run not mirrored) are left out.
+        Archived ones included, in launch order (``created_at``, then run id).
     """
     tagged = ctx.index.list_runs(
         project=spec.project, tag=sweep_tag(spec.id), include_archived=True, limit=None
     )
-    by_id = {r.run_id: r for r in tagged}
-    for run_id in spec.run_ids:
-        if run_id not in by_id and (record := ctx.index.get_run(run_id)) is not None:
-            by_id[run_id] = record
-    order = {run_id: i for i, run_id in enumerate(spec.run_ids)}
-    return sorted(
-        by_id.values(), key=lambda r: (order.get(r.run_id, len(order)), r.created_at, r.run_id)
-    )
+    return sorted(tagged, key=lambda r: (r.created_at, r.run_id))
 
 
 def _board(ctx: Context, spec: SweepSpec, runs: list[RunRecord]) -> Leaderboard | None:
@@ -19557,8 +20554,8 @@ def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary:
     Returns
     -------
     SweepSummary
-        ``counts`` has every run status plus ``total`` (all launched ids, indexed
-        or not). Cells follow ``sweep_combos`` order; stats come from the task's
+        ``counts`` has every run status plus ``total`` (the number of members;
+        ``run_ids`` lists them). Cells follow ``sweep_combos`` order; stats come from the task's
         leaderboard over the sweep's finished runs. ``total_usd`` adds each run's
         ``cost.total_usd`` (its ``usage.usd`` while the cost is not filled).
 
@@ -19572,7 +20569,7 @@ def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary:
     counts = dict.fromkeys(STATUS_KEYS, 0)
     for r in runs:
         counts[r.status.value] += 1
-    counts["total"] = len(set(spec.run_ids) | {r.run_id for r in runs})
+    counts["total"] = len(runs)
     board = _board(ctx, spec, runs)
     cells = _cells(spec, runs, board)
     rank = {row.group_id: i for i, row in enumerate(board.rows)} if board is not None else {}
@@ -19584,6 +20581,7 @@ def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary:
         best=ranked[0] if ranked else None,
         headline=_headline(board, ranked, _p_between(ctx, spec, runs, board, ranked)),
         total_usd=math.fsum(_run_usd(r) for r in runs),
+        run_ids=[r.run_id for r in runs],
     )
 
 
@@ -19654,12 +20652,13 @@ git commit -m "feat(core): summarize sweeps with cells, best cell, headline, and
   - Phase 1a (exist): `launch_run(ctx, req: RunRequest) -> RunRecord`, `load_project_config(repo) -> ProjectConfig`, `template_fields(text) -> set[str]`, `Context.update_run(run_id, event_type, mutate, payload)`, `utcnow()`
   - Contract 1.6 (execution group, earlier): `RunRequest.gpus: int = 0` and `RunRequest.queue: bool = False` ("prepare_run accepts gpus, queue"); with `gpus=0, queue=False`, `launch_run` starts the run at once as in phase 1. `RunRecord.sweep_id`, `RunRecord.gpus_requested` (records group).
 - Produces:
-  - `Launcher = Callable[[RunRequest], RunRecord]` — how a run is started. The hub API passes a forwarder for `host` sweeps (`POST /api/v1/hosts/{host}/runs` with the request's fields; the run learns its sweep id from its `sweep:<id>` tag, Task 46); the default launches here with `launch_run` and sets `record.sweep_id` with `mark_sweep`.
+  - `Launcher = Callable[[RunRequest, str], RunRecord]` — how a run is started: the request and the run's deterministic command id. The hub API passes a forwarder for `host` sweeps (`POST /api/v1/hosts/{host}/runs` with the request's fields and that `command_id`, so the env server's receipts turn a repeat into the same run; the run learns its sweep id from its `sweep:<id>` tag, Task 46); the default launches here with `launch_run` inside `ctx.events.run_once(command_id, ...)` and sets `record.sweep_id` with `mark_sweep`.
+  - `run_command_id(environment_id: str, project: str, sweep_id: str, params: dict[str, str], seed: int | None) -> str` — 16 hex digits of a SHA-256 over them (sorted params): the one command id of that sweep run, on every launch, retry, and extend.
   - `mark_sweep(ctx: Context, run_id: str, sweep_id: str) -> RunRecord` — sets `RunRecord.sweep_id` (event `run.tagged`, payload `{sweep_id}`). The env server's launch route uses it for forwarded sweep runs (Task 43).
-  - `launch_sweep(ctx: Context, *, project: str, grid: list[SweepParam], seeds: list[int], command: list[str], task: str | None = None, host: str | None = None, random: int | None = None, hypothesis: str = "", gpus: int = 0, queue: bool = False, created_by: str = "human", repo: Path | None = None, launch: Launcher | None = None, command_id: str | None = None) -> SweepSummary` — backs `POST /api/v1/sweeps`, `hx sweep`, MCP `launch_sweep`. With `command_id`, the sweep id is claimed for that command before the first run starts (`<store>/<project>/sweeps/.commands/<sha256 of command_id>.json`, `{command_id, sweep_id}`). A retry of the same command (the API's `run_once` drops the receipt of a failed call, so a retry runs again) resumes that same sweep: it launches only the (seed, combination) pairs the sweep has no run for, with the same tag `sweep:<id>`, so the hub's per-run command ids (Task 46) match runs of the same sweep and a local retry never starts a run twice.
-  - Constants `MAX_SWEEP_RUNS = 1000`; private `_resolve_repo`, `_check_launchable`, `_local_launcher`, `_requests`, `_launch_all`, `_combo_key`, `_launched`, `_claimed_sweep`, `_claim_sweep`.
+  - `launch_sweep(ctx: Context, *, project: str, grid: list[SweepParam], seeds: list[int], command: list[str], task: str | None = None, host: str | None = None, random: int | None = None, hypothesis: str = "", gpus: int = 0, queue: bool = False, created_by: str = "human", repo: Path | None = None, launch: Launcher | None = None, command_id: str | None = None) -> SweepSummary` — backs `POST /api/v1/sweeps`, `hx sweep`, MCP `launch_sweep`. With `command_id`, the sweep id is claimed for that command before the first run starts (`<store>/<project>/sweeps/.commands/<sha256 of command_id>.json`, `{command_id, sweep_id}`). A retry of the same command (the API's `run_once` drops the receipt of a failed call, so a retry runs again) resumes that same sweep: it issues every (params, seed) that has no member yet, each with its `run_command_id`, so a run that was accepted but whose answer was lost (or that is not mirrored yet) comes back from its receipt instead of starting twice, and counts once it is indexed.
+  - Constants `MAX_SWEEP_RUNS = 1000`; private `_resolve_repo`, `_check_launchable`, `_local_launcher`, `_requests`, `_issue`, `_combo_key`, `_claimed_sweep`, `_claim_sweep`.
 
-Every run gets tag `sweep:<id>`, `params` = its combination (also passed as `vars`, so `{lr}` in the command is filled), its `seed`, the sweep's task, hypothesis, created_by, gpus and queue. Runs are launched seed-major (seed 1 of every cell first), so a queue fills the whole table early. Everything is checked before the first run starts: spec validity, size (<= 1000 runs), that every `{field}` in the command is a sweep param or a built-in that a sweep fills (`run_id`, `run_dir`, `repo`, `task`, `seed`, plus `dataset.*` when a task is set), and that the command uses every swept param (a param the command never reads would give identical runs). `{seed}` is not required: runs also get `$HYPOTHEX_SEED`. If a launch fails midway, the runs already launched stay in the file (with the seeds that have runs) and the error is raised; if nothing launched, the file is removed.
+Every run gets tag `sweep:<id>`, `params` = its combination (also passed as `vars`, so `{lr}` in the command is filled), its `seed`, the sweep's task, hypothesis, created_by, gpus and queue. Runs are launched seed-major (seed 1 of every cell first), so a queue fills the whole table early. Each run's command id is `run_command_id(...)`. Everything is checked before the first run starts: spec validity, size (<= 1000 runs), that every `{field}` in the command is a sweep param or a built-in that a sweep fills (`run_id`, `run_dir`, `repo`, `task`, `seed`, plus `dataset.*` when a task is set), and that the command uses every swept param (a param the command never reads would give identical runs). `{seed}` is not required: runs also get `$HYPOTHEX_SEED`. If a launch fails midway, the error is raised; the definition stays (its runs are found by their tag), and a retry issues only the missing runs. If no run started and the sweep has no member, the file is removed (a `command_id` claim stays, so a retry reuses the id and its run command ids).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -19701,6 +20700,7 @@ from hypothex.core.sweeps import (
     load_sweep,
     new_sweep_id,
     planned_runs,
+    run_command_id,
     save_sweep,
     summarize_sweep,
     sweep_combos,
@@ -19715,17 +20715,43 @@ Append to the end of `tests/core/test_sweeps.py` (two blank lines before it):
 ```python
 # --------------------------------------------------------------------------- Task 40 launch
 class FakeLauncher:
-    """Creates a queued run per request (no process); records every request."""
+    """
+    A host: creates a queued run per new command id (no process); keeps receipts.
 
-    def __init__(self, ctx: Context, fail_at: int | None = None) -> None:
+    ``fail_at`` refuses the n-th new run; ``lose_answer_at`` starts the n-th run
+    and then fails (its answer was lost); ``mirrored=False`` keeps runs off the
+    hub's index until ``mirror_all()``.
+    """
+
+    def __init__(
+        self,
+        ctx: Context,
+        fail_at: int | None = None,
+        *,
+        lose_answer_at: int | None = None,
+        mirrored: bool = True,
+    ) -> None:
         self.ctx = ctx
         self.fail_at = fail_at
+        self.lose_answer_at = lose_answer_at
+        self.mirrored = mirrored
         self.requests: list[RunRequest] = []
+        self.command_ids: list[str] = []
+        self.receipts: dict[str, RunRecord] = {}
+        self.unmirrored: list[RunRecord] = []
 
-    def __call__(self, req: RunRequest) -> RunRecord:
+    def mirror_all(self) -> None:
+        for record in self.unmirrored:
+            self.ctx.create_run(record)
+        self.unmirrored.clear()
+
+    def __call__(self, req: RunRequest, command_id: str) -> RunRecord:
+        if command_id in self.receipts:  # a repeat: the run it already started
+            return self.receipts[command_id]
         if self.fail_at is not None and len(self.requests) == self.fail_at:
             raise RunError("host refused the run")
         self.requests.append(req)
+        self.command_ids.append(command_id)
         record = make_record(
             f"r{len(self.requests):02d}",
             project="toy",
@@ -19740,7 +20766,14 @@ class FakeLauncher:
             config_hash=config_hash({"params": req.params}),
             cwd=str(req.repo),
         )
-        return self.ctx.create_run(record)
+        if self.mirrored:
+            record = self.ctx.create_run(record)
+        else:
+            self.unmirrored.append(record)
+        self.receipts[command_id] = record
+        if self.lose_answer_at is not None and len(self.requests) == self.lose_answer_at:
+            raise RunError("connection reset: the answer was lost")
+        return record
 
 
 LR = SweepParam(name="lr", values=["1e-4", "3e-4"])
@@ -19769,7 +20802,8 @@ def test_launch_creates_file_and_one_run_per_cell_and_seed(ctx: Context, toy_rep
     assert sid.startswith("s-") and len(sid) == 6
     assert sweep_path(ctx.layout, "toy", sid).is_file()
     assert summary.spec.host == "gpu1"
-    assert summary.spec.run_ids == [f"r{i:02d}" for i in range(1, 9)]
+    assert summary.run_ids == [f"r{i:02d}" for i in range(1, 9)]
+    assert len(set(fake.command_ids)) == 8 and all(len(c) == 16 for c in fake.command_ids)
     assert summary.counts["total"] == 8
     assert summary.counts["queued"] == 8
     # seed-major: seed 1 of every cell first
@@ -19892,7 +20926,7 @@ def test_host_sweep_needs_no_checkout_on_the_hub(ctx: Context, toy_repo: Path) -
         command=CMD[:4],
         launch=fake,
     )
-    assert len(summary.spec.run_ids) == 2
+    assert len(summary.run_ids) == 2
     with pytest.raises(SweepError, match="no checkout here"):
         launch_sweep(ctx, project="toy", grid=[LR], seeds=[1], command=CMD[:4])
 
@@ -19904,7 +20938,7 @@ def test_failed_launch_keeps_the_runs_already_started(ctx: Context, toy_repo: Pa
         launch_sweep(ctx, project="toy", grid=[LR], seeds=[1, 2], command=CMD[:4], launch=fake)
     (path,) = ctx.layout.project_dir("toy").glob("sweeps/*.yaml")
     spec = load_sweep(ctx.layout, "toy", path.stem)
-    assert spec.run_ids == ["r01", "r02", "r03"]
+    assert summarize_sweep(ctx, "toy", spec.id).run_ids == ["r01", "r02", "r03"]
     assert spec.seeds == [1, 2]
 
 
@@ -19931,7 +20965,7 @@ def test_launch_with_the_local_launcher_runs_real_commands(ctx: Context, toy_rep
         seeds=[1],
         command=[sys.executable, "-c", "print('lr={lr} seed={seed}')"],
     )
-    records = [wait_for_run(ctx, rid, timeout=60) for rid in summary.spec.run_ids]
+    records = [wait_for_run(ctx, rid, timeout=60) for rid in summary.run_ids]
     assert [r.status for r in records] == [RunStatus.FINISHED, RunStatus.FINISHED]
     assert [r.command[-1] for r in records] == ["print('lr=0.1 seed=1')", "print('lr=0.2 seed=1')"]
     assert [r.params for r in records] == [{"lr": "0.1"}, {"lr": "0.2"}]
@@ -19958,7 +20992,7 @@ def test_a_retried_launch_resumes_the_same_sweep(ctx: Context, toy_repo: Path) -
     fake.fail_at = None  # the client retries the same command
     summary = launch_sweep(ctx, **args)
     assert summary.spec.id == first["id"]
-    assert summary.spec.run_ids == ["r01", "r02", "r03", "r04"]
+    assert summary.run_ids == ["r01", "r02", "r03", "r04"]
     assert summary.spec.seeds == [1, 2]
     assert [(r.seed, r.params) for r in fake.requests[2:]] == [
         (2, {"lr": "1e-4"}),
@@ -19967,9 +21001,56 @@ def test_a_retried_launch_resumes_the_same_sweep(ctx: Context, toy_repo: Path) -
     assert {tuple(r.tags) for r in fake.requests} == {(f"sweep:{first['id']}",)}
     assert [s["id"] for s in list_sweeps(ctx, "toy")] == [first["id"]]
     again = launch_sweep(ctx, **args)  # nothing is missing: nothing starts
-    assert again.spec.run_ids == summary.spec.run_ids and len(fake.requests) == 4
+    assert again.run_ids == summary.run_ids and len(fake.requests) == 4
     other = launch_sweep(ctx, **{**args, "command_id": "cmd-2"})  # another command: new sweep
     assert other.spec.id != first["id"]
+
+
+def test_a_run_whose_answer_was_lost_is_never_started_twice(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # the host accepted run 3 but the answer was lost; it is not mirrored yet either
+    ctx.register_project(toy_repo)
+    fake = FakeLauncher(ctx, lose_answer_at=3, mirrored=False)
+    args: dict[str, Any] = {
+        "project": "toy",
+        "grid": [LR],
+        "seeds": [1, 2],
+        "command": ["python", "train.py", "{lr}"],
+        "launch": fake,
+        "command_id": "cmd-1",
+    }
+    with pytest.raises(RunError, match="answer was lost"):
+        launch_sweep(ctx, **args)
+    fake.lose_answer_at = None
+    summary = launch_sweep(ctx, **args)  # every missing run again, with the same command ids
+    assert len(fake.requests) == 4  # run 3 came back from its receipt
+    assert summary.counts["total"] == 0  # nothing mirrored yet
+    fake.mirror_all()
+    mirrored = summarize_sweep(ctx, "toy", summary.spec.id)
+    assert mirrored.run_ids == ["r01", "r02", "r03", "r04"]
+    assert sorted((r.seed, r.params["lr"]) for r in fake.requests) == [
+        (1, "1e-4"),
+        (1, "3e-4"),
+        (2, "1e-4"),
+        (2, "3e-4"),
+    ]
+    assert load_sweep(ctx.layout, "toy", summary.spec.id).seeds == [1, 2]
+
+
+def test_each_sweep_run_has_one_command_id_on_every_launch(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    fake = FakeLauncher(ctx)
+    summary = launch_sweep(
+        ctx, project="toy", grid=[LR], seeds=[1], command=CMD[:4], launch=fake
+    )
+    env = ctx.descriptor.environment_id
+    sid = summary.spec.id
+    assert fake.command_ids == [
+        run_command_id(env, "toy", sid, {"lr": "1e-4"}, 1),
+        run_command_id(env, "toy", sid, {"lr": "3e-4"}, 1),
+    ]
+    assert run_command_id(env, "toy", sid, {"lr": "1e-4"}, 2) not in fake.command_ids
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -20035,8 +21116,47 @@ COMMANDS_DIR = ".commands"
 _ALWAYS_FIELDS = frozenset({"run_id", "run_dir", "repo", "task", "seed"})
 _TASK_FIELDS = frozenset({"dataset.name", "dataset.version", "dataset.path"})
 
-Launcher = Callable[[RunRequest], RunRecord]
-"""Starts (or queues) one run and returns its record; the hub passes a forwarder."""
+Launcher = Callable[[RunRequest, str], RunRecord]
+"""Starts (or queues) one run and returns its record; gets the run's command id.
+
+The hub passes a forwarder. A launcher must turn a repeated command id into
+the run it already started (command receipts), never a second run.
+"""
+
+
+def run_command_id(
+    environment_id: str, project: str, sweep_id: str, params: dict[str, str], seed: int | None
+) -> str:
+    """
+    The one command id of a sweep run, the same on every launch, retry, and extend.
+
+    Parameters
+    ----------
+    environment_id : str
+        The environment that owns the sweep (the hub's): two hubs' sweeps with
+        the same short id never share run ids.
+    project : str
+        Project name.
+    sweep_id : str
+        Sweep id.
+    params : dict of str to str
+        The run's combination (order does not matter).
+    seed : int or None
+        The run's seed.
+
+    Returns
+    -------
+    str
+        16 hex digits.
+
+    Examples
+    --------
+    >>> a = run_command_id("env", "toy", "s-0001", {"lr": "1e-4", "beam": "5"}, 1)
+    >>> a == run_command_id("env", "toy", "s-0001", {"beam": "5", "lr": "1e-4"}, 1), len(a)
+    (True, 16)
+    """
+    key = json.dumps([environment_id, project, sweep_id, sorted(params.items()), seed])
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 def _resolve_repo(
@@ -20123,13 +21243,17 @@ def mark_sweep(ctx: Context, run_id: str, sweep_id: str) -> RunRecord:
 
 
 def _local_launcher(ctx: Context, sweep_id: str) -> Launcher:
-    """Launch on this machine with ``launch_run`` and record ``sweep_id`` on the run."""
+    """Launch on this machine with ``launch_run`` (once per command id) and mark the sweep."""
 
-    def launch(req: RunRequest) -> RunRecord:
-        record = launch_run(ctx, req)
-        if record.sweep_id == sweep_id:
-            return record
-        return mark_sweep(ctx, record.run_id, sweep_id)
+    def launch(req: RunRequest, command_id: str) -> RunRecord:
+        def start() -> dict[str, Any]:
+            record = launch_run(ctx, req)
+            if record.sweep_id != sweep_id:
+                record = mark_sweep(ctx, record.run_id, sweep_id)
+            return record.model_dump(mode="json")
+
+        # the receipt makes a repeated command id return the run it started
+        return RunRecord.model_validate(ctx.events.run_once(command_id, start))
 
     return launch
 
@@ -20169,31 +21293,6 @@ def _combo_key(params: dict[str, str]) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(params.items()))
 
 
-_RunKey = tuple[int | None, tuple[tuple[str, str], ...]]
-"""(seed, sorted param items) of one sweep run."""
-
-
-def _launched(ctx: Context, spec: SweepSpec) -> set[_RunKey]:
-    """
-    The (seed, combination) pairs a sweep already has a run for.
-
-    Raises
-    ------
-    SweepError
-        A run id of the sweep is not indexed yet (a remote run still mirroring),
-        so the gaps cannot be known without risking a duplicate run.
-    """
-    runs = sweep_runs(ctx, spec)
-    indexed = {r.run_id for r in runs}
-    unseen = [rid for rid in spec.run_ids if rid not in indexed]
-    if unseen:
-        raise SweepError(
-            f"sweep {spec.id}: {len(unseen)} runs are not indexed yet (still mirroring "
-            "from the host?); retry in a moment"
-        )
-    return {(r.seed, _combo_key(r.params)) for r in runs}
-
-
 def _command_file(layout: Layout, project: str, command_id: str) -> Path:
     digest = hashlib.sha256(command_id.encode("utf-8")).hexdigest()[:32]
     return sweeps_dir(layout, project) / COMMANDS_DIR / f"{digest}.json"
@@ -20222,17 +21321,28 @@ def _claim_sweep(layout: Layout, project: str, command_id: str | None, sweep_id:
     atomic_write_text(path, json.dumps({"command_id": command_id, "sweep_id": sweep_id}))
 
 
-def _launch_all(
+def _issue(
+    ctx: Context,
+    spec: SweepSpec,
     launch: Launcher,
     requests: Iterable[tuple[int, RunRequest]],
-    run_ids: list[str],
-    seeds_done: list[int],
+    started: list[str],
 ) -> None:
-    """Launch requests in order, appending to ``run_ids``/``seeds_done`` as they start."""
+    """
+    Issue every (params, seed) of ``requests`` that has no member yet, in order.
+
+    Each run gets its ``run_command_id``, so a run that exists but is not
+    indexed yet (its answer lost, or not mirrored) comes back from the
+    launcher's receipt instead of starting twice. ``started`` collects the run
+    ids as they come back.
+    """
+    have = {(r.seed, _combo_key(r.params)) for r in sweep_runs(ctx, spec)}
+    owner = ctx.descriptor.environment_id
     for seed, req in requests:
-        run_ids.append(launch(req).run_id)
-        if seed not in seeds_done:
-            seeds_done.append(seed)
+        if (seed, _combo_key(req.params)) in have:
+            continue
+        command_id = run_command_id(owner, spec.project, spec.id, req.params, seed)
+        started.append(launch(req, command_id).run_id)
 
 
 def launch_sweep(
@@ -20290,10 +21400,11 @@ def launch_sweep(
     repo : Path, optional
         Project repo; default the registered repo of ``project``.
     launch : callable, optional
-        ``RunRequest -> RunRecord``; default launches here with ``launch_run``.
+        ``(RunRequest, command id) -> RunRecord``; default launches here with
+        ``launch_run``, once per command id.
     command_id : str, optional
         The client's command id. A retry with the same id resumes the sweep
-        the first call created and launches only its missing runs.
+        the first call created and issues only its missing runs.
 
     Returns
     -------
@@ -20336,34 +21447,22 @@ def launch_sweep(
     repo_path = _resolve_repo(ctx, project, task, repo, remote=launch is not None)
     claimed = _claimed_sweep(ctx.layout, project, command_id)
     spec = draft.model_copy(update={"id": claimed or new_sweep_id(ctx.layout, project)})
-    have: set[_RunKey] = set()
-    run_ids: list[str] = []
-    seeds_done: list[int] = []
+    started: list[str] = []
     with _sweep_lock(ctx.layout, project, spec.id):
         if claimed is not None and sweep_path(ctx.layout, project, spec.id).is_file():
-            # a retry of the same command: resume that sweep, launch only what it lacks
-            spec = load_sweep(ctx.layout, project, spec.id)
-            have = _launched(ctx, spec)
-            run_ids, seeds_done = list(spec.run_ids), list(spec.seeds)
+            spec = load_sweep(ctx.layout, project, spec.id)  # a retry: the stored definition
         else:
             save_sweep(ctx.layout, spec)
             _claim_sweep(ctx.layout, project, command_id, spec.id)  # before any run starts
-        requests = [
-            (seed, req)
-            for seed, req in _requests(
-                spec, seeds, repo_path, hypothesis=hypothesis, gpus=gpus, queue=queue
-            )
-            if (seed, _combo_key(req.params)) not in have
-        ]
+        requests = _requests(
+            spec, spec.seeds, repo_path, hypothesis=hypothesis, gpus=gpus, queue=queue
+        )
         try:
-            _launch_all(launch or _local_launcher(ctx, spec.id), requests, run_ids, seeds_done)
-        finally:
-            if run_ids:
-                save_sweep(
-                    ctx.layout, spec.model_copy(update={"run_ids": run_ids, "seeds": seeds_done})
-                )
-            else:
+            _issue(ctx, spec, launch or _local_launcher(ctx, spec.id), requests, started)
+        except BaseException:
+            if not started and not sweep_runs(ctx, spec):  # nothing to show: no sweep
                 sweep_path(ctx.layout, project, spec.id).unlink(missing_ok=True)
+            raise
     return summarize_sweep(ctx, project, spec.id)
 ```
 
@@ -20371,7 +21470,7 @@ def launch_sweep(
 
 Run: `uv run pytest tests/core/test_sweeps.py -q`
 
-Expected: `71 passed`
+Expected: `73 passed`
 
 Run: `uv run ruff check src/hypothex/core/sweeps.py tests/core/test_sweeps.py && uv run ruff format --check src/hypothex/core/sweeps.py tests/core/test_sweeps.py && uv run ty check src/hypothex/core/sweeps.py tests/core/test_sweeps.py`
 
@@ -20396,16 +21495,16 @@ git commit -m "feat(core): launch sweeps as tagged runs with params and seeds"
 
 **Interfaces:**
 - Consumes:
-  - Tasks 37–40: `load_sweep`, `save_sweep`, `_sweep_lock`, `sweep_runs`, `summarize_sweep`, `_check_launchable`, `_resolve_repo`, `_local_launcher`, `_requests`, `_launch_all`, `Launcher`
+  - Tasks 37–40: `load_sweep`, `save_sweep`, `_sweep_lock`, `sweep_runs`, `summarize_sweep`, `_check_launchable`, `_resolve_repo`, `_local_launcher`, `_requests`, `_issue`, `run_command_id`, `Launcher`
   - Phase 1a (exist; phase 2 keeps the signature): `stop_run(ctx, run_id) -> RunRecord` stops a queued run as `killed`; raises `RunError` when the run is no longer active.
 - Produces:
   - `stop_if_queued(ctx: Context, run_id: str) -> RunRecord` — `control.cancel_if_queued`: stops a run only if it has not started (else returns it unchanged), so "cancel queued" never kills a run the scheduler started a moment ago. The env server's `only_queued` stop uses it (Task 43).
   - `control.cancel_if_queued(ctx: Context, run_id: str) -> RunRecord` — one conditional step, never a status check followed by an unconditional stop: a run waiting in the GPU queue is removed under the scheduler lock (`_remove_from_queue`, Task 21); any other local queued run is cancelled by taking its execution claim first (`EXECUTION_CLAIM`, Task 18): if the claim is free the run can never execute (a supervisor on its way gets `already being executed`) and it is marked `killed` (`run.killed {reason: "cancelled while queued"}`); if a supervisor holds the claim, the run is left alone. A SLURM run goes to `slurm.cancel_if_pending`.
   - `slurm.cancel_if_pending(ctx: Context, record: RunRecord) -> RunRecord` — `scancel --state=PENDING <job>`: the controller cancels the job only while it is still pending, atomically; the run is marked `killed` only when `sacct`/`squeue` then shows the job `CANCELLED`, else returned unchanged (it started). A run whose job id is not recorded yet is left to `reconcile`.
   - `cancel_queued(ctx: Context, project: str, sweep_id: str, *, stop: Callable[[str], object] | None = None) -> SweepSummary` — backs `POST /api/v1/sweeps/{project}/{id}/cancel_queued`, `hx sweep cancel`, MCP `cancel_sweep`. The default `stop` is `stop_if_queued`; the hub passes `stop` that forwards to the owning host.
-  - `extend_sweep(ctx: Context, project: str, sweep_id: str, seeds: list[int], *, repo: Path | None = None, gpus: int | None = None, queue: bool | None = None, hypothesis: str | None = None, launch: Launcher | None = None) -> SweepSummary` — backs `POST /api/v1/sweeps/{project}/{id}/extend`, `hx sweep extend --seeds`, MCP `extend_sweep`.
+  - `extend_sweep(ctx: Context, project: str, sweep_id: str, seeds: list[int], *, repo: Path | None = None, gpus: int | None = None, queue: bool | None = None, hypothesis: str | None = None, launch: Launcher | None = None) -> SweepSummary` — backs `POST /api/v1/sweeps/{project}/{id}/extend`, `hx sweep extend --seeds`, MCP `extend_sweep`. It saves the grown definition (the new seeds) first, then issues every (params, seed) of the sweep that has no member yet, each with its `run_command_id` (Task 40). So an extend that failed midway is resumed by the same call again: done cells and seeds are skipped, the rest are issued, and a run whose answer was lost comes back from its receipt.
 
-`cancel_queued` stops only runs whose indexed status is `queued`; a run that ended or started between the read and the stop (`RunError`) is skipped. `extend_sweep` adds one run per combination (from `sweep_combos`, so random samples are reused) and new seed, under the sweep lock. `gpus` defaults to the first run's `gpus_requested`, `queue` to `gpus > 0`, `hypothesis` to the first run's. A seed whose runs all exist is refused. A seed that is in the sweep but misses runs (an earlier extend failed midway) is allowed again, and only its missing runs are launched; that needs every run of the sweep in the index (a remote run not mirrored yet gives a "retry in a moment" error, never a duplicate run). On a midway failure the file keeps the launched runs and the seeds that have runs.
+`cancel_queued` stops only runs whose indexed status is `queued`; a run that ended or started between the read and the stop (`RunError`) is skipped. `extend_sweep` adds one run per combination (from `sweep_combos`, so random samples are reused) and seed, under the sweep lock. `gpus` defaults to the first run's `gpus_requested`, `queue` to `gpus > 0`, `hypothesis` to the first run's. Seeds already in the sweep are not an error: extend is idempotent, so a retried extend (or an extend with a seed whose runs all exist) issues only what is missing, possibly nothing.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -20450,6 +21549,7 @@ from hypothex.core.sweeps import (
     load_sweep,
     new_sweep_id,
     planned_runs,
+    run_command_id,
     save_sweep,
     stop_if_queued,
     summarize_sweep,
@@ -20530,7 +21630,7 @@ def test_extend_adds_every_cell_for_each_new_seed(ctx: Context, toy_repo: Path) 
     sid = launched(ctx, toy_repo, fake)
     summary = extend_sweep(ctx, "toy", sid, [2, 3, 2], launch=fake)
     assert summary.spec.seeds == [1, 2, 3]
-    assert summary.spec.run_ids == ["r01", "r02", "r03", "r04", "r05", "r06"]
+    assert summary.run_ids == ["r01", "r02", "r03", "r04", "r05", "r06"]
     assert summary.counts["total"] == 6
     new = fake.requests[2:]
     assert [(r.seed, r.params["lr"]) for r in new] == [
@@ -20569,19 +21669,25 @@ def test_extend_random_sweep_reuses_its_samples(ctx: Context, toy_repo: Path) ->
     assert all(len(c["run_ids"]) == 2 for c in summary.cells)
 
 
-@pytest.mark.parametrize(
-    ("seeds", "message"),
-    [([], "at least one new seed"), ([1, 4], "seeds already in sweep s-[0-9a-f]{4}: 1")],
-)
-def test_extend_rejects_bad_seeds(
-    ctx: Context, toy_repo: Path, seeds: list[int], message: str
+def test_extend_needs_a_seed(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    with pytest.raises(SweepError, match="at least one seed"):
+        extend_sweep(ctx, "toy", sid, [], launch=fake)
+    assert len(fake.requests) == 2
+    assert load_sweep(ctx.layout, "toy", sid).seeds == [1]
+
+
+def test_extend_with_seeds_it_has_issues_only_what_is_missing(
+    ctx: Context, toy_repo: Path
 ) -> None:
     fake = FakeLauncher(ctx)
     sid = launched(ctx, toy_repo, fake)
-    with pytest.raises(SweepError, match=message):
-        extend_sweep(ctx, "toy", sid, seeds, launch=fake)
-    assert len(fake.requests) == 2
-    assert load_sweep(ctx.layout, "toy", sid).seeds == [1]
+    same = extend_sweep(ctx, "toy", sid, [1], launch=fake)  # seed 1 is complete
+    assert len(fake.requests) == 2 and same.counts["total"] == 2
+    grown = extend_sweep(ctx, "toy", sid, [1, 4], launch=fake)
+    assert [(r.seed, r.params["lr"]) for r in fake.requests[2:]] == [(4, "1e-4"), (4, "3e-4")]
+    assert grown.spec.seeds == [1, 4]
 
 
 def test_extend_refuses_to_grow_past_the_limit(ctx: Context, toy_repo: Path) -> None:
@@ -20594,23 +21700,19 @@ def test_extend_refuses_to_grow_past_the_limit(ctx: Context, toy_repo: Path) -> 
 def test_extend_partial_failure_then_retry_launches_only_missing_runs(
     ctx: Context, toy_repo: Path
 ) -> None:
+    # extending [2, 3]: seed 2 completes, seed 3 half; the same request again resumes it
     fake = FakeLauncher(ctx)
     sid = launched(ctx, toy_repo, fake)
-    fake.fail_at = 3  # 2 original runs + 1 run of seed 2, then fail
+    fake.fail_at = 5  # 2 original runs + both of seed 2 + one of seed 3, then fail
     with pytest.raises(RunError):
         extend_sweep(ctx, "toy", sid, [2, 3], launch=fake)
-    spec = load_sweep(ctx.layout, "toy", sid)
-    assert spec.seeds == [1, 2]
-    assert spec.run_ids == ["r01", "r02", "r03"]
+    assert load_sweep(ctx.layout, "toy", sid).seeds == [1, 2, 3]  # the definition came first
+    assert summarize_sweep(ctx, "toy", sid).run_ids == ["r01", "r02", "r03", "r04", "r05"]
     fake.fail_at = None
     grown = extend_sweep(ctx, "toy", sid, [2, 3], launch=fake)
-    assert [(r.seed, r.params["lr"]) for r in fake.requests[3:]] == [
-        (2, "3e-4"),
-        (3, "1e-4"),
-        (3, "3e-4"),
-    ]
+    assert [(r.seed, r.params["lr"]) for r in fake.requests[5:]] == [(3, "3e-4")]
     assert grown.spec.seeds == [1, 2, 3]
-    assert grown.spec.run_ids == ["r01", "r02", "r03", "r04", "r05", "r06"]
+    assert grown.run_ids == ["r01", "r02", "r03", "r04", "r05", "r06"]
 
 
 def test_extend_while_runs_wait_in_the_queue(
@@ -20630,7 +21732,7 @@ def test_extend_while_runs_wait_in_the_queue(
     assert (grown.counts["queued"], grown.counts["total"]) == (4, 4)
     positions = Scheduler(ctx).positions()
     # the new seed's runs join the queue behind the runs that were already waiting
-    assert [positions[run_id] for run_id in grown.spec.run_ids] == [1, 2, 3, 4]
+    assert [positions[run_id] for run_id in grown.run_ids] == [1, 2, 3, 4]
     cancelled = cancel_queued(ctx, "toy", sid)
     assert (cancelled.counts["killed"], cancelled.counts["queued"]) == (4, 0)
     assert Scheduler(ctx).positions() == {}
@@ -20826,8 +21928,8 @@ def extend_sweep(
     sweep_id : str
         Sweep id.
     seeds : list of int
-        New seeds. A seed already in the sweep is allowed only while some of its
-        runs are missing (an earlier extend failed midway); then only those run.
+        Seeds to add. Seeds already in the sweep are fine: only missing runs
+        are issued (an extend that failed midway is resumed this way).
     repo : Path, optional
         Project repo; default the registered repo.
     gpus : int, optional
@@ -20837,7 +21939,8 @@ def extend_sweep(
     hypothesis : str, optional
         Default the sweep's first run's hypothesis.
     launch : callable, optional
-        ``RunRequest -> RunRecord``; default launches here with ``launch_run``.
+        ``(RunRequest, command id) -> RunRecord``; default launches here with
+        ``launch_run``, once per command id.
 
     Returns
     -------
@@ -20847,35 +21950,20 @@ def extend_sweep(
     Raises
     ------
     SweepError
-        No seeds, a seed whose runs all exist, runs of the sweep not indexed yet
-        (when a seed is retried), or the sweep would grow past ``MAX_SWEEP_RUNS``.
+        No seeds, or the sweep would grow past ``MAX_SWEEP_RUNS``.
     StoreError
         If the sweep does not exist.
     """
     new = list(dict.fromkeys(seeds))
     if not new:
-        raise SweepError("give at least one new seed")
+        raise SweepError("give at least one seed")
     with _sweep_lock(ctx.layout, project, sweep_id):
         spec = load_sweep(ctx.layout, project, sweep_id)
+        grown = spec.model_copy(
+            update={"seeds": [*spec.seeds, *[s for s in new if s not in spec.seeds]]}
+        )
+        _check_launchable(grown)
         runs = sweep_runs(ctx, spec)
-        have = {(r.seed, _combo_key(r.params)) for r in runs}
-        retried = [s for s in new if s in spec.seeds]
-        if retried:
-            indexed = {r.run_id for r in runs}
-            unseen = [rid for rid in spec.run_ids if rid not in indexed]
-            if unseen:
-                raise SweepError(
-                    f"sweep {sweep_id}: {len(unseen)} runs are not indexed yet (still "
-                    "mirroring from the host?); retry in a moment"
-                )
-        combos = [_combo_key(c) for c in sweep_combos(spec)]
-        full = sorted(s for s in retried if all((s, c) in have for c in combos))
-        if full:
-            raise SweepError(
-                f"seeds already in sweep {sweep_id}: {', '.join(str(s) for s in full)}"
-            )
-        grown = [*spec.seeds, *[s for s in new if s not in spec.seeds]]
-        _check_launchable(spec.model_copy(update={"seeds": grown}))
         first = runs[0] if runs else None
         n_gpus = gpus if gpus is not None else (first.gpus_requested if first else 0)
         if n_gpus < 0:
@@ -20883,26 +21971,16 @@ def extend_sweep(
         if hypothesis is None:
             hypothesis = first.hypothesis if first else ""
         repo_path = _resolve_repo(ctx, project, spec.task, repo, remote=launch is not None)
-        run_ids = list(spec.run_ids)
-        seeds_done = list(spec.seeds)
-        requests = [
-            (seed, req)
-            for seed, req in _requests(
-                spec,
-                new,
-                repo_path,
-                hypothesis=hypothesis,
-                gpus=n_gpus,
-                queue=queue if queue is not None else n_gpus > 0,
-            )
-            if (seed, _combo_key(req.params)) not in have  # a retried seed: missing runs only
-        ]
-        try:
-            _launch_all(launch or _local_launcher(ctx, sweep_id), requests, run_ids, seeds_done)
-        finally:
-            save_sweep(
-                ctx.layout, spec.model_copy(update={"run_ids": run_ids, "seeds": seeds_done})
-            )
+        save_sweep(ctx.layout, grown)  # the definition first: a retry knows every seed
+        requests = _requests(
+            grown,
+            grown.seeds,
+            repo_path,
+            hypothesis=hypothesis,
+            gpus=n_gpus,
+            queue=queue if queue is not None else n_gpus > 0,
+        )
+        _issue(ctx, grown, launch or _local_launcher(ctx, sweep_id), requests, [])
     return summarize_sweep(ctx, project, sweep_id)
 ```
 
@@ -20982,12 +22060,15 @@ def cancel_if_pending(ctx: Context, record: RunRecord) -> RunRecord:
     job = poll([job_id]).get(job_id)
     if job is None or not job.state.startswith("CANCELLED"):
         return ctx.find_record(record.run_id)  # it started: leave it to run
-    killed = ctx.update_run(
+    killed = _end_if_active(
+        ctx,
         record.run_id,
         "run.killed",
         _end(RunStatus.KILLED),
         {"reason": "cancelled while queued", "slurm_job_id": job_id},
     )
+    if killed is None:
+        return _publish_node_end(ctx, record.run_id)
     mark_published(ctx.layout, killed)
     return killed
 ```
@@ -21037,7 +22118,7 @@ def test_cancel_if_queued_cancels_only_a_pending_job(ctx: Context, slurm: FakeSl
 
 Run: `uv run pytest tests/core/test_sweeps.py -q`
 
-Expected: `86 passed` in `test_sweeps.py`; `uv run pytest tests/core/test_slurm.py -q` reports `68 passed`
+Expected: `88 passed` in `test_sweeps.py`; `uv run pytest tests/core/test_slurm.py -q` reports `81 passed`
 
 Run: `uv run ruff check src/hypothex/core/sweeps.py tests/core/test_sweeps.py && uv run ruff format --check src/hypothex/core/sweeps.py tests/core/test_sweeps.py && uv run ty check src/hypothex/core/sweeps.py tests/core/test_sweeps.py`
 
@@ -23567,7 +24648,7 @@ git commit -m "feat(api): launch on a host and forward remote run actions with t
 
 **Interfaces:**
 - Consumes: the sweep engine `launch_sweep`, `extend_sweep`, `cancel_queued`, `list_sweeps`, `summarize_sweep`, `Launcher`, `SWEEP_TAG_PREFIX`, `SweepParam`, `SweepSpec`, `SweepSummary` (Tasks 37–41); `find_sweep`, `ssh_target`, `is_remote` (Task 42); `launch_on_host`, `remote_checkout`, `HostLaunchBody` (Task 45); `HubManager` (Task 44); `copy_from` (Task 6); `EnvClient.fetch_file` (Task 15); `Artifact` (records).
-- Each forwarded sweep run gets the command id `<command_id>:<seed>:<8 hex of its params>`, so a retried request never starts a run twice and a retried `extend` (which launches only missing runs, Task 41) never reuses another run's command id. A remote run learns its sweep id from its `sweep:<id>` tag. `POST /api/v1/sweeps` passes its `command_id` to `launch_sweep`, so a retry after a partial failure resumes the same sweep id (Task 40): the per-run command ids then always name runs tagged with that sweep.
+- Each forwarded sweep run carries the deterministic command id the engine gives it (`run_command_id`, Task 40), so the host's receipts turn any repeat (a retried launch or extend, a run whose answer was lost, a run not mirrored yet) into the run that already exists. A remote run learns its sweep id from its `sweep:<id>` tag. `POST /api/v1/sweeps` passes its `command_id` to `launch_sweep`, so a retry after a partial failure resumes the same sweep id (Task 40). The summary a host sweep route returns waits (up to `MIRROR_WAIT_SECONDS`) until the runs this call started are mirrored, since membership is derived from indexed runs.
 - Produces (in `hypothex.api.app`):
   - `MIRROR_WAIT_SECONDS = 10.0`, `PULL_MAX_BYTES = 64 * 1024**3`
   - `class SweepBody(ActionBody)`: `project`, `task`, `host`, `grid: list[SweepParam]`, `random`, `seeds` (≥1), `command` (≥1), `hypothesis`, `gpus`, `queue`, `commit`, `diff` (the last two are optional and additive: `hx sweep --host` sends the client checkout's commit and diff, so a hub without that checkout runs the client's code); `class SeedsBody(ActionBody)`: `seeds`; `class PullBody(ActionBody)`: `artifact: str = "checkpoint"`
@@ -23624,21 +24705,21 @@ def client(home: Path, ctx: Context, toy_repo: Path) -> Iterator[TestClient]:
 def test_local_sweep_routes(client: TestClient, ctx: Context) -> None:
     first = client.post("/api/v1/sweeps", json=_body(command_id="S1")).json()
     sid = first["spec"]["id"]
-    assert len(first["spec"]["run_ids"]) == 4 and first["spec"]["host"] is None
+    assert len(first["run_ids"]) == 4 and first["spec"]["host"] is None
     assert client.post("/api/v1/sweeps", json=_body(command_id="S1")).json()["spec"]["id"] == sid
-    for rid in first["spec"]["run_ids"]:
+    for rid in first["run_ids"]:
         control.wait_for_run(ctx, rid, timeout=60)
     listed = client.get("/api/v1/projects/toy/sweeps").json()
     assert [(s["id"], s["n_runs"]) for s in listed] == [(sid, 4)]
     assert client.get(f"/api/v1/sweeps/toy/{sid}").json()["spec"]["seeds"] == [1, 2]
     more = client.post(f"/api/v1/sweeps/toy/{sid}/extend", json={"seeds": [3]}).json()
-    assert more["spec"]["seeds"] == [1, 2, 3] and len(more["spec"]["run_ids"]) == 6
+    assert more["spec"]["seeds"] == [1, 2, 3] and len(more["run_ids"]) == 6
     again = client.post(f"/api/v1/sweeps/toy/{sid}/extend", json={"seeds": [3]})
-    assert again.status_code == 400 and "already in sweep" in again.json()["error"]
-    for rid in more["spec"]["run_ids"]:
+    assert again.status_code == 200 and len(again.json()["run_ids"]) == 6  # idempotent
+    for rid in more["run_ids"]:
         control.wait_for_run(ctx, rid, timeout=60)
     cancelled = client.post(f"/api/v1/sweeps/toy/{sid}/cancel_queued", json={}).json()
-    statuses = {ctx.find_record(rid).status for rid in cancelled["spec"]["run_ids"]}
+    statuses = {ctx.find_record(rid).status for rid in cancelled["run_ids"]}
     assert statuses == {RunStatus.FINISHED}
     assert client.get("/api/v1/sweeps/toy/s-000000").status_code == 404
 
@@ -23661,7 +24742,7 @@ def test_sweep_input_errors(client: TestClient) -> None:
 def test_remote_sweep_runs_on_the_host(tmp_path: Path) -> None:
     with remote_hub(tmp_path) as r:
         out = r.client.post("/api/v1/sweeps", json=_body(host="gpu1", command_id="RS")).json()
-        sid, ids = out["spec"]["id"], out["spec"]["run_ids"]
+        sid, ids = out["spec"]["id"], out["run_ids"]
         assert len(ids) == 4 and out["spec"]["host"] == "gpu1"
         assert set(ids) <= r.hub.index.run_ids()
         head = git(r.hub_repo, "rev-parse", "HEAD")
@@ -23681,7 +24762,7 @@ def test_remote_cancel_queued_stops_queued_runs_on_the_host(
     with remote_hub(tmp_path) as r:
         body = _body(host="gpu1", seeds=[1], gpus=1, queue=True)
         out = r.client.post("/api/v1/sweeps", json=body).json()
-        sid, ids = out["spec"]["id"], out["spec"]["run_ids"]
+        sid, ids = out["spec"]["id"], out["run_ids"]
         assert len(ids) == 2
         wait_until(lambda: all(r.hub.find_record(i).status == RunStatus.QUEUED for i in ids))
         r.client.post(f"/api/v1/sweeps/toy/{sid}/cancel_queued", json={"command_id": "C1"})
@@ -23815,7 +24896,6 @@ Expected: `15 failed` — the sweep and pull routes answer 404/405.
 In `src/hypothex/api/app.py` add the imports (`json` came with Task 44)
 
 ```python
-import hashlib
 import time
 from pathlib import Path, PurePosixPath
 
@@ -23990,22 +25070,22 @@ In `create_app`, after the `forward` helper add:
 ```python
     def launcher_for(
         host: str | None,
-        command_id: str | None,
+        launched: list[str],
         *,
         project: str,
         commit: str | None = None,
         diff: str | None = None,
     ) -> Launcher | None:
-        # None: the sweep engine launches here; a host name: forward each run to it
+        # None: the sweep engine launches here; a host name: forward each run to it.
+        # `launched` collects the run ids the host answers with (settled() waits for them)
         if not is_remote(host):
             return None
         target = str(host)
         pinned: dict[str, str | None] = {}
 
-        def launch(req: RunRequest) -> RunRecord:
+        def launch(req: RunRequest, run_command_id: str) -> RunRecord:
             tags = [t for t in req.tags if t.startswith(SWEEP_TAG_PREFIX)]
             sweep_id = tags[0].removeprefix(SWEEP_TAG_PREFIX) if tags else None
-            key = hashlib.sha256(json.dumps(req.params, sort_keys=True).encode()).hexdigest()[:8]
             local = req.repo.is_dir()  # False for a project copied from a host
             if "commit" not in pinned:
                 # spec 8A.4: one commit for every run of this call; the host fetches it
@@ -24032,9 +25112,11 @@ In `create_app`, after the `forward` helper add:
                 queue=req.queue,
                 sweep_id=sweep_id,
                 created_by=req.created_by,
-                command_id=f"{command_id}:{req.seed}:{key}" if command_id else None,
+                command_id=run_command_id,  # the host's receipt makes a repeat the same run
             )
-            return RunRecord.model_validate(launch_on_host(ctx, manager, target, body))
+            record = RunRecord.model_validate(launch_on_host(ctx, manager, target, body))
+            launched.append(record.run_id)
+            return record
 
         return launch
 
@@ -24056,9 +25138,10 @@ In `create_app`, after the `forward` helper add:
 
         return stop
 
-    def settled(spec: SweepSpec) -> SweepSummary:
+    def settled(spec: SweepSpec, launched: list[str]) -> SweepSummary:
+        # members are indexed runs: wait until this call's remote runs are mirrored
         if is_remote(spec.host):
-            await_mirrored(ctx, spec.run_ids)
+            await_mirrored(ctx, launched)
         return summarize_sweep(ctx, spec.project, spec.id)
 ```
 
@@ -24072,6 +25155,7 @@ Add a sweeps section after the run routes (before `# compare & datasets`):
             remote = is_remote(body.host)
             if remote:
                 remote_checkout(ctx, str(body.host), body.project)  # unknown host or no map
+            launched: list[str] = []
             summary = launch_sweep(
                 ctx,
                 project=body.project,
@@ -24087,14 +25171,14 @@ Add a sweeps section after the run routes (before `# compare & datasets`):
                 created_by=body.created_by,
                 launch=launcher_for(
                     body.host,
-                    body.command_id,
+                    launched,
                     project=body.project,
                     commit=body.commit,
                     diff=body.diff,
                 ),
                 command_id=body.command_id,  # a retry resumes this sweep (Task 40)
             )
-            return settled(summary.spec)
+            return settled(summary.spec, launched)
 
         return once(body, act)
 
@@ -24130,9 +25214,10 @@ Add a sweeps section after the run routes (before `# compare & datasets`):
     def sweep_extend(project: str, sweep_id: str, body: SeedsBody) -> dict[str, Any]:
         def act() -> SweepSummary:
             spec = find_sweep(ctx, sweep_id, project)
-            launch = launcher_for(spec.host, body.command_id, project=spec.project)
+            launched: list[str] = []
+            launch = launcher_for(spec.host, launched, project=spec.project)
             more = extend_sweep(ctx, spec.project, spec.id, body.seeds, launch=launch)
-            return settled(more.spec)
+            return settled(more.spec, launched)
 
         return once(body, act)
 
@@ -25660,7 +26745,7 @@ def test_local_launch_passes_gpus_and_queue(
 
 def test_local_sweep_commands(in_repo: Path, ctx: Context) -> None:
     out = hx("sweep", "-t", "toy-acc", "-H", "x helps", "--grid", "x=1,2", "--seeds", "2", "--", *SWEEP_CMD)
-    sid, ids = out["spec"]["id"], out["spec"]["run_ids"]
+    sid, ids = out["spec"]["id"], out["run_ids"]
     assert len(ids) == 4 and out["spec"]["seeds"] == [1, 2]
     for rid in ids:
         control.wait_for_run(ctx, rid, timeout=60)
@@ -25668,8 +26753,8 @@ def test_local_sweep_commands(in_repo: Path, ctx: Context) -> None:
     assert hx("sweeps", "-p", "toy")[0]["project"] == "toy"
     assert hx("sweep", "show", sid)["spec"]["id"] == sid
     more = hx("sweep", "extend", sid, "--seeds", "3")
-    assert more["spec"]["seeds"] == [1, 2, 3] and len(more["spec"]["run_ids"]) == 6
-    for rid in more["spec"]["run_ids"]:
+    assert more["spec"]["seeds"] == [1, 2, 3] and len(more["run_ids"]) == 6
+    for rid in more["run_ids"]:
         control.wait_for_run(ctx, rid, timeout=60)
     assert hx("sweep", "cancel", sid)["spec"]["id"] == sid
     text = runner.invoke(app, ["sweep", "show", sid]).stdout
@@ -25725,7 +26810,7 @@ def test_sweep_follow_ups_from_another_machine(
         assert hx("sweep", "show", sid)["spec"]["id"] == sid
         assert hx("sweep", "show", sid, "-p", "toy")["spec"]["host"] == "gpu1"
         more = hx("sweep", "extend", sid, "--seeds", "2")
-        assert more["spec"]["seeds"] == [1, 2] and len(more["spec"]["run_ids"]) == 4
+        assert more["spec"]["seeds"] == [1, 2] and len(more["run_ids"]) == 4
         assert hx("sweep", "cancel", sid)["spec"]["id"] == sid
 
 
@@ -25739,8 +26824,8 @@ def test_sweep_on_a_host_and_pull(
             "sweep", "--host", "gpu1", "-t", "toy-acc", "-H", "remote sweep",
             "--grid", "x=1,2", "--seeds", "1", "--", *SWEEP_CMD,
         )  # fmt: skip
-        assert out["spec"]["host"] == "gpu1" and len(out["spec"]["run_ids"]) == 2
-        assert all(r.env.find_record(i).sweep_id == out["spec"]["id"] for i in out["spec"]["run_ids"])
+        assert out["spec"]["host"] == "gpu1" and len(out["run_ids"]) == 2
+        assert all(r.env.find_record(i).sweep_id == out["spec"]["id"] for i in out["run_ids"])
         record = seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
         wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
         pulled = hx("pull", "e1", "--artifact", "predictions/predictions.jsonl")
@@ -26514,15 +27599,15 @@ def test_local_sweep_tools(home: Path, ctx: Context, toy_repo: Path) -> None:
     base = {"project": "toy", "task": "toy-acc", "hypothesis": "x helps", "seeds": [1]}
     err, out = call(home, "launch_sweep", {**base, "command": SWEEP_CMD, "grid": {"x": [1, 2.5]}})
     assert not err
-    sid, ids = out["spec"]["id"], out["spec"]["run_ids"]
+    sid, ids = out["spec"]["id"], out["run_ids"]
     assert sorted(ctx.find_record(i).params["x"] for i in ids) == ["1", "2.5"]
     for rid in ids:
         control.wait_for_run(ctx, rid, timeout=60)
     err, got = call(home, "get_sweep", {"project": "toy", "sweep_id": sid})
     assert not err and got["spec"]["id"] == sid
     err, more = call(home, "extend_sweep", {"project": "toy", "sweep_id": sid, "seeds": [2]})
-    assert not err and len(more["spec"]["run_ids"]) == 4
-    for rid in more["spec"]["run_ids"]:
+    assert not err and len(more["run_ids"]) == 4
+    for rid in more["run_ids"]:
         control.wait_for_run(ctx, rid, timeout=60)
     err, cancelled = call(home, "cancel_sweep", {"project": "toy", "sweep_id": sid})
     assert not err and cancelled["spec"]["id"] == sid
@@ -26548,7 +27633,7 @@ def test_remote_sweep_and_pull_tools(
                 "host": "gpu1",
             },
         )
-        assert not err and out["spec"]["host"] == "gpu1" and len(out["spec"]["run_ids"]) == 2
+        assert not err and out["spec"]["host"] == "gpu1" and len(out["run_ids"]) == 2
         record = seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
         wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
         rel = "predictions/predictions.jsonl"
@@ -26965,12 +28050,14 @@ One command seeds everything; `hx serve` brings it up. Mechanism: separate Hypot
 
 **Files:**
 - Modify: `src/hypothex/demo.py` (imports; fake-host section at the end)
-- Modify: `src/hypothex/cli/main.py` (`demo --with-hosts`; `serve` runs `demo_hosts_running`)
+- Modify: `src/hypothex/cli/main.py` (`demo --with-hosts`; `serve` passes `demo_hosts_running` to the app's lifespan)
+- Modify: `src/hypothex/api/app.py` (`create_app(..., lifespan_context=None)`)
 - Test: `tests/test_demo.py`
 
 **Interfaces:**
 - Consumes: `seed_demo`, `DEMO_TASKS` (phase 1b demo); `HostSpec`, `SlurmDefaults`, `load_hosts`, `save_hosts` (Task 2); `ExecutorInfo` additions, `compute_cost` (Tasks 1, 3); `SweepParam`, `SweepSpec`, `save_sweep`, `load_sweep` (Tasks 37, 38); env routes `POST /api/v1/runs` with `gpus/queue/sweep_id` (Task 43); `hx serve --kind` writing `server.json` and running the GPU scheduler (Tasks 22, 47); `HYPOTHEX_FAKE_GPUS` (Task 17).
 - Produces (in `hypothex.demo`): `DEMO_HOSTS_DIR = "demo-hosts"`, `DEMO_HOSTS_FILE = "hosts.json"`, `DEMO_SWEEP_ID = "s-7f3a"`, `DEMO_SLEEP_ENV = "HX_DEMO_SLEEP"`; `seed_demo_hosts(home: Path) -> dict[str, str]` (`{"gpu1": home, "cluster": home, "sweep": "rxn-forward/s-7f3a"}`); `demo_hosts_running(home: Path, *, ready_timeout: float = 60.0) -> ContextManager[list[str]]` (yields the live run ids; no-op without the marker). CLI: `hx demo [--kinds ...] --with-hosts [--json]` adds `"hosts"` to its output.
+- Produces (in `hypothex.api.app`): `create_app(..., lifespan_context: Callable[[], AbstractContextManager[object]] | None = None)`. The context is entered (in a worker thread) in the ASGI lifespan startup, before the hub connects its hosts, and exited in the lifespan shutdown, after the hub stopped. uvicorn runs the lifespan inside its signal handling and re-raises SIGTERM only after it, so the demo hosts are stopped on SIGTERM as on Ctrl-C; an outer `with` around uvicorn would be skipped by that re-raise. `hx serve` passes `demo_hosts_running`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -27039,7 +28126,9 @@ def test_seed_demo_hosts_writes_hosts_runs_and_the_sweep(hosts_home: Path) -> No
     lost = next(r for r in cluster.index.list_runs(limit=None) if r.status == RunStatus.LOST)
     assert (lost.executor.slurm_job_id, lost.executor.node) == ("48211932", "r208u06n02")
     spec = load_sweep(hub.layout, "rxn-forward", DEMO_SWEEP_ID)
-    assert spec.host == "gpu1" and spec.seeds == [1, 2, 3] and len(spec.run_ids) == 21
+    assert spec.host == "gpu1" and spec.seeds == [1, 2, 3]
+    members = gpu.index.list_runs(tag=f"sweep:{DEMO_SWEEP_ID}", include_archived=True, limit=None)
+    assert len(members) == 21
     assert [p.name for p in spec.grid] == ["lr", "beam"]
     gpus = json.loads((hosts_home / DEMO_HOSTS_DIR / "gpu1-gpus.json").read_text())
     assert len(gpus) == 8 and [g["index"] for g in gpus if g["external"]] == [3, 7]
@@ -27097,12 +28186,64 @@ def test_demo_hosts_serve_connected_hosts_a_queue_and_a_sweep(tmp_path: Path) ->
             assert len(current["gpu1"]["gpus"]) == 8
             assert current["cluster"]["slurm"] == {"pending": 0, "running": 0}
             wait_until(lambda: rows()["gpu1"]["queue"] == 3, timeout=60)
-            hub = Context.open(home)
-            spec = load_sweep(hub.layout, "rxn-forward", DEMO_SWEEP_ID)
-            assert len(spec.run_ids) == 27
-            wait_until(lambda: set(spec.run_ids) <= hub.index.run_ids(), timeout=60)
-            summary = client.get(f"/api/v1/sweeps/rxn-forward/{DEMO_SWEEP_ID}").json()
-            assert summary["spec"]["run_ids"] == spec.run_ids
+            def summary() -> dict:
+                return client.get(f"/api/v1/sweeps/rxn-forward/{DEMO_SWEEP_ID}").json()
+
+            # 21 seeded + 6 live runs, all tagged sweep:<id>, members once mirrored
+            wait_until(lambda: summary()["counts"]["total"] == 27, timeout=60)
+            assert set(started) <= set(summary()["run_ids"])
+
+
+def test_sigterm_to_hx_serve_stops_the_demo_hosts(tmp_path: Path) -> None:
+    # a real SIGTERM to a real `hx serve`: uvicorn re-raises it after its shutdown,
+    # so the cleanup must run in the app's lifespan, not in a `with` around uvicorn
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    from hypothex.core.execution import process_alive
+
+    home = tmp_path / "hub"
+    seed_demo(home, ["training"])
+    seed_demo_hosts(home)
+    log = (tmp_path / "serve.log").open("wb")
+    hub = subprocess.Popen(
+        [sys.executable, "-m", "hypothex.cli.main", "--home", str(home), "serve", "--port", "0"],
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        files = [
+            home / DEMO_HOSTS_DIR / name / "serve" / "server.json" for name in ("gpu1", "cluster")
+        ]
+
+        def host_pids() -> list[int]:
+            pids = []
+            for path in files:
+                try:
+                    pids.append(json.loads(path.read_text())["pid"])
+                except (OSError, ValueError, KeyError):
+                    return []
+            return pids
+
+        hub_file = home / "serve" / "server.json"
+        wait_until(lambda: len(host_pids()) == 2 and hub_file.is_file(), timeout=90)
+        pids = host_pids()
+        assert all(process_alive(pid, None) for pid in pids)
+        hub.send_signal(signal.SIGTERM)
+        assert hub.wait(timeout=90) in (-signal.SIGTERM, 0)
+        wait_until(lambda: not any(process_alive(pid, None) for pid in pids), timeout=30)
+        assert not hub_file.exists()
+    finally:
+        if hub.poll() is None:
+            hub.kill()
+            hub.wait()
+        for pid in host_pids():
+            if process_alive(pid, None):
+                os.kill(pid, signal.SIGKILL)
+        log.close()
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -27133,7 +28274,7 @@ from hypothex.core.cost import compute_cost
 from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.layout import Layout
 from hypothex.core.records import DatasetRef, ExecutorInfo, GitInfo, RunRecord, RunStatus, ScoreRecord
-from hypothex.core.sweeps import SweepParam, SweepSpec, load_sweep, save_sweep
+from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep
 from hypothex.remote.config import HostSpec, SlurmDefaults, load_hosts, save_hosts
 ```
 
@@ -27481,7 +28622,7 @@ def seed_demo_hosts(home: Path) -> dict[str, str]:
     for name, text in _FAKE_SLURM.items():
         atomic_write_text(bin_dir / name, text)
         (bin_dir / name).chmod(0o755)
-    sweep_runs = _seed_gpu1_sweep(gpu_ctx, gpu_repo, anchor)
+    _seed_gpu1_sweep(gpu_ctx, gpu_repo, anchor)  # tagged sweep:<id>: the sweep's members
     _seed_cluster_runs(slurm_ctx, slurm_repo, anchor)
     save_sweep(
         hub.layout,
@@ -27499,7 +28640,6 @@ def seed_demo_hosts(home: Path) -> dict[str, str]:
             command_template=list(_SWEEP_COMMAND),
             created_by="agent:tuner",
             created_at=anchor - timedelta(hours=5, minutes=20),
-            run_ids=sweep_runs,
         ),
     )
     hosts = load_hosts(hub.layout)
@@ -27650,10 +28790,7 @@ def _launch_live_runs(home: Path, hosts: list[_DemoHost], urls: dict[str, str]) 
         if resp.status_code >= 400:
             raise StoreError(f"demo host {gpu.name} refused a run: {resp.text[:300]}")
         run_ids.append(resp.json()["run_id"])
-    layout = Layout(home.expanduser().resolve())
-    spec = load_sweep(layout, project, DEMO_SWEEP_ID)
-    save_sweep(layout, spec.model_copy(update={"run_ids": [*spec.run_ids, *run_ids]}))
-    return run_ids
+    return run_ids  # tagged sweep:<id>: the hub counts them once they are mirrored
 
 
 def _stop_runs(url: str, run_ids: list[str]) -> None:
@@ -27777,7 +28914,48 @@ def demo(
     _emit(made, as_json, text)
 ```
 
-In `serve`, import `from hypothex.demo import demo_hosts_running` with the other lazy imports and replace:
+In `src/hypothex/api/app.py`, add the keyword `lifespan_context: Callable[[], contextlib.AbstractContextManager[object]] | None = None,` to `create_app` (after `hub_url`), and document it in the Parameters section:
+
+```python
+    lifespan_context : callable, optional
+        Returns a context manager entered when the server starts (before the
+        hub connects its hosts) and exited when it stops (after the hub
+        stopped), in the ASGI lifespan: inside uvicorn's signal handling, so a
+        SIGTERM runs its cleanup too. ``hx serve`` passes the demo hosts.
+```
+
+In `create_app`, replace:
+
+```python
+    app = FastAPI(
+        title="Hypothex",
+        version=__version__,
+        lifespan=lifespan,
+```
+
+with:
+
+```python
+    @asynccontextmanager
+    async def lifespan_with_context(app_: FastAPI) -> AsyncIterator[None]:
+        # uvicorn re-raises SIGTERM after its shutdown, which skips any `with` around
+        # it; the lifespan's own shutdown always runs first
+        with contextlib.ExitStack() as extra:
+            if lifespan_context is not None:
+                await asyncio.to_thread(extra.enter_context, lifespan_context())
+            try:
+                async with lifespan(app_):
+                    yield
+            finally:
+                await asyncio.to_thread(extra.close)
+
+    app = FastAPI(
+        title="Hypothex",
+        version=__version__,
+        lifespan=lifespan_with_context,
+```
+
+In `serve` (`src/hypothex/cli/main.py`), import `from hypothex.demo import demo_hosts_running` with the other lazy imports and replace:
 
 ```python
     with _server_file(home, info):
@@ -27789,18 +28967,29 @@ In `serve`, import `from hypothex.demo import demo_hosts_running` with the other
 with (keep `auth_token=token`):
 
 ```python
-    with demo_hosts_running(home) as live, _server_file(home, info):
-        if live:
-            typer.secho(f"demo hosts up; {len(live)} sweep runs launched on gpu1", err=True)
+    @contextmanager
+    def demo_hosts() -> Iterator[None]:
+        # entered and left by the app's lifespan, so SIGTERM stops the demo hosts too
+        with demo_hosts_running(home) as live:
+            if live:
+                typer.secho(f"demo hosts up; {len(live)} sweep runs launched on gpu1", err=True)
+            yield
+
+    with _server_file(home, info):
         application = create_app(
-            home, host=host, kind=resolved, auth_token=token, hub_url=_url(host, bound)
+            home,
+            host=host,
+            kind=resolved,
+            auth_token=token,
+            hub_url=_url(host, bound),
+            lifespan_context=demo_hosts,
         )
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/test_demo.py tests/cli/test_serve.py -q`
-Expected: all pass (the 5 new demo tests plus the existing ones; `test_serve.py` checks that the final `hx serve` still demands the env-server token). The serve test takes a few seconds: two `hx serve` subprocesses and one 5 s scheduler tick.
+Expected: all pass (the 6 new demo tests plus the existing ones; `test_serve.py` checks that the final `hx serve` still demands the env-server token). The serve tests take a few seconds each: `hx serve` subprocesses and one 5 s scheduler tick; `test_sigterm_to_hx_serve_stops_the_demo_hosts` sends a real SIGTERM to a real `hx serve` and checks that both fake hosts are gone.
 
 - [ ] **Step 6: Try it by hand (no real hosts involved)**
 
@@ -27818,7 +29007,7 @@ Expected: clean; all tests pass.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/hypothex/demo.py src/hypothex/cli/main.py tests/test_demo.py
+git add src/hypothex/demo.py src/hypothex/cli/main.py src/hypothex/api/app.py tests/test_demo.py
 git commit -m "feat(demo): hx demo --with-hosts seeds fake gpu and slurm hosts, a queue, and a sweep"
 ```
 
@@ -28177,7 +29366,7 @@ git commit -m "docs: remote hosts, sweeps, pull, service, and demo hosts in the 
 
 Spec 8A.9 ("Docker integration tests (marked `docker`, skipped when Docker is unavailable): a real sshd container (bootstrap, tunnel, reconnect after `docker restart`) and a small SLURM cluster (submit, status, cancel, lost detection). Never against the user's hosts."). Image tags are pinned: `python:3.12.7-slim-bookworm`, `debian:12.7-slim`, `mariadb:10.11.9`, `ghcr.io/astral-sh/uv:0.8.22`.
 
-`tests/docker/conftest.py` owns the harness: a skip hook (Docker, Compose v2, OpenSSH), an isolated SSH access object (throwaway ed25519 key, one `Host` alias in a temp `ssh_config`, `ssh`/`scp` wrappers that always pass `-F <temp config>`, exported as `HYPOTHEX_SSH`/`HYPOTHEX_SCP`), a `HubThread` that runs the `Hub` on a private asyncio loop, and fixtures for one sshd container (`tests/docker/sshd/`) and one Compose SLURM cluster (`tests/docker/slurm/`: MariaDB + slurmdbd + slurmctld/login node with sshd + compute node `c1`, `/home` on one shared volume). The autouse `isolate_remote` fixture (Task 1 Step 0) also runs for `docker` tests: it points `HYPOTHEX_HUB_URL` at a dead port (and puts refusing `nvidia-smi`/SLURM stubs on the host's `PATH`; the clusters' commands run inside the containers), so `hx hosts add` never reaches the user's running hub, and points `HYPOTHEX_SSH`/`HYPOTHEX_SCP` at the refusing script. The docker conftest's own autouse fixture `docker_ssh_env` (it runs after the root one) then puts back the wrappers of the test's `sshd_box` or `slurm_cluster`, so module-scoped hubs (`slurm_hub`) that reconnect in the middle of a test still use the isolated wrappers; a Docker test with neither fixture keeps the refusing script. Containers and Compose projects get unique names (`hx-sshd-<8 hex>`, `hxslurm<8 hex>`) and are always removed in fixture teardown. `HYPOTHEX_REQUIRE_DOCKER=1` turns the skip into a usage error (CI uses it). Run the modules whole: the first test of each module bootstraps the host that the later tests reuse.
+`tests/docker/conftest.py` owns the harness: a skip hook (Docker, Compose v2, OpenSSH), an isolated SSH access object (throwaway ed25519 key, one `Host` alias in a temp `ssh_config`, `ssh`/`scp` wrappers that always pass `-F <temp config>`, exported as `HYPOTHEX_SSH`/`HYPOTHEX_SCP`), a `HubThread` that runs the `Hub` on a private asyncio loop, and fixtures for one sshd container (`tests/docker/sshd/`) and one Compose SLURM cluster (`tests/docker/slurm/`: MariaDB + slurmdbd + slurmctld/login node with sshd + compute node `c1`, `/home` on one shared volume). The autouse `isolate_remote` fixture (Task 1 Step 0) also runs for `docker` tests: it points `HYPOTHEX_HUB_URL` at a dead port (and puts refusing `nvidia-smi`/SLURM stubs on the host's `PATH`; the clusters' commands run inside the containers), so `hx hosts add` never reaches the user's running hub, and points `HYPOTHEX_SSH`/`HYPOTHEX_SCP` at the refusing script. The docker conftest's own autouse fixture `docker_ssh_env` (it runs after the root one) then puts back the wrappers of the test's `sshd_box` or `slurm_cluster`; the session baseline (`pytest_configure`) already covers module-scoped fixtures, and `slurm_hub` also sets the dead `HYPOTHEX_HUB_URL` itself, so module-scoped hubs (`slurm_hub`) that reconnect in the middle of a test still use the isolated wrappers; a Docker test with neither fixture keeps the refusing script. Containers and Compose projects get unique names (`hx-sshd-<8 hex>`, `hxslurm<8 hex>`) and are always removed in fixture teardown. `HYPOTHEX_REQUIRE_DOCKER=1` turns the skip into a usage error (CI uses it). Run the modules whole: the first test of each module bootstraps the host that the later tests reuse.
 
 What the part author verified (2026-10-03, colima, Docker 29.5.2, Compose v5.6.0, arm64): the sshd image builds; key-only login through the `-F` wrapper; `ssh -L` tunnel; `uv tool install --force` of the wheel (about 4 s); `hx serve` and a finished run; `docker restart -t 1` kills the tunnel and `environment.json` survives. SLURM: `c1` is `idle` about 10 s after `up -d`; `sbatch` runs on `c1` and writes to the shared `/home`; `sacct` shows `COMPLETED`; `scancel` gives `CANCELLED by 1000`; `docker compose kill c1` gives `NODE_FAIL` after about 30 s. The hub-level tests need Parts 1–9 and could not run before them; their timeouts include SLURM's 30 s poll.
 
@@ -29995,6 +31184,7 @@ from tests.docker.conftest import (
     wait_remote_status,
     wait_until,
 )
+from tests.fakes import DEAD_HUB
 
 pytestmark = pytest.mark.docker
 
@@ -30020,6 +31210,8 @@ def slurm_hub(
     with pytest.MonkeyPatch.context() as mp:
         home = tmp_path_factory.mktemp("slurm-hub")
         mp.setenv("HYPOTHEX_HOME", str(home))
+        # module fixture: set the hub URL here too (`hosts add|map` must never reach a real hub)
+        mp.setenv("HYPOTHEX_HUB_URL", DEAD_HUB)
         for key, value in slurm_cluster.access.env().items():
             mp.setenv(key, value)
         alias = slurm_cluster.access.alias
@@ -30566,3 +31758,19 @@ Inputs: part files B1–B10 (`.superpowers/plan-parts/p2/`), the contract, and s
 - Also fixed while verifying: Task 29 `test_reconcile_keeps_runs_with_an_exit_record` read the last event, which is `run.eval_skipped`; Tasks 41/43 queued-stop tests now use the server's own environment id; Task 49 ty errors (`parse_args` override with typer's vendored click, untyped rows) and Task 45 SIM108; Task 6/7 counts.
 
 Verified in a scratch worktree of `phase-2` (HEAD `8e9ea65`), built task by task from this plan with scripts (no Docker, no real host, `~/.ssh` untouched): Tasks 1–36 and 37–50 applied in order; `uv run pytest -q` 1129 passed through Task 50 (bootstrap tests also under `dash`), `ruff check` clean apart from E501 lines that `ruff format` rewraps, `ty check src` clean. Not executed here: Tasks 51–59 (demo, docs, Docker, cost on leaderboards), whose edits this round are limited to the `auth_token` line (51), user docs (52), and the Task 57 fixture.
+
+**Review round 2.** Codex review 2 (`.superpowers/plan-parts/p2/codex-review-2.md`) and the controller rulings S1–S9. The rulings replace mechanisms instead of patching them; the superseded code and its tests are removed, not kept beside the new ones. Each backend item is fixed in the task that owns the code:
+
+- 1 (isolation starts too late, S1): the fail-closed baseline is session-wide. `pytest_configure` in `tests/conftest.py` (Task 1 Step 0) sets the dead `HYPOTHEX_HUB_URL`, the refusing `HYPOTHEX_SSH`/`HYPOTHEX_SCP`, the refusing `nvidia-smi`/SLURM stubs first on `PATH`, and unsets `HYPOTHEX_FAKE_GPUS` before any test module is imported or any session/module fixture runs; `isolate_remote` repeats it per test. New test `test_module_fixtures_already_run_fail_closed` (a module fixture sees the baseline). Task 57's module fixture `slurm_hub` sets `HYPOTHEX_HUB_URL` itself.
+- 3 (run-root symlink, S2): `open_run_path(store, run_dir, rel_path)` opens the store root and walks down to the run folder and the file with `O_NOFOLLOW` (`O_DIRECTORY` for folders) from that trusted descriptor (Task 14). New tests: the run folder itself replaced by a symlink, and swapped mid-request (both the run root and a folder in it).
+- 4 (racy lease, S3): the lease, its renewer, and lock stealing are gone. `hx_lock` is an OS lock: `flock` when present, else `python3` `fcntl`, held by a helper process that exits with the script, so the OS drops it when its holder dies; only a host with neither uses a mkdir lock that is broken solely for a provably dead owner on the same host and never for a live or another host's owner (the error names the lock path) (Task 8). The eight lease tests are replaced by thirteen: mode choice, exclusion and release per mode, release when the holder is SIGKILLed (OS modes), and the mkdir rules (dead, recycled, live, other host). Task 11's two-hubs test runs with a mkdir and an OS lock. Verified here also with a `flock(1)` stand-in in the scratch tree, since macOS has no `flock` (those three cases skip there).
+- 5 (unowned workload, S4): gated spawn. `execute_run` starts `sh -c 'IFS= read -r _ || exit 97; exec "$@"' hx-gate <command>` with stdin a pipe, saves `child_pid` (`run.started`), and only then writes `go` (Task 18). A supervisor that dies before that leaves a gate that exits 97 without running anything, so repair releases the GPUs safely. New fault test at both points (before `child_pid`, before `go`): the command never runs, the GPUs are held until repair, then released. Phase 1's `_launch_running` helper waits for the command's `ready` line, since `running` is now saved just before the gate opens.
+- 6, 7, 9 (SLURM, S5): explicit intent states `pending` → `submitted(job_id)` | `unknown` in the outbox (Task 28). A timeout, a communication error, or no job id is `unknown` (`SubmitUnknownError`, event `run.submit_unknown`), never a rejection. `unknown` (or `pending` with a dead submitter) is resolved only by the unique comment in `squeue` and `sacct`, both filtered by comment (`find_submitted(comment) -> (job, complete)`, Task 26); the run fails and the intent is dropped only when both answered without a match, the submitter is dead, and `SUBMIT_SETTLE_SECONDS` passed (Task 29). `--job-name`, `--comment`, `--output` (and abbreviations) are rejected in `extra` (`reserved_sbatch_option`, Tasks 2, 25). A stop before the job id is known sets `cancel_requested` under the outbox lock that recording a job id also takes; whoever learns the job id cancels it, and the intent stays until then (Tasks 28, 30). The fake `sacct` gained the `Comment` column. New tests: name-alone never matches, `sacct` failing means unknown, rejection vs unknown outcome, an unknown outcome resolved by its comment, failed only when provably absent, a stop during `sbatch`, a stop of an unknown submission whose job appears later.
+- 8 (terminal publication, S6): `_end_if_active` (Task 28) replaces `Context.update_run` for every end the login node writes on a SLURM run: under the run lock a run the node already ended gets no write and no event, and the node's actual end is published instead (`_publish_node_end` → `sync_node_run`); the outbox entry goes only after the event of the actual terminal status (Tasks 29, 30, 41). New tests: the node ends during `reconcile` (published `finished`, no `run.lost`), and a stop racing the node's end.
+- 10, 11, 12 (mirror, S7): the append/offset path is removed (route `offset`, `fetch_file(offset=)`, `APPEND_OVERLAP_BYTES`, `_append*`, `_Staged`, the in-mirror refetch). Every changed file is fetched whole into a per-run staging folder; only when all fetches succeeded is the run id claimed hub-wide (`<store>/.claims/<run_id>.json`, written under one shared lock and checked against every project of the store) and are the files installed in one pass under the run lock, `run.yaml` after the files, `.mirror.json` last (Tasks 14, 15, 34). One deviation from S7's "rename swap": the install is a pass of whole-file `os.replace`, not one rename of the run folder, because the folder holds its `.lock` (a swap would orphan lock holders); whole-file installs are idempotent, so the next mirror repairs any cut-short install. New tests: an index failure after growth never duplicates bytes (100 + 10 identical bytes), a failed fetch installs nothing (no terminal `run.yaml` next to stale predictions), a claimed id stays owned after a failed index (another project is refused). Log tails stay capped at 8 MiB and are fetched whole.
+- 13, 14 (sweeps, S8): membership is derived from the `sweep:<id>` tag; `SweepSpec.run_ids` is removed and `SweepSummary.run_ids` is derived (contract and spec 8A.6 updated). Each (params, seed) has one command id, `run_command_id(environment_id, project, sweep_id, params, seed)` (16 hex of a SHA-256; the hub's environment id and the project are added to S8's inputs so two hubs' `s-xxxx` ids never collide on one host's receipts). Launch, a retried launch, and extend save the definition (new seeds first), then issue every missing (params, seed) with its command id; the local launcher runs inside `EventLog.run_once`, the hub forwards the id to the host's receipts (Tasks 40, 41, 46). `_launched`, `_launch_all`, the "not indexed yet, retry" error, and the "seeds already in sweep" error are gone (extend is idempotent). New tests: a run whose answer was lost (and not mirrored) is never started twice and counts once mirrored; one command id per run on every launch; a multi-seed extend resumed after seed 2 completed and seed 3 half-completed; extend with seeds it has.
+- 15 (SIGTERM, S9): `create_app(..., lifespan_context=)` enters the demo hosts in the ASGI lifespan startup and leaves them in its shutdown, inside uvicorn's signal handling; `hx serve` passes `demo_hosts_running` and no longer wraps uvicorn in it (Task 51). New test `test_sigterm_to_hx_serve_stops_the_demo_hosts` sends a real SIGTERM to a real `hx serve`; it fails with the old outer `with` (checked in the scratch tree) and passes now.
+- Non-blocking notes: (a) `_recover_starts` finds queue markers on disk, so a run that ended while it waited loses its `queue.json` on the next tick (Task 20, new test); (b) `copy_from` renames an old folder aside to `.<name>.old` next to it and the next `copy_from` puts it back after a crash between the two renames, under a `flock` on the folder (Task 6, new fault test); (c) `run.lost` names SLURM's end state (e.g. `NODE_FAIL`) when `sacct` gave one at either of the two polls (`confirm_gone` now keeps the first poll's record), else neutral wording (Task 29, new test).
+- Coordinator alignment: `mirror.run_updated` carries `reason` when the host's event had one (Tasks 34, 35; contract 1.5; test with a SLURM `NODE_FAIL` reason).
+
+Verified in a scratch worktree of `phase-2` (HEAD `67866f9`), built from this plan with scripts (no Docker, no real host, `~/.ssh` untouched): Tasks 1–51 applied in order, then `uv run ruff format` + `ruff check --fix` (import merging and line wrapping only), `ruff check` clean, `ty check src` clean, `uv run pytest -q`: `1169 passed, 3 skipped` (the skips are the three `flock`-mode lock tests: macOS has no `flock`; with a `flock(1)` stand-in on `PATH` all 15 lock tests pass). Not executed here: Tasks 52–59 (docs, Docker, cost on leaderboards); this round changed Task 57's `slurm_hub` fixture only by one `setenv`.

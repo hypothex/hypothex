@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { PanelRegistryContext } from "../../src/pages/components/PanelGrid";
 import type { QueryResponse, ViewDetail, ViewInfo } from "../../src/pages/components/types";
 import { TaskPage, boardMeta } from "../../src/pages/Task";
 import { makeBoard } from "./fixtures";
@@ -119,6 +121,45 @@ describe("TaskPage", () => {
     const body = calls.find((c) => c.url === `${BASE}/reeval`)?.body as Record<string, unknown>;
     expect(typeof body.command_id).toBe("string");
     expect(body.created_by).toBe("human");
+  });
+
+  test("a tab switch does not draw the previous view's panels under the new view", async () => {
+    let release: (value: QueryResponse) => void = () => {};
+    const pending = new Promise<QueryResponse>((resolve) => {
+      release = resolve;
+    });
+    const OTHER: QueryResponse = {
+      panels: [{ type: "leaderboard", title: "Only board", rows: [{}], meta: {} }],
+    };
+    const otherDetail = detail(VIEWS[1]);
+    otherDetail.view.panels = [{ type: "leaderboard", title: "Only board", data: {}, layout: { span: 12, row: null } }];
+    mockApi({
+      ...routes("overview"),
+      [`GET ${BASE}/views/route-quality`]: otherDetail,
+      [`POST ${BASE}/views/query`]: (call: Call) =>
+        (call.body as { name: string }).name === "overview" ? PANELS : pending,
+    });
+    const page = (view?: string) => (
+      <PanelRegistryContext.Provider value={registry}>
+        <QueryClientProvider client={client}>
+          <TaskPage project="toy-classifier" task="toy-test" view={view} />
+        </QueryClientProvider>
+      </PanelRegistryContext.Provider>
+    );
+    const { rerender, client } = renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, {
+      registry,
+    });
+    await screen.findByRole("region", { name: "a Best" });
+
+    rerender(page("route-quality"));
+    const tabs = screen.getByRole("navigation", { name: "Views" });
+    await waitFor(() => expect(within(tabs).getByText("1 panel")).toBeTruthy());
+    // The new view's detail is in, its panel data is not: the old panels must not show.
+    expect(screen.queryAllByRole("region")).toHaveLength(0);
+
+    release(OTHER);
+    const board = await screen.findByRole("region", { name: "a Only board" });
+    expect(board.style.gridColumn).toBe("span 12");
   });
 
   test("shows the error for an unknown view", async () => {

@@ -120,13 +120,18 @@ def config_hash(data: dict[str, Any]) -> str:
 _MAP_TAG = "\x00map"
 
 
-def _key_text(key: Any) -> str:
-    """Write a mapping key as ``json.dumps`` would (``1`` -> ``"1"``), else as ``str``."""
+def _typed_key(key: Any) -> list[str]:
+    """
+    Write a mapping key as ``[type, text]``, so ``1`` and ``"1"`` stay apart.
+
+    The text is what ``json.dumps`` writes for JSON scalars and ``str`` otherwise
+    (a YAML date key).
+    """
     if isinstance(key, str):
-        return key
+        return ["str", key]
     if key is None or isinstance(key, bool | int | float):
-        return json.dumps(key)
-    return str(key)
+        return [type(key).__name__, json.dumps(key)]
+    return [type(key).__name__, str(key)]
 
 
 def _canonical(value: Any) -> Any:
@@ -135,11 +140,12 @@ def _canonical(value: Any) -> Any:
 
     Only used for configs whose keys ``json.dumps(sort_keys=True)`` rejects, so
     the hash of every config it accepts is unchanged. A mapping becomes
-    ``{"\\x00map": [[key, value], ...]}``: objects appear only as that wrapper,
-    so two configs that differ give different text.
+    ``{"\\x00map": [[[type, key], value], ...]}``: objects appear only as that
+    wrapper and every key keeps its type, so two configs that differ give
+    different text (``{1: a, "1": b}`` is not ``{1: b, "1": a}``).
     """
     if isinstance(value, dict):
-        pairs = [[_key_text(k), _canonical(v)] for k, v in value.items()]
+        pairs = [[_typed_key(k), _canonical(v)] for k, v in value.items()]
         pairs.sort(key=lambda kv: (kv[0], json.dumps(kv[1], default=str)))
         return {_MAP_TAG: pairs}
     if isinstance(value, list | tuple):

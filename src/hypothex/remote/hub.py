@@ -332,7 +332,8 @@ def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) ->
     on every mirror, so a task or metric version added on the host reaches
     the hub. A project registered on the hub (or copied from another host) is
     never replaced; a later ``hx register`` of a checkout on the hub replaces
-    the copy.
+    the copy. The copy's ``repo`` is the path the host reported, on the host:
+    hub code must never read or write under it (check ``remote_host`` first).
     """
     known: ProjectEntry | None = None
     with contextlib.suppress(StoreError):

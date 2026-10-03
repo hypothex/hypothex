@@ -91,12 +91,21 @@ def _task_setup(
     Raises
     ------
     EvalError
-        If the run has no task, or the task no longer exists.
+        If the run has no task, the task no longer exists, or the project
+        is a copy from a host (``ProjectEntry.remote_host``): its repo path
+        is on that host, so it is never read here.
     """
     if record.task is None:
         raise EvalError(f"run {record.run_id} has no task; nothing to evaluate against")
+    entry = ctx.store.load_project(record.project)
+    if entry.remote_host is not None:
+        # the host sent this repo path: never load hypothex.yaml (and metric code) from it here
+        raise EvalError(
+            f"project {record.project!r} was copied from host {entry.remote_host} and its repo "
+            f"is on that host; evaluate there, or `hx register` a checkout here"
+        )
     checkout = run_checkout(ctx, record) if from_checkout else None
-    repo = checkout or Path(ctx.store.load_project(record.project).repo)
+    repo = checkout or Path(entry.repo)
     config = load_project_config(repo)
     if record.task not in config.tasks:
         raise EvalError(f"task {record.task!r} no longer exists in {repo / CONFIG_FILENAME}")
@@ -278,8 +287,9 @@ def reeval(
     Raises
     ------
     EvalError
-        If neither a run id nor a project and task are given, or a
-        non-current metric version is requested.
+        If neither a run id nor a project and task are given, a
+        non-current metric version is requested, or the project is a copy
+        from a host (its repo path is on that host).
     """
     if run_id is not None:
         targets = [ctx.find_record(run_id)]

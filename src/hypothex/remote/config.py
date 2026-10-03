@@ -286,7 +286,9 @@ def save_hosts(layout: Layout, hosts: EnvironmentsFile) -> None:
     Atomically write ``<home>/environments.yaml``.
 
     Fields left at their defaults are omitted, so the file stays short.
-    Comments in a hand-edited file are not kept.
+    Comments in a hand-edited file are not kept. The text is validated again
+    first (``model_copy(update=...)`` skips validation), so a file that
+    ``load_hosts`` would reject is never written.
 
     Parameters
     ----------
@@ -294,6 +296,11 @@ def save_hosts(layout: Layout, hosts: EnvironmentsFile) -> None:
         Hub home layout; the home directory is created if missing.
     hosts : EnvironmentsFile
         Hosts to write.
+
+    Raises
+    ------
+    ConfigError
+        The hosts do not match the schema; the file is left unchanged.
 
     Examples
     --------
@@ -304,4 +311,9 @@ def save_hosts(layout: Layout, hosts: EnvironmentsFile) -> None:
     >>> load_hosts(lay).environments["gpu1"].ssh_alias
     'g1'
     """
-    write_yaml(environments_path(layout), hosts.model_dump(mode="json", exclude_defaults=True))
+    data = hosts.model_dump(mode="json", exclude_defaults=True)
+    try:
+        EnvironmentsFile.model_validate(data)
+    except ValidationError as exc:
+        raise ConfigError(f"invalid hosts, not saved: {exc}") from exc
+    write_yaml(environments_path(layout), data)

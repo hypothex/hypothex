@@ -153,18 +153,79 @@ def _write_private(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # another user's process: alive
+    except (OverflowError, ValueError):
+        return False
+    return True
+
+
+def _refuse_live_owner(home: Path, path: Path) -> None:
+    """
+    Raise ``ConfigError`` when ``server.json`` names a server that may still own ``home``.
+
+    One server per home, as the bootstrap start script keeps it: a record on
+    another host (a shared home), or of a live process here, is never replaced.
+    A record whose process is gone (or that cannot be read) is stale.
+    """
+    import httpx
+
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(record, dict) or not isinstance(record.get("pid"), int):
+        return
+    pid, port = record["pid"], record.get("port")
+    where = record.get("hostname")
+    if isinstance(where, str) and where and where != socket.gethostname():
+        raise ConfigError(
+            f"{path} names an hx server on {where} (pid {pid}), not {socket.gethostname()}; "
+            f"stop it there (or remove {path} if it is gone), then retry"
+        )
+    if pid == os.getpid() or not _pid_alive(pid):
+        return
+    own_id = load_descriptor(Layout(home)).environment_id
+    answered: str | None = None
+    with contextlib.suppress(httpx.HTTPError, ValueError, TypeError, AttributeError):
+        url = f"http://127.0.0.1:{int(port)}/.well-known/hypothex/environment"
+        answered = httpx.get(url, timeout=2.0).json().get("environment_id")
+    if answered == own_id:
+        raise ConfigError(
+            f"an hx server already serves this home on port {port} (pid {pid}); "
+            "use it, or stop it first"
+        )
+    raise ConfigError(
+        f"pid {pid} from {path} is alive but does not answer for this home on port {port}; "
+        f"stop it if it is an hx server, or remove {path} if it is not, then retry"
+    )
+
+
 @contextmanager
 def _server_file(home: Path, info: ServerInfo) -> Iterator[None]:
     # <home>/serve/server.json says which server owns this home (bootstrap reuses it);
     # the hostname tells login nodes that share a home apart (Task 11); the token is
-    # why it is owner-only
+    # why it is owner-only. A live owner keeps it: checked and written under a lock
+    # of its own (start.sh holds serve/.lock while the `hx serve` it starts runs)
+    import fcntl
+
     path = home / "serve" / "server.json"
     record = {
         **info.model_dump(mode="json"),
         "hostname": socket.gethostname(),
         "token": info.token,
     }
-    _write_private(path, json.dumps(record, indent=2))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    with (path.parent / ".owner.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        _refuse_live_owner(home, path)
+        _write_private(path, json.dumps(record, indent=2))
     try:
         yield
     finally:
@@ -318,18 +379,25 @@ sweep_app = typer.Typer(
 app.add_typer(sweep_app, name="sweep")
 
 
+def _hub_token() -> str | None:
+    # a hub that requires a token: $HYPOTHEX_HUB_TOKEN, or this home's server.json
+    from hypothex.mcp.server import resolve_hub_token
+
+    return resolve_hub_token(home=_home_path())
+
+
 def _hub(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
     # The hub client lives with the MCP helpers; import lazily to keep `hx` fast.
     from hypothex.mcp.server import hub_call
 
-    return hub_call(method, path, body)
+    return hub_call(method, path, body, token=_hub_token())
 
 
 def _hub_try(method: str, path: str, body: dict[str, Any] | None = None) -> Any | None:
-    from hypothex.mcp.server import HubUnavailableError, hub_call
+    from hypothex.mcp.server import HubUnavailableError
 
     try:
-        return hub_call(method, path, body)
+        return _hub(method, path, body)
     except HubUnavailableError:
         return None
 
@@ -1144,7 +1212,7 @@ def sweep_show(sweep_id: str, project: ProjectOpt = None, as_json: JsonFlag = Fa
     """Show a sweep: progress, params x primary metric, best cell, cost."""
     from hypothex.mcp.server import sweep_summary
 
-    _sweep_out(sweep_summary(_ctx(), sweep_id, project), as_json)
+    _sweep_out(sweep_summary(_ctx(), sweep_id, project, token=_hub_token()), as_json)
 
 
 @sweep_app.command("cancel")
@@ -1154,7 +1222,7 @@ def sweep_cancel(sweep_id: str, project: ProjectOpt = None, as_json: JsonFlag = 
     from hypothex.mcp.server import is_remote, locate_sweep
 
     c = _ctx()
-    spec, here = locate_sweep(c, sweep_id, project)
+    spec, here = locate_sweep(c, sweep_id, project, token=_hub_token())
     if is_remote(spec.host) or not here:
         body = {"command_id": new_command_id(), "created_by": _created_by()}
         summary = _hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/cancel_queued", body)
@@ -1175,7 +1243,7 @@ def sweep_extend(
     from hypothex.mcp.server import is_remote, locate_sweep, parse_seeds
 
     c = _ctx()
-    spec, here = locate_sweep(c, sweep_id, project)
+    spec, here = locate_sweep(c, sweep_id, project, token=_hub_token())
     seed_list = parse_seeds(seeds, count_ok=False)
     if is_remote(spec.host) or not here:
         body = {"seeds": seed_list, "command_id": new_command_id(), "created_by": _created_by()}
@@ -1723,7 +1791,14 @@ def hosts_map(project: str, host: str, path: str, as_json: JsonFlag = False) -> 
     """Say where PROJECT's checkout is on HOST (runs there use it)."""
     c, hosts = _hosts()
     spec = _known_host(hosts, host)
-    updated = spec.model_copy(update={"projects": {**spec.projects, project: path}})
+    try:
+        updated = HostSpec.model_validate(
+            {**spec.model_dump(), "projects": {**spec.projects, project: path}}
+        )
+    except ValidationError as exc:
+        raise ConfigError(
+            f"invalid mapping {project} -> {path} on {host}: {exc.errors()[0]['msg']}"
+        ) from exc
     environments = {**hosts.environments, host: updated}
     save_hosts(c.layout, hosts.model_copy(update={"environments": environments}))
     _hub_try("POST", "/api/v1/hosts/reload", {})  # a running hub serves the new map at once

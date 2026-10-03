@@ -715,6 +715,37 @@ class HubManager:
         name = self._seen.get(environment_id) or self._cursor_host(environment_id)
         return name if name in self.names() else None
 
+    def environment_ids(self, state: HostState) -> list[str]:
+        """
+        Return every environment id a host is known to have served.
+
+        The live id first, then ids seen earlier in this process, then the hub's
+        persisted cursors (``host_cursors``). A disconnected host has no live id,
+        but its mirrored runs stay in the index and still count in its totals.
+
+        Parameters
+        ----------
+        state : HostState
+            The host's current state.
+
+        Returns
+        -------
+        list of str
+            Distinct ids, the live one first; empty when none is known.
+        """
+        ids = [state.environment_id] if state.environment_id else []
+        ids += [eid for eid, host in self._seen.items() if host == state.name]
+        try:
+            with self.ctx.index.engine.connect() as conn:
+                rows = conn.execute(
+                    text("SELECT environment_id FROM host_cursors WHERE host = :h"),
+                    {"h": state.name},
+                ).all()
+        except OperationalError:
+            rows = []
+        ids += [str(row[0]) for row in rows]
+        return list(dict.fromkeys(ids))
+
     def _cursor_host(self, environment_id: str) -> str | None:
         try:
             with self.ctx.index.engine.connect() as conn:
@@ -826,7 +857,8 @@ def host_rows(
                 client = manager.client(state.name)
                 gpus = client.get_json("/api/v1/gpus")
                 queue = len(client.get_json("/api/v1/queue"))
-        runs = environment_runs(ctx, state.environment_id) if state.environment_id else []
+        # every env id the host served: a disconnected host keeps its totals
+        runs = [r for eid in manager.environment_ids(state) for r in environment_runs(ctx, eid)]
         slurm = None
         if spec.kind == "slurm":
             accounting = None  # unknown until the host answers
@@ -1576,7 +1608,7 @@ def create_app(
     if ctx.descriptor.kind == "slurm":
         require_flock(ctx.layout.home)  # every run-state write takes the run lock
     # one Context (and descriptor) for HTTP and MCP
-    mcp_server = build_server(hub_url=hub_url, context=ctx)
+    mcp_server = build_server(hub_url=hub_url, context=ctx, hub_token=auth_token)
     mcp_http = mcp_server.streamable_http_app(streamable_http_path="/")
 
     @asynccontextmanager

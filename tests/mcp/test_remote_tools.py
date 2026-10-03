@@ -9,7 +9,7 @@ from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.sweeps import list_sweeps
 from hypothex.mcp.server import MCPServer, _text
-from tests.api.envserver import remote_hub, wait_until
+from tests.api.envserver import remote_hub, serve_app, wait_until
 from tests.factories import PREDS_075, seed_finished_run
 from tests.mcp.test_server import call
 
@@ -24,6 +24,19 @@ def test_list_hosts_through_the_hub(
         monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
         err, out = call(home, "list_hosts")
         assert not err and [h["name"] for h in out["hosts"]] == ["local", "gpu1"]
+
+
+def test_mounted_mcp_calls_its_own_hub_with_the_server_token(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(home, background_repair=False, hub=False, auth_token="hub-secret")
+    with serve_app(app) as url:
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", url)
+        err, out = call(home, "list_hosts", server=app.state.mcp)
+        assert not err, out
+        assert [h["name"] for h in out["hosts"]] == ["local"]
+        err, message = call(home, "list_hosts")  # a client without the token is refused
+        assert err and "bearer token" in message
 
 
 def test_list_hosts_without_a_hub(home: Path) -> None:
@@ -161,11 +174,15 @@ def test_create_app_gives_mcp_its_own_url(home: Path, monkeypatch: pytest.Monkey
     real = app_module.build_server
 
     def spy(
-        h: Path | None = None, hub_url: str | None = None, *, context: Context | None = None
+        h: Path | None = None,
+        hub_url: str | None = None,
+        *,
+        context: Context | None = None,
+        hub_token: str | None = None,
     ) -> MCPServer:
-        seen["hub_url"] = hub_url
-        return real(h, hub_url=hub_url, context=context)
+        seen.update(hub_url=hub_url, hub_token=hub_token)
+        return real(h, hub_url=hub_url, context=context, hub_token=hub_token)
 
     monkeypatch.setattr(app_module, "build_server", spy)
-    create_app(home, background_repair=False, hub_url="http://127.0.0.1:5555")
-    assert seen == {"hub_url": "http://127.0.0.1:5555"}
+    create_app(home, background_repair=False, hub_url="http://127.0.0.1:5555", auth_token="t")
+    assert seen == {"hub_url": "http://127.0.0.1:5555", "hub_token": "t"}

@@ -1048,7 +1048,9 @@ def test_two_hubs_break_a_dead_lock_once(host: FakeHost, servers: list[int]) -> 
     assert _alive(infos[0].pid)
     recorded = json.loads((host.hx_home / "serve" / "server.json").read_text())
     assert recorded["pid"] == infos[0].pid
-    leftovers = sorted(p.name for p in (host.hx_home / "serve").iterdir() if "lock" in p.name)
+    leftovers = sorted(
+        p.name for p in (host.hx_home / "serve").iterdir() if p.name.startswith(".lock")
+    )
     assert leftovers == []  # no .lock, .lock.break, or .lock.stale.* left behind
 
 
@@ -1068,7 +1070,9 @@ def test_two_hubs_starting_one_host_share_one_server(
     assert _alive(infos[0].pid)
     recorded = json.loads((host.hx_home / "serve" / "server.json").read_text())
     assert recorded["pid"] == infos[0].pid
-    leftovers = sorted(p.name for p in (host.hx_home / "serve").iterdir() if "lock" in p.name)
+    leftovers = sorted(
+        p.name for p in (host.hx_home / "serve").iterdir() if p.name.startswith(".lock")
+    )
     assert leftovers == ([".lock"] if lock_tool == "python3" else [])  # an OS lock file stays
     assert not (host.hx_home / "serve" / ".lock").is_dir()
 

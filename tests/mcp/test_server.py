@@ -12,7 +12,7 @@ from hypothex.api.app import create_app
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.evaluation import evaluate_run
-from hypothex.mcp.server import build_server, require_agent_hypothesis
+from hypothex.mcp.server import MCPServer, build_server, require_agent_hypothesis
 from tests.factories import PREDS_075, seed_finished_run
 
 EXPECTED_TOOLS = {
@@ -55,8 +55,14 @@ panels:
 BAD_VIEW = GOOD_VIEW.replace("[accuracy]", "[acuracy]")
 
 
-def call(home: Path, name: str, args: dict[str, Any] | None = None) -> tuple[bool, Any]:
-    server = build_server(home)
+def call(
+    home: Path,
+    name: str,
+    args: dict[str, Any] | None = None,
+    *,
+    server: MCPServer | None = None,
+) -> tuple[bool, Any]:
+    server = server or build_server(home)
 
     async def go() -> tuple[bool, Any]:
         async with Client(server) as client:

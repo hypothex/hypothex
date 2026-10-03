@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import json
 import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import yaml
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
+from hypothex.api.security import is_loopback_bind
 from hypothex.core import control
 from hypothex.core import panels as core_panels
 from hypothex.core import queries as q
@@ -26,6 +29,7 @@ from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
 from hypothex.core.ids import new_command_id
 from hypothex.core.jsonutil import to_jsonable
+from hypothex.core.layout import default_home
 from hypothex.core.records import RunStatus
 from hypothex.core.store import ProjectEntry
 from hypothex.core.sweeps import SweepParam, SweepSpec, load_sweep, summarize_sweep, sweep_path
@@ -398,6 +402,55 @@ def hub_url() -> str:
     return os.environ.get("HYPOTHEX_HUB_URL", DEFAULT_HUB_URL).rstrip("/")
 
 
+def resolve_hub_token(url: str | None = None, home: Path | None = None) -> str | None:
+    """
+    Return the bearer token to send to the hub at ``url``.
+
+    ``$HYPOTHEX_HUB_TOKEN`` wins. Else, when ``url`` is a loopback address, the
+    token in ``<home>/serve/server.json`` of the server on that port: the hub's
+    own record, readable only by its owner. A token is never read from that
+    file for a hub on another machine, so it cannot leak there.
+
+    Parameters
+    ----------
+    url : str, optional
+        Hub base URL; defaults to ``hub_url()``.
+    home : Path, optional
+        Hypothex home holding ``serve/server.json``; defaults to ``default_home()``.
+
+    Returns
+    -------
+    str or None
+        The token, or None when the hub needs none (or none is known).
+
+    Examples
+    --------
+    >>> resolve_hub_token("http://127.0.0.1:7777")  # doctest: +SKIP
+    'a3f9...'
+    >>> resolve_hub_token("http://gpu.example:7777") is None  # without $HYPOTHEX_HUB_TOKEN
+    True
+    """
+    given = os.environ.get("HYPOTHEX_HUB_TOKEN")
+    if given:
+        return given
+    parts = urlsplit(url or hub_url())
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.hostname is None or not is_loopback_bind(parts.hostname):
+        return None
+    path = (home or default_home()) / "serve" / "server.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("port") != port:
+        return None
+    token = record.get("token")
+    return token if isinstance(token, str) and token else None
+
+
 def hub_call(
     method: str,
     path: str,
@@ -405,6 +458,7 @@ def hub_call(
     *,
     url: str | None = None,
     timeout: float = 120.0,
+    token: str | None = None,
 ) -> Any:
     """
     Call the hub's HTTP API and return the decoded JSON answer.
@@ -421,6 +475,8 @@ def hub_call(
         Hub base URL; defaults to ``hub_url()``.
     timeout : float
         Seconds to wait for the answer.
+    token : str, optional
+        Bearer token for a hub that requires one; defaults to ``resolve_hub_token(url)``.
 
     Returns
     -------
@@ -442,8 +498,10 @@ def hub_call(
     [{'name': 'local', 'kind': 'local', ...}]
     """
     base = (url or hub_url()).rstrip("/")
+    auth = token or resolve_hub_token(base)
+    headers = {"Authorization": f"Bearer {auth}"} if auth else {}
     try:
-        resp = httpx.request(method, base + path, json=body, timeout=timeout)
+        resp = httpx.request(method, base + path, json=body, timeout=timeout, headers=headers)
     except httpx.TransportError as exc:
         raise HubUnavailableError(
             f"the hub at {base} did not answer ({exc}); start it with `hx serve`"
@@ -721,7 +779,12 @@ def client_checkout(root: Path) -> tuple[dict[str, str | None], list[str]]:
 
 
 def sweep_summary(
-    ctx: Context, sweep_id: str, project: str | None = None, *, url: str | None = None
+    ctx: Context,
+    sweep_id: str,
+    project: str | None = None,
+    *,
+    url: str | None = None,
+    token: str | None = None,
 ) -> dict[str, Any]:
     """
     A sweep's summary from this store, else from the hub.
@@ -735,6 +798,8 @@ def sweep_summary(
     project : str, optional
     url : str, optional
         Hub URL (default ``hub_url()``).
+    token : str, optional
+        Hub bearer token (default ``resolve_hub_token`` for this home).
 
     Returns
     -------
@@ -745,12 +810,18 @@ def sweep_summary(
         spec = find_sweep(ctx, sweep_id, project)
     except StoreError:
         path = f"/api/v1/sweeps/{project}/{sweep_id}" if project else f"/api/v1/sweeps/{sweep_id}"
-        return hub_call("GET", path, url=url)
+        auth = token or resolve_hub_token(url, ctx.layout.home)
+        return hub_call("GET", path, url=url, token=auth)
     return to_jsonable(summarize_sweep(ctx, spec.project, spec.id))
 
 
 def locate_sweep(
-    ctx: Context, sweep_id: str, project: str | None = None, *, url: str | None = None
+    ctx: Context,
+    sweep_id: str,
+    project: str | None = None,
+    *,
+    url: str | None = None,
+    token: str | None = None,
 ) -> tuple[SweepSpec, bool]:
     """
     Find a sweep's spec here, else on the hub.
@@ -762,6 +833,8 @@ def locate_sweep(
     project : str, optional
     url : str, optional
         Hub URL (default ``hub_url()``).
+    token : str, optional
+        Hub bearer token (default ``resolve_hub_token`` for this home).
 
     Returns
     -------
@@ -771,7 +844,7 @@ def locate_sweep(
     try:
         return find_sweep(ctx, sweep_id, project), True
     except StoreError:
-        summary = sweep_summary(ctx, sweep_id, project, url=url)
+        summary = sweep_summary(ctx, sweep_id, project, url=url, token=token)
         return SweepSpec.model_validate(summary["spec"]), False
 
 
@@ -832,7 +905,11 @@ def _text(value: str | int | float) -> str:
 
 
 def build_server(
-    home: Path | None = None, hub_url: str | None = None, *, context: Context | None = None
+    home: Path | None = None,
+    hub_url: str | None = None,
+    *,
+    context: Context | None = None,
+    hub_token: str | None = None,
 ) -> MCPServer:
     """
     Build the Hypothex MCP server.
@@ -848,6 +925,9 @@ def build_server(
     context : Context, optional
         An open context to use instead, so a server that also serves HTTP
         (``create_app``) answers both from one context and one descriptor.
+    hub_token : str, optional
+        Bearer token for the hub (``create_app`` passes its own, so the mounted
+        tools can call their own server); default ``resolve_hub_token`` for this home.
 
     Returns
     -------
@@ -865,8 +945,11 @@ def build_server(
     def dump(obj: Any) -> Any:
         return obj.model_dump(mode="json") if hasattr(obj, "model_dump") else obj
 
+    def auth() -> str | None:
+        return hub_token or resolve_hub_token(hub_url, ctx().layout.home)
+
     def hub(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-        return hub_call(method, path, body, url=hub_url)
+        return hub_call(method, path, body, url=hub_url, token=auth())
 
     def via_hub(run_id: str, action: str, body: dict[str, Any], agent: str = "mcp") -> Any:
         # a mirrored run is acted on by its host: the hub forwards it (Task 45)
@@ -1192,14 +1275,14 @@ def build_server(
     @_expose_errors
     def get_sweep(project: str, sweep_id: str) -> dict[str, Any]:
         """A sweep's summary: progress counts, params x primary metric cells, best, cost."""
-        return sweep_summary(ctx(), sweep_id, project, url=hub_url)
+        return sweep_summary(ctx(), sweep_id, project, url=hub_url, token=auth())
 
     @mcp.tool()
     @_expose_errors
     def cancel_sweep(project: str, sweep_id: str) -> dict[str, Any]:
         """Stop the sweep's queued runs; runs that already started keep going."""
         c = ctx()
-        spec, here = locate_sweep(c, sweep_id, project, url=hub_url)
+        spec, here = locate_sweep(c, sweep_id, project, url=hub_url, token=auth())
         if is_remote(spec.host) or not here:
             body = {"command_id": new_command_id(), "created_by": "agent:mcp"}
             return hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/cancel_queued", body)
@@ -1215,7 +1298,7 @@ def build_server(
         is refused; a seed with missing runs (an earlier extend failed) gets only those.
         """
         c = ctx()
-        spec, here = locate_sweep(c, sweep_id, project, url=hub_url)
+        spec, here = locate_sweep(c, sweep_id, project, url=hub_url, token=auth())
         if is_remote(spec.host) or not here:
             body = {"seeds": seeds, "command_id": new_command_id(), "created_by": f"agent:{agent}"}
             return hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/extend", body)

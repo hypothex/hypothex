@@ -108,3 +108,67 @@ def test_no_auth_serves_without_a_token(tmp_path: Path) -> None:
     finally:
         proc.terminate()
         proc.wait(timeout=30)
+
+
+def _serve_once(home: Path) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in os.environ.items() if k != "HYPOTHEX_SERVE_TOKEN"}
+    return subprocess.run(
+        [*HX, "--home", str(home), "serve", "--port", "0", "--kind", "ssh"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _record(home: Path, **fields: object) -> Path:
+    path = home / "serve" / "server.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    base: dict[str, object] = {"pid": 1, "port": 9, "managed": False, "token": None}
+    path.write_text(json.dumps({**base, **fields}))
+    return path
+
+
+def test_a_second_serve_keeps_the_live_owner(tmp_path: Path) -> None:
+    # one server per home: a second `hx serve` must not take over server.json
+    home = tmp_path / "h"
+    proc = _serve(home)
+    info_path = home / "serve" / "server.json"
+    try:
+        info = wait_until(lambda: json.loads(info_path.read_text()), timeout=30)
+        url = f"http://127.0.0.1:{info['port']}/.well-known/hypothex/environment"
+        wait_until(lambda: httpx.get(url, timeout=2).json(), timeout=30)
+        second = _serve_once(home)
+        assert second.returncode == 1, second.stderr
+        assert f"pid {proc.pid}" in second.stderr and "already serves" in second.stderr
+        assert "Traceback" not in second.stderr
+        assert json.loads(info_path.read_text())["pid"] == proc.pid
+    finally:
+        proc.terminate()
+        proc.wait(timeout=30)
+    assert not info_path.exists()
+
+
+def test_serve_refuses_a_live_unanswering_or_foreign_owner(tmp_path: Path) -> None:
+    home = tmp_path / "h"
+    # a live pid (this test) that does not answer for the home on its port
+    path = _record(home, pid=os.getpid(), hostname=socket.gethostname())
+    result = _serve_once(home)
+    assert result.returncode == 1 and "does not answer" in result.stderr
+    assert json.loads(path.read_text())["pid"] == os.getpid()
+    _record(home, pid=os.getpid(), hostname="other-login-node")
+    result = _serve_once(home)
+    assert result.returncode == 1 and "other-login-node" in result.stderr
+
+
+def test_serve_replaces_the_record_of_a_dead_server(tmp_path: Path) -> None:
+    home = tmp_path / "h"
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    path = _record(home, pid=gone.pid, hostname=socket.gethostname())
+    proc = _serve(home)
+    try:
+        wait_until(lambda: json.loads(path.read_text())["pid"] == proc.pid or None, timeout=30)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=30)

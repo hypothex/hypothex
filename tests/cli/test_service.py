@@ -74,7 +74,12 @@ def test_systemd_unit(fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_launchd_plist(fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
     hx_home = fake_home / "hx"
+    assert not hx_home.exists()
     sf = install_service(hx_home, None)
+    # launchd opens the log before hx runs: its folder must exist (owner-only:
+    # server.json with its token goes there too)
+    assert (hx_home / "serve").is_dir()
+    assert (hx_home / "serve").stat().st_mode & 0o777 == 0o700
     path = fake_home / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
     assert sf.path == str(path)
     data = plistlib.loads(path.read_bytes())

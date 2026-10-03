@@ -222,6 +222,16 @@ descriptor needs ``Authorization: Bearer <token>``:
 
    HYPOTHEX_SERVE_TOKEN=$(openssl rand -hex 24) hx serve --host 0.0.0.0
 
+The CLI and ``hx mcp`` reach the hub at ``HYPOTHEX_HUB_URL`` (default
+``http://127.0.0.1:7777``) and send ``HYPOTHEX_HUB_TOKEN`` when it is set. Without
+it, for a hub on this machine they read the token from the hub's own
+``<home>/serve/server.json`` (owner-only). The MCP server that ``hx serve`` mounts
+uses the server's token:
+
+.. code-block:: bash
+
+   HYPOTHEX_HUB_URL=http://gpu-box:7777 HYPOTHEX_HUB_TOKEN=... hx hosts status
+
 .. code-block:: bash
 
    hx mcp

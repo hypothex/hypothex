@@ -236,6 +236,10 @@ def install_service(
     """
     Write the unit file; the caller prints ``enable`` for the user to run.
 
+    On macOS it also makes ``<home>/serve`` (mode 0700): launchd opens the log
+    there before ``hx serve`` runs, and fails to start the agent if the folder
+    is missing.
+
     Parameters
     ----------
     home : Path
@@ -247,6 +251,10 @@ def install_service(
     ServiceFile
     """
     sf = service_file(home, kind, platform)
+    if sf.platform == "darwin":
+        serve = home / "serve"
+        serve.mkdir(parents=True, exist_ok=True)
+        serve.chmod(0o700)  # server.json (with its token) lives here too
     atomic_write_text(Path(sf.path), sf.text)
     return sf
 

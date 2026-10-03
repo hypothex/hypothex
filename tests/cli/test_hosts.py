@@ -14,12 +14,13 @@ from hypothex.core.errors import ConfigError
 from hypothex.mcp.server import HubUnavailableError
 from hypothex.remote import bootstrap
 from hypothex.remote.bootstrap import ProbeResult, ServerInfo
-from hypothex.remote.config import load_hosts
+from hypothex.remote.config import EnvironmentsFile, HostSpec, load_hosts, save_hosts
 from hypothex.remote.ssh import SshTarget
-from tests.api.envserver import env_server, host_state, remote_hub, wait_until
+from tests.api.envserver import env_server, host_state, remote_hub, serve_app, wait_until
 
 runner = CliRunner()
 WHEEL = Path("/tmp/hx.whl")
+GPU1 = HostSpec(route="url", url="http://127.0.0.1:9")
 
 
 def hx(*args: str) -> Any:
@@ -133,15 +134,20 @@ def test_add_list_map_rm_without_a_hub(home: Path, fake_bootstrap: FakeBootstrap
         (["add", "g", "--ssh", "x", "--partition", "gpu"], "--slurm"),
         (["add", "g", "--ssh", "x", "--usd-per-gpu-hour", "-1"], "invalid host g"),
         (["map", "toy", "nope", "/x"], "unknown host nope"),
+        (["map", "toy", "gpu1", "relative/path"], "invalid mapping"),
+        (["map", "bad name", "gpu1", "/srv/x"], "invalid mapping"),
         (["rm", "nope"], "unknown host nope"),
     ],
 )
 def test_hosts_input_errors(
     home: Path, fake_bootstrap: FakeBootstrap, args: list[str], message: str
 ) -> None:
+    save_hosts(Context.open(home).layout, EnvironmentsFile(environments={"gpu1": GPU1}))
     with pytest.raises(ConfigError, match=message):
         runner.invoke(app, ["hosts", *args], catch_exceptions=False)
     assert fake_bootstrap.calls == []
+    # nothing bad was saved: host commands still work
+    assert [h["name"] for h in hx("hosts", "list")] == ["gpu1"]
 
 
 def test_add_twice_is_an_error(home: Path, fake_bootstrap: FakeBootstrap) -> None:
@@ -163,6 +169,26 @@ def test_add_slurm_needs_sbatch_and_saves_nothing(
 def test_status_needs_the_hub(home: Path) -> None:
     with pytest.raises(HubUnavailableError, match="hx serve"):
         runner.invoke(app, ["hosts", "status"], catch_exceptions=False)
+
+
+def test_hub_commands_send_the_hub_token(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hypothex.api.app import create_app
+
+    hub_app = create_app(home, background_repair=False, hub=False, auth_token="hub-secret")
+    with serve_app(hub_app) as url:
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", url)
+        refused = runner.invoke(app, ["hosts", "status", "--json"])
+        assert refused.exit_code != 0
+        monkeypatch.setenv("HYPOTHEX_HUB_TOKEN", "hub-secret")
+        assert [x["name"] for x in hx("hosts", "status")] == ["local"]
+        monkeypatch.delenv("HYPOTHEX_HUB_TOKEN")
+        # the hub's own server.json (owner-only) gives the token to a CLI on the same home
+        port = int(url.rsplit(":", 1)[1])
+        (home / "serve").mkdir(parents=True, exist_ok=True)
+        (home / "serve" / "server.json").write_text(
+            json.dumps({"pid": 1, "port": port, "managed": False, "token": "hub-secret"})
+        )
+        assert [x["name"] for x in hx("hosts", "status")] == ["local"]
 
 
 def test_status_connect_disconnect_and_add_through_the_hub(

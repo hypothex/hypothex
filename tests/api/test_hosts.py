@@ -2,6 +2,7 @@ import json
 from datetime import timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -11,7 +12,7 @@ from hypothex.core.context import Context
 from hypothex.core.gpus import GpuInfo
 from hypothex.core.ids import utcnow
 from hypothex.core.records import CostTotals, RunStatus
-from hypothex.remote.config import HostSpec, SlurmDefaults, load_hosts, save_hosts
+from hypothex.remote.config import HostKind, HostSpec, SlurmDefaults, load_hosts, save_hosts
 from tests.api.envserver import host_state, remote_hub, wait_until, write_fake_gpus, write_hosts
 from tests.factories import make_record, seed_finished_run
 
@@ -190,3 +191,39 @@ def test_disconnected_hosts_stay_disconnected_after_a_restart(tmp_path: Path) ->
             client.post("/api/v1/hosts/gpu1/connect", json={})
             wait_until(lambda: host_state(client, "gpu1") == "connected", timeout=30)
         assert not json.loads((r.hub.layout.home / "hosts_disabled.json").read_text())
+
+
+def _gpu1_row(client: TestClient | httpx.Client) -> dict:
+    return next(x for x in client.get("/api/v1/hosts").json() if x["name"] == "gpu1")
+
+
+@pytest.mark.parametrize("kind", ["ssh", "slurm"])
+def test_a_disconnected_host_keeps_its_totals(tmp_path: Path, kind: HostKind) -> None:
+    slurm = SlurmDefaults(partition="gpu") if kind == "slurm" else None
+    with remote_hub(tmp_path, kind=kind, slurm=slurm) as r:
+        eid = r.env.descriptor.environment_id
+        seed_finished_run(r.env, r.env_repo, "e1")  # mirrored: the hub keeps gpu1's cursor
+        wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
+        r.hub.create_run(make_record("q1", environment_id=eid, status=RunStatus.QUEUED))
+        r.hub.create_run(
+            make_record(
+                "f1",
+                environment_id=eid,
+                status=RunStatus.FINISHED,
+                ended_at=utcnow(),
+                cost=CostTotals(total_usd=12.0),
+            )
+        )
+        before = _gpu1_row(r.client)
+        assert before["cost_today_usd"] >= 12.0
+        r.client.post("/api/v1/hosts/gpu1/disconnect", json={})
+        after = _gpu1_row(r.client)
+        assert after["state"]["state"] == "disabled"
+        assert after["cost_today_usd"] == before["cost_today_usd"]
+        if kind == "slurm":
+            assert after["slurm"]["pending"] == before["slurm"]["pending"] == 1
+            assert after["slurm"]["running"] == before["slurm"]["running"]
+        # a restarted hub has never seen gpu1 connected: the saved cursor names its env
+        again = create_app(r.hub.layout.home, background_repair=False)
+        with TestClient(again, base_url=BASE_URL) as client:
+            assert _gpu1_row(client)["cost_today_usd"] == before["cost_today_usd"]

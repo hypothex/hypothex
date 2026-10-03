@@ -738,7 +738,12 @@ export interface SweepSpec {
 /** One parameter combination of a sweep: primary-metric mean and 95% CI over its seeds. */
 export interface SweepCell {
   params: Record<string, string>;
-  group_id: string;
+  /**
+   * Leaderboard group of the cell's best-scored runs; null while no run of the cell is
+   * scored (all queued or running, or a combo an extend added that has not launched) and
+   * for every cell when the sweep has no task (no board).
+   */
+  group_id: string | null;
   /** Scored runs in the cell. */
   n: number;
   /** null while no run of the cell is scored. */

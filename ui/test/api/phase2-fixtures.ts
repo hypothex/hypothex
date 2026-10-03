@@ -3,8 +3,10 @@
  *
  * Typed against `src/api/models.ts`, so `bun run typecheck` fails when a model drifts
  * from the contract. Numbers are invented but consistent: gpu1 has 3 GPUs (one held by
- * run r-6b0e, one by a process outside hx, one free); the sweep is 2 lr values x 1 beam x
- * 3 seeds = 6 runs. `HOSTS` is shaped like the backend's `host_rows`: the hub's own
+ * run r-6b0e, one by a process outside hx, one free); the sweep grid is 3 lr values x 1
+ * beam x 3 seeds, with 6 runs so far: the third lr value came from an extend that has not
+ * launched yet, so its cell has no runs and no group (`group_id: null`, as the backend
+ * sends it). `HOSTS` is shaped like the backend's `host_rows`: the hub's own
  * `local` row first, and no GPUs or queue for a host that is not connected (dgx is stale).
  * Every row carries the hub's `stale_banner_hours` (default 24, controller ruling R1).
  */
@@ -192,7 +194,7 @@ export const SWEEP: SweepSummary = {
     task: "acc",
     host: "gpu1",
     grid: [
-      { name: "lr", values: ["1e-4", "3e-4"], low: null, high: null, log: false },
+      { name: "lr", values: ["1e-4", "3e-4", "1e-3"], low: null, high: null, log: false },
       { name: "beam", values: ["10"], low: null, high: null, log: false },
     ],
     random: null,
@@ -214,6 +216,15 @@ export const SWEEP: SweepSummary = {
       lo: null,
       hi: null,
       run_ids: ["r-71f2", "r-1d77", "r-c2b9"],
+    },
+    {
+      params: { lr: "1e-3", beam: "10" },
+      group_id: null,
+      n: 0,
+      mean: null,
+      lo: null,
+      hi: null,
+      run_ids: [],
     },
   ],
   best: BEST_CELL,

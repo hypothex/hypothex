@@ -107,10 +107,34 @@ export function keepLastKnown(prev: readonly M.HostRow[] | undefined, next: M.Ho
   });
 }
 
-/** `GET /api/v1/hosts` through `keepLastKnown` against the cached `["hosts"]` list. */
+/**
+ * Each QueryClient's last row with data, by host name: the last `connected` row, or a stale
+ * row that already carries one. A host that drops goes `connected` -> `connecting` (and
+ * `bootstrapping` on SSH retries) -> `stale`; those middle rows have no GPUs, so the cached
+ * list alone would lose the cells before the host turns stale.
+ */
+const lastKnownRows = new WeakMap<QueryClient, Map<string, M.HostRow>>();
+
+/** Store every row of `rows` that has data (connected, or GPUs carried) in `known`. */
+function rememberRows(known: Map<string, M.HostRow>, rows: readonly M.HostRow[]): Map<string, M.HostRow> {
+  for (const row of rows) {
+    if (row.state.state === "connected" || row.gpus.length > 0) known.set(row.name, row);
+  }
+  return known;
+}
+
+/**
+ * `GET /api/v1/hosts` through `keepLastKnown` against the last row with data of each host
+ * (seeded from the cached `["hosts"]` list), so a stale host gets the cells it had while
+ * connected even when `connecting` or `bootstrapping` polls came between.
+ */
 export async function fetchHosts(qc: QueryClient, signal?: AbortSignal): Promise<M.HostRow[]> {
   const rows = await api.hosts(signal);
-  return keepLastKnown(qc.getQueryData<M.HostRow[]>(queryKeys.hosts()), rows);
+  const known =
+    lastKnownRows.get(qc) ?? rememberRows(new Map(), qc.getQueryData<M.HostRow[]>(queryKeys.hosts()) ?? []);
+  const out = keepLastKnown([...known.values()], rows);
+  lastKnownRows.set(qc, rememberRows(known, out));
+  return out;
 }
 
 /** Retry transient failures twice; never retry a 4xx (the answer will not change). */

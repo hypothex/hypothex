@@ -14,6 +14,7 @@ import {
   RUN_EVENT_INVALIDATES,
   createQueryClient,
   fetchAllRuns,
+  fetchHosts,
   keepLastKnown,
   queryKeys,
   shouldRetry,
@@ -194,6 +195,50 @@ describe("hooks", () => {
     const { wrapper } = setup();
     const { result } = renderHook(() => useHosts(25), { wrapper });
     await waitFor(() => expect(result.current.data?.[1]?.gpus.length).toBe(3));
+    mockRoutes({ "/api/v1/hosts": [local, gone(gpu1, "stale")] });
+    await waitFor(() => expect(result.current.data?.[1]?.state.state).toBe("stale"), { timeout: 1_000 });
+    expect([result.current.data?.[1]?.gpus.length, result.current.data?.[1]?.queue]).toEqual([3, 3]);
+  });
+
+  test("fetchHosts keeps the last connected GPUs and queue through connecting and bootstrapping", async () => {
+    const [local, gpu1] = HOSTS as [HostRow, HostRow];
+    const qc = createQueryClient();
+    const poll = async (rows: HostRow[]): Promise<HostRow | undefined> => {
+      mockRoutes({ "/api/v1/hosts": rows });
+      const out = await fetchHosts(qc);
+      qc.setQueryData(queryKeys.hosts(), out);
+      return out[1];
+    };
+    expect((await poll([local, gpu1]))?.gpus.length).toBe(3);
+    // the hub retries first: these rows have no data and must not draw old cells as live
+    const connecting = await poll([local, gone(gpu1, "connecting")]);
+    expect([connecting?.gpus, connecting?.queue]).toEqual([[], 0]);
+    expect((await poll([local, gone(gpu1, "bootstrapping")]))?.gpus).toEqual([]);
+    // then the stale timeout passes: the cells from the last connected poll come back, greyed
+    const stale = await poll([local, gone(gpu1, "stale")]);
+    expect([stale?.gpus, stale?.queue]).toEqual([gpu1.gpus, 3]);
+    expect((await poll([local, gone(gpu1, "stale")]))?.gpus).toEqual(gpu1.gpus);
+    // another environment behind the same name: nothing carries over
+    expect((await poll([local, gone(gpu1, "stale", { environment_id: "env-new" })]))?.queue).toBe(0);
+  });
+
+  test("fetchHosts snapshots are per QueryClient", async () => {
+    const [local, gpu1] = HOSTS as [HostRow, HostRow];
+    mockRoutes({ "/api/v1/hosts": [local, gpu1] });
+    await fetchHosts(createQueryClient());
+    mockRoutes({ "/api/v1/hosts": [local, gone(gpu1, "stale")] });
+    expect((await fetchHosts(createQueryClient()))[1]?.gpus).toEqual([]);
+  });
+
+  test("useHosts keeps a stale host's last GPUs when a connecting poll came between", async () => {
+    const [local, gpu1] = HOSTS as [HostRow, HostRow];
+    mockRoutes({ "/api/v1/hosts": [local, gpu1] });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useHosts(25), { wrapper });
+    await waitFor(() => expect(result.current.data?.[1]?.gpus.length).toBe(3));
+    mockRoutes({ "/api/v1/hosts": [local, gone(gpu1, "connecting")] });
+    await waitFor(() => expect(result.current.data?.[1]?.state.state).toBe("connecting"), { timeout: 1_000 });
+    expect(result.current.data?.[1]?.gpus).toEqual([]);
     mockRoutes({ "/api/v1/hosts": [local, gone(gpu1, "stale")] });
     await waitFor(() => expect(result.current.data?.[1]?.state.state).toBe("stale"), { timeout: 1_000 });
     expect([result.current.data?.[1]?.gpus.length, result.current.data?.[1]?.queue]).toEqual([3, 3]);

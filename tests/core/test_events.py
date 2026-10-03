@@ -32,6 +32,38 @@ def test_two_handles_share_one_log(tmp_path: Path) -> None:
     assert [e.type for e in two.since(0)] == ["x"]
 
 
+def test_one_connection_per_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[object] = []
+    real = events.sqlite3.connect
+
+    def connect(*args: object, **kwargs: object) -> object:
+        conn = real(*args, **kwargs)  # type: ignore[arg-type]
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(events.sqlite3, "connect", connect)
+    log = EventLog(tmp_path / "e.db")
+    for i in range(20):
+        log.append("x", payload={"i": i})
+    assert log.last_sequence() == 20
+    assert len(opened) == 1
+    seen: list[int] = []
+    worker = threading.Thread(target=lambda: seen.append(log.append("y").sequence))
+    worker.start()
+    worker.join()
+    assert seen == [21] and len(opened) == 2  # the other thread got its own connection
+    assert [e.type for e in log.since(19)] == ["x", "y"]
+
+
+def test_a_failed_transaction_does_not_poison_the_connection(tmp_path: Path) -> None:
+    log = EventLog(tmp_path / "e.db")
+    with pytest.raises(RuntimeError), log._conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("INSERT INTO event_keys(key, sequence) VALUES ('k', 1)")
+        raise RuntimeError("boom")
+    assert log.append_once("k", "x") is not None  # the half-done insert was rolled back
+
+
 def test_run_once_is_idempotent(tmp_path: Path) -> None:
     log = EventLog(tmp_path / "e.db")
     calls: list[int] = []

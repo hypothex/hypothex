@@ -2,9 +2,10 @@
  * Response and body shapes of the Hypothex HTTP API.
  *
  * Hand-written from the phase 1b interface contract
- * (docs/superpowers/plans/2026-09-27-hypothex-phase1b-contract.md, sections 1-2) and the
- * phase 1a pydantic models. Most routes return `dict[str, Any]`, so the generated
- * `types.ts` knows their paths but not their bodies; these types fill that gap.
+ * (docs/superpowers/plans/2026-09-27-hypothex-phase1b-contract.md, sections 1-2), the
+ * phase 2 contract (docs/superpowers/plans/2026-10-03-hypothex-phase2-contract.md, sections
+ * 1.5-1.7 and 2) and the phase 1a pydantic models. Most routes return `dict[str, Any]`, so
+ * the generated `types.ts` knows their paths but not their bodies; these types fill that gap.
  */
 
 export type RunStatus = "queued" | "running" | "finished" | "failed" | "killed" | "lost";
@@ -60,6 +61,19 @@ export interface ExecutorInfo {
   pid: number | null;
   pid_create_time: number | null;
   child_pid: number | null;
+  /**
+   * Phase 2 fields; a phase 1 server omits them. The env server's own hostname
+   * (`socket.gethostname()`), set on every run; NOT the hub's name for the host (match runs
+   * to hosts by `environment_id`, `hostRowForRun`).
+   */
+  host?: string | null;
+  /** GPU indices the run holds (`CUDA_VISIBLE_DEVICES`). */
+  gpus?: number[];
+  slurm_job_id?: string | null;
+  /** SLURM compute node. */
+  node?: string | null;
+  /** 1-based position in the host queue while `queued`. */
+  queue_position?: number | null;
 }
 
 export interface UsageTotals {
@@ -101,6 +115,10 @@ export interface RunRecord {
   archived: boolean;
   created_by: string;
   usage: UsageTotals | null;
+  /** Phase 2 fields; a phase 1 server omits them. Filled when the run ends. */
+  cost?: CostTotals | null;
+  sweep_id?: string | null;
+  gpus_requested?: number;
 }
 
 export interface ScoreRecord {
@@ -166,6 +184,8 @@ export interface RunDetail {
   has_diff: boolean;
   metric_names: string[];
   children: string[];
+  /** Connection state of the owning host; null for a hub run (phase 2; absent before). */
+  host_state?: ConnState | null;
 }
 
 export interface PredictionRow {
@@ -208,6 +228,8 @@ export interface RunsQuery {
   tag?: string;
   archived?: boolean;
   limit?: number;
+  /** Phase 2: runs of one environment (one host), e.g. a host's queue (Task 27). */
+  environment_id?: string;
 }
 
 export interface PredictionsQuery {
@@ -262,6 +284,8 @@ export interface LeaderboardRow {
   vs_best: VersusBest | null;
   created_by: string[];
   usage: UsageTotals | null;
+  /** Phase 2 (spec 8A.7): cost summed over the group's runs; a phase 1 server omits it. */
+  cost?: CostTotals | null;
 }
 
 export interface Leaderboard {
@@ -339,6 +363,9 @@ export interface OverviewSummary {
   running: RunRecord[];
   failures: FailureRow[];
   projects: ProjectRow[];
+  /** Phase 2 (spec 8A.7): cost of the runs in the window, and of the runs today. */
+  cost_usd?: number;
+  cost_today_usd?: number;
 }
 
 // views and panels (contract 1.4, 1.6) --------------------------------------------------
@@ -556,4 +583,215 @@ export interface EvalReport {
   evaluated: string[];
   skipped: Record<string, string>;
   warnings: string[];
+}
+
+// phase 2: hosts, launch, sweeps, cost (phase 2 contract 1.5-1.7, 2) ---------------------
+/** How a host runs jobs: a plain SSH box or a SLURM login node. */
+export type HostKind = "ssh" | "slurm";
+
+/** The hub's connection state for one host (`hypothex.remote.hub.ConnState`). */
+export type ConnState =
+  | "connecting"
+  | "bootstrapping"
+  | "connected"
+  | "stale"
+  | "upgrade"
+  | "error"
+  | "disabled";
+
+/** `RunRecord.cost`: `gpu_hours = wall x len(executor.gpus)`, `total_usd = gpu_usd + api_usd`. */
+export interface CostTotals {
+  gpu_hours: number;
+  gpu_usd: number;
+  api_usd: number;
+  total_usd: number;
+}
+
+/** Default `sbatch` resources of a SLURM host. */
+export interface SlurmDefaults {
+  partition: string | null;
+  account: string | null;
+  /** `HH:MM:SS`. */
+  time: string;
+  gpus: number;
+  extra: string[];
+}
+
+/** One GPU on a host (`hypothex.core.gpus.GpuInfo`, from `nvidia-smi`). */
+export interface GpuInfo {
+  index: number;
+  name: string;
+  /** Utilization in percent, 0-100, as `nvidia-smi` reports it. */
+  util: number;
+  mem_used_mb: number;
+  mem_total_mb: number;
+  /** A process outside hx holds this GPU. */
+  external: boolean;
+  /** The hx run holding this GPU, if any. */
+  run_id: string | null;
+}
+
+/** `hypothex.remote.hub.HostState`: one host's connection, as the hub sees it. */
+export interface HostState {
+  name: string;
+  /** `"local"` only on the hub's own row of `GET /api/v1/hosts`. */
+  kind: HostKind | "local";
+  state: ConnState;
+  /** When `state` last changed (ISO 8601). */
+  since: string;
+  message: string;
+  environment_id: string | null;
+  hx_version: string | null;
+  last_sequence: number;
+  local_port: number | null;
+}
+
+/**
+ * One row of `GET /api/v1/hosts`. The hub's own row comes first (`name: "local"`,
+ * `kind: "local"`). GPUs and queue are filled only while the host is `connected`.
+ */
+export interface HostRow {
+  name: string;
+  kind: HostKind | "local";
+  state: HostState;
+  gpus: GpuInfo[];
+  /** Runs waiting in the host queue (SSH hosts); 0 while the host is not connected. */
+  queue: number;
+  /**
+   * SLURM job counts; null on SSH hosts. `comment_accounting` false: the cluster's accounting
+   * keeps no job comments, so an unknown submission stays unknown; null: not known yet.
+   */
+  slurm: { pending: number; running: number; comment_accounting?: boolean | null } | null;
+  cost_today_usd: number;
+  /** `$/GPU-h` from `environments.yaml`; null when no rate is set (contract section 2). */
+  usd_per_gpu_hour?: number | null;
+  /**
+   * Hours a host may stay unreachable before the Overview banner (spec 5.6). The hub's
+   * `environments.yaml` setting (default 24), the same on every row (controller ruling R1).
+   */
+  stale_banner_hours?: number;
+  /** Projects mapped to a repo path on this host. */
+  projects: string[];
+}
+
+/** Run fields both launch routes take (the backend's `RunFields`, without the action fields). */
+export interface RunFields {
+  task?: string | null;
+  stage?: string | null;
+  command?: string[] | null;
+  hypothesis?: string;
+  seed?: number | null;
+  tags?: string[];
+  params?: Record<string, string>;
+  vars?: Record<string, string>;
+  gpus?: number;
+  queue?: boolean;
+  /** SLURM hosts: overrides of the host's `SlurmDefaults`. */
+  slurm?: Partial<SlurmDefaults> | null;
+  /** Pinned commit (spec 8A.4); absent: the hub pins its own checkout's HEAD and diff. */
+  commit?: string | null;
+  /** Uncommitted diff applied on `commit` in a worktree; only sent together with `commit`. */
+  diff?: string | null;
+}
+
+/** Body of `POST /api/v1/runs`: a run on the hub itself, from the hub's own checkout. */
+export interface LaunchRequest extends RunFields {
+  repo: string;
+}
+
+/**
+ * Body of `POST /api/v1/hosts/{host}/runs`. The project goes by name, never as a path on
+ * this machine: a project copied from a host has no checkout on the hub, and the hub finds
+ * the host's mapped checkout itself.
+ */
+export interface HostLaunchRequest extends RunFields {
+  project: string;
+}
+
+/** One swept parameter: a list of values, or a `low`..`high` range for random samples. */
+export interface SweepParam {
+  name: string;
+  values: string[] | null;
+  low: number | null;
+  high: number | null;
+  log: boolean;
+}
+
+/**
+ * `<store>/<project>/sweeps/<id>.yaml`: the sweep's definition only. Which runs belong to
+ * the sweep is derived by the backend from the runs tagged `SweepSummary.tag`
+ * (`SweepSummary.run_ids`), never stored here.
+ */
+export interface SweepSpec {
+  id: string;
+  project: string;
+  task: string | null;
+  host: string | null;
+  grid: SweepParam[];
+  random: number | null;
+  seeds: number[];
+  command_template: string[];
+  created_by: string;
+  created_at: string;
+}
+
+/** One parameter combination of a sweep: primary-metric mean and 95% CI over its seeds. */
+export interface SweepCell {
+  params: Record<string, string>;
+  /**
+   * Leaderboard group of the cell's best-scored runs; null while no run of the cell is
+   * scored (all queued or running, or a combo an extend added that has not launched) and
+   * for every cell when the sweep has no task (no board).
+   */
+  group_id: string | null;
+  /** Scored runs in the cell. */
+  n: number;
+  /** null while no run of the cell is scored. */
+  mean: number | null;
+  lo: number | null;
+  hi: number | null;
+  run_ids: string[];
+}
+
+/** `GET /api/v1/sweeps/{project}/{id}` and every sweep action. */
+export interface SweepSummary {
+  spec: SweepSpec;
+  /**
+   * The sweep's runs, derived by the backend from the runs tagged `tag`, oldest
+   * first (launch order). A run launched by a retry or an extend shows up here as soon as
+   * the hub has it, whether or not the request that started it got its answer.
+   */
+  run_ids: string[];
+  /**
+   * The sweep's member tag, `sweep:<owner8>:<id>` (`owner8`: the hub's environment id, so
+   * two hubs' sweeps with one id never mix). The UI filters runs by it and never builds it.
+   */
+  tag: string;
+  /** Runs per status, e.g. `{finished: 4, running: 1, queued: 1}`. */
+  counts: Record<string, number>;
+  cells: SweepCell[];
+  best: SweepCell | null;
+  headline: string;
+  total_usd: number;
+}
+
+/** One row of `GET /api/v1/projects/{project}/sweeps`. */
+export interface SweepListItem {
+  id: string;
+  created_at: string;
+  n_runs: number;
+  best: SweepCell | null;
+}
+
+/** `POST /api/v1/runs/{id}/pull`: where the artifact landed on the hub. */
+export interface PullResult {
+  local_path: string;
+}
+
+/** One row of `GET /api/v1/queue` (an env route; the hub serves its own queue). */
+export interface QueueEntry {
+  run_id: string;
+  /** 1-based. */
+  position: number;
+  gpus_requested: number;
 }

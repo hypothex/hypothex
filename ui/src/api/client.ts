@@ -36,6 +36,16 @@ export const ROUTES = {
   runStop: "/api/v1/runs/{run_id}/stop",
   runNotes: "/api/v1/runs/{run_id}/notes",
   compareExamples: "/api/v1/compare/examples",
+  hosts: "/api/v1/hosts",
+  hostConnect: "/api/v1/hosts/{host}/connect",
+  hostRuns: "/api/v1/hosts/{host}/runs",
+  sweep: "/api/v1/sweeps/{project}/{sweep_id}",
+  sweepCancelQueued: "/api/v1/sweeps/{project}/{sweep_id}/cancel_queued",
+  sweepExtend: "/api/v1/sweeps/{project}/{sweep_id}/extend",
+  projectSweeps: "/api/v1/projects/{project}/sweeps",
+  runPull: "/api/v1/runs/{run_id}/pull",
+  gpus: "/api/v1/gpus",
+  queue: "/api/v1/queue",
 } as const satisfies Record<string, keyof paths>;
 
 export type Route = (typeof ROUTES)[keyof typeof ROUTES];
@@ -210,4 +220,37 @@ export const api = {
       params: { run_id: runId },
       body: { ...action(opts), text, author: opts?.created_by ?? "human" },
     }),
+  // phase 2: hosts, launch, sweeps, pull ---------------------------------------------------
+  hosts: (signal?: AbortSignal) => get<M.HostRow[]>(ROUTES.hosts, { signal }),
+  /** The hub's own GPUs (an env route: the hub is the env server of its own runs). */
+  gpus: (signal?: AbortSignal) => get<M.GpuInfo[]>(ROUTES.gpus, { signal }),
+  /** The hub's own run queue, in order. */
+  queue: (signal?: AbortSignal) => get<M.QueueEntry[]>(ROUTES.queue, { signal }),
+  connectHost: (host: string, opts?: M.ActionOptions) =>
+    post<M.HostState>(ROUTES.hostConnect, { params: { host }, body: action(opts) }),
+  /** Start a run on the hub itself. */
+  launch: (body: M.LaunchRequest, opts?: M.ActionOptions) =>
+    post<M.RunRecord>(ROUTES.runs, { body: { ...action(opts), ...body } }),
+  /** Start or queue a run on a remote host; the hub forwards it and returns the host's record. */
+  launchOnHost: (host: string, body: M.HostLaunchRequest, opts?: M.ActionOptions) =>
+    post<M.RunRecord>(ROUTES.hostRuns, { params: { host }, body: { ...action(opts), ...body } }),
+  sweep: (project: string, sweepId: string, signal?: AbortSignal) =>
+    get<M.SweepSummary>(ROUTES.sweep, { params: { project, sweep_id: sweepId }, signal }),
+  projectSweeps: (project: string, signal?: AbortSignal) =>
+    get<M.SweepListItem[]>(ROUTES.projectSweeps, { params: { project }, signal }),
+  /** Stop the sweep's queued runs (recorded as `killed`); running runs keep going. */
+  cancelQueued: (project: string, sweepId: string, opts?: M.ActionOptions) =>
+    post<M.SweepSummary>(ROUTES.sweepCancelQueued, {
+      params: { project, sweep_id: sweepId },
+      body: action(opts),
+    }),
+  /** Add runs for every parameter combination x each new seed. */
+  extendSweep: (project: string, sweepId: string, seeds: readonly number[], opts?: M.ActionOptions) =>
+    post<M.SweepSummary>(ROUTES.sweepExtend, {
+      params: { project, sweep_id: sweepId },
+      body: { ...action(opts), seeds: [...seeds] },
+    }),
+  /** Copy one remote artifact (a kind such as `checkpoint`, or a run-relative path) to the hub. */
+  pull: (runId: string, artifact: string, opts?: M.ActionOptions) =>
+    post<M.PullResult>(ROUTES.runPull, { params: { run_id: runId }, body: { ...action(opts), artifact } }),
 };

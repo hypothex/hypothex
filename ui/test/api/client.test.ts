@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import { ApiError, api, buildUrl, wsUrl } from "../../src/api/client";
 import { mockFetch } from "./fetch-mock";
+import { GPU1_STATE, HOSTS, SWEEP, SWEEP_LIST } from "./phase2-fixtures";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -138,6 +139,152 @@ describe("errors", () => {
     }) as unknown as typeof fetch;
     const err = (await api.projects().catch((e: unknown) => e)) as ApiError;
     expect([err.status, err.type, err.message]).toEqual([0, "NetworkError", "Cannot reach hx serve"]);
+  });
+});
+
+describe("phase 2 api", () => {
+  test("hosts GETs the hub's own row and every host with its state, GPUs and queue", async () => {
+    const calls = mockFetch(HOSTS);
+    const rows = await api.hosts();
+    expect(rows.map((r) => [r.name, r.kind, r.state.state, r.gpus.length, r.queue, r.slurm?.pending ?? null])).toEqual([
+      ["local", "local", "connected", 0, 0, null],
+      ["gpu1", "ssh", "connected", 3, 3, null],
+      ["mccleary", "slurm", "connected", 0, 0, 6],
+      ["dgx", "ssh", "stale", 0, 0, null],
+    ]);
+    expect(calls).toEqual([{ url: "/api/v1/hosts", method: "GET", body: undefined }]);
+  });
+
+  test("connectHost POSTs the given command id", async () => {
+    const calls = mockFetch(GPU1_STATE);
+    const state = await api.connectHost("gpu1", { command_id: "c-1" });
+    expect([state.state, state.local_port]).toEqual(["connected", 51234]);
+    expect(calls).toEqual([
+      { url: "/api/v1/hosts/gpu1/connect", method: "POST", body: { command_id: "c-1", created_by: "human" } },
+    ]);
+  });
+
+  test("launch POSTs a hub run to /api/v1/runs", async () => {
+    const calls = mockFetch({ run_id: "r-1", status: "running" });
+    const run = await api.launch(
+      { repo: "/Users/sv/code/toy", task: "acc", stage: "train", hypothesis: "baseline", seed: 1 },
+      { command_id: "l-0" },
+    );
+    expect(run.run_id).toBe("r-1");
+    expect(calls[0]).toEqual({
+      url: "/api/v1/runs",
+      method: "POST",
+      body: {
+        command_id: "l-0",
+        created_by: "human",
+        repo: "/Users/sv/code/toy",
+        task: "acc",
+        stage: "train",
+        hypothesis: "baseline",
+        seed: 1,
+      },
+    });
+  });
+
+  test("launchOnHost sends the project by name with gpus, queue, slurm, commit and diff", async () => {
+    const calls = mockFetch({ run_id: "r-9", status: "queued", executor: { type: "slurm", queue_position: 2 } });
+    const run = await api.launchOnHost(
+      "mccleary",
+      {
+        project: "toy",
+        task: "acc",
+        command: ["python", "train.py", "--lr", "3e-4"],
+        hypothesis: "lr 3e-4 converges faster",
+        gpus: 2,
+        queue: true,
+        slurm: { partition: "gpu", time: "04:00:00" },
+        commit: "8f4cac43877b75953f18ff1daf7e6fc54a5d8f37",
+        diff: "diff --git a/train.py b/train.py\n",
+      },
+      { command_id: "l-1" },
+    );
+    expect([run.status, run.executor.queue_position]).toEqual(["queued", 2]);
+    expect(calls[0]).toEqual({
+      url: "/api/v1/hosts/mccleary/runs",
+      method: "POST",
+      body: {
+        command_id: "l-1",
+        created_by: "human",
+        project: "toy",
+        task: "acc",
+        command: ["python", "train.py", "--lr", "3e-4"],
+        hypothesis: "lr 3e-4 converges faster",
+        gpus: 2,
+        queue: true,
+        slurm: { partition: "gpu", time: "04:00:00" },
+        commit: "8f4cac43877b75953f18ff1daf7e6fc54a5d8f37",
+        diff: "diff --git a/train.py b/train.py\n",
+      },
+    });
+    // a host launch never carries a path on this machine
+    expect("repo" in (calls[0]?.body as Record<string, unknown>)).toBe(false);
+  });
+
+  test("a host that is down surfaces the hub's error type and message", async () => {
+    mockFetch({ error: "host dgx is stale", type: "HostUnavailableError" }, 503);
+    const err = (await api.launchOnHost("dgx", { project: "toy" }).catch((e: unknown) => e)) as ApiError;
+    expect(err).toBeInstanceOf(ApiError);
+    expect([err.status, err.type, err.message]).toEqual([503, "HostUnavailableError", "host dgx is stale"]);
+  });
+
+  test("sweep and projectSweeps encode the project and sweep id", async () => {
+    const first = mockFetch(SWEEP);
+    const one = await api.sweep("my proj", "s-7f3a");
+    const second = mockFetch(SWEEP_LIST);
+    const list = await api.projectSweeps("my proj");
+    expect(one.best?.params).toEqual({ lr: "3e-4", beam: "10" });
+    expect(list.map((s) => [s.id, s.n_runs, s.best?.mean])).toEqual([["s-7f3a", 6, 0.9121]]);
+    expect([...first, ...second].map((c) => c.url)).toEqual([
+      "/api/v1/sweeps/my%20proj/s-7f3a",
+      "/api/v1/projects/my%20proj/sweeps",
+    ]);
+  });
+
+  test("cancelQueued and extendSweep POST to the sweep's action routes", async () => {
+    const calls = mockFetch(SWEEP);
+    await api.cancelQueued("toy", "s-7f3a", { command_id: "k-1" });
+    await api.extendSweep("toy", "s-7f3a", [4, 5], { command_id: "e-1" });
+    expect(calls).toEqual([
+      {
+        url: "/api/v1/sweeps/toy/s-7f3a/cancel_queued",
+        method: "POST",
+        body: { command_id: "k-1", created_by: "human" },
+      },
+      {
+        url: "/api/v1/sweeps/toy/s-7f3a/extend",
+        method: "POST",
+        body: { command_id: "e-1", created_by: "human", seeds: [4, 5] },
+      },
+    ]);
+  });
+
+  test("gpus and queue GET the hub's own GPUs and queue", async () => {
+    // gpu1's three GPUs as the body (HOSTS[0] is the hub's own row, which has none)
+    const first = mockFetch(HOSTS[1]?.gpus ?? []);
+    const gpus = await api.gpus();
+    const second = mockFetch([{ run_id: "r-1", position: 1, gpus_requested: 2 }]);
+    const queue = await api.queue();
+    expect([gpus.length, queue[0]?.position]).toEqual([3, 1]);
+    expect([...first, ...second].map((c) => [c.url, c.method])).toEqual([
+      ["/api/v1/gpus", "GET"],
+      ["/api/v1/queue", "GET"],
+    ]);
+  });
+
+  test("pull POSTs the artifact and returns the hub path", async () => {
+    const calls = mockFetch({ local_path: "/Users/sv/.hypothex/store/toy/runs/r-9/pulled/model.pt" });
+    const out = await api.pull("r-9", "checkpoint", { command_id: "p-1" });
+    expect(out.local_path).toBe("/Users/sv/.hypothex/store/toy/runs/r-9/pulled/model.pt");
+    expect(calls[0]).toEqual({
+      url: "/api/v1/runs/r-9/pull",
+      method: "POST",
+      body: { command_id: "p-1", created_by: "human", artifact: "checkpoint" },
+    });
   });
 });
 

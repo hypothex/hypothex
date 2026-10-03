@@ -21,6 +21,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/hosts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Hosts List */
+        get: operations["hosts_list_api_v1_hosts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/hosts/reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Hosts Reload */
+        post: operations["hosts_reload_api_v1_hosts_reload_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/hosts/{host}/connect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Host Connect */
+        post: operations["host_connect_api_v1_hosts__host__connect_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/hosts/{host}/disconnect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Host Disconnect */
+        post: operations["host_disconnect_api_v1_hosts__host__disconnect_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/hosts/{host}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Host Launch */
+        post: operations["host_launch_api_v1_hosts__host__runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/overview": {
         parameters: {
             query?: never;
@@ -466,6 +551,125 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sweeps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sweep Create */
+        post: operations["sweep_create_api_v1_sweeps_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sweeps/{sweep_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Sweep Get By Id */
+        get: operations["sweep_get_by_id_api_v1_sweeps__sweep_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sweeps/{project}/{sweep_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Sweep Get */
+        get: operations["sweep_get_api_v1_sweeps__project___sweep_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/sweeps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Sweeps */
+        get: operations["project_sweeps_api_v1_projects__project__sweeps_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sweeps/{project}/{sweep_id}/cancel_queued": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sweep Cancel */
+        post: operations["sweep_cancel_api_v1_sweeps__project___sweep_id__cancel_queued_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sweeps/{project}/{sweep_id}/extend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sweep Extend */
+        post: operations["sweep_extend_api_v1_sweeps__project___sweep_id__extend_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runs/{run_id}/pull": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run Pull */
+        post: operations["run_pull_api_v1_runs__run_id__pull_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/compare": {
         parameters: {
             query?: never;
@@ -517,6 +721,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runs/{run_id}/files/{path}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Run File */
+        get: operations["run_file_api_v1_runs__run_id__files__path__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/entry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Entry */
+        get: operations["project_entry_api_v1_projects__project__entry_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/gpus": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Gpus */
+        get: operations["gpus_api_v1_gpus_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Queue */
+        get: operations["queue_api_v1_queue_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/slurm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Slurm Capabilities */
+        get: operations["slurm_capabilities_api_v1_slurm_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -558,10 +847,14 @@ export interface components {
             detail?: components["schemas"]["ValidationError"][];
         };
         /**
-         * LaunchBody
-         * @description Body of ``POST /api/v1/runs``.
+         * HostLaunchBody
+         * @description Body of ``POST /api/v1/hosts/{host}/runs``.
+         *
+         *     ``project`` names the project (what the UI, CLI, and MCP send). ``repo`` is
+         *     used only when it is a folder on the hub: a client-local path from another
+         *     machine is ignored. The host runs in its own mapped checkout (``hx hosts map``).
          */
-        LaunchBody: {
+        HostLaunchBody: {
             /** Command Id */
             command_id?: string | null;
             /**
@@ -569,8 +862,6 @@ export interface components {
              * @default api
              */
             created_by: string;
-            /** Repo */
-            repo: string;
             /** Task */
             task?: string | null;
             /** Stage */
@@ -594,6 +885,82 @@ export interface components {
             vars?: {
                 [key: string]: string;
             };
+            /**
+             * Gpus
+             * @default 0
+             */
+            gpus: number;
+            /**
+             * Queue
+             * @default false
+             */
+            queue: boolean;
+            slurm?: components["schemas"]["SlurmDefaults"] | null;
+            /** Commit */
+            commit?: string | null;
+            /** Diff */
+            diff?: string | null;
+            /** Sweep Id */
+            sweep_id?: string | null;
+            /** Repo */
+            repo?: string | null;
+            /** Project */
+            project?: string | null;
+        };
+        /**
+         * LaunchBody
+         * @description Body of ``POST /api/v1/runs``: start a run in this environment.
+         */
+        LaunchBody: {
+            /** Command Id */
+            command_id?: string | null;
+            /**
+             * Created By
+             * @default api
+             */
+            created_by: string;
+            /** Task */
+            task?: string | null;
+            /** Stage */
+            stage?: string | null;
+            /** Command */
+            command?: string[] | null;
+            /**
+             * Hypothesis
+             * @default
+             */
+            hypothesis: string;
+            /** Seed */
+            seed?: number | null;
+            /** Tags */
+            tags?: string[];
+            /** Params */
+            params?: {
+                [key: string]: string;
+            };
+            /** Vars */
+            vars?: {
+                [key: string]: string;
+            };
+            /**
+             * Gpus
+             * @default 0
+             */
+            gpus: number;
+            /**
+             * Queue
+             * @default false
+             */
+            queue: boolean;
+            slurm?: components["schemas"]["SlurmDefaults"] | null;
+            /** Commit */
+            commit?: string | null;
+            /** Diff */
+            diff?: string | null;
+            /** Sweep Id */
+            sweep_id?: string | null;
+            /** Repo */
+            repo: string;
         };
         /**
          * NoteBody
@@ -635,7 +1002,7 @@ export interface components {
             /** Pick */
             pick?: ("best" | "latest" | "all") | null;
             /** Source */
-            source?: ("runs" | "scores" | "metrics" | "predictions" | "samples" | "usage" | "traces") | null;
+            source?: ("runs" | "scores" | "metrics" | "predictions" | "samples" | "usage" | "traces" | "groups") | null;
             /** Fields */
             fields?: string[] | null;
             /** Run Id */
@@ -701,6 +1068,24 @@ export interface components {
             render: "chart" | "table";
         };
         /**
+         * PullBody
+         * @description Body of ``POST /api/v1/runs/{id}/pull``: an artifact kind or a path.
+         */
+        PullBody: {
+            /** Command Id */
+            command_id?: string | null;
+            /**
+             * Created By
+             * @default api
+             */
+            created_by: string;
+            /**
+             * Artifact
+             * @default checkpoint
+             */
+            artifact: string;
+        };
+        /**
          * ReevalBody
          * @description Body of a ``reeval`` action.
          */
@@ -762,6 +1147,145 @@ export interface components {
          * @enum {string}
          */
         RunStatus: "queued" | "running" | "finished" | "failed" | "killed" | "lost";
+        /**
+         * SeedsBody
+         * @description Body of ``POST /api/v1/sweeps/{project}/{id}/extend``.
+         */
+        SeedsBody: {
+            /** Command Id */
+            command_id?: string | null;
+            /**
+             * Created By
+             * @default api
+             */
+            created_by: string;
+            /** Seeds */
+            seeds: number[];
+        };
+        /**
+         * SlurmDefaults
+         * @description Default ``sbatch`` resources for a SLURM host.
+         *
+         *     ``time`` uses SLURM's formats (``MM``, ``HH:MM:SS``, ``D-HH:MM:SS``).
+         *     ``extra`` holds further ``sbatch`` options, exactly one option token per
+         *     item (``--qos=high``, ``--exclusive``, ``-pgpu``); options Hypothex sets
+         *     itself are refused (``sbatch_option_problem``).
+         *
+         *     Examples
+         *     --------
+         *     >>> SlurmDefaults(partition="gpu", time="1-00:00:00", extra=["--qos=high"]).gpus
+         *     1
+         */
+        SlurmDefaults: {
+            /** Partition */
+            partition?: string | null;
+            /** Account */
+            account?: string | null;
+            /**
+             * Time
+             * @default 02:00:00
+             */
+            time: string;
+            /**
+             * Gpus
+             * @default 1
+             */
+            gpus: number;
+            /** Extra */
+            extra?: string[];
+        };
+        /**
+         * StopBody
+         * @description Body of ``POST /api/v1/runs/{id}/stop``; ``only_queued`` leaves started runs alone.
+         */
+        StopBody: {
+            /** Command Id */
+            command_id?: string | null;
+            /**
+             * Created By
+             * @default api
+             */
+            created_by: string;
+            /**
+             * Only Queued
+             * @default false
+             */
+            only_queued: boolean;
+        };
+        /**
+         * SweepBody
+         * @description Body of ``POST /api/v1/sweeps``.
+         *
+         *     ``commit`` and ``diff`` are optional: ``hx sweep --host`` sends the client
+         *     checkout's commit and diff, so a hub without that checkout runs the client's code.
+         */
+        SweepBody: {
+            /** Command Id */
+            command_id?: string | null;
+            /**
+             * Created By
+             * @default api
+             */
+            created_by: string;
+            /** Project */
+            project: string;
+            /** Task */
+            task?: string | null;
+            /** Host */
+            host?: string | null;
+            /** Grid */
+            grid: components["schemas"]["SweepParam"][];
+            /** Random */
+            random?: number | null;
+            /** Seeds */
+            seeds: number[];
+            /** Command */
+            command: string[];
+            /** Hypothesis */
+            hypothesis: string;
+            /**
+             * Gpus
+             * @default 0
+             */
+            gpus: number;
+            /**
+             * Queue
+             * @default false
+             */
+            queue: boolean;
+            /** Commit */
+            commit?: string | null;
+            /** Diff */
+            diff?: string | null;
+        };
+        /**
+         * SweepParam
+         * @description One swept parameter: a list of grid ``values`` or a ``low``/``high`` range.
+         *
+         *     Range params are sampled ``SweepSpec.random`` times (log-uniform when ``log``).
+         *
+         *     Examples
+         *     --------
+         *     >>> SweepParam(name="lr", values=["1e-4", "3e-4"]).is_range
+         *     False
+         *     >>> SweepParam(name="lr", low=1e-5, high=1e-2, log=True).is_range
+         *     True
+         */
+        SweepParam: {
+            /** Name */
+            name: string;
+            /** Values */
+            values?: string[] | null;
+            /** Low */
+            low?: number | null;
+            /** High */
+            high?: number | null;
+            /**
+             * Log
+             * @default false
+             */
+            log: boolean;
+        };
         /**
          * TagBody
          * @description Body of ``POST /api/v1/runs/{id}/tags``.
@@ -872,6 +1396,174 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    hosts_list_api_v1_hosts_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    }[];
+                };
+            };
+        };
+    };
+    hosts_reload_api_v1_hosts_reload_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ActionBody"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    }[];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    host_connect_api_v1_hosts__host__connect_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                host: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ActionBody"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    host_disconnect_api_v1_hosts__host__disconnect_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                host: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ActionBody"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    host_launch_api_v1_hosts__host__runs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                host: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostLaunchBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -1332,6 +2024,7 @@ export interface operations {
                 task?: string | null;
                 status?: components["schemas"]["RunStatus"] | null;
                 tag?: string | null;
+                environment_id?: string | null;
                 archived?: boolean;
                 limit?: number;
             };
@@ -1728,7 +2421,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ActionBody"];
+                "application/json": components["schemas"]["StopBody"];
             };
         };
         responses: {
@@ -1902,6 +2595,254 @@ export interface operations {
             };
         };
     };
+    sweep_create_api_v1_sweeps_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SweepBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sweep_get_by_id_api_v1_sweeps__sweep_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sweep_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sweep_get_api_v1_sweeps__project___sweep_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project: string;
+                sweep_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    project_sweeps_api_v1_projects__project__sweeps_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    }[];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sweep_cancel_api_v1_sweeps__project___sweep_id__cancel_queued_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project: string;
+                sweep_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ActionBody"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sweep_extend_api_v1_sweeps__project___sweep_id__extend_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project: string;
+                sweep_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SeedsBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_pull_api_v1_runs__run_id__pull_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PullBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     compare_api_v1_compare_get: {
         parameters: {
             query: {
@@ -2000,6 +2941,140 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_file_api_v1_runs__run_id__files__path__get: {
+        parameters: {
+            query?: {
+                max_bytes?: number;
+                tail?: boolean;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+                path: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    project_entry_api_v1_projects__project__entry_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    gpus_api_v1_gpus_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    }[];
+                };
+            };
+        };
+    };
+    queue_api_v1_queue_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    }[];
+                };
+            };
+        };
+    };
+    slurm_capabilities_api_v1_slurm_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };

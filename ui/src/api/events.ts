@@ -12,7 +12,8 @@ import { createContext, createElement, type ReactNode, useContext, useEffect, us
 
 import { wsUrl } from "./client";
 import type { HxEvent, WsMessage } from "./models";
-import { RUN_EVENT_INVALIDATES } from "./queries";
+import { noteLostReasons } from "./lostReasons";
+import { HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "./queries";
 
 /** One entry of the server's event log (`hypothex.core.events.Event`). */
 export type { HxEvent };
@@ -107,8 +108,11 @@ function defaultStorage(): Pick<Storage, "getItem" | "setItem"> | null {
   }
 }
 
-/** `RUN_EVENT_INVALIDATES` families whose next key segment is the project. */
-const BY_PROJECT = new Set(["task", "leaderboard", "views/query"]);
+/** Run families whose next key segment is the project. */
+const BY_PROJECT = new Set(["task", "leaderboard", "views/query", "sweeps"]);
+
+/** Event type the hub emits after mirroring a remote run's event (phase 2 contract 1.5). */
+export const MIRROR_RUN_UPDATED = "mirror.run_updated";
 
 const CONNECTING = 0;
 
@@ -124,16 +128,29 @@ export function backoffDelay(attempt: number): number {
 }
 
 /**
- * Query keys to invalidate for one event. Only `run.*` events change query data.
+ * Query keys to invalidate for one event.
  *
- * The families are `RUN_EVENT_INVALIDATES` (Task 4), narrowed where the key allows:
- * `["task" | "leaderboard", project]`, `["views", "query", project]`, `["run", runId]`
- * (prefix match, so `["run", id]` covers its metrics, logs, predictions and traces).
+ * - `run.*`: `RUN_EVENT_INVALIDATES`, narrowed to the event's run and project.
+ * - `mirror.run_updated` (a remote run changed): `REMOTE_RUN_INVALIDATES`, narrowed the
+ *   same way, so it also refreshes the hosts list.
+ * - `host.*`: `HOST_EVENT_INVALIDATES` as is (a host change touches all its runs).
+ * - anything else: nothing.
  */
 export function keysForEvent(event: HxEvent): QueryKey[] {
-  if (!event.type.startsWith("run.")) return [];
+  if (event.type.startsWith("host.")) return HOST_EVENT_INVALIDATES.map((family) => [...family]);
+  if (event.type === MIRROR_RUN_UPDATED) return narrow(REMOTE_RUN_INVALIDATES, event);
+  if (event.type.startsWith("run.")) return narrow(RUN_EVENT_INVALIDATES, event);
+  return [];
+}
+
+/**
+ * Narrow key families to one run event where the key allows: `["run", runId]` (prefix
+ * match, so it covers the run's metrics, logs, predictions and traces), and
+ * `["task" | "leaderboard" | "sweeps", project]`, `["views", "query", project]`.
+ */
+function narrow(families: readonly QueryKey[], event: HxEvent): QueryKey[] {
   const keys: QueryKey[] = [];
-  for (const family of RUN_EVENT_INVALIDATES) {
+  for (const family of families) {
     const id = family.join("/");
     if (id === "run") {
       if (event.run_id) keys.push([...family, event.run_id]);
@@ -389,7 +406,10 @@ export function useEventStream(options: EventStreamHookOptions = {}): StreamStat
     const storage = initial.current.storage === undefined ? defaultStorage() : initial.current.storage;
     const stream = new EventStream({
       url: url ?? wsUrl(),
-      onEvents: (events) => invalidateForEvents(client, events),
+      onEvents: (events) => {
+        noteLostReasons(events);
+        invalidateForEvents(client, events);
+      },
       onStatus: setStatus,
       onSequence: (sequence) => writeSequence(storage, sequence),
       resumeSequence: readSequence(storage),

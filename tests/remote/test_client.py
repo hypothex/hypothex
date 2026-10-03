@@ -7,6 +7,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import pytest
 import uvicorn
 
@@ -92,3 +93,88 @@ def test_unreachable_server_raises_unreachable() -> None:
     with client, pytest.raises(EnvUnreachableError) as err:
         client.descriptor()
     assert err.value.status_code is None and "cannot reach" in str(err.value)
+
+
+# files -------------------------------------------------------------------------------
+def test_fetch_file_writes_whole_file_or_nothing(
+    env: EnvClient, ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    run_dir = ctx.run_dir(seed_finished_run(ctx, toy_repo, "r1"))
+    (run_dir / "logs" / "stdout.log").write_bytes(b"0123456789")
+    (run_dir / "traces").mkdir()
+    (run_dir / "traces" / "a b#1.jsonl").write_bytes(b"{}\n")
+    out = tmp_path / "mirror"
+    assert env.fetch_file("r1", "run.yaml", out / "run.yaml", max_bytes=10_000) is True
+    assert (out / "run.yaml").read_bytes() == (run_dir / "run.yaml").read_bytes()
+    assert env.fetch_file("r1", "traces/a b#1.jsonl", out / "t.jsonl", max_bytes=100)
+    assert (out / "t.jsonl").read_bytes() == b"{}\n"
+    assert env.fetch_file("r1", "nope.txt", out / "nope.txt", max_bytes=100) is False
+    assert not (out / "nope.txt").exists()
+    (out / "stdout.log").write_bytes(b"old")
+    assert env.fetch_file("r1", "logs/stdout.log", out / "stdout.log", max_bytes=9) is False
+    assert (out / "stdout.log").read_bytes() == b"old"
+    tail = env.fetch_file("r1", "logs/stdout.log", out / "stdout.log", max_bytes=4, tail=True)
+    assert tail is True and (out / "stdout.log").read_bytes() == b"6789"
+    assert sorted(p.name for p in out.iterdir()) == ["run.yaml", "stdout.log", "t.jsonl"]
+
+
+def test_fetch_folder_copies_files_under_the_limit(
+    env: EnvClient, ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    run_dir = ctx.run_dir(seed_finished_run(ctx, toy_repo, "r1"))
+    preds = run_dir / "predictions"
+    (preds / "sub").mkdir(parents=True)
+    (preds / "small.jsonl").write_bytes(b"s")
+    (preds / "sub" / "deep.jsonl").write_bytes(b"dd")
+    (preds / "huge.bin").write_bytes(b"x" * 50)
+    dest = tmp_path / "mirror" / "predictions"
+    assert env.fetch_file("r1", "predictions", dest, max_bytes=10) is True
+    assert (dest / "small.jsonl").read_bytes() == b"s"
+    assert (dest / "sub" / "deep.jsonl").read_bytes() == b"dd"
+    assert not (dest / "huge.bin").exists()
+    listed = env.list_files("r1", "predictions")
+    assert [(f.path, f.size) for f in listed] == [
+        ("predictions/huge.bin", 50),
+        ("predictions/small.jsonl", 1),
+        ("predictions/sub/deep.jsonl", 2),
+    ]
+    with pytest.raises(EnvRequestError) as not_dir:
+        env.list_files("r1", "run.yaml")
+    assert "is a file" in str(not_dir.value)
+
+
+def test_fetch_ignores_listing_entries_outside_the_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {"predictions/ok.jsonl": b"ok", "../../evil.sh": b"rm -rf ~", "/abs.txt": b"x"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        rel = request.url.path.split("/files/", 1)[1]
+        if rel == "predictions":
+            listing = [{"path": p, "size": len(b)} for p, b in files.items()]
+            listing.append({"path": "other/x.txt", "size": 1})
+            return httpx.Response(200, json=listing, headers={"X-Hypothex-Dir": "1"})
+        return httpx.Response(200, content=files.get(rel, b"?"))
+
+    client = EnvClient("http://fake-host")
+    client._http = httpx.Client(base_url="http://fake-host", transport=httpx.MockTransport(handler))
+    dest = tmp_path / "mirror" / "predictions"
+    assert client.fetch_file("r1", "predictions", dest, max_bytes=100) is True
+    written = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
+    assert written == ["mirror/predictions/ok.jsonl"]
+
+
+def test_dropped_transfer_leaves_no_partial_file(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        def body() -> Iterator[bytes]:
+            yield b"first half"
+            raise httpx.ReadError("connection reset")
+
+        return httpx.Response(200, content=body())
+
+    client = EnvClient("http://fake-host")
+    client._http = httpx.Client(base_url="http://fake-host", transport=httpx.MockTransport(handler))
+    dest = tmp_path / "scores.jsonl"
+    with pytest.raises(EnvUnreachableError):
+        client.fetch_file("r1", "scores.jsonl", dest, max_bytes=100)
+    assert list(tmp_path.iterdir()) == []

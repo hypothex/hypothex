@@ -10,17 +10,22 @@ run files over ``GET /api/v1/runs/{id}/files/{path}``, and the event stream over
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import Any
+from urllib.parse import quote
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from hypothex.core.environment import EnvironmentDescriptor
 from hypothex.core.errors import HypothexError
 
 DIR_HEADER = "X-Hypothex-Dir"
 SIZE_HEADER = "X-Hypothex-Size"
+FILE_CHUNK_BYTES = 64 * 1024
 
 
 class EnvRequestError(HypothexError):
@@ -81,6 +86,44 @@ def _error_from(resp: httpx.Response, what: str) -> EnvRequestError:
         status_code=resp.status_code,
         error_type=error_type,
     )
+
+
+class RemoteFile(BaseModel):
+    """
+    One file in a run-folder listing; ``path`` is relative to the run folder.
+
+    ``mtime_ns`` is the file's modification time on the host (0 when unknown).
+    """
+
+    path: str
+    size: int
+    mtime_ns: int = 0
+
+
+def _local_parts(entry: str, base: PurePosixPath) -> tuple[str, ...] | None:
+    """
+    Return the parts of ``entry`` below ``base``, or ``None`` when it is not safely below.
+
+    A listing comes from another machine, so a bad entry (absolute, ``..``, or outside
+    the listed folder) must never pick where the hub writes.
+
+    Parameters
+    ----------
+    entry : str
+        Listed path, relative to the run folder.
+    base : PurePosixPath
+        The listed folder, relative to the run folder.
+
+    Returns
+    -------
+    tuple of str or None
+    """
+    path = PurePosixPath(entry)
+    if path.is_absolute() or ".." in path.parts or "\x00" in entry:
+        return None
+    if path.parts[: len(base.parts)] != base.parts or len(path.parts) <= len(base.parts):
+        return None
+    return path.parts[len(base.parts) :]
 
 
 class EnvClient:
@@ -158,6 +201,9 @@ class EnvClient:
                 f"{what} -> {resp.status_code}: answer is not JSON", status_code=resp.status_code
             ) from exc
 
+    def _file_url(self, run_id: str, rel_path: str) -> str:
+        return f"/api/v1/runs/{quote(run_id, safe='')}/files/{quote(rel_path, safe='/')}"
+
     def descriptor(self) -> EnvironmentDescriptor:
         """
         Fetch the server's environment descriptor.
@@ -230,3 +276,134 @@ class EnvClient:
             The server answered with a 4xx/5xx status.
         """
         return self._request("POST", path, json=body)
+
+    def list_files(self, run_id: str, rel_dir: str = "") -> list[RemoteFile]:
+        """
+        List the files under a folder of a run (recursive, hidden files left out).
+
+        Parameters
+        ----------
+        run_id : str
+            Run id.
+        rel_dir : str
+            Folder relative to the run folder; ``""`` lists the whole run.
+
+        Returns
+        -------
+        list of RemoteFile
+            Paths relative to the run folder, sorted.
+
+        Raises
+        ------
+        EnvRequestError
+            The run or folder does not exist (``status_code == 404``) or
+            ``rel_dir`` is a file.
+        """
+        url = self._file_url(run_id, rel_dir)
+        try:
+            resp = self._http.get(url, params={"max_bytes": 0})
+        except httpx.TransportError as exc:
+            raise self._unreachable(exc) from exc
+        if resp.status_code == 413 or (not resp.is_error and not resp.headers.get(DIR_HEADER)):
+            raise EnvRequestError(f"{rel_dir!r} of run {run_id} is a file, not a folder")
+        if resp.is_error:
+            raise _error_from(resp, f"GET {url}")
+        return [RemoteFile.model_validate(item) for item in resp.json()]
+
+    def fetch_file(
+        self,
+        run_id: str,
+        rel_path: str,
+        dest: Path,
+        *,
+        max_bytes: int,
+        tail: bool = False,
+    ) -> bool:
+        """
+        Copy one run file (or every file of a run folder) to ``dest``.
+
+        A file is written to a temporary name next to ``dest`` and renamed when
+        complete, so readers never see half a file. For a folder, ``dest`` becomes a
+        folder and each listed file is fetched under it with the same limit; files
+        over the limit are skipped.
+
+        Parameters
+        ----------
+        run_id : str
+            Run id.
+        rel_path : str
+            Path relative to the run folder, e.g. ``scores.jsonl`` or ``predictions``.
+        dest : Path
+            Local file (or folder) to write.
+        max_bytes : int
+            Largest file to copy.
+        tail : bool
+            For a file over ``max_bytes``, copy its last ``max_bytes`` bytes instead
+            of skipping it (for log tails).
+
+        Returns
+        -------
+        bool
+            ``False`` when skipped: missing, or over ``max_bytes`` without ``tail``.
+            ``True`` when the file, or the folder listing, was fetched.
+
+        Raises
+        ------
+        EnvUnreachableError
+            The connection failed or dropped mid-transfer (``dest`` is unchanged).
+        EnvRequestError
+            The server answered with an error other than 404/413.
+
+        Examples
+        --------
+        >>> with EnvClient(url) as c:  # doctest: +SKIP
+        ...     c.fetch_file("r1", "run.yaml", mirror / "run.yaml", max_bytes=200 * 2**20)
+        True
+        """
+        url = self._file_url(run_id, rel_path)
+        params: dict[str, Any] = {"max_bytes": max_bytes, "tail": tail}
+        try:
+            with self._http.stream("GET", url, params=params) as resp:
+                if resp.status_code in (404, 413):
+                    return False
+                if resp.is_error:
+                    resp.read()
+                    raise _error_from(resp, f"GET {url}")
+                if not resp.headers.get(DIR_HEADER):
+                    return self._write_stream(resp, dest, max_bytes)
+                listing = [RemoteFile.model_validate(item) for item in json.loads(resp.read())]
+        except httpx.TransportError as exc:
+            raise self._unreachable(exc) from exc
+        base = PurePosixPath(rel_path)
+        for entry in listing:
+            parts = _local_parts(entry.path, base)
+            if parts is None or (entry.size > max_bytes and not tail):
+                continue
+            self.fetch_file(
+                run_id, entry.path, dest.joinpath(*parts), max_bytes=max_bytes, tail=tail
+            )
+        return True
+
+    @staticmethod
+    def _write_stream(resp: httpx.Response, dest: Path, max_bytes: int) -> bool:
+        """Stream ``resp`` into ``dest`` atomically; ``False`` if it exceeds ``max_bytes``."""
+        declared = resp.headers.get("content-length")
+        if declared is not None and int(declared) > max_bytes:
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".part", dir=dest.parent)
+        done = False
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                written = 0
+                for chunk in resp.iter_bytes(FILE_CHUNK_BYTES):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        return False
+                    fh.write(chunk)
+            os.replace(tmp_name, dest)
+            done = True
+            return True
+        finally:
+            if not done:
+                Path(tmp_name).unlink(missing_ok=True)

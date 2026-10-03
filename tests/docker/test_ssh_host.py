@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import shutil
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
-from tests.docker.conftest import docker_skip_reason, make_ssh_access, run_cmd
+from hypothex import __version__
+from hypothex.cli.main import app
+from hypothex.core.context import Context
+from hypothex.core.environment import PROTOCOL_VERSION
+from hypothex.remote.bootstrap import ensure_server, probe
+from hypothex.remote.config import load_hosts
+from tests.docker.conftest import (
+    DESCRIPTOR_PY,
+    REMOTE_HOME,
+    SshBox,
+    docker_skip_reason,
+    make_ssh_access,
+    run_cmd,
+)
+
+runner = CliRunner()
 
 
 # harness checks (no Docker needed) ------------------------------------------------------
@@ -44,3 +61,65 @@ def test_docker_skip_reason_without_docker_cli(
 ) -> None:
     monkeypatch.setenv("PATH", str(tmp_path))
     assert docker_skip_reason() == "docker CLI not found"
+
+
+# against the container ------------------------------------------------------------------
+@pytest.fixture
+def hub_ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sshd_box: SshBox) -> Context:
+    """A fresh hub home whose ssh/scp are the box's isolated wrappers."""
+    home = tmp_path / "hub"
+    monkeypatch.setenv("HYPOTHEX_HOME", str(home))
+    for key, value in sshd_box.access.env().items():
+        monkeypatch.setenv(key, value)
+    return Context.open(home)
+
+
+def server_json(box: SshBox) -> dict:
+    return json.loads(box.sh("cat ~/.hypothex/serve/server.json"))
+
+
+@pytest.mark.docker
+def test_hosts_add_bootstraps_a_managed_server(sshd_box: SshBox, hub_ctx: Context) -> None:
+    home = str(hub_ctx.layout.home)
+    argv = ["--home", home, "hosts", "add", "box", "--ssh", sshd_box.access.alias, "--json"]
+    result = runner.invoke(app, argv, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+
+    spec = load_hosts(hub_ctx.layout).environments["box"]
+    assert (spec.route, spec.kind, spec.ssh_alias, spec.home) == (
+        "ssh",
+        "ssh",
+        "hx-docker-sshd",
+        "~/.hypothex",
+    )
+    wheels = sshd_box.sh("ls ~/.hypothex/runtime/wheels").split()
+    assert f"hypothex-{__version__}-py3-none-any.whl" in wheels
+
+    info = server_json(sshd_box)
+    assert info["managed"] is True
+    assert info["hx_version"] == __version__
+    assert info["protocol_version"] == PROTOCOL_VERSION
+    sshd_box.exec("kill", "-0", str(info["pid"]))  # alive (raises if not)
+    descriptor = json.loads(sshd_box.exec("python3", "-c", DESCRIPTOR_PY, str(info["port"])))
+    assert descriptor["kind"] == "ssh"
+    assert descriptor["hx_version"] == __version__
+    assert descriptor["hostname"] == sshd_box.exec("hostname").strip()
+
+    # a second bootstrap reuses the healthy server instead of starting another
+    again = ensure_server(sshd_box.access.target(), REMOTE_HOME)
+    assert (again.pid, again.port, again.managed) == (info["pid"], info["port"], True)
+    assert info["token"] and again.token == info["token"]  # env server auth (Task 47)
+    mode = sshd_box.sh("stat -c %a ~/.hypothex/serve/server.json").strip()
+    assert mode == "600"
+
+
+@pytest.mark.docker
+def test_probe_reports_the_box(sshd_box: SshBox) -> None:
+    result = probe(sshd_box.access.target(), REMOTE_HOME)
+    assert result.os.lower() == "linux"
+    assert result.arch == sshd_box.exec("uname", "-m").strip()
+    assert result.python is not None and "3.12" in result.python
+    assert result.uv is not None and "0.8.22" in result.uv
+    assert result.gpus == 0
+    assert result.slurm is None
+    assert result.home.endswith("/.hypothex")

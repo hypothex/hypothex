@@ -19,7 +19,8 @@ import shutil
 import socket
 import subprocess
 import time
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
@@ -328,3 +329,74 @@ def docker_ssh_env(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
             for key, value in box.access.env().items():
                 monkeypatch.setenv(key, value)
             return
+
+
+# sshd box -------------------------------------------------------------------------------
+@dataclass
+class SshBox:
+    """One running sshd container (user ``hx``, toy project at ``/home/hx/dock``)."""
+
+    container: str
+    access: SshAccess
+
+    def exec(self, *argv: str, user: str = "hx", timeout: float = 120) -> str:
+        """
+        Run a command inside the container (not over ssh); return stdout.
+
+        Parameters
+        ----------
+        *argv : str
+        user : str
+        timeout : float
+
+        Returns
+        -------
+        str
+        """
+        cmd = ["docker", "exec", "-u", user, self.container, *argv]
+        return run_cmd(cmd, timeout=timeout).stdout
+
+    def sh(self, script: str, *, user: str = "hx") -> str:
+        """
+        Run a shell script inside the container; return stdout.
+
+        Parameters
+        ----------
+        script : str
+        user : str
+
+        Returns
+        -------
+        str
+        """
+        return self.exec("sh", "-c", script, user=user)
+
+    def restart(self) -> None:
+        """Restart the container (kills the env server) and wait for sshd."""
+        run_cmd(["docker", "restart", "-t", "1", self.container], timeout=120)
+        wait_for_ssh(self.access)
+
+
+@pytest.fixture(scope="session")
+def sshd_image() -> str:
+    """Build the sshd test image (cached by Docker after the first build)."""
+    run_cmd(["docker", "build", "-t", SSHD_IMAGE, str(DOCKER_DIR / "sshd")], timeout=1800)
+    return SSHD_IMAGE
+
+
+@pytest.fixture(scope="module")
+def sshd_box(sshd_image: str, tmp_path_factory: pytest.TempPathFactory) -> Iterator[SshBox]:
+    """Start one sshd container per test module on a fixed localhost port."""
+    port = free_port()
+    access = make_ssh_access(tmp_path_factory.mktemp("sshd-access"), "hx-docker-sshd", port)
+    name = f"hx-sshd-{uuid.uuid4().hex[:8]}"
+    run_cmd(
+        ["docker", "run", "-d", "--name", name, "--label", "hypothex-test=1"]
+        + ["-p", f"127.0.0.1:{port}:22", "-e", f"AUTHORIZED_KEY={access.public_key}"]
+        + [sshd_image]
+    )
+    try:
+        wait_for_ssh(access)
+        yield SshBox(container=name, access=access)
+    finally:
+        run_cmd(["docker", "rm", "-f", name], check=False)

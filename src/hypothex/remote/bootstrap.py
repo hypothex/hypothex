@@ -34,6 +34,8 @@ _PREFIX = "HX:"
 _PARAM = re.compile(r"^HX_[A-Z_]+$")
 _SKIP_DIRS = {"__pycache__"}
 _SKIP_SUFFIXES = {".pyc", ".pyo"}
+_SCRIPT_RESERVE = 60
+"""Seconds of each script's ssh timeout kept for its work after the lock wait."""
 
 
 class BootstrapError(HypothexError):
@@ -184,12 +186,18 @@ def _run_script(
     """
     Run one bootstrap script on ``target`` and return its parsed output.
 
+    The script's lock wait is capped at ``timeout`` minus
+    :data:`_SCRIPT_RESERVE` seconds (``HX_LOCK_LIMIT``), so a lock held by
+    another hub fails inside the script with its own message before ``ssh``
+    is killed for the timeout.
+
     Raises
     ------
     BootstrapError
         The script exited non-zero or reported ``HX:error=``; the message
         carries the error and any ``HX:log=`` lines.
     """
+    params.setdefault("HX_LOCK_LIMIT", str(max(1, int(timeout) - _SCRIPT_RESERVE)))
     proc = run_remote(target, _render(name, **params), timeout=timeout)
     values, logs = _parse_output(proc.stdout.decode("utf-8", "replace"))
     if proc.returncode != 0:

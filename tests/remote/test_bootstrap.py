@@ -301,6 +301,73 @@ def test_mkdir_lock_of_another_host_is_never_broken(tmp_path: Path) -> None:
     assert (lock / "owner").read_text().strip() == "login2|4242|x"
 
 
+def test_lock_limit_caps_the_lock_wait(tmp_path: Path) -> None:
+    # bootstrap.py passes HX_LOCK_LIMIT below its ssh timeout: the script must
+    # give up on a busy lock (with its own message) before ssh is killed
+    lock = tmp_path / "L"
+    _held_lock(lock, f"{_hostname()}|{os.getpid()}|{_birth(os.getpid())}")
+    path = _lock_path(tmp_path, "mkdir")
+    env = {k: v for k, v in os.environ.items() if k != "HX_LOCK_WAIT"}
+    for wait in ("", "30"):
+        start = time.monotonic()
+        script = COMMON_SH.read_text(encoding="utf-8") + f'\nhx_lock "{lock}"\n'
+        done = subprocess.run(
+            ["sh", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={
+                **env,
+                "PATH": path,
+                "HX_LOCK_LIMIT": "1",
+                **({"HX_LOCK_WAIT": wait} if wait else {}),
+            },
+        )
+        assert "HX:error=lock" in done.stdout and "waited 1s" in done.stdout
+        assert time.monotonic() - start < 10
+
+
+def test_every_script_gives_up_on_its_lock_before_ssh_times_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, float]] = []
+    answers = {
+        "probe": "HX:os=linux\nHX:arch=x\nHX:home=/h\n",
+        "install": "HX:home=/h\nHX:installed=1.0\n",
+        "start": 'HX:server={"pid": 1, "port": 2, "managed": true, "hx_version": "1", '
+        '"protocol_version": 1}\n',
+        "stop": "HX:stopped=1\n",
+        "logs": "HX:log=x\n",
+    }
+
+    def fake_run_remote(
+        target: SshTarget, script: str, *, timeout: float
+    ) -> subprocess.CompletedProcess[bytes]:
+        name = next(
+            n
+            for n in answers
+            if n in bs.BOOTSTRAP_SCRIPTS and script.endswith(bs.BOOTSTRAP_SCRIPTS[n])
+        )
+        calls.append((script, timeout))
+        return subprocess.CompletedProcess([], 0, answers[name].encode(), b"")
+
+    monkeypatch.setattr(bs, "run_remote", fake_run_remote)
+    monkeypatch.setattr(bs, "copy_to", lambda *args, **kwargs: None)
+    wheel = tmp_path / "hypothex-1.0-py3-none-any.whl"
+    wheel.write_bytes(b"w")
+    target = SshTarget(alias="gpu1")
+    bs.probe(target, "/h")
+    bs.install(target, "/h", wheel)
+    bs.ensure_server(target, "/h")
+    bs.stop_server(target, "/h")
+    bs.server_logs(target, "/h")
+    assert len(calls) == 6
+    for script, timeout in calls:
+        [limit] = [line for line in script.splitlines() if line.startswith("HX_LOCK_LIMIT=")]
+        # the lock wait, plus a minute for the script's own work, fits in the ssh timeout
+        assert int(limit.split("=", 1)[1].strip("'")) + 60 <= timeout
+
+
 # ---------------------------------------------------------------------- build_wheel
 @pytest.fixture(scope="session")
 def wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:

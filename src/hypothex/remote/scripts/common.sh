@@ -150,8 +150,13 @@ hx_lock() {
     # flock(1), else python3, an OS lock on the file PATH, held by a helper process
     # that exits with this script: the OS drops the lock when its holder dies, so it
     # is never broken or stolen. Without either tool (or while a mkdir lock folder
-    # is at PATH): hx_mkdir_lock. Sets HX_LOCK_MODE.
+    # is at PATH): hx_mkdir_lock. Sets HX_LOCK_MODE. Waits HX_LOCK_WAIT seconds
+    # (default 300), at most HX_LOCK_LIMIT (bootstrap.py sets it below its ssh
+    # timeout, so a busy lock fails here with a clear message, not as an ssh timeout).
     _hx_limit=${HX_LOCK_WAIT:-300}
+    if [ -n "${HX_LOCK_LIMIT:-}" ] && [ "$HX_LOCK_LIMIT" -lt "$_hx_limit" ]; then
+        _hx_limit=$HX_LOCK_LIMIT
+    fi
     if [ -d "$1" ]; then
         HX_LOCK_MODE=mkdir
     elif command -v flock >/dev/null 2>&1; then

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import secrets
 import time
@@ -9,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
+from hypothex.core import slurm
 from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
@@ -36,6 +38,7 @@ from hypothex.core.records import (
     RunStatus,
 )
 from hypothex.core.scheduler import Scheduler, assign_gpus, scheduler_lock
+from hypothex.remote.config import SlurmDefaults
 
 QUEUED_GRACE_SECONDS = 60.0
 WAIT_REPAIR_SECONDS = 5.0
@@ -67,7 +70,21 @@ def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
         ``req.queue``) fewer free GPUs than ``req.gpus``: nothing is created.
         GPUs taken while the run was prepared, or a supervisor that could not
         be started: the run is created and marked ``failed``.
+
+    Notes
+    -----
+    On a SLURM environment (``req.slurm`` set, or ``hx serve --kind slurm``)
+    the run is submitted with ``sbatch`` instead. SLURM's own queue holds it,
+    so ``req.queue`` is ignored there and no host GPUs are checked.
     """
+    defaults = _slurm_defaults(ctx, req)
+    if defaults is not None:
+        slurm.validate_defaults(defaults)
+        if req.slurm is not None:
+            slurm.remember_slurm_defaults(ctx.layout, defaults)
+        # no host queue marker: a queue.json would make the GPU scheduler start it here
+        submitted = dataclasses.replace(req, slurm=defaults, queue=False)
+        return slurm.submit_run(ctx, prepare_run(ctx, submitted), defaults)
     if req.queue:
         record = prepare_run(ctx, req)
         try:  # the only place a run joins the queue: marker, FIFO place, position at once
@@ -124,6 +141,21 @@ def _start_supervisor(ctx: Context, record: RunRecord) -> None:
         message = f"could not start the supervisor: {exc}"
         ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": message})
         raise RunError(message) from exc
+
+
+def _slurm_defaults(ctx: Context, req: RunRequest) -> SlurmDefaults | None:
+    """
+    SLURM settings for a launch, or None for a launch that is not submitted to SLURM.
+
+    The request's own settings win; on a SLURM env without them, the last
+    settings a launch sent (normally the hub's ``slurm:`` block, so partition
+    and account survive), else bare ``SlurmDefaults()``.
+    """
+    if req.slurm is not None:
+        return req.slurm
+    if ctx.descriptor.kind != "slurm":
+        return None
+    return slurm.last_slurm_defaults(ctx.layout) or SlurmDefaults()
 
 
 def wait_for_run(
@@ -299,7 +331,11 @@ def _start(
 ) -> RunRecord:
     if background:
         return launch_run(ctx, req)
-    record = prepare_run(ctx, req)
+    if _slurm_defaults(ctx, req) is not None:
+        # a foreground run would execute here, on the login node, not in a SLURM job
+        raise RunError("SLURM runs are always submitted; drop --foreground")
+    # foreground: the run executes right here, so it must not also wait in the host queue
+    record = prepare_run(ctx, dataclasses.replace(req, queue=False))
     return execute_run(ctx, record.run_id, stdout_sink=stdout_sink, stderr_sink=stderr_sink)
 
 
@@ -386,6 +422,9 @@ def rerun(
         parent=parent.run_id,
         cwd=cwd,
         created_by=created_by,
+        gpus=parent.gpus_requested,
+        queue=parent.gpus_requested > 0,  # wait for GPUs; never start with none
+        slurm=slurm.run_slurm_settings(parent_dir),
     )
     return _start(ctx, req, background, stdout_sink, stderr_sink)
 
@@ -447,6 +486,9 @@ def reinfer(
         kind=RunKind.INFER,
         parent=parent.run_id,
         created_by=created_by,
+        gpus=parent.gpus_requested,
+        queue=parent.gpus_requested > 0,
+        slurm=slurm.run_slurm_settings(ctx.run_dir(parent)),
     )
     return _start(ctx, req, background, stdout_sink, stderr_sink)
 

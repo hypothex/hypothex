@@ -14,12 +14,14 @@ import pytest
 from typer.testing import CliRunner
 
 from hypothex.cli.main import app
+from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, RunError
 from hypothex.core.execution import RunRequest, prepare_run
 from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus
 from hypothex.core.slurm import (
     EXIT_FILE,
+    SBATCH_FILE,
     SlurmError,
     SlurmJob,
     SlurmTimeout,
@@ -35,6 +37,7 @@ from hypothex.core.slurm import (
     require_flock,
     run_child,
     submit,
+    submit_run,
 )
 from hypothex.remote.config import SlurmDefaults
 from tests.factories import make_record
@@ -713,3 +716,193 @@ def test_a_home_without_flock_is_refused(tmp_path: Path, monkeypatch: pytest.Mon
     assert not flock_supported(tmp_path)
     with pytest.raises(ConfigError, match=r"does not support flock.*mount it with flock"):
         require_flock(tmp_path)
+
+
+# submit_run and launch_run ------------------------------------------------------------------
+def test_launch_run_submits_to_slurm(ctx: Context, toy_repo: Path, slurm: FakeSlurm) -> None:
+    req = RunRequest(
+        repo=toy_repo,
+        command=[PY, "-c", "pass"],
+        hypothesis="slurm",
+        gpus=2,
+        slurm=SlurmDefaults(partition="gpu", time="00:10:00"),
+    )
+    record = control.launch_run(ctx, req)
+    assert record.status == RunStatus.QUEUED
+    ex = record.executor
+    assert (ex.type, ex.slurm_job_id, ex.pid, ex.child_pid) == ("slurm", "1000", None, None)
+    assert ex.host == ctx.descriptor.label
+    run_dir = ctx.run_dir(record)
+    assert not (run_dir / "supervisor.pid").exists()
+    job = slurm.job("1000")
+    assert job["script"] == (run_dir / SBATCH_FILE).read_text()
+    assert (
+        job["comment"].startswith(f"hx-{record.run_id}-")
+        and len(job["comment"]) == len(f"hx-{record.run_id}-") + 8
+    )
+    assert job["directives"] == {
+        "comment": job["comment"],  # the fake keeps every flag, --comment included
+        "job-name": f"hx-{record.run_id}",
+        "output": f"{run_dir}/logs/slurm-%j.out",
+        "time": "00:10:00",
+        "gpus": "2",
+        "partition": "gpu",
+    }
+    assert job["cwd"] == record.cwd
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id]
+    assert types[-2:] == ["run.submitting", "run.submitted"]  # the intent comes before sbatch
+
+
+def test_launch_run_on_slurm_env_uses_default_settings(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    ctx.descriptor = ctx.descriptor.model_copy(update={"kind": "slurm"})
+    record = control.launch_run(ctx, RunRequest(repo=toy_repo, command=[PY, "-c", "pass"]))
+    assert record.executor.slurm_job_id == "1000"
+    assert slurm.job("1000")["directives"]["time"] == "02:00:00"
+    assert slurm.job("1000")["directives"]["gpus"] == "1"
+
+
+def test_launch_run_rejects_unsafe_settings_before_creating_a_run(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    unsafe = SlurmDefaults.model_construct(partition="gpu;id")  # skips Task 2's check
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=unsafe)
+    with pytest.raises(SlurmError, match="partition"):
+        control.launch_run(ctx, req)
+    assert ctx.index.list_runs(include_archived=True, limit=None) == []
+    assert slurm.calls("sbatch") == []
+
+
+def test_queued_slurm_launch_never_waits_in_the_host_queue(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    req = RunRequest(
+        repo=toy_repo, command=[PY, "-c", "pass"], gpus=2, queue=True, slurm=SlurmDefaults()
+    )
+    record = control.launch_run(ctx, req)
+    assert record.executor.slurm_job_id == "1000"
+    assert not (ctx.run_dir(record) / "queue.json").exists()
+
+
+def test_an_unknown_sbatch_outcome_keeps_the_run_and_its_intent(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import slurm as slurm_module
+
+    real = slurm_module.submit
+
+    def accepted_then_timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        real(script, cwd, comment=comment)  # the controller took the job ...
+        raise slurm_module.SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", accepted_then_timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    record = control.launch_run(ctx, req)  # ... and no error: it may well run
+    assert record.status == RunStatus.QUEUED and record.executor.slurm_job_id is None
+    entry = json.loads((ctx.layout.home / "slurm" / "outbox" / f"{record.run_id}.json").read_text())
+    assert entry["state"] == "unknown" and entry["comment"] == slurm.job("1000")["comment"]
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id]
+    assert types[-1] == "run.submit_unknown" and "run.failed" not in types
+
+
+def test_submit_run_records_sbatch_failure(ctx: Context, toy_repo: Path, slurm: FakeSlurm) -> None:
+    slurm.set(fail={"sbatch": "sbatch: error: invalid partition specified: nope"})
+    record = prepare_run(ctx, RunRequest(repo=toy_repo, command=[PY, "-c", "pass"]))
+    with pytest.raises(RunError, match="invalid partition specified: nope"):
+        submit_run(ctx, record, SlurmDefaults(partition="nope"))
+    failed = ctx.find_record(record.run_id)
+    assert failed.status == RunStatus.FAILED
+    assert failed.ended_at is not None
+    last = [e for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id][-1]
+    assert last.type == "run.failed"
+    assert "invalid partition specified: nope" in last.payload["reason"]
+
+
+def test_end_to_end_job_runs_hx_run_child(ctx: Context, toy_repo: Path, slurm: FakeSlurm) -> None:
+    slurm.set(mode="run")
+    req = RunRequest(
+        repo=toy_repo,
+        command=[PY, "-c", "print('on node')"],
+        hypothesis="e2e",
+        gpus=1,
+        slurm=SlurmDefaults(partition="gpu"),
+    )
+    record = control.launch_run(ctx, req)
+    done = control.wait_for_run(ctx, record.run_id, timeout=60)
+    assert done.status == RunStatus.FINISHED
+    ex = done.executor
+    assert (ex.type, ex.slurm_job_id, ex.node, ex.gpus) == ("slurm", "1000", "fake-node1", [0])
+    run_dir = ctx.run_dir(done)
+    assert (run_dir / "logs" / "stdout.log").read_text() == "on node\n"
+    wait_until(lambda: not slurm.job("1000")["in_queue"])
+    assert slurm.job("1000")["state"] == "COMPLETED"
+    slurm_out = (run_dir / "logs" / "slurm-1000.out").read_text()
+    assert f"finished (exit 0) {done.run_id}" in slurm_out
+    assert json.loads((run_dir / EXIT_FILE).read_text())["status"] == "finished"
+
+
+def test_submit_run_saves_the_settings_with_the_run(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    settings = SlurmDefaults(partition="gpu", account="lab", time="00:10:00", gpus=2)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], gpus=2, slurm=settings)
+    record = control.launch_run(ctx, req)
+    saved = json.loads((ctx.run_dir(record) / "slurm.json").read_text())
+    assert SlurmDefaults.model_validate(saved) == settings
+
+
+def test_slurm_env_remembers_the_last_settings_it_was_sent(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    ctx.descriptor = ctx.descriptor.model_copy(update={"kind": "slurm"})
+    hub_block = SlurmDefaults(partition="gpu", account="lab")
+    control.launch_run(ctx, RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=hub_block))
+    # a later launch without settings (hx launch on the login node) keeps partition and account
+    control.launch_run(ctx, RunRequest(repo=toy_repo, command=[PY, "-c", "pass"]))
+    directives = slurm.job("1001")["directives"]
+    assert (directives["partition"], directives["account"]) == ("gpu", "lab")
+
+
+def test_rerun_keeps_the_slurm_settings_and_gpus(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    settings = SlurmDefaults(partition="gpu", account="lab", time="00:10:00")
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], gpus=2, slurm=settings)
+    parent = control.launch_run(ctx, req)
+    (ctx.layout.home / "slurm_defaults.json").unlink()  # only the run's own copy is left
+    child = control.rerun(ctx, parent.run_id)
+    assert child.gpus_requested == 2 and child.executor.slurm_job_id == "1001"
+    directives = slurm.job("1001")["directives"]
+    assert (directives["partition"], directives["account"], directives["gpus"]) == (
+        "gpu",
+        "lab",
+        "2",
+    )
+
+
+def test_foreground_rerun_on_slurm_is_refused(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    parent = control.launch_run(ctx, req)
+    # reinfer reaches the same check: both go through control._start
+    with pytest.raises(RunError, match="SLURM runs are always submitted; drop --foreground"):
+        control.rerun(ctx, parent.run_id, background=False)
+    assert [r.run_id for r in ctx.index.list_runs(include_archived=True, limit=None)] == [
+        parent.run_id
+    ]
+    assert len(slurm.calls("sbatch")) == 1  # nothing ran on the login node either
+
+
+def test_rerun_of_a_gpu_run_waits_for_gpus(
+    ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = tmp_path / "gpus.json"
+    fake.write_text(json.dumps([{"index": 0}, {"index": 1}]))
+    monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(fake))
+    parent = prepare_run(ctx, RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], gpus=2))
+    child = control.rerun(ctx, parent.run_id)
+    assert child.gpus_requested == 2
+    assert child.status == RunStatus.QUEUED and child.executor.queue_position == 1
+    assert not (ctx.run_dir(child) / "supervisor.pid").exists()

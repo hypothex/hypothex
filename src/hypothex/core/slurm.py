@@ -11,6 +11,7 @@ is gone without an exit record (spec 5.6, 8A.5).
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import fcntl
 import getpass
@@ -18,6 +19,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import socket
@@ -34,13 +36,13 @@ from hypothex.core.context import Context
 from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, HypothexError, RunError
 from hypothex.core.events import EventLog
-from hypothex.core.execution import execute_run
+from hypothex.core.execution import execute_run, process_create_time
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.ids import utcnow
 from hypothex.core.index import Index
 from hypothex.core.layout import Layout
-from hypothex.core.records import RunRecord, ScoreRecord
-from hypothex.core.store import RunStore, run_lock
+from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.store import RunStore, dir_lock, run_lock
 from hypothex.remote.config import SlurmDefaults, sbatch_option_problem
 
 log = logging.getLogger(__name__)
@@ -73,6 +75,15 @@ EXIT_FILE = "exit.json"
 """Exit record the compute node writes after the run ends (``status``, ``exit_code``)."""
 NO_FLOCK_ERRNOS = frozenset({errno.ENOSYS, errno.ENOLCK, errno.EOPNOTSUPP})
 """``flock`` errors of shared filesystems without lock support (Lustre, some NFS)."""
+SBATCH_FILE = "slurm.sbatch"
+SLURM_SETTINGS_FILE = "slurm.json"
+"""The effective ``SlurmDefaults`` of one run, saved in its folder (reruns reuse them)."""
+LAST_SLURM_DEFAULTS = "slurm_defaults.json"
+"""``<home>/slurm_defaults.json``: the settings of the last launch that sent them."""
+OUTBOX_DIR = "slurm/outbox"
+"""``<home>/slurm/outbox/<run_id>.json``: submission intent and publication cursor."""
+SUBMIT_SETTLE_SECONDS = 300.0
+"""An unknown submission counts as absent only this long after its intent."""
 FLOCK_PROBE = ".flock-probe"
 
 
@@ -937,3 +948,362 @@ def run_child(
     }
     atomic_write_text(ctx.run_dir(final) / EXIT_FILE, json.dumps(exit_record))
     return final
+
+
+def _end(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
+    def mutate(r: RunRecord) -> RunRecord:
+        if r.status in TERMINAL_STATUSES:
+            return r
+        return r.model_copy(update={"status": status, "ended_at": utcnow()})
+
+    return mutate
+
+
+def _outbox_path(layout: Layout, run_id: str) -> Path:
+    return layout.home / OUTBOX_DIR / f"{run_id}.json"
+
+
+def _outbox_lock(layout: Layout) -> contextlib.AbstractContextManager[None]:
+    return dir_lock(layout.home / OUTBOX_DIR)
+
+
+def _done(entry: dict[str, Any]) -> bool:
+    """An entry can go: terminal status published, job known, no cancel pending."""
+    try:
+        published = RunStatus(entry["published"])
+    except (KeyError, ValueError):
+        return False
+    return (
+        published in TERMINAL_STATUSES
+        and entry.get("state") == "submitted"
+        and not entry.get("cancel_requested")
+    )
+
+
+def track_slurm_run(
+    layout: Layout,
+    record: RunRecord,
+    *,
+    comment: str | None = None,
+    submitter: dict[str, Any] | None = None,
+) -> None:
+    """
+    Put a SLURM run in this login node's outbox.
+
+    The entry holds the submission intent (``state``, ``comment``, the
+    submitting process, ``intent_at``), a stop that came before the job id
+    (``cancel_requested``), and ``published``: the last status the login node
+    published as an event. ``reconcile`` walks the outbox, not the index, so
+    nothing the compute node writes is ever skipped (Task 29).
+
+    Parameters
+    ----------
+    layout : Layout
+    record : RunRecord
+        The run; its current status is what the index already shows.
+    comment : str, optional
+        The ``--comment`` given to ``sbatch``.
+    submitter : dict, optional
+        ``{"pid", "create_time"}`` of the process that calls ``sbatch``.
+    """
+    job_id = record.executor.slurm_job_id
+    entry = {
+        "run_id": record.run_id,
+        "state": "submitted" if job_id else "pending",
+        "job_id": job_id,
+        "comment": comment,
+        "submitter": submitter,
+        "intent_at": utcnow().isoformat(),
+        "cancel_requested": False,
+        "published": record.status.value,
+    }
+    with _outbox_lock(layout):
+        atomic_write_text(_outbox_path(layout, record.run_id), json.dumps(entry))
+
+
+def _intent(layout: Layout, run_id: str) -> dict[str, Any] | None:
+    try:
+        entry = json.loads(_outbox_path(layout, run_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
+def _update_intent(layout: Layout, run_id: str, **fields: Any) -> dict[str, Any] | None:
+    """Change an outbox entry under the outbox lock; it is removed once done."""
+    path = _outbox_path(layout, run_id)
+    with _outbox_lock(layout):
+        entry = _intent(layout, run_id)
+        if entry is None:
+            return None
+        entry.update(fields)
+        if _done(entry):
+            path.unlink(missing_ok=True)
+        else:
+            atomic_write_text(path, json.dumps(entry))
+    return entry
+
+
+def _drop_intent(layout: Layout, run_id: str) -> None:
+    with _outbox_lock(layout):
+        _outbox_path(layout, run_id).unlink(missing_ok=True)
+
+
+def read_outbox(layout: Layout) -> list[dict[str, Any]]:
+    """
+    Return the outbox entries, oldest run id first; unreadable ones are skipped.
+
+    Parameters
+    ----------
+    layout : Layout
+
+    Returns
+    -------
+    list of dict
+    """
+    folder = layout.home / OUTBOX_DIR
+    entries: list[dict[str, Any]] = []
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+            RunStatus(entry["published"])
+        except (OSError, ValueError, KeyError, TypeError):
+            log.warning("skipping unreadable SLURM outbox entry %s", path)
+            continue
+        entries.append(entry)
+    return entries
+
+
+def mark_published(layout: Layout, record: RunRecord) -> None:
+    """
+    Record that the login node published ``record.status``.
+
+    The entry goes once that status is terminal and the submission is settled
+    (job known, no cancel pending); else ``reconcile`` keeps working on it.
+
+    Parameters
+    ----------
+    layout : Layout
+    record : RunRecord
+    """
+    _update_intent(layout, record.run_id, published=record.status.value)
+
+
+def _as_slurm(host: str) -> Callable[[RunRecord], RunRecord]:
+    """Mark a run as a SLURM run before ``sbatch`` (its pids are no longer local)."""
+
+    def mutate(r: RunRecord) -> RunRecord:
+        update: dict[str, Any] = {"type": SLURM_EXECUTOR, "host": r.executor.host or host}
+        if r.status == RunStatus.QUEUED:
+            update.update(pid=None, pid_create_time=None, child_pid=None)
+        return r.model_copy(update={"executor": r.executor.model_copy(update=update)})
+
+    return mutate
+
+
+def _with_job(job_id: str) -> Callable[[RunRecord], RunRecord]:
+    def mutate(r: RunRecord) -> RunRecord:
+        update = {"type": SLURM_EXECUTOR, "slurm_job_id": r.executor.slurm_job_id or job_id}
+        return r.model_copy(update={"executor": r.executor.model_copy(update=update)})
+
+    return mutate
+
+
+def _end_if_active(
+    ctx: Context,
+    run_id: str,
+    event_type: str,
+    mutate: Callable[[RunRecord], RunRecord],
+    payload: dict[str, Any],
+) -> RunRecord | None:
+    """
+    End an active SLURM run and emit ``event_type``; None when it had already ended.
+
+    ``Context.update_run`` emits its event even when ``mutate`` keeps a record
+    that the compute node ended first (a ``run.lost`` carrying ``finished``).
+    Here the check, the write, the event, and the index update happen under
+    the run lock, and nothing is written or emitted for a run that ended: the
+    caller then publishes the node's own end (``sync_node_run``, Task 29).
+    """
+    project = ctx.find_record(run_id).project
+    with run_lock(ctx.layout.run_dir(project, run_id)):
+        current = ctx.store.read_record(project, run_id)
+        if current.status in TERMINAL_STATUSES:
+            return None
+        ended = mutate(current)
+        ctx.store.write_record(ended)
+        ctx.events.append(
+            event_type,
+            project=project,
+            run_id=run_id,
+            payload={"status": ended.status.value, **payload},
+        )
+        ctx.index.upsert_run(ended)
+    return ended
+
+
+def _fail_submission(ctx: Context, record: RunRecord, exc: SlurmError) -> RunError:
+    """SLURM rejected the job for sure: fail the run and forget the intent."""
+    _end_if_active(
+        ctx, record.run_id, "run.failed", _end(RunStatus.FAILED), {"reason": f"sbatch: {exc}"}
+    )
+    _drop_intent(ctx.layout, record.run_id)
+    return RunError(f"could not submit run {record.run_id} to SLURM: {exc}")
+
+
+def _cancel_requested(ctx: Context, run_id: str, job_id: str) -> bool:
+    """
+    ``scancel`` a job whose run was stopped before its job id was known.
+
+    Returns True once the job is cancelled or already ended (``cancel_requested``
+    is cleared then); False to try again on the next poll.
+    """
+    try:
+        cancel(job_id)
+    except SlurmError as exc:
+        try:
+            job = poll([job_id]).get(job_id)
+        except SlurmError:
+            return False
+        if job is not None and not is_finished(job):
+            log.warning("run %s: could not cancel slurm job %s yet: %s", run_id, job_id, exc)
+            return False
+    _update_intent(ctx.layout, run_id, cancel_requested=False)
+    return True
+
+
+def _record_job(ctx: Context, run_id: str, job_id: str, *, recovered: bool = False) -> RunRecord:
+    """
+    Record a submission's job id; carry out a stop that arrived before it.
+
+    The intent is updated under the outbox lock, and a stop sets
+    ``cancel_requested`` under the same lock (``stop_slurm_run``, Task 30), so
+    exactly one of them cancels the job.
+    """
+    entry = _update_intent(ctx.layout, run_id, state="submitted", job_id=job_id)
+    payload: dict[str, Any] = {"slurm_job_id": job_id}
+    if recovered:
+        payload["recovered"] = True
+    record = ctx.update_run(run_id, "run.submitted", _with_job(job_id), payload)
+    if entry is not None and entry.get("cancel_requested"):
+        _cancel_requested(ctx, run_id, job_id)
+    return record
+
+
+def submit_run(ctx: Context, record: RunRecord, defaults: SlurmDefaults) -> RunRecord:
+    """
+    Submit a queued run as a SLURM job and record the job id.
+
+    The intent is written before ``sbatch`` runs: the outbox entry (state
+    ``pending``, a unique comment ``hx-<run_id>-<nonce>``, this process) and
+    ``run.submitting``, which marks the run as a SLURM run. Then:
+
+    - a job id: recorded (``run.submitted``); a stop that came first is
+      carried out now (``scancel``);
+    - an unknown outcome (sbatch timed out, a communication error, no job
+      id): state ``unknown``, event ``run.submit_unknown``, and the run stays
+      ``queued``; ``reconcile`` finds the job by its comment, or fails the run
+      once SLURM provably never took it;
+    - a rejection: the run is ``failed`` and ``RunError`` is raised.
+
+    The script is saved as ``<run_dir>/slurm.sbatch``. The run stays
+    ``queued`` until ``hx run --child`` starts on the node.
+
+    Parameters
+    ----------
+    ctx : Context
+    record : RunRecord
+        A run just created by ``prepare_run``.
+    defaults : SlurmDefaults
+
+    Returns
+    -------
+    RunRecord
+        The run with ``executor.type == "slurm"`` (and ``executor.slurm_job_id``
+        unless the outcome is unknown).
+
+    Raises
+    ------
+    RunError
+        SLURM rejected the job; the run is then recorded as ``failed``.
+    """
+    run_dir = ctx.run_dir(record)
+    try:
+        script = render_sbatch(record, defaults, ctx.layout.home)
+    except SlurmError as exc:
+        raise _fail_submission(ctx, record, exc) from exc
+    atomic_write_text(run_dir / SBATCH_FILE, script)
+    atomic_write_text(run_dir / SLURM_SETTINGS_FILE, defaults.model_dump_json())
+    comment = f"hx-{record.run_id}-{secrets.token_hex(4)}"
+    me = os.getpid()
+    submitter = {"pid": me, "create_time": process_create_time(me)}
+    track_slurm_run(ctx.layout, record, comment=comment, submitter=submitter)
+    ctx.update_run(
+        record.run_id, "run.submitting", _as_slurm(ctx.descriptor.label), {"comment": comment}
+    )
+    try:
+        job_id = submit(script, Path(record.cwd), comment=comment)
+    except SubmitUnknownError as exc:
+        # sbatch may have accepted it: never a rejection. reconcile resolves it by comment
+        _update_intent(ctx.layout, record.run_id, state="unknown")
+        current = ctx.find_record(record.run_id)
+        ctx.emit("run.submit_unknown", current, {"reason": str(exc)[:500], "comment": comment})
+        return current
+    except SlurmError as exc:
+        raise _fail_submission(ctx, record, exc) from exc
+    return _record_job(ctx, record.run_id, job_id)
+
+
+def run_slurm_settings(run_dir: Path) -> SlurmDefaults | None:
+    """
+    Return the SLURM settings a run was submitted with.
+
+    Parameters
+    ----------
+    run_dir : Path
+        The run folder.
+
+    Returns
+    -------
+    SlurmDefaults or None
+        ``<run_dir>/slurm.json``, or None for a run that was not submitted to
+        SLURM (or whose file is unreadable).
+    """
+    try:
+        return SlurmDefaults.model_validate_json((run_dir / SLURM_SETTINGS_FILE).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def remember_slurm_defaults(layout: Layout, defaults: SlurmDefaults) -> None:
+    """
+    Save the settings a launch sent, for later launches that send none.
+
+    An env server never sees the hub's ``environments.yaml``; the hub sends
+    its ``slurm:`` block with every launch, and this keeps the latest one.
+
+    Parameters
+    ----------
+    layout : Layout
+    defaults : SlurmDefaults
+    """
+    atomic_write_text(layout.home / LAST_SLURM_DEFAULTS, defaults.model_dump_json())
+
+
+def last_slurm_defaults(layout: Layout) -> SlurmDefaults | None:
+    """
+    Return the settings :func:`remember_slurm_defaults` saved last.
+
+    Parameters
+    ----------
+    layout : Layout
+
+    Returns
+    -------
+    SlurmDefaults or None
+        None when no launch has sent settings yet (or the file is unreadable).
+    """
+    try:
+        return SlurmDefaults.model_validate_json((layout.home / LAST_SLURM_DEFAULTS).read_text())
+    except (OSError, ValueError):
+        return None

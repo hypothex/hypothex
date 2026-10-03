@@ -1,5 +1,6 @@
 """Env-server routes: run files (path safety, max_bytes), GPUs, and the queue."""
 
+import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -9,9 +10,13 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from hypothex.api import app as app_module
 from hypothex.api.app import create_app, read_span
 from hypothex.core.context import Context
-from tests.factories import seed_finished_run
+from hypothex.core.gpus import GpuInfo
+from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus
+from hypothex.core.scheduler import Scheduler
+from tests.factories import make_record, seed_finished_run
 
 FILES = "/api/v1/runs/r1/files"
 
@@ -231,3 +236,101 @@ def test_read_span_stops_at_the_length_fixed_at_start(tmp_path: Path) -> None:
     assert b"".join(chunks) == b"cdef"
     with pytest.raises(OSError):
         os.fstat(fd)  # closed when the iterator finished
+
+
+def _seed(ctx: Context, repo: Path, run_id: str, **overrides: Any) -> RunRecord:
+    entry = ctx.register_project(repo)
+    fields: dict[str, Any] = {
+        "task": "toy-acc",
+        "cwd": str(repo),
+        "environment_id": ctx.descriptor.environment_id,
+    }
+    fields.update(overrides)
+    return ctx.create_run(make_record(run_id, project=entry.project, **fields))
+
+
+def _gpu(index: int, *, external: bool = False) -> GpuInfo:
+    return GpuInfo(
+        index=index,
+        name="NVIDIA A100-SXM4-80GB",
+        util=0.0,
+        mem_used_mb=0,
+        mem_total_mb=81920,
+        external=external,
+    )
+
+
+# gpus --------------------------------------------------------------------------------
+def test_gpus_marks_runs_of_this_environment_only(
+    client: TestClient, ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        app_module, "query_gpus", lambda: [_gpu(0), _gpu(1, external=True), _gpu(2)]
+    )
+    _seed(ctx, toy_repo, "mine", status=RunStatus.RUNNING, executor=ExecutorInfo(gpus=[1]))
+    _seed(
+        ctx,
+        toy_repo,
+        "mirrored",
+        status=RunStatus.RUNNING,
+        environment_id="other-host",
+        executor=ExecutorInfo(gpus=[0]),
+    )
+    _seed(ctx, toy_repo, "done", status=RunStatus.FINISHED, executor=ExecutorInfo(gpus=[2]))
+    body = client.get("/api/v1/gpus").json()
+    assert [(g["index"], g["run_id"], g["external"]) for g in body] == [
+        (0, None, False),
+        (1, "mine", False),
+        (2, None, False),
+    ]
+    assert body[1]["name"] == "NVIDIA A100-SXM4-80GB" and body[1]["mem_total_mb"] == 81920
+
+
+def test_gpus_are_cached_for_ten_seconds(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    def fake() -> list[GpuInfo]:
+        calls.append(1)
+        return [_gpu(0)] * len(calls)
+
+    monkeypatch.setattr(app_module, "query_gpus", fake)
+    assert len(client.get("/api/v1/gpus").json()) == 1
+    assert len(client.get("/api/v1/gpus").json()) == 1
+    assert len(calls) == 1
+    monkeypatch.setattr(app_module, "GPU_CACHE_SECONDS", 0.0)
+    assert len(client.get("/api/v1/gpus").json()) == 2
+    assert len(calls) == 2
+
+
+def test_no_gpus_is_an_empty_list(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_module, "query_gpus", lambda: [])
+    assert client.get("/api/v1/gpus").json() == []
+
+
+# queue -------------------------------------------------------------------------------
+def test_queue_lists_positions_in_order_with_gpus_requested(
+    client: TestClient,
+    ctx: Context,
+    toy_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_gpus = tmp_path / "gpus.json"
+    fake_gpus.write_text(json.dumps([{"index": i} for i in range(4)]))
+    monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(fake_gpus))
+    for run_id, gpus in (("q-a", 1), ("q-b", 4), ("q-c", 2)):
+        _seed(ctx, toy_repo, run_id, status=RunStatus.QUEUED, gpus_requested=gpus)
+    scheduler = Scheduler(ctx)
+    for run_id in ("q-b", "q-a", "q-c"):
+        scheduler.enqueue(run_id)
+    assert client.get("/api/v1/queue").json() == [
+        {"run_id": "q-b", "position": 1, "gpus_requested": 4},
+        {"run_id": "q-a", "position": 2, "gpus_requested": 1},
+        {"run_id": "q-c", "position": 3, "gpus_requested": 2},
+    ]
+
+
+def test_empty_queue_is_an_empty_list(client: TestClient) -> None:
+    assert client.get("/api/v1/queue").json() == []

@@ -9,6 +9,7 @@ import logging
 import os
 import stat
 import threading
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -32,12 +33,13 @@ from hypothex.core.context import Context
 from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
+from hypothex.core.gpus import GpuInfo, gpu_status, query_gpus
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import reserved_run_path
 from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_panel
 from hypothex.core.records import RunStatus
-from hypothex.core.scheduler import run_scheduler_loop
+from hypothex.core.scheduler import Scheduler, run_scheduler_loop
 from hypothex.core.views import PanelData, PanelSpec, ViewSpec
 from hypothex.mcp.server import (
     ViewValidationError,
@@ -62,6 +64,7 @@ UI_DIST = Path(__file__).resolve().parent.parent / "ui_dist"
 NO_UI_FALLBACK = frozenset({"api", "mcp", ".well-known", "assets"})
 FILE_MAX_BYTES = 200 * 1024 * 1024
 FILE_CHUNK_BYTES = 64 * 1024
+GPU_CACHE_SECONDS = 10.0
 _OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
@@ -454,6 +457,34 @@ def file_response(fd: int, rel_path: str, *, max_bytes: int, tail: bool) -> Resp
     )
 
 
+class GpuCache:
+    """
+    ``query_gpus()`` at most once per ``GPU_CACHE_SECONDS`` (spec 8A.7: every 10 s).
+
+    Thread-safe; FastAPI runs sync routes in a thread pool.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._at: float | None = None
+        self._gpus: list[GpuInfo] = []
+
+    def get(self) -> list[GpuInfo]:
+        """
+        Return the cached GPU list, refreshing it when older than ``GPU_CACHE_SECONDS``.
+
+        Returns
+        -------
+        list of GpuInfo
+        """
+        with self._lock:
+            now = time.monotonic()
+            if self._at is None or now - self._at >= GPU_CACHE_SECONDS:
+                self._gpus = query_gpus()
+                self._at = now
+            return list(self._gpus)
+
+
 def register_env_routes(app: FastAPI, ctx: Context) -> None:
     """
     Add the env-server routes: run files, GPUs, and the GPU queue (spec 5.5, 8A.5, 8A.7).
@@ -465,6 +496,8 @@ def register_env_routes(app: FastAPI, ctx: Context) -> None:
     ctx : Context
         Open context.
     """
+    gpu_cache = GpuCache()
+    app.state.gpu_cache = gpu_cache  # the hub's own `local` row in GET /api/v1/hosts shares it
 
     @app.get("/api/v1/runs/{run_id}/files/{path:path}")
     def run_file(
@@ -483,6 +516,25 @@ def register_env_routes(app: FastAPI, ctx: Context) -> None:
                 os.close(fd)
             return JSONResponse(listing, headers={DIR_HEADER: "1"})
         return file_response(fd, path, max_bytes=max_bytes, tail=tail)
+
+    @app.get("/api/v1/gpus")
+    def gpus() -> list[dict[str, Any]]:
+        # held GPUs carry their run id; mirrored runs of other hosts never mark them
+        return to_jsonable(gpu_status(ctx, gpu_cache.get()))
+
+    @app.get("/api/v1/queue")
+    def queue() -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        positions = Scheduler(ctx).positions()
+        for run_id, position in sorted(positions.items(), key=lambda item: item[1]):
+            try:
+                record = ctx.find_record(run_id)
+            except StoreError:
+                continue
+            rows.append(
+                {"run_id": run_id, "position": position, "gpus_requested": record.gpus_requested}
+            )
+        return rows
 
 
 def create_app(

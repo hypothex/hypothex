@@ -1,3 +1,7 @@
+import errno
+import fcntl
+import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,6 +27,52 @@ def test_atomic_write_replaces_and_leaves_no_temp(tmp_path: Path) -> None:
     atomic_write_text(target, "two")
     assert target.read_text() == "two"
     assert [p.name for p in target.parent.iterdir()] == ["file.txt"]
+
+
+def test_atomic_write_flushes_file_then_renames_then_flushes_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    real_sync, real_replace = fsutil.fsync_full, os.replace
+
+    def sync(fd: int) -> None:
+        calls.append("sync-dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "sync-file")
+        real_sync(fd)
+
+    def replace(src: str, dst: Path) -> None:
+        calls.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(fsutil, "fsync_full", sync)
+    monkeypatch.setattr(fsutil.os, "replace", replace)
+    atomic_write_bytes(tmp_path / "run.yaml", b"a: 1\n")
+    assert calls == ["sync-file", "replace", "sync-dir"]
+
+
+@pytest.mark.skipif(not hasattr(fcntl, "F_FULLFSYNC"), reason="F_FULLFSYNC is macOS only")
+def test_fsync_full_uses_f_fullfsync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[int] = []
+    real = fcntl.fcntl
+
+    def spy(fd: int, cmd: int, *args: object) -> object:
+        seen.append(cmd)
+        return real(fd, cmd, *args)
+
+    monkeypatch.setattr(fsutil.fcntl, "fcntl", spy)
+    atomic_write_bytes(tmp_path / "f.bin", b"x")
+    assert seen.count(fcntl.F_FULLFSYNC) == 2  # the temp file, then the folder
+
+
+def test_fsync_full_falls_back_to_fsync(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def refuse(fd: int, cmd: int, *args: object) -> object:
+        raise OSError(errno.ENOTSUP, "no full sync here")
+
+    synced: list[int] = []
+    monkeypatch.setattr(fsutil.fcntl, "fcntl", refuse)
+    monkeypatch.setattr(fsutil.os, "fsync", synced.append)
+    with (tmp_path / "f").open("wb") as fh:
+        fsutil.fsync_full(fh.fileno())
+        assert synced == [fh.fileno()]
 
 
 def test_read_jsonl_skips_partial_last_line(tmp_path: Path) -> None:

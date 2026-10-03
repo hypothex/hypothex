@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import os
 import tempfile
@@ -37,7 +39,11 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     """
-    Write bytes so readers never see a partial file.
+    Write bytes so readers never see a partial file, and keep them after a crash.
+
+    The data goes to a temp file in the same folder, which is flushed
+    (``fsync_full``) and renamed over ``path``; then the folder is flushed so
+    the rename itself survives a power loss.
 
     Parameters
     ----------
@@ -60,11 +66,66 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
-            os.fsync(fh.fileno())
+            fsync_full(fh.fileno())
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+    fsync_dir(path.parent)
+
+
+def fsync_full(fd: int) -> None:
+    """
+    Flush a file descriptor's data to stable storage.
+
+    On macOS ``os.fsync`` only hands the data to the drive, which may keep it
+    in its cache; ``F_FULLFSYNC`` also flushes that cache. Elsewhere (or on a
+    file system that refuses ``F_FULLFSYNC``) this is ``os.fsync``.
+
+    Parameters
+    ----------
+    fd : int
+        Open file or folder descriptor.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> with tempfile.TemporaryFile() as fh:
+    ...     _ = fh.write(b"x")
+    ...     fsync_full(fh.fileno())
+    """
+    full = getattr(fcntl, "F_FULLFSYNC", None)
+    if full is not None:
+        try:
+            fcntl.fcntl(fd, full)
+            return
+        except OSError:
+            pass  # e.g. a network file system: fall back to a plain fsync
+    os.fsync(fd)
+
+
+def fsync_dir(path: Path) -> None:
+    """
+    Make the entries of a folder (a create, rename, or delete in it) durable.
+
+    Parameters
+    ----------
+    path : Path
+        Folder to flush. File systems that cannot fsync a folder are skipped.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> fsync_dir(Path(tempfile.mkdtemp()))
+    """
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        fsync_full(fd)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EBADF):
+            raise
+    finally:
+        os.close(fd)
 
 
 def write_yaml(path: Path, data: dict[str, Any]) -> None:

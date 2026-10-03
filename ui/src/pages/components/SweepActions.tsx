@@ -21,13 +21,23 @@ export interface SweepActionsProps {
   cellCount: number;
   /** The sweep's runs, for `--gpus`, `--queue` and `-H` in Copy as CLI. */
   runs: readonly RunRecord[];
+  /** Opens the Launch dialog for "Rerun sweep"; no button without it. */
+  onRerun?: () => void;
 }
 
 type CopyState = "idle" | "copied" | "failed";
 
 const COPY_TEXT: Record<CopyState, string> = { idle: "Copy as CLI", copied: "Copied", failed: "Clipboard blocked" };
 
-export function SweepActions({ project, sweepId, spec, queued, cellCount, runs }: SweepActionsProps): ReactElement {
+export function SweepActions({
+  project,
+  sweepId,
+  spec,
+  queued,
+  cellCount,
+  runs,
+  onRerun,
+}: SweepActionsProps): ReactElement {
   const [copy, setCopy] = useState<CopyState>("idle");
   const [open, setOpen] = useState(false);
   const [count, setCount] = useState(String(Math.max(1, spec.seeds.length)));
@@ -59,6 +69,16 @@ export function SweepActions({ project, sweepId, spec, queued, cellCount, runs }
   return (
     <div className="sw-actions">
       <div className="actions">
+        {onRerun ? (
+          <button
+            type="button"
+            className="btn"
+            title="Launch the best cell again on new seeds, on any host"
+            onClick={onRerun}
+          >
+            Rerun sweep
+          </button>
+        ) : null}
         <button type="button" className="btn" title={cli} onClick={() => void doCopy()}>
           {COPY_TEXT[copy]}
         </button>

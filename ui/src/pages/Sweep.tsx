@@ -5,7 +5,7 @@
  * Actions: Copy as CLI, Cancel queued, Add seeds.
  */
 import { useQuery } from "@tanstack/react-query";
-import type { ReactElement } from "react";
+import { type ReactElement, useState } from "react";
 import { api } from "../api/client";
 import type { HostRow, Leaderboard, RunRecord, RunStatus, RunsQuery, SweepSummary } from "../api/models";
 import { queryKeys, useAllRuns, useHosts, useSweep } from "../api/queries";
@@ -33,6 +33,7 @@ import {
   staleHosts,
   sweepStats,
 } from "./components/SweepModel";
+import { SweepRerun } from "./components/SweepRerun";
 import { SweepRuns } from "./components/SweepRuns";
 import { SweepStyles } from "./components/SweepStyles";
 import { SweepTable } from "./components/SweepTable";
@@ -130,6 +131,8 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
   const running = states.filter((s) => s === "running" || s === "stale").length;
   const queued = states.filter((s) => s === "queued").length;
   const maxSeeds = spec.seeds.length;
+  const [rerun, setRerun] = useState(false);
+  const [launched, setLaunched] = useState<{ host: string; n: number } | null>(null);
   return (
     <>
       <div className="run-top">
@@ -161,8 +164,12 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
           queued={counts.queued ?? 0}
           cellCount={cells.length}
           runs={ordered}
+          onRerun={() => setRerun(true)}
         />
       </div>
+      {launched ? (
+        <p className="small launched" role="status">{`Launched ${launched.n} on ${launched.host}`}</p>
+      ) : null}
       <div className="sweep-stats">
         <StatStrip
           items={sweepStats({
@@ -224,6 +231,19 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
       <Figure letter="c" title="Runs on hosts" aside={`${running} running, ${queued} queued`}>
         <SweepRuns runs={ordered} names={names} stale={stale} hosts={hosts} now={now} />
       </Figure>
+      {rerun ? (
+        <SweepRerun
+          project={project}
+          spec={spec}
+          best={best}
+          runs={ordered}
+          onClose={() => setRerun(false)}
+          onLaunched={(records, host) => {
+            setRerun(false);
+            setLaunched({ host, n: records.length });
+          }}
+        />
+      ) : null}
     </>
   );
 }

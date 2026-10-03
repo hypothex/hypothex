@@ -84,12 +84,19 @@ export function parseBlocks(src: string): Block[] {
   return out;
 }
 
-/** Return a link target if it is safe to render, else `null`. */
+/**
+ * Return a link target if it is safe to render, else `null`.
+ *
+ * The target is cleaned the way a URL parser reads it first (leading and trailing C0
+ * controls and spaces dropped, tabs and newlines removed anywhere), so a scheme cannot
+ * hide behind them. Web and mail links pass; other schemes and protocol-relative links
+ * (`//`, or `\\` which browsers read as `/`) do not.
+ */
 export function safeHref(url: string): string | null {
-  const u = url.trim();
+  const u = url.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "").replace(/[\t\n\r]/g, "");
   if (/^(https?:|mailto:)/i.test(u)) return u;
   if (/^[a-z][a-z0-9+.-]*:/i.test(u)) return null;
-  if (u.startsWith("//")) return null;
+  if (/^[\\/]{2}/.test(u)) return null;
   return u;
 }
 

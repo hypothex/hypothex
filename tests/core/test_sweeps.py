@@ -2,26 +2,42 @@
 
 from __future__ import annotations
 
+import math
 import time
+from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from hypothex.core.context import Context
 from hypothex.core.errors import StoreError
+from hypothex.core.ids import utcnow
+from hypothex.core.records import (
+    CostTotals,
+    GitInfo,
+    RunRecord,
+    RunStatus,
+    ScoreRecord,
+    UsageTotals,
+)
+from hypothex.core.seeds import config_hash
 from hypothex.core.sweeps import (
     SweepParam,
     SweepSpec,
     expand,
+    list_sweeps,
     load_sweep,
     new_sweep_id,
     parse_sweep_tag,
     planned_runs,
     save_sweep,
+    summarize_sweep,
     sweep_combos,
     sweep_path,
     sweep_tag,
 )
+from tests.factories import make_record, write_toy_project
 
 NOW = "2026-10-03T09:12:00Z"
 
@@ -260,3 +276,239 @@ def test_new_sweep_id_reserves_a_fresh_file(ctx: Context, monkeypatch: pytest.Mo
     assert new_sweep_id(ctx.layout, "toy") == "s-beef"
     assert sweep_path(ctx.layout, "toy", "s-abcd").read_text() == ""
     assert sweep_path(ctx.layout, "toy", "s-beef").is_file()
+
+
+# --------------------------------------------------------------------------- Task 39 summary
+def add_run(
+    ctx: Context,
+    run_id: str,
+    lr: str,
+    seed: int,
+    status: RunStatus,
+    value: float | None = None,
+    *,
+    sweep: str = "s-0001",
+    owner: str | None = None,
+    cost_usd: float | None = None,
+    usage_usd: float | None = None,
+    commit: str | None = None,
+) -> RunRecord:
+    record = make_record(
+        run_id,
+        project="toy",
+        task="toy-acc",
+        params={"lr": lr},
+        vars={"lr": lr},
+        seed=seed,
+        tags=[sweep_tag(owner or ctx.descriptor.environment_id, sweep)],
+        status=status,
+        config_hash=config_hash({"params": {"lr": lr}}),
+        environment_id=ctx.descriptor.environment_id,
+        cost=CostTotals(total_usd=cost_usd) if cost_usd is not None else None,
+        usage=UsageTotals(usd=usage_usd) if usage_usd is not None else None,
+        git=GitInfo(commit=commit),
+    )
+    ctx.create_run(record)
+    if value is not None:
+        ctx.add_score(
+            record,
+            ScoreRecord(
+                metric="accuracy", version="v1", key="value", value=value, created_at=utcnow()
+            ),
+        )
+    return record
+
+
+@pytest.fixture
+def toy_sweep(ctx: Context, toy_repo: Path) -> SweepSpec:
+    """lr 1e-4 / 3e-4 / 1e-3 x seeds 1, 2; 1e-3 still queued/running."""
+    ctx.register_project(toy_repo)
+    spec = spec_of(grid=[{"name": "lr", "values": ["1e-4", "3e-4", "1e-3"]}])
+    save_sweep(ctx.layout, spec)
+    add_run(ctx, "a1", "1e-4", 1, RunStatus.FINISHED, 0.70, cost_usd=1.25)
+    add_run(ctx, "b1", "3e-4", 1, RunStatus.FINISHED, 0.80, cost_usd=1.25)
+    add_run(ctx, "c1", "1e-3", 1, RunStatus.RUNNING, usage_usd=0.5)
+    add_run(ctx, "a2", "1e-4", 2, RunStatus.FINISHED, 0.74, cost_usd=1.0)
+    add_run(ctx, "b2", "3e-4", 2, RunStatus.FINISHED, 0.84, cost_usd=1.0)
+    add_run(ctx, "c2", "1e-3", 2, RunStatus.QUEUED)
+    return spec
+
+
+def test_summary_counts_cells_best_and_cost(ctx: Context, toy_sweep: SweepSpec) -> None:
+    summary = summarize_sweep(ctx, "toy", "s-0001")
+    assert summary.spec == toy_sweep
+    assert summary.counts == {
+        "queued": 1,
+        "running": 1,
+        "finished": 4,
+        "failed": 0,
+        "killed": 0,
+        "lost": 0,
+        "total": 6,
+    }
+    assert sorted(summary.run_ids) == ["a1", "a2", "b1", "b2", "c1", "c2"]
+    assert [c["params"] for c in summary.cells] == [{"lr": "1e-4"}, {"lr": "3e-4"}, {"lr": "1e-3"}]
+    low, high, pending = summary.cells
+    assert low["run_ids"] == ["a1", "a2"]
+    assert low["n"] == 2
+    assert low["mean"] == pytest.approx(0.72)
+    # t(1) = 12.706, std / sqrt(2) = 0.02 -> half-width 0.25412
+    assert low["lo"] == pytest.approx(0.72 - 0.25412)
+    assert low["hi"] == pytest.approx(0.72 + 0.25412)
+    assert low["std"] == pytest.approx(math.sqrt(0.0008))
+    assert high["mean"] == pytest.approx(0.82)
+    assert high["group_id"] == config_hash({"params": {"lr": "3e-4"}})[7:15] + "@nogit"
+    assert pending["mean"] is None
+    assert pending["n"] == 0
+    assert pending["group_id"] is None
+    assert pending["run_ids"] == ["c1", "c2"]
+    assert pending["runs"] == [
+        {"run_id": "c1", "status": "running", "seed": 1},
+        {"run_id": "c2", "status": "queued", "seed": 2},
+    ]
+    assert summary.best == high
+    assert summary.headline == "lr 3e-4: 0.820 accuracy, +0.100 over lr 1e-4, p = 0.07"
+    assert summary.total_usd == pytest.approx(1.25 + 1.25 + 0.5 + 1.0 + 1.0)
+
+
+def test_headline_p_compares_the_two_cells_it_names(ctx: Context, toy_sweep: SweepSpec) -> None:
+    # a third lr 3e-4 run at another commit forms its own group: one run, the board's
+    # top row, but not the row the cell shows (the cell keeps its larger group)
+    add_run(ctx, "b3", "3e-4", 3, RunStatus.FINISHED, 0.99, commit="c0ffee")
+    summary = summarize_sweep(ctx, "toy", "s-0001")
+    assert summary.best is not None and summary.best["run_ids"] == ["b1", "b2", "b3"]
+    assert summary.best["mean"] == pytest.approx(0.82) and summary.best["n"] == 2
+    # the p of lr 3e-4 (b1, b2) against lr 1e-4 (a1, a2), not against the b3 group
+    assert summary.headline == "lr 3e-4: 0.820 accuracy, +0.100 over lr 1e-4, p = 0.07"
+
+
+def test_headline_names_only_the_params_that_differ(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    save_sweep(
+        ctx.layout,
+        spec_of(
+            grid=[
+                {"name": "lr", "values": ["1e-4", "3e-4"]},
+                {"name": "beam", "values": ["5"]},
+            ],
+            seeds=[1],
+            command_template=["python", "train.py", "{lr}", "{beam}"],
+        ),
+    )
+    for run_id, lr, value in [("x1", "1e-4", 0.6), ("x2", "3e-4", 0.9)]:
+        record = make_record(
+            run_id,
+            project="toy",
+            task="toy-acc",
+            params={"lr": lr, "beam": "5"},
+            seed=1,
+            tags=[sweep_tag(ctx.descriptor.environment_id, "s-0001")],
+            status=RunStatus.FINISHED,
+            config_hash=config_hash({"params": {"lr": lr, "beam": "5"}}),
+        )
+        ctx.create_run(record)
+        ctx.add_score(
+            record,
+            ScoreRecord(
+                metric="accuracy", version="v1", key="value", value=value, created_at=utcnow()
+            ),
+        )
+    summary = summarize_sweep(ctx, "toy", "s-0001")
+    assert summary.headline == "lr 3e-4, beam 5: 0.900 accuracy, +0.300 over lr 1e-4"
+
+
+def test_summary_without_scores_says_so(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    save_sweep(ctx.layout, spec_of())
+    add_run(ctx, "q1", "1e-4", 1, RunStatus.QUEUED)
+    summary = summarize_sweep(ctx, "toy", "s-0001")
+    assert summary.headline == "No scored runs yet"
+    assert summary.best is None
+    assert summary.counts["queued"] == 1
+    assert summary.counts["total"] == 1 and summary.run_ids == ["q1"]
+    assert summary.total_usd == 0.0
+
+
+def test_summary_without_task_has_no_stats(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    save_sweep(ctx.layout, spec_of(task=None))
+    add_run(ctx, "a1", "1e-4", 1, RunStatus.FINISHED, 0.7)
+    summary = summarize_sweep(ctx, "toy", "s-0001")
+    assert summary.best is None
+    assert summary.cells[0]["mean"] is None
+    assert summary.cells[0]["run_ids"] == ["a1"]
+    assert summary.headline == "No scored runs yet"
+
+
+def test_membership_is_the_sweep_tag(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    save_sweep(ctx.layout, spec_of())
+    add_run(ctx, "late", "3e-4", 1, RunStatus.FINISHED, 0.9)
+    add_run(ctx, "other", "3e-4", 1, RunStatus.FINISHED, 0.1, sweep="s-0002")
+    summary = summarize_sweep(ctx, "toy", "s-0001")
+    assert summary.counts["total"] == 1 and summary.run_ids == ["late"]
+    assert summary.best is not None
+    assert summary.best["run_ids"] == ["late"]
+    assert summary.tag == sweep_tag(ctx.descriptor.environment_id, "s-0001")
+
+
+def test_two_hubs_with_the_same_sweep_id_never_share_runs(
+    ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    # hub A (ctx) and hub B both made sweep s-0001 on one host; the host's runs of both
+    # are mirrored to both hubs
+    other = Context.open(tmp_path / "hub-b")
+    assert other.descriptor.environment_id[:8] != ctx.descriptor.environment_id[:8]
+    for hub in (ctx, other):
+        hub.register_project(toy_repo)
+        save_sweep(hub.layout, spec_of())
+    for hub in (ctx, other):
+        add_run(hub, f"a-{hub is ctx}", "1e-4", 1, RunStatus.FINISHED, 0.7)
+        add_run(hub, f"b-{hub is ctx}", "3e-4", 1, RunStatus.FINISHED, 0.9, owner="b0b0b0b0")
+    add_run(ctx, "from-b", "3e-4", 2, RunStatus.QUEUED, owner=other.descriptor.environment_id)
+    add_run(other, "from-a", "1e-4", 2, RunStatus.QUEUED, owner=ctx.descriptor.environment_id)
+    mine = summarize_sweep(ctx, "toy", "s-0001")
+    theirs = summarize_sweep(other, "toy", "s-0001")
+    assert mine.run_ids == ["a-True"] and mine.counts["total"] == 1
+    assert theirs.run_ids == ["a-False"] and theirs.counts["total"] == 1
+    assert mine.tag != theirs.tag
+
+
+def test_lower_is_better_picks_the_smallest_mean(ctx: Context, tmp_path: Path) -> None:
+    repo = write_toy_project(tmp_path / "lowtoy")
+    config = yaml.safe_load((repo / "hypothex.yaml").read_text())
+    config["metrics"]["accuracy"]["higher_is_better"] = False
+    (repo / "hypothex.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    ctx.register_project(repo)
+    save_sweep(ctx.layout, spec_of(seeds=[1]))
+    add_run(ctx, "a1", "1e-4", 1, RunStatus.FINISHED, 0.2)
+    add_run(ctx, "b1", "3e-4", 1, RunStatus.FINISHED, 0.5)
+    summary = summarize_sweep(ctx, "toy", "s-0001")
+    assert summary.best is not None
+    assert summary.best["params"] == {"lr": "1e-4"}
+    assert summary.headline == "lr 1e-4: 0.200 accuracy, −0.300 over lr 3e-4"
+
+
+def test_cell_split_across_commits_uses_the_larger_seed_group(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    save_sweep(ctx.layout, spec_of(grid=[{"name": "lr", "values": ["1e-4"]}], seeds=[1, 2, 3]))
+    add_run(ctx, "a1", "1e-4", 1, RunStatus.FINISHED, 0.70, commit="c1")
+    add_run(ctx, "a2", "1e-4", 2, RunStatus.FINISHED, 0.74, commit="c1")
+    add_run(ctx, "a3", "1e-4", 3, RunStatus.FINISHED, 0.90, commit="c2")
+    (cell,) = summarize_sweep(ctx, "toy", "s-0001").cells
+    assert cell["run_ids"] == ["a1", "a2", "a3"]
+    assert cell["n"] == 2
+    assert cell["mean"] == pytest.approx(0.72)
+    assert cell["group_id"].endswith("@c1")
+
+
+def test_list_sweeps_newest_first(ctx: Context, toy_sweep: SweepSpec) -> None:
+    save_sweep(ctx.layout, spec_of(id="s-0002", created_at="2026-10-04T00:00:00Z"))
+    broken = sweep_path(ctx.layout, "toy", "s-0003")
+    broken.write_text("grid: [\n")
+    rows = list_sweeps(ctx, "toy")
+    assert [r["id"] for r in rows] == ["s-0002", "s-0001"]
+    assert rows[1]["n_runs"] == 6
+    assert rows[1]["best"]["params"] == {"lr": "3e-4"}
+    assert rows[0]["best"] is None
+    assert list_sweeps(ctx, "nothing-here") == []

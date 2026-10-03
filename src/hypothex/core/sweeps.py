@@ -15,14 +15,20 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from random import Random
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from hypothex.core.config import BUILTIN_TEMPLATE_VARS, NAME_PATTERN
+from hypothex.core.context import Context
 from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.fsutil import read_yaml, write_yaml
+from hypothex.core.headlines import NO_RUNS, fmt_metric, fmt_metric_delta, fmt_p
 from hypothex.core.layout import Layout
+from hypothex.core.leaderboard import Leaderboard, LeaderboardRow, build_leaderboard
+from hypothex.core.queries import primary_examples
+from hypothex.core.records import RunRecord, RunStatus
 
 log = logging.getLogger(__name__)
 
@@ -478,3 +484,267 @@ def new_sweep_id(layout: Layout, project: str) -> str:
             continue
         return sweep_id
     raise StoreError(f"could not reserve a sweep id in {folder}")
+
+
+# summary ------------------------------------------------------------------------------
+STATUS_KEYS = tuple(s.value for s in RunStatus)
+
+
+class SweepSummary(BaseModel):
+    """
+    A sweep's spec, progress, and per-cell results.
+
+    ``cells`` holds one dict per param combination: ``params``, ``group_id``,
+    ``n`` (scored seeds), ``mean``, ``lo``/``hi`` (95% interval: test-set when
+    per-example scores exist, else over seeds), ``std``, ``run_ids``, and
+    ``runs`` (``run_id``, ``status``, ``seed`` of each run). ``best`` is the
+    best scored cell.
+    """
+
+    spec: SweepSpec
+    counts: dict[str, int]
+    cells: list[dict[str, Any]]
+    best: dict[str, Any] | None
+    headline: str
+    total_usd: float
+    run_ids: list[str] = Field(default_factory=list)
+    """The sweep's members (runs tagged ``tag``), in launch order; derived."""
+    tag: str = ""
+    """The sweep's member tag ``sweep:<owner8>:<id>`` (ask ``GET /api/v1/runs?tag=``)."""
+
+
+def sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]:
+    """
+    Return the members of a sweep: its indexed runs tagged ``sweep:<owner8>:<id>``.
+
+    Membership is derived, never stored: a run that a host accepted counts as
+    soon as it is mirrored, even when the launch call that started it failed.
+    The owner is this environment (its store holds the definition), so the
+    runs of another hub's sweep with the same id are never members.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    spec : SweepSpec
+        The sweep.
+
+    Returns
+    -------
+    list of RunRecord
+        Archived ones included, in launch order (``created_at``, then run id).
+    """
+    tag = sweep_tag(ctx.descriptor.environment_id, spec.id)
+    tagged = ctx.index.list_runs(project=spec.project, tag=tag, include_archived=True, limit=None)
+    return sorted(tagged, key=lambda r: (r.created_at, r.run_id))
+
+
+def _board(ctx: Context, spec: SweepSpec, runs: list[RunRecord]) -> Leaderboard | None:
+    """The task leaderboard restricted to the sweep's runs, or None without a task."""
+    if spec.task is None:
+        return None
+    try:
+        entry = ctx.store.load_project(spec.project)
+    except StoreError:
+        return None
+    if spec.task not in entry.config.tasks:
+        return None
+    scores = ctx.index.scores_for(r.run_id for r in runs)
+    per_example = primary_examples(ctx, entry.config, spec.task, runs, None)
+    return build_leaderboard(
+        spec.project, spec.task, entry.config, runs, scores, per_example=per_example
+    )
+
+
+def _cell(
+    params: dict[str, str], members: list[RunRecord], rows: list[LeaderboardRow]
+) -> dict[str, Any]:
+    """One heat-table cell from its runs and the leaderboard rows they fall in."""
+    row = rows[0] if rows else None
+    primary = row.primary if row is not None else None
+    lo = hi = None
+    if row is not None and row.test_interval is not None:
+        lo, hi = row.test_interval.lo, row.test_interval.hi
+    elif primary is not None:
+        lo, hi = primary.ci_low, primary.ci_high
+    return {
+        "params": params,
+        "group_id": row.group_id if row is not None else None,
+        "n": primary.n if primary is not None else 0,
+        "mean": primary.mean if primary is not None else None,
+        "lo": lo,
+        "hi": hi,
+        "std": primary.std if primary is not None and primary.n > 1 else None,
+        "run_ids": [m.run_id for m in members],
+        "runs": [{"run_id": m.run_id, "status": m.status.value, "seed": m.seed} for m in members],
+    }
+
+
+def _cells(
+    spec: SweepSpec, runs: list[RunRecord], board: Leaderboard | None
+) -> list[dict[str, Any]]:
+    """Group runs by param combination (in expansion order) and attach their stats."""
+    names = [p.name for p in spec.grid]
+    keyed: dict[tuple[str, ...], list[RunRecord]] = {
+        tuple(c[n] for n in names): [] for c in sweep_combos(spec)
+    }
+    for r in runs:
+        keyed.setdefault(tuple(r.params.get(n, "") for n in names), []).append(r)
+    rows = board.rows if board is not None else []
+    rank = {row.group_id: i for i, row in enumerate(rows)}
+    cells = []
+    for key, members in keyed.items():
+        ids = {m.run_id for m in members}
+        hits = [row for row in rows if ids & set(row.run_ids) and row.primary is not None]
+        hits.sort(key=lambda row: (-row.n, rank[row.group_id]))
+        cells.append(_cell(dict(zip(names, key, strict=True)), members, hits))
+    return cells
+
+
+def _label(params: dict[str, str]) -> str:
+    """``lr 3e-4, beam 10``."""
+    return ", ".join(f"{k} {v}" for k, v in params.items())
+
+
+def _metric_name(primary: str) -> str:
+    """``accuracy/value`` -> ``accuracy``; other keys stay as ``topk/k=1``."""
+    metric, _, key = primary.partition("/")
+    return metric if key == "value" else primary
+
+
+def _p_between(
+    ctx: Context,
+    spec: SweepSpec,
+    runs: list[RunRecord],
+    board: Leaderboard | None,
+    ranked: list[dict[str, Any]],
+) -> float | None:
+    """
+    p-value of the displayed best cell against the displayed runner-up.
+
+    The leaderboard's ``vs_best`` compares each row with the board's best row,
+    which may be a row no cell shows (a cell keeps its largest group). So the
+    two displayed rows get their own leaderboard, and its one comparison (the
+    same sign, paired-bootstrap, or Welch test) is the headline's p.
+    """
+    if board is None or len(ranked) < 2:
+        return None
+    rows = {row.group_id: row for row in board.rows}
+    ids = set(rows[ranked[0]["group_id"]].run_ids) | set(rows[ranked[1]["group_id"]].run_ids)
+    pair = _board(ctx, spec, [r for r in runs if r.run_id in ids])
+    if pair is None or len(pair.rows) < 2 or pair.rows[1].vs_best is None:
+        return None
+    return pair.rows[1].vs_best.p
+
+
+def _headline(board: Leaderboard | None, ranked: list[dict[str, Any]], p: float | None) -> str:
+    """``lr 3e-4: 0.820 accuracy, +0.100 over lr 1e-4, p = 0.07``."""
+    if board is None or not ranked:
+        return NO_RUNS
+    best = ranked[0]
+    value = fmt_metric(best["mean"], board.unit, board.value_format)
+    head = f"{value} {_metric_name(board.primary)}"
+    label = _label(best["params"])
+    text = f"{label}: {head}" if label else head
+    if len(ranked) < 2:
+        return text
+    runner = ranked[1]
+    delta = fmt_metric_delta(
+        best["mean"] - runner["mean"], runner["mean"], board.unit, board.value_format
+    )
+    differs = {k: v for k, v in runner["params"].items() if best["params"].get(k) != v}
+    text += f", {delta} over {_label(differs or runner['params'])}"
+    if p is not None:
+        text += f", {fmt_p(p)}"
+    return text
+
+
+def _run_usd(record: RunRecord) -> float:
+    """Final cost of a run, or its API spend so far when the cost is not filled yet."""
+    if record.cost is not None:
+        return record.cost.total_usd
+    return record.usage.usd if record.usage is not None else 0.0
+
+
+def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary:
+    """
+    Summarize a sweep: status counts, per-cell stats, best cell, headline, cost.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    project : str
+        Project name.
+    sweep_id : str
+        Sweep id.
+
+    Returns
+    -------
+    SweepSummary
+        ``counts`` has every run status plus ``total`` (the number of members;
+        ``run_ids`` lists them). Cells follow ``sweep_combos`` order; stats come from the task's
+        leaderboard over the sweep's finished runs. ``total_usd`` adds each run's
+        ``cost.total_usd`` (its ``usage.usd`` while the cost is not filled).
+
+    Raises
+    ------
+    StoreError
+        If the sweep does not exist.
+    """
+    spec = load_sweep(ctx.layout, project, sweep_id)
+    runs = sweep_runs(ctx, spec)
+    counts = dict.fromkeys(STATUS_KEYS, 0)
+    for r in runs:
+        counts[r.status.value] += 1
+    counts["total"] = len(runs)
+    board = _board(ctx, spec, runs)
+    cells = _cells(spec, runs, board)
+    rank = {row.group_id: i for i, row in enumerate(board.rows)} if board is not None else {}
+    ranked = sorted((c for c in cells if c["mean"] is not None), key=lambda c: rank[c["group_id"]])
+    return SweepSummary(
+        spec=spec,
+        counts=counts,
+        cells=cells,
+        best=ranked[0] if ranked else None,
+        headline=_headline(board, ranked, _p_between(ctx, spec, runs, board, ranked)),
+        total_usd=math.fsum(_run_usd(r) for r in runs),
+        run_ids=[r.run_id for r in runs],
+        tag=sweep_tag(ctx.descriptor.environment_id, spec.id),
+    )
+
+
+def list_sweeps(ctx: Context, project: str) -> list[dict[str, Any]]:
+    """
+    List a project's sweeps, newest first.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    project : str
+        Project name.
+
+    Returns
+    -------
+    list of dict
+        ``{id, created_at, n_runs, best}`` per sweep; unreadable files are skipped.
+    """
+    folder = sweeps_dir(ctx.layout, project)
+    out: list[dict[str, Any]] = []
+    for path in sorted(folder.glob("*.yaml")) if folder.is_dir() else []:
+        try:
+            summary = summarize_sweep(ctx, project, path.stem)
+        except StoreError:
+            log.warning("skipping unreadable sweep file %s", path)
+            continue
+        out.append(
+            {
+                "id": summary.spec.id,
+                "created_at": summary.spec.created_at,
+                "n_runs": summary.counts["total"],
+                "best": summary.best,
+            }
+        )
+    out.sort(key=lambda s: (s["created_at"], s["id"]), reverse=True)
+    return out

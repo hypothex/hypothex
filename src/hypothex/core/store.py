@@ -223,6 +223,8 @@ class ProjectEntry(BaseModel):
     config: ProjectConfig
     registered_at: datetime
     previous_repos: list[str] = Field(default_factory=list)
+    remote_host: str | None = None
+    """Set when the hub copied this entry from a host (the repo path is on that host)."""
 
 
 @contextmanager
@@ -312,6 +314,17 @@ class RunStore:
         )
         atomic_write_text(self._project_file(config.project), entry.model_dump_json(indent=2))
         return entry
+
+    def save_project(self, entry: ProjectEntry) -> None:
+        """
+        Atomically write a project entry as it is (the hub's copy of a host's project).
+
+        Parameters
+        ----------
+        entry : ProjectEntry
+            Entry to store.
+        """
+        atomic_write_text(self._project_file(entry.project), entry.model_dump_json(indent=2))
 
     def load_project(self, project: str) -> ProjectEntry:
         """

@@ -532,6 +532,11 @@ def register_env_routes(app: FastAPI, ctx: Context) -> None:
             return JSONResponse(listing, headers={DIR_HEADER: "1"})
         return file_response(fd, path, max_bytes=max_bytes, tail=tail)
 
+    @app.get("/api/v1/projects/{project}/entry")
+    def project_entry(project: str) -> dict[str, Any]:
+        # the hub copies a host-only project's config snapshot with this (Task 34)
+        return ctx.store.load_project(project).model_dump(mode="json")
+
     @app.get("/api/v1/gpus")
     def gpus() -> list[dict[str, Any]]:
         # held GPUs carry their run id; mirrored runs of other hosts never mark them

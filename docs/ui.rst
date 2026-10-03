@@ -13,8 +13,13 @@ the page you are looking at, without a reload.
 Screens
 -------
 
-- **Overview** (``/``): one-line status, runs by launcher, ideas, running runs, recent
-  failures (with ``Open stderr``), and projects. Ideas are grouped by task, and each task
+- **Overview** (``/``): one-line status, the Hosts panel, runs by launcher, ideas,
+  running runs, recent failures (with ``Open stderr``), and projects. The Hosts panel
+  has one row per host (the hub first): kind, connection state and Hypothex version,
+  one cell per GPU (agent run, human run, free, or used outside Hypothex), SLURM
+  running/pending, queue length, price per GPU hour, and cost today. A stale host
+  keeps its last known cells, greyed out; a host that is stale longer than
+  ``stale_banner_hours`` (default 24) gets a banner. See :doc:`remote`. Ideas are grouped by task, and each task
   has its own x axis, because tasks use different metrics.
 - **Task** (``/t/<project>/<task>?view=<name>``): the task's views as tabs. ``overview``
   is the preset for the task kind; every other tab is a saved view (see :doc:`views`).

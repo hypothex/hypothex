@@ -411,3 +411,119 @@ def test_build_wheel_without_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     with pytest.raises(BootstrapError, match="uv is needed on this machine"):
         bs.build_wheel(tmp_path / "cache")
     assert [p.name for p in (tmp_path / "cache").iterdir()] == []
+
+
+# -------------------------------------------------------------------------- install
+def _real_uv() -> str:
+    found = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
+    if not Path(found).exists():
+        pytest.skip("uv is not installed")
+    return found
+
+
+@pytest.fixture
+def uv_env(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point the host's uv at this machine's cache, offline, with this Python."""
+    uv = _real_uv()
+    cache = subprocess.run([uv, "cache", "dir"], capture_output=True, text=True, check=True)
+    monkeypatch.setenv("UV_CACHE_DIR", cache.stdout.strip())
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    monkeypatch.setenv("UV_PYTHON", PY)
+    return uv
+
+
+def _installed_version(host: FakeHost) -> str:
+    hx = host.hx_home / "runtime" / "bin" / "hx"
+    return subprocess.run(
+        [str(hx), "--version"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_install_puts_hx_under_runtime(host: FakeHost, wheel: Path, uv_env: str) -> None:
+    from hypothex import __version__
+
+    host.add_tool("uv", f'exec {uv_env} "$@"\n')
+    bs.install(host.target, "~/.hypothex", wheel)
+    runtime = host.hx_home / "runtime"
+    assert _installed_version(host) == __version__
+    assert (runtime / "wheels" / wheel.name).is_file()
+    assert [p.name for p in (runtime / "wheels").iterdir()] == [wheel.name]
+    assert (runtime / "tools" / "hypothex").is_dir()
+    assert not (runtime / ".lock").exists()
+    assert [c[0] for c in host.calls()] == ["ssh", "scp", "ssh"]
+    # A second install of the same wheel works (--force) and leaves one wheel.
+    bs.install(host.target, "~/.hypothex", wheel)
+    assert _installed_version(host) == __version__
+
+
+def test_install_bootstraps_missing_uv(host: FakeHost, wheel: Path, uv_env: str) -> None:
+    from hypothex import __version__
+
+    # Fake curl serves an "installer" that drops a uv shim into $UV_INSTALL_DIR.
+    installer = (
+        'mkdir -p "$UV_INSTALL_DIR"\n'
+        f'printf \'#!/bin/sh\\nexec {uv_env} "$@"\\n\' > "$UV_INSTALL_DIR/uv"\n'
+        'chmod +x "$UV_INSTALL_DIR/uv"\n'
+    )
+    script = host.fakebin / "installer.sh"
+    script.write_text(installer)
+    host.add_tool(
+        "curl", f'case "$*" in *astral.sh/uv/install.sh*) cat {script};; *) exit 7;; esac\n'
+    )
+    bs.install(host.target, "~/.hypothex", wheel)
+    assert (host.remote_home / ".local" / "bin" / "uv").is_file()
+    assert _installed_version(host) == __version__
+
+
+def test_install_without_uv_or_network(host: FakeHost, wheel: Path) -> None:
+    host.add_tool("curl", 'echo "curl: (6) Could not resolve host: astral.sh" >&2\nexit 6\n')
+    with pytest.raises(BootstrapError, match="uv is missing on the host") as info:
+        bs.install(host.target, "~/.hypothex", wheel)
+    message = str(info.value)
+    assert "https://astral.sh/uv/install.sh" in message
+    assert "Could not resolve host" in message
+    assert not (host.hx_home / "runtime" / "bin" / "hx").exists()
+    assert not (host.hx_home / "runtime" / ".lock").exists()
+
+
+def test_install_reports_uv_failure_with_log(host: FakeHost, tmp_path: Path, uv_env: str) -> None:
+    host.add_tool("uv", f'exec {uv_env} "$@"\n')
+    bad = tmp_path / "hypothex-0.0.1-py3-none-any.whl"
+    bad.write_bytes(b"not a zip file")
+    with pytest.raises(BootstrapError, match="uv tool install failed for hypothex-0.0.1") as info:
+        bs.install(host.target, "~/.hypothex", bad)
+    assert len(str(info.value).splitlines()) > 1  # carries uv's own output
+
+
+def test_install_missing_local_wheel(host: FakeHost, tmp_path: Path) -> None:
+    with pytest.raises(BootstrapError, match="wheel not found"):
+        bs.install(host.target, "~/.hypothex", tmp_path / "nope.whl")
+    assert host.calls() == []
+
+
+def test_install_breaks_stale_lock(host: FakeHost, wheel: Path, uv_env: str) -> None:
+    from hypothex import __version__
+
+    host.add_tool("uv", f'exec {uv_env} "$@"\n')
+    lock = host.hx_home / "runtime" / ".lock"
+    lock.mkdir(parents=True)
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    (lock / "owner").write_text(f"{_hostname()}|{dead.pid}|\n")
+    bs.install(host.target, "~/.hypothex", wheel)
+    assert _installed_version(host) == __version__
+    assert not lock.exists()
+
+
+def test_install_waits_for_live_lock(
+    host: FakeHost, wheel: Path, uv_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.add_tool("uv", f'exec {uv_env} "$@"\n')
+    monkeypatch.setenv("HX_LOCK_WAIT", "1")
+    lock = host.hx_home / "runtime" / ".lock"
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text(f"{_hostname()}|{os.getpid()}|{_birth(os.getpid())}\n")
+    with pytest.raises(BootstrapError, match=r"lock .*\.lock is held by .*\|\d+\|.*; waited 1s"):
+        bs.install(host.target, "~/.hypothex", wheel)
+    assert lock.exists()  # a live owner's lock is never broken
+    assert not (host.hx_home / "runtime" / "bin" / "hx").exists()

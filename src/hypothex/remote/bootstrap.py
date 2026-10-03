@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 import hypothex
 from hypothex._version import __version__
 from hypothex.core.errors import HypothexError
-from hypothex.remote.ssh import SshTarget, run_remote
+from hypothex.remote.ssh import SshTarget, copy_to, run_remote
 
 _PREFIX = "HX:"
 _PARAM = re.compile(r"^HX_[A-Z_]+$")
@@ -414,3 +414,57 @@ def build_wheel(cache_dir: Path) -> Path:
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+
+
+def install(target: SshTarget, home: str, wheel: Path) -> None:
+    """
+    Install ``wheel`` on a host with ``uv tool install --force``.
+
+    Copies the wheel with ``scp`` to ``<home>/runtime/wheels/`` under a temporary
+    name, then, under the lock dir ``<home>/runtime/.lock``, installs it into
+    ``<home>/runtime/tools`` with the ``hx`` entry point in ``<home>/runtime/bin``.
+    If the host has no ``uv`` (``PATH``, ``~/.local/bin``, ``~/.cargo/bin``), the
+    official installer puts one into ``~/.local/bin`` first.
+
+    Parameters
+    ----------
+    target : SshTarget
+        Host to install on.
+    home : str
+        Hypothex home on the host; ``~`` is expanded there.
+    wheel : Path
+        Local wheel from :func:`build_wheel`.
+
+    Raises
+    ------
+    BootstrapError
+        Wheel missing, lock held too long, uv missing and not installable, the
+        install failed, or the installed ``hx --version`` differs from the wheel.
+
+    Examples
+    --------
+    >>> install(SshTarget(alias="gpu1"), "~/.hypothex", build_wheel(cache))  # doctest: +SKIP
+    """
+    if not wheel.is_file():
+        raise BootstrapError(f"wheel not found: {wheel}")
+    values, _ = _run_script(target, "install", HX_HOME=home, HX_STEP="prepare")
+    remote_home = values.get("home")
+    if not remote_home:
+        raise BootstrapError(f"{target.alias}: install prepare step reported no home")
+    upload = f"{wheel.name}.part-{uuid.uuid4().hex[:8]}"
+    copy_to(target, wheel, f"{remote_home}/runtime/wheels/{upload}")
+    values, _ = _run_script(
+        target,
+        "install",
+        timeout=900,
+        HX_HOME=home,
+        HX_STEP="install",
+        HX_WHEEL=wheel.name,
+        HX_UPLOAD=upload,
+    )
+    expected = wheel.name.split("-")[1]
+    installed = values.get("installed", "")
+    if installed != expected:
+        raise BootstrapError(
+            f"{target.alias}: installed hx reports version {installed!r}, expected {expected!r}"
+        )

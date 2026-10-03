@@ -2051,6 +2051,8 @@ def create_app(
     # sweeps --------------------------------------------------------------------------
     @app.post("/api/v1/sweeps")
     def sweep_create(body: SweepBody) -> dict[str, Any]:
+        require_agent_hypothesis(body.created_by, body.hypothesis)
+
         def act() -> SweepSummary:
             remote = is_remote(body.host)
             if remote:

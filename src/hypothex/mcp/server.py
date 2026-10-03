@@ -807,8 +807,28 @@ def _expose_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def _text(value: str | int | float) -> str:
-    """Render a sweep value as the CLI would (``0.0001`` -> ``0.0001``, ``1e-05``)."""
-    return f"{value:g}" if isinstance(value, float) else str(value)
+    """
+    Render a sweep value as text that parses back to the same value.
+
+    A float uses ``repr``: the shortest text that round-trips, so no digit is
+    lost (``f"{v:g}"`` keeps only 6 significant digits).
+
+    Parameters
+    ----------
+    value : str or int or float
+        One grid value from the agent.
+
+    Returns
+    -------
+    str
+        The value as the run's ``{name}`` text.
+
+    Examples
+    --------
+    >>> [_text(v) for v in (0.0001, 1e-05, 2.5, 0.1234567, 3, "a")]
+    ['0.0001', '1e-05', '2.5', '0.1234567', '3', 'a']
+    """
+    return repr(value) if isinstance(value, float) else str(value)
 
 
 def build_server(
@@ -1134,6 +1154,7 @@ def build_server(
         param as {name}; {seed} is optional. host=None runs here; a host name runs there.
         Returns the summary: spec (with run_ids), counts, cells, best, total_usd.
         """
+        require_agent_hypothesis(f"agent:{agent}", hypothesis)
         params = [SweepParam(name=k, values=[_text(v) for v in vs]) for k, vs in grid.items()]
         params += parse_ranges([f"{k}={v}" for k, v in (ranges or {}).items()])
         if is_remote(host):

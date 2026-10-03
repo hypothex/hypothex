@@ -72,6 +72,9 @@ def test_sweep_input_errors(client: TestClient) -> None:
     assert client.post("/api/v1/sweeps", json=_body(seeds=[])).status_code == 422
     unknown = client.post("/api/v1/sweeps", json=_body(host="nope"))
     assert unknown.status_code == 400 and "hx hosts add nope" in unknown.json()["error"]
+    blank = client.post("/api/v1/sweeps", json=_body(created_by="agent:x", hypothesis=" "))
+    assert blank.status_code == 400 and "agents must give a hypothesis" in blank.json()["error"]
+    assert client.get("/api/v1/projects/toy/sweeps").json() == []
 
 
 def test_remote_sweep_runs_on_the_host(tmp_path: Path) -> None:

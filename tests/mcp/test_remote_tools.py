@@ -7,7 +7,8 @@ from hypothex.api import app as app_module
 from hypothex.api.app import create_app
 from hypothex.core import control
 from hypothex.core.context import Context
-from hypothex.mcp.server import MCPServer
+from hypothex.core.sweeps import list_sweeps
+from hypothex.mcp.server import MCPServer, _text
 from tests.api.envserver import remote_hub, wait_until
 from tests.factories import PREDS_075, seed_finished_run
 from tests.mcp.test_server import call
@@ -51,10 +52,11 @@ def test_launch_run_on_a_host(tmp_path: Path, home: Path, monkeypatch: pytest.Mo
 def test_local_sweep_tools(home: Path, ctx: Context, toy_repo: Path) -> None:
     ctx.register_project(toy_repo)
     base = {"project": "toy", "task": "toy-acc", "hypothesis": "x helps", "seeds": [1]}
-    err, out = call(home, "launch_sweep", {**base, "command": SWEEP_CMD, "grid": {"x": [1, 2.5]}})
+    grid = {"x": [1, 0.1234567]}
+    err, out = call(home, "launch_sweep", {**base, "command": SWEEP_CMD, "grid": grid})
     assert not err
     sid, ids = out["spec"]["id"], out["run_ids"]
-    assert sorted(ctx.find_record(i).params["x"] for i in ids) == ["1", "2.5"]
+    assert sorted(ctx.find_record(i).params["x"] for i in ids) == ["0.1234567", "1"]
     for rid in ids:
         control.wait_for_run(ctx, rid, timeout=60)
     err, got = call(home, "get_sweep", {"project": "toy", "sweep_id": sid})
@@ -69,6 +71,46 @@ def test_local_sweep_tools(home: Path, ctx: Context, toy_repo: Path) -> None:
         home, "launch_sweep", {**base, "command": [PY, "{seed}"], "grid": {"x": [1]}}
     )
     assert err and "{x}" in message
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (0.0001, "0.0001"),
+        (1e-05, "1e-05"),
+        (2.5, "2.5"),
+        (0.1234567, "0.1234567"),
+        (1234567.0, "1234567.0"),
+        (3, "3"),
+        ("1e-3", "1e-3"),
+    ],
+)
+def test_sweep_values_keep_every_digit(value: str | int | float, text: str) -> None:
+    assert _text(value) == text
+    if isinstance(value, float):
+        assert float(_text(value)) == value
+
+
+@pytest.mark.parametrize("host", [None, "gpu1"])
+def test_launch_sweep_refuses_an_agent_without_a_hypothesis(
+    home: Path, ctx: Context, toy_repo: Path, host: str | None
+) -> None:
+    ctx.register_project(toy_repo)
+    err, message = call(
+        home,
+        "launch_sweep",
+        {
+            "project": "toy",
+            "task": "toy-acc",
+            "hypothesis": "  ",
+            "command": SWEEP_CMD,
+            "grid": {"x": [1]},
+            "seeds": [1],
+            "host": host,
+        },
+    )
+    assert err and "agents must give a hypothesis" in message
+    assert list_sweeps(ctx, "toy") == []  # refused before anything starts
 
 
 def test_remote_sweep_and_pull_tools(

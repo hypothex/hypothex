@@ -32,7 +32,8 @@ from hypothex.core.errors import StoreError
 from hypothex.core.events import Event, EventLog
 from hypothex.core.fsutil import append_jsonl
 from hypothex.core.ids import utcnow
-from hypothex.core.index import SCHEMA_VERSION, Index
+from hypothex.core.index import SCHEMA_VERSION, Index, rebuild_index
+from hypothex.core.layout import Layout
 from hypothex.core.records import (
     Artifact,
     CostTotals,
@@ -41,6 +42,7 @@ from hypothex.core.records import (
     RunStatus,
     ScoreRecord,
 )
+from hypothex.core.store import RunStore
 from hypothex.remote.bootstrap import BootstrapError, ServerInfo
 from hypothex.remote.client import EnvUnreachableError, RemoteFile
 from hypothex.remote.config import EnvironmentsFile, HostSpec
@@ -82,8 +84,7 @@ def test_clear_keeps_cursors(tmp_path: Path) -> None:
     assert idx.get_cursor("a", "env-1") == 5
 
 
-def test_old_schema_version_is_rebuilt_with_cursor_table(tmp_path: Path) -> None:
-    assert SCHEMA_VERSION == 2
+def test_old_schema_version_is_rebuilt_and_keeps_cursors(tmp_path: Path) -> None:
     path = tmp_path / "i.db"
     Index(path).set_cursor("a", "env-1", 5)
     with sqlite3.connect(path) as conn:
@@ -92,7 +93,10 @@ def test_old_schema_version_is_rebuilt_with_cursor_table(tmp_path: Path) -> None
         )
     again = Index(path)
     assert again.rebuilt_schema is True
-    assert again.get_cursor("a", "env-1") == 0
+    layout = Layout(tmp_path / "home")
+    layout.ensure()
+    rebuild_index(again, RunStore(layout))
+    assert again.get_cursor("a", "env-1") == 5  # the mirrored folders stay: no replay
 
 
 def test_append_once_writes_one_event_per_key(tmp_path: Path) -> None:

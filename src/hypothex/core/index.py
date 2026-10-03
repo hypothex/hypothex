@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import fcntl
 import json
 import math
+import sqlite3
 import time
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     Boolean,
@@ -20,16 +24,25 @@ from sqlalchemy import (
     delete,
     event,
     func,
+    insert,
     select,
+    text,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
+from hypothex.core.errors import RunNotFoundError
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import ProjectEntry, RunStore
 
-SCHEMA_VERSION = 2
+if TYPE_CHECKING:
+    from hypothex.core.context import Context
+
+SCHEMA_VERSION = 3
 MAX_POINTS_PER_METRIC = 1000
+GENERATION_KEY = "generation"
+"""``meta`` row holding the index generation (see ``index_generation``)."""
 
 
 class Base(DeclarativeBase):
@@ -125,6 +138,21 @@ class HostCursorRow(Base):
     last_sequence: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class RunChangeRow(Base):
+    """The index generation of the last write that touched each run."""
+
+    __tablename__ = "run_changes"
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer)
+
+
+class PointsPendingRow(Base):
+    """Runs whose metric points a rebuild skipped; ``metric_points`` reads them on first use."""
+
+    __tablename__ = "metric_points_pending"
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+
+
 # HostCursorRow is not listed: ``clear()`` (``hx reindex``) keeps the mirror cursors,
 # because the mirrored run folders stay on disk and need no replay.
 _DATA_TABLES = (
@@ -136,7 +164,27 @@ _DATA_TABLES = (
     RunTagRow,
     ScoreRow,
     MetricPointRow,
+    PointsPendingRow,
 )
+_CARRIED_TABLES = (HostCursorRow,)
+"""Rows a rebuild copies from the old index: they are not derived from run folders."""
+
+_BUMP_GENERATION = text(
+    "INSERT INTO meta(key, value) VALUES (:key, '1') ON CONFLICT(key) "
+    "DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)"
+).bindparams(key=GENERATION_KEY)
+_MARK_RUN = text(
+    "INSERT INTO run_changes(run_id, generation) "
+    "SELECT :run_id, CAST(value AS INTEGER) FROM meta WHERE key = :key "
+    "ON CONFLICT(run_id) DO UPDATE SET generation = excluded.generation"
+).bindparams(key=GENERATION_KEY)
+
+
+def _touch(session: Session, *run_ids: str) -> None:
+    """Bump the index generation and record which runs changed, in the caller's transaction."""
+    session.execute(_BUMP_GENERATION)
+    for run_id in run_ids:
+        session.execute(_MARK_RUN, {"run_id": run_id})
 
 
 def _sqlite_pragmas(dbapi_conn: Any, _record: Any) -> None:
@@ -144,6 +192,32 @@ def _sqlite_pragmas(dbapi_conn: Any, _record: Any) -> None:
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA busy_timeout=10000")
     cur.close()
+
+
+def _run_values(record: RunRecord) -> dict[str, Any]:
+    """Column values of one ``runs`` row."""
+    return {
+        "run_id": record.run_id,
+        "project": record.project,
+        "task": record.task,
+        "status": record.status.value,
+        "created_at": record.created_at.isoformat(),
+        "config_hash": record.config_hash,
+        "commit": record.git.commit,
+        "environment_id": record.environment_id,
+        "archived": record.archived,
+        "starred": record.starred,
+        "record_json": record.model_dump_json(),
+    }
+
+
+def _score_values(run_id: str, score: ScoreRecord) -> dict[str, Any]:
+    """Column values of one ``scores`` row (the id is assigned by SQLite)."""
+    return {
+        "run_id": run_id,
+        "record_json": score.model_dump_json(),
+        "created_at": score.created_at.isoformat(),
+    }
 
 
 def downsample(points: list[MetricPoint], limit: int = MAX_POINTS_PER_METRIC) -> list[MetricPoint]:
@@ -181,40 +255,89 @@ class Index:
     """
     SQLite index used for fast listing and filtering.
 
-    The index is disposable: when ``SCHEMA_VERSION`` changes it is recreated
-    empty and ``rebuilt_schema`` is True so the caller rebuilds it from files.
+    The index is disposable. A new file, or one written with another
+    ``SCHEMA_VERSION``, sets ``rebuilt_schema``: the caller then rebuilds it
+    from files (``rebuild_index``). An old index is left as it is until that
+    rebuild replaces it in one transaction, so readers never see it half
+    built. A new file gets empty tables at once.
 
     Parameters
     ----------
     path : Path
         SQLite file path.
+    store : RunStore, optional
+        File store that ``metric_points`` reads when a rebuild skipped a run's
+        points; without it those runs have no points until they are re-indexed.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, store: RunStore | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self.store = store
         self.engine = create_engine(
             f"sqlite:///{path}", connect_args={"check_same_thread": False, "timeout": 10}
         )
         event.listen(self.engine, "connect", _sqlite_pragmas)
         self.rebuilt_schema = self._ensure_schema()
 
+    def schema_version(self) -> str | None:
+        """
+        Return the schema version the last rebuild stored, or None.
+
+        Returns
+        -------
+        str or None
+            None for a new file, or one no rebuild has finished.
+        """
+        try:
+            return self.get_meta("schema_version")
+        except OperationalError:  # a new file: no meta table yet
+            return None
+
     def _ensure_schema(self) -> bool:
-        Base.metadata.create_all(self.engine)
-        with Session(self.engine) as session:
-            row = session.get(MetaRow, "schema_version")
-            if row is not None and row.value == str(SCHEMA_VERSION):
-                return False
-        Base.metadata.drop_all(self.engine)
-        Base.metadata.create_all(self.engine)
-        with Session(self.engine) as session, session.begin():
-            session.add(MetaRow(key="schema_version", value=str(SCHEMA_VERSION)))
+        """Create the tables of a new file; True when the caller must rebuild."""
+        if self.schema_version() == str(SCHEMA_VERSION):
+            return False
+        with self.engine.connect() as conn:
+            tables = conn.execute(
+                text("SELECT count(*) FROM sqlite_master WHERE type = 'table'")
+            ).scalar_one()
+        if not tables:
+            Base.metadata.create_all(self.engine)
         return True
+
+    def generation(self) -> int:
+        """
+        Return the index generation: it grows on every write of indexed data.
+
+        Every write of projects, runs, tags, scores, or metric points (and
+        every rebuild) adds at least 1 in the same transaction, so two equal
+        readings mean nothing indexed changed in between, also across
+        processes. Bookkeeping (``set_meta``, ``set_cursor``) does not count.
+
+        Returns
+        -------
+        int
+            0 for an index that was never written.
+
+        Examples
+        --------
+        >>> import tempfile
+        >>> idx = Index(Path(tempfile.mkdtemp()) / "i.db")
+        >>> before = idx.generation()
+        >>> idx.delete_run("nope")
+        >>> idx.generation() > before
+        True
+        """
+        value = self.get_meta(GENERATION_KEY)
+        return int(value) if value is not None else 0
 
     def clear(self) -> None:
         """Delete all indexed data except the hub's mirror cursors (keeps the schema)."""
         with Session(self.engine) as session, session.begin():
             for model in _DATA_TABLES:
                 session.execute(delete(model))
+            _touch(session)
 
     # projects -----------------------------------------------------------------
     def upsert_project(self, entry: ProjectEntry) -> None:
@@ -228,6 +351,7 @@ class Index:
         """
         cfg = entry.config
         with Session(self.engine) as session, session.begin():
+            _touch(session)
             session.merge(
                 ProjectRow(name=entry.project, repo=entry.repo, entry_json=entry.model_dump_json())
             )
@@ -301,21 +425,8 @@ class Index:
             Run to index.
         """
         with Session(self.engine) as session, session.begin():
-            session.merge(
-                RunRow(
-                    run_id=record.run_id,
-                    project=record.project,
-                    task=record.task,
-                    status=record.status.value,
-                    created_at=record.created_at.isoformat(),
-                    config_hash=record.config_hash,
-                    commit=record.git.commit,
-                    environment_id=record.environment_id,
-                    archived=record.archived,
-                    starred=record.starred,
-                    record_json=record.model_dump_json(),
-                )
-            )
+            _touch(session, record.run_id)
+            session.merge(RunRow(**_run_values(record)))
             session.execute(delete(RunTagRow).where(RunTagRow.run_id == record.run_id))
             session.add_all(
                 RunTagRow(run_id=record.run_id, tag=t) for t in sorted(set(record.tags))
@@ -410,7 +521,8 @@ class Index:
             Run id.
         """
         with Session(self.engine) as session, session.begin():
-            for model in (RunRow, RunTagRow, ScoreRow, MetricPointRow):
+            _touch(session, run_id)
+            for model in (RunRow, RunTagRow, ScoreRow, MetricPointRow, PointsPendingRow):
                 session.execute(delete(model).where(model.run_id == run_id))
 
     def get_meta(self, key: str) -> str | None:
@@ -457,13 +569,8 @@ class Index:
             Score to index.
         """
         with Session(self.engine) as session, session.begin():
-            session.add(
-                ScoreRow(
-                    run_id=run_id,
-                    record_json=score.model_dump_json(),
-                    created_at=score.created_at.isoformat(),
-                )
-            )
+            _touch(session, run_id)
+            session.add(ScoreRow(**_score_values(run_id, score)))
 
     def replace_scores(self, run_id: str, scores: list[ScoreRecord]) -> None:
         """
@@ -477,15 +584,10 @@ class Index:
             Full replacement set, oldest first.
         """
         with Session(self.engine) as session, session.begin():
+            _touch(session, run_id)
             session.execute(delete(ScoreRow).where(ScoreRow.run_id == run_id))
-            session.add_all(
-                ScoreRow(
-                    run_id=run_id,
-                    record_json=s.model_dump_json(),
-                    created_at=s.created_at.isoformat(),
-                )
-                for s in scores
-            )
+            if scores:
+                session.execute(insert(ScoreRow), [_score_values(run_id, s) for s in scores])
 
     def scores_for(self, run_ids: Iterable[str]) -> dict[str, list[ScoreRecord]]:
         """
@@ -526,16 +628,25 @@ class Index:
         points : list of MetricPoint
             Full history to (down)sample and store.
         """
+        rows = [
+            {"run_id": run_id, "name": p.name, "step": p.step, "value": p.value, "t": p.t}
+            for p in downsample(points)
+        ]
         with Session(self.engine) as session, session.begin():
+            _touch(session, run_id)
             session.execute(delete(MetricPointRow).where(MetricPointRow.run_id == run_id))
-            session.add_all(
-                MetricPointRow(run_id=run_id, name=p.name, step=p.step, value=p.value, t=p.t)
-                for p in downsample(points)
-            )
+            session.execute(delete(PointsPendingRow).where(PointsPendingRow.run_id == run_id))
+            if rows:
+                session.execute(insert(MetricPointRow), rows)
 
     def metric_points(self, run_id: str) -> list[MetricPoint]:
         """
         Return one run's indexed metric history ordered by name then step.
+
+        A rebuild does not read ``metrics.jsonl`` files (the slow part of a
+        rebuild); the first call for such a run reads its file through
+        ``store`` and indexes the points, so the result is the same as if the
+        rebuild had read them.
 
         Parameters
         ----------
@@ -546,15 +657,21 @@ class Index:
         -------
         list of MetricPoint
         """
+        if self.store is not None:
+            with Session(self.engine) as session:
+                pending = session.get(PointsPendingRow, run_id) is not None
+                project = session.scalar(select(RunRow.project).where(RunRow.run_id == run_id))
+            if pending and project is not None:
+                self.replace_metric_points(run_id, self.store.read_metric_points(project, run_id))
         stmt = (
-            select(MetricPointRow)
+            select(MetricPointRow.name, MetricPointRow.step, MetricPointRow.value, MetricPointRow.t)
             .where(MetricPointRow.run_id == run_id)
             .order_by(MetricPointRow.name, MetricPointRow.step)
         )
         with Session(self.engine) as session:
             return [
-                MetricPoint(name=r.name, step=r.step, value=r.value, t=r.t)
-                for r in session.scalars(stmt)
+                MetricPoint(name=name, step=step, value=value, t=t)
+                for name, step, value, t in session.execute(stmt)
             ]
 
     # host cursors -------------------------------------------------------------
@@ -635,14 +752,293 @@ def index_run(index: Index, store: RunStore, record: RunRecord) -> None:
     )
 
 
+def index_generation(ctx: Context) -> int:
+    """
+    Return the index generation of a context: it grows on every index write.
+
+    Every write of indexed data (a run upserted or deleted, a score added or
+    replaced, metric points replaced, a project registered, a rebuild) adds
+    at least 1 in the same SQLite transaction, so the number is consistent
+    across processes. Cache anything derived from the index (leaderboards,
+    view panels) under this number: an unchanged generation means unchanged
+    index data. It is one primary-key read, cheap enough for every request.
+    Bookkeeping writes (``Index.set_meta``, ``Index.set_cursor``) do not
+    count, and files that change without an index write (a live run's
+    ``metrics.jsonl``) are not seen.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open context.
+
+    Returns
+    -------
+    int
+        The generation; 0 for an index that was never written.
+
+    Examples
+    --------
+    >>> before = index_generation(ctx)  # doctest: +SKIP
+    >>> ctx.add_score(record, score)  # doctest: +SKIP
+    >>> index_generation(ctx) > before  # doctest: +SKIP
+    True
+    """
+    return ctx.index.generation()
+
+
+REBUILD_BATCH = 2000
+"""Rows per ``executemany`` while a rebuild fills its temporary database."""
+
+
+@contextlib.contextmanager
+def _rebuild_lock(index: Index) -> Iterator[None]:
+    """
+    Hold the cross-process lock that lets one rebuild of ``index`` run at a time.
+
+    On a file system without ``flock`` the rebuild runs unlocked: it is still
+    atomic, two processes may just both rebuild.
+    """
+    lock_path = index.path.with_name(index.path.name + ".rebuild.lock")
+    with lock_path.open("a") as fh:
+        locked = True
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            if exc.errno not in (errno.ENOSYS, errno.ENOLCK, errno.EOPNOTSUPP):
+                raise
+            locked = False
+        try:
+            yield
+        finally:
+            if locked:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _insert_sql(table: str, schema: str, columns: Iterable[str]) -> str:
+    cols = list(columns)
+    names = ", ".join(f'"{c}"' for c in cols)
+    marks = ", ".join(f":{c}" for c in cols)
+    return f'INSERT INTO {schema}."{table}" ({names}) VALUES ({marks})'
+
+
+class _Batch:
+    """Collects row dicts per table and writes them with ``executemany``."""
+
+    def __init__(self, conn: sqlite3.Connection, schema: str) -> None:
+        self.conn = conn
+        self.schema = schema
+        self.rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self.size = 0
+
+    def add(self, table: str, row: dict[str, Any]) -> None:
+        self.rows[table].append(row)
+        self.size += 1
+        if self.size >= REBUILD_BATCH:
+            self.flush()
+
+    def flush(self) -> None:
+        for name, rows in self.rows.items():
+            if rows:
+                self.conn.executemany(_insert_sql(name, self.schema, rows[0]), rows)
+        self.rows.clear()
+        self.size = 0
+
+
+def _add_run(batch: _Batch, store: RunStore, record: RunRecord) -> None:
+    """Queue one run, its tags, its scores, and a pending mark for its metric points."""
+    batch.add(RunRow.__tablename__, _run_values(record))
+    for tag in sorted(set(record.tags)):
+        batch.add(RunTagRow.__tablename__, {"run_id": record.run_id, "tag": tag})
+    for score in store.read_scores(record.project, record.run_id):
+        batch.add(ScoreRow.__tablename__, _score_values(record.run_id, score))
+    batch.add(PointsPendingRow.__tablename__, {"run_id": record.run_id})
+
+
+def _add_project(batch: _Batch, entry: ProjectEntry) -> None:
+    """Queue one project and its datasets, metrics, and tasks."""
+    cfg, name = entry.config, entry.project
+    batch.add(
+        ProjectRow.__tablename__,
+        {"name": name, "repo": entry.repo, "entry_json": entry.model_dump_json()},
+    )
+    for n, d in cfg.datasets.items():
+        row = {"project": name, "name": n, "version": d.version, "host": d.host, "path": d.path}
+        batch.add(DatasetRow.__tablename__, row)
+    for n, m in cfg.metrics.items():
+        row = {
+            "project": name,
+            "name": n,
+            "version": m.version,
+            "fn": m.fn,
+            "higher_is_better": m.higher_is_better,
+        }
+        batch.add(MetricRow.__tablename__, row)
+    for n, t in cfg.tasks.items():
+        row = {
+            "project": name,
+            "name": n,
+            "dataset": t.dataset,
+            "split": t.split,
+            "primary": t.primary,
+            "metrics_json": json.dumps(t.metrics),
+        }
+        batch.add(TaskRow.__tablename__, row)
+
+
+def _table_names(conn: sqlite3.Connection, schema: str) -> set[str]:
+    rows = conn.execute(
+        f"SELECT name FROM {schema}.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    )
+    return {r[0] for r in rows}
+
+
+def _int_meta(conn: sqlite3.Connection, key: str) -> int:
+    """An integer ``main.meta`` value; 0 when the table or row is missing."""
+    try:
+        row = conn.execute("SELECT value FROM main.meta WHERE key = ?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        return 0
+    return int(row[0]) if row is not None else 0
+
+
+def _build_fresh(path: Path, store: RunStore) -> int:
+    """Write every run of ``store`` into a new database at ``path``; return the run count."""
+    for leftover in (path, path.with_name(path.name + "-journal")):
+        leftover.unlink(missing_ok=True)
+    engine = create_engine(f"sqlite:///{path}")
+    Base.metadata.create_all(engine)
+    engine.dispose()
+    conn = sqlite3.connect(path, isolation_level=None)
+    try:
+        conn.execute("PRAGMA journal_mode=OFF")  # a throwaway file: a crash just deletes it
+        conn.execute("PRAGMA synchronous=OFF")
+        conn.execute("BEGIN")
+        batch = _Batch(conn, "main")
+        count = 0
+        for record in store.iter_records():
+            _add_run(batch, store, record)
+            count += 1
+        batch.flush()
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    return count
+
+
+def _catch_up(conn: sqlite3.Connection, store: RunStore, since: int) -> None:
+    """
+    Re-read into ``fresh`` the runs written to the live index after generation ``since``.
+
+    Runs while the live index is locked for writing, so every write that
+    committed during the rebuild is seen here, and every later one lands on
+    top of the swapped-in data.
+    """
+    if "run_changes" not in _table_names(conn, "main"):
+        return
+    changed = [
+        (run_id, project)
+        for run_id, project in conn.execute(
+            "SELECT c.run_id, r.project FROM main.run_changes c "
+            "LEFT JOIN main.runs r ON r.run_id = c.run_id WHERE c.generation > ?",
+            (since,),
+        )
+    ]
+    batch = _Batch(conn, "fresh")
+    for run_id, project in changed:
+        for name in ("runs", "run_tags", "scores", "metric_points_pending"):
+            conn.execute(f'DELETE FROM fresh."{name}" WHERE run_id = ?', (run_id,))
+        try:
+            record = store.read_record(project or store.find_project_of(run_id), run_id)
+        except RunNotFoundError:
+            continue  # the folder is gone: the run stays out
+        except Exception:  # noqa: BLE001 - an unreadable run.yaml is skipped, as in a scan
+            continue
+        _add_run(batch, store, record)
+    batch.flush()
+
+
+def _swap_in(index: Index, store: RunStore, fresh: Path, since: int) -> None:
+    """Replace every table of the live index with ``fresh`` in one write transaction."""
+    conn = sqlite3.connect(index.path, timeout=60, isolation_level=None)
+    try:
+        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute("ATTACH DATABASE ? AS fresh", (str(fresh),))
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _catch_up(conn, store, since)
+            batch = _Batch(conn, "fresh")
+            for entry in store.list_projects():  # few and cheap: read under the lock
+                _add_project(batch, entry)
+            batch.flush()
+            live = _table_names(conn, "main")
+            for model in _CARRIED_TABLES:
+                table = Base.metadata.tables[model.__tablename__]
+                if table.name in live:
+                    cols = ", ".join(f'"{c.name}"' for c in table.columns)
+                    with contextlib.suppress(sqlite3.OperationalError):  # an old shape: drop it
+                        conn.execute(
+                            f'INSERT OR REPLACE INTO fresh."{table.name}" ({cols}) '
+                            f'SELECT {cols} FROM main."{table.name}"'
+                        )
+            generation = _int_meta(conn, GENERATION_KEY) + 1
+            for name in live:
+                conn.execute(f'DROP TABLE main."{name}"')
+            schema = conn.execute(
+                "SELECT type, name, sql FROM fresh.sqlite_master "
+                "WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type = 'index'"
+            ).fetchall()
+            for _type, _name, sql in schema:
+                conn.execute(sql)  # unqualified: creates it in main
+            for _type, name, _sql in schema:
+                if _type == "table":
+                    conn.execute(f'INSERT INTO main."{name}" SELECT * FROM fresh."{name}"')
+            conn.executemany(
+                "INSERT OR REPLACE INTO main.meta(key, value) VALUES (?, ?)",
+                [("schema_version", str(SCHEMA_VERSION)), (GENERATION_KEY, str(generation))],
+            )
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.execute("DETACH DATABASE fresh")
+    finally:
+        conn.close()
+
+
+def _rebuild_locked(index: Index, store: RunStore) -> int:
+    try:
+        since = index.generation()  # read before the scan: later writes are caught up
+    except OperationalError:  # a file with no meta table
+        since = 0
+    fresh = index.path.with_name(index.path.name + ".tmp")
+    try:
+        count = _build_fresh(fresh, store)
+        _swap_in(index, store, fresh, since)
+    finally:
+        for leftover in (fresh, fresh.with_name(fresh.name + "-journal")):
+            leftover.unlink(missing_ok=True)
+    index.engine.dispose()  # pooled connections re-read the new schema
+    return count
+
+
 def rebuild_index(index: Index, store: RunStore) -> int:
     """
-    Rebuild the whole index from files.
+    Rebuild the whole index from files, atomically.
+
+    The runs are written into ``<index>.tmp`` first, without any lock on the
+    live index; then one write transaction re-reads the runs written to the
+    live index meanwhile, copies the hub's mirror cursors, and replaces every
+    table. Readers (other processes too) see the old index until that
+    transaction commits, then the new one, never a part of it; a write that
+    lands during the rebuild is kept. Metric points are not read here:
+    ``Index.metric_points`` reads a run's file on first use. One rebuild runs
+    at a time (a lock file next to the index).
 
     Parameters
     ----------
     index : Index
-        Index to clear and repopulate.
+        Index to repopulate.
     store : RunStore
         File store, the source of truth.
 
@@ -651,14 +1047,34 @@ def rebuild_index(index: Index, store: RunStore) -> int:
     int
         Number of runs indexed.
     """
-    index.clear()
-    for entry in store.list_projects():
-        index.upsert_project(entry)
-    count = 0
-    for record in store.iter_records():
-        index_run(index, store, record)
-        count += 1
-    return count
+    with _rebuild_lock(index):
+        return _rebuild_locked(index, store)
+
+
+def rebuild_index_if_stale(index: Index, store: RunStore) -> int | None:
+    """
+    Rebuild the index unless its stored schema version is current.
+
+    For ``Context.open``: when several processes open an old index at once,
+    the first rebuilds it and the others wait for that rebuild, then find the
+    index current and do not rebuild it again.
+
+    Parameters
+    ----------
+    index : Index
+        Index to check.
+    store : RunStore
+        File store, the source of truth.
+
+    Returns
+    -------
+    int or None
+        Number of runs indexed, or None when no rebuild was needed.
+    """
+    with _rebuild_lock(index):
+        if index.schema_version() == str(SCHEMA_VERSION):
+            return None
+        return _rebuild_locked(index, store)
 
 
 def repair_index_gaps(index: Index, store: RunStore) -> list[str]:

@@ -4,7 +4,14 @@ from pathlib import Path
 from hypothex.core.config import ProjectConfig
 from hypothex.core.fsutil import append_jsonl
 from hypothex.core.ids import utcnow
-from hypothex.core.index import Index, downsample, rebuild_index, repair_index_gaps
+from hypothex.core.index import (
+    SCHEMA_VERSION,
+    Index,
+    downsample,
+    rebuild_index,
+    rebuild_index_if_stale,
+    repair_index_gaps,
+)
 from hypothex.core.layout import Layout
 from hypothex.core.records import MetricPoint, RunStatus, ScoreRecord
 from hypothex.core.store import RunStore
@@ -57,11 +64,23 @@ def test_downsample_keeps_last_point_and_limit() -> None:
 
 def test_schema_version_mismatch_triggers_rebuild(tmp_path: Path) -> None:
     path = tmp_path / "i.db"
-    assert Index(path).rebuilt_schema  # fresh file
+    store = RunStore(Layout(tmp_path / "home"))
+    store.layout.ensure()
+    fresh = Index(path)
+    assert fresh.rebuilt_schema  # new file: empty tables, rebuild from files
+    fresh.upsert_run(make_record("r1"))  # usable at once
+    assert Index(path).rebuilt_schema  # still not rebuilt
+    rebuild_index(fresh, store)
     assert not Index(path).rebuilt_schema
+    fresh.upsert_run(make_record("r1"))
     with sqlite3.connect(path) as conn:
         conn.execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'")
-    assert Index(path).rebuilt_schema
+    old = Index(path)
+    assert old.rebuilt_schema
+    assert [r.run_id for r in old.list_runs()] == ["r1"]  # untouched until the rebuild
+    assert rebuild_index_if_stale(old, store) == 0
+    assert old.list_runs() == [] and old.schema_version() == str(SCHEMA_VERSION)
+    assert rebuild_index_if_stale(old, store) is None
 
 
 def _seeded_store(tmp_path: Path) -> RunStore:
@@ -93,7 +112,7 @@ def test_rebuild_matches_live_index(tmp_path: Path) -> None:
         live.replace_metric_points(
             record.run_id, store.read_metric_points(record.project, record.run_id)
         )
-    rebuilt = Index(tmp_path / "rebuilt.db")
+    rebuilt = Index(tmp_path / "rebuilt.db", store=store)
     assert rebuild_index(rebuilt, store) == 2
     assert live.list_runs() == rebuilt.list_runs()
     assert live.scores_for(["r1", "r2"]) == rebuilt.scores_for(["r1", "r2"])

@@ -10,7 +10,7 @@ from typing import Any
 from hypothex.core.config import load_project_config
 from hypothex.core.environment import EnvironmentDescriptor, load_descriptor
 from hypothex.core.events import EventLog
-from hypothex.core.index import Index, rebuild_index, repair_index_if_changed
+from hypothex.core.index import Index, rebuild_index_if_stale, repair_index_if_changed
 from hypothex.core.layout import Layout, default_home
 from hypothex.core.records import RunRecord, ScoreRecord
 from hypothex.core.store import ProjectEntry, RunStore, run_lock
@@ -39,8 +39,9 @@ class Context:
         A run folder with no index row (a crash between the file write and the
         index write) is indexed here. The store is listed only when a run or
         project folder changed since the last listing
-        (``index.repair_index_if_changed``); an index with a new schema is
-        rebuilt from files.
+        (``index.repair_index_if_changed``); a new index, or one with an old
+        schema, is rebuilt from files (``index.rebuild_index_if_stale``): other
+        processes read the old index until the rebuilt one replaces it.
 
         Parameters
         ----------
@@ -54,7 +55,7 @@ class Context:
         layout = Layout((home or default_home()).expanduser().resolve())
         layout.ensure()
         store = RunStore(layout)
-        index = Index(layout.index_db)
+        index = Index(layout.index_db, store=store)
         ctx = cls(
             layout=layout,
             store=store,
@@ -63,7 +64,7 @@ class Context:
             descriptor=load_descriptor(layout),
         )
         if index.rebuilt_schema:
-            rebuild_index(index, store)
+            rebuild_index_if_stale(index, store)  # atomic; a concurrent open waits for it
         else:
             repair_index_if_changed(index, store)
         return ctx

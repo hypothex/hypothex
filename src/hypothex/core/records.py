@@ -5,6 +5,7 @@ from __future__ import annotations
 import shlex
 from datetime import datetime
 from enum import StrEnum
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -92,12 +93,45 @@ class UsageTotals(BaseModel):
 
 
 class ExecutorInfo(BaseModel):
-    """How the run's process is supervised."""
+    """
+    How and where the run's process is supervised.
+
+    ``host`` is the run's host name from the hub's ``environments.yaml``
+    (None on the hub itself). ``gpus`` holds the GPU indices given to the run
+    (its ``CUDA_VISIBLE_DEVICES``). ``slurm_job_id`` and ``node`` are set for
+    SLURM runs. ``queue_position`` is the 1-based place in the host's queue
+    while the run waits, else None.
+    """
 
     type: str = "local"
     pid: int | None = None
     pid_create_time: float | None = None
     child_pid: int | None = None
+    host: str | None = None
+    gpus: list[Annotated[int, Field(ge=0)]] = Field(default_factory=list)
+    slurm_job_id: str | None = None
+    node: str | None = None
+    queue_position: int | None = Field(default=None, ge=1)
+
+
+class CostTotals(BaseModel):
+    """
+    What a run cost; stored as ``RunRecord.cost`` when the run ends.
+
+    ``gpu_hours`` is wall time times the number of GPUs, ``gpu_usd`` prices
+    them at the host's ``usd_per_gpu_hour``, ``api_usd`` is ``usage.usd``,
+    and ``total_usd`` is ``gpu_usd + api_usd``. See ``hypothex.core.cost``.
+
+    Examples
+    --------
+    >>> CostTotals(gpu_hours=3.0, gpu_usd=6.3, api_usd=0.375, total_usd=6.675).total_usd
+    6.675
+    """
+
+    gpu_hours: float = 0.0
+    gpu_usd: float = 0.0
+    api_usd: float = 0.0
+    total_usd: float = 0.0
 
 
 class RunRecord(BaseModel):
@@ -135,6 +169,9 @@ class RunRecord(BaseModel):
     archived: bool = False
     created_by: str = "human"
     usage: UsageTotals | None = None
+    cost: CostTotals | None = None
+    sweep_id: str | None = None
+    gpus_requested: int = Field(default=0, ge=0)
 
     @property
     def command_display(self) -> str:

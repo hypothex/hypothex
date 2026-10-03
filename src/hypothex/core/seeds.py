@@ -87,6 +87,10 @@ def config_hash(data: dict[str, Any]) -> str:
     """
     Hash a configuration dict, ignoring a top-level ``seed`` key.
 
+    Key order never matters, at any depth. Keys that ``json`` cannot sort or
+    write (mixed ``int`` and ``str`` keys, YAML date keys) are hashed through a
+    canonical form instead of raising ``TypeError``.
+
     Parameters
     ----------
     data : dict
@@ -101,10 +105,46 @@ def config_hash(data: dict[str, Any]) -> str:
     --------
     >>> config_hash({"lr": 1, "seed": 1}) == config_hash({"lr": 1, "seed": 2})
     True
+    >>> config_hash({"layers": {1: 64, "out": 10}}) == config_hash({"layers": {"out": 10, 1: 64}})
+    True
     """
     payload = {k: v for k, v in data.items() if k != "seed"}
-    blob = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    try:
+        blob = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    except TypeError:
+        # keys json cannot sort (``{1: a, b: c}``) or write (a YAML date key)
+        blob = json.dumps(_canonical(payload), default=str, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+_MAP_TAG = "\x00map"
+
+
+def _key_text(key: Any) -> str:
+    """Write a mapping key as ``json.dumps`` would (``1`` -> ``"1"``), else as ``str``."""
+    if isinstance(key, str):
+        return key
+    if key is None or isinstance(key, bool | int | float):
+        return json.dumps(key)
+    return str(key)
+
+
+def _canonical(value: Any) -> Any:
+    """
+    Make every mapping a tagged, key-sorted list of pairs, so any keys sort.
+
+    Only used for configs whose keys ``json.dumps(sort_keys=True)`` rejects, so
+    the hash of every config it accepts is unchanged. A mapping becomes
+    ``{"\\x00map": [[key, value], ...]}``: objects appear only as that wrapper,
+    so two configs that differ give different text.
+    """
+    if isinstance(value, dict):
+        pairs = [[_key_text(k), _canonical(v)] for k, v in value.items()]
+        pairs.sort(key=lambda kv: (kv[0], json.dumps(kv[1], default=str)))
+        return {_MAP_TAG: pairs}
+    if isinstance(value, list | tuple):
+        return [_canonical(v) for v in value]
+    return value
 
 
 class Stats(BaseModel):

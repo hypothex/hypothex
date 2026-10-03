@@ -125,7 +125,7 @@ def test_safe_stem_replaces_unsafe_characters_and_adds_a_hash() -> None:
     # sha1("route 7/b:ü")[:8] = b85600fe, sha1("../x")[:8] = 72e4d01d
     assert safe_stem("route 7/b:ü") == "route_7_b__-b85600fe"
     assert safe_stem("a-b_c.d") == "a-b_c.d"  # already safe: unchanged, no hash
-    assert safe_stem("../x") == ".._x-72e4d01d"
+    assert safe_stem("../x") == "_._x-72e4d01d"  # a leading dot becomes _ (never hidden)
     with pytest.raises(ValueError, match="must not be empty"):
         safe_stem("")
 

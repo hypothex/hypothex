@@ -44,6 +44,8 @@ _M = TypeVar("_M", bound=BaseModel)
 RUN_SUBDIRS = ("logs", "predictions", "env")
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
 _HASH_TAIL = re.compile(r"-[0-9a-f]{8}\Z")
+MAX_STEM = 200
+"""Longest stem kept from a name (ASCII after sanitising; the hash adds 9 more)."""
 
 
 def safe_stem(name: str) -> str:
@@ -51,13 +53,16 @@ def safe_stem(name: str) -> str:
     Turn an example id or sample name into a file name stem.
 
     Every character outside ``[A-Za-z0-9_.-]`` becomes ``_``, so the name can never
-    contain a path separator and leave its folder. ``-`` and the first 8 hex digits
-    of ``sha1(name)`` are appended when that changes the name, and also when the
-    name already ends in ``-`` plus 8 lowercase hex digits (so ``a_b-3ec69c85``
-    cannot take the stem of ``a/b``). Any other name is returned unchanged. So an
-    unchanged stem never ends in a hash and a hashed one always does: two distinct
-    names share a stem only if they sanitise alike and their sha1 digests share the
-    first 8 hex digits, which ``check_stem_owner`` catches before a write.
+    contain a path separator and leave its folder; a leading ``.`` becomes ``_`` too,
+    so the file is never hidden (and never ``.`` or ``..``), and the stem is cut to
+    ``MAX_STEM`` characters, so ``<stem>.jsonl`` fits any file system's name limit.
+    ``-`` and the first 8 hex digits of ``sha1(name)`` are appended when any of that
+    changes the name, and also when the name already ends in ``-`` plus 8 lowercase
+    hex digits (so ``a_b-3ec69c85`` cannot take the stem of ``a/b``). Any other name
+    is returned unchanged. So an unchanged stem never ends in a hash and a hashed one
+    always does: two distinct names share a stem only if they sanitise alike and
+    their sha1 digests share the first 8 hex digits, which ``check_stem_owner``
+    catches before a write.
 
     Parameters
     ----------
@@ -82,13 +87,20 @@ def safe_stem(name: str) -> str:
     'a_b'
     >>> safe_stem("a_b-3ec69c85")
     'a_b-3ec69c85-d64fa8bc'
+    >>> safe_stem("..")
+    '_.-9d891e73'
     """
     if not name:
         raise ValueError("name must not be empty")
     stem = _UNSAFE_CHARS.sub("_", name)
+    if stem.startswith("."):
+        stem = "_" + stem[1:]
+    stem = stem[:MAX_STEM]
     if stem == name and not _HASH_TAIL.search(name):
         return stem
-    return f"{stem}-{hashlib.sha1(name.encode('utf-8')).hexdigest()[:8]}"
+    # surrogatepass: a str from undecodable bytes or JSON may hold lone surrogates
+    digest = hashlib.sha1(name.encode("utf-8", "surrogatepass")).hexdigest()
+    return f"{stem}-{digest[:8]}"
 
 
 def check_stem_owner(path: Path, key: str, original: str) -> None:

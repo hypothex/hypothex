@@ -31,6 +31,7 @@ from hypothex.core.config import (
 from hypothex.core.context import Context
 from hypothex.core.control import cancel_if_queued, launch_run
 from hypothex.core.errors import HypothexError, RunError, StoreError
+from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import COMMIT_PATTERN, RunRequest
 from hypothex.core.fsutil import atomic_write_text, read_yaml, write_yaml
 from hypothex.core.headlines import NO_RUNS, fmt_metric, fmt_metric_delta, fmt_p
@@ -834,6 +835,9 @@ COMMANDS_DIR = ".commands"
 _ALWAYS_FIELDS = frozenset({"run_id", "run_dir", "repo", "task", "seed"})
 _TASK_FIELDS = frozenset({"dataset.name", "dataset.version", "dataset.path"})
 
+MAX_RUN_ATTEMPTS = 4
+"""Command ids one sweep run may try: its first, then one per interrupted receipt."""
+
 Launcher = Callable[[RunRequest, str], RunRecord]
 """Starts (or queues) one run and returns its record; gets the run's command id.
 
@@ -843,10 +847,19 @@ the run it already started (command receipts), never a second run.
 
 
 def run_command_id(
-    environment_id: str, project: str, sweep_id: str, params: dict[str, str], seed: int | None
+    environment_id: str,
+    project: str,
+    sweep_id: str,
+    params: dict[str, str],
+    seed: int | None,
+    attempt: int = 0,
 ) -> str:
     """
-    The one command id of a sweep run, the same on every launch, retry, and extend.
+    The command id of a sweep run, the same on every launch, retry, and extend.
+
+    A run has one id per ``attempt``. Attempt 0 is the usual one; the next
+    attempt is used only after the previous id's receipt was interrupted (see
+    ``MAX_RUN_ATTEMPTS``). Each id is fixed, so a resume walks the same ids.
 
     Parameters
     ----------
@@ -861,6 +874,8 @@ def run_command_id(
         The run's combination (order does not matter).
     seed : int or None
         The run's seed.
+    attempt : int
+        0 for the run's first command id; n for its n-th replacement.
 
     Returns
     -------
@@ -872,8 +887,13 @@ def run_command_id(
     >>> a = run_command_id("env", "toy", "s-0001", {"lr": "1e-4", "beam": "5"}, 1)
     >>> a == run_command_id("env", "toy", "s-0001", {"beam": "5", "lr": "1e-4"}, 1), len(a)
     (True, 16)
+    >>> a == run_command_id("env", "toy", "s-0001", {"lr": "1e-4", "beam": "5"}, 1, attempt=1)
+    False
     """
-    key = json.dumps([environment_id, project, sweep_id, sorted(params.items()), seed])
+    parts: list[Any] = [environment_id, project, sweep_id, sorted(params.items()), seed]
+    if attempt:
+        parts.append(attempt)  # attempt 0 keeps the ids runs had before attempts existed
+    key = json.dumps(parts)
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
@@ -1065,6 +1085,63 @@ def _claim_sweep(layout: Layout, project: str, command_id: str | None, sweep_id:
     atomic_write_text(path, json.dumps({"command_id": command_id, "sweep_id": sweep_id}))
 
 
+def _interrupted(exc: BaseException) -> bool:
+    """
+    True when a launch failed on an interrupted receipt, here or on a host.
+
+    A host's answer keeps the error's class name (``EnvRequestError.error_type``).
+    """
+    name = CommandInterruptedError.__name__
+    return isinstance(exc, CommandInterruptedError) or getattr(exc, "error_type", None) == name
+
+
+def _member(ctx: Context, spec: SweepSpec, seed: int, params: dict[str, str]) -> RunRecord | None:
+    """The sweep's run of (``params``, ``seed``), if one is indexed now."""
+    key = (seed, _combo_key(params))
+    return next((r for r in sweep_runs(ctx, spec) if (r.seed, _combo_key(r.params)) == key), None)
+
+
+def _launch_run(
+    ctx: Context,
+    spec: SweepSpec,
+    launch: Launcher,
+    seed: int,
+    req: RunRequest,
+    requested: list[str] | None,
+) -> RunRecord:
+    """
+    Launch one sweep run, past command ids whose receipts were interrupted.
+
+    An interrupted receipt (the server stopped while it launched) never runs
+    its command again, so that id would block every resume of the sweep. As
+    the receipt asks, the runs are checked first: a member with these params
+    and seed is the run that launch made. Else the run's next command id
+    (``run_command_id`` ``attempt``) is tried, up to ``MAX_RUN_ATTEMPTS``.
+    """
+    owner = ctx.descriptor.environment_id
+    attempt = 0
+    while True:
+        command_id = run_command_id(owner, spec.project, spec.id, req.params, seed, attempt)
+        if requested is not None:
+            requested.append(command_id)
+        try:
+            return launch(req, command_id)
+        except HypothexError as exc:
+            if not _interrupted(exc) or attempt == MAX_RUN_ATTEMPTS - 1:
+                raise
+            member = _member(ctx, spec, seed, req.params)
+            if member is not None:
+                return member
+            log.warning(
+                "sweep %s run %s seed %s: command %s was interrupted; trying the next id",
+                spec.id,
+                req.params,
+                seed,
+                command_id,
+            )
+            attempt += 1
+
+
 def _issue(
     ctx: Context,
     spec: SweepSpec,
@@ -1078,19 +1155,16 @@ def _issue(
 
     Each run gets its ``run_command_id``, so a run that exists but is not
     indexed yet (its answer lost, or not mirrored) comes back from the
-    launcher's receipt instead of starting twice. ``started`` collects the run
-    ids as they come back; ``requested`` collects each command id before its
-    request goes out (the caller then knows a request was made).
+    launcher's receipt instead of starting twice (``_launch_run``: an
+    interrupted receipt moves on to the run's next id). ``started`` collects
+    the run ids as they come back; ``requested`` collects each command id
+    before its request goes out (the caller then knows a request was made).
     """
     have = {(r.seed, _combo_key(r.params)) for r in sweep_runs(ctx, spec)}
-    owner = ctx.descriptor.environment_id
     for seed, req in requests:
         if (seed, _combo_key(req.params)) in have:
             continue
-        command_id = run_command_id(owner, spec.project, spec.id, req.params, seed)
-        if requested is not None:
-            requested.append(command_id)
-        started.append(launch(req, command_id).run_id)
+        started.append(_launch_run(ctx, spec, launch, seed, req, requested).run_id)
 
 
 def launch_sweep(

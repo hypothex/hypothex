@@ -65,6 +65,53 @@ def test_seed_warning_message_when_seed_dropped() -> None:
     assert "hx.seed()" in msg
 
 
+def _ids(monkeypatch: pytest.MonkeyPatch, *ids: str) -> None:
+    supply = iter(ids)
+    monkeypatch.setattr(execution, "new_run_id", lambda task: next(supply))
+
+
+def test_prepare_run_skips_an_id_whose_folder_exists(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    _ids(monkeypatch, first.run_id, "20260101-000000-explore-0000000b")
+    again = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    assert again.run_id == "20260101-000000-explore-0000000b"
+    assert ctx.find_record(first.run_id).command == first.command  # untouched
+
+
+def test_prepare_run_retries_when_another_launcher_takes_the_id(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clash, fresh = "20260101-000000-explore-0000000a", "20260101-000000-explore-0000000b"
+    _ids(monkeypatch, clash, fresh)
+    real_git_info = execution.git_info
+    taken: list[str] = []
+
+    def git_info_racing(cwd: Path):  # runs after the id check, before create_run
+        if not taken:
+            other = ctx.layout.run_dir("toy", clash)
+            other.mkdir(parents=True)
+            taken.append(str(other))
+        return real_git_info(cwd)
+
+    monkeypatch.setattr(execution, "git_info", git_info_racing)
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    assert rec.run_id == fresh and taken
+    assert ctx.index.get_run(clash) is None
+    assert not any(e.run_id == clash for e in ctx.events.since(0))
+    assert list(ctx.layout.run_dir("toy", clash).iterdir()) == []  # the other run's folder
+
+
+def test_prepare_run_gives_up_after_run_id_attempts(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    monkeypatch.setattr(execution, "new_run_id", lambda task: first.run_id)
+    with pytest.raises(RunError, match="free run id"):
+        prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+
+
 def test_prepare_run_emits_seed_warning_when_not_templated(ctx: Context, toy_repo: Path) -> None:
     rec = prepare_run(
         ctx, RunRequest(repo=toy_repo, command=cmd("pass", "--seed"), seed=7, hypothesis="x")

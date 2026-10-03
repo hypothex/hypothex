@@ -32,7 +32,7 @@ from hypothex.core.context import Context
 from hypothex.core.cost import compute_cost
 from hypothex.core.datasets import FingerprintCache, dataset_ref, resolve_dataset_path
 from hypothex.core.envcapture import capture_env
-from hypothex.core.errors import GitError, HypothexError, RunError, TemplateError
+from hypothex.core.errors import GitError, HypothexError, RunError, StoreError, TemplateError
 from hypothex.core.evalrunner import default_python_cmd
 from hypothex.core.evaluation import evaluate_run, run_checkout
 from hypothex.core.fsutil import atomic_write_bytes, atomic_write_text, read_yaml, write_yaml
@@ -70,6 +70,12 @@ A process the command left running in the background (``cmd &``, a daemon) keeps
 the output pipes open; past this the run is recorded anyway (``run.warning``)."""
 PROVIDED_TEMPLATE_VARS = BUILTIN_TEMPLATE_VARS - {"checkpoint"}
 """Template values Hypothex fills in itself; ``--var`` cannot set them."""
+RUN_ID_ATTEMPTS = 8
+"""How many fresh run ids ``prepare_run`` draws before it gives up (ids clash very rarely)."""
+
+
+class _RunIdTakenError(Exception):
+    """``ctx.create_run`` found a run folder with the new id; it wrote nothing."""
 
 
 @dataclass
@@ -395,6 +401,10 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     that checkout: ``hypothex.yaml`` (tasks, stages, datasets), ``{repo}`` and
     ``{dataset.path}``, the working directory, git info, and the environment.
 
+    The run id is drawn again when its run folder or worktree already exists,
+    also when another launcher creates the same id while this one prepares
+    (``RUN_ID_ATTEMPTS`` tries).
+
     Parameters
     ----------
     ctx : Context
@@ -411,8 +421,8 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         Unknown task/stage, missing template value, a ``--var`` that sets a
         value Hypothex provides (``run_dir``, ``repo``, ...), a working
         directory that does not exist, command not found, an agent run
-        without a hypothesis, more GPUs than this host has, or a pinned
-        commit/diff that cannot be checked out (spec 8A.4).
+        without a hypothesis, more GPUs than this host has, a pinned
+        commit/diff that cannot be checked out (spec 8A.4), or no free run id.
     """
     repo = req.repo.resolve()
     host_config = load_project_config(repo)  # the host checkout names the project
@@ -432,17 +442,24 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         total = len(query_gpus())
         if req.gpus > total:
             raise RunError(f"asked for {req.gpus} GPUs; this host has {total}")
-    run_id = new_run_id(req.task)
-    worktree = _checkout(
-        repo, req.commit, req.diff, ctx.layout.worktrees_dir(host_config.project) / run_id
-    )
-    try:
-        return _prepare_in(ctx, req, repo, host_config, worktree, run_id)
-    except BaseException:
-        # any failure after the worktree exists removes it (spec 8A.4)
+    for _ in range(RUN_ID_ATTEMPTS):
+        run_id = new_run_id(req.task)
+        dest = ctx.layout.worktrees_dir(host_config.project) / run_id
+        if ctx.layout.run_dir(host_config.project, run_id).exists() or dest.exists():
+            continue  # taken already: draw another id before any work
+        worktree = _checkout(repo, req.commit, req.diff, dest)
+        try:
+            return _prepare_in(ctx, req, repo, host_config, worktree, run_id)
+        except _RunIdTakenError:
+            pass  # another launcher created the same id meanwhile: retry with a new one
+        except BaseException:
+            # any failure after the worktree exists removes it (spec 8A.4)
+            if worktree is not None:
+                _discard_worktree(repo, worktree)
+            raise
         if worktree is not None:
             _discard_worktree(repo, worktree)
-        raise
+    raise RunError(f"could not pick a free run id in {RUN_ID_ATTEMPTS} tries")
 
 
 def _prepare_in(
@@ -567,7 +584,12 @@ def _prepare_in(
         created_by=req.created_by,
         gpus_requested=req.gpus,
     )
-    ctx.create_run(record)
+    try:
+        ctx.create_run(record)
+    except StoreError as exc:
+        if isinstance(exc.__cause__, FileExistsError):  # the run folder exists: id clash
+            raise _RunIdTakenError(run_id) from exc
+        raise
     if user_config is not None:
         write_yaml(run_dir / "config.yaml", user_config)
     diff = capture_diff(cwd)

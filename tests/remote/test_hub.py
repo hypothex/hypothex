@@ -876,3 +876,84 @@ def test_a_crash_at_any_install_step_is_reindexed(
     indexed = hub.index.get_run("r1")
     assert indexed is not None and indexed.tags == ["x"]
     assert not (local / hub_mod.INDEX_PENDING).exists()
+
+
+# B34 review ----------------------------------------------------------------------------
+
+
+def test_the_mirror_copies_the_nonfinite_metric_sidecar(pair: tuple[Context, Context]) -> None:
+    hub, remote = pair
+    record = seed_run(remote, "r1")
+    append_jsonl(
+        remote.run_dir(record) / "metrics_nonfinite.jsonl",
+        {"name": "loss", "step": 9, "value": "nan", "t": 1.0},
+    )
+    assert wanted_path("metrics_nonfinite.jsonl")
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    [row] = hub.store.read_nonfinite_points("toy", "r1")
+    assert (row.name, row.step) == ("loss", 9)
+
+
+def test_a_project_copied_from_the_host_is_refreshed(
+    pair: tuple[Context, Context], toy_repo: Path
+) -> None:
+    hub, remote = pair
+    remote.register_project(toy_repo)
+    seed_run(remote, "r1")
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    entry = remote.store.load_project("toy")
+    newer = entry.model_copy(update={"repo": "/host/moved/toy"})
+    remote.store.save_project(newer)  # the host re-registers its checkout
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    copied = hub.store.load_project("toy")
+    assert (copied.repo, copied.remote_host) == ("/host/moved/toy", "gpu1")
+    assert hub.index.get_project("toy").repo == "/host/moved/toy"  # type: ignore[union-attr]
+
+
+def test_a_project_registered_on_the_hub_is_never_replaced(
+    pair: tuple[Context, Context], toy_repo: Path
+) -> None:
+    hub, remote = pair
+    remote.register_project(toy_repo)
+    hub.register_project(toy_repo)
+    remote.store.save_project(
+        remote.store.load_project("toy").model_copy(update={"repo": "/host/toy"})
+    )
+    seed_run(remote, "r1")
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    kept = hub.store.load_project("toy")
+    assert kept.remote_host is None and kept.repo == str(toy_repo)
+
+
+@pytest.mark.parametrize("direction", ["file-to-dir", "dir-to-file"])
+def test_a_path_that_changes_between_file_and_folder_is_mirrored(
+    pair: tuple[Context, Context], direction: str
+) -> None:
+    hub, remote = pair
+    record = seed_run(remote, "r1", status=RunStatus.RUNNING)
+    logs = remote.run_dir(record) / "logs"
+    logs.mkdir(exist_ok=True)
+    if direction == "file-to-dir":
+        (logs / "output").write_text("whole\n")
+    else:
+        (logs / "output").mkdir()
+        (logs / "output" / "part").write_text("part\n")
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    if direction == "file-to-dir":
+        (logs / "output").unlink()
+        (logs / "output").mkdir()
+        (logs / "output" / "part").write_text("part\n")
+    else:
+        (logs / "output" / "part").unlink()
+        (logs / "output").rmdir()
+        (logs / "output").write_text("whole\n")
+    result = hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert result is not None and result[1]
+    local = hub.layout.run_dir("toy", "r1") / "logs" / "output"
+    if direction == "file-to-dir":
+        assert (local / "part").read_text() == "part\n"
+    else:
+        assert local.read_text() == "whole\n"
+    manifest = json.loads((hub.layout.run_dir("toy", "r1") / hub_mod.MANIFEST_NAME).read_text())
+    assert ("logs/output/part" in manifest) is (direction == "file-to-dir")
+    assert ("logs/output" in manifest) is (direction == "dir-to-file")

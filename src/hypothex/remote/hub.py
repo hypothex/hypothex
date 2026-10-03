@@ -46,6 +46,7 @@ MIRROR_FILES = (
     "run.yaml",
     "scores.jsonl",
     "metrics.jsonl",
+    "metrics_nonfinite.jsonl",
     "notes.md",
     "usage.jsonl",
     "config.yaml",
@@ -313,15 +314,20 @@ def _read_remote_record(path: Path) -> RunRecord | None:
 
 def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) -> None:
     """
-    Copy a project the hub does not know from the host (spec 5.2: the hub holds the index).
+    Copy a project from the host, or refresh this host's copy (spec 5.2: the hub holds the index).
 
     Without its ``ProjectEntry`` (the ``hypothex.yaml`` snapshot) a project
     registered only on the host would show no tasks, leaderboards, or sweep
-    stats on the hub. The copy is marked ``remote_host``; a later ``hx
-    register`` of a checkout on the hub replaces it.
+    stats on the hub. The copy is marked ``remote_host`` and is fetched again
+    on every mirror, so a task or metric version added on the host reaches
+    the hub. A project registered on the hub (or copied from another host) is
+    never replaced; a later ``hx register`` of a checkout on the hub replaces
+    the copy.
     """
+    known: ProjectEntry | None = None
     with contextlib.suppress(StoreError):
-        ctx.store.load_project(project)
+        known = ctx.store.load_project(project)
+    if known is not None and known.remote_host != host:
         return
     try:
         data = client.get_json(f"/api/v1/projects/{project}/entry")
@@ -329,7 +335,7 @@ def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) ->
     except (HypothexError, ValueError) as exc:
         log.info("host %s: project %s not copied: %s", host, project, exc)
         return
-    if entry.project != project:
+    if entry.project != project or entry == known:
         return
     ctx.store.save_project(entry)
     ctx.index.upsert_project(entry)
@@ -366,7 +372,7 @@ def mirror_run(
     ever appended. Artifacts the host recorded as ``local`` get the host's
     name, and an ended run gets its ``cost`` at the host's price
     (``price_record``). A project the hub does not know is copied from the
-    host first (``_ensure_project``).
+    host first, and a copy from this host is refreshed (``_ensure_project``).
 
     Parameters
     ----------
@@ -511,12 +517,25 @@ def _durable_touch(path: Path) -> None:
         os.close(folder)
 
 
-def _drop_local(path: Path) -> bool:
-    """Delete a local file the host no longer serves; True when one was there."""
-    if path.is_file() or path.is_symlink():
-        path.unlink()
-        return True
-    return False
+def _drop_local(run_dir: Path, rel: str) -> bool:
+    """
+    Delete a local file the host no longer serves; True when one was there.
+
+    Folders the delete leaves empty go too (never ``run_dir``), so the host may
+    put a file where a mirrored folder was.
+    """
+    path = run_dir / rel
+    if not (path.is_file() or path.is_symlink()):
+        return False
+    path.unlink()
+    for parent in path.parents:
+        if parent == run_dir or run_dir not in parent.parents:
+            break
+        try:
+            parent.rmdir()
+        except OSError:  # not empty (or already gone)
+            break
+    return True
 
 
 def _install(
@@ -536,8 +555,10 @@ def _install(
     mirror (or ``reindex_pending`` at hub start) re-indexes. Every file
     replaces its local copy whole (``os.replace``), so installing the same
     bytes again changes nothing. Files the host no longer serves are deleted
-    (``gone``); skipped files are deleted too and listed in
-    ``.hx/mirror-skips.json`` (``skipped``), never marked next to the file.
+    (``gone``) before any install, with the folders that leaves empty, so a
+    path that changed between file and folder on the host installs; skipped
+    files are deleted too and listed in ``.hx/mirror-skips.json``
+    (``skipped``), never marked next to the file.
 
     Returns
     -------
@@ -548,6 +569,9 @@ def _install(
     redo = pending.exists() or ctx.index.get_run(record.run_id) is None
     _durable_touch(pending)  # before the first live change
     changed = False
+    for rel in [*gone, *skipped]:  # first: a new file may take an old file's (or folder's) place
+        changed |= _drop_local(run_dir, rel)  # no stale copy of a file the hub does not hold
+        manifest.pop(rel, None)
     for entry, path in staged:
         dst = run_dir / entry.path
         if not (dst.is_file() and filecmp.cmp(path, dst, shallow=False)):
@@ -555,9 +579,6 @@ def _install(
             os.replace(path, dst)
             changed = True
         manifest[entry.path] = [entry.size, entry.mtime_ns]
-    for rel in [*gone, *skipped]:
-        changed |= _drop_local(run_dir / rel)  # no stale copy of a file the hub does not hold
-        manifest.pop(rel, None)
     changed |= _write_skips(run_dir, skipped)
     if _read_local(ctx, record.project, record.run_id) != record:
         ctx.store.write_record(record)  # after the files: never terminal next to stale files

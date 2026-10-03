@@ -1,0 +1,324 @@
+"""Host-level GPU queue for SSH hosts (spec 8A.5): FIFO, first fit.
+
+A run waits in the queue while it is ``queued`` and its folder holds
+``queue.json``. Each ``tick`` starts, in queue order, every run whose GPU
+count fits the GPUs that are free right now (no hx run holds them and
+``nvidia-smi`` shows no process on them).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from hypothex.core.context import Context
+from hypothex.core.errors import HypothexError, RunError
+from hypothex.core.execution import (
+    QUEUE_FILE,
+    SUPERVISOR_PID_FILE,
+    spawn_supervisor,
+    write_queue_marker,
+)
+from hypothex.core.fsutil import atomic_write_text
+from hypothex.core.gpus import free_gpus, gpu_status, query_gpus
+from hypothex.core.ids import utcnow
+from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
+from hypothex.core.store import dir_lock
+
+SCHEDULER_INTERVAL_SECONDS = 5.0
+log = logging.getLogger(__name__)
+
+
+@contextmanager
+def scheduler_lock(ctx: Context) -> Iterator[None]:
+    """
+    Hold the host-wide lock for GPU assignment and queue changes.
+
+    Not re-entrant: never nest it.
+
+    Parameters
+    ----------
+    ctx : Context
+    """
+    with dir_lock(ctx.layout.home / "scheduler"):
+        yield
+
+
+def assign_gpus(indices: list[int]) -> Callable[[RunRecord], RunRecord]:
+    """
+    Build an ``update_run`` mutator that records a run's GPUs.
+
+    Parameters
+    ----------
+    indices : list of int
+        GPU indices the run may use (its ``CUDA_VISIBLE_DEVICES``).
+
+    Returns
+    -------
+    callable
+        Sets ``executor.gpus`` and clears ``executor.queue_position``.
+    """
+
+    def mutate(r: RunRecord) -> RunRecord:
+        executor = r.executor.model_copy(update={"gpus": list(indices), "queue_position": None})
+        return r.model_copy(update={"executor": executor})
+
+    return mutate
+
+
+def _release_gpus(r: RunRecord) -> RunRecord:
+    """Drop a reservation that a crashed start left behind; keep the queue position."""
+    return r.model_copy(update={"executor": r.executor.model_copy(update={"gpus": []})})
+
+
+def _set_position(position: int) -> Callable[[RunRecord], RunRecord]:
+    def mutate(r: RunRecord) -> RunRecord:
+        executor = r.executor.model_copy(update={"queue_position": position})
+        return r.model_copy(update={"executor": executor})
+
+    return mutate
+
+
+def _spawn_failed(r: RunRecord) -> RunRecord:
+    if r.status in TERMINAL_STATUSES:
+        return r
+    executor = r.executor.model_copy(update={"queue_position": None})
+    return r.model_copy(
+        update={"status": RunStatus.FAILED, "ended_at": utcnow(), "executor": executor}
+    )
+
+
+@dataclass(frozen=True)
+class _Entry:
+    run_id: str
+    enqueued_at: datetime
+    gpus: int
+
+
+def _enqueued_at(marker: Path, record: RunRecord) -> datetime:
+    """Read when a run joined the queue; fall back to its creation time."""
+    try:
+        return datetime.fromisoformat(json.loads(marker.read_text("utf-8"))["enqueued_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return record.created_at
+
+
+class Scheduler:
+    """
+    The GPU queue of this environment (SSH hosts).
+
+    Parameters
+    ----------
+    ctx : Context
+    """
+
+    def __init__(self, ctx: Context) -> None:
+        self.ctx = ctx
+
+    def _entries(self) -> list[_Entry]:
+        """Waiting runs of this environment, in queue order."""
+        mine = self.ctx.descriptor.environment_id
+        entries: list[_Entry] = []
+        for record in self.ctx.index.list_runs(
+            status=RunStatus.QUEUED, include_archived=True, limit=None
+        ):
+            marker = self.ctx.run_dir(record) / QUEUE_FILE
+            if record.environment_id != mine or not marker.is_file():
+                continue
+            entries.append(
+                _Entry(record.run_id, _enqueued_at(marker, record), record.gpus_requested)
+            )
+        return sorted(entries, key=lambda e: (e.enqueued_at, e.run_id))
+
+    def positions(self) -> dict[str, int]:
+        """
+        Return each waiting run's 1-based queue position.
+
+        Returns
+        -------
+        dict of str to int
+            Run id to position, first in line = 1.
+        """
+        return {e.run_id: i for i, e in enumerate(self._entries(), start=1)}
+
+    def _reposition(self, new: str | None = None) -> None:
+        """Write changed positions to the runs (call with the lock held)."""
+        for position, entry in enumerate(self._entries(), start=1):
+            if self.ctx.find_record(entry.run_id).executor.queue_position == position:
+                continue
+            event = "run.enqueued" if entry.run_id == new else "run.queue_moved"
+            self.ctx.update_run(
+                entry.run_id, event, _set_position(position), {"position": position}
+            )
+
+    def refresh_positions(self) -> None:
+        """Rewrite ``executor.queue_position`` of waiting runs whose place changed."""
+        with scheduler_lock(self.ctx):
+            self._reposition()
+
+    def _recover_starts(self) -> None:
+        """
+        Finish or undo starts that a crash cut short (call with the lock held).
+
+        A start is: record the GPUs, spawn the supervisor (``supervisor.pid``
+        commits it), delete ``queue.json``, all under the lock. So at the
+        start of a tick, an active run with ``queue.json`` and ``supervisor.pid``
+        was started (its marker is deleted; it is never spawned again), and a
+        waiting run with GPUs but no ``supervisor.pid`` was never started (its
+        GPUs are released and it keeps its place in the queue). The markers
+        are found on disk, not through the index's active runs, so a run that
+        ended while it waited (killed, failed, or a crash between its end and
+        the marker's removal) never keeps a stale ``queue.json``.
+        """
+        mine = self.ctx.descriptor.environment_id
+        for marker in sorted(self.ctx.layout.store.glob(f"*/runs/*/{QUEUE_FILE}")):
+            run_dir = marker.parent
+            try:
+                record = self.ctx.store.read_record(run_dir.parent.parent.name, run_dir.name)
+            except HypothexError:
+                continue
+            if record.environment_id != mine:
+                continue
+            started = (run_dir / SUPERVISOR_PID_FILE).is_file()
+            if started or record.status != RunStatus.QUEUED:
+                # started (never spawned again), or ended while it waited
+                marker.unlink(missing_ok=True)
+            elif record.executor.gpus:
+                self.ctx.update_run(record.run_id, "run.gpus_released", _release_gpus, {"gpus": []})
+
+    def _keep_fifo(self, record: RunRecord, run_dir: Path) -> None:
+        """
+        Put a run that joins the queue behind every run already waiting.
+
+        ``enqueued_at`` comes from this host's clock. When the clock stepped back
+        (NTP, a VM resume), a new run would sort ahead of older ones; it is moved
+        to just after the latest waiting run instead. Call with the lock held.
+        """
+        marker = run_dir / QUEUE_FILE
+        mine = _enqueued_at(marker, record)
+        others = [e.enqueued_at for e in self._entries() if e.run_id != record.run_id]
+        latest = max(others, default=None)
+        if latest is not None and mine <= latest:
+            later = latest + timedelta(microseconds=1)
+            atomic_write_text(marker, json.dumps({"enqueued_at": later.isoformat()}))
+
+    def enqueue(self, run_id: str) -> int:
+        """
+        Put a queued run of this environment in the GPU queue.
+
+        Parameters
+        ----------
+        run_id : str
+
+        Returns
+        -------
+        int
+            The run's 1-based queue position.
+
+        Raises
+        ------
+        RunError
+            If the run is not queued, belongs to another environment, already
+            has a supervisor, or asks for more GPUs than this host has.
+        """
+        with scheduler_lock(self.ctx):
+            record = self.ctx.find_record(run_id)
+            if record.status != RunStatus.QUEUED:
+                raise RunError(
+                    f"run {run_id} is {record.status.value}; only queued runs can wait for GPUs"
+                )
+            if record.environment_id != self.ctx.descriptor.environment_id:
+                raise RunError(f"run {run_id} belongs to another environment")
+            run_dir = self.ctx.run_dir(record)
+            if (run_dir / SUPERVISOR_PID_FILE).is_file():
+                raise RunError(f"run {run_id} was already started")
+            total = len(query_gpus())
+            if record.gpus_requested > total:
+                raise RunError(
+                    f"run {run_id} asks for {record.gpus_requested} GPUs; this host has {total}"
+                )
+            if not (run_dir / QUEUE_FILE).is_file():
+                write_queue_marker(run_dir)
+            if record.executor.queue_position is None:  # joining, not already waiting
+                self._keep_fifo(record, run_dir)
+            self._reposition(new=run_id)
+            return self.positions()[run_id]
+
+    def tick(self) -> list[str]:
+        """
+        Start every waiting run whose GPUs fit, in queue order (first fit).
+
+        A run that does not fit stays in line; later, smaller runs may start
+        before it.
+
+        Returns
+        -------
+        list of str
+            Ids of the runs started, in queue order.
+        """
+        started: list[str] = []
+        with scheduler_lock(self.ctx):
+            self._recover_starts()
+            entries = self._entries()
+            if not entries:
+                return started
+            free = free_gpus(gpu_status(self.ctx))
+            for entry in entries:
+                if entry.gpus > len(free):
+                    continue
+                record = self.ctx.find_record(entry.run_id)
+                marker = self.ctx.run_dir(record) / QUEUE_FILE
+                if record.status != RunStatus.QUEUED:
+                    marker.unlink(missing_ok=True)
+                    continue
+                chosen, free = free[: entry.gpus], free[entry.gpus :]
+                record = self.ctx.update_run(
+                    entry.run_id, "run.gpus_assigned", assign_gpus(chosen), {"gpus": chosen}
+                )
+                try:
+                    spawn_supervisor(self.ctx, record)
+                except OSError as exc:  # never committed: nothing runs, so the GPUs go back
+                    marker.unlink(missing_ok=True)
+                    self.ctx.update_run(
+                        entry.run_id,
+                        "run.failed",
+                        _spawn_failed,
+                        {"reason": f"could not start the supervisor: {exc}"},
+                    )
+                    continue
+                marker.unlink(missing_ok=True)
+                started.append(entry.run_id)
+            self._reposition()
+        return started
+
+
+def run_scheduler_loop(
+    ctx: Context, stop: threading.Event, interval: float = SCHEDULER_INTERVAL_SECONDS
+) -> None:
+    """
+    Tick the scheduler every ``interval`` seconds until ``stop`` is set.
+
+    Used by ``hx serve --kind ssh`` in a background thread. A failing tick is
+    logged and the loop goes on.
+
+    Parameters
+    ----------
+    ctx : Context
+    stop : threading.Event
+        Set it to end the loop.
+    interval : float
+        Seconds between ticks.
+    """
+    scheduler = Scheduler(ctx)
+    while not stop.is_set():
+        try:
+            scheduler.tick()
+        except Exception:  # noqa: BLE001 - one bad tick must not stop the queue
+            log.exception("scheduler tick failed")
+        stop.wait(interval)

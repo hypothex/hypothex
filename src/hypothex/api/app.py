@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import logging
-from collections.abc import AsyncIterator, Callable
+import os
+import stat
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -29,6 +32,7 @@ from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
 from hypothex.core.jsonutil import to_jsonable
+from hypothex.core.layout import reserved_run_path
 from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_panel
 from hypothex.core.records import RunStatus
@@ -43,6 +47,7 @@ from hypothex.mcp.server import (
     validate_view,
     view_document,
 )
+from hypothex.remote.client import DIR_HEADER, SIZE_HEADER
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +56,11 @@ WS_POLL_SECONDS = 0.5
 WS_BATCH = 500
 UI_DIST = Path(__file__).resolve().parent.parent / "ui_dist"
 NO_UI_FALLBACK = frozenset({"api", "mcp", ".well-known", "assets"})
+FILE_MAX_BYTES = 200 * 1024 * 1024
+FILE_CHUNK_BYTES = 64 * 1024
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 
 class SpaStaticFiles(StaticFiles):
@@ -210,6 +220,238 @@ def _run_view(kind: str) -> list[PanelSpec]:
             ),
         ]
     return [PanelSpec(type="curves", title="metrics")]
+
+
+def open_run_path(store: Path, run_dir: Path, rel_path: str) -> int:
+    """
+    Open ``rel_path`` inside a run folder one name at a time and return its fd.
+
+    The walk starts at a descriptor of the store root, the one trusted path.
+    Every name below it, the run folder's own ``<project>/runs/<run_id>``
+    included, is opened relative to the descriptor of the folder above it with
+    ``O_NOFOLLOW``, so no symlink is ever followed: a link, a run folder
+    replaced by a link, or a folder swapped for a link while the request runs,
+    is refused like ``../``. Hypothex never writes symlinks into the store.
+
+    Parameters
+    ----------
+    store : Path
+        The store root (``Layout.store``).
+    run_dir : Path
+        The run folder, below ``store``.
+    rel_path : str
+        Path relative to the run folder (``/``-separated); ``""`` is the folder itself.
+
+    Returns
+    -------
+    int
+        An open descriptor of the file or folder (``O_NONBLOCK``, so a FIFO
+        never hangs); the caller closes it.
+
+    Raises
+    ------
+    StoreError
+        The path is absolute, has ``..`` or a symlink (in the run folder or on
+        the way to it), leaves the run folder, is in the reserved ``.hx/``
+        folder, or does not exist (all answered with ``404``).
+
+    Examples
+    --------
+    >>> open_run_path(Path("/tmp"), Path("/tmp/r1"), "../etc/passwd")
+    Traceback (most recent call last):
+    ...
+    hypothex.core.errors.StoreError: '../etc/passwd' is outside the run folder
+    """
+    pure = PurePosixPath(rel_path)
+    if pure.is_absolute() or ".." in pure.parts or "\x00" in rel_path:
+        raise StoreError(f"{rel_path!r} is outside the run folder")
+    if reserved_run_path(rel_path):  # Hypothex's own state: never served to anyone
+        raise StoreError(f"{rel_path!r} is reserved for Hypothex")
+    try:
+        to_run = run_dir.relative_to(store).parts
+    except ValueError:
+        raise StoreError(f"run folder {run_dir} is outside the store") from None
+    try:
+        fd = os.open(store, _OPEN_FLAGS | _DIRECTORY)
+    except OSError as exc:
+        raise StoreError(f"cannot open the store: {exc.strerror}") from None
+    for i, part in enumerate((*to_run, *pure.parts)):
+        folder = _DIRECTORY if i < len(to_run) else 0  # down to the run folder: folders only
+        try:
+            if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise StoreError(f"run folder has no {rel_path!r}")
+            child = os.open(part, _OPEN_FLAGS | _NOFOLLOW | folder, dir_fd=fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):  # O_NOFOLLOW met a symlink
+                raise StoreError(f"{rel_path!r} is outside the run folder") from None
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                raise StoreError(f"run folder has no {rel_path!r}") from None
+            raise StoreError(f"cannot read {rel_path!r}: {exc.strerror}") from None
+        finally:
+            os.close(fd)
+        fd = child
+    return fd
+
+
+def list_run_files(dir_fd: int, prefix: str = "") -> list[dict[str, Any]]:
+    """
+    List the regular files under an open folder, recursively, as ``{path, size, mtime_ns}``.
+
+    The walk goes through folder descriptors (``O_NOFOLLOW`` for each sub-folder),
+    so symlinks are never listed or walked, even one that replaces a folder
+    during the walk. Hidden names (``.lock``, temporary ``.*.tmp`` files) are
+    left out.
+
+    Parameters
+    ----------
+    dir_fd : int
+        Open descriptor of a folder inside the run folder (from
+        :func:`open_run_path`); not closed here.
+    prefix : str
+        That folder's path relative to the run folder, ``""`` or ending in ``/``.
+
+    Returns
+    -------
+    list of dict
+        ``[{"path": "predictions/predictions.jsonl", "size": 123, "mtime_ns": ...}, ...]``,
+        sorted by path.
+    """
+    out: list[dict[str, Any]] = []
+    for name in sorted(os.listdir(dir_fd)):
+        if name.startswith("."):
+            continue
+        try:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            out.append({"path": prefix + name, "size": info.st_size, "mtime_ns": info.st_mtime_ns})
+        elif stat.S_ISDIR(info.st_mode):
+            try:
+                child = os.open(name, _OPEN_FLAGS | _NOFOLLOW | _DIRECTORY, dir_fd=dir_fd)
+            except OSError:
+                continue  # gone, or swapped for a symlink since the stat
+            try:
+                out.extend(list_run_files(child, f"{prefix}{name}/"))
+            finally:
+                os.close(child)
+    return sorted(out, key=lambda item: item["path"])
+
+
+def read_span(fd: int, start: int, length: int) -> Iterator[bytes]:
+    """
+    Yield exactly the bytes ``[start, start + length)`` of an open file, then close it.
+
+    The length is fixed when the response starts, so a log that keeps growing
+    while it is sent never overruns the declared ``Content-Length``.
+
+    Parameters
+    ----------
+    fd : int
+        Open file descriptor; closed when the iterator finishes or is closed.
+    start : int
+        First byte offset.
+    length : int
+        Number of bytes to send at most.
+
+    Yields
+    ------
+    bytes
+        Chunks of up to 64 KiB.
+    """
+    try:
+        offset, end = start, start + length
+        while offset < end:
+            chunk = os.pread(fd, min(FILE_CHUNK_BYTES, end - offset), offset)
+            if not chunk:
+                return
+            offset += len(chunk)
+            yield chunk
+    finally:
+        os.close(fd)
+
+
+def file_response(fd: int, rel_path: str, *, max_bytes: int, tail: bool) -> Response:
+    """
+    Answer a run-file request: the bytes, the last ``max_bytes`` bytes, or ``413``.
+
+    Parameters
+    ----------
+    fd : int
+        Open descriptor from :func:`open_run_path`; this function owns it (it is
+        closed here, or by :func:`read_span` once the body is sent).
+    rel_path : str
+        The requested path, for messages.
+    max_bytes : int
+        Largest body to send.
+    tail : bool
+        Send the last ``max_bytes`` bytes of a bigger file instead of ``413``.
+
+    Returns
+    -------
+    Response
+        ``200`` streaming body with ``Content-Length`` and ``X-Hypothex-Size`` (full
+        size), or a ``413`` JSON error ``{error, type: "FileTooLargeError", size}``.
+
+    Raises
+    ------
+    StoreError
+        The path is not a regular file (FIFO, socket, device).
+    """
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(fd)
+        raise StoreError(f"{rel_path!r} is not a regular file")
+    size = info.st_size
+    start, length = 0, size
+    if size > max_bytes:
+        if not tail:
+            os.close(fd)
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": f"{rel_path} is {size} bytes, over max_bytes={max_bytes}",
+                    "type": "FileTooLargeError",
+                    "size": size,
+                },
+            )
+        start, length = size - max_bytes, max_bytes
+    return StreamingResponse(
+        read_span(fd, start, length),
+        media_type="application/octet-stream",
+        headers={"Content-Length": str(length), SIZE_HEADER: str(size)},
+    )
+
+
+def register_env_routes(app: FastAPI, ctx: Context) -> None:
+    """
+    Add the env-server routes: run files, GPUs, and the GPU queue (spec 5.5, 8A.5, 8A.7).
+
+    Parameters
+    ----------
+    app : FastAPI
+        The application.
+    ctx : Context
+        Open context.
+    """
+
+    @app.get("/api/v1/runs/{run_id}/files/{path:path}")
+    def run_file(
+        run_id: str,
+        path: str,
+        max_bytes: Annotated[int, Query(ge=0)] = FILE_MAX_BYTES,
+        tail: bool = False,
+    ) -> Response:
+        run_dir = ctx.run_dir(ctx.find_record(run_id))
+        fd = open_run_path(ctx.layout.store, run_dir, path)
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            rel = "/".join(PurePosixPath(path).parts)
+            try:
+                listing = list_run_files(fd, f"{rel}/" if rel else "")
+            finally:
+                os.close(fd)
+            return JSONResponse(listing, headers={DIR_HEADER: "1"})
+        return file_response(fd, path, max_bytes=max_bytes, tail=tail)
 
 
 def create_app(
@@ -544,6 +786,7 @@ def create_app(
         except WebSocketDisconnect:
             return
 
+    register_env_routes(app, ctx)
     app.mount("/mcp", mcp_http)
 
     ui = ui_dir or UI_DIST

@@ -76,3 +76,35 @@ class Layout:
     def ensure(self) -> None:
         """Create the home and store directories if missing."""
         self.store.mkdir(parents=True, exist_ok=True)
+
+
+HX_DIR = ".hx"
+"""Reserved folder in every run folder for Hypothex's own state (``.hx/mirror-skips.json``).
+
+No remote or artifact path may address it: the env files route refuses it and the hub
+mirror never fetches a host path in it (:func:`reserved_run_path`)."""
+
+
+def reserved_run_path(rel_path: str) -> bool:
+    """
+    Return True when a run-relative path is inside the reserved ``.hx`` folder.
+
+    Parameters
+    ----------
+    rel_path : str
+        ``/``-separated path relative to a run folder.
+
+    Returns
+    -------
+    bool
+        True when its first component (after empty and ``.`` parts) is ``.hx``.
+
+    Examples
+    --------
+    >>> reserved_run_path(".hx/mirror-skips.json"), reserved_run_path("./.hx")
+    (True, True)
+    >>> reserved_run_path("predictions/.hx"), reserved_run_path("predictions/x.skipped")
+    (False, False)
+    """
+    parts = [part for part in rel_path.split("/") if part not in ("", ".")]
+    return bool(parts) and parts[0] == HX_DIR

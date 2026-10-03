@@ -10,6 +10,7 @@ streams update. Spec sections 5.3, 5.5, 5.6, and 8A.2-8A.3.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import filecmp
 import json
@@ -17,24 +18,32 @@ import logging
 import os
 import re
 import tempfile
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Any, Literal, TypeVar
 
 import yaml
 from pydantic import BaseModel
 
 from hypothex.core.context import Context
 from hypothex.core.cost import price_record
+from hypothex.core.environment import PROTOCOL_VERSION
 from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.events import Event
 from hypothex.core.fsutil import atomic_write_text, read_yaml
+from hypothex.core.ids import utcnow
 from hypothex.core.index import index_run
 from hypothex.core.layout import HX_DIR, reserved_run_path
-from hypothex.core.records import Artifact, RunRecord
+from hypothex.core.records import ACTIVE_STATUSES, Artifact, RunRecord
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
-from hypothex.remote.client import EnvClient, RemoteFile
-from hypothex.remote.config import HostKind
+from hypothex.remote.bootstrap import BootstrapError
+from hypothex.remote.client import EnvClient, EnvRequestError, RemoteFile
+from hypothex.remote.config import EnvironmentsFile, HostKind, HostSpec
+from hypothex.remote.ssh import Tunnel
 
 log = logging.getLogger(__name__)
 
@@ -736,3 +745,561 @@ def mirror_event(
     _emit_mirror(
         ctx, host, environment_id, mirrored[0], event.type, event.sequence, reason=_reason(event)
     )
+
+
+class _UpgradeRequiredError(Exception):
+    """The host speaks another protocol version; retrying cannot help."""
+
+
+AUTH_FAILURE_STATUSES = frozenset({401, 403})
+"""HTTP answers of an env server that does not accept the hub's token (spec 5.3)."""
+
+
+def _auth_failure(exc: BaseException) -> int | None:
+    """The 401/403 status of an authentication failure, else None."""
+    if isinstance(exc, EnvRequestError) and exc.status_code in AUTH_FAILURE_STATUSES:
+        return exc.status_code
+    return None
+
+
+T = TypeVar("T")
+
+
+def _run_key(event: Event) -> tuple[str, str] | None:
+    """The ``(project, run_id)`` a ``run.*`` event is about, or None."""
+    if not event.type.startswith("run.") or event.project is None or event.run_id is None:
+        return None
+    return event.project, event.run_id
+
+
+def _brief(exc: BaseException) -> str:
+    text = str(exc).strip() or type(exc).__name__
+    return text[-_MESSAGE_LIMIT:]
+
+
+# supervisors -------------------------------------------------------------------------
+REPLAY_BATCH_EVENTS = 500
+"""Most events one ``_apply`` call mirrors; each run in a batch is mirrored once."""
+
+
+@dataclass
+class _Supervisor:
+    name: str
+    spec: HostSpec
+    state: HostState
+    backoff: Backoff
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    task: asyncio.Task[None] | None = None
+    client: EnvClient | None = None
+    tunnel: Tunnel | None = None
+    last_ok: float | None = None
+    last_ok_at: datetime | None = None
+    failure: str = ""
+    failed_bootstrap: bool = False
+    pending: set[asyncio.Future[Any]] = field(default_factory=set)
+    token: str | None = None
+
+
+class Hub:
+    """
+    One connection supervisor per remote host, plus the mirror into the hub store.
+
+    Hosts with ``route: local`` are the hub itself: they get no supervisor and
+    always report ``connected``. Timing knobs (``backoff_delays``,
+    ``stable_after``, ``stale_after``, ``ping_interval``) are attributes so tests
+    can shorten them before ``start()``.
+
+    Parameters
+    ----------
+    ctx : Context
+        The hub context; mirrored runs, cursors, and ``host.state`` /
+        ``mirror.run_updated`` events go here.
+    hosts : EnvironmentsFile
+        Parsed ``environments.yaml``.
+    """
+
+    def __init__(self, ctx: Context, hosts: EnvironmentsFile) -> None:
+        self.ctx = ctx
+        self.hosts = hosts
+        self.backoff_delays: tuple[float, ...] = BACKOFF_SECONDS
+        self.stable_after = STABLE_AFTER_SECONDS
+        self.stale_after = STALE_AFTER_SECONDS
+        self.ping_interval = PING_INTERVAL_SECONDS
+        self._started = False
+        self._sups: dict[str, _Supervisor] = {}
+        for name, spec in sorted(hosts.environments.items()):
+            self._sups[name] = self._new_supervisor(name, spec)
+
+    def _new_supervisor(self, name: str, spec: HostSpec) -> _Supervisor:
+        now = utcnow()
+        if spec.route == "local":
+            state = HostState(
+                name=name,
+                kind=spec.kind,
+                state="connected",
+                since=now,
+                message="hub",
+                environment_id=self.ctx.descriptor.environment_id,
+                hx_version=self.ctx.descriptor.hx_version,
+            )
+        else:
+            state = HostState(name=name, kind=spec.kind, state="connecting", since=now)
+        return _Supervisor(name=name, spec=spec, state=state, backoff=Backoff())
+
+    # public API ----------------------------------------------------------------------
+    async def start(self) -> None:
+        """
+        Start one supervisor task per remote host (no-op when already started).
+
+        First re-indexes mirrored runs a cut-short mirror left with
+        ``.mirror-index-pending`` (``reindex_pending``).
+        """
+        if self._started:
+            return
+        self._started = True
+        try:
+            repaired = reindex_pending(self.ctx)
+        except Exception:  # noqa: BLE001 - each run's next mirror redoes it anyway
+            log.exception("re-indexing half-mirrored runs failed")
+        else:
+            if repaired:
+                log.info("re-indexed half-mirrored runs: %s", ", ".join(repaired))
+        for sup in self._sups.values():
+            if sup.spec.route != "local":
+                self._launch(sup)
+
+    async def stop(self) -> None:
+        """Cancel every supervisor, wait for its shielded mirror work, and close its tunnel."""
+        for sup in self._sups.values():
+            await self._halt(sup)
+        self._started = False
+
+    async def add_host(self, name: str, spec: HostSpec) -> HostState:
+        """
+        Add a host, or restart only this host's supervisor when its spec changed.
+
+        Other hosts keep their sessions and tunnels (``hx hosts add``, ``map``,
+        and ``upgrade`` call this instead of rebuilding the hub).
+
+        Parameters
+        ----------
+        name : str
+            Host name.
+        spec : HostSpec
+            The host's entry.
+
+        Returns
+        -------
+        HostState
+            The host's state right after the change.
+        """
+        old = self._sups.get(name)
+        if old is not None:
+            if old.spec == spec:
+                return old.state.model_copy()
+            await self._halt(old)
+        sup = self._new_supervisor(name, spec)
+        self._sups[name] = sup
+        self.hosts.environments[name] = spec
+        if self._started and spec.route != "local":
+            self._launch(sup)
+        return sup.state.model_copy()
+
+    async def remove_host(self, name: str) -> None:
+        """
+        Stop one host's supervisor and forget the host (``hx hosts rm``).
+
+        Parameters
+        ----------
+        name : str
+            Host name; unknown names are ignored.
+        """
+        sup = self._sups.pop(name, None)
+        self.hosts.environments.pop(name, None)
+        if sup is not None:
+            await self._halt(sup)
+
+    async def connect(self, name: str) -> HostState:
+        """
+        (Re)start a host's supervisor with a fresh backoff.
+
+        Parameters
+        ----------
+        name : str
+            Host name.
+
+        Returns
+        -------
+        HostState
+            The state right after the restart (usually ``connecting``).
+        """
+        sup = self._get(name)
+        if sup.spec.route != "local":
+            await self._halt(sup)
+            self._set(sup, "connecting")
+            self._launch(sup)
+        return sup.state.model_copy()
+
+    async def disconnect(self, name: str) -> HostState:
+        """
+        Stop a host's supervisor and mark it ``disabled`` until ``connect``.
+
+        Parameters
+        ----------
+        name : str
+            Host name.
+
+        Returns
+        -------
+        HostState
+            The ``disabled`` state.
+        """
+        sup = self._get(name)
+        if sup.spec.route != "local":
+            await self._halt(sup)
+            self._set(sup, "disabled", "disconnected")
+        return sup.state.model_copy()
+
+    def state(self, name: str) -> HostState:
+        """
+        Return one host's connection state.
+
+        Parameters
+        ----------
+        name : str
+            Host name.
+
+        Returns
+        -------
+        HostState
+
+        Raises
+        ------
+        HostUnavailableError
+            If no such host is configured.
+        """
+        return self._get(name).state.model_copy()
+
+    def states(self) -> list[HostState]:
+        """
+        Return every host's state, sorted by name.
+
+        Returns
+        -------
+        list of HostState
+        """
+        return [self._sups[n].state.model_copy() for n in sorted(self._sups)]
+
+    def client(self, name: str) -> EnvClient:
+        """
+        Return the client of a connected host.
+
+        Parameters
+        ----------
+        name : str
+            Host name.
+
+        Returns
+        -------
+        EnvClient
+
+        Raises
+        ------
+        HostUnavailableError
+            If the host is unknown, is the hub itself, or is not ``connected``.
+        """
+        sup = self._get(name)
+        if sup.spec.route == "local":
+            raise HostUnavailableError(f"host {name!r} is the hub itself")
+        if sup.state.state != "connected" or sup.client is None:
+            detail = f": {sup.state.message}" if sup.state.message else ""
+            raise HostUnavailableError(f"host {name!r} is {sup.state.state}{detail}")
+        return sup.client
+
+    # state ---------------------------------------------------------------------------
+    def _get(self, name: str) -> _Supervisor:
+        try:
+            return self._sups[name]
+        except KeyError:
+            raise HostUnavailableError(f"unknown host {name!r}") from None
+
+    def _set(
+        self,
+        sup: _Supervisor,
+        state: ConnState,
+        message: str = "",
+        *,
+        since: datetime | None = None,
+        **fields: object,
+    ) -> None:
+        changed = sup.state.state != state
+        update: dict[str, object] = {"state": state, "message": message, **fields}
+        if changed or since is not None:
+            update["since"] = since or utcnow()
+        sup.state = sup.state.model_copy(update=update)
+        if changed:
+            self.ctx.events.append("host.state", payload=sup.state.model_dump(mode="json"))
+
+    def _mark_ok(self, sup: _Supervisor) -> None:
+        sup.last_ok = time.monotonic()
+        sup.last_ok_at = utcnow()
+        if sup.state.state == "stale":
+            self._set(sup, "connected")
+
+    def _is_stale(self, sup: _Supervisor) -> bool:
+        return sup.last_ok is not None and time.monotonic() - sup.last_ok > self.stale_after
+
+    # supervisor loop -----------------------------------------------------------------
+    def _launch(self, sup: _Supervisor) -> None:
+        sup.backoff = Backoff(self.backoff_delays, self.stable_after)
+        sup.task = asyncio.create_task(self._supervise(sup), name=f"hx-hub-{sup.name}")
+
+    async def _halt(self, sup: _Supervisor) -> None:
+        task, sup.task = sup.task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await self._drain(sup)
+
+    async def _drain(self, sup: _Supervisor) -> None:
+        """Wait for the shielded worker threads of this host's old session."""
+        while sup.pending:
+            await asyncio.gather(*list(sup.pending), return_exceptions=True)
+
+    async def _shielded(self, sup: _Supervisor, fn: Callable[..., T], *args: object) -> T:
+        """Run ``fn`` in a worker thread that a cancel cannot split; ``_halt`` waits for it."""
+        future: asyncio.Future[T] = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+        sup.pending.add(future)
+        future.add_done_callback(sup.pending.discard)
+        return await asyncio.shield(future)
+
+    async def _supervise(self, sup: _Supervisor) -> None:
+        while True:
+            try:
+                await self._session(sup)
+                sup.failure, sup.failed_bootstrap = "connection closed", False
+            except _UpgradeRequiredError as exc:
+                self._set(sup, "upgrade", str(exc))
+                return
+            except EnvRequestError as exc:
+                status = _auth_failure(exc)
+                if status is not None:  # retrying with the same token cannot help
+                    self._set(
+                        sup,
+                        "error",
+                        f"authentication failed (HTTP {status}); reconnect or re-pair: "
+                        f"hx hosts connect {sup.name}",
+                    )
+                    return
+                sup.failure, sup.failed_bootstrap = _brief(exc), False
+            except BootstrapError as exc:
+                sup.failure, sup.failed_bootstrap = _brief(exc), True
+            except Exception as exc:  # noqa: BLE001 - every failure means "retry later"
+                sup.failure, sup.failed_bootstrap = _brief(exc), False
+            log.info("host %s: %s", sup.name, sup.failure)
+            delay = sup.backoff.next_delay(time.monotonic())
+            message = f"retry in {delay:g}s: {sup.failure}"
+            if self._is_stale(sup):
+                self._set(sup, "stale", message, since=sup.last_ok_at)
+            elif sup.failed_bootstrap:
+                self._set(sup, "error", message)
+            else:
+                self._set(sup, "connecting", message)
+            await self._wait(sup, delay)
+
+    async def _wait(self, sup: _Supervisor, delay: float) -> None:
+        end = time.monotonic() + delay
+        while (left := end - time.monotonic()) > 0:
+            await asyncio.sleep(min(left, 1.0))
+            if sup.state.state != "stale" and self._is_stale(sup):
+                self._set(sup, "stale", sup.state.message, since=sup.last_ok_at)
+
+    async def _open_route(self, sup: _Supervisor) -> str:
+        spec = sup.spec
+        if spec.route == "url":
+            if not spec.url:
+                raise BootstrapError(f"host {sup.name!r} has route url but no url")
+            return spec.url.rstrip("/")
+        raise BootstrapError(f"host {sup.name!r}: route {spec.route} is not supported yet")
+
+    def _close_route(self, sup: _Supervisor) -> None:
+        tunnel, sup.tunnel = sup.tunnel, None
+        if tunnel is not None:
+            with contextlib.suppress(Exception):
+                tunnel.stop()
+
+    async def _session(self, sup: _Supervisor) -> None:
+        client: EnvClient | None = None
+        pinger: EnvClient | None = None
+        try:
+            sup.token = None  # route url: no token; route ssh: _open_route sets it
+            base_url = await self._open_route(sup)
+            client = EnvClient(base_url, token=sup.token)
+            pinger = EnvClient(base_url, timeout=PING_TIMEOUT_SECONDS, token=sup.token)
+            desc = await asyncio.to_thread(client.descriptor)
+            if desc.protocol_version != PROTOCOL_VERSION:
+                raise _UpgradeRequiredError(
+                    f"upgrade hx on {sup.name}: protocol {desc.protocol_version}, "
+                    f"hub speaks {PROTOCOL_VERSION}"
+                )
+            env_id = desc.environment_id
+            cursor = await asyncio.to_thread(self._read_cursor, sup, env_id)
+            sup.client = client
+            sup.failed_bootstrap = False
+            self._mark_ok(sup)
+            sup.backoff.connected(time.monotonic())
+            self._set(
+                sup,
+                "connected",
+                environment_id=env_id,
+                hx_version=desc.hx_version,
+                last_sequence=cursor,
+                local_port=sup.tunnel.local_port if sup.tunnel is not None else None,
+            )
+            consume = asyncio.create_task(self._consume(sup, client, env_id, cursor))
+            watch = asyncio.create_task(self._watch(sup, pinger, client, env_id))
+            try:
+                done, _ = await asyncio.wait({consume, watch}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in (consume, watch):
+                    task.cancel()
+                await asyncio.gather(consume, watch, return_exceptions=True)
+            for task in done:
+                task.result()
+        finally:
+            sup.client = None
+            # the shielded apply/refresh threads still use `client`: wait, then close both
+            await self._drain(sup)
+            for http in (client, pinger):
+                if http is not None:
+                    with contextlib.suppress(Exception):
+                        http.close()
+            self._close_route(sup)
+
+    def _read_cursor(self, sup: _Supervisor, env_id: str) -> int:
+        with sup.lock:
+            return self.ctx.index.get_cursor(sup.name, env_id)
+
+    def _apply(
+        self, sup: _Supervisor, client: EnvClient, env_id: str, events: list[Event]
+    ) -> int | None:
+        """
+        Mirror a batch of events and advance the cursor, at most once per sequence.
+
+        Each run the batch is about is mirrored once; then one
+        ``mirror.run_updated`` is emitted per event, then the cursor is saved.
+        Returns the new cursor, or None when every event was already applied.
+        """
+        with sup.lock:
+            cursor = self.ctx.index.get_cursor(sup.name, env_id)
+            fresh = [e for e in events if e.sequence > cursor]
+            if not fresh:
+                return None
+            mirrored: dict[tuple[str, str], RunRecord | None] = {}
+            for event in fresh:
+                key = _run_key(event)
+                if key is None or key in mirrored:
+                    continue
+                result = mirror_run(
+                    self.ctx,
+                    client,
+                    sup.name,
+                    env_id,
+                    *key,
+                    usd_per_gpu_hour=sup.spec.usd_per_gpu_hour,
+                )
+                mirrored[key] = result[0] if result is not None else None
+            for event in fresh:
+                key = _run_key(event)
+                record = mirrored.get(key) if key is not None else None
+                if record is not None:
+                    _emit_mirror(
+                        self.ctx,
+                        sup.name,
+                        env_id,
+                        record,
+                        event.type,
+                        event.sequence,
+                        reason=_reason(event),
+                    )
+            last = fresh[-1].sequence
+            self.ctx.index.set_cursor(sup.name, env_id, last)
+            return last
+
+    async def _consume(self, sup: _Supervisor, client: EnvClient, env_id: str, cursor: int) -> None:
+        # bounded: a long replay waits in the socket, not in the hub's memory
+        queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=2 * REPLAY_BATCH_EVENTS)
+
+        async def read() -> None:
+            async for event in client.events(cursor):
+                if event.sequence > cursor:
+                    await queue.put(event)
+
+        reader = asyncio.create_task(read())
+        getter: asyncio.Future[Event] | None = None
+        try:
+            while True:
+                if queue.empty():
+                    if reader.done():
+                        reader.result()  # the stream ended (or failed): end the session
+                        return
+                    getter = asyncio.ensure_future(queue.get())
+                    await asyncio.wait({getter, reader}, return_when=asyncio.FIRST_COMPLETED)
+                    if not getter.done():
+                        getter.cancel()
+                        continue
+                    batch = [getter.result()]
+                else:
+                    batch = [queue.get_nowait()]
+                while not queue.empty() and len(batch) < REPLAY_BATCH_EVENTS:
+                    batch.append(queue.get_nowait())
+                # shielded: a cancel never splits "mirror + emit" from "save cursor"
+                await self._shielded(sup, self._apply, sup, client, env_id, batch)
+                cursor = batch[-1].sequence
+                sup.state = sup.state.model_copy(update={"last_sequence": cursor})
+                self._mark_ok(sup)
+        finally:
+            if getter is not None:  # a cancel during the wait leaves it pending
+                getter.cancel()
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+
+    async def _watch(
+        self, sup: _Supervisor, pinger: EnvClient, client: EnvClient, env_id: str
+    ) -> None:
+        while True:
+            await asyncio.sleep(self.ping_interval)
+            if sup.tunnel is not None and not sup.tunnel.alive():
+                raise ConnectionError("ssh tunnel exited")
+            try:
+                await asyncio.to_thread(pinger.descriptor)
+            except Exception as exc:  # noqa: BLE001 - a failed ping only counts toward stale
+                if self._is_stale(sup):
+                    raise ConnectionError(
+                        f"no answer for {self.stale_after:g}s: {_brief(exc)}"
+                    ) from exc
+                continue
+            self._mark_ok(sup)
+            await self._shielded(sup, self._refresh_active, sup, client, env_id)
+
+    def _refresh_active(self, sup: _Supervisor, client: EnvClient, env_id: str) -> None:
+        """Re-mirror this host's queued/running runs; SDK metric writes emit no event."""
+        with sup.lock:
+            for status in sorted(ACTIVE_STATUSES):
+                for record in self.ctx.index.list_runs(
+                    status=status, include_archived=True, limit=None
+                ):
+                    if record.environment_id != env_id:
+                        continue
+                    mirrored = mirror_run(
+                        self.ctx,
+                        client,
+                        sup.name,
+                        env_id,
+                        record.project,
+                        record.run_id,
+                        usd_per_gpu_hour=sup.spec.usd_per_gpu_hour,
+                    )
+                    if mirrored is not None and mirrored[1]:
+                        _emit_mirror(self.ctx, sup.name, env_id, mirrored[0], "refresh", None)

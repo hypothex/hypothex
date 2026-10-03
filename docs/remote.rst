@@ -1,198 +1,303 @@
-Remote hosts and sweeps
-=======================
+Remote hosts
+============
 
-Hypothex runs experiments on SSH GPU boxes and SLURM clusters. Your machine is the
-**hub**: it runs ``hx serve``, keeps the index of every project, and serves the UI.
-Each host runs its own **env server** (``hx serve`` on the host). The env server
-starts, watches, and records its runs, so a run keeps going when your laptop sleeps
-or the network drops. The hub copies the results back as they happen.
+Hypothex runs experiments on SSH GPU boxes and SLURM clusters. This page explains the
+parts, how to add a host, and how runs reach it. The GPU queue, SLURM, sweeps, and cost
+have their own pages: :doc:`gpus`, :doc:`slurm`, :doc:`sweeps`, :doc:`cost`.
 
-Env servers listen on ``127.0.0.1`` only, and the hub reaches them through an SSH
-tunnel made with your own ``ssh`` and ``~/.ssh/config``. On a shared GPU box or a
-SLURM login node other users can reach ``127.0.0.1`` too, so an env server answers
-only requests that carry its token (``Authorization: Bearer``). The token is new for
-each start and is kept in ``~/.hypothex/serve/server.json`` on the host (readable only
-by you); the hub reads it over ``ssh``. Only the descriptor
-``/.well-known/hypothex/environment`` is open. The hub's own ``hx serve`` (the UI on
-your machine) works as before, without a token.
+How it fits together
+--------------------
+
+- The **hub** is your machine. It runs ``hx serve``, keeps the index of every project,
+  serves the UI, and connects to every host in ``~/.hypothex/environments.yaml``.
+- Each host runs its own **env server** (``hx serve --kind ssh`` or ``--kind slurm``).
+  The env server starts, watches, and records its runs. A run keeps going when your
+  laptop sleeps or the network drops.
+- The hub reaches an env server through an **SSH tunnel** (``ssh -N -L``) made with
+  your own ``ssh`` and ``~/.ssh/config``. The env server listens on ``127.0.0.1`` only.
+- The hub subscribes to each host's event stream and **mirrors** the runs: it copies
+  the small files of each run to the hub as they change. Big files stay on the host.
+
+The env server asks for a bearer token on every request. See :doc:`security`.
+
+Before you start
+----------------
+
+- ``ssh ALIAS`` works from the hub without a password prompt (key login or an agent).
+  Hypothex runs ``ssh`` with ``-o BatchMode=yes``, so it never asks for a password.
+- The host has a git checkout of your project, and can ``git fetch`` the commits you
+  launch (push them first).
+- The host has ``uv``, or ``curl``/``wget`` and network access to install it. The
+  install also needs access to the package index for Hypothex's dependencies.
+- A SLURM host: run the env server on a login node, and give it a home on a shared
+  filesystem that supports ``flock`` (see :doc:`slurm`).
 
 Add a host
 ----------
 
 .. code-block:: bash
 
-   hx hosts add gpu1 --ssh gpu1-alias --usd-per-gpu-hour 2.10
-   hx hosts add cluster --ssh login-node --slurm --partition gpu --time 08:00:00
-   hx hosts map deepretro gpu1 /home/sv/code/DeepRetro
+   hx hosts add gpu-box --ssh gpu-box --usd-per-gpu-hour 2.10
+   hx hosts add cluster --ssh cluster-login --slurm --partition gpu --time 08:00:00
+   hx hosts map toy-classifier gpu-box /home/me/code/toy-classifier
 
-``--ssh`` takes a ``Host`` from ``~/.ssh/config``. ``hx hosts map`` tells the hub where
-a project's checkout is on the host; runs there use it. Hosts are kept in
-``~/.hypothex/environments.yaml`` on the hub:
+``hx hosts add NAME`` options:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Option
+     - Meaning
+   * - ``--ssh ALIAS``
+     - A ``Host`` from ``~/.ssh/config`` (or ``user@host``). Give ``--ssh`` or
+       ``--url``, not both.
+   * - ``--url URL``
+     - An env server that already listens at ``URL`` (tests and special setups). No
+       bootstrap.
+   * - ``--slurm``
+     - The host is a SLURM login node.
+   * - ``--partition P``, ``--account A``
+     - Default SLURM partition and account (need ``--slurm``).
+   * - ``--time T``
+     - Default SLURM time limit (default ``02:00:00``).
+   * - ``--gpus N``
+     - Default SLURM GPUs per job (default 1).
+   * - ``--remote-home PATH``
+     - The Hypothex home on the host (default ``~/.hypothex``).
+   * - ``--usd-per-gpu-hour X``
+     - The price of one GPU hour, for :doc:`cost`.
+   * - ``--json``
+     - Print machine-readable JSON.
+
+A host name uses ``a-z``, ``0-9``, ``-`` and ``_`` (up to 32 characters). ``local``
+is reserved for the hub.
+
+What ``hx hosts add --ssh`` does
+--------------------------------
+
+``hx hosts add --ssh`` sets the host up over ``ssh`` in three steps (the
+*bootstrap*):
+
+1. **Probe**: it checks the OS, Python, ``uv``, ``nvidia-smi``, and ``sbatch``. With
+   ``--slurm`` and no ``sbatch`` on the host, nothing is added.
+2. **Install**: it builds a wheel of the Hypothex version you run (``uv build``) from
+   a source checkout, or downloads that release from PyPI for a hub installed with
+   ``uv tool install``. It copies the wheel with ``scp`` and installs it with
+   ``uv tool install --force`` into ``~/.hypothex/runtime`` on the host. If the host
+   has no ``uv``, the official installer puts one into ``~/.local/bin``.
+3. **Start**: it starts ``hx serve --host 127.0.0.1 --port 0`` on the host, or reuses
+   a healthy env server for that home. The port and the token go into
+   ``~/.hypothex/serve/server.json`` on the host (mode 0600).
+
+Then it writes the host to ``environments.yaml`` and, when the hub runs, the hub
+connects at once. Without a running hub, the next ``hx serve`` connects it.
+
+The environments file
+---------------------
+
+Hosts are kept in ``~/.hypothex/environments.yaml`` on the hub. ``hx hosts add``,
+``map``, and ``rm`` write it; you can also edit it by hand.
 
 .. code-block:: yaml
 
+   stale_banner_hours: 24          # UI banner when a host is stale this long
    environments:
-     gpu1:
-       route: ssh
-       ssh_alias: gpu1-alias
-       kind: ssh
+     gpu-box:
+       route: ssh                  # ssh | url
+       ssh_alias: gpu-box
+       kind: ssh                   # ssh | slurm
        home: ~/.hypothex
        usd_per_gpu_hour: 2.10
-       projects: {deepretro: /home/sv/code/DeepRetro}
+       projects: {toy-classifier: /home/me/code/toy-classifier}
      cluster:
        route: ssh
-       ssh_alias: login-node
+       ssh_alias: cluster-login
        kind: slurm
-       slurm: {partition: gpu, account: null, time: "08:00:00", gpus: 1}
+       slurm: {partition: gpu, account: null, time: "08:00:00", gpus: 1, extra: ["--qos=normal"]}
 
-``hx hosts add --ssh`` sets the host up: it checks the host (OS, Python or ``uv``,
-``nvidia-smi``, ``sbatch``), installs this version of Hypothex into
-``~/.hypothex/runtime`` on the host, and starts the env server (or reuses a healthy
-one). The wheel comes from your source checkout (``uv build``); a hub installed with
-``uv tool install hypothex`` downloads its own release from PyPI instead (no network,
-or an unpublished version: run ``hx`` from a source checkout). A SLURM host's home must
-support ``flock`` (on Lustre, mount with ``-o flock``); the env server refuses to start
-otherwise, and ``hx hosts add --slurm`` adds nothing. While ``hx serve`` runs on the hub
-it connects every host: it starts the env server again when it is gone (after a reboot)
-and opens the tunnel. A dropped connection is retried after 3, 4, 8, and then every 16
-seconds; a host that refuses the hub's token (HTTP 401/403) shows ``error`` and is not
-retried until ``hx hosts connect``. ``hx hosts add``, ``map``, and ``rm`` update a
-running hub at once.
+``slurm.extra`` holds more ``sbatch`` options, one option per item. See :doc:`slurm`.
+A broken file does not stop ``hx serve``: every host shows ``error`` with the message
+until you fix the file.
+
+Map a project
+-------------
 
 .. code-block:: bash
 
-   hx hosts list              # what environments.yaml says (no hub needed)
-   hx hosts status --json     # live: state, GPUs busy, queue, SLURM jobs, cost today
-   hx hosts disconnect gpu1   # stop watching gpu1; its runs keep going
-   hx hosts connect gpu1      # watch it again
-   hx hosts upgrade gpu1      # install this Hypothex version on gpu1 and restart its server
-   hx hosts rm gpu1
+   hx hosts map PROJECT HOST PATH
 
-Host states: ``connecting``, ``bootstrapping``, ``connected``, ``stale`` (no answer
-for 60 s; its runs show as stale, they are not lost), ``upgrade`` (the host runs an
-incompatible Hypothex; use ``hx hosts upgrade``), ``error``, and ``disabled``
-(disconnected). ``GET /api/v1/hosts`` lists the hub itself first as ``local``.
-``hx hosts disconnect`` is kept across hub restarts; connecting, disconnecting, or
-adding one host never drops the others. A broken ``environments.yaml`` does not stop
-``hx serve``: the hosts show ``error`` with the message until the file is fixed. The UI
-shows a banner for a host ``stale`` longer than ``stale_banner_hours`` (top of
-``environments.yaml``, default 24).
+``hx hosts map`` tells the hub where a project's checkout is on a host. Runs on that
+host use it. ``PATH`` is absolute or starts with ``~``. A running hub uses the new map
+at once.
 
-The CLI and the MCP server reach the hub at ``HYPOTHEX_HUB_URL`` (default
-``http://127.0.0.1:7777``).
+Manage hosts
+------------
+
+.. code-block:: bash
+
+   hx hosts list                 # what environments.yaml says (no hub needed)
+   hx hosts status               # live: state, GPUs busy, queue, SLURM jobs, cost today
+   hx hosts status gpu-box --json
+   hx hosts disconnect gpu-box   # stop watching gpu-box; its runs keep going
+   hx hosts connect gpu-box      # watch it again (also clears an error)
+   hx hosts upgrade gpu-box      # install this Hypothex version and restart its server
+   hx hosts rm gpu-box           # forget it; its env server and runs keep going
+
+``hx hosts status`` columns: host, kind, state, since, GPUs busy (busy/total), queue,
+SLURM pending/running, cost today, message. The first row is always the hub itself,
+named ``local``.
+
+``hx hosts disconnect`` is kept across hub restarts. Connecting, disconnecting, or
+adding one host never drops the other hosts.
+
+Host states
+-----------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 80
+
+   * - State
+     - Meaning
+   * - ``connecting``
+     - The hub opens the tunnel and reads the descriptor.
+   * - ``bootstrapping``
+     - The hub checks the env server over ``ssh`` and starts it again when it is gone
+       (for example after a reboot).
+   * - ``connected``
+     - Events and files flow.
+   * - ``stale``
+     - No answer for 60 s. Its runs show as stale; they are not lost.
+   * - ``upgrade``
+     - The host runs an incompatible Hypothex. Run ``hx hosts upgrade HOST``.
+   * - ``error``
+     - The connection failed; the message says why.
+   * - ``disabled``
+     - You ran ``hx hosts disconnect``.
+
+A dropped connection is tried again after 3, 4, 8, and then every 16 seconds. A host
+that refuses the hub's token (HTTP 401 or 403) shows ``error`` and is not tried again
+until ``hx hosts connect``. The UI shows a banner for a host that is ``stale`` longer
+than ``stale_banner_hours``.
+
+Where the CLI finds the hub
+---------------------------
+
+Commands that need live hosts (``hx hosts status``, ``hx launch --host``,
+``hx sweep --host``, ``hx pull``, and the MCP host tools) call the hub at
+``HYPOTHEX_HUB_URL`` (default ``http://127.0.0.1:7777``). They send
+``HYPOTHEX_HUB_TOKEN`` when it is set. For a hub on this machine they read the token
+from the hub's own ``~/.hypothex/serve/server.json`` when it has one.
+
+.. code-block:: bash
+
+   HYPOTHEX_HUB_URL=http://127.0.0.1:7777 hx hosts status
 
 Launch on a host
 ----------------
 
 .. code-block:: bash
 
-   hx launch --host gpu1 --gpus 2 --queue -t TASK -H "why" -- python train.py --seed '{seed}'
+   hx launch --host gpu-box --gpus 2 --queue -t TASK -H "why" -- python train.py --seed '{seed}'
    hx launch --host cluster --gpus 2 --time 04:00:00 -t TASK -H "why" -- python train.py
+   hx launch --host gpu-box --wait -t TASK -H "why" -- python eval.py   # block until it ends
 
-- The run uses the exact commit you launched from: the hub sends your checkout's
-  ``HEAD`` and your uncommitted changes (``git diff HEAD``). The host runs ``git
-  fetch`` when it does not have that commit (push it first to a remote the host can
-  fetch), and applies the changes in a clean git worktree; its own checkout is not
-  touched. A diff that is not UTF-8 text, or is larger than 5 MiB, is refused: commit
-  it first. New files that git does not track yet are not in ``git diff HEAD``;
-  ``hx launch`` names them in a warning (``git add`` them to send them).
-- ``hx launch --host`` and ``hx sweep --host`` work from any machine that reaches the
-  hub: they send the project name, commit, and diff, never a local path.
-- SSH hosts keep a queue. A GPU is free when no run holds it and ``nvidia-smi`` shows
-  no other process on it. Queued runs start in order (first fit) with
-  ``CUDA_VISIBLE_DEVICES`` set.
-- SLURM hosts submit with ``sbatch`` (``--gpus``, ``--time``, ``--partition``,
-  ``--account``; defaults from the host entry) and check ``squeue``/``sacct`` every
-  30 s. ``hx stop`` runs ``scancel``. A job that disappears without an exit record is
-  marked ``lost``. A rerun keeps the run's GPUs and SLURM settings. SLURM runs are
-  always submitted: ``hx rerun --foreground`` is refused there. A run targets one host;
-  there is no queue across hosts.
-- On a SLURM cluster only the env server on the login node opens the SQLite files
-  (``index.db``, ``events.db``): SQLite does not work across machines on NFS, Lustre,
-  or GPFS. The job on the compute node writes only files in the run's folder
-  (``run.yaml``, logs, metrics, and ``exit.json``); the env server reads them every
-  30 s and records the run's start and end.
-- Stop, rerun, re-infer, re-evaluate, tags, stars, and notes on a remote run go to its
-  host with the same command id, so a repeated click still acts once. ``hx`` and the MCP
-  tools send them through the hub too (they never act on the hub's copy). When the run's
-  host is no longer in ``environments.yaml``, stop, rerun, re-infer, and re-evaluate
-  answer ``503`` instead of acting on the hub's copy.
-- Cost: ``gpu_hours = wall time x GPUs`` and ``usd = gpu_hours x usd_per_gpu_hour``,
-  plus API cost from ``usage.jsonl``.
-- Leaderboard rows (each seed group), sweeps, and the Overview (the window and
-  today) show what the runs cost; ``hx hosts status --json`` shows each host's rate.
+``hx launch`` takes the same options as ``hx run``, plus ``--host``, ``--gpus``,
+``--queue``, ``--partition``, ``--time``, ``--account``, and ``--wait``.
 
-Sweeps
-------
+- The run uses the exact commit you launched from. The CLI sends your checkout's
+  ``HEAD`` and your uncommitted changes (``git diff HEAD``). The host runs
+  ``git fetch`` when it does not have that commit, and applies the changes in a clean
+  git worktree; its own checkout is not touched.
+- A diff that is not UTF-8 text, or is larger than 5 MiB, is refused: commit it first.
+- New files that git does not track are not in ``git diff HEAD``. ``hx launch`` names
+  them in a warning; ``git add`` them to send them.
+- ``--config`` is not sent to hosts. Commit the file and pass its path with ``--var``.
+- ``hx launch --host`` works from any machine that reaches the hub: it sends the
+  project name, commit, and diff, never a local path.
+- A run targets one host. There is no queue across hosts.
 
-.. code-block:: bash
+Act on remote runs
+------------------
 
-   hx sweep -t TASK -H "lr x beam" --grid lr=1e-4,3e-4,1e-3 --grid beam=5,10 \
-       --seeds 3 --host gpu1 --gpus 2 --queue -- \
-       python train.py --lr '{lr}' --beam '{beam}' --seed '{seed}'
+``hx stop``, ``rerun``, ``reinfer``, ``reeval``, ``tag``, ``star``, ``archive``, and
+``note`` on a remote run go through the hub to the run's host, with one command id, so
+a repeated call still acts once. They never change only the hub's copy. When the
+run's host is no longer in ``environments.yaml``, stop, rerun, re-infer, and
+re-evaluate answer ``503``. ``--foreground`` is refused for a remote run.
 
-Every combination runs once per seed (here 3 x 2 x 3 = 18 runs), tagged
-``sweep:<hub>:<id>`` (``<hub>``: the first 8 characters of the hub's environment id,
-so two hubs using one host never mix their sweeps). Seed 1 of every combination
-starts first, so a queue fills the whole
-table early. The command must use every swept name; each run also gets its seed as
-``$HYPOTHEX_SEED``. ``--seeds 3`` means seeds 1, 2, 3; ``--seeds 1,2,5`` lists them.
-For random search give ranges and a count: ``--random 20 --param lr=1e-5:1e-3:log``.
-A sweep has at most 1000 runs.
+What the hub copies
+-------------------
+
+The hub copies each run's small files: ``run.yaml``, ``scores.jsonl``,
+``metrics.jsonl``, ``notes.md``, ``usage.jsonl``, ``config.yaml``, ``git.diff``,
+``git.stat``, and the folders ``predictions``, ``traces``, ``samples``, ``env``, and
+``logs``. Each file can be up to 200 MiB; of each log, the hub keeps the last 8 MiB.
+Checkpoints and other artifacts stay on the host; the hub shows them with the host's
+name. Copy one when you need it:
 
 .. code-block:: bash
 
-   hx sweeps --json                     # newest first, with the best cell
-   hx sweep show s-7f3a --json          # progress, params x primary metric, best, cost
-   hx sweep extend s-7f3a --seeds 4,5
-   hx sweep cancel s-7f3a               # stop queued runs; running runs keep going
-
-The sweep is saved at ``<store>/<project>/sweeps/<id>.yaml``; the UI shows it at
-``/s/<project>/<id>``. If a host drops in the middle of a launch, the sweep keeps the
-runs that started; ``hx sweep extend`` with the same seeds then starts only the missing
-runs.
-
-Big files
----------
-
-The hub copies each run's small files (``run.yaml``, scores, metrics, notes,
-predictions, traces; up to 200 MB each) and the last 8 MiB of each log. A file that
-only grows (logs, ``*.jsonl``) is copied from where the last copy ended, so a long
-run's logs do not cross the tunnel again every 10 s. Checkpoints and other artifacts
-stay on the host; the hub shows them with the host's name. Copy one when you need it:
-
-.. code-block:: bash
-
-   hx pull RUN_ID                                       # the latest checkpoint
+   hx pull RUN_ID                                          # the latest checkpoint
    hx pull RUN_ID --artifact predictions/predictions.jsonl
+   hx pull RUN_ID --artifact checkpoint --json             # prints {"local_path": ...}
 
-The copy goes to ``pulled/`` in the run's folder on the hub. A path outside the run
-folder must be one of the run's own artifacts, and ``scp`` runs in SFTP mode
-(``scp -s``), so a path is never read by the host's shell.
+``--artifact`` is an artifact kind (the latest of that kind), an artifact path, or a
+path in the run folder. The copy goes to ``pulled/`` in the run's folder on the hub.
+A path outside the run folder must be one of the run's own artifacts. ``scp`` runs in
+SFTP mode (``scp -s``), so the host's shell never reads the path.
 
-A project that is registered only on a host still shows on the hub: the hub copies
-its ``hypothex.yaml`` snapshot from the host with its first run, so tasks,
-leaderboards, and sweep tables work. To launch it from the hub, use ``--host`` (the
-host's checkout runs it) or run it once from a checkout on the hub (``hx run``
-registers the project).
+A project that is registered only on a host still shows on the hub: the hub copies its
+``hypothex.yaml`` snapshot from the host with its first run. Tasks, leaderboards, and
+sweep tables then work on the hub.
 
 Keep an env server running
 --------------------------
 
-On a host where the env server should survive reboots and logouts:
+The hub starts an env server again when it is gone (after a reboot). To keep one
+running without the hub, install a user service on the host:
 
 .. code-block:: bash
 
-   hx service install --kind slurm      # or --kind ssh
+   hx service install --kind ssh        # or --kind slurm
+   hx service uninstall
 
-This writes a systemd user unit (Linux) or a launchd agent (macOS) and prints the
-commands that enable it; Hypothex never runs them for you. ``hx service uninstall``
-removes the file and prints how to stop the server. The hub never stops an env server
-that it did not start.
+``hx service install`` writes a systemd user unit (Linux) or a launchd agent (macOS)
+and prints the commands that enable it; Hypothex never runs them for you.
+``hx service uninstall`` removes the file and prints how to stop the server. The hub
+never stops an env server that it did not start.
 
-To run an env server by hand: ``hx serve --kind ssh --port 0``. The port it picks and
-its token are written to ``~/.hypothex/serve/server.json``. ``--no-auth`` drops the
-token; use it only for test hosts that the hub reaches by ``route: url``.
+Run an env server by hand
+-------------------------
+
+.. code-block:: bash
+
+   hx serve --kind ssh --port 0         # on the host
+
+The port it picks and its token go into ``~/.hypothex/serve/server.json``. The kind is
+saved, so a later ``hx serve`` on that home uses it again. ``--no-auth`` drops the
+token; use it only for test hosts that the hub reaches with ``hx hosts add --url``.
+
+Sweeps on a host
+----------------
+
+.. code-block:: bash
+
+   hx sweep -t TASK -H "lr x beam" --grid lr=1e-4,3e-4 --grid beam=5,10 --seeds 3 \
+       --host gpu-box --gpus 1 --queue -- python train.py --lr '{lr}' --beam '{beam}' --seed '{seed}'
+   hx sweep extend SWEEP_ID --seeds 4,5
+
+A sweep sends one commit and diff for all its runs. See :doc:`sweeps`.
+
+MCP tools
+---------
+
+``list_hosts``, ``launch_run`` (with ``host``, ``gpus``, ``queue``), ``launch_sweep``,
+``get_sweep``, ``cancel_sweep``, ``extend_sweep``, and ``pull_artifact``. They call the
+hub at ``HYPOTHEX_HUB_URL``. See :doc:`mcp`.
+
+.. _demo-hosts:
 
 Try it without hosts
 --------------------
@@ -205,16 +310,5 @@ Try it without hosts
 The demo adds two fake hosts as separate homes under ``/tmp/hx-demo/demo-hosts``:
 ``gpu1`` (8 fake A100 GPUs, two of them used by other people) and ``cluster`` (SLURM,
 with fake ``sbatch``, ``squeue``, and ``sacct``). ``hx serve`` starts both, fills the
-GPU queue on ``gpu1`` with three running and three queued runs of sweep ``s-7f3a``, and
-stops them when it exits. No real host is contacted.
-
-MCP tools
----------
-
-``list_hosts``, ``launch_run`` (with ``host``, ``gpus``, ``queue``), ``launch_sweep``,
-``get_sweep``, ``cancel_sweep``, ``extend_sweep``, and ``pull_artifact``. The tools
-that need live hosts call the hub at ``HYPOTHEX_HUB_URL``. With ``host``,
-``launch_run`` and ``launch_sweep`` send the commit and uncommitted diff of the
-client's checkout (``launch_run``'s ``repo``; for ``launch_sweep``, ``repo`` or the
-project's registered checkout), so the host runs the client's code, as
-``hx launch --host`` and ``hx sweep --host`` do.
+GPU queue on ``gpu1`` with three running and three queued runs of sweep ``s-7f3a``,
+and stops them when it exits. No real host is contacted.

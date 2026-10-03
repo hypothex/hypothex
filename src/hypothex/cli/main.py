@@ -360,6 +360,12 @@ HostOpt = Annotated[
     str | None, typer.Option("--host", help="Run on this host (`hx hosts list`); default here.")
 ]
 GpusOpt = Annotated[int, typer.Option("--gpus", min=0, help="GPUs for each run.")]
+LaunchGpusOpt = Annotated[
+    int | None,
+    typer.Option(
+        "--gpus", min=0, help="GPUs for each run (default 0; on SLURM, the host's default)."
+    ),
+]
 QueueOpt = Annotated[bool, typer.Option("--queue", help="Wait in the host's queue for GPUs.")]
 REMOTE_POLL_SECONDS = 2.0
 
@@ -446,8 +452,35 @@ def _through_hub(run_id: str, action: str, body: dict[str, Any]) -> Any | None:
 
 
 def _launch_remote(
-    host: str, req: RunRequest, *, gpus: int, queue: bool, slurm: dict[str, str]
+    host: str, req: RunRequest, *, gpus: int | None, queue: bool, slurm: dict[str, Any]
 ) -> RunRecord:
+    """
+    Launch ``req`` on ``host`` through the hub.
+
+    An explicit ``gpus`` (also 0) goes in ``slurm.gpus`` too, so it overrides a SLURM
+    host's default GPU count, as the UI's launch does; ``None`` keeps that default.
+    Hosts that are not SLURM hosts ignore ``slurm.gpus``.
+
+    Parameters
+    ----------
+    host : str
+        Host name (``hx hosts list``).
+    req : RunRequest
+        The launch; ``config_path`` is refused (the file is not sent).
+    gpus : int or None
+        GPUs per run; ``None`` when ``--gpus`` was not given.
+    queue : bool
+        Wait in the host's queue for GPUs.
+    slurm : dict
+        ``partition``, ``time``, ``account`` as given.
+
+    Returns
+    -------
+    RunRecord
+        The run as the host created it.
+    """
+    if gpus is not None:
+        slurm = {**slurm, "gpus": gpus}
     if req.config_path is not None:
         raise RunError("--config is not sent to hosts; commit the file and pass it with --var")
     body = {
@@ -460,7 +493,7 @@ def _launch_remote(
         "tags": req.tags,
         "params": req.params,
         "vars": req.vars,
-        "gpus": gpus,
+        "gpus": gpus or 0,
         "queue": queue,
         "slurm": slurm or None,
         "created_by": req.created_by,
@@ -817,7 +850,7 @@ def launch(
     stage: StageOpt = None,
     repo: RepoOpt = None,
     host: HostOpt = None,
-    gpus: GpusOpt = 0,
+    gpus: LaunchGpusOpt = None,
     queue: QueueOpt = False,
     partition: Annotated[str | None, typer.Option(help="SLURM partition.")] = None,
     time_limit: Annotated[
@@ -841,7 +874,7 @@ def launch(
         repo=repo,
         interactive=not as_json,
     )
-    slurm = {
+    slurm: dict[str, Any] = {
         k: v
         for k, v in {"partition": partition, "time": time_limit, "account": account}.items()
         if v is not None
@@ -864,7 +897,7 @@ def launch(
     if slurm:
         raise RunError("--partition, --time, and --account need --host <slurm host>")
     c = _ctx()
-    record = launch_run(c, dataclasses.replace(req, gpus=gpus, queue=queue))
+    record = launch_run(c, dataclasses.replace(req, gpus=gpus or 0, queue=queue))
     _warn_seed(record)
     if wait:
         record = wait_for_run(c, record.run_id, timeout=WAIT_FOREVER)

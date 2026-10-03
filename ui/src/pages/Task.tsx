@@ -1,9 +1,27 @@
 /**
  * Task screen (spec 8.3.2): the leaderboard's one-line headline, view tabs (the kind's
  * preset, custom views, `+ view`), and the active view's panels on a 12-column grid.
+ * "New run" opens the Launch dialog (spec 8A.8), prefilled from the best config's latest
+ * run: its command template, params and vars, and the next unused seeds of that config.
+ * The template is the one at the click: live leaderboard updates never reset an open dialog.
  */
+import { useQuery } from "@tanstack/react-query";
+import { Fragment, useRef, useState } from "react";
 import { api } from "../api/client";
-import { RUN_EVENT_INVALIDATES, useLeaderboard, useView, useViewQuery, useViews } from "../api/queries";
+import type { RunRecord } from "../api/models";
+import {
+  RUN_EVENT_INVALIDATES,
+  queryKeys,
+  useAllRuns,
+  useLeaderboard,
+  useTask,
+  useView,
+  useViewQuery,
+  useViews,
+} from "../api/queries";
+import { type LaunchDefaults, launchDefaults } from "../launch/draft";
+import { LaunchDialog } from "../launch/LaunchDialog";
+import { shortId } from "./components/format";
 import { AppLink, hrefs } from "./components/links";
 import { PanelGrid } from "./components/PanelGrid";
 import { ErrorBox, Loading } from "./components/QueryState";
@@ -31,6 +49,85 @@ export function boardMeta(board: Leaderboard): string[] {
   return out;
 }
 
+interface LaunchedRuns {
+  host: string;
+  records: RunRecord[];
+}
+
+interface NewRunProps {
+  project: string;
+  task: string;
+  templateRunId: string | null;
+  onClose: () => void;
+  onLaunched: (records: RunRecord[], host: string) => void;
+}
+
+interface Opened {
+  repo: string;
+  defaults: LaunchDefaults;
+}
+
+/**
+ * Loads the repo path, the template run and every run of the task (not only the newest
+ * page: an older run may hold a seed), then shows the dialog. What it opened with is kept
+ * until the dialog closes: a refetch (each launch invalidates runs) or a failed refetch
+ * must not swap the dialog for a spinner or an error and lose the session in it.
+ */
+function NewRun({ project, task, templateRunId, onClose, onLaunched }: NewRunProps) {
+  const detail = useTask(project, task);
+  const runs = useAllRuns({ project, task });
+  const template = useQuery({
+    queryKey: queryKeys.run(templateRunId ?? ""),
+    queryFn: ({ signal }) => api.run(templateRunId ?? "", signal),
+    enabled: templateRunId !== null,
+  });
+  const opened = useRef<Opened | null>(null);
+  if (opened.current === null) {
+    // A failed runs read would propose seeds that already exist; a failed template read
+    // would open a blank dialog without saying so. Both stop here instead.
+    const error = detail.error ?? runs.error ?? template.error;
+    if (error) return <ErrorBox error={error} />;
+    if (detail.data === undefined || runs.data === undefined || (templateRunId !== null && template.isPending)) {
+      return <Loading />;
+    }
+    const all = runs.data;
+    opened.current = {
+      repo: detail.data.repo,
+      defaults: launchDefaults(template.data?.record ?? null, all.runs, all.complete),
+    };
+  }
+  const { repo, defaults } = opened.current;
+  return (
+    <LaunchDialog
+      project={project}
+      task={task}
+      repo={repo}
+      initial={defaults.draft}
+      carry={defaults.carry}
+      seedsNote={defaults.seedsNote}
+      onClose={onClose}
+      onLaunched={onLaunched}
+    />
+  );
+}
+
+/** `Launched 3 on gpu1, 2 queued: f2c8 93e7 c2b9`, each id a link to its run. */
+function LaunchedLine({ launched }: { launched: LaunchedRuns }) {
+  const queued = launched.records.filter((r) => r.status === "queued").length;
+  return (
+    <p className="small launched" role="status">
+      Launched {launched.records.length} on {launched.host}
+      {queued > 0 ? `, ${queued} queued` : ""}:{" "}
+      {launched.records.map((r, i) => (
+        <Fragment key={r.run_id}>
+          {i > 0 ? " " : ""}
+          <AppLink href={hrefs.run(r.run_id)}>{shortId(r.run_id)}</AppLink>
+        </Fragment>
+      ))}
+    </p>
+  );
+}
+
 export function TaskPage({ project, task, view }: TaskPageProps) {
   const active = view ? String(view) : "overview";
   const board = useLeaderboard(project, task);
@@ -41,6 +138,9 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
     send: (_: void, opts) => api.reevalTask(project, task, {}, opts),
     invalidate: RUN_EVENT_INVALIDATES,
   });
+  // the template run at the click (`undefined`: closed); the leaderboard keeps changing
+  const [launching, setLaunching] = useState<string | null | undefined>(undefined);
+  const [launched, setLaunched] = useState<LaunchedRuns | null>(null);
 
   const info = views.data?.find((v) => v.name === active) ?? detail.data?.info;
   const editable = info !== undefined && info.origin !== "preset";
@@ -48,6 +148,7 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
   // `useViewQuery` keeps the last view's panels while the next loads; they must not be
   // drawn with the new view's specs, so wait for the active view's own data.
   const ready = panels.data !== undefined && !panels.isPlaceholderData && !detail.isPending;
+  const templateRunId = board.data?.rows[0]?.latest_run_id ?? null;
 
   return (
     <div className="page">
@@ -107,17 +208,26 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
           ) : null}
           <button
             type="button"
-            className="btn primary"
+            className="btn"
             onClick={() => reeval.run()}
             disabled={reeval.pending}
             title="Re-score every run's saved predictions with the current metric versions"
           >
             Re-evaluate all
           </button>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => setLaunching(templateRunId)}
+            title="Launch runs of this task on any host"
+          >
+            New run
+          </button>
         </span>
       </nav>
       {views.error ? <ErrorBox error={views.error} /> : null}
       {reeval.error ? <ErrorBox error={reeval.error} /> : null}
+      {launched ? <LaunchedLine launched={launched} /> : null}
 
       {viewError ? (
         <ErrorBox error={viewError} />
@@ -126,6 +236,19 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
       ) : (
         <Loading />
       )}
+
+      {launching !== undefined ? (
+        <NewRun
+          project={project}
+          task={task}
+          templateRunId={launching}
+          onClose={() => setLaunching(undefined)}
+          onLaunched={(records, host) => {
+            setLaunching(undefined);
+            setLaunched({ host, records });
+          }}
+        />
+      ) : null}
     </div>
   );
 }

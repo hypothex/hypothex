@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -15,6 +16,7 @@ from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep, sweep_path
 from hypothex.mcp.server import (
     DEFAULT_HUB_URL,
     HubUnavailableError,
+    client_checkout,
     find_sweep,
     hub_call,
     hub_url,
@@ -22,6 +24,7 @@ from hypothex.mcp.server import (
     parse_grid,
     parse_ranges,
     parse_seeds,
+    resolve_hub_token,
     ssh_target,
 )
 from hypothex.remote.config import HostSpec
@@ -125,6 +128,55 @@ def test_hub_call_maps_answers_and_errors(home: Path, toy: Context) -> None:
         hub_call("GET", "/api/v1/projects")  # the autouse fixture points at a dead port
 
 
+HUB_TOKEN = "hub-secret"
+
+
+def test_hub_call_sends_the_hub_token(
+    home: Path, toy: Context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(home, background_repair=False, hub=False, auth_token=HUB_TOKEN)
+    with serve_app(app) as url:
+        with pytest.raises(HypothexError, match="bearer token"):
+            hub_call("GET", "/api/v1/projects", url=url)
+        with pytest.raises(HypothexError, match="bearer token"):
+            hub_call("GET", "/api/v1/projects", url=url, token="wrong")
+        assert hub_call("GET", "/api/v1/projects", url=url, token=HUB_TOKEN)[0]["project"] == "toy"
+        monkeypatch.setenv("HYPOTHEX_HUB_TOKEN", HUB_TOKEN)
+        assert hub_call("GET", "/api/v1/projects", url=url)[0]["project"] == "toy"
+
+
+def _server_json(home: Path, port: int, token: str | None) -> None:
+    (home / "serve").mkdir(parents=True, exist_ok=True)
+    record = {"pid": 1, "port": port, "managed": False, "token": token}
+    (home / "serve" / "server.json").write_text(json.dumps(record))
+
+
+def test_hub_token_from_the_env_or_the_local_server_file(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert resolve_hub_token("http://127.0.0.1:7777", home) is None  # no server.json
+    _server_json(home, 7777, "abc")
+    assert resolve_hub_token("http://127.0.0.1:7777", home) == "abc"
+    assert resolve_hub_token("http://localhost:7777/", home) == "abc"
+    assert resolve_hub_token("http://[::1]:7777", home) == "abc"
+    assert resolve_hub_token("http://127.0.0.1:7777") == "abc"  # default home: $HYPOTHEX_HOME
+    assert resolve_hub_token("http://127.0.0.1:7778", home) is None  # another server's port
+    assert resolve_hub_token("http://gpu.example:7777", home) is None  # never sent off this machine
+    _server_json(home, 7777, None)
+    assert resolve_hub_token("http://127.0.0.1:7777", home) is None
+    (home / "serve" / "server.json").write_text("{not json")
+    assert resolve_hub_token("http://127.0.0.1:7777", home) is None
+    monkeypatch.setenv("HYPOTHEX_HUB_TOKEN", "from-env")
+    assert resolve_hub_token("http://gpu.example:7777", home) == "from-env"
+
+
+def test_hub_call_uses_the_local_server_token(home: Path, toy: Context) -> None:
+    app = create_app(home, background_repair=False, hub=False, auth_token=HUB_TOKEN)
+    with serve_app(app) as url:
+        _server_json(home, int(url.rsplit(":", 1)[1]), HUB_TOKEN)
+        assert hub_call("GET", "/api/v1/projects", url=url)[0]["project"] == "toy"
+
+
 def _status_app() -> FastAPI:
     app = FastAPI()
 
@@ -190,3 +242,20 @@ def test_write_fake_scp_refuses_paths_outside_its_folder(tmp_path: Path) -> None
     res = _scp(scp, str(src), "box:f.txt")  # BatchMode is required, as for every fake
     assert res.returncode == 255 and "BatchMode" in res.stderr
     assert not (root / "box" / "f.txt").exists()
+
+
+def test_client_checkout_names_untracked_files_raw(toy_repo: Path) -> None:
+    """Untracked names come back unquoted, even non-ASCII ones (git ``-z``)."""
+    (toy_repo / "caf\u00e9.py").write_text("x = 1\n")
+    (toy_repo / "sub").mkdir()
+    (toy_repo / "sub" / "new.py").write_text("y = 2\n")
+    fields, untracked = client_checkout(toy_repo)
+    assert fields["commit"] is not None
+    assert untracked == ["caf\u00e9.py", "sub/new.py"]
+
+
+def test_client_checkout_outside_a_repo(tmp_path: Path) -> None:
+    plain = write_toy_project(tmp_path / "plain", use_git=False)
+    fields, untracked = client_checkout(plain)
+    assert fields["commit"] is None and fields["diff"] is None
+    assert untracked == []

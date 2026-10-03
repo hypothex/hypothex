@@ -109,6 +109,24 @@ def test_save_replaces_the_file_atomically(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "update",
+    [{"projects": {"toy": "relative/path"}}, {"projects": {"bad name": "/srv/x"}}],
+)
+def test_save_refuses_hosts_that_would_not_load(tmp_path: Path, update: dict) -> None:
+    # model_copy(update=...) skips validation; save_hosts must not write what
+    # load_hosts rejects, or every later host command breaks
+    layout = Layout(tmp_path)
+    good = HostSpec(route="ssh", ssh_alias="g1", projects={"toy": "/srv/toy"})
+    save_hosts(layout, EnvironmentsFile(environments={"gpu1": good}))
+    bad = EnvironmentsFile().model_copy(
+        update={"environments": {"gpu1": good.model_copy(update=update)}}
+    )
+    with pytest.raises(ConfigError, match="gpu1"):
+        save_hosts(layout, bad)
+    assert load_hosts(layout).environments["gpu1"].projects == {"toy": "/srv/toy"}
+
+
+@pytest.mark.parametrize(
     ("spec", "message"),
     [
         ({"route": "ssh"}, "route ssh needs ssh_alias"),

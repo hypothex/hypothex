@@ -48,6 +48,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.add_cleanup(lambda: shutil.rmtree(base, ignore_errors=True))
     session = pytest.MonkeyPatch()
     session.setenv("HYPOTHEX_HUB_URL", DEAD_HUB)
+    session.delenv("HYPOTHEX_HUB_TOKEN", raising=False)
     session.delenv("HYPOTHEX_FAKE_GPUS", raising=False)
     refuse_remote(base / "no-ssh", session)
     refuse_host_tools(base, session)
@@ -74,6 +75,7 @@ def isolate_remote(_isolation_bin: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     afterwards, so one that forgets fails closed instead of using the real tool.
     """
     monkeypatch.setenv("HYPOTHEX_HUB_URL", DEAD_HUB)
+    monkeypatch.delenv("HYPOTHEX_HUB_TOKEN", raising=False)
     monkeypatch.delenv("HYPOTHEX_FAKE_GPUS", raising=False)
     refuse_remote(_isolation_bin / "no-ssh", monkeypatch)
     refuse_host_tools(_isolation_bin, monkeypatch)

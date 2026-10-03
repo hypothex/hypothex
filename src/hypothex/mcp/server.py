@@ -4,29 +4,35 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import json
 import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import yaml
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
+from hypothex.api.security import is_loopback_bind
 from hypothex.core import control
 from hypothex.core import panels as core_panels
 from hypothex.core import queries as q
+from hypothex.core import sweeps as core_sweeps
 from hypothex.core import views as core_views
 from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
+from hypothex.core.ids import new_command_id
 from hypothex.core.jsonutil import to_jsonable
+from hypothex.core.layout import default_home
 from hypothex.core.records import RunStatus
 from hypothex.core.store import ProjectEntry
-from hypothex.core.sweeps import SweepParam, SweepSpec, load_sweep, sweep_path
+from hypothex.core.sweeps import SweepParam, SweepSpec, load_sweep, summarize_sweep, sweep_path
 from hypothex.core.views import PanelSpec, ValidationIssue, ViewInfo, ViewSpec
 from hypothex.remote.config import HostSpec
 from hypothex.remote.ssh import SshTarget
@@ -46,6 +52,13 @@ hypothex.yaml; then call reevaluate for the task.
 
 Dashboards: list_views, get_view, add_view (YAML; validated, never saved while invalid;
 fix the returned issues and call again), query_view (panel data as rows).
+
+Remote hosts (need `hx serve` running on the hub): list_hosts (state, GPUs, queue,
+SLURM jobs, cost today); launch_run(host=..., gpus=..., queue=True) runs on a host;
+launch_sweep runs every grid combination x seed (the command uses {name} for each
+param; runs get $HYPOTHEX_SEED, or use {seed}); get_sweep, cancel_sweep (queued runs
+only), extend_sweep (more seeds); pull_artifact copies a big file such as a checkpoint
+from a host to the hub.
 """
 
 PRESET_VIEW = core_views.RESERVED_VIEW
@@ -389,6 +402,55 @@ def hub_url() -> str:
     return os.environ.get("HYPOTHEX_HUB_URL", DEFAULT_HUB_URL).rstrip("/")
 
 
+def resolve_hub_token(url: str | None = None, home: Path | None = None) -> str | None:
+    """
+    Return the bearer token to send to the hub at ``url``.
+
+    ``$HYPOTHEX_HUB_TOKEN`` wins. Else, when ``url`` is a loopback address, the
+    token in ``<home>/serve/server.json`` of the server on that port: the hub's
+    own record, readable only by its owner. A token is never read from that
+    file for a hub on another machine, so it cannot leak there.
+
+    Parameters
+    ----------
+    url : str, optional
+        Hub base URL; defaults to ``hub_url()``.
+    home : Path, optional
+        Hypothex home holding ``serve/server.json``; defaults to ``default_home()``.
+
+    Returns
+    -------
+    str or None
+        The token, or None when the hub needs none (or none is known).
+
+    Examples
+    --------
+    >>> resolve_hub_token("http://127.0.0.1:7777")  # doctest: +SKIP
+    'a3f9...'
+    >>> resolve_hub_token("http://gpu.example:7777") is None  # without $HYPOTHEX_HUB_TOKEN
+    True
+    """
+    given = os.environ.get("HYPOTHEX_HUB_TOKEN")
+    if given:
+        return given
+    parts = urlsplit(url or hub_url())
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.hostname is None or not is_loopback_bind(parts.hostname):
+        return None
+    path = (home or default_home()) / "serve" / "server.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("port") != port:
+        return None
+    token = record.get("token")
+    return token if isinstance(token, str) and token else None
+
+
 def hub_call(
     method: str,
     path: str,
@@ -396,6 +458,7 @@ def hub_call(
     *,
     url: str | None = None,
     timeout: float = 120.0,
+    token: str | None = None,
 ) -> Any:
     """
     Call the hub's HTTP API and return the decoded JSON answer.
@@ -412,6 +475,8 @@ def hub_call(
         Hub base URL; defaults to ``hub_url()``.
     timeout : float
         Seconds to wait for the answer.
+    token : str, optional
+        Bearer token for a hub that requires one; defaults to ``resolve_hub_token(url)``.
 
     Returns
     -------
@@ -433,8 +498,10 @@ def hub_call(
     [{'name': 'local', 'kind': 'local', ...}]
     """
     base = (url or hub_url()).rstrip("/")
+    auth = token or resolve_hub_token(base)
+    headers = {"Authorization": f"Bearer {auth}"} if auth else {}
     try:
-        resp = httpx.request(method, base + path, json=body, timeout=timeout)
+        resp = httpx.request(method, base + path, json=body, timeout=timeout, headers=headers)
     except httpx.TransportError as exc:
         raise HubUnavailableError(
             f"the hub at {base} did not answer ({exc}); start it with `hx serve`"
@@ -657,6 +724,130 @@ def find_sweep(ctx: Context, sweep_id: str, project: str | None = None) -> Sweep
     return load_sweep(ctx.layout, found[0], sweep_id)
 
 
+def acts_through_hub(ctx: Context, run_id: str) -> bool:
+    """
+    Tell whether a mutation of ``run_id`` must go through the hub.
+
+    True for a run of another environment (mirrored from a host, which owns its
+    processes, job, and files) and for a run this store does not have (a CLI or
+    MCP client on another machine than the hub).
+
+    Parameters
+    ----------
+    ctx : Context
+    run_id : str
+
+    Returns
+    -------
+    bool
+    """
+    try:
+        record = ctx.find_record(run_id)
+    except StoreError:
+        return True
+    return record.environment_id != ctx.descriptor.environment_id
+
+
+def client_checkout(root: Path) -> tuple[dict[str, str | None], list[str]]:
+    """
+    The project, HEAD, and uncommitted diff of a checkout here, for a host launch.
+
+    A client sends these instead of its repo path (the hub may be another
+    machine, spec 5.2); the host fetches ``commit`` and applies ``diff`` (8A.4).
+
+    Parameters
+    ----------
+    root : Path
+        The project checkout.
+
+    Returns
+    -------
+    tuple of (dict, list of str)
+        ``{project, commit, diff}`` and the untracked files ``git diff HEAD`` leaves out.
+    """
+    from hypothex.api.app import local_diff  # lazy: hypothex.api.app imports this module
+    from hypothex.core.gitinfo import head_commit, untracked_files
+
+    commit = head_commit(root)
+    untracked = untracked_files(root) if commit is not None else []
+    fields: dict[str, str | None] = {
+        "project": load_project_config(root).project,
+        "commit": commit,
+        "diff": local_diff(str(root)) if commit is not None else None,
+    }
+    return fields, untracked
+
+
+def sweep_summary(
+    ctx: Context,
+    sweep_id: str,
+    project: str | None = None,
+    *,
+    url: str | None = None,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """
+    A sweep's summary from this store, else from the hub.
+
+    A sweep made through the hub from another machine has its file only on the hub.
+
+    Parameters
+    ----------
+    ctx : Context
+    sweep_id : str
+    project : str, optional
+    url : str, optional
+        Hub URL (default ``hub_url()``).
+    token : str, optional
+        Hub bearer token (default ``resolve_hub_token`` for this home).
+
+    Returns
+    -------
+    dict
+        ``SweepSummary`` as JSON.
+    """
+    try:
+        spec = find_sweep(ctx, sweep_id, project)
+    except StoreError:
+        path = f"/api/v1/sweeps/{project}/{sweep_id}" if project else f"/api/v1/sweeps/{sweep_id}"
+        auth = token or resolve_hub_token(url, ctx.layout.home)
+        return hub_call("GET", path, url=url, token=auth)
+    return to_jsonable(summarize_sweep(ctx, spec.project, spec.id))
+
+
+def locate_sweep(
+    ctx: Context,
+    sweep_id: str,
+    project: str | None = None,
+    *,
+    url: str | None = None,
+    token: str | None = None,
+) -> tuple[SweepSpec, bool]:
+    """
+    Find a sweep's spec here, else on the hub.
+
+    Parameters
+    ----------
+    ctx : Context
+    sweep_id : str
+    project : str, optional
+    url : str, optional
+        Hub URL (default ``hub_url()``).
+    token : str, optional
+        Hub bearer token (default ``resolve_hub_token`` for this home).
+
+    Returns
+    -------
+    tuple of (SweepSpec, bool)
+        The spec and whether its file is in this store (False: act through the hub).
+    """
+    try:
+        return find_sweep(ctx, sweep_id, project), True
+    except StoreError:
+        summary = sweep_summary(ctx, sweep_id, project, url=url, token=token)
+        return SweepSpec.model_validate(summary["spec"]), False
+
+
 def _expose_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
     """
     Let expected errors reach the calling agent as readable text.
@@ -688,7 +879,38 @@ def _expose_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-def build_server(home: Path | None = None, *, context: Context | None = None) -> MCPServer:
+def _text(value: str | int | float) -> str:
+    """
+    Render a sweep value as text that parses back to the same value.
+
+    A float uses ``repr``: the shortest text that round-trips, so no digit is
+    lost (``f"{v:g}"`` keeps only 6 significant digits).
+
+    Parameters
+    ----------
+    value : str or int or float
+        One grid value from the agent.
+
+    Returns
+    -------
+    str
+        The value as the run's ``{name}`` text.
+
+    Examples
+    --------
+    >>> [_text(v) for v in (0.0001, 1e-05, 2.5, 0.1234567, 3, "a")]
+    ['0.0001', '1e-05', '2.5', '0.1234567', '3', 'a']
+    """
+    return repr(value) if isinstance(value, float) else str(value)
+
+
+def build_server(
+    home: Path | None = None,
+    hub_url: str | None = None,
+    *,
+    context: Context | None = None,
+    hub_token: str | None = None,
+) -> MCPServer:
     """
     Build the Hypothex MCP server.
 
@@ -697,9 +919,15 @@ def build_server(home: Path | None = None, *, context: Context | None = None) ->
     home : Path, optional
         Hypothex home directory; opened on the first tool call. Ignored when
         ``context`` is given.
+    hub_url : str, optional
+        Hub URL for tools that need live hosts; default ``hub_url()``
+        (``$HYPOTHEX_HUB_URL`` or ``http://127.0.0.1:7777``).
     context : Context, optional
         An open context to use instead, so a server that also serves HTTP
         (``create_app``) answers both from one context and one descriptor.
+    hub_token : str, optional
+        Bearer token for the hub (``create_app`` passes its own, so the mounted
+        tools can call their own server); default ``resolve_hub_token`` for this home.
 
     Returns
     -------
@@ -716,6 +944,19 @@ def build_server(home: Path | None = None, *, context: Context | None = None) ->
 
     def dump(obj: Any) -> Any:
         return obj.model_dump(mode="json") if hasattr(obj, "model_dump") else obj
+
+    def auth() -> str | None:
+        return hub_token or resolve_hub_token(hub_url, ctx().layout.home)
+
+    def hub(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+        return hub_call(method, path, body, url=hub_url, token=auth())
+
+    def via_hub(run_id: str, action: str, body: dict[str, Any], agent: str = "mcp") -> Any:
+        # a mirrored run is acted on by its host: the hub forwards it (Task 45)
+        if not acts_through_hub(ctx(), run_id):
+            return None
+        full = {**body, "command_id": new_command_id(), "created_by": f"agent:{agent}"}
+        return hub("POST", f"/api/v1/runs/{run_id}/{action}", full)
 
     @mcp.tool()
     @_expose_errors
@@ -790,14 +1031,36 @@ def build_server(home: Path | None = None, *, context: Context | None = None) ->
         template_vars: dict[str, str] | None = None,
         tags: list[str] | None = None,
         agent: str = "mcp",
+        host: str | None = None,
+        gpus: int = 0,
+        queue: bool = False,
     ) -> dict[str, Any]:
         """
         Start a run in the background. Give a command (argv list; may use {seed},
         {run_dir}, {dataset.path}, ...) or a stage name from hypothex.yaml. A
-        hypothesis is required.
+        hypothesis is required. host runs it on that host (see list_hosts) with its
+        checkout of the project; gpus and queue=True wait for free GPUs there.
         """
         created_by = f"agent:{agent}"
         require_agent_hypothesis(created_by, hypothesis)
+        if is_remote(host):
+            fields, _ = client_checkout(Path(repo))  # never a path: the hub may be elsewhere
+            body = {
+                **fields,
+                "task": task,
+                "stage": stage,
+                "command": command,
+                "hypothesis": hypothesis,
+                "seed": seed,
+                "tags": tags or [],
+                "params": params or {},
+                "vars": template_vars or {},
+                "gpus": gpus,
+                "queue": queue,
+                "created_by": created_by,
+                "command_id": new_command_id(),
+            }
+            return {"run": hub("POST", f"/api/v1/hosts/{host}/runs", body), "host": host}
         record = control.launch_run(
             ctx(),
             RunRequest(
@@ -811,6 +1074,8 @@ def build_server(home: Path | None = None, *, context: Context | None = None) ->
                 params=params or {},
                 vars=template_vars or {},
                 created_by=created_by,
+                gpus=gpus,
+                queue=queue,
             ),
         )
         return {"run": dump(record), "run_dir": str(ctx().run_dir(record))}
@@ -819,12 +1084,18 @@ def build_server(home: Path | None = None, *, context: Context | None = None) ->
     @_expose_errors
     def rerun(run_id: str, agent: str = "mcp") -> dict[str, Any]:
         """Rerun with the same command, commit (via worktree if needed), config, and seed."""
+        out = via_hub(run_id, "rerun", {}, agent)
+        if out is not None:
+            return {"run": out}
         return {"run": dump(control.rerun(ctx(), run_id, created_by=f"agent:{agent}"))}
 
     @mcp.tool()
     @_expose_errors
     def reinfer(run_id: str, checkpoint: str | None = None, agent: str = "mcp") -> dict[str, Any]:
         """Run the project's `infer` stage with this run's (or the given) checkpoint."""
+        out = via_hub(run_id, "reinfer", {"checkpoint": checkpoint}, agent)
+        if out is not None:
+            return {"run": out}
         return {
             "run": dump(
                 control.reinfer(ctx(), run_id, checkpoint=checkpoint, created_by=f"agent:{agent}")
@@ -843,6 +1114,9 @@ def build_server(home: Path | None = None, *, context: Context | None = None) ->
         """Re-score saved predictions with current metric versions (one run or a whole task)."""
         c = ctx()
         if run_id is not None:
+            out = via_hub(run_id, "reeval", {"metric": metric, "force": force})
+            if out is not None:
+                return out
             return dump(reeval(c, run_id=run_id, metric=metric, force=force))
         if task is None:
             raise ValueError("give run_id or task")
@@ -853,13 +1127,17 @@ def build_server(home: Path | None = None, *, context: Context | None = None) ->
     @_expose_errors
     def stop_run(run_id: str) -> dict[str, Any]:
         """Stop a queued or running run."""
+        out = via_hub(run_id, "stop", {})
+        if out is not None:
+            return {"run": out}
         return {"run": dump(control.stop_run(ctx(), run_id))}
 
     @mcp.tool()
     @_expose_errors
     def add_note(run_id: str, text: str, author: str = "agent") -> dict[str, Any]:
         """Append a Markdown note to a run (findings, next steps)."""
-        q.add_note(ctx(), run_id, text, author)
+        if via_hub(run_id, "notes", {"text": text, "author": author}) is None:
+            q.add_note(ctx(), run_id, text, author)
         return {"ok": True}
 
     @mcp.tool()
@@ -868,6 +1146,9 @@ def build_server(home: Path | None = None, *, context: Context | None = None) ->
         run_id: str, add: list[str] | None = None, remove: list[str] | None = None
     ) -> dict[str, Any]:
         """Add or remove tags on a run."""
+        out = via_hub(run_id, "tags", {"add": add or [], "remove": remove or []})
+        if out is not None:
+            return {"run": out}
         return {"run": dump(q.tag_run(ctx(), run_id, add or [], remove or []))}
 
     @mcp.tool()
@@ -923,5 +1204,115 @@ def build_server(home: Path | None = None, *, context: Context | None = None) ->
     def query_view(task: str, name: str, project: str | None = None) -> dict[str, Any]:
         """Compute a saved view's panels as rows (the same data the UI draws)."""
         return query_task_view(ctx(), task, project=project, name=name)
+
+    @mcp.tool()
+    @_expose_errors
+    def list_hosts() -> dict[str, Any]:
+        """
+        Hosts the hub knows, `local` (the hub) first: connection state, GPUs (util,
+        memory, the run or outside process holding each), queue length, SLURM
+        pending/running, cost today.
+        """
+        return {"hosts": hub("GET", "/api/v1/hosts")}
+
+    @mcp.tool()
+    @_expose_errors
+    def launch_sweep(
+        project: str,
+        command: list[str],
+        hypothesis: str,
+        grid: dict[str, list[str | int | float]],
+        seeds: list[int],
+        task: str | None = None,
+        host: str | None = None,
+        random: int | None = None,
+        ranges: dict[str, str] | None = None,
+        gpus: int = 0,
+        queue: bool = False,
+        agent: str = "mcp",
+    ) -> dict[str, Any]:
+        """
+        Start a sweep: one run per grid combination (plus `random` samples from
+        `ranges`, e.g. {"lr": "1e-5:1e-3:log"}) and seed. The command must use every
+        param as {name}; {seed} is optional. host=None runs here; a host name runs there.
+        Returns the summary: spec (with run_ids), counts, cells, best, total_usd.
+        """
+        require_agent_hypothesis(f"agent:{agent}", hypothesis)
+        params = [SweepParam(name=k, values=[_text(v) for v in vs]) for k, vs in grid.items()]
+        params += parse_ranges([f"{k}={v}" for k, v in (ranges or {}).items()])
+        if is_remote(host):
+            body = {
+                "project": project,
+                "task": task,
+                "host": host,
+                "grid": [p.model_dump(mode="json") for p in params],
+                "random": random,
+                "seeds": seeds,
+                "command": command,
+                "hypothesis": hypothesis,
+                "gpus": gpus,
+                "queue": queue,
+                "created_by": f"agent:{agent}",
+                "command_id": new_command_id(),
+            }
+            return hub("POST", "/api/v1/sweeps", body)
+        summary = core_sweeps.launch_sweep(
+            ctx(),
+            project=project,
+            task=task,
+            grid=params,
+            random=random,
+            seeds=seeds,
+            command=command,
+            hypothesis=hypothesis,
+            gpus=gpus,
+            queue=queue,
+            created_by=f"agent:{agent}",
+        )
+        return dump(summary)
+
+    @mcp.tool()
+    @_expose_errors
+    def get_sweep(project: str, sweep_id: str) -> dict[str, Any]:
+        """A sweep's summary: progress counts, params x primary metric cells, best, cost."""
+        return sweep_summary(ctx(), sweep_id, project, url=hub_url, token=auth())
+
+    @mcp.tool()
+    @_expose_errors
+    def cancel_sweep(project: str, sweep_id: str) -> dict[str, Any]:
+        """Stop the sweep's queued runs; runs that already started keep going."""
+        c = ctx()
+        spec, here = locate_sweep(c, sweep_id, project, url=hub_url, token=auth())
+        if is_remote(spec.host) or not here:
+            body = {"command_id": new_command_id(), "created_by": "agent:mcp"}
+            return hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/cancel_queued", body)
+        return dump(core_sweeps.cancel_queued(c, spec.project, spec.id))
+
+    @mcp.tool()
+    @_expose_errors
+    def extend_sweep(
+        project: str, sweep_id: str, seeds: list[int], agent: str = "mcp"
+    ) -> dict[str, Any]:
+        """
+        Add runs for every combination x the new seeds. A seed whose runs all exist
+        is refused; a seed with missing runs (an earlier extend failed) gets only those.
+        """
+        c = ctx()
+        spec, here = locate_sweep(c, sweep_id, project, url=hub_url, token=auth())
+        if is_remote(spec.host) or not here:
+            body = {"seeds": seeds, "command_id": new_command_id(), "created_by": f"agent:{agent}"}
+            return hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/extend", body)
+        return dump(core_sweeps.extend_sweep(c, spec.project, spec.id, seeds))
+
+    @mcp.tool()
+    @_expose_errors
+    def pull_artifact(run_id: str, artifact: str = "checkpoint") -> dict[str, Any]:
+        """
+        Copy one big file of a remote run to the hub: an artifact kind (latest of it,
+        e.g. checkpoint), an artifact path, or a path inside the run folder.
+        Returns {local_path}.
+        """
+        body = {"artifact": artifact, "command_id": new_command_id(), "created_by": "agent:mcp"}
+        return hub("POST", f"/api/v1/runs/{run_id}/pull", body)
 
     return mcp

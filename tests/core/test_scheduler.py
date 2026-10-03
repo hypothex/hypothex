@@ -1,10 +1,13 @@
 import json
 import os
+import shlex
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
@@ -16,6 +19,7 @@ from hypothex.core.execution import (
     prepare_run,
 )
 from hypothex.core.records import RunRecord, RunStatus
+from tests.factories import git, write_toy_project
 
 PY = sys.executable
 CUDA = "import os; print(os.environ.get('CUDA_VISIBLE_DEVICES', 'unset'))"
@@ -222,3 +226,198 @@ def test_execute_run_without_gpus_leaves_cuda_visible_devices_alone(
     rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(CUDA)))
     execute_run(ctx, rec.run_id)
     assert stdout_of(ctx, rec.run_id) == "7"
+
+
+# commit pin and hub diff (spec 8A.4) ---------------------------------------------------
+READ_MARKER = "print(open('marker.txt').read())"
+BAD_DIFF = "diff --git a/nope.txt b/nope.txt\n--- a/nope.txt\n+++ b/nope.txt\n@@ -1 +1 @@\n-a\n+b\n"
+
+
+def git_diff(repo: Path) -> str:
+    # not tests.factories.git: that strips the trailing newline a patch needs
+    out = subprocess.run(
+        ["git", "-C", str(repo), "diff", "HEAD", "--binary"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout
+
+
+def commit_marker(repo: Path, text: str) -> str:
+    (repo / "marker.txt").write_text(text)
+    git(repo, "add", "marker.txt")
+    git(repo, "commit", "-qm", f"marker {text}")
+    return git(repo, "rev-parse", "HEAD")
+
+
+def worktrees(ctx: Context) -> list[Path]:
+    folder = ctx.layout.worktrees_dir("toy")
+    return sorted(folder.iterdir()) if folder.is_dir() else []
+
+
+def test_hub_diff_is_applied_in_a_worktree(ctx: Context, toy_repo: Path) -> None:
+    head = commit_marker(toy_repo, "old")
+    (toy_repo / "marker.txt").write_text("patched")
+    diff = git_diff(toy_repo)
+    git(toy_repo, "checkout", "--", "marker.txt")
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(READ_MARKER), diff=diff))
+    assert rec.cwd == str(ctx.layout.worktrees_dir("toy") / rec.run_id)
+    assert rec.git.commit == head and rec.git.dirty
+    assert (ctx.run_dir(rec) / "git.diff").read_text() == diff
+    done = execute_run(ctx, rec.run_id)
+    assert done.status == RunStatus.FINISHED
+    assert stdout_of(ctx, rec.run_id) == "patched"
+    assert (toy_repo / "marker.txt").read_text() == "old"
+
+
+def test_same_commit_and_same_diff_runs_in_place(ctx: Context, toy_repo: Path) -> None:
+    head = commit_marker(toy_repo, "old")
+    (toy_repo / "marker.txt").write_text("dirty")
+    req = RunRequest(repo=toy_repo, command=cmd(READ_MARKER), commit=head, diff=git_diff(toy_repo))
+    rec = prepare_run(ctx, req)
+    assert rec.cwd == str(toy_repo.resolve())
+    assert worktrees(ctx) == []
+    execute_run(ctx, rec.run_id)
+    assert stdout_of(ctx, rec.run_id) == "dirty"
+
+
+def test_pinned_commit_without_diff_ignores_local_edits(ctx: Context, toy_repo: Path) -> None:
+    head = commit_marker(toy_repo, "old")
+    (toy_repo / "marker.txt").write_text("local edit")
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(READ_MARKER), commit=head))
+    assert rec.cwd == str(ctx.layout.worktrees_dir("toy") / rec.run_id)
+    assert not rec.git.dirty
+    execute_run(ctx, rec.run_id)
+    assert stdout_of(ctx, rec.run_id) == "old"
+
+
+def test_missing_commit_is_fetched_from_the_remote(
+    ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    remote = tmp_path / "remote.git"
+    git(tmp_path, "clone", "-q", "--bare", str(toy_repo), str(remote))
+    git(toy_repo, "remote", "add", "origin", str(remote))
+    hub = tmp_path / "hub"
+    git(tmp_path, "clone", "-q", str(remote), str(hub))
+    sha = commit_marker(hub, "from hub")
+    git(hub, "push", "-q", "origin", "HEAD:main")
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(READ_MARKER), commit=sha[:10]))
+    assert rec.git.commit == sha
+    execute_run(ctx, rec.run_id)
+    assert stdout_of(ctx, rec.run_id) == "from hub"
+
+
+def test_unknown_commit_fails_cleanly(ctx: Context, toy_repo: Path) -> None:
+    missing = "0123456789abcdef0123456789abcdef01234567"
+    with pytest.raises(RunError, match=r"0123456789ab is not in .*even after `git fetch`"):
+        prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=missing))
+    assert ctx.store.list_run_ids() == {}
+    assert worktrees(ctx) == []
+
+
+def test_diff_that_does_not_apply_leaves_nothing_behind(ctx: Context, toy_repo: Path) -> None:
+    with pytest.raises(RunError, match="could not apply the saved diff"):
+        prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), diff=BAD_DIFF))
+    assert ctx.store.list_run_ids() == {}
+    assert worktrees(ctx) == []
+    assert git(toy_repo, "worktree", "list", "--porcelain").count("worktree ") == 1
+
+
+def test_missing_command_in_the_worktree_removes_it(ctx: Context, toy_repo: Path) -> None:
+    head = commit_marker(toy_repo, "old")
+    with pytest.raises(RunError, match=r"command not found: \./nope\.sh"):
+        prepare_run(ctx, RunRequest(repo=toy_repo, command=["./nope.sh"], commit=head, diff=""))
+    (toy_repo / "marker.txt").write_text("edit")
+    with pytest.raises(RunError, match=r"command not found: \./nope\.sh"):
+        prepare_run(ctx, RunRequest(repo=toy_repo, command=["./nope.sh"], commit=head))
+    assert ctx.store.list_run_ids() == {}
+    assert worktrees(ctx) == []
+    assert git(toy_repo, "worktree", "list", "--porcelain").count("worktree ") == 1
+
+
+def test_diff_needs_a_git_repo(ctx: Context, tmp_path: Path) -> None:
+    repo = write_toy_project(tmp_path / "plain", use_git=False)
+    with pytest.raises(RunError, match="is not a git repository with a commit"):
+        prepare_run(ctx, RunRequest(repo=repo, command=cmd("pass"), diff=BAD_DIFF))
+    assert ctx.store.list_run_ids() == {}
+
+
+@pytest.mark.parametrize("commit", ["--upload-pack=touch /tmp/x", "HEAD~1", "main", "abc", "g123"])
+def test_commit_must_be_a_hex_sha(ctx: Context, toy_repo: Path, commit: str) -> None:
+    with pytest.raises(RunError, match="is not a hex sha"):
+        prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=commit))
+    assert ctx.store.list_run_ids() == {}
+    assert worktrees(ctx) == []
+
+
+def test_failure_after_the_worktree_exists_removes_it(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import execution
+
+    head = commit_marker(toy_repo, "old")
+    (toy_repo / "marker.txt").write_text("local edit")  # dirty: a worktree is needed
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("env capture failed")
+
+    monkeypatch.setattr(execution, "capture_env", boom)
+    with pytest.raises(OSError, match="env capture failed"):
+        prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(READ_MARKER), commit=head))
+    assert worktrees(ctx) == []
+    assert git(toy_repo, "worktree", "list", "--porcelain").count("worktree ") == 1
+
+
+def test_pinned_commit_supplies_config_stages_datasets_and_repo(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # the host checkout is behind the hub: the stage, the task, the dataset, and
+    # train.py exist only at the pinned commit
+    base = git(toy_repo, "rev-parse", "HEAD")
+    config = yaml.safe_load((toy_repo / "hypothex.yaml").read_text())
+    config["stages"]["fit"] = f"{shlex.quote(PY)} {{repo}}/train.py {{dataset.path}}"
+    config["datasets"]["newset"] = {
+        "version": "v2",
+        "path": "data/new.jsonl",
+        "splits": {"test": "data/new.jsonl"},
+    }
+    config["tasks"]["new-task"] = {
+        "dataset": "newset",
+        "split": "test",
+        "metrics": ["accuracy"],
+        "primary": "accuracy",
+    }
+    (toy_repo / "hypothex.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    (toy_repo / "data" / "new.jsonl").write_text('{"id": "ex-0", "reference": 1}\n')
+    (toy_repo / "train.py").write_text(
+        "import sys\nprint('pinned', open(sys.argv[1]).read().strip())\n"
+    )
+    git(toy_repo, "add", "-A")
+    git(toy_repo, "commit", "-qm", "new stage, task, and dataset")
+    pinned = git(toy_repo, "rev-parse", "HEAD")
+    git(toy_repo, "checkout", "-q", base)  # the host checkout stays at the old commit
+    assert not (toy_repo / "train.py").exists()
+    req = RunRequest(repo=toy_repo, stage="fit", task="new-task", commit=pinned)
+    rec = prepare_run(ctx, req)
+    tree = ctx.layout.worktrees_dir("toy") / rec.run_id
+    assert rec.cwd == str(tree)
+    assert rec.command[1:] == [f"{tree}/train.py", str(tree / "data" / "new.jsonl")]
+    assert [(d.name, d.version) for d in rec.datasets] == [("newset", "v2")]
+    assert rec.git.commit == pinned
+    assert ctx.store.load_project("toy").repo == str(toy_repo.resolve())
+    assert execute_run(ctx, rec.run_id).status == RunStatus.FINISHED
+    assert stdout_of(ctx, rec.run_id) == 'pinned {"id": "ex-0", "reference": 1}'
+
+
+def test_pinned_commit_of_another_project_is_refused(ctx: Context, toy_repo: Path) -> None:
+    config = yaml.safe_load((toy_repo / "hypothex.yaml").read_text())
+    config["project"] = "other"
+    (toy_repo / "hypothex.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    git(toy_repo, "commit", "-qam", "rename the project")
+    renamed = git(toy_repo, "rev-parse", "HEAD")
+    git(toy_repo, "checkout", "-q", "HEAD~1")
+    with pytest.raises(RunError, match="names project 'other', not 'toy'"):
+        prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=renamed))
+    assert ctx.store.list_run_ids() == {}
+    assert worktrees(ctx) == []

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -25,11 +26,11 @@ from hypothex.core.context import Context
 from hypothex.core.cost import compute_cost
 from hypothex.core.datasets import FingerprintCache, dataset_ref, resolve_dataset_path
 from hypothex.core.envcapture import capture_env
-from hypothex.core.errors import HypothexError, RunError, TemplateError
+from hypothex.core.errors import GitError, HypothexError, RunError, TemplateError
 from hypothex.core.evalrunner import default_python_cmd
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.fsutil import atomic_write_bytes, atomic_write_text, read_yaml, write_yaml
-from hypothex.core.gitinfo import capture_diff, git_info
+from hypothex.core.gitinfo import capture_diff, create_worktree, git_info, head_commit
 from hypothex.core.gpus import query_gpus
 from hypothex.core.ids import new_run_id, utcnow
 from hypothex.core.records import ExecutorInfo, RunKind, RunRecord, RunStatus
@@ -41,6 +42,9 @@ STOP_MARKER = "stop_requested"
 TERM_GRACE_SECONDS = 10.0
 SUPERVISOR_PID_FILE = "supervisor.pid"
 QUEUE_FILE = "queue.json"
+GIT_FETCH_TIMEOUT_SECONDS = 120.0
+COMMIT_PATTERN = re.compile(r"^[0-9a-fA-F]{4,40}$")
+"""A pinned commit is a full or abbreviated hex sha; nothing else reaches ``git``."""
 EXECUTION_CLAIM = "execution.claim"
 GATE_EXIT = 97
 GATE_ARGV = ("sh", "-c", 'IFS= read -r _ || exit 97; exec "$@"', "hx-gate")
@@ -179,6 +183,98 @@ def seed_warning(template: list[str], seed: int | None) -> str | None:
     )
 
 
+def _resolve_commit(repo: Path, commit: str) -> str | None:
+    """Return the full sha of ``commit`` in ``repo``, or None if it is not there."""
+    if not COMMIT_PATTERN.fullmatch(commit):
+        raise RunError(f"commit {commit[:40]!r} is not a hex sha (4 to 40 hex characters)")
+    out = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"],
+        capture_output=True,
+        text=True,
+    )
+    sha = out.stdout.strip()
+    return sha if out.returncode == 0 and sha else None
+
+
+def _fetch(repo: Path) -> str:
+    """Run ``git fetch --all`` in ``repo``; return its error text ("" on success)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "fetch", "--quiet", "--all"],
+            capture_output=True,
+            text=True,
+            timeout=GIT_FETCH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return f"git fetch timed out after {GIT_FETCH_TIMEOUT_SECONDS:.0f}s"
+    return out.stderr.strip() if out.returncode != 0 else ""
+
+
+def _discard_worktree(repo: Path, path: Path) -> None:
+    """Remove a worktree made for a run that was never created."""
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "remove", "--force", str(path)], capture_output=True
+    )
+    shutil.rmtree(path, ignore_errors=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True)
+
+
+def _checkout(repo: Path, commit: str | None, diff: str | None, dest: Path) -> Path | None:
+    """
+    Make the working copy a request pins with ``commit`` and/or ``diff`` (spec 8A.4).
+
+    Parameters
+    ----------
+    repo : Path
+        The project repo on this host.
+    commit : str or None
+        Commit to run (full or abbreviated sha); None means the repo's HEAD.
+    diff : str or None
+        Uncommitted changes to apply on top of ``commit``; empty or None means none.
+    dest : Path
+        Where to create the worktree when one is needed.
+
+    Returns
+    -------
+    Path or None
+        The new worktree, or None when the repo already is at ``commit``
+        with exactly ``diff`` (or nothing was pinned).
+
+    Raises
+    ------
+    RunError
+        Not a git repo, commit missing even after ``git fetch``, or the diff
+        does not apply (the half-made worktree is removed).
+    """
+    if commit is None and diff is None:
+        return None
+    head = head_commit(repo)
+    if head is None:
+        raise RunError(
+            f"{repo} is not a git repository with a commit; "
+            "pinning a commit or sending a diff needs git"
+        )
+    wanted = commit or head
+    resolved = _resolve_commit(repo, wanted)
+    if resolved is None:
+        fetch_error = _fetch(repo)
+        resolved = _resolve_commit(repo, wanted)
+        if resolved is None:
+            detail = f" ({fetch_error})" if fetch_error else ""
+            raise RunError(
+                f"commit {wanted[:12]} is not in {repo}, even after `git fetch`{detail}; "
+                "push it to a remote this host can fetch"
+            )
+    patch = diff.encode("utf-8") if diff else None
+    if head == resolved and capture_diff(repo).diff == patch:
+        return None
+    try:
+        return create_worktree(repo, resolved, dest, patch)
+    except GitError as exc:
+        _discard_worktree(repo, dest)
+        raise RunError(str(exc)) from exc
+
+
 def write_queue_marker(run_dir: Path) -> None:
     """
     Mark a queued run as waiting in this host's GPU queue.
@@ -270,7 +366,12 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     """
     Validate a request, create the run folder, and capture git/env/dataset state.
 
-    Nothing is created when the request is invalid.
+    Nothing is created when the request is invalid. With ``req.commit`` or
+    ``req.diff`` (spec 8A.4) the run's code is checked out first: in place when
+    the repo already is at that commit with that diff, else in a worktree at
+    ``<store>/<project>/worktrees/<run_id>``. Everything else is then read from
+    that checkout: ``hypothex.yaml`` (tasks, stages, datasets), ``{repo}`` and
+    ``{dataset.path}``, the working directory, git info, and the environment.
 
     Parameters
     ----------
@@ -286,10 +387,48 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     ------
     RunError
         Unknown task/stage, missing template value, command not found, an
-        agent run without a hypothesis, or more GPUs than this host has.
+        agent run without a hypothesis, more GPUs than this host has, or a
+        pinned commit/diff that cannot be checked out (spec 8A.4).
     """
     repo = req.repo.resolve()
-    config = load_project_config(repo)
+    project = load_project_config(repo).project  # the host checkout names the project
+    if os.environ.get("HYPOTHEX_AGENT") and not req.hypothesis.strip():
+        raise RunError("agents must give a hypothesis (--hypothesis): why does this run exist?")
+    if req.config_path is not None and not req.config_path.is_file():
+        raise RunError(f"config file not found: {req.config_path}")
+    if req.gpus < 0:
+        raise RunError(f"gpus must be 0 or more, got {req.gpus}")
+    if req.gpus > 0 and req.slurm is None:  # SLURM allocates GPUs on the compute node
+        total = len(query_gpus())
+        if req.gpus > total:
+            raise RunError(f"asked for {req.gpus} GPUs; this host has {total}")
+    run_id = new_run_id(req.task)
+    worktree = _checkout(repo, req.commit, req.diff, ctx.layout.worktrees_dir(project) / run_id)
+    try:
+        return _prepare_in(ctx, req, repo, worktree, run_id)
+    except BaseException:
+        # any failure after the worktree exists removes it (spec 8A.4)
+        if worktree is not None:
+            _discard_worktree(repo, worktree)
+        raise
+
+
+def _prepare_in(
+    ctx: Context, req: RunRequest, repo: Path, worktree: Path | None, run_id: str
+) -> RunRecord:
+    """
+    Create the run from its checkout: ``worktree`` when there is one, else ``repo``.
+
+    ``repo`` is the host checkout; it only names the project and is the path
+    registered for it. Config, commands, datasets, and captures use the checkout.
+    """
+    src = worktree or repo
+    config = load_project_config(src)
+    project = load_project_config(repo).project
+    if config.project != project:
+        raise RunError(
+            f"the pinned commit's hypothex.yaml names project {config.project!r}, not {project!r}"
+        )
     if req.task is not None and req.task not in config.tasks:
         raise RunError(f"unknown task {req.task!r}; known tasks: {sorted(config.tasks)}")
     if req.command is None:
@@ -304,22 +443,15 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         template = list(req.command)
     if not template:
         raise RunError("empty command")
-    if os.environ.get("HYPOTHEX_AGENT") and not req.hypothesis.strip():
-        raise RunError("agents must give a hypothesis (--hypothesis): why does this run exist?")
-    if req.config_path is not None and not req.config_path.is_file():
-        raise RunError(f"config file not found: {req.config_path}")
     user_config = read_yaml(req.config_path) if req.config_path is not None else None
-    if req.gpus < 0:
-        raise RunError(f"gpus must be 0 or more, got {req.gpus}")
-    if req.gpus > 0 and req.slurm is None:  # SLURM allocates GPUs on the compute node
-        total = len(query_gpus())
-        if req.gpus > total:
-            raise RunError(f"asked for {req.gpus} GPUs; this host has {total}")
 
     cwd = (req.cwd or repo).resolve()
-    run_id = new_run_id(req.task)
+    if worktree is not None:
+        cwd = worktree / (cwd.relative_to(repo) if cwd.is_relative_to(repo) else Path())
+        if not cwd.is_dir():
+            raise RunError(f"working directory {cwd} does not exist at the pinned commit")
     run_dir = ctx.layout.run_dir(config.project, run_id)
-    values = {"run_id": run_id, "run_dir": str(run_dir), "repo": str(repo), "task": req.task or ""}
+    values = {"run_id": run_id, "run_dir": str(run_dir), "repo": str(src), "task": req.task or ""}
     if req.seed is not None:
         values["seed"] = str(req.seed)
     if req.config_path is not None:
@@ -331,7 +463,7 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
             {
                 "dataset.name": task_spec.dataset,
                 "dataset.version": ds.version,
-                "dataset.path": str(resolve_dataset_path(repo, ds.path_for(task_spec.split))),
+                "dataset.path": str(resolve_dataset_path(src, ds.path_for(task_spec.split))),
             }
         )
     values.update(req.vars)
@@ -352,7 +484,7 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
                 task_spec.dataset,
                 config.datasets[task_spec.dataset],
                 task_spec.split,
-                repo,
+                src,
                 cache,
                 ctx.descriptor.label,
             )
@@ -404,7 +536,7 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         atomic_write_text(run_dir / "git.stat", diff.stat)
     if diff.too_large:
         atomic_write_text(run_dir / "git.diff.too_large", "diff larger than the capture limit\n")
-    capture_env(repo, run_dir / "env", default_python_cmd(repo, config))
+    capture_env(src, run_dir / "env", default_python_cmd(src, config))
     warning = seed_warning(template, req.seed)
     if warning is not None:
         ctx.emit("run.warning", record, {"message": warning})

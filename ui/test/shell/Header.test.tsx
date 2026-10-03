@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 
 import { RECENT_KEY, paletteShortcut, screenOf, updateRecent } from "../../src/shell/Header";
 import { mockRoutes } from "../api/fetch-mock";
@@ -78,5 +78,23 @@ describe("Header", () => {
       task: { project: "toy", task: "acc" },
       run: { runId: "r-7" },
     });
+  });
+
+  test("shows nothing about live updates while the stream is ready", async () => {
+    renderApp("/");
+    await screen.findByRole("navigation", { name: "Screens" });
+    expect(screen.queryByRole("status", { name: /Live updates/ })).toBeNull();
+  });
+
+  test("says when live updates are off or reconnecting", async () => {
+    renderApp("/", { streamStatus: "offline" });
+    const offline = await screen.findByRole("status", { name: "Live updates off" });
+    expect(offline.textContent).toBe("● offline");
+    expect(offline.getAttribute("title")).toMatch(/not live/);
+    cleanup();
+    renderApp("/", { streamStatus: "connected" });
+    expect((await screen.findByRole("status", { name: "Live updates reconnecting" })).textContent).toBe(
+      "● connecting",
+    );
   });
 });

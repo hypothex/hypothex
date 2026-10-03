@@ -7,6 +7,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
+import { useStreamStatus } from "../api/events";
 import { ThemeToggle } from "./ThemeToggle";
 
 export type Screen = "overview" | "task" | "run" | "examples";
@@ -97,6 +98,27 @@ export function paletteShortcut(platform: string = navigator.platform): string {
   return /Mac|iPhone|iPad/.test(platform) ? "⌘K" : "Ctrl K";
 }
 
+/** A dot and word while live updates are down; nothing while they are live. */
+function LiveStatus() {
+  const status = useStreamStatus();
+  if (status === "ready") return null;
+  const offline = status === "offline";
+  return (
+    <span
+      className={offline ? "live off" : "live"}
+      role="status"
+      aria-label={`Live updates ${offline ? "off" : "reconnecting"}`}
+      title={
+        offline
+          ? "Live updates are off: data is not live, reload to reconnect"
+          : "Reconnecting live updates: data is not live yet"
+      }
+    >
+      {offline ? "● offline" : "● connecting"}
+    </span>
+  );
+}
+
 export interface HeaderProps {
   /** Opens the command palette. */
   onFind?: () => void;
@@ -148,6 +170,7 @@ export function Header({ onFind }: HeaderProps) {
           )}
         </nav>
         <div className="bar-r">
+          <LiveStatus />
           <button className="find" id="findBtn" type="button" aria-haspopup="dialog" onClick={onFind}>
             <span>Find a run, task or path</span>
             <kbd>{paletteShortcut()}</kbd>

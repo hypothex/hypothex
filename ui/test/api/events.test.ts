@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, renderHook } from "@testing-library/react";
+import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, render, renderHook, screen } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { queryKeys } from "../../src/api/queries";
 import {
@@ -10,6 +10,7 @@ import {
   FLUSH_MS,
   type HxEvent,
   invalidateForEvents,
+  LiveUpdates,
   keysForEvent,
   keysForEvents,
   readSequence,
@@ -17,6 +18,7 @@ import {
   type SocketLike,
   type StreamStatus,
   useEventStream,
+  useStreamStatus,
   writeSequence,
 } from "../../src/api/events";
 
@@ -529,6 +531,49 @@ describe("useEventStream", () => {
     expect(sockets.length).toBe(1);
   });
 
+  test("while offline, a window focus refetches every query; while live it does not", () => {
+    const client = new QueryClient();
+    const spy = spyOn(client, "invalidateQueries");
+    const sockets: FakeSocket[] = [];
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+    const { unmount } = renderHook(
+      () =>
+        useEventStream({
+          url: "ws://127.0.0.1:7777/api/v1/ws",
+          clock: new FakeClock(),
+          storage: null,
+          createSocket: (url) => {
+            const socket = new FakeSocket(url);
+            sockets.push(socket);
+            return socket;
+          },
+        }),
+      { wrapper },
+    );
+    const socket = sockets[0];
+    if (!socket) throw new Error("hook did not open a socket");
+    const refocus = () =>
+      act(() => {
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+      });
+    try {
+      act(() => {
+        socket.open();
+        socket.receive({ type: "ready", last_sequence: 0 });
+      });
+      refocus();
+      expect(spy).not.toHaveBeenCalled();
+      act(() => socket.receive({ type: "error", error: "bad subscribe" }));
+      refocus();
+      expect(spy.mock.calls).toEqual([[]]);
+    } finally {
+      focusManager.setFocused(undefined);
+      unmount();
+    }
+  });
+
   test("resumes from sessionStorage and saves the last delivered sequence", () => {
     const client = new QueryClient();
     const storage = memoryStorage({ [SEQUENCE_KEY]: "7" });
@@ -562,6 +607,60 @@ describe("useEventStream", () => {
       clock.advance(FLUSH_MS);
     });
     expect(storage.data.get(SEQUENCE_KEY)).toBe("9");
+    unmount();
+  });
+});
+
+describe("LiveUpdates", () => {
+  test("gives its children the stream status", () => {
+    const client = new QueryClient();
+    const clock = new FakeClock();
+    const sockets: FakeSocket[] = [];
+    function Probe() {
+      return createElement("output", null, useStreamStatus());
+    }
+    const { unmount } = render(
+      createElement(
+        QueryClientProvider,
+        { client },
+        createElement(
+          LiveUpdates,
+          {
+            options: {
+              url: "ws://127.0.0.1:7777/api/v1/ws",
+              clock,
+              storage: null,
+              createSocket: (url: string) => {
+                const socket = new FakeSocket(url);
+                sockets.push(socket);
+                return socket;
+              },
+            },
+          },
+          createElement(Probe),
+        ),
+      ),
+    );
+    const status = () => screen.getByRole("status").textContent;
+    expect(status()).toBe("connecting");
+    const socket = sockets[0];
+    if (!socket) throw new Error("LiveUpdates did not open a socket");
+    act(() => {
+      socket.open();
+      socket.receive({ type: "ready", last_sequence: 0 });
+    });
+    expect(status()).toBe("ready");
+    act(() => socket.receive({ type: "error", error: "bad subscribe" }));
+    expect(status()).toBe("offline");
+    unmount();
+  });
+
+  test("outside LiveUpdates the status reads ready", () => {
+    function Probe() {
+      return createElement("output", null, useStreamStatus());
+    }
+    const { unmount } = render(createElement(Probe));
+    expect(screen.getByRole("status").textContent).toBe("ready");
     unmount();
   });
 });

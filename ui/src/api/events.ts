@@ -7,8 +7,8 @@
  * delivered sequence is kept in `sessionStorage`, so a page load resumes there instead of
  * replaying the whole event log.
  */
-import { type QueryClient, type QueryKey, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { focusManager, type QueryClient, type QueryKey, useQueryClient } from "@tanstack/react-query";
+import { createContext, createElement, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 
 import { wsUrl } from "./client";
 import type { HxEvent, WsMessage } from "./models";
@@ -376,6 +376,7 @@ export class EventStream {
 
 /**
  * Subscribe to live events for the app's lifetime and invalidate affected queries.
+ * While the stream is offline, a window focus refetches every query instead.
  *
  * Call once (through `LiveUpdates`). Options are read on mount only (tests pass fakes).
  */
@@ -398,11 +399,36 @@ export function useEventStream(options: EventStreamHookOptions = {}): StreamStat
     stream.start();
     return () => stream.stop();
   }, [client]);
+  // Queries do not refetch on focus while events keep them fresh; with the stream
+  // offline (perhaps for good, after a server error) a focus refetches everything.
+  useEffect(() => {
+    if (status !== "offline") return;
+    return focusManager.subscribe((focused) => {
+      if (focused) void client.invalidateQueries();
+    });
+  }, [client, status]);
   return status;
 }
 
-/** Keeps the app's queries live; render once inside the `QueryClientProvider`. */
-export function LiveUpdates(): null {
-  useEventStream();
-  return null;
+/** Live-update stream status for the shell; `ready` outside `LiveUpdates`. */
+export const StreamStatusContext = createContext<StreamStatus>("ready");
+
+/** Status of the live-update stream (`ready` when screens are live). */
+export function useStreamStatus(): StreamStatus {
+  return useContext(StreamStatusContext);
+}
+
+export interface LiveUpdatesProps {
+  children?: ReactNode;
+  /** Test fakes for the stream (read on mount only). */
+  options?: EventStreamHookOptions;
+}
+
+/**
+ * Keeps the app's queries live and gives `children` the stream status
+ * (`useStreamStatus`). Render once inside the `QueryClientProvider`, around the app.
+ */
+export function LiveUpdates({ children, options }: LiveUpdatesProps) {
+  const status = useEventStream(options);
+  return createElement(StreamStatusContext.Provider, { value: status }, children);
 }

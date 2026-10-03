@@ -20,8 +20,9 @@ if (!root) throw new Error("index.html has no #root element");
 createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <LiveUpdates />
-      <RouterProvider router={router} />
+      <LiveUpdates>
+        <RouterProvider router={router} />
+      </LiveUpdates>
     </QueryClientProvider>
   </StrictMode>,
 );

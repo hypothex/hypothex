@@ -48,14 +48,16 @@ function OverviewBody({ summary }: { summary: OverviewSummary }) {
   const hosts = useHosts();
   const hubVersion = useHubVersion();
   const now = useNow();
-  const rows = hosts.data ?? [];
+  // TanStack keeps the last good data when a later poll fails; on an error the page goes
+  // back to the phase 1 headline and counts, like the first-load failure
+  const rows = hosts.error ? [] : (hosts.data ?? []);
   const remote = remoteRows(rows);
   // the overview's cost today covers every run (hub runs too); the hosts' sum is the fallback
   const hostSums = hostTotals(rows, now);
   const totals = { ...hostSums, usdToday: summary.cost_today_usd ?? hostSums.usdToday };
   const withHosts = remote.length > 0;
   const hours = staleBannerHours(rows);
-  const gone = hosts.error ? [] : longStale(remote, now, hours);
+  const gone = longStale(remote, now, hours);
   const hubCost = summary.cost_today_usd ?? 0;
   return (
     <>

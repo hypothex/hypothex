@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { cleanup, screen, waitFor, within } from "@testing-library/react";
+import { queryKeys } from "../../src/api/queries";
 import { OverviewPage } from "../../src/pages/Overview";
 import { makeOverview } from "./fixtures";
 import { HttpReply, mockApi, renderWithClient, restoreFetch } from "./helpers";
@@ -152,6 +153,31 @@ test("hosts endpoint fails: error inside the Hosts panel, the rest of the page s
   expect((await within(panel).findByRole("alert")).textContent).toBe("hub offline");
   expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Idle. SVM leads toy-test by 0.037, p = 0.15");
   expect(screen.getByRole("region", { name: "c Ideas" })).toBeTruthy();
+});
+
+test("hosts refetch fails after a good load: old rows do not drive the headline or metaline", async () => {
+  // TanStack Query keeps the last good data when a later poll fails
+  let fail = false;
+  const summary = { ...makeOverview(), counts: { running: 12, queued: 11 }, running: makeHostRuns() };
+  const good = [localRow(), ...asSent(makeHosts(Date.now()))];
+  mockApi({
+    "GET /api/v1/overview": summary,
+    "GET /api/v1/hosts": () => (fail ? new HttpReply(500, { error: "hub offline", type: "HostUnavailableError" }) : good),
+    [ENV]: { hx_version: "0.5.0" },
+  });
+  const { client } = renderWithClient(<OverviewPage />);
+  const h1 = await screen.findByRole("heading", { level: 1 });
+  await waitFor(() => expect(h1.textContent).toBe("12 running, 11 waiting. dgx stale 4m"));
+  fail = true;
+  await client.refetchQueries({ queryKey: queryKeys.hosts() });
+  const panel = screen.getByRole("region", { name: "a Hosts" });
+  expect((await within(panel).findByRole("alert")).textContent).toBe("hub offline");
+  expect(client.getQueryData(queryKeys.hosts())).toBeTruthy();
+  expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Idle. SVM leads toy-test by 0.037, p = 0.15");
+  const meta = [...document.querySelectorAll(".metaline span")].map((s) => s.textContent);
+  expect(meta).toEqual(["12 running", "11 queued"]);
+  expect(panel.querySelector(".aside")).toBeNull();
+  expect(document.querySelector(".hosts-banner")).toBeNull();
 });
 
 test("shows the server error", async () => {

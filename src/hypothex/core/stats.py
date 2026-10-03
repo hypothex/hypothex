@@ -557,7 +557,9 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
     f = max(math.frexp(w)[1] + 2 * e for w, e in ((wa, ea), (wb, eb)) if w > 0.0)
     f += f % 2  # even, so the square root of 2**f is exact
     sa, sb = math.ldexp(wa, 2 * ea - f), math.ldexp(wb, 2 * eb - f)  # larger in [0.25, 1)
-    g = max(ea, eb)
+    # a zero mean (an all-zero sample) has no scale: it must not push the
+    # other mean below the smallest float
+    g = max((e for m, e in ((ma, ea), (mb, eb)) if m != 0.0), default=0)
     diff = math.ldexp(ma, ea - g) - math.ldexp(mb, eb - g)  # (mean_a - mean_b) / 2**g
     u = diff / math.sqrt(sa + sb)  # t / 2**shift, |u| <= 4
     shift = g - f // 2

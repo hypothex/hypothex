@@ -340,18 +340,22 @@ def _exact_welch_p(a: list[float], b: list[float]) -> float:
     return 0.0 if math.isinf(t) else float(2.0 * sps.t.sf(t, float(df)))
 
 
+small_ints = st.one_of(st.just(0), st.integers(-1000, 1000))  # zeros come up often
+
+
 @FAST
 @given(
-    st.lists(st.integers(-1000, 1000), min_size=2, max_size=8),
-    st.lists(st.integers(-1000, 1000), min_size=2, max_size=8),
-    st.integers(-1000, 1000),
-    st.integers(-1000, 1000),
+    st.lists(small_ints, min_size=2, max_size=8),
+    st.lists(small_ints, min_size=2, max_size=8),
+    st.integers(-1074, 1000),
+    st.integers(-1074, 1000),
 )
 @example([0, 1], [1, 1], -232, 997)  # a spread of ~1e-70 next to values of ~1e300
+@example([0, 1] * 4, [0] * 8, -1074, 0)  # subnormals next to an all-zero sample
 def test_welch_on_two_unrelated_scales_matches_exact_arithmetic(
     ia: list[int], ib: list[int], ka: int, kb: int
 ) -> None:
-    # every value is an int times a power of two: exact, normal and finite
+    # every value is an int times a power of two (down to 2**-1074): exact and finite
     a, b = [math.ldexp(i, ka) for i in ia], [math.ldexp(i, kb) for i in ib]
     p = welch_p(a, b)
     if len(set(a)) == 1 and len(set(b)) == 1:
@@ -447,5 +451,7 @@ def test_regression_welch_near_the_float_limits() -> None:
     assert welch_p([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]) == pytest.approx(0.021312, abs=1e-6)
     # a constant whose sum / n rounds off by an ulp is still constant (was 1.4e-32)
     assert welch_p([0.0, 0.0], [699050.9501341588] * 3) is None
+    # an all-zero sample set the shared scale and flushed subnormal means (gave 1.0)
+    assert welch_p([0.0, 5e-324] * 4, [0.0] * 8) == pytest.approx(0.0331455, rel=1e-5)
     # one shared scale underflowed the small sample's spread to 0 (gave None)
     assert welch_p([0.0, 1e-70], [1e300, 1e300]) == 0.0

@@ -640,6 +640,58 @@ def test_a_file_deleted_after_the_listing_is_deleted_here(pair: tuple[Context, C
     assert "notes.md" not in json.loads((local / hub_mod.MANIFEST_NAME).read_text())
 
 
+def test_a_file_deleted_on_the_host_between_mirrors_is_deleted_here(
+    pair: tuple[Context, Context],
+) -> None:
+    hub, remote = pair
+    record = seed_run(remote, "r1", status=RunStatus.RUNNING)
+    run_dir = remote.run_dir(record)
+    old = run_dir / "predictions" / "old.jsonl"
+    old.write_text('{"id": "e0", "prediction": "old"}\n')
+    log_file = run_dir / "logs" / "stdout.log"
+    log_file.parent.mkdir(exist_ok=True)
+    log_file.write_text("step 1\n")
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    local = hub.layout.run_dir("toy", "r1")
+    assert (local / "predictions" / "old.jsonl").is_file() and (
+        local / "logs" / "stdout.log"
+    ).is_file()
+    old.unlink()  # the user deletes them on the host: never listed again
+    log_file.unlink()
+    client = FakeClient(remote)
+    result = hub_mod.mirror_run(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert result is not None and result[1]  # a change
+    assert client.fetched == ["run.yaml"]  # nothing to fetch: only deletes
+    assert not (local / "predictions" / "old.jsonl").exists()
+    assert not (local / "logs" / "stdout.log").exists()
+    manifest = json.loads((local / hub_mod.MANIFEST_NAME).read_text())
+    assert "predictions/old.jsonl" not in manifest and "logs/stdout.log" not in manifest
+    assert (local / "predictions" / "predictions.jsonl").is_file()  # still listed: kept
+    assert "predictions/predictions.jsonl" in manifest
+    again = hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert again is not None and not again[1]  # settled: the next mirror changes nothing
+
+
+def test_an_unsafe_manifest_entry_is_never_deleted(pair: tuple[Context, Context]) -> None:
+    hub, remote = pair
+    seed_run(remote, "r1")
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    local = hub.layout.run_dir("toy", "r1")
+    outside = local.parent / "keep.txt"
+    outside.write_text("not the mirror's file\n")
+    (local / ".hx").mkdir(exist_ok=True)
+    (local / ".hx" / "state").write_text("hub state\n")
+    manifest = json.loads((local / hub_mod.MANIFEST_NAME).read_text())
+    manifest |= {"../keep.txt": [1, 1], ".hx/state": [1, 1], "run.yaml": [1, 1]}
+    (local / hub_mod.MANIFEST_NAME).write_text(json.dumps(manifest))
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert (
+        outside.is_file() and (local / ".hx" / "state").is_file() and (local / "run.yaml").is_file()
+    )
+    cleaned = json.loads((local / hub_mod.MANIFEST_NAME).read_text())
+    assert not {"../keep.txt", ".hx/state", "run.yaml"} & set(cleaned)
+
+
 def test_a_file_that_grew_too_big_is_recorded_as_skipped(
     pair: tuple[Context, Context], monkeypatch: pytest.MonkeyPatch
 ) -> None:

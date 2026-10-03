@@ -216,7 +216,17 @@ def _read_manifest(run_dir: Path) -> dict[str, list[int]]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, list)}
+    return {k: v for k, v in data.items() if isinstance(v, list) and _mirrored_path(k)}
+
+
+def _mirrored_path(rel: object) -> bool:
+    """A path the mirror may hold in ``.mirror.json`` and so may delete (never ``run.yaml``)."""
+    return (
+        isinstance(rel, str)
+        and rel != "run.yaml"
+        and wanted_path(rel)
+        and not reserved_run_path(rel)
+    )
 
 
 def _read_local(ctx: Context, project: str, run_id: str) -> RunRecord | None:
@@ -348,13 +358,15 @@ def mirror_run(
     whole into a per-run staging folder, except files whose size and mtime
     match the last mirror (``.mirror.json``) and files larger than
     ``MIRROR_MAX_BYTES`` (recorded as ``remote_file`` artifacts with the host
-    name). ``logs/*`` are tails: at most the last ``LOG_TAIL_BYTES`` (spec
-    5.3, 8A.3). Only when every fetch succeeded is the run id claimed
-    hub-wide (``_claim``) and are the files installed, in one pass under the
-    run lock (``_install``); nothing is ever appended. Artifacts the host
-    recorded as ``local`` get the host's name, and an ended run gets its
-    ``cost`` at the host's price (``price_record``). A project the hub does
-    not know is copied from the host first (``_ensure_project``).
+    name). A file mirrored before (in ``.mirror.json``) that the host no
+    longer lists, or no longer serves, is deleted here. ``logs/*`` are tails:
+    at most the last ``LOG_TAIL_BYTES`` (spec 5.3, 8A.3). Only when every
+    fetch succeeded is the run id claimed hub-wide (``_claim``) and are the
+    files installed, in one pass under the run lock (``_install``); nothing is
+    ever appended. Artifacts the host recorded as ``local`` get the host's
+    name, and an ended run gets its ``cost`` at the host's price
+    (``price_record``). A project the hub does not know is copied from the
+    host first (``_ensure_project``).
 
     Parameters
     ----------
@@ -404,7 +416,9 @@ def mirror_run(
         remote_only: list[Artifact] = []
         skipped: dict[str, dict[str, object]] = {}
         unfetched: list[RemoteFile] = []
+        listed: set[str] = set()
         for entry in client.list_files(run_id):
+            listed.add(entry.path)
             if entry.path == "run.yaml" or reserved_run_path(entry.path):
                 continue  # .hx/ holds the hub's own state: never taken from a host
             if not wanted_path(entry.path):
@@ -421,7 +435,8 @@ def mirror_run(
                 unfetched.append(entry)
             else:
                 staged.append((entry, fetched))
-        gone: list[str] = []
+        # mirrored before but no longer listed: deleted on the host, so its copy here goes
+        gone: list[str] = [rel for rel in manifest if rel not in listed]
         if unfetched:
             # listed but not served: deleted since the listing (404) or grown too big (413)
             relisted = {f.path: f for f in client.list_files(run_id)}

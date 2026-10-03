@@ -1,7 +1,9 @@
 import json
 import os
+import socket
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -347,19 +349,36 @@ def test_view_add_and_validate_with_a_non_utf8_file(
 
 
 class _FakeUvicorn:
+    """Records what ``hx serve`` would serve; binds a free port instead of the asked one."""
+
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        self._asked: tuple[str, int] = ("", 0)
 
-    def run(self, application: object, **kwargs: object) -> None:
-        self.calls.append({"app": application, **kwargs})
+    def listen(self, host: str, port: int) -> socket.socket:
+        self._asked = (host, port)
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        return sock
+
+    def run(self, server: Any, sockets: list[socket.socket] | None = None) -> None:
+        for sock in sockets or []:
+            sock.close()
+        host, port = self._asked
+        self.calls.append({"app": server.config.app, "host": host, "port": port})
 
 
 @pytest.fixture
 def fake_uvicorn(monkeypatch: pytest.MonkeyPatch) -> _FakeUvicorn:
     import uvicorn
 
+    import hypothex.cli.main as cli_main
+
     fake = _FakeUvicorn()
-    monkeypatch.setattr(uvicorn, "run", fake.run)
+    monkeypatch.setattr(cli_main, "_listen", fake.listen)
+    monkeypatch.setattr(
+        uvicorn.Server, "run", lambda server, sockets=None: fake.run(server, sockets)
+    )
     monkeypatch.delenv("HYPOTHEX_SERVE_TOKEN", raising=False)
     return fake
 
@@ -398,6 +417,31 @@ def test_serve_with_a_token_binds_anywhere_and_enforces_it(
         assert c.get("/api/v1/runs").status_code == 401
         good = {"Authorization": "Bearer s3cret"}
         assert c.get("/api/v1/runs", headers=good).json() == []
+
+
+def test_no_auth_env_server_still_refuses_a_network_bind(
+    home: Path, fake_uvicorn: _FakeUvicorn
+) -> None:
+    with pytest.raises(ConfigError, match="without authentication"):
+        runner.invoke(
+            app,
+            ["serve", "--host", "0.0.0.0", "--kind", "ssh", "--no-auth"],
+            catch_exceptions=False,
+        )
+    assert fake_uvicorn.calls == []
+
+
+def test_env_server_makes_a_token_when_none_is_given(
+    home: Path, fake_uvicorn: _FakeUvicorn
+) -> None:
+    from fastapi.testclient import TestClient
+
+    result = runner.invoke(app, ["serve", "--kind", "slurm"], catch_exceptions=False)
+    assert result.exit_code == 0
+    [call] = fake_uvicorn.calls
+    with TestClient(call["app"], base_url="http://127.0.0.1:7777") as c:  # type: ignore[arg-type]
+        assert c.get("/api/v1/runs").status_code == 401
+        assert c.get("/.well-known/hypothex/environment").json()["kind"] == "slurm"
 
 
 def test_show_says_untracked_files_only(in_repo: Path) -> None:

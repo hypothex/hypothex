@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import secrets
+import socket
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated, Any, cast, get_args
+from typing import TYPE_CHECKING, Annotated, Any, cast, get_args
 
 import typer
 import yaml
@@ -35,6 +40,9 @@ from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import Layout, default_home
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
 
+if TYPE_CHECKING:
+    from hypothex.remote.bootstrap import ServerInfo
+
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
@@ -46,6 +54,14 @@ app.add_typer(task_app, name="task")
 app.add_typer(datasets_app, name="datasets")
 view_app = typer.Typer(no_args_is_help=True, help="Task views: dashboards written as YAML.")
 app.add_typer(view_app, name="view")
+service_app = typer.Typer(
+    no_args_is_help=True,
+    help="Keep an env server running on this machine (systemd user unit or launchd agent).",
+)
+app.add_typer(service_app, name="service")
+KindOpt = Annotated[
+    str | None, typer.Option("--kind", help="What this machine is to the hub: ssh or slurm.")
+]
 
 JsonFlag = Annotated[bool, typer.Option("--json", help="Print machine-readable JSON.")]
 ProjectOpt = Annotated[str | None, typer.Option("--project", "-p", help="Project name.")]
@@ -84,6 +100,64 @@ def main(
 # helpers --------------------------------------------------------------------------
 def _ctx() -> Context:
     return Context.open(_state.home)
+
+
+def _home_path() -> Path:
+    return (_state.home or default_home()).expanduser().resolve()
+
+
+def _listen(host: str, port: int) -> socket.socket:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((host, port))
+    except OSError as exc:
+        sock.close()
+        raise ConfigError(f"cannot listen on {host}:{port}: {exc.strerror or exc}") from exc
+    return sock
+
+
+def _url(host: str, port: int) -> str:
+    reach = {"0.0.0.0": "127.0.0.1", "": "127.0.0.1", "::": "::1"}.get(host, host)
+    return f"http://[{reach}]:{port}" if ":" in reach else f"http://{reach}:{port}"
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Atomically write ``path`` as mode 0600 inside a 0700 folder (it holds a token)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+@contextmanager
+def _server_file(home: Path, info: ServerInfo) -> Iterator[None]:
+    # <home>/serve/server.json says which server owns this home (bootstrap reuses it);
+    # the hostname tells login nodes that share a home apart (Task 11); the token is
+    # why it is owner-only
+    path = home / "serve" / "server.json"
+    record = {
+        **info.model_dump(mode="json"),
+        "hostname": socket.gethostname(),
+        "token": info.token,
+    }
+    _write_private(path, json.dumps(record, indent=2))
+    try:
+        yield
+    finally:
+        _drop_server_file(home, info.pid)
+
+
+def _drop_server_file(home: Path, pid: int) -> None:
+    """Remove ``<home>/serve/server.json`` if it still names process ``pid``."""
+    path = home / "serve" / "server.json"
+    with contextlib.suppress(OSError, ValueError, KeyError):
+        if json.loads(path.read_text(encoding="utf-8"))["pid"] == pid:
+            path.unlink()
 
 
 def _print_json(obj: Any) -> None:
@@ -942,38 +1016,52 @@ def resolve_serve_kind(home: Path, kind: str | None) -> str:
     return kind
 
 
-def serve_token(host: str) -> str | None:
+def _serve_token(host: str, kind: str | None, no_auth: bool) -> str | None:
     """
     Take the bearer token ``hx serve`` requires, and refuse an open network bind.
 
     The token comes from ``HYPOTHEX_SERVE_TOKEN`` and is removed from the
-    environment at once, so runs started by this server never inherit it.
+    environment at once, so runs started by this server never inherit it. An env
+    server (``kind`` ``ssh`` or ``slurm``) always has one, a fresh
+    ``secrets.token_hex(24)`` when none is given, unless ``no_auth``: any local
+    user on a shared host can reach its loopback port. The hub's own server keeps
+    phase 1's rule: a token only when one is given.
 
     Parameters
     ----------
     host : str
         The ``--host`` to bind.
+    kind : str or None
+        The resolved environment kind (``local``, ``ssh``, or ``slurm``).
+    no_auth : bool
+        ``--no-auth``: serve without a token (demo and test hosts only).
 
     Returns
     -------
     str or None
-        The token, or None when none is set (loopback binds only).
+        The token, or None when the server runs without one (loopback binds only).
 
     Raises
     ------
     ConfigError
-        ``host`` is not a loopback address and no token is set: the API starts
+        ``host`` is not a loopback address and there is no token: the API starts
         arbitrary commands, and the ``Host``/``Origin`` checks are no defence
         against a client on the network.
 
     Examples
     --------
-    >>> serve_token("127.0.0.1") is None
+    >>> _serve_token("127.0.0.1", "local", False) is None
     True
     """
     from hypothex.api.security import is_loopback_bind
 
-    token = os.environ.pop("HYPOTHEX_SERVE_TOKEN", None) or None
+    given = os.environ.pop("HYPOTHEX_SERVE_TOKEN", None) or None
+    if no_auth:
+        token = None
+    elif kind in SERVE_KINDS:
+        token = given or secrets.token_hex(24)
+    else:
+        token = given
     if token is None and not is_loopback_bind(host):
         raise ConfigError(
             f"refusing to serve on {host!r} without authentication: anyone who can reach "
@@ -988,7 +1076,7 @@ def serve_token(host: str) -> str | None:
 @app.command()
 def serve(
     host: Annotated[str, typer.Option(help="Bind address.")] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="Port.")] = 7777,
+    port: Annotated[int, typer.Option(help="Port; 0 picks a free one.")] = 7777,
     kind: Annotated[
         str | None,
         typer.Option(
@@ -996,23 +1084,91 @@ def serve(
             help="Run as a host's env server: ssh (GPU queue) or slurm. Default: the saved kind.",
         ),
     ] = None,
+    no_auth: Annotated[
+        bool,
+        typer.Option(
+            "--no-auth", help="Env server without a bearer token (demo and test hosts only)."
+        ),
+    ] = False,
 ) -> None:
     """
-    Serve the HTTP/WebSocket API (and the UI when built).
+    Serve the HTTP/WebSocket API, the UI when built, and (on the hub) the hosts.
 
-    With ``HYPOTHEX_SERVE_TOKEN`` set, every request except the environment
-    descriptor needs ``Authorization: Bearer <token>``. A non-loopback --host is
-    refused without a token.
+    An env server (``--kind ssh|slurm``) requires ``Authorization: Bearer <token>``
+    on every request except the environment descriptor; the token is
+    ``HYPOTHEX_SERVE_TOKEN`` or a fresh one, and is kept in ``<home>/serve/server.json``
+    (mode 0600). The hub's server needs a token only when ``HYPOTHEX_SERVE_TOKEN``
+    is set. A non-loopback --host is refused without a token.
     """
     import uvicorn
 
     from hypothex.api.app import create_app
+    from hypothex.core.environment import PROTOCOL_VERSION
+    from hypothex.remote.bootstrap import ServerInfo
 
-    token = serve_token(host)
-    home = (_state.home or default_home()).expanduser().resolve()
+    home = _home_path()
     resolved = resolve_serve_kind(home, kind)
-    application = create_app(home, host=host, kind=resolved, auth_token=token)
-    uvicorn.run(application, host=host, port=port)
+    token = _serve_token(host, resolved, no_auth)
+    sock = _listen(host, port)
+    bound = sock.getsockname()[1]
+    info = ServerInfo(
+        pid=os.getpid(),
+        port=bound,
+        managed=False,
+        hx_version=__version__,
+        protocol_version=PROTOCOL_VERSION,
+        token=token,
+    )
+
+    class _Server(uvicorn.Server):
+        # uvicorn re-raises SIGTERM/SIGINT once it has shut down, which ends the
+        # process before `with _server_file` cleans up: drop server.json first
+        @contextmanager
+        def capture_signals(self) -> Iterator[None]:
+            with super().capture_signals():
+                try:
+                    yield
+                finally:
+                    _drop_server_file(home, info.pid)
+
+    with _server_file(home, info):
+        application = create_app(home, host=host, kind=resolved, auth_token=token)
+        typer.secho(f"hx serve on {_url(host, bound)}", err=True)
+        # the socket is bound already: uvicorn logs no "running on" line for it, so
+        # the start script finds the port in server.json (written above, Task 11)
+        config = uvicorn.Config(application, host=host, port=bound, log_level="info")
+        _Server(config).run(sockets=[sock])
+
+
+@service_app.command("install")
+def service_install(kind: KindOpt = None, as_json: JsonFlag = False) -> None:
+    """Write the unit file and print how to enable it (hx never runs systemctl/launchctl)."""
+    from hypothex.remote.service import install_service
+
+    check_serve_kind(kind)
+    out = install_service(_home_path(), kind)
+    if as_json:
+        _print_json(out)
+        return
+    typer.echo(f"wrote {out.path}")
+    typer.echo("enable it with:")
+    for command in out.enable:
+        typer.echo(f"  {command}")
+
+
+@service_app.command("uninstall")
+def service_uninstall(as_json: JsonFlag = False) -> None:
+    """Remove the unit file and print how to stop the running server."""
+    from hypothex.remote.service import uninstall_service
+
+    out, removed = uninstall_service(_home_path())
+    if as_json:
+        _print_json({**out.model_dump(mode="json"), "removed": removed})
+        return
+    typer.echo(f"removed {out.path}" if removed else f"no unit file at {out.path}")
+    typer.echo("stop the running server with:")
+    for command in out.disable:
+        typer.echo(f"  {command}")
 
 
 @app.command()
@@ -1039,7 +1195,7 @@ def demo(
     unknown = sorted(set(chosen) - set(known))
     if unknown:
         raise ConfigError(f"unknown kind(s) {', '.join(unknown)}; choose from {', '.join(known)}")
-    home = (_state.home or default_home()).expanduser().resolve()
+    home = _home_path()
     # a project is the demo's only when its repo is under <home>/demo-repos/: a
     # name alone is not enough (the repo's own example is also "toy-classifier")
     demo_repos = home / "demo-repos"

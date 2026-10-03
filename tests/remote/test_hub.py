@@ -6,25 +6,52 @@ random loopback port, in a thread) or a fake; nothing connects to a real host.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
+import socket
 import sqlite3
 import threading
+import time
+from collections.abc import Callable, Iterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+import uvicorn
+from starlette.responses import JSONResponse
 
 import hypothex.remote.hub as hub_mod
+from hypothex._version import __version__
+from hypothex.api.app import create_app
 from hypothex.core.context import Context
+from hypothex.core.environment import PROTOCOL_VERSION
 from hypothex.core.errors import StoreError
 from hypothex.core.events import Event, EventLog
 from hypothex.core.fsutil import append_jsonl
 from hypothex.core.ids import utcnow
 from hypothex.core.index import SCHEMA_VERSION, Index
-from hypothex.core.records import Artifact, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.records import (
+    Artifact,
+    CostTotals,
+    ExecutorInfo,
+    RunRecord,
+    RunStatus,
+    ScoreRecord,
+)
+from hypothex.remote.bootstrap import BootstrapError, ServerInfo
 from hypothex.remote.client import EnvUnreachableError, RemoteFile
-from hypothex.remote.hub import Backoff, mirror_event, wanted_path
+from hypothex.remote.config import EnvironmentsFile, HostSpec
+from hypothex.remote.hub import (
+    Backoff,
+    HostState,
+    HostUnavailableError,
+    Hub,
+    mirror_event,
+    wanted_path,
+)
 from tests.factories import make_record
 
 # index cursors -----------------------------------------------------------------------
@@ -957,3 +984,1032 @@ def test_a_path_that_changes_between_file_and_folder_is_mirrored(
     manifest = json.loads((hub.layout.run_dir("toy", "r1") / hub_mod.MANIFEST_NAME).read_text())
     assert ("logs/output/part" in manifest) is (direction == "file-to-dir")
     assert ("logs/output" in manifest) is (direction == "dir-to-file")
+
+
+# helpers -----------------------------------------------------------------------------
+
+
+class EnvServer:
+    """A real env server (``create_app``) on 127.0.0.1 in a background thread."""
+
+    def __init__(self, home: Path, wrap: Callable[[Any], Any] | None = None) -> None:
+        self.home = home
+        self.wrap = wrap  # an ASGI wrapper around the app (tests of refused requests)
+        self.port = 0
+        self.server: uvicorn.Server | None = None
+        self.thread: threading.Thread | None = None
+        self.ctx: Context
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def start(self) -> None:
+        app = create_app(self.home, background_repair=False)
+        self.ctx = app.state.ctx
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", self.port))  # port 0 first, then the same port again
+        self.port = sock.getsockname()[1]
+        served = self.wrap(app) if self.wrap is not None else app
+        config = uvicorn.Config(served, log_level="error", timeout_graceful_shutdown=1)
+        self.server = uvicorn.Server(config)
+        self.thread = threading.Thread(
+            target=self.server.run, kwargs={"sockets": [sock]}, daemon=True
+        )
+        self.thread.start()
+        deadline = time.monotonic() + 10
+        while not self.server.started:
+            assert time.monotonic() < deadline, "env server did not start"
+            time.sleep(0.02)
+
+    def stop(self) -> None:
+        if self.server is None or self.thread is None:
+            return
+        self.server.should_exit = True
+        self.thread.join(10)
+        assert not self.thread.is_alive(), "env server did not stop"
+        self.server, self.thread = None, None
+
+
+@pytest.fixture
+def servers(tmp_path: Path) -> Iterator[tuple[EnvServer, EnvServer]]:
+    a, b = EnvServer(tmp_path / "host-a"), EnvServer(tmp_path / "host-b")
+    a.start()
+    b.start()
+    yield a, b
+    a.stop()
+    b.stop()
+
+
+def hosts_for(a: EnvServer, b: EnvServer) -> EnvironmentsFile:
+    return EnvironmentsFile(
+        environments={
+            "a": HostSpec(route="url", url=a.url),
+            "b": HostSpec(route="url", url=b.url),
+            "mac": HostSpec(route="local"),
+        }
+    )
+
+
+def fast(hub: Hub) -> Hub:
+    """Shrink the hub's timings so tests finish in seconds."""
+    hub.backoff_delays = (0.05, 0.1, 0.2, 0.4)
+    hub.stable_after = 0.5
+    hub.ping_interval = 0.2
+    return hub
+
+
+async def until(pred: Callable[[], object], timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not pred():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.05)
+
+
+def run_seqs(ctx: Context) -> list[int]:
+    return [e.sequence for e in ctx.events.since(0, 100_000) if e.type.startswith("run.")]
+
+
+def mirrored_seqs(hub_ctx: Context, host: str) -> list[int]:
+    return [
+        e.payload["remote_sequence"]
+        for e in hub_ctx.events.since(0, 100_000)
+        if e.type == "mirror.run_updated"
+        and e.payload["host"] == host
+        and e.payload["original_type"] != "refresh"
+    ]
+
+
+# hub supervisors over route: url -----------------------------------------------------
+
+
+def test_hub_mirrors_two_hosts(tmp_path: Path, servers: tuple[EnvServer, EnvServer]) -> None:
+    a, b = servers
+    seed_run(a.ctx, "a-1", value=0.25)
+    seed_run(b.ctx, "b-1", value=0.75)
+    hub_ctx = Context.open(tmp_path / "hub")
+    env_a, env_b = a.ctx.descriptor.environment_id, b.ctx.descriptor.environment_id
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, hosts_for(a, b)))
+        await hub.start()
+        try:
+            await until(
+                lambda: hub.state("a").last_sequence == 2 and hub.state("b").last_sequence == 2
+            )
+            states = {s.name: s for s in hub.states()}
+            assert [s.name for s in hub.states()] == ["a", "b", "mac"]
+            assert states["a"].state == "connected"
+            assert states["a"].kind == "ssh"
+            assert states["a"].environment_id == env_a
+            assert states["a"].hx_version == __version__
+            assert states["b"].environment_id == env_b
+            assert states["mac"].state == "connected"
+            assert states["mac"].environment_id == hub_ctx.descriptor.environment_id
+            assert hub.client("a").descriptor().environment_id == env_a
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    for run_id, env, value, srv in (("a-1", env_a, 0.25, a), ("b-1", env_b, 0.75, b)):
+        got = hub_ctx.index.get_run(run_id)
+        assert got is not None and got.environment_id == env
+        assert [s.value for s in hub_ctx.index.scores_for([run_id])[run_id]] == [value]
+        remote_dir = srv.ctx.layout.run_dir("toy", run_id)
+        local_dir = hub_ctx.layout.run_dir("toy", run_id)
+        for rel in ("run.yaml", "scores.jsonl", "predictions/predictions.jsonl"):
+            assert (local_dir / rel).is_file(), rel
+        assert (local_dir / "scores.jsonl").read_bytes() == (
+            remote_dir / "scores.jsonl"
+        ).read_bytes()
+    assert mirrored_seqs(hub_ctx, "a") == run_seqs(a.ctx) == [1, 2]
+    assert mirrored_seqs(hub_ctx, "b") == run_seqs(b.ctx) == [1, 2]
+    assert hub_ctx.index.get_cursor("a", env_a) == 2
+    connected = [
+        e.payload["name"]
+        for e in hub_ctx.events.since(0)
+        if e.type == "host.state" and e.payload["state"] == "connected"
+    ]
+    assert sorted(connected) == ["a", "b"]
+
+
+def test_reconnect_replays_without_gaps_or_duplicates(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer]
+) -> None:
+    a, b = servers
+    seed_run(a.ctx, "a-1")
+    hub_ctx = Context.open(tmp_path / "hub")
+    env_a = a.ctx.descriptor.environment_id
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, hosts_for(a, b)))
+        await hub.start()
+        try:
+            await until(lambda: mirrored_seqs(hub_ctx, "a") == [1, 2])
+            await asyncio.to_thread(a.stop)
+            await until(lambda: hub.state("a").state == "connecting")
+            assert hub.state("a").message.startswith("retry in ")
+            with pytest.raises(HostUnavailableError, match="'a' is connecting"):
+                hub.client("a")
+            # written while the hub cannot reach the host
+            seed_run(a.ctx, "a-2")
+            seed_run(a.ctx, "a-3")
+            a.ctx.update_run("a-1", "run.tagged", lambda r: r.model_copy(update={"tags": ["best"]}))
+            await asyncio.to_thread(a.start)
+            await until(
+                lambda: (
+                    hub.state("a").state == "connected"
+                    and mirrored_seqs(hub_ctx, "a") == run_seqs(a.ctx)
+                )
+            )
+            assert hub.state("b").state == "connected"
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert run_seqs(a.ctx) == [1, 2, 3, 4, 5, 6, 7]
+    assert mirrored_seqs(hub_ctx, "a") == [1, 2, 3, 4, 5, 6, 7]
+    assert {"a-1", "a-2", "a-3"} <= hub_ctx.index.run_ids()
+    tagged = hub_ctx.index.get_run("a-1")
+    assert tagged is not None and tagged.tags == ["best"]
+    assert hub_ctx.index.get_cursor("a", env_a) == 7
+
+
+def test_hub_restart_resumes_from_saved_cursor(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer]
+) -> None:
+    a, b = servers
+    seed_run(a.ctx, "a-1")
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        first = fast(Hub(hub_ctx, hosts_for(a, b)))
+        await first.start()
+        await until(lambda: mirrored_seqs(hub_ctx, "a") == [1, 2])
+        await first.stop()
+        seed_run(a.ctx, "a-2")
+        second = fast(Hub(Context.open(tmp_path / "hub"), hosts_for(a, b)))
+        await second.start()
+        try:
+            await until(lambda: second.state("a").last_sequence == 4)
+        finally:
+            await second.stop()
+
+    asyncio.run(main())
+    assert mirrored_seqs(hub_ctx, "a") == [1, 2, 3, 4]
+
+
+def test_host_goes_stale_without_pings_and_recovers(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer]
+) -> None:
+    a, b = servers
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, hosts_for(a, b)))
+        hub.stale_after = 0.6
+        await hub.start()
+        try:
+            await until(lambda: hub.state("a").state == "connected")
+            await asyncio.to_thread(a.stop)
+            stopped_at = utcnow()
+            await until(lambda: hub.state("a").state == "stale")
+            stale = hub.state("a")
+            assert stale.since <= stopped_at  # since = last successful contact
+            assert (stopped_at - stale.since).total_seconds() < 2
+            assert hub.state("b").state == "connected"
+            await asyncio.to_thread(a.start)
+            await until(lambda: hub.state("a").state == "connected")
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    states = [
+        e.payload["state"]
+        for e in hub_ctx.events.since(0)
+        if e.type == "host.state" and e.payload["name"] == "a"
+    ]
+    assert "stale" in states
+    assert states[-1] == "connected"
+
+
+def test_protocol_mismatch_marks_upgrade_and_stops_retrying(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer]
+) -> None:
+    a, b = servers
+    a.ctx.descriptor = a.ctx.descriptor.model_copy(
+        update={"protocol_version": PROTOCOL_VERSION + 1}
+    )
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, hosts_for(a, b)))
+        await hub.start()
+        try:
+            await until(lambda: hub.state("a").state == "upgrade")
+            assert hub.state("a").message == (
+                f"upgrade hx on a: protocol {PROTOCOL_VERSION + 1}, hub speaks {PROTOCOL_VERSION}"
+            )
+            seed_run(a.ctx, "a-1")
+            await asyncio.sleep(1.0)
+            assert hub.state("a").state == "upgrade"
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert hub_ctx.index.get_run("a-1") is None
+
+
+def test_disconnect_and_connect(tmp_path: Path, servers: tuple[EnvServer, EnvServer]) -> None:
+    a, b = servers
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, hosts_for(a, b)))
+        await hub.start()
+        try:
+            await until(lambda: hub.state("a").state == "connected")
+            off = await hub.disconnect("a")
+            assert (off.state, off.message) == ("disabled", "disconnected")
+            with pytest.raises(HostUnavailableError, match="'a' is disabled"):
+                hub.client("a")
+            seed_run(a.ctx, "a-1")
+            await asyncio.sleep(1.0)
+            assert hub_ctx.index.get_run("a-1") is None
+            await hub.connect("a")
+            await until(lambda: hub_ctx.index.get_run("a-1") is not None)
+            assert hub.state("a").state == "connected"
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+
+
+def test_unknown_and_local_hosts_have_no_client(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer]
+) -> None:
+    a, b = servers
+    hub = Hub(Context.open(tmp_path / "hub"), hosts_for(a, b))
+    with pytest.raises(HostUnavailableError, match="unknown host 'nope'"):
+        hub.state("nope")
+    with pytest.raises(HostUnavailableError, match="'mac' is the hub itself"):
+        hub.client("mac")
+    assert isinstance(hub.state("a"), HostState)
+    assert hub.state("a").state == "connecting"
+
+
+def test_running_runs_refresh_metrics_without_events(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer]
+) -> None:
+    a, b = servers
+    record = seed_run(a.ctx, "a-live", status=RunStatus.RUNNING)
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, hosts_for(a, b)))
+        await hub.start()
+        try:
+            await until(lambda: mirrored_seqs(hub_ctx, "a") == [1, 2])
+            # the SDK appends metrics.jsonl without emitting an event
+            append_jsonl(
+                a.ctx.run_dir(record) / "metrics.jsonl", {"name": "loss", "step": 1, "value": 0.5}
+            )
+            await until(lambda: len(hub_ctx.index.metric_points("a-live")) == 1)
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert [(p.name, p.value) for p in hub_ctx.index.metric_points("a-live")] == [("loss", 0.5)]
+    refreshes = [
+        e
+        for e in hub_ctx.events.since(0)
+        if e.type == "mirror.run_updated" and e.payload["original_type"] == "refresh"
+    ]
+    assert refreshes and refreshes[0].run_id == "a-live"
+    assert refreshes[0].payload["remote_sequence"] is None
+
+
+def test_apply_mirrors_each_sequence_once(pair: tuple[Context, Context]) -> None:
+    hub_ctx, remote = pair
+    seed_run(remote, "r1")
+    hub = Hub(
+        hub_ctx,
+        EnvironmentsFile(environments={"gpu1": HostSpec(route="url", url="http://127.0.0.1:9")}),
+    )
+    sup = hub._sups["gpu1"]
+    event = run_event(remote, "r1")
+    client = FakeClient(remote)
+    hub._apply(sup, client, "env-remote", [event])  # type: ignore[arg-type]
+    hub._apply(sup, client, "env-remote", [event])  # type: ignore[arg-type]  # a retried session
+    assert mirrored_seqs(hub_ctx, "gpu1") == [2]
+    assert hub_ctx.index.get_cursor("gpu1", "env-remote") == 2
+
+
+def test_replay_mirrors_each_run_once_per_batch(pair: tuple[Context, Context]) -> None:
+    hub_ctx, remote = pair
+    seed_run(remote, "r1")
+    for i in range(10):
+        tags = [f"t{i}"]
+        remote.update_run("r1", "run.tagged", lambda r, t=tags: r.model_copy(update={"tags": t}))
+    seed_run(remote, "r2")
+    events = [e for e in remote.events.since(0) if e.type.startswith("run.")]
+    hub = Hub(
+        hub_ctx,
+        EnvironmentsFile(environments={"gpu1": HostSpec(route="url", url="http://127.0.0.1:9")}),
+    )
+    client = FakeClient(remote)
+    last = hub._apply(hub._sups["gpu1"], client, "env-remote", events)  # type: ignore[arg-type]
+    assert last == events[-1].sequence
+    assert client.fetched.count("run.yaml") == 2  # one per run, not one per event
+    assert mirrored_seqs(hub_ctx, "gpu1") == [e.sequence for e in events]
+    assert hub_ctx.find_record("r1").tags == ["t9"]
+
+
+class DroppingClient(FakeClient):
+    """A FakeClient whose connection drops once, after ``drop_after`` fetched files."""
+
+    def __init__(self, remote: Context, drop_after: int) -> None:
+        super().__init__(remote)
+        self.drop_after: int | None = drop_after
+
+    def fetch_file(
+        self, run_id: str, rel_path: str, dest: Path, *, max_bytes: int, **kw: Any
+    ) -> bool:
+        if self.drop_after is not None and len(self.fetched) >= self.drop_after:
+            self.drop_after = None
+            raise EnvUnreachableError("cannot reach http://127.0.0.1:1: connection reset")
+        return super().fetch_file(run_id, rel_path, dest, max_bytes=max_bytes, **kw)
+
+
+def test_tunnel_drop_mid_mirror_keeps_the_cursor_and_retries(
+    pair: tuple[Context, Context],
+) -> None:
+    # Review Focus: the ssh tunnel dies after run.yaml and one prediction file arrived.
+    hub_ctx, remote = pair
+    seed_run(remote, "r1")
+    hub = Hub(
+        hub_ctx,
+        EnvironmentsFile(environments={"gpu1": HostSpec(route="url", url="http://127.0.0.1:9")}),
+    )
+    sup = hub._sups["gpu1"]
+    event = run_event(remote, "r1")
+    client = DroppingClient(remote, drop_after=2)
+    with pytest.raises(EnvUnreachableError):
+        hub._apply(sup, client, "env-remote", [event])  # type: ignore[arg-type]
+    assert hub_ctx.index.get_cursor("gpu1", "env-remote") == 0  # replayed after reconnect
+    assert not hub_ctx.layout.run_dir("toy", "r1").exists()  # nothing half-installed
+    assert mirrored_seqs(hub_ctx, "gpu1") == []
+    hub._apply(sup, client, "env-remote", [event])  # type: ignore[arg-type]  # the next session
+    assert hub_ctx.index.get_cursor("gpu1", "env-remote") == 2
+    assert mirrored_seqs(hub_ctx, "gpu1") == [2]
+    local = hub_ctx.layout.run_dir("toy", "r1")
+    assert (local / "scores.jsonl").is_file()
+    assert (local / "predictions" / "predictions.jsonl").is_file()
+
+
+def test_run_that_ended_while_the_hub_was_off_is_mirrored_and_priced(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer]
+) -> None:
+    # Review Focus: the laptop slept for hours; a run started and ended on the host.
+    a, _ = servers
+    hub_ctx = Context.open(tmp_path / "hub")
+    hosts = EnvironmentsFile(
+        environments={"a": HostSpec(route="url", url=a.url, usd_per_gpu_hour=2.0)}
+    )
+
+    async def session(until_sequence: int) -> None:
+        hub = fast(Hub(Context.open(tmp_path / "hub"), hosts))
+        await hub.start()
+        try:
+            await until(
+                lambda: (
+                    hub.state("a").state == "connected"
+                    and hub.state("a").last_sequence == until_sequence
+                )
+            )
+        finally:
+            await hub.stop()
+
+    asyncio.run(session(0))
+    ended = utcnow() - timedelta(hours=2)
+    a.ctx.create_run(
+        make_record(
+            "a-night",
+            environment_id=a.ctx.descriptor.environment_id,
+            executor=ExecutorInfo(gpus=[0, 1]),
+        )
+    )
+    a.ctx.update_run(
+        "a-night",
+        "run.started",
+        lambda r: r.model_copy(
+            update={"status": RunStatus.RUNNING, "started_at": ended - timedelta(hours=3)}
+        ),
+    )
+    a.ctx.update_run(
+        "a-night",
+        "run.finished",
+        lambda r: r.model_copy(
+            update={"status": RunStatus.FINISHED, "ended_at": ended, "exit_code": 0}
+        ),
+    )
+    asyncio.run(session(3))
+    mirrored = hub_ctx.find_record("a-night")
+    assert (mirrored.status, mirrored.ended_at) == (RunStatus.FINISHED, ended)
+    assert mirrored.environment_id == a.ctx.descriptor.environment_id  # not lost, not stale
+    # 3 h x 2 GPUs at $2.00 per GPU hour, priced by the hub (the host has no price)
+    assert mirrored.cost == CostTotals(gpu_hours=6.0, gpu_usd=12.0, total_usd=12.0)
+    assert mirrored_seqs(hub_ctx, "a") == [1, 2, 3]
+
+
+def test_add_and_remove_host_leave_other_sessions_alone(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer]
+) -> None:
+    a, b = servers
+    hub_ctx = Context.open(tmp_path / "hub")
+    only_a = EnvironmentsFile(environments={"a": HostSpec(route="url", url=a.url)})
+
+    def connects(name: str) -> int:
+        return sum(
+            1
+            for e in hub_ctx.events.since(0)
+            if e.type == "host.state"
+            and e.payload["name"] == name
+            and e.payload["state"] == "connected"
+        )
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, only_a))
+        await hub.start()
+        try:
+            await until(lambda: hub.state("a").state == "connected")
+            session_a = hub._sups["a"].client
+            await hub.add_host("b", HostSpec(route="url", url=b.url))
+            await until(lambda: hub.state("b").state == "connected")
+            assert hub._sups["a"].client is session_a  # a kept its session
+            await hub.remove_host("b")
+            with pytest.raises(HostUnavailableError, match="unknown host 'b'"):
+                hub.state("b")
+            assert hub._sups["a"].client is session_a
+            assert connects("a") == 1
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+
+
+def test_stop_waits_for_shielded_mirror_work(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, b = servers
+    seed_run(a.ctx, "a-1")
+    hub_ctx = Context.open(tmp_path / "hub")
+    started, finished = threading.Event(), threading.Event()
+    real = hub_mod.mirror_run
+
+    def slow_mirror(*args: Any, **kwargs: Any) -> Any:
+        started.set()
+        time.sleep(0.5)
+        try:
+            return real(*args, **kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(hub_mod, "mirror_run", slow_mirror)
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, hosts_for(a, b)))
+        await hub.start()
+        await until(started.is_set)
+        await hub.stop()
+        assert finished.is_set()  # no thread of the old session is still mirroring
+
+    asyncio.run(main())
+
+
+def test_sessions_close_their_http_clients(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, b = servers
+    hub_ctx = Context.open(tmp_path / "hub")
+    created: list[Any] = []
+
+    class CountingClient(hub_mod.EnvClient):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+    monkeypatch.setattr(hub_mod, "EnvClient", CountingClient)
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, hosts_for(a, b)))
+        await hub.start()
+        await until(lambda: hub.state("a").state == "connected")
+        await hub.disconnect("a")
+        await hub.connect("a")
+        await until(lambda: hub.state("a").state == "connected")
+        await hub.stop()
+
+    asyncio.run(main())
+    # at least two sessions of a and one of b, each with a client and a pinger
+    assert len(created) >= 6
+    assert all(c._http.is_closed for c in created)  # no socket leaks on reconnect
+
+
+def test_a_halt_during_the_session_drain_still_closes_clients_and_route(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, _ = servers
+    seed_run(a.ctx, "a-1")
+    hub_ctx = Context.open(tmp_path / "hub")
+    created: list[Any] = []
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    real = hub_mod.mirror_run
+
+    class CountingClient(hub_mod.EnvClient):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+    class FakeTunnel:
+        local_port = 0
+        stopped = False
+
+        def stop(self) -> None:
+            assert finished.is_set()  # never torn down under a running mirror
+            FakeTunnel.stopped = True
+
+    def blocked_mirror(*args: Any, **kwargs: Any) -> Any:
+        started.set()
+        release.wait(10)
+        try:
+            return real(*args, **kwargs)
+        finally:
+            finished.set()
+
+    async def failing_watch(self: Hub, sup: Any, *args: Any) -> None:
+        await until(started.is_set)
+        sup.tunnel = FakeTunnel()
+        raise RuntimeError("no answer")  # the session ends on its own mid-mirror
+
+    monkeypatch.setattr(hub_mod, "EnvClient", CountingClient)
+    monkeypatch.setattr(hub_mod, "mirror_run", blocked_mirror)
+    monkeypatch.setattr(hub_mod.Hub, "_watch", failing_watch)
+    only_a = EnvironmentsFile(environments={"a": HostSpec(route="url", url=a.url)})
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, only_a))
+        await hub.start()
+        try:
+            sup = hub._sups["a"]
+            await until(lambda: started.is_set() and sup.tunnel is not None)
+            await until(lambda: sup.client is None)  # the session is in its drain
+            halt = asyncio.create_task(hub.disconnect("a"))  # the cancel lands in the drain
+            await asyncio.sleep(0.2)
+            assert not halt.done()  # the halt waits for the mirror thread
+            assert not any(c._http.is_closed for c in created)
+            release.set()
+            await halt
+            assert finished.is_set()
+            assert len(created) == 2
+            assert all(c._http.is_closed for c in created)  # no socket leaks
+            assert FakeTunnel.stopped and sup.tunnel is None  # no orphan tunnel
+        finally:
+            release.set()
+            await hub.stop()
+
+    asyncio.run(main())
+
+
+def live_session_counter(monkeypatch: pytest.MonkeyPatch) -> set[object]:
+    """Swap ``Hub._session`` for one that stays open and takes a while to clean up."""
+    live: set[object] = set()
+
+    async def slow_session(self: Hub, sup: Any) -> None:
+        token = object()
+        live.add(token)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.1)  # cleanup that another lifecycle call can overtake
+            live.discard(token)
+
+    monkeypatch.setattr(hub_mod.Hub, "_session", slow_session)
+    return live
+
+
+@pytest.mark.parametrize(
+    "rival",
+    ["connect", "disconnect", "remove", "replace"],
+)
+def test_racing_lifecycle_calls_leave_at_most_one_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rival: str
+) -> None:
+    live = live_session_counter(monkeypatch)
+    hub_ctx = Context.open(tmp_path / "hub")
+    spec = HostSpec(route="url", url="http://127.0.0.1:9")
+    only_a = EnvironmentsFile(environments={"a": spec})
+    rivals: dict[str, Callable[[Hub], Any]] = {
+        "connect": lambda hub: hub.connect("a"),
+        "disconnect": lambda hub: hub.disconnect("a"),
+        "remove": lambda hub: hub.remove_host("a"),
+        "replace": lambda hub: hub.add_host("a", HostSpec(route="url", url="http://127.0.0.1:8")),
+    }
+    expected = {"connect": 1, "disconnect": 0, "remove": 0, "replace": 1}
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, only_a))
+        await hub.start()
+        try:
+            await until(lambda: len(live) == 1)
+            first = asyncio.create_task(hub.connect("a"))
+            await asyncio.sleep(0)  # the first call is inside its halt
+            second = asyncio.create_task(rivals[rival](hub))
+            await asyncio.gather(first, second, return_exceptions=True)
+            await asyncio.sleep(0.3)  # every launched session is open by now
+            assert len(live) == expected[rival]
+        finally:
+            await hub.stop()
+        assert live == set()  # stop() reached every session: none is orphaned
+
+    asyncio.run(main())
+
+
+def test_connect_before_start_is_not_launched_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live = live_session_counter(monkeypatch)
+    hub_ctx = Context.open(tmp_path / "hub")
+    only_a = EnvironmentsFile(environments={"a": HostSpec(route="url", url="http://127.0.0.1:9")})
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, only_a))
+        await hub.connect("a")
+        await hub.start()
+        try:
+            await asyncio.sleep(0.3)
+            assert len(live) == 1
+        finally:
+            await hub.stop()
+        assert live == set()
+
+    asyncio.run(main())
+
+
+class RefuseWithoutToken:
+    """ASGI wrapper: the descriptor answers, every other request is refused (no token)."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self.subscriptions = 0
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] not in ("http", "websocket") or scope["path"].startswith("/.well-known/"):
+            await self.app(scope, receive, send)
+            return
+        if scope["type"] == "websocket":
+            self.subscriptions += 1
+            await receive()
+            await send({"type": "websocket.close", "code": 1008})  # handshake answers 403
+            return
+        body = {"error": "missing or wrong bearer token", "type": "AuthError"}
+        await JSONResponse(body, status_code=401)(scope, receive, send)
+
+
+def test_an_auth_failure_stops_retrying_until_connect(tmp_path: Path) -> None:
+    guards: list[RefuseWithoutToken] = []
+
+    def wrap(app: Any) -> RefuseWithoutToken:
+        guards.append(RefuseWithoutToken(app))
+        return guards[-1]
+
+    server = EnvServer(tmp_path / "host-a", wrap=wrap)
+    server.start()
+    try:
+        hosts = EnvironmentsFile(environments={"a": HostSpec(route="url", url=server.url)})
+
+        async def main() -> None:
+            hub = fast(Hub(Context.open(tmp_path / "hub"), hosts))
+            await hub.start()
+            try:
+                await until(lambda: hub.state("a").state == "error")
+                state = hub.state("a")
+                assert state.message.startswith("authentication failed (HTTP 403)")
+                assert "hx hosts connect a" in state.message
+                await asyncio.sleep(1.0)  # many backoff periods: nothing retries
+                assert guards[0].subscriptions == 1
+                assert hub._sups["a"].task is not None and hub._sups["a"].task.done()
+                await hub.connect("a")  # an explicit reconnect tries again, once
+                await until(lambda: guards[0].subscriptions == 2)
+            finally:
+                await hub.stop()
+
+        asyncio.run(main())
+    finally:
+        server.stop()
+
+
+def test_a_failed_cursor_write_never_re_emits_on_replay(
+    pair: tuple[Context, Context], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub_ctx, remote = pair
+    seed_run(remote, "r1")
+    hub = Hub(
+        hub_ctx,
+        EnvironmentsFile(environments={"gpu1": HostSpec(route="url", url="http://127.0.0.1:9")}),
+    )
+    sup = hub._sups["gpu1"]
+    events = [e for e in remote.events.since(0) if e.type.startswith("run.")]
+    real = hub_ctx.index.set_cursor
+
+    def crash(host: str, environment_id: str, last_sequence: int) -> None:
+        raise RuntimeError("database is locked")  # the events are in, the cursor is not
+
+    monkeypatch.setattr(hub_ctx.index, "set_cursor", crash)
+    with pytest.raises(RuntimeError):
+        hub._apply(sup, FakeClient(remote), "env-remote", events)  # type: ignore[arg-type]
+    assert hub_ctx.index.get_cursor("gpu1", "env-remote") == 0
+    monkeypatch.setattr(hub_ctx.index, "set_cursor", real)
+    hub._apply(sup, FakeClient(remote), "env-remote", events)  # type: ignore[arg-type]  # replay
+    assert mirrored_seqs(hub_ctx, "gpu1") == [e.sequence for e in events]  # each once
+    assert hub_ctx.index.get_cursor("gpu1", "env-remote") == events[-1].sequence
+
+
+def test_hub_start_reindexes_a_run_a_crash_left_half_indexed(
+    pair: tuple[Context, Context], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub_ctx, remote = pair
+    seed_run(remote, "r1", value=0.75)
+
+    def crash(index: Index, store: Any, record: RunRecord) -> None:
+        raise Crash  # the files and run.yaml are in; the index is not
+
+    monkeypatch.setattr(hub_mod, "index_run", crash)
+    with pytest.raises(Crash):
+        hub_mod.mirror_run(hub_ctx, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    monkeypatch.undo()
+    assert hub_ctx.index.get_run("r1") is None
+
+    async def main() -> None:
+        hub = Hub(hub_ctx, EnvironmentsFile())  # no host ever sends an event for r1 again
+        await hub.start()
+        await hub.stop()
+
+    asyncio.run(main())
+    assert [s.value for s in hub_ctx.index.scores_for(["r1"])["r1"]] == [0.75]
+    assert not (hub_ctx.layout.run_dir("toy", "r1") / hub_mod.INDEX_PENDING).exists()
+
+
+# hub supervisors over route: ssh (fake bootstrap + fake tunnel) -----------------------
+
+
+class FakeTunnel:
+    """Stands in for ``ssh -N -L``: the in-process server already listens on the port."""
+
+    instances: list[FakeTunnel] = []
+
+    def __init__(self, target: Any, remote_port: int, local_port: int | None = None) -> None:
+        self.target = target
+        self.local_port = remote_port
+        self.started = self.stopped = self.dead = False
+        FakeTunnel.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    def alive(self) -> bool:
+        return not self.dead
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+@pytest.fixture
+def fake_ssh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tuple[str, str, str]]:
+    FakeTunnel.instances = []
+    monkeypatch.setattr(hub_mod, "Tunnel", FakeTunnel)
+    monkeypatch.setenv("HYPOTHEX_SSH", str(tmp_path / "bin" / "fake-ssh"))
+    return []
+
+
+def ssh_hosts() -> EnvironmentsFile:
+    return EnvironmentsFile(environments={"gpu1": HostSpec(route="ssh", ssh_alias="gpu1")})
+
+
+def test_ssh_route_bootstraps_tunnels_and_mirrors(
+    tmp_path: Path,
+    servers: tuple[EnvServer, EnvServer],
+    fake_ssh: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a, _ = servers
+    seed_run(a.ctx, "a-1")
+
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        assert kind == "ssh"
+        fake_ssh.append((target.alias, home, target.ssh_bin))
+        return ServerInfo(
+            pid=1,
+            port=a.port,
+            managed=True,
+            hx_version=__version__,
+            protocol_version=PROTOCOL_VERSION,
+            token="t0k",
+        )
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, ssh_hosts()))
+        await hub.start()
+        try:
+            await until(lambda: hub.state("gpu1").last_sequence == 2)
+            assert hub.state("gpu1").local_port == a.port
+            # the env server's token (from server.json over ssh) goes on every request
+            assert hub.client("gpu1").auth_headers() == {"Authorization": "Bearer t0k"}
+            assert fake_ssh == [("gpu1", "~/.hypothex", str(tmp_path / "bin" / "fake-ssh"))]
+            FakeTunnel.instances[0].dead = True  # the ssh -L process died
+            await until(lambda: len(fake_ssh) == 2 and hub.state("gpu1").state == "connected")
+            assert FakeTunnel.instances[0].stopped
+            assert FakeTunnel.instances[1].started
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert FakeTunnel.instances[1].stopped
+    assert hub_ctx.index.get_run("a-1") is not None
+    states = [e.payload["state"] for e in hub_ctx.events.since(0) if e.type == "host.state"]
+    assert states[:2] == ["bootstrapping", "connected"]
+
+
+def test_ssh_bootstrap_failure_is_error_and_retried(
+    tmp_path: Path, fake_ssh: list[tuple[str, str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        fake_ssh.append((target.alias, home, target.ssh_bin))
+        raise BootstrapError("uv is missing on gpu1 and the installer has no network")
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+
+    async def main() -> None:
+        hub = fast(Hub(Context.open(tmp_path / "hub"), ssh_hosts()))
+        await hub.start()
+        try:
+            await until(lambda: len(fake_ssh) >= 3)
+            state = hub.state("gpu1")
+            assert state.state in ("error", "bootstrapping")
+            await until(lambda: hub.state("gpu1").state == "error")
+            assert hub.state("gpu1").message.startswith("retry in ")
+            assert hub.state("gpu1").message.endswith(
+                "uv is missing on gpu1 and the installer has no network"
+            )
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert FakeTunnel.instances == []
+
+
+def test_ssh_server_with_old_protocol_needs_upgrade(
+    tmp_path: Path, fake_ssh: list[tuple[str, str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        fake_ssh.append((target.alias, home, target.ssh_bin))
+        return ServerInfo(pid=1, port=1, managed=True, hx_version="0.0.1", protocol_version=0)
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+
+    async def main() -> None:
+        hub = fast(Hub(Context.open(tmp_path / "hub"), ssh_hosts()))
+        await hub.start()
+        try:
+            await until(lambda: hub.state("gpu1").state == "upgrade")
+            await asyncio.sleep(0.5)
+            assert len(fake_ssh) == 1
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert FakeTunnel.instances == []
+
+
+def test_disconnect_during_tunnel_start_leaves_no_tunnel(
+    tmp_path: Path,
+    servers: tuple[EnvServer, EnvServer],
+    fake_ssh: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a, _ = servers
+    order: list[str] = []
+    entered = threading.Event()
+
+    class SlowTunnel(FakeTunnel):
+        def start(self) -> None:
+            entered.set()
+            time.sleep(0.5)  # ssh -N -L is still coming up when the user disconnects
+            order.append("start")
+
+        def stop(self) -> None:
+            order.append("stop")
+            super().stop()
+
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        return ServerInfo(
+            pid=1, port=a.port, managed=True, hx_version=__version__,
+            protocol_version=PROTOCOL_VERSION,
+        )  # fmt: skip
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+    monkeypatch.setattr(hub_mod, "Tunnel", SlowTunnel)
+
+    async def main() -> None:
+        hub = fast(Hub(Context.open(tmp_path / "hub"), ssh_hosts()))
+        await hub.start()
+        try:
+            await asyncio.to_thread(entered.wait, 10)
+            state = await hub.disconnect("gpu1")
+            assert state.state == "disabled"
+            assert order == ["start", "stop"]  # started before the cleanup, then stopped
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert order == ["start", "stop"]
+
+
+def test_the_token_never_reaches_states_events_or_logs(
+    tmp_path: Path,
+    fake_ssh: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "5ec2e7" * 8
+
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        fake_ssh.append((target.alias, home, target.ssh_bin))
+        return ServerInfo(
+            pid=1, port=1, managed=True, hx_version=__version__,
+            protocol_version=PROTOCOL_VERSION, token=sentinel,
+        )  # fmt: skip  # port 1: nothing answers, so the session fails and retries
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+    caplog.set_level(logging.DEBUG)
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, ssh_hosts()))
+        await hub.start()
+        try:
+            await until(lambda: len(fake_ssh) >= 3)
+            seen = json.dumps([s.model_dump(mode="json") for s in hub.states()])
+            assert sentinel not in seen and sentinel not in repr(hub.states())
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    events = json.dumps([e.payload for e in hub_ctx.events.since(0, 100_000)])
+    assert sentinel not in events
+    assert sentinel not in caplog.text

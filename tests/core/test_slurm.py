@@ -1924,3 +1924,14 @@ def test_a_rejected_pinned_slurm_run_s_worktree_is_removed(
     with pytest.raises(RunError, match="invalid partition"):
         _pinned_slurm_run(ctx, toy_repo, "pass")
     assert _worktrees(ctx) == []
+
+
+def test_cancel_if_queued_cancels_only_a_pending_job(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "PENDING")
+    slurm.add_job("1001", "RUNNING", node="n1")  # started; the node has not published yet
+    slurm_run(ctx, "r1", job_id="1000", status=RunStatus.QUEUED)
+    slurm_run(ctx, "r2", job_id="1001", status=RunStatus.QUEUED)
+    assert control.cancel_if_queued(ctx, "r1").status == RunStatus.KILLED
+    assert control.cancel_if_queued(ctx, "r2").status == RunStatus.QUEUED
+    assert slurm.job("1001")["state"] == "RUNNING"
+    assert slurm.calls("scancel") == [["--state=PENDING", "1000"], ["--state=PENDING", "1001"]]

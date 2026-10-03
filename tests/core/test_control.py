@@ -453,3 +453,37 @@ def test_reinfer_passes_the_parents_config(ctx: Context, toy_repo: Path, tmp_pat
     assert child.status == RunStatus.FINISHED
     assert (ctx.run_dir(child) / "config.yaml").read_text() == "lr: 0.1\n"
     assert child.command[-1] == str(ctx.run_dir(child) / "config.yaml")
+
+
+def _pinned_request(repo: Path, *, gpus: int = 0, queue: bool = False) -> RunRequest:
+    """A request pinned to the previous commit, so it runs in its own worktree."""
+    _commit_train(repo, "train v1")
+    old = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    _commit_train(repo, "train v2")
+    return RunRequest(repo=repo, command=[PY, "train.py"], commit=old, gpus=gpus, queue=queue)
+
+
+def test_cancelling_an_unstarted_pinned_run_releases_its_worktree(
+    ctx: Context, toy_repo: Path
+) -> None:
+    rec = prepare_run(ctx, _pinned_request(toy_repo))
+    tree = ctx.layout.worktrees_dir("toy") / rec.run_id
+    assert tree.is_dir()  # the checkout was made at prepare time
+    assert control.cancel_if_queued(ctx, rec.run_id).status == RunStatus.KILLED
+    assert not tree.exists()  # no supervisor will ever run it: nothing else removes it
+
+
+def test_removing_a_pinned_run_from_the_gpu_queue_releases_its_worktree(
+    ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gpus = tmp_path / "gpus.json"
+    fake_gpus.write_text('[{"index": 0, "external": true}]')  # busy: nothing can start
+    monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(fake_gpus))
+    rec = launch_run(ctx, _pinned_request(toy_repo, gpus=1, queue=True))
+    assert rec.status == RunStatus.QUEUED
+    tree = ctx.layout.worktrees_dir("toy") / rec.run_id
+    assert tree.is_dir()
+    assert control.cancel_if_queued(ctx, rec.run_id).status == RunStatus.KILLED
+    assert not tree.exists()

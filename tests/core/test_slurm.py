@@ -3,6 +3,7 @@ import getpass
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -343,6 +344,7 @@ def test_render_sbatch_exact_directives(tmp_path: Path) -> None:
         "#!/bin/bash\n"
         "#SBATCH --job-name=hx-r1\n"
         f"#SBATCH --output={home}/store/toy/runs/r1/logs/slurm-%j.out\n"
+        "#SBATCH --no-requeue\n"
         "#SBATCH --time=08:00:00\n"
         "#SBATCH --gpus=2\n"
         "#SBATCH --partition=gpu\n"
@@ -357,13 +359,14 @@ def test_render_sbatch_exact_directives(tmp_path: Path) -> None:
 def test_render_sbatch_defaults_and_zero_gpus(tmp_path: Path) -> None:
     home = tmp_path / "hx"
     lines = render_sbatch(make_record("r1"), SlurmDefaults(), home).splitlines()
-    assert lines[1:5] == [
+    assert lines[1:6] == [
         "#SBATCH --job-name=hx-r1",
         f"#SBATCH --output={home}/store/toy/runs/r1/logs/slurm-%j.out",
+        "#SBATCH --no-requeue",
         "#SBATCH --time=02:00:00",
         "#SBATCH --gpus=1",
     ]
-    assert lines[5] == ""
+    assert lines[6] == ""
     cpu = render_sbatch(make_record("r1"), SlurmDefaults(gpus=0), home)
     assert "--gpus" not in cpu
 
@@ -385,6 +388,11 @@ def test_render_sbatch_defaults_and_zero_gpus(tmp_path: Path) -> None:
         (SlurmDefaults.model_construct(partition="gpu; rm"), "partition 'gpu; rm'"),
         (SlurmDefaults.model_construct(account="lab\n#SBATCH --qos=high"), "account"),
         (SlurmDefaults.model_construct(time="2 hours"), "time '2 hours'"),
+        # a requeued job would hit its own execution claim (NODE_FAIL hidden as FAILED)
+        (SlurmDefaults(extra=["--requeue"]), "sets --requeue"),
+        (SlurmDefaults(extra=["--req"]), "sets --requeue"),
+        (SlurmDefaults(extra=["--no-requeue"]), "sets --no-requeue"),
+        (SlurmDefaults(extra=["--no-req"]), "sets --no-requeue"),
     ],
 )
 def test_render_sbatch_rejects_unsafe_settings(
@@ -392,6 +400,18 @@ def test_render_sbatch_rejects_unsafe_settings(
 ) -> None:
     with pytest.raises(SlurmError, match=message):
         render_sbatch(make_record("r1"), defaults, tmp_path / "hx")
+
+
+def test_render_sbatch_keeps_options_that_do_not_touch_requeue(tmp_path: Path) -> None:
+    defaults = SlurmDefaults(extra=["--reservation=lab", "--nodes=1", "--no-kill"])
+    script = render_sbatch(make_record("r1"), defaults, tmp_path / "hx")
+    assert "#SBATCH --reservation=lab\n" in script and "#SBATCH --no-kill\n" in script
+
+
+def test_fake_sbatch_records_flag_directives(slurm: FakeSlurm) -> None:
+    script = "#!/bin/bash\n#SBATCH --job-name=hx-x\n#SBATCH --no-requeue\ntrue\n"
+    assert sh("sbatch", "--parsable", stdin=script).stdout == "1000\n"
+    assert slurm.job("1000")["directives"] == {"job-name": "hx-x", "no-requeue": ""}
 
 
 def test_render_sbatch_rejects_home_with_spaces(tmp_path: Path) -> None:
@@ -786,6 +806,7 @@ def test_launch_run_submits_to_slurm(ctx: Context, toy_repo: Path, slurm: FakeSl
         "comment": job["comment"],  # the fake keeps every flag, --comment included
         "job-name": f"hx-{record.run_id}",
         "output": f"{run_dir}/logs/slurm-%j.out",
+        "no-requeue": "",
         "time": "00:10:00",
         "gpus": "2",
         "partition": "gpu",
@@ -1387,6 +1408,159 @@ def test_a_terminal_run_yaml_indexed_by_another_write_is_still_published(
     assert reconcile(ctx) == [] and not outbox(ctx, "r1").exists()
 
 
+def age_intent(ctx: Context, run_id: str) -> dict[str, Any]:
+    """Move a submission intent's ``intent_at`` far into the past (past every settle window)."""
+    entry = json.loads(outbox(ctx, run_id).read_text())
+    entry["intent_at"] = "2000-01-01T00:00:00+00:00"
+    outbox(ctx, run_id).write_text(json.dumps(entry))
+    return entry
+
+
+def test_a_submission_that_dies_by_any_error_settles_as_unknown(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def undecodable(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(slurm_module, "submit", undecodable)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    with pytest.raises(UnicodeDecodeError):
+        control.launch_run(ctx, req)
+    [run_id] = list(ctx.index.run_ids())
+    # this process (the submitter) lives on, but its sbatch call is over
+    assert json.loads(outbox(ctx, run_id).read_text())["state"] == "unknown"
+    age_intent(ctx, run_id)
+    [failed] = reconcile(ctx)
+    assert failed.status == RunStatus.FAILED
+    assert not outbox(ctx, run_id).exists()
+
+
+def test_a_stale_pending_intent_settles_while_its_submitter_lives(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def crash(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise Crash
+
+    monkeypatch.setattr(slurm_module, "submit", crash)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    with pytest.raises(Crash):
+        control.launch_run(ctx, req)
+    [run_id] = list(ctx.index.run_ids())
+    assert json.loads(outbox(ctx, run_id).read_text())["state"] == "pending"
+    assert reconcile(ctx) == []  # sbatch may still answer it
+    age_intent(ctx, run_id)  # far longer than sbatch can run (SLURM_COMMAND_TIMEOUT)
+    [failed] = reconcile(ctx)
+    assert failed.status == RunStatus.FAILED
+    assert not outbox(ctx, run_id).exists()
+
+
+def test_a_stopped_unknown_submission_without_comment_accounting_leaves_the_outbox(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slurm.set(accounting_flags="")
+
+    def timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    run_id = control.launch_run(ctx, req).run_id
+    assert control.stop_run(ctx, run_id).status == RunStatus.KILLED
+    assert reconcile(ctx) == [] and outbox(ctx, run_id).exists()  # the job may still appear
+    age_intent(ctx, run_id)
+    reconcile(ctx)
+    assert not outbox(ctx, run_id).exists()  # not in squeue after the window: nothing to cancel
+    calls = len(slurm.calls("squeue"))
+    reconcile(ctx)
+    assert len(slurm.calls("squeue")) == calls  # no more lookups for it
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == run_id]
+    assert types.count("run.killed") == 1
+    assert ctx.find_record(run_id).status == RunStatus.KILLED
+
+
+def test_an_unreadable_run_keeps_its_outbox_entry(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    record = slurm_run(ctx, "r1", job_id="1000")
+    run_yaml = ctx.run_dir(record) / "run.yaml"
+    good = run_yaml.read_text()
+    run_yaml.write_text("status: [unclosed\n")
+    assert reconcile(ctx) == []
+    assert outbox(ctx, "r1").exists()  # a store error is not a missing run
+    run_yaml.write_text(good)
+    [tracked] = reconcile(ctx)
+    assert tracked.executor.node == "n1"
+
+
+def test_a_missing_run_leaves_the_outbox(ctx: Context, slurm: FakeSlurm) -> None:
+    record = slurm_run(ctx, "r1", job_id="1000")
+    shutil.rmtree(ctx.run_dir(record))
+    assert reconcile(ctx) == []
+    assert not outbox(ctx, "r1").exists()
+
+
+def test_a_bad_exit_record_is_ignored_and_never_blocks_other_runs(
+    ctx: Context, slurm: FakeSlurm
+) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    slurm.add_job("1001", "RUNNING", node="n2")
+    r1 = slurm_run(ctx, "r1", job_id="1000")
+    slurm_run(ctx, "r2", job_id="1001")
+    bad = {"run_id": "r1", "status": "finished", "exit_code": 0, "ended_at": "not-a-date"}
+    (ctx.run_dir(r1) / EXIT_FILE).write_text(json.dumps(bad))
+    changed = SlurmPoller(ctx).poll_once()
+    assert sorted((r.run_id, r.executor.node) for r in changed) == [("r1", "n1"), ("r2", "n2")]
+    assert ctx.find_record("r1").status == RunStatus.RUNNING  # no usable exit record
+
+
+def test_one_failing_run_never_blocks_the_others(
+    ctx: Context, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    slurm.add_job("1001", "RUNNING", node="n2")
+    slurm.add_job("1002", "RUNNING", node="n3")
+    for run_id, job_id in (("r1", "1000"), ("r2", "1001"), ("r3", "1002")):
+        slurm_run(ctx, run_id, job_id=job_id)
+    real_sync, real_node = slurm_module.sync_node_run, slurm_module._set_node
+
+    def sync_breaks_on_r1(c: Context, current: RunRecord) -> RunRecord | None:
+        if current.run_id == "r1":
+            raise TypeError("broken folder sync")
+        return real_sync(c, current)
+
+    def node_breaks_on_n2(node: str) -> Callable[[RunRecord], RunRecord]:
+        if node == "n2":
+            raise ValueError("broken node update")
+        return real_node(node)
+
+    monkeypatch.setattr(slurm_module, "sync_node_run", sync_breaks_on_r1)
+    monkeypatch.setattr(slurm_module, "_set_node", node_breaks_on_n2)
+    changed = SlurmPoller(ctx).poll_once()
+    assert [(r.run_id, r.executor.node) for r in changed] == [("r3", "n3")]
+    assert outbox(ctx, "r1").exists() and outbox(ctx, "r2").exists()
+
+
+def test_a_stop_and_the_poller_publish_the_node_s_end_once(
+    ctx: Context, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    slurm_run(ctx, "r1", job_id="1000", node="n1")
+    real = slurm_module.mark_published
+    pollers: list[threading.Thread] = []
+
+    def poller_runs_before_the_cursor_moves(layout: Any, record: RunRecord) -> None:
+        if record.status == RunStatus.KILLED and not pollers:
+            pollers.append(threading.Thread(target=reconcile, args=(ctx,)))
+            pollers[0].start()
+            pollers[0].join(1.0)  # the poller must wait for this publication to finish
+        real(layout, record)
+
+    monkeypatch.setattr(slurm_module, "mark_published", poller_runs_before_the_cursor_moves)
+    assert control.stop_run(ctx, "r1", grace=0.0).status == RunStatus.KILLED
+    pollers[0].join(30)
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
+    assert types.count("run.killed") == 1
+
+
 # stop -> scancel ----------------------------------------------------------------------------
 def test_stop_queued_slurm_run_cancels_job(ctx: Context, slurm: FakeSlurm) -> None:
     slurm.add_job("1000", "PENDING")
@@ -1447,9 +1621,15 @@ def test_stop_end_to_end_child_records_killed(
     control.wait_for_run(ctx, record.run_id, timeout=60, statuses=frozenset({RunStatus.RUNNING}))
     start = time.monotonic()
     stopped = control.stop_run(ctx, record.run_id)
+    # well under the login node's own grace (TERM_GRACE_SECONDS = 10 s): the node ended it
+    assert time.monotonic() - start < 5
     assert stopped.status == RunStatus.KILLED
-    assert time.monotonic() - start < 10
     assert slurm.job("1000")["state"] == "CANCELLED"
+    exit_record = json.loads((ctx.run_dir(stopped) / EXIT_FILE).read_text())
+    assert exit_record["status"] == "killed"  # written by hx run --child on the node
+    reconcile(ctx)
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id]
+    assert types.count("run.killed") == 1
 
 
 def test_stop_finds_the_job_a_crashed_submission_left(

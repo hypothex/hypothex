@@ -27,9 +27,9 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, cast
 
@@ -37,7 +37,7 @@ from pydantic import BaseModel
 
 from hypothex.core.context import Context
 from hypothex.core.environment import load_descriptor
-from hypothex.core.errors import ConfigError, HypothexError, RunError
+from hypothex.core.errors import ConfigError, HypothexError, RunError, RunNotFoundError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.events import EventLog
 from hypothex.core.execution import STOP_MARKER, execute_run, process_alive, process_create_time
@@ -95,6 +95,8 @@ OUTBOX_DIR = "slurm/outbox"
 """``<home>/slurm/outbox/<run_id>.json``: submission intent and publication cursor."""
 SUBMIT_SETTLE_SECONDS = 300.0
 """An unknown submission counts as absent only this long after its intent."""
+PENDING_STALE_SECONDS = SLURM_COMMAND_TIMEOUT + SUBMIT_SETTLE_SECONDS
+"""A ``pending`` intent this old is ``unknown`` even while its submitter lives: sbatch is over."""
 FLOCK_PROBE = ".flock-probe"
 
 
@@ -165,7 +167,9 @@ def validate_defaults(defaults: SlurmDefaults) -> None:
         A field holds whitespace or shell characters, or an ``extra`` item is
         not exactly one safe option token or sets an option Hypothex owns
         (``sbatch_option_problem``: ``--job-name``, ``--comment``,
-        ``--output``, ``--error``, ``--chdir``, ``--wrap``, in any form).
+        ``--output``, ``--error``, ``--chdir``, ``--wrap``, in any form; and
+        here also ``--requeue`` / ``--no-requeue`` or an abbreviation of them,
+        see ``REQUEUE_OPTIONS``).
 
     Examples
     --------
@@ -177,9 +181,32 @@ def validate_defaults(defaults: SlurmDefaults) -> None:
     if defaults.account is not None:
         _safe("account", defaults.account)
     for item in defaults.extra:
-        problem = sbatch_option_problem(item)
+        problem = sbatch_option_problem(item) or _requeue_problem(item)
         if problem is not None:
             raise SlurmError(f"slurm extra option {problem}")
+
+
+REQUEUE_OPTIONS = ("requeue", "no-requeue")
+"""sbatch options ``render_sbatch`` owns: every job is ``--no-requeue``.
+
+A requeued job would run ``hx run --child`` a second time under the same job
+id; that attempt finds the run already claimed and fails, so SLURM's real end
+(``NODE_FAIL``) would be reported as ``FAILED`` after a second allocation.
+"""
+
+
+def _requeue_problem(item: str) -> str | None:
+    """Why ``item`` sets a requeue option (``--requeue``, ``--no-req``, ...), or None."""
+    if not item.startswith("--"):
+        return None  # sbatch has no short form of either
+    name = item[2:].split("=", 1)[0]
+    taken = next((r for r in REQUEUE_OPTIONS if name and r.startswith(name)), None)
+    if taken is None:
+        return None
+    return (
+        f"{item!r} sets --{taken}, which Hypothex sets itself "
+        "(every job is --no-requeue: a second attempt cannot run the same run)"
+    )
 
 
 def render_sbatch(record: RunRecord, defaults: SlurmDefaults, home: Path) -> str:
@@ -187,7 +214,9 @@ def render_sbatch(record: RunRecord, defaults: SlurmDefaults, home: Path) -> str
     Render the batch script that runs ``record`` on a compute node.
 
     Directives, in order: ``--job-name=hx-<run_id>``,
-    ``--output=<run_dir>/logs/slurm-%j.out``, ``--time``, ``--gpus`` (the
+    ``--output=<run_dir>/logs/slurm-%j.out``, ``--no-requeue`` (a node
+    failure must end the job, not start a second attempt that finds the run
+    already claimed: ``REQUEUE_OPTIONS``), ``--time``, ``--gpus`` (the
     run's ``gpus_requested``, else ``defaults.gpus``; left out when 0),
     ``--partition`` and ``--account`` (when set), then each ``extra`` item.
     The body runs ``hx run --child <run_id>`` with this Python, so the node
@@ -221,6 +250,7 @@ def render_sbatch(record: RunRecord, defaults: SlurmDefaults, home: Path) -> str
         #!/bin/bash
         #SBATCH --job-name=hx-r1
         #SBATCH --output=/h/store/toy/runs/r1/logs/slurm-%j.out
+        #SBATCH --no-requeue
         #SBATCH --time=02:00:00
         #SBATCH --gpus=1
         #SBATCH --partition=gpu
@@ -238,6 +268,7 @@ def render_sbatch(record: RunRecord, defaults: SlurmDefaults, home: Path) -> str
     directives = [
         f"--job-name=hx-{record.run_id}",
         f"--output={run_dir / 'logs' / 'slurm-%j.out'}",
+        "--no-requeue",
         f"--time={defaults.time}",
     ]
     if gpus > 0:
@@ -1155,10 +1186,11 @@ def _end_if_active(
 
 def _fail_submission(ctx: Context, record: RunRecord, exc: SlurmError) -> RunError:
     """SLURM rejected the job for sure: fail the run and forget the intent."""
-    _end_if_active(
-        ctx, record.run_id, "run.failed", _end(RunStatus.FAILED), {"reason": f"sbatch: {exc}"}
-    )
-    _drop_intent(ctx.layout, record.run_id)
+    with _publish_lock(ctx.run_dir(record)):
+        _end_if_active(
+            ctx, record.run_id, "run.failed", _end(RunStatus.FAILED), {"reason": f"sbatch: {exc}"}
+        )
+        _drop_intent(ctx.layout, record.run_id)
     return RunError(f"could not submit run {record.run_id} to SLURM: {exc}")
 
 
@@ -1215,7 +1247,11 @@ def submit_run(ctx: Context, record: RunRecord, defaults: SlurmDefaults) -> RunR
       id): state ``unknown``, event ``run.submit_unknown``, and the run stays
       ``queued``; ``reconcile`` finds the job by its comment, or fails the run
       once SLURM provably never took it;
-    - a rejection: the run is ``failed`` and ``RunError`` is raised.
+    - a rejection: the run is ``failed`` and ``RunError`` is raised;
+    - any other error (a busy index, an undecodable ``sbatch`` answer): the
+      intent becomes ``unknown`` like a timeout, since this process outlives
+      the call and ``reconcile`` would otherwise wait for it, and the error
+      propagates.
 
     The script is saved as ``<run_dir>/slurm.sbatch``. The run stays
     ``queued`` until ``hx run --child`` starts on the node.
@@ -1249,20 +1285,35 @@ def submit_run(ctx: Context, record: RunRecord, defaults: SlurmDefaults) -> RunR
     me = os.getpid()
     submitter = {"pid": me, "create_time": process_create_time(me)}
     track_slurm_run(ctx.layout, record, comment=comment, submitter=submitter)
-    ctx.update_run(
-        record.run_id, "run.submitting", _as_slurm(ctx.descriptor.label), {"comment": comment}
-    )
     try:
-        job_id = submit(script, Path(record.cwd), comment=comment)
-    except SubmitUnknownError as exc:
-        # sbatch may have accepted it: never a rejection. reconcile resolves it by comment
-        _update_intent(ctx.layout, record.run_id, state="unknown")
-        current = ctx.find_record(record.run_id)
-        ctx.emit("run.submit_unknown", current, {"reason": str(exc)[:500], "comment": comment})
-        return current
-    except SlurmError as exc:
-        raise _fail_submission(ctx, record, exc) from exc
-    return _record_job(ctx, record.run_id, job_id)
+        ctx.update_run(
+            record.run_id, "run.submitting", _as_slurm(ctx.descriptor.label), {"comment": comment}
+        )
+        try:
+            job_id = submit(script, Path(record.cwd), comment=comment)
+        except SubmitUnknownError as exc:
+            # sbatch may have accepted it: never a rejection. reconcile resolves it by comment
+            _update_intent(ctx.layout, record.run_id, state="unknown")
+            current = ctx.find_record(record.run_id)
+            ctx.emit("run.submit_unknown", current, {"reason": str(exc)[:500], "comment": comment})
+            return current
+        except SlurmError as exc:
+            raise _fail_submission(ctx, record, exc) from exc
+        return _record_job(ctx, record.run_id, job_id)
+    except Exception:
+        # any other error (a busy index, an undecodable sbatch answer): this process lives
+        # on, so a `pending` intent would never settle; reconcile resolves it by comment
+        _settle_pending(ctx.layout, record.run_id)
+        raise
+
+
+def _settle_pending(layout: Layout, run_id: str) -> None:
+    """Mark a ``pending`` intent ``unknown``: its ``sbatch`` call is over, outcome unseen."""
+    with _outbox_lock(layout):
+        entry = _intent(layout, run_id)
+        if entry is not None and entry.get("state") == "pending":
+            entry["state"] = "unknown"
+            atomic_write_text(_outbox_path(layout, run_id), json.dumps(entry))
 
 
 def run_slurm_settings(run_dir: Path) -> SlurmDefaults | None:
@@ -1342,66 +1393,143 @@ def last_slurm_defaults(layout: Layout) -> SlurmDefaults | None:
     return _read_settings(layout.home / LAST_SLURM_DEFAULTS)
 
 
-def _read_exit(run_dir: Path) -> dict[str, Any] | None:
+def _exit_fields(data: object) -> dict[str, Any] | str:
+    """The checked fields of an exit record, or why it cannot be used."""
+    if not isinstance(data, dict):
+        return "not a JSON object"
     try:
-        data = json.loads((run_dir / EXIT_FILE).read_text(encoding="utf-8"))
-        RunStatus(data["status"])
-    except (OSError, ValueError, KeyError, TypeError):
+        status = RunStatus(data.get("status"))
+    except ValueError:
+        return f"status {data.get('status')!r} is not a run status"
+    if status not in TERMINAL_STATUSES:
+        return f"status {status.value!r} is not an end status"
+    exit_code = data.get("exit_code")
+    if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int)):
+        return f"exit_code {exit_code!r} is not an integer"
+    raw = data.get("ended_at")
+    ended_at: datetime | None = None
+    if raw is not None:
+        try:
+            ended_at = datetime.fromisoformat(raw) if isinstance(raw, str) else None
+        except ValueError:
+            ended_at = None
+        if ended_at is None:
+            return f"ended_at {raw!r} is not an ISO 8601 time"
+        if ended_at.tzinfo is None:
+            ended_at = ended_at.replace(tzinfo=UTC)
+    return {"status": status, "exit_code": exit_code, "ended_at": ended_at}
+
+
+def _read_exit(run_dir: Path) -> dict[str, Any] | None:
+    """
+    The node's exit record, checked: ``status`` (an end status), ``exit_code``, ``ended_at``.
+
+    None when there is none, and (with a warning) when it cannot be used: a
+    bad record must never stop the poll at this run (or at the runs after it).
+    """
+    path = run_dir / EXIT_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return None
-    return data if isinstance(data, dict) else None
+    except (OSError, ValueError) as exc:
+        log.warning("ignoring unreadable exit record %s: %s", path, exc)
+        return None
+    fields = _exit_fields(data)
+    if isinstance(fields, str):
+        log.warning("ignoring exit record %s: %s", path, fields)
+        return None
+    return fields
 
 
 def _apply_exit(exit_record: dict[str, Any]) -> Callable[[RunRecord], RunRecord]:
     def mutate(r: RunRecord) -> RunRecord:
         if r.status in TERMINAL_STATUSES:
             return r
-        ended = exit_record.get("ended_at")
         return r.model_copy(
             update={
-                "status": RunStatus(exit_record["status"]),
-                "exit_code": exit_record.get("exit_code"),
-                "ended_at": datetime.fromisoformat(ended) if ended else utcnow(),
+                "status": exit_record["status"],
+                "exit_code": exit_record["exit_code"],
+                "ended_at": exit_record["ended_at"] or utcnow(),
             }
         )
 
     return mutate
 
 
-def sync_node_run(ctx: Context, seen: RunStatus, current: RunRecord) -> RunRecord | None:
+PUBLISH_LOCK = ".publish.lock"
+"""Lock file in a SLURM run's folder held while the login node publishes its status."""
+_PUBLISH_HELD = threading.local()
+
+
+@contextlib.contextmanager
+def _publish_lock(run_dir: Path) -> Iterator[None]:
+    """
+    Serialize publishing one run's status, across threads and processes.
+
+    The poller and a stop request can publish the same run at once; each
+    reads the outbox cursor, emits, and moves the cursor under this lock, so
+    an end is emitted once. Re-entrant within a thread. Lock order: this
+    lock, then the run lock, then the outbox lock.
+    """
+    held: set[str] = _PUBLISH_HELD.__dict__.setdefault("paths", set())
+    key = str(run_dir)
+    if key in held:
+        yield
+        return
+    with (run_dir / PUBLISH_LOCK).open("a") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def sync_node_run(ctx: Context, current: RunRecord) -> RunRecord | None:
     """
     Publish what the compute node wrote to a SLURM run's folder (login node only).
 
     The node never opens ``index.db`` or ``events.db`` (Task 27). Here the env
     server emits the event for the node's new status, updates the index and
-    the metric points, and scores a finished task run.
+    the metric points, and scores a finished task run. All of it happens
+    under the run's publication lock, with ``run.yaml`` and the outbox cursor
+    (``published``: the status the login node last published, whatever the
+    index shows) read again under it, so two threads never publish one
+    status twice. A run without an outbox entry counts as published.
 
     Parameters
     ----------
     ctx : Context
         The env server's full context.
-    seen : RunStatus
-        The status the login node last published for the run (the outbox
-        entry's ``published``), whatever the index shows.
     current : RunRecord
-        The run as ``run.yaml`` says now.
+        The run (read again from ``run.yaml`` under the lock).
 
     Returns
     -------
     RunRecord or None
         The run when its status was published, else None.
     """
+    with _publish_lock(ctx.run_dir(current)):
+        return _sync_node_run(ctx, ctx.store.read_record(current.project, current.run_id))
+
+
+def _sync_node_run(ctx: Context, current: RunRecord) -> RunRecord | None:
+    """``sync_node_run``'s body; the caller holds the publication lock."""
+    seen = _published(ctx.layout, current)
     changed = False
     if current.status in ACTIVE_STATUSES:
         exit_record = _read_exit(ctx.run_dir(current))
         if exit_record is not None:
             # run.yaml lost the node's last write; the exit record wins
-            status = exit_record["status"]
+            status = exit_record["status"].value
             applied = _end_if_active(
                 ctx,
                 current.run_id,
                 f"run.{status}",
                 _apply_exit(exit_record),
-                {"exit_code": exit_record.get("exit_code"), "source": "exit.json"},
+                {"exit_code": exit_record["exit_code"], "source": "exit.json"},
             )
             if applied is not None:
                 current, seen, changed = applied, applied.status, True
@@ -1443,7 +1571,7 @@ def _published(layout: Layout, current: RunRecord) -> RunStatus:
 def _publish_node_end(ctx: Context, run_id: str) -> RunRecord:
     """A requested end lost the race with the node: publish the node's own end instead."""
     current = ctx.find_record(run_id)
-    return sync_node_run(ctx, _published(ctx.layout, current), current) or current
+    return sync_node_run(ctx, current) or ctx.find_record(run_id)
 
 
 UNRESOLVED_SUBMISSION = "submission outcome unknown; check squeue/sacct"
@@ -1463,13 +1591,16 @@ def _resolve_intent(ctx: Context, entry: dict[str, Any], current: RunRecord) -> 
 
     A job carrying the comment is recorded. The run fails, and the intent is
     dropped, only when SLURM provably never took the job: both ``squeue`` and
-    ``sacct`` answered without it, its submitter is dead (a ``pending`` one
-    may still be in ``sbatch``), and ``SUBMIT_SETTLE_SECONDS`` passed since
-    the intent. Anything less leaves the intent for the next poll. When the
-    node ended the run meanwhile, its end is published instead of a failure,
-    and only then is the intent dropped. Without comment accounting the
-    answer is never complete: the run stays ``unknown`` and gets one
-    ``run.submit_unknown`` event naming ``UNRESOLVED_SUBMISSION``.
+    ``sacct`` answered without it, its ``sbatch`` call is over (a ``pending``
+    intent counts as over once its submitter is dead or
+    ``PENDING_STALE_SECONDS`` passed), and ``SUBMIT_SETTLE_SECONDS`` passed
+    since the intent. Anything less leaves the intent for the next poll. When
+    the node ended the run meanwhile, its end is published instead of a
+    failure, and only then is the intent dropped. Without comment accounting
+    the answer is never complete: the run stays ``unknown`` and gets one
+    ``run.submit_unknown`` event naming ``UNRESOLVED_SUBMISSION``; but a run
+    that already ended (a stop) is forgotten once ``squeue`` still lacks the
+    job after the settle window, as nothing is left to cancel.
     """
     run_id = current.run_id
     comment = entry.get("comment")
@@ -1484,12 +1615,20 @@ def _resolve_intent(ctx: Context, entry: dict[str, Any], current: RunRecord) -> 
         return _record_job(ctx, run_id, job.job_id, recovered=True)
     if entry.get("state") == "pending":
         submitter = entry.get("submitter") or {}
-        if process_alive(submitter.get("pid"), submitter.get("create_time")):
+        alive = process_alive(submitter.get("pid"), submitter.get("create_time"))
+        if alive and _intent_age(entry) < PENDING_STALE_SECONDS:
             return None  # sbatch may still answer it
         entry = _update_intent(ctx.layout, run_id, state="unknown") or entry
     if _intent_age(entry) < SUBMIT_SETTLE_SECONDS:
         return None
     if not complete:
+        if current.status in TERMINAL_STATUSES:
+            # stopped (or ended) and still not in squeue after the settle window: the job
+            # can never start now, so nothing is left to cancel; publish, then forget it
+            with _publish_lock(ctx.run_dir(current)):
+                published = sync_node_run(ctx, current)
+                _drop_intent(ctx.layout, run_id)
+            return published
         if not comment_accounting() and not entry.get("unresolved_notice"):
             _update_intent(ctx.layout, run_id, unresolved_notice=True)
             ctx.emit(
@@ -1498,56 +1637,81 @@ def _resolve_intent(ctx: Context, entry: dict[str, Any], current: RunRecord) -> 
                 {"reason": UNRESOLVED_SUBMISSION, "comment": comment, "comment_accounting": False},
             )
         return None
-    failed = _end_if_active(
-        ctx,
-        run_id,
-        "run.failed",
-        _end(RunStatus.FAILED),
-        {
-            "reason": f"sbatch never accepted job hx-{run_id}: "
-            f"no job with comment {comment} in squeue or sacct"
-        },
-    )
-    if failed is None:  # the node ended it first: publish that end, never drop it unseen
-        failed = _publish_node_end(ctx, run_id)
-    _drop_intent(ctx.layout, run_id)  # after the end: a crash in between only repeats it
+    with _publish_lock(ctx.run_dir(current)):
+        failed = _end_if_active(
+            ctx,
+            run_id,
+            "run.failed",
+            _end(RunStatus.FAILED),
+            {
+                "reason": f"sbatch never accepted job hx-{run_id}: "
+                f"no job with comment {comment} in squeue or sacct"
+            },
+        )
+        if failed is None:  # the node ended it first: publish that end, never drop it unseen
+            failed = _publish_node_end(ctx, run_id)
+        _drop_intent(ctx.layout, run_id)  # after the end: a crash in between only repeats it
     return failed
 
 
 def _tracked_slurm_runs(
     ctx: Context,
 ) -> tuple[list[tuple[str, RunRecord]], list[RunRecord]]:
-    """Sync every outbox run from its folder; return (job id, run) pairs to poll and changes."""
+    """
+    Sync every outbox run from its folder; return (job id, run) pairs to poll and changes.
+
+    One run's failure (a bad record, a store error) is logged and skipped: it
+    never stops the runs after it, and its entry stays for the next poll.
+    """
     found: list[tuple[str, RunRecord]] = []
     changed: list[RunRecord] = []
     for entry in read_outbox(ctx.layout):
-        run_id = entry["run_id"]
         try:
-            current = ctx.find_record(run_id)
-        except HypothexError:  # the run is gone
-            _drop_intent(ctx.layout, run_id)
+            pair = _track_entry(ctx, entry, changed)
+        except HypothexError as exc:
+            log.warning(
+                "SLURM run %s: sync failed; trying again next poll: %s", entry.get("run_id"), exc
+            )
             continue
-        if current.environment_id != ctx.descriptor.environment_id:
-            _drop_intent(ctx.layout, run_id)
+        except Exception:
+            log.exception("SLURM run %s: sync failed; trying again next poll", entry.get("run_id"))
             continue
-        published = sync_node_run(ctx, RunStatus(entry["published"]), current)
-        if published is not None:
-            changed.append(published)
-            current = published
-        job_id = entry.get("job_id") or current.executor.slurm_job_id
-        if job_id is None:
-            resolved = _resolve_intent(ctx, entry, current)
-            if resolved is not None:
-                changed.append(resolved)
-            continue  # tracked from the next poll on
-        if entry.get("state") != "submitted":  # the node's run.yaml names the job
-            entry = _update_intent(ctx.layout, run_id, state="submitted", job_id=job_id) or entry
-        if entry.get("cancel_requested"):
-            _cancel_requested(ctx, run_id, job_id)
-            continue
-        if current.status in ACTIVE_STATUSES:
-            found.append((job_id, current))
+        if pair is not None:
+            found.append(pair)
     return sorted(found, key=lambda pair: pair[1].run_id), changed
+
+
+def _track_entry(
+    ctx: Context, entry: dict[str, Any], changed: list[RunRecord]
+) -> tuple[str, RunRecord] | None:
+    """Sync one outbox run (changes go to ``changed``); its (job id, run) when it needs a poll."""
+    run_id = str(entry["run_id"])
+    try:
+        current = ctx.find_record(run_id)
+    except RunNotFoundError:  # the run is gone; any other store error keeps the entry
+        _drop_intent(ctx.layout, run_id)
+        return None
+    if current.environment_id != ctx.descriptor.environment_id:
+        _drop_intent(ctx.layout, run_id)
+        return None
+    published = sync_node_run(ctx, current)
+    if published is not None:
+        changed.append(published)
+        current = published
+    job_id = entry.get("job_id") or current.executor.slurm_job_id
+    if job_id is None:
+        resolved = _resolve_intent(ctx, entry, current)
+        if resolved is not None:
+            changed.append(resolved)
+        return None  # tracked from the next poll on
+    if entry.get("state") != "submitted":  # the node's run.yaml names the job
+        entry = _update_intent(ctx.layout, run_id, state="submitted", job_id=job_id) or entry
+    if entry.get("cancel_requested"):
+        _cancel_requested(ctx, run_id, job_id)
+        return None
+    if current.status in ACTIVE_STATUSES:
+        return job_id, current
+    return None
 
 
 def _set_node(node: str) -> Callable[[RunRecord], RunRecord]:
@@ -1604,27 +1768,51 @@ def reconcile(
     jobs = poll([job_id for job_id, _ in runs])
     gone_now: dict[str, SlurmJob | None] = {}
     for job_id, record in runs:
-        job = jobs.get(job_id)
-        current = ctx.find_record(record.run_id)
-        if current.status in TERMINAL_STATUSES:  # the node ended it since the folder sync
-            changed.append(_publish_node_end(ctx, current.run_id))
+        try:  # one run's failure is logged and never stops the runs after it
+            updated = _reconcile_job(ctx, job_id, record, jobs.get(job_id), confirm_gone, gone_now)
+        except HypothexError as exc:
+            log.warning(
+                "SLURM run %s: reconcile failed; trying again next poll: %s", record.run_id, exc
+            )
             continue
-        if job is not None and not is_finished(job):
-            if job.node is not None and job.node != current.executor.node:
-                changed.append(
-                    ctx.update_run(
-                        current.run_id,
-                        "run.slurm_state",
-                        _set_node(job.node),
-                        {"slurm_job_id": job_id, "slurm_state": job.state, "node": job.node},
-                    )
-                )
+        except Exception:
+            log.exception("SLURM run %s: reconcile failed; trying again next poll", record.run_id)
             continue
-        if confirm_gone is not None and job_id not in confirm_gone:
-            gone_now[job_id] = job
-            continue
-        if job is None and confirm_gone is not None:
-            job = confirm_gone.get(job_id)  # sacct had the end state at the first poll
+        if updated is not None:
+            changed.append(updated)
+    if confirm_gone is not None:
+        confirm_gone.clear()
+        confirm_gone.update(gone_now)
+    return changed
+
+
+def _reconcile_job(
+    ctx: Context,
+    job_id: str,
+    record: RunRecord,
+    job: SlurmJob | None,
+    confirm_gone: dict[str, SlurmJob | None] | None,
+    gone_now: dict[str, SlurmJob | None],
+) -> RunRecord | None:
+    """Compare one active run with its job (``reconcile``); the run when its record changed."""
+    current = ctx.find_record(record.run_id)
+    if current.status in TERMINAL_STATUSES:  # the node ended it since the folder sync
+        return _publish_node_end(ctx, current.run_id)
+    if job is not None and not is_finished(job):
+        if job.node is not None and job.node != current.executor.node:
+            return ctx.update_run(
+                current.run_id,
+                "run.slurm_state",
+                _set_node(job.node),
+                {"slurm_job_id": job_id, "slurm_state": job.state, "node": job.node},
+            )
+        return None
+    if confirm_gone is not None and job_id not in confirm_gone:
+        gone_now[job_id] = job
+        return None
+    if job is None and confirm_gone is not None:
+        job = confirm_gone.get(job_id)  # sacct had the end state at the first poll
+    with _publish_lock(ctx.run_dir(current)):
         lost = _end_if_active(
             ctx,
             current.run_id,
@@ -1637,14 +1825,9 @@ def reconcile(
             },
         )
         if lost is None:  # the node's end arrived first: publish it, never "lost"
-            changed.append(_publish_node_end(ctx, current.run_id))
-            continue
+            return _publish_node_end(ctx, current.run_id)
         mark_published(ctx.layout, lost)  # acknowledged after the event of this end
-        changed.append(lost)
-    if confirm_gone is not None:
-        confirm_gone.clear()
-        confirm_gone.update(gone_now)
-    return changed
+    return lost
 
 
 def stop_slurm_run(ctx: Context, record: RunRecord, *, grace: float) -> RunRecord:
@@ -1693,16 +1876,17 @@ def stop_slurm_run(ctx: Context, record: RunRecord, *, grace: float) -> RunRecor
             if current.status in TERMINAL_STATUSES:
                 return _publish_node_end(ctx, record.run_id)
             time.sleep(0.1)
-    killed = _end_if_active(
-        ctx,
-        record.run_id,
-        "run.killed",
-        _end(RunStatus.KILLED),
-        {"reason": "stopped", "slurm_job_id": job_id},
-    )
-    if killed is None:  # the node's end came first: publish that end, not `killed`
-        return _publish_node_end(ctx, record.run_id)
-    mark_published(ctx.layout, killed)
+    with _publish_lock(ctx.run_dir(record)):  # the poller may publish this run right now
+        killed = _end_if_active(
+            ctx,
+            record.run_id,
+            "run.killed",
+            _end(RunStatus.KILLED),
+            {"reason": "stopped", "slurm_job_id": job_id},
+        )
+        if killed is None:  # the node's end came first: publish that end, not `killed`
+            return _publish_node_end(ctx, record.run_id)
+        mark_published(ctx.layout, killed)
     return killed
 
 

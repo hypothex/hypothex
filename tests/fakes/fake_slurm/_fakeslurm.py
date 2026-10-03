@@ -40,7 +40,8 @@ from typing import Any
 FAKE_NODE = "fake-node1"
 SQUEUE_FORMAT = "%i|%T|%N"
 SACCT_FORMAT = "JobID,State,ExitCode,NodeList"
-_DIRECTIVE = re.compile(r"^#SBATCH\s+--([A-Za-z-]+)=(.*)$")
+_DIRECTIVE = re.compile(r"^#SBATCH\s+--([A-Za-z-]+)(?:=(.*))?$")
+"""An ``#SBATCH --name=value`` line, or a flag ``#SBATCH --name`` (kept with value "")."""
 
 
 def _state_path() -> Path:
@@ -153,7 +154,7 @@ def sbatch(argv: list[str]) -> int:
     for line in script.splitlines():
         match = _DIRECTIVE.match(line.strip())
         if match:
-            directives[match.group(1)] = match.group(2)
+            directives[match.group(1)] = match.group(2) or ""
     directives.update(options)
     with locked_state() as state:
         job_id = str(state["next_id"])

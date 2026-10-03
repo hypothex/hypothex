@@ -54,6 +54,8 @@ from hypothex.remote.config import SlurmDefaults
 
 STOP_MARKER = "stop_requested"
 TERM_GRACE_SECONDS = 10.0
+STOP_POLL_SECONDS = 0.5
+"""How often a supervisor checks the stop marker while its child runs."""
 SUPERVISOR_PID_FILE = "supervisor.pid"
 QUEUE_FILE = "queue.json"
 GIT_FETCH_TIMEOUT_SECONDS = 120.0
@@ -877,12 +879,8 @@ def _execute(
             _pump(proc.stderr, run_dir / "logs" / "stderr.log", stderr_sink, stop_pumps),
         ]
         interrupted = False
-        # stop_run may have written the marker after the pre-start check but
-        # before the child pid was recorded, so it could not signal the child.
-        if (run_dir / STOP_MARKER).exists():
-            terminate_group(proc.pid)
         try:
-            exit_code = proc.wait()
+            exit_code = _wait_unless_stopped(proc, run_dir / STOP_MARKER)
         except KeyboardInterrupt:
             interrupted = True
             terminate_group(proc.pid)
@@ -942,6 +940,36 @@ def _execute(
             reason = f"{type(exc).__name__}: {exc}"
             ctx.emit("run.eval_skipped", final, {"reason": reason[:500]})
     return ctx.find_record(run_id)
+
+
+def _wait_unless_stopped(proc: subprocess.Popen[bytes], marker: Path) -> int:
+    """
+    Wait for ``proc``; terminate its group once ``marker`` appears.
+
+    ``stop_run`` signals the child itself, but only if a record it read names
+    the child. A stop whose reads all missed it (or a stop that died before it
+    signalled) still ends the run here.
+
+    Parameters
+    ----------
+    proc : subprocess.Popen
+        The run's child, the leader of its own process group.
+    marker : Path
+        The run's stop marker.
+
+    Returns
+    -------
+    int
+        The child's exit code.
+    """
+    while True:
+        if marker.exists():
+            terminate_group(proc.pid)
+            return proc.wait()
+        try:
+            return proc.wait(timeout=STOP_POLL_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _drain(

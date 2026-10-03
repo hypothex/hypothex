@@ -329,7 +329,13 @@ export const HOSTS_CSS = `
 .page .hosts-banner b { color: var(--ink); font-weight: 600; }
 `;
 
-/** One glyph per state, never colour alone (mockup `GL`). */
+/**
+ * One glyph per state, never colour alone (mockup `GL`).
+ *
+ * connected: filled dot; stale: half-filled ring; connecting: open arc;
+ * bootstrapping: dashed ring; upgrade: up arrow; error: red cross;
+ * disabled: plain ring.
+ */
 export function StateGlyph({ state }: { state: ConnState }) {
   const ring = (dash?: string) => (
     <circle cx="5" cy="5" r="4" style={{ fill: "none", stroke: "var(--ink-2)", strokeWidth: 1.4, strokeDasharray: dash }} />
@@ -343,8 +349,13 @@ export function StateGlyph({ state }: { state: ConnState }) {
         <path d="M5 1a4 4 0 0 1 0 8z" style={{ fill: "var(--ink)" }} />
       </>
     );
-  else if (state === "connecting" || state === "bootstrapping") body = ring("1.6 1.6");
-  else if (state === "error" || state === "upgrade")
+  else if (state === "connecting")
+    // Open three-quarter arc: a ring not yet closed.
+    body = <path d="M5 1a4 4 0 1 1 -4 4" style={{ fill: "none", stroke: "var(--ink-2)", strokeWidth: 1.4 }} />;
+  else if (state === "bootstrapping") body = ring("1.6 1.6");
+  else if (state === "upgrade")
+    body = <path d="M5 9V1.6M1.8 4.6L5 1.4L8.2 4.6" style={{ fill: "none", stroke: "var(--ink-2)", strokeWidth: 1.4 }} />;
+  else if (state === "error")
     body = <path d="M1.4 1.4L8.6 8.6M8.6 1.4L1.4 8.6" style={{ stroke: "var(--fail)", strokeWidth: 1.4 }} />;
   else body = ring();
   return (

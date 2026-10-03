@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { render, screen, within } from "@testing-library/react";
-import { HOSTS_CSS, HostsPanel } from "../../src/pages/components/HostsPanel";
+import { HOSTS_CSS, HostsPanel, StateGlyph } from "../../src/pages/components/HostsPanel";
+import type { ConnState } from "../../src/pages/components/types";
 import { NOW, RUN_AGENT, gpu, makeHostRuns, makeHosts } from "./hostFixtures";
 
 function renderPanel(hosts = makeHosts(), hubVersion: string | null = "0.5.0") {
@@ -115,4 +116,19 @@ test("the key names every cell kind and mark", () => {
   renderPanel();
   const key = screen.getByLabelText("Key");
   expect(key.textContent).toBe("agent runhuman runfreenot hxstalehx≠version mismatch");
+});
+
+test("StateGlyph: every ConnState has its own SVG shape", () => {
+  const states: ConnState[] = ["connecting", "bootstrapping", "connected", "stale", "upgrade", "error", "disabled"];
+  const shapes = states.map((state) => {
+    const { container, unmount } = render(<StateGlyph state={state} />);
+    const svg = container.querySelector("svg");
+    expect(svg?.getAttribute("data-state")).toBe(state);
+    // Children only, so the data-state attribute cannot make two glyphs differ.
+    const shape = svg?.innerHTML ?? "";
+    unmount();
+    return shape;
+  });
+  expect(shapes.every((s) => s.length > 0)).toBe(true);
+  expect(new Set(shapes).size).toBe(states.length);
 });

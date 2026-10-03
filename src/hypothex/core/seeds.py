@@ -112,12 +112,16 @@ def config_hash(data: dict[str, Any]) -> str:
     try:
         blob = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     except TypeError:
-        # keys json cannot sort (``{1: a, b: c}``) or write (a YAML date key)
-        blob = json.dumps(_canonical(payload), default=str, separators=(",", ":"))
+        # keys json cannot sort (``{1: a, b: c}``) or write (a YAML date key).
+        # The legacy text always starts with "{", so this prefix keeps the two
+        # forms from ever writing the same text.
+        canonical = json.dumps(_canonical(payload), default=str, separators=(",", ":"))
+        blob = _CANONICAL_PREFIX + canonical
     return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 _MAP_TAG = "\x00map"
+_CANONICAL_PREFIX = "canonical:"
 
 
 def _typed_key(key: Any) -> list[str]:

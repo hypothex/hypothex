@@ -188,6 +188,9 @@ def test_regression_config_hash_mixed_keys() -> None:
     assert config_hash({dt.date(2026, 1, 1): "x"}).startswith("sha256:")
     # 1 and "1" are different keys: swapping their values is a different config
     assert config_hash({"layers": {1: 64, "1": 128}}) != config_hash({"layers": {1: 128, "1": 64}})
+    # the canonical form is a valid config too: it must not hash like one
+    wrapped = {"\x00map": [[["date", "2026-01-01"], "x"]]}
+    assert config_hash({dt.date(2026, 1, 1): "x"}) != config_hash(wrapped)
     assert config_hash({"d": {dt.date(2026, 1, 1): 1, "2026-01-01": 2}}) != config_hash(
         {"d": {dt.date(2026, 1, 1): 2, "2026-01-01": 1}}
     )

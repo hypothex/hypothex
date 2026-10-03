@@ -6,7 +6,7 @@ import contextlib
 import json
 import os
 import re
-import select
+import selectors
 import shlex
 import shutil
 import signal
@@ -599,9 +599,11 @@ def _pump(
             return
         out = sink
         fd = src.fileno()
-        with log_path.open("ab") as fh:
+        # a selector (poll/epoll/kqueue), not select(): that fails for fds >= 1024
+        with selectors.DefaultSelector() as sel, log_path.open("ab") as fh:
+            sel.register(fd, selectors.EVENT_READ)
             while not stop.is_set():
-                if not select.select([fd], [], [], 0.1)[0]:
+                if not sel.select(0.1):
                     continue
                 chunk = os.read(fd, 65536)
                 if not chunk:

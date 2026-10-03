@@ -1,9 +1,13 @@
+import os
+import resource
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from hypothex.core import execution
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
@@ -292,3 +296,30 @@ def test_unexpected_eval_error_is_recorded_as_eval_skipped(
     assert done.status == RunStatus.FINISHED
     skipped = [e for e in ctx.events.since(0) if e.type == "run.eval_skipped"]
     assert skipped and "results" in skipped[0].payload["reason"]
+
+
+def test_pump_reads_a_pipe_on_a_file_descriptor_above_1024(tmp_path: Path) -> None:
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    high = 1500
+    if soft <= high:
+        if hard != resource.RLIM_INFINITY and hard <= high:
+            pytest.skip("cannot open a file descriptor above 1024")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (high + 1, hard))
+    r, w = os.pipe()
+    try:
+        os.dup2(r, high)
+        os.close(r)
+        src = os.fdopen(high, "rb", buffering=0)
+        log = tmp_path / "out.log"
+        thread = execution._pump(src, log, None, threading.Event())
+        os.write(w, b"hello\n")
+        os.close(w)
+        w = -1
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert log.read_bytes() == b"hello\n"
+        src.close()
+    finally:
+        if w >= 0:
+            os.close(w)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))

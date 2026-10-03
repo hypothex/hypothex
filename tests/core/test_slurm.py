@@ -1179,6 +1179,79 @@ def test_a_node_that_ends_during_reconcile_is_published_not_lost(
     assert not outbox(ctx, "r1").exists()  # acknowledged after run.finished, not before
 
 
+def _exit_record(run_dir: Path, status: str = "finished", exit_code: int = 0) -> None:
+    record = {"status": status, "exit_code": exit_code, "ended_at": "2026-10-03T10:00:00+00:00"}
+    (run_dir / EXIT_FILE).write_text(json.dumps(record))
+
+
+def test_an_exit_record_that_shows_up_during_reconcile_is_published_not_lost(
+    ctx: Context, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = slurm_run(ctx, "r1", job_id="1000")
+    real = slurm_module.poll
+
+    def poll_then_the_exit_record_shows(job_ids: list[str]) -> dict[str, SlurmJob]:
+        jobs = real(job_ids)  # gone: the run is about to be marked lost ...
+        _exit_record(ctx.run_dir(record), "failed", 3)  # ... the node's exit record shows up
+        return jobs
+
+    monkeypatch.setattr(slurm_module, "poll", poll_then_the_exit_record_shows)
+    [ended] = reconcile(ctx)
+    assert (ended.status, ended.exit_code) == (RunStatus.FAILED, 3)
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
+    assert "run.lost" not in types and types.count("run.failed") == 1
+    assert not outbox(ctx, "r1").exists()
+
+
+def test_a_late_exit_record_replaces_lost(ctx: Context, slurm: FakeSlurm) -> None:
+    # a shared filesystem hid the node's files for both polls; the login node wrote lost
+    # over the node's final run.yaml, then the exit record became visible
+    record = slurm_run(ctx, "r1", job_id="1000")
+    [lost] = reconcile(ctx)
+    assert lost.status == RunStatus.LOST
+    assert outbox(ctx, "r1").exists()  # kept: a late node end can still replace lost
+    assert reconcile(ctx) == []  # nothing new yet
+    _exit_record(ctx.run_dir(record))
+    [done] = reconcile(ctx)
+    assert (done.status, done.exit_code) == (RunStatus.FINISHED, 0)
+    assert ctx.find_record("r1").status == RunStatus.FINISHED
+    indexed = ctx.index.get_run("r1")
+    assert indexed is not None and indexed.status == RunStatus.FINISHED
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
+    assert types[types.index("run.lost") + 1 :][:2] == ["run.finished", "run.eval_skipped"]
+    assert not outbox(ctx, "r1").exists()
+    assert reconcile(ctx) == []
+
+
+def test_a_late_node_run_yaml_replaces_lost(ctx: Context, slurm: FakeSlurm) -> None:
+    record = slurm_run(ctx, "r1", job_id="1000")
+    [lost] = reconcile(ctx)
+    assert lost.status == RunStatus.LOST
+    # the node's final run.yaml becomes visible (its finish sets the status unconditionally)
+    final = record.model_copy(update={"status": RunStatus.FINISHED, "exit_code": 0})
+    ctx.store.write_record(final.model_copy(update={"ended_at": utcnow()}))
+    [done] = reconcile(ctx)
+    assert done.status == RunStatus.FINISHED
+    indexed = ctx.index.get_run("r1")
+    assert indexed is not None and indexed.status == RunStatus.FINISHED
+    assert ctx.events.since(0, limit=10_000)[-1].type == "run.eval_skipped"  # scored after it
+    assert not outbox(ctx, "r1").exists()
+
+
+def test_a_lost_run_is_forgotten_after_the_recheck_window(ctx: Context, slurm: FakeSlurm) -> None:
+    record = slurm_run(ctx, "r1", job_id="1000")
+    [lost] = reconcile(ctx)
+    entry = json.loads(outbox(ctx, "r1").read_text())
+    lost_at = utcnow() - timedelta(seconds=slurm_module.LOST_RECHECK_SECONDS + 1)
+    entry["lost_at"] = lost_at.isoformat()
+    outbox(ctx, "r1").write_text(json.dumps(entry))
+    assert reconcile(ctx) == []
+    assert not outbox(ctx, "r1").exists()
+    _exit_record(ctx.run_dir(record))  # too late: nothing polls the run any more
+    assert reconcile(ctx) == []
+    assert ctx.find_record("r1").status == RunStatus.LOST == lost.status
+
+
 def test_an_unknown_outcome_is_resolved_by_the_job_s_comment(
     ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
 ) -> None:

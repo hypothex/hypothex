@@ -1217,6 +1217,77 @@ def test_hub_restart_resumes_from_saved_cursor(
     assert mirrored_seqs(hub_ctx, "a") == [1, 2, 3, 4]
 
 
+def test_a_host_whose_event_log_restarted_is_replayed_from_the_start(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer]
+) -> None:
+    a, b = servers
+    seed_run(a.ctx, "a-1")
+    seed_run(a.ctx, "a-2")
+    hub_ctx = Context.open(tmp_path / "hub")
+    env_a = a.ctx.descriptor.environment_id
+
+    async def main() -> None:
+        first = fast(Hub(hub_ctx, hosts_for(a, b)))
+        await first.start()
+        await until(lambda: mirrored_seqs(hub_ctx, "a") == [1, 2, 3, 4])
+        await first.stop()
+        # the host loses events.db (deleted, or an old backup) but keeps its environment id
+        await asyncio.to_thread(a.stop)
+        for path in a.home.glob("events.db*"):
+            path.unlink()
+        await asyncio.to_thread(a.start)
+        assert a.ctx.descriptor.environment_id == env_a
+        seed_run(a.ctx, "a-new")
+        assert run_seqs(a.ctx) == [1, 2]  # below the hub's cursor (4)
+        second = fast(Hub(Context.open(tmp_path / "hub"), hosts_for(a, b)))
+        await second.start()
+        try:
+            await until(lambda: mirrored_seqs(hub_ctx, "a") == [1, 2, 3, 4, 1, 2])
+        finally:
+            await second.stop()
+
+    asyncio.run(main())
+    assert hub_ctx.index.get_run("a-new") is not None
+    assert hub_ctx.index.get_cursor("a", env_a) == 2
+
+
+class HostsAnswer:
+    """Answers ``GET /api/v1/hosts`` with ``rows``, or fails when ``rows`` is an error."""
+
+    def __init__(self, rows: object) -> None:
+        self.rows = rows
+
+    def get_json(self, path: str, **params: Any) -> Any:
+        assert path == "/api/v1/hosts"
+        if isinstance(self.rows, Exception):
+            raise self.rows
+        return self.rows
+
+
+@pytest.mark.parametrize(
+    ("rows", "kept"),
+    [
+        ([{"kind": "local", "state": {"last_sequence": 9}}], True),  # host ahead: no restart
+        ([{"kind": "local", "state": {"last_sequence": 2}}], False),  # host behind: replay
+        (EnvUnreachableError("down"), True),  # unknown: keep the cursor
+        ([{"kind": "ssh", "state": {"last_sequence": 2}}], True),  # no own row
+        ([{"kind": "local", "state": {"last_sequence": "2"}}], True),  # not a number
+    ],
+)
+def test_the_cursor_is_dropped_only_when_the_host_is_provably_behind(
+    tmp_path: Path, rows: object, kept: bool
+) -> None:
+    hub_ctx = Context.open(tmp_path / "hub")
+    hub = Hub(
+        hub_ctx,
+        EnvironmentsFile(environments={"gpu1": HostSpec(route="url", url="http://127.0.0.1:9")}),
+    )
+    hub_ctx.index.set_cursor("gpu1", "env-remote", 5)
+    got = hub._check_cursor(hub._sups["gpu1"], HostsAnswer(rows), "env-remote", 5)  # type: ignore[arg-type]
+    assert got == (5 if kept else 0)
+    assert hub_ctx.index.get_cursor("gpu1", "env-remote") == got
+
+
 def test_host_goes_stale_without_pings_and_recovers(
     tmp_path: Path, servers: tuple[EnvServer, EnvServer]
 ) -> None:

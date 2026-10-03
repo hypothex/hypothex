@@ -28,6 +28,8 @@ from typing import Any, Literal, TypeVar
 
 import yaml
 from pydantic import BaseModel
+from sqlalchemy import delete
+from sqlalchemy.orm import Session
 
 from hypothex.core.context import Context
 from hypothex.core.cost import price_record
@@ -36,7 +38,7 @@ from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.events import Event
 from hypothex.core.fsutil import atomic_write_text, read_yaml
 from hypothex.core.ids import utcnow
-from hypothex.core.index import index_run
+from hypothex.core.index import HostCursorRow, index_run
 from hypothex.core.layout import HX_DIR, reserved_run_path
 from hypothex.core.records import ACTIVE_STATUSES, Artifact, RunRecord
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
@@ -673,6 +675,7 @@ def _emit_mirror(
     original_type: str,
     remote_sequence: int | None,
     *,
+    remote_created_at: datetime | None = None,
     reason: str | None = None,
 ) -> None:
     payload: dict[str, object] = {
@@ -690,9 +693,11 @@ def _emit_mirror(
         )
         return
     # events.db and the cursor (index.db) are two databases: a crash between this event
-    # and the cursor write replays the remote event, and the key drops the repeat
+    # and the cursor write replays the remote event, and the key drops the repeat. The
+    # event's time is part of its identity: a host whose log restarted reuses sequences
+    stamp = f":{remote_created_at.isoformat()}" if remote_created_at is not None else ""
     ctx.events.append_once(
-        f"mirror:{host}:{environment_id}:{remote_sequence}",
+        f"mirror:{host}:{environment_id}:{remote_sequence}{stamp}",
         "mirror.run_updated",
         project=record.project,
         run_id=record.run_id,
@@ -745,7 +750,14 @@ def mirror_event(
     if mirrored is None:
         return
     _emit_mirror(
-        ctx, host, environment_id, mirrored[0], event.type, event.sequence, reason=_reason(event)
+        ctx,
+        host,
+        environment_id,
+        mirrored[0],
+        event.type,
+        event.sequence,
+        remote_created_at=event.created_at,
+        reason=_reason(event),
     )
 
 
@@ -777,6 +789,42 @@ def _run_key(event: Event) -> tuple[str, str] | None:
 def _brief(exc: BaseException) -> str:
     text = str(exc).strip() or type(exc).__name__
     return text[-_MESSAGE_LIMIT:]
+
+
+def _host_sequence(client: EnvClient) -> int | None:
+    """
+    Return the last sequence of the host's own event log, or None when unknown.
+
+    Read from the host's own (``kind: local``) row of its ``GET /api/v1/hosts``.
+
+    Parameters
+    ----------
+    client : EnvClient
+        Client of the host's env server.
+
+    Returns
+    -------
+    int or None
+        The host's ``events.last_sequence()``; None when the host does not
+        answer or sends no such row.
+    """
+    try:
+        rows = client.get_json("/api/v1/hosts")
+        [own] = [r for r in rows if r.get("kind") == "local"]
+        value = own["state"]["last_sequence"]
+    except (HypothexError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _reset_cursor(ctx: Context, host: str, environment_id: str) -> None:
+    """Forget the mirror cursor of one host environment (``set_cursor`` only moves forward)."""
+    with Session(ctx.index.engine) as session, session.begin():
+        session.execute(
+            delete(HostCursorRow).where(
+                HostCursorRow.host == host, HostCursorRow.environment_id == environment_id
+            )
+        )
 
 
 # supervisors -------------------------------------------------------------------------
@@ -1205,6 +1253,8 @@ class Hub:
                 )
             env_id = desc.environment_id
             cursor = await asyncio.to_thread(self._read_cursor, sup, env_id)
+            if cursor:
+                cursor = await asyncio.to_thread(self._check_cursor, sup, client, env_id, cursor)
             sup.client = client
             sup.failed_bootstrap = False
             self._mark_ok(sup)
@@ -1250,6 +1300,29 @@ class Hub:
         with sup.lock:
             return self.ctx.index.get_cursor(sup.name, env_id)
 
+    def _check_cursor(self, sup: _Supervisor, client: EnvClient, env_id: str, cursor: int) -> int:
+        """
+        Return the cursor to subscribe after, reset to 0 when the host's event log restarted.
+
+        Host sequences only grow, so a host whose last sequence is below the
+        cursor lost its ``events.db`` (deleted, or the home restored from a
+        backup) but kept its environment id. Its new events reuse sequences the
+        hub has already seen, so the cursor is dropped and the whole log is
+        replayed; mirroring is idempotent.
+        """
+        latest = _host_sequence(client)
+        if latest is None or latest >= cursor:
+            return cursor
+        log.warning(
+            "host %s: event log restarted (host at sequence %d, hub cursor %d); replaying it",
+            sup.name,
+            latest,
+            cursor,
+        )
+        with sup.lock:
+            _reset_cursor(self.ctx, sup.name, env_id)
+        return 0
+
     def _apply(
         self, sup: _Supervisor, client: EnvClient, env_id: str, events: list[Event]
     ) -> int | None:
@@ -1290,6 +1363,7 @@ class Hub:
                         record,
                         event.type,
                         event.sequence,
+                        remote_created_at=event.created_at,
                         reason=_reason(event),
                     )
             last = fresh[-1].sequence

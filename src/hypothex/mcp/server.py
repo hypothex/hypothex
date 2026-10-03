@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -23,7 +26,10 @@ from hypothex.core.execution import RunRequest
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.records import RunStatus
 from hypothex.core.store import ProjectEntry
+from hypothex.core.sweeps import SweepParam, SweepSpec, load_sweep, sweep_path
 from hypothex.core.views import PanelSpec, ValidationIssue, ViewInfo, ViewSpec
+from hypothex.remote.config import HostSpec
+from hypothex.remote.ssh import SshTarget
 
 INSTRUCTIONS = """\
 Hypothex tracks ML/AI experiments across projects. Each run belongs to a task
@@ -360,6 +366,295 @@ def require_agent_hypothesis(created_by: str, hypothesis: str) -> None:
     """
     if created_by.startswith("agent:") and not hypothesis.strip():
         raise RunError("agents must give a hypothesis: why does this run exist?")
+
+
+# hub client and sweep option parsers (shared by the API, CLI, and MCP) ------------
+DEFAULT_HUB_URL = "http://127.0.0.1:7777"
+LOCAL_HOST = "local"
+
+
+class HubUnavailableError(HypothexError):
+    """The hub (``hx serve`` on the hub machine) did not answer."""
+
+
+def hub_url() -> str:
+    """
+    Return the hub's base URL.
+
+    Returns
+    -------
+    str
+        ``$HYPOTHEX_HUB_URL`` without a trailing slash, else ``DEFAULT_HUB_URL``.
+    """
+    return os.environ.get("HYPOTHEX_HUB_URL", DEFAULT_HUB_URL).rstrip("/")
+
+
+def hub_call(
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    url: str | None = None,
+    timeout: float = 120.0,
+) -> Any:
+    """
+    Call the hub's HTTP API and return the decoded JSON answer.
+
+    Parameters
+    ----------
+    method : str
+        ``GET`` or ``POST``.
+    path : str
+        API path, e.g. ``/api/v1/hosts``.
+    body : dict, optional
+        JSON body for ``POST``.
+    url : str, optional
+        Hub base URL; defaults to ``hub_url()``.
+    timeout : float
+        Seconds to wait for the answer.
+
+    Returns
+    -------
+    Any
+        The JSON answer.
+
+    Raises
+    ------
+    HubUnavailableError
+        The hub did not answer, or answered 503 (a host is unreachable).
+    StoreError
+        The hub answered 404.
+    HypothexError
+        Any other error answer; the message is the hub's ``error`` text.
+
+    Examples
+    --------
+    >>> hub_call("GET", "/api/v1/hosts")  # doctest: +SKIP
+    [{'name': 'local', 'kind': 'local', ...}]
+    """
+    base = (url or hub_url()).rstrip("/")
+    try:
+        resp = httpx.request(method, base + path, json=body, timeout=timeout)
+    except httpx.TransportError as exc:
+        raise HubUnavailableError(
+            f"the hub at {base} did not answer ({exc}); start it with `hx serve`"
+        ) from exc
+    if resp.status_code < 400:
+        return resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    message = data.get("error") if isinstance(data, dict) else None
+    text = message or f"hub answered {resp.status_code} to {method} {path}"
+    if resp.status_code == 404:
+        raise StoreError(text)
+    if resp.status_code == 503:
+        raise HubUnavailableError(text)
+    raise HypothexError(text)
+
+
+def is_remote(host: str | None) -> bool:
+    """
+    Return True when ``host`` names a remote host (not the hub itself).
+
+    Parameters
+    ----------
+    host : str or None
+        Host name; ``None``, ``""``, and ``"local"`` mean the hub.
+
+    Returns
+    -------
+    bool
+
+    Examples
+    --------
+    >>> is_remote(None), is_remote("local"), is_remote("gpu1")
+    (False, False, True)
+    """
+    return host not in (None, "", LOCAL_HOST)
+
+
+def ssh_target(spec: HostSpec) -> SshTarget:
+    """
+    Build the ``SshTarget`` for a host reached over ssh.
+
+    ``ssh``/``scp`` come from ``$HYPOTHEX_SSH``/``$HYPOTHEX_SCP`` (tests set fakes).
+
+    Parameters
+    ----------
+    spec : HostSpec
+        The host's entry in ``environments.yaml``.
+
+    Returns
+    -------
+    SshTarget
+
+    Raises
+    ------
+    ConfigError
+        If the host is not ``route: ssh`` with an ``ssh_alias``.
+    """
+    if spec.route != "ssh" or not spec.ssh_alias:
+        raise ConfigError("this host is not reached over ssh (needs route: ssh and ssh_alias)")
+    return SshTarget(alias=spec.ssh_alias)
+
+
+def parse_grid(items: list[str]) -> list[SweepParam]:
+    """
+    Parse ``--grid name=v1,v2`` options.
+
+    Parameters
+    ----------
+    items : list of str
+        One item per ``--grid``.
+
+    Returns
+    -------
+    list of SweepParam
+
+    Raises
+    ------
+    RunError
+        For a malformed item or a repeated name.
+
+    Examples
+    --------
+    >>> [p.values for p in parse_grid(["lr=1e-4,3e-4"])]
+    [['1e-4', '3e-4']]
+    """
+    out: list[SweepParam] = []
+    for item in items:
+        name, sep, raw = item.partition("=")
+        name = name.strip()
+        values = [v.strip() for v in raw.split(",") if v.strip()]
+        if not sep or not name or not values:
+            raise RunError(f"--grid must look like name=v1,v2; got {item!r}")
+        if name in {p.name for p in out}:
+            raise RunError(f"--grid {name} is given twice")
+        out.append(SweepParam(name=name, values=values))
+    return out
+
+
+def parse_ranges(items: list[str]) -> list[SweepParam]:
+    """
+    Parse ``--param name=low:high[:log]`` options (sampled by ``--random N``).
+
+    Parameters
+    ----------
+    items : list of str
+        One item per ``--param``.
+
+    Returns
+    -------
+    list of SweepParam
+
+    Raises
+    ------
+    RunError
+        For a malformed item, ``low >= high``, or a log range with ``low <= 0``.
+
+    Examples
+    --------
+    >>> parse_ranges(["lr=1e-5:1e-3:log"])[0].log
+    True
+    """
+    out: list[SweepParam] = []
+    for item in items:
+        name, sep, raw = item.partition("=")
+        parts = raw.split(":")
+        bad = RunError(f"--param must be name=low:high[:log]; got {item!r}")
+        if not sep or not name.strip() or len(parts) not in (2, 3):
+            raise bad
+        if len(parts) == 3 and parts[2] != "log":
+            raise bad
+        try:
+            low, high = float(parts[0]), float(parts[1])
+        except ValueError as exc:
+            raise bad from exc
+        log = len(parts) == 3
+        if not low < high:
+            raise RunError(f"--param {name}: low must be below high")
+        if log and low <= 0:
+            raise RunError(f"--param {name}: a log range needs low > 0")
+        out.append(SweepParam(name=name.strip(), low=low, high=high, log=log))
+    return out
+
+
+def parse_seeds(text: str, *, count_ok: bool = True) -> list[int]:
+    """
+    Parse ``--seeds``: a count (``3`` -> 1, 2, 3) or a list (``1,2,5``).
+
+    Parameters
+    ----------
+    text : str
+        Option value.
+    count_ok : bool
+        If False, a single number is one seed, not a count (``hx sweep extend``).
+
+    Returns
+    -------
+    list of int
+
+    Raises
+    ------
+    RunError
+        For text that is not integers, a count below 1, or a repeated seed.
+
+    Examples
+    --------
+    >>> parse_seeds("3"), parse_seeds("4,5"), parse_seeds("7", count_ok=False)
+    ([1, 2, 3], [4, 5], [7])
+    """
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    try:
+        values = [int(p) for p in parts]
+    except ValueError as exc:
+        raise RunError(f"--seeds must be a count (3) or a list (1,2,3); got {text!r}") from exc
+    if not values:
+        raise RunError("--seeds is empty")
+    if count_ok and len(values) == 1 and "," not in text:
+        if values[0] < 1:
+            raise RunError("--seeds count must be at least 1")
+        return list(range(1, values[0] + 1))
+    if len(set(values)) != len(values):
+        raise RunError(f"--seeds repeats a seed: {text}")
+    return values
+
+
+def find_sweep(ctx: Context, sweep_id: str, project: str | None = None) -> SweepSpec:
+    """
+    Load a sweep by id, searching every project when none is given.
+
+    Parameters
+    ----------
+    ctx : Context
+    sweep_id : str
+    project : str, optional
+
+    Returns
+    -------
+    SweepSpec
+
+    Raises
+    ------
+    StoreError
+        No such sweep (or a name that is not a sweep id).
+    ConfigError
+        The id exists in more than one project (pass the project).
+    """
+    projects = [project] if project else [e.project for e in ctx.store.list_projects()]
+    found: list[str] = []
+    for name in projects:
+        with contextlib.suppress(StoreError):  # a hostile id never builds a path
+            if sweep_path(ctx.layout, name, sweep_id).is_file():
+                found.append(name)
+    if not found:
+        where = f" in project {project}" if project else ""
+        raise StoreError(f"no sweep {sweep_id}{where}")
+    if len(found) > 1:
+        raise ConfigError(f"sweep {sweep_id} exists in {', '.join(found)}; pass --project")
+    return load_sweep(ctx.layout, found[0], sweep_id)
 
 
 def _expose_errors(fn: Callable[..., Any]) -> Callable[..., Any]:

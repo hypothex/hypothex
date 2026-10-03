@@ -8,8 +8,12 @@ marker, and ``HYPOTHEX_FAKE_SSH_LOG`` (logged with ``"prog": "scp"``).
 
 A remote operand is ``[user@]alias:path``. ``~``, ``~/x`` and relative paths
 resolve against the fake home; absolute remote paths must lie inside the
-fake root so a test can never write to real system paths. Like real ``scp``,
-the destination's parent directory must exist and directories need ``-r``.
+fake root so a test can never write to real system paths. Every resolved
+remote path (``..`` and symlinks followed) must stay inside the fake root.
+With ``HYPOTHEX_FAKE_SCP_ANY_HOST=1`` an unknown alias gets an empty home
+under the root instead of failing (``tests.api.envserver.write_fake_scp``).
+Like real ``scp``, the destination's parent directory must exist and
+directories need ``-r``.
 """
 
 from __future__ import annotations
@@ -53,18 +57,21 @@ def resolve(operand: str) -> Path:
     root = Path(root_env).resolve()
     host = match.group("host")
     home = root / host
+    if host in (".", ".."):
+        fail(f"ssh: Could not resolve hostname {host}: nodename nor servname provided", 255)
+    if not home.is_dir() and os.environ.get("HYPOTHEX_FAKE_SCP_ANY_HOST") == "1":
+        home.mkdir()
     if not home.is_dir():
         fail(f"ssh: Could not resolve hostname {host}: nodename nor servname provided", 255)
     if (home / ".fake_down").exists():
         fail(f"ssh: connect to host {host} port 22: Connection refused", 255)
     raw = match.group("path")
     if raw in ("", "~"):
-        return home
-    if raw.startswith("~/"):
-        return home / raw[2:]
-    path = Path(raw)
-    if not path.is_absolute():
-        return home / path
+        path = home
+    elif raw.startswith("~/"):
+        path = home / raw[2:]
+    else:
+        path = home / raw  # an absolute ``raw`` replaces ``home``
     resolved = path.resolve()
     if not resolved.is_relative_to(root):
         fail(f"fake scp: {raw} is outside the fake remote root")

@@ -1,14 +1,16 @@
 """Test helpers: in-process env servers and fakes for remote work.
 
 Nothing here reaches a real host or hub. Servers run in threads on 127.0.0.1 with a
-random port; the fake ``scp`` copies local paths. The autouse ``isolate_remote``
-fixture (``tests/conftest.py``) already points ``HYPOTHEX_SSH``/``HYPOTHEX_SCP`` at a
-script that always fails and ``HYPOTHEX_HUB_URL`` at a dead port.
+random port; the fake ``scp`` (``tests/fakes/fake_scp.py``) copies only inside a fake
+root on this machine. The autouse ``isolate_remote`` fixture (``tests/conftest.py``)
+already points ``HYPOTHEX_SSH``/``HYPOTHEX_SCP`` at a script that always fails and
+``HYPOTHEX_HUB_URL`` at a dead port.
 """
 
 from __future__ import annotations
 
 import json
+import shlex
 import socket
 import sys
 import threading
@@ -23,36 +25,7 @@ from fastapi import FastAPI
 
 from hypothex.core.context import Context
 from hypothex.remote.config import EnvironmentsFile, HostSpec, save_hosts
-
-FAKE_SCP = '''#!PYTHON
-"""Fake scp for tests: `alias:/path` is the local /path. No network."""
-import os
-import shutil
-import sys
-
-VALUED = {"-o", "-P", "-i", "-F", "-l", "-c", "-S", "-J"}
-args, paths, i = sys.argv[1:], [], 0
-while i < len(args):
-    if args[i] in VALUED:
-        i += 2
-        continue
-    if args[i].startswith("-"):
-        i += 1
-        continue
-    paths.append(args[i])
-    i += 1
-
-
-def local(p):
-    return p.split(":", 1)[1] if ":" in p and not p.startswith("/") else p
-
-
-src, dst = local(paths[-2]), local(paths[-1])
-if not os.path.exists(src):
-    print(f"scp: {src}: No such file or directory", file=sys.stderr)
-    sys.exit(1)
-(shutil.copytree if os.path.isdir(src) else shutil.copy)(src, dst)
-'''
+from tests.fakes import FAKES_DIR
 
 
 def wait_until(check: Callable[[], Any], timeout: float = 20.0, interval: float = 0.1) -> Any:
@@ -163,8 +136,35 @@ def write_fake_gpus(path: Path, count: int = 8, external: tuple[int, ...] = ()) 
 
 
 def write_fake_scp(folder: Path) -> Path:
-    """Write the fake ``scp`` script into ``folder`` and return its path."""
+    """
+    Write a fake ``scp`` confined to ``folder`` and return its path.
+
+    The script runs ``tests/fakes/fake_scp.py`` with ``folder`` as its fake root
+    (``HYPOTHEX_FAKE_REMOTE_ROOT``) and ``HYPOTHEX_FAKE_SCP_ANY_HOST=1``: every alias
+    gets the home ``folder/<alias>``, an absolute remote path must lie inside
+    ``folder``, and ``-o BatchMode=yes`` is required. Nothing outside ``folder`` is
+    ever read or written for a remote operand.
+
+    Parameters
+    ----------
+    folder : Path
+        Existing directory; holds the script (``fake-scp``) and is the fake root.
+
+    Returns
+    -------
+    Path
+        The executable script; point ``HYPOTHEX_SCP`` at it.
+
+    Examples
+    --------
+    >>> monkeypatch.setenv("HYPOTHEX_SCP", str(write_fake_scp(tmp_path)))  # doctest: +SKIP
+    """
     path = folder / "fake-scp"
-    path.write_text(FAKE_SCP.replace("PYTHON", sys.executable, 1))
+    env = (
+        f"HYPOTHEX_FAKE_REMOTE_ROOT={shlex.quote(str(folder.resolve()))} "
+        "HYPOTHEX_FAKE_SCP_ANY_HOST=1"
+    )
+    script = shlex.quote(str(FAKES_DIR / "fake_scp.py"))
+    path.write_text(f'#!/bin/sh\n{env} exec {shlex.quote(sys.executable)} {script} "$@"\n')
     path.chmod(0o755)
     return path

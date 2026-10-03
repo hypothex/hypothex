@@ -1,0 +1,136 @@
+"""What a run cost: GPU hours priced at the host's rate, plus API spend."""
+
+from __future__ import annotations
+
+from hypothex.core.records import TERMINAL_STATUSES, CostTotals, RunRecord
+
+COST_DECIMALS = 6
+
+
+def billed_gpus(record: RunRecord) -> int:
+    """
+    Return how many GPUs a run is billed for.
+
+    The GPUs the run held (``executor.gpus``). A SLURM run whose node did not
+    report indices is billed for what it asked for (``gpus_requested``),
+    because SLURM reserved that many.
+
+    Parameters
+    ----------
+    record : RunRecord
+        The run.
+
+    Returns
+    -------
+    int
+        Number of GPUs; 0 for CPU runs.
+
+    Examples
+    --------
+    >>> from hypothex.core.records import ExecutorInfo
+    >>> billed_gpus(RunRecord.model_construct(executor=ExecutorInfo(gpus=[0, 2])))
+    2
+    >>> slurm = ExecutorInfo(slurm_job_id="81234")
+    >>> billed_gpus(RunRecord.model_construct(executor=slurm, gpus_requested=4))
+    4
+    """
+    if record.executor.gpus:
+        return len(record.executor.gpus)
+    if record.executor.slurm_job_id is not None:
+        return record.gpus_requested
+    return 0
+
+
+def wall_hours(record: RunRecord) -> float:
+    """
+    Return a run's wall time in hours.
+
+    Parameters
+    ----------
+    record : RunRecord
+        The run.
+
+    Returns
+    -------
+    float
+        ``ended_at - started_at`` in hours; 0 when the run never started or has
+        not ended, and 0 (not negative) when clocks put the end before the start.
+    """
+    if record.started_at is None or record.ended_at is None:
+        return 0.0
+    return max((record.ended_at - record.started_at).total_seconds(), 0.0) / 3600.0
+
+
+def compute_cost(record: RunRecord, usd_per_gpu_hour: float | None) -> CostTotals:
+    """
+    Compute what a run cost.
+
+    ``gpu_hours = wall × GPUs`` (``wall_hours`` × ``billed_gpus``);
+    ``gpu_usd = gpu_hours × usd_per_gpu_hour`` (0 when the host has no rate);
+    ``api_usd = usage.usd``; ``total_usd = gpu_usd + api_usd``. Each value is
+    rounded to 6 decimals after the sums, so float noise never shows up in
+    ``run.yaml``.
+
+    Parameters
+    ----------
+    record : RunRecord
+        The run, normally ended (``started_at`` and ``ended_at`` set).
+    usd_per_gpu_hour : float or None
+        The host's price per GPU hour from ``environments.yaml``; None if unknown.
+
+    Returns
+    -------
+    CostTotals
+        The run's cost.
+
+    Examples
+    --------
+    >>> from datetime import UTC, datetime, timedelta
+    >>> from hypothex.core.records import ExecutorInfo, UsageTotals
+    >>> start = datetime(2026, 10, 3, 10, tzinfo=UTC)
+    >>> rec = RunRecord.model_construct(
+    ...     started_at=start,
+    ...     ended_at=start + timedelta(minutes=90),
+    ...     executor=ExecutorInfo(gpus=[0, 1]),
+    ...     usage=UsageTotals(usd=0.375),
+    ...     gpus_requested=2,
+    ... )
+    >>> compute_cost(rec, 2.10)
+    CostTotals(gpu_hours=3.0, gpu_usd=6.3, api_usd=0.375, total_usd=6.675)
+    """
+    gpu_hours = wall_hours(record) * billed_gpus(record)
+    gpu_usd = gpu_hours * (usd_per_gpu_hour or 0.0)
+    api_usd = record.usage.usd if record.usage is not None else 0.0
+    return CostTotals(
+        gpu_hours=round(gpu_hours, COST_DECIMALS),
+        gpu_usd=round(gpu_usd, COST_DECIMALS),
+        api_usd=round(api_usd, COST_DECIMALS),
+        total_usd=round(gpu_usd + api_usd, COST_DECIMALS),
+    )
+
+
+def price_record(record: RunRecord, usd_per_gpu_hour: float | None) -> RunRecord:
+    """
+    Return the record with ``cost`` computed at a given rate, once it has ended.
+
+    Env servers do not know their price (it lives in the hub's
+    ``environments.yaml``), so they fill ``cost`` at finish with no rate. The
+    hub calls this on each mirrored record with the host's
+    ``usd_per_gpu_hour``; it also prices ended runs that have no cost yet
+    (``lost``, killed before start). Active runs are returned unchanged.
+
+    Parameters
+    ----------
+    record : RunRecord
+        A run record.
+    usd_per_gpu_hour : float or None
+        The host's price per GPU hour; None if unknown.
+
+    Returns
+    -------
+    RunRecord
+        A copy with ``cost`` set when the run has ended, else ``record`` itself.
+    """
+    if record.status not in TERMINAL_STATUSES:
+        return record
+    return record.model_copy(update={"cost": compute_cost(record, usd_per_gpu_hour)})

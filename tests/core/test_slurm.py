@@ -5,6 +5,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from datetime import timedelta
@@ -12,8 +13,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
+from hypothex.api.app import create_app
 from hypothex.cli.main import app
 from hypothex.core import control
 from hypothex.core import slurm as slurm_module
@@ -27,6 +30,7 @@ from hypothex.core.slurm import (
     SBATCH_FILE,
     SlurmError,
     SlurmJob,
+    SlurmPoller,
     SlurmTimeout,
     SubmitUnknownError,
     cancel,
@@ -1528,3 +1532,97 @@ def test_a_stop_racing_the_node_s_end_publishes_the_node_s_end(
     types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
     assert "run.killed" not in types and types.count("run.finished") == 1
     assert not (ctx.layout.home / "slurm" / "outbox" / "r1.json").exists()
+
+
+# poll loop and hx serve --kind slurm -------------------------------------------------------------
+def test_poller_poll_once_two_strikes_and_survives_errors(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm_run(ctx, "r1", job_id="1000")
+    poller = SlurmPoller(ctx, interval=0.05)
+    slurm.set(fail={"squeue": "slurm_load_jobs error: Unable to contact slurm controller"})
+    assert poller.poll_once() == []
+    slurm.set(fail={})
+    assert poller.poll_once() == []
+    assert [r.run_id for r in poller.poll_once()] == ["r1"]
+
+
+def test_poller_thread_marks_lost_and_stops(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm_run(ctx, "r1", job_id="1000")
+    poller = SlurmPoller(ctx, interval=0.05)
+    poller.start()
+    try:
+        assert poller.alive
+        wait_until(lambda: ctx.find_record("r1").status == RunStatus.LOST, timeout=10)
+    finally:
+        poller.stop()
+    assert not poller.alive
+
+
+def poller_threads() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t.name == "hx-slurm-poller"]
+
+
+def test_slurm_server_runs_the_poller_for_its_life(
+    home: Path, ctx: Context, slurm: FakeSlurm
+) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    slurm_run(ctx, "r1", job_id="1000")
+    with TestClient(create_app(home, kind="slurm"), base_url="http://127.0.0.1:7777"):
+        wait_until(lambda: ctx.find_record("r1").executor.node == "n1", timeout=10)
+        assert poller_threads()
+    wait_until(lambda: not poller_threads(), timeout=10)
+
+
+def test_ssh_server_has_no_slurm_poller(home: Path, slurm: FakeSlurm) -> None:
+    with TestClient(create_app(home, kind="ssh"), base_url="http://127.0.0.1:7777"):
+        assert poller_threads() == []
+    assert slurm.state()["calls"] == []
+
+
+def test_poller_stop_keeps_a_busy_thread_owned(
+    ctx: Context, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a squeue that hangs: stop must not forget the thread and start a second one
+    busy = threading.Event()
+    release = threading.Event()
+
+    def hanging(
+        c: Context, *, confirm_gone: dict[str, SlurmJob | None] | None = None
+    ) -> list[RunRecord]:
+        busy.set()
+        release.wait(30)
+        return []
+
+    monkeypatch.setattr(slurm_module, "reconcile", hanging)
+    poller = SlurmPoller(ctx, interval=0.05)
+    poller.start()
+    assert busy.wait(5)
+    assert poller.stop(timeout=0.1) is False
+    assert poller.alive
+    poller.start()
+    assert len(poller_threads()) == 1
+    release.set()
+    assert poller.stop() is True
+    assert not poller.alive and poller_threads() == []
+
+
+def test_slurm_server_refuses_a_home_without_flock(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_flock(fd: int, operation: int) -> None:
+        raise OSError(errno.ENOSYS, "Function not implemented")
+
+    monkeypatch.setattr("hypothex.core.slurm.fcntl.flock", no_flock)
+    with pytest.raises(ConfigError, match="does not support flock"):
+        create_app(home, kind="slurm")
+
+
+def test_slurm_server_reports_comment_accounting_per_start(home: Path, slurm: FakeSlurm) -> None:
+    base = "http://127.0.0.1:7777"
+    with TestClient(create_app(home, kind="slurm"), base_url=base) as client:
+        assert client.get("/api/v1/slurm").json() == {"comment_accounting": True}
+        slurm.set(accounting_flags="")
+        assert client.get("/api/v1/slurm").json() == {"comment_accounting": True}  # cached
+    with TestClient(create_app(home, kind="slurm"), base_url=base) as client:
+        wait_until(lambda: client.get("/api/v1/slurm").json() == {"comment_accounting": False})
+    with TestClient(create_app(home, kind="ssh"), base_url=base) as client:
+        assert client.get("/api/v1/slurm").json() == {"comment_accounting": None}

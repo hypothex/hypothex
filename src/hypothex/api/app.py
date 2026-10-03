@@ -40,6 +40,7 @@ from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_panel
 from hypothex.core.records import RunStatus
 from hypothex.core.scheduler import Scheduler, run_scheduler_loop
+from hypothex.core.slurm import SlurmPoller, comment_accounting, require_flock
 from hypothex.core.views import PanelData, PanelSpec, ViewSpec
 from hypothex.mcp.server import (
     ViewValidationError,
@@ -536,6 +537,14 @@ def register_env_routes(app: FastAPI, ctx: Context) -> None:
             )
         return rows
 
+    @app.get("/api/v1/slurm")
+    def slurm_capabilities() -> dict[str, Any]:
+        # the hub shows this on the host row: without job comments in SLURM's accounting
+        # an unknown submission can never be proven absent
+        if ctx.descriptor.kind != "slurm":
+            return {"comment_accounting": None}
+        return {"comment_accounting": comment_accounting()}
+
 
 def create_app(
     home: Path | None = None,
@@ -561,9 +570,10 @@ def create_app(
     home : Path, optional
         Hypothex home; defaults to ``$HYPOTHEX_HOME`` or ``~/.hypothex``.
     background_repair : bool
-        Run the background loops: mark orphaned runs lost every 30 s, and start
-        queued runs whose GPUs are free every 5 s unless the kind is ``slurm``.
-        Disable in tests.
+        Run the background loops: mark orphaned runs lost every 30 s; start
+        queued runs whose GPUs are free every 5 s unless the kind is ``slurm``;
+        on a ``slurm`` env server, reconcile SLURM jobs every 30 s
+        (``SlurmPoller``). Disable in tests.
     host : str, optional
         The address the server binds to; also accepted as ``Host`` unless it is
         a wildcard such as ``0.0.0.0``.
@@ -588,6 +598,8 @@ def create_app(
     ctx = Context.open(home)
     if kind is not None:
         ctx.descriptor.kind = kind
+    if ctx.descriptor.kind == "slurm":
+        require_flock(ctx.layout.home)  # every run-state write takes the run lock
     mcp_server = build_server(home)
     mcp_http = mcp_server.streamable_http_app(streamable_http_path="/")
 
@@ -609,11 +621,19 @@ def create_app(
             )
         for loop in loops:
             loop.start()
+        # SLURM env servers reconcile their jobs every 30 s; lost needs two polls in a row
+        poller = SlurmPoller(ctx) if background_repair and ctx.descriptor.kind == "slurm" else None
+        if poller is not None:
+            poller.start()
         async with mcp_server.session_manager.run():
             try:
                 yield
             finally:
                 stop.set()
+                if poller is not None:
+                    # wait for the thread itself: a squeue can block for 60 s, and the
+                    # context must not be released under a poll that is still running
+                    await asyncio.to_thread(poller.stop)
                 if task is not None:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):

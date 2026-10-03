@@ -25,6 +25,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -85,6 +86,7 @@ EXIT_FILE = "exit.json"
 NO_FLOCK_ERRNOS = frozenset({errno.ENOSYS, errno.ENOLCK, errno.EOPNOTSUPP})
 """``flock`` errors of shared filesystems without lock support (Lustre, some NFS)."""
 SBATCH_FILE = "slurm.sbatch"
+SLURM_POLL_SECONDS = 30.0
 SLURM_SETTINGS_FILE = "slurm.json"
 """The effective ``SlurmDefaults`` of one run, saved in its folder (reruns reuse them)."""
 LAST_SLURM_DEFAULTS = "slurm_defaults.json"
@@ -1738,3 +1740,97 @@ def _job_or_cancel_request(ctx: Context, run_id: str) -> str | None:
     payload = {"slurm_job_id": found.job_id, "recovered": True}
     ctx.update_run(run_id, "run.submitted", _with_job(found.job_id), payload)
     return found.job_id
+
+
+class SlurmPoller:
+    """
+    Reconcile SLURM runs now and then every ``interval`` seconds (daemon thread).
+
+    A run is marked lost only after two polls in a row find its job gone.
+
+    Parameters
+    ----------
+    ctx : Context
+    interval : float
+        Seconds between polls (``SLURM_POLL_SECONDS`` in ``hx serve``).
+
+    Examples
+    --------
+    >>> poller = SlurmPoller(ctx)  # doctest: +SKIP
+    >>> poller.start()  # doctest: +SKIP
+    >>> poller.stop()  # doctest: +SKIP
+    """
+
+    def __init__(self, ctx: Context, interval: float = SLURM_POLL_SECONDS) -> None:
+        self.ctx = ctx
+        self.interval = interval
+        self._gone: dict[str, SlurmJob | None] = {}
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def alive(self) -> bool:
+        """True while the polling thread runs."""
+        return self._thread is not None and self._thread.is_alive()
+
+    def poll_once(self) -> list[RunRecord]:
+        """
+        Run one reconcile; a SLURM or store error is logged, not raised.
+
+        Returns
+        -------
+        list of RunRecord
+            Runs whose record changed.
+        """
+        try:
+            return reconcile(self.ctx, confirm_gone=self._gone)
+        except HypothexError as exc:
+            log.warning("slurm poll failed: %s", exc)
+            return []
+
+    def _loop(self) -> None:
+        try:
+            comment_accounting(refresh=True)  # a new server start asks SLURM again
+        except Exception:
+            log.exception("slurm comment accounting probe crashed")
+        while True:
+            try:
+                self.poll_once()
+            except Exception:
+                log.exception("slurm poll crashed")
+            if self._stop.wait(self.interval):
+                return
+
+    def start(self) -> None:
+        """Start the polling thread (no-op while a thread, even a stopping one, is alive)."""
+        if self.alive:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="hx-slurm-poller", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float | None = None) -> bool:
+        """
+        Stop the polling thread and wait for it.
+
+        A thread still busy after ``timeout`` (a SLURM command can block for
+        ``SLURM_COMMAND_TIMEOUT``) stays owned: ``alive`` is still True and
+        ``start`` will not start a second thread beside it.
+
+        Parameters
+        ----------
+        timeout : float, optional
+            Seconds to wait; None waits until the thread ends.
+
+        Returns
+        -------
+        bool
+            True when no polling thread is left.
+        """
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout)
+            if self._thread.is_alive():
+                return False
+        self._thread = None
+        return True

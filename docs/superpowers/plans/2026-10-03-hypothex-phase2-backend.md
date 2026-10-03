@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-26-hypothex-design.md`, sections 5.2–5.7 and **8A** (read 8A.1–8A.9 before starting; 5.3 for events, replay, idempotent commands, and startup repair).
 
-**Contract:** `docs/superpowers/plans/2026-10-03-hypothex-phase2-contract.md`, sections 1–3 and 5. Every name, field, and route listed there is exact. This plan adds private helpers and a few public helpers (each task's Interfaces lists them) and optional keyword arguments and fields (`ensure_server(..., kind=)`, `mirror_run`/`mirror_event(..., usd_per_gpu_hour=)`, and the additive changes listed at the end of the contract: `ServerInfo.token`, `EnvClient(token=)`, `fetch_file(tail=)`, `HostState.kind` accepting `"local"`, `Hub.add_host`/`remove_host`, `usd_per_gpu_hour` on host rows, `cost` on leaderboard rows and the Overview, `commit` on launch bodies, `GET /api/v1/projects/{project}/entry`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the parts disagreed and how it was resolved.
+**Contract:** `docs/superpowers/plans/2026-10-03-hypothex-phase2-contract.md`, sections 1–3 and 5. Every name, field, and route listed there is exact. This plan adds private helpers and a few public helpers (each task's Interfaces lists them) and optional keyword arguments and fields (`ensure_server(..., kind=)`, `mirror_run`/`mirror_event(..., usd_per_gpu_hour=)`, and the additive changes listed at the end of the contract: `ServerInfo.token`, `EnvClient(token=)`, `fetch_file(tail=)`, `HostState.kind` accepting `"local"`, `Hub.add_host`/`remove_host`, `usd_per_gpu_hour` on host rows, `cost` on leaderboard rows and the Overview, `commit` on launch bodies, `GET /api/v1/projects/{project}/entry`, and from review round 3 `SweepSummary.tag`, `slurm.comment_accounting` on host rows, `GET /api/v1/slurm`, `comment_accounting()`); it never renames or reshapes a contract name except where the contract's "Changes after review round 2/3" sections mark a change. The Assembly notes at the end list every place where the parts disagreed and how it was resolved.
 
 **Mockups:** `docs/mockups/phase2/` (numbers for the demo hosts). **Frontend:** `docs/superpowers/plans/2026-10-03-hypothex-phase2-frontend.md` (contract section 4) starts after this plan is merged and uses `hx demo --with-hosts` for fixtures.
 
@@ -30,7 +30,7 @@
 - SLURM: `sbatch --parsable --comment=hx-<run_id>-<nonce>` with `--job-name=hx-<run_id>`, `--output=<run_dir>/logs/slurm-%j.out`, `--time`, `--gpus` (left out when 0), `--partition`, `--account`, then `extra`; the submission intent (comment, submitter) is written to `<home>/slurm/outbox/` before `sbatch`; the job runs `hx run --child <run_id>`; `squeue`/`sacct` every `30 s` over the outbox; `stop` → `scancel`, "cancel queued" → `scancel --state=PENDING`; a job gone without an exit record → `lost` after two polls in a row; a foreground SLURM run is refused; the home must support `flock`.
 - Cost (spec 8A.7): `gpu_hours = wall × len(executor.gpus)`; `gpu_usd = gpu_hours × usd_per_gpu_hour`; `total_usd = gpu_usd + usage.usd`; each value rounded to 6 decimals; a negative wall time counts as 0. Env servers fill `cost` with no rate; the hub prices mirrored runs with the host's `usd_per_gpu_hour`.
 - Host names match `^[a-z0-9][a-z0-9_-]{0,31}$`; `local` is reserved for the hub, which `GET /api/v1/hosts` lists first.
-- Sweeps: file `<store>/<project>/sweeps/<id>.yaml`, id `s-<4 hex>`, run tag `sweep:<id>`, params `k=v`, at most `1000` runs, seed-major launch order. The command must use every swept param; `{seed}` is optional (runs get `$HYPOTHEX_SEED`).
+- Sweeps: file `<store>/<project>/sweeps/<id>.yaml`, id `s-<4 hex>`, run tag `sweep:<owner8>:<id>` (`owner8` = the first 8 hex digits of the environment id that holds the definition, normally the hub's; membership is an exact match on it, so two hubs' `s-xxxx` never share runs), params `k=v`, at most `1000` runs, seed-major launch order. The command must use every swept param; `{seed}` is optional (runs get `$HYPOTHEX_SEED`).
 - Every mutating call carries a `command_id`; a forwarded command keeps the same `command_id`. Every `hx` command supports `--json`.
 - Copy is terse (the UI rule of spec section 8): numbers, glyphs, short labels; CLI text output is one line or a table, never paragraphs.
 - Commits: one conventional message per task, exactly as given in the task. No `Co-Authored-By` lines and no AI or Claude mentions in commits or PR text.
@@ -560,10 +560,10 @@ git commit -m "feat(records): executor host/gpus/slurm fields, cost totals, swee
 - Consumes: `hypothex.core.config.NAME_PATTERN`, `YAML_CYCLE`, `scan_yaml(text) -> YamlScan`, `has_cycle(data) -> bool`; `hypothex.core.errors.ConfigError`; `hypothex.core.fsutil.read_yaml`, `write_yaml`; `hypothex.core.layout.Layout`.
 - Produces (used by ssh, bootstrap, hub, slurm, CLI, API, demo groups):
   - `HostKind = Literal["ssh", "slurm"]`, `Route = Literal["ssh", "url", "local"]`.
-  - `class SlurmDefaults(BaseModel)` (extra forbidden): `partition: str | None = None`, `account: str | None = None`, `time: str = "02:00:00"`, `gpus: int = 1`, `extra: list[str] = []`. Each `extra` item is one `--name` or `--name=value` option with no newline, and never one of `RESERVED_SBATCH_OPTIONS = ("job-name", "comment", "output")` or an abbreviation of one (sbatch accepts unique prefixes such as `--job=`): Hypothex sets those itself, and the job's identity must stay its own (SLURM recovery matches the `--comment`, Task 26).
+  - `class SlurmDefaults(BaseModel)` (extra forbidden): `partition: str | None = None`, `account: str | None = None`, `time: str = "02:00:00"`, `gpus: int = 1`, `extra: list[str] = []`. Each `extra` item is exactly ONE option token: `shlex.split(item) == [item]`, and the token is `--name` or `--name=value` (`^--[a-z][a-z0-9-]*(=[A-Za-z0-9_.:+@/,=-]+)?$`) or a short `-X` / `-Xvalue` with the same safe value characters. So `"--qos=normal --output=/tmp/x --job-name=c"` (three options in one item, which sbatch would read as three) is refused. No item may set an option Hypothex owns, in any form: `RESERVED_SBATCH_OPTIONS = ("job-name", "comment", "output", "error", "chdir", "wrap")`, any abbreviation of them (sbatch accepts unique prefixes such as `--job=`), and their short forms `-J`, `-o`, `-e`, `-D` (`RESERVED_SBATCH_SHORT`). A value after a short flag that takes none (`-H`, `-k`, `-I`, ...: `SBATCH_SHORT_FLAGS`) would be read as more bundled options (`-HJx` is `-H -J x`), so it is refused too. One function says why an item is refused: `sbatch_option_problem(item) -> str | None` (Task 25's `validate_defaults` calls it again). Hypothex sets those options itself, and the job's identity must stay its own (SLURM recovery matches the `--comment`, Task 26).
   - `class HostSpec(BaseModel)` (extra forbidden): `route: Route`, `kind: HostKind = "ssh"`, `ssh_alias: str | None`, `url: str | None`, `home: str = "~/.hypothex"`, `usd_per_gpu_hour: float | None` (finite, `>= 0`), `slurm: SlurmDefaults | None`, `projects: dict[str, str]`. Rules: `route=ssh` needs `ssh_alias`; `route=url` needs `url` (`http(s)://`); `kind=slurm` needs `slurm`, other kinds must not have it; project names match `NAME_PATTERN`; `home` and project paths match `REMOTE_PATH` (absolute or `~`-relative, characters `[A-Za-z0-9_.+@/-]` only, so later groups can put them in POSIX scripts).
   - `class EnvironmentsFile(BaseModel)` (extra forbidden): `stale_banner_hours: float = 24` (> 0, finite: spec 5.6's "unreachable for more than 24 h (configurable)" banner; every `GET /api/v1/hosts` row carries it, Task 44); `environments: dict[str, HostSpec] = {}`; names match `HOST_NAME`; `local` is reserved (`RESERVED_HOST_NAMES`).
-  - Constants: `HOST_NAME = r"^[a-z0-9][a-z0-9_-]{0,31}$"`, `RESERVED_HOST_NAMES`, `ENVIRONMENTS_FILENAME = "environments.yaml"`, `SSH_ALIAS`, `REMOTE_PATH`, `SLURM_NAME`, `SLURM_TIME`, `SBATCH_OPTION`.
+  - Constants: `HOST_NAME = r"^[a-z0-9][a-z0-9_-]{0,31}$"`, `RESERVED_HOST_NAMES`, `ENVIRONMENTS_FILENAME = "environments.yaml"`, `SSH_ALIAS`, `REMOTE_PATH`, `SLURM_NAME`, `SLURM_TIME`, `SBATCH_VALUE`, `SBATCH_LONG`, `SBATCH_SHORT`, `RESERVED_SBATCH_OPTIONS`, `RESERVED_SBATCH_SHORT`, `SBATCH_SHORT_FLAGS`.
   - `environments_path(layout: Layout) -> Path` returns `<home>/environments.yaml`.
   - `load_hosts(layout: Layout) -> EnvironmentsFile`: missing or empty file returns an empty `EnvironmentsFile`; any problem raises `ConfigError` whose message starts with the file path.
   - `save_hosts(layout: Layout, hosts: EnvironmentsFile) -> None`: atomic write; defaults omitted.
@@ -768,11 +768,50 @@ def test_slurm_extra_is_one_option_per_line() -> None:
 
 
 @pytest.mark.parametrize(
-    "item", ["--job-name=custom", "--job=custom", "--comment=x", "--output=/tmp/o", "--out=/tmp/o"]
+    "item",
+    [
+        "--job-name=custom",
+        "--job=custom",
+        "--comment=x",
+        "--output=/tmp/o",
+        "--out=/tmp/o",
+        "--error=/tmp/e",
+        "--chdir=/tmp",
+        "--ch=/tmp",
+        "--wrap=id",
+        "-Jcustom",
+        "-J",
+        "-o/tmp/o",
+        "-e/tmp/e",
+        "-D/tmp",
+    ],
 )
 def test_slurm_extra_cannot_set_the_job_identity(item: str) -> None:
-    with pytest.raises(ValidationError, match="set by Hypothex"):
+    with pytest.raises(ValidationError, match="Hypothex sets itself"):
         SlurmDefaults(extra=[item])
+
+
+@pytest.mark.parametrize(
+    ("item", "message"),
+    [
+        ("--qos=normal --output=/tmp/x --job-name=c", "exactly one option token"),
+        ("--qos='a b'", "exactly one option token"),
+        ("--qos=normal\t--output=/tmp/x", "exactly one option token"),
+        ("--mem=1G;id", "not an sbatch option"),
+        ("--export=$HOME", "not an sbatch option"),
+        ("--QOS=high", "not an sbatch option"),
+        ("-HJx", "bundles short options"),
+        ("-kofile", "bundles short options"),
+    ],
+)
+def test_slurm_extra_is_exactly_one_safe_option(item: str, message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        SlurmDefaults(extra=[item])
+
+
+def test_slurm_extra_keeps_ordinary_options() -> None:
+    items = ["--qos=high", "--exclusive", "--gres=gpu:a100:2", "--export=ALL,SEED=1", "-pgpu-long"]
+    assert SlurmDefaults(extra=[*items, "-H", "-q"]).extra == [*items, "-H", "-q"]
 
 
 def test_slurm_partition_and_gpus_rules() -> None:
@@ -895,6 +934,7 @@ Create `src/hypothex/remote/config.py`:
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -919,25 +959,72 @@ REMOTE_PATH = r"^(~|~/[A-Za-z0-9_.+@/-]*|/[A-Za-z0-9_.+@/-]*)$"
 """A path on a host: absolute or under ``~``, shell-safe characters only."""
 SLURM_NAME = r"^[A-Za-z0-9_][A-Za-z0-9_.,-]*$"
 SLURM_TIME = r"^(\d+-)?\d+(:\d{2}){0,2}$"
-SBATCH_OPTION = r"^--[A-Za-z][A-Za-z0-9-]*(=[^\r\n]*)?$"
-RESERVED_SBATCH_OPTIONS = ("job-name", "comment", "output")
-"""``sbatch`` options Hypothex sets itself: the job's identity and its log file."""
+SBATCH_VALUE = r"[A-Za-z0-9_.:+@/,=-]+"
+"""Characters an ``extra`` option value may hold (nothing a shell or sbatch would split)."""
+SBATCH_LONG = re.compile(rf"--([a-z][a-z0-9-]*)(?:={SBATCH_VALUE})?")
+SBATCH_SHORT = re.compile(rf"-([A-Za-z])({SBATCH_VALUE})?")
+RESERVED_SBATCH_OPTIONS = ("job-name", "comment", "output", "error", "chdir", "wrap")
+"""``sbatch`` options Hypothex owns: the job's identity, its log files, and its command."""
+RESERVED_SBATCH_SHORT = {"J": "job-name", "o": "output", "e": "error", "D": "chdir"}
+SBATCH_SHORT_FLAGS = frozenset("hHIkOQsuvVW")
+"""Short options that take no value (or only an optional one): text after them could be
+read as more bundled options (``-HJx`` is ``-H -J x``)."""
 
 
-def reserved_sbatch_option(item: str) -> str | None:
+def sbatch_option_problem(item: str) -> str | None:
     """
-    Return the reserved option an ``extra`` item would set, or None.
+    Say why ``item`` cannot be an ``extra`` sbatch option, or return None.
 
-    sbatch accepts any unique prefix of a long option, so ``--job=x`` is
-    ``--job-name=x``.
+    An item is exactly one option token (``shlex.split(item) == [item]``):
+    ``--name``, ``--name=value``, ``-X``, or ``-Xvalue``, values in
+    ``SBATCH_VALUE`` only. It never sets an option Hypothex owns, in any form:
+    a long name, any prefix of it (sbatch accepts unique abbreviations, so
+    ``--job=x`` is ``--job-name=x``), or its short letter.
+
+    Parameters
+    ----------
+    item : str
+        One ``extra`` item.
+
+    Returns
+    -------
+    str or None
+        The reason it is refused, or None when it is one safe option.
 
     Examples
     --------
-    >>> reserved_sbatch_option("--job=x"), reserved_sbatch_option("--qos=high")
-    ('job-name', None)
+    >>> sbatch_option_problem("--qos=high") is None
+    True
+    >>> sbatch_option_problem("-Jx")
+    "'-Jx' sets --job-name, which Hypothex sets itself (it identifies the job)"
+    >>> sbatch_option_problem("--qos=normal --job-name=c")
+    "'--qos=normal --job-name=c' must be exactly one option token (one option per item)"
     """
-    name = item.removeprefix("--").split("=", 1)[0]
-    return next((r for r in RESERVED_SBATCH_OPTIONS if name and r.startswith(name)), None)
+    try:
+        tokens = shlex.split(item)
+    except ValueError:
+        tokens = []
+    if tokens != [item]:
+        return f"{item!r} must be exactly one option token (one option per item)"
+    taken: str | None = None
+    long = SBATCH_LONG.fullmatch(item)
+    if long is not None:
+        name = long.group(1)
+        taken = next((r for r in RESERVED_SBATCH_OPTIONS if r.startswith(name)), None)
+    else:
+        short = SBATCH_SHORT.fullmatch(item)
+        if short is None:
+            return (
+                f"{item!r} is not an sbatch option: use --name, --name=value, -X, or -Xvalue "
+                "with letters, digits, and _ . : + @ / , = - only"
+            )
+        letter, value = short.group(1), short.group(2)
+        taken = RESERVED_SBATCH_SHORT.get(letter)
+        if taken is None and value and letter in SBATCH_SHORT_FLAGS:
+            return f"{item!r} bundles short options; give each option as its own item"
+    if taken is not None:
+        return f"{item!r} sets --{taken}, which Hypothex sets itself (it identifies the job)"
+    return None
 
 
 class SlurmDefaults(BaseModel):
@@ -945,8 +1032,9 @@ class SlurmDefaults(BaseModel):
     Default ``sbatch`` resources for a SLURM host.
 
     ``time`` uses SLURM's formats (``MM``, ``HH:MM:SS``, ``D-HH:MM:SS``).
-    ``extra`` holds further ``sbatch`` options, one per item, each written as
-    ``--name`` or ``--name=value`` (for example ``--qos=high``).
+    ``extra`` holds further ``sbatch`` options, exactly one option token per
+    item (``--qos=high``, ``--exclusive``, ``-pgpu``); options Hypothex sets
+    itself are refused (``sbatch_option_problem``).
 
     Examples
     --------
@@ -960,15 +1048,15 @@ class SlurmDefaults(BaseModel):
     account: str | None = Field(default=None, pattern=SLURM_NAME)
     time: str = Field(default="02:00:00", pattern=SLURM_TIME)
     gpus: int = Field(default=1, ge=0)
-    extra: list[Annotated[str, Field(pattern=SBATCH_OPTION)]] = Field(default_factory=list)
+    extra: list[str] = Field(default_factory=list)
 
     @field_validator("extra")
     @classmethod
-    def _keep_the_job_identity(cls, extra: list[str]) -> list[str]:
+    def _one_safe_option_each(cls, extra: list[str]) -> list[str]:
         for item in extra:
-            taken = reserved_sbatch_option(item)
-            if taken is not None:
-                raise ValueError(f"{item!r}: --{taken} is set by Hypothex (it identifies the job)")
+            problem = sbatch_option_problem(item)
+            if problem is not None:
+                raise ValueError(problem)
         return extra
 
 
@@ -1151,14 +1239,14 @@ def save_hosts(layout: Layout, hosts: EnvironmentsFile) -> None:
 ```
 
 Notes for the implementer:
-- Pydantic 2 uses the Rust regex engine for `Field(pattern=...)`, where `$` is the true end of the string. That is why `"--qos=high\n"` and `"02:00:00\n"` are rejected. Do not switch these models to `regex_engine="python-re"`.
+- Pydantic 2 uses the Rust regex engine for `Field(pattern=...)`, where `$` is the true end of the string. That is why `"02:00:00\n"` is rejected. Do not switch these models to `regex_engine="python-re"`. `extra` items are checked by `sbatch_option_problem` with `re.fullmatch` and `shlex.split`, so `"--qos=high\n"` (two tokens' worth of text) is refused too.
 - The two hand checks (`_check_route_and_kind`, `_check_names`) use Python's `re`, where `$` also matches before a final newline. They use `re.fullmatch`, never `re.match`, so a quoted YAML key such as `"gpu1\n"` is rejected.
 - The guards copy `load_project_config`: `scan_yaml` first (depth and size), then `read_yaml`, then `has_cycle`. `views_anchor` is not used here. Anchors that do not form a cycle are allowed.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_config.py -v`
-Expected: `69 passed`.
+Expected: `87 passed`.
 
 Run: `uv run python -m doctest src/hypothex/remote/config.py && uv run ruff check src/hypothex/remote tests/remote && uv run ruff format --check src/hypothex/remote tests/remote`
 Expected: no doctest output, `All checks passed!`, `4 files already formatted`.
@@ -2886,7 +2974,7 @@ def test_a_folder_swap_cut_short_is_recovered(
 
     def crash_after_the_old_folder_moved(src: str | Path, dst: str | Path) -> None:
         real(src, dst)
-        if str(dst).endswith(".d.old"):
+        if Path(dst).name.startswith(".hx-pull-") and str(dst).endswith(".old"):
             raise _Crash
 
     target = fake_remote.target("gpu1")
@@ -2894,13 +2982,75 @@ def test_a_folder_swap_cut_short_is_recovered(
     with pytest.raises(_Crash):
         copy_from(target, "d", dest)
     monkeypatch.setattr(os, "replace", real)
-    assert not dest.exists() and (dest.parent / ".d.old" / "old.txt").is_file()
+    [backup] = dest.parent.glob(".hx-pull-*.old")
+    [record] = dest.parent.glob(".hx-pull-*.json")
+    assert not dest.exists() and (backup / "old.txt").is_file()
+    assert record.stem == backup.stem  # the transaction that owns the backup
     with pytest.raises(SshError):  # the next pull fails, but the old folder comes back
         copy_from(target, "nope", dest)
     assert sorted(p.name for p in dest.iterdir()) == ["old.txt"]
     copy_from(target, "d", dest)
     assert sorted(p.name for p in dest.iterdir()) == ["new.txt"]
     assert sorted(p.name for p in dest.parent.iterdir()) == ["d"]
+
+
+def test_a_swap_that_crashed_before_its_first_rename_changes_nothing(
+    fake_remote: FakeRemote, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "d").mkdir()
+    (home / "d" / "new.txt").write_text("n")
+    dest = tmp_path / "out" / "d"
+    dest.mkdir(parents=True)
+    (dest / "old.txt").write_text("o")
+    real = os.replace
+
+    def crash_before_any_rename(src: str | Path, dst: str | Path) -> None:
+        raise _Crash
+
+    target = fake_remote.target("gpu1")
+    monkeypatch.setattr(os, "replace", crash_before_any_rename)
+    with pytest.raises(_Crash):
+        copy_from(target, "d", dest)
+    monkeypatch.setattr(os, "replace", real)
+    assert sorted(p.name for p in dest.iterdir()) == ["old.txt"]  # the record alone is left
+    assert len(list(dest.parent.glob(".hx-pull-*.json"))) == 1
+    copy_from(target, "d", dest)
+    assert sorted(p.name for p in dest.iterdir()) == ["new.txt"]
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["d"]
+
+
+def test_a_pull_never_touches_files_it_did_not_record(
+    fake_remote: FakeRemote, tmp_path: Path
+) -> None:
+    home = fake_remote.add_host("gpu1")
+    (home / "best.pt").write_text("new")
+    (home / "d").mkdir()
+    (home / "d" / "new.txt").write_text("n")
+    x = tmp_path / "x"
+    x.mkdir()
+    (x / ".best.pt.old").write_text("mine")  # the user's own files, named like backups
+    (x / ".d.old").mkdir()
+    (x / ".d.old" / "keep.txt").write_text("k")
+    (x / ".hx-pull-0123.old").write_text("also mine")  # a backup name without a record
+    target = fake_remote.target("gpu1")
+    copy_from(target, "best.pt", x / "best.pt")  # a new file next to .best.pt.old
+    copy_from(target, "best.pt", x / "best.pt")  # and its replacement
+    (x / "d").mkdir()
+    (x / "d" / "stale.txt").write_text("s")
+    copy_from(target, "d", x / "d")  # a folder swap next to .d.old
+    assert (x / "best.pt").read_text() == "new"
+    assert (x / ".best.pt.old").read_text() == "mine"
+    assert (x / ".d.old" / "keep.txt").read_text() == "k"
+    assert (x / ".hx-pull-0123.old").read_text() == "also mine"
+    assert sorted(p.name for p in (x / "d").iterdir()) == ["new.txt"]
+    assert sorted(p.name for p in x.iterdir()) == [
+        ".best.pt.old",
+        ".d.old",
+        ".hx-pull-0123.old",
+        "best.pt",
+        "d",
+    ]
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -2916,6 +3066,7 @@ In `src/hypothex/remote/ssh.py`, replace the import block (from `from __future__
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import shlex
@@ -2923,6 +3074,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -3008,11 +3160,14 @@ def copy_from(target: SshTarget, remote_path: str, local: Path, *, timeout: floa
     is renamed into place only on success, so ``local`` is never left
     half-written and concurrent pulls never share a staging path. An existing
     file is replaced atomically (``os.replace``). An existing folder cannot be
-    renamed over, so it is renamed aside to ``.<name>.old`` next to ``local``
-    first and removed only once the new one is in place; a swap cut short
-    between its two renames (a crash) is undone by the next ``copy_from`` to
-    the same path. Installs into one folder are serialized (``flock`` on the
-    folder).
+    renamed over, so it is moved aside to a unique owned name
+    ``.hx-pull-<uuid>.old`` next to ``local``, recorded first in the
+    transaction file ``.hx-pull-<uuid>.json``, and removed only once the new
+    one is in place. A swap cut short (a crash) is finished or undone by the
+    next ``copy_from`` into that folder, which acts only on recorded
+    transactions and only on the names they record: no file is ever claimed
+    because of its name. Installs into one folder are serialized (``flock`` on
+    the folder).
 
     Parameters
     ----------
@@ -3040,7 +3195,7 @@ def copy_from(target: SshTarget, remote_path: str, local: Path, *, timeout: floa
     _check_remote_path(remote_path, source=True)
     local.parent.mkdir(parents=True, exist_ok=True)
     with _install_lock(local):
-        _recover_aside(local)  # an earlier swap was cut short: put the old folder back
+        _recover_swaps(local.parent)  # a recorded swap was cut short: finish or undo it
     # A unique staging folder per call: two pulls of one file never share it.
     stage = Path(tempfile.mkdtemp(prefix=f".{local.name}.", suffix=".part", dir=local.parent))
     part = stage / local.name
@@ -3058,8 +3213,10 @@ def copy_from(target: SshTarget, remote_path: str, local: Path, *, timeout: floa
         shutil.rmtree(stage, ignore_errors=True)
 
 
-def _aside(local: Path) -> Path:
-    return local.with_name(f".{local.name}.old")
+PULL_TXN_PREFIX = ".hx-pull-"
+"""Owned names of a folder swap next to its destination: ``.hx-pull-<uuid>.old`` (the
+old folder) and ``.hx-pull-<uuid>.json`` (the transaction record, written first)."""
+_TXN_RECORD = re.compile(r"\.hx-pull-([0-9a-f]{32})\.json")
 
 
 @contextmanager
@@ -3073,32 +3230,74 @@ def _install_lock(local: Path) -> Iterator[None]:
         os.close(fd)  # closing drops the lock
 
 
-def _recover_aside(local: Path) -> None:
-    """Finish or undo a folder swap cut short between its two renames (lock held)."""
-    aside = _aside(local)
-    if not (aside.exists() or aside.is_symlink()):
-        return
-    if local.exists() or local.is_symlink():
-        _remove(aside)  # the new folder is in: only the cleanup was missed
-    else:
-        os.replace(aside, local)  # the old folder never got its successor: put it back
+def _plain_name(name: object) -> bool:
+    return isinstance(name, str) and name not in ("", ".", "..") and "/" not in name
+
+
+def _write_record(path: Path, data: dict[str, str]) -> None:
+    """Create a transaction record durably (``O_EXCL``: a uuid name is never reused)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, json.dumps(data).encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _recover_swaps(folder: Path) -> None:
+    """
+    Finish or undo folder swaps cut short in ``folder`` (install lock held).
+
+    Only transactions recorded in ``.hx-pull-<uuid>.json`` are acted on, and
+    only on the two names each record holds (its destination and its own
+    ``.hx-pull-<uuid>.old``). An unreadable record is left alone: it was cut
+    short while being written, before anything was moved.
+    """
+    for record in sorted(folder.glob(f"{PULL_TXN_PREFIX}*.json")):
+        match = _TXN_RECORD.fullmatch(record.name)
+        if match is None:
+            continue
+        txn = match.group(1)
+        try:
+            data = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        dest, backup = data.get("dest"), data.get("backup")
+        if data.get("txn") != txn or backup != f"{PULL_TXN_PREFIX}{txn}.old":
+            continue
+        if not _plain_name(dest):
+            continue
+        dest_path, backup_path = folder / str(dest), folder / str(backup)
+        if backup_path.exists() or backup_path.is_symlink():
+            if dest_path.exists() or dest_path.is_symlink():
+                _remove(backup_path)  # the new folder is in: only the cleanup was missed
+            else:
+                os.replace(backup_path, dest_path)  # no successor arrived: put it back
+        record.unlink(missing_ok=True)
 
 
 def _install(part: Path, local: Path) -> None:
     """Move ``part`` to ``local``; an existing ``local`` is never lost, even by a crash."""
     with _install_lock(local):
-        _recover_aside(local)
+        _recover_swaps(local.parent)
         if part.is_dir() and local.is_dir() and not local.is_symlink():
-            # os.replace cannot overwrite a non-empty folder: rename the old one aside
-            # (next to it, where _recover_aside finds it after a crash), then swap
-            aside = _aside(local)
-            os.replace(local, aside)
+            # os.replace cannot overwrite a non-empty folder: record the swap, move the old
+            # folder to its owned backup name, then swap (_recover_swaps reads the record)
+            txn = uuid.uuid4().hex
+            backup = local.with_name(f"{PULL_TXN_PREFIX}{txn}.old")
+            record = local.with_name(f"{PULL_TXN_PREFIX}{txn}.json")
+            _write_record(record, {"txn": txn, "dest": local.name, "backup": backup.name})
+            os.replace(local, backup)
             try:
                 os.replace(part, local)
             except OSError:
-                os.replace(aside, local)
+                os.replace(backup, local)
+                record.unlink(missing_ok=True)
                 raise
-            _remove(aside)
+            _remove(backup)
+            record.unlink()
             return
         if part.is_dir() and (local.exists() or local.is_symlink()):
             _remove(local)  # a folder replacing a file: no atomic swap exists for this case
@@ -3108,7 +3307,7 @@ def _install(part: Path, local: Path) -> None:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_ssh.py -q`
-Expected: `41 passed`.
+Expected: `43 passed`.
 
 - [ ] **Step 6: Lint, format, type-check, full suite**
 
@@ -3350,6 +3549,7 @@ In `src/hypothex/remote/ssh.py`, replace the import block (from `from __future__
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import shlex
@@ -3359,6 +3559,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -3539,12 +3740,12 @@ class Tunnel:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_ssh.py -q`
-Expected: `50 passed` in under 15 s.
+Expected: `52 passed` in under 15 s.
 
 - [ ] **Step 5: Check for flakiness**
 
 Run: `for i in 1 2 3 4 5; do uv run pytest tests/remote/test_ssh.py -q | tail -1; done`
-Expected: `50 passed` five times.
+Expected: `52 passed` five times.
 
 - [ ] **Step 6: Lint, format, type-check, full suite**
 
@@ -11287,7 +11488,7 @@ An env server on a SLURM login node submits each run as one `sbatch` job; the jo
 - **The job command** is `<sys.executable> -m hypothex.cli.main --home <home> run --child <run_id>`: `hx run --child` without depending on `PATH` on the compute node (the shared filesystem makes the login node's Python visible there).
 - **Only the env server process opens the SQLite files.** SQLite in WAL mode (`index.db`, `events.db`) does not work across hosts on NFS, Lustre, or GPFS. So `hx run --child` on the compute node never calls `Context.open`: it uses `NodeContext` (Task 27), which writes only run-folder files (atomic `run.yaml`, `logs/`, `metrics.jsonl`, and the exit record `exit.json`) under the run lock, and never scores (the login node does).
 - **The home must support `flock`.** Every run-state write takes the run lock (`fcntl.flock`). Some shared filesystems refuse it (Lustre without `-o flock` answers `ENOSYS`). There is no partial no-flock mode: an env server of kind `slurm` probes its home (`require_flock`, Task 27) and refuses to start, so `hx hosts add --slurm` fails with a message that names the fix and adds nothing.
-- **Submission intent states (no outcome is ever guessed).** Before `sbatch`, `submit_run` (Task 28) marks the run as a SLURM run (`run.submitting`, `executor.type="slurm"`) and writes its intent to the SLURM outbox `<home>/slurm/outbox/<run_id>.json`: state `pending`, a unique `--comment hx-<run_id>-<nonce>`, the submitting process (pid and start time), and `intent_at`. `sbatch` gets that comment. Then `pending` → `submitted` (the job id) or `unknown` (a timeout, a communication error, or no job id: SLURM may have taken the job). Only a clear rejection fails the run at once. A `pending` intent whose submitter died, or an `unknown` one, is resolved only by its comment (`find_submitted`, Task 26: `squeue` and `sacct`, each filtered by the comment, never by job name alone): a job is recorded; the run fails only when both commands answered without such a job and `SUBMIT_SETTLE_SECONDS` (300) passed since the intent. `--job-name`, `--comment`, and `--output` are reserved: `extra` can never set them (Tasks 2, 25).
+- **Submission intent states (no outcome is ever guessed).** Before `sbatch`, `submit_run` (Task 28) marks the run as a SLURM run (`run.submitting`, `executor.type="slurm"`) and writes its intent to the SLURM outbox `<home>/slurm/outbox/<run_id>.json`: state `pending`, a unique `--comment hx-<run_id>-<nonce>`, the submitting process (pid and start time), and `intent_at`. `sbatch` gets that comment. Then `pending` → `submitted` (the job id) or `unknown` (SLURM may have taken the job). Only positive evidence of a rejection fails the run at once: `sbatch` exited non-zero with a recognised SLURM rejection on stderr and printed no job id (Task 26); a signal, a timeout, empty or garbled output, and any unknown error leave the intent `unknown`. A `pending` intent whose submitter died, or an `unknown` one, is resolved only by its comment (`find_submitted`, Task 26: `squeue` and `sacct`, each filtered by the comment, never by job name alone): a job is recorded; the run fails only when both commands answered without such a job and `SUBMIT_SETTLE_SECONDS` (300) passed since the intent. "Both answered" needs a cluster whose accounting stores job comments (`AccountingStoreFlags` with `job_comment`, probed once per server start, Task 26); without it absence in `sacct` proves nothing, the run stays `unknown`, `GET /api/v1/hosts` shows `slurm.comment_accounting: false`, and the run gets a `run.submit_unknown` event with the reason "submission outcome unknown; check squeue/sacct" (Task 29). `--job-name`, `--comment`, `--output`, `--error`, `--chdir`, and `--wrap` are reserved in any form, and each `extra` item is exactly one option token (Tasks 2, 25).
 - **A stop never races a submission.** A stop before the job id is known sets `cancel_requested` in the intent under the outbox lock that recording a job id also takes; whichever learns the job id (`submit_run` when `sbatch` answers, or `reconcile` when it finds the job) cancels it, and the intent stays until the job is cancelled or proven absent (Task 30).
 - **Terminal publication is conditional.** Every end the login node writes on a SLURM run (`lost`, `killed`, `failed`, an applied `exit.json`) goes through `_end_if_active` (Task 28): under the run lock, a run the node already ended gets no write and no event, and the node's actual end is published instead (`sync_node_run`). An outbox entry is acknowledged (removed) only after the event of the run's actual terminal status.
 - **Node changes are published from an outbox, not from the index status.** The outbox entry also holds the last status the login node published for the run. `reconcile` walks the outbox (not the index's active runs), so a job that finished before its submission was recorded, or a terminal `run.yaml` that another login-node write indexed first, still gets its `run.finished` (or `failed`/`killed`) event and its scores. The entry is removed once a terminal status is published (at least once: a crash between the event and the outbox write repeats the event, which the mirror and scoring tolerate). The login node's `reconcile` / `SlurmPoller` (Tasks 29, 31) reads the node's `run.yaml` changes and emits `run.started` / `run.finished` / `run.failed` / `run.killed`, updates the index and metric points, and scores finished task runs (`sync_node_run`). The Docker cluster shares one kernel, so no test can show the cross-host SQLite failure; the test for this rule checks that the node never constructs `Index` or `EventLog`.
@@ -11307,15 +11508,16 @@ An env server on a SLURM login node submits each run as one `sbatch` job; the jo
 
 **Files:**
 - Create: `tests/fakes/fake_slurm/_fakeslurm.py`
-- Create: `tests/fakes/fake_slurm/sbatch`, `tests/fakes/fake_slurm/squeue`, `tests/fakes/fake_slurm/sacct`, `tests/fakes/fake_slurm/scancel` (executable)
+- Create: `tests/fakes/fake_slurm/sbatch`, `tests/fakes/fake_slurm/squeue`, `tests/fakes/fake_slurm/sacct`, `tests/fakes/fake_slurm/scancel`, `tests/fakes/fake_slurm/scontrol` (executable)
 - Test: `tests/core/test_slurm.py` (create)
 
 **Interfaces:**
 - Consumes: nothing from `hypothex`.
 - Produces (used by every later Part 6 task, and free for other groups such as the demo with fake hosts):
-  - Executables `sbatch`, `squeue`, `sacct`, `scancel` in `tests/fakes/fake_slurm/`. State file path from env `HYPOTHEX_FAKE_SLURM_STATE`.
-  - State JSON: `{"next_id": 1000, "mode": "hold" | "run", "user": str | null, "fail": {cmd: stderr message}, "jobs": {id: {"state", "node", "exit" ("rc:signal"), "in_queue", "in_sacct", "name", "comment", "output", "gpus", "directives", "script", "cwd", "pgid"}}, "calls": [[cmd, *argv], ...]}`.
-  - Supported argv (anything else exits 2): `sbatch [--parsable] [--comment=C] [file]` (script from stdin when no file), `squeue --noheader [--user=U] [--name=N] --format=%i|%T|%N` (or `%i|%T|%N|%k`, `%k` = comment), `sacct -X --noheader --parsable2 --format=JobID,State,ExitCode,NodeList[,Comment] [--jobs=a,b | --name=N] [--starttime=...]` (no `--jobs`/`--name`: every job), `scancel <id>...`.
+  - Executables `sbatch`, `squeue`, `sacct`, `scancel`, `scontrol` in `tests/fakes/fake_slurm/`. State file path from env `HYPOTHEX_FAKE_SLURM_STATE`.
+  - State JSON: `{"next_id": 1000, "mode": "hold" | "run", "user": str | null, "fail": {cmd: stderr message}, "accounting_flags": "job_comment", "sbatch_signal": null, "jobs": {id: {"state", "node", "exit" ("rc:signal"), "in_queue", "in_sacct", "name", "comment", "output", "gpus", "directives", "script", "cwd", "pgid"}}, "calls": [[cmd, *argv], ...]}`.
+  - Supported argv (anything else exits 2): `sbatch [--parsable] [--comment=C] [file]` (script from stdin when no file), `squeue --noheader [--user=U] [--name=N] --format=%i|%T|%N` (or `%i|%T|%N|%k`, `%k` = comment), `sacct -X --noheader --parsable2 --format=JobID,State,ExitCode,NodeList[,Comment] [--jobs=a,b | --name=N] [--starttime=...]` (no `--jobs`/`--name`: every job), `scancel <id>...`, `scontrol show config` (prints `AccountingStoreFlags = <accounting_flags>`, `(null)` when empty: SLURM keeps job comments in accounting only with `job_comment`).
+  - `sbatch_signal` (for example `"KILL"`): `sbatch` queues the job and then kills itself with that signal before it prints the job id (SLURM accepted the job; the caller sees a signal).
   - In `mode: run`, `sbatch` starts the job at once on node `fake-node1` with `SLURM_JOB_ID`, `SLURMD_NODENAME`, and `CUDA_VISIBLE_DEVICES=0..gpus-1`, writes output to `--output` (with `%j` replaced), and sets `COMPLETED`/`FAILED` and `exit` when the script ends. `scancel` of a running job sends SIGTERM to the job's process group.
   - Test helpers in `tests/core/test_slurm.py`: `FakeSlurm` (`state()`, `save()`, `set(**fields)`, `add_job(job_id, state, *, node, exit, in_queue, in_sacct)`, `job(id)`, `calls(cmd)`), fixture `slurm`, `wait_until(predicate, timeout)`, `sh(*argv, stdin)`.
 
@@ -11350,6 +11552,8 @@ class FakeSlurm:
                 "mode": "hold",
                 "user": None,
                 "fail": {},
+                "accounting_flags": "job_comment",
+                "sbatch_signal": None,
                 "jobs": {},
                 "calls": [],
             }
@@ -11496,12 +11700,28 @@ def test_fake_slurm_finds_jobs_by_name_and_comment(slurm: FakeSlurm) -> None:
     assert acct.stdout == (
         "1000|CANCELLED|0:15|None assigned|hx-r1-ab12\n1001|PENDING|0:0|None assigned|\n"
     )
+
+
+def test_fake_scontrol_reports_the_accounting_flags(slurm: FakeSlurm) -> None:
+    config = sh("scontrol", "show", "config")
+    assert config.returncode == 0
+    assert "AccountingStoreFlags    = job_comment\n" in config.stdout
+    slurm.set(accounting_flags="")
+    assert "AccountingStoreFlags    = (null)\n" in sh("scontrol", "show", "config").stdout
+    assert sh("scontrol", "show", "jobs").returncode == 2
+
+
+def test_fake_sbatch_can_die_by_a_signal_after_accepting(slurm: FakeSlurm) -> None:
+    slurm.set(sbatch_signal="KILL")
+    out = sh("sbatch", "--parsable", "--comment=hx-r1-sig", stdin="#!/bin/bash\ntrue\n")
+    assert (out.returncode, out.stdout) == (-9, "")
+    assert slurm.job("1000")["comment"] == "hx-r1-sig"  # SLURM had taken it
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/core/test_slurm.py -v`
-Expected: 4 FAIL. Each `sh("sbatch", ...)` / `sh("squeue", ...)` reaches the refusing stub that `isolate_remote` (Task 1 Step 0) puts at the front of `PATH` (exit 99, `hypothex tests: real sbatch is blocked`), never a real SLURM command, because the `slurm` fixture has no fake folder to put in front of it yet.
+Expected: 6 FAIL. Each `sh("sbatch", ...)` / `sh("squeue", ...)` / `sh("scontrol", ...)` reaches the refusing stub that `isolate_remote` (Task 1 Step 0) puts at the front of `PATH` (exit 99, `hypothex tests: real sbatch is blocked`), never a real SLURM command, because the `slurm` fixture has no fake folder to put in front of it yet.
 
 - [ ] **Step 3: Write the shared fake logic**
 
@@ -11515,6 +11735,7 @@ Never talks to a real cluster. State lives in the JSON file named by
 ``HYPOTHEX_FAKE_SLURM_STATE``::
 
     {"next_id": 1000, "mode": "hold", "user": null, "fail": {"squeue": "message"},
+     "accounting_flags": "job_comment", "sbatch_signal": null,
      "jobs": {"1000": {"state": "PENDING", "node": null, "exit": "0:0",
                        "in_queue": true, "in_sacct": true, "name": "hx-...",
                        "output": "/abs/slurm-%j.out", "gpus": 1, "directives": {},
@@ -11524,7 +11745,11 @@ Never talks to a real cluster. State lives in the JSON file named by
 ``mode: hold`` keeps submitted jobs PENDING until a test edits the state.
 ``mode: run`` starts each job at once on ``fake-node1`` in a detached process
 and marks it COMPLETED or FAILED when its script exits. ``fail`` maps a
-command name to a stderr message; that command then exits 1. Runs on any
+command name to a stderr message; that command then exits 1.
+``accounting_flags`` is what ``scontrol show config`` reports as
+``AccountingStoreFlags`` (SLURM stores job comments only with
+``job_comment``). ``sbatch_signal`` makes ``sbatch`` kill itself with that
+signal right after it queued the job, before it prints the id. Runs on any
 ``python3`` >= 3.9 (stdlib only).
 """
 
@@ -11567,6 +11792,8 @@ def locked_state() -> Iterator[dict[str, Any]]:
         state.setdefault("mode", "hold")
         state.setdefault("user", None)
         state.setdefault("fail", {})
+        state.setdefault("accounting_flags", "job_comment")
+        state.setdefault("sbatch_signal", None)
         state.setdefault("jobs", {})
         state.setdefault("calls", [])
         yield state
@@ -11623,6 +11850,7 @@ def sbatch(argv: list[str]) -> int:
             "pgid": None,
         }
         mode = state["mode"]
+        die_by = state["sbatch_signal"]
     if mode == "run":
         subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "runjob", job_id],
@@ -11632,6 +11860,9 @@ def sbatch(argv: list[str]) -> int:
             start_new_session=True,
             close_fds=True,
         )
+    if die_by:  # accepted, but the caller never hears the job id
+        sys.stdout.flush()
+        os.kill(os.getpid(), getattr(signal, f"SIG{die_by}"))
     print(job_id if "--parsable" in argv else f"Submitted batch job {job_id}")
     return 0
 
@@ -11739,11 +11970,26 @@ def sacct(argv: list[str]) -> int:
     return 0
 
 
+def scontrol(argv: list[str]) -> int:
+    """Fake ``scontrol show config``: the accounting flags (other keys are fixed)."""
+    _begin("scontrol", argv)
+    if argv != ["show", "config"]:
+        sys.stderr.write(f"fake scontrol: unsupported arguments {argv}\n")
+        return 2
+    with locked_state() as state:
+        flags = state["accounting_flags"] or "(null)"
+    print("Configuration data as of 2026-10-03T09:00:00")
+    print("AccountingStorageType   = accounting_storage/slurmdbd")
+    print(f"AccountingStoreFlags    = {flags}")
+    print("ClusterName             = fake")
+    return 0
+
+
 if __name__ == "__main__":
     raise SystemExit(runjob(sys.argv[2]))
 ```
 
-- [ ] **Step 4: Write the four fake executables**
+- [ ] **Step 4: Write the five fake executables**
 
 Create `tests/fakes/fake_slurm/sbatch`:
 
@@ -11805,14 +12051,29 @@ from _fakeslurm import scancel  # noqa: E402
 raise SystemExit(scancel(sys.argv[1:]))
 ```
 
+Create `tests/fakes/fake_slurm/scontrol`:
+
+```python
+#!/usr/bin/env python3
+"""Fake ``scontrol`` for tests; state and behaviour live in _fakeslurm.py."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _fakeslurm import scontrol  # noqa: E402
+
+raise SystemExit(scontrol(sys.argv[1:]))
+```
+
 Make them executable (git keeps the mode):
 
-Run: `chmod +x tests/fakes/fake_slurm/sbatch tests/fakes/fake_slurm/squeue tests/fakes/fake_slurm/sacct tests/fakes/fake_slurm/scancel`
+Run: `chmod +x tests/fakes/fake_slurm/sbatch tests/fakes/fake_slurm/squeue tests/fakes/fake_slurm/sacct tests/fakes/fake_slurm/scancel tests/fakes/fake_slurm/scontrol`
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py -v`
-Expected: `4 passed`.
+Expected: `6 passed`.
 
 - [ ] **Step 6: Lint**
 
@@ -11923,10 +12184,15 @@ def test_render_sbatch_defaults_and_zero_gpus(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("defaults", "message"),
     [
-        (SlurmDefaults.model_construct(extra=["--mem=32G\nrm -rf ~"]), "contains a newline"),
-        (SlurmDefaults.model_construct(extra=["mem=32G"]), "must start with '-'"),
+        (SlurmDefaults.model_construct(extra=["--mem=32G\nrm -rf ~"]), "exactly one option"),
+        (SlurmDefaults.model_construct(extra=["mem=32G"]), "not an sbatch option"),
         (SlurmDefaults.model_construct(extra=["--job-name=x"]), "sets --job-name"),
         (SlurmDefaults.model_construct(extra=["--comm=x"]), "sets --comment"),
+        (SlurmDefaults.model_construct(extra=["-Jx"]), "sets --job-name"),
+        (
+            SlurmDefaults.model_construct(extra=["--qos=normal --output=/tmp/x --job-name=c"]),
+            "exactly one option",
+        ),
         (SlurmDefaults.model_construct(partition="gpu; rm"), "partition 'gpu; rm'"),
         (SlurmDefaults.model_construct(account="lab\n#SBATCH --qos=high"), "account"),
         (SlurmDefaults.model_construct(time="2 hours"), "time '2 hours'"),
@@ -11977,7 +12243,7 @@ from pydantic import BaseModel
 from hypothex.core.errors import HypothexError
 from hypothex.core.layout import Layout
 from hypothex.core.records import RunRecord
-from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
+from hypothex.remote.config import SlurmDefaults, sbatch_option_problem
 
 FINISHED_STATES = frozenset(
     {
@@ -12058,9 +12324,10 @@ def validate_defaults(defaults: SlurmDefaults) -> None:
     Raises
     ------
     SlurmError
-        A field holds whitespace or shell characters, or an ``extra`` item
-        holds a newline, does not start with ``-``, or sets one of the
-        options Hypothex reserves (``--job-name``, ``--comment``, ``--output``).
+        A field holds whitespace or shell characters, or an ``extra`` item is
+        not exactly one safe option token or sets an option Hypothex owns
+        (``sbatch_option_problem``: ``--job-name``, ``--comment``,
+        ``--output``, ``--error``, ``--chdir``, ``--wrap``, in any form).
 
     Examples
     --------
@@ -12072,17 +12339,9 @@ def validate_defaults(defaults: SlurmDefaults) -> None:
     if defaults.account is not None:
         _safe("account", defaults.account)
     for item in defaults.extra:
-        if "\n" in item or "\r" in item:
-            raise SlurmError(f"slurm extra option {item!r} contains a newline")
-        if not item.startswith("-"):
-            raise SlurmError(
-                f"slurm extra option {item!r} must start with '-' (for example --mem=32G)"
-            )
-        taken = reserved_sbatch_option(item)
-        if taken is not None:
-            raise SlurmError(
-                f"slurm extra option {item!r} sets --{taken}, which Hypothex sets itself"
-            )
+        problem = sbatch_option_problem(item)
+        if problem is not None:
+            raise SlurmError(f"slurm extra option {problem}")
 
 
 def render_sbatch(record: RunRecord, defaults: SlurmDefaults, home: Path) -> str:
@@ -12161,7 +12420,7 @@ def render_sbatch(record: RunRecord, defaults: SlurmDefaults, home: Path) -> str
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py -v`
-Expected: `14 passed`.
+Expected: `18 passed`.
 
 - [ ] **Step 5: Lint and type-check**
 
@@ -12181,17 +12440,19 @@ git commit -m "feat(slurm): render sbatch scripts with validated directives"
 
 **Files:**
 - Modify: `src/hypothex/core/slurm.py`
+- Modify: `tests/conftest.py` (autouse `fresh_slurm_probe`)
 - Test: `tests/core/test_slurm.py`
 
 **Interfaces:**
 - Consumes: Task 25 (`SlurmError`, `SlurmJob`, `is_finished`); the fakes from Task 24.
 - Produces (contract 1.6 plus helpers):
-  - `submit(script: str, cwd: Path, *, comment: str | None = None) -> str` — `sbatch --parsable [--comment=C]`, script on stdin; returns the job id. `submit_run` (Task 28) passes a unique `hx-<run_id>-<nonce>` comment, its submission identity. Two kinds of failure: `SlurmError` when SLURM rejected the job for sure (sbatch missing, or sbatch exited with an error such as an invalid partition), and `SubmitUnknownError(SlurmError)` when SLURM may have accepted it: our timeout (`SlurmTimeout`), a communication error in sbatch's message (`timed out`, `socket`, `connection`, `unable to contact`), or exit 0 without a job id.
-  - `find_submitted(comment: str) -> tuple[SlurmJob | None, bool]` — the job carrying exactly that comment, looked up by comment only, never by job name: `squeue --noheader --user=<me> --format=%i|%T|%N|%k`, then `sacct -X --noheader --parsable2 --format=JobID,State,ExitCode,NodeList,Comment --starttime=now-7days` (newest match). The bool says the answer is complete (both commands answered), so `(None, True)` means SLURM has no such job; a failing `sacct` gives `(None, False)`. Raises `SlurmError` when `squeue` fails.
+  - `submit(script: str, cwd: Path, *, comment: str | None = None) -> str` — `sbatch --parsable [--comment=C]`, script on stdin; returns the job id. `submit_run` (Task 28) passes a unique `hx-<run_id>-<nonce>` comment, its submission identity. A rejection needs positive evidence: `SlurmError` only when sbatch is missing (nothing ran), or sbatch exited non-zero (a real exit code, not a signal) AND printed no job id AND its stderr has a line `sbatch: ...` with a recognised SLURM rejection (`SBATCH_REJECTIONS`: invalid partition, account, QOS, time limit, node configuration not available, policy violation, unrecognized option, ...). Everything else is `SubmitUnknownError(SlurmError)`, SLURM may have accepted the job: our timeout (`SlurmTimeout`), death by a signal (even after the controller accepted the job), empty or garbled output, a job id next to an error, and any error message not in the list.
+  - `find_submitted(comment: str) -> tuple[SlurmJob | None, bool]` — the job carrying exactly that comment, looked up by comment only, never by job name: `squeue --noheader --user=<me> --format=%i|%T|%N|%k`, then `sacct -X --noheader --parsable2 --format=JobID,State,ExitCode,NodeList,Comment --starttime=now-7days` (newest match). The bool says the answer is complete (both commands answered and `sacct` can see comments), so `(None, True)` means SLURM has no such job; a failing `sacct` gives `(None, False)`, and so does a cluster whose accounting does not store job comments (`comment_accounting()` False: `sacct` is not asked, absence there proves nothing). Raises `SlurmError` when `squeue` fails.
+  - `comment_accounting(*, refresh: bool = False) -> bool` — whether SLURM's accounting stores job comments: `scontrol show config` has `AccountingStoreFlags` containing `job_comment` (older SLURM: `AccountingStoreJobComment = Yes`). The answer is cached for the server's life (`SlurmPoller` refreshes it when it starts); a failing probe answers False and is not cached. `reset_comment_accounting() -> None` clears the cache (tests: the autouse `fresh_slurm_probe` in `tests/conftest.py`).
   - `poll(job_ids: list[str]) -> dict[str, SlurmJob]` — `squeue --noheader --user=<getpass.getuser()> --format=%i|%T|%N`, then `sacct -X --noheader --parsable2 --format=JobID,State,ExitCode,NodeList --jobs=<missing ids>`. Raises `SlurmError` only when `squeue` fails.
   - `cancel(job_id: str) -> None` — `scancel <id>`; raises `SlurmError` on failure.
   - `lost_reason(job_id: str, job: SlurmJob | None) -> str`
-  - Constants `SLURM_COMMAND_TIMEOUT = 60.0`, `SQUEUE_FORMAT`, `SQUEUE_COMMENT_FORMAT = "%i|%T|%N|%k"`, `SACCT_FORMAT`, `SACCT_COMMENT_FORMAT`; exceptions `SlurmTimeout(SlurmError)`, `SubmitUnknownError(SlurmError)`; module logger `log`.
+  - Constants `SLURM_COMMAND_TIMEOUT = 60.0`, `SQUEUE_FORMAT`, `SQUEUE_COMMENT_FORMAT = "%i|%T|%N|%k"`, `SACCT_FORMAT`, `SACCT_COMMENT_FORMAT`, `SBATCH_REJECTIONS`; exceptions `SlurmTimeout(SlurmError)`, `SubmitUnknownError(SlurmError)`; private `_exec` (runs one command, returns the `CompletedProcess`), `_run` (stdout, or `SlurmError` on a non-zero exit); module logger `log`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -12216,6 +12477,7 @@ from hypothex.core.slurm import (
     SlurmJob,
     SubmitUnknownError,
     cancel,
+    comment_accounting,
     find_submitted,
     is_finished,
     lost_reason,
@@ -12281,9 +12543,90 @@ def test_submit_tells_rejection_from_an_unknown_outcome(
     slurm.set(fail={"sbatch": timeout})
     with pytest.raises(SubmitUnknownError, match="Socket timed out"):
         submit(script, tmp_path)
-    monkeypatch.setattr("hypothex.core.slurm._run", lambda *a, **k: "Submitted?\n")
+    monkeypatch.setattr(
+        "hypothex.core.slurm._exec",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 0, "Submitted?\n", ""),
+    )
     with pytest.raises(SubmitUnknownError, match="not a job id"):
         submit(script, tmp_path)
+
+
+def test_sbatch_killed_by_a_signal_after_accepting_is_unknown(
+    slurm: FakeSlurm, tmp_path: Path
+) -> None:
+    slurm.set(sbatch_signal="KILL")
+    with pytest.raises(SubmitUnknownError, match="signal 9"):
+        submit("#!/bin/bash\ntrue\n", tmp_path, comment="hx-r1-kill")
+    found, complete = find_submitted("hx-r1-kill")  # SLURM had taken it
+    assert found is not None and (found.job_id, complete) == ("1000", True)
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout", "stderr"),
+    [
+        (1, "", "sbatch: error: Something nobody has seen before\n"),
+        (1, "1000\n", "sbatch: error: invalid partition specified: gpu\n"),  # an id after all
+        (-15, "", "sbatch: error: invalid partition specified: gpu\n"),  # a signal
+        (1, "", ""),
+        (0, "", ""),
+        (0, "\x00\x01garbled\n", ""),
+    ],
+)
+def test_only_positive_evidence_is_a_rejection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rc: int, stdout: str, stderr: str
+) -> None:
+    monkeypatch.setattr(
+        "hypothex.core.slurm._exec",
+        lambda argv, **k: subprocess.CompletedProcess(argv, rc, stdout, stderr),
+    )
+    with pytest.raises(SubmitUnknownError):
+        submit("#!/bin/bash\ntrue\n", tmp_path)
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "sbatch: error: invalid partition specified: nope",
+        "sbatch: error: Batch job submission failed: Invalid account or account/partition "
+        "combination specified",
+        "sbatch: error: Batch job submission failed: Requested node configuration is not available",
+        "sbatch: error: Batch job submission failed: Job violates accounting/QOS policy "
+        "(job submit limit, user's size and/or time limits)",
+        "sbatch: unrecognized option '--bogus'",
+    ],
+)
+def test_a_recognised_rejection_is_definitive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stderr: str
+) -> None:
+    monkeypatch.setattr(
+        "hypothex.core.slurm._exec",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 1, "", stderr + "\n"),
+    )
+    with pytest.raises(SlurmError) as rejected:
+        submit("#!/bin/bash\ntrue\n", tmp_path)
+    assert not isinstance(rejected.value, SubmitUnknownError)
+
+
+def test_without_comment_accounting_sacct_never_proves_absence(slurm: FakeSlurm) -> None:
+    slurm.set(accounting_flags="")
+    slurm.add_job("1000", "COMPLETED", comment="hx-r1-done", in_queue=False)
+    slurm.add_job("1001", "PENDING", comment="hx-r2-queued")
+    assert find_submitted("hx-r1-done") == (None, False)  # unknown, never "absent"
+    found, complete = find_submitted("hx-r2-queued")  # squeue's %k still works
+    assert found is not None and (found.job_id, complete) == ("1001", True)
+    assert slurm.calls("sacct") == []
+
+
+def test_comment_accounting_is_probed_once_per_server_start(slurm: FakeSlurm) -> None:
+    assert comment_accounting() is True
+    slurm.set(accounting_flags="job_env")
+    assert comment_accounting() is True  # cached for this server's life
+    assert comment_accounting(refresh=True) is False  # the next server start asks again
+    assert len(slurm.calls("scontrol")) == 2
+    slurm.set(fail={"scontrol": "scontrol: error: slurm_load_ctl_conf: Unable to contact"})
+    assert comment_accounting(refresh=True) is False  # a failing probe: no comment lookup
+    slurm.set(fail={}, accounting_flags="job_comment,job_env")
+    assert comment_accounting() is True  # ... and it is asked again, not cached
 
 
 def test_submit_failure_raises_with_stderr(slurm: FakeSlurm, tmp_path: Path) -> None:
@@ -12373,10 +12716,23 @@ def test_cancel_calls_scancel_and_raises_on_unknown_job(slurm: FakeSlurm) -> Non
     assert slurm.calls("scancel") == [["1000"], ["1000"]]
 ```
 
+Append to `tests/conftest.py` (and add `from collections.abc import Iterator` to its imports):
+
+```python
+@pytest.fixture(autouse=True)
+def fresh_slurm_probe() -> Iterator[None]:
+    """Each test probes SLURM's accounting anew (the answer is cached per server start)."""
+    from hypothex.core.slurm import reset_comment_accounting
+
+    reset_comment_accounting()
+    yield
+    reset_comment_accounting()
+```
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/core/test_slurm.py -v`
-Expected: collection error `ImportError: cannot import name 'cancel' from 'hypothex.core.slurm'`.
+Expected: collection error `ImportError: cannot import name 'cancel' from 'hypothex.core.slurm'` (and every other test file errors in the new autouse fixture until `reset_comment_accounting` exists).
 
 - [ ] **Step 3: Write the implementation**
 
@@ -12399,7 +12755,7 @@ from pydantic import BaseModel
 from hypothex.core.errors import HypothexError
 from hypothex.core.layout import Layout
 from hypothex.core.records import RunRecord
-from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
+from hypothex.remote.config import SlurmDefaults, sbatch_option_problem
 
 log = logging.getLogger(__name__)
 ```
@@ -12426,16 +12782,43 @@ class SubmitUnknownError(SlurmError):
     """``sbatch`` failed in a way that may still have created the job."""
 
 
-_UNSURE = re.compile(r"timed out|timeout|socket|connection|unable to contact", re.IGNORECASE)
-"""sbatch errors after which the controller may still have accepted the job."""
+SBATCH_REJECTIONS = (
+    "invalid partition",
+    "invalid account",
+    "invalid qos",
+    "invalid generic resource",
+    "invalid feature specification",
+    "invalid job array specification",
+    "invalid --time specification",
+    "invalid time limit",
+    "invalid node name",
+    "invalid wckey",
+    "invalid numeric value",
+    "requested node configuration is not available",
+    "requested partition configuration not available",
+    "requested time limit is invalid",
+    "node count specification invalid",
+    "memory specification can not be satisfied",
+    "more processors requested than permitted",
+    "job violates accounting/qos policy",
+    "user's group not permitted to use this partition",
+    "access/permission denied",
+    "unrecognized option",
+    "unrecognised option",
+    "option requires an argument",
+)
+"""sbatch messages that prove SLURM refused the job (matched on ``sbatch: ...`` lines)."""
+_JOB_ID = re.compile(r"^(\d+)(;\S+)?$")
 
 
-def _run(argv: list[str], *, input_text: str | None = None, cwd: Path | None = None) -> str:
-    """Run one SLURM command; return stdout or raise ``SlurmError``."""
+def _exec(
+    argv: list[str], *, input_text: str | None = None, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run one SLURM command and return how it ended (``SlurmError`` if it never ran)."""
     if shutil.which(argv[0]) is None:
         raise SlurmError(f"{argv[0]} not found on PATH; is this a SLURM login node?")
     try:
-        out = subprocess.run(
+        return subprocess.run(
             argv,
             input=input_text,
             capture_output=True,
@@ -12447,10 +12830,33 @@ def _run(argv: list[str], *, input_text: str | None = None, cwd: Path | None = N
         raise SlurmTimeout(f"{argv[0]} timed out after {SLURM_COMMAND_TIMEOUT:.0f}s") from exc
     except OSError as exc:
         raise SlurmError(f"could not run {argv[0]}: {exc}") from exc
+
+
+def _detail(out: subprocess.CompletedProcess[str]) -> str:
+    return out.stderr.strip()[-500:] or out.stdout.strip()[-500:]
+
+
+def _run(argv: list[str], *, input_text: str | None = None, cwd: Path | None = None) -> str:
+    """Run one SLURM command; return stdout or raise ``SlurmError``."""
+    out = _exec(argv, input_text=input_text, cwd=cwd)
     if out.returncode != 0:
-        detail = out.stderr.strip()[-500:] or out.stdout.strip()[-500:]
-        raise SlurmError(f"{shlex.join(argv)} failed (exit {out.returncode}): {detail}")
+        raise SlurmError(f"{shlex.join(argv)} failed (exit {out.returncode}): {_detail(out)}")
     return out.stdout
+
+
+def _parsable_job_id(stdout: str) -> str | None:
+    """The job id ``sbatch --parsable`` printed (``id`` or ``id;cluster``), or None."""
+    lines = stdout.strip().splitlines()
+    match = _JOB_ID.fullmatch(lines[-1].strip()) if lines else None
+    return match.group(1) if match else None
+
+
+def _rejected(stderr: str) -> bool:
+    """True when sbatch's stderr names a recognised SLURM rejection."""
+    for line in stderr.lower().splitlines():
+        if line.startswith("sbatch:") and any(r in line for r in SBATCH_REJECTIONS):
+            return True
+    return False
 
 
 def submit(script: str, cwd: Path, *, comment: str | None = None) -> str:
@@ -12476,29 +12882,34 @@ def submit(script: str, cwd: Path, *, comment: str | None = None) -> str:
     Raises
     ------
     SubmitUnknownError
-        SLURM may have accepted the job: sbatch timed out, reported a
-        communication error, or printed no job id. Never treat this as a
-        rejection (``reconcile`` looks for the job by its comment).
+        SLURM may have accepted the job: sbatch timed out, died by a signal,
+        printed no job id (or garbage), printed one next to an error, or
+        failed with a message that is not a recognised rejection. Never treat
+        this as a rejection (``reconcile`` looks for the job by its comment).
     SlurmError
-        SLURM did not accept the job: sbatch is missing or reported an error.
+        SLURM refused the job, on positive evidence only: sbatch is missing,
+        or it exited non-zero, printed no job id, and named a rejection from
+        ``SBATCH_REJECTIONS``.
     """
     argv = ["sbatch", "--parsable"]
     if comment is not None:
         argv.append(f"--comment={comment}")
     try:
-        out = _run(argv, input_text=script, cwd=cwd)
+        out = _exec(argv, input_text=script, cwd=cwd)
     except SlurmTimeout as exc:
         raise SubmitUnknownError(f"{exc}; the job may exist") from exc
-    except SlurmError as exc:
-        detail = str(exc).partition("): ")[2]  # sbatch's own message, not our argv
-        if _UNSURE.search(detail):
-            raise SubmitUnknownError(str(exc)) from exc
-        raise
-    lines = out.strip().splitlines()
-    job_id = lines[-1].split(";", 1)[0].strip() if lines else ""
-    if not job_id.isdigit():
-        raise SubmitUnknownError(f"sbatch --parsable printed {out.strip()!r}, not a job id")
-    return job_id
+    job_id = _parsable_job_id(out.stdout)
+    if out.returncode == 0 and job_id is not None:
+        return job_id
+    if out.returncode > 0 and job_id is None and _rejected(out.stderr):
+        raise SlurmError(f"sbatch refused the job (exit {out.returncode}): {_detail(out)}")
+    if out.returncode < 0:
+        why = f"sbatch was killed by signal {-out.returncode}"
+    elif out.returncode == 0:
+        why = f"sbatch --parsable printed {out.stdout.strip()[-200:]!r}, not a job id"
+    else:
+        why = f"sbatch failed (exit {out.returncode}) without a known rejection: {_detail(out)}"
+    raise SubmitUnknownError(f"{why}; the job may exist")
 
 
 def _node(raw: str) -> str | None:
@@ -12607,7 +13018,9 @@ def find_submitted(comment: str) -> tuple[SlurmJob | None, bool]:
     tuple of (SlurmJob or None, bool)
         The job (the newest if several) and whether the answer is complete:
         True when both commands answered. ``(None, True)`` means SLURM has no
-        such job; ``(None, False)`` means unknown (``sacct`` failed).
+        such job; ``(None, False)`` means unknown (``sacct`` failed, or the
+        cluster's accounting does not store job comments, so ``sacct`` cannot
+        see them: ``comment_accounting``).
 
     Raises
     ------
@@ -12626,6 +13039,8 @@ def find_submitted(comment: str) -> tuple[SlurmJob | None, bool]:
         parts = line.strip().split("|", 3)
         if len(parts) == 4 and parts[3] == comment:
             return SlurmJob(job_id=parts[0], state=parts[1], node=_node(parts[2])), True
+    if not comment_accounting():
+        return None, False  # sacct keeps no comments here: its silence proves nothing
     try:
         acct = _run(
             [
@@ -12647,6 +13062,62 @@ def find_submitted(comment: str) -> tuple[SlurmJob | None, bool]:
         if job is not None:
             jobs.append(job)
     return (max(jobs, key=lambda j: int(j.job_id)) if jobs else None), True
+
+
+_COMMENT_ACCOUNTING: dict[str, bool] = {}
+"""The answer of ``comment_accounting`` for this server's life (key ``"answer"``)."""
+
+
+def _stores_job_comment(config: str) -> bool:
+    """Read ``scontrol show config``: are job comments kept in accounting?"""
+    for line in config.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if key == "AccountingStoreFlags":
+            return "job_comment" in {flag.strip().lower() for flag in value.split(",")}
+        if key == "AccountingStoreJobComment":  # SLURM before 21.08
+            return value.lower() in ("yes", "true", "1")
+    return False
+
+
+def comment_accounting(*, refresh: bool = False) -> bool:
+    """
+    Return True when SLURM's accounting stores job comments.
+
+    Only then can ``sacct`` find a job by its ``--comment``, so only then can
+    a missing comment prove that SLURM never took a submission. Probes
+    ``scontrol show config`` (``AccountingStoreFlags`` containing
+    ``job_comment``; older SLURM: ``AccountingStoreJobComment = Yes``) once
+    per server start: ``SlurmPoller`` refreshes it when it starts. A failing
+    probe answers False and is not cached.
+
+    Parameters
+    ----------
+    refresh : bool
+        Probe again instead of using the cached answer.
+
+    Returns
+    -------
+    bool
+    """
+    if not refresh and "answer" in _COMMENT_ACCOUNTING:
+        return _COMMENT_ACCOUNTING["answer"]
+    try:
+        config = _run(["scontrol", "show", "config"])
+    except SlurmError as exc:
+        log.warning("scontrol show config failed; job comments count as not stored: %s", exc)
+        _COMMENT_ACCOUNTING.pop("answer", None)  # never cached: asked again next time
+        return False
+    answer = _stores_job_comment(config)
+    _COMMENT_ACCOUNTING["answer"] = answer
+    return answer
+
+
+def reset_comment_accounting() -> None:
+    """Forget the cached ``comment_accounting`` answer (a new server start, or a test)."""
+    _COMMENT_ACCOUNTING.clear()
 
 
 def cancel(job_id: str) -> None:
@@ -12699,7 +13170,7 @@ def lost_reason(job_id: str, job: SlurmJob | None) -> str:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py -v`
-Expected: `27 passed`.
+Expected: `45 passed`.
 
 - [ ] **Step 5: Lint and type-check**
 
@@ -12709,7 +13180,7 @@ Expected: `All checks passed!`, `2 files already formatted`, `All checks passed!
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/hypothex/core/slurm.py tests/core/test_slurm.py
+git add src/hypothex/core/slurm.py tests/core/test_slurm.py tests/conftest.py
 git commit -m "feat(slurm): submit with sbatch, poll squeue then sacct, cancel with scancel"
 ```
 
@@ -12763,6 +13234,7 @@ from hypothex.core.slurm import (
     SlurmJob,
     SubmitUnknownError,
     cancel,
+    comment_accounting,
     find_submitted,
     flock_supported,
     is_finished,
@@ -12937,7 +13409,7 @@ from hypothex.core.index import Index
 from hypothex.core.layout import Layout
 from hypothex.core.records import RunRecord, ScoreRecord
 from hypothex.core.store import RunStore, run_lock
-from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
+from hypothex.remote.config import SlurmDefaults, sbatch_option_problem
 ```
 
 Add these constants right below the `_NO_NODE = ...` line:
@@ -13313,7 +13785,7 @@ with:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py tests/cli/test_cli.py -v`
-Expected: `33 passed` in `test_slurm.py`; `tests/cli/test_cli.py` all pass.
+Expected: `51 passed` in `test_slurm.py`; `tests/cli/test_cli.py` all pass.
 
 - [ ] **Step 6: Lint and type-check**
 
@@ -13340,7 +13812,7 @@ git commit -m "feat(slurm): hx run --child executes a submitted run with run-fol
 - Consumes: `prepare_run(ctx, req) -> RunRecord` with `RunRequest.gpus` / `RunRequest.slurm` (contract 1.6); `render_sbatch`, `submit` (Tasks 25–26); `run_child` via `hx run --child` (Task 27); `control.wait_for_run` (phase 1a).
 - Produces:
   - `SBATCH_FILE = "slurm.sbatch"`, `SLURM_SETTINGS_FILE = "slurm.json"`, `LAST_SLURM_DEFAULTS = "slurm_defaults.json"`
-  - `submit_run(ctx: Context, record: RunRecord, defaults: SlurmDefaults) -> RunRecord` — saves the effective settings as `<run_dir>/slurm.json`; records the intent before `sbatch` (outbox entry, state `pending`, with a unique comment `hx-<run_id>-<8 hex>` and the submitting process; `run.submitting {comment}` sets `executor.type="slurm"` and `executor.host`); runs `sbatch --comment=<comment>`. Then: a job id → state `submitted` and `executor.slurm_job_id` (`run.submitted`), and a stop that came first (`cancel_requested`) is carried out at once (`scancel`); an unknown outcome (`SubmitUnknownError`) → state `unknown`, event `run.submit_unknown {reason}`, the run stays `queued` and is returned (`reconcile` resolves it); a rejection (`SlurmError`) → the run is `failed`, the intent dropped, `RunError` raised.
+  - `submit_run(ctx: Context, record: RunRecord, defaults: SlurmDefaults) -> RunRecord` — saves the effective settings as `<run_dir>/slurm.json`; records the intent before `sbatch` (outbox entry, state `pending`, with a unique comment `hx-<run_id>-<8 hex>` and the submitting process; `run.submitting {comment}` sets `executor.type="slurm"` and `executor.host`); runs `sbatch --comment=<comment>`. Then: a job id → state `submitted` and `executor.slurm_job_id` (`run.submitted`), and a stop that came first (`cancel_requested`) is carried out at once (`scancel`); an unknown outcome (`SubmitUnknownError`: a timeout, a signal, empty or garbled output, any error that is not a recognised rejection) → state `unknown`, event `run.submit_unknown {reason}`, the run stays `queued` and is returned (`reconcile` resolves it); a definitive rejection (`SlurmError` from `submit`, positive evidence only, or `render_sbatch` refusing the settings before any `sbatch`) → the run is `failed`, the intent dropped, `RunError` raised.
   - SLURM outbox (login node only): `OUTBOX_DIR = "slurm/outbox"`. One entry per tracked run, `<home>/slurm/outbox/<run_id>.json` = `{run_id, state, job_id, comment, submitter: {pid, create_time}, intent_at, cancel_requested, published}`. `state` is the submission intent: `pending` (sbatch may be running) → `submitted` (job id known) or `unknown` (sbatch's outcome is not known). `cancel_requested` is a stop that arrived before the job id was known. `published` is the last status the login node published. Every change goes through the outbox lock (`dir_lock(<home>/slurm/outbox)`). An entry is removed only when its run's terminal status is published, its job is known (`submitted`), and no cancel is pending, or when `reconcile` proved that SLURM never took the job. Helpers: `track_slurm_run(layout: Layout, record: RunRecord, *, comment: str | None = None, submitter: dict[str, Any] | None = None) -> None` (state `submitted` when the record has a job id, else `pending`), `read_outbox(layout: Layout) -> list[dict[str, Any]]`, `mark_published(layout: Layout, record: RunRecord) -> None`, private `_intent`, `_update_intent`, `_drop_intent`, `_record_job`, `_cancel_requested`, `_end_if_active`. Task 29's `reconcile` walks the outbox.
   - `_end_if_active(ctx, run_id, event_type, mutate, payload) -> RunRecord | None`: the conditional end of a SLURM run. Under the run lock it re-reads `run.yaml`; when the run already ended (the node wrote its end first) it writes and emits nothing and returns None, so no `run.lost` or `run.killed` event ever carries another status. Every terminal transition the login node makes on a SLURM run uses it (`Context.update_run` would emit the requested event even when the mutation kept the node's end).
   - `SUBMIT_SETTLE_SECONDS = 300.0`: an unknown submission counts as absent only this long after its intent (sbatch retries, a slow controller).
@@ -13381,6 +13853,7 @@ from hypothex.core.slurm import (
     SlurmJob,
     SubmitUnknownError,
     cancel,
+    comment_accounting,
     find_submitted,
     flock_supported,
     is_finished,
@@ -13631,7 +14104,7 @@ from hypothex.core.index import Index
 from hypothex.core.layout import Layout
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import RunStore, dir_lock, run_lock
-from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
+from hypothex.remote.config import SlurmDefaults, sbatch_option_problem
 ```
 
 Add these constants right below the `NO_FLOCK_ERRNOS = ...` docstring line:
@@ -14135,7 +14608,7 @@ with:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py tests/core/test_control.py -v`
-Expected: `45 passed` in `test_slurm.py` (the end-to-end test takes a few seconds: the fake `sbatch` really runs `hx run --child`); `tests/core/test_control.py` all pass.
+Expected: `63 passed` in `test_slurm.py` (the end-to-end test takes a few seconds: the fake `sbatch` really runs `hx run --child`); `tests/core/test_control.py` all pass.
 
 - [ ] **Step 6: Lint and type-check**
 
@@ -14162,7 +14635,8 @@ git commit -m "feat(slurm): launch_run submits runs to slurm on slurm environmen
 - Consumes: `poll`, `is_finished`, `lost_reason` (Task 26); `SLURM_EXECUTOR` (Task 27); `_end` (Task 28); `ctx.index.list_runs(status=..., include_archived=True, limit=None)`, `ctx.find_record`, `ctx.update_run`.
 - Produces:
   - `sync_node_run(ctx: Context, seen: RunStatus, current: RunRecord) -> RunRecord | None` — the login node publishes what the compute node wrote. `seen` is the outbox's `published` status (never the index's: another login-node write may have indexed the node's terminal `run.yaml` already). When `run.yaml` has a new status it emits `run.started` (running) or `run.<status>` (`{status, exit_code, source: "node"}`), upserts the index, and re-indexes the metric points; a finished task run without scores is scored here (`evaluate_run`; a scoring error emits `run.eval_skipped`); then `mark_published` (Task 28) moves the cursor, or removes the entry for a terminal status. When `exit.json` exists but `run.yaml` is still active, the exit record is applied with `update_run`. Returns the record when it changed.
-  - `reconcile(ctx: Context, *, confirm_gone: dict[str, SlurmJob | None] | None = None) -> list[RunRecord]` — walks the SLURM outbox (Task 28), not the index: syncs each tracked run from its folder (`sync_node_run`). A submission whose job id is not known (`pending` whose submitter died, or `unknown`) is resolved only by its comment (`find_submitted`): a job carrying it is recorded (`run.submitted {slurm_job_id, recovered: true}`; a pending cancel is carried out); the run fails (`sbatch never accepted job hx-<run_id>: ...`) and the intent is dropped only when both `squeue` and `sacct` answered without such a job, its submitter is dead, and `SUBMIT_SETTLE_SECONDS` passed since the intent. A job the node already names in `run.yaml` settles the intent too. A `cancel_requested` job is cancelled once known. Then compares the rest with SLURM; returns changed runs; emits `run.slurm_state` (node assigned) and `run.lost` (`{reason, slurm_job_id, slurm_state}`, the reason naming SLURM's end state, such as `NODE_FAIL`, whenever `sacct` gave one at either of the two polls); raises `SlurmError` when `squeue` fails, after the folder sync. Every end it writes goes through `_end_if_active`: when the node's own end arrived first, that end is published instead (`sync_node_run`), and the outbox entry is acknowledged only after the event of the run's actual terminal status. Entries of other environments or of deleted runs are dropped.
+  - `reconcile(ctx: Context, *, confirm_gone: dict[str, SlurmJob | None] | None = None) -> list[RunRecord]` — walks the SLURM outbox (Task 28), not the index: syncs each tracked run from its folder (`sync_node_run`). A submission whose job id is not known (`pending` whose submitter died, or `unknown`) is resolved only by its comment (`find_submitted`): a job carrying it is recorded (`run.submitted {slurm_job_id, recovered: true}`; a pending cancel is carried out); the run fails (`sbatch never accepted job hx-<run_id>: ...`) and the intent is dropped only when both `squeue` and `sacct` answered without such a job, its submitter is dead, and `SUBMIT_SETTLE_SECONDS` passed since the intent; when the node ended the run meanwhile (`_end_if_active` returns None), the node's end is published (`_publish_node_end`) before the intent is dropped. On a cluster without comment accounting (`find_submitted` is never complete) such a run stays `queued` with its intent `unknown`, and once (intent field `unresolved_notice`) it gets `run.submit_unknown {reason: "submission outcome unknown; check squeue/sacct", comment, comment_accounting: false}`. A job the node already names in `run.yaml` settles the intent too. A `cancel_requested` job is cancelled once known. Then compares the rest with SLURM; returns changed runs; emits `run.slurm_state` (node assigned) and `run.lost` (`{reason, slurm_job_id, slurm_state}`, the reason naming SLURM's end state, such as `NODE_FAIL`, whenever `sacct` gave one at either of the two polls); raises `SlurmError` when `squeue` fails, after the folder sync. Every end it writes goes through `_end_if_active`: when the node's own end arrived first, that end is published instead (`sync_node_run`), and the outbox entry is acknowledged only after the event of the run's actual terminal status. Entries of other environments or of deleted runs are dropped.
+  - Constant `UNRESOLVED_SUBMISSION = "submission outcome unknown; check squeue/sacct"`.
   - `control._repair_one` returns `None` for runs with `executor.type == "slurm"` (so `repair_runs`, the API's 30 s repair loop, and `wait_for_run` never mark them lost).
 
 - [ ] **Step 1: Write the failing tests**
@@ -14201,6 +14675,7 @@ from hypothex.core.slurm import (
     SlurmJob,
     SubmitUnknownError,
     cancel,
+    comment_accounting,
     find_submitted,
     flock_supported,
     is_finished,
@@ -14469,6 +14944,84 @@ def test_an_unknown_outcome_fails_only_when_slurm_provably_never_took_the_job(
     assert not outbox(ctx, run_id).exists()
 
 
+def test_without_comment_accounting_an_unknown_submission_stays_unknown(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slurm.set(accounting_flags="")  # the cluster's sacct keeps no job comments
+
+    def timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    run_id = control.launch_run(ctx, req).run_id
+    entry = json.loads(outbox(ctx, run_id).read_text())
+    entry["intent_at"] = "2000-01-01T00:00:00+00:00"
+    outbox(ctx, run_id).write_text(json.dumps(entry))
+    assert reconcile(ctx) == [] and reconcile(ctx) == []  # never "absent", however long
+    assert ctx.find_record(run_id).status == RunStatus.QUEUED
+    assert json.loads(outbox(ctx, run_id).read_text())["state"] == "unknown"
+    notices = [
+        e.payload
+        for e in ctx.events.since(0, limit=10_000)
+        if e.run_id == run_id and e.payload.get("reason") == slurm_module.UNRESOLVED_SUBMISSION
+    ]
+    assert notices == [
+        {
+            "reason": "submission outcome unknown; check squeue/sacct",
+            "comment": entry["comment"],
+            "comment_accounting": False,
+        }
+    ]
+    assert slurm.calls("sacct") == []
+
+
+def test_sbatch_killed_after_accepting_is_found_by_its_comment(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    slurm.set(sbatch_signal="KILL")  # the controller took the job; sbatch died before the id
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    record = control.launch_run(ctx, req)
+    assert record.status == RunStatus.QUEUED and record.executor.slurm_job_id is None
+    assert json.loads(outbox(ctx, record.run_id).read_text())["state"] == "unknown"
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id]
+    assert types[-1] == "run.submit_unknown" and "run.failed" not in types
+    slurm.set(sbatch_signal=None)
+    [found] = reconcile(ctx)
+    assert (found.status, found.executor.slurm_job_id) == (RunStatus.QUEUED, "1000")
+    assert len(slurm.calls("sbatch")) == 1  # never submitted twice
+
+
+def test_a_node_that_ends_while_its_intent_is_resolved_is_published(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    run_id = control.launch_run(ctx, req).run_id
+    entry = json.loads(outbox(ctx, run_id).read_text())
+    entry["intent_at"] = "2000-01-01T00:00:00+00:00"
+    outbox(ctx, run_id).write_text(json.dumps(entry))
+    real = slurm_module.find_submitted
+
+    def nothing_found_then_the_node_finishes(comment: str) -> tuple[SlurmJob | None, bool]:
+        answer = real(comment)  # (None, True): no job carries the comment ...
+        node_end = {"status": RunStatus.FINISHED, "exit_code": 0, "ended_at": utcnow()}
+        ctx.store.write_record(ctx.find_record(run_id).model_copy(update=node_end))
+        return answer  # ... yet the node ran it and ended (a late accounting record)
+
+    monkeypatch.setattr(slurm_module, "find_submitted", nothing_found_then_the_node_finishes)
+    [done] = reconcile(ctx)
+    assert done.status == RunStatus.FINISHED
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == run_id]
+    assert "run.failed" not in types and types.count("run.finished") == 1
+    indexed = ctx.index.get_run(run_id)
+    assert indexed is not None and indexed.status == RunStatus.FINISHED
+    assert not outbox(ctx, run_id).exists()  # dropped only after the node's end was published
+
+
 def test_repair_runs_leaves_slurm_runs_to_reconcile(ctx: Context) -> None:
     old = utcnow() - timedelta(minutes=2)
     ctx.create_run(
@@ -14640,7 +15193,7 @@ from hypothex.core.records import (
     ScoreRecord,
 )
 from hypothex.core.store import RunStore, dir_lock, run_lock
-from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
+from hypothex.remote.config import SlurmDefaults, sbatch_option_problem
 ```
 
 Append to the end of the file:
@@ -14750,6 +15303,10 @@ def _publish_node_end(ctx: Context, run_id: str) -> RunRecord:
     return sync_node_run(ctx, _published(ctx.layout, current), current) or current
 
 
+UNRESOLVED_SUBMISSION = "submission outcome unknown; check squeue/sacct"
+"""Shown on a run whose submission no lookup can settle (no comment accounting)."""
+
+
 def _intent_age(entry: dict[str, Any]) -> float:
     try:
         return (utcnow() - datetime.fromisoformat(entry["intent_at"])).total_seconds()
@@ -14767,7 +15324,11 @@ def _resolve_intent(
     dropped, only when SLURM provably never took the job: both ``squeue`` and
     ``sacct`` answered without it, its submitter is dead (a ``pending`` one
     may still be in ``sbatch``), and ``SUBMIT_SETTLE_SECONDS`` passed since
-    the intent. Anything less leaves the intent for the next poll.
+    the intent. Anything less leaves the intent for the next poll. When the
+    node ended the run meanwhile, its end is published instead of a failure,
+    and only then is the intent dropped. Without comment accounting the
+    answer is never complete: the run stays ``unknown`` and gets one
+    ``run.submit_unknown`` event naming ``UNRESOLVED_SUBMISSION``.
     """
     run_id = current.run_id
     comment = entry.get("comment")
@@ -14785,7 +15346,16 @@ def _resolve_intent(
         if process_alive(submitter.get("pid"), submitter.get("create_time")):
             return None  # sbatch may still answer it
         entry = _update_intent(ctx.layout, run_id, state="unknown") or entry
-    if not complete or _intent_age(entry) < SUBMIT_SETTLE_SECONDS:
+    if _intent_age(entry) < SUBMIT_SETTLE_SECONDS:
+        return None
+    if not complete:
+        if not comment_accounting() and not entry.get("unresolved_notice"):
+            _update_intent(ctx.layout, run_id, unresolved_notice=True)
+            ctx.emit(
+                "run.submit_unknown",
+                current,
+                {"reason": UNRESOLVED_SUBMISSION, "comment": comment, "comment_accounting": False},
+            )
         return None
     failed = _end_if_active(
         ctx,
@@ -14797,6 +15367,8 @@ def _resolve_intent(
             f"no job with comment {comment} in squeue or sacct"
         },
     )
+    if failed is None:  # the node ended it first: publish that end, never drop it unseen
+        failed = _publish_node_end(ctx, run_id)
     _drop_intent(ctx.layout, run_id)  # after the end: a crash in between only repeats it
     return failed
 
@@ -14957,7 +15529,7 @@ with:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py tests/core/test_control.py -v`
-Expected: `65 passed` in `test_slurm.py`; `tests/core/test_control.py` all pass.
+Expected: `86 passed` in `test_slurm.py`; `tests/core/test_control.py` all pass.
 
 - [ ] **Step 6: Lint and type-check**
 
@@ -15022,6 +15594,7 @@ from hypothex.core.slurm import (
     SlurmJob,
     SubmitUnknownError,
     cancel,
+    comment_accounting,
     find_submitted,
     flock_supported,
     is_finished,
@@ -15242,7 +15815,7 @@ from hypothex.core.records import (
     ScoreRecord,
 )
 from hypothex.core.store import RunStore, dir_lock, run_lock
-from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
+from hypothex.remote.config import SlurmDefaults, sbatch_option_problem
 ```
 
 Append to the end of the file:
@@ -15368,7 +15941,7 @@ with:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py tests/core/test_control.py -v`
-Expected: `74 passed` in `test_slurm.py`; `tests/core/test_control.py` all pass.
+Expected: `95 passed` in `test_slurm.py`; `tests/core/test_control.py` all pass.
 
 - [ ] **Step 6: Lint and type-check**
 
@@ -15388,15 +15961,16 @@ git commit -m "feat(slurm): stop slurm runs with scancel"
 
 **Files:**
 - Modify: `src/hypothex/core/slurm.py`
-- Modify: `src/hypothex/api/app.py` (import; the lifespan starts and stops the poller)
+- Modify: `src/hypothex/api/app.py` (import; the lifespan starts and stops the poller; env route `GET /api/v1/slurm`)
 - Test: `tests/core/test_slurm.py`
 
 **Interfaces:**
 - Consumes: `reconcile` (Task 29); `create_app(..., kind=...)` and its lifespan (Task 22).
 - Produces:
   - `SLURM_POLL_SECONDS = 30.0`
-  - `class SlurmPoller: __init__(ctx: Context, interval: float = SLURM_POLL_SECONDS)`, `start() -> None`, `stop(timeout: float | None = None) -> bool`, `poll_once() -> list[RunRecord]`, property `alive: bool`. `stop` waits for the thread (by default until it ends: a SLURM command can block for `SLURM_COMMAND_TIMEOUT` = 60 s) and returns whether it ended; a thread that did not end within `timeout` stays owned (`alive`), and `start` never starts a second one beside it. Thread name `hx-slurm-poller`. First poll at start (startup repair, spec 5.3), then every `interval`; each poll first publishes the compute nodes' `run.yaml` changes as events and index updates (`sync_node_run`, Task 29), since the nodes never open the SQLite files; two-poll rule for `lost`; errors are logged, never raised. The env server process (this poller and the API) is the only process that opens `index.db` and `events.db` on a SLURM host.
+  - `class SlurmPoller: __init__(ctx: Context, interval: float = SLURM_POLL_SECONDS)`, `start() -> None`, `stop(timeout: float | None = None) -> bool`, `poll_once() -> list[RunRecord]`, property `alive: bool`. `stop` waits for the thread (by default until it ends: a SLURM command can block for `SLURM_COMMAND_TIMEOUT` = 60 s) and returns whether it ended; a thread that did not end within `timeout` stays owned (`alive`), and `start` never starts a second one beside it. Thread name `hx-slurm-poller`. The thread first probes SLURM's comment accounting again (`comment_accounting(refresh=True)`: the answer is cached per server start, Task 26), then polls at once (startup repair, spec 5.3), then every `interval`; each poll first publishes the compute nodes' `run.yaml` changes as events and index updates (`sync_node_run`, Task 29), since the nodes never open the SQLite files; two-poll rule for `lost`; errors are logged, never raised. The env server process (this poller and the API) is the only process that opens `index.db` and `events.db` on a SLURM host.
   - `create_app`: kind `slurm` (from `--kind` or `environment.json`, Task 22) first runs `require_flock(home)` (Task 27): a SLURM env server never starts on a home without `flock`. With `background_repair` the lifespan starts a `SlurmPoller` and, on shutdown, waits until its thread has ended before the server releases the context. So `hx serve --kind slurm` (and an env server started by the hub on a SLURM host, Task 11) polls SLURM every 30 s.
+  - Env route `GET /api/v1/slurm` → `{"comment_accounting": bool | null}` (`null` on a server that is not `slurm`); the hub copies it onto the host row (Task 44).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -15438,6 +16012,7 @@ from hypothex.core.slurm import (
     SlurmPoller,
     SubmitUnknownError,
     cancel,
+    comment_accounting,
     find_submitted,
     flock_supported,
     is_finished,
@@ -15538,6 +16113,18 @@ def test_slurm_server_refuses_a_home_without_flock(
     monkeypatch.setattr("hypothex.core.slurm.fcntl.flock", no_flock)
     with pytest.raises(ConfigError, match="does not support flock"):
         create_app(home, kind="slurm")
+
+
+def test_slurm_server_reports_comment_accounting_per_start(home: Path, slurm: FakeSlurm) -> None:
+    base = "http://127.0.0.1:7777"
+    with TestClient(create_app(home, kind="slurm"), base_url=base) as client:
+        assert client.get("/api/v1/slurm").json() == {"comment_accounting": True}
+        slurm.set(accounting_flags="")
+        assert client.get("/api/v1/slurm").json() == {"comment_accounting": True}  # cached
+    with TestClient(create_app(home, kind="slurm"), base_url=base) as client:
+        wait_until(lambda: client.get("/api/v1/slurm").json() == {"comment_accounting": False})
+    with TestClient(create_app(home, kind="ssh"), base_url=base) as client:
+        assert client.get("/api/v1/slurm").json() == {"comment_accounting": None}
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -15594,7 +16181,7 @@ from hypothex.core.records import (
     ScoreRecord,
 )
 from hypothex.core.store import RunStore, dir_lock, run_lock
-from hypothex.remote.config import SlurmDefaults, reserved_sbatch_option
+from hypothex.remote.config import SlurmDefaults, sbatch_option_problem
 ```
 
 Add this constant right below the `SBATCH_FILE = "slurm.sbatch"` line:
@@ -15653,6 +16240,7 @@ class SlurmPoller:
             return []
 
     def _loop(self) -> None:
+        comment_accounting(refresh=True)  # a new server start asks SLURM again
         while True:
             try:
                 self.poll_once()
@@ -15698,7 +16286,18 @@ class SlurmPoller:
 
 - [ ] **Step 4: Start the poller in the env server's lifespan**
 
-In `src/hypothex/api/app.py`, add `from hypothex.core.slurm import SlurmPoller, require_flock` to the `hypothex` imports (run `uv run ruff check --fix src/hypothex/api/app.py` to sort them). In `create_app`, directly after Task 22's lines `    if kind is not None:` / `        ctx.descriptor.kind = kind`, add:
+In `src/hypothex/api/app.py`, add `from hypothex.core.slurm import SlurmPoller, comment_accounting, require_flock` to the `hypothex` imports (run `uv run ruff check --fix src/hypothex/api/app.py` to sort them). In `register_env_routes`, right after the `/api/v1/queue` route (Task 23), add:
+
+```python
+    @app.get("/api/v1/slurm")
+    def slurm_capabilities() -> dict[str, Any]:
+        # the hub shows this on the host row: without job comments in SLURM's accounting
+        # an unknown submission can never be proven absent (Task 29)
+        if ctx.descriptor.kind != "slurm":
+            return {"comment_accounting": None}
+        return {"comment_accounting": comment_accounting()}
+```
+ In `create_app`, directly after Task 22's lines `    if kind is not None:` / `        ctx.descriptor.kind = kind`, add:
 
 ```python
     if ctx.descriptor.kind == "slurm":
@@ -15752,7 +16351,7 @@ In the `create_app` docstring, replace the `background_repair` entry with:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_slurm.py -v`
-Expected: `80 passed`.
+Expected: `102 passed`.
 
 - [ ] **Step 6: Run the whole suite, lint, and type-check**
 
@@ -16391,7 +16990,8 @@ git commit -m "feat(remote): hub host state, reconnect backoff, and mirror path 
   - `mirror_run(ctx: Context, client: EnvClient, host: str, environment_id: str, project: str, run_id: str, *, usd_per_gpu_hour: float | None = None) -> tuple[RunRecord, bool] | None`.
   - `mirror_event(ctx: Context, client: EnvClient, host: str, environment_id: str, event: Event, *, usd_per_gpu_hour: float | None = None) -> None` (contract signature plus one optional keyword: the host's price, used to fill `RunRecord.cost`). It emits `mirror.run_updated` with payload `{"host", "environment_id", "original_type", "remote_sequence", "status"}` plus `"reason"` when the host's event carried one (`run.lost`, `run.killed`, `run.failed`: for example a SLURM `NODE_FAIL`), so the UI can show why a run ended.
   - private `_emit_mirror(ctx, host, environment_id, record, original_type, remote_sequence, *, reason=None)` and `_reason(event) -> str | None`, which Task 35 uses.
-  - Constants `LOG_TAIL_BYTES = 8 * 1024 * 1024` (spec 5.3: logs are mirrored as tails, fetched whole), `CLAIMS_DIR = ".claims"` (`<store>/.claims/<run_id>.json`, the hub-wide owner of a mirrored run id), and `INDEX_PENDING = ".mirror-index-pending"`.
+  - Constants `LOG_TAIL_BYTES = 8 * 1024 * 1024` (spec 5.3: logs are mirrored as tails, fetched whole), `CLAIMS_DIR = ".claims"` (`<store>/.claims/<run_id>.json`, the hub-wide owner of a mirrored run id), `INDEX_PENDING = ".mirror-index-pending"`, and `SKIPPED_SUFFIX = ".skipped"` (`<file>.skipped`: `{reason, size, max_bytes}` in place of a file the hub does not hold).
+  - `reindex_pending(ctx: Context) -> list[str]`: at hub start (`Hub.start`, Task 35), re-index every mirrored run whose folder still has `.mirror-index-pending` (a mirror cut short), then remove the marker; returns their run ids.
   - `ProjectEntry.remote_host: str | None = None` (set on a project the hub copied from a host) and `RunStore.save_project(entry: ProjectEntry) -> None` (atomic write of `project.json`).
   - Env route `GET /api/v1/projects/{project}/entry` → the host's `ProjectEntry` JSON (404 for an unknown project).
 
@@ -16403,15 +17003,16 @@ What `mirror_run` does, in order. Nothing in the hub's run folder changes until 
 4. Checks that `run.yaml` names the same run.
 5. Copies the project's `ProjectEntry` from the host when the hub does not know the project (spec 5.2: the hub holds the cross-project index). The copy has `remote_host` set, so tasks, leaderboards, and sweep stats work for a project registered only on the host; a later `hx register` of a hub checkout replaces it. A host without the route (or an error) is logged and skipped.
 6. Lists the run's files (`EnvClient.list_files`).
-7. Fetches every wanted file whose `[size, mtime_ns]` differs from `.mirror.json`, whole, into the staging folder: `logs/*` as a tail of at most `LOG_TAIL_BYTES` (spec 5.3, 8A.3; a log is never a `remote_file`), any other file up to `MIRROR_MAX_BYTES`. A changed file is fetched again whole (a growing `metrics.jsonl` costs its size per refresh, a log at most 8 MiB). A dropped connection raises before anything is installed.
-8. Records each too-big non-log file as a `remote_file` artifact.
+7. Fetches every wanted file whose `[size, mtime_ns]` differs from `.mirror.json`, whole, into the staging folder: `logs/*` as a tail of at most `LOG_TAIL_BYTES` (spec 5.3, 8A.3; a log is never a `remote_file`), any other file up to `MIRROR_MAX_BYTES`. A changed file is fetched again whole (a growing `metrics.jsonl` costs its size per refresh, a log at most 8 MiB). A dropped connection raises before anything is installed. A listed file the host does not serve (`fetch_file` False: a 404 because it was deleted after the listing, or a 413 because it grew past the limit) makes the mirror list the run again, once: still missing, its local copy is deleted (and its manifest entry dropped); now too big, it becomes a skipped file (step 8); listed and small, it is fetched once more, and a second refusal makes it a skipped file too (`reason: "not served"`). So no stale copy of a listed file the mirror could not fetch ever stays next to newer files.
+8. Records each too-big non-log file as a `remote_file` artifact; a skipped file's local copy is deleted and a small `<file>.skipped` marker (`{reason, size, max_bytes}`) takes its place. A file fetched again later replaces the marker.
 9. Gives the host's own artifacts (`host: "local"` on the host) the host's name, so the hub never shows a host checkpoint as a local file.
 10. Claims the run id hub-wide before any install (`_claim`): under the shared claim lock (`<store>/.claims/.lock`) it checks step 2 again and writes `<store>/.claims/<run_id>.json` (`{project, environment_id}`). The claim outlives a failed install or index, so a second host or project can never take the id, even when the first one's index never finished; two mirrors that both passed step 2 cannot both win.
 11. Under `run_lock`, installs in one pass (`_install`):
-   - each staged file replaces its local copy with one `os.replace` (skipped when the bytes are equal); installing the same whole file twice changes nothing, so a mirror cut short anywhere is repaired by the next one;
+   - first writes `.mirror-index-pending` durably (fsync of the marker and the folder), before the first change to the live folder, and notes whether it was already there (a mirror cut short) or the run is not indexed yet;
+   - each staged file replaces its local copy with one `os.replace` (skipped when the bytes are equal); installing the same whole file twice changes nothing, so a mirror cut short anywhere is repaired by the next one; then the deletions and `.skipped` markers of step 7;
    - writes `run.yaml` (with the host's `environment_id`) after the files, so a terminal status never shows next to stale predictions;
-   - calls `index_run` when something changed, the run is not indexed yet, or `.mirror-index-pending` is left from an `index_run` that failed (the marker is written before `index_run` and removed after it);
-   - writes `.mirror.json` last: after any failure the next mirror fetches the same files again.
+   - calls `index_run` when something changed, the marker was already there, or the run is not indexed yet: a replay that finds the marker always re-indexes, whatever it fetched;
+   - writes `.mirror.json`, then removes the marker last: after any failure the next mirror fetches the same files again and re-indexes. A crash at any step leaves the marker, and `reindex_pending` repairs the index at the next hub start even when no new event ever comes for the run.
    The install is a pass of per-file renames, not one rename of the whole folder: the run folder holds its `.lock`, which a folder swap would orphan.
 12. Re-emits `mirror.run_updated` with `EventLog.append_once` keyed by `mirror:<host>:<environment_id>:<remote_sequence>` (Task 32), so a replay after a crash between the event and the cursor write emits nothing twice; the periodic refresh (`remote_sequence` None) uses `append`.
 
@@ -16423,6 +17024,7 @@ In `tests/remote/test_hub.py`, replace the import block with:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -16932,6 +17534,174 @@ def test_two_hosts_never_both_install_one_run_id(tmp_path: Path) -> None:
     assert hub.find_record("r1").environment_id == owner
     indexed = hub.index.get_run("r1")
     assert indexed is not None and indexed.environment_id == owner
+
+
+class StaleListing(FakeClient):
+    """Lists the files as they were when it was made, then the truth (a listing gone stale)."""
+
+    def __init__(self, remote: Context, listing: list[RemoteFile]) -> None:
+        super().__init__(remote)
+        self.listing = listing
+        self.listed = 0
+
+    def list_files(self, run_id: str, rel_dir: str = "") -> list[RemoteFile]:
+        self.listed += 1
+        return self.listing if self.listed == 1 else super().list_files(run_id, rel_dir)
+
+
+def test_a_file_deleted_after_the_listing_is_deleted_here(pair: tuple[Context, Context]) -> None:
+    hub, remote = pair
+    record = seed_run(remote, "r1", status=RunStatus.RUNNING)
+    notes = remote.run_dir(record) / "notes.md"
+    notes.write_text("old notes\n")
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    local = hub.layout.run_dir("toy", "r1")
+    assert (local / "notes.md").read_text() == "old notes\n"
+    notes.write_text("new notes, deleted before the hub fetches them\n")
+    listing = FakeClient(remote).list_files("r1")
+    notes.unlink()  # 404 for the listed file, and absent from the second listing
+    client = StaleListing(remote, listing)
+    assert hub_mod.mirror_run(hub, client, "gpu1", "env-remote", "toy", "r1") is not None  # type: ignore[arg-type]
+    assert client.listed == 2  # listed again, once
+    assert not (local / "notes.md").exists()  # no stale copy next to newer files
+    assert "notes.md" not in json.loads((local / hub_mod.MANIFEST_NAME).read_text())
+
+
+def test_a_file_that_grew_too_big_leaves_a_skipped_marker(
+    pair: tuple[Context, Context], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, remote = pair
+    monkeypatch.setattr(hub_mod, "MIRROR_MAX_BYTES", 2000)
+    record = seed_run(remote, "r1", status=RunStatus.RUNNING)
+    preds = remote.run_dir(record) / "predictions" / "predictions.jsonl"
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    local = hub.layout.run_dir("toy", "r1") / "predictions" / "predictions.jsonl"
+    assert local.is_file()
+    preds.write_text("x" * 500 + "\n")  # small when listed ...
+    listing = FakeClient(remote).list_files("r1")
+    preds.write_bytes(b"y" * 5000)  # ... too big when fetched: 413
+    client = StaleListing(remote, listing)
+    hub_mod.mirror_run(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    marker = local.with_name("predictions.jsonl.skipped")
+    assert not local.exists()
+    assert json.loads(marker.read_text()) == {"reason": "too big", "size": 5000, "max_bytes": 2000}
+    assert hub.find_record("r1").artifacts == [
+        Artifact(kind="remote_file", path="predictions/predictions.jsonl", host="gpu1", size=5000)
+    ]
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert not local.exists() and marker.is_file()  # a fresh listing agrees
+    preds.write_text('{"id": "e1", "prediction": "small again"}\n')
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert local.read_bytes() == preds.read_bytes() and not marker.exists()
+
+
+def test_a_listed_file_never_served_leaves_no_stale_copy(pair: tuple[Context, Context]) -> None:
+    hub, remote = pair
+    record = seed_run(remote, "r1", status=RunStatus.RUNNING)
+    notes = remote.run_dir(record) / "notes.md"
+    notes.write_text("v1\n")
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    notes.write_text("v2, which the host refuses to serve\n")
+
+    class Refusing(FakeClient):
+        def fetch_file(
+            self, run_id: str, rel_path: str, dest: Path, *, max_bytes: int, tail: bool = False
+        ) -> bool:
+            if rel_path == "notes.md":
+                return False
+            return super().fetch_file(run_id, rel_path, dest, max_bytes=max_bytes, tail=tail)
+
+    hub_mod.mirror_run(hub, Refusing(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    local = hub.layout.run_dir("toy", "r1") / "notes.md"
+    assert not local.exists()
+    note = json.loads(local.with_name("notes.md.skipped").read_text())
+    assert note["reason"] == "not served" and note["size"] == notes.stat().st_size
+
+
+class Crash(BaseException):
+    """The hub dies right here (a BaseException: nothing on the way catches it)."""
+
+
+def crash_at(step: str, hub: Context, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the next mirror die at one step of its install."""
+    if step == "marker":  # the marker is durable, nothing else changed yet
+        real_touch = hub_mod._durable_touch
+
+        def touch_then_crash(path: Path) -> None:
+            real_touch(path)
+            raise Crash
+
+        monkeypatch.setattr(hub_mod, "_durable_touch", touch_then_crash)
+    elif step == "file":  # the first live file is replaced
+        real_replace = os.replace
+
+        def replace_then_crash(src: Any, dst: Any) -> None:
+            real_replace(src, dst)
+            if Path(dst).name == "scores.jsonl":
+                raise Crash
+
+        monkeypatch.setattr(os, "replace", replace_then_crash)
+    elif step == "record":  # run.yaml is written
+        real_write = hub.store.write_record
+
+        def write_then_crash(record: RunRecord) -> None:
+            real_write(record)
+            raise Crash
+
+        monkeypatch.setattr(hub.store, "write_record", write_then_crash)
+    elif step == "index":  # index_run got half-way
+
+        def half_index(index: Index, store: Any, record: RunRecord) -> None:
+            index.upsert_run(record)
+            raise Crash
+
+        monkeypatch.setattr(hub_mod, "index_run", half_index)
+    else:  # "manifest": .mirror.json is written, the marker is still there
+        real_atomic = hub_mod.atomic_write_text
+
+        def write_then_crash_on_manifest(path: Path, text: str) -> None:
+            real_atomic(path, text)
+            if path.name == hub_mod.MANIFEST_NAME:
+                raise Crash
+
+        monkeypatch.setattr(hub_mod, "atomic_write_text", write_then_crash_on_manifest)
+
+
+def scores_of(records: list[ScoreRecord]) -> list[float]:
+    return sorted(s.value for s in records if s.value is not None)
+
+
+def indexed_scores(hub: Context) -> list[float]:
+    return scores_of(hub.index.scores_for(["r1"]).get("r1", []))
+
+
+@pytest.mark.parametrize("repair", ["replay", "startup"])
+@pytest.mark.parametrize("step", ["marker", "file", "record", "index", "manifest"])
+def test_a_crash_at_any_install_step_is_reindexed(
+    pair: tuple[Context, Context], monkeypatch: pytest.MonkeyPatch, step: str, repair: str
+) -> None:
+    hub, remote = pair
+    record = seed_run(remote, "r1", value=0.5)
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    remote.add_score(
+        record, ScoreRecord(metric="f1", version="1", key="value", value=0.9, created_at=utcnow())
+    )
+    remote.update_run("r1", "run.tagged", lambda r: r.model_copy(update={"tags": ["x"]}))
+    crash_at(step, hub, monkeypatch)
+    with pytest.raises(Crash):
+        hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    monkeypatch.undo()
+    local = hub.layout.run_dir("toy", "r1")
+    assert (local / hub_mod.INDEX_PENDING).exists()  # written before the first change
+    if repair == "startup":  # the hub restarts; no event ever comes for this run again
+        assert hub_mod.reindex_pending(hub) == ["r1"]
+        on_disk = scores_of(hub.store.read_scores("toy", "r1"))
+        assert indexed_scores(hub) == on_disk  # the index matches whatever was installed
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert indexed_scores(hub) == [0.5, 0.9]
+    indexed = hub.index.get_run("r1")
+    assert indexed is not None and indexed.tags == ["x"]
+    assert not (local / hub_mod.INDEX_PENDING).exists()
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -16980,7 +17750,10 @@ LOG_TAIL_BYTES = 8 * 1024 * 1024
 CLAIMS_DIR = ".claims"
 """``<store>/.claims/<run_id>.json``: the project and environment that own a mirrored run id."""
 INDEX_PENDING = ".mirror-index-pending"
-"""Left in a mirrored run folder while ``index_run`` runs; seen again, the index is redone."""
+"""Written (durably) before a mirror first changes a run folder and removed after its index
+and manifest; seen again (a replay, or the next hub start), the index is redone."""
+SKIPPED_SUFFIX = ".skipped"
+"""``<file>.skipped``: ``{reason, size, max_bytes}`` in place of a file the hub does not hold."""
 ```
 
 In `src/hypothex/core/store.py`, add one field at the end of `class ProjectEntry`:
@@ -17216,23 +17989,40 @@ def mirror_run(
         manifest = _read_manifest(run_dir)
         staged: list[tuple[RemoteFile, Path]] = []
         remote_only: list[Artifact] = []
+        skipped: dict[str, dict[str, object]] = {}
+        unfetched: list[RemoteFile] = []
         for entry in client.list_files(run_id):
             if entry.path == "run.yaml" or not wanted_path(entry.path):
                 continue
-            is_log = entry.path.startswith("logs/")
-            if entry.size > MIRROR_MAX_BYTES and not is_log:
-                remote_only.append(
-                    Artifact(kind=REMOTE_FILE_KIND, path=entry.path, host=host, size=entry.size)
-                )
+            if _too_big(entry):
+                remote_only.append(_remote_artifact(entry, host))
+                skipped[entry.path] = _skip_note("too big", entry)
                 continue
             unchanged = manifest.get(entry.path) == [entry.size, entry.mtime_ns]
             if unchanged and (run_dir / entry.path).is_file():
                 continue
-            dest = staging / "files" / entry.path
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            limit = LOG_TAIL_BYTES if is_log else MIRROR_MAX_BYTES
-            if client.fetch_file(run_id, entry.path, dest, max_bytes=limit, tail=is_log):
-                staged.append((entry, dest))
+            fetched = _fetch(client, run_id, staging, entry)
+            if fetched is None:
+                unfetched.append(entry)
+            else:
+                staged.append((entry, fetched))
+        gone: list[str] = []
+        if unfetched:
+            # listed but not served: deleted since the listing (404) or grown too big (413)
+            relisted = {f.path: f for f in client.list_files(run_id)}
+            for entry in unfetched:
+                now = relisted.get(entry.path)
+                if now is None:
+                    gone.append(entry.path)  # still missing: its stale copy here goes
+                elif _too_big(now):
+                    remote_only.append(_remote_artifact(now, host))
+                    skipped[now.path] = _skip_note("too big", now)
+                else:
+                    fetched = _fetch(client, run_id, staging, now)
+                    if fetched is None:
+                        skipped[now.path] = _skip_note("not served", now)
+                    else:
+                        staged.append((now, fetched))
         record = price_record(
             record.model_copy(
                 update={
@@ -17248,8 +18038,55 @@ def mirror_run(
             log.warning("host %s: not mirroring: %s", host, reason)
             return None
         with run_lock(run_dir):
-            changed = _install(ctx, run_dir, staged, manifest, record)
+            changed = _install(ctx, run_dir, staged, manifest, record, gone, skipped)
     return record, changed
+
+
+def _too_big(entry: RemoteFile) -> bool:
+    """A non-log file over ``MIRROR_MAX_BYTES`` stays on the host (logs are tails)."""
+    return entry.size > MIRROR_MAX_BYTES and not entry.path.startswith("logs/")
+
+
+def _remote_artifact(entry: RemoteFile, host: str) -> Artifact:
+    return Artifact(kind=REMOTE_FILE_KIND, path=entry.path, host=host, size=entry.size)
+
+
+def _skip_note(reason: str, entry: RemoteFile) -> dict[str, object]:
+    return {"reason": reason, "size": entry.size, "max_bytes": MIRROR_MAX_BYTES}
+
+
+def _fetch(client: EnvClient, run_id: str, staging: Path, entry: RemoteFile) -> Path | None:
+    """Fetch one listed file whole into staging; None when the host did not serve it."""
+    is_log = entry.path.startswith("logs/")
+    dest = staging / "files" / entry.path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    limit = LOG_TAIL_BYTES if is_log else MIRROR_MAX_BYTES
+    if client.fetch_file(run_id, entry.path, dest, max_bytes=limit, tail=is_log):
+        return dest
+    return None
+
+
+def _durable_touch(path: Path) -> None:
+    """Create ``path`` and make it durable (fsync of the file and its folder)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    folder = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(folder)
+    finally:
+        os.close(folder)
+
+
+def _drop_local(path: Path) -> bool:
+    """Delete a local file the host no longer serves; True when one was there."""
+    if path.is_file() or path.is_symlink():
+        path.unlink()
+        return True
+    return False
 
 
 def _install(
@@ -17258,20 +18095,27 @@ def _install(
     staged: list[tuple[RemoteFile, Path]],
     manifest: dict[str, list[int]],
     record: RunRecord,
+    gone: list[str],
+    skipped: dict[str, dict[str, object]],
 ) -> bool:
     """
     Install fully fetched files, then ``run.yaml``, then re-index; caller holds the run lock.
 
-    Every file replaces its local copy whole (``os.replace``), so installing the
-    same bytes again changes nothing: a crash or a failed ``index_run`` part-way
-    is repaired by the next mirror, which fetches the same files again
-    (``.mirror.json`` is written last) and finds ``.mirror-index-pending``.
+    ``.mirror-index-pending`` is made durable before the first change to the
+    live folder and removed last, so a crash at any step leaves it: the next
+    mirror (or ``reindex_pending`` at hub start) re-indexes. Every file
+    replaces its local copy whole (``os.replace``), so installing the same
+    bytes again changes nothing. Files the host no longer serves are deleted
+    (``gone``) or replaced by a ``<file>.skipped`` marker (``skipped``).
 
     Returns
     -------
     bool
         Whether any file or the record changed.
     """
+    pending = run_dir / INDEX_PENDING
+    redo = pending.exists() or ctx.index.get_run(record.run_id) is None
+    _durable_touch(pending)  # before the first live change
     changed = False
     for entry, path in staged:
         dst = run_dir / entry.path
@@ -17279,17 +18123,65 @@ def _install(
             dst.parent.mkdir(parents=True, exist_ok=True)
             os.replace(path, dst)
             changed = True
+        changed |= _drop_local(dst.with_name(dst.name + SKIPPED_SUFFIX))
         manifest[entry.path] = [entry.size, entry.mtime_ns]
+    for rel in gone:
+        dst = run_dir / rel
+        changed |= _drop_local(dst)
+        changed |= _drop_local(dst.with_name(dst.name + SKIPPED_SUFFIX))
+        manifest.pop(rel, None)
+    for rel, note in skipped.items():
+        dst = run_dir / rel
+        changed |= _drop_local(dst)
+        marker = dst.with_name(dst.name + SKIPPED_SUFFIX)
+        text = json.dumps(note, sort_keys=True)
+        if not (marker.is_file() and marker.read_text(encoding="utf-8") == text):
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(marker, text)
+            changed = True
+        manifest.pop(rel, None)
     if _read_local(ctx, record.project, record.run_id) != record:
         ctx.store.write_record(record)  # after the files: never terminal next to stale files
         changed = True
-    pending = run_dir / INDEX_PENDING
-    if changed or pending.exists() or ctx.index.get_run(record.run_id) is None:
-        pending.touch()  # durable: an index_run that fails half-way is redone next time
+    if changed or redo:
         index_run(ctx.index, ctx.store, record)
-        pending.unlink()
     atomic_write_text(run_dir / MANIFEST_NAME, json.dumps(manifest, sort_keys=True))
+    pending.unlink()  # last: the whole install is acknowledged
     return changed
+
+
+def reindex_pending(ctx: Context) -> list[str]:
+    """
+    Re-index every mirrored run left with ``.mirror-index-pending`` (call at hub start).
+
+    A mirror cut short (a crash, a failed ``index_run``) leaves the marker; a
+    replay of that run re-indexes too, but a run whose host never sends
+    another event would keep a stale index without this.
+
+    Parameters
+    ----------
+    ctx : Context
+        The hub context.
+
+    Returns
+    -------
+    list of str
+        The run ids re-indexed (a run without a ``run.yaml`` yet keeps its
+        marker for its next mirror).
+    """
+    store = ctx.layout.store
+    done: list[str] = []
+    for marker in sorted(store.glob(f"*/runs/*/{INDEX_PENDING}")) if store.is_dir() else []:
+        run_dir = marker.parent
+        project, run_id = run_dir.parent.parent.name, run_dir.name
+        with run_lock(run_dir):
+            record = _read_local(ctx, project, run_id)
+            if record is None or not marker.exists():
+                continue
+            index_run(ctx.index, ctx.store, record)
+            marker.unlink()
+        done.append(run_id)
+    return done
 
 
 def _reason(event: Event) -> str | None:
@@ -17385,7 +18277,7 @@ def mirror_event(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_hub.py -v`
-Expected: 43 passed.
+Expected: 56 passed.
 
 Run: `uv run pytest tests/api tests/core -q`
 Expected: all pass (`ProjectEntry.remote_host` defaults to None, so phase 1 `project.json` files still load).
@@ -17465,6 +18357,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import sqlite3
 import threading
@@ -18160,6 +19053,31 @@ def test_a_failed_cursor_write_never_re_emits_on_replay(
     hub._apply(sup, FakeClient(remote), "env-remote", events)  # type: ignore[arg-type]  # replay
     assert mirrored_seqs(hub_ctx, "gpu1") == [e.sequence for e in events]  # each once
     assert hub_ctx.index.get_cursor("gpu1", "env-remote") == events[-1].sequence
+
+
+def test_hub_start_reindexes_a_run_a_crash_left_half_indexed(
+    pair: tuple[Context, Context], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub_ctx, remote = pair
+    seed_run(remote, "r1", value=0.75)
+
+    def crash(index: Index, store: Any, record: RunRecord) -> None:
+        raise Crash  # the files and run.yaml are in; the index is not
+
+    monkeypatch.setattr(hub_mod, "index_run", crash)
+    with pytest.raises(Crash):
+        hub_mod.mirror_run(hub_ctx, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    monkeypatch.undo()
+    assert hub_ctx.index.get_run("r1") is None
+
+    async def main() -> None:
+        hub = Hub(hub_ctx, EnvironmentsFile())  # no host ever sends an event for r1 again
+        await hub.start()
+        await hub.stop()
+
+    asyncio.run(main())
+    assert [s.value for s in hub_ctx.index.scores_for(["r1"])["r1"]] == [0.75]
+    assert not (hub_ctx.layout.run_dir("toy", "r1") / hub_mod.INDEX_PENDING).exists()
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -18313,10 +19231,22 @@ class Hub:
 
     # public API ----------------------------------------------------------------------
     async def start(self) -> None:
-        """Start one supervisor task per remote host (no-op when already started)."""
+        """
+        Start one supervisor task per remote host (no-op when already started).
+
+        First re-indexes mirrored runs a cut-short mirror left with
+        ``.mirror-index-pending`` (``reindex_pending``).
+        """
         if self._started:
             return
         self._started = True
+        try:
+            repaired = reindex_pending(self.ctx)
+        except Exception:  # noqa: BLE001 - each run's next mirror redoes it anyway
+            log.exception("re-indexing half-mirrored runs failed")
+        else:
+            if repaired:
+                log.info("re-indexed half-mirrored runs: %s", ", ".join(repaired))
         for sup in self._sups.values():
             if sup.spec.route != "local":
                 self._launch(sup)
@@ -18758,7 +19688,7 @@ class Hub:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_hub.py -v`
-Expected: 60 passed in about 32 s. When an env server stops with an open WebSocket, uvicorn logs a `CancelledError ... timeout graceful shutdown exceeded` traceback. This is expected; the tests still pass.
+Expected: 74 passed in about 32 s. When an env server stops with an open WebSocket, uvicorn logs a `CancelledError ... timeout graceful shutdown exceeded` traceback. This is expected; the tests still pass.
 
 Run: `uv run python -m doctest src/hypothex/remote/hub.py && uv run ruff check src/hypothex/remote/hub.py tests/remote/test_hub.py && uv run ruff format --check src/hypothex/remote/hub.py tests/remote/test_hub.py && uv run ty check src/hypothex/remote/hub.py`
 Expected: clean.
@@ -18807,6 +19737,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import socket
 import sqlite3
 import threading
@@ -19160,7 +20091,7 @@ with:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/remote/test_hub.py -v`
-Expected: 65 passed in about 35 s.
+Expected: 79 passed in about 35 s.
 
 Run: `uv run python -m doctest src/hypothex/remote/hub.py && uv run ruff check src/hypothex/remote/hub.py src/hypothex/core/index.py tests/remote/test_hub.py && uv run ruff format --check src/hypothex/remote/hub.py src/hypothex/core/index.py tests/remote/test_hub.py && uv run ty check src/hypothex/remote/hub.py src/hypothex/core/index.py`
 Expected: clean.
@@ -19181,9 +20112,9 @@ git commit -m "feat(remote): ssh route for hub supervisors via bootstrap and tun
 
 Contract 1.7 and the sweep rows of section 2. Spec 5.7, 8A.6. Mockup `docs/mockups/phase2/shot-sweep-light.png`.
 
-`hypothex.core.sweeps` is the one sweep engine: define a sweep (grid + seeded log/linear random samples × seeds), store its definition at `<store>/<project>/sweeps/<id>.yaml`, launch its runs tagged `sweep:<id>` with params `k=v`, summarize it (counts, per-cell stats, best cell, headline, total USD), cancel its queued runs, and extend it with seeds. The API, CLI, MCP, and hub call it (spec 7: no logic only in those layers). Starting and stopping a run are injected callables (`launch=`, `stop=`) that default to local `launch_run`/`stop_if_queued`, so the hub forwards the runs of a `host` sweep to the env server without this module knowing about transport.
+`hypothex.core.sweeps` is the one sweep engine: define a sweep (grid + seeded log/linear random samples × seeds), store its definition at `<store>/<project>/sweeps/<id>.yaml`, launch its runs tagged `sweep:<owner8>:<id>` with params `k=v`, summarize it (counts, per-cell stats, best cell, headline, total USD), cancel its queued runs, and extend it with seeds. The API, CLI, MCP, and hub call it (spec 7: no logic only in those layers). Starting and stopping a run are injected callables (`launch=`, `stop=`) that default to local `launch_run`/`stop_if_queued`, so the hub forwards the runs of a `host` sweep to the env server without this module knowing about transport.
 
-**Run identity is deterministic; membership is derived.** A sweep's runs are the indexed runs tagged `sweep:<id>`; the sweep file holds only the definition (no run ids), and `SweepSummary.run_ids` lists the members. Each (params, seed) of a sweep has one command id, `run_command_id(environment_id, project, sweep_id, params, seed)` = the first 16 hex digits of a SHA-256 over them (the hub's environment id and the project keep ids of two hubs' `s-xxxx` sweeps apart). Launch, a retried launch, and extend all do the same thing: save the definition (the new seeds first), then issue every (params, seed) that has no member yet, with its command id. Command receipts (`EventLog.run_once` here, the env server's receipts for forwarded runs) turn a repeat into the run that already exists, so a run whose launch answer was lost, or that is not mirrored yet, is never started twice and always counts once it is indexed. Cell statistics reuse the phase 1b leaderboard (`build_leaderboard`), so sweep numbers match the task page. These tests use only the local store, a fake launcher, local `python -c` runs, and fake GPUs.
+**Run identity is deterministic; membership is derived.** A sweep's runs are the indexed runs tagged `sweep:<owner8>:<id>`, where `owner8` is the first 8 hex digits of the environment id that holds the definition (`sweep_tag(owner, sweep_id)`; the hub's id for every sweep made through the hub). Sweep ids are short and per hub, and one host can serve two hubs: an owner-blind `sweep:<id>` tag would let a hub count another hub's runs of its own `s-7f3a` (they are mirrored to both). The sweep file holds only the definition (no run ids), and `SweepSummary.run_ids` lists the members. Each (params, seed) of a sweep has one command id, `run_command_id(environment_id, project, sweep_id, params, seed)` = the first 16 hex digits of a SHA-256 over them (the hub's environment id and the project keep ids of two hubs' `s-xxxx` sweeps apart). Launch, a retried launch, and extend all do the same thing: save the definition (the new seeds first), then issue every (params, seed) that has no member yet, with its command id. Command receipts (`EventLog.run_once` here, the env server's receipts for forwarded runs) turn a repeat into the run that already exists, so a run whose launch answer was lost, or that is not mirrored yet, is never started twice and always counts once it is indexed. Cell statistics reuse the phase 1b leaderboard (`build_leaderboard`), so sweep numbers match the task page. These tests use only the local store, a fake launcher, local `python -c` runs, and fake GPUs.
 
 ---
 
@@ -19200,11 +20131,11 @@ Contract 1.7 and the sweep rows of section 2. Spec 5.7, 8A.6. Mockup `docs/mocku
 - Produces:
   - `class SweepError(HypothexError)` — invalid sweep request (API maps it to 400).
   - `class SweepParam(BaseModel)`: `name: str; values: list[str] | None = None; low: float | None = None; high: float | None = None; log: bool = False`; property `is_range -> bool`. Numbers in `values` are coerced to strings.
-  - `class SweepSpec(BaseModel, extra="forbid")`: `id; project; task: str | None; host: str | None; grid: list[SweepParam]; random: int | None = None; seeds: list[int]; command_template: list[str]; created_by: str; created_at: datetime` (contract 1.7, exact; review round 2 removed `run_ids`: membership is derived from the `sweep:<id>` tag, Task 39).
+  - `class SweepSpec(BaseModel, extra="forbid")`: `id; project; task: str | None; host: str | None; grid: list[SweepParam]; random: int | None = None; seeds: list[int]; command_template: list[str]; created_by: str; created_at: datetime` (contract 1.7, exact; review round 2 removed `run_ids`: membership is derived from the `sweep:<owner8>:<id>` tag, Task 39).
   - `expand(spec: SweepSpec, rng_seed: int = 0) -> list[dict[str, str]]` (contract 1.7).
   - `sweep_combos(spec: SweepSpec) -> list[dict[str, str]]` — `expand` with a seed derived from `spec.id`; launch, extend and summary all use it.
-  - `planned_runs(spec: SweepSpec) -> int`; `sweep_tag(sweep_id: str) -> str` (`"sweep:<id>"`).
-  - Constants `SWEEP_ID_PATTERN`, `PARAM_NAME_PATTERN`, `SWEEP_TAG_PREFIX`, `SAMPLE_DIGITS`; module logger `log`.
+  - `planned_runs(spec: SweepSpec) -> int`; `sweep_tag(owner: str, sweep_id: str) -> str` (`"sweep:<owner[:8]>:<id>"`, `owner` = the owning environment id); `parse_sweep_tag(tag: str) -> tuple[str, str] | None` (`(owner8, sweep_id)`, None for other tags).
+  - Constants `SWEEP_ID_PATTERN`, `PARAM_NAME_PATTERN`, `SWEEP_TAG_PREFIX`, `SWEEP_OWNER_CHARS = 8`, `SAMPLE_DIGITS`; module logger `log`.
 
 Semantics fixed here: grid params form a product in the given order. Range params (`low`/`high`, `log` for log-uniform) need `random=N`; the N samples are drawn once and crossed with every grid combination (so every grid cell sees the same samples and the heat table compares like with like). With `random=N` and no range params, N grid combinations are kept at random (all when N >= grid size); they are picked as flat indices into the grid and decoded one by one, so a huge grid (ten params of 100 values is 10^20 combinations) is never built in memory. Sampled values are formatted with 4 significant digits (full `repr` if rounding left the range). Param names are template-field names (`{lr}`) and may not shadow built-in template vars (`seed`, `run_dir`, ...), because sweep params are passed as run vars.
 
@@ -19226,6 +20157,7 @@ from hypothex.core.sweeps import (
     SweepParam,
     SweepSpec,
     expand,
+    parse_sweep_tag,
     planned_runs,
     sweep_combos,
     sweep_tag,
@@ -19386,8 +20318,13 @@ def test_bad_specs_are_rejected(overrides: dict[str, object], message: str) -> N
         spec_of(**overrides)
 
 
-def test_sweep_tag() -> None:
-    assert sweep_tag("s-7f3a") == "sweep:s-7f3a"
+def test_sweep_tag_names_its_owner() -> None:
+    env = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+    assert sweep_tag(env, "s-7f3a") == "sweep:0a1b2c3d:s-7f3a"
+    assert sweep_tag(env, "s-7f3a") != sweep_tag("ffffffff" + env[8:], "s-7f3a")
+    assert parse_sweep_tag("sweep:0a1b2c3d:s-7f3a") == ("0a1b2c3d", "s-7f3a")
+    for other in ["sweep:s-7f3a", "best", "sweep::s-7f3a", "sweep:0a1b2c3d:Bad Id"]:
+        assert parse_sweep_tag(other) is None
 
 
 def test_random_subset_of_a_huge_grid_never_builds_the_product() -> None:
@@ -19434,6 +20371,7 @@ import hashlib
 import itertools
 import logging
 import math
+import re
 import sys
 from datetime import datetime
 from random import Random
@@ -19448,6 +20386,8 @@ log = logging.getLogger(__name__)
 SWEEP_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 PARAM_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_.]*$"
 SWEEP_TAG_PREFIX = "sweep:"
+SWEEP_OWNER_CHARS = 8
+"""A sweep tag names its owner by the first 8 hex digits of its environment id."""
 SAMPLE_DIGITS = 4
 
 
@@ -19512,8 +20452,9 @@ class SweepSpec(BaseModel, extra="forbid"):
     A sweep's definition, as stored in ``<store>/<project>/sweeps/<id>.yaml``.
 
     The file never lists runs: a sweep's runs are the runs tagged
-    ``sweep:<id>`` (``sweep_runs``). ``seeds`` lists every seed the sweep asks
-    for; ``extend_sweep`` adds to it before it launches.
+    ``sweep:<owner8>:<id>`` (``sweep_tag``, ``sweep_runs``). ``seeds`` lists
+    every seed the sweep asks for; ``extend_sweep`` adds to it before it
+    launches.
     """
 
     id: str = Field(pattern=SWEEP_ID_PATTERN)
@@ -19541,26 +20482,63 @@ class SweepSpec(BaseModel, extra="forbid"):
         return self
 
 
-def sweep_tag(sweep_id: str) -> str:
+def sweep_tag(owner: str, sweep_id: str) -> str:
     """
-    Return the tag every run of a sweep carries.
+    Return the tag every run of a sweep carries: ``sweep:<owner8>:<id>``.
+
+    The owner is the environment that holds the sweep's definition (the hub,
+    for sweeps made through it). Sweep ids are short and per hub, and one host
+    can serve two hubs, so the tag names the owner: each hub's membership
+    query (an exact tag match) sees only its own runs.
 
     Parameters
     ----------
+    owner : str
+        Environment id of the owner; its first ``SWEEP_OWNER_CHARS`` characters
+        are used.
     sweep_id : str
         Sweep id.
 
     Returns
     -------
     str
-        ``sweep:<id>``.
+        ``sweep:<owner8>:<id>``.
 
     Examples
     --------
-    >>> sweep_tag("s-7f3a")
-    'sweep:s-7f3a'
+    >>> sweep_tag("0a1b2c3d4e5f60718293a4b5c6d7e8f9", "s-7f3a")
+    'sweep:0a1b2c3d:s-7f3a'
     """
-    return f"{SWEEP_TAG_PREFIX}{sweep_id}"
+    return f"{SWEEP_TAG_PREFIX}{owner[:SWEEP_OWNER_CHARS]}:{sweep_id}"
+
+
+def parse_sweep_tag(tag: str) -> tuple[str, str] | None:
+    """
+    Split a sweep tag into its owner and sweep id.
+
+    Parameters
+    ----------
+    tag : str
+        Any run tag.
+
+    Returns
+    -------
+    tuple of (str, str) or None
+        ``(owner8, sweep_id)``, or None when ``tag`` is not a sweep tag.
+
+    Examples
+    --------
+    >>> parse_sweep_tag("sweep:0a1b2c3d:s-7f3a")
+    ('0a1b2c3d', 's-7f3a')
+    >>> parse_sweep_tag("best") is None
+    True
+    """
+    if not tag.startswith(SWEEP_TAG_PREFIX):
+        return None
+    owner, sep, sweep_id = tag.removeprefix(SWEEP_TAG_PREFIX).partition(":")
+    if not sep or not owner or re.fullmatch(SWEEP_ID_PATTERN, sweep_id) is None:
+        return None
+    return owner, sweep_id
 
 
 # expansion ---------------------------------------------------------------------------
@@ -19760,6 +20738,7 @@ from hypothex.core.sweeps import (
     expand,
     load_sweep,
     new_sweep_id,
+    parse_sweep_tag,
     planned_runs,
     save_sweep,
     sweep_combos,
@@ -20049,9 +21028,9 @@ git commit -m "feat(core): store sweeps under <store>/<project>/sweeps"
   - Phase 1b (exist): `build_leaderboard(project, task, config, runs, scores, versions=None, *, per_example=None) -> Leaderboard`, `Leaderboard.rows: list[LeaderboardRow]` (best first; `group_id`, `run_ids`, `n`, `primary: Stats | None`, `test_interval: NoiseInterval | None`, `vs_best.p`), `queries.primary_examples(ctx, config, task, runs, versions)`, `headlines.NO_RUNS`, `fmt_metric`, `fmt_metric_delta`, `fmt_p`, `Index.list_runs(project=, tag=, include_archived=, limit=)`, `Index.get_run`, `Index.scores_for`
   - Contract 1.6 (records group, earlier): `hypothex.core.records.CostTotals` (`total_usd: float`), `RunRecord.cost: CostTotals | None = None`, `RunRecord.sweep_id: str | None = None`, `RunRecord.gpus_requested: int = 0`
 - Produces:
-  - `class SweepSummary(BaseModel)`: `spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []` (contract 1.7; `run_ids` is derived: the indexed runs tagged `sweep:<id>`, in launch order).
+  - `class SweepSummary(BaseModel)`: `spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []; tag: str = ""` (contract 1.7; `run_ids` is derived: the indexed runs tagged `tag`, in launch order; `tag` is the sweep's member tag `sweep:<owner8>:<id>`, so clients such as the UI ask `GET /api/v1/runs?tag=` for exactly these runs).
   - `summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary` (contract 1.7). `counts` has keys `queued, running, finished, failed, killed, lost, total`. Each cell: `{params, group_id, n, mean, lo, hi, run_ids}` (contract) plus `std` and `runs: [{run_id, status, seed}]` for the heat-table glyphs.
-  - `sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]` — the sweep's members: indexed runs tagged `sweep:<id>`, archived ones included, in launch order (`created_at`, then run id).
+  - `sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]` — the sweep's members: indexed runs tagged `sweep_tag(ctx.descriptor.environment_id, spec.id)` (this environment owns the definitions in its store), archived ones included, in launch order (`created_at`, then run id). A run of another owner's sweep with the same id is never a member.
   - `list_sweeps(ctx: Context, project: str) -> list[dict[str, Any]]` — `[{id, created_at, n_runs, best}]`, newest first (backs `GET /api/v1/projects/{project}/sweeps` and `hx sweeps`).
   - Constant `STATUS_KEYS`.
 
@@ -20089,6 +21068,7 @@ from hypothex.core.sweeps import (
     list_sweeps,
     load_sweep,
     new_sweep_id,
+    parse_sweep_tag,
     planned_runs,
     save_sweep,
     summarize_sweep,
@@ -20112,6 +21092,7 @@ def add_run(
     value: float | None = None,
     *,
     sweep: str = "s-0001",
+    owner: str | None = None,
     cost_usd: float | None = None,
     usage_usd: float | None = None,
     commit: str | None = None,
@@ -20123,7 +21104,7 @@ def add_run(
         params={"lr": lr},
         vars={"lr": lr},
         seed=seed,
-        tags=[sweep_tag(sweep)],
+        tags=[sweep_tag(owner or ctx.descriptor.environment_id, sweep)],
         status=status,
         config_hash=config_hash({"params": {"lr": lr}}),
         environment_id=ctx.descriptor.environment_id,
@@ -20225,7 +21206,7 @@ def test_headline_names_only_the_params_that_differ(ctx: Context, toy_repo: Path
             task="toy-acc",
             params={"lr": lr, "beam": "5"},
             seed=1,
-            tags=[sweep_tag("s-0001")],
+            tags=[sweep_tag(ctx.descriptor.environment_id, "s-0001")],
             status=RunStatus.FINISHED,
             config_hash=config_hash({"params": {"lr": lr, "beam": "5"}}),
         )
@@ -20272,6 +21253,29 @@ def test_membership_is_the_sweep_tag(ctx: Context, toy_repo: Path) -> None:
     assert summary.counts["total"] == 1 and summary.run_ids == ["late"]
     assert summary.best is not None
     assert summary.best["run_ids"] == ["late"]
+    assert summary.tag == sweep_tag(ctx.descriptor.environment_id, "s-0001")
+
+
+def test_two_hubs_with_the_same_sweep_id_never_share_runs(
+    ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    # hub A (ctx) and hub B both made sweep s-0001 on one host; the host's runs of both
+    # are mirrored to both hubs
+    other = Context.open(tmp_path / "hub-b")
+    assert other.descriptor.environment_id[:8] != ctx.descriptor.environment_id[:8]
+    for hub in (ctx, other):
+        hub.register_project(toy_repo)
+        save_sweep(hub.layout, spec_of())
+    for hub in (ctx, other):
+        add_run(hub, f"a-{hub is ctx}", "1e-4", 1, RunStatus.FINISHED, 0.7)
+        add_run(hub, f"b-{hub is ctx}", "3e-4", 1, RunStatus.FINISHED, 0.9, owner="b0b0b0b0")
+    add_run(ctx, "from-b", "3e-4", 2, RunStatus.QUEUED, owner=other.descriptor.environment_id)
+    add_run(other, "from-a", "1e-4", 2, RunStatus.QUEUED, owner=ctx.descriptor.environment_id)
+    mine = summarize_sweep(ctx, "toy", "s-0001")
+    theirs = summarize_sweep(other, "toy", "s-0001")
+    assert mine.run_ids == ["a-True"] and mine.counts["total"] == 1
+    assert theirs.run_ids == ["a-False"] and theirs.counts["total"] == 1
+    assert mine.tag != theirs.tag
 
 
 def test_lower_is_better_picks_the_smallest_mean(ctx: Context, tmp_path: Path) -> None:
@@ -20383,15 +21387,19 @@ class SweepSummary(BaseModel):
     headline: str
     total_usd: float
     run_ids: list[str] = Field(default_factory=list)
-    """The sweep's members (runs tagged ``sweep:<id>``), in launch order; derived."""
+    """The sweep's members (runs tagged ``tag``), in launch order; derived."""
+    tag: str = ""
+    """The sweep's member tag ``sweep:<owner8>:<id>`` (ask ``GET /api/v1/runs?tag=``)."""
 
 
 def sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]:
     """
-    Return the members of a sweep: its indexed runs tagged ``sweep:<id>``.
+    Return the members of a sweep: its indexed runs tagged ``sweep:<owner8>:<id>``.
 
     Membership is derived, never stored: a run that a host accepted counts as
     soon as it is mirrored, even when the launch call that started it failed.
+    The owner is this environment (its store holds the definition), so the
+    runs of another hub's sweep with the same id are never members.
 
     Parameters
     ----------
@@ -20405,9 +21413,8 @@ def sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]:
     list of RunRecord
         Archived ones included, in launch order (``created_at``, then run id).
     """
-    tagged = ctx.index.list_runs(
-        project=spec.project, tag=sweep_tag(spec.id), include_archived=True, limit=None
-    )
+    tag = sweep_tag(ctx.descriptor.environment_id, spec.id)
+    tagged = ctx.index.list_runs(project=spec.project, tag=tag, include_archived=True, limit=None)
     return sorted(tagged, key=lambda r: (r.created_at, r.run_id))
 
 
@@ -20582,6 +21589,7 @@ def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary:
         headline=_headline(board, ranked, _p_between(ctx, spec, runs, board, ranked)),
         total_usd=math.fsum(_run_usd(r) for r in runs),
         run_ids=[r.run_id for r in runs],
+        tag=sweep_tag(ctx.descriptor.environment_id, spec.id),
     )
 
 
@@ -20625,7 +21633,7 @@ def list_sweeps(ctx: Context, project: str) -> list[dict[str, Any]]:
 
 Run: `uv run pytest tests/core/test_sweeps.py -q`
 
-Expected: `53 passed`
+Expected: `54 passed`
 
 Run: `uv run ruff check src/hypothex/core/sweeps.py tests/core/test_sweeps.py && uv run ruff format --check src/hypothex/core/sweeps.py tests/core/test_sweeps.py && uv run ty check src/hypothex/core/sweeps.py tests/core/test_sweeps.py`
 
@@ -20640,7 +21648,7 @@ git commit -m "feat(core): summarize sweeps with cells, best cell, headline, and
 
 ---
 
-### Task 40: Launch a sweep (tag sweep:<id>, params k=v, seed-major order)
+### Task 40: Launch a sweep (tag sweep:<owner8>:<id>, params k=v, seed-major order)
 
 **Files:**
 - Modify: `src/hypothex/core/sweeps.py`
@@ -20652,13 +21660,13 @@ git commit -m "feat(core): summarize sweeps with cells, best cell, headline, and
   - Phase 1a (exist): `launch_run(ctx, req: RunRequest) -> RunRecord`, `load_project_config(repo) -> ProjectConfig`, `template_fields(text) -> set[str]`, `Context.update_run(run_id, event_type, mutate, payload)`, `utcnow()`
   - Contract 1.6 (execution group, earlier): `RunRequest.gpus: int = 0` and `RunRequest.queue: bool = False` ("prepare_run accepts gpus, queue"); with `gpus=0, queue=False`, `launch_run` starts the run at once as in phase 1. `RunRecord.sweep_id`, `RunRecord.gpus_requested` (records group).
 - Produces:
-  - `Launcher = Callable[[RunRequest, str], RunRecord]` — how a run is started: the request and the run's deterministic command id. The hub API passes a forwarder for `host` sweeps (`POST /api/v1/hosts/{host}/runs` with the request's fields and that `command_id`, so the env server's receipts turn a repeat into the same run; the run learns its sweep id from its `sweep:<id>` tag, Task 46); the default launches here with `launch_run` inside `ctx.events.run_once(command_id, ...)` and sets `record.sweep_id` with `mark_sweep`.
+  - `Launcher = Callable[[RunRequest, str], RunRecord]` — how a run is started: the request and the run's deterministic command id. The hub API passes a forwarder for `host` sweeps (`POST /api/v1/hosts/{host}/runs` with the request's fields and that `command_id`, so the env server's receipts turn a repeat into the same run; the run learns its sweep id from its `sweep:<owner8>:<id>` tag, `parse_sweep_tag`, Task 46); the default launches here with `launch_run` inside `ctx.events.run_once(command_id, ...)` and sets `record.sweep_id` with `mark_sweep`.
   - `run_command_id(environment_id: str, project: str, sweep_id: str, params: dict[str, str], seed: int | None) -> str` — 16 hex digits of a SHA-256 over them (sorted params): the one command id of that sweep run, on every launch, retry, and extend.
   - `mark_sweep(ctx: Context, run_id: str, sweep_id: str) -> RunRecord` — sets `RunRecord.sweep_id` (event `run.tagged`, payload `{sweep_id}`). The env server's launch route uses it for forwarded sweep runs (Task 43).
   - `launch_sweep(ctx: Context, *, project: str, grid: list[SweepParam], seeds: list[int], command: list[str], task: str | None = None, host: str | None = None, random: int | None = None, hypothesis: str = "", gpus: int = 0, queue: bool = False, created_by: str = "human", repo: Path | None = None, launch: Launcher | None = None, command_id: str | None = None) -> SweepSummary` — backs `POST /api/v1/sweeps`, `hx sweep`, MCP `launch_sweep`. With `command_id`, the sweep id is claimed for that command before the first run starts (`<store>/<project>/sweeps/.commands/<sha256 of command_id>.json`, `{command_id, sweep_id}`). A retry of the same command (the API's `run_once` drops the receipt of a failed call, so a retry runs again) resumes that same sweep: it issues every (params, seed) that has no member yet, each with its `run_command_id`, so a run that was accepted but whose answer was lost (or that is not mirrored yet) comes back from its receipt instead of starting twice, and counts once it is indexed.
   - Constants `MAX_SWEEP_RUNS = 1000`; private `_resolve_repo`, `_check_launchable`, `_local_launcher`, `_requests`, `_issue`, `_combo_key`, `_claimed_sweep`, `_claim_sweep`.
 
-Every run gets tag `sweep:<id>`, `params` = its combination (also passed as `vars`, so `{lr}` in the command is filled), its `seed`, the sweep's task, hypothesis, created_by, gpus and queue. Runs are launched seed-major (seed 1 of every cell first), so a queue fills the whole table early. Each run's command id is `run_command_id(...)`. Everything is checked before the first run starts: spec validity, size (<= 1000 runs), that every `{field}` in the command is a sweep param or a built-in that a sweep fills (`run_id`, `run_dir`, `repo`, `task`, `seed`, plus `dataset.*` when a task is set), and that the command uses every swept param (a param the command never reads would give identical runs). `{seed}` is not required: runs also get `$HYPOTHEX_SEED`. If a launch fails midway, the error is raised; the definition stays (its runs are found by their tag), and a retry issues only the missing runs. If no run started and the sweep has no member, the file is removed (a `command_id` claim stays, so a retry reuses the id and its run command ids).
+Every run gets tag `sweep_tag(<this environment's id>, <id>)` = `sweep:<owner8>:<id>`, `params` = its combination (also passed as `vars`, so `{lr}` in the command is filled), its `seed`, the sweep's task, hypothesis, created_by, gpus and queue. Runs are launched seed-major (seed 1 of every cell first), so a queue fills the whole table early. Each run's command id is `run_command_id(...)`. Everything is checked before the first run starts: spec validity, size (<= 1000 runs), that every `{field}` in the command is a sweep param or a built-in that a sweep fills (`run_id`, `run_dir`, `repo`, `task`, `seed`, plus `dataset.*` when a task is set), and that the command uses every swept param (a param the command never reads would give identical runs). `{seed}` is not required: runs also get `$HYPOTHEX_SEED`. If a launch fails midway, the error is raised; the definition stays (its runs are found by their tag), and a retry issues only the missing runs. The definition is never deleted once a launch request was made, even when the first request fails: a failure may hide an accepted run (the host took it and the answer was lost), and that run would point at a sweep that no longer exists. Only a failure before any request (the checks above, before the file is written, or an error before the first launcher call) leaves no file. A sweep whose requests all failed stays listed with 0 runs; a retry with the same `command_id` reuses its id and run command ids, so an accepted run comes back from its receipt.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -20699,6 +21707,7 @@ from hypothex.core.sweeps import (
     list_sweeps,
     load_sweep,
     new_sweep_id,
+    parse_sweep_tag,
     planned_runs,
     run_command_id,
     save_sweep,
@@ -20815,7 +21824,7 @@ def test_launch_creates_file_and_one_run_per_cell_and_seed(ctx: Context, toy_rep
     ]
     assert [r.seed for r in fake.requests[4:]] == [2, 2, 2, 2]
     first = fake.requests[0]
-    assert first.tags == [f"sweep:{sid}"]
+    assert first.tags == [f"sweep:{ctx.descriptor.environment_id[:8]}:{sid}"]
     assert first.vars == {"lr": "1e-4", "beam": "1"}
     assert first.command == CMD
     assert first.task == "toy-acc"
@@ -20942,7 +21951,8 @@ def test_failed_launch_keeps_the_runs_already_started(ctx: Context, toy_repo: Pa
     assert spec.seeds == [1, 2]
 
 
-def test_failed_first_launch_removes_the_sweep(ctx: Context, toy_repo: Path) -> None:
+def test_a_failed_first_launch_keeps_the_definition(ctx: Context, toy_repo: Path) -> None:
+    # the hub cannot know the host refused it: an error may hide an accepted run
     ctx.register_project(toy_repo)
     with pytest.raises(RunError):
         launch_sweep(
@@ -20953,7 +21963,35 @@ def test_failed_first_launch_removes_the_sweep(ctx: Context, toy_repo: Path) -> 
             command=CMD[:4],
             launch=FakeLauncher(ctx, fail_at=0),
         )
-    assert list(ctx.layout.project_dir("toy").glob("sweeps/*.yaml")) == []
+    [listed] = list_sweeps(ctx, "toy")
+    assert listed["n_runs"] == 0
+    assert sweep_path(ctx.layout, "toy", listed["id"]).is_file()
+
+
+def test_a_lost_first_response_keeps_the_definition_and_the_run(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # the host accepted the first run, the answer was lost, nothing is mirrored yet
+    ctx.register_project(toy_repo)
+    fake = FakeLauncher(ctx, lose_answer_at=1, mirrored=False)
+    args: dict[str, Any] = {
+        "project": "toy",
+        "grid": [LR],
+        "seeds": [1],
+        "command": CMD[:4],
+        "launch": fake,
+        "command_id": "cmd-1",
+    }
+    with pytest.raises(RunError, match="answer was lost"):
+        launch_sweep(ctx, **args)
+    [listed] = list_sweeps(ctx, "toy")
+    sid = listed["id"]
+    assert sweep_path(ctx.layout, "toy", sid).is_file()  # the accepted run keeps its sweep
+    fake.lose_answer_at = None
+    summary = launch_sweep(ctx, **args)
+    assert summary.spec.id == sid and len(fake.requests) == 2  # run 1 came from its receipt
+    fake.mirror_all()
+    assert summarize_sweep(ctx, "toy", sid).run_ids == ["r01", "r02"]
 
 
 def test_launch_with_the_local_launcher_runs_real_commands(ctx: Context, toy_repo: Path) -> None:
@@ -20970,7 +22008,7 @@ def test_launch_with_the_local_launcher_runs_real_commands(ctx: Context, toy_rep
     assert [r.command[-1] for r in records] == ["print('lr=0.1 seed=1')", "print('lr=0.2 seed=1')"]
     assert [r.params for r in records] == [{"lr": "0.1"}, {"lr": "0.2"}]
     assert all(r.sweep_id == summary.spec.id for r in records)
-    assert all(sweep_tag(summary.spec.id) in r.tags for r in records)
+    assert all(sweep_tag(ctx.descriptor.environment_id, summary.spec.id) in r.tags for r in records)
     log = (ctx.run_dir(records[1]) / "logs" / "stdout.log").read_text()
     assert "lr=0.2 seed=1" in log
 
@@ -20998,7 +22036,8 @@ def test_a_retried_launch_resumes_the_same_sweep(ctx: Context, toy_repo: Path) -
         (2, {"lr": "1e-4"}),
         (2, {"lr": "3e-4"}),
     ]
-    assert {tuple(r.tags) for r in fake.requests} == {(f"sweep:{first['id']}",)}
+    owner = ctx.descriptor.environment_id
+    assert {tuple(r.tags) for r in fake.requests} == {(sweep_tag(owner, first["id"]),)}
     assert [s["id"] for s in list_sweeps(ctx, "toy")] == [first["id"]]
     again = launch_sweep(ctx, **args)  # nothing is missing: nothing starts
     assert again.run_ids == summary.run_ids and len(fake.requests) == 4
@@ -21263,12 +22302,14 @@ def _requests(
     seeds: Iterable[int],
     repo: Path,
     *,
+    owner: str,
     hypothesis: str,
     gpus: int,
     queue: bool,
 ) -> Iterator[tuple[int, RunRequest]]:
     """One request per seed and combination, seed-major (seed 1 of every cell first)."""
     combos = sweep_combos(spec)
+    tag = sweep_tag(owner, spec.id)
     for seed in seeds:
         for combo in combos:
             yield (
@@ -21279,7 +22320,7 @@ def _requests(
                     task=spec.task,
                     hypothesis=hypothesis,
                     seed=seed,
-                    tags=[sweep_tag(spec.id)],
+                    tags=[tag],
                     params=dict(combo),
                     vars=dict(combo),
                     created_by=spec.created_by,
@@ -21327,6 +22368,7 @@ def _issue(
     launch: Launcher,
     requests: Iterable[tuple[int, RunRequest]],
     started: list[str],
+    requested: list[str] | None = None,
 ) -> None:
     """
     Issue every (params, seed) of ``requests`` that has no member yet, in order.
@@ -21334,7 +22376,8 @@ def _issue(
     Each run gets its ``run_command_id``, so a run that exists but is not
     indexed yet (its answer lost, or not mirrored) comes back from the
     launcher's receipt instead of starting twice. ``started`` collects the run
-    ids as they come back.
+    ids as they come back; ``requested`` collects each command id before its
+    request goes out (the caller then knows a request was made).
     """
     have = {(r.seed, _combo_key(r.params)) for r in sweep_runs(ctx, spec)}
     owner = ctx.descriptor.environment_id
@@ -21342,6 +22385,8 @@ def _issue(
         if (seed, _combo_key(req.params)) in have:
             continue
         command_id = run_command_id(owner, spec.project, spec.id, req.params, seed)
+        if requested is not None:
+            requested.append(command_id)
         started.append(launch(req, command_id).run_id)
 
 
@@ -21366,10 +22411,12 @@ def launch_sweep(
     """
     Create a sweep file and launch one run per param combination and seed.
 
-    Every run gets tag ``sweep:<id>``, params ``k=v`` (also as template vars, so
-    ``{k}`` in the command is filled), and its seed. Runs are launched seed-major.
-    If a launch fails, the runs already launched stay in the sweep file and the
-    error is raised; when none launched, the sweep file is removed.
+    Every run gets tag ``sweep:<owner8>:<id>`` (``sweep_tag``; this environment
+    owns the sweep), params ``k=v`` (also as template vars, so ``{k}`` in the
+    command is filled), and its seed. Runs are launched seed-major.
+    If a launch fails, the error is raised and the sweep file stays, even when
+    the first request failed (a lost answer may hide an accepted run); only an
+    error before any launch request leaves no file.
 
     Parameters
     ----------
@@ -21455,12 +22502,21 @@ def launch_sweep(
             save_sweep(ctx.layout, spec)
             _claim_sweep(ctx.layout, project, command_id, spec.id)  # before any run starts
         requests = _requests(
-            spec, spec.seeds, repo_path, hypothesis=hypothesis, gpus=gpus, queue=queue
+            spec,
+            spec.seeds,
+            repo_path,
+            owner=ctx.descriptor.environment_id,
+            hypothesis=hypothesis,
+            gpus=gpus,
+            queue=queue,
         )
+        requested: list[str] = []
         try:
-            _issue(ctx, spec, launch or _local_launcher(ctx, spec.id), requests, started)
+            _issue(ctx, spec, launch or _local_launcher(ctx, spec.id), requests, started, requested)
         except BaseException:
-            if not started and not sweep_runs(ctx, spec):  # nothing to show: no sweep
+            # once a request went out its outcome is unknown (an accepted run whose answer
+            # was lost): the definition stays. Only a failure before any request removes it.
+            if not requested and claimed is None:
                 sweep_path(ctx.layout, project, spec.id).unlink(missing_ok=True)
             raise
     return summarize_sweep(ctx, project, spec.id)
@@ -21470,7 +22526,7 @@ def launch_sweep(
 
 Run: `uv run pytest tests/core/test_sweeps.py -q`
 
-Expected: `73 passed`
+Expected: `75 passed`
 
 Run: `uv run ruff check src/hypothex/core/sweeps.py tests/core/test_sweeps.py && uv run ruff format --check src/hypothex/core/sweeps.py tests/core/test_sweeps.py && uv run ty check src/hypothex/core/sweeps.py tests/core/test_sweeps.py`
 
@@ -21548,6 +22604,7 @@ from hypothex.core.sweeps import (
     list_sweeps,
     load_sweep,
     new_sweep_id,
+    parse_sweep_tag,
     planned_runs,
     run_command_id,
     save_sweep,
@@ -21641,7 +22698,7 @@ def test_extend_adds_every_cell_for_each_new_seed(ctx: Context, toy_repo: Path) 
     ]
     # gpus, queue, and hypothesis follow the sweep's first run
     assert all((r.gpus, r.queue, r.hypothesis) == (2, True, "lr matters") for r in new)
-    assert all(r.tags == [f"sweep:{sid}"] for r in new)
+    assert all(r.tags == [sweep_tag(ctx.descriptor.environment_id, sid)] for r in new)
     assert load_sweep(ctx.layout, "toy", sid).seeds == [1, 2, 3]
 
 
@@ -21976,6 +23033,7 @@ def extend_sweep(
             grown,
             grown.seeds,
             repo_path,
+            owner=ctx.descriptor.environment_id,
             hypothesis=hypothesis,
             gpus=n_gpus,
             queue=queue if queue is not None else n_gpus > 0,
@@ -22118,7 +23176,7 @@ def test_cancel_if_queued_cancels_only_a_pending_job(ctx: Context, slurm: FakeSl
 
 Run: `uv run pytest tests/core/test_sweeps.py -q`
 
-Expected: `88 passed` in `test_sweeps.py`; `uv run pytest tests/core/test_slurm.py -q` reports `81 passed`
+Expected: `90 passed` in `test_sweeps.py`; `uv run pytest tests/core/test_slurm.py -q` reports `103 passed`
 
 Run: `uv run ruff check src/hypothex/core/sweeps.py tests/core/test_sweeps.py && uv run ruff format --check src/hypothex/core/sweeps.py tests/core/test_sweeps.py && uv run ty check src/hypothex/core/sweeps.py tests/core/test_sweeps.py`
 
@@ -23326,7 +24384,12 @@ def test_slurm_counts_and_cost_today(tmp_path: Path) -> None:
             )
         )
         row = next(x for x in r.client.get("/api/v1/hosts").json() if x["name"] == "gpu1")
-        assert row["kind"] == "slurm" and row["slurm"] == {"pending": 2, "running": 1}
+        # the env server has no SLURM here (the isolation stub refuses scontrol): no comments
+        assert row["kind"] == "slurm" and row["slurm"] == {
+            "pending": 2,
+            "running": 1,
+            "comment_accounting": False,
+        }
         assert row["cost_today_usd"] == 3.25
 
 
@@ -23880,9 +24943,18 @@ def host_rows(
         runs = environment_runs(ctx, state.environment_id) if state.environment_id else []
         slurm = None
         if spec.kind == "slurm":
+            accounting = None  # unknown until the host answers
+            if state.state == "connected":
+                with contextlib.suppress(HypothexError, httpx.HTTPError, AttributeError):
+                    accounting = (
+                        manager.client(state.name)
+                        .get_json("/api/v1/slurm")
+                        .get("comment_accounting")
+                    )
             slurm = {
                 "pending": sum(1 for r in runs if r.status == RunStatus.QUEUED),
                 "running": sum(1 for r in runs if r.status == RunStatus.RUNNING),
+                "comment_accounting": accounting,
             }
         rows.append(
             {
@@ -24647,8 +25719,8 @@ git commit -m "feat(api): launch on a host and forward remote run actions with t
 - Test: `tests/api/test_sweeps_pull.py`
 
 **Interfaces:**
-- Consumes: the sweep engine `launch_sweep`, `extend_sweep`, `cancel_queued`, `list_sweeps`, `summarize_sweep`, `Launcher`, `SWEEP_TAG_PREFIX`, `SweepParam`, `SweepSpec`, `SweepSummary` (Tasks 37–41); `find_sweep`, `ssh_target`, `is_remote` (Task 42); `launch_on_host`, `remote_checkout`, `HostLaunchBody` (Task 45); `HubManager` (Task 44); `copy_from` (Task 6); `EnvClient.fetch_file` (Task 15); `Artifact` (records).
-- Each forwarded sweep run carries the deterministic command id the engine gives it (`run_command_id`, Task 40), so the host's receipts turn any repeat (a retried launch or extend, a run whose answer was lost, a run not mirrored yet) into the run that already exists. A remote run learns its sweep id from its `sweep:<id>` tag. `POST /api/v1/sweeps` passes its `command_id` to `launch_sweep`, so a retry after a partial failure resumes the same sweep id (Task 40). The summary a host sweep route returns waits (up to `MIRROR_WAIT_SECONDS`) until the runs this call started are mirrored, since membership is derived from indexed runs.
+- Consumes: the sweep engine `launch_sweep`, `extend_sweep`, `cancel_queued`, `list_sweeps`, `summarize_sweep`, `Launcher`, `parse_sweep_tag`, `SweepParam`, `SweepSpec`, `SweepSummary` (Tasks 37–41); `find_sweep`, `ssh_target`, `is_remote` (Task 42); `launch_on_host`, `remote_checkout`, `HostLaunchBody` (Task 45); `HubManager` (Task 44); `copy_from` (Task 6); `EnvClient.fetch_file` (Task 15); `Artifact` (records).
+- Each forwarded sweep run carries the deterministic command id the engine gives it (`run_command_id`, Task 40), so the host's receipts turn any repeat (a retried launch or extend, a run whose answer was lost, a run not mirrored yet) into the run that already exists. A remote run learns its sweep id from its `sweep:<owner8>:<id>` tag (`parse_sweep_tag`); the owner is the hub, so another hub's runs of a sweep with the same id are never counted. `POST /api/v1/sweeps` passes its `command_id` to `launch_sweep`, so a retry after a partial failure resumes the same sweep id (Task 40). The summary a host sweep route returns waits (up to `MIRROR_WAIT_SECONDS`) until the runs this call started are mirrored, since membership is derived from indexed runs.
 - Produces (in `hypothex.api.app`):
   - `MIRROR_WAIT_SECONDS = 10.0`, `PULL_MAX_BYTES = 64 * 1024**3`
   - `class SweepBody(ActionBody)`: `project`, `task`, `host`, `grid: list[SweepParam]`, `random`, `seeds` (≥1), `command` (≥1), `hypothesis`, `gpus`, `queue`, `commit`, `diff` (the last two are optional and additive: `hx sweep --host` sends the client checkout's commit and diff, so a hub without that checkout runs the client's code); `class SeedsBody(ActionBody)`: `seeds`; `class PullBody(ActionBody)`: `artifact: str = "checkpoint"`
@@ -24748,7 +25820,8 @@ def test_remote_sweep_runs_on_the_host(tmp_path: Path) -> None:
         head = git(r.hub_repo, "rev-parse", "HEAD")
         for rid in ids:
             record = r.env.find_record(rid)
-            assert record.sweep_id == sid and f"sweep:{sid}" in record.tags
+            owner = r.hub.descriptor.environment_id[:8]
+            assert record.sweep_id == sid and f"sweep:{owner}:{sid}" in record.tags
             assert Path(record.cwd).resolve() == r.env_repo.resolve()
             assert record.git.commit == head  # every run pinned to the hub's commit
 
@@ -24901,7 +25974,6 @@ from pathlib import Path, PurePosixPath
 
 from hypothex.core.records import Artifact, RunRecord, RunStatus
 from hypothex.core.sweeps import (
-    SWEEP_TAG_PREFIX,
     Launcher,
     SweepParam,
     SweepSpec,
@@ -24911,6 +25983,7 @@ from hypothex.core.sweeps import (
     launch_sweep,
     list_sweeps,
     mark_sweep,
+    parse_sweep_tag,
     stop_if_queued,
     summarize_sweep,
 )
@@ -25084,8 +26157,8 @@ In `create_app`, after the `forward` helper add:
         pinned: dict[str, str | None] = {}
 
         def launch(req: RunRequest, run_command_id: str) -> RunRecord:
-            tags = [t for t in req.tags if t.startswith(SWEEP_TAG_PREFIX)]
-            sweep_id = tags[0].removeprefix(SWEEP_TAG_PREFIX) if tags else None
+            parsed = [p for p in map(parse_sweep_tag, req.tags) if p is not None]
+            sweep_id = parsed[0][1] if parsed else None
             local = req.repo.is_dir()  # False for a project copied from a host
             if "commit" not in pinned:
                 # spec 8A.4: one commit for every run of this call; the host fetches it
@@ -27093,7 +28166,7 @@ def sweep_create(
     repo: RepoOpt = None,
     as_json: JsonFlag = False,
 ) -> None:
-    """Start a sweep (default subcommand): every combination x seed, tagged sweep:<id>."""
+    """Start a sweep (default subcommand): every combination x seed, tagged with the sweep."""
     from hypothex.core.sweeps import launch_sweep
     from hypothex.mcp.server import is_remote, parse_grid, parse_ranges, parse_seeds
 
@@ -28127,7 +29200,8 @@ def test_seed_demo_hosts_writes_hosts_runs_and_the_sweep(hosts_home: Path) -> No
     assert (lost.executor.slurm_job_id, lost.executor.node) == ("48211932", "r208u06n02")
     spec = load_sweep(hub.layout, "rxn-forward", DEMO_SWEEP_ID)
     assert spec.host == "gpu1" and spec.seeds == [1, 2, 3]
-    members = gpu.index.list_runs(tag=f"sweep:{DEMO_SWEEP_ID}", include_archived=True, limit=None)
+    tag = f"sweep:{hub.descriptor.environment_id[:8]}:{DEMO_SWEEP_ID}"  # the hub owns it
+    members = gpu.index.list_runs(tag=tag, include_archived=True, limit=None)
     assert len(members) == 21
     assert [p.name for p in spec.grid] == ["lr", "beam"]
     gpus = json.loads((hosts_home / DEMO_HOSTS_DIR / "gpu1-gpus.json").read_text())
@@ -28184,12 +29258,16 @@ def test_demo_hosts_serve_connected_hosts_a_queue_and_a_sweep(tmp_path: Path) ->
             )
             current = rows()
             assert len(current["gpu1"]["gpus"]) == 8
-            assert current["cluster"]["slurm"] == {"pending": 0, "running": 0}
+            assert current["cluster"]["slurm"] == {
+                "pending": 0,
+                "running": 0,
+                "comment_accounting": True,
+            }
             wait_until(lambda: rows()["gpu1"]["queue"] == 3, timeout=60)
             def summary() -> dict:
                 return client.get(f"/api/v1/sweeps/rxn-forward/{DEMO_SWEEP_ID}").json()
 
-            # 21 seeded + 6 live runs, all tagged sweep:<id>, members once mirrored
+            # 21 seeded + 6 live runs, all tagged for the hub, members once mirrored
             wait_until(lambda: summary()["counts"]["total"] == 27, timeout=60)
             assert set(started) <= set(summary()["run_ids"])
 
@@ -28273,8 +29351,9 @@ from hypothex.core.config import render_template
 from hypothex.core.cost import compute_cost
 from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.layout import Layout
+from hypothex.core.environment import load_descriptor
 from hypothex.core.records import DatasetRef, ExecutorInfo, GitInfo, RunRecord, RunStatus, ScoreRecord
-from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep
+from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep, sweep_tag
 from hypothex.remote.config import HostSpec, SlurmDefaults, load_hosts, save_hosts
 ```
 
@@ -28339,6 +29418,10 @@ _FAKE_SLURM = {
     "squeue": "#!/bin/sh\n# demo stand-in: the queue is empty\nexit 0\n",
     "sacct": "#!/bin/sh\n# demo stand-in: no accounting records\nexit 0\n",
     "scancel": "#!/bin/sh\nexit 0\n",
+    "scontrol": (
+        "#!/bin/sh\n# demo stand-in: accounting keeps job comments\n"
+        'echo "AccountingStoreFlags    = job_comment"\n'
+    ),
 }
 
 
@@ -28425,6 +29508,7 @@ def _host_run(
     created_by: str,
     rate: float,
     sweep_id: str | None = None,
+    sweep_owner: str = "",
     slurm_job: str | None = None,
     node: str | None = None,
 ) -> RunRecord:
@@ -28468,7 +29552,7 @@ def _host_run(
         started_at=created_at,
         ended_at=created_at + timedelta(minutes=minutes),
         exit_code=exit_code,
-        tags=[f"sweep:{sweep_id}"] if sweep_id else [],
+        tags=[sweep_tag(sweep_owner, sweep_id)] if sweep_id else [],
         created_by=created_by,
         sweep_id=sweep_id,
         gpus_requested=2,
@@ -28489,8 +29573,8 @@ def _score(ctx: Context, record: RunRecord, value: float) -> None:
     )
 
 
-def _seed_gpu1_sweep(ctx: Context, repo: Path, anchor: datetime) -> list[str]:
-    """Seed the sweep's finished and failed cells on gpu1; return their run ids."""
+def _seed_gpu1_sweep(ctx: Context, repo: Path, anchor: datetime, owner: str) -> list[str]:
+    """Seed the sweep's finished and failed cells on gpu1 (tagged for ``owner``, the hub)."""
     start = anchor - timedelta(hours=5, minutes=20)
     run_ids: list[str] = []
     for (lr, beam), runs in _SWEEP_GRID.items():
@@ -28514,6 +29598,7 @@ def _seed_gpu1_sweep(ctx: Context, repo: Path, anchor: datetime) -> list[str]:
                 created_by="agent:tuner",
                 rate=_DEMO_GPU_RATE,
                 sweep_id=DEMO_SWEEP_ID,
+                sweep_owner=owner,
             )
             if failed:
                 atomic_write_text(
@@ -28622,7 +29707,8 @@ def seed_demo_hosts(home: Path) -> dict[str, str]:
     for name, text in _FAKE_SLURM.items():
         atomic_write_text(bin_dir / name, text)
         (bin_dir / name).chmod(0o755)
-    _seed_gpu1_sweep(gpu_ctx, gpu_repo, anchor)  # tagged sweep:<id>: the sweep's members
+    owner = hub.descriptor.environment_id  # the hub owns the sweep: its tag names the hub
+    _seed_gpu1_sweep(gpu_ctx, gpu_repo, anchor, owner)  # tagged: the sweep's members
     _seed_cluster_runs(slurm_ctx, slurm_repo, anchor)
     save_sweep(
         hub.layout,
@@ -28759,6 +29845,8 @@ def _launch_live_runs(home: Path, hosts: list[_DemoHost], urls: dict[str, str]) 
     if active:
         return []
     project, task = DEMO_TASKS["training"]
+    hub_id = load_descriptor(Layout(home.expanduser().resolve())).environment_id
+    tag = sweep_tag(hub_id, DEMO_SWEEP_ID)  # the hub owns the sweep
     cells = [
         (lr, beam, seed, state)
         for (lr, beam), runs in _SWEEP_GRID.items()
@@ -28779,7 +29867,7 @@ def _launch_live_runs(home: Path, hosts: list[_DemoHost], urls: dict[str, str]) 
                 "seed": seed,
                 "params": params,
                 "vars": params,
-                "tags": [f"sweep:{DEMO_SWEEP_ID}"],
+                "tags": [tag],
                 "gpus": 2,
                 "queue": True,
                 "sweep_id": DEMO_SWEEP_ID,
@@ -28790,7 +29878,7 @@ def _launch_live_runs(home: Path, hosts: list[_DemoHost], urls: dict[str, str]) 
         if resp.status_code >= 400:
             raise StoreError(f"demo host {gpu.name} refused a run: {resp.text[:300]}")
         run_ids.append(resp.json()["run_id"])
-    return run_ids  # tagged sweep:<id>: the hub counts them once they are mirrored
+    return run_ids  # tagged for the hub: it counts them once they are mirrored
 
 
 def _stop_runs(url: str, run_ids: list[str]) -> None:
@@ -29250,7 +30338,9 @@ Sweeps
        python train.py --lr '{lr}' --beam '{beam}' --seed '{seed}'
 
 Every combination runs once per seed (here 3 x 2 x 3 = 18 runs), tagged
-``sweep:<id>``. Seed 1 of every combination starts first, so a queue fills the whole
+``sweep:<hub>:<id>`` (``<hub>``: the first 8 characters of the hub's environment id,
+so two hubs using one host never mix their sweeps). Seed 1 of every combination
+starts first, so a queue fills the whole
 table early. The command must use every swept name; each run also gets its seed as
 ``$HYPOTHEX_SEED``. ``--seeds 3`` means seeds 1, 2, 3; ``--seeds 1,2,5`` lists them.
 For random search give ranges and a count: ``--random 20 --param lr=1e-5:1e-3:log``.
@@ -30806,6 +31896,8 @@ JobAcctGatherType=jobacct_gather/none
 AccountingStorageType=accounting_storage/slurmdbd
 AccountingStorageHost=slurmdbd
 AccountingStoragePort=6819
+# sacct shows job comments only with this flag: Hypothex settles unknown submissions by them
+AccountingStoreFlags=job_comment
 JobCompType=jobcomp/none
 SchedulerType=sched/backfill
 SelectType=select/cons_tres
@@ -31774,3 +32866,18 @@ Verified in a scratch worktree of `phase-2` (HEAD `8e9ea65`), built task by task
 - Coordinator alignment: `mirror.run_updated` carries `reason` when the host's event had one (Tasks 34, 35; contract 1.5; test with a SLURM `NODE_FAIL` reason).
 
 Verified in a scratch worktree of `phase-2` (HEAD `67866f9`), built from this plan with scripts (no Docker, no real host, `~/.ssh` untouched): Tasks 1–51 applied in order, then `uv run ruff format` + `ruff check --fix` (import merging and line wrapping only), `ruff check` clean, `ty check src` clean, `uv run pytest -q`: `1169 passed, 3 skipped` (the skips are the three `flock`-mode lock tests: macOS has no `flock`; with a `flock(1)` stand-in on `PATH` all 15 lock tests pass). Not executed here: Tasks 52–59 (docs, Docker, cost on leaderboards); this round changed Task 57's `slurm_hub` fixture only by one `setenv`.
+
+**Review round 3.** Codex review 3 and the controller rulings 1–9. Each backend item is fixed in the task that owns the code; superseded code and tests are removed, not kept beside the new ones:
+
+- 1 (uncertain SLURM submissions): `submit` (Task 26) calls a rejection definitive only on positive evidence: `sbatch` exited non-zero (a real exit code, not a signal), printed no job id, and has an `sbatch: ...` stderr line with a recognised rejection (`SBATCH_REJECTIONS`: invalid partition/account/QOS/time, node configuration not available, policy violation, unrecognized option, ...). A signal, our timeout, empty or garbled output, a job id next to an error, and any unknown message are `SubmitUnknownError`, so the intent stays `unknown`. `_exec` returns the `CompletedProcess`; the `_UNSURE` keyword list is gone. The fake `sbatch` gained `sbatch_signal` (queue the job, then die by that signal before printing the id). New tests: Task 24 `test_fake_sbatch_can_die_by_a_signal_after_accepting`; Task 26 `test_sbatch_killed_by_a_signal_after_accepting_is_unknown`, `test_only_positive_evidence_is_a_rejection` (6 cases), `test_a_recognised_rejection_is_definitive` (5 cases); Task 29 `test_sbatch_killed_after_accepting_is_found_by_its_comment` (end to end: `run.submit_unknown`, intent `unknown`, then `reconcile` records job 1000 with one `sbatch` call).
+- 2 (`_resolve_intent` dropped a node's end): when `_end_if_active` returns None, `_resolve_intent` publishes the node's end (`_publish_node_end`) before `_drop_intent` (Task 29), like the reconcile and stop paths. Test `test_a_node_that_ends_while_its_intent_is_resolved_is_published` (on the old code `reconcile` returned nothing, no `run.finished`, and the intent was gone).
+- 3 (reserved options via values): `sbatch_option_problem` (Task 2) replaces `SBATCH_OPTION` and `reserved_sbatch_option`. Each `extra` item is exactly one token (`shlex.split(item) == [item]`) matching `^--[a-z][a-z0-9-]*(=[A-Za-z0-9_.:+@/,=-]+)?$` or `-X[value]` with the same value characters; `job-name`/`-J`, `comment`, `output`/`-o`, `error`/`-e`, `chdir`/`-D`, and `wrap` are refused as long names, any prefix, or short letters; a value after a short flag that takes none (`-HJx` = `-H -J x`) is refused as bundling. `validate_defaults` (Task 25) calls the same function. Tests: Task 2 (14 reserved forms; 8 malformed items including `"--qos=normal --output=/tmp/x --job-name=c"`; ordinary options kept), Task 25 (`-Jx` and the three-option item).
+- 4 (skipped fetches): when a listed file is not served (`fetch_file` False), `mirror_run` (Task 34) lists the run again once. Still missing: the local copy is deleted and its manifest entry dropped. Too big (at listing time or after the second listing) or refused twice: the local copy is deleted and `<file>.skipped` (`{reason, size, max_bytes}`) is written; a later fetch removes the marker. Deletions and markers happen in `_install`, under the run lock, before `.mirror.json`, so no mirror is acknowledged while a stale copy of a listed-but-unfetched file remains. Tests: `test_a_file_deleted_after_the_listing_is_deleted_here`, `test_a_file_that_grew_too_big_leaves_a_skipped_marker`, `test_a_listed_file_never_served_leaves_no_stale_copy`.
+- 5 (sweep definition after an ambiguous launch): `launch_sweep` (Task 40) deletes the definition only when no launch request went out (`_issue(..., requested=)`) and the call is not a retry of a claimed sweep; after any request it stays (listed with 0 runs). `test_failed_first_launch_removes_the_sweep` is replaced by `test_a_failed_first_launch_keeps_the_definition`; new `test_a_lost_first_response_keeps_the_definition_and_the_run` (the retry gets run 1 back from its receipt; both runs count once mirrored).
+- 6 (mirror marker order): `_install` (Task 34) makes `.mirror-index-pending` durable (fsync of the file and the folder) before the first live change, re-indexes whenever the marker was already there or the run is not indexed, and removes it after `.mirror.json`. `reindex_pending(ctx)` re-indexes every marked run; `Hub.start` (Task 35) calls it. Tests: `test_a_crash_at_any_install_step_is_reindexed` (crash after the marker, after the first file, after `run.yaml`, inside `index_run`, after the manifest; each repaired by a replay and by a hub start: 10 cases; the old order fails the file and `run.yaml` cases), Task 35 `test_hub_start_reindexes_a_run_a_crash_left_half_indexed`.
+- 7 (pull backups): `copy_from` (Task 6) writes the transaction record `<dest-dir>/.hx-pull-<uuid>.json` (`{txn, dest, backup}`, `O_EXCL`, fsync) and then moves the old folder to `.hx-pull-<uuid>.old`. `_recover_swaps` acts only on readable records whose fields match their own uuid, and only on the two names each records; `_aside` and `_recover_aside` (which claimed any `.<name>.old`) are gone. Tests: the crash test checks the owned names; new `test_a_swap_that_crashed_before_its_first_rename_changes_nothing` and `test_a_pull_never_touches_files_it_did_not_record` (`x/best.pt` next to the user's `.best.pt.old`, `.d.old`, and an unrecorded `.hx-pull-0123.old`; the old code moved `.best.pt.old` onto `best.pt`).
+- 8 (sweep owner namespace): run tags are `sweep:<owner8>:<sweep_id>` (`sweep_tag(owner, sweep_id)`, `parse_sweep_tag`, `SWEEP_OWNER_CHARS`, Task 37), `owner8` being the first 8 hex digits of the environment that holds the definition (the hub). `sweep_runs` matches this environment's tag, so membership, summaries, `cancel_queued`, and `extend_sweep` filter by owner (Task 39); `SweepSummary.tag` carries the tag (additive, contract 1.7); `_requests` takes `owner` (Tasks 40, 41); the host forwarder reads the sweep id with `parse_sweep_tag` (Task 46); the demo tags gpu1's sweep runs with the hub's id (Task 51); user docs (Task 52). New test Task 39 `test_two_hubs_with_the_same_sweep_id_never_share_runs`. Frontend plan (minimal): `SweepSummary.tag`; `sweepRunsQuery(project, tag)`, and the sweep page starts its runs query once the summary (and its tag) is in; fixtures (`SWEEP_TAG`) and mocked URLs follow. Spec 8A.6 still says `sweep:<id>`; it was not edited (plans only), the contract records the change.
+- 9 (accounting capability): `comment_accounting()` (Task 26) probes `scontrol show config` for `AccountingStoreFlags` containing `job_comment` (older SLURM: `AccountingStoreJobComment = Yes`), cached for the server's life; `SlurmPoller` refreshes it when it starts (Task 31); a failing probe answers False and is not cached; the autouse `fresh_slurm_probe` (`tests/conftest.py`) resets it per test. Without it `find_submitted` never claims a complete answer (`sacct` is not asked), so `reconcile` never fails an unknown submission: the run stays `queued`, the intent `unknown`, and past the settle time it gets one `run.submit_unknown` with `UNRESOLVED_SUBMISSION` = "submission outcome unknown; check squeue/sacct" (Task 29). Env route `GET /api/v1/slurm` (Task 31) feeds `slurm.comment_accounting` on host rows (Task 44; contract 2; frontend `HostRow` type only). Fake `scontrol` with `accounting_flags` (Task 24), a demo `scontrol` stand-in (Task 51), and `AccountingStoreFlags=job_comment` in the Docker cluster (Task 56). Tests for both configurations: Task 24 `test_fake_scontrol_reports_the_accounting_flags`; Task 26 `test_without_comment_accounting_sacct_never_proves_absence`, `test_comment_accounting_is_probed_once_per_server_start`; Task 29 `test_without_comment_accounting_an_unknown_submission_stays_unknown` (with accounting: the existing `test_an_unknown_outcome_fails_only_when_slurm_provably_never_took_the_job`); Task 31 `test_slurm_server_reports_comment_accounting_per_start`; Task 44 and Task 51 row assertions.
+- Also: the contract's files-route row no longer lists `offset` (dropped in round 2); Task 26 commits `tests/conftest.py`.
+
+Verified in a scratch worktree of `phase-2` (HEAD `ab4c88f`), built from this plan with scripts (no Docker, no real host, `~/.ssh` untouched): Tasks 1–51 applied in order, then `uv run ruff format` + `ruff check --fix` (import merging and the line wrapping of code the round 2 build also rewrapped; every block this round added or changed is already formatted), `ruff check` clean, `ruff format --check` clean, `ty check src` clean, `uv run pytest -q`: `1227 passed, 3 skipped` (round 2: 1169 passed; +58 new tests; the skips are the three `flock`-mode lock tests on macOS). Per file: `test_config.py` 87, `test_ssh.py` 52, `test_slurm.py` 103, `test_hub.py` 79, `test_sweeps.py` 90, `test_hosts.py` 11. Not executed here: Tasks 52–59 (docs, Docker, cost on leaderboards); this round changed Task 52's docs text and Task 56's `slurm.conf` by one line.

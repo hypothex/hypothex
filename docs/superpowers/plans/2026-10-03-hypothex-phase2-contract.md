@@ -11,7 +11,7 @@ Hard rule: no test or step ever connects to the user's real hosts. Tests use in-
 ```python
 HostKind = Literal["ssh", "slurm"]
 Route = Literal["ssh", "url", "local"]
-class SlurmDefaults(BaseModel, extra="forbid"): partition: str | None = None; account: str | None = None; time: str = "02:00:00"; gpus: int = 1; extra: list[str] = []
+class SlurmDefaults(BaseModel, extra="forbid"): partition: str | None = None; account: str | None = None; time: str = "02:00:00"; gpus: int = 1; extra: list[str] = []   # each item exactly one sbatch option token; never job-name/J, comment, output/o, error/e, chdir/D, wrap in any form
 class HostSpec(BaseModel, extra="forbid"):
     route: Route; kind: HostKind = "ssh"
     ssh_alias: str | None = None          # required for route=ssh
@@ -91,7 +91,7 @@ MIRROR_FILES = ("run.yaml", "scores.jsonl", "metrics.jsonl", "notes.md", "usage.
 MIRROR_DIRS = ("predictions", "traces", "samples", "env", "logs")
 MIRROR_MAX_BYTES = 200 * 1024 * 1024
 ```
-Backoff 3/4/8/16 s, reset after 30 s connected. Cursor persisted in the hub index table `host_cursors(host, environment_id, last_sequence)`. Mirror writes go through `RunStore` and `index_run`: each changed file is fetched whole into a per-run staging folder, and only when every fetch succeeded is the run id claimed hub-wide (`<store>/.claims/<run_id>.json`) and are the files installed in one pass under the run lock (no appends, no byte offsets). Mirror events are re-emitted as `mirror.run_updated` with payload `{host, environment_id, original_type, remote_sequence, status, reason?}`: `original_type` is the host's event type, and `reason` is copied from the host's event when it has one (`run.lost`, `run.killed`, `run.failed`, e.g. a SLURM `NODE_FAIL`). Hub marks a host `stale` after 60 s without a successful ping; runs on stale hosts are shown stale (derived, never written as status).
+Backoff 3/4/8/16 s, reset after 30 s connected. Cursor persisted in the hub index table `host_cursors(host, environment_id, last_sequence)`. Mirror writes go through `RunStore` and `index_run`: each changed file is fetched whole into a per-run staging folder, and only when every fetch succeeded is the run id claimed hub-wide (`<store>/.claims/<run_id>.json`) and are the files installed in one pass under the run lock (no appends, no byte offsets). A listed file the host does not serve is listed again once: still missing, its local copy is deleted; too big (or refused twice), its local copy is deleted and `<file>.skipped` (`{reason, size, max_bytes}`) takes its place. `.mirror-index-pending` is written before the first change to a run folder and removed last; a replay that finds it re-indexes, and the hub re-indexes such runs when it starts. Mirror events are re-emitted as `mirror.run_updated` with payload `{host, environment_id, original_type, remote_sequence, status, reason?}`: `original_type` is the host's event type, and `reason` is copied from the host's event when it has one (`run.lost`, `run.killed`, `run.failed`, e.g. a SLURM `NODE_FAIL`). Hub marks a host `stale` after 60 s without a successful ping; runs on stale hosts are shown stale (derived, never written as status).
 
 ### 1.6 Env-server additions (`hypothex.core` on the host)
 
@@ -114,8 +114,9 @@ class Scheduler:
 # hypothex.core.slurm
 class SlurmJob(BaseModel): job_id: str; state: str; node: str | None = None; exit_code: int | None = None
 def render_sbatch(record: RunRecord, defaults: SlurmDefaults, home: Path) -> str: ...
-def submit(script: str, cwd: Path, *, comment: str | None = None) -> str: ...   # job id; `sbatch --parsable`; SubmitUnknownError when SLURM may have taken the job
-def find_submitted(comment: str) -> tuple[SlurmJob | None, bool]: ...   # by the unique comment only (squeue and sacct); bool = both answered
+def submit(script: str, cwd: Path, *, comment: str | None = None) -> str: ...   # job id; `sbatch --parsable`; SlurmError only on positive evidence (non-zero exit + recognised rejection on stderr + no job id); anything else (signal, timeout, garbled, unknown error) is SubmitUnknownError
+def find_submitted(comment: str) -> tuple[SlurmJob | None, bool]: ...   # by the unique comment only (squeue and sacct); bool = both answered and sacct stores comments
+def comment_accounting(*, refresh: bool = False) -> bool: ...   # scontrol show config: AccountingStoreFlags has job_comment; cached per server start
 def poll(job_ids: list[str]) -> dict[str, SlurmJob]: ...    # squeue then sacct for finished
 def cancel(job_id: str) -> None: ...
 # hypothex.core.cost
@@ -131,10 +132,10 @@ class SweepSpec(BaseModel, extra="forbid"): id: str; project: str; task: str | N
 def expand(spec: SweepSpec, rng_seed: int = 0) -> list[dict[str, str]]: ...   # grid product (+ random samples), each dict = params; seeds applied separately
 def save_sweep(layout: Layout, spec: SweepSpec) -> Path: ...    # <store>/<project>/sweeps/<id>.yaml
 def load_sweep(layout: Layout, project: str, sweep_id: str) -> SweepSpec: ...
-class SweepSummary(BaseModel): spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []   # run_ids derived: indexed runs tagged sweep:<id>, launch order
+class SweepSummary(BaseModel): spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []; tag: str = ""   # tag = the sweep's member tag sweep:<owner8>:<id>; run_ids derived: indexed runs with that tag, launch order
 def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary: ...   # cells: {params, group_id, n, mean, lo, hi, run_ids}
 ```
-Sweep membership is derived from the `sweep:<id>` tag, never stored. Each (params, seed) has one deterministic command id (`run_command_id`: 16 hex of a SHA-256 over the owning environment, project, sweep id, sorted params, seed); launch, a retried launch, and extend save the definition and issue every missing (params, seed) with it, and command receipts make a repeat the same run.
+Sweep membership is derived from the tag `sweep:<owner8>:<id>`, never stored; `owner8` is the first 8 characters of the environment id that holds the definition (the hub), so two hubs' sweeps with the same id on one host never share runs. Clients read `SweepSummary.tag` instead of building the tag. Each (params, seed) has one deterministic command id (`run_command_id`: 16 hex of a SHA-256 over the owning environment, project, sweep id, sorted params, seed); launch, a retried launch, and extend save the definition and issue every missing (params, seed) with it, and command receipts make a repeat the same run.
 
 ## 2. HTTP API additions
 
@@ -142,15 +143,16 @@ Hub (and env servers where marked *env*):
 
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
-| GET | `/api/v1/hosts` | | `list[{name, kind: "local" \| HostKind, state: HostState, gpus: list[GpuInfo], queue: int, slurm: {pending, running}\|null, cost_today_usd: float, usd_per_gpu_hour: float\|null, projects: list[str], stale_banner_hours: float}]` (first row: the hub, `name` and `kind` `"local"`; `stale_banner_hours` is the same on every row) |
+| GET | `/api/v1/hosts` | | `list[{name, kind: "local" \| HostKind, state: HostState, gpus: list[GpuInfo], queue: int, slurm: {pending, running, comment_accounting: bool\|null}\|null, cost_today_usd: float, usd_per_gpu_hour: float\|null, projects: list[str], stale_banner_hours: float}]` (first row: the hub, `name` and `kind` `"local"`; `stale_banner_hours` is the same on every row; `comment_accounting` false: the cluster's accounting keeps no job comments, so an unknown submission can never be settled; null: not known, the host is not connected) |
 | POST | `/api/v1/hosts/reload` | `{command_id?}` | the host rows after re-reading `environments.yaml` (`hx hosts add\|map\|rm` call it) |
 | POST | `/api/v1/hosts/{host}/connect` / `/disconnect` | `{command_id?}` | `HostState` |
 | POST | `/api/v1/hosts/{host}/runs` | launch body + `{gpus, queue, slurm?: SlurmDefaults, project?, commit?, diff?}`; the project by name (a `repo` path is used only when it is a folder on the hub); without `commit` the hub pins its own checkout's HEAD (and sends its uncommitted diff); with `commit` the body's `diff` (none for a clean run) | run record (forwarded) |
 | GET | `/api/v1/runs` | phase 1 filters + `environment_id?`; `limit` is never capped below the request | `list[RunRecord]` |
-| GET | `/api/v1/runs/{id}/files/{path:path}` *env* | `max_bytes`, `tail?`, `offset?` | file bytes; 404 / 413 |
+| GET | `/api/v1/runs/{id}/files/{path:path}` *env* | `max_bytes`, `tail?` | file bytes; 404 / 413 |
 | GET | `/api/v1/projects/{project}/entry` *env* | | the host's `ProjectEntry` (the hub copies a host-only project) |
 | GET | `/api/v1/gpus` *env* | | `list[GpuInfo]` |
 | GET | `/api/v1/queue` *env* | | `[{run_id, position, gpus_requested}]` |
+| GET | `/api/v1/slurm` *env* | | `{comment_accounting: bool \| null}` (null when the server is not `slurm`) |
 | POST | `/api/v1/sweeps` | `{project, task?, host?, grid, random?, seeds, command, hypothesis, gpus?, queue?, commit?, diff?, command_id?}` | `SweepSummary` |
 | GET | `/api/v1/sweeps/{project}/{id}` | | `SweepSummary` |
 | GET | `/api/v1/sweeps/{id}` | | `SweepSummary` (any project; for clients on another machine) |
@@ -197,3 +199,7 @@ Additive unless noted. `EnvironmentsFile.stale_banner_hours` (default 24) and `s
 ## Changes after review round 2 (2026-10-03)
 
 Not all additive (marked "changed"). Changed: `SweepSpec.run_ids` is removed; `SweepSummary.run_ids` (derived from the `sweep:<id>` tag) replaces it, so API, CLI, and MCP clients read `summary.run_ids`, not `summary.spec.run_ids`. Changed: `EnvClient.fetch_file` and the files route drop `offset` (the mirror fetches whole files). Changed: `find_submitted(comment)` returns `(job, complete)` and matches the comment only. Additive: `mirror.run_updated` carries `reason` when the host's event had one; `SubmitUnknownError`; event `run.submit_unknown`; `SlurmDefaults.extra` refuses `--job-name`, `--comment`, `--output` (and their abbreviations); a stop of a SLURM run whose job id is not known yet is carried out once the job appears; `create_app(..., lifespan_context=)` (the demo hosts of `hx serve` start and stop in the ASGI lifespan, so SIGTERM stops them); `extend` is idempotent (seeds already in the sweep issue only missing runs, never a 400).
+
+## Changes after review round 3 (2026-10-03)
+
+Additive unless noted. `SweepSummary.tag` (the member tag); changed: sweep runs are tagged `sweep:<owner8>:<id>` instead of `sweep:<id>` (clients use `SweepSummary.tag`, `RunRecord.sweep_id` is unchanged). Host rows: `slurm.comment_accounting: bool | null`; env route `GET /api/v1/slurm`; `comment_accounting()`. Changed: `SlurmDefaults.extra` items must each be exactly one option token, and `--error`, `--chdir`, `--wrap` and the short forms `-J`, `-o`, `-e`, `-D` join the reserved options. Changed: `submit` raises `SlurmError` only on positive evidence of a rejection; everything else is `SubmitUnknownError`. Backend-only: without comment accounting an unknown submission stays `queued` (`run.submit_unknown`, reason "submission outcome unknown; check squeue/sacct"); the mirror deletes stale copies of listed files it could not fetch and writes `<file>.skipped` markers; `copy_from` backups are `.hx-pull-<uuid>.old` with a `.hx-pull-<uuid>.json` record; a sweep definition is never deleted after a launch request was made. The files route table no longer lists `offset` (dropped in round 2).

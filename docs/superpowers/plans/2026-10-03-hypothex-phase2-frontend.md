@@ -14,7 +14,7 @@
 
 **Mockups:** `docs/mockups/phase2/` (`index.html`, `shot-overview-*`, `shot-launch-*`, `shot-sweep-*`, `shot-run-{queued,running,stale,lost}-*`).
 
-**Depends on:** phases 1a and 1b on `main`, and the backend plan `docs/superpowers/plans/2026-10-03-hypothex-phase2-backend.md` merged: the section 2 routes in `/api/openapi.json`, `RunDetail.host_state`, `mirror.run_updated` and `host.*` events (a mirrored `run.lost` carries the original `reason` in its payload), `SweepSummary.run_ids` derived from the `sweep:<id>` tags (ruling S8), the demo cleanup in the hub's ASGI lifespan shutdown (ruling S9), `hx demo --with-hosts`, and `docs/remote.rst`.
+**Depends on:** phases 1a and 1b on `main`, and the backend plan `docs/superpowers/plans/2026-10-03-hypothex-phase2-backend.md` merged: the section 2 routes in `/api/openapi.json`, `RunDetail.host_state`, `mirror.run_updated` and `host.*` events (a mirrored `run.lost` carries the original `reason` in its payload), `SweepSummary.run_ids` derived from the sweep's member tag `SweepSummary.tag` = `sweep:<owner8>:<id>` (ruling S8; owner namespace: backend review round 3), the demo cleanup in the hub's ASGI lifespan shutdown (ruling S9), `hx demo --with-hosts`, and `docs/remote.rst`.
 
 ## Global Constraints
 
@@ -22,7 +22,7 @@
 - Paths: commands run from `ui/` unless the step says "repo root" (`/Users/shreyasv/Desktop/code/research_dash`). Unit and component tests live in `ui/test/`, mirroring `ui/src/`; Playwright specs in `ui/e2e/`.
 - Generated file: `ui/src/api/types.ts` comes from `bunx openapi-typescript` against a running hub, is checked in, and is never edited by hand. Response bodies are typed by `ui/src/api/models.ts`, the only hand-written copy of the contract shapes.
 - Contract names (exact): `HostKind`, `ConnState` (`connecting | bootstrapping | connected | stale | upgrade | error | disabled`), `HostState`, `HostRow`, `GpuInfo`, `CostTotals`, `SlurmDefaults`, `SweepParam`, `SweepSpec`, `SweepSummary`; executor additions `host`, `gpus`, `slurm_job_id`, `node`, `queue_position`; `RunRecord.cost`, `RunRecord.sweep_id`, `RunRecord.gpus_requested`; `RunDetail.host_state` (`null` = a hub run); event type `mirror.run_updated`, event prefix `host.`. Phase 2 fields are optional in the models, so phase 1 records still type-check.
-- Routes (exact): UI route `/s/$project/$id` (contract `/s/:project/:id`). API the UI calls: `GET /api/v1/hosts`, `POST /api/v1/hosts/{host}/connect`, `POST /api/v1/hosts/{host}/runs`, `GET /api/v1/gpus`, `GET /api/v1/queue`, `GET /api/v1/sweeps/{project}/{id}`, `GET /api/v1/projects/{project}/sweeps`, `POST /api/v1/sweeps/{project}/{id}/cancel_queued`, `POST /api/v1/sweeps/{project}/{id}/extend`, `POST /api/v1/runs/{id}/pull`. `POST /api/v1/sweeps` and `POST /api/v1/hosts/{host}/disconnect` exist on the hub (Task 2's `types.ts` test checks them) but no screen uses them, so the client has no function for them. Sweep runs carry the tag `sweep:<id>`.
+- Routes (exact): UI route `/s/$project/$id` (contract `/s/:project/:id`). API the UI calls: `GET /api/v1/hosts`, `POST /api/v1/hosts/{host}/connect`, `POST /api/v1/hosts/{host}/runs`, `GET /api/v1/gpus`, `GET /api/v1/queue`, `GET /api/v1/sweeps/{project}/{id}`, `GET /api/v1/projects/{project}/sweeps`, `POST /api/v1/sweeps/{project}/{id}/cancel_queued`, `POST /api/v1/sweeps/{project}/{id}/extend`, `POST /api/v1/runs/{id}/pull`. `POST /api/v1/sweeps` and `POST /api/v1/hosts/{host}/disconnect` exist on the hub (Task 2's `types.ts` test checks them) but no screen uses them, so the client has no function for them. Sweep runs carry the tag `sweep:<owner8>:<id>` (`owner8`: the first 8 characters of the hub's environment id); the UI never builds it and reads `SweepSummary.tag`.
 - Which host a run is on: the `GET /api/v1/hosts` row whose `state.environment_id` equals the run's `environment_id` (`hostRowForRun`, Task 5), the same match as the backend's `host_for_environment`. `executor.host` is never used for this: the backend writes the env server's own `socket.gethostname()` there for every run (hub runs too), not the hub's name for the host. A run detail with `host_state: null` is a hub run. When no row matches (the hosts list is not loaded or failed), texts fall back to the machine's hostname (`record.host`) and Reconnect is disabled.
 - One data layer: every request goes through `api.*` in `ui/src/api/client.ts`; no module builds its own `fetch` or route table.
 - Actions: every POST carries `command_id` and `created_by: "human"` (the `action()` helper inside `api.*`). A retry after a dropped connection reuses the same `command_id`; a launch uses `<attempt>.s<seed>` per seed, and the attempt changes only when the form changes. After a partial launch the dialog remembers the seeds that started and never sends them again, even after an edit (a new attempt id would make the backend start them twice).
@@ -119,7 +119,7 @@ Gives the UI typed access to every phase 2 hub route and keeps hosts, runs, over
   - `interface SlurmDefaults { partition: string | null; account: string | null; time: string; gpus: number; extra: string[] }`
   - `interface GpuInfo { index: number; name: string; util: number; mem_used_mb: number; mem_total_mb: number; external: boolean; run_id: string | null }`
   - `interface HostState { name; kind: HostKind | "local"; state: ConnState; since: string; message: string; environment_id: string | null; hx_version: string | null; last_sequence: number; local_port: number | null }`
-  - `interface HostRow { name: string; kind: HostKind | "local"; state: HostState; gpus: GpuInfo[]; queue: number; slurm: { pending: number; running: number } | null; cost_today_usd: number; usd_per_gpu_hour?: number | null; stale_banner_hours?: number; projects: string[] }` (the backend's `host_rows` always lists the hub itself first as `{name: "local", kind: "local"}`; contract `HostKind` stays `"ssh" | "slurm"`; `usd_per_gpu_hour` is the contract's host rate; `stale_banner_hours` is the hub's `environments.yaml` setting, the same on every row, controller ruling R1)
+  - `interface HostRow { name: string; kind: HostKind | "local"; state: HostState; gpus: GpuInfo[]; queue: number; slurm: { pending: number; running: number; comment_accounting?: boolean | null } | null; cost_today_usd: number; usd_per_gpu_hour?: number | null; stale_banner_hours?: number; projects: string[] }` (`comment_accounting` false: the cluster cannot settle an unknown SLURM submission; no screen uses it yet; the backend's `host_rows` always lists the hub itself first as `{name: "local", kind: "local"}`; contract `HostKind` stays `"ssh" | "slurm"`; `usd_per_gpu_hour` is the contract's host rate; `stale_banner_hours` is the hub's `environments.yaml` setting, the same on every row, controller ruling R1)
   - `interface RunFields { task?; stage?; command?: string[] | null; hypothesis?; seed?; tags?; params?; vars?; gpus?: number; queue?: boolean; slurm?: Partial<SlurmDefaults> | null; commit?: string | null; diff?: string | null }` (the backend's `RunFields`, without the action fields)
   - `interface LaunchRequest extends RunFields { repo: string }` (`POST /api/v1/runs`: the hub's own checkout)
   - `interface HostLaunchRequest extends RunFields { project: string }` (`POST /api/v1/hosts/{host}/runs`: the project by name, never a path on this machine; the hub finds its own checkout and the host's mapped one)
@@ -127,7 +127,7 @@ Gives the UI typed access to every phase 2 hub route and keeps hosts, runs, over
   - `interface SweepParam { name: string; values: string[] | null; low: number | null; high: number | null; log: boolean }`
   - `interface SweepSpec { id; project; task: string | null; host: string | null; grid: SweepParam[]; random: number | null; seeds: number[]; command_template: string[]; created_by: string; created_at: string }` (the definition only: no `run_ids`, controller ruling S8)
   - `interface SweepCell { params: Record<string, string>; group_id: string; n: number; mean: number | null; lo: number | null; hi: number | null; run_ids: string[] }`
-  - `interface SweepSummary { spec: SweepSpec; run_ids: string[]; counts: Record<string, number>; cells: SweepCell[]; best: SweepCell | null; headline: string; total_usd: number }` (`run_ids`: the sweep's membership, derived by the backend from the runs tagged `sweep:<id>`, oldest first; ruling S8)
+  - `interface SweepSummary { spec: SweepSpec; run_ids: string[]; tag: string; counts: Record<string, number>; cells: SweepCell[]; best: SweepCell | null; headline: string; total_usd: number }` (`run_ids`: the sweep's membership, derived by the backend from the runs tagged `tag`, oldest first; ruling S8; `tag` is `sweep:<owner8>:<id>`, the filter for `GET /api/v1/runs?tag=`)
   - `interface SweepListItem { id: string; created_at: string; n_runs: number; best: SweepCell | null }`
   - `interface PullResult { local_path: string }`
   - `interface QueueEntry { run_id: string; position: number; gpus_requested: number }` (`GET /api/v1/queue`)
@@ -345,6 +345,7 @@ export const SWEEP: SweepSummary = {
     created_at: "2026-10-03T09:12:00Z",
   },
   run_ids: ["r-7e3f", "r-f0a1", "r-66cd", "r-71f2", "r-1d77", "r-c2b9"],
+  tag: "sweep:0a1b2c3d:s-7f3a",
   counts: { finished: 4, running: 1, queued: 1 },
   cells: [
     BEST_CELL,
@@ -610,8 +611,11 @@ export interface HostRow {
   gpus: GpuInfo[];
   /** Runs waiting in the host queue (SSH hosts); 0 while the host is not connected. */
   queue: number;
-  /** SLURM job counts; null on SSH hosts. */
-  slurm: { pending: number; running: number } | null;
+  /**
+   * SLURM job counts; null on SSH hosts. `comment_accounting` false: the cluster's accounting
+   * keeps no job comments, so an unknown submission stays unknown; null: not known yet.
+   */
+  slurm: { pending: number; running: number; comment_accounting?: boolean | null } | null;
   cost_today_usd: number;
   /** `$/GPU-h` from `environments.yaml`; null when no rate is set (contract section 2). */
   usd_per_gpu_hour?: number | null;
@@ -669,7 +673,7 @@ export interface SweepParam {
 
 /**
  * `<store>/<project>/sweeps/<id>.yaml`: the sweep's definition only. Which runs belong to
- * the sweep is derived by the backend from the runs tagged `sweep:<id>`
+ * the sweep is derived by the backend from the runs tagged `SweepSummary.tag`
  * (`SweepSummary.run_ids`), never stored here.
  */
 export interface SweepSpec {
@@ -702,11 +706,16 @@ export interface SweepCell {
 export interface SweepSummary {
   spec: SweepSpec;
   /**
-   * The sweep's runs, derived by the backend from the runs tagged `sweep:<id>`, oldest
+   * The sweep's runs, derived by the backend from the runs tagged `tag`, oldest
    * first (launch order). A run launched by a retry or an extend shows up here as soon as
    * the hub has it, whether or not the request that started it got its answer.
    */
   run_ids: string[];
+  /**
+   * The sweep's member tag, `sweep:<owner8>:<id>` (`owner8`: the hub's environment id, so
+   * two hubs' sweeps with one id never mix). The UI filters runs by it and never builds it.
+   */
+  tag: string;
   /** Runs per status, e.g. `{finished: 4, running: 1, queued: 1}`. */
   counts: Record<string, number>;
   cells: SweepCell[];
@@ -7170,7 +7179,7 @@ git -C /Users/shreyasv/Desktop/code/research_dash commit -m "feat(ui): New run b
 
 ## Group 4: Sweep page `/s/:project/:id` (Tasks 14–22)
 
-The Sweep page from `docs/mockups/phase2/shot-sweep-{light,dark}.png` (spec 5.7, 8A.6): one-line headline with the best cell, meta line, stat strip with cost and ETA, progress strip, (a) a params heat table for two list params (a sortable table otherwise), (b) a seeds forest with 95% intervals, (c) runs on hosts, and the actions Copy as CLI, Cancel queued, Add seeds and Rerun sweep. All arithmetic lives in one pure module (`SweepModel.ts`: parse `summarize_sweep` cells, derive `stale`, heat axes and levels, labels, tooltips, the `hx sweep` command, ETA, GPU-hours, progress, sorting, stat items). Small presentational components (`SweepGlyphs`, `SweepHeat`, `SweepTable`, `SweepForest`, `SweepRuns`, `SweepActions`, `SweepStyles`, `SweepRerun`) take plain props. `pages/Sweep.tsx` loads four queries: the summary (`useSweep`), every run of the sweep (`useAllRuns`, Task 3: `GET /api/v1/runs?project=&tag=sweep:<id>&archived=true&limit=1000`, then larger limits while a page is full), the hosts (stale derivation), and the task leaderboard when the sweep has a task (metric name, direction, unit, version, and seed values: a cell gets dots only when its group's row holds no run outside the cell, so dots and the cell's mean and 95% CI cover the same runs). A run's host is the `GET /api/v1/hosts` row whose `state.environment_id` is the run's `environment_id` (`hostRowForRun`, Task 5), never `executor.host` (the box's own hostname). A queued or running run whose host is not `connected` is drawn stale, as on its run page; nothing is written. Summary cells are read through `parseCells`, so a server that omits the optional `std` and `runs` still renders.
+The Sweep page from `docs/mockups/phase2/shot-sweep-{light,dark}.png` (spec 5.7, 8A.6): one-line headline with the best cell, meta line, stat strip with cost and ETA, progress strip, (a) a params heat table for two list params (a sortable table otherwise), (b) a seeds forest with 95% intervals, (c) runs on hosts, and the actions Copy as CLI, Cancel queued, Add seeds and Rerun sweep. All arithmetic lives in one pure module (`SweepModel.ts`: parse `summarize_sweep` cells, derive `stale`, heat axes and levels, labels, tooltips, the `hx sweep` command, ETA, GPU-hours, progress, sorting, stat items). Small presentational components (`SweepGlyphs`, `SweepHeat`, `SweepTable`, `SweepForest`, `SweepRuns`, `SweepActions`, `SweepStyles`, `SweepRerun`) take plain props. `pages/Sweep.tsx` loads four queries: the summary (`useSweep`), every run of the sweep once the summary is in (`useAllRuns`, Task 3: `GET /api/v1/runs?project=&tag=<summary.tag>&archived=true&limit=1000`, then larger limits while a page is full), the hosts (stale derivation), and the task leaderboard when the sweep has a task (metric name, direction, unit, version, and seed values: a cell gets dots only when its group's row holds no run outside the cell, so dots and the cell's mean and 95% CI cover the same runs). A run's host is the `GET /api/v1/hosts` row whose `state.environment_id` is the run's `environment_id` (`hostRowForRun`, Task 5), never `executor.host` (the box's own hostname). A queued or running run whose host is not `connected` is drawn stale, as on its run page; nothing is written. Summary cells are read through `parseCells`, so a server that omits the optional `std` and `runs` still renders.
 
 ### Task 14: Sweep model, part 1 (cells, run state, axes, labels)
 
@@ -7212,6 +7221,8 @@ import { makeBoard, makeRecord } from "./fixtures";
 export const PROJECT = "rxn";
 export const TASK = "fwd";
 export const SWEEP_ID = "s-7f3a";
+/** The member tag the backend sends as `SweepSummary.tag` (the hub's id prefix, then the id). */
+export const SWEEP_TAG = `sweep:0a1b2c3d:${SWEEP_ID}`;
 export const NOW = Date.parse("2026-10-03T12:00:00Z");
 export const TEMPLATE = ["python", "train.py", "--lr", "{lr}", "--beam", "{beam}", "--seed", "{seed}"];
 
@@ -7283,7 +7294,7 @@ function sweepRun(s: RunSpec): RunRecord {
     ended_at: s.ended ?? null,
     exit_code: s.exit ?? (s.status === "finished" ? 0 : null),
     artifacts: [],
-    tags: [`sweep:${SWEEP_ID}`],
+    tags: [SWEEP_TAG],
     created_by: "agent:tuner",
     executor: {
       ...base.executor,
@@ -7375,8 +7386,9 @@ export function makeSummary(
       created_at: "2026-10-03T09:12:00Z",
       ...specOver,
     },
-    // membership is derived by the backend from the `sweep:<id>` tags (ruling S8)
+    // membership is derived by the backend from the runs tagged `tag` (ruling S8)
     run_ids: ["a1", "b1", "c1", "d1", "a2", "b2", "c2", "d2"].map(rid),
+    tag: SWEEP_TAG,
     counts: { queued: 1, running: 1, finished: 5, failed: 1, killed: 0, lost: 0, total: 8 },
     cells: RAW_CELLS,
     best: CELL_D,
@@ -10195,9 +10207,9 @@ git commit -m "feat(ui): sweep actions copy as CLI, cancel queued and add seeds"
 
 **Interfaces:**
 - Consumes: `useSweep(project, sweepId)` (key `["sweeps", project, "detail", sweepId]`), `useProjectSweeps(project)`, `useHosts()`, `useAllRuns` (Task 3), `HostRow`, `SweepSummary`, `SweepListItem` (Task 1); phase 1b `api.leaderboard`, `queryKeys.leaderboard`, `RunsQuery`, `Figure`, `Unbroken`, `AppLink`, `hrefs`, `ErrorBox`, `Loading`, `StatStrip`, `PageStyles`, `fmtClock`, `isAgent`, `primaryMetricName`; every export of Tasks 14–20.
-- Produces: `sweepRunsQuery(project: string, sweepId: string): Omit<RunsQuery, "limit">` (read through `useAllRuns`, so a sweep extended past 1,000 runs is still whole); `interface SweepPageProps { project: string; sweepId: string; now?: number }`; `SweepPage(props)`; router `sweepRoute` (id `/s/$project/$id`, params `{ project, id }`); `isAppPath` accepts `/s/…`, so plain sweep links inside panels navigate in-app. On the Task page, `SweepsLine` (`p.sweeps`, `aria-label="Sweeps"`) lists the project's sweeps from `GET /api/v1/projects/{project}/sweeps` (id linking `sweepHref`, runs, best config and its mean), so a sweep page is reachable without a run's crumb (spec 5.7: the UI shows each sweep as a group with its best config).
+- Produces: `sweepRunsQuery(project: string, tag: string): Omit<RunsQuery, "limit">` (`tag` is `SweepSummary.tag`; read through `useAllRuns` once the summary is loaded, so a sweep extended past 1,000 runs is still whole); `interface SweepPageProps { project: string; sweepId: string; now?: number }`; `SweepPage(props)`; router `sweepRoute` (id `/s/$project/$id`, params `{ project, id }`); `isAppPath` accepts `/s/…`, so plain sweep links inside panels navigate in-app. On the Task page, `SweepsLine` (`p.sweeps`, `aria-label="Sweeps"`) lists the project's sweeps from `GET /api/v1/projects/{project}/sweeps` (id linking `sweepHref`, runs, best config and its mean), so a sweep page is reachable without a run's crumb (spec 5.7: the UI shows each sweep as a group with its best config).
 
-The page loads four queries: the summary (`useSweep`), every run of the sweep by tag with archived runs (`useAllRuns`: `limit=1000` first, then larger limits while a page is full; the backend default of 200, or any one fixed limit, would cut large sweeps), the hosts (host names by environment and stale derivation), and the task leaderboard only when the sweep has a task (metric name, direction, unit, version, and the forest's seed values, restricted to each cell's own runs by `seedValues`). Hosts and leaderboard errors are ignored: the page still draws without seed dots or stale marks, and names hosts by the machines' own hostnames.
+The page loads four queries: the summary (`useSweep`), every run of the sweep by its member tag (`summary.tag`, so the runs query starts when the summary is in) with archived runs (`useAllRuns`: `limit=1000` first, then larger limits while a page is full; the backend default of 200, or any one fixed limit, would cut large sweeps), the hosts (host names by environment and stale derivation), and the task leaderboard only when the sweep has a task (metric name, direction, unit, version, and the forest's seed values, restricted to each cell's own runs by `seedValues`). Hosts and leaderboard errors are ignored: the page still draws without seed dots or stale marks, and names hosts by the machines' own hostnames.
 
 - [ ] **Step 1: Write the failing page tests**
 
@@ -10208,7 +10220,18 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { SweepPage, sweepRunsQuery } from "../../src/pages/Sweep";
 import { HttpReply, mockApi, renderWithClient, restoreFetch } from "./helpers";
-import { HOSTS, NOW, PROJECT, RUNS, SWEEP_ID, TASK, makeSummary, makeSweepBoard, rid } from "./sweepFixtures";
+import {
+  HOSTS,
+  NOW,
+  PROJECT,
+  RUNS,
+  SWEEP_ID,
+  SWEEP_TAG,
+  TASK,
+  makeSummary,
+  makeSweepBoard,
+  rid,
+} from "./sweepFixtures";
 
 afterEach(() => {
   cleanup();
@@ -10216,7 +10239,7 @@ afterEach(() => {
 });
 
 const SWEEP = `/api/v1/sweeps/${PROJECT}/${SWEEP_ID}`;
-const RUNS_URL = "/api/v1/runs?project=rxn&tag=sweep%3As-7f3a&archived=true&limit=1000";
+const RUNS_URL = "/api/v1/runs?project=rxn&tag=sweep%3A0a1b2c3d%3As-7f3a&archived=true&limit=1000";
 const HEADLINE = "lr 3e-4, beam 10: 0.912 top1, +0.008 over beam 5";
 
 function routes(summary = makeSummary(), runs: unknown = RUNS): Record<string, unknown> {
@@ -10240,11 +10263,11 @@ function renderPage(sweepId = SWEEP_ID) {
 }
 
 describe("SweepPage", () => {
-  test("sweepRunsQuery asks for every run of the sweep, archived included", () => {
+  test("sweepRunsQuery asks for every run with the sweep's member tag, archived included", () => {
     // no limit: useAllRuns pages through 1000, 4000, ... until a page is not full
-    expect(sweepRunsQuery("rxn", "s-7f3a")).toEqual({
+    expect(sweepRunsQuery("rxn", SWEEP_TAG)).toEqual({
       project: "rxn",
-      tag: "sweep:s-7f3a",
+      tag: "sweep:0a1b2c3d:s-7f3a",
       archived: true,
     });
   });
@@ -10325,7 +10348,6 @@ describe("SweepPage", () => {
         error: "sweep not found: rxn/nope",
         type: "StoreError",
       }),
-      "GET /api/v1/runs?project=rxn&tag=sweep%3Anope&archived=true&limit=1000": [],
       "GET /api/v1/hosts": HOSTS,
     });
     renderPage("nope");
@@ -10483,11 +10505,12 @@ import { SweepStyles } from "./components/SweepStyles";
 import { SweepTable } from "./components/SweepTable";
 
 /**
- * `GET /api/v1/runs` query for every run of a sweep (tag `sweep:<id>`, archived included).
- * No limit: `useAllRuns` pages until it has them all (a fixed limit would cut big sweeps).
+ * `GET /api/v1/runs` query for every run of a sweep (its member tag `SweepSummary.tag`,
+ * `sweep:<owner8>:<id>`, archived included). The UI never builds the tag: the owner part is
+ * the hub's environment id. No limit: `useAllRuns` pages until it has them all.
  */
-export function sweepRunsQuery(project: string, sweepId: string): Omit<RunsQuery, "limit"> {
-  return { project, tag: `sweep:${sweepId}`, archived: true };
+export function sweepRunsQuery(project: string, tag: string): Omit<RunsQuery, "limit"> {
+  return { project, tag, archived: true };
 }
 
 export interface SweepPageProps {
@@ -10499,7 +10522,8 @@ export interface SweepPageProps {
 
 export function SweepPage({ project, sweepId, now }: SweepPageProps): ReactElement {
   const summary = useSweep(project, sweepId);
-  const runs = useAllRuns(sweepRunsQuery(project, sweepId));
+  const memberTag = summary.data?.tag; // the runs query waits for the summary's member tag
+  const runs = useAllRuns(sweepRunsQuery(project, memberTag ?? ""), memberTag !== undefined);
   const hosts = useHosts();
   const task = summary.data?.spec.task ?? null;
   const board = useQuery({
@@ -10561,7 +10585,7 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
   const metric = board ? primaryMetricName(board.primary) : "score";
   const version = board?.metric_versions[metric];
   const stale = staleHosts(hosts);
-  // membership comes from the backend (`summary.run_ids`, derived from the `sweep:<id>` tags)
+  // membership comes from the backend (`summary.run_ids`, derived from the runs tagged `summary.tag`)
   const ordered = orderRuns(runs, summary.run_ids);
   const byId = new Map(ordered.map((r) => [r.run_id, r]));
   const stateOf = (id: string, fallback: RunStatus | null) => runState(byId.get(id), fallback, stale);
@@ -10972,7 +10996,7 @@ afterEach(() => {
 });
 
 const SWEEP = `/api/v1/sweeps/${PROJECT}/${SWEEP_ID}`;
-const RUNS_URL = "/api/v1/runs?project=rxn&tag=sweep%3As-7f3a&archived=true&limit=1000";
+const RUNS_URL = "/api/v1/runs?project=rxn&tag=sweep%3A0a1b2c3d%3As-7f3a&archived=true&limit=1000";
 const REPO = "/Users/sv/code/rxn";
 
 describe("rerunDefaults", () => {
@@ -14304,7 +14328,7 @@ export interface SweepItemLite {
 }
 export interface SweepLite {
   headline: string;
-  /** The sweep's runs, derived by the hub from the `sweep:<id>` tags (not in the spec). */
+  /** The sweep's runs, derived by the hub from the runs tagged `tag` (not in the spec). */
   run_ids: string[];
   spec: { id: string; project: string };
 }
@@ -14910,3 +14934,4 @@ This plan was assembled from five group drafts (F1–F5, now Groups 1–5). Wher
 16. **Removed text.** Per-group headers, constraints, review-focus lists, file lists, "consumed from" tables and self-review notes were replaced by the global sections and the group intros; every test they named is still in its task. Group references were rewritten to task numbers and backend group names (`B5`, `B8`, `B9`) to "the backend plan".
 17. **Codex review 1 (frontend items).** Item 3 / isolation: both Playwright web servers use `reuseExistingServer: false`; `serve-demo.ts` writes a fresh `environment.json` (new `environment_id`, label `hx-e2e-demo` / `hx-e2e-hosts`) and an auto fixture checks the hub's descriptor against it before every test, so `live.spec.ts` notes and `launch.spec.ts` launches cannot reach another server (Task 28). Shutdown order (non-blocking note): Playwright sends SIGTERM (`gracefulShutdown`); `serve-demo.ts` runs the venv's `hx` directly, signals the hub alone, waits for its HTTP cleanup of demo runs and fake hosts, and only then SIGKILLs the group; `e2e/shutdown-check.ts` is the focused regression (Task 28). Item 10: the gpus/queue client test mocks gpu1's three GPUs (`HOSTS[1]`), not the hub row's none (Task 2). Item 27: host launches send `project` and never a path (`HostLaunchRequest { project }`), the hub launch keeps its own `repo`; `commit` is pinned only by Rerun sweep from a clean template run (`pinnedCommit`), otherwise the hub pins its checkout's HEAD and diff; the dialog never sends a `diff` (Tasks 1, 2, 9–12, 22). Item 31: seed dots come from the cell's own runs only: the group row's values when every run of that row is in the cell, else none (Task 14). Item 32: the queue panel reads the whole queue of the run's environment (`useAllRuns({status: "queued", environment_id})`, limits 1000, 4000, … while a page is full) and keeps the page's own run (`queueRows(..., current)`); the sweep page reads its runs the same way (Tasks 3, 21, 25, 27). The hub's `/api/v1/runs` must accept `environment_id` for the filter to save transfer; the client also filters by environment, so rows are right either way. Item 33: models carry `HostRow.usd_per_gpu_hour`, `HostRow.stale_banner_hours`, `LeaderboardRow.cost`, `OverviewSummary.cost_usd` / `cost_today_usd` (Task 1); the leaderboard shows each group's cost (Task 24), the Overview's cost today prefers `cost_today_usd` (Task 7). Ruling R1: the banner threshold is `stale_banner_hours` from the `GET /api/v1/hosts` rows (`staleBannerHours`, default 24), not a fixed 24 h (Tasks 5, 7). Non-blocking notes: a partial retry needs free GPUs only for the seeds not started (`checkDraft(..., started)`, Tasks 10, 12); the params table's default sort follows a lower-is-better direction that arrives after the first render (Task 17); the lost bar uses neutral words (`SLURM job N lost`, `run lost`) and points to the `run.lost` event (Task 23).
 18. **Codex review 2 (frontend items) and coordinator follow-ups.** Item 2 / ruling S1: no step or check uses a fixed port any more. `ui/e2e/paths.ts` asks the OS for a free port per run (`freePort`; the Playwright runner passes both ports to its workers and web servers in `HX_E2E_PORT` / `HX_E2E_HOSTS_PORT`); `shutdown-check.ts` picks its own, wipes its home first, verifies the hub's identity (`readIdentity` + `answersAs`) before it reads `/api/v1/hosts` or `/api/v1/runs` (`getJson` refuses until then), and fails at once when `serve-demo.ts` cannot start or exits (`serve-demo.ts` itself exits on a spawn `error`, a failed `hx demo` or an early hub exit). Task 2's type generation and the visual checks of Tasks 7 and 27 bind port 0 through `uv run python`, write the temp home's identity first, and touch the hub only after `/.well-known/hypothex/environment` answers with it (Task 2 also stops waiting when `hx serve` exits, and kills only its own server by its unique home). Item 15 / ruling S9: the UI side keeps SIGTERM to the hub alone; the hub's ASGI lifespan shutdown (backend) stops the demo runs and fake hosts inside uvicorn's signal handling; `shutdown-check.ts` sends the real SIGTERM and keeps the ordering regression, plus a child-start-failure demonstration (Task 28 Step 11). Ruling S8: `SweepSpec` has no `run_ids`; `SweepSummary.run_ids` is the membership the backend derives from the `sweep:<id>` tags, and the sweep page orders its runs by it (Tasks 1, 14, 15, 21, 28). Coordinator (a): after a partial launch the preview, its `×N`, the summary and `Copy as CLI` cover only the seeds not launched (Task 12). Coordinator (b): `ui/src/api/lostReasons.ts` keeps the `reason` of `run.lost` events (and of `mirror.run_updated` with `original_type: "run.lost"`) seen on the event stream; the lost bar shows it first, else the neutral words (Tasks 4, 23, 25, 27, 29). Backend dependency: the backend plan's `mirror.run_updated` payload is `{host, environment_id, original_type, remote_sequence, status}`; it must also copy the original event's `reason` for a mirrored `run.lost`, or remote lost runs (all SLURM losses) always show the neutral words.
+19. **Backend review round 3 (shape changes only).** Sweep runs are tagged `sweep:<owner8>:<id>` (the hub's environment id prefix, so two hubs' sweeps with one id never mix): `SweepSummary.tag` carries the tag, `sweepRunsQuery(project, tag)` takes it, and the sweep page starts its runs query once the summary is loaded (Tasks 1, 14, 21, 22; fixtures `SWEEP_TAG`, mocked run URLs). Host rows add `slurm.comment_accounting?: boolean | null` (Task 1 `HostRow` type only; no screen shows it yet).

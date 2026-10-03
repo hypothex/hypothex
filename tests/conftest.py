@@ -1,5 +1,6 @@
 import shutil
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -82,3 +83,13 @@ def isolate_remote(_isolation_bin: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 def fake_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeRemote:
     """Fake ssh/scp world; add hosts with ``fake_remote.add_host("gpu1")``."""
     return install_fake_remote(tmp_path / "fake-remote", monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def fresh_slurm_probe() -> Iterator[None]:
+    """Each test probes SLURM's accounting anew (the answer is cached per server start)."""
+    from hypothex.core.slurm import reset_comment_accounting
+
+    reset_comment_accounting()
+    yield
+    reset_comment_accounting()

@@ -11,8 +11,12 @@ is gone without an exit record (spec 5.6, 8A.5).
 
 from __future__ import annotations
 
+import getpass
+import logging
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,6 +26,8 @@ from hypothex.core.errors import HypothexError
 from hypothex.core.layout import Layout
 from hypothex.core.records import RunRecord
 from hypothex.remote.config import SlurmDefaults, sbatch_option_problem
+
+log = logging.getLogger(__name__)
 
 FINISHED_STATES = frozenset(
     {
@@ -38,6 +44,13 @@ FINISHED_STATES = frozenset(
     }
 )
 _SAFE_VALUE = re.compile(r"[A-Za-z0-9_.:+@/,-]+")
+
+SLURM_COMMAND_TIMEOUT = 60.0
+SQUEUE_FORMAT = "%i|%T|%N"
+SQUEUE_COMMENT_FORMAT = "%i|%T|%N|%k"
+SACCT_FORMAT = "JobID,State,ExitCode,NodeList"
+SACCT_COMMENT_FORMAT = "JobID,State,ExitCode,NodeList,Comment"
+_NO_NODE = frozenset({"", "None assigned", "(null)", "n/a"})
 
 
 class SlurmError(HypothexError):
@@ -195,3 +208,395 @@ def render_sbatch(record: RunRecord, defaults: SlurmDefaults, home: Path) -> str
     )
     lines = ["#!/bin/bash", *(f"#SBATCH {d}" for d in directives), "", f"exec {child}", ""]
     return "\n".join(lines)
+
+
+class SlurmTimeout(SlurmError):
+    """A SLURM command did not answer within ``SLURM_COMMAND_TIMEOUT``."""
+
+
+class SubmitUnknownError(SlurmError):
+    """``sbatch`` failed in a way that may still have created the job."""
+
+
+SBATCH_REJECTIONS = (
+    "invalid partition",
+    "invalid account",
+    "invalid qos",
+    "invalid generic resource",
+    "invalid feature specification",
+    "invalid job array specification",
+    "invalid --time specification",
+    "invalid time limit",
+    "invalid node name",
+    "invalid wckey",
+    "invalid numeric value",
+    "requested node configuration is not available",
+    "requested partition configuration not available",
+    "requested time limit is invalid",
+    "node count specification invalid",
+    "memory specification can not be satisfied",
+    "more processors requested than permitted",
+    "job violates accounting/qos policy",
+    "user's group not permitted to use this partition",
+    "access/permission denied",
+    "unrecognized option",
+    "unrecognised option",
+    "option requires an argument",
+)
+"""sbatch messages that prove SLURM refused the job (matched on ``sbatch: ...`` lines)."""
+_JOB_ID = re.compile(r"^(\d+)(;\S+)?$")
+
+
+def _exec(
+    argv: list[str], *, input_text: str | None = None, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run one SLURM command and return how it ended (``SlurmError`` if it never ran)."""
+    if shutil.which(argv[0]) is None:
+        raise SlurmError(f"{argv[0]} not found on PATH; is this a SLURM login node?")
+    try:
+        return subprocess.run(
+            argv,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=SLURM_COMMAND_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SlurmTimeout(f"{argv[0]} timed out after {SLURM_COMMAND_TIMEOUT:.0f}s") from exc
+    except OSError as exc:
+        raise SlurmError(f"could not run {argv[0]}: {exc}") from exc
+
+
+def _detail(out: subprocess.CompletedProcess[str]) -> str:
+    return out.stderr.strip()[-500:] or out.stdout.strip()[-500:]
+
+
+def _run(argv: list[str], *, input_text: str | None = None, cwd: Path | None = None) -> str:
+    """Run one SLURM command; return stdout or raise ``SlurmError``."""
+    out = _exec(argv, input_text=input_text, cwd=cwd)
+    if out.returncode != 0:
+        raise SlurmError(f"{shlex.join(argv)} failed (exit {out.returncode}): {_detail(out)}")
+    return out.stdout
+
+
+def _parsable_job_id(stdout: str) -> str | None:
+    """The job id ``sbatch --parsable`` printed (``id`` or ``id;cluster``), or None."""
+    lines = stdout.strip().splitlines()
+    match = _JOB_ID.fullmatch(lines[-1].strip()) if lines else None
+    return match.group(1) if match else None
+
+
+def _rejected(stderr: str) -> bool:
+    """True when sbatch's stderr names a recognised SLURM rejection."""
+    for line in stderr.lower().splitlines():
+        if line.startswith("sbatch:") and any(r in line for r in SBATCH_REJECTIONS):
+            return True
+    return False
+
+
+def submit(script: str, cwd: Path, *, comment: str | None = None) -> str:
+    """
+    Submit a batch script with ``sbatch --parsable`` (script on stdin).
+
+    Parameters
+    ----------
+    script : str
+        The script text (see ``render_sbatch``).
+    cwd : Path
+        Directory sbatch runs in (the job's default working directory).
+    comment : str, optional
+        ``--comment`` for the job; ``submit_run`` passes its unique submission
+        identity so a crash after ``sbatch`` can be matched to the job
+        (``find_submitted``).
+
+    Returns
+    -------
+    str
+        The job id, e.g. ``"48213077"`` (a ``;cluster`` suffix is dropped).
+
+    Raises
+    ------
+    SubmitUnknownError
+        SLURM may have accepted the job: sbatch timed out, died by a signal,
+        printed no job id (or garbage), printed one next to an error, or
+        failed with a message that is not a recognised rejection. Never treat
+        this as a rejection (``reconcile`` looks for the job by its comment).
+    SlurmError
+        SLURM refused the job, on positive evidence only: sbatch is missing,
+        or it exited non-zero, printed no job id, and named a rejection from
+        ``SBATCH_REJECTIONS``.
+    """
+    argv = ["sbatch", "--parsable"]
+    if comment is not None:
+        argv.append(f"--comment={comment}")
+    try:
+        out = _exec(argv, input_text=script, cwd=cwd)
+    except SlurmTimeout as exc:
+        raise SubmitUnknownError(f"{exc}; the job may exist") from exc
+    job_id = _parsable_job_id(out.stdout)
+    if out.returncode == 0 and job_id is not None:
+        return job_id
+    if out.returncode > 0 and job_id is None and _rejected(out.stderr):
+        raise SlurmError(f"sbatch refused the job (exit {out.returncode}): {_detail(out)}")
+    if out.returncode < 0:
+        why = f"sbatch was killed by signal {-out.returncode}"
+    elif out.returncode == 0:
+        why = f"sbatch --parsable printed {out.stdout.strip()[-200:]!r}, not a job id"
+    else:
+        why = f"sbatch failed (exit {out.returncode}) without a known rejection: {_detail(out)}"
+    raise SubmitUnknownError(f"{why}; the job may exist")
+
+
+def _node(raw: str) -> str | None:
+    return None if raw.strip() in _NO_NODE else raw.strip()
+
+
+def _exit_code(raw: str) -> int | None:
+    code, _, sig = raw.strip().partition(":")
+    if not code.isdigit():
+        return None
+    if sig.isdigit() and int(sig) != 0:
+        return 128 + int(sig)
+    return int(code)
+
+
+def poll(job_ids: list[str]) -> dict[str, SlurmJob]:
+    """
+    Look up jobs: first in ``squeue`` (queued or running), then in ``sacct``.
+
+    ``squeue`` lists all of this user's jobs (``squeue -j`` fails on some
+    SLURM versions once a job left the queue). Jobs not in the queue are
+    looked up with ``sacct -X``. A failing ``sacct`` (for example accounting
+    disabled) is logged and treated as "no record".
+
+    Parameters
+    ----------
+    job_ids : list of str
+
+    Returns
+    -------
+    dict of str to SlurmJob
+        Only the jobs SLURM knows; a job that vanished from both is absent.
+
+    Raises
+    ------
+    SlurmError
+        If ``squeue`` fails: then nothing is known and callers must not
+        conclude that jobs are gone.
+    """
+    if not job_ids:
+        return {}
+    wanted = set(job_ids)
+    jobs: dict[str, SlurmJob] = {}
+    queue = _run(
+        ["squeue", "--noheader", f"--user={getpass.getuser()}", f"--format={SQUEUE_FORMAT}"]
+    )
+    for line in queue.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) == 3 and parts[0] in wanted:
+            jobs[parts[0]] = SlurmJob(job_id=parts[0], state=parts[1], node=_node(parts[2]))
+    missing = [j for j in job_ids if j not in jobs]
+    if not missing:
+        return jobs
+    try:
+        acct = _run(
+            [
+                "sacct",
+                "-X",
+                "--noheader",
+                "--parsable2",
+                f"--format={SACCT_FORMAT}",
+                f"--jobs={','.join(missing)}",
+            ]
+        )
+    except SlurmError as exc:
+        log.warning("sacct failed; treating jobs %s as unknown: %s", missing, exc)
+        return jobs
+    for line in acct.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 4 or parts[0] not in wanted or parts[0] in jobs:
+            continue
+        state = parts[1].split()[0] if parts[1].strip() else "UNKNOWN"
+        jobs[parts[0]] = SlurmJob(
+            job_id=parts[0], state=state, node=_node(parts[3]), exit_code=_exit_code(parts[2])
+        )
+    return jobs
+
+
+def _sacct_job(line: str) -> SlurmJob | None:
+    parts = line.strip().split("|")
+    if len(parts) != 4 or not parts[0].isdigit():
+        return None
+    state = parts[1].split()[0] if parts[1].strip() else "UNKNOWN"
+    return SlurmJob(
+        job_id=parts[0], state=state, node=_node(parts[3]), exit_code=_exit_code(parts[2])
+    )
+
+
+def find_submitted(comment: str) -> tuple[SlurmJob | None, bool]:
+    """
+    Find the job that carries a submission's unique comment, if SLURM has one.
+
+    ``submit_run`` records its intent (with a unique ``hx-<run_id>-<nonce>``
+    comment) before it calls ``sbatch``. When the outcome is unknown (a crash,
+    a timeout), this finds the job: in ``squeue`` (``%k``), else in ``sacct``
+    (``Comment``), each filtered by exactly this comment. A job name alone
+    never identifies a submission.
+
+    Parameters
+    ----------
+    comment : str
+        The comment the submission used.
+
+    Returns
+    -------
+    tuple of (SlurmJob or None, bool)
+        The job (the newest if several) and whether the answer is complete:
+        True when both commands answered. ``(None, True)`` means SLURM has no
+        such job; ``(None, False)`` means unknown (``sacct`` failed, or the
+        cluster's accounting does not store job comments, so ``sacct`` cannot
+        see them: ``comment_accounting``).
+
+    Raises
+    ------
+    SlurmError
+        If ``squeue`` fails (then nothing is known).
+    """
+    queue = _run(
+        [
+            "squeue",
+            "--noheader",
+            f"--user={getpass.getuser()}",
+            f"--format={SQUEUE_COMMENT_FORMAT}",
+        ]
+    )
+    for line in queue.splitlines():
+        parts = line.strip().split("|", 3)
+        if len(parts) == 4 and parts[3] == comment:
+            return SlurmJob(job_id=parts[0], state=parts[1], node=_node(parts[2])), True
+    if not comment_accounting():
+        return None, False  # sacct keeps no comments here: its silence proves nothing
+    try:
+        acct = _run(
+            [
+                "sacct",
+                "-X",
+                "--noheader",
+                "--parsable2",
+                f"--format={SACCT_COMMENT_FORMAT}",
+                "--starttime=now-7days",
+            ]
+        )
+    except SlurmError as exc:
+        log.warning("sacct failed; job with comment %s is not known yet: %s", comment, exc)
+        return None, False
+    jobs: list[SlurmJob] = []
+    for line in acct.splitlines():
+        row, _, found = line.strip().rpartition("|")
+        job = _sacct_job(row) if found == comment else None
+        if job is not None:
+            jobs.append(job)
+    return (max(jobs, key=lambda j: int(j.job_id)) if jobs else None), True
+
+
+_COMMENT_ACCOUNTING: dict[str, bool] = {}
+"""The answer of ``comment_accounting`` for this server's life (key ``"answer"``)."""
+
+
+def _stores_job_comment(config: str) -> bool:
+    """Read ``scontrol show config``: are job comments kept in accounting?"""
+    for line in config.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if key == "AccountingStoreFlags":
+            return "job_comment" in {flag.strip().lower() for flag in value.split(",")}
+        if key == "AccountingStoreJobComment":  # SLURM before 21.08
+            return value.lower() in ("yes", "true", "1")
+    return False
+
+
+def comment_accounting(*, refresh: bool = False) -> bool:
+    """
+    Return True when SLURM's accounting stores job comments.
+
+    Only then can ``sacct`` find a job by its ``--comment``, so only then can
+    a missing comment prove that SLURM never took a submission. Probes
+    ``scontrol show config`` (``AccountingStoreFlags`` containing
+    ``job_comment``; older SLURM: ``AccountingStoreJobComment = Yes``) once
+    per server start: ``SlurmPoller`` refreshes it when it starts. A failing
+    probe answers False and is not cached.
+
+    Parameters
+    ----------
+    refresh : bool
+        Probe again instead of using the cached answer.
+
+    Returns
+    -------
+    bool
+    """
+    if not refresh and "answer" in _COMMENT_ACCOUNTING:
+        return _COMMENT_ACCOUNTING["answer"]
+    try:
+        config = _run(["scontrol", "show", "config"])
+    except SlurmError as exc:
+        log.warning("scontrol show config failed; job comments count as not stored: %s", exc)
+        _COMMENT_ACCOUNTING.pop("answer", None)  # never cached: asked again next time
+        return False
+    answer = _stores_job_comment(config)
+    _COMMENT_ACCOUNTING["answer"] = answer
+    return answer
+
+
+def reset_comment_accounting() -> None:
+    """Forget the cached ``comment_accounting`` answer (a new server start, or a test)."""
+    _COMMENT_ACCOUNTING.clear()
+
+
+def cancel(job_id: str) -> None:
+    """
+    Cancel a job with ``scancel``.
+
+    Parameters
+    ----------
+    job_id : str
+
+    Raises
+    ------
+    SlurmError
+        scancel is missing or fails (for example the job already left the queue).
+    """
+    _run(["scancel", job_id])
+
+
+def lost_reason(job_id: str, job: SlurmJob | None) -> str:
+    """
+    Explain why a run whose SLURM job ended without an exit record is lost.
+
+    Parameters
+    ----------
+    job_id : str
+    job : SlurmJob or None
+        The ``sacct`` record; None when SLURM has none.
+
+    Returns
+    -------
+    str
+
+    Examples
+    --------
+    >>> lost_reason("7", SlurmJob(job_id="7", state="NODE_FAIL", node="n2"))
+    'SLURM ended job 7 with NODE_FAIL on n2; no exit record'
+    >>> lost_reason("7", None)
+    'slurm job 7 left the queue; SLURM reports no end state for it; no exit record'
+    """
+    if job is None:  # neutral: no accounting record (or sacct failed); the cause is not known
+        return (
+            f"slurm job {job_id} left the queue; SLURM reports no end state for it; no exit record"
+        )
+    where = f" on {job.node}" if job.node else ""
+    code = f" (exit {job.exit_code})" if job.exit_code is not None else ""
+    return f"SLURM ended job {job_id} with {job.state}{where}{code}; no exit record"

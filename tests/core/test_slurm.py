@@ -1,3 +1,4 @@
+import getpass
 import json
 import os
 import shlex
@@ -12,7 +13,16 @@ import pytest
 
 from hypothex.core.slurm import (
     SlurmError,
+    SlurmJob,
+    SubmitUnknownError,
+    cancel,
+    comment_accounting,
+    find_submitted,
+    is_finished,
+    lost_reason,
+    poll,
     render_sbatch,
+    submit,
 )
 from hypothex.remote.config import SlurmDefaults
 from tests.factories import make_record
@@ -329,3 +339,227 @@ def test_render_sbatch_rejects_unsafe_settings(
 def test_render_sbatch_rejects_home_with_spaces(tmp_path: Path) -> None:
     with pytest.raises(SlurmError, match="whitespace"):
         render_sbatch(make_record("r1"), SlurmDefaults(), tmp_path / "my home")
+
+
+# submit / poll / cancel ------------------------------------------------------------------
+def test_submit_returns_job_id_and_sends_script_on_stdin(slurm: FakeSlurm, tmp_path: Path) -> None:
+    script = "#!/bin/bash\n#SBATCH --job-name=hx-a\ntrue\n"
+    assert submit(script, tmp_path) == "1000"
+    assert submit(script, tmp_path) == "1001"
+    assert slurm.calls("sbatch") == [["--parsable"], ["--parsable"]]
+    job = slurm.job("1000")
+    assert job["script"] == script
+    assert job["cwd"] == str(tmp_path.resolve())
+
+
+def test_submit_passes_the_comment_and_find_submitted_matches_it(
+    slurm: FakeSlurm, tmp_path: Path
+) -> None:
+    script = "#!/bin/bash\n#SBATCH --job-name=hx-r1\ntrue\n"
+    assert submit(script, tmp_path, comment="hx-r1-aaaa") == "1000"
+    assert submit(script, tmp_path, comment="hx-r1-bbbb") == "1001"
+    assert slurm.calls("sbatch")[0] == ["--parsable", "--comment=hx-r1-aaaa"]
+    found, complete = find_submitted("hx-r1-bbbb")
+    assert found is not None and (found.job_id, found.state, complete) == ("1001", "PENDING", True)
+    assert find_submitted("hx-r2-cccc") == (None, True)
+    cancel("1001")  # left the queue: sacct finds it by its comment
+    found, _ = find_submitted("hx-r1-bbbb")
+    assert found is not None and (found.job_id, found.state) == ("1001", "CANCELLED")
+
+
+def test_find_submitted_never_matches_by_name_alone(slurm: FakeSlurm) -> None:
+    # a job named hx-r1 (extra --job-name, or another submission) with another comment
+    slurm.add_job("1000", "PENDING", name="hx-r1", comment="hx-r1-other")
+    slurm.add_job("1001", "COMPLETED", name="hx-r1", in_queue=False)
+    assert find_submitted("hx-r1-mine") == (None, True)
+
+
+def test_find_submitted_is_incomplete_while_sacct_fails(slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "COMPLETED", name="hx-r1", comment="hx-r1-mine", in_queue=False)
+    slurm.set(fail={"sacct": "sacct: error: Slurm accounting storage is disabled"})
+    assert find_submitted("hx-r1-mine") == (None, False)  # unknown, never "absent"
+
+
+def test_submit_tells_rejection_from_an_unknown_outcome(
+    slurm: FakeSlurm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = "#!/bin/bash\ntrue\n"
+    slurm.set(fail={"sbatch": "sbatch: error: invalid partition specified: nope"})
+    with pytest.raises(SlurmError) as rejected:
+        submit(script, tmp_path)
+    assert not isinstance(rejected.value, SubmitUnknownError)
+    timeout = "sbatch: error: Batch job submission failed: Socket timed out on send/recv operation"
+    slurm.set(fail={"sbatch": timeout})
+    with pytest.raises(SubmitUnknownError, match="Socket timed out"):
+        submit(script, tmp_path)
+    monkeypatch.setattr(
+        "hypothex.core.slurm._exec",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 0, "Submitted?\n", ""),
+    )
+    with pytest.raises(SubmitUnknownError, match="not a job id"):
+        submit(script, tmp_path)
+
+
+def test_sbatch_killed_by_a_signal_after_accepting_is_unknown(
+    slurm: FakeSlurm, tmp_path: Path
+) -> None:
+    slurm.set(sbatch_signal="KILL")
+    with pytest.raises(SubmitUnknownError, match="signal 9"):
+        submit("#!/bin/bash\ntrue\n", tmp_path, comment="hx-r1-kill")
+    found, complete = find_submitted("hx-r1-kill")  # SLURM had taken it
+    assert found is not None and (found.job_id, complete) == ("1000", True)
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout", "stderr"),
+    [
+        (1, "", "sbatch: error: Something nobody has seen before\n"),
+        (1, "1000\n", "sbatch: error: invalid partition specified: gpu\n"),  # an id after all
+        (-15, "", "sbatch: error: invalid partition specified: gpu\n"),  # a signal
+        (1, "", ""),
+        (0, "", ""),
+        (0, "\x00\x01garbled\n", ""),
+    ],
+)
+def test_only_positive_evidence_is_a_rejection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rc: int, stdout: str, stderr: str
+) -> None:
+    monkeypatch.setattr(
+        "hypothex.core.slurm._exec",
+        lambda argv, **k: subprocess.CompletedProcess(argv, rc, stdout, stderr),
+    )
+    with pytest.raises(SubmitUnknownError):
+        submit("#!/bin/bash\ntrue\n", tmp_path)
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "sbatch: error: invalid partition specified: nope",
+        "sbatch: error: Batch job submission failed: Invalid account or account/partition "
+        "combination specified",
+        "sbatch: error: Batch job submission failed: Requested node configuration is not available",
+        "sbatch: error: Batch job submission failed: Job violates accounting/QOS policy "
+        "(job submit limit, user's size and/or time limits)",
+        "sbatch: unrecognized option '--bogus'",
+    ],
+)
+def test_a_recognised_rejection_is_definitive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stderr: str
+) -> None:
+    monkeypatch.setattr(
+        "hypothex.core.slurm._exec",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 1, "", stderr + "\n"),
+    )
+    with pytest.raises(SlurmError) as rejected:
+        submit("#!/bin/bash\ntrue\n", tmp_path)
+    assert not isinstance(rejected.value, SubmitUnknownError)
+
+
+def test_without_comment_accounting_sacct_never_proves_absence(slurm: FakeSlurm) -> None:
+    slurm.set(accounting_flags="")
+    slurm.add_job("1000", "COMPLETED", comment="hx-r1-done", in_queue=False)
+    slurm.add_job("1001", "PENDING", comment="hx-r2-queued")
+    assert find_submitted("hx-r1-done") == (None, False)  # unknown, never "absent"
+    found, complete = find_submitted("hx-r2-queued")  # squeue's %k still works
+    assert found is not None and (found.job_id, complete) == ("1001", True)
+    assert slurm.calls("sacct") == []
+
+
+def test_comment_accounting_is_probed_once_per_server_start(slurm: FakeSlurm) -> None:
+    assert comment_accounting() is True
+    slurm.set(accounting_flags="job_env")
+    assert comment_accounting() is True  # cached for this server's life
+    assert comment_accounting(refresh=True) is False  # the next server start asks again
+    assert len(slurm.calls("scontrol")) == 2
+    slurm.set(fail={"scontrol": "scontrol: error: slurm_load_ctl_conf: Unable to contact"})
+    assert comment_accounting(refresh=True) is False  # a failing probe: no comment lookup
+    slurm.set(fail={}, accounting_flags="job_comment,job_env")
+    assert comment_accounting() is True  # ... and it is asked again, not cached
+
+
+def test_submit_failure_raises_with_stderr(slurm: FakeSlurm, tmp_path: Path) -> None:
+    slurm.set(fail={"sbatch": "sbatch: error: invalid partition specified: nope"})
+    with pytest.raises(SlurmError, match="invalid partition specified: nope"):
+        submit("#!/bin/bash\ntrue\n", tmp_path)
+
+
+def test_submit_without_sbatch_on_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(SlurmError, match="sbatch not found on PATH"):
+        submit("#!/bin/bash\ntrue\n", tmp_path)
+
+
+def test_poll_reads_squeue_then_sacct(slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    slurm.add_job("1001", "PENDING")
+    slurm.add_job("1002", "COMPLETED", node="n2", exit="0:0", in_queue=False)
+    slurm.add_job("1003", "FAILED", node="n3", exit="2:0", in_queue=False)
+    slurm.add_job("1004", "CANCELLED by 1000", exit="0:15", in_queue=False)
+    slurm.add_job("1005", "COMPLETED", in_queue=False, in_sacct=False)
+    slurm.add_job("1007", "RUNNING", node="n9")
+    jobs = poll(["1000", "1001", "1002", "1003", "1004", "1005", "1006"])
+    assert jobs == {
+        "1000": SlurmJob(job_id="1000", state="RUNNING", node="n1"),
+        "1001": SlurmJob(job_id="1001", state="PENDING"),
+        "1002": SlurmJob(job_id="1002", state="COMPLETED", node="n2", exit_code=0),
+        "1003": SlurmJob(job_id="1003", state="FAILED", node="n3", exit_code=2),
+        "1004": SlurmJob(job_id="1004", state="CANCELLED", exit_code=143),
+    }
+    assert slurm.calls("squeue") == [
+        ["--noheader", f"--user={getpass.getuser()}", "--format=%i|%T|%N"]
+    ]
+    assert slurm.calls("sacct") == [
+        [
+            "-X",
+            "--noheader",
+            "--parsable2",
+            "--format=JobID,State,ExitCode,NodeList",
+            "--jobs=1002,1003,1004,1005,1006",
+        ]
+    ]
+
+
+def test_poll_skips_sacct_when_all_queued_and_nothing_for_empty(slurm: FakeSlurm) -> None:
+    assert poll([]) == {}
+    assert slurm.state()["calls"] == []
+    slurm.add_job("1000", "PENDING")
+    assert poll(["1000"]) == {"1000": SlurmJob(job_id="1000", state="PENDING")}
+    assert slurm.calls("sacct") == []
+
+
+def test_poll_raises_when_squeue_fails(slurm: FakeSlurm) -> None:
+    slurm.set(fail={"squeue": "slurm_load_jobs error: Unable to contact slurm controller"})
+    with pytest.raises(SlurmError, match="Unable to contact slurm controller"):
+        poll(["1000"])
+
+
+def test_poll_tolerates_sacct_failure(slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    slurm.set(fail={"sacct": "sacct: error: Slurm accounting storage is disabled"})
+    assert poll(["1000", "1001"]) == {"1000": SlurmJob(job_id="1000", state="RUNNING", node="n1")}
+
+
+def test_is_finished_and_lost_reason() -> None:
+    assert not is_finished(SlurmJob(job_id="1", state="COMPLETING"))
+    assert is_finished(SlurmJob(job_id="1", state="TIMEOUT"))
+    node_fail = SlurmJob(job_id="7", state="NODE_FAIL", node="r208u06n02")
+    assert lost_reason("7", node_fail) == (
+        "SLURM ended job 7 with NODE_FAIL on r208u06n02; no exit record"
+    )
+    failed = SlurmJob(job_id="7", state="FAILED", node="n3", exit_code=2)
+    assert (
+        lost_reason("7", failed) == "SLURM ended job 7 with FAILED on n3 (exit 2); no exit record"
+    )
+    assert lost_reason("7", None) == (
+        "slurm job 7 left the queue; SLURM reports no end state for it; no exit record"
+    )
+
+
+def test_cancel_calls_scancel_and_raises_on_unknown_job(slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "PENDING")
+    cancel("1000")
+    assert slurm.job("1000")["state"] == "CANCELLED"
+    with pytest.raises(SlurmError, match="Invalid job id specified"):
+        cancel("1000")
+    assert slurm.calls("scancel") == [["1000"], ["1000"]]

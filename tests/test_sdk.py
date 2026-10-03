@@ -254,3 +254,17 @@ def test_log_checkpoint_records_step_and_metrics(run_env: Path, tmp_path: Path) 
     with pytest.raises(ValueError, match="checkpoint metric 'val' must be a finite number"):
         run.log_checkpoint(ckpt, step=200, metrics={"val": float("inf")})
     assert len(_lines(run_env / "artifacts.jsonl")) == 1
+
+
+def test_log_skips_non_finite_values_with_a_warning(run_env: Path) -> None:
+    run = hx.current()
+    with pytest.warns(RuntimeWarning, match="loss"):
+        run.log({"loss": float("nan"), "acc": 0.5})
+    with pytest.warns(RuntimeWarning, match="loss"):
+        run.log({"loss": float("inf")})
+    run.log({"loss": 0.25})
+    rows = _lines(run_env / "metrics.jsonl")
+    assert [(r["name"], r["step"], r["value"]) for r in rows] == [
+        ("acc", 0, 0.5),
+        ("loss", 2, 0.25),
+    ]

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import shlex
-from datetime import datetime
+from collections.abc import Callable
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated
 
@@ -191,10 +192,50 @@ class ScoreRecord(BaseModel):
     created_at: datetime
 
 
+def end_unstarted(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
+    """
+    Build an ``update_run`` mutator that ends a run that never started.
+
+    The run gets ``status`` and ``ended_at``, and gives back what it only held
+    while it waited: its GPUs (``executor.gpus``) and its queue position. A run
+    that is no longer ``queued`` (it started or already ended) is left as it is.
+
+    Parameters
+    ----------
+    status : RunStatus
+        The terminal status, e.g. ``failed`` (could not start) or ``killed``
+        (removed from the queue).
+
+    Returns
+    -------
+    callable
+        Takes the current record and returns the ended one.
+
+    Examples
+    --------
+    >>> ctx.update_run(run_id, "run.failed", end_unstarted(RunStatus.FAILED))  # doctest: +SKIP
+    """
+
+    def mutate(r: RunRecord) -> RunRecord:
+        if r.status != RunStatus.QUEUED:
+            return r
+        executor = r.executor.model_copy(update={"gpus": [], "queue_position": None})
+        return r.model_copy(
+            update={"status": status, "ended_at": datetime.now(UTC), "executor": executor}
+        )
+
+    return mutate
+
+
 class MetricPoint(BaseModel):
-    """One step of a logged metric history; stored in ``metrics.jsonl``."""
+    """
+    One step of a logged metric history; stored in ``metrics.jsonl``.
+
+    ``value`` is finite: a ``NaN`` or infinite row (a diverged loss written by
+    an old SDK) fails validation, so readers skip it.
+    """
 
     name: str
     step: int
-    value: float
+    value: float = Field(allow_inf_nan=False)
     t: float | None = None

@@ -811,7 +811,10 @@ def test_non_finite_values_count_as_missing(ctx: Context, toy_repo: Path) -> Non
         ("s2", 0.2, 0.5, True)
     ]
     loss = _panel("scatter", data={"x": "usage.usd", "y": "val/loss", "group_by": "run"})
-    assert query_panel(ctx, "toy", "toy-acc", loss).rows == []  # last val/loss point is NaN
+    # a NaN metric point is skipped when read (MetricPoint is finite): the last point is 0.4
+    assert [(r["group_id"], r["y"]) for r in query_panel(ctx, "toy", "toy-acc", loss).rows] == [
+        ("s2", 0.4)
+    ]
 
 
 def test_scatter_categorical_x_is_ordinal_in_natural_order(ctx: Context, toy_repo: Path) -> None:

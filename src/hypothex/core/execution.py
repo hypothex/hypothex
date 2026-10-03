@@ -20,6 +20,7 @@ import psutil
 
 from hypothex.core.config import load_project_config, render_template
 from hypothex.core.context import Context
+from hypothex.core.cost import compute_cost
 from hypothex.core.datasets import FingerprintCache, dataset_ref, resolve_dataset_path
 from hypothex.core.envcapture import capture_env
 from hypothex.core.errors import HypothexError, RunError, TemplateError
@@ -370,7 +371,10 @@ def execute_run(
 
     Output is written to ``logs/`` and optionally echoed to sinks. Ctrl-C,
     SIGTERM, SIGHUP, or a stop request end the run as ``killed``. A finished
-    task run with predictions is scored automatically.
+    task run with predictions is scored automatically. The executor fields set
+    before start (``host``, ``gpus``, SLURM job and node) are kept, and the
+    ended record carries ``cost`` (GPU hours and API spend; the hub adds the
+    GPU price).
 
     Parameters
     ----------
@@ -390,7 +394,16 @@ def execute_run(
     if record.status != RunStatus.QUEUED:
         raise RunError(f"run {run_id} is {record.status.value}, not queued")
     run_dir = ctx.run_dir(record)
-    me = ExecutorInfo(pid=os.getpid(), pid_create_time=process_create_time(os.getpid()))
+    # Keep what the scheduler or SLURM recorded (host, gpus, job id, node); the
+    # run is no longer waiting, so it has no queue position.
+    me = record.executor.model_copy(
+        update={
+            "pid": os.getpid(),
+            "pid_create_time": process_create_time(os.getpid()),
+            "child_pid": None,
+            "queue_position": None,
+        }
+    )
     if (run_dir / STOP_MARKER).exists():
         return ctx.update_run(
             run_id,
@@ -483,7 +496,7 @@ def execute_run(
     def finish(r: RunRecord) -> RunRecord:
         # A path logged twice (e.g. an overwritten last.pt) keeps its latest step/metrics.
         merged = {(a.kind, a.path): a for a in [*r.artifacts, *logged]}
-        return r.model_copy(
+        done = r.model_copy(
             update={
                 "status": status,
                 "ended_at": utcnow(),
@@ -492,6 +505,9 @@ def execute_run(
                 "usage": usage,
             }
         )
+        # The price per GPU hour lives in the hub's environments.yaml; the hub
+        # re-prices mirrored runs with cost.price_record.
+        return done.model_copy(update={"cost": compute_cost(done, None)})
 
     final = ctx.update_run(run_id, f"run.{status.value}", finish, {"exit_code": exit_code})
     if auto_evaluate and status == RunStatus.FINISHED and final.task:

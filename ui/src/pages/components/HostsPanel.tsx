@@ -9,9 +9,10 @@
  * The pure helpers below (`gpuCells`, `hostTotals`, `hostsHeadline`, ...) are exported
  * for tests and for the Overview headline and metaline.
  */
-import { useEffect, useState } from "react";
-import { firstClause, isAgent, parseTime, shortId } from "./format";
-import type { GpuInfo, HostRow, RunRecord } from "./types";
+import { type CSSProperties, createElement, useEffect, useState } from "react";
+import { firstClause, fmtClock, isAgent, parseTime, shortId } from "./format";
+import { AppLink, hrefs } from "./links";
+import type { ConnState, GpuInfo, HostRow, RunRecord } from "./types";
 
 // formatting ---------------------------------------------------------------------------------
 
@@ -273,4 +274,272 @@ export function useNow(intervalMs = 30_000): number {
     return () => clearInterval(id);
   }, [intervalMs]);
   return now;
+}
+
+// component ----------------------------------------------------------------------------------
+
+/** Panel CSS, scoped under `.page .hosts`, `.page .hosts-key` and `.page .hosts-banner` (values from the mockup). */
+export const HOSTS_CSS = `
+.page .hosts { font-variant-numeric: tabular-nums; }
+.page .hosts .hrow { display: grid; grid-template-columns: 168px 132px minmax(0, 1fr) 52px 70px 70px; gap: 0 18px; align-items: center; padding: 14px 0; border-top: 1px solid var(--rule-2); }
+.page .hosts .hrow.head { padding: 0 0 8px; border-top: 0; border-bottom: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); align-items: end; }
+.page .hosts .hrow.head + .hrow { border-top: 0; }
+.page .hosts .r { text-align: right; }
+.page .hosts .hn b { font-weight: 600; font-size: 15px; margin-right: 8px; }
+.page .hosts .kind { font-size: 11.5px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 9px; padding: 0 7px; }
+.page .hosts .meta { font-size: 12.5px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.page .hosts .hs { font-size: 13.5px; color: var(--ink-2); }
+.page .hosts .hs .st { font-weight: 400; color: var(--ink-2); gap: 7px; }
+.page .hosts .hs b { color: var(--ink); font-weight: 600; }
+.page .hosts .q { font-size: 15px; }
+.page .hosts .money { font-size: 14px; }
+.page .hosts .z { color: var(--ink-3); }
+.page .hosts .ver { display: inline-flex; gap: 5px; align-items: center; cursor: help; }
+.page .hosts .ver .ne { color: var(--fail); font-weight: 650; }
+.page .hosts .ver.bad { color: var(--ink); }
+.page .hosts .cells, .page .hosts .gidx { display: grid; gap: 4px; }
+.page .hosts .gidx span { font-size: 11.5px; color: var(--ink-3); padding-left: 2px; }
+.page .hosts .gc { position: relative; height: 44px; border-radius: 4px; padding: 5px 7px 0 9px; font-size: 13px; line-height: 1.25; overflow: hidden; white-space: nowrap; text-decoration: none; color: var(--ink); }
+.page .hosts .gc .id { font-weight: 550; }
+.page .hosts .gc .u { display: block; font-size: 12px; color: var(--ink-3); }
+.page .hosts .gc.busy { background: var(--paper-2); }
+.page .hosts .gc.busy::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--ink-3); }
+.page .hosts .gc.agent::before { background: var(--agent); }
+.page .hosts .gc.human::before { background: var(--human); }
+.page .hosts .gc .ub { position: absolute; left: 9px; right: 7px; bottom: 6px; height: 2px; background: var(--rule); border-radius: 1px; }
+.page .hosts .gc .ub i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ink-2); border-radius: 1px; }
+.page .hosts .gc.free { border: 1px dashed var(--rule); color: var(--ink-3); padding-left: 8px; }
+.page .hosts .gc.other { border: 1px solid var(--rule); color: var(--ink-2); padding-left: 8px; background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ink-3) 22%, transparent) 0 1px, transparent 1px 6px); }
+.page .hosts .gc.other .id { font-weight: 450; }
+.page .hosts .hrow.stale .cells { opacity: .42; filter: grayscale(1); }
+.page .hosts .hrow.stale .hn b { color: var(--ink-2); }
+.page .hosts .msg { font-size: 13px; color: var(--ink-2); }
+.page .hosts .slurm { display: flex; align-items: baseline; }
+.page .hosts .slurm > div { padding: 0 22px; border-left: 1px solid var(--rule-2); cursor: help; }
+.page .hosts .slurm > div:first-child { padding-left: 2px; border-left: 0; }
+.page .hosts .slurm b { font: 400 21px/1 var(--sans); letter-spacing: -.01em; color: var(--ink); margin-right: 6px; }
+.page .hosts .slurm span { font-size: 12.5px; color: var(--ink-3); }
+.page .hosts-key .gk { display: inline-block; width: 18px; height: 12px; border-radius: 2px; }
+.page .hosts-key .gk.agent { background: var(--paper-2); box-shadow: inset 3px 0 0 var(--agent); }
+.page .hosts-key .gk.human { background: var(--paper-2); box-shadow: inset 3px 0 0 var(--human); }
+.page .hosts-key .gk.free { border: 1px dashed var(--ink-3); }
+.page .hosts-key .gk.other { border: 1px solid var(--rule); background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ink-3) 40%, transparent) 0 1px, transparent 1px 4px); }
+.page .hosts-key .ne { color: var(--fail); font-weight: 650; }
+.page .hosts-banner { margin: 12px 0 0; padding: 10px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-size: 14px; color: var(--ink-2); }
+.page .hosts-banner b { color: var(--ink); font-weight: 600; }
+`;
+
+/** One glyph per state, never colour alone (mockup `GL`). */
+export function StateGlyph({ state }: { state: ConnState }) {
+  const ring = (dash?: string) => (
+    <circle cx="5" cy="5" r="4" style={{ fill: "none", stroke: "var(--ink-2)", strokeWidth: 1.4, strokeDasharray: dash }} />
+  );
+  let body;
+  if (state === "connected") body = <circle cx="5" cy="5" r="4" style={{ fill: "var(--ink-2)" }} />;
+  else if (state === "stale")
+    body = (
+      <>
+        <circle cx="5" cy="5" r="4" style={{ fill: "none", stroke: "var(--ink)", strokeWidth: 1.4 }} />
+        <path d="M5 1a4 4 0 0 1 0 8z" style={{ fill: "var(--ink)" }} />
+      </>
+    );
+  else if (state === "connecting" || state === "bootstrapping") body = ring("1.6 1.6");
+  else if (state === "error" || state === "upgrade")
+    body = <path d="M1.4 1.4L8.6 8.6M8.6 1.4L1.4 8.6" style={{ stroke: "var(--fail)", strokeWidth: 1.4 }} />;
+  else body = ring();
+  return (
+    <svg width="10" height="10" aria-hidden="true" data-state={state}>
+      {body}
+    </svg>
+  );
+}
+
+function Version({ host, version, hub }: { host: string; version: string | null; hub: string | null }) {
+  if (!version) return <span>hx ·</span>;
+  const bad = hub !== null && version !== hub;
+  return (
+    <span
+      className={bad ? "ver bad" : "ver"}
+      title={bad ? `hub runs hx ${hub}. Update: hx hosts upgrade ${host}` : `hx ${version}`}
+    >
+      {`hx ${version}`}
+      {bad ? <span className="ne">≠</span> : null}
+    </span>
+  );
+}
+
+function stateTitle(row: HostRow): string {
+  const st = row.state;
+  if (st.state === "stale") return `No heartbeat since ${fmtClock(st.since)}. Cells show the last known state.`;
+  if (st.state === "upgrade") return st.message || `hx hosts upgrade ${row.name}`;
+  return st.message || `${st.state} since ${fmtClock(st.since)}`;
+}
+
+function StateCell({ row, hub, now }: { row: HostRow; hub: string | null; now: number }) {
+  const st = row.state;
+  const stale = st.state === "stale";
+  const word = stale ? `stale ${fmtAgeMs(now - parseTime(st.since))}` : st.state;
+  return (
+    <div className="hs">
+      <span className="st" title={stateTitle(row)}>
+        <StateGlyph state={st.state} />
+        {stale ? <b>{word}</b> : word}
+      </span>
+      <div className="meta">
+        <Version host={row.name} version={st.hx_version ?? null} hub={hub} />
+        {stale ? `  as of ${fmtClock(st.since)}` : null}
+      </div>
+    </div>
+  );
+}
+
+interface CellProps {
+  host: string;
+  cell: GpuCell;
+  run: RunRecord | undefined;
+  asOf: string | null;
+}
+
+function Cell({ host, cell, run, asOf }: CellProps) {
+  const style: CSSProperties = { gridColumn: `${cell.index + 1} / span ${cell.span}` };
+  const title = cellTitle(host, cell, run, asOf);
+  if (cell.kind === "free") {
+    return (
+      <div className="gc free" style={style} title={title}>
+        free
+      </div>
+    );
+  }
+  const util = meanUtil(cell);
+  if (cell.kind === "other") {
+    return (
+      <div className="gc other" style={style} title={title}>
+        <span className="id">not hx</span>
+        <span className="u">{`${util}%`}</span>
+      </div>
+    );
+  }
+  const runId = cell.runId ?? "";
+  return (
+    <AppLink className={`gc busy ${cell.kind}`} style={style} title={title} href={hrefs.run(runId)}>
+      <span className="id">{shortId(runId)}</span>
+      <span className="u">{cell.span > 1 ? `${util}% ×${cell.span}` : `${util}%`}</span>
+      <span className="ub">
+        <i style={{ width: `${Math.min(100, Math.max(0, util))}%` }} />
+      </span>
+    </AppLink>
+  );
+}
+
+function Cells({ row, runs, columns }: { row: HostRow; runs: ReadonlyMap<string, RunRecord>; columns: number }) {
+  if (row.slurm) {
+    return (
+      <div className="slurm">
+        <div title={`hx jobs running on ${row.name}`}>
+          <b>{row.slurm.running}</b>
+          <span>running</span>
+        </div>
+        <div title={`hx jobs pending on ${row.name}`}>
+          <b>{row.slurm.pending}</b>
+          <span>pending</span>
+        </div>
+      </div>
+    );
+  }
+  if (row.gpus.length === 0) {
+    const text = row.state.state === "connected" ? (row.kind === "slurm" ? "·" : "no GPUs") : row.state.message || "·";
+    return <div className="msg">{text}</div>;
+  }
+  const asOf = row.state.state === "stale" ? fmtClock(row.state.since) : null;
+  return (
+    <div className="cells" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
+      {gpuCells(row.gpus, runs).map((cell) => (
+        <Cell
+          key={cell.index}
+          host={row.name}
+          cell={cell}
+          run={cell.runId ? runs.get(cell.runId) : undefined}
+          asOf={asOf}
+        />
+      ))}
+    </div>
+  );
+}
+
+function HostLine(props: { row: HostRow; runs: ReadonlyMap<string, RunRecord>; hub: string | null; now: number; columns: number }) {
+  const { row, runs, hub, now, columns } = props;
+  const rate = row.usd_per_gpu_hour ?? null;
+  const cost = row.cost_today_usd;
+  return (
+    <div className={row.state.state === "stale" ? "hrow stale" : "hrow"} role="group" aria-label={row.name}>
+      <div className="hn">
+        <div>
+          <b>{row.name}</b>
+          <span className="kind">{row.name === "local" ? "hub" : row.kind}</span>
+        </div>
+        <div className="meta" title={row.projects.join(", ")}>
+          {gpuSpec(row.gpus) || "·"}
+        </div>
+      </div>
+      <StateCell row={row} hub={hub} now={now} />
+      <Cells row={row} runs={runs} columns={columns} />
+      <div className={row.queue > 0 ? "r q" : "r q z"} title={row.queue > 0 ? `${row.queue} hx runs waiting for GPUs` : "Queue empty"}>
+        {row.queue}
+      </div>
+      <div className={rate !== null ? "r money" : "r money z"} title={rate !== null ? "$/GPU-h from environments.yaml" : "No rate set"}>
+        {rate !== null ? `$${rate.toFixed(2)}` : "·"}
+      </div>
+      <div className={cost > 0 ? "r money" : "r money z"} title="GPU and API cost of runs today">
+        {cost > 0 ? fmtMoney(cost) : "·"}
+      </div>
+    </div>
+  );
+}
+
+export interface HostsPanelProps {
+  /** `GET /api/v1/hosts`. */
+  hosts: HostRow[];
+  /** Active runs (`OverviewSummary.running`), for each cell's launcher and label. */
+  runs: RunRecord[];
+  /** hx version of the hub; null while unknown (then no `≠` marks). */
+  hubVersion: string | null;
+  /** Current time in ms, for stale ages. */
+  now: number;
+}
+
+/** The Hosts panel body: header, one row per host, and the key. */
+export function HostsPanel({ hosts, runs, hubVersion, now }: HostsPanelProps) {
+  if (hosts.length === 0) return <p className="small">none</p>;
+  const byId = new Map(runs.map((r) => [r.run_id, r]));
+  const columns = gpuColumns(hosts);
+  return (
+    <>
+      {createElement("style", { "data-hx": "hosts" }, HOSTS_CSS)}
+      <div className="hosts">
+        <div className="hrow head">
+          <div>host</div>
+          <div>state</div>
+          <div className="gidx" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
+            {Array.from({ length: columns }, (_, i) => (
+              <span key={i}>{i}</span>
+            ))}
+          </div>
+          <div className="r">queue</div>
+          <div className="r">$/GPU‑h</div>
+          <div className="r">today</div>
+        </div>
+        {hosts.map((row) => (
+          <HostLine key={row.name} row={row} runs={byId} hub={hubVersion} now={now} columns={columns} />
+        ))}
+      </div>
+      <div className="key hosts-key" aria-label="Key">
+        <span><span className="gk agent" />agent run</span>
+        <span><span className="gk human" />human run</span>
+        <span><span className="gk free" />free</span>
+        <span><span className="gk other" />not hx</span>
+        <span><StateGlyph state="stale" />stale</span>
+        <span><span>hx<span className="ne">≠</span></span>version mismatch</span>
+      </div>
+    </>
+  );
 }

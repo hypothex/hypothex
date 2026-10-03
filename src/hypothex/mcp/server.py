@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import functools
 import os
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -700,17 +699,10 @@ def client_checkout(root: Path) -> tuple[dict[str, str | None], list[str]]:
         ``{project, commit, diff}`` and the untracked files ``git diff HEAD`` leaves out.
     """
     from hypothex.api.app import local_diff  # lazy: hypothex.api.app imports this module
-    from hypothex.core.gitinfo import head_commit
+    from hypothex.core.gitinfo import head_commit, untracked_files
 
     commit = head_commit(root)
-    untracked: list[str] = []
-    if commit is not None:
-        out = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"],
-            capture_output=True,
-            text=True,
-        )
-        untracked = out.stdout.splitlines() if out.returncode == 0 else []
+    untracked = untracked_files(root) if commit is not None else []
     fields: dict[str, str | None] = {
         "project": load_project_config(root).project,
         "commit": commit,

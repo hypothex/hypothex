@@ -15,6 +15,7 @@ from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep, sweep_path
 from hypothex.mcp.server import (
     DEFAULT_HUB_URL,
     HubUnavailableError,
+    client_checkout,
     find_sweep,
     hub_call,
     hub_url,
@@ -190,3 +191,20 @@ def test_write_fake_scp_refuses_paths_outside_its_folder(tmp_path: Path) -> None
     res = _scp(scp, str(src), "box:f.txt")  # BatchMode is required, as for every fake
     assert res.returncode == 255 and "BatchMode" in res.stderr
     assert not (root / "box" / "f.txt").exists()
+
+
+def test_client_checkout_names_untracked_files_raw(toy_repo: Path) -> None:
+    """Untracked names come back unquoted, even non-ASCII ones (git ``-z``)."""
+    (toy_repo / "caf\u00e9.py").write_text("x = 1\n")
+    (toy_repo / "sub").mkdir()
+    (toy_repo / "sub" / "new.py").write_text("y = 2\n")
+    fields, untracked = client_checkout(toy_repo)
+    assert fields["commit"] is not None
+    assert untracked == ["caf\u00e9.py", "sub/new.py"]
+
+
+def test_client_checkout_outside_a_repo(tmp_path: Path) -> None:
+    plain = write_toy_project(tmp_path / "plain", use_git=False)
+    fields, untracked = client_checkout(plain)
+    assert fields["commit"] is None and fields["diff"] is None
+    assert untracked == []

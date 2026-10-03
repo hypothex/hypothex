@@ -1600,6 +1600,38 @@ def test_a_halt_keeps_a_cancel_aimed_at_its_caller(tmp_path: Path) -> None:
     asyncio.run(main())
 
 
+def test_a_stop_in_a_cancelled_callers_finally_halts_every_host(tmp_path: Path) -> None:
+    hub = Hub(Context.open(tmp_path / "hub"), EnvironmentsFile(environments={}))
+    sups = [
+        hub._new_supervisor(name, HostSpec(route="url", url="http://127.0.0.1:9"))
+        for name in ("a", "b")
+    ]
+    hub._sups.update({sup.name: sup for sup in sups})
+
+    async def main() -> None:
+        tasks = [asyncio.create_task(asyncio.sleep(60)) for _ in sups]
+        for sup, task in zip(sups, tasks, strict=True):
+            sup.task = task
+        started = asyncio.Event()
+
+        async def caller() -> None:
+            try:
+                started.set()
+                await asyncio.sleep(60)
+            finally:
+                await hub.stop()  # runs while the caller's own cancel is being handled
+
+        outer = asyncio.create_task(caller())
+        await started.wait()
+        outer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await outer
+        assert all(task.cancelled() for task in tasks)  # the second host is halted too
+        assert all(sup.task is None for sup in sups)
+
+    asyncio.run(main())
+
+
 def test_a_halt_during_the_session_drain_still_closes_clients_and_route(
     tmp_path: Path, servers: tuple[EnvServer, EnvServer], monkeypatch: pytest.MonkeyPatch
 ) -> None:

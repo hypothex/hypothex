@@ -1093,13 +1093,15 @@ class Hub:
     async def _halt(self, sup: _Supervisor) -> None:
         task, sup.task = sup.task, None
         if task is not None:
+            current = asyncio.current_task()
+            # a caller already unwinding a cancel (``stop`` in a ``finally``) must still halt
+            before = current.cancelling() if current is not None else 0
             task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
-                current = asyncio.current_task()
-                if current is not None and current.cancelling():
-                    raise  # the cancel was aimed at our caller, not only at the task
+                if current is not None and current.cancelling() > before:
+                    raise  # a new cancel was aimed at our caller, not only at the task
         await self._drain(sup)
 
     async def _drain(self, sup: _Supervisor) -> None:

@@ -27,8 +27,7 @@ from hypothex.core.execution import (
 )
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gpus import free_gpus, gpu_status, query_gpus
-from hypothex.core.ids import utcnow
-from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
+from hypothex.core.records import ACTIVE_STATUSES, RunRecord, RunStatus, end_unstarted
 from hypothex.core.store import dir_lock
 
 SCHEDULER_INTERVAL_SECONDS = 5.0
@@ -85,13 +84,8 @@ def _set_position(position: int) -> Callable[[RunRecord], RunRecord]:
     return mutate
 
 
-def _spawn_failed(r: RunRecord) -> RunRecord:
-    if r.status in TERMINAL_STATUSES:
-        return r
-    executor = r.executor.model_copy(update={"queue_position": None})
-    return r.model_copy(
-        update={"status": RunStatus.FAILED, "ended_at": utcnow(), "executor": executor}
-    )
+_spawn_failed = end_unstarted(RunStatus.FAILED)
+"""Fail a run whose supervisor never started; it gives back its GPUs and queue place."""
 
 
 @dataclass(frozen=True)
@@ -120,6 +114,7 @@ class Scheduler:
 
     def __init__(self, ctx: Context) -> None:
         self.ctx = ctx
+        self._swept = False
 
     def _entries(self) -> list[_Entry]:
         """Waiting runs of this environment, in queue order."""
@@ -171,13 +166,27 @@ class Scheduler:
         start of a tick, an active run with ``queue.json`` and ``supervisor.pid``
         was started (its marker is deleted; it is never spawned again), and a
         waiting run with GPUs but no ``supervisor.pid`` was never started (its
-        GPUs are released and it keeps its place in the queue). The markers
-        are found on disk, not through the index's active runs, so a run that
-        ended while it waited (killed, failed, or a crash between its end and
-        the marker's removal) never keeps a stale ``queue.json``.
+        GPUs are released and it keeps its place in the queue).
+
+        Every tick checks only the runs the index lists as active (one stat
+        each). The first tick of a scheduler also sweeps the whole store, so a
+        run that ended while it waited (killed, failed, or a crash between its
+        end and the marker's removal) never keeps a stale ``queue.json``.
         """
         mine = self.ctx.descriptor.environment_id
-        for marker in sorted(self.ctx.layout.store.glob(f"*/runs/*/{QUEUE_FILE}")):
+        if self._swept:
+            markers = [
+                self.ctx.run_dir(r) / QUEUE_FILE
+                for status in ACTIVE_STATUSES
+                for r in self.ctx.index.list_runs(status=status, include_archived=True, limit=None)
+                if r.environment_id == mine
+            ]
+        else:
+            markers = list(self.ctx.layout.store.glob(f"*/runs/*/{QUEUE_FILE}"))
+            self._swept = True
+        for marker in sorted(markers):
+            if not marker.is_file():
+                continue
             run_dir = marker.parent
             try:
                 record = self.ctx.store.read_record(run_dir.parent.parent.name, run_dir.name)

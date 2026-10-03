@@ -39,7 +39,40 @@ class ValidationReport(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
-def _task_setup(ctx: Context, record: RunRecord) -> tuple[Path, ProjectConfig, TaskSpec]:
+def run_checkout(ctx: Context, record: RunRecord) -> Path | None:
+    """
+    Return the git worktree a run executed in, while it still exists.
+
+    Runs pinned to another commit (spec 8A.4) and reruns at an older commit
+    execute in ``<store>/<project>/worktrees/<name>/``.
+
+    Parameters
+    ----------
+    ctx : Context
+    record : RunRecord
+
+    Returns
+    -------
+    Path or None
+        The worktree root (it holds ``hypothex.yaml``), or None when the run
+        ran in the project repo or its worktree was removed.
+
+    Examples
+    --------
+    >>> run_checkout(ctx, record)  # doctest: +SKIP
+    PosixPath('/home/me/.hypothex/store/toy/worktrees/20261003-101500-toy-acc-1a2b')
+    """
+    root = ctx.layout.worktrees_dir(record.project)
+    cwd = Path(record.cwd)
+    if not cwd.is_relative_to(root) or cwd == root:
+        return None
+    tree = root / cwd.relative_to(root).parts[0]
+    return tree if (tree / CONFIG_FILENAME).is_file() else None
+
+
+def _task_setup(
+    ctx: Context, record: RunRecord, *, from_checkout: bool = False
+) -> tuple[Path, ProjectConfig, TaskSpec]:
     """
     Load the project config and task spec a run's task belongs to.
 
@@ -47,6 +80,9 @@ def _task_setup(ctx: Context, record: RunRecord) -> tuple[Path, ProjectConfig, T
     ----------
     ctx : Context
     record : RunRecord
+    from_checkout : bool
+        Read ``hypothex.yaml`` (and so the metric code) from the worktree the
+        run executed in while it exists (``run_checkout``), not the project repo.
 
     Returns
     -------
@@ -59,7 +95,8 @@ def _task_setup(ctx: Context, record: RunRecord) -> tuple[Path, ProjectConfig, T
     """
     if record.task is None:
         raise EvalError(f"run {record.run_id} has no task; nothing to evaluate against")
-    repo = Path(ctx.store.load_project(record.project).repo)
+    checkout = run_checkout(ctx, record) if from_checkout else None
+    repo = checkout or Path(ctx.store.load_project(record.project).repo)
     config = load_project_config(repo)
     if record.task not in config.tasks:
         raise EvalError(f"task {record.task!r} no longer exists in {repo / CONFIG_FILENAME}")
@@ -88,12 +125,19 @@ def _numeric_values(raw: object) -> dict[str, float] | None:
 
 
 def evaluate_run(
-    ctx: Context, run_id: str, *, metrics: list[str] | None = None
+    ctx: Context,
+    run_id: str,
+    *,
+    metrics: list[str] | None = None,
+    from_checkout: bool = True,
 ) -> tuple[list[ScoreRecord], list[str]]:
     """
     Score one run with the current version of its task's metrics.
 
-    Scores are appended; older scores are never changed.
+    Scores are appended; older scores are never changed. A run that executed
+    in a worktree (a pinned commit, spec 8A.4) is scored with that checkout's
+    ``hypothex.yaml``, metric code, and dataset while the worktree exists, so a
+    task that only exists at the pinned commit is still scored.
 
     Parameters
     ----------
@@ -101,6 +145,9 @@ def evaluate_run(
     run_id : str
     metrics : list of str, optional
         Subset of the task's metrics; default all.
+    from_checkout : bool
+        Use the run's worktree when it has one (default). ``reeval`` passes
+        False: re-evaluation scores with the project repo's current metrics.
 
     Returns
     -------
@@ -117,7 +164,7 @@ def evaluate_run(
         For any other evaluation failure.
     """
     record = ctx.find_record(run_id)
-    repo, config, task = _task_setup(ctx, record)
+    repo, config, task = _task_setup(ctx, record, from_checkout=from_checkout)
     names = metrics or task.metrics
     unknown = [m for m in names if m not in task.metrics]
     if unknown:
@@ -278,7 +325,7 @@ def reeval(
             report.skipped[record.run_id] = "already scored at the current version"
             continue
         try:
-            _, warnings = evaluate_run(ctx, record.run_id, metrics=names)
+            _, warnings = evaluate_run(ctx, record.run_id, metrics=names, from_checkout=False)
         except NoPredictionsError:
             report.skipped[record.run_id] = "no predictions"
             continue

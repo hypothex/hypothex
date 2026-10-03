@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import secrets
+import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -13,7 +13,7 @@ from typing import BinaryIO
 from hypothex.core import slurm
 from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
-from hypothex.core.errors import RunError
+from hypothex.core.errors import RunError, RunNotFoundError
 from hypothex.core.execution import (
     QUEUE_FILE,
     STOP_MARKER,
@@ -27,7 +27,6 @@ from hypothex.core.execution import (
     terminate_group,
 )
 from hypothex.core.fsutil import atomic_write_text
-from hypothex.core.gitinfo import capture_diff, create_worktree, head_commit
 from hypothex.core.gpus import free_gpus, gpu_status
 from hypothex.core.ids import utcnow
 from hypothex.core.records import (
@@ -36,12 +35,14 @@ from hypothex.core.records import (
     RunKind,
     RunRecord,
     RunStatus,
+    end_unstarted,
 )
 from hypothex.core.scheduler import Scheduler, assign_gpus, scheduler_lock
 from hypothex.remote.config import SlurmDefaults
 
 QUEUED_GRACE_SECONDS = 60.0
 WAIT_REPAIR_SECONDS = 5.0
+log = logging.getLogger(__name__)
 
 
 def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
@@ -89,48 +90,81 @@ def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
         record = prepare_run(ctx, req)
         try:  # the only place a run joins the queue: marker, FIFO place, position at once
             Scheduler(ctx).enqueue(record.run_id)
-        except RunError as exc:
+        except Exception as exc:
+            # any failure (also OSError, ConfigError): a queued run without a
+            # marker and with a live launcher pid would never be started or repaired
             ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": str(exc)})
             raise
         return ctx.find_record(record.run_id)
     if req.gpus > 0:
-        with scheduler_lock(ctx):  # early error only; released before the slow part
-            gpus = gpu_status(ctx)
-            free = free_gpus(gpus)
-            # more than the host has at all: prepare_run raises the clearer error
-            if len(free) < req.gpus <= len(gpus):
-                raise RunError(
-                    f"{req.gpus} GPUs requested; {len(free)} of {len(gpus)} free; "
-                    "add --queue to wait for them"
-                )
-        # git info, capture_env, dataset fingerprints: never under the host-wide lock
-        record = prepare_run(ctx, req)
-        with scheduler_lock(ctx):
-            gpus = gpu_status(ctx)  # a fresh nvidia-smi: sees processes started meanwhile
-            free = free_gpus(gpus)
-            if len(free) < req.gpus:
-                message = (
-                    f"{req.gpus} GPUs requested; {len(free)} of {len(gpus)} free now "
-                    "(taken while the run was prepared); add --queue to wait for them"
-                )
-                ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": message})
-                raise RunError(message)
-            chosen = free[: req.gpus]
-            record = ctx.update_run(
-                record.run_id, "run.gpus_assigned", assign_gpus(chosen), {"gpus": chosen}
-            )
-            _start_supervisor(ctx, record)  # under the lock: GPUs never wait without one
+        record = _prepare_on_free_gpus(
+            ctx, req, "add --queue to wait for them", lambda r: _start_supervisor(ctx, r)
+        )
         return ctx.find_record(record.run_id)
     record = prepare_run(ctx, req)
     _start_supervisor(ctx, record)
     return ctx.find_record(record.run_id)
 
 
-def _fail_unstarted(r: RunRecord) -> RunRecord:
-    """Mark a prepared run that never started as failed (frees any GPUs it held)."""
-    if r.status in TERMINAL_STATUSES:
-        return r
-    return r.model_copy(update={"status": RunStatus.FAILED, "ended_at": utcnow()})
+def _prepare_on_free_gpus(
+    ctx: Context, req: RunRequest, hint: str, start: Callable[[RunRecord], None] | None
+) -> RunRecord:
+    """
+    Prepare a run and give it the lowest ``req.gpus`` free GPUs of this host now.
+
+    Parameters
+    ----------
+    ctx : Context
+    req : RunRequest
+        A request with ``gpus > 0`` that does not wait in the queue.
+    hint : str
+        How to wait for GPUs instead, appended to the error message.
+    start : callable or None
+        Called with the run under the scheduler lock once it holds its GPUs
+        (spawns the supervisor), so GPUs never wait without an owner. None
+        when the caller executes the run itself right away (foreground).
+
+    Returns
+    -------
+    RunRecord
+        The prepared run with ``executor.gpus`` set.
+
+    Raises
+    ------
+    RunError
+        Fewer free GPUs than requested: before anything is created, or (when
+        they were taken while the run was prepared) after it, and the run is
+        then marked ``failed``.
+    """
+    with scheduler_lock(ctx):  # early error only; released before the slow part
+        gpus = gpu_status(ctx)
+        free = free_gpus(gpus)
+        # more than the host has at all: prepare_run raises the clearer error
+        if len(free) < req.gpus <= len(gpus):
+            raise RunError(f"{req.gpus} GPUs requested; {len(free)} of {len(gpus)} free; {hint}")
+    # git info, capture_env, dataset fingerprints: never under the host-wide lock
+    record = prepare_run(ctx, req)
+    with scheduler_lock(ctx):
+        gpus = gpu_status(ctx)  # a fresh nvidia-smi: sees processes started meanwhile
+        free = free_gpus(gpus)
+        if len(free) < req.gpus:
+            message = (
+                f"{req.gpus} GPUs requested; {len(free)} of {len(gpus)} free now "
+                f"(taken while the run was prepared); {hint}"
+            )
+            ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": message})
+            raise RunError(message)
+        chosen = free[: req.gpus]
+        record = ctx.update_run(
+            record.run_id, "run.gpus_assigned", assign_gpus(chosen), {"gpus": chosen}
+        )
+        if start is not None:
+            start(record)
+    return record
+
+
+_fail_unstarted = end_unstarted(RunStatus.FAILED)
+"""Mark a prepared run that never started as failed; it gives back its GPUs."""
 
 
 def _start_supervisor(ctx: Context, record: RunRecord) -> None:
@@ -231,13 +265,8 @@ def _scheduler_held(run_dir: Path) -> bool:
     return (run_dir / QUEUE_FILE).is_file() and not (run_dir / SUPERVISOR_PID_FILE).is_file()
 
 
-def _unqueue(r: RunRecord) -> RunRecord:
-    if r.status in TERMINAL_STATUSES:
-        return r
-    executor = r.executor.model_copy(update={"queue_position": None})
-    return r.model_copy(
-        update={"status": RunStatus.KILLED, "ended_at": utcnow(), "executor": executor}
-    )
+_unqueue = end_unstarted(RunStatus.KILLED)
+"""Kill a run removed from the GPU queue before it started."""
 
 
 def _remove_from_queue(ctx: Context, run_id: str, run_dir: Path) -> RunRecord | None:
@@ -338,8 +367,13 @@ def _start(
     if _slurm_defaults(ctx, req) is not None:
         # a foreground run would execute here, on the login node, not in a SLURM job
         raise RunError("SLURM runs are always submitted; drop --foreground")
-    # foreground: the run executes right here, so it must not also wait in the host queue
-    record = prepare_run(ctx, dataclasses.replace(req, queue=False))
+    # foreground: the run executes right here, so it must not also wait in the host queue,
+    # but it still takes its GPUs like any other run on this host
+    here = dataclasses.replace(req, queue=False)
+    if here.gpus > 0:
+        record = _prepare_on_free_gpus(ctx, here, "drop --foreground to wait for them", None)
+    else:
+        record = prepare_run(ctx, here)
     return execute_run(ctx, record.run_id, stdout_sink=stdout_sink, stderr_sink=stderr_sink)
 
 
@@ -355,11 +389,14 @@ def rerun(
     """
     Run the same command, commit, config, seed, and vars again as a child run.
 
-    If the repo is no longer at the recorded commit (or its uncommitted diff
-    differs), the rerun executes in a fresh git worktree at the recorded commit
-    with the saved diff applied. If the repo moved since the parent ran (the
+    The parent's commit and saved diff are pinned on the request (spec 8A.4):
+    if the repo is no longer at that commit (or its uncommitted diff differs),
+    the rerun executes in a fresh git worktree at the recorded commit with the
+    saved diff applied, and ``{repo}``, dataset paths, and the environment
+    resolve inside that checkout. If the repo moved since the parent ran (the
     project was re-registered at a new path), the working directory is mapped
-    onto the new location.
+    onto the new location; a parent that ran in a worktree keeps its
+    subdirectory.
 
     Parameters
     ----------
@@ -381,8 +418,9 @@ def rerun(
     Raises
     ------
     RunError
-        If the saved diff was too large to reproduce, or the working
-        directory does not exist in the (possibly moved) repo.
+        If the saved diff was too large to reproduce, the commit cannot be
+        checked out, or the working directory does not exist in the
+        (possibly moved) repo.
     """
     parent = ctx.find_record(run_id)
     entry = ctx.store.load_project(parent.project)
@@ -395,21 +433,12 @@ def rerun(
         )
     diff_file = parent_dir / "git.diff"
     saved_diff = diff_file.read_bytes() if diff_file.is_file() else None
-    relative = _relative_cwd(Path(parent.cwd), repo, [Path(p) for p in entry.previous_repos])
-    cwd = repo / relative
-    if parent.git.commit is not None:
-        same_tree = head_commit(repo) == parent.git.commit and capture_diff(repo).diff == saved_diff
-        if not same_tree:
-            worktree = ctx.layout.worktrees_dir(parent.project) / (
-                f"{parent.run_id}-{secrets.token_hex(3)}"
-            )
-            create_worktree(repo, parent.git.commit, worktree, saved_diff)
-            cwd = worktree / relative
-    if not cwd.is_dir():
-        raise RunError(
-            f"working directory {cwd} for the rerun of {run_id} does not exist "
-            f"(the run used {parent.cwd}; the project repo is now {repo})"
-        )
+    parent_cwd = Path(parent.cwd)
+    trees = ctx.layout.worktrees_dir(parent.project)
+    if parent_cwd.is_relative_to(trees) and parent_cwd != trees:
+        relative = Path(*parent_cwd.relative_to(trees).parts[1:])  # inside its worktree
+    else:
+        relative = _relative_cwd(parent_cwd, repo, [Path(p) for p in entry.previous_repos])
     config_file = parent_dir / "config.yaml"
     req = RunRequest(
         repo=repo,
@@ -424,11 +453,13 @@ def rerun(
         vars=dict(parent.vars),
         kind=parent.kind,
         parent=parent.run_id,
-        cwd=cwd,
+        cwd=repo / relative,
         created_by=created_by,
         gpus=parent.gpus_requested,
         queue=parent.gpus_requested > 0,  # wait for GPUs; never start with none
         slurm=slurm.run_slurm_settings(parent_dir),
+        commit=parent.git.commit,  # prepare_run checks it out when the repo moved on
+        diff=saved_diff,
     )
     return _start(ctx, req, background, stdout_sink, stderr_sink)
 
@@ -445,6 +476,9 @@ def reinfer(
 ) -> RunRecord:
     """
     Run the project's ``infer`` stage with a run's checkpoint as a child run.
+
+    The parent's ``config.yaml`` (if it had one) is passed on, so ``{config}``
+    works in the ``infer`` stage.
 
     Parameters
     ----------
@@ -479,6 +513,7 @@ def reinfer(
     chosen = checkpoint or (checkpoints[-1] if checkpoints else None)
     if chosen is None:
         raise RunError(f"run {run_id} has no checkpoint artifact; pass --checkpoint PATH")
+    config_file = ctx.run_dir(parent) / "config.yaml"
     req = RunRequest(
         repo=repo,
         stage="infer",
@@ -486,6 +521,7 @@ def reinfer(
         hypothesis=f"Re-infer of {parent.run_id}: {parent.hypothesis}".strip(),
         seed=parent.seed,
         tags=list(parent.tags),
+        config_path=config_file if config_file.is_file() else None,
         vars={**parent.vars, "checkpoint": chosen},
         kind=RunKind.INFER,
         parent=parent.run_id,
@@ -504,7 +540,8 @@ def repair_runs(ctx: Context) -> list[RunRecord]:
     A run is orphaned when its supervisor is gone (queued runs get a
     ``QUEUED_GRACE_SECONDS`` grace period). Runs waiting in the GPU queue
     have no supervisor yet and stay queued. An orphaned child process is
-    terminated so it does not run unrecorded.
+    terminated so it does not run unrecorded. An index row whose run folder
+    was deleted is dropped; the other runs are still repaired.
 
     Parameters
     ----------
@@ -524,7 +561,12 @@ def repair_runs(ctx: Context) -> list[RunRecord]:
     for indexed in candidates:
         if indexed.environment_id != ctx.descriptor.environment_id:
             continue
-        current = ctx.find_record(indexed.run_id)
+        try:
+            current = ctx.find_record(indexed.run_id)
+        except RunNotFoundError:
+            log.warning("run %s is indexed but its folder is gone; dropped", indexed.run_id)
+            ctx.index.delete_run(indexed.run_id)
+            continue
         if current.status not in ACTIVE_STATUSES:
             ctx.index.upsert_run(current)
             continue

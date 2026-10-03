@@ -72,9 +72,11 @@ Start a stage in the background; check progress with ``hx logs`` or ``hx show``.
 
 Rerun with the same command, commit, config, and seed. If the repo has moved on
 (new commit or different uncommitted diff), the rerun uses a fresh git worktree at
-the recorded commit with the saved diff applied. If the repo itself moved and the
-project was re-registered at the new path, the working directory is mapped onto
-the new location.
+the recorded commit with the saved diff applied; ``{repo}``, dataset paths, and the
+captured environment then point into that worktree, and the run is scored with its
+metric code. When the run ends, the worktree is removed unless the run left files in
+it (outputs, checkpoints). If the repo itself moved and the project was re-registered
+at the new path, the working directory is mapped onto the new location.
 
 .. code-block:: bash
 

@@ -362,3 +362,94 @@ def test_stop_marker_before_start_ends_killed_without_starting(
     assert done.started_at is None and done.executor.child_pid is None
     killed = [e for e in ctx.events.since(0) if e.type == "run.killed"]
     assert killed[-1].payload.get("reason") == "stopped before start"
+
+
+# review fixes: reruns check out through prepare_run, repair skips gone runs, reinfer config
+def _commit_train(repo: Path, text: str) -> None:
+    (repo / "train.py").write_text(f"print({text!r})\n")
+    subprocess.run(["git", "-C", str(repo), "add", "train.py"], check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(repo)]
+        + ["commit", "-qm", text],
+        check=True,
+    )
+
+
+def test_rerun_in_a_worktree_renders_repo_inside_the_checkout(ctx: Context, toy_repo: Path) -> None:
+    _commit_train(toy_repo, "train v1")
+    req = RunRequest(repo=toy_repo, command=[PY, "{repo}/train.py"])
+    parent = execute_run(ctx, prepare_run(ctx, req).run_id)
+    _commit_train(toy_repo, "train v2")
+    child = rerun(ctx, parent.run_id, background=False)
+    assert child.git.commit == parent.git.commit
+    assert child.cwd == str(ctx.layout.worktrees_dir("toy") / child.run_id)
+    assert child.command[1] == f"{child.cwd}/train.py"
+    assert (ctx.run_dir(child) / "logs" / "stdout.log").read_text().strip() == "train v1"
+
+
+def test_rerun_keeps_the_subdirectory_of_a_worktree_parent(ctx: Context, toy_repo: Path) -> None:
+    (toy_repo / "pkg").mkdir()
+    (toy_repo / "pkg" / "keep.txt").write_text("x\n")
+    _commit_train(toy_repo, "train v1")
+    subprocess.run(["git", "-C", str(toy_repo), "add", "pkg"], check=True)
+    _commit_train(toy_repo, "train v1b")
+    head = subprocess.run(
+        ["git", "-C", str(toy_repo), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    _commit_train(toy_repo, "train v2")
+    req = RunRequest(repo=toy_repo, command=PRINT_CWD, cwd=toy_repo / "pkg", commit=head)
+    parent = execute_run(ctx, prepare_run(ctx, req).run_id)
+    assert Path(parent.cwd).name == "pkg"
+    child = rerun(ctx, parent.run_id, background=False)
+    assert child.status == RunStatus.FINISHED
+    assert Path(child.cwd) == ctx.layout.worktrees_dir("toy") / child.run_id / "pkg"
+
+
+def test_rerun_that_fails_after_the_checkout_leaves_no_worktree(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import execution
+
+    _commit_train(toy_repo, "train v1")
+    parent = execute_run(
+        ctx, prepare_run(ctx, RunRequest(repo=toy_repo, command=[PY, "train.py"])).run_id
+    )
+    _commit_train(toy_repo, "train v2")
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("env capture failed")
+
+    monkeypatch.setattr(execution, "capture_env", boom)
+    with pytest.raises(OSError, match="env capture failed"):
+        rerun(ctx, parent.run_id, background=False)
+    folder = ctx.layout.worktrees_dir("toy")
+    assert not folder.is_dir() or list(folder.iterdir()) == []
+
+
+def test_repair_skips_a_run_whose_folder_was_deleted(ctx: Context) -> None:
+    _active(ctx, "gone", RunStatus.RUNNING, dead_pid())
+    _active(ctx, "zdead", RunStatus.RUNNING, dead_pid())
+    shutil.rmtree(ctx.run_dir(ctx.find_record("gone")))
+    assert [r.run_id for r in repair_runs(ctx)] == ["zdead"]
+    assert ctx.index.get_run("gone") is None
+
+
+def test_reinfer_passes_the_parents_config(ctx: Context, toy_repo: Path, tmp_path: Path) -> None:
+    import yaml
+
+    config = yaml.safe_load((toy_repo / "hypothex.yaml").read_text())
+    config["stages"]["infer"] += " --config {config}"
+    (toy_repo / "hypothex.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    user_config = tmp_path / "cfg.yaml"
+    user_config.write_text("lr: 0.1\n")
+    code = (
+        "import json, os; d = os.environ['HYPOTHEX_RUN_DIR']; "
+        "open(d + '/artifacts.jsonl', 'a').write(json.dumps("
+        "{'kind': 'checkpoint', 'path': '/tmp/model.pt'}) + '\\n')"
+    )
+    req = RunRequest(repo=toy_repo, command=cmd(code), config_path=user_config)
+    parent = execute_run(ctx, prepare_run(ctx, req).run_id)
+    child = reinfer(ctx, parent.run_id, background=False)
+    assert child.status == RunStatus.FINISHED
+    assert (ctx.run_dir(child) / "config.yaml").read_text() == "lr: 0.1\n"
+    assert child.command[-1] == str(ctx.run_dir(child) / "config.yaml")

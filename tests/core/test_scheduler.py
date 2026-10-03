@@ -966,3 +966,170 @@ def test_queued_run_starts_from_the_server_loop(
     with TestClient(create_app(home, kind="ssh"), base_url="http://127.0.0.1:7777"):
         assert wait_for_run(ctx, rid, timeout=60).status == RunStatus.FINISHED
     assert stdout_of(ctx, rid) == "served"
+
+
+# review fixes: pinned config snapshot, pinned scoring, unstarted runs, queue errors ------
+def add_task_at_new_commit(repo: Path) -> tuple[str, str]:
+    """Commit a new task and a ``fit`` stage that predicts it; return (base, new) shas."""
+    base = git(repo, "rev-parse", "HEAD")
+    config = yaml.safe_load((repo / "hypothex.yaml").read_text())
+    config["stages"]["fit"] = f"{shlex.quote(PY)} {{repo}}/train.py"
+    config["tasks"]["new-task"] = {
+        "dataset": "toyset",
+        "split": "test",
+        "metrics": ["accuracy"],
+        "primary": "accuracy",
+    }
+    (repo / "hypothex.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    (repo / "train.py").write_text(
+        "import json, os\n"
+        "d = os.environ['HYPOTHEX_RUN_DIR']\n"
+        "with open(d + '/predictions/predictions.jsonl', 'w') as fh:\n"
+        "    for i, p in enumerate([0, 1, 0, 0]):\n"
+        "        fh.write(json.dumps({'id': f'ex-{i}', 'prediction': p}) + '\\n')\n"
+    )
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "new task")
+    return base, git(repo, "rev-parse", "HEAD")
+
+
+def test_pinned_launch_keeps_the_stored_project_config(ctx: Context, toy_repo: Path) -> None:
+    base, _ = add_task_at_new_commit(toy_repo)
+    ctx.register_project(toy_repo)
+    assert "new-task" in ctx.store.load_project("toy").config.tasks
+    prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=base))
+    assert "new-task" in ctx.store.load_project("toy").config.tasks
+
+
+def test_pinned_run_is_scored_with_its_own_checkout(ctx: Context, toy_repo: Path) -> None:
+    # the task exists only at the pinned commit; the host checkout is behind
+    base, new = add_task_at_new_commit(toy_repo)
+    git(toy_repo, "checkout", "-q", base)
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, stage="fit", task="new-task", commit=new))
+    done = execute_run(ctx, rec.run_id)
+    assert done.status == RunStatus.FINISHED
+    types = [e.type for e in ctx.events.since(0) if e.run_id == rec.run_id]
+    assert "run.eval_skipped" not in types
+    assert [s.value for s in ctx.store.read_scores("toy", rec.run_id)] == [1.0]
+
+
+def test_foreground_rerun_of_a_gpu_parent_takes_free_gpus(
+    ctx: Context, toy_repo: Path, gpus: SetGpus
+) -> None:
+    from hypothex.core.control import rerun
+
+    gpus([{"index": 0, "external": True}, {"index": 1}])
+    parent = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(CUDA), gpus=1))
+    execute_run(ctx, parent.run_id)
+    child = rerun(ctx, parent.run_id, background=False)
+    assert child.status == RunStatus.FINISHED
+    assert child.executor.gpus == [1]
+    assert stdout_of(ctx, child.run_id) == "1"
+    gpus([{"index": 0, "external": True}, {"index": 1, "external": True}])
+    with pytest.raises(RunError, match="1 GPUs requested; 0 of 2 free"):
+        rerun(ctx, parent.run_id, background=False)
+
+
+def test_unstarted_failures_clear_the_gpus_they_never_used(
+    ctx: Context, toy_repo: Path, gpus: SetGpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import control
+
+    gpus([{"index": 0}])
+    rid = queue_run(ctx, toy_repo, 1)
+    real_write = execution.atomic_write_text
+
+    def no_pid_file(path: Path, *args: object, **kwargs: object) -> None:
+        if Path(path).name == "supervisor.pid":
+            raise OSError(28, "No space left on device")
+        real_write(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution, "atomic_write_text", no_pid_file)
+    assert Scheduler(ctx).tick() == []
+    failed = ctx.find_record(rid)
+    assert failed.status == RunStatus.FAILED
+    assert failed.executor.gpus == [] and failed.executor.queue_position is None
+    monkeypatch.setattr(execution, "atomic_write_text", real_write)
+
+    def broken(c: Context, r: RunRecord) -> int:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(control, "spawn_supervisor", broken)
+    with pytest.raises(RunError, match="could not start the supervisor"):
+        launch_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), gpus=1))
+    [other] = [r for r in ctx.index.run_ids() if r != rid]
+    assert ctx.find_record(other).status == RunStatus.FAILED
+    assert ctx.find_record(other).executor.gpus == []
+
+
+@pytest.mark.parametrize("error", [OSError(28, "No space left on device"), ConfigError("bad")])
+def test_any_enqueue_error_fails_the_queued_run(
+    ctx: Context,
+    toy_repo: Path,
+    gpus: SetGpus,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    gpus([{"index": 0}])
+
+    def broken(self: Scheduler, run_id: str) -> int:
+        raise error
+
+    monkeypatch.setattr(Scheduler, "enqueue", broken)
+    with pytest.raises(type(error)):
+        launch_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), gpus=1, queue=True))
+    [run_id] = list(ctx.index.run_ids())
+    assert ctx.find_record(run_id).status == RunStatus.FAILED
+    reasons = [e.payload["reason"] for e in ctx.events.since(0) if e.type == "run.failed"]
+    assert str(error) in reasons[0]
+
+
+def test_ticks_scan_only_active_runs_after_the_first(
+    ctx: Context, toy_repo: Path, gpus: SetGpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gpus([{"index": 0, "external": True}])  # busy: nothing starts
+    rid = queue_run(ctx, toy_repo, 1)
+    marker = ctx.run_dir(ctx.find_record(rid)) / QUEUE_FILE
+    ctx.update_run(rid, "run.killed", lambda r: r.model_copy(update={"status": RunStatus.KILLED}))
+    globs: list[str] = []
+    real_glob = Path.glob
+
+    def counting_glob(self: Path, pattern: str, *args: object, **kwargs: object) -> object:
+        if QUEUE_FILE in pattern:
+            globs.append(pattern)
+        return real_glob(self, pattern, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "glob", counting_glob)
+    scheduler = Scheduler(ctx)
+    scheduler.tick()
+    assert not marker.exists()  # the first tick still sweeps stale markers
+    assert len(globs) == 1
+    other = queue_run(ctx, toy_repo, 1)
+    for _ in range(3):
+        scheduler.tick()
+    assert len(globs) == 1
+    assert Scheduler(ctx).positions() == {other: 1}
+
+
+def test_a_clean_worktree_is_removed_when_its_run_ends(ctx: Context, toy_repo: Path) -> None:
+    head = commit_marker(toy_repo, "old")
+    (toy_repo / "marker.txt").write_text("patched")
+    diff = git_diff(toy_repo)
+    git(toy_repo, "checkout", "--", "marker.txt")
+    code = "import sys; sys.dont_write_bytecode = False; print(open('marker.txt').read())"
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(code), commit=head, diff=diff))
+    assert Path(rec.cwd).is_dir()
+    assert execute_run(ctx, rec.run_id).status == RunStatus.FINISHED
+    assert stdout_of(ctx, rec.run_id) == "patched"
+    assert worktrees(ctx) == []
+    assert git(toy_repo, "worktree", "list", "--porcelain").count("worktree ") == 1
+
+
+def test_a_worktree_with_run_outputs_is_kept(ctx: Context, toy_repo: Path) -> None:
+    head = commit_marker(toy_repo, "old")
+    commit_marker(toy_repo, "new")
+    code = "import os; os.makedirs('ckpt'); open('ckpt/last.pt', 'w').write('weights')"
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(code), commit=head))
+    assert execute_run(ctx, rec.run_id).status == RunStatus.FINISHED
+    assert (Path(rec.cwd) / "ckpt" / "last.pt").read_text() == "weights"
+    assert worktrees(ctx) == [Path(rec.cwd)]

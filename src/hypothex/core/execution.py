@@ -6,6 +6,7 @@ import contextlib
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -21,19 +22,32 @@ from typing import IO, BinaryIO
 
 import psutil
 
-from hypothex.core.config import load_project_config, render_template
+from hypothex.core.config import (
+    BUILTIN_TEMPLATE_VARS,
+    ProjectConfig,
+    load_project_config,
+    render_template,
+)
 from hypothex.core.context import Context
 from hypothex.core.cost import compute_cost
 from hypothex.core.datasets import FingerprintCache, dataset_ref, resolve_dataset_path
 from hypothex.core.envcapture import capture_env
 from hypothex.core.errors import GitError, HypothexError, RunError, TemplateError
 from hypothex.core.evalrunner import default_python_cmd
-from hypothex.core.evaluation import evaluate_run
+from hypothex.core.evaluation import evaluate_run, run_checkout
 from hypothex.core.fsutil import atomic_write_bytes, atomic_write_text, read_yaml, write_yaml
 from hypothex.core.gitinfo import capture_diff, create_worktree, git_info, head_commit
 from hypothex.core.gpus import query_gpus
 from hypothex.core.ids import new_run_id, utcnow
-from hypothex.core.records import ExecutorInfo, RunKind, RunRecord, RunStatus
+from hypothex.core.records import (
+    TERMINAL_STATUSES,
+    Artifact,
+    ExecutorInfo,
+    RunKind,
+    RunRecord,
+    RunStatus,
+    UsageTotals,
+)
 from hypothex.core.seeds import config_hash, run_fingerprint
 from hypothex.core.store import sum_usage
 from hypothex.remote.config import SlurmDefaults
@@ -49,6 +63,13 @@ EXECUTION_CLAIM = "execution.claim"
 GATE_EXIT = 97
 GATE_ARGV = ("sh", "-c", 'IFS= read -r _ || exit 97; exec "$@"', "hx-gate")
 """Run commands behind this gate: they start only after the supervisor writes ``go``."""
+PUMP_DRAIN_SECONDS = 5.0
+"""After the command exits, how long its output may still flow before the run ends.
+
+A process the command left running in the background (``cmd &``, a daemon) keeps
+the output pipes open; past this the run is recorded anyway (``run.warning``)."""
+PROVIDED_TEMPLATE_VARS = BUILTIN_TEMPLATE_VARS - {"checkpoint"}
+"""Template values Hypothex fills in itself; ``--var`` cannot set them."""
 
 
 @dataclass
@@ -64,8 +85,9 @@ class RunRequest:
     ``slurm`` holds ``sbatch`` settings; a request with it is submitted to
     SLURM (``control.launch_run``), and SLURM's queue holds it.
     ``commit`` pins the commit to run and ``diff`` is uncommitted changes to
-    apply on top of it (text of ``git diff HEAD --binary``); when the repo is
-    not already at exactly that state the run uses a git worktree (spec 8A.4).
+    apply on top of it (``git diff HEAD --binary``: text from the hub, raw bytes
+    from a rerun's ``git.diff``); when the repo is not already at exactly that
+    state the run uses a git worktree (spec 8A.4).
     """
 
     repo: Path
@@ -86,7 +108,7 @@ class RunRequest:
     queue: bool = False
     slurm: SlurmDefaults | None = None
     commit: str | None = None
-    diff: str | None = None
+    diff: str | bytes | None = None
 
 
 def process_create_time(pid: int) -> float | None:
@@ -219,7 +241,7 @@ def _discard_worktree(repo: Path, path: Path) -> None:
     subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True)
 
 
-def _checkout(repo: Path, commit: str | None, diff: str | None, dest: Path) -> Path | None:
+def _checkout(repo: Path, commit: str | None, diff: str | bytes | None, dest: Path) -> Path | None:
     """
     Make the working copy a request pins with ``commit`` and/or ``diff`` (spec 8A.4).
 
@@ -229,7 +251,7 @@ def _checkout(repo: Path, commit: str | None, diff: str | None, dest: Path) -> P
         The project repo on this host.
     commit : str or None
         Commit to run (full or abbreviated sha); None means the repo's HEAD.
-    diff : str or None
+    diff : str, bytes, or None
         Uncommitted changes to apply on top of ``commit``; empty or None means none.
     dest : Path
         Where to create the worktree when one is needed.
@@ -265,7 +287,7 @@ def _checkout(repo: Path, commit: str | None, diff: str | None, dest: Path) -> P
                 f"commit {wanted[:12]} is not in {repo}, even after `git fetch`{detail}; "
                 "push it to a remote this host can fetch"
             )
-    patch = diff.encode("utf-8") if diff else None
+    patch = (diff if isinstance(diff, bytes) else diff.encode("utf-8")) if diff else None
     if head == resolved and capture_diff(repo).diff == patch:
         return None
     try:
@@ -386,14 +408,22 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     Raises
     ------
     RunError
-        Unknown task/stage, missing template value, command not found, an
-        agent run without a hypothesis, more GPUs than this host has, or a
-        pinned commit/diff that cannot be checked out (spec 8A.4).
+        Unknown task/stage, missing template value, a ``--var`` that sets a
+        value Hypothex provides (``run_dir``, ``repo``, ...), a working
+        directory that does not exist, command not found, an agent run
+        without a hypothesis, more GPUs than this host has, or a pinned
+        commit/diff that cannot be checked out (spec 8A.4).
     """
     repo = req.repo.resolve()
-    project = load_project_config(repo).project  # the host checkout names the project
+    host_config = load_project_config(repo)  # the host checkout names the project
     if os.environ.get("HYPOTHEX_AGENT") and not req.hypothesis.strip():
         raise RunError("agents must give a hypothesis (--hypothesis): why does this run exist?")
+    provided = sorted(set(req.vars) & PROVIDED_TEMPLATE_VARS)
+    if provided:
+        raise RunError(
+            f"--var {provided[0]} is set by Hypothex and cannot be overridden "
+            f"(Hypothex sets: {', '.join(sorted(PROVIDED_TEMPLATE_VARS))})"
+        )
     if req.config_path is not None and not req.config_path.is_file():
         raise RunError(f"config file not found: {req.config_path}")
     if req.gpus < 0:
@@ -403,9 +433,11 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         if req.gpus > total:
             raise RunError(f"asked for {req.gpus} GPUs; this host has {total}")
     run_id = new_run_id(req.task)
-    worktree = _checkout(repo, req.commit, req.diff, ctx.layout.worktrees_dir(project) / run_id)
+    worktree = _checkout(
+        repo, req.commit, req.diff, ctx.layout.worktrees_dir(host_config.project) / run_id
+    )
     try:
-        return _prepare_in(ctx, req, repo, worktree, run_id)
+        return _prepare_in(ctx, req, repo, host_config, worktree, run_id)
     except BaseException:
         # any failure after the worktree exists removes it (spec 8A.4)
         if worktree is not None:
@@ -414,17 +446,24 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
 
 
 def _prepare_in(
-    ctx: Context, req: RunRequest, repo: Path, worktree: Path | None, run_id: str
+    ctx: Context,
+    req: RunRequest,
+    repo: Path,
+    host_config: ProjectConfig,
+    worktree: Path | None,
+    run_id: str,
 ) -> RunRecord:
     """
     Create the run from its checkout: ``worktree`` when there is one, else ``repo``.
 
-    ``repo`` is the host checkout; it only names the project and is the path
-    registered for it. Config, commands, datasets, and captures use the checkout.
+    ``repo`` is the host checkout and ``host_config`` its ``hypothex.yaml``:
+    they name the project and are what is registered for it, so a run pinned
+    to an older commit never changes the project's stored tasks. Config,
+    commands, datasets, and captures of the run use the checkout.
     """
     src = worktree or repo
-    config = load_project_config(src)
-    project = load_project_config(repo).project
+    config = load_project_config(worktree) if worktree is not None else host_config
+    project = host_config.project
     if config.project != project:
         raise RunError(
             f"the pinned commit's hypothex.yaml names project {config.project!r}, not {project!r}"
@@ -450,6 +489,8 @@ def _prepare_in(
         cwd = worktree / (cwd.relative_to(repo) if cwd.is_relative_to(repo) else Path())
         if not cwd.is_dir():
             raise RunError(f"working directory {cwd} does not exist at the pinned commit")
+    elif not cwd.is_dir():
+        raise RunError(f"working directory {cwd} does not exist")
     run_dir = ctx.layout.run_dir(config.project, run_id)
     values = {"run_id": run_id, "run_dir": str(run_dir), "repo": str(src), "task": req.task or ""}
     if req.seed is not None:
@@ -474,7 +515,7 @@ def _prepare_in(
     if not _executable_exists(argv[0], cwd):
         raise RunError(f"command not found: {argv[0]}")
 
-    entry = ctx.store.register_project(config, repo)
+    entry = ctx.store.register_project(host_config, repo)
     ctx.index.upsert_project(entry)
     datasets = []
     if task_spec is not None:
@@ -543,14 +584,28 @@ def _prepare_in(
     return record
 
 
-def _pump(src: IO[bytes] | None, log_path: Path, sink: BinaryIO | None) -> threading.Thread:
+def _pump(
+    src: IO[bytes] | None, log_path: Path, sink: BinaryIO | None, stop: threading.Event
+) -> threading.Thread:
+    """
+    Copy a pipe to a log file (and ``sink``) until EOF or until ``stop`` is set.
+
+    ``stop`` lets the run end when a process the command left behind still
+    holds the pipe open, so EOF never comes.
+    """
+
     def run() -> None:
         if src is None:
             return
         out = sink
         fd = src.fileno()
         with log_path.open("ab") as fh:
-            while chunk := os.read(fd, 65536):
+            while not stop.is_set():
+                if not select.select([fd], [], [], 0.1)[0]:
+                    continue
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    return
                 fh.write(chunk)
                 fh.flush()
                 if out is not None:
@@ -629,6 +684,14 @@ def execute_run(
     ended record carries ``cost`` (GPU hours and API spend; the hub adds the
     GPU price).
 
+    The run ends when the command exits. Output still flowing from processes
+    it left running is captured for ``PUMP_DRAIN_SECONDS`` more, then the run
+    is recorded with a ``run.warning``. A failure to read or index what the
+    run logged also becomes a ``run.warning``, never a run stuck ``running``.
+
+    After scoring, the git worktree the run executed in (spec 8A.4) is
+    removed when the run left nothing in it (``release_worktree``).
+
     Parameters
     ----------
     ctx : Context
@@ -636,13 +699,87 @@ def execute_run(
     stdout_sink, stderr_sink : binary file, optional
         Where to echo the child's output.
     auto_evaluate : bool
-        Score finished task runs.
+        Score finished task runs, then remove the run's clean worktree. With
+        False (a SLURM compute node) the caller scores the run and keeps the
+        worktree until then.
 
     Returns
     -------
     RunRecord
         The final record.
     """
+    final = _execute(ctx, run_id, stdout_sink, stderr_sink, auto_evaluate)
+    if auto_evaluate and final.status in TERMINAL_STATUSES:
+        release_worktree(ctx, final)
+    return final
+
+
+def release_worktree(ctx: Context, record: RunRecord) -> bool:
+    """
+    Remove the git worktree an ended run executed in, if the run left nothing there.
+
+    The worktree is kept when it holds anything the run may have made: an
+    untracked or ignored file (other than Python bytecode caches), or tracked
+    changes other than the diff the run started with (``git.diff``).
+
+    Parameters
+    ----------
+    ctx : Context
+    record : RunRecord
+        An ended run.
+
+    Returns
+    -------
+    bool
+        True if a worktree was removed.
+
+    Examples
+    --------
+    >>> release_worktree(ctx, ctx.find_record(run_id))  # doctest: +SKIP
+    True
+    """
+    tree = run_checkout(ctx, record)
+    if tree is None:
+        return False
+    run_dir = ctx.run_dir(record)
+    if (run_dir / "git.diff.too_large").exists():
+        return False
+    saved = run_dir / "git.diff"
+    try:
+        if capture_diff(tree).diff != (saved.read_bytes() if saved.is_file() else None):
+            return False
+        status = subprocess.run(
+            ["git", "-C", str(tree), "status", "--porcelain", "-z"]
+            + ["--ignored", "--untracked-files=all"],
+            capture_output=True,
+        )
+        if status.returncode != 0:
+            return False
+        for entry in status.stdout.split(b"\0"):
+            code, path = entry[:2], entry[3:]
+            if code[:1] in (b"R", b"C"):
+                return False  # a staged rename: the run changed the tree
+            if code in (b"??", b"!!") and not _bytecode(path):
+                return False
+        _discard_worktree(Path(ctx.store.load_project(record.project).repo), tree)
+    except (OSError, HypothexError):
+        return False
+    return True
+
+
+def _bytecode(path: bytes) -> bool:
+    """True for a Python bytecode cache file, which a run may always leave behind."""
+    return b"__pycache__/" in path or path.endswith((b".pyc", b"__pycache__"))
+
+
+def _execute(
+    ctx: Context,
+    run_id: str,
+    stdout_sink: BinaryIO | None,
+    stderr_sink: BinaryIO | None,
+    auto_evaluate: bool,
+) -> RunRecord:
+    """Execute a queued run (``execute_run`` without the worktree cleanup)."""
     record = ctx.find_record(run_id)
     if record.status != RunStatus.QUEUED:
         raise RunError(f"run {run_id} is {record.status.value}, not queued")
@@ -732,9 +869,10 @@ def execute_run(
             proc.wait()
             raise
         _open_gate(proc)  # child_pid is saved: only now may the command run
+        stop_pumps = threading.Event()
         pumps = [
-            _pump(proc.stdout, run_dir / "logs" / "stdout.log", stdout_sink),
-            _pump(proc.stderr, run_dir / "logs" / "stderr.log", stderr_sink),
+            _pump(proc.stdout, run_dir / "logs" / "stdout.log", stdout_sink, stop_pumps),
+            _pump(proc.stderr, run_dir / "logs" / "stderr.log", stderr_sink, stop_pumps),
         ]
         interrupted = False
         # stop_run may have written the marker after the pre-start check but
@@ -747,8 +885,15 @@ def execute_run(
             interrupted = True
             terminate_group(proc.pid)
             exit_code = proc.wait()
-    for pump in pumps:
-        pump.join()
+    if not _drain(pumps, stop_pumps, proc):
+        ctx.emit(
+            "run.warning",
+            record,
+            {
+                "message": "the command exited but its output is still open (a process it "
+                f"left running?); output after {PUMP_DRAIN_SECONDS:g}s is not captured"
+            },
+        )
 
     stopped = interrupted or term.signalled or (run_dir / STOP_MARKER).exists()
     if stopped:
@@ -757,11 +902,17 @@ def execute_run(
         status = RunStatus.FINISHED
     else:
         status = RunStatus.FAILED
-    logged = ctx.store.read_artifacts(record.project, record.run_id)
-    usage = sum_usage(ctx.store.read_usage(record.project, record.run_id))
-    ctx.index.replace_metric_points(
-        record.run_id, ctx.store.read_metric_points(record.project, record.run_id)
-    )
+    logged: list[Artifact] = []
+    usage: UsageTotals | None = None
+    try:  # nothing the run logged may keep it from ending
+        logged = ctx.store.read_artifacts(record.project, record.run_id)
+        usage = sum_usage(ctx.store.read_usage(record.project, record.run_id))
+        ctx.index.replace_metric_points(
+            record.run_id, ctx.store.read_metric_points(record.project, record.run_id)
+        )
+    except Exception as exc:  # noqa: BLE001 - the run ends either way; the warning says why
+        message = f"could not read or index what the run logged: {type(exc).__name__}: {exc}"
+        ctx.emit("run.warning", record, {"message": message[:500]})
 
     def finish(r: RunRecord) -> RunRecord:
         # A path logged twice (e.g. an overwritten last.pt) keeps its latest step/metrics.
@@ -785,4 +936,32 @@ def execute_run(
             evaluate_run(ctx, run_id)
         except HypothexError as exc:  # the run itself finished; scoring can be retried
             ctx.emit("run.eval_skipped", final, {"reason": str(exc)[:500]})
+        except Exception as exc:  # noqa: BLE001 - e.g. a malformed worker result
+            reason = f"{type(exc).__name__}: {exc}"
+            ctx.emit("run.eval_skipped", final, {"reason": reason[:500]})
     return ctx.find_record(run_id)
+
+
+def _drain(
+    pumps: list[threading.Thread], stop: threading.Event, proc: subprocess.Popen[bytes]
+) -> bool:
+    """
+    Let the output pumps reach EOF for up to ``PUMP_DRAIN_SECONDS``, then stop them.
+
+    Returns
+    -------
+    bool
+        False when a pipe was still open at the deadline (a process the
+        command left running holds it); its later output is not captured.
+    """
+    deadline = time.monotonic() + PUMP_DRAIN_SECONDS
+    for pump in pumps:
+        pump.join(max(0.0, deadline - time.monotonic()))
+    drained = not any(pump.is_alive() for pump in pumps)
+    stop.set()
+    for pump in pumps:
+        pump.join()
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe is not None:
+            pipe.close()
+    return drained

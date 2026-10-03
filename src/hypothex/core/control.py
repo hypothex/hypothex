@@ -284,6 +284,15 @@ def _remove_from_queue(ctx: Context, run_id: str, run_dir: Path) -> RunRecord | 
     return killed
 
 
+def _require_own(ctx: Context, record: RunRecord, action: str) -> None:
+    """Refuse a run of another environment: its processes, job, and folder are elsewhere."""
+    if record.environment_id != ctx.descriptor.environment_id:
+        raise RunError(
+            f"run {record.run_id} belongs to environment {record.environment_id}; "
+            f"{action} it through the hub (`hx serve` on the hub forwards it to its host)"
+        )
+
+
 def cancel_if_queued(ctx: Context, run_id: str) -> RunRecord:
     """
     Stop a run only if it has not started; a started run is returned unchanged.
@@ -305,8 +314,14 @@ def cancel_if_queued(ctx: Context, run_id: str) -> RunRecord:
     -------
     RunRecord
         ``killed`` when the run was cancelled before it started, else as it is.
+
+    Raises
+    ------
+    RunError
+        If the run belongs to another environment (a mirrored run).
     """
     record = ctx.find_record(run_id)
+    _require_own(ctx, record, "stop")
     if record.status != RunStatus.QUEUED:
         return record
     if record.executor.type == slurm.SLURM_EXECUTOR:
@@ -344,9 +359,10 @@ def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) ->
     Raises
     ------
     RunError
-        If the run is not queued or running.
+        If the run is not queued or running, or belongs to another environment.
     """
     record = ctx.find_record(run_id)
+    _require_own(ctx, record, "stop")
     if record.status not in ACTIVE_STATUSES:
         raise RunError(
             f"run {run_id} is {record.status.value}; only queued or running runs can be stopped"
@@ -362,7 +378,11 @@ def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) ->
         return slurm.stop_slurm_run(ctx, record, grace=grace)
     atomic_write_text(run_dir / STOP_MARKER, utcnow().isoformat())
     child = record.executor.child_pid
-    if record.status == RunStatus.RUNNING and child is not None and process_alive(child, None):
+    # a pid recorded by another environment (a mirrored run) names a process on
+    # another machine: never signal it from here
+    mine = record.environment_id == ctx.descriptor.environment_id
+    running = record.status == RunStatus.RUNNING
+    if mine and running and child is not None and process_alive(child, None):
         terminate_group(child, grace)
     deadline = time.monotonic() + grace + 5
     while time.monotonic() < deadline:
@@ -464,10 +484,11 @@ def rerun(
     ------
     RunError
         If the saved diff was too large to reproduce, the commit cannot be
-        checked out, or the working directory does not exist in the
-        (possibly moved) repo.
+        checked out, the working directory does not exist in the
+        (possibly moved) repo, or the parent belongs to another environment.
     """
     parent = ctx.find_record(run_id)
+    _require_own(ctx, parent, "rerun")
     entry = ctx.store.load_project(parent.project)
     repo = Path(entry.repo)
     parent_dir = ctx.run_dir(parent)
@@ -547,9 +568,11 @@ def reinfer(
     Raises
     ------
     RunError
-        If there is no ``infer`` stage or no checkpoint.
+        If there is no ``infer`` stage or no checkpoint, or the parent belongs
+        to another environment.
     """
     parent = ctx.find_record(run_id)
+    _require_own(ctx, parent, "reinfer")
     repo = Path(ctx.store.load_project(parent.project).repo)
     config = load_project_config(repo)
     if "infer" not in config.stages:

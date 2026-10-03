@@ -39,13 +39,14 @@ from hypothex._version import __version__
 from hypothex.api.security import OriginGuard, TokenGuard, allowed_hosts
 from hypothex.core import control
 from hypothex.core import queries as q
-from hypothex.core.config import parse_metric_version
+from hypothex.core.config import load_project_config, parse_metric_version
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import RunRequest
 from hypothex.core.fsutil import atomic_write_text
+from hypothex.core.gitinfo import DIFF_LIMIT_BYTES, capture_diff, head_commit
 from hypothex.core.gpus import GpuInfo, gpu_status, query_gpus
 from hypothex.core.ids import utcnow
 from hypothex.core.index import RunRow
@@ -62,6 +63,7 @@ from hypothex.mcp.server import (
     LOCAL_HOST,
     ViewValidationError,
     build_server,
+    is_remote,
     list_task_views,
     put_view,
     query_task_view,
@@ -70,7 +72,13 @@ from hypothex.mcp.server import (
     validate_view,
     view_document,
 )
-from hypothex.remote.client import DIR_HEADER, SIZE_HEADER, EnvClient
+from hypothex.remote.client import (
+    DIR_HEADER,
+    SIZE_HEADER,
+    EnvClient,
+    EnvRequestError,
+    EnvUnreachableError,
+)
 from hypothex.remote.config import EnvironmentsFile, HostSpec, SlurmDefaults, load_hosts
 from hypothex.remote.hub import HostState, HostUnavailableError, Hub
 
@@ -162,6 +170,19 @@ class StopBody(ActionBody):
     """Body of ``POST /api/v1/runs/{id}/stop``; ``only_queued`` leaves started runs alone."""
 
     only_queued: bool = False
+
+
+class HostLaunchBody(RunFields):
+    """
+    Body of ``POST /api/v1/hosts/{host}/runs``.
+
+    ``project`` names the project (what the UI, CLI, and MCP send). ``repo`` is
+    used only when it is a folder on the hub: a client-local path from another
+    machine is ignored. The host runs in its own mapped checkout (``hx hosts map``).
+    """
+
+    repo: str | None = None
+    project: str | None = None
 
 
 class SubscribeMessage(BaseModel):
@@ -778,6 +799,190 @@ def host_rows(
     return rows
 
 
+def _hub_checkout(body: HostLaunchBody) -> str | None:
+    """The body's repo only when it is a folder on the hub (a client may send its own path)."""
+    return body.repo if body.repo is not None and Path(body.repo).is_dir() else None
+
+
+def _project_of(body: HostLaunchBody) -> str:
+    if body.project:
+        return body.project
+    checkout = _hub_checkout(body)
+    if checkout is not None:
+        return load_project_config(Path(checkout)).project
+    raise RunError("give the project by name (the hub has no folder at that repo path)")
+
+
+def _registered_checkout(ctx: Context, project: str) -> str | None:
+    """The registered repo of ``project`` when it is a folder on the hub, else None."""
+    try:
+        entry = ctx.store.load_project(project)
+    except StoreError:
+        return None
+    if entry.remote_host is not None or not Path(entry.repo).is_dir():
+        return None  # a project copied from a host: its repo path is on that host
+    return entry.repo
+
+
+def remote_checkout(ctx: Context, host: str, project: str) -> tuple[HostSpec, str]:
+    """
+    Return a host's entry and its checkout of ``project``.
+
+    Parameters
+    ----------
+    ctx : Context
+        Hub context (reads ``environments.yaml`` fresh, so ``hx hosts map`` needs
+        no restart).
+    host : str
+        Host name.
+    project : str
+        Project name.
+
+    Returns
+    -------
+    tuple of (HostSpec, str)
+        The host's entry and the checkout path on that host.
+
+    Raises
+    ------
+    ConfigError
+        Unknown host.
+    RunError
+        The project has no checkout on the host.
+
+    Examples
+    --------
+    >>> spec, path = remote_checkout(ctx, "gpu1", "toy")  # doctest: +SKIP
+    """
+    spec = load_hosts(ctx.layout).environments.get(host)
+    if spec is None or spec.route == "local":
+        raise _unknown_host(host)
+    path = spec.projects.get(project)
+    if path is None:
+        raise RunError(
+            f"project {project} has no checkout on {host}; "
+            f"run `hx hosts map {project} {host} <path on {host}>`"
+        )
+    return spec, path
+
+
+def local_diff(repo: str | None) -> str | None:
+    """
+    Return the uncommitted diff of a checkout on the hub, as text.
+
+    Parameters
+    ----------
+    repo : str or None
+        Checkout path; None or a missing folder gives None.
+
+    Returns
+    -------
+    str or None
+        ``git diff HEAD --binary`` text, or None when clean.
+
+    Raises
+    ------
+    RunError
+        If the diff is larger than ``DIFF_LIMIT_BYTES`` or is not UTF-8 text.
+
+    Examples
+    --------
+    >>> local_diff(None) is None
+    True
+    """
+    if repo is None or not Path(repo).is_dir():
+        return None
+    captured = capture_diff(Path(repo), limit=DIFF_LIMIT_BYTES)
+    if captured.too_large:
+        raise RunError(
+            f"uncommitted changes in {repo} are larger than {DIFF_LIMIT_BYTES} bytes; "
+            "commit them before launching on a host"
+        )
+    if captured.diff is None:
+        return None
+    try:
+        return captured.diff.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RunError(
+            f"uncommitted changes in {repo} are not UTF-8 text; "
+            "commit them before launching on a host"
+        ) from exc
+
+
+def _slurm_for(host: str, spec: HostSpec, body: RunFields) -> dict[str, Any] | None:
+    if spec.kind != "slurm":
+        if body.slurm is not None:
+            raise RunError(f"host {host} is not a SLURM host; drop --partition/--time/--account")
+        return None
+    merged = (spec.slurm or SlurmDefaults()).model_dump()
+    if body.slurm is not None:
+        merged.update(body.slurm.model_dump(exclude_unset=True))
+    if body.gpus:
+        merged["gpus"] = body.gpus
+    return SlurmDefaults.model_validate(merged).model_dump(mode="json")
+
+
+def launch_on_host(
+    ctx: Context, manager: HubManager, host: str, body: HostLaunchBody
+) -> dict[str, Any]:
+    """
+    Launch a run on ``host`` (or here, for ``local``).
+
+    The body is forwarded with the same ``command_id``; ``repo`` becomes the
+    host's mapped checkout and ``slurm`` the host's defaults overridden by the
+    body. The run always pins a commit when the hub has a checkout (spec 8A.4):
+    the body's ``commit`` with the body's ``diff`` (None for a clean run), else
+    the hub checkout's HEAD with its uncommitted diff. A host-only project (no
+    checkout here) sends no commit, and the host runs its checkout as it is.
+
+    Parameters
+    ----------
+    ctx : Context
+        Hub context.
+    manager : HubManager
+        The hub's host connections.
+    host : str
+        Host name; ``local`` launches on the hub.
+    body : HostLaunchBody
+        Launch fields.
+
+    Returns
+    -------
+    dict
+        The run record as the host returns it.
+
+    Raises
+    ------
+    ConfigError
+        Unknown host.
+    RunError
+        No project, no checkout on the host, an agent launch without a
+        hypothesis, SLURM fields for a non-SLURM host, or an unusable diff.
+    HostUnavailableError
+        The host is not connected.
+
+    Examples
+    --------
+    >>> launch_on_host(ctx, manager, "gpu1", HostLaunchBody(project="toy"))  # doctest: +SKIP
+    """
+    if not is_remote(host):
+        repo = _hub_checkout(body) or ctx.store.load_project(_project_of(body)).repo
+        return to_jsonable(launch_here(ctx, body, repo))
+    project = _project_of(body)
+    spec, checkout = remote_checkout(ctx, host, project)
+    require_agent_hypothesis(body.created_by, body.hypothesis)
+    hub_repo = _hub_checkout(body) or _registered_checkout(ctx, project)
+    slurm = _slurm_for(host, spec, body)
+    # spec 8A.4: pin the commit the diff was taken against; the host fetches it if needed
+    commit = body.commit or (head_commit(Path(hub_repo)) if hub_repo is not None else None)
+    # a client that sent its own commit sends its own diff (or none); else the hub's
+    sent = body.diff is not None or body.commit is not None
+    diff = body.diff if sent else local_diff(hub_repo)
+    payload = body.model_dump(mode="json", exclude={"project"})
+    payload.update(repo=checkout, commit=commit, diff=diff, slurm=slurm)
+    return manager.client(host).post_json("/api/v1/runs", payload)
+
+
 def _run_view(kind: str) -> list[PanelSpec]:
     """
     Run-detail panels for a task kind (spec section 8.4); the UI fills in the run.
@@ -1256,6 +1461,13 @@ def create_app(
             content["issues"] = to_jsonable(exc.issues)
         return JSONResponse(status_code=status, content=content)
 
+    @app.exception_handler(EnvRequestError)
+    async def host_error(_: Request, exc: EnvRequestError) -> JSONResponse:
+        # a host's error answer keeps its status; no answer at all is 503
+        status = 503 if isinstance(exc, EnvUnreachableError) else exc.status_code or 502
+        content = {"error": str(exc), "type": exc.error_type or type(exc).__name__}
+        return JSONResponse(status_code=status, content=content)
+
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
         if not request.url.path.startswith("/api/"):
@@ -1286,6 +1498,35 @@ def create_app(
     def once(body: ActionBody, fn: Callable[[], Any]) -> dict[str, Any]:
         return ctx.events.run_once(body.command_id, lambda: to_jsonable(fn()))
 
+    def forward(
+        run_id: str,
+        action: str,
+        body: ActionBody,
+        local: Callable[[], Any],
+        *,
+        remote_only: bool = False,
+    ) -> dict[str, Any]:
+        # A run mirrored from a host is acted on by that host; same body, same command_id.
+        # The run is looked up inside `once`, so a replayed command_id gets its receipt
+        # first (as in phase 1); an error releases the claim, so a retry runs again.
+        def act() -> Any:
+            record = ctx.find_record(run_id)
+            host = manager.host_for_environment(record.environment_id)
+            if host is None:
+                foreign = record.environment_id != ctx.descriptor.environment_id
+                if remote_only and foreign:
+                    # its pids and paths belong to another machine: never act on them here
+                    raise HostUnavailableError(
+                        f"run {run_id} belongs to environment {record.environment_id}, which "
+                        f"no configured host serves; {action} must run on that host "
+                        "(`hx hosts add` / `hx hosts connect`)"
+                    )
+                return local()
+            payload = body.model_dump(mode="json")
+            return manager.client(host).post_json(f"/api/v1/runs/{run_id}/{action}", payload)
+
+        return once(body, act)
+
     # environment -----------------------------------------------------------------
     @app.get("/.well-known/hypothex/environment")
     def environment() -> dict[str, Any]:
@@ -1310,6 +1551,10 @@ def create_app(
     @app.post("/api/v1/hosts/{host}/disconnect")
     async def host_disconnect(host: str, body: ActionBody | None = None) -> dict[str, Any]:
         return to_jsonable(await manager.disconnect(host))
+
+    @app.post("/api/v1/hosts/{host}/runs")
+    def host_launch(host: str, body: HostLaunchBody) -> dict[str, Any]:
+        return once(body, lambda: launch_on_host(ctx, manager, host, body))
 
     # overview ----------------------------------------------------------------------
     @app.get("/api/v1/overview")
@@ -1478,38 +1723,56 @@ def create_app(
 
     @app.post("/api/v1/runs/{run_id}/rerun")
     def run_rerun(run_id: str, body: ActionBody) -> dict[str, Any]:
-        return once(body, lambda: control.rerun(ctx, run_id, created_by=body.created_by))
+        return forward(
+            run_id,
+            "rerun",
+            body,
+            lambda: control.rerun(ctx, run_id, created_by=body.created_by),
+            remote_only=True,
+        )
 
     @app.post("/api/v1/runs/{run_id}/reinfer")
     def run_reinfer(run_id: str, body: ReinferBody) -> dict[str, Any]:
-        return once(
+        return forward(
+            run_id,
+            "reinfer",
             body,
             lambda: control.reinfer(
                 ctx, run_id, checkpoint=body.checkpoint, created_by=body.created_by
             ),
+            remote_only=True,
         )
 
     @app.post("/api/v1/runs/{run_id}/reeval")
     def run_reeval(run_id: str, body: ReevalBody) -> dict[str, Any]:
-        return once(body, lambda: reeval(ctx, run_id=run_id, metric=body.metric, force=body.force))
+        return forward(
+            run_id,
+            "reeval",
+            body,
+            lambda: reeval(ctx, run_id=run_id, metric=body.metric, force=body.force),
+            remote_only=True,
+        )
 
     @app.post("/api/v1/runs/{run_id}/stop")
     def run_stop(run_id: str, body: StopBody) -> dict[str, Any]:
-        if body.only_queued:
-            return once(body, lambda: stop_if_queued(ctx, run_id))
-        return once(body, lambda: control.stop_run(ctx, run_id))
+        def act() -> RunRecord:
+            if body.only_queued:
+                return stop_if_queued(ctx, run_id)
+            return control.stop_run(ctx, run_id)
+
+        return forward(run_id, "stop", body, act, remote_only=True)
 
     @app.post("/api/v1/runs/{run_id}/tags")
     def run_tags(run_id: str, body: TagBody) -> dict[str, Any]:
-        return once(body, lambda: q.tag_run(ctx, run_id, body.add, body.remove))
+        return forward(run_id, "tags", body, lambda: q.tag_run(ctx, run_id, body.add, body.remove))
 
     @app.post("/api/v1/runs/{run_id}/star")
     def run_star(run_id: str, body: FlagBody) -> dict[str, Any]:
-        return once(body, lambda: q.star_run(ctx, run_id, body.on))
+        return forward(run_id, "star", body, lambda: q.star_run(ctx, run_id, body.on))
 
     @app.post("/api/v1/runs/{run_id}/archive")
     def run_archive(run_id: str, body: FlagBody) -> dict[str, Any]:
-        return once(body, lambda: q.archive_run(ctx, run_id, body.on))
+        return forward(run_id, "archive", body, lambda: q.archive_run(ctx, run_id, body.on))
 
     @app.post("/api/v1/runs/{run_id}/notes")
     def run_note(run_id: str, body: NoteBody) -> dict[str, Any]:
@@ -1517,7 +1780,7 @@ def create_app(
             q.add_note(ctx, run_id, body.text, body.author)
             return {"ok": True}
 
-        return once(body, act)
+        return forward(run_id, "notes", body, act)
 
     # compare & datasets ----------------------------------------------------------------
     @app.get("/api/v1/compare")

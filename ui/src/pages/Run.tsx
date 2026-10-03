@@ -2,9 +2,7 @@
  * Run screen (spec 8.3.3): hypothesis as title, status, stat strip, the task kind's run
  * panels (spec 8.4), where everything is, scores by metric version, notes, and actions.
  */
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../api/client";
-import { queryKeys, useRun, useRunTraces } from "../api/queries";
+import { useLeaderboard, useRun, useRunTraces, useTaskKind } from "../api/queries";
 import { Figure, panelLetter } from "./components/Figure";
 import { firstClause, shortId } from "./components/format";
 import { KindPanels, kindPanelCount, readsTraces, runViewPanels } from "./components/KindPanels";
@@ -43,17 +41,9 @@ export function RunPage({ runId, log, example }: RunPageProps) {
   const project = record?.project ?? "";
   const task = record?.task ?? "";
   const hasTask = task !== "";
-  // The same keys as useTaskKind and useLeaderboard, but idle for a run without a task.
-  const kind = useQuery({
-    queryKey: queryKeys.taskKind(project, task),
-    enabled: hasTask,
-    queryFn: ({ signal }) => api.taskKind(project, task, signal),
-  });
-  const board = useQuery({
-    queryKey: queryKeys.leaderboard(project, task),
-    enabled: hasTask,
-    queryFn: ({ signal }) => api.leaderboard(project, task, [], signal),
-  });
+  // Idle for a run without a task.
+  const kind = useTaskKind(project, task, { enabled: hasTask });
+  const board = useLeaderboard(project, task, [], { enabled: hasTask });
   const kindSpecs = kind.data?.run_view ?? [];
   const traces = useRunTraces(runId, kindSpecs.some(readsTraces));
 

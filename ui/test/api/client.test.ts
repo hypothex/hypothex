@@ -93,11 +93,11 @@ describe("api", () => {
     expect(a?.command_id).not.toBe(b?.command_id);
   });
 
-  test("star and note carry their own fields", async () => {
+  test("reinfer and note carry their own fields", async () => {
     const calls = mockFetch({ ok: true });
-    await api.star("r1", false, { command_id: "s" });
+    await api.reinfer("r1", "ckpt-3", { command_id: "r" });
     await api.note("r1", "looks good", { command_id: "n" });
-    expect(calls[0]?.body).toEqual({ command_id: "s", created_by: "human", on: false });
+    expect(calls[0]?.body).toEqual({ command_id: "r", created_by: "human", checkpoint: "ckpt-3" });
     expect(calls[1]?.body).toEqual({ command_id: "n", created_by: "human", text: "looks good", author: "human" });
   });
 });

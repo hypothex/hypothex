@@ -2,10 +2,8 @@
  * Examples screen (spec 8.3.4): two runs compared example by example: 2×2 outcome
  * table, sign-test p, one mark per example, and B's failing examples.
  */
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api } from "../api/client";
-import { queryKeys, useRun } from "../api/queries";
+import { useCompareExamples, useRun, useRunPredictions, useTask } from "../api/queries";
 import { ErrorsTable, ExampleStrip, OutcomeTable, SignTestChart } from "./components/ExampleCharts";
 import { examplesHeadline, examplesMeta, exampleTotal, pairLabels } from "./components/examples";
 import { Figure } from "./components/Figure";
@@ -93,35 +91,20 @@ export function ExamplesPage({ a, b, metric }: ExamplesPageProps) {
   const task = recA?.task ?? "";
   const explicit = metric ? String(metric) : null;
 
-  const taskQ = useQuery({
-    queryKey: queryKeys.task(project, task),
-    enabled: explicit === null && task !== "",
-    queryFn: ({ signal }) => api.task(project, task, signal),
-  });
+  const taskQ = useTask(project, task, { enabled: explicit === null && task !== "" });
   const metricRef = explicit ?? (taskQ.data ? primaryMetricName(taskQ.data.summary.primary) : null);
   // One row of B's per-example scores names the binary field (`correct`, `solved`, ...).
   // If this read fails, compare still runs without a field and shows the server's own error.
   const probe = { metric: metricRef ?? "", limit: 1 };
-  const fieldQ = useQuery({
-    queryKey: queryKeys.runPredictions(b, probe),
-    enabled: metricRef !== null,
-    queryFn: ({ signal }) => api.runPredictions(b, probe, signal),
-  });
+  const fieldQ = useRunPredictions(b, probe, { enabled: metricRef !== null });
   const field = fieldQ.data && metricRef ? pickExampleField(fieldQ.data, metricRef) : undefined;
-  const diffQ = useQuery({
-    queryKey: queryKeys.compareExamples(a, b, metricRef ?? "", field),
+  const diffQ = useCompareExamples(a, b, metricRef ?? "", field, {
     enabled: metricRef !== null && !fieldQ.isPending,
-    queryFn: ({ signal }) => api.compareExamples(a, b, metricRef ?? "", field, signal),
   });
   const diff = diffQ.data;
   const [limit, setLimit] = useState(FIRST_PAGE);
   const failing = { metric: diff?.metric, failures_only: true, field: diff?.field, limit };
-  const errors = useQuery({
-    queryKey: queryKeys.runPredictions(b, failing),
-    enabled: diff !== undefined,
-    placeholderData: keepPreviousData,
-    queryFn: ({ signal }) => api.runPredictions(b, failing, signal),
-  });
+  const errors = useRunPredictions(b, failing, { enabled: diff !== undefined, keepPrevious: true });
 
   const labels = recA && recB ? pairLabels(recA, recB) : null;
   const [labelA, labelB] = labels ?? ["A", "B"];

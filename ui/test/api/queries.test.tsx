@@ -9,8 +9,12 @@ import {
   createQueryClient,
   queryKeys,
   shouldRetry,
+  useCompareExamples,
   useLeaderboard,
+  useRunPredictions,
   useSaveView,
+  useTask,
+  useTaskKind,
   useView,
   useViewQuery,
 } from "../../src/api/queries";
@@ -46,7 +50,7 @@ describe("queryKeys", () => {
     const hit = [
       queryKeys.runs({ project: "toy" }),
       queryKeys.run("r1"),
-      queryKeys.runMetrics("r1"),
+      queryKeys.runLogs("r1", "stdout"),
       queryKeys.tasks(),
       queryKeys.task("toy", "acc"),
       queryKeys.leaderboard("toy", "acc"),
@@ -87,6 +91,42 @@ describe("hooks", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(result.current.fetchStatus).toBe("idle");
     expect(calls).toEqual([]);
+  });
+
+  test("read hooks stay idle with enabled: false", async () => {
+    const calls = mockRoutes({});
+    const { wrapper } = setup();
+    const { result } = renderHook(
+      () => [
+        useTask("toy", "acc", { enabled: false }),
+        useLeaderboard("toy", "acc", [], { enabled: false }),
+        useTaskKind("toy", "acc", { enabled: false }),
+        useRunPredictions("r1", { metric: "accuracy" }, { enabled: false }),
+        useCompareExamples("r1", "r2", "accuracy", undefined, { enabled: false }),
+      ],
+      { wrapper },
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect(result.current.map((q) => q.fetchStatus)).toEqual(["idle", "idle", "idle", "idle", "idle"]);
+    expect(calls).toEqual([]);
+  });
+
+  test("useRunPredictions keeps the last page only when asked", async () => {
+    const page = { run_id: "r1", total: 0, offset: 0, limit: 1, rows: [] };
+    mockRoutes({ "/api/v1/runs/r1/predictions": page });
+    const { wrapper } = setup();
+    const { result, rerender } = renderHook(
+      ({ limit, keep }: { limit: number; keep: boolean }) =>
+        useRunPredictions("r1", { limit }, { keepPrevious: keep }),
+      { wrapper, initialProps: { limit: 1, keep: false } },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    rerender({ limit: 2, keep: false });
+    expect(result.current.data).toBeUndefined();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    rerender({ limit: 3, keep: true });
+    expect(result.current.isPlaceholderData).toBe(true);
+    expect(result.current.data).toEqual(page);
   });
 
   test("useSaveView invalidates the view list, the document and panel queries of that task", async () => {

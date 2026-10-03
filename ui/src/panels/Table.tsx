@@ -3,6 +3,7 @@
  */
 import { type CSSProperties, useMemo, useState } from "react";
 import { MINUS } from "../charts/Scale";
+import { fmtNum, fmtSigned, shortId } from "../charts/valueFormat";
 import type { PanelResult } from "./index";
 
 type Row = Record<string, unknown>;
@@ -12,24 +13,6 @@ type SortDir = "asc" | "desc";
 export { MINUS };
 /** Rows rendered before the table stops and shows a count. */
 export const ROW_CAP = 500;
-
-/**
- * Format a number tersely.
- *
- * Integers are grouped (`12,000`), values in [-1, 1] get three decimals (`0.663`), values
- * below 1000 get three significant digits (`12.3`), larger values are rounded and grouped.
- */
-export function fmtNum(v: number): string {
-  if (!Number.isFinite(v)) return String(v);
-  const a = Math.abs(v);
-  let s: string;
-  if (Number.isInteger(a)) s = a.toLocaleString("en-US");
-  else if (a < 0.001) s = String(Number(a.toPrecision(2)));
-  else if (a <= 1) s = a.toFixed(3);
-  else if (a < 1000) s = String(Number(a.toPrecision(3)));
-  else s = Math.round(a).toLocaleString("en-US");
-  return v < 0 ? MINUS + s : s;
-}
 
 /** Render any JSON cell value as short text. Missing values become an em dash. */
 export function fmtCell(v: unknown): string {
@@ -64,17 +47,6 @@ export function columnLabel(field: string): string {
 /** A change column (`delta_prev`, `Δ`): its numbers carry a sign. */
 export function isDeltaColumn(field: string): boolean {
   return /^(delta|Δ)/i.test(field);
-}
-
-/** A signed number: `+0.025`, `−0.048`, `0`. */
-export function fmtSigned(v: number): string {
-  const s = fmtNum(v);
-  return v > 0 && Number(s.replace(/,/g, "")) !== 0 ? `+${s}` : s;
-}
-
-/** Short run id for a cell: the last `-` segment (`…-toy-test-4093` → `4093`). */
-export function shortRun(runId: string): string {
-  return runId.split("-").pop() || runId;
 }
 
 /**
@@ -209,7 +181,7 @@ export function TablePanel({ result }: { result: PanelResult }) {
                     style={{ ...S.td, textAlign: align }}
                   >
                     {c === "run_id" && typeof v === "string" ? (
-                      <a href={`/r/${encodeURIComponent(v)}`}>{shortRun(v)}</a>
+                      <a href={`/r/${encodeURIComponent(v)}`}>{shortId(v)}</a>
                     ) : (
                       text
                     )}

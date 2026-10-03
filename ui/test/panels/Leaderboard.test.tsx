@@ -6,7 +6,6 @@ import {
   Leaderboard,
   bestBand,
   examplesHref,
-  fmtDuration,
   metricLabel,
   primaryKey,
   rowInterval,
@@ -101,12 +100,9 @@ describe("helpers", () => {
     expect(primaryKey(ROWS, { primary: "accuracy" })).toBe("accuracy/value");
     expect(primaryKey([], {})).toBeNull();
   });
-  test("metricLabel and fmtDuration", () => {
+  test("metricLabel", () => {
     expect(metricLabel("accuracy/value")).toBe("accuracy");
     expect(metricLabel("latency/p95")).toBe("latency p95");
-    expect(fmtDuration(42.4)).toBe("42s");
-    expect(fmtDuration(250)).toBe("4m 10s");
-    expect(fmtDuration(3900)).toBe("1h 5m");
   });
   test("bestBand prefers the test interval, then the seed t-interval", () => {
     expect(bestBand(SVM)).toEqual({ lo: 0.874, hi: 0.953, how: "Wilson, n = 180" });

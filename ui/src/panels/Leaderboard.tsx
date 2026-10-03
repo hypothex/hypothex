@@ -29,7 +29,7 @@ import {
   type LinearScale,
 } from "../charts/Scale";
 import { useTooltip, type Tooltip } from "../charts/Tooltip";
-import { valueFormatter, type ValueFormatter } from "../charts/valueFormat";
+import { fmtDuration, valueFormatter, type ValueFormatter } from "../charts/valueFormat";
 import type { LeaderboardRow, NoiseInterval, Stats, UsageTotals, VersusBest } from "../api/models";
 import type { PanelProps } from "./index";
 
@@ -108,14 +108,6 @@ export function examplesHref(a: string, b: string, metric: string): string {
 /** Short column label for a score key: `accuracy/value` → `accuracy`, `lat/p95` → `lat p95`. */
 export function metricLabel(key: string): string {
   return key.replace(/\/value$/, "").replace("/", " ");
-}
-
-/** Compact duration: `42s`, `4m 10s`, `1h 5m`. */
-export function fmtDuration(seconds: number): string {
-  const s = Math.round(seconds);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
-  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
 
 /** The best group's band: its test-set interval, else its seed t-interval. */

@@ -63,6 +63,58 @@ export function fmtSig3Trim(v: number): string {
   return v === 0 ? "0" : minus(sig3Trim(v));
 }
 
+// Plain formatters shared by panels and pages (one definition each). ---------------------
+
+/**
+ * Format a number tersely.
+ *
+ * Integers are grouped (`12,000`), values in [-1, 1] get three decimals (`0.663`), values
+ * below 1000 get three significant digits (`12.3`), larger values are rounded and grouped.
+ */
+export function fmtNum(v: number): string {
+  if (!Number.isFinite(v)) return String(v);
+  const a = Math.abs(v);
+  let s: string;
+  if (Number.isInteger(a)) s = a.toLocaleString("en-US");
+  else if (a < 0.001) s = String(Number(a.toPrecision(2)));
+  else if (a <= 1) s = a.toFixed(3);
+  else if (a < 1000) s = String(Number(a.toPrecision(3)));
+  else s = Math.round(a).toLocaleString("en-US");
+  return v < 0 ? MINUS + s : s;
+}
+
+/** A signed number (`fmtNum` digits): `+6`, `−2`, `+0.025`, `0`. */
+export function fmtSigned(v: number): string {
+  const s = fmtNum(v);
+  return v > 0 && Number(s.replace(/,/g, "")) !== 0 ? `+${s}` : s;
+}
+
+/** A wall-clock duration: `0.8 s`, `2m 5s`, `5h 40m`; `—` when missing. */
+export function fmtDuration(seconds: number | null | undefined): string {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "—";
+  if (seconds < 60) return `${seconds.toFixed(1)} s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+/** The random tail of a run id: `…-toy-test-6f71` → `6f71`. */
+export function shortId(runId: string): string {
+  return runId.split("-").pop() || runId;
+}
+
+/**
+ * An axis title: `label, unit, log`. The unit is left out when the label already ends
+ * with it (`latency_ms`, `latency/ms`) or when the ticks carry it (`unitOnTicks`).
+ */
+export function axisTitle(
+  label: string,
+  unit: string,
+  { log = false, unitOnTicks = false }: { log?: boolean; unitOnTicks?: boolean } = {},
+): string {
+  const named = unit !== "" && (label.endsWith(`_${unit}`) || label.endsWith(`/${unit}`));
+  return [label, named || unitOnTicks ? "" : unit, log ? "log" : ""].filter(Boolean).join(", ");
+}
+
 /** Parse a d3-format specifier; null when missing or invalid. */
 export function parseFormat(spec: unknown): ((v: number) => string) | null {
   if (typeof spec !== "string" || spec === "") return null;

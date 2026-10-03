@@ -9,8 +9,8 @@ import { curveStepAfter, line } from "d3-shape";
 import type { CSSProperties } from "react";
 import type { DistributionRow } from "../api/models";
 import { FS, useElementWidth } from "../charts/Scale";
+import { axisTitle, fmtNum } from "../charts/valueFormat";
 import type { PanelResult } from "./index";
-import { fmtNum } from "./Table";
 
 /** One group's distribution row (contract 1.6). */
 export type DistRow = DistributionRow;
@@ -120,15 +120,6 @@ export function xAxis(
 
 // geometry in CSS px; the width is measured
 /** Width used before layout is known (and in test DOMs). */
-/**
- * The x-axis title: `name, unit, log`, without the unit when the name already ends
- * with it (`latency_ms` or `latency/ms` with unit `ms` gives `latency_ms, log`).
- */
-export function axisTitle(name: string, unit: string, kind: Scale): string {
-  const named = unit !== "" && (name.endsWith(`_${unit}`) || name.endsWith(`/${unit}`));
-  return [name, named ? "" : unit, kind === "log" ? "log" : ""].filter(Boolean).join(", ");
-}
-
 export const DIST_FALLBACK_W = 720;
 const PL = 132;
 const PR = 16;
@@ -276,7 +267,7 @@ export function DistributionPanel({ result }: { result: PanelResult }) {
   const kind: Scale = meta.scale === "linear" ? "linear" : "log";
   const name = typeof meta.name === "string" ? meta.name : "";
   const xLabel =
-    typeof meta.x_label === "string" ? meta.x_label : axisTitle(name, unit, kind);
+    typeof meta.x_label === "string" ? meta.x_label : axisTitle(name, unit, { log: kind === "log" });
 
   const values = rows.flatMap((r) => [
     r.p50,

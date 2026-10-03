@@ -1,7 +1,8 @@
 /**
  * Run-state glyphs from the phase 2 mockup (filled dot = finished, ringed dot = running,
- * ring = queued, half-filled ring = stale, red cross = failed or lost, grey cross =
- * killed), a cell's run list, and the sweep progress strip.
+ * ring = queued, half-filled ring = stale, red cross = failed, red struck ring = lost,
+ * grey cross in a ring = killed), a cell's run list, and the sweep progress strip. Each
+ * state has its own shape; colour only repeats it.
  */
 import type { ReactElement } from "react";
 import type { RunStatus } from "../../api/models";
@@ -13,6 +14,10 @@ import { type RunGlyphState, type SweepCellRun, progressLabel, progressSegments 
 export const RUN_LIST_MAX = 6;
 
 const CROSS = "M1.4 1.4L8.6 8.6M8.6 1.4L1.4 8.6";
+/** Small cross inside the 12px ring (killed). */
+const RING_CROSS = "M4 4L8 8M8 4L4 8";
+/** One diagonal stroke through the 12px ring (lost). */
+const RING_SLASH = "M2.3 9.7L9.7 2.3";
 
 /** The glyph of one run state, as a small inline SVG (decorative: the text says the state). */
 export function RunGlyph({ state }: { state: RunGlyphState }): ReactElement {
@@ -50,9 +55,22 @@ export function RunGlyph({ state }: { state: RunGlyphState }): ReactElement {
         </>,
       );
     case "killed":
-      return box(10, <path className="x killed" d={CROSS} />);
-    case "failed":
+      return box(
+        12,
+        <>
+          <circle className="x-ring killed" cx={6} cy={6} r={5.2} />
+          <path className="x killed" d={RING_CROSS} />
+        </>,
+      );
     case "lost":
+      return box(
+        12,
+        <>
+          <circle className="x-ring" cx={6} cy={6} r={5.2} />
+          <path className="x" d={RING_SLASH} />
+        </>,
+      );
+    case "failed":
       return box(10, <path className="x" d={CROSS} />);
   }
 }

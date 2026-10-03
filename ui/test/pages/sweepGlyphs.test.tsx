@@ -24,6 +24,27 @@ describe("sweep glyphs", () => {
     expect(container.querySelector('[data-glyph="stale"] path.half')).not.toBeNull();
   });
 
+  test("every state has its own shape, not only its own colour", () => {
+    const states: RunGlyphState[] = ["finished", "running", "queued", "stale", "failed", "lost", "killed"];
+    const { container } = render(
+      <>
+        {states.map((s) => (
+          <RunGlyph key={s} state={s} />
+        ))}
+      </>,
+    );
+    const svgs = [...container.querySelectorAll("svg.rg")];
+    // Fill against ring is set by class, so the full markup tells all seven apart.
+    expect(new Set(svgs.map((svg) => svg.innerHTML)).size).toBe(states.length);
+    // The three cross states differ by colour class, so their geometry alone must differ.
+    const geometry = (state: RunGlyphState): string =>
+      container.querySelector(`[data-glyph="${state}"]`)?.innerHTML.replace(/\sclass="[^"]*"/g, "") ?? "";
+    expect(new Set(["failed", "lost", "killed"].map((s) => geometry(s as RunGlyphState))).size).toBe(3);
+    expect(container.querySelector('[data-glyph="killed"] circle.x-ring')).not.toBeNull();
+    expect(container.querySelector('[data-glyph="lost"] circle.x-ring')).not.toBeNull();
+    expect(container.querySelector('[data-glyph="failed"] circle')).toBeNull();
+  });
+
   test("a cell's run list shows six runs and counts the rest", () => {
     const runs: SweepCellRun[] = Array.from({ length: 8 }, (_, i) => ({
       run_id: `20261003-x-r${i}`,

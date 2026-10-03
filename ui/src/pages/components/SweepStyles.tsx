@@ -44,7 +44,9 @@ export const SWEEP_CSS = `
 .page .rg .stale-ring { fill: none; stroke: var(--ink); stroke-width: 1.4; }
 .page .rg .half { fill: var(--ink); }
 .page .rg .x { fill: none; stroke: var(--fail); stroke-width: 1.8; stroke-linecap: round; }
-.page .rg .x.killed { stroke: var(--ink-3); }
+.page .rg .x-ring { fill: none; stroke: var(--fail); stroke-width: 1.2; }
+.page .rg .x.killed, .page .rg .x-ring.killed { stroke: var(--ink-3); }
+.page .rg .x.killed { stroke-width: 1.5; }
 .page .sw-table, .page .sw-runs { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
 .page .sw-runs { max-width: 860px; }
 .page .sw-table th, .page .sw-runs th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12.5px; padding: 0 14px 8px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; }

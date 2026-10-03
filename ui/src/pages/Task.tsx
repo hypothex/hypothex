@@ -14,6 +14,7 @@ import {
   queryKeys,
   useAllRuns,
   useLeaderboard,
+  useProjectSweeps,
   useTask,
   useView,
   useViewQuery,
@@ -21,11 +22,12 @@ import {
 } from "../api/queries";
 import { type LaunchDefaults, launchDefaults } from "../launch/draft";
 import { LaunchDialog } from "../launch/LaunchDialog";
-import { shortId } from "./components/format";
+import { fmtScore, shortId } from "./components/format";
 import { AppLink, hrefs } from "./components/links";
 import { PanelGrid } from "./components/PanelGrid";
 import { ErrorBox, Loading } from "./components/QueryState";
 import { PageStyles } from "./components/styles";
+import { paramsText, sweepHref } from "./components/SweepModel";
 import type { Leaderboard } from "./components/types";
 import { useAction } from "./components/useAction";
 import { Unbroken } from "./components/Headline";
@@ -122,6 +124,34 @@ function LaunchedLine({ launched }: { launched: LaunchedRuns }) {
         <Fragment key={r.run_id}>
           {i > 0 ? " " : ""}
           <AppLink href={hrefs.run(r.run_id)}>{shortId(r.run_id)}</AppLink>
+        </Fragment>
+      ))}
+    </p>
+  );
+}
+
+/**
+ * The project's sweeps (spec 5.7: each sweep as a group with its best config): id linking
+ * the sweep page, run count, best params and mean. Nothing while there are none, or when
+ * the list fails (the rest of the page does not depend on it).
+ */
+function SweepsLine({ project }: { project: string }) {
+  const sweeps = useProjectSweeps(project);
+  const items = sweeps.data ?? [];
+  if (items.length === 0) return null;
+  return (
+    <p className="small sweeps" aria-label="Sweeps" title={`Sweeps of project ${project}`}>
+      sweeps:{" "}
+      {items.map((s, i) => (
+        <Fragment key={s.id}>
+          {i > 0 ? " · " : ""}
+          <AppLink href={sweepHref(project, s.id)} title={`${s.n_runs} runs, created ${s.created_at}`}>
+            {s.id}
+          </AppLink>
+          {` ×${s.n_runs}`}
+          {s.best && s.best.mean !== null
+            ? ` ${paramsText(s.best.params, Object.keys(s.best.params))} ${fmtScore(s.best.mean)}`
+            : ""}
         </Fragment>
       ))}
     </p>
@@ -228,6 +258,7 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
       {views.error ? <ErrorBox error={views.error} /> : null}
       {reeval.error ? <ErrorBox error={reeval.error} /> : null}
       {launched ? <LaunchedLine launched={launched} /> : null}
+      <SweepsLine project={project} />
 
       {viewError ? (
         <ErrorBox error={viewError} />

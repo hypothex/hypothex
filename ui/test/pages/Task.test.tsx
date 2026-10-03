@@ -54,6 +54,7 @@ function routes(view: string): Record<string, unknown> {
     [`GET ${BASE}/views/${view}`]: detail(info),
     [`POST ${BASE}/views/query`]: PANELS,
     [`POST ${BASE}/reeval`]: { evaluated: 12 },
+    "GET /api/v1/projects/toy-classifier/sweeps": [],
   };
 }
 
@@ -192,6 +193,25 @@ describe("TaskPage", () => {
       gpus: 0,
       queue: false,
     });
+  });
+
+  test("lists the project's sweeps with their best config, each linking its sweep page", async () => {
+    mockApi({
+      ...routes("overview"),
+      "GET /api/v1/projects/toy-classifier/sweeps": [
+        {
+          id: "s-7f3a",
+          created_at: "2026-10-03T09:12:00Z",
+          n_runs: 6,
+          best: { params: { lr: "3e-4", beam: "10" }, group_id: "g-7e3f", n: 3, mean: 0.9121, lo: 0.9109, hi: 0.9133, run_ids: [] },
+        },
+        { id: "s-1b2c", created_at: "2026-10-02T09:00:00Z", n_runs: 4, best: null },
+      ],
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    const line = await screen.findByLabelText("Sweeps");
+    expect(line.textContent).toBe("sweeps: s-7f3a ×6 lr 3e-4, beam 10 0.9121 · s-1b2c ×4");
+    expect(within(line).getByRole("link", { name: "s-7f3a" }).getAttribute("href")).toBe("/s/toy-classifier/s-7f3a");
   });
 
   test("New run reads past the first 1,000 runs: an older seed of the template's config is never proposed", async () => {

@@ -35,6 +35,12 @@ EXPECTED_TOOLS = {
     "get_view",
     "add_view",
     "query_view",
+    "list_hosts",
+    "launch_sweep",
+    "get_sweep",
+    "cancel_sweep",
+    "extend_sweep",
+    "pull_artifact",
 }
 
 GOOD_VIEW = """\

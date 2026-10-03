@@ -1512,6 +1512,7 @@ def create_app(
     kind: str | None = None,
     auth_token: str | None = None,
     hub: bool = True,
+    hub_url: str | None = None,
 ) -> FastAPI:
     """
     Build the FastAPI application.
@@ -1552,6 +1553,9 @@ def create_app(
     hub : bool
         Connect to the hosts in ``environments.yaml`` (the hub role). Off in tests
         that need no live hosts.
+    hub_url : str, optional
+        This server's own URL, given to the mounted MCP server so its remote tools
+        call this hub (``hx serve`` passes it).
 
     Returns
     -------
@@ -1571,7 +1575,8 @@ def create_app(
     manager = HubManager(ctx)
     if ctx.descriptor.kind == "slurm":
         require_flock(ctx.layout.home)  # every run-state write takes the run lock
-    mcp_server = build_server(context=ctx)  # one Context (and descriptor) for HTTP and MCP
+    # one Context (and descriptor) for HTTP and MCP
+    mcp_server = build_server(hub_url=hub_url, context=ctx)
     mcp_http = mcp_server.streamable_http_app(streamable_http_path="/")
 
     @asynccontextmanager

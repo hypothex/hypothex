@@ -1571,7 +1571,9 @@ def serve(
                     _drop_server_file(home, info.pid)
 
     with _server_file(home, info):
-        application = create_app(home, host=host, kind=resolved, auth_token=token)
+        application = create_app(
+            home, host=host, kind=resolved, auth_token=token, hub_url=_url(host, bound)
+        )
         typer.secho(f"hx serve on {_url(host, bound)}", err=True)
         # the socket is bound already: uvicorn logs no "running on" line for it, so
         # the start script finds the port in server.json (written above, Task 11)

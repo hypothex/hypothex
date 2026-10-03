@@ -100,6 +100,7 @@ class RunRow(Base):
     config_hash: Mapped[str] = mapped_column(String)
     commit: Mapped[str | None] = mapped_column(String, nullable=True)
     environment_id: Mapped[str] = mapped_column(String)
+    parent: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     starred: Mapped[bool] = mapped_column(Boolean, default=False)
     record_json: Mapped[str] = mapped_column(Text)
@@ -205,6 +206,7 @@ def _run_values(record: RunRecord) -> dict[str, Any]:
         "config_hash": record.config_hash,
         "commit": record.git.commit,
         "environment_id": record.environment_id,
+        "parent": record.parent,
         "archived": record.archived,
         "starred": record.starred,
         "record_json": record.model_dump_json(),
@@ -497,6 +499,35 @@ class Index:
             stmt = stmt.limit(limit)
         with Session(self.engine) as session:
             return [RunRecord.model_validate_json(j) for j in session.scalars(stmt)]
+
+    def child_run_ids(self, run_id: str) -> list[str]:
+        """
+        Return the ids of runs whose ``parent`` is ``run_id``, archived ones too.
+
+        One lookup on the indexed ``parent`` column, whatever the project size.
+
+        Parameters
+        ----------
+        run_id : str
+            Parent run id.
+
+        Returns
+        -------
+        list of str
+            Child run ids, newest first.
+
+        Examples
+        --------
+        >>> idx.child_run_ids("20261004-101500-qa-1a2b3c4d")  # doctest: +SKIP
+        ['20261004-111500-qa-5e6f7a8b']
+        """
+        stmt = (
+            select(RunRow.run_id)
+            .where(RunRow.parent == run_id)
+            .order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
+        )
+        with Session(self.engine) as session:
+            return list(session.scalars(stmt))
 
     def run_ids(self) -> set[str]:
         """

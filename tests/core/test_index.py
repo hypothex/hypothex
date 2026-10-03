@@ -33,6 +33,21 @@ def test_upsert_and_filters(tmp_path: Path) -> None:
     assert idx.get_run("zz") is None
 
 
+def test_child_run_ids_use_the_parent_index(tmp_path: Path) -> None:
+    idx = Index(tmp_path / "i.db")
+    idx.upsert_run(make_record("p1"))
+    idx.upsert_run(make_record("c1", parent="p1"))
+    idx.upsert_run(make_record("c2", parent="p1", archived=True, project="other"))
+    idx.upsert_run(make_record("c3", parent="p2"))
+    assert sorted(idx.child_run_ids("p1")) == ["c1", "c2"]
+    assert idx.child_run_ids("c1") == []
+    with idx.engine.connect() as conn:
+        plan = conn.exec_driver_sql(
+            "EXPLAIN QUERY PLAN SELECT run_id FROM runs WHERE parent = 'p1'"
+        ).all()
+    assert any("ix_runs_parent" in str(row) for row in plan)
+
+
 def test_upsert_run_replaces_tags(tmp_path: Path) -> None:
     idx = Index(tmp_path / "i.db")
     idx.upsert_run(make_record("r1", tags=["old"]))

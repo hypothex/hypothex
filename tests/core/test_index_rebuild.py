@@ -221,6 +221,14 @@ def test_rebuild_replaces_a_leftover_temp_file(tmp_path: Path) -> None:
     assert len(index.list_runs()) == 2
 
 
+def test_rebuild_fills_the_parent_column(tmp_path: Path) -> None:
+    store = _store(tmp_path, runs=1)
+    store.create_run(make_record("kid", parent="r0", status=RunStatus.FINISHED))
+    index = Index(tmp_path / "index.db", store=store)
+    rebuild_index(index, store)
+    assert index.child_run_ids("r0") == ["kid"]
+
+
 # generation --------------------------------------------------------------------------
 
 

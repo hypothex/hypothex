@@ -25,6 +25,7 @@ from hypothex.core.execution import (
     execute_run,
     prepare_run,
     process_alive,
+    release_worktree,
     spawn_supervisor,
     terminate_group,
 )
@@ -279,6 +280,7 @@ def _remove_from_queue(ctx: Context, run_id: str, run_dir: Path) -> RunRecord | 
         (run_dir / QUEUE_FILE).unlink()
         killed = ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "removed from queue"})
     Scheduler(ctx).refresh_positions()
+    release_worktree(ctx, killed)  # it never ran: execute_run will not clean up after it
     return killed
 
 
@@ -318,7 +320,9 @@ def cancel_if_queued(ctx: Context, run_id: str) -> RunRecord:
         os.close(os.open(run_dir / EXECUTION_CLAIM, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
     except FileExistsError:
         return ctx.find_record(run_id)  # it started: leave it alone
-    return ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "cancelled while queued"})
+    killed = ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "cancelled while queued"})
+    release_worktree(ctx, killed)  # a supervisor that arrives now refuses the run, so no cleanup
+    return killed
 
 
 def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) -> RunRecord:

@@ -14,6 +14,7 @@ import pytest
 from hypothex.core.slurm import (
     SlurmError,
     SlurmJob,
+    SlurmTimeout,
     SubmitUnknownError,
     cancel,
     comment_accounting,
@@ -454,6 +455,34 @@ def test_a_recognised_rejection_is_definitive(
     with pytest.raises(SlurmError) as rejected:
         submit("#!/bin/bash\ntrue\n", tmp_path)
     assert not isinstance(rejected.value, SubmitUnknownError)
+
+
+def _time_out(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    raise subprocess.TimeoutExpired(args[0], 60.0)
+
+
+def test_sbatch_timeout_is_unknown_never_a_rejection(
+    slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("hypothex.core.slurm.subprocess.run", _time_out)
+    with pytest.raises(SubmitUnknownError, match="timed out.*the job may exist"):
+        submit("#!/bin/bash\ntrue\n", tmp_path, comment="hx-r1-timeout")
+
+
+def test_poll_timeout_raises_slurm_timeout(
+    slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hypothex.core.slurm.subprocess.run", _time_out)
+    with pytest.raises(SlurmTimeout, match="squeue timed out") as timed_out:
+        poll(["1000"])
+    assert not isinstance(timed_out.value, SubmitUnknownError)
+
+
+def test_sbatch_that_cannot_start_is_a_definitive_error(slurm: FakeSlurm, tmp_path: Path) -> None:
+    with pytest.raises(SlurmError, match="could not run sbatch") as refused:
+        submit("#!/bin/bash\ntrue\n", tmp_path / "no-such-dir")
+    assert not isinstance(refused.value, SubmitUnknownError | SlurmTimeout)
+    assert slurm.calls("sbatch") == []  # it never ran, so no job can exist
 
 
 def test_without_comment_accounting_sacct_never_proves_absence(slurm: FakeSlurm) -> None:

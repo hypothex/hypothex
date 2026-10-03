@@ -11,6 +11,7 @@ import sqlite3
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +19,7 @@ from sqlalchemy import (
     Boolean,
     Float,
     Integer,
+    Select,
     String,
     Text,
     create_engine,
@@ -27,6 +29,7 @@ from sqlalchemy import (
     insert,
     select,
     text,
+    tuple_,
 )
 from sqlalchemy import Index as SqlIndex
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -255,6 +258,32 @@ def downsample(points: list[MetricPoint], limit: int = MAX_POINTS_PER_METRIC) ->
     return out
 
 
+def _filter_runs(
+    stmt: Select[Any],
+    *,
+    project: str | None,
+    task: str | None,
+    status: RunStatus | str | None,
+    tag: str | None,
+    environment_id: str | None,
+    include_archived: bool,
+) -> Select[Any]:
+    """Add the ``list_runs`` filters to a select over ``runs``."""
+    if project is not None:
+        stmt = stmt.where(RunRow.project == project)
+    if task is not None:
+        stmt = stmt.where(RunRow.task == task)
+    if status is not None:
+        stmt = stmt.where(RunRow.status == str(status))
+    if tag is not None:
+        stmt = stmt.join(RunTagRow, RunTagRow.run_id == RunRow.run_id).where(RunTagRow.tag == tag)
+    if environment_id is not None:
+        stmt = stmt.where(RunRow.environment_id == environment_id)
+    if not include_archived:
+        stmt = stmt.where(RunRow.archived.is_(False))
+    return stmt
+
+
 class Index:
     """
     SQLite index used for fast listing and filtering.
@@ -463,6 +492,7 @@ class Index:
         environment_id: str | None = None,
         include_archived: bool = False,
         limit: int | None = 500,
+        before: tuple[datetime | str, str] | None = None,
     ) -> list[RunRecord]:
         """
         List runs, newest first.
@@ -477,30 +507,77 @@ class Index:
             Include archived runs.
         limit : int or None
             Maximum rows; ``None`` for all.
+        before : tuple of (datetime or str, str), optional
+            Keyset cursor ``(created_at, run_id)`` of the last run of the
+            previous page: only runs after it in this order are returned.
 
         Returns
         -------
         list of RunRecord
+
+        Examples
+        --------
+        >>> page = idx.list_runs(limit=200)  # doctest: +SKIP
+        >>> last = page[-1]  # doctest: +SKIP
+        >>> idx.list_runs(limit=200, before=(last.created_at, last.run_id))  # doctest: +SKIP
         """
         stmt = select(RunRow.record_json).order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
-        if project is not None:
-            stmt = stmt.where(RunRow.project == project)
-        if task is not None:
-            stmt = stmt.where(RunRow.task == task)
-        if status is not None:
-            stmt = stmt.where(RunRow.status == str(status))
-        if tag is not None:
-            stmt = stmt.join(RunTagRow, RunTagRow.run_id == RunRow.run_id).where(
-                RunTagRow.tag == tag
-            )
-        if environment_id is not None:
-            stmt = stmt.where(RunRow.environment_id == environment_id)
-        if not include_archived:
-            stmt = stmt.where(RunRow.archived.is_(False))
+        stmt = _filter_runs(
+            stmt,
+            project=project,
+            task=task,
+            status=status,
+            tag=tag,
+            environment_id=environment_id,
+            include_archived=include_archived,
+        )
+        if before is not None:
+            created, run_id = before
+            stamp = created.isoformat() if isinstance(created, datetime) else created
+            stmt = stmt.where(tuple_(RunRow.created_at, RunRow.run_id) < tuple_(stamp, run_id))
         if limit is not None:
             stmt = stmt.limit(limit)
         with Session(self.engine) as session:
             return [RunRecord.model_validate_json(j) for j in session.scalars(stmt)]
+
+    def count_runs(
+        self,
+        *,
+        project: str | None = None,
+        task: str | None = None,
+        status: RunStatus | str | None = None,
+        tag: str | None = None,
+        environment_id: str | None = None,
+        include_archived: bool = False,
+    ) -> int:
+        """
+        Count the runs ``list_runs`` would return with no limit, without reading them.
+
+        Parameters
+        ----------
+        project, task, status, tag, environment_id, include_archived : optional
+            The same filters as ``list_runs``.
+
+        Returns
+        -------
+        int
+
+        Examples
+        --------
+        >>> idx.count_runs(project="toy", status="finished")  # doctest: +SKIP
+        12
+        """
+        stmt = _filter_runs(
+            select(func.count()).select_from(RunRow),
+            project=project,
+            task=task,
+            status=status,
+            tag=tag,
+            environment_id=environment_id,
+            include_archived=include_archived,
+        )
+        with Session(self.engine) as session:
+            return int(session.scalar(stmt) or 0)
 
     def child_run_ids(self, run_id: str) -> list[str]:
         """

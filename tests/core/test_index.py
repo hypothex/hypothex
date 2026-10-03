@@ -1,5 +1,8 @@
 import sqlite3
+from datetime import timedelta
 from pathlib import Path
+
+import pytest
 
 from hypothex.core.config import ProjectConfig
 from hypothex.core.fsutil import append_jsonl
@@ -13,7 +16,7 @@ from hypothex.core.index import (
     repair_index_gaps,
 )
 from hypothex.core.layout import Layout
-from hypothex.core.records import MetricPoint, RunStatus, ScoreRecord
+from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import RunStore
 from tests.factories import make_record
 
@@ -46,6 +49,55 @@ def test_child_run_ids_use_the_parent_index(tmp_path: Path) -> None:
             "EXPLAIN QUERY PLAN SELECT run_id FROM runs WHERE parent = 'p1'"
         ).all()
     assert any("ix_runs_parent" in str(row) for row in plan)
+
+
+def test_keyset_pages_match_the_full_list(tmp_path: Path) -> None:
+    idx = Index(tmp_path / "i.db")
+    same = utcnow()
+    for i in range(7):  # four share a created_at: the run id breaks the tie
+        when = same if i < 4 else same - timedelta(seconds=i)
+        idx.upsert_run(make_record(f"r{i}", created_at=when, tags=["t"] if i % 2 else []))
+    full = idx.list_runs(limit=None)
+    pages: list[str] = []
+    before = None
+    while True:
+        page = idx.list_runs(limit=3, before=before)
+        if not page:
+            break
+        pages += [r.run_id for r in page]
+        before = (page[-1].created_at, page[-1].run_id)
+    assert pages == [r.run_id for r in full]
+    iso = (full[2].created_at.isoformat(), full[2].run_id)
+    assert idx.list_runs(before=iso) == full[3:]
+    assert [r.run_id for r in idx.list_runs(tag="t", before=iso)] == [
+        r.run_id for r in full[3:] if r.tags == ["t"]
+    ]
+
+
+def test_count_runs_matches_list_runs_without_parsing_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    idx = Index(tmp_path / "i.db")
+    idx.upsert_run(make_record("r1", task="a", tags=["x"]))
+    idx.upsert_run(make_record("r2", task="b", archived=True, tags=["x"]))
+    idx.upsert_run(make_record("r3", status=RunStatus.FINISHED, environment_id="e2"))
+    cases: list[dict] = [
+        {},
+        {"include_archived": True},
+        {"task": "a"},
+        {"tag": "x"},
+        {"tag": "x", "include_archived": True},
+        {"status": RunStatus.FINISHED},
+        {"environment_id": "e2"},
+        {"project": "nope"},
+    ]
+    want = [len(idx.list_runs(limit=None, **c)) for c in cases]
+
+    def no_parse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("count_runs parsed a record")
+
+    monkeypatch.setattr(RunRecord, "model_validate_json", no_parse)
+    assert [idx.count_runs(**c) for c in cases] == want == [2, 3, 1, 1, 2, 1, 1, 0]
 
 
 def test_upsert_run_replaces_tags(tmp_path: Path) -> None:

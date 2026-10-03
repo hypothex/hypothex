@@ -301,6 +301,18 @@ def test_mkdir_lock_of_another_host_is_never_broken(tmp_path: Path) -> None:
     assert (lock / "owner").read_text().strip() == "login2|4242|x"
 
 
+def test_mkdir_lock_gets_past_a_file_an_os_lock_left(tmp_path: Path) -> None:
+    # flock and python3 leave a regular file at the lock path; a node without
+    # either tool must still take the lock, not wait on a file nobody holds
+    lock = tmp_path / "L"
+    lock.write_text("")
+    start = time.monotonic()
+    out = _take(lock, _lock_path(tmp_path, "mkdir"), wait="5")
+    assert "HX:mode=mkdir" in out, out
+    assert time.monotonic() - start < 4
+    assert not lock.exists()  # released when the script exits
+
+
 def test_lock_limit_caps_the_lock_wait(tmp_path: Path) -> None:
     # bootstrap.py passes HX_LOCK_LIMIT below its ssh timeout: the script must
     # give up on a busy lock (with its own message) before ssh is killed

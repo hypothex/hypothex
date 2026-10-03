@@ -127,6 +127,12 @@ hx_mkdir_lock() {
     _hx_waited=0
     _hx_token="$(hostname 2>/dev/null || echo unknown)|$$|$(hx_pid_start $$)"
     while ! mkdir "$1" 2>/dev/null; do
+        if [ -f "$1" ] && rm -f "$1" 2>/dev/null; then
+            # A regular file is the lock file a flock/python3 run left (the OS lock
+            # goes with its holder, the file stays). This node has neither tool, so
+            # no OS lock on it can be held from here: it only blocks the mkdir.
+            continue
+        fi
         _hx_owner=$(cat "$1/owner" 2>/dev/null || true)
         if hx_owner_dead "$_hx_owner" && mkdir "$1.break" 2>/dev/null; then
             if [ "$(cat "$1/owner" 2>/dev/null || true)" = "$_hx_owner" ]; then

@@ -1,3 +1,4 @@
+import errno
 import getpass
 import json
 import os
@@ -10,8 +11,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
+from hypothex.cli.main import app
+from hypothex.core.context import Context
+from hypothex.core.errors import ConfigError, RunError
+from hypothex.core.execution import RunRequest, prepare_run
+from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus
 from hypothex.core.slurm import (
+    EXIT_FILE,
     SlurmError,
     SlurmJob,
     SlurmTimeout,
@@ -19,10 +27,13 @@ from hypothex.core.slurm import (
     cancel,
     comment_accounting,
     find_submitted,
+    flock_supported,
     is_finished,
     lost_reason,
     poll,
     render_sbatch,
+    require_flock,
+    run_child,
     submit,
 )
 from hypothex.remote.config import SlurmDefaults
@@ -30,6 +41,7 @@ from tests.factories import make_record
 
 FAKE_SLURM = Path(__file__).resolve().parents[1] / "fakes" / "fake_slurm"
 PY = sys.executable
+runner = CliRunner()
 
 
 class FakeSlurm:
@@ -592,3 +604,112 @@ def test_cancel_calls_scancel_and_raises_on_unknown_job(slurm: FakeSlurm) -> Non
     with pytest.raises(SlurmError, match="Invalid job id specified"):
         cancel("1000")
     assert slurm.calls("scancel") == [["1000"], ["1000"]]
+
+
+# hx run --child ----------------------------------------------------------------------------
+def submitted(ctx: Context, toy_repo: Path, code: str, job_id: str = "4242") -> RunRecord:
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", code], gpus=2, slurm=SlurmDefaults())
+    record = prepare_run(ctx, req)
+    return ctx.update_run(
+        record.run_id,
+        "run.submitted",
+        lambda r: r.model_copy(
+            update={"executor": ExecutorInfo(type="slurm", slurm_job_id=job_id, host="cluster")}
+        ),
+    )
+
+
+READ_OWN_RECORD = (
+    "import os, yaml; "
+    "r = yaml.safe_load(open(os.environ['HYPOTHEX_RUN_DIR'] + '/run.yaml')); "
+    "print(r['status'], r['executor']['type'], r['executor']['slurm_job_id'], "
+    "r['executor']['node'])"
+)
+
+
+def test_run_child_keeps_slurm_executor_fields(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLURM_JOB_ID", "4242")
+    monkeypatch.setenv("SLURMD_NODENAME", "n7")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3")
+    record = submitted(ctx, toy_repo, READ_OWN_RECORD)
+    final = run_child(ctx.layout.home, record.run_id)
+    assert final.status == RunStatus.FINISHED
+    run_dir = ctx.run_dir(final)
+    # while running, run.yaml already said slurm + node (not a plain local executor)
+    assert (run_dir / "logs" / "stdout.log").read_text().strip() == "running slurm 4242 n7"
+    ex = final.executor
+    assert (ex.type, ex.slurm_job_id, ex.node, ex.gpus, ex.host) == (
+        "slurm",
+        "4242",
+        "n7",
+        [2, 3],
+        "cluster",
+    )
+    assert ex.pid == os.getpid()
+
+
+def test_run_child_gpus_fall_back_to_requested_count(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("SLURMD_NODENAME", raising=False)
+    record = submitted(ctx, toy_repo, "pass")
+    final = run_child(ctx.layout.home, record.run_id)
+    assert final.executor.gpus == [0, 1]
+    assert final.executor.node is not None and final.executor.node != ""
+
+
+def test_cli_run_child(ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SLURM_JOB_ID", "4242")
+    monkeypatch.setenv("SLURMD_NODENAME", "n7")
+    record = submitted(ctx, toy_repo, "import sys; print('on node'); sys.exit(3)")
+    result = runner.invoke(app, ["run", "--child", record.run_id, "--json"])
+    assert result.exit_code == 3
+    final = ctx.find_record(record.run_id)
+    assert (final.status, final.exit_code, final.executor.node) == (RunStatus.FAILED, 3, "n7")
+    assert (ctx.run_dir(final) / "logs" / "stdout.log").read_text() == "on node\n"
+
+
+def test_cli_run_child_refuses_a_run_that_is_not_queued(ctx: Context, toy_repo: Path) -> None:
+    record = submitted(ctx, toy_repo, "pass")
+    run_child(ctx.layout.home, record.run_id)
+    result = runner.invoke(app, ["run", "--child", record.run_id])
+    assert result.exit_code != 0
+    assert isinstance(result.exception, RunError)
+    assert "not queued" in str(result.exception)
+
+
+def test_run_child_never_opens_the_index_or_event_log(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = submitted(ctx, toy_repo, "print('on node')")
+    before = len(ctx.events.since(0, limit=10_000))
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the compute node opened a SQLite file")
+
+    monkeypatch.setattr("hypothex.core.index.Index.__init__", refuse)
+    monkeypatch.setattr("hypothex.core.events.EventLog.__init__", refuse)
+    final = run_child(ctx.layout.home, record.run_id)
+    assert final.status == RunStatus.FINISHED
+    # no node-side events and no index writes: the login node publishes them later
+    assert len(ctx.events.since(0, limit=10_000)) == before
+    indexed = ctx.index.get_run(record.run_id)
+    assert indexed is not None and indexed.status == RunStatus.QUEUED
+    exit_record = json.loads((ctx.run_dir(final) / EXIT_FILE).read_text())
+    assert (exit_record["status"], exit_record["exit_code"]) == ("finished", 0)
+
+
+def test_a_home_without_flock_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert flock_supported(tmp_path)
+    require_flock(tmp_path)
+
+    def no_flock(fd: int, operation: int) -> None:
+        raise OSError(errno.ENOSYS, "Function not implemented")  # Lustre without -o flock
+
+    monkeypatch.setattr("hypothex.core.slurm.fcntl.flock", no_flock)
+    assert not flock_supported(tmp_path)
+    with pytest.raises(ConfigError, match=r"does not support flock.*mount it with flock"):
+        require_flock(tmp_path)

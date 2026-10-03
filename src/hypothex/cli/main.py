@@ -402,9 +402,27 @@ def run(
     var: VarOpt = None,
     stage: StageOpt = None,
     repo: RepoOpt = None,
+    child: Annotated[
+        str | None,
+        typer.Option("--child", hidden=True, help="Execute a submitted run (inside a SLURM job)."),
+    ] = None,
     as_json: JsonFlag = False,
 ) -> None:
     """Run a command in the foreground and record it: hx run -t TASK -H WHY -- CMD..."""
+    if child is not None:
+        from hypothex.core.slurm import run_child
+
+        # never _ctx(): the compute node must not open index.db / events.db
+        _finish(
+            run_child(
+                (_state.home or default_home()).expanduser().resolve(),
+                child,
+                stdout_sink=sys.stderr.buffer if as_json else sys.stdout.buffer,
+                stderr_sink=sys.stderr.buffer,
+            ),
+            as_json,
+        )
+        return
     req = _request(
         ctx.args,
         task=task,

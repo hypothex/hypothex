@@ -11,20 +11,36 @@ is gone without an exit record (spec 5.6, 8A.5).
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import getpass
+import json
 import logging
+import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, BinaryIO, cast
 
 from pydantic import BaseModel
 
-from hypothex.core.errors import HypothexError
+from hypothex.core.context import Context
+from hypothex.core.environment import load_descriptor
+from hypothex.core.errors import ConfigError, HypothexError, RunError
+from hypothex.core.events import EventLog
+from hypothex.core.execution import execute_run
+from hypothex.core.fsutil import atomic_write_text
+from hypothex.core.ids import utcnow
+from hypothex.core.index import Index
 from hypothex.core.layout import Layout
-from hypothex.core.records import RunRecord
+from hypothex.core.records import RunRecord, ScoreRecord
+from hypothex.core.store import RunStore, run_lock
 from hypothex.remote.config import SlurmDefaults, sbatch_option_problem
 
 log = logging.getLogger(__name__)
@@ -51,6 +67,13 @@ SQUEUE_COMMENT_FORMAT = "%i|%T|%N|%k"
 SACCT_FORMAT = "JobID,State,ExitCode,NodeList"
 SACCT_COMMENT_FORMAT = "JobID,State,ExitCode,NodeList,Comment"
 _NO_NODE = frozenset({"", "None assigned", "(null)", "n/a"})
+
+SLURM_EXECUTOR = "slurm"
+EXIT_FILE = "exit.json"
+"""Exit record the compute node writes after the run ends (``status``, ``exit_code``)."""
+NO_FLOCK_ERRNOS = frozenset({errno.ENOSYS, errno.ENOLCK, errno.EOPNOTSUPP})
+"""``flock`` errors of shared filesystems without lock support (Lustre, some NFS)."""
+FLOCK_PROBE = ".flock-probe"
 
 
 class SlurmError(HypothexError):
@@ -600,3 +623,317 @@ def lost_reason(job_id: str, job: SlurmJob | None) -> str:
     where = f" on {job.node}" if job.node else ""
     code = f" (exit {job.exit_code})" if job.exit_code is not None else ""
     return f"SLURM ended job {job_id} with {job.state}{where}{code}; no exit record"
+
+
+def _visible_gpus(env: Mapping[str, str], fallback: int) -> list[int]:
+    raw = env.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if not raw:
+        return list(range(max(fallback, 0)))
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if all(p.isdigit() for p in parts):
+        return [int(p) for p in parts]
+    return list(range(len(parts)))  # GPU UUIDs: only the count is meaningful
+
+
+def flock_supported(home: Path) -> bool:
+    """
+    Tell whether ``flock`` works on the filesystem that holds ``home``.
+
+    Parameters
+    ----------
+    home : Path
+        The Hypothex home (created if missing; the probe file is
+        ``<home>/.flock-probe``).
+
+    Returns
+    -------
+    bool
+        False when ``flock`` answers ``ENOSYS``, ``ENOLCK``, or ``EOPNOTSUPP``
+        (Lustre mounted without ``-o flock``, some NFS setups).
+    """
+    home.mkdir(parents=True, exist_ok=True)
+    fd = os.open(home / FLOCK_PROBE, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError as exc:
+        if exc.errno in NO_FLOCK_ERRNOS:
+            return False
+        raise
+    finally:
+        os.close(fd)
+    return True
+
+
+def require_flock(home: Path) -> None:
+    """
+    Refuse a SLURM home whose filesystem has no ``flock``.
+
+    Every run-state write (the login node's API, ``sbatch`` submission,
+    ``scancel``, the poller, and ``hx run --child`` on the node) takes the run
+    lock, so a SLURM env server needs ``flock`` on its home.
+
+    Parameters
+    ----------
+    home : Path
+
+    Raises
+    ------
+    ConfigError
+        ``flock`` does not work there.
+    """
+    if not flock_supported(home):
+        raise ConfigError(
+            f"{home} does not support flock, which a SLURM env server needs for its run "
+            "locks; mount it with flock (Lustre: -o flock) or set home: in "
+            "environments.yaml to a shared path that has it"
+        )
+
+
+class _NodeIndex:
+    """Stand-in for the SQLite index on a compute node: nothing is indexed there."""
+
+    def get_run(self, run_id: str) -> None:
+        """Always None: the node finds runs by folder (``RunStore.find_project_of``)."""
+        return None
+
+    def upsert_run(self, record: RunRecord) -> None:
+        """Do nothing; the login node indexes the run when it reads ``run.yaml``."""
+
+    def upsert_project(self, entry: object) -> None:
+        """Do nothing; projects are registered on the login node."""
+
+    def replace_metric_points(self, run_id: str, points: object) -> None:
+        """Do nothing; the login node indexes ``metrics.jsonl`` when it syncs the run."""
+
+    def add_score(self, run_id: str, score: object) -> None:
+        """Do nothing; finished runs are scored on the login node."""
+
+
+class _NodeEvents:
+    """Stand-in for the SQLite event log on a compute node: no events are written there."""
+
+    def append(self, event_type: str, **fields: Any) -> None:
+        """Do nothing; the login node emits the run's events (``sync_node_run``)."""
+
+
+@dataclass
+class NodeContext(Context):
+    """
+    The run-folder-only ``Context`` that ``hx run --child`` uses on a compute node.
+
+    SQLite in WAL mode does not work across hosts on NFS, Lustre, or GPFS. So
+    the node never opens ``index.db`` or
+    ``events.db``: it writes only run-folder files (atomic ``run.yaml``,
+    ``logs/``, ``metrics.jsonl``, and the exit record ``exit.json``). Only the
+    env server process on the login node opens the SQLite files; its
+    ``SlurmPoller`` reads the node's ``run.yaml`` changes and emits
+    ``run.started`` / ``run.finished`` / ``run.failed`` / ``run.killed`` and
+    updates the index (``sync_node_run``).
+
+    Every update also sets the SLURM executor fields: ``execute_run`` keeps the
+    fields recorded before start (``type``, ``slurm_job_id``, ``host``), but the
+    node name and the GPU indices are known only here.
+
+    Examples
+    --------
+    >>> ctx = NodeContext.open_node(Path("~/.hypothex"), node="n7")  # doctest: +SKIP
+    """
+
+    job_id: str | None = None
+    node: str | None = None
+    gpus: list[int] | None = None
+
+    @classmethod
+    def open_node(
+        cls,
+        home: Path,
+        *,
+        job_id: str | None = None,
+        node: str | None = None,
+        gpus: list[int] | None = None,
+    ) -> NodeContext:
+        """
+        Open a home for run-folder writes only (no index, no event log).
+
+        Parameters
+        ----------
+        home : Path
+            The Hypothex home on the shared filesystem.
+        job_id, node : str, optional
+            ``SLURM_JOB_ID`` and the node name.
+        gpus : list of int, optional
+            GPU indices visible to the job.
+
+        Returns
+        -------
+        NodeContext
+        """
+        layout = Layout(home.expanduser().resolve())
+        return cls(
+            layout=layout,
+            store=RunStore(layout),
+            index=cast(Index, _NodeIndex()),
+            events=cast(EventLog, _NodeEvents()),
+            descriptor=load_descriptor(layout),
+            job_id=job_id,
+            node=node,
+            gpus=gpus,
+        )
+
+    def find_record(self, run_id: str) -> RunRecord:
+        """
+        Read a run's record from its folder (no index lookup).
+
+        Parameters
+        ----------
+        run_id : str
+
+        Returns
+        -------
+        RunRecord
+        """
+        return self.store.read_record(self.store.find_project_of(run_id), run_id)
+
+    def create_run(self, record: RunRecord) -> RunRecord:
+        """
+        Refuse: runs are created on the login node.
+
+        Parameters
+        ----------
+        record : RunRecord
+
+        Raises
+        ------
+        RunError
+            Always.
+        """
+        raise RunError(f"a compute node never creates runs ({record.run_id})")
+
+    def update_run(
+        self,
+        run_id: str,
+        event_type: str,
+        mutate: Callable[[RunRecord], RunRecord],
+        payload: dict[str, Any] | None = None,
+    ) -> RunRecord:
+        """
+        Apply ``mutate`` and the SLURM executor fields, then write ``run.yaml`` only.
+
+        No event is emitted and nothing is indexed here; the login node does
+        both when its poller sees the new ``run.yaml``.
+
+        Parameters
+        ----------
+        run_id : str
+        event_type : str
+            Ignored on the node (the login node picks the event from the status).
+        mutate : callable
+        payload : dict, optional
+            Ignored on the node.
+
+        Returns
+        -------
+        RunRecord
+        """
+        project = self.store.find_project_of(run_id)
+        with run_lock(self.layout.run_dir(project, run_id)):
+            current = self.store.read_record(project, run_id)
+            updated = mutate(current)
+            executor = updated.executor.model_copy(
+                update={
+                    "type": SLURM_EXECUTOR,
+                    "slurm_job_id": current.executor.slurm_job_id or self.job_id,
+                    "node": self.node or current.executor.node,
+                    "gpus": self.gpus if self.gpus is not None else current.executor.gpus,
+                    "host": current.executor.host,
+                }
+            )
+            updated = updated.model_copy(update={"executor": executor})
+            self.store.write_record(updated)  # atomic rename
+        return updated
+
+    def add_score(self, record: RunRecord, score: ScoreRecord) -> None:
+        """
+        Refuse: finished runs are scored on the login node (``sync_node_run``).
+
+        Parameters
+        ----------
+        record : RunRecord
+        score : ScoreRecord
+
+        Raises
+        ------
+        RunError
+            Always.
+        """
+        raise RunError(f"a compute node never scores runs ({record.run_id})")
+
+    def emit(
+        self, event_type: str, record: RunRecord, payload: dict[str, Any] | None = None
+    ) -> None:
+        """
+        Drop an informational event (the node has no event log).
+
+        Parameters
+        ----------
+        event_type : str
+        record : RunRecord
+        payload : dict, optional
+        """
+
+
+def run_child(
+    home: Path,
+    run_id: str,
+    *,
+    stdout_sink: BinaryIO | None = None,
+    stderr_sink: BinaryIO | None = None,
+) -> RunRecord:
+    """
+    Execute a submitted run inside its SLURM job (``hx run --child``).
+
+    Reads ``SLURM_JOB_ID``, ``SLURMD_NODENAME`` (else the hostname), and
+    ``CUDA_VISIBLE_DEVICES`` (else ``gpus_requested`` indices) and records
+    them in ``executor`` for the whole run. Uses a :class:`NodeContext`: no
+    SQLite file is opened on the compute node. Scoring is left to the login
+    node. At the end the exit record ``exit.json`` (``status``,
+    ``exit_code``, ``ended_at``) is written next to ``run.yaml``.
+
+    Parameters
+    ----------
+    home : Path
+        The Hypothex home (shared with the login node).
+    run_id : str
+        A ``queued`` run.
+    stdout_sink, stderr_sink : binary file, optional
+        Where to echo the command's output (the job's ``slurm-%j.out``).
+
+    Returns
+    -------
+    RunRecord
+        The final record.
+
+    Raises
+    ------
+    RunError
+        If the run is not queued.
+    """
+    env = os.environ
+    ctx = NodeContext.open_node(
+        home,
+        job_id=env.get("SLURM_JOB_ID"),
+        node=env.get("SLURMD_NODENAME") or socket.gethostname(),
+    )
+    ctx.gpus = _visible_gpus(env, ctx.find_record(run_id).gpus_requested)
+    final = execute_run(
+        ctx, run_id, stdout_sink=stdout_sink, stderr_sink=stderr_sink, auto_evaluate=False
+    )
+    exit_record = {
+        "run_id": final.run_id,
+        "status": final.status.value,
+        "exit_code": final.exit_code,
+        "ended_at": (final.ended_at or utcnow()).isoformat(),
+    }
+    atomic_write_text(ctx.run_dir(final) / EXIT_FILE, json.dumps(exit_record))
+    return final

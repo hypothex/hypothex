@@ -1,45 +1,120 @@
 /**
- * Overview screen (spec 8.3.1): status headline; runs by launcher; recent ideas;
- * running; failures with a link to stderr; projects table.
+ * Overview screen (spec 8.3.1, 8A.8): status headline; hosts (GPUs, SLURM, queue, cost);
+ * runs by launcher; recent ideas; running; failures with a link to stderr; projects table.
+ *
+ * With hosts configured, the headline reads `12 running, 11 waiting. dgx stale 4m` and the
+ * metaline shows free GPUs, cost today, the hub's hx version and the host count (mockup
+ * `docs/mockups/phase2/shot-overview-*`). The hosts list always has the hub's own `local`
+ * row; with no other host both stay as in phase 1 (plus `$N today` once runs cost money). A
+ * host stale for longer than the hub's `stale_banner_hours` (default 24) gets a banner (spec
+ * 5.6); its runs stay stale, never lost.
  */
-import { useOverview } from "../api/queries";
+import { useQuery } from "@tanstack/react-query";
+import { Fragment } from "react";
+import { api } from "../api/client";
+import { useHosts, useOverview } from "../api/queries";
 import { Figure } from "./components/Figure";
+import { Unbroken } from "./components/Headline";
+import {
+  HostsPanel,
+  fmtMoney,
+  hostTotals,
+  hostsHeadline,
+  hostsMetaline,
+  longStale,
+  remoteRows,
+  staleBannerHours,
+  useNow,
+} from "./components/HostsPanel";
 import { IdeaList } from "./components/IdeaList";
 import { FailureList, ProjectsTable, RunningList } from "./components/OverviewLists";
 import { ErrorBox, Loading } from "./components/QueryState";
 import { RunTimeline } from "./components/RunTimeline";
 import { PageStyles } from "./components/styles";
 import type { OverviewSummary } from "./components/types";
-import { Unbroken } from "./components/Headline";
+
+/** The hub's hx version from its environment descriptor; null until known or on error. */
+function useHubVersion(): string | null {
+  const env = useQuery({
+    queryKey: ["environment"],
+    queryFn: ({ signal }) => api.environment(signal),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const version = env.data?.hx_version;
+  return typeof version === "string" ? version : null;
+}
 
 function OverviewBody({ summary }: { summary: OverviewSummary }) {
+  const hosts = useHosts();
+  const hubVersion = useHubVersion();
+  const now = useNow();
+  const rows = hosts.data ?? [];
+  const remote = remoteRows(rows);
+  // the overview's cost today covers every run (hub runs too); the hosts' sum is the fallback
+  const hostSums = hostTotals(rows, now);
+  const totals = { ...hostSums, usdToday: summary.cost_today_usd ?? hostSums.usdToday };
+  const withHosts = remote.length > 0;
+  const hours = staleBannerHours(rows);
+  const gone = hosts.error ? [] : longStale(remote, now, hours);
+  const hubCost = summary.cost_today_usd ?? 0;
   return (
     <>
       <h1 className="headline">
-        <Unbroken text={summary.headline} />
+        <Unbroken text={withHosts ? hostsHeadline(summary.counts, totals) : summary.headline} />
       </h1>
       <p className="metaline">
-        {Object.entries(summary.counts).map(([key, value]) => (
-          <span key={key}>{`${value} ${key}`}</span>
-        ))}
+        {withHosts
+          ? hostsMetaline(totals, hubVersion, remote.length).map((text) => <span key={text}>{text}</span>)
+          : [
+              ...Object.entries(summary.counts).map(([key, value]) => <span key={key}>{`${value} ${key}`}</span>),
+              ...(hubCost > 0 ? [<span key="cost today">{`${fmtMoney(hubCost)} today`}</span>] : []),
+            ]}
       </p>
-      <Figure letter="a" title="Runs by launcher">
+      {gone.length > 0 ? (
+        <p
+          className="hosts-banner"
+          role="status"
+          title={`No answer for more than ${hours} h. Its runs stay stale, not lost: only the host marks a run lost.`}
+        >
+          {gone.map((h, i) => (
+            <Fragment key={h.name}>
+              {i > 0 ? ", " : null}
+              <b>{h.name}</b>
+              {` unreachable ${h.age}`}
+            </Fragment>
+          ))}
+        </p>
+      ) : null}
+      <Figure
+        letter="a"
+        title="Hosts"
+        aside={totals.usdToday > 0 ? `${fmtMoney(totals.usdToday)} today` : undefined}
+      >
+        {hosts.error ? (
+          <ErrorBox error={hosts.error} />
+        ) : hosts.data ? (
+          <HostsPanel hosts={hosts.data} runs={summary.running} hubVersion={hubVersion} now={now} />
+        ) : (
+          <Loading />
+        )}
+      </Figure>
+      <Figure letter="b" title="Runs by launcher">
         <RunTimeline items={summary.timeline} />
       </Figure>
       <div className="ov-grid">
         <div>
-          <Figure letter="b" title="Ideas">
+          <Figure letter="c" title="Ideas">
             <IdeaList ideas={summary.ideas} />
           </Figure>
         </div>
         <div className="side">
-          <Figure letter="c" title="Running">
+          <Figure letter="d" title="Running">
             <RunningList runs={summary.running} />
           </Figure>
-          <Figure letter="d" title="Failures">
+          <Figure letter="e" title="Failures">
             <FailureList failures={summary.failures} />
           </Figure>
-          <Figure letter="e" title="Projects">
+          <Figure letter="f" title="Projects">
             <ProjectsTable projects={summary.projects} />
           </Figure>
         </div>

@@ -490,14 +490,22 @@ class HubThread:
         Returns
         -------
         HostState
+
+        Raises
+        ------
+        AssertionError
+            On timeout; the message names the last ``HostState`` (its
+            ``message`` carries the bootstrap error).
         """
 
-        def check() -> HostState | None:
+        def check() -> HostState:
+            # Raise (not return None) while not ready so wait_until keeps the
+            # state as ``last``: its ``message`` carries the bootstrap error.
             state = self.hub.state(name)
             if state.state != "connected":
-                return None
+                raise AssertionError(repr(state))
             if after is not None and state.since <= after.since:
-                return None
+                raise AssertionError(f"not reconnected since {after.since!r}: {state!r}")
             return state
 
         return wait_until(check, timeout=timeout, what=f"host {name} connected", interval=0.25)

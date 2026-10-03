@@ -6,6 +6,8 @@ import json
 import shlex
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import httpx
 import pytest
@@ -16,9 +18,11 @@ from hypothex.cli.main import app
 from hypothex.core.context import Context
 from hypothex.core.environment import PROTOCOL_VERSION
 from hypothex.core.errors import RunNotFoundError
+from hypothex.core.ids import utcnow
 from hypothex.remote.bootstrap import ensure_server, probe
 from hypothex.remote.client import EnvClient
 from hypothex.remote.config import HostSpec, load_hosts
+from hypothex.remote.hub import HostState, Hub
 from hypothex.remote.ssh import Tunnel
 from tests.docker.conftest import (
     BOOTSTRAP_TIMEOUT,
@@ -75,6 +79,22 @@ def test_docker_skip_reason_without_docker_cli(
 ) -> None:
     monkeypatch.setenv("PATH", str(tmp_path))
     assert docker_skip_reason() == "docker CLI not found"
+
+
+def test_wait_connected_timeout_names_the_last_host_state() -> None:
+    state = HostState(
+        name="box", kind="ssh", state="error", since=utcnow(), message="bootstrap failed: boom"
+    )
+    hub = HubThread.__new__(HubThread)  # no real Hub: only .hub.state() is used
+    hub.hub = cast(Hub, SimpleNamespace(state=lambda name: state))
+    with pytest.raises(AssertionError, match="bootstrap failed: boom"):
+        hub.wait_connected("box", timeout=0.2)
+
+    up = state.model_copy(update={"state": "connected"})
+    hub.hub = cast(Hub, SimpleNamespace(state=lambda name: up))
+    with pytest.raises(AssertionError, match="not reconnected since"):
+        hub.wait_connected("box", timeout=0.2, after=up)
+    assert hub.wait_connected("box", timeout=0.2) == up
 
 
 # against the container ------------------------------------------------------------------

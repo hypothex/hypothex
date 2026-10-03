@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from hypothex.core import queries as q
 from hypothex.core.config import TaskKind
 from hypothex.core.context import Context
+from hypothex.core.cost import cost_since, today_start
 from hypothex.core.errors import ConfigError
 from hypothex.core.headlines import overview_headline
 from hypothex.core.ids import utcnow
@@ -345,13 +346,7 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
     counts["agent"] = sum(1 for r in window if r.created_by.startswith("agent"))
     counts["human"] = counts["total"] - counts["agent"]
 
-    today = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
     cost_usd = sum(r.cost.total_usd for r in window if r.cost is not None)
-    cost_today_usd = sum(
-        r.cost.total_usd
-        for r in everything
-        if r.cost is not None and r.ended_at is not None and r.ended_at >= today
-    )
     summary = OverviewSummary(
         headline="",
         counts=counts,
@@ -361,7 +356,7 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
         failures=failures,
         projects=projects,
         cost_usd=round(cost_usd, 4),
-        cost_today_usd=round(cost_today_usd, 4),
+        cost_today_usd=cost_since(everything, today_start()),
     )
     summary.headline = overview_headline(summary, board=_focus_board(ideas, boards))
     return summary

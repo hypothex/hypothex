@@ -42,6 +42,7 @@ from hypothex.core import control
 from hypothex.core import queries as q
 from hypothex.core.config import load_project_config, parse_metric_version
 from hypothex.core.context import Context
+from hypothex.core.cost import cost_since, today_start
 from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
 from hypothex.core.evaluation import reeval
 from hypothex.core.events import CommandInterruptedError
@@ -785,19 +786,6 @@ def environment_runs(ctx: Context, environment_id: str) -> list[RunRecord]:
         return [RunRecord.model_validate_json(j) for j in session.scalars(stmt)]
 
 
-def _today_start() -> datetime:
-    return datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def _cost_since(runs: list[RunRecord], since: datetime) -> float:
-    total = sum(
-        r.cost.total_usd
-        for r in runs
-        if r.cost is not None and r.ended_at is not None and r.ended_at >= since
-    )
-    return round(total, 4)
-
-
 def host_rows(
     ctx: Context, manager: HubManager, gpu_cache: GpuCache | None = None
 ) -> list[dict[str, Any]]:
@@ -821,7 +809,7 @@ def host_rows(
         ``{name, kind, state, gpus, queue, slurm, cost_today_usd, usd_per_gpu_hour,
         projects, stale_banner_hours}``.
     """
-    since = _today_start()
+    since = today_start()
     eid = ctx.descriptor.environment_id
     local_runs = environment_runs(ctx, eid)
     local_state = HostState(
@@ -847,7 +835,7 @@ def host_rows(
             "gpus": [g.model_dump(mode="json") for g in gpu_status(ctx, seen_gpus)],
             "queue": sum(1 for r in local_runs if r.status == RunStatus.QUEUED),
             "slurm": None,
-            "cost_today_usd": _cost_since(local_runs, since),
+            "cost_today_usd": cost_since(local_runs, since),
             "usd_per_gpu_hour": local_rate,
             "projects": sorted(e.project for e in ctx.index.list_projects()),
             "stale_banner_hours": manager.hosts.stale_banner_hours,
@@ -887,7 +875,7 @@ def host_rows(
                 "gpus": gpus,
                 "queue": queue,
                 "slurm": slurm,
-                "cost_today_usd": _cost_since(runs, since),
+                "cost_today_usd": cost_since(runs, since),
                 "usd_per_gpu_hour": spec.usd_per_gpu_hour,
                 "projects": sorted(spec.projects),
                 "stale_banner_hours": manager.hosts.stale_banner_hours,

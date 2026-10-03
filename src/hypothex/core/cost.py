@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
 
 from hypothex.core.records import TERMINAL_STATUSES, CostTotals, RunRecord
 
@@ -169,3 +170,67 @@ def add_costs(costs: Iterable[CostTotals | None]) -> CostTotals | None:
         api_usd=round(sum(c.api_usd for c in present), 6),
         total_usd=round(sum(c.total_usd for c in present), 6),
     )
+
+
+def today_start() -> datetime:
+    """
+    Return local midnight today, as an aware datetime.
+
+    "Today's cost" counts runs that ended at or after this moment. Host rows and
+    the Overview both use it, so their ``cost_today_usd`` values agree.
+
+    Returns
+    -------
+    datetime
+        Today at 00:00 in the machine's local time zone.
+
+    Examples
+    --------
+    >>> start = today_start()
+    >>> (start.hour, start.minute, start.second, start.microsecond)
+    (0, 0, 0, 0)
+    >>> start.tzinfo is not None
+    True
+    """
+    return datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def cost_since(runs: Iterable[RunRecord], since: datetime) -> float:
+    """
+    Sum ``cost.total_usd`` of the runs that ended at or after a moment.
+
+    Runs with no cost or no ``ended_at`` are skipped. A run counts on the day it
+    ended, however long ago it started.
+
+    Parameters
+    ----------
+    runs : iterable of RunRecord
+        Runs to sum.
+    since : datetime
+        Aware start of the period (normally ``today_start()``).
+
+    Returns
+    -------
+    float
+        Total USD, rounded to 4 decimals; 0.0 when no run matches.
+
+    Examples
+    --------
+    >>> from datetime import UTC, datetime
+    >>> since = datetime(2026, 10, 3, tzinfo=UTC)
+    >>> runs = [
+    ...     RunRecord.model_construct(cost=CostTotals(total_usd=1.25),
+    ...         ended_at=datetime(2026, 10, 3, 9, tzinfo=UTC)),
+    ...     RunRecord.model_construct(cost=CostTotals(total_usd=9.0),
+    ...         ended_at=datetime(2026, 10, 2, 23, tzinfo=UTC)),
+    ...     RunRecord.model_construct(cost=None, ended_at=datetime(2026, 10, 3, tzinfo=UTC)),
+    ... ]
+    >>> cost_since(runs, since)
+    1.25
+    """
+    total = sum(
+        r.cost.total_usd
+        for r in runs
+        if r.cost is not None and r.ended_at is not None and r.ended_at >= since
+    )
+    return round(total, 4)

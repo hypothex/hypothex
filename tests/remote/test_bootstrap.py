@@ -504,7 +504,13 @@ def _real_uv() -> str:
 
 @pytest.fixture
 def uv_env(monkeypatch: pytest.MonkeyPatch) -> str:
-    """Point the host's uv at this machine's cache, offline, with this Python."""
+    """
+    Point the host's uv at this machine's cache, offline, with this Python.
+
+    The cache must hold the index pages and wheels of hypothex's dependencies
+    (``uv sync`` alone does not cache index pages); CI warms it with
+    ``uv tool install .`` first.
+    """
     uv = _real_uv()
     cache = subprocess.run([uv, "cache", "dir"], capture_output=True, text=True, check=True)
     monkeypatch.setenv("UV_CACHE_DIR", cache.stdout.strip())

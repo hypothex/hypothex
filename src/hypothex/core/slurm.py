@@ -1748,6 +1748,12 @@ def _track_entry(
         return None  # tracked from the next poll on
     if entry.get("state") != "submitted":  # the node's run.yaml names the job
         entry = _update_intent(ctx.layout, run_id, state="submitted", job_id=job_id) or entry
+    if current.executor.slurm_job_id is None:
+        # the submitter died between the outbox write and run.yaml (``_record_job``)
+        current = _record_job(ctx, run_id, job_id, recovered=True)
+        changed.append(current)
+        if entry.get("cancel_requested"):
+            return None  # ``_record_job`` carried out the stop (or the next poll retries it)
     if entry.get("cancel_requested"):
         _cancel_requested(ctx, run_id, job_id)
         return None
@@ -1832,7 +1838,9 @@ def reconcile(
       only ``run.yaml`` and ``exit.json``, so the events and the index updates
       of SLURM runs come from here. A run whose job id was never recorded (its
       submitter crashed after ``sbatch``) is matched to its job by name and
-      comment, or failed when its submitter is dead and SLURM has no job.
+      comment, or failed when its submitter is dead and SLURM has no job. A
+      job id that only the outbox holds (the submitter died before writing
+      ``run.yaml``) is recorded in ``run.yaml`` with ``run.submitted``.
     - Job queued or running: keep; record its node when SLURM assigned one.
     - Run already has an exit record (``run.yaml`` is terminal): keep.
     - Job ended (``sacct``) or vanished, and no exit record: mark ``lost``.

@@ -1198,6 +1198,32 @@ def test_an_unknown_outcome_is_resolved_by_the_job_s_comment(
     assert len(slurm.calls("sbatch")) == 1  # never submitted twice
 
 
+def test_a_job_id_only_the_outbox_knows_reaches_run_yaml(ctx: Context, slurm: FakeSlurm) -> None:
+    # sbatch answered and the outbox got the job id, then the env server died before
+    # _record_job wrote run.yaml (no slurm_job_id there, no run.submitted)
+    record = ctx.create_run(
+        make_record(
+            "r1",
+            status=RunStatus.QUEUED,
+            environment_id=ctx.descriptor.environment_id,
+            executor=ExecutorInfo(type="slurm"),
+        )
+    )
+    track_slurm_run(ctx.layout, record, comment="hx-r1-0000")
+    slurm_module._update_intent(ctx.layout, "r1", state="submitted", job_id="1000")
+    slurm.add_job("1000", "PENDING", comment="hx-r1-0000")
+    [recorded] = reconcile(ctx)
+    assert recorded.executor.slurm_job_id == "1000"
+    assert ctx.find_record("r1").executor.slurm_job_id == "1000"
+    submitted = [e for e in ctx.events.since(0, limit=10_000) if e.type == "run.submitted"]
+    assert [(e.payload["slurm_job_id"], e.payload["recovered"]) for e in submitted] == [
+        ("1000", True)
+    ]
+    assert reconcile(ctx) == []  # recorded once
+    killed = slurm_module.cancel_if_pending(ctx, ctx.find_record("r1"))
+    assert killed.status == RunStatus.KILLED  # hx sweep cancel-queued now reaches it
+
+
 def test_an_unknown_outcome_fails_only_when_slurm_provably_never_took_the_job(
     ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
 ) -> None:

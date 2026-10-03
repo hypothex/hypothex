@@ -282,6 +282,10 @@ def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) ->
         removed = _remove_from_queue(ctx, run_id, run_dir)
         if removed is not None:
             return removed
+    if record.executor.type == slurm.SLURM_EXECUTOR:
+        # child_pid lives on a compute node: never signal it from here. The stop
+        # marker is written by stop_slurm_run, only once scancel worked.
+        return slurm.stop_slurm_run(ctx, record, grace=grace)
     atomic_write_text(run_dir / STOP_MARKER, utcnow().isoformat())
     child = record.executor.child_pid
     if record.status == RunStatus.RUNNING and child is not None and process_alive(child, None):

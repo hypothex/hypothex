@@ -19,7 +19,7 @@ from hypothex.core import control
 from hypothex.core import slurm as slurm_module
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, RunError
-from hypothex.core.execution import RunRequest, prepare_run
+from hypothex.core.execution import STOP_MARKER, RunRequest, prepare_run
 from hypothex.core.ids import utcnow
 from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus
 from hypothex.core.slurm import (
@@ -1381,3 +1381,150 @@ def test_a_terminal_run_yaml_indexed_by_another_write_is_still_published(
     types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
     assert types.count("run.finished") == 1
     assert reconcile(ctx) == [] and not outbox(ctx, "r1").exists()
+
+
+# stop -> scancel ----------------------------------------------------------------------------
+def test_stop_queued_slurm_run_cancels_job(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm.add_job("1000", "PENDING")
+    slurm_run(ctx, "r1", job_id="1000", status=RunStatus.QUEUED)
+    start = time.monotonic()
+    stopped = control.stop_run(ctx, "r1")
+    assert time.monotonic() - start < 2
+    assert stopped.status == RunStatus.KILLED
+    assert slurm.calls("scancel") == [["1000"]]
+    assert slurm.job("1000")["state"] == "CANCELLED"
+    assert (ctx.run_dir(stopped) / STOP_MARKER).is_file()
+
+
+def test_stop_running_slurm_run_never_signals_a_local_pid(ctx: Context, slurm: FakeSlurm) -> None:
+    sleeper = subprocess.Popen([PY, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        slurm.add_job("1000", "RUNNING", node="n1")
+        slurm_run(ctx, "r1", job_id="1000", child_pid=sleeper.pid, node="n1")
+        stopped = control.stop_run(ctx, "r1", grace=0.3)
+        assert stopped.status == RunStatus.KILLED
+        assert sleeper.poll() is None  # the pid belongs to the compute node, not to us
+        assert slurm.job("1000")["state"] == "CANCELLED"
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
+def test_stop_raises_when_scancel_fails_and_job_still_queued(
+    ctx: Context, slurm: FakeSlurm
+) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    slurm.set(fail={"scancel": "scancel: error: Access/permission denied"})
+    slurm_run(ctx, "r1", job_id="1000")
+    with pytest.raises(RunError, match="Access/permission denied"):
+        control.stop_run(ctx, "r1", grace=0.1)
+    assert ctx.find_record("r1").status == RunStatus.RUNNING
+    # no marker: when the job ends normally later, the node must not record `killed`
+    assert not (ctx.run_dir(ctx.find_record("r1")) / STOP_MARKER).exists()
+
+
+def test_stop_marks_killed_when_job_already_gone(ctx: Context, slurm: FakeSlurm) -> None:
+    slurm_run(ctx, "r1", job_id="1000", status=RunStatus.QUEUED)
+    stopped = control.stop_run(ctx, "r1")
+    assert stopped.status == RunStatus.KILLED
+    assert slurm.calls("scancel") == [["1000"]]
+
+
+def test_stop_end_to_end_child_records_killed(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    slurm.set(mode="run")
+    req = RunRequest(
+        repo=toy_repo,
+        command=[PY, "-c", "import time; time.sleep(60)"],
+        slurm=SlurmDefaults(gpus=0),
+    )
+    record = control.launch_run(ctx, req)
+    control.wait_for_run(ctx, record.run_id, timeout=60, statuses=frozenset({RunStatus.RUNNING}))
+    start = time.monotonic()
+    stopped = control.stop_run(ctx, record.run_id)
+    assert stopped.status == RunStatus.KILLED
+    assert time.monotonic() - start < 10
+    assert slurm.job("1000")["state"] == "CANCELLED"
+
+
+def test_stop_finds_the_job_a_crashed_submission_left(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = slurm_module.submit
+
+    def submit_then_crash(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        real(script, cwd, comment=comment)
+        raise Crash
+
+    monkeypatch.setattr(slurm_module, "submit", submit_then_crash)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    with pytest.raises(Crash):
+        control.launch_run(ctx, req)
+    [run_id] = list(ctx.index.run_ids())
+    stopped = control.stop_run(ctx, run_id)
+    assert stopped.status == RunStatus.KILLED
+    assert slurm.calls("scancel") == [["1000"]]
+    assert not (ctx.layout.home / "slurm" / "outbox" / f"{run_id}.json").exists()
+
+
+def test_a_stop_during_sbatch_cancels_the_job_sbatch_then_creates(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = slurm_module.submit
+    stopped: list[RunRecord] = []
+
+    def stop_arrives_during_sbatch(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        [run_id] = list(ctx.index.run_ids())
+        stopped.append(control.stop_run(ctx, run_id))  # no job yet: a cancel request
+        return real(script, cwd, comment=comment)  # ... then SLURM accepts the job
+
+    monkeypatch.setattr(slurm_module, "submit", stop_arrives_during_sbatch)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    record = control.launch_run(ctx, req)
+    assert stopped[0].status == RunStatus.KILLED
+    assert slurm.job("1000")["state"] == "CANCELLED"
+    assert slurm.calls("scancel") == [["1000"]]
+    assert ctx.find_record(record.run_id).status == RunStatus.KILLED
+    assert not (ctx.layout.home / "slurm" / "outbox" / f"{record.run_id}.json").exists()
+
+
+def test_a_stop_of_an_unknown_submission_cancels_the_job_reconcile_finds(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def timed_out(script: str, cwd: Path, *, comment: str | None = None) -> str:
+        raise SubmitUnknownError("sbatch timed out after 60s; the job may exist")
+
+    monkeypatch.setattr(slurm_module, "submit", timed_out)
+    req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
+    run_id = control.launch_run(ctx, req).run_id
+    assert control.stop_run(ctx, run_id).status == RunStatus.KILLED
+    box = ctx.layout.home / "slurm" / "outbox" / f"{run_id}.json"
+    entry = json.loads(box.read_text())
+    assert entry["cancel_requested"] is True  # kept: the job may still appear
+    # the controller was slow: the job shows up after the stop
+    slurm.add_job("1000", "PENDING", name=f"hx-{run_id}", comment=entry["comment"])
+    reconcile(ctx)
+    assert slurm.job("1000")["state"] == "CANCELLED"
+    assert not box.exists()
+    assert ctx.find_record(run_id).status == RunStatus.KILLED
+
+
+def test_a_stop_racing_the_node_s_end_publishes_the_node_s_end(
+    ctx: Context, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slurm.add_job("1000", "RUNNING", node="n1")
+    slurm_run(ctx, "r1", job_id="1000", node="n1")
+    real = slurm_module.cancel
+
+    def cancel_as_the_node_finishes(job_id: str) -> None:
+        real(job_id)
+        done = ctx.find_record("r1").model_copy(update={"status": RunStatus.FINISHED})
+        ctx.store.write_record(done.model_copy(update={"exit_code": 0}))
+
+    monkeypatch.setattr(slurm_module, "cancel", cancel_as_the_node_finishes)
+    ended = control.stop_run(ctx, "r1", grace=0.0)
+    assert ended.status == RunStatus.FINISHED
+    types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == "r1"]
+    assert "run.killed" not in types and types.count("run.finished") == 1
+    assert not (ctx.layout.home / "slurm" / "outbox" / "r1.json").exists()

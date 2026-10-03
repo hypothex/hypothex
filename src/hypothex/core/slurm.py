@@ -25,6 +25,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,7 +39,7 @@ from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, HypothexError, RunError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.events import EventLog
-from hypothex.core.execution import execute_run, process_alive, process_create_time
+from hypothex.core.execution import STOP_MARKER, execute_run, process_alive, process_create_time
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.ids import utcnow
 from hypothex.core.index import Index
@@ -1642,3 +1643,98 @@ def reconcile(
         confirm_gone.clear()
         confirm_gone.update(gone_now)
     return changed
+
+
+def stop_slurm_run(ctx: Context, record: RunRecord, *, grace: float) -> RunRecord:
+    """
+    Stop a SLURM run with ``scancel``; it ends as ``killed``.
+
+    A queued (pending) job is marked killed at once. For a running job,
+    SLURM sends SIGTERM to ``hx run --child``, which records ``killed``
+    itself; after ``grace`` seconds without that, the run is marked here.
+
+    Parameters
+    ----------
+    ctx : Context
+    record : RunRecord
+        An active run with ``executor.type == "slurm"``.
+    grace : float
+        Seconds to wait for the node to record the end.
+
+    Returns
+    -------
+    RunRecord
+        The final record.
+
+    Raises
+    ------
+    RunError
+        scancel failed and the job is still queued or running.
+    """
+    job_id = record.executor.slurm_job_id or _job_or_cancel_request(ctx, record.run_id)
+    if job_id is not None:
+        try:
+            cancel(job_id)
+        except SlurmError as exc:
+            job = poll([job_id]).get(job_id)
+            if job is not None and not is_finished(job):
+                raise RunError(
+                    f"could not cancel slurm job {job_id} of run {record.run_id}: {exc}"
+                ) from exc
+    # only now: a marker left by a failed scancel would make a job that later ends
+    # normally record `killed` on the node
+    atomic_write_text(ctx.run_dir(record) / STOP_MARKER, utcnow().isoformat())
+    if record.status == RunStatus.RUNNING:
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            current = ctx.find_record(record.run_id)
+            if current.status in TERMINAL_STATUSES:
+                return _publish_node_end(ctx, record.run_id)
+            time.sleep(0.1)
+    killed = _end_if_active(
+        ctx,
+        record.run_id,
+        "run.killed",
+        _end(RunStatus.KILLED),
+        {"reason": "stopped", "slurm_job_id": job_id},
+    )
+    if killed is None:  # the node's end came first: publish that end, not `killed`
+        return _publish_node_end(ctx, record.run_id)
+    mark_published(ctx.layout, killed)
+    return killed
+
+
+def _job_or_cancel_request(ctx: Context, run_id: str) -> str | None:
+    """
+    The job of a submission whose id is not recorded yet, or a cancel request.
+
+    The job is looked up by the intent's comment. Without a job, ``cancel_requested``
+    is set under the outbox lock, the same lock ``_record_job`` takes when
+    ``sbatch`` answers or ``reconcile`` finds the job: whichever runs second
+    sees the other's change, so the job that appears later is cancelled.
+    """
+    entry = _intent(ctx.layout, run_id)
+    if entry is None:
+        return None
+    found: SlurmJob | None = None
+    if entry.get("job_id") is None and entry.get("comment"):
+        try:
+            found, _ = find_submitted(entry["comment"])
+        except SlurmError as exc:
+            log.warning("run %s: squeue failed while stopping: %s", run_id, exc)
+    with _outbox_lock(ctx.layout):
+        entry = _intent(ctx.layout, run_id)
+        if entry is None:
+            return None
+        if entry.get("job_id"):
+            return str(entry["job_id"])
+        if found is None:
+            entry["cancel_requested"] = True
+        else:
+            entry.update(state="submitted", job_id=found.job_id)
+        atomic_write_text(_outbox_path(ctx.layout, run_id), json.dumps(entry))
+    if found is None:
+        return None
+    payload = {"slurm_job_id": found.job_id, "recovered": True}
+    ctx.update_run(run_id, "run.submitted", _with_job(found.job_id), payload)
+    return found.job_id

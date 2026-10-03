@@ -204,6 +204,8 @@ def test_bad_params_are_rejected(param: dict[str, object], message: str) -> None
         ({"project": "Toy Project"}, "pattern"),
         ({"command_template": []}, "at least 1"),
         ({"gpus": 2}, "Extra inputs"),
+        ({"diff": "diff --git a/x b/x\n"}, "a diff needs the commit"),
+        ({"commit": "HEAD; rm -rf /"}, "pattern"),
     ],
 )
 def test_bad_specs_are_rejected(overrides: dict[str, object], message: str) -> None:
@@ -250,6 +252,19 @@ def test_save_and_load_round_trip(ctx: Context) -> None:
     assert "run_ids" not in path.read_text()  # the definition only: members are tagged runs
     with pytest.raises(ValidationError):
         spec_of(run_ids=["r1"])
+
+
+def test_pinned_code_round_trips_and_old_files_pin_nothing(ctx: Context) -> None:
+    pinned = spec_of(commit="3b8e06d" * 5 + "abcde", diff="diff --git a/t.py b/t.py\n")
+    save_sweep(ctx.layout, pinned)
+    assert load_sweep(ctx.layout, "toy", "s-0001") == pinned
+    # a file written before sweeps stored their code: no keys, nothing pinned
+    path = sweep_path(ctx.layout, "toy", "s-0001")
+    old = yaml.safe_load(path.read_text())
+    del old["commit"], old["diff"]
+    path.write_text(yaml.safe_dump(old))
+    loaded = load_sweep(ctx.layout, "toy", "s-0001")
+    assert (loaded.commit, loaded.diff) == (None, None)
 
 
 def test_load_missing_sweep_is_a_store_error(ctx: Context) -> None:
@@ -1046,6 +1061,32 @@ def test_extend_adds_every_cell_for_each_new_seed(ctx: Context, toy_repo: Path) 
     assert all((r.gpus, r.queue, r.hypothesis) == (2, True, "lr matters") for r in new)
     assert all(r.tags == [sweep_tag(ctx.descriptor.environment_id, sid)] for r in new)
     assert load_sweep(ctx.layout, "toy", sid).seeds == [1, 2, 3]
+
+
+def test_extend_pins_the_code_the_sweep_was_launched_with(ctx: Context, toy_repo: Path) -> None:
+    # CONF-1: new seeds must run the sweep's code, or they land in another seed group
+    fake = FakeLauncher(ctx)
+    commit, diff = "a" * 40, "diff --git a/train.py b/train.py\n"
+    sid = launched(ctx, toy_repo, fake, commit=commit, diff=diff)
+    spec = load_sweep(ctx.layout, "toy", sid)
+    assert (spec.commit, spec.diff) == (commit, diff)
+    extend_sweep(ctx, "toy", sid, [2], launch=fake)
+    assert len(fake.requests) == 4
+    assert all((r.commit, r.diff) == (commit, diff) for r in fake.requests)
+
+
+def test_a_sweep_without_pinned_code_pins_nothing(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    extend_sweep(ctx, "toy", sid, [2], launch=fake)
+    assert all((r.commit, r.diff) == (None, None) for r in fake.requests)
+
+
+def test_launch_refuses_a_diff_without_its_commit(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    with pytest.raises(SweepError, match="a diff needs the commit"):
+        launched(ctx, toy_repo, fake, diff="diff --git a/x b/x\n")
+    assert fake.requests == [] and list_sweeps(ctx, "toy") == []
 
 
 def test_extend_explicit_gpus_and_queue_win(ctx: Context, toy_repo: Path) -> None:

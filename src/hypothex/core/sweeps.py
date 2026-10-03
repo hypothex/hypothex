@@ -31,7 +31,7 @@ from hypothex.core.config import (
 from hypothex.core.context import Context
 from hypothex.core.control import cancel_if_queued, launch_run
 from hypothex.core.errors import HypothexError, RunError, StoreError
-from hypothex.core.execution import RunRequest
+from hypothex.core.execution import COMMIT_PATTERN, RunRequest
 from hypothex.core.fsutil import atomic_write_text, read_yaml, write_yaml
 from hypothex.core.headlines import NO_RUNS, fmt_metric, fmt_metric_delta, fmt_p
 from hypothex.core.ids import utcnow
@@ -114,6 +114,12 @@ class SweepSpec(BaseModel, extra="forbid"):
     ``sweep:<owner8>:<id>`` (``sweep_tag``, ``sweep_runs``). ``seeds`` lists
     every seed the sweep asks for; ``extend_sweep`` adds to it before it
     launches.
+
+    ``commit`` and ``diff`` pin the sweep's code (spec 8A.4): every run, the
+    runs an extend adds included, gets them, so new seeds join the same seed
+    groups. ``diff`` is ``git diff HEAD --binary`` text applied on top of
+    ``commit``. Both are None for a sweep that pins nothing (older files too):
+    its runs use the checkout as it is.
     """
 
     id: str = Field(pattern=SWEEP_ID_PATTERN)
@@ -126,10 +132,12 @@ class SweepSpec(BaseModel, extra="forbid"):
     command_template: list[str] = Field(min_length=1)
     created_by: str
     created_at: datetime
+    commit: str | None = Field(None, pattern=COMMIT_PATTERN.pattern)
+    diff: str | None = None
 
     @model_validator(mode="after")
     def _check(self) -> SweepSpec:
-        """Reject duplicate param names or seeds, and ranges without ``random``."""
+        """Reject duplicate param names or seeds, ranges without ``random``, a bare diff."""
         names = [p.name for p in self.grid]
         dups = sorted({n for n in names if names.count(n) > 1})
         if dups:
@@ -138,6 +146,8 @@ class SweepSpec(BaseModel, extra="forbid"):
             raise ValueError("duplicate seeds")
         if self.random is None and any(p.is_range for p in self.grid):
             raise ValueError("low/high params need random=N samples")
+        if self.diff is not None and self.commit is None:
+            raise ValueError("a diff needs the commit it was taken against")
         return self
 
 
@@ -995,6 +1005,8 @@ def _requests(
                     created_by=spec.created_by,
                     gpus=gpus,
                     queue=queue,
+                    commit=spec.commit,
+                    diff=spec.diff,
                 ),
             )
 
@@ -1098,6 +1110,8 @@ def launch_sweep(
     repo: Path | None = None,
     launch: Launcher | None = None,
     command_id: str | None = None,
+    commit: str | None = None,
+    diff: str | None = None,
 ) -> SweepSummary:
     """
     Create a sweep file and launch one run per param combination and seed.
@@ -1143,6 +1157,12 @@ def launch_sweep(
     command_id : str, optional
         The client's command id. A retry with the same id resumes the sweep
         the first call created and issues only its missing runs.
+    commit : str, optional
+        Commit every run of the sweep pins (stored as ``SweepSpec.commit``,
+        so an extend pins it too); default none: the checkout as it is.
+    diff : str, optional
+        Uncommitted changes applied on top of ``commit`` (``git diff HEAD
+        --binary`` text); needs ``commit``.
 
     Returns
     -------
@@ -1178,6 +1198,8 @@ def launch_sweep(
             command_template=command,
             created_by=created_by,
             created_at=utcnow(),
+            commit=commit,
+            diff=diff,
         )
     except ValidationError as exc:
         raise SweepError(f"invalid sweep: {_brief(exc)}") from exc

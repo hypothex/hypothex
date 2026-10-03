@@ -20,6 +20,7 @@ import math
 import operator
 import os
 import time
+import warnings
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -115,20 +116,43 @@ class Run:
         """
         Log metric values; each name gets its own auto-incrementing step.
 
+        A ``NaN`` or infinite value (a diverged loss) is not written to
+        ``metrics.jsonl``: it gives a ``RuntimeWarning`` and its step is used up,
+        so later values keep their steps. Training goes on. The divergence is
+        recorded in ``metrics_nonfinite.jsonl`` as ``{name, step, value, t}``
+        with ``value`` one of ``"nan"``, ``"inf"``, ``"-inf"``; the curves panel
+        marks it.
+
         Parameters
         ----------
         values : mapping of str to float
             E.g. ``{"loss": 0.41}``.
         step : int, optional
             Explicit step for all values.
+
+        Examples
+        --------
+        >>> hx.current().log({"loss": 0.41})  # doctest: +SKIP
         """
         now = time.time()
         for name, value in values.items():
             s = step if step is not None else self._steps.get(name, -1) + 1
             self._steps[name] = s
+            number = float(value)
+            if not math.isfinite(number):
+                warnings.warn(
+                    f"hypothex: metric {name!r} at step {s} is {number}; not logged",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                append_jsonl(
+                    self.run_dir / "metrics_nonfinite.jsonl",
+                    {"name": name, "step": s, "value": str(number), "t": now},
+                )
+                continue
             append_jsonl(
                 self.run_dir / "metrics.jsonl",
-                {"name": name, "step": s, "value": float(value), "t": now},
+                {"name": name, "step": s, "value": number, "t": now},
             )
 
     def log_predictions(self, rows: Iterable[Mapping[str, Any]]) -> int:

@@ -4,18 +4,31 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Boolean, Float, Integer, String, Text, create_engine, delete, event, select
+from sqlalchemy import (
+    Boolean,
+    Float,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    delete,
+    event,
+    func,
+    select,
+)
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import ProjectEntry, RunStore
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_POINTS_PER_METRIC = 1000
 
 
@@ -103,6 +116,17 @@ class MetricPointRow(Base):
     t: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class HostCursorRow(Base):
+    """Last remote event sequence the hub mirrored, per host and environment."""
+
+    __tablename__ = "host_cursors"
+    host: Mapped[str] = mapped_column(String, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(String, primary_key=True)
+    last_sequence: Mapped[int] = mapped_column(Integer, default=0)
+
+
+# HostCursorRow is not listed: ``clear()`` (``hx reindex``) keeps the mirror cursors,
+# because the mirrored run folders stay on disk and need no replay.
 _DATA_TABLES = (
     ProjectRow,
     DatasetRow,
@@ -187,7 +211,7 @@ class Index:
         return True
 
     def clear(self) -> None:
-        """Delete all indexed data (keeps the schema)."""
+        """Delete all indexed data except the hub's mirror cursors (keeps the schema)."""
         with Session(self.engine) as session, session.begin():
             for model in _DATA_TABLES:
                 session.execute(delete(model))
@@ -369,6 +393,52 @@ class Index:
         with Session(self.engine) as session:
             return set(session.scalars(select(RunRow.run_id)))
 
+    def delete_run(self, run_id: str) -> None:
+        """
+        Drop a run and its tags, scores, and metric points from the index.
+
+        Used when the run's folder is gone; the files are the source of truth.
+
+        Parameters
+        ----------
+        run_id : str
+            Run id.
+        """
+        with Session(self.engine) as session, session.begin():
+            for model in (RunRow, RunTagRow, ScoreRow, MetricPointRow):
+                session.execute(delete(model).where(model.run_id == run_id))
+
+    def get_meta(self, key: str) -> str | None:
+        """
+        Return a stored index setting, or None.
+
+        Parameters
+        ----------
+        key : str
+            Setting name, e.g. ``schema_version``.
+
+        Returns
+        -------
+        str or None
+        """
+        with Session(self.engine) as session:
+            row = session.get(MetaRow, key)
+            return None if row is None else row.value
+
+    def set_meta(self, key: str, value: str) -> None:
+        """
+        Store an index setting.
+
+        Parameters
+        ----------
+        key : str
+            Setting name.
+        value : str
+            Its value.
+        """
+        with Session(self.engine) as session, session.begin():
+            session.merge(MetaRow(key=key, value=value))
+
     # scores -------------------------------------------------------------------
     def add_score(self, run_id: str, score: ScoreRecord) -> None:
         """
@@ -482,6 +552,63 @@ class Index:
                 for r in session.scalars(stmt)
             ]
 
+    # host cursors -------------------------------------------------------------
+    def get_cursor(self, host: str, environment_id: str) -> int:
+        """
+        Return the last mirrored event sequence of one host environment.
+
+        Parameters
+        ----------
+        host : str
+            Host name from ``environments.yaml``.
+        environment_id : str
+            The host's stable environment id.
+
+        Returns
+        -------
+        int
+            Last mirrored sequence; 0 when the pair was never mirrored.
+
+        Examples
+        --------
+        >>> import tempfile
+        >>> idx = Index(Path(tempfile.mkdtemp()) / "i.db")
+        >>> idx.get_cursor("gpu1", "env-a")
+        0
+        >>> idx.set_cursor("gpu1", "env-a", 42)
+        >>> idx.get_cursor("gpu1", "env-a")
+        42
+        """
+        with Session(self.engine) as session:
+            row = session.get(HostCursorRow, (host, environment_id))
+            return row.last_sequence if row else 0
+
+    def set_cursor(self, host: str, environment_id: str, last_sequence: int) -> None:
+        """
+        Store the last mirrored event sequence of one host environment.
+
+        The cursor only moves forward: one atomic upsert keeps the larger of
+        the stored and the new value, so a late writer never moves it back.
+
+        Parameters
+        ----------
+        host : str
+            Host name from ``environments.yaml``.
+        environment_id : str
+            The host's stable environment id.
+        last_sequence : int
+            Sequence of the last event the hub mirrored.
+        """
+        stmt = sqlite_insert(HostCursorRow).values(
+            host=host, environment_id=environment_id, last_sequence=last_sequence
+        )
+        newer = func.max(HostCursorRow.last_sequence, stmt.excluded.last_sequence)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["host", "environment_id"], set_={"last_sequence": newer}
+        )
+        with Session(self.engine) as session, session.begin():
+            session.execute(stmt)
+
 
 def index_run(index: Index, store: RunStore, record: RunRecord) -> None:
     """
@@ -558,4 +685,77 @@ def repair_index_gaps(index: Index, store: RunStore) -> list[str]:
             continue
         index_run(index, store, record)
         added.append(run_id)
+    return added
+
+
+STORE_SCAN_KEY = "store_scanned"
+SETTLED_NANOSECONDS = 2_000_000_000
+"""A folder changed this recently may still be filling in; its scan is not trusted yet."""
+
+
+def store_fingerprint(store: RunStore) -> tuple[str, bool]:
+    """
+    Fingerprint the folders a new run or project changes, without listing runs.
+
+    Creating or deleting a run folder changes the modification time of its
+    project's ``runs/`` folder; a new or re-registered project changes the
+    store folder or its project folder. So this costs one ``stat`` per
+    project, not per run.
+
+    Parameters
+    ----------
+    store : RunStore
+        File store.
+
+    Returns
+    -------
+    fingerprint : str
+        Stable text of the folders' modification times.
+    settled : bool
+        False when any of them changed in the last ``SETTLED_NANOSECONDS`` (a
+        run folder may exist before its ``run.yaml``, and coarse clocks give
+        two changes in one tick the same time).
+
+    Examples
+    --------
+    >>> store_fingerprint(RunStore(layout))  # doctest: +SKIP
+    ('[["", 1759480000000000000], ["toy", ...]]', True)
+    """
+    root = store.layout.store
+    stamps: list[tuple[str, int]] = [("", root.stat().st_mtime_ns)]
+    for project in sorted(p for p in root.iterdir() if p.is_dir()):
+        stamps.append((project.name, project.stat().st_mtime_ns))
+        runs = project / "runs"
+        if runs.is_dir():
+            stamps.append((f"{project.name}/runs", runs.stat().st_mtime_ns))
+    newest = max(ns for _, ns in stamps)
+    return json.dumps(stamps), time.time_ns() - newest >= SETTLED_NANOSECONDS
+
+
+def repair_index_if_changed(index: Index, store: RunStore) -> list[str]:
+    """
+    Run ``repair_index_gaps`` only when run or project folders changed since the last scan.
+
+    ``Context.open`` calls this on every open (each CLI command, each
+    supervisor), so an unchanged store costs one ``stat`` per project instead
+    of a listing of every run folder.
+
+    Parameters
+    ----------
+    index : Index
+        Index to fill in.
+    store : RunStore
+        File store, the source of truth.
+
+    Returns
+    -------
+    list of str
+        Run ids that were added, sorted.
+    """
+    fingerprint, settled = store_fingerprint(store)
+    if index.get_meta(STORE_SCAN_KEY) == fingerprint:
+        return []
+    added = repair_index_gaps(index, store)
+    if settled:  # taken before the scan: a later change gives a new fingerprint
+        index.set_meta(STORE_SCAN_KEY, fingerprint)
     return added

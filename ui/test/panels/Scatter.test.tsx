@@ -2,7 +2,6 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import type { PanelResult } from "../../src/panels/index";
 import {
-  axisTitle,
   bestIndex,
   refLabel,
   paretoPath,
@@ -325,15 +324,13 @@ describe("ScatterPanel", () => {
     expect(screen.queryByText("Pareto")).toBeNull();
   });
 
-  test("refLabel and axisTitle shorten refs and place units", () => {
+  test("refLabel shortens refs", () => {
     expect(refLabel("solved/value")).toBe("solved");
     expect(refLabel("latency/p95")).toBe("latency p95");
     expect(refLabel("usage.usd")).toBe("cost");
     expect(refLabel("usage.usd/solved")).toBe("cost per solved");
     expect(refLabel("usage.tokens_in")).toBe("tokens in");
     expect(refLabel("version")).toBe("version");
-    expect(axisTitle("latency p95", "ms")).toBe("latency p95, ms");
-    expect(axisTitle("cost", "$", true)).toBe("cost, log");
   });
 
   test("x_unit and y_unit: currency leads each tick and the tooltip value", () => {

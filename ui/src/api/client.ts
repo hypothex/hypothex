@@ -26,7 +26,6 @@ export const ROUTES = {
   viewQuery: "/api/v1/tasks/{project}/{task}/views/query",
   runs: "/api/v1/runs",
   run: "/api/v1/runs/{run_id}",
-  runMetrics: "/api/v1/runs/{run_id}/metrics",
   runLogs: "/api/v1/runs/{run_id}/logs",
   runPredictions: "/api/v1/runs/{run_id}/predictions",
   runTraces: "/api/v1/runs/{run_id}/traces",
@@ -35,9 +34,6 @@ export const ROUTES = {
   runReinfer: "/api/v1/runs/{run_id}/reinfer",
   runReeval: "/api/v1/runs/{run_id}/reeval",
   runStop: "/api/v1/runs/{run_id}/stop",
-  runTags: "/api/v1/runs/{run_id}/tags",
-  runStar: "/api/v1/runs/{run_id}/star",
-  runArchive: "/api/v1/runs/{run_id}/archive",
   runNotes: "/api/v1/runs/{run_id}/notes",
   compareExamples: "/api/v1/compare/examples",
 } as const satisfies Record<string, keyof paths>;
@@ -181,8 +177,6 @@ export const api = {
       params: { project, task, name },
       body: { text, command_id: action(opts).command_id },
     }),
-  deleteView: (project: string, task: string, name: string) =>
-    request<{ ok: true }>("DELETE", ROUTES.view, { params: { project, task, name } }),
   validateView: (project: string, task: string, text: string, signal?: AbortSignal) =>
     post<M.ViewValidation>(ROUTES.viewValidate, { params: { project, task }, body: { text }, signal }),
   queryView: (project: string, task: string, body: M.ViewQueryBody, signal?: AbortSignal) =>
@@ -191,8 +185,6 @@ export const api = {
     get<M.RunRecord[]>(ROUTES.runs, { query: { ...query }, signal }),
   run: (runId: string, signal?: AbortSignal) =>
     get<M.RunDetail>(ROUTES.run, { params: { run_id: runId }, signal }),
-  runMetrics: (runId: string, signal?: AbortSignal) =>
-    get<M.MetricPoint[]>(ROUTES.runMetrics, { params: { run_id: runId }, signal }),
   runLogs: (runId: string, stream: M.LogStream = "stdout", offset?: number, signal?: AbortSignal) =>
     get<M.LogChunk>(ROUTES.runLogs, { params: { run_id: runId }, query: { stream, offset }, signal }),
   runPredictions: (runId: string, query: M.PredictionsQuery = {}, signal?: AbortSignal) =>
@@ -213,12 +205,6 @@ export const api = {
     post<M.EvalReport>(ROUTES.taskReeval, { params: { project, task }, body: { ...action(opts), ...args } }),
   stop: (runId: string, opts?: M.ActionOptions) =>
     post<M.RunRecord>(ROUTES.runStop, { params: { run_id: runId }, body: action(opts) }),
-  tag: (runId: string, add: string[], remove: string[] = [], opts?: M.ActionOptions) =>
-    post<M.RunRecord>(ROUTES.runTags, { params: { run_id: runId }, body: { ...action(opts), add, remove } }),
-  star: (runId: string, on: boolean, opts?: M.ActionOptions) =>
-    post<M.RunRecord>(ROUTES.runStar, { params: { run_id: runId }, body: { ...action(opts), on } }),
-  archive: (runId: string, on: boolean, opts?: M.ActionOptions) =>
-    post<M.RunRecord>(ROUTES.runArchive, { params: { run_id: runId }, body: { ...action(opts), on } }),
   note: (runId: string, text: string, opts?: M.ActionOptions) =>
     post<{ ok: true }>(ROUTES.runNotes, {
       params: { run_id: runId },

@@ -1,0 +1,1048 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hypothex, remote machines</title>
+<script>
+  (function () {
+    var q = new URLSearchParams(location.search).get("theme");
+    var t = q || localStorage.getItem("hx-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400..700;1,6..72,400..500&display=swap" rel="stylesheet">
+<style>
+/* ------------------------------------------------------------------ tokens (v4, verbatim) */
+:root {
+  --paper: #F6F7F3;
+  --paper-2: #ECEEE8;
+  --ink: #15181E;
+  --ink-2: #464C57;
+  --ink-3: #767C87;
+  --rule: #D5D8D0;
+  --rule-2: #E4E6E0;
+  --best: #00846A;
+  --best-wash: rgba(0, 132, 106, .12);
+  --best-edge: rgba(0, 132, 106, .50);
+  --fail: #C8412B;
+  --agent: #5B48C2;
+  --human: #A66A12;
+  --serif: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --paper: #12161C;
+  --paper-2: #1A1F27;
+  --ink: #E9ECEF;
+  --ink-2: #AEB5BF;
+  --ink-3: #7C8490;
+  --rule: #2C333D;
+  --rule-2: #222830;
+  --best: #1FA282;
+  --best-wash: rgba(31, 162, 130, .17);
+  --best-edge: rgba(31, 162, 130, .60);
+  --fail: #DE5F49;
+  --agent: #8C7BEA;
+  --human: #C08629;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 400 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+a { color: inherit; text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:hover { text-decoration-color: currentColor; }
+:focus-visible { outline: 2px solid var(--agent); outline-offset: 2px; border-radius: 3px; }
+button, input, select, textarea { font: inherit; color: inherit; }
+.num { font-variant-numeric: tabular-nums; }
+.path, code, kbd { font-family: var(--mono); font-size: .86em; }
+
+/* ------------------------------------------------------------------ chrome (v4) */
+.bar { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--paper) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--rule); }
+.bar-in { max-width: 1280px; margin: 0 auto; padding: 0 40px; height: 60px; display: flex; align-items: stretch; gap: 40px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 600 21px/1 var(--serif); letter-spacing: -.01em; }
+.brand svg { display: block; }
+.tabs { display: flex; gap: 4px; }
+.tabs a { display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: var(--ink-3); font-size: 14.5px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs a:hover { color: var(--ink); }
+.tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
+.bar-r { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.find { display: flex; align-items: center; gap: 28px; height: 34px; padding: 0 8px 0 12px; min-width: 250px; border: 1px solid var(--rule); border-radius: 7px; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 13.5px; }
+.find:hover { border-color: var(--ink-3); }
+.find kbd { margin-left: auto; font-family: var(--sans); font-size: 12px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; }
+.theme { height: 34px; padding: 0 12px; border: 1px solid var(--rule); border-radius: 7px; background: transparent; cursor: pointer; font-size: 13.5px; color: var(--ink-2); display: flex; gap: 8px; align-items: center; }
+.theme:hover { border-color: var(--ink-3); color: var(--ink); }
+main { max-width: 1280px; margin: 0 auto; padding: 44px 40px 120px; }
+.view[hidden] { display: none; }
+
+/* ------------------------------------------------------------------ type (v4) */
+.crumb { margin: 0 0 18px; font-size: 13.5px; color: var(--ink-3); }
+.crumb a { color: var(--ink-2); text-decoration: none; }
+.crumb a:hover { text-decoration: underline; }
+.crumb .sep { margin: 0 6px; color: var(--rule); }
+h1.finding { margin: 0; max-width: 21em; font: 500 46px/1.06 var(--serif); font-variation-settings: "opsz" 72; letter-spacing: -.018em; text-wrap: balance; }
+.metaline { margin: 14px 0 0; display: flex; flex-wrap: wrap; gap: 4px 22px; font-size: 14px; color: var(--ink-3); font-variant-numeric: tabular-nums; align-items: center; }
+.metaline b { color: var(--ink-2); font-weight: 500; }
+.hint { text-decoration: underline dotted var(--rule); text-underline-offset: 3px; cursor: help; }
+.stats { display: flex; flex-wrap: wrap; gap: 14px 0; margin: 0; padding: 0; }
+.stats > div { padding: 0 32px; border-left: 1px solid var(--rule-2); cursor: help; display: flex; flex-direction: column-reverse; }
+.stats > div:first-child { padding-left: 0; border-left: 0; }
+.stats dt { font-size: 12.5px; color: var(--ink-3); }
+.stats dd { margin: 0 0 3px; font: 400 25px/1.1 var(--sans); letter-spacing: -.012em; font-variant-numeric: tabular-nums; color: var(--ink); }
+.stats dd small { font-size: 15px; color: var(--ink-3); letter-spacing: 0; }
+.fig { margin-top: 64px; }
+.fig-h { display: flex; align-items: baseline; gap: 12px; margin: 0 0 18px; }
+.fig-h .pl { font: 700 19px/1 var(--sans); }
+.fig-h .t { font: 600 16px/1.3 var(--sans); }
+.fig-h .aside { margin-left: auto; font-size: 13px; color: var(--ink-3); }
+.small { font-size: 13px; color: var(--ink-3); }
+.key { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 14px; font-size: 13px; color: var(--ink-2); }
+.key span { display: inline-flex; align-items: center; gap: 7px; }
+.key svg { display: block; overflow: visible; }
+
+svg text { font-family: var(--sans); fill: var(--ink-2); }
+svg .tk { font-size: 11.5px; fill: var(--ink-3); font-variant-numeric: tabular-nums; }
+svg .lbl { font-size: 12.5px; fill: var(--ink-2); }
+svg .lbl-s { font-size: 11.5px; fill: var(--ink-3); }
+svg .lbl-b { font-size: 12.5px; fill: var(--ink); font-weight: 600; }
+svg .axis { stroke: var(--ink-3); stroke-width: 1; }
+svg .grid { stroke: var(--rule-2); stroke-width: 1; }
+svg .hair { stroke: var(--rule); stroke-width: 1; }
+svg .band { fill: var(--best-wash); }
+svg .band-edge { stroke: var(--best-edge); stroke-width: 1; }
+svg .bestline { stroke: var(--best); stroke-width: 1.25; }
+svg .whisk { stroke: var(--ink-3); stroke-width: 1.5; stroke-linecap: round; fill: none; }
+svg .whisk.best { stroke: var(--best); }
+svg .mean { fill: var(--ink); stroke: var(--paper); stroke-width: 2; }
+svg .mean.best { fill: var(--best); }
+svg .seed { fill: var(--ink-2); stroke: var(--paper); stroke-width: 2; }
+svg .seed.run { fill: var(--paper); stroke: var(--ink-2); stroke-width: 1.5; }
+svg .dia { fill: var(--paper); stroke: var(--ink); stroke-width: 1.6; }
+svg .dia.best { stroke: var(--best); fill: var(--best-wash); }
+svg .lead { stroke: var(--ink-3); stroke-width: 1; fill: none; }
+svg .m-agent { fill: var(--agent); }
+svg .m-human { fill: var(--human); }
+svg .m-best { fill: var(--best); }
+svg .m-fail { stroke: var(--fail); stroke-width: 2; stroke-linecap: round; }
+svg .ringed { stroke: var(--paper); stroke-width: 2; }
+svg .hit { fill: transparent; cursor: default; }
+svg .raw { stroke: var(--ink-3); stroke-width: 1; fill: none; opacity: .45; }
+svg .ml { stroke: var(--ink); stroke-width: 2; fill: none; stroke-linejoin: round; }
+svg .vl { stroke: var(--ink-2); stroke-width: 1.5; fill: none; }
+svg .ck { fill: var(--paper); stroke: var(--ink-2); stroke-width: 1.4; }
+svg .now { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 2 3; }
+svg .gone { stroke: var(--ink-3); stroke-width: 1.5; stroke-dasharray: 2 4; fill: none; }
+svg .todo { fill: var(--paper-2); }
+
+.who { display: inline-flex; align-items: center; gap: 6px; }
+.who i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.who.agent i { background: var(--agent); }
+.who.human i { background: var(--human); border-radius: 1px; }
+
+.btn { height: 32px; padding: 0 13px; border-radius: 6px; border: 1px solid var(--rule); background: transparent; font-size: 13.5px; color: var(--ink); cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--ink-3); }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.primary:hover { opacity: .88; }
+.btn:disabled { color: var(--ink-3); cursor: not-allowed; border-color: var(--rule-2); }
+.cmd { display: block; padding: 12px 14px; background: var(--paper-2); border-radius: 6px; font: 400 13px/1.6 var(--mono); color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+.tag { font-size: 12.5px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 99px; padding: 1px 9px; }
+.sample { font-size: 12px; color: var(--human); border-color: color-mix(in srgb, var(--human) 45%, transparent); cursor: help; }
+.kind { font-size: 12px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 99px; padding: 0 8px; font-weight: 400; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.seg button { height: 30px; padding: 0 11px; border: 0; background: transparent; color: var(--ink-2); cursor: pointer; font-size: 13.5px; }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.filters { display: flex; align-items: center; gap: 22px; margin-top: 36px; padding: 12px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-size: 13.5px; color: var(--ink-2); }
+.filters .r { margin-left: auto; display: flex; gap: 8px; }
+.st { display: inline-flex; align-items: center; gap: 8px; }
+.st svg { display: block; overflow: visible; flex: none; }
+
+/* overview context (v4) */
+.ov-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 72px; margin-top: 64px; }
+.ov-grid .fig { margin-top: 0; }
+.side .fig + .fig { margin-top: 48px; }
+.ideas { list-style: none; margin: 0; padding: 0; }
+.idea { display: grid; grid-template-columns: minmax(0, 1fr) 140px 110px; gap: 0 20px; align-items: center; padding: 13px 0; border-top: 1px solid var(--rule-2); }
+.idea:first-child { border-top: 0; }
+.idea .nm { font-weight: 550; font-size: 15px; }
+.idea .nm a { text-decoration: none; }
+.idea .meta { font-size: 13px; color: var(--ink-3); margin-top: 1px; }
+.idea .sc { text-align: right; font-size: 15px; font-variant-numeric: tabular-nums; }
+.idea .sc small, .idea .n small { display: block; font-size: 12.5px; color: var(--ink-3); }
+.idea .n { font-size: 13.5px; color: var(--ink-2); text-align: right; font-variant-numeric: tabular-nums; }
+.fail-b { font: 400 15.5px/1.5 var(--serif); color: var(--ink-2); margin: 0 0 10px; }
+.fail-b b { color: var(--ink); font-weight: 650; }
+.fail-b .small { font-family: var(--sans); }
+.fail-b .x { color: var(--fail); font-family: var(--sans); font-weight: 600; margin-right: 6px; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tbl th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12.5px; padding: 0 0 8px; border-bottom: 1px solid var(--rule); }
+.tbl td { padding: 10px 0; border-bottom: 1px solid var(--rule-2); vertical-align: top; }
+.tbl .r { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl tr:last-child td { border-bottom: 0; }
+
+/* run (v4) */
+.run-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 40px; align-items: start; }
+.actions { display: flex; gap: 8px; padding-top: 10px; }
+.run-stats { margin-top: 36px; }
+.run-stats .stats > div { padding: 0 26px; }
+.run-stats .stats > div:first-child { padding-left: 0; }
+.run-grid { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 72px; margin-top: 64px; }
+.run-grid .fig { margin-top: 0; }
+.tree { font-size: 14px; }
+.tree .root { display: grid; grid-template-columns: 116px minmax(0, 1fr) auto; gap: 0 16px; align-items: baseline; padding: 14px 0 10px; border-top: 1px solid var(--rule); }
+.tree .root:first-child { border-top: 0; padding-top: 0; }
+.tree .k { color: var(--ink); font-weight: 550; }
+.p { font-family: var(--mono); font-size: 13px; word-break: normal; color: var(--ink); }
+.p .pre { color: var(--ink-3); }
+.hostp { color: var(--ink-2); }
+.host { font-family: var(--sans); font-size: 11.5px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 4px; padding: 0 5px; }
+.tree .kids { list-style: none; margin: 0 0 6px 132px; padding: 0; }
+.tree .kids li { display: grid; grid-template-columns: 18px minmax(0, 1fr) 150px auto; gap: 0 10px; align-items: baseline; padding: 5px 0; }
+.tree .kids li .br { color: var(--ink-3); font-family: var(--mono); font-size: 13px; }
+.tree .kids li .what { font-size: 12.5px; color: var(--ink-3); text-align: right; }
+.tree .kids.dim .p, .tree .root.dim .p { color: var(--ink-3); }
+.copy { border: 0; background: transparent; color: var(--ink-3); font-size: 12.5px; cursor: pointer; padding: 4px; border-radius: 4px; align-self: center; }
+.copy:hover { color: var(--ink); background: var(--paper-2); }
+.gitline { margin: 4px 0 8px 132px; font: 400 13px/1.5 var(--sans); color: var(--ink-3); }
+.cmdrow { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 0 16px; align-items: start; padding: 0 0 18px; }
+.selbar { display: flex; align-items: center; gap: 18px; margin-top: 36px; padding: 12px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-size: 14px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.selbar b { color: var(--ink); font-weight: 600; font-size: 15px; }
+.selbar .r { margin-left: auto; display: flex; gap: 8px; }
+.selbar.lost b { color: var(--fail); }
+.runs { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+.runs th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12.5px; padding: 0 14px 8px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.runs td { padding: 8px 14px 8px 0; border-bottom: 1px solid var(--rule-2); vertical-align: middle; white-space: nowrap; }
+.runs th:first-child, .runs td:first-child { padding-left: 8px; }
+.runs .r { text-align: right; }
+.runs tr.sel td { background: var(--paper-2); }
+.runs tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--ink); }
+.runs .dim { color: var(--ink-3); }
+
+/* ------------------------------------------------------------------ phase 2: hosts */
+.hosts { font-variant-numeric: tabular-nums; }
+.hrow { display: grid; grid-template-columns: 168px 132px minmax(0, 1fr) 52px 70px 70px; gap: 0 18px; align-items: center; padding: 14px 0; border-top: 1px solid var(--rule-2); }
+.hrow.head { padding: 0 0 8px; border-top: 0; border-bottom: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); align-items: end; }
+.hrow.head + .hrow { border-top: 0; }
+.hrow .r { text-align: right; }
+.hrow .hn b { font-weight: 600; font-size: 15px; margin-right: 8px; }
+.hrow .meta { font-size: 12.5px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hrow .hs { font-size: 13.5px; color: var(--ink-2); }
+.hrow .hs b { color: var(--ink); font-weight: 600; }
+.hrow .q { font-size: 15px; }
+.hrow .q.z, .hrow .money.z { color: var(--ink-3); }
+.hrow .money { font-size: 14px; }
+.ver { display: inline-flex; gap: 5px; align-items: center; cursor: help; }
+.ver .ne { color: var(--fail); font-weight: 650; }
+.ver.bad { color: var(--ink); }
+.cells, .gidx { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; }
+.gidx span { font-size: 11.5px; color: var(--ink-3); padding-left: 2px; }
+.gc { position: relative; height: 44px; border-radius: 4px; padding: 5px 7px 0 9px; font-size: 13px; line-height: 1.25; overflow: hidden; cursor: default; white-space: nowrap; }
+.gc .id { font-weight: 550; color: var(--ink); }
+.gc .u { display: block; font-size: 12px; color: var(--ink-3); }
+.gc.busy { background: var(--paper-2); }
+.gc.busy::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+.gc.agent::before { background: var(--agent); }
+.gc.human::before { background: var(--human); }
+.gc .ub { position: absolute; left: 9px; right: 7px; bottom: 6px; height: 2px; background: var(--rule); border-radius: 1px; }
+.gc .ub i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ink-2); border-radius: 1px; }
+.gc.free { border: 1px dashed var(--rule); color: var(--ink-3); padding-left: 8px; }
+.gc.other { border: 1px solid var(--rule); color: var(--ink-2); padding-left: 8px;
+  background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ink-3) 22%, transparent) 0 1px, transparent 1px 6px); }
+.gc.other .id { font-weight: 450; color: var(--ink-2); }
+.gc.boot { border: 1px dotted var(--ink-3); color: var(--ink-3); padding-left: 8px; }
+.gc.none { border: 1px solid var(--rule-2); color: var(--ink-3); padding-left: 8px; }
+.hrow.stale .cells { opacity: .42; filter: grayscale(1); }
+.hrow.stale .hn b { color: var(--ink-2); }
+.slurm { display: flex; align-items: baseline; gap: 0; }
+.slurm > div { padding: 0 22px; border-left: 1px solid var(--rule-2); cursor: help; }
+.slurm > div:first-child { padding-left: 2px; border-left: 0; }
+.slurm b { font: 400 21px/1 var(--sans); letter-spacing: -.01em; color: var(--ink); margin-right: 6px; }
+.slurm span { font-size: 12.5px; color: var(--ink-3); }
+.boot-steps { display: flex; gap: 4px; align-items: center; height: 44px; }
+.boot-steps i { width: 26px; height: 4px; border-radius: 2px; background: var(--rule); display: inline-block; }
+.boot-steps i.done { background: var(--ink-2); }
+.boot-steps i.cur { background: repeating-linear-gradient(90deg, var(--ink-2) 0 3px, transparent 3px 5px); }
+.boot-steps span { margin-left: 10px; font-size: 13px; color: var(--ink-2); }
+.gk { display: inline-block; width: 18px; height: 12px; border-radius: 2px; position: relative; }
+
+/* ------------------------------------------------------------------ phase 2: launch dialog */
+.behind { pointer-events: none; }
+.ovl { position: fixed; inset: 0; z-index: 30; background: color-mix(in srgb, var(--ink) 24%, transparent); display: flex; justify-content: center; align-items: flex-start; padding-top: 84px; overflow: auto; }
+[data-theme="dark"] .ovl { background: rgba(0, 0, 0, .55); }
+.ovl[hidden] { display: none; }
+.dlg { width: 840px; background: var(--paper); border: 1px solid var(--rule); border-radius: 10px; box-shadow: 0 24px 60px -20px rgba(10, 14, 20, .35); margin-bottom: 60px; }
+.dlg-h { display: flex; align-items: baseline; gap: 14px; padding: 18px 24px 14px; border-bottom: 1px solid var(--rule); }
+.dlg-h h2 { margin: 0; font: 500 24px/1.1 var(--serif); letter-spacing: -.01em; }
+.dlg-h .x { margin-left: auto; border: 0; background: transparent; color: var(--ink-3); font-size: 20px; line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 4px; }
+.dlg-h .x:hover { color: var(--ink); background: var(--paper-2); }
+.dlg-b { padding: 8px 24px 4px; }
+.fr { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 0 16px; align-items: baseline; padding: 14px 0; border-top: 1px solid var(--rule-2); }
+.fr:first-child { border-top: 0; }
+.fr > label, .fr > .lb { font-weight: 550; font-size: 14px; color: var(--ink); }
+.fr .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.in { height: 32px; border: 1px solid var(--rule); border-radius: 6px; background: transparent; padding: 0 10px; font-size: 14px; color: var(--ink); }
+.in:focus { outline: 2px solid var(--agent); outline-offset: 0; border-color: transparent; }
+.in.mono { font-family: var(--mono); font-size: 13px; }
+.in.w-s { width: 64px; text-align: center; font-variant-numeric: tabular-nums; }
+.in.w-m { width: 112px; font-variant-numeric: tabular-nums; }
+.in.w-l { width: 100%; }
+select.in { padding-right: 4px; }
+.tmpl { min-height: 32px; border: 1px solid var(--rule); border-radius: 6px; padding: 6px 10px; font: 400 13px/1.6 var(--mono); color: var(--ink); word-break: break-word; }
+.tok { background: var(--best-wash); color: var(--ink); border-radius: 3px; padding: 0 2px; box-shadow: inset 0 0 0 1px var(--best-edge); }
+.lbl-x { font-size: 12.5px; color: var(--ink-3); }
+.stp { display: inline-flex; align-items: center; border: 1px solid var(--rule); border-radius: 6px; height: 32px; }
+.stp button { width: 30px; height: 30px; border: 0; background: transparent; color: var(--ink-2); cursor: pointer; font-size: 16px; }
+.stp button:hover { color: var(--ink); }
+.stp span { min-width: 26px; text-align: center; font-variant-numeric: tabular-nums; font-size: 14px; }
+.sw { position: relative; display: inline-flex; align-items: center; gap: 9px; cursor: pointer; font-size: 14px; color: var(--ink-2); }
+.sw input { position: absolute; opacity: 0; }
+.sw .tr { width: 30px; height: 18px; border-radius: 9px; background: var(--rule); position: relative; transition: background .12s; flex: none; }
+.sw .tr::after { content: ""; position: absolute; left: 2px; top: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--paper); transition: transform .12s; }
+.sw input:checked + .tr { background: var(--ink); }
+.sw input:checked + .tr::after { transform: translateX(12px); }
+.sw input:focus-visible + .tr { outline: 2px solid var(--agent); outline-offset: 2px; }
+.hp { display: grid; gap: 0; border: 1px solid var(--rule); border-radius: 7px; overflow: hidden; }
+.hp label { display: grid; grid-template-columns: 18px 92px 56px minmax(0, 1fr) 84px 52px; gap: 0 12px; align-items: center; padding: 8px 12px; cursor: pointer; font-size: 14px; border-top: 1px solid var(--rule-2); font-variant-numeric: tabular-nums; }
+.hp label:first-child { border-top: 0; }
+.hp label:hover { background: color-mix(in srgb, var(--paper-2) 55%, transparent); }
+.hp label.on { background: var(--paper-2); box-shadow: inset 2px 0 0 var(--ink); }
+.hp label.off { color: var(--ink-3); cursor: not-allowed; }
+.hp input { appearance: none; -webkit-appearance: none; margin: 0; width: 14px; height: 14px; border-radius: 50%; border: 1.4px solid var(--ink-3); display: grid; place-content: center; }
+.hp input:checked { border-color: var(--ink); }
+.hp input:checked::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ink); }
+.hp input:disabled { border-color: var(--rule); }
+.hp .nm { font-weight: 550; }
+.hp .fr-n { text-align: right; color: var(--ink-2); }
+.hp .fr-n b { color: var(--ink); font-weight: 600; }
+.hp .qq { text-align: right; color: var(--ink-3); font-size: 13px; }
+.mini { display: flex; gap: 2px; align-items: center; }
+.mini i { width: 9px; height: 12px; border-radius: 1.5px; display: block; }
+.mini i.b { background: var(--ink-2); }
+.mini i.f { box-shadow: inset 0 0 0 1px var(--ink-3); }
+.mini i.o { box-shadow: inset 0 0 0 1px var(--rule); background: repeating-linear-gradient(135deg, var(--ink-3) 0 1px, transparent 1px 3px); }
+.mini i.s { background: var(--ink-3); opacity: .35; }
+.mini i.n { box-shadow: inset 0 0 0 1px var(--rule-2); }
+.prev { display: flex; align-items: stretch; gap: 10px; }
+.prev .cmd { flex: 1; min-width: 0; padding: 9px 12px; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prev .cmd b { font-weight: 500; background: var(--best-wash); box-shadow: inset 0 0 0 1px var(--best-edge); border-radius: 3px; padding: 0 2px; }
+.prev .cmd .hostp { color: var(--ink-3); }
+.prev .xn { align-self: center; font-size: 13px; color: var(--ink-3); white-space: nowrap; }
+.dlg-f { display: flex; gap: 8px; align-items: center; padding: 14px 24px; border-top: 1px solid var(--rule); }
+.dlg-f .sp { margin-left: auto; }
+.dlg-f .sum { font-size: 13px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+/* ------------------------------------------------------------------ phase 2: sweep */
+.sw-grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 72px; margin-top: 64px; align-items: start; }
+.sw-grid .fig { margin-top: 0; }
+.heat { border-collapse: separate; border-spacing: 4px; margin: -4px; font-variant-numeric: tabular-nums; }
+.heat th { font: 500 12.5px/1.3 var(--sans); color: var(--ink-3); text-align: center; padding: 0 0 6px; }
+.heat th.rh { text-align: right; padding: 0 12px 0 0; white-space: nowrap; width: 72px; }
+.heat th.cor { text-align: right; padding: 0 12px 6px 0; }
+.heat td.c { box-shadow: inset 0 0 0 1px var(--rule-2); width: 168px; height: 112px; vertical-align: top; padding: 12px 14px 10px; border-radius: 5px; position: relative; }
+.heat td.c .v { font: 400 26px/1 var(--sans); letter-spacing: -.015em; display: block; cursor: help; }
+.heat td.c .v small { font-size: 12.5px; color: var(--ink-3); letter-spacing: 0; margin-left: 6px; }
+.heat td.c.dk .v small { color: inherit; opacity: .75; }
+.heat td.c .rl { display: flex; gap: 10px; margin-top: 14px; font-size: 12.5px; }
+.heat td.c .rl a { display: inline-flex; align-items: center; gap: 4px; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); }
+.heat td.c .rl svg { display: block; overflow: visible; }
+.heat td.c.dk { color: var(--paper); }
+.heat td.c.dk .rl a { color: var(--paper); }
+.heat td.c.best { box-shadow: inset 0 0 0 2px var(--best), inset 0 0 0 4px var(--paper); }
+.heat td.c .bm { position: absolute; top: 12px; right: 12px; display: inline-flex; gap: 5px; align-items: center; font-size: 12.5px; font-weight: 600; }
+.heat td.m { font-size: 13.5px; color: var(--ink-2); text-align: center; vertical-align: middle; cursor: help; }
+.heat td.m.rm { text-align: left; padding-left: 10px; }
+.heat .mh { font-size: 12px; color: var(--ink-3); }
+.ramp { display: inline-flex; gap: 2px; vertical-align: middle; }
+.ramp i { width: 18px; height: 10px; display: block; border-radius: 1px; }
+.prog { display: flex; gap: 2px; margin-top: 18px; }
+.prog i { flex: 1; height: 10px; border-radius: 1.5px; display: block; }
+.prog i.f { background: var(--ink-2); }
+.prog i.r { background: var(--ink-2); opacity: .45; }
+.prog i.q { box-shadow: inset 0 0 0 1px var(--ink-3); }
+.prog i.x { background: var(--fail); }
+.sweep-stats { margin-top: 36px; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (max-width: 1100px) {
+  .ov-grid, .run-grid, .sw-grid { grid-template-columns: 1fr; gap: 48px; }
+  .hrow { grid-template-columns: 140px 120px minmax(0, 1fr) 44px 0 64px; } .hrow > :nth-child(5) { visibility: hidden; }
+  .find { min-width: 0; } .find span { display: none; }
+}
+@media (max-width: 720px) {
+  .bar-in { padding: 0 16px; gap: 16px; } main { padding: 28px 16px 80px; }
+  h1.finding { font-size: 32px; }
+  .brand span, .sample { display: none; }
+  .hrow { grid-template-columns: 1fr 64px; } .hrow > :nth-child(n+3) { grid-column: 1 / -1; }
+  .dlg { width: calc(100vw - 24px); }
+}
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="#overview" aria-label="Hypothex, overview">
+      <svg width="22" height="18" viewBox="0 0 22 18" aria-hidden="true">
+        <rect x="9" y="1" width="8" height="16" style="fill:var(--best-wash)"/>
+        <line x1="9" y1="1" x2="9" y2="17" style="stroke:var(--best-edge)"/><line x1="17" y1="1" x2="17" y2="17" style="stroke:var(--best-edge)"/>
+        <line x1="1" y1="9" x2="21" y2="9" style="stroke:var(--ink);stroke-width:1.4"/>
+        <rect x="10" y="5" width="5.6" height="5.6" transform="rotate(45 12.8 7.8)" style="fill:var(--best)"/>
+        <circle cx="4" cy="9" r="2.6" style="fill:var(--ink)"/>
+      </svg>
+      <span>Hypothex</span>
+    </a>
+    <nav class="tabs" aria-label="Screens">
+      <a href="#overview">Overview</a>
+      <a href="#launch">Task</a>
+      <a href="#sweep">Sweep</a>
+      <a href="#run/running" id="runTab">Run</a>
+    </nav>
+    <div class="bar-r">
+      <span class="tag sample" title="Invented numbers for this mockup">sample data</span>
+      <button class="find" id="findBtn" type="button" title="Command palette (not wired in this mockup)"><span>Find a run, task or path</span><kbd>⌘K</kbd></button>
+      <button class="theme" id="themeBtn" type="button" aria-label="Switch colour mode">
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7 1a6 6 0 0 1 0 12z" fill="currentColor"/></svg>
+        <span id="themeLbl">Dark</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="view" id="v-overview" aria-labelledby="ov-h"></section>
+  <section class="view" id="v-task" aria-labelledby="task-h" hidden></section>
+  <section class="view" id="v-sweep" aria-labelledby="sw-h" hidden></section>
+  <section class="view" id="v-run" aria-labelledby="run-h" hidden></section>
+</main>
+
+<div class="ovl" id="ovl" hidden></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="tip" id="tip" role="tooltip"></div>
+<style>
+.toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px); opacity: 0; background: var(--ink); color: var(--paper); padding: 10px 16px; border-radius: 7px; font-size: 13.5px; transition: all .18s ease; pointer-events: none; z-index: 60; max-width: 80vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toast.on { opacity: 1; transform: translate(-50%, 0); }
+.tip { position: fixed; z-index: 70; pointer-events: none; background: var(--ink); color: var(--paper); font-size: 12.5px; line-height: 1.4; padding: 7px 10px; border-radius: 6px; max-width: 340px; opacity: 0; transition: opacity .08s; font-variant-numeric: tabular-nums; }
+.tip.on { opacity: 1; }
+</style>
+
+<script src="data.js"></script>
+<script>
+/* ================================================================== helpers */
+const HX = window.HX, H = HX.hosts, SW = HX.sweep, N_TEST = HX.n_test;
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const f4 = v => v.toFixed(4), f3 = v => v.toFixed(3);
+const NBH = "‑";
+const MINUS = "−";
+const money = v => "$" + (v >= 10 ? Math.round(v).toLocaleString("en-US") : v.toFixed(2));
+const kStep = n => (n >= 1000 ? (n % 1000 ? (n / 1000).toFixed(1) : n / 1000) + "k" : String(n));
+const whoKind = c => (c.startsWith("agent:") ? "agent" : "human");
+const whoHtml = c => `<span class="who ${whoKind(c)}"><i></i>${esc(c)}</span>`;
+const hostById = Object.fromEntries(H.map(h => [h.id, h]));
+const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
+function wilson(p, n, z = 1.96) {
+  const z2 = z * z, d = 1 + z2 / n, c = (p + z2 / (2 * n)) / d;
+  const h = (z * Math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))) / d;
+  return [c - h, c + h];
+}
+const S = {
+  line: (x1, y1, x2, y2, c) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="${c}"/>`,
+  rect: (x, y, w, h, c, extra = "") => `<rect x="${x}" y="${y}" width="${Math.max(0, w)}" height="${h}" class="${c}" ${extra}/>`,
+  circ: (x, y, r, c, extra = "") => `<circle cx="${x}" cy="${y}" r="${r}" class="${c}" ${extra}/>`,
+  text: (x, y, t, c, a = "start", extra = "") => `<text x="${x}" y="${y}" class="${c}" text-anchor="${a}" ${extra}>${t}</text>`,
+  dia: (x, y, r, c) => `<path d="M${x} ${y - r}L${x + r} ${y}L${x} ${y + r}L${x - r} ${y}Z" class="${c}"/>`,
+  sq: (x, y, r, c) => `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}" rx="1.5" class="${c}"/>`,
+  cross: (x, y, r) => `<path d="M${x - r} ${y - r}L${x + r} ${y + r}M${x + r} ${y - r}L${x - r} ${y + r}" class="m-fail"/>`,
+  svg: (w, h, body, extra = "") => `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" ${extra}>${body}</svg>`,
+};
+const path = (pts, X, Y, c) => pts.length ? `<path d="${pts.map((p, i) => (i ? "L" : "M") + X(p[0]).toFixed(1) + " " + Y(p[1]).toFixed(1)).join("")}" class="${c}"/>` : "";
+const COPY = `<svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="display:block"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M9 2.5V2a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`;
+const copyBtn = (v, what = "path") => `<button class="copy" type="button" data-copy="${esc(v)}" title="Copy ${esc(v)}" aria-label="Copy ${what}">${COPY}</button>`;
+function hpHtml(host, abs) {
+  const i = abs.lastIndexOf("/") + 1;
+  return `<span class="p"><span class="hostp">${esc(host)}:</span><span class="pre">${esc(abs.slice(0, i)).replace(/\//g, "/<wbr>")}</span><span style="white-space:nowrap">${esc(abs.slice(i))}</span></span>`;
+}
+
+/* ---- state glyphs: one shape per state, never colour alone ---- */
+const GL = {
+  connected: `<svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="4" style="fill:var(--ink-2)"/></svg>`,
+  stale: `<svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="4" style="fill:none;stroke:var(--ink);stroke-width:1.4"/><path d="M5 1a4 4 0 0 1 0 8z" style="fill:var(--ink)"/></svg>`,
+  bootstrapping: `<svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="4" style="fill:none;stroke:var(--ink-2);stroke-width:1.4;stroke-dasharray:1.6 1.6"/></svg>`,
+  queued: `<svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="4" style="fill:none;stroke:var(--ink-2);stroke-width:1.4"/></svg>`,
+  running: `<svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="5.2" style="fill:none;stroke:var(--ink-3);stroke-width:1"/><circle cx="6" cy="6" r="3" style="fill:var(--ink)"/></svg>`,
+  finished: `<svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="4" style="fill:var(--ink-2)"/></svg>`,
+  lost: `<svg width="10" height="10" aria-hidden="true">${S.cross(5, 5, 3.6)}</svg>`,
+  failed: `<svg width="10" height="10" aria-hidden="true">${S.cross(5, 5, 3.6)}</svg>`,
+};
+const RUNG = { f: GL.finished, r: GL.running, q: GL.queued, x: GL.failed };
+const RUNW = { f: "finished", r: "running", q: "queued", x: "failed" };
+
+/* ================================================================== host cells, shared by Overview, Run (queued) and Launch */
+function cellHtml(c, h) {
+  const span = c.span ? ` style="grid-column:span ${c.span}"` : "";
+  const gpuIdx = c.span ? `GPU ${c.i}–${c.i + c.span - 1}` : c.gpu || `GPU ${c.i}`;
+  if (c.free) return `<div class="gc free" data-tip="${esc(`${h.name} ${gpuIdx}: free`)}">free</div>`;
+  if (c.other) return `<div class="gc other" data-tip="${esc(`${h.name} ${gpuIdx}: not hx\n${c.user}, ${c.proc}, pid ${c.pid}\n${c.util}%, ${c.mem} GB`)}"><span class="id">${esc(c.user)}</span><span class="u">${c.util}%</span></div>`;
+  const tip = `${h.name} ${gpuIdx}: ${c.run}\n${c.label}\n${c.who}\n${c.utils ? c.utils.map((u, k) => `GPU ${c.i + k} ${u}%`).join(", ") : c.util + "%"}, ${c.mem} GB${h.state === "stale" ? `\nas of ${h.seen}` : ""}`;
+  return `<a class="gc busy ${whoKind(c.who)}" href="#run/running" data-tip="${esc(tip)}" style="${c.span ? `grid-column:span ${c.span};` : ""}text-decoration:none"><span class="id">${esc(c.run)}</span><span class="u">${c.util}%${c.span ? ` <span style="opacity:.8">×${c.span}</span>` : ""}</span><span class="ub"><i style="width:${c.util}%"></i></span></a>`;
+}
+function cellsHtml(h) {
+  if (h.kind === "slurm") {
+    const s = h.slurm;
+    return `<div class="slurm">
+      <div title="SLURM jobs from hx running on partition ${esc(h.partition)}, ${s.gpus_running} GPUs"><b>${s.running}</b><span>running</span></div>
+      <div title="SLURM jobs from hx pending on partition ${esc(h.partition)}"><b>${s.pending}</b><span>pending</span></div>
+      <div title="Oldest pending job has waited this long"><b>${s.oldest_pending}</b><span>oldest</span></div>
+      <div title="Fair-share factor from sshare"><b>${s.fairshare.toFixed(2)}</b><span>fair-share</span></div>
+    </div>`;
+  }
+  if (h.state === "bootstrapping") {
+    const b = h.boot;
+    return `<div class="boot-steps" title="${esc(b.steps.map((t, i) => `${i < b.step - 1 ? "✓" : i === b.step - 1 ? "…" : "·"} ${t}`).join("\n"))}">${b.steps.map((t, i) => `<i class="${i < b.step - 1 ? "done" : i === b.step - 1 ? "cur" : ""}"></i>`).join("")}<span>${b.step}/${b.steps.length} ${esc(b.steps[b.step - 1])}</span></div>`;
+  }
+  return `<div class="cells">${h.cells.map(c => cellHtml(c, h)).join("")}</div>`;
+}
+function stateHtml(h) {
+  const mism = h.hx && h.hx !== HX.hub_hx;
+  const ver = h.hx == null ? `<span class="small">hx ·</span>`
+    : `<span class="ver${mism ? " bad" : ""}" title="${mism ? `hub runs hx ${HX.hub_hx}. Update: hx host update ${h.id}` : `hx ${h.hx}, same as hub`}">hx ${h.hx}${mism ? `<span class="ne">≠</span>` : ""}</span>`;
+  let st;
+  if (h.state === "connected") st = `<span class="st" title="Heartbeat ${h.seen}">${GL.connected}connected</span>`;
+  else if (h.state === "stale") st = `<span class="st" title="No heartbeat since ${h.seen}. Retrying ssh every 30 s. Cells show the last known state."><b class="st">${GL.stale}stale ${staleFor(h)}</b></span>`;
+  else st = `<span class="st" title="Installing hx on ${h.name}">${GL.bootstrapping}bootstrapping</span>`;
+  return `<div class="hs">${st}<div class="meta">${ver}${h.state === "stale" ? `&nbsp; as of ${h.seen.slice(0, 5)}` : ""}</div></div>`;
+}
+const staleFor = h => Math.round((Date.parse("2026-10-03T14:32:00Z") - Date.parse(`2026-10-03T${h.seen}Z`)) / 60000) + "m";
+const hostCost = h => (h.rate ? h.gpu_h_today * h.rate : 0);
+function hostsPanel() {
+  const total = H.reduce((a, h) => a + hostCost(h), 0);
+  const rows = H.map(h => {
+    const spec = h.kind === "slurm" ? `partition ${h.partition}` : h.kind === "hub" ? h.gpu_name : `${h.gpus}×${h.gpu_name}`;
+    return `<div class="hrow${h.state === "stale" ? " stale" : ""}">
+      <div class="hn"><div><b>${esc(h.name)}</b><span class="kind" title="${h.kind === "hub" ? "This machine runs the hub" : h.kind === "ssh" ? "Reached over ssh" : "Jobs go through sbatch"}">${h.kind}</span></div><div class="meta" title="${esc(h.addr)}">${esc(spec)}</div></div>
+      ${stateHtml(h)}
+      ${cellsHtml(h)}
+      <div class="r q${h.queue ? "" : " z"}" title="${h.queue ? `${h.queue} hx runs waiting for GPUs on ${h.name}` : "Queue empty"}">${h.queue}</div>
+      <div class="r money${h.rate ? "" : " z"}" title="${h.rate ? "Configured rate in hosts.toml" : "No rate set"}">${h.rate ? "$" + h.rate.toFixed(2) : "·"}</div>
+      <div class="r money${hostCost(h) ? "" : " z"}" title="${h.rate ? `${h.gpu_h_today} GPU‑h today × $${h.rate.toFixed(2)}` : "No rate set"}">${hostCost(h) ? money(hostCost(h)) : "·"}</div>
+    </div>`;
+  }).join("");
+  return { total, html: `<div class="hosts">
+    <div class="hrow head"><div>host</div><div>state</div><div class="gidx">${[...Array(8)].map((_, i) => `<span>${i}</span>`).join("")}</div><div class="r">queue</div><div class="r" title="Dollars per GPU-hour, set per host">$/GPU‑h</div><div class="r">today</div></div>
+    ${rows}
+  </div>
+  <div class="key" aria-label="Key">
+    <span><span class="gk" style="background:var(--paper-2);box-shadow:inset 3px 0 0 var(--agent)"></span>agent run</span>
+    <span><span class="gk" style="background:var(--paper-2);box-shadow:inset 3px 0 0 var(--human)"></span>human run</span>
+    <span><span class="gk" style="border:1px dashed var(--ink-3)"></span>free</span>
+    <span><span class="gk" style="border:1px solid var(--rule);background:repeating-linear-gradient(135deg, color-mix(in srgb, var(--ink-3) 40%, transparent) 0 1px, transparent 1px 4px)"></span>not hx</span>
+    <span>${GL.stale}stale</span>
+    <span><span class="ver bad">hx<span class="ne">≠</span></span>version mismatch</span>
+  </div>` };
+}
+
+/* ================================================================== OVERVIEW */
+function renderOverview() {
+  const hp = hostsPanel();
+  const cells = H.flatMap(h => h.cells || []);
+  const running = cells.filter(c => c.run).length + H.filter(h => h.kind === "slurm").reduce((a, h) => a + h.slurm.running, 0);
+  const waiting = H.reduce((a, h) => a + h.queue, 0) + H.filter(h => h.kind === "slurm").reduce((a, h) => a + h.slurm.pending, 0);
+  const free = H.filter(h => h.state === "connected").flatMap(h => h.cells || []).filter(c => c.free).length;
+  const stale = H.filter(h => h.state === "stale");
+  $("#v-overview").innerHTML = `
+    <p class="crumb">All projects</p>
+    <h1 class="finding" id="ov-h">${running} running, ${waiting} waiting. ${stale.map(h => `${esc(h.name)} stale ${staleFor(h)}`).join(", ")}</h1>
+    <p class="metaline"><span title="Free GPUs on connected ssh hosts">${free} GPU free</span><span title="Sum over hosts, configured $/GPU-h">${money(hp.total)} today</span><span title="hx version on the hub">hub hx ${HX.hub_hx}</span><span>${H.length} hosts</span></p>
+
+    <div class="fig">
+      <div class="fig-h"><span class="pl">a</span><span class="t">Hosts</span><span class="aside">${money(hp.total)} today</span></div>
+      ${hp.html}
+    </div>
+
+    <div class="ov-grid">
+      <div class="fig">
+        <div class="fig-h"><span class="pl">b</span><span class="t">Ideas</span><span class="aside">${esc(HX.project)} / ${esc(HX.task)}</span></div>
+        <ul class="ideas">${HX.ideas.map(i => `<li class="idea">
+          <div><div class="nm"><a href="${i.best ? "#sweep" : "#launch"}">${esc(i.name)}</a></div><div class="meta">${esc(i.who)}, ${esc(i.at)}</div></div>
+          <div class="n">${i.runs} runs</div>
+          <div class="sc">${i.score != null ? `${i.best ? `<span style="color:var(--best)">◆</span> ` : ""}${f4(i.score)}` : `<span class="small" style="font-size:15px">·</span>`}<small>${esc(i.sub)}</small></div></li>`).join("")}</ul>
+      </div>
+      <div class="side">
+        <div class="fig">
+          <div class="fig-h"><span class="pl">c</span><span class="t">Failures</span></div>
+          ${HX.failures.map(f => `<p class="fail-b" title="${esc(f.label)} on ${esc(f.host)}"><span class="x">×</span><b><a href="${f.run === "5e9a" ? "#run/lost" : "#sweep"}" style="text-decoration:none">${esc(f.run)}</a>, ${esc(f.why)}</b> <span class="small num">${esc(f.host)} ${esc(f.at)}</span></p>`).join("")}
+        </div>
+        <div class="fig">
+          <div class="fig-h"><span class="pl">d</span><span class="t">Projects</span></div>
+          <table class="tbl"><thead><tr><th>Task</th><th class="r" style="padding-left:12px">Runs</th><th class="r" style="padding-left:12px">Best</th></tr></thead>
+          <tbody><tr><td><a href="#launch">${esc(HX.project)} / uspto‑forward‑top1</a></td><td class="r" style="padding-left:12px">44</td><td class="r" style="padding-left:12px">0.9121</td></tr></tbody></table>
+        </div>
+      </div>
+    </div>`;
+}
+
+/* ================================================================== TASK + LAUNCH DIALOG */
+function renderTask() {
+  $("#v-task").innerHTML = `
+    <p class="crumb"><a href="#overview">${esc(HX.project)}</a><span class="sep">/</span>${esc(HX.task)}</p>
+    <h1 class="finding" id="task-h">lr 3e‑4, beam 10 leads by 0.0013 top‑1, p = ${SW.p_best.toFixed(2)}</h1>
+    <p class="metaline"><span class="kind">training</span><span>uspto-mit v2</span><span>n = 40,000</span><span>top1 v1</span><span>44 runs</span></p>
+    <div class="filters" role="group" aria-label="Actions">
+      <div class="seg" role="group"><button type="button" aria-pressed="true">best ckpt</button><button type="button" aria-pressed="false">final</button></div>
+      <span class="r"><button class="btn" type="button">Export CSV</button><button class="btn" type="button">Re-evaluate all</button><button class="btn primary" type="button" id="newRun">New run</button></span>
+    </div>
+    <div class="fig" style="opacity:.6">
+      <div class="fig-h"><span class="pl">a</span><span class="t">Configs</span><span class="aside">12 configs, 44 runs</span></div>
+      <div style="height:420px;border-top:1px solid var(--rule)"></div>
+    </div>`;
+  $("#newRun").addEventListener("click", () => openLaunch("gpu1"));
+}
+
+const L = { host: "gpu1", gpus: 1, queue: true, seeds: HX.launch.seeds, partition: "gpu", time: "08:00:00", sgpus: 2 };
+function freeOf(h) { return h.kind === "ssh" || h.kind === "hub" ? (h.state === "connected" ? (h.cells || []).filter(c => c.free).length : 0) : null; }
+function freeIdx(h) { return (h.cells || []).filter(c => c.free).map(c => c.i); }
+function miniCells(h) {
+  if (h.kind === "slurm") return `<span class="small">${h.slurm.running} run, ${h.slurm.pending} pend</span>`;
+  if (h.kind === "hub") return `<span class="mini"><i class="b"></i></span>`;
+  const out = [];
+  for (let i = 0; i < h.gpus; i++) {
+    const c = (h.cells || []).find(c => i >= c.i && i < c.i + (c.span || 1));
+    out.push(h.state === "bootstrapping" ? "n" : h.state === "stale" ? "s" : !c ? "n" : c.free ? "f" : c.other ? "o" : "b");
+  }
+  return `<span class="mini" aria-hidden="true">${out.map(k => `<i class="${k}"></i>`).join("")}</span>`;
+}
+const seedList = () => L.seeds.split(/[\s,]+/).filter(Boolean);
+function cliOf() {
+  const h = hostById[L.host], q = s => `"${s.replace(/"/g, '\\"')}"`;
+  const parts = [`hx run -t ${HX.task}`, `--host ${h.id}`];
+  if (h.kind === "slurm") parts.push(`--partition ${L.partition}`, `--time ${L.time}`, `--gpus ${L.sgpus}`);
+  else parts.push(`--gpus ${L.gpus}`, L.queue ? "--queue" : "--no-queue");
+  parts.push(`--seeds ${seedList().join(",")}`, `-H ${q($("#lHyp") ? $("#lHyp").value : HX.launch.hypothesis)}`, "--", HX.launch.command);
+  return parts.join(" ");
+}
+function planOf() {
+  const h = hostById[L.host], n = seedList().length;
+  if (h.kind === "slurm") return { now: 0, queued: n, line: `sbatch -p ${L.partition} -t ${L.time} --gres=gpu:${L.sgpus}`, cvd: "" };
+  const free = freeIdx(h), fit = Math.floor(free.length / L.gpus);
+  const now = Math.min(n, fit), queued = n - now;
+  const cvd = now ? free.slice(0, L.gpus).join(",") : "";
+  return { now, queued, cvd, pos: h.queue + 1 };
+}
+function launchHtml() {
+  const h = hostById[L.host], slurm = h.kind === "slurm", P = planOf(), seeds = seedList();
+  const seed0 = seeds[0] || "1";
+  const resolved = HX.launch.command.replace("{seed}", seed0);
+  const prefix = slurm ? `${P.line} ` : P.cvd ? `CUDA_VISIBLE_DEVICES=${P.cvd} ` : "";
+  const hostRow = x => {
+    const fr = freeOf(x), off = x.state === "bootstrapping";
+    const right = x.kind === "slurm" ? `<span class="fr-n" title="Oldest pending job has waited this long">wait ${x.slurm.oldest_pending}</span>` : x.state === "stale" ? `<span class="fr-n">stale ${staleFor(x)}</span>` : off ? `<span class="fr-n" title="Bootstrapping">boot ${x.boot.step}/${x.boot.steps.length}</span>` : `<span class="fr-n"><b>${fr}</b> free</span>`;
+    return `<label class="${x.id === L.host ? "on" : ""}${off ? " off" : ""}" title="${esc(x.addr)}${x.gpu_name ? `, ${x.gpus}×${x.gpu_name}` : ""}">
+      <input type="radio" name="lhost" value="${x.id}" ${x.id === L.host ? "checked" : ""} ${off ? "disabled" : ""}>
+      <span class="nm">${esc(x.name)}</span><span class="kind" style="justify-self:start">${x.kind}</span>
+      ${miniCells(x)}${right}<span class="qq" title="hx queue on ${esc(x.name)}">${x.kind === "slurm" ? "" : `q ${x.queue}`}</span></label>`;
+  };
+  return `<div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlg-h">
+    <div class="dlg-h"><h2 id="dlg-h">New run</h2><span class="small">${esc(HX.project)} / ${esc(HX.task)}</span><button class="x" type="button" id="dlgX" aria-label="Close">×</button></div>
+    <div class="dlg-b">
+      <div class="fr"><span class="lb">Host</span><div class="hp" role="radiogroup" aria-label="Host">${H.map(hostRow).join("")}</div></div>
+      ${slurm ? `
+      <div class="fr"><span class="lb" title="sbatch options">SLURM</span><div class="row">
+        <label class="lbl-x">partition <select class="in" id="lPart" style="margin-left:6px"><option ${L.partition === "gpu" ? "selected" : ""}>gpu</option><option>gpu_devel</option><option>scavenge_gpu</option></select></label>
+        <label class="lbl-x">time <input class="in mono w-m" id="lTime" value="${esc(L.time)}" style="margin-left:6px" title="--time, h:mm:ss"></label>
+        <label class="lbl-x">gpus <span class="stp" style="margin-left:6px;vertical-align:middle"><button type="button" data-sg="-1" aria-label="Fewer GPUs">−</button><span>${L.sgpus}</span><button type="button" data-sg="1" aria-label="More GPUs">+</button></span></label>
+        <span class="p" style="font-size:12px;color:var(--ink-3);flex-basis:100%" title="sbatch flags hx will use">${esc(P.line)}</span>
+      </div></div>` : `
+      <div class="fr"><span class="lb">GPUs</span><div class="row">
+        <span class="stp"><button type="button" data-g="-1" aria-label="Fewer GPUs">−</button><span>${L.gpus}</span><button type="button" data-g="1" aria-label="More GPUs">+</button></span>
+        <span class="lbl-x" title="GPUs per run">per run</span>
+        <span class="small" style="margin-left:auto" title="Seeds that start now, and seeds that wait in the hx queue">${P.now ? `${P.now} now, <span class="p" style="font-size:12px;color:var(--ink-2)">CUDA_VISIBLE_DEVICES=${P.cvd}</span>` : "0 now"}${P.queued ? `, ${P.queued} queued` : ""}</span>
+      </div></div>
+      <div class="fr"><span class="lb">Queue</span><div class="row">
+        <label class="sw"><input type="checkbox" id="lQueue" ${L.queue ? "checked" : ""}><span class="tr"></span>wait for GPUs</label>
+        ${L.queue && P.queued ? `<span class="small" style="margin-left:auto" title="Position in the ${esc(h.name)} queue after ${h.queue} waiting runs">pos ${P.pos}–${P.pos + P.queued - 1}</span>` : !L.queue && P.queued ? `<span class="small" style="margin-left:auto;color:var(--fail)" title="Not enough free GPUs and queue off">${P.queued} won't start</span>` : ""}
+      </div></div>`}
+      <div class="fr"><label for="lSeeds">Seeds</label><div class="row"><input class="in mono" id="lSeeds" value="${esc(L.seeds)}" style="width:160px"><span class="lbl-x">×${seeds.length}</span></div></div>
+      <div class="fr"><span class="lb">Command</span><div><div class="tmpl" contenteditable="true" spellcheck="false" aria-label="Command template">${esc(HX.launch.command).replace("{seed}", `<span class="tok" title="Filled with each seed">{seed}</span>`)}</div>
+        <div class="lbl-x" style="margin-top:6px" title="Working directory on ${esc(h.name)}">${slurm ? "~/code/rxn-forward" : "~/code/rxn-forward"} @ main b82f04c</div></div></div>
+      <div class="fr"><label for="lHyp">Hypothesis</label><input class="in w-l" id="lHyp" value="${esc(HX.launch.hypothesis)}"></div>
+      <div class="fr"><span class="lb" title="Seed ${esc(seed0)}, as it will run">Preview</span><div class="prev"><code class="cmd" title="${esc(`${h.id}: ${prefix}${resolved}`)}"><span class="hostp">${esc(h.id)}:</span> ${esc(resolved.replace(/ \S+$/, " "))}<b>${esc(seed0)}</b></code><span class="xn">×${seeds.length}</span></div></div>
+    </div>
+    <div class="dlg-f">
+      <button class="btn" type="button" id="lCli" title="${esc(cliOf())}">Copy as CLI</button>
+      <span class="sp sum">${slurm ? `${seeds.length} jobs × ${L.sgpus} GPU, ≤ ${L.time}` : `${seeds.length} × ${L.gpus} GPU on ${esc(h.name)}`}${h.rate ? `, $${h.rate.toFixed(2)}/GPU‑h` : ""}</span>
+      <button class="btn" type="button" id="lCancel">Cancel</button>
+      <button class="btn primary" type="button" id="lGo">Launch ${seeds.length}</button>
+    </div>
+  </div>`;
+}
+function openLaunch(host) {
+  if (host) L.host = host;
+  const o = $("#ovl");
+  o.innerHTML = launchHtml(); o.hidden = false;
+  o.querySelectorAll('input[name="lhost"]').forEach(r => r.addEventListener("change", () => { L.host = r.value; openLaunch(); }));
+  o.querySelectorAll("[data-g]").forEach(b => b.addEventListener("click", () => { L.gpus = Math.max(1, Math.min(8, L.gpus + +b.dataset.g)); openLaunch(); }));
+  o.querySelectorAll("[data-sg]").forEach(b => b.addEventListener("click", () => { L.sgpus = Math.max(1, Math.min(8, L.sgpus + +b.dataset.sg)); openLaunch(); }));
+  const q = $("#lQueue"); if (q) q.addEventListener("change", () => { L.queue = q.checked; openLaunch(); });
+  $("#lSeeds").addEventListener("change", e => { L.seeds = e.target.value; openLaunch(); });
+  const t = $("#lTime"); if (t) t.addEventListener("change", e => { L.time = e.target.value; openLaunch(); });
+  const p = $("#lPart"); if (p) p.addEventListener("change", e => { L.partition = e.target.value; openLaunch(); });
+  $("#lCli").addEventListener("click", () => { const c = cliOf(); navigator.clipboard && navigator.clipboard.writeText(c).catch(() => {}); toast("Copied " + c); });
+  const close = () => { o.hidden = true; if (location.hash.startsWith("#launch")) history.replaceState(null, "", "#task"); };
+  $("#dlgX").addEventListener("click", close); $("#lCancel").addEventListener("click", close);
+  $("#lGo").addEventListener("click", () => { const P = planOf(); close(); toast(`Launched ${seedList().length} on ${L.host}${P.queued ? `, ${P.queued} queued` : ""}`); });
+}
+
+/* ================================================================== SWEEP */
+const cellKey = (lr, b) => `${lr}|${b}`;
+function cellStats(k) {
+  const g = SW.grid[k], done = g.runs.filter(r => r[1] === "f").map(r => r[2]);
+  const m = done.length ? mean(done) : null;
+  const sd = done.length > 1 ? Math.sqrt(done.reduce((a, v) => a + (v - m) * (v - m), 0) / (done.length - 1)) : null;
+  return { g, done, m, sd, iv: m != null ? wilson(m, N_TEST) : null };
+}
+function renderSweep() {
+  const keys = SW.lrs.flatMap(lr => SW.beams.map(b => cellKey(lr, b)));
+  const all = keys.flatMap(k => SW.grid[k].runs);
+  const cnt = st => all.filter(r => r[1] === st).length;
+  const stats = Object.fromEntries(keys.map(k => [k, cellStats(k)]));
+  const complete = keys.filter(k => stats[k].done.length === 3);
+  const bestK = complete.reduce((a, k) => (stats[k].m > stats[a].m ? k : a), complete[0]);
+  const second = complete.filter(k => k !== bestK).reduce((a, k) => (stats[k].m > stats[a].m ? k : a), complete.find(k => k !== bestK));
+  const B = stats[bestK], gap = B.m - stats[second].m;
+  const [blr, bb] = bestK.split("|"), [slr, sb] = second.split("|");
+  const cost = Object.entries(SW.gpu_h).reduce((a, [h, v]) => a + v * hostById[h].rate, 0);
+  const gpuH = Object.values(SW.gpu_h).reduce((a, v) => a + v, 0);
+  const ms = keys.filter(k => stats[k].m != null).map(k => stats[k].m);
+  const lo = Math.min(...ms), hi = Math.max(...ms);
+  const level = m => (m - lo) / (hi - lo);
+  const fill = t => `color-mix(in srgb, var(--ink) ${Math.round(4 + t * 30)}%, transparent)`;
+  const cellHtmlS = k => {
+    const s = stats[k], [lr, b] = k.split("|"), isB = k === bestK;
+    const t = s.m != null ? level(s.m) : 0, dk = false;
+    const links = s.g.runs.map((r, i) => `<a href="${r[1] === "q" ? "#run/queued" : r[1] === "r" ? (r[0] === "a9d3" ? "#run/stale" : "#run/running") : "#run/running"}" data-tip="${esc(`${r[0]}, seed ${i + 1}\n${RUNW[r[1]]}${r[2] != null ? " " + f4(r[2]) : ""}${SW.failed_why[r[0]] ? "\n" + SW.failed_why[r[0]] : ""}\n${r[3]}`)}">${dk ? RUNG[r[1]].replace(/var\(--ink-2\)|var\(--ink\)/g, "var(--paper)") : RUNG[r[1]]}${r[0]}</a>`).join("");
+    const tip = s.m != null ? `lr ${lr}, beam ${b}\nmean ${f4(s.m)} over ${s.done.length} seed${s.done.length > 1 ? "s" : ""}\nseeds ${s.done.map(f4).join(", ")}\n95% CI ${f4(s.iv[0])}–${f4(s.iv[1])}\n(Wilson, n = ${N_TEST.toLocaleString("en-US")})${s.sd != null ? `\nseed σ ${f4(s.sd)}` : ""}` : "";
+    return `<td class="c${dk ? " dk" : ""}${isB ? " best" : ""}" style="background:${s.m != null ? fill(t) : "transparent"};${s.m == null ? "box-shadow:inset 0 0 0 1px var(--rule)" : ""}">
+      ${isB ? `<span class="bm" style="color:${dk ? "var(--paper)" : "var(--best)"}">◆ best</span>` : ""}
+      <span class="v" data-tip="${esc(tip)}">${s.m != null ? f4(s.m) : "·"}${s.done.length < 3 ? `<small>n=${s.done.length}</small>` : ""}</span>
+      <span class="rl">${links}</span></td>`;
+  };
+  const rowMean = lr => mean(SW.beams.map(b => stats[cellKey(lr, b)].m).filter(v => v != null));
+  const colMean = b => mean(SW.lrs.map(lr => stats[cellKey(lr, b)].m).filter(v => v != null));
+
+  $("#v-sweep").innerHTML = `
+    <p class="crumb"><a href="#overview">${esc(HX.project)}</a><span class="sep">/</span><a href="#launch">${esc(HX.task)}</a><span class="sep">/</span>sweep ${esc(SW.id)}</p>
+    <div class="run-top">
+      <div>
+        <h1 class="finding" id="sw-h">lr ${blr}, beam ${bb}: ${f4(B.m)} top‑1, +${f4(gap)} over beam ${sb}, p = ${SW.p_best.toFixed(2)}</h1>
+        <div class="metaline">
+          <span title="Grid: ${SW.lrs.length} learning rates × ${SW.beams.length} beam widths × ${SW.seeds.length} seeds"><b>lr ${SW.lrs.length} × beam ${SW.beams.length} × ${SW.seeds.length} seeds</b> = ${all.length}</span>
+          <span>${SW.gpus_per_run} GPU / run</span>
+          <span>${Object.keys(SW.gpu_h).join(", ")}</span>
+          ${whoHtml(SW.created_by)}
+          <span>${SW.started} UTC</span>
+          <span class="tag" title="Sweep id">${esc(SW.id)}</span>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" type="button" data-copy="hx sweep -t ${esc(HX.task)} --grid lr=1e-4,3e-4,1e-3 --grid beam=1,5,10 --seeds 1,2,3 --gpus 2 --hosts gpu1,dgx,mccleary -- ${esc(SW.template)}" title="Same sweep as an hx command">Copy as CLI</button>
+        <button class="btn" type="button" data-toast="Cancelled ${cnt("q")} queued runs" title="Cancel the ${cnt("q")} queued runs">Cancel queued</button>
+        <button class="btn primary" type="button" data-toast="Queued 3 more seeds for lr ${blr}, beam ${bb}" title="Add seeds 4–6 to the best cell">Add seeds</button>
+      </div>
+    </div>
+    <div class="sweep-stats">
+      <dl class="stats">
+        <div title="Mean top-1 of lr ${blr}, beam ${bb} over 3 seeds"><dt>best top‑1</dt><dd>${f4(B.m)}</dd></div>
+        <div title="Test-set 95% CI (Wilson, n = ${N_TEST.toLocaleString("en-US")})"><dt>95% CI</dt><dd>${f3(B.iv[0])}–${f3(B.iv[1])}</dd></div>
+        <div title="Runs finished"><dt>finished</dt><dd>${cnt("f")}<small> / ${all.length}</small></dd></div>
+        <div title="Runs running now"><dt>running</dt><dd>${cnt("r")}</dd></div>
+        <div title="Runs in a host queue"><dt>queued</dt><dd>${cnt("q")}</dd></div>
+        <div title="${esc(Object.entries(SW.failed_why).map(([k, v]) => `${k}: ${v}`).join("\n"))}"><dt>failed</dt><dd>${cnt("x")}</dd></div>
+        <div title="${esc(Object.entries(SW.gpu_h).map(([h, v]) => `${h}: ${v} GPU‑h × $${hostById[h].rate.toFixed(2)} = ${money(v * hostById[h].rate)}`).join("\n"))}"><dt>cost, ${gpuH.toFixed(0)} GPU‑h</dt><dd>${money(cost)}</dd></div>
+        <div title="Estimate from running step rates and queue depth"><dt>ETA</dt><dd>${SW.eta.replace(/(\d+)h (\d+)m/, "$1<small>h</small> $2<small>m</small>")}</dd></div>
+      </dl>
+      <div class="prog" role="img" aria-label="${cnt("f")} finished, ${cnt("r")} running, ${cnt("q")} queued, ${cnt("x")} failed">${[..."f".repeat(cnt("f")), ..."r".repeat(cnt("r")), ..."q".repeat(cnt("q")), ..."x".repeat(cnt("x"))].map(k => `<i class="${k}"></i>`).join("")}</div>
+    </div>
+
+    <div class="sw-grid">
+      <div class="fig">
+        <div class="fig-h"><span class="pl">a</span><span class="t">top‑1 by lr × beam</span><span class="aside">mean over seeds</span></div>
+        <table class="heat" aria-label="Mean top-1 by learning rate and beam width">
+          <thead><tr><th class="cor">lr \\ beam</th>${SW.beams.map(b => `<th>${b}</th>`).join("")}<th class="mh" title="Mean over beam">mean</th></tr></thead>
+          <tbody>${SW.lrs.map(lr => `<tr><th class="rh" scope="row">${lr}</th>${SW.beams.map(b => cellHtmlS(cellKey(lr, b))).join("")}<td class="m rm" title="Mean over beam at lr ${lr}">${f4(rowMean(lr))}</td></tr>`).join("")}
+            <tr><th class="rh mh" scope="row" title="Mean over lr">mean</th>${SW.beams.map(b => `<td class="m" title="Mean over lr at beam ${b}">${f4(colMean(b))}</td>`).join("")}<td></td></tr></tbody>
+        </table>
+        <div class="key" aria-label="Key">
+          <span><span class="ramp">${[0, .25, .5, .75, 1].map(t => `<i style="background:${fill(t)}"></i>`).join("")}</span>${f3(lo)}–${f3(hi)}</span>
+          <span style="color:var(--best)">◆<span style="color:var(--ink-2)">best, 3 seeds</span></span>
+          <span>${GL.finished}finished</span><span>${GL.running}running</span><span>${GL.queued}queued</span><span>${GL.failed}failed</span>
+        </div>
+      </div>
+      <div class="fig">
+        <div class="fig-h"><span class="pl">b</span><span class="t">Seeds, 95% CI</span><span class="aside">top‑1</span></div>
+        <div id="swForest"></div>
+      </div>
+    </div>
+
+    <div class="fig">
+      <div class="fig-h"><span class="pl">c</span><span class="t">Runs on hosts</span><span class="aside">${cnt("r")} running, ${cnt("q")} queued</span></div>
+      <table class="runs" style="max-width:860px"><thead><tr><th>run</th><th>lr</th><th class="r">beam</th><th class="r">seed</th><th>state</th><th>host</th><th class="r">GPU‑h</th><th class="r">cost</th></tr></thead>
+      <tbody>${keys.flatMap(k => SW.grid[k].runs.map((r, i) => ({ k, r, i }))).filter(o => o.r[1] !== "f").map(({ k, r, i }) => {
+        const [lr, b] = k.split("|"), h = hostById[r[3]];
+        const gh = r[1] === "r" ? (r[0] === "a9d3" ? 6.9 : r[0] === "6b0e" ? 3.1 : 2.4) : r[1] === "x" ? 0.2 : 0;
+        const stTxt = r[1] === "q" ? `queued, pos ${r[0] === "c2b9" ? 1 : r[0] === "f2c8" ? 2 : 3}` : r[1] === "x" ? "failed, NaN 3.1k" : r[0] === "a9d3" ? "stale 4m" : "running";
+        return `<tr><td><span class="st">${r[0] === "a9d3" ? GL.stale : RUNG[r[1]]}<a href="${r[1] === "q" ? "#run/queued" : r[0] === "a9d3" ? "#run/stale" : "#run/running"}">${r[0]}</a></span></td><td>${lr}</td><td class="r">${b}</td><td class="r">${i + 1}</td><td>${stTxt}</td><td>${esc(h.name)}</td><td class="r">${gh ? gh.toFixed(1) : "·"}</td><td class="r">${gh ? money(gh * h.rate) : "·"}</td></tr>`;
+      }).join("")}
+      <tr><td colspan="8" class="dim" style="padding-top:12px">+ ${cnt("f")} finished</td></tr></tbody></table>
+    </div>`;
+  drawSweepForest(keys, stats, bestK);
+}
+function drawSweepForest(keys, stats, bestK) {
+  const el = $("#swForest"); if (!el || !el.offsetParent) return;
+  const W = el.clientWidth, LW = 96, ROW = 34, TOP = 22;
+  const rows = keys.filter(k => stats[k].m != null).sort((a, b) => stats[b].m - stats[a].m);
+  const DOM = [0.874, 0.918];
+  const X = v => LW + ((v - DOM[0]) / (DOM[1] - DOM[0])) * (W - LW - 8);
+  const yAx = TOP + rows.length * ROW + 4;
+  const B = stats[bestK];
+  let h = "";
+  [0.88, 0.89, 0.90, 0.91].forEach(t => (h += S.line(X(t), TOP, X(t), yAx, "grid")));
+  h += S.rect(X(B.iv[0]), TOP, X(B.iv[1]) - X(B.iv[0]), yAx - TOP, "band") + S.line(X(B.iv[0]), TOP, X(B.iv[0]), yAx, "band-edge") + S.line(X(B.iv[1]), TOP, X(B.iv[1]), yAx, "band-edge");
+  rows.forEach((k, i) => {
+    const s = stats[k], y = TOP + i * ROW + ROW / 2, isB = k === bestK, [lr, b] = k.split("|");
+    h += S.text(LW - 12, y + 4, `${lr}, ${b}`, isB ? "lbl-b" : "lbl", "end");
+    h += `<path d="M${X(s.iv[0])} ${y}H${X(s.iv[1])}M${X(s.iv[0])} ${y - 4}V${y + 4}M${X(s.iv[1])} ${y - 4}V${y + 4}" class="whisk${isB ? " best" : ""}"/>`;
+    s.done.forEach(v => (h += S.circ(X(v), y - 9, 3, "seed")));
+    h += S.sq(X(s.m), y, 4.2, "mean" + (isB ? " best" : ""));
+    if (s.done.length < 3) h += S.text(X(s.iv[1]) + 8, y + 4, `n=${s.done.length}`, "lbl-s");
+    h += `<rect x="${LW}" y="${y - ROW / 2}" width="${W - LW}" height="${ROW}" class="hit" data-tip="${esc(`lr ${lr}, beam ${b}\nmean ${f4(s.m)}, seeds ${s.done.map(f4).join(", ")}\n95% CI ${f4(s.iv[0])}–${f4(s.iv[1])}`)}"/>`;
+  });
+  h += S.line(LW, yAx, W, yAx, "axis");
+  [0.88, 0.89, 0.90, 0.91].forEach(t => (h += S.line(X(t), yAx, X(t), yAx + 4, "axis") + S.text(X(t), yAx + 17, t.toFixed(2), "tk", "middle")));
+  h += S.text(LW - 12, 10, "lr, beam", "lbl-s", "end");
+  h += S.text(W, yAx + 36, "top‑1 v1, test", "lbl-s", "end");
+  el.innerHTML = S.svg(W, yAx + 42, h, 'role="img" aria-label="Cells sorted by mean top-1 with seed dots and test-set 95% CIs" style="overflow:visible;pointer-events:auto"');
+}
+
+/* ================================================================== RUN, four remote states */
+let RSTATE = "running";
+function stateLine(r) {
+  const h = hostById[r.host];
+  if (r.state === "queued") return `<span class="st" title="Queued at ${r.queued_at}">${GL.queued}<b>queued</b>&nbsp;${r.pos} of ${r.of} on ${esc(h.name)}</span><span title="${esc(h.name)} has ${r.free} free GPU; this run needs ${r.gpus}">needs ${r.gpus} GPU, ${r.free} free</span>`;
+  if (r.state === "running") return `<span class="st" title="Heartbeat ${r.heartbeat}">${GL.running}<b>running</b>&nbsp;${r.elapsed}</span><span>${esc(h.name)}, job ${r.slurm.job}</span>`;
+  if (r.state === "stale") return `<span class="st" title="Last event ${r.last_event}">${GL.stale}<b>stale</b>&nbsp;${r.unreachable}</span><span>${esc(h.name)}, pid ${r.pid}</span>`;
+  return `<span class="st" title="${esc(r.reason_long)}">${GL.lost}<b style="color:var(--fail)">lost</b>&nbsp;${r.last_event.slice(0, 5)}</span><span>${esc(h.name)}, job ${r.slurm.job}</span>`;
+}
+function runActions(r) {
+  const tail = r.host === "mccleary" ? `ssh mccleary tail -f ${r.run_dir}/logs/stdout.log` : `ssh ${r.host} tail -f ${r.run_dir}/logs/stdout.log`;
+  if (r.state === "queued") return `<button class="btn" type="button" data-toast="Moved ${r.short} to the front of the gpu1 queue" title="Move to position 1">Move up</button><button class="btn" type="button" data-toast="Moved ${r.short} to dgx queue, position 3" title="Queue on another host">Move host</button><button class="btn primary" type="button" data-toast="Cancelled ${r.short}">Cancel</button>`;
+  if (r.state === "running") return `<button class="btn" type="button" data-copy="${esc(tail)}" title="${esc(tail)}">Copy tail</button><button class="btn" type="button" data-toast="Re-evaluation queued for ${r.short}, step 6k checkpoint">Re-evaluate</button><button class="btn primary" type="button" data-toast="scancel ${r.slurm.job} sent">Stop</button>`;
+  if (r.state === "stale") return `<button class="btn primary" type="button" data-toast="Reconnecting to dgx" title="Retry ssh now. Next auto retry in ${r.retry_in}">Reconnect</button><button class="btn" type="button" data-toast="Marked ${r.short} lost" title="Stop waiting; mark lost">Mark lost</button><button class="btn" type="button" disabled title="dgx unreachable">Stop</button>`;
+  return `<button class="btn" type="button" data-toast="Rerun queued: ${r.short}, seed 2, commit ${r.git.commit}" title="From step 0">Rerun</button><button class="btn primary" type="button" data-toast="Resume queued on mccleary from step ${kStep(r.ckpt)}" title="From ckpt/step_0${r.ckpt}.pt">Resume ${kStep(r.ckpt)}</button><button class="btn" type="button" disabled title="Already lost">Stop</button>`;
+}
+function runStats(r) {
+  const h = hostById[r.host];
+  const lastVal = r.curve ? r.curve.val.at(-1) : null;
+  if (r.state === "queued") return `
+    <div title="Position in the ${esc(h.name)} hx queue"><dt>position</dt><dd>${r.pos}<small> / ${r.of}</small></dd></div>
+    <div title="GPUs this run needs on one host"><dt>needs</dt><dd>${r.gpus}<small> GPU</small></dd></div>
+    <div title="Free GPUs on ${esc(h.name)} now"><dt>free on ${esc(h.name)}</dt><dd>${r.free}<small> / ${h.gpus}</small></dd></div>
+    <div title="Queued at ${r.queued_at}"><dt>waiting</dt><dd>11<small>m</small></dd></div>
+    <div title="6b0e (2 GPUs) ends ≈ 14:57 at its step rate; b7e0 at position 1 then takes 2 GPUs; 1d77 ends ≈ 15:06"><dt>est. start</dt><dd>≈ 15:06</dd></div>`;
+  const common = `
+    <div title="Last step reported, of ${r.steps.toLocaleString("en-US")}"><dt>step</dt><dd>${kStep(r.step)}<small> / ${kStep(r.steps)}</small></dd></div>
+    <div title="Val top-1 at step ${lastVal[0].toLocaleString("en-US")}"><dt>val top‑1</dt><dd>${f4(lastVal[1])}</dd></div>`;
+  if (r.state === "running") return common + `
+    <div title="Mean GPU utilisation, both GPUs, last 5 min"><dt>GPU</dt><dd>${r.gpu_util}<small>%</small></dd></div>
+    <div title="Peak GPU memory of 80 GB"><dt>mem</dt><dd>${r.gpu_mem}<small> GB</small></dd></div>
+    <div title="SLURM wall time used of the limit"><dt>wall</dt><dd>${r.slurm.time.slice(0, 4)}<small> / ${r.slurm.limit.slice(0, 4)}</small></dd></div>
+    <div title="${r.slurm.time} × 2 GPUs × $${h.rate.toFixed(2)}"><dt>cost</dt><dd>$1.87</dd></div>`;
+  if (r.state === "stale") return common + `
+    <div title="No heartbeat from dgx since ${r.last_event}"><dt>unreachable</dt><dd>${r.unreachable.replace("m", "<small>m</small>")}</dd></div>
+    <div title="ssh retries since ${r.last_event}, every 30 s"><dt>retries</dt><dd>${r.tries}</dd></div>
+    <div title="Last metrics line written"><dt>last event</dt><dd>${r.last_event.slice(0, 5)}</dd></div>`;
+  return common + `
+    <div title="Last checkpoint saved before the node failed"><dt>last ckpt</dt><dd>${kStep(r.ckpt)}</dd></div>
+    <div title="Wall time before the node failed"><dt>ran</dt><dd>52<small>m</small></dd></div>
+    <div title="${r.slurm.time} × 2 GPUs × $${h.rate.toFixed(2)}"><dt>cost</dt><dd>$0.87</dd></div>`;
+}
+function alertBar(r) {
+  if (r.state === "stale") return `<div class="selbar"><span class="st"><b>dgx unreachable ${r.unreachable}</b></span><span title="Last metrics line">last event ${r.last_event}, step ${r.step.toLocaleString("en-US")}</span><span title="ssh retries every 30 s">retry ${r.tries}, next ${r.retry_in}</span><span class="r"><span class="small" title="hx marks a run lost after 30 min without heartbeat">lost at 14:58</span></span></div>`;
+  if (r.state === "lost") return `<div class="selbar lost"><span class="st" title="${esc(r.reason_long)}"><b>${r.reason}</b></span><span>${r.slurm.node}, ${r.last_event}</span><span>no exit code, no final metrics</span><span class="r"><span class="small" title="Checkpoint on disk">ckpt ${kStep(r.ckpt)} ✓</span></span></div>`;
+  return "";
+}
+function placementHtml(r) {
+  const h = hostById[r.host];
+  const row = (k, v, tip = "", copy = "") => `<div class="root"><span class="k"${tip ? ` title="${esc(tip)}"` : ""}>${k}</span><span>${v}</span>${copy ? copyBtn(copy, k) : "<span></span>"}</div>`;
+  const hostV = `<b style="font-weight:600">${esc(h.name)}</b> <span class="kind">${h.kind}</span><span class="small" style="display:block">${esc(h.addr)}</span>`;
+  let out = row("Host", hostV, "", h.addr);
+  if (r.state === "queued") {
+    out += row("GPUs", `${r.gpus}× ${esc(h.gpu_name)} <span class="small">assigned at start</span>`, "CUDA_VISIBLE_DEVICES is set when GPUs free up");
+    out += row("Queue", `${r.pos} of ${r.of} <span class="small">since ${r.queued_at}</span>`);
+    return out;
+  }
+  if (r.slurm) {
+    out += row("Job", `<span class="p">${r.slurm.job}</span> <span class="small">${r.state === "lost" ? "NODE_FAIL" : "RUNNING"}</span>`, "SLURM job id", r.slurm.job);
+    out += row("Node", `<span class="p">${r.slurm.node}</span> <span class="small">partition ${r.slurm.partition}</span>`, "", r.slurm.node);
+    out += row("Wall", `${r.slurm.time} <span class="small">/ ${r.slurm.limit}</span>`, "--time");
+  }
+  out += row("GPUs", `<span class="p">CUDA_VISIBLE_DEVICES=${r.cvd}</span> <span class="small">${r.gpus}× ${h.gpu_name ? h.gpu_name.split(" ")[0] : "A100"}</span>`, r.slurm ? `--gres=${r.slurm.gres}` : "", `CUDA_VISIBLE_DEVICES=${r.cvd}`);
+  if (r.pid) out += row("PID", `<span class="p">${r.pid}</span> <span class="small">${r.state === "stale" ? `as of ${r.last_event}` : `heartbeat ${r.heartbeat}`}</span>`);
+  return out;
+}
+function pathsHtml(r) {
+  const h = hostById[r.host], rel = abs => abs.slice(r.run_dir.length + 1), pending = r.state === "queued";
+  const kid = (sub, what = "", br = "├") => `<li><span class="br">${br}</span><span class="p">${esc(sub)}</span><span class="what">${what}</span>${pending ? "<span></span>" : copyBtn(`${h.id}:${r.run_dir}/${sub}`)}</li>`;
+  return `<div class="cmdrow"><div class="tree"><span class="k">Command</span></div><div><code class="cmd">${esc(r.command)}</code></div></div>
+    <div class="tree">
+      <div class="root"><span class="k" title="Working directory">Project</span><span>${hpHtml(h.id, r.repo)}</span>${copyBtn(`${h.id}:${r.repo}`)}</div>
+      <p class="gitline"><span class="p">${esc(r.git.branch)} @ ${esc(r.git.commit)}</span>&nbsp; clean</p>
+      <div class="root${pending ? " dim" : ""}"><span class="k" title="${pending ? "Created when the run starts" : "Everything this run wrote"}">Run</span><span>${hpHtml(h.id, r.run_dir)}${pending ? ` <span class="small">not yet</span>` : ""}</span>${pending ? "<span></span>" : copyBtn(`${h.id}:${r.run_dir}`)}</div>
+      ${pending ? "" : `<ul class="kids">${kid("logs/stdout.log", r.state === "stale" ? `as of ${r.last_event.slice(0, 5)}` : "")}${kid("logs/stderr.log", r.state === "lost" ? "no exit" : "")}${kid("metrics.jsonl", `${Math.round(r.step / 100) + Math.round(r.step / 500)} rows`)}${r.slurm ? kid(`slurm-${r.slurm.job}.out`, "") : ""}${kid("ckpt/", r.state === "lost" ? "6 files, 3.2 GB" : r.state === "stale" ? "4 files, 2.1 GB" : "3 files, 1.6 GB", "└")}</ul>`}
+    </div>`;
+}
+function queueHtml(r) {
+  const h = hostById[r.host];
+  const rows = [...r.ahead, { pos: r.pos, run: r.short, label: r.title, who: r.created_by, gpus: r.gpus, wait: "11m", me: true }, ...r.behind];
+  return `<div class="hosts"><div class="hrow head" style="grid-template-columns:minmax(0,1fr)"><div class="gidx">${[...Array(8)].map((_, i) => `<span>${i}</span>`).join("")}</div></div>
+    <div style="padding:10px 0 0">${cellsHtml(h)}</div></div>
+    <table class="runs" style="margin-top:28px"><thead><tr><th>pos</th><th>run</th><th>config</th><th></th><th class="r">GPUs</th><th class="r">waiting</th></tr></thead>
+    <tbody>${rows.map(q => `<tr class="${q.me ? "sel" : ""}"><td>${q.pos}</td><td><span class="st">${GL.queued}${q.me ? `<b style="font-weight:600">${q.run}</b>` : `<a href="#run/queued">${q.run}</a>`}</span></td><td>${esc(q.label)}</td><td>${whoHtml(q.who)}</td><td class="r">${q.gpus}</td><td class="r">${q.wait}</td></tr>`).join("")}</tbody></table>`;
+}
+function drawRunCurve(r) {
+  const el = $("#runCurve"); if (!el || !el.offsetParent) return;
+  const W = el.clientWidth, LW = 86, PR = 10, rowH = [150, 150], gap = 22;
+  const XEND = Math.min(r.steps, Math.ceil(r.step * 1.35 / 2000) * 2000);
+  const X = s => LW + (s / XEND) * (W - LW - PR);
+  const yLoss = { lo: 0.08, hi: 0.56, top: 6 }, yTop = { lo: 0.80, hi: 0.92, top: 6 + rowH[0] + gap };
+  const Y = (o, h) => v => o.top + h - ((v - o.lo) / (o.hi - o.lo)) * h;
+  const YL = Y(yLoss, rowH[0]), YT = Y(yTop, rowH[1]);
+  const yAx = yTop.top + rowH[1] + 8;
+  const c = r.curve, last = c.train.at(-1), lastV = c.val.at(-1);
+  let h = "";
+  /* steps not yet run */
+  h += S.rect(X(r.step), yLoss.top, X(XEND) - X(r.step), yAx - yLoss.top, "todo");
+  [0.1, 0.3, 0.5].forEach(t => (h += S.line(LW, YL(t), W - PR, YL(t), "grid") + S.text(LW - 8, YL(t) + 4, t.toFixed(1), "tk", "end")));
+  [0.82, 0.86, 0.90].forEach(t => (h += S.line(LW, YT(t), W - PR, YT(t), "grid") + S.text(LW - 8, YT(t) + 4, t.toFixed(2), "tk", "end")));
+  h += S.text(0, yLoss.top + rowH[0] / 2, "train loss", "lbl");
+  h += S.text(0, yTop.top + rowH[1] / 2, "val top‑1", "lbl");
+  h += path(c.train, X, YL, "raw");
+  const ema = []; let e = c.train[0][1]; c.train.forEach(p => { e = 0.85 * e + 0.15 * p[1]; ema.push([p[0], e]); });
+  h += path(ema, X, YL, "ml");
+  h += path(c.val, X, YT, "ml");
+  c.val.forEach((p, i) => { if (p[0] % 2000 === 0) h += S.circ(X(p[0]), YT(p[1]), 3, "ck"); });
+  /* the state mark at the last event */
+  const xe = X(r.step);
+  if (r.state === "running") {
+    h += S.line(xe, yLoss.top, xe, yAx, "now");
+    h += S.text(xe + 6, yLoss.top + 12, `now, ${kStep(r.step)}`, "lbl-s");
+    h += S.circ(xe, YT(lastV[1]), 4.5, "mean");
+  } else if (r.state === "stale") {
+    h += S.line(xe, yLoss.top, xe, yAx, "now");
+    h += S.text(xe + 6, yLoss.top + 12, `last event ${r.last_event.slice(0, 5)}`, "lbl-b");
+    h += `<path d="M${xe} ${YT(lastV[1])}H${xe + 70}" class="gone"/>` + S.circ(xe, YT(lastV[1]), 4.5, "ck");
+    h += `<path d="M${xe} ${YL(ema.at(-1)[1])}H${xe + 70}" class="gone"/>`;
+  } else {
+    h += S.line(xe, yLoss.top, xe, yAx, "now");
+    h += S.text(xe + 8, yLoss.top + 12, `${r.reason} ${r.last_event.slice(0, 5)}`, "lbl-b");
+    h += S.cross(xe, YT(lastV[1]), 4.5) + S.cross(xe, YL(ema.at(-1)[1]), 4.5);
+    h += S.line(X(r.ckpt), YT(0.80), X(r.ckpt), yAx, "lead") ;
+    h += S.circ(X(r.ckpt), YT(c.val.find(p => p[0] === r.ckpt)[1]), 4.5, "mean");
+    h += S.text(X(r.ckpt) - 6, yAx - 8, `ckpt ${kStep(r.ckpt)}`, "lbl-s", "end");
+  }
+  h += S.line(LW, yAx, W - PR, yAx, "axis");
+  const tickEvery = XEND > 10000 ? 4000 : 2000;
+  for (let s = 0; s <= XEND; s += tickEvery) h += S.line(X(s), yAx, X(s), yAx + 4, "axis") + S.text(X(s), yAx + 17, kStep(s), "tk", "middle");
+  h += S.text(W - PR, yAx + 36, `step, of ${kStep(r.steps)}`, "lbl-s", "end");
+  /* hover: nearest val point */
+  c.val.forEach(p => (h += `<rect x="${X(p[0]) - 6}" y="${yLoss.top}" width="12" height="${yAx - yLoss.top}" class="hit" data-tip="${esc(`step ${p[0].toLocaleString("en-US")}\nval top-1 ${f4(p[1])}\ntrain ${(c.train.find(t => t[0] === p[0]) || last)[1].toFixed(3)}`)}"/>`));
+  el.innerHTML = S.svg(W, yAx + 42, h, `role="img" aria-label="Train loss and val top-1 up to step ${r.step}" style="overflow:visible;pointer-events:auto"`);
+}
+function renderRun() {
+  const r = HX.runs[RSTATE], h = hostById[r.host];
+  const verb = { queued: `queued ${r.pos}${r.pos === 2 ? "nd" : "th"} on ${h.name}`, running: `${f4(r.curve ? r.curve.val.at(-1)[1] : 0)} val top‑1 at ${kStep(r.step)}`, stale: `stale since ${r.last_event ? r.last_event.slice(0, 5) : ""}`, lost: `lost at ${kStep(r.step)}` }[r.state];
+  $("#v-run").innerHTML = `
+    <p class="crumb"><a href="#overview">${esc(HX.project)}</a><span class="sep">/</span><a href="#launch">${esc(HX.task)}</a>${r.sweep ? `<span class="sep">/</span><a href="#sweep">sweep ${esc(r.sweep)}</a>` : ""}<span class="sep">/</span>${esc(r.run_id)}</p>
+    <div class="run-top">
+      <div>
+        <h1 class="finding" id="run-h">${esc(r.title)}: ${verb}</h1>
+        <div class="metaline">
+          ${stateLine(r)}
+          ${whoHtml(r.created_by)}
+          <span class="p">${esc(r.git.branch)} @ ${esc(r.git.commit)}</span>
+          <span class="kind">training</span>
+        </div>
+      </div>
+      <div class="actions">${runActions(r)}</div>
+    </div>
+    ${alertBar(r)}
+    <div class="run-stats"><dl class="stats">${runStats(r)}</dl></div>
+    <div class="run-grid">
+      <div class="col">
+        <div class="fig">${r.state === "queued"
+          ? `<div class="fig-h"><span class="pl">a</span><span class="t">Queue</span><span class="aside">${esc(h.name)}, ${h.queue} waiting</span></div>${queueHtml(r)}`
+          : `<div class="fig-h"><span class="pl">a</span><span class="t">Curves</span><span class="aside">${r.short}</span></div><div id="runCurve"></div>
+             <div class="key"><span><svg width="22" height="12"><path d="M1 6H21" class="ml"/></svg>train EMA, val</span><span><svg width="22" height="12"><path d="M1 4L5 8L9 3L13 7L17 4L21 6" class="raw" style="opacity:.9"/></svg>train</span><span><svg width="12" height="12">${S.circ(6, 6, 3, "ck")}</svg>ckpt</span><span><svg width="20" height="12"><rect x="0" y="0" width="20" height="12" class="todo"/></svg>to go</span>${r.state === "stale" ? `<span><svg width="22" height="12"><path d="M1 6H21" class="gone"/></svg>no data</span>` : ""}${r.state === "lost" ? `<span><svg width="12" height="12">${S.cross(6, 6, 4)}</svg>lost</span>` : ""}</div>`}
+        </div>
+      </div>
+      <div class="col">
+        <div class="fig"><div class="fig-h"><span class="pl">b</span><span class="t">Placement</span><span class="aside">${r.slurm ? "slurm" : "ssh"}</span></div><div class="tree">${placementHtml(r)}</div></div>
+      </div>
+    </div>
+    <div class="fig" style="max-width:860px"><div class="fig-h"><span class="pl">c</span><span class="t">Paths</span><span class="aside"><span class="host" title="Run host">${esc(h.id)}</span></span></div>${pathsHtml(r)}</div>`;
+  $("#runTab").textContent = "Run " + r.short;
+  $("#runTab").setAttribute("href", "#run/" + RSTATE);
+  drawRunCurve(r);
+}
+
+/* ================================================================== routing, theme, toast, tips */
+const VIEWS = ["overview", "task", "sweep", "run"];
+function show() {
+  const parts = (location.hash || "#overview").slice(1).split("/");
+  let v = parts[0];
+  $("#ovl").hidden = true;
+  if (v === "launch") v = "task";
+  if (!VIEWS.includes(v)) v = "overview";
+  VIEWS.forEach(k => ($("#v-" + k).hidden = k !== v));
+  document.querySelectorAll(".tabs a").forEach(a => {
+    const t = a.getAttribute("href").slice(1).split("/")[0];
+    if ((t === "launch" ? "task" : t) === v) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+  });
+  if (v === "overview") renderOverview();
+  if (v === "task") { renderTask(); if (parts[0] === "launch") openLaunch(parts[1] || "gpu1"); }
+  if (v === "sweep") renderSweep();
+  if (v === "run") { RSTATE = HX.runs[parts[1]] ? parts[1] : RSTATE; renderRun(); }
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", show);
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(show, 150); });
+
+function setThemeLabel() { $("#themeLbl").textContent = document.documentElement.dataset.theme === "dark" ? "Light" : "Dark"; }
+$("#themeBtn").addEventListener("click", () => {
+  const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = t; localStorage.setItem("hx-theme", t); setThemeLabel();
+});
+let toastT;
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("on"), 2400); }
+document.addEventListener("click", e => {
+  const c = e.target.closest("[data-copy]");
+  if (c) { navigator.clipboard && navigator.clipboard.writeText(c.dataset.copy).catch(() => {}); toast("Copied " + c.dataset.copy); return; }
+  const t = e.target.closest("[data-toast]"); if (t) toast(t.dataset.toast);
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#ovl").hidden) { $("#ovl").hidden = true; } });
+const tip = $("#tip");
+document.addEventListener("mousemove", e => {
+  const t = e.target.closest && e.target.closest("[data-tip]");
+  if (!t) { tip.classList.remove("on"); return; }
+  tip.innerHTML = esc(t.getAttribute("data-tip")).replace(/\n/g, "<br>");
+  tip.style.left = Math.min(innerWidth - 360, e.clientX + 14) + "px"; tip.style.top = (e.clientY + 16) + "px";
+  tip.classList.add("on");
+});
+setThemeLabel();
+document.fonts.ready.then(show);
+</script>
+</body>
+</html>

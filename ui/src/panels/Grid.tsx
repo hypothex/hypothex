@@ -5,8 +5,8 @@
 import type { CSSProperties } from "react";
 import type { GridRow } from "../api/models";
 import { FS, useElementWidth } from "../charts/Scale";
+import { fmtNum } from "../charts/valueFormat";
 import type { PanelResult } from "./index";
-import { fmtNum } from "./Table";
 
 /** One grid cell (contract 1.6). */
 export type { GridRow };

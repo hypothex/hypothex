@@ -7,6 +7,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
+import { useStreamStatus } from "../api/events";
 import { ThemeToggle } from "./ThemeToggle";
 
 export type Screen = "overview" | "task" | "run" | "examples";
@@ -53,10 +54,31 @@ export function updateRecent(prev: RecentTargets, pathname: string, search: Reco
   }
 }
 
+type Json = Record<string, unknown>;
+
+const isObject = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
+const isName = (v: unknown): v is string => typeof v === "string" && v !== "";
+
+/** The well-formed entries of a stored value; anything else (old or corrupt) is dropped. */
+export function parseRecent(value: unknown): RecentTargets {
+  if (!isObject(value)) return {};
+  const out: RecentTargets = {};
+  const { task, run, examples } = value;
+  if (isObject(task) && isName(task.project) && isName(task.task)) {
+    out.task = { project: task.project, task: task.task };
+  }
+  if (isObject(run) && isName(run.runId)) out.run = { runId: run.runId };
+  if (isObject(examples) && isName(examples.a) && isName(examples.b)) {
+    out.examples = { a: examples.a, b: examples.b };
+    if (isName(examples.metric)) out.examples.metric = examples.metric;
+  }
+  return out;
+}
+
 function loadRecent(): RecentTargets {
   try {
     const raw = localStorage.getItem(RECENT_KEY);
-    return raw ? (JSON.parse(raw) as RecentTargets) : {};
+    return raw ? parseRecent(JSON.parse(raw)) : {};
   } catch {
     return {};
   }
@@ -95,6 +117,27 @@ function BrandMark() {
 /** "⌘K" on Apple platforms, "Ctrl K" elsewhere. */
 export function paletteShortcut(platform: string = navigator.platform): string {
   return /Mac|iPhone|iPad/.test(platform) ? "⌘K" : "Ctrl K";
+}
+
+/** A dot and word while live updates are down; nothing while they are live. */
+function LiveStatus() {
+  const status = useStreamStatus();
+  if (status === "ready") return null;
+  const offline = status === "offline";
+  return (
+    <span
+      className={offline ? "live off" : "live"}
+      role="status"
+      aria-label={`Live updates ${offline ? "off" : "reconnecting"}`}
+      title={
+        offline
+          ? "Live updates are off: data is not live, reload to reconnect"
+          : "Reconnecting live updates: data is not live yet"
+      }
+    >
+      {offline ? "● offline" : "● connecting"}
+    </span>
+  );
 }
 
 export interface HeaderProps {
@@ -148,6 +191,7 @@ export function Header({ onFind }: HeaderProps) {
           )}
         </nav>
         <div className="bar-r">
+          <LiveStatus />
           <button className="find" id="findBtn" type="button" aria-haspopup="dialog" onClick={onFind}>
             <span>Find a run, task or path</span>
             <kbd>{paletteShortcut()}</kbd>

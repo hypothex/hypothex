@@ -72,9 +72,11 @@ Start a stage in the background; check progress with ``hx logs`` or ``hx show``.
 
 Rerun with the same command, commit, config, and seed. If the repo has moved on
 (new commit or different uncommitted diff), the rerun uses a fresh git worktree at
-the recorded commit with the saved diff applied. If the repo itself moved and the
-project was re-registered at the new path, the working directory is mapped onto
-the new location.
+the recorded commit with the saved diff applied; ``{repo}``, dataset paths, and the
+captured environment then point into that worktree, and the run is scored with its
+metric code. When the run ends, the worktree is removed unless the run left files in
+it (outputs, checkpoints). If the repo itself moved and the project was re-registered
+at the new path, the working directory is mapped onto the new location.
 
 .. code-block:: bash
 
@@ -210,6 +212,15 @@ Servers
 Serve the HTTP/WebSocket API on ``127.0.0.1:7777``, and the UI at
 ``http://127.0.0.1:7777/`` when the package contains a UI build
 (``src/hypothex/ui_dist``; ``cd ui && bun run build`` makes one).
+
+``--host`` other than a loopback address (``127.0.0.1``, ``::1``, ``localhost``)
+is refused unless ``HYPOTHEX_SERVE_TOKEN`` is set, because the API starts
+arbitrary commands. With the token set, every request except the environment
+descriptor needs ``Authorization: Bearer <token>``:
+
+.. code-block:: bash
+
+   HYPOTHEX_SERVE_TOKEN=$(openssl rand -hex 24) hx serve --host 0.0.0.0
 
 .. code-block:: bash
 

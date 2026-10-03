@@ -254,3 +254,33 @@ def test_log_checkpoint_records_step_and_metrics(run_env: Path, tmp_path: Path) 
     with pytest.raises(ValueError, match="checkpoint metric 'val' must be a finite number"):
         run.log_checkpoint(ckpt, step=200, metrics={"val": float("inf")})
     assert len(_lines(run_env / "artifacts.jsonl")) == 1
+
+
+def test_log_skips_non_finite_values_with_a_warning(run_env: Path) -> None:
+    run = hx.current()
+    with pytest.warns(RuntimeWarning, match="loss"):
+        run.log({"loss": float("nan"), "acc": 0.5})
+    with pytest.warns(RuntimeWarning, match="loss"):
+        run.log({"loss": float("inf")})
+    run.log({"loss": 0.25})
+    rows = _lines(run_env / "metrics.jsonl")
+    assert [(r["name"], r["step"], r["value"]) for r in rows] == [
+        ("acc", 0, 0.5),
+        ("loss", 2, 0.25),
+    ]
+
+
+def test_log_records_non_finite_values_as_divergence_markers(run_env: Path) -> None:
+    run = hx.current()
+    with pytest.warns(RuntimeWarning):
+        run.log({"loss": float("nan"), "acc": 0.5})
+    with pytest.warns(RuntimeWarning):
+        run.log({"loss": float("inf"), "grad": float("-inf")}, step=7)
+    rows = _lines(run_env / "metrics_nonfinite.jsonl")
+    assert [(r["name"], r["step"], r["value"]) for r in rows] == [
+        ("loss", 0, "nan"),
+        ("loss", 7, "inf"),
+        ("grad", 7, "-inf"),
+    ]
+    assert all(isinstance(r["t"], float) for r in rows)
+    assert len(_lines(run_env / "metrics.jsonl")) == 1  # only acc

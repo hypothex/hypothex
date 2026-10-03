@@ -2,11 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { PanelResult } from "../../src/panels/index";
 import { MINUS } from "../../src/charts/Scale";
+import { fmtNum, fmtSigned } from "../../src/charts/valueFormat";
 import {
   columnLabel,
   fmtCell,
-  fmtNum,
-  fmtSigned,
   panelColumns,
   ROW_CAP,
   sortRows,

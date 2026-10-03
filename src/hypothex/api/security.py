@@ -14,19 +14,60 @@ from this machine. A web page in the user's browser can reach
 
 Non-browser clients (CLI, MCP clients, ``curl``) send no ``Origin`` header
 and are unaffected.
+
+Neither check is authentication: any client that is not a browser can send
+``Host: localhost``. So ``hx serve`` binds a non-loopback address only with a
+bearer token (``HYPOTHEX_SERVE_TOKEN``), which :class:`TokenGuard` enforces on
+every request except the public descriptor.
 """
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
 from urllib.parse import urlsplit
 
 from starlette.datastructures import Headers
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 WILDCARD_BINDS = frozenset({"", "0.0.0.0", "::", "[::]", "*"})
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+PUBLIC_PREFIX = "/.well-known/hypothex/"
+"""The descriptor stays open: ``start.sh`` and the hub read it to find the server."""
+
+
+def is_loopback_bind(bind_host: str) -> bool:
+    """
+    Tell whether a bind address only accepts connections from this machine.
+
+    Parameters
+    ----------
+    bind_host : str
+        The ``--host`` given to ``hx serve``.
+
+    Returns
+    -------
+    bool
+        ``True`` for ``localhost`` and loopback IPs (``127.0.0.0/8``, ``::1``);
+        ``False`` for wildcards (``0.0.0.0``, ``::``), other IPs, and other
+        host names, which may resolve to a public interface.
+
+    Examples
+    --------
+    >>> is_loopback_bind("127.0.0.1"), is_loopback_bind("[::1]")
+    (True, True)
+    >>> is_loopback_bind("0.0.0.0"), is_loopback_bind("192.168.1.5")
+    (False, False)
+    """
+    host = bind_host.strip()
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.removeprefix("[").removesuffix("]")).is_loopback
+    except ValueError:
+        return False
 
 
 def allowed_hosts(bind_host: str | None = None) -> list[str]:
@@ -142,3 +183,50 @@ class OriginGuard:
                 await response(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+class TokenGuard:
+    """
+    Require ``Authorization: Bearer <token>`` on every HTTP and WebSocket request.
+
+    Only paths under ``PUBLIC_PREFIX`` (the environment descriptor) stay open.
+    A missing or wrong token gets ``401`` with ``{error, type: "AuthError"}``;
+    a WebSocket handshake is closed with code ``1008``.
+
+    Parameters
+    ----------
+    app : ASGIApp
+        The wrapped application.
+    token : str
+        The server's token (``HYPOTHEX_SERVE_TOKEN``).
+    """
+
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self.app = app
+        self._expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """
+        Pass requests that carry the token (or ask for the descriptor).
+
+        Parameters
+        ----------
+        scope : Scope
+        receive : Receive
+        send : Send
+        """
+        if scope["type"] not in ("http", "websocket") or scope["path"].startswith(PUBLIC_PREFIX):
+            await self.app(scope, receive, send)
+            return
+        given = Headers(scope=scope).get("authorization", "").encode()
+        if hmac.compare_digest(given, self._expected):
+            await self.app(scope, receive, send)
+            return
+        if scope["type"] == "websocket":
+            await receive()  # websocket.connect
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        response = JSONResponse(
+            {"error": "missing or wrong bearer token", "type": "AuthError"}, status_code=401
+        )
+        await response(scope, receive, send)

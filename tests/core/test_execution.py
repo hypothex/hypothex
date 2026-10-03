@@ -1,8 +1,13 @@
+import os
+import resource
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
+from hypothex.core import execution
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
@@ -207,3 +212,114 @@ def test_checkpoints_keep_step_and_metrics(ctx: Context, toy_repo: Path, tmp_pat
         ("checkpoint", str(step_100.resolve()), 100, {"val_top1": 0.5}),
         ("checkpoint", str(last.resolve()), 200, {"val_top1": 0.75}),  # latest entry wins
     ]
+
+
+# review fixes -----------------------------------------------------------------------------
+NON_FINITE = (
+    "import os; d = os.environ['HYPOTHEX_RUN_DIR']; f = open(d + '/metrics.jsonl', 'a'); "
+    'f.write(\'{"name": "loss", "step": 1, "value": 0.5}\\n\'); '
+    'f.write(\'{"name": "loss", "step": 2, "value": NaN}\\n\'); '
+    'f.write(\'{"name": "loss", "step": 3, "value": Infinity}\\n\'); print(\'trained\')'
+)
+
+
+def test_non_finite_metric_values_do_not_break_the_run_or_the_index(
+    ctx: Context, toy_repo: Path
+) -> None:
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(NON_FINITE)))
+    assert done.status == RunStatus.FINISHED and done.exit_code == 0 and done.ended_at
+    assert [(p.step, p.value) for p in ctx.index.metric_points(done.run_id)] == [(1, 0.5)]
+    ctx.layout.index_db.unlink()
+    reopened = Context.open(ctx.layout.home)
+    assert reopened.index.get_run(done.run_id) is not None
+    assert [p.value for p in reopened.index.metric_points(done.run_id)] == [0.5]
+
+
+def test_index_refresh_failure_still_finishes_the_run(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("index is broken")
+
+    monkeypatch.setattr(ctx.index, "replace_metric_points", boom)
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd("print(1)")))
+    assert done.status == RunStatus.FINISHED and done.exit_code == 0
+    warnings = [e.payload["message"] for e in _warning_events(ctx, done.run_id)]
+    assert any("index is broken" in w for w in warnings)
+
+
+def test_background_process_left_running_does_not_hold_the_run(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import execution
+
+    monkeypatch.setattr(execution, "PUMP_DRAIN_SECONDS", 0.5)
+    start = time.monotonic()
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=["sh", "-c", "sleep 30 & echo main-done"]))
+    try:
+        assert time.monotonic() - start < 10
+        assert done.status == RunStatus.FINISHED and done.exit_code == 0
+        assert (ctx.run_dir(done) / "logs" / "stdout.log").read_text().strip() == "main-done"
+        warnings = [e.payload["message"] for e in _warning_events(ctx, done.run_id)]
+        assert any("still open" in w for w in warnings)
+    finally:
+        execution.terminate_group(done.executor.child_pid or 0, grace=1)
+
+
+@pytest.mark.parametrize("name", ["run_dir", "run_id", "repo", "task", "seed", "dataset.path"])
+def test_vars_cannot_override_hypothex_template_values(
+    ctx: Context, toy_repo: Path, name: str
+) -> None:
+    req = RunRequest(repo=toy_repo, command=cmd("print(1)"), vars={name: "/elsewhere"})
+    with pytest.raises(RunError, match=f"{name} is set by Hypothex"):
+        prepare_run(ctx, req)
+    assert ctx.store.list_run_ids() == {}
+
+
+def test_checkpoint_var_is_still_allowed(ctx: Context, toy_repo: Path) -> None:
+    req = RunRequest(
+        repo=toy_repo, command=cmd("print(1)", "{checkpoint}"), vars={"checkpoint": "x"}
+    )
+    assert prepare_run(ctx, req).command[-1] == "x"
+
+
+def test_unexpected_eval_error_is_recorded_as_eval_skipped(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import execution
+
+    def malformed(*args: object, **kwargs: object) -> None:
+        raise KeyError("results")
+
+    monkeypatch.setattr(execution, "evaluate_run", malformed)
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(WRITE_PREDS), task="toy-acc"))
+    assert done.status == RunStatus.FINISHED
+    skipped = [e for e in ctx.events.since(0) if e.type == "run.eval_skipped"]
+    assert skipped and "results" in skipped[0].payload["reason"]
+
+
+def test_pump_reads_a_pipe_on_a_file_descriptor_above_1024(tmp_path: Path) -> None:
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    high = 1500
+    if soft <= high:
+        if hard != resource.RLIM_INFINITY and hard <= high:
+            pytest.skip("cannot open a file descriptor above 1024")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (high + 1, hard))
+    r, w = os.pipe()
+    try:
+        os.dup2(r, high)
+        os.close(r)
+        src = os.fdopen(high, "rb", buffering=0)
+        log = tmp_path / "out.log"
+        thread = execution._pump(src, log, None, threading.Event())
+        os.write(w, b"hello\n")
+        os.close(w)
+        w = -1
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert log.read_bytes() == b"hello\n"
+        src.close()
+    finally:
+        if w >= 0:
+            os.close(w)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))

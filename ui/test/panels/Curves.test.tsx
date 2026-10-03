@@ -193,6 +193,54 @@ describe("Curves panel", () => {
     ]);
   });
 
+  test("a non-finite value is drawn like a spike, labelled NaN <step>", () => {
+    const meta = {
+      ...META,
+      events: [{ run_id: "b1", step: 700, kind: "nonfinite" }, ...META.events],
+    };
+    const { container } = render(<Curves result={result(points(), meta)} />);
+    const chart = container.querySelector("svg[role=img]") as SVGElement;
+    const base = chart.querySelector('.curve-col[data-group="base"]') as Element;
+    const marks = base.querySelectorAll(".event.nonfinite");
+    expect(marks.length).toBe(3);
+    expect(base.querySelectorAll(".event.nonfinite line.ev").length).toBe(3);
+    expect(base.querySelectorAll(".event.nonfinite path.evg").length).toBe(1);
+    expect(base.querySelector(".event.nonfinite text.lbl-s")?.textContent).toBe("NaN 700");
+    expect(base.querySelector(".event.nonfinite title")?.textContent).toBe("NaN 700");
+    // no clip caret: a NaN has no value to point at
+    expect(base.querySelectorAll(".event.nonfinite .clip-caret").length).toBe(0);
+    // the y-domain is not changed by it
+    expect(buildCurves(points(), meta).scales).toEqual(buildCurves(points(), META).scales);
+    expect([...container.querySelectorAll(".key span")].map((s) => s.textContent)).toEqual([
+      "seed",
+      "mean",
+      "best ckpt",
+      "spike",
+      "NaN",
+      "killed",
+    ]);
+  });
+
+  test("a non-finite value after the last finite point stays on the chart", () => {
+    const meta = { ...META, events: [{ run_id: "b1", step: 9000, kind: "nonfinite" }] };
+    expect(buildCurves(points(), meta).maxStep).toBe(9000);
+    // an event of a run with no points (not drawn) never stretches the axis
+    const ghost = { ...META, events: [{ run_id: "zz", step: 9000, kind: "nonfinite" }] };
+    expect(buildCurves(points(), ghost).maxStep).toBe(1000);
+    const { container } = render(<Curves result={result(points(), meta)} />);
+    const base = container.querySelector('.curve-col[data-group="base"]') as Element;
+    const xs = [...base.querySelectorAll(".event.nonfinite line.ev")].map((l) => Number(l.getAttribute("x1")));
+    expect(xs.length).toBeGreaterThan(0);
+    // the NaN sits at the right end of the base column, never past it
+    const hit = container.querySelector('rect.hit[data-hit="base"]') as Element;
+    const x0 = Number(hit.getAttribute("x"));
+    const w = Number(hit.getAttribute("width"));
+    for (const x of xs) {
+      expect(x).toBeGreaterThan(x0 + 0.9 * w);
+      expect(x).toBeLessThanOrEqual(x0 + w + 0.5);
+    }
+  });
+
   test("hover shows every seed and the mean at the nearest step", () => {
     const { container } = render(<Curves result={result()} />);
     // Fallback width 960: colW = (960 - 104 - 36) / 2 = 410; step 300 sits at 104 + 0.3 * 410 = 227.

@@ -3,14 +3,16 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from mcp import Client
 from mcp.types import TextContent
 
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
+from hypothex.core.errors import RunError
 from hypothex.core.evaluation import evaluate_run
-from hypothex.mcp.server import build_server
+from hypothex.mcp.server import build_server, require_agent_hypothesis
 from tests.factories import PREDS_075, seed_finished_run
 
 EXPECTED_TOOLS = {
@@ -90,6 +92,30 @@ def test_launch_requires_hypothesis(home: Path, toy_repo: Path) -> None:
         home, "launch_run", {"repo": str(toy_repo), "hypothesis": " ", "command": ["true"]}
     )
     assert err and "hypothesis" in message
+
+
+def test_require_agent_hypothesis() -> None:
+    require_agent_hypothesis("human", "")  # people may launch without one
+    require_agent_hypothesis("api", " ")
+    require_agent_hypothesis("agent:claude", "bigger lr helps")
+    for hypothesis in ("", "  \n"):
+        with pytest.raises(RunError, match="hypothesis"):
+            require_agent_hypothesis("agent:claude", hypothesis)
+
+
+def test_build_server_uses_a_given_context(home: Path, tmp_path: Path, toy_repo: Path) -> None:
+    # $HYPOTHEX_HOME (``home``) is empty; the given Context is another home
+    other = Context.open(tmp_path / "other")
+    seed_finished_run(other, toy_repo, "r1", predictions=PREDS_075)
+    server = build_server(context=other)
+
+    async def go() -> Any:
+        async with Client(server) as client:
+            return await client.call_tool("list_runs", {})
+
+    result = asyncio.run(go())
+    assert not result.is_error
+    assert [r["run_id"] for r in result.structured_content["runs"]] == ["r1"]
 
 
 def test_reevaluate_note_and_tag(home: Path, ctx: Context, toy_repo: Path) -> None:

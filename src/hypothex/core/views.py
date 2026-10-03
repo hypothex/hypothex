@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from hypothex.core.config import (
     CONFIG_FILENAME,
+    NAME_PATTERN,
     RESERVED_VIEW_NAMES,
     VIEW_NAME_PATTERN,
     YAML_CYCLE,
@@ -635,11 +636,19 @@ def views_dir(repo: Path, task: str) -> Path:
     Path
         ``<repo>/.hypothex/views/<task>/``.
 
+    Raises
+    ------
+    ConfigError
+        If ``task`` is not a valid task name (``NAME_PATTERN``), so no path
+        can leave ``<repo>/.hypothex/views``.
+
     Examples
     --------
     >>> views_dir(Path("/r"), "t").as_posix()
     '/r/.hypothex/views/t'
     """
+    if re.fullmatch(NAME_PATTERN, task) is None:
+        raise ConfigError(f"task name {task!r} must match {NAME_PATTERN}")
     return repo / ".hypothex" / "views" / task
 
 

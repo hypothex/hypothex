@@ -13,6 +13,7 @@ import {
   YamlEditor,
   type YamlEditorHandle,
 } from "../editor/YamlEditor";
+import { shellJoin } from "./components/format";
 import { PanelBody } from "./components/PanelGrid";
 
 /** Starting text for `/t/:project/:task/edit/new`. */
@@ -34,7 +35,8 @@ export function metricOf(primary: string): string {
  * Shell text that saves `text` as view `name` with the CLI.
  *
  * `hx view add` reads a file, so the command writes one with a quoted heredoc
- * (no shell expansion inside) and then adds it.
+ * (no shell expansion inside) and then adds it. `project` and `task` come from the
+ * URL, so every argument is shell-quoted.
  */
 export function cliCommand(project: string, task: string, name: string, text: string): string {
   const body = text.endsWith("\n") ? text : `${text}\n`;
@@ -42,7 +44,8 @@ export function cliCommand(project: string, task: string, name: string, text: st
   let tag = "YAML";
   while (lines.has(tag)) tag = `${tag}_`;
   const file = `/tmp/hx-view-${name}.yaml`;
-  return `cat > ${file} <<'${tag}'\n${body}${tag}\nhx view add ${task} --file ${file} --name ${name} -p ${project}`;
+  const add = shellJoin(["hx", "view", "add", task, "--file", file, "--name", name, "-p", project]);
+  return `cat > ${shellJoin([file])} <<'${tag}'\n${body}${tag}\n${add}`;
 }
 
 function useDebounced<T>(value: T, ms: number): T {

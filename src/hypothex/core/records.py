@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import shlex
-from datetime import datetime
+from collections.abc import Callable
+from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -92,12 +94,45 @@ class UsageTotals(BaseModel):
 
 
 class ExecutorInfo(BaseModel):
-    """How the run's process is supervised."""
+    """
+    How and where the run's process is supervised.
+
+    ``host`` is the run's host name from the hub's ``environments.yaml``
+    (None on the hub itself). ``gpus`` holds the GPU indices given to the run
+    (its ``CUDA_VISIBLE_DEVICES``). ``slurm_job_id`` and ``node`` are set for
+    SLURM runs. ``queue_position`` is the 1-based place in the host's queue
+    while the run waits, else None.
+    """
 
     type: str = "local"
     pid: int | None = None
     pid_create_time: float | None = None
     child_pid: int | None = None
+    host: str | None = None
+    gpus: list[Annotated[int, Field(ge=0)]] = Field(default_factory=list)
+    slurm_job_id: str | None = None
+    node: str | None = None
+    queue_position: int | None = Field(default=None, ge=1)
+
+
+class CostTotals(BaseModel):
+    """
+    What a run cost; stored as ``RunRecord.cost`` when the run ends.
+
+    ``gpu_hours`` is wall time times the number of GPUs, ``gpu_usd`` prices
+    them at the host's ``usd_per_gpu_hour``, ``api_usd`` is ``usage.usd``,
+    and ``total_usd`` is ``gpu_usd + api_usd``. See ``hypothex.core.cost``.
+
+    Examples
+    --------
+    >>> CostTotals(gpu_hours=3.0, gpu_usd=6.3, api_usd=0.375, total_usd=6.675).total_usd
+    6.675
+    """
+
+    gpu_hours: float = 0.0
+    gpu_usd: float = 0.0
+    api_usd: float = 0.0
+    total_usd: float = 0.0
 
 
 class RunRecord(BaseModel):
@@ -135,6 +170,9 @@ class RunRecord(BaseModel):
     archived: bool = False
     created_by: str = "human"
     usage: UsageTotals | None = None
+    cost: CostTotals | None = None
+    sweep_id: str | None = None
+    gpus_requested: int = Field(default=0, ge=0)
 
     @property
     def command_display(self) -> str:
@@ -154,10 +192,70 @@ class ScoreRecord(BaseModel):
     created_at: datetime
 
 
+def end_unstarted(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
+    """
+    Build an ``update_run`` mutator that ends a run that never started.
+
+    The run gets ``status`` and ``ended_at``, and gives back what it only held
+    while it waited: its GPUs (``executor.gpus``) and its queue position. A run
+    that is no longer ``queued`` (it started or already ended) is left as it is.
+
+    Parameters
+    ----------
+    status : RunStatus
+        The terminal status, e.g. ``failed`` (could not start) or ``killed``
+        (removed from the queue).
+
+    Returns
+    -------
+    callable
+        Takes the current record and returns the ended one.
+
+    Examples
+    --------
+    >>> ctx.update_run(run_id, "run.failed", end_unstarted(RunStatus.FAILED))  # doctest: +SKIP
+    """
+
+    def mutate(r: RunRecord) -> RunRecord:
+        if r.status != RunStatus.QUEUED:
+            return r
+        executor = r.executor.model_copy(update={"gpus": [], "queue_position": None})
+        return r.model_copy(
+            update={"status": status, "ended_at": datetime.now(UTC), "executor": executor}
+        )
+
+    return mutate
+
+
 class MetricPoint(BaseModel):
-    """One step of a logged metric history; stored in ``metrics.jsonl``."""
+    """
+    One step of a logged metric history; stored in ``metrics.jsonl``.
+
+    ``value`` is finite: a ``NaN`` or infinite row (a diverged loss written by
+    an old SDK) fails validation, so readers skip it.
+    """
 
     name: str
     step: int
-    value: float
+    value: float = Field(allow_inf_nan=False)
+    t: float | None = None
+
+
+class NonFiniteMetric(BaseModel):
+    """
+    A ``NaN`` or infinite metric value the SDK did not log; stored in
+    ``metrics_nonfinite.jsonl``.
+
+    It marks where a run diverged; the curves panel shows it as a
+    ``nonfinite`` event.
+
+    Examples
+    --------
+    >>> NonFiniteMetric(name="loss", step=9000, value="nan").value
+    'nan'
+    """
+
+    name: str
+    step: int
+    value: Literal["nan", "inf", "-inf"]
     t: float | None = None

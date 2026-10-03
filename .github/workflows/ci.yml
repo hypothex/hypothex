@@ -17,6 +17,13 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --all-groups
+      # the bootstrap tests install the wheel offline with `uv tool install`; `uv sync`
+      # installs from the lockfile and caches no index pages, so resolve once online here
+      - name: Warm the uv cache for offline tool installs
+        run: uv tool install --python ${{ matrix.python }} .
+        env:
+          UV_TOOL_DIR: ${{ runner.temp }}/uv-tools
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/uv-bin
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run ty check src

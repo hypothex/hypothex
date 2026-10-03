@@ -39,8 +39,10 @@ export function useAction<T = unknown, A = void>({
     mutationFn: ({ commandId, arg }) => send(arg, { command_id: commandId, created_by: "human" }),
     retry: shouldRetry,
     retryDelay: ACTION_RETRY_DELAY_MS,
-    onSuccess: async (data) => {
-      await Promise.all(invalidate.map((queryKey) => client.invalidateQueries({ queryKey })));
+    // Mark the keys stale and refetch in the background: the button and the caller's
+    // `onSuccess` (often a navigation) must not wait for every refetch to land.
+    onSuccess: (data) => {
+      for (const queryKey of invalidate) void client.invalidateQueries({ queryKey });
       onSuccess?.(data);
     },
   });

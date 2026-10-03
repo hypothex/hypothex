@@ -45,7 +45,9 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
   const info = views.data?.find((v) => v.name === active) ?? detail.data?.info;
   const editable = info !== undefined && info.origin !== "preset";
   const viewError = detail.error ?? panels.error;
-  const ready = panels.data !== undefined && !detail.isPending;
+  // `useViewQuery` keeps the last view's panels while the next loads; they must not be
+  // drawn with the new view's specs, so wait for the active view's own data.
+  const ready = panels.data !== undefined && !panels.isPlaceholderData && !detail.isPending;
 
   return (
     <div className="page">

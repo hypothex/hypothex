@@ -29,7 +29,14 @@ from hypothex.core.fsutil import (
 )
 from hypothex.core.ids import utcnow
 from hypothex.core.layout import Layout
-from hypothex.core.records import Artifact, MetricPoint, RunRecord, ScoreRecord, UsageTotals
+from hypothex.core.records import (
+    Artifact,
+    MetricPoint,
+    NonFiniteMetric,
+    RunRecord,
+    ScoreRecord,
+    UsageTotals,
+)
 
 log = logging.getLogger(__name__)
 _M = TypeVar("_M", bound=BaseModel)
@@ -216,6 +223,8 @@ class ProjectEntry(BaseModel):
     config: ProjectConfig
     registered_at: datetime
     previous_repos: list[str] = Field(default_factory=list)
+    remote_host: str | None = None
+    """Set when the hub copied this entry from a host (the repo path is on that host)."""
 
 
 @contextmanager
@@ -305,6 +314,17 @@ class RunStore:
         )
         atomic_write_text(self._project_file(config.project), entry.model_dump_json(indent=2))
         return entry
+
+    def save_project(self, entry: ProjectEntry) -> None:
+        """
+        Atomically write a project entry as it is (the hub's copy of a host's project).
+
+        Parameters
+        ----------
+        entry : ProjectEntry
+            Entry to store.
+        """
+        atomic_write_text(self._project_file(entry.project), entry.model_dump_json(indent=2))
 
     def load_project(self, project: str) -> ProjectEntry:
         """
@@ -550,6 +570,26 @@ class RunStore:
             Points in the order written; malformed rows are skipped.
         """
         return _parse_rows(MetricPoint, self.layout.run_dir(project, run_id) / "metrics.jsonl")
+
+    def read_nonfinite_points(self, project: str, run_id: str) -> list[NonFiniteMetric]:
+        """
+        Read the ``NaN`` / infinite metric values the SDK recorded for a run.
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+        run_id : str
+            Run id.
+
+        Returns
+        -------
+        list of NonFiniteMetric
+            Rows of ``metrics_nonfinite.jsonl`` in the order written; malformed
+            rows are skipped.
+        """
+        path = self.layout.run_dir(project, run_id) / "metrics_nonfinite.jsonl"
+        return _parse_rows(NonFiniteMetric, path)
 
     def read_artifacts(self, project: str, run_id: str) -> list[Artifact]:
         """

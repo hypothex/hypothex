@@ -9,10 +9,16 @@ import {
   createQueryClient,
   queryKeys,
   shouldRetry,
+  useCompareExamples,
   useLeaderboard,
+  useRunPredictions,
   useSaveView,
+  useTask,
+  useTaskKind,
   useView,
+  useViewQuery,
 } from "../../src/api/queries";
+import { mockApi } from "../pages/helpers";
 import { mockRoutes } from "./fetch-mock";
 
 const realFetch = globalThis.fetch;
@@ -44,7 +50,7 @@ describe("queryKeys", () => {
     const hit = [
       queryKeys.runs({ project: "toy" }),
       queryKeys.run("r1"),
-      queryKeys.runMetrics("r1"),
+      queryKeys.runLogs("r1", "stdout"),
       queryKeys.tasks(),
       queryKeys.task("toy", "acc"),
       queryKeys.leaderboard("toy", "acc"),
@@ -87,6 +93,42 @@ describe("hooks", () => {
     expect(calls).toEqual([]);
   });
 
+  test("read hooks stay idle with enabled: false", async () => {
+    const calls = mockRoutes({});
+    const { wrapper } = setup();
+    const { result } = renderHook(
+      () => [
+        useTask("toy", "acc", { enabled: false }),
+        useLeaderboard("toy", "acc", [], { enabled: false }),
+        useTaskKind("toy", "acc", { enabled: false }),
+        useRunPredictions("r1", { metric: "accuracy" }, { enabled: false }),
+        useCompareExamples("r1", "r2", "accuracy", undefined, { enabled: false }),
+      ],
+      { wrapper },
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect(result.current.map((q) => q.fetchStatus)).toEqual(["idle", "idle", "idle", "idle", "idle"]);
+    expect(calls).toEqual([]);
+  });
+
+  test("useRunPredictions keeps the last page only when asked", async () => {
+    const page = { run_id: "r1", total: 0, offset: 0, limit: 1, rows: [] };
+    mockRoutes({ "/api/v1/runs/r1/predictions": page });
+    const { wrapper } = setup();
+    const { result, rerender } = renderHook(
+      ({ limit, keep }: { limit: number; keep: boolean }) =>
+        useRunPredictions("r1", { limit }, { keepPrevious: keep }),
+      { wrapper, initialProps: { limit: 1, keep: false } },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    rerender({ limit: 2, keep: false });
+    expect(result.current.data).toBeUndefined();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    rerender({ limit: 3, keep: true });
+    expect(result.current.isPlaceholderData).toBe(true);
+    expect(result.current.data).toEqual(page);
+  });
+
   test("useSaveView invalidates the view list, the document and panel queries of that task", async () => {
     mockRoutes({ "/api/v1/tasks/toy/acc/views/route": { info: { name: "route" }, view: { title: "r" } } });
     const { qc, wrapper } = setup();
@@ -99,5 +141,27 @@ describe("hooks", () => {
     act(() => result.current.mutate({ name: "route", text: "title: r\n" }));
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect([list, doc, panels, other].map((k) => invalidated(qc, k))).toEqual([true, true, true, false]);
+  });
+
+  test("useSaveView succeeds without waiting for the invalidated queries to refetch", async () => {
+    let queries = 0;
+    mockApi({
+      "POST /api/v1/tasks/toy/acc/views/query": () => {
+        queries += 1;
+        // The first load answers; the refetch after the save never does.
+        return queries === 1 ? { panels: [] } : new Promise(() => {});
+      },
+      "PUT /api/v1/tasks/toy/acc/views/route": { info: { name: "route" }, view: { title: "r" } },
+    });
+    const { wrapper } = setup();
+    const { result } = renderHook(
+      () => ({ panels: useViewQuery("toy", "acc", { name: "route" }), save: useSaveView("toy", "acc") }),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.panels.isSuccess).toBe(true));
+    act(() => result.current.save.mutate({ name: "route", text: "title: r\n" }));
+    await waitFor(() => expect(queries).toBe(2));
+    await waitFor(() => expect(result.current.save.isSuccess).toBe(true));
+    expect(result.current.panels.isFetching).toBe(true);
   });
 });

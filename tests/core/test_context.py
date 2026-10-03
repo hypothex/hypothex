@@ -1,3 +1,5 @@
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -52,3 +54,31 @@ def test_open_rebuilds_deleted_index(home: Path) -> None:
 def test_find_record_unknown(ctx: Context) -> None:
     with pytest.raises(RunNotFoundError):
         ctx.find_record("nope")
+
+
+def test_open_skips_the_store_scan_when_nothing_changed(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core.store import RunStore
+
+    ctx = Context.open(home)
+    ctx.create_run(make_record("r1"))
+    past = time.time() - 60  # settled: nothing changed in the last seconds
+    project = ctx.layout.project_dir("toy")
+    for folder in (ctx.layout.store, project, project / "runs"):
+        os.utime(folder, (past, past))
+    Context.open(home)  # the store changed since the last scan: this open scans it
+    scans: list[int] = []
+    real = RunStore.list_run_ids
+
+    def counting(self: RunStore) -> dict[str, str]:
+        scans.append(1)
+        return real(self)
+
+    monkeypatch.setattr(RunStore, "list_run_ids", counting)
+    for _ in range(3):
+        Context.open(home)
+    assert scans == []
+    ctx.store.create_run(make_record("orphan"))  # file written, index not
+    assert Context.open(home).index.get_run("orphan") is not None
+    assert scans == [1]

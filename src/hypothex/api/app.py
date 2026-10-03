@@ -4,34 +4,50 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import logging
-from collections.abc import AsyncIterator, Callable
+import os
+import stat
+import threading
+import time
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Annotated, Any
+from pathlib import Path, PurePosixPath
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 from starlette.types import Scope
 
 from hypothex._version import __version__
-from hypothex.api.security import OriginGuard, allowed_hosts
+from hypothex.api.security import OriginGuard, TokenGuard, allowed_hosts
 from hypothex.core import control
 from hypothex.core import queries as q
+from hypothex.core.config import parse_metric_version
 from hypothex.core.context import Context
-from hypothex.core.errors import HypothexError, StoreError
+from hypothex.core.errors import HypothexError, RunError, StoreError
 from hypothex.core.evaluation import reeval
+from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import RunRequest
+from hypothex.core.gpus import GpuInfo, gpu_status, query_gpus
 from hypothex.core.jsonutil import to_jsonable
+from hypothex.core.layout import reserved_run_path
 from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_panel
 from hypothex.core.records import RunStatus
+from hypothex.core.scheduler import Scheduler, run_scheduler_loop
+from hypothex.core.slurm import SlurmPoller, comment_accounting, require_flock
 from hypothex.core.views import PanelData, PanelSpec, ViewSpec
 from hypothex.mcp.server import (
     ViewValidationError,
@@ -40,17 +56,27 @@ from hypothex.mcp.server import (
     put_view,
     query_task_view,
     remove_view,
+    require_agent_hypothesis,
     validate_view,
     view_document,
 )
+from hypothex.remote.client import DIR_HEADER, SIZE_HEADER
 
 log = logging.getLogger(__name__)
 
 REPAIR_INTERVAL_SECONDS = 30.0
+SCHEDULER_INTERVAL_SECONDS = 5.0
+ENV_KINDS = ("local", "ssh", "slurm")
 WS_POLL_SECONDS = 0.5
 WS_BATCH = 500
 UI_DIST = Path(__file__).resolve().parent.parent / "ui_dist"
 NO_UI_FALLBACK = frozenset({"api", "mcp", ".well-known", "assets"})
+FILE_MAX_BYTES = 200 * 1024 * 1024
+FILE_CHUNK_BYTES = 64 * 1024
+GPU_CACHE_SECONDS = 10.0
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 
 class SpaStaticFiles(StaticFiles):
@@ -108,6 +134,13 @@ class LaunchBody(ActionBody):
     vars: dict[str, str] = Field(default_factory=dict)
 
 
+class SubscribeMessage(BaseModel):
+    """The first WebSocket message: ``{type: subscribe, after_sequence: N}``."""
+
+    type: Literal["subscribe"]
+    after_sequence: int = Field(default=0, ge=0)
+
+
 class ReinferBody(ActionBody):
     """Body of ``POST /api/v1/runs/{id}/reinfer``."""
 
@@ -161,6 +194,33 @@ class ViewQueryBody(BaseModel):
     panel: PanelSpec | None = None
 
 
+async def client_left(ws: WebSocket, seconds: float) -> bool:
+    """
+    Wait up to ``seconds`` for a client message; tell whether the client disconnected.
+
+    The event stream polls the log while idle. Waiting on ``receive`` instead of
+    sleeping lets it notice a closed subscription at once, so a hub that reconnects
+    never leaves a polling task behind, and server shutdown is not held up.
+
+    Parameters
+    ----------
+    ws : WebSocket
+        Accepted WebSocket.
+    seconds : float
+        Longest wait.
+
+    Returns
+    -------
+    bool
+        ``True`` when the client disconnected; ``False`` on timeout or any other message.
+    """
+    try:
+        message = await asyncio.wait_for(ws.receive(), seconds)
+    except TimeoutError:
+        return False
+    return message["type"] == "websocket.disconnect"
+
+
 async def _repair_loop(ctx: Context) -> None:
     """Mark orphaned runs lost every ``REPAIR_INTERVAL_SECONDS``."""
     while True:
@@ -212,20 +272,320 @@ def _run_view(kind: str) -> list[PanelSpec]:
     return [PanelSpec(type="curves", title="metrics")]
 
 
+def open_run_path(store: Path, run_dir: Path, rel_path: str) -> int:
+    """
+    Open ``rel_path`` inside a run folder one name at a time and return its fd.
+
+    The walk starts at a descriptor of the store root, the one trusted path.
+    Every name below it, the run folder's own ``<project>/runs/<run_id>``
+    included, is opened relative to the descriptor of the folder above it with
+    ``O_NOFOLLOW``, so no symlink is ever followed: a link, a run folder
+    replaced by a link, or a folder swapped for a link while the request runs,
+    is refused like ``../``. Hypothex never writes symlinks into the store.
+
+    Parameters
+    ----------
+    store : Path
+        The store root (``Layout.store``).
+    run_dir : Path
+        The run folder, below ``store``.
+    rel_path : str
+        Path relative to the run folder (``/``-separated); ``""`` is the folder itself.
+
+    Returns
+    -------
+    int
+        An open descriptor of the file or folder (``O_NONBLOCK``, so a FIFO
+        never hangs); the caller closes it.
+
+    Raises
+    ------
+    StoreError
+        The path is absolute, has ``..`` or a symlink (in the run folder or on
+        the way to it), leaves the run folder, is in the reserved ``.hx/``
+        folder, or does not exist (all answered with ``404``).
+
+    Examples
+    --------
+    >>> open_run_path(Path("/tmp"), Path("/tmp/r1"), "../etc/passwd")
+    Traceback (most recent call last):
+    ...
+    hypothex.core.errors.StoreError: '../etc/passwd' is outside the run folder
+    """
+    pure = PurePosixPath(rel_path)
+    if pure.is_absolute() or ".." in pure.parts or "\x00" in rel_path:
+        raise StoreError(f"{rel_path!r} is outside the run folder")
+    if reserved_run_path(rel_path):  # Hypothex's own state: never served to anyone
+        raise StoreError(f"{rel_path!r} is reserved for Hypothex")
+    try:
+        to_run = run_dir.relative_to(store).parts
+    except ValueError:
+        raise StoreError(f"run folder {run_dir} is outside the store") from None
+    try:
+        fd = os.open(store, _OPEN_FLAGS | _DIRECTORY)
+    except OSError as exc:
+        raise StoreError(f"cannot open the store: {exc.strerror}") from None
+    for i, part in enumerate((*to_run, *pure.parts)):
+        folder = _DIRECTORY if i < len(to_run) else 0  # down to the run folder: folders only
+        try:
+            if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise StoreError(f"run folder has no {rel_path!r}")
+            child = os.open(part, _OPEN_FLAGS | _NOFOLLOW | folder, dir_fd=fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):  # O_NOFOLLOW met a symlink
+                raise StoreError(f"{rel_path!r} is outside the run folder") from None
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                raise StoreError(f"run folder has no {rel_path!r}") from None
+            raise StoreError(f"cannot read {rel_path!r}: {exc.strerror}") from None
+        finally:
+            os.close(fd)
+        fd = child
+    return fd
+
+
+def list_run_files(dir_fd: int, prefix: str = "") -> list[dict[str, Any]]:
+    """
+    List the regular files under an open folder, recursively, as ``{path, size, mtime_ns}``.
+
+    The walk goes through folder descriptors (``O_NOFOLLOW`` for each sub-folder),
+    so symlinks are never listed or walked, even one that replaces a folder
+    during the walk. Hidden names (``.lock``, temporary ``.*.tmp`` files) are
+    left out.
+
+    Parameters
+    ----------
+    dir_fd : int
+        Open descriptor of a folder inside the run folder (from
+        :func:`open_run_path`); not closed here.
+    prefix : str
+        That folder's path relative to the run folder, ``""`` or ending in ``/``.
+
+    Returns
+    -------
+    list of dict
+        ``[{"path": "predictions/predictions.jsonl", "size": 123, "mtime_ns": ...}, ...]``,
+        sorted by path.
+    """
+    out: list[dict[str, Any]] = []
+    for name in sorted(os.listdir(dir_fd)):
+        if name.startswith("."):
+            continue
+        try:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            out.append({"path": prefix + name, "size": info.st_size, "mtime_ns": info.st_mtime_ns})
+        elif stat.S_ISDIR(info.st_mode):
+            try:
+                child = os.open(name, _OPEN_FLAGS | _NOFOLLOW | _DIRECTORY, dir_fd=dir_fd)
+            except OSError:
+                continue  # gone, or swapped for a symlink since the stat
+            try:
+                out.extend(list_run_files(child, f"{prefix}{name}/"))
+            finally:
+                os.close(child)
+    return sorted(out, key=lambda item: item["path"])
+
+
+def read_span(fd: int, start: int, length: int) -> Iterator[bytes]:
+    """
+    Yield exactly the bytes ``[start, start + length)`` of an open file, then close it.
+
+    The length is fixed when the response starts, so a log that keeps growing
+    while it is sent never overruns the declared ``Content-Length``.
+
+    Parameters
+    ----------
+    fd : int
+        Open file descriptor; closed when the iterator finishes or is closed.
+    start : int
+        First byte offset.
+    length : int
+        Number of bytes to send at most.
+
+    Yields
+    ------
+    bytes
+        Chunks of up to 64 KiB.
+    """
+    try:
+        offset, end = start, start + length
+        while offset < end:
+            chunk = os.pread(fd, min(FILE_CHUNK_BYTES, end - offset), offset)
+            if not chunk:
+                return
+            offset += len(chunk)
+            yield chunk
+    finally:
+        os.close(fd)
+
+
+def file_response(fd: int, rel_path: str, *, max_bytes: int, tail: bool) -> Response:
+    """
+    Answer a run-file request: the bytes, the last ``max_bytes`` bytes, or ``413``.
+
+    Parameters
+    ----------
+    fd : int
+        Open descriptor from :func:`open_run_path`; this function owns it (it is
+        closed here, or by :func:`read_span` once the body is sent).
+    rel_path : str
+        The requested path, for messages.
+    max_bytes : int
+        Largest body to send.
+    tail : bool
+        Send the last ``max_bytes`` bytes of a bigger file instead of ``413``.
+
+    Returns
+    -------
+    Response
+        ``200`` streaming body with ``Content-Length`` and ``X-Hypothex-Size`` (full
+        size), or a ``413`` JSON error ``{error, type: "FileTooLargeError", size}``.
+
+    Raises
+    ------
+    StoreError
+        The path is not a regular file (FIFO, socket, device).
+    """
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(fd)
+        raise StoreError(f"{rel_path!r} is not a regular file")
+    size = info.st_size
+    start, length = 0, size
+    if size > max_bytes:
+        if not tail:
+            os.close(fd)
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": f"{rel_path} is {size} bytes, over max_bytes={max_bytes}",
+                    "type": "FileTooLargeError",
+                    "size": size,
+                },
+            )
+        start, length = size - max_bytes, max_bytes
+    return StreamingResponse(
+        read_span(fd, start, length),
+        media_type="application/octet-stream",
+        headers={"Content-Length": str(length), SIZE_HEADER: str(size)},
+    )
+
+
+class GpuCache:
+    """
+    ``query_gpus()`` at most once per ``GPU_CACHE_SECONDS`` (spec 8A.7: every 10 s).
+
+    Thread-safe; FastAPI runs sync routes in a thread pool.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._at: float | None = None
+        self._gpus: list[GpuInfo] = []
+
+    def get(self) -> list[GpuInfo]:
+        """
+        Return the cached GPU list, refreshing it when older than ``GPU_CACHE_SECONDS``.
+
+        Returns
+        -------
+        list of GpuInfo
+        """
+        with self._lock:
+            now = time.monotonic()
+            if self._at is None or now - self._at >= GPU_CACHE_SECONDS:
+                self._gpus = query_gpus()
+                self._at = now
+            return list(self._gpus)
+
+
+def register_env_routes(app: FastAPI, ctx: Context) -> None:
+    """
+    Add the env-server routes: run files, GPUs, and the GPU queue (spec 5.5, 8A.5, 8A.7).
+
+    Parameters
+    ----------
+    app : FastAPI
+        The application.
+    ctx : Context
+        Open context.
+    """
+    gpu_cache = GpuCache()
+    app.state.gpu_cache = gpu_cache  # the hub's own `local` row in GET /api/v1/hosts shares it
+
+    @app.get("/api/v1/runs/{run_id}/files/{path:path}")
+    def run_file(
+        run_id: str,
+        path: str,
+        max_bytes: Annotated[int, Query(ge=0)] = FILE_MAX_BYTES,
+        tail: bool = False,
+    ) -> Response:
+        run_dir = ctx.run_dir(ctx.find_record(run_id))
+        fd = open_run_path(ctx.layout.store, run_dir, path)
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            rel = "/".join(PurePosixPath(path).parts)
+            try:
+                listing = list_run_files(fd, f"{rel}/" if rel else "")
+            finally:
+                os.close(fd)
+            return JSONResponse(listing, headers={DIR_HEADER: "1"})
+        return file_response(fd, path, max_bytes=max_bytes, tail=tail)
+
+    @app.get("/api/v1/projects/{project}/entry")
+    def project_entry(project: str) -> dict[str, Any]:
+        # the hub copies a host-only project's config snapshot with this (Task 34)
+        return ctx.store.load_project(project).model_dump(mode="json")
+
+    @app.get("/api/v1/gpus")
+    def gpus() -> list[dict[str, Any]]:
+        # held GPUs carry their run id; mirrored runs of other hosts never mark them
+        return to_jsonable(gpu_status(ctx, gpu_cache.get()))
+
+    @app.get("/api/v1/queue")
+    def queue() -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        positions = Scheduler(ctx).positions()
+        for run_id, position in sorted(positions.items(), key=lambda item: item[1]):
+            try:
+                record = ctx.find_record(run_id)
+            except StoreError:
+                continue
+            rows.append(
+                {"run_id": run_id, "position": position, "gpus_requested": record.gpus_requested}
+            )
+        return rows
+
+    @app.get("/api/v1/slurm")
+    def slurm_capabilities() -> dict[str, Any]:
+        # the hub shows this on the host row: without job comments in SLURM's accounting
+        # an unknown submission can never be proven absent
+        if ctx.descriptor.kind != "slurm":
+            return {"comment_accounting": None}
+        return {"comment_accounting": comment_accounting()}
+
+
 def create_app(
     home: Path | None = None,
     *,
     background_repair: bool = True,
     host: str | None = None,
     ui_dir: Path | None = None,
+    kind: str | None = None,
+    auth_token: str | None = None,
 ) -> FastAPI:
     """
     Build the FastAPI application.
 
-    Only local requests are served: the ``Host`` header must name a loopback
-    address (or ``host``), else the answer is ``400``; a state-changing request
-    or WebSocket handshake with a foreign ``Origin`` is rejected with ``403``.
-    This blocks DNS-rebinding and cross-site attacks from a browser page.
+    The ``Host`` header must name a loopback address (or ``host``), else the
+    answer is ``400``; a state-changing request or WebSocket handshake with a
+    foreign ``Origin`` is rejected with ``403``. This blocks DNS-rebinding and
+    cross-site attacks from a browser page, but it is not authentication: any
+    other client can send ``Host: localhost``. ``auth_token`` adds that.
+
+    Errors under ``/api/`` are JSON ``{error, type}``: domain errors, ``404``,
+    ``405``, and ``422`` (which keeps FastAPI's ``detail`` list too).
 
     When ``ui_dir`` holds ``index.html`` the UI is served at ``/``; unknown
     non-API paths return ``index.html`` so browser routes survive a reload.
@@ -235,34 +595,80 @@ def create_app(
     home : Path, optional
         Hypothex home; defaults to ``$HYPOTHEX_HOME`` or ``~/.hypothex``.
     background_repair : bool
-        Mark orphaned runs lost every 30 s (disable in tests).
+        Run the background loops: mark orphaned runs lost every 30 s; start
+        queued runs whose GPUs are free every 5 s unless the kind is ``slurm``;
+        on a ``slurm`` env server, reconcile SLURM jobs every 30 s
+        (``SlurmPoller``). Disable in tests.
     host : str, optional
         The address the server binds to; also accepted as ``Host`` unless it is
         a wildcard such as ``0.0.0.0``.
     ui_dir : Path, optional
         Built UI folder; defaults to the packaged ``hypothex/ui_dist``.
+    kind : str, optional
+        Environment kind this server reports: ``local``, ``ssh``, or ``slurm``
+        (``hx serve --kind``). Default: the kind saved in ``environment.json``.
+    auth_token : str, optional
+        Require ``Authorization: Bearer <auth_token>`` on every route except the
+        descriptor (``hx serve`` sets it from ``HYPOTHEX_SERVE_TOKEN``; see
+        ``TokenGuard``).
 
     Returns
     -------
     FastAPI
         The application; consumers use only this API.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``kind``.
     """
+    if kind is not None and kind not in ENV_KINDS:
+        raise ValueError(f"kind must be one of {', '.join(ENV_KINDS)}, got {kind!r}")
     ctx = Context.open(home)
-    mcp_server = build_server(home)
+    if kind is not None:
+        ctx.descriptor.kind = kind
+    if ctx.descriptor.kind == "slurm":
+        require_flock(ctx.layout.home)  # every run-state write takes the run lock
+    mcp_server = build_server(context=ctx)  # one Context (and descriptor) for HTTP and MCP
     mcp_http = mcp_server.streamable_http_app(streamable_http_path="/")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(control.repair_runs, ctx)
         task = asyncio.create_task(_repair_loop(ctx)) if background_repair else None
+        stop = threading.Event()
+        loops: list[threading.Thread] = []
+        if background_repair and ctx.descriptor.kind != "slurm":
+            loops.append(
+                threading.Thread(
+                    target=run_scheduler_loop,
+                    args=(ctx, stop),
+                    kwargs={"interval": SCHEDULER_INTERVAL_SECONDS},
+                    name="hx-scheduler",
+                    daemon=True,
+                )
+            )
+        for loop in loops:
+            loop.start()
+        # SLURM env servers reconcile their jobs every 30 s; lost needs two polls in a row
+        poller = SlurmPoller(ctx) if background_repair and ctx.descriptor.kind == "slurm" else None
+        if poller is not None:
+            poller.start()
         async with mcp_server.session_manager.run():
             try:
                 yield
             finally:
+                stop.set()
+                if poller is not None:
+                    # wait for the thread itself: a squeue can block for 60 s, and the
+                    # context must not be released under a poll that is still running
+                    await asyncio.to_thread(poller.stop)
                 if task is not None:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
+                for loop in loops:
+                    await asyncio.to_thread(loop.join, 10)
 
     app = FastAPI(
         title="Hypothex",
@@ -272,17 +678,49 @@ def create_app(
         openapi_url="/api/openapi.json",
     )
     app.state.ctx = ctx
+    app.state.mcp = mcp_server
     hosts = allowed_hosts(host)
     app.add_middleware(OriginGuard, hosts=hosts)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
+    if auth_token:
+        app.add_middleware(TokenGuard, token=auth_token)  # outermost: checked first
 
     @app.exception_handler(HypothexError)
     async def hypothex_error(_: Request, exc: HypothexError) -> JSONResponse:
         status = 404 if isinstance(exc, StoreError) else 400
+        if isinstance(exc, CommandInterruptedError):
+            status = 409  # the command's outcome is unknown: never replayed
         content: dict[str, Any] = {"error": str(exc), "type": type(exc).__name__}
         if isinstance(exc, ViewValidationError):
             content["issues"] = to_jsonable(exc.issues)
         return JSONResponse(status_code=status, content=content)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        if not request.url.path.startswith("/api/"):
+            return await http_exception_handler(request, exc)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": str(exc.detail), "type": "HTTPError"},
+            headers=exc.headers,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> Response:
+        if not request.url.path.startswith("/api/"):
+            return await request_validation_exception_handler(request, exc)
+        problems = exc.errors()
+        first = problems[0] if problems else {}
+        where = ".".join(str(part) for part in first.get("loc", ()))
+        message = str(first.get("msg", "invalid request"))
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": f"{where}: {message}" if where else message,
+                "type": "RequestValidationError",
+                "detail": to_jsonable(problems),
+            },
+        )
 
     def once(body: ActionBody, fn: Callable[[], Any]) -> dict[str, Any]:
         return ctx.events.run_once(body.command_id, lambda: to_jsonable(fn()))
@@ -326,9 +764,10 @@ def create_app(
     ) -> dict[str, Any]:
         versions = {}
         for item in metric or []:
-            name, _, version = item.partition("@")
-            if version:
-                versions[name] = version
+            name, version = parse_metric_version(item)
+            if version is None:
+                raise RunError(f"metric needs name@version, got {item!r}")
+            versions[name] = version
         return to_jsonable(q.get_leaderboard(ctx, task, project, versions or None))
 
     @app.post("/api/v1/tasks/{project}/{task}/reeval")
@@ -394,6 +833,7 @@ def create_app(
 
     @app.post("/api/v1/runs")
     def launch(body: LaunchBody) -> dict[str, Any]:
+        require_agent_hypothesis(body.created_by, body.hypothesis)
         req = RunRequest(
             repo=Path(body.repo),
             command=body.command,
@@ -519,17 +959,24 @@ def create_app(
     async def events_ws(ws: WebSocket) -> None:
         await ws.accept()
         try:
-            msg = await ws.receive_json()
-            if msg.get("type") != "subscribe":
+            first = await ws.receive()
+            if first["type"] == "websocket.disconnect":
+                return
+            try:
+                sub = SubscribeMessage.model_validate_json(
+                    first.get("text") or first.get("bytes") or ""
+                )
+            except ValidationError:
                 await ws.send_json(
                     {
                         "type": "error",
-                        "error": "first message must be {type: subscribe, after_sequence: N}",
+                        "error": "first message must be {type: subscribe, after_sequence: N}"
+                        " with N an integer >= 0",
                     }
                 )
                 await ws.close()
                 return
-            last = int(msg.get("after_sequence", 0))
+            last = sub.after_sequence
             ready = False
             while True:
                 batch = await asyncio.to_thread(ctx.events.since, last, WS_BATCH)
@@ -540,10 +987,12 @@ def create_app(
                     if not ready:
                         await ws.send_json({"type": "ready", "last_sequence": last})
                         ready = True
-                    await asyncio.sleep(WS_POLL_SECONDS)
+                    if await client_left(ws, WS_POLL_SECONDS):
+                        return
         except WebSocketDisconnect:
             return
 
+    register_env_routes(app, ctx)
     app.mount("/mcp", mcp_http)
 
     ui = ui_dir or UI_DIST

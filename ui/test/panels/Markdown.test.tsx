@@ -44,6 +44,24 @@ describe("safeHref", () => {
     expect(safeHref("data:text/html,<b>x</b>")).toBeNull();
     expect(safeHref("//evil.example")).toBeNull();
   });
+
+  test("drops script and data links hidden behind control characters", () => {
+    // URL parsers strip leading/trailing C0 controls and spaces, and tabs or newlines anywhere.
+    expect(safeHref("\x01javascript:alert%281%29")).toBeNull();
+    expect(safeHref("\x00 data:text/html,<script>x</script>")).toBeNull();
+    expect(safeHref("java\tscript:alert(1)")).toBeNull();
+    expect(safeHref("jav\nascript:alert(1)")).toBeNull();
+    expect(safeHref("\x1f//evil.example")).toBeNull();
+    expect(safeHref("\\\\evil.example")).toBeNull();
+    expect(safeHref("/\\evil.example")).toBeNull();
+    expect(safeHref("\x01/r/abc\x02")).toBe("/r/abc");
+  });
+
+  test("a control-character script link renders as plain text", () => {
+    const { container } = render(<MarkdownPanel result={md("[click](\x01javascript:alert%281%29)")} />);
+    expect(container.querySelector("a")).toBeNull();
+    expect(container.textContent).toContain("click");
+  });
 });
 
 describe("MarkdownPanel", () => {

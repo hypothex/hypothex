@@ -10,10 +10,9 @@ import { scaleLinear } from "d3-scale";
 import type { CSSProperties } from "react";
 import type { ScatterMeta, ScatterRow } from "../api/models";
 import { FS, useElementWidth } from "../charts/Scale";
-import { valueFormatter, withUnit } from "../charts/valueFormat";
+import { axisTitle, fmtNum, valueFormatter, withUnit } from "../charts/valueFormat";
 import { fmtTick, xAxis, xScale } from "./Distribution";
 import type { PanelResult } from "./index";
-import { fmtNum } from "./Table";
 
 /** Optimisation direction of one axis. */
 export type Dir = "min" | "max";
@@ -95,12 +94,6 @@ export function refLabel(ref: string): string {
 }
 
 const CURRENCY = new Set(["$", "£", "€"]);
-
-/** A currency unit leads each tick (`$20`); other units go in the axis title. */
-export function axisTitle(label: string, unit: string, log = false): string {
-  const withU = unit && !CURRENCY.has(unit) ? `${label}, ${unit}` : label;
-  return log ? `${withU}, log` : withU;
-}
 
 /** Width used before layout is known (and in test DOMs). */
 export const SCATTER_FALLBACK_W = 640;
@@ -237,7 +230,7 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
         style={{ display: "block", overflow: "visible", fontFamily: "var(--sans)" }}
       >
         <text x={PL} y={PT - 12} style={T.lblS}>
-          {axisTitle(yLabel, yUnit)}
+          {axisTitle(yLabel, yUnit, { unitOnTicks: CURRENCY.has(yUnit) })}
         </text>
         {yTicks.map((t) => (
           <g key={`y${t}`}>
@@ -278,7 +271,7 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
               </g>
             ))}
         <text x={W - PR} y={H - PB + 36} textAnchor="end" style={T.lblS}>
-          {axisTitle(xLabel, xUnit, kind === "log" && !ordinal)}
+          {axisTitle(xLabel, xUnit, { log: kind === "log" && !ordinal, unitOnTicks: CURRENCY.has(xUnit) })}
         </text>
         {stairsD && <path data-testid="pareto" d={stairsD} style={T.pareto} />}
         {rows.map((r, i) => {

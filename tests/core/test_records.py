@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from hypothex.core.fsutil import append_jsonl
 from hypothex.core.layout import Layout
 from hypothex.core.records import Artifact, GitInfo, RunRecord, UsageTotals
@@ -77,3 +79,13 @@ def test_sdk_style_artifact_rows_without_step_still_parse(tmp_path: Path) -> Non
         ("model", None, {}),
         ("checkpoint", 10, {"loss": 0.5}),
     ]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_metric_point_rejects_non_finite_values(value: float) -> None:
+    from pydantic import ValidationError
+
+    from hypothex.core.records import MetricPoint
+
+    with pytest.raises(ValidationError):
+        MetricPoint(name="loss", step=1, value=value)

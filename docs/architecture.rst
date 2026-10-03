@@ -48,6 +48,11 @@ same transaction as the events it produces; a repeated ``command_id`` returns th
 first result instead of doing the work twice. This makes a double-clicked
 "Rerun" (or a retried agent call) start exactly one run.
 
+If the server stops while a command runs, the command may already have taken
+effect (a launched run outlives the server). It is never run again under that
+id: a retry gets ``409`` with ``CommandInterruptedError``. Check the runs, then
+send the command again with a new ``command_id``.
+
 Supervisors and repair
 ------------------------
 
@@ -65,14 +70,21 @@ period even while the launching server is still up.
 Local-only API
 --------------
 
-Phase 1a has no authentication, so ``hx serve`` only answers local requests.
-The ``Host`` header must be ``127.0.0.1``, ``localhost``, ``[::1]`` (any port),
+``hx serve`` binds ``127.0.0.1`` by default. The ``Host`` header must be ``127.0.0.1``, ``localhost``, ``[::1]`` (any port),
 or the ``--host`` address when it is not a wildcard such as ``0.0.0.0``;
 anything else gets ``400``. This blocks DNS-rebinding attacks, where a web page
 makes its own host name resolve to ``127.0.0.1``. A ``POST`` or WebSocket
 handshake whose ``Origin`` is not one of those hosts gets ``403``, so a web page
 cannot start runs through the user's browser. Clients that send no ``Origin``
 (the CLI, MCP clients, ``curl``) are not affected.
+
+These checks are not authentication: any client that is not a browser can send
+``Host: localhost``. So ``hx serve`` refuses a non-loopback ``--host`` (such as
+``0.0.0.0``) unless ``HYPOTHEX_SERVE_TOKEN`` is set. With a token, every request
+except ``/.well-known/hypothex/environment`` needs
+``Authorization: Bearer <token>`` (``401`` otherwise; a WebSocket is closed with
+code ``1008``). To reach a server on another machine without a token, keep it on
+``127.0.0.1`` and use an SSH tunnel: ``ssh -L 7777:127.0.0.1:7777 HOST``.
 
 .. code-block:: bash
 

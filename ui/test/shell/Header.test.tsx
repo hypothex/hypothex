@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 
-import { RECENT_KEY, paletteShortcut, screenOf, updateRecent } from "../../src/shell/Header";
+import { RECENT_KEY, paletteShortcut, parseRecent, screenOf, updateRecent } from "../../src/shell/Header";
 import { mockRoutes } from "../api/fetch-mock";
 import { renderApp } from "../render-app";
 
@@ -42,6 +42,25 @@ describe("updateRecent", () => {
   });
 });
 
+test("parseRecent keeps only non-empty string fields", () => {
+  expect(
+    parseRecent({
+      task: { project: "toy", task: "acc", extra: 1 },
+      run: { runId: 7 },
+      examples: { a: "r1", b: "r2", metric: 3 },
+    }),
+  ).toEqual({ task: { project: "toy", task: "acc" }, examples: { a: "r1", b: "r2" } });
+  expect(parseRecent({ examples: { a: "r1", b: "r2", metric: "f1" } })).toEqual({
+    examples: { a: "r1", b: "r2", metric: "f1" },
+  });
+  expect([parseRecent(null), parseRecent([]), parseRecent("x"), parseRecent({ task: { project: "" } })]).toEqual([
+    {},
+    {},
+    {},
+    {},
+  ]);
+});
+
 test("paletteShortcut shows the platform's modifier", () => {
   expect([paletteShortcut("MacIntel"), paletteShortcut("Win32")]).toEqual(["⌘K", "Ctrl K"]);
 });
@@ -63,6 +82,28 @@ describe("Header", () => {
     await waitFor(() => expect(tabs().map((a) => a.textContent)).toEqual(["Overview", "Run"]));
   });
 
+  test("stored entries of the wrong shape are dropped, good ones kept", async () => {
+    localStorage.setItem(
+      RECENT_KEY,
+      JSON.stringify({ task: { task: "x" }, run: { runId: "r-3" }, examples: { a: "r1", b: {} } }),
+    );
+    renderApp("/");
+    await screen.findByRole("navigation", { name: "Screens" });
+    await waitFor(() =>
+      expect(tabs().map((a) => [a.textContent, a.getAttribute("href")])).toEqual([
+        ["Overview", "/"],
+        ["Run", "/r/r-3"],
+      ]),
+    );
+    for (const bad of ['{"task":"x"}', '{"task":{}}', '{"run":{"runId":""}}', "[1]", "null", "7"]) {
+      cleanup();
+      localStorage.setItem(RECENT_KEY, bad);
+      renderApp("/");
+      await screen.findByRole("navigation", { name: "Screens" });
+      expect(tabs().map((a) => a.textContent)).toEqual(["Overview"]);
+    }
+  });
+
   test("remembers the last task and run as tabs", async () => {
     const { router } = renderApp("/t/toy/acc");
     await waitFor(() => expect(router.state.location.pathname).toBe("/t/toy/acc"));
@@ -78,5 +119,23 @@ describe("Header", () => {
       task: { project: "toy", task: "acc" },
       run: { runId: "r-7" },
     });
+  });
+
+  test("shows nothing about live updates while the stream is ready", async () => {
+    renderApp("/");
+    await screen.findByRole("navigation", { name: "Screens" });
+    expect(screen.queryByRole("status", { name: /Live updates/ })).toBeNull();
+  });
+
+  test("says when live updates are off or reconnecting", async () => {
+    renderApp("/", { streamStatus: "offline" });
+    const offline = await screen.findByRole("status", { name: "Live updates off" });
+    expect(offline.textContent).toBe("● offline");
+    expect(offline.getAttribute("title")).toMatch(/not live/);
+    cleanup();
+    renderApp("/", { streamStatus: "connected" });
+    expect((await screen.findByRole("status", { name: "Live updates reconnecting" })).textContent).toBe(
+      "● connecting",
+    );
   });
 });

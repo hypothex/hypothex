@@ -2,6 +2,9 @@
 import { format } from "d3-format";
 import { MINUS, fmtP as pDigits } from "../../charts/Scale";
 import { withUnit } from "../../charts/valueFormat";
+
+// Shared with the panels: one definition each, in charts/valueFormat.
+export { fmtDuration, fmtSigned, shortId } from "../../charts/valueFormat";
 import type { RunRecord } from "./types";
 
 /** Shown for a missing value (the same glyph as the panels). */
@@ -53,11 +56,6 @@ export function fmtDelta(v: number | null | undefined): string {
   return `${sign}${fmtScore(Math.abs(v))}`;
 }
 
-/** A signed integer, e.g. `+6`. */
-export function fmtSigned(n: number): string {
-  return n > 0 ? `+${n}` : n < 0 ? `${MINUS}${Math.abs(n)}` : "0";
-}
-
 /** An interval `lo–hi`; 3 decimals when both ends are fractions. */
 export function fmtInterval(lo: number, hi: number): string {
   if (Math.abs(lo) <= 1 && Math.abs(hi) <= 1) {
@@ -71,14 +69,6 @@ export function fmtP(p: number | null | undefined): string {
   if (!isNum(p)) return DASH;
   const digits = pDigits(p);
   return digits.startsWith("<") ? `p ${digits}` : `p = ${digits}`;
-}
-
-/** A wall-clock duration: `0.8 s`, `2m 5s`, `5h 40m`. */
-export function fmtDuration(seconds: number | null | undefined): string {
-  if (!isNum(seconds)) return DASH;
-  if (seconds < 60) return `${seconds.toFixed(1)} s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
 /** Seconds a run has taken (so far, while it runs); null before it starts. */
@@ -134,11 +124,6 @@ export function fmtUsd(v: number): string {
 /** A count: exact below 1000, else SI (`4.5k`). */
 export function fmtCount(n: number): string {
   return n < 1000 ? String(Math.round(n)) : si3(n);
-}
-
-/** The random tail of a run id: `…-6f71` → `6f71`. */
-export function shortId(runId: string): string {
-  return runId.split("-").pop() || runId;
 }
 
 /** The first 8 hex digits of a `sha256:`/`xxh3:` hash. */

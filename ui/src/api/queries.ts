@@ -27,7 +27,6 @@ export const queryKeys = {
   taskKind: (project: string, task: string) => ["taskKind", project, task] as const,
   runs: (query: M.RunsQuery = {}) => ["runs", query] as const,
   run: (runId: string) => ["run", runId] as const,
-  runMetrics: (runId: string) => ["run", runId, "metrics"] as const,
   runLogs: (runId: string, stream: M.LogStream) => ["run", runId, "logs", stream] as const,
   runPredictions: (runId: string, query: M.PredictionsQuery = {}) =>
     ["run", runId, "predictions", query] as const,
@@ -75,6 +74,19 @@ export function createQueryClient(): QueryClient {
 }
 
 // reads ------------------------------------------------------------------------------------
+/** Options a page may set on a read hook. */
+export interface ReadOptions {
+  /** False keeps the query idle (for example until the run that names its task loads). */
+  enabled?: boolean;
+  /** Show the last result while a new key loads (pagination). */
+  keepPrevious?: boolean;
+}
+
+const readOptions = ({ enabled = true, keepPrevious = false }: ReadOptions) => ({
+  enabled,
+  placeholderData: keepPrevious ? keepPreviousData : undefined,
+});
+
 export const useOverview = (since?: string) =>
   useQuery({ queryKey: queryKeys.overview(since), queryFn: ({ signal }) => api.overview(since, signal) });
 
@@ -84,19 +96,30 @@ export const useProjects = () =>
 export const useTasks = (project?: string) =>
   useQuery({ queryKey: queryKeys.tasks(project), queryFn: ({ signal }) => api.tasks(project, signal) });
 
-export const useTask = (project: string, task: string) =>
-  useQuery({ queryKey: queryKeys.task(project, task), queryFn: ({ signal }) => api.task(project, task, signal) });
+export const useTask = (project: string, task: string, opts: ReadOptions = {}) =>
+  useQuery({
+    queryKey: queryKeys.task(project, task),
+    queryFn: ({ signal }) => api.task(project, task, signal),
+    ...readOptions(opts),
+  });
 
-export const useLeaderboard = (project: string, task: string, metrics: readonly string[] = []) =>
+export const useLeaderboard = (
+  project: string,
+  task: string,
+  metrics: readonly string[] = [],
+  opts: ReadOptions = {},
+) =>
   useQuery({
     queryKey: queryKeys.leaderboard(project, task, metrics),
     queryFn: ({ signal }) => api.leaderboard(project, task, metrics, signal),
+    ...readOptions(opts),
   });
 
-export const useTaskKind = (project: string, task: string) =>
+export const useTaskKind = (project: string, task: string, opts: ReadOptions = {}) =>
   useQuery({
     queryKey: queryKeys.taskKind(project, task),
     queryFn: ({ signal }) => api.taskKind(project, task, signal),
+    ...readOptions(opts),
   });
 
 export const useRuns = (query: M.RunsQuery = {}) =>
@@ -105,20 +128,17 @@ export const useRuns = (query: M.RunsQuery = {}) =>
 export const useRun = (runId: string) =>
   useQuery({ queryKey: queryKeys.run(runId), queryFn: ({ signal }) => api.run(runId, signal) });
 
-export const useRunMetrics = (runId: string) =>
-  useQuery({ queryKey: queryKeys.runMetrics(runId), queryFn: ({ signal }) => api.runMetrics(runId, signal) });
-
 export const useRunLogs = (runId: string, stream: M.LogStream = "stdout") =>
   useQuery({
     queryKey: queryKeys.runLogs(runId, stream),
     queryFn: ({ signal }) => api.runLogs(runId, stream, undefined, signal),
   });
 
-export const useRunPredictions = (runId: string, query: M.PredictionsQuery = {}) =>
+export const useRunPredictions = (runId: string, query: M.PredictionsQuery = {}, opts: ReadOptions = {}) =>
   useQuery({
     queryKey: queryKeys.runPredictions(runId, query),
     queryFn: ({ signal }) => api.runPredictions(runId, query, signal),
-    placeholderData: keepPreviousData,
+    ...readOptions(opts),
   });
 
 export const useRunTraces = (runId: string, enabled = true) =>
@@ -136,10 +156,17 @@ export const useRunTrace = (runId: string, exampleId: string | null) =>
     enabled: exampleId !== null,
   });
 
-export const useCompareExamples = (a: string, b: string, metric: string, field?: string) =>
+export const useCompareExamples = (
+  a: string,
+  b: string,
+  metric: string,
+  field?: string,
+  opts: ReadOptions = {},
+) =>
   useQuery({
     queryKey: queryKeys.compareExamples(a, b, metric, field),
     queryFn: ({ signal }) => api.compareExamples(a, b, metric, field, signal),
+    ...readOptions(opts),
   });
 
 export const useViews = (project: string, task: string) =>
@@ -167,23 +194,12 @@ export function useSaveView(project: string, task: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ name, text }: { name: string; text: string }) => api.saveView(project, task, name, text),
-    onSuccess: async (_data, { name }) => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: queryKeys.views(project, task) }),
-        qc.invalidateQueries({ queryKey: queryKeys.view(project, task, name) }),
-        qc.invalidateQueries({ queryKey: ["views", "query", project, task] }),
-      ]);
-    },
-  });
-}
-
-export function useDeleteView(project: string, task: string) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (name: string) => api.deleteView(project, task, name),
-    onSuccess: async (_data, name) => {
-      qc.removeQueries({ queryKey: queryKeys.view(project, task, name) });
-      await qc.invalidateQueries({ queryKey: queryKeys.views(project, task) });
+    // Not awaited: the caller's `onSuccess` (the editor navigates away) must not wait
+    // for the editor's own preview query to refetch.
+    onSuccess: (_data, { name }) => {
+      void qc.invalidateQueries({ queryKey: queryKeys.views(project, task) });
+      void qc.invalidateQueries({ queryKey: queryKeys.view(project, task, name) });
+      void qc.invalidateQueries({ queryKey: ["views", "query", project, task] });
     },
   });
 }

@@ -142,18 +142,23 @@ export function Preview({ results, layouts, selected, problems, stale, renderPan
                 className={cls.filter(Boolean).join(" ")}
                 style={{ gridColumn: `${p.col} / span ${p.span}`, gridRow: `${p.row}` }}
                 onClick={() => onSelect?.(i)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") onSelect?.(i);
-                }}
-                tabIndex={0}
               >
-                <div className="hx-ed-fig-h">
+                {/* The header is the keyboard control; a click anywhere on the panel also selects. */}
+                <button
+                  type="button"
+                  className="hx-ed-fig-h"
+                  aria-pressed={i === sel}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelect?.(i);
+                  }}
+                >
                   <span className="pl">{panelLetter(i)}</span>
                   <span className="t">{r.title}</span>
                   <span className="aside" title={`span ${p.span} of 12, row ${p.row}`}>
                     {p.overflow ? "over 12 columns" : `${p.span}/12`}
                   </span>
-                </div>
+                </button>
                 {problem ? <div className="hx-ed-perr">✕ {problem}</div> : renderPanel(r)}
               </section>
             );

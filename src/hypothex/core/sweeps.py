@@ -1377,6 +1377,128 @@ def launch_sweep(
     """
     if gpus < 0:
         raise SweepError("gpus must be 0 or more")
+    draft = _draft(project, task, host, grid, random, seeds, command, created_by, commit, diff)
+    repo_path = _resolve_repo(ctx, project, task, repo, remote=launch is not None)
+    with _created(ctx, draft, command_id) as (spec, resumed):
+        requests = _requests(
+            spec,
+            spec.seeds,
+            repo_path,
+            owner=ctx.descriptor.environment_id,
+            hypothesis=hypothesis,
+            gpus=gpus,
+            queue=queue,
+            commit=spec.commit,
+            diff=spec.diff,
+        )
+        requested: list[str] = []
+        try:
+            _issue(ctx, spec, launch or _local_launcher(ctx, spec.id), requests, requested)
+        except BaseException:
+            # once a request went out its outcome is unknown (an accepted run whose answer
+            # was lost): the definition stays. Only a failure before any request removes it.
+            if not requested and not resumed:
+                sweep_path(ctx.layout, project, spec.id).unlink(missing_ok=True)
+            raise
+    return summarize_sweep(ctx, project, spec.id)
+
+
+def create_sweep(
+    ctx: Context,
+    *,
+    project: str,
+    grid: list[SweepParam],
+    seeds: list[int],
+    command: list[str],
+    task: str | None = None,
+    host: str | None = None,
+    random: int | None = None,
+    created_by: str = "human",
+    repo: Path | None = None,
+    remote: bool = False,
+    command_id: str | None = None,
+    commit: str | None = None,
+    diff: str | None = None,
+) -> SweepSpec:
+    """
+    Check and store a sweep's definition without launching any run.
+
+    The first half of ``launch_sweep``, for a caller that answers at once and
+    launches later (the hub, for a big sweep): ``extend_sweep`` with the
+    spec's own seeds (and the launch's ``gpus``, ``queue``, ``hypothesis``)
+    then issues every run, and a repeat of it issues only the missing ones.
+    Arguments are as in ``launch_sweep``; the same ``command_id`` returns the
+    sweep it created before.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    project : str
+        Project name.
+    grid : list of SweepParam
+        Grid and range params.
+    seeds : list of int
+        Seeds; each combination runs once per seed.
+    command : list of str
+        Command template with ``{param}`` and ``{seed}`` fields.
+    task : str, optional
+        Task the runs are scored on.
+    host : str, optional
+        Host name recorded on the sweep.
+    random : int, optional
+        Number of random samples (see ``expand``).
+    created_by : str
+        ``human`` or ``agent:<name>``.
+    repo : Path, optional
+        Project repo; default the registered repo of ``project``.
+    remote : bool
+        The runs go to a host: the hub needs no checkout of its own.
+    command_id : str, optional
+        The client's command id.
+    commit : str, optional
+        Commit every run pins (``SweepSpec.commit``).
+    diff : str, optional
+        Uncommitted changes on top of ``commit``.
+
+    Returns
+    -------
+    SweepSpec
+        The stored definition (the earlier one for a repeated ``command_id``).
+
+    Raises
+    ------
+    SweepError
+        Invalid grid, seeds, size, command fields, task, or repo.
+    StoreError
+        ``project`` is not registered and no ``repo`` was given.
+
+    Examples
+    --------
+    >>> spec = create_sweep(ctx, project="toy", grid=[SweepParam(name="lr", values=["1e-4"])],
+    ...     seeds=[1, 2], command=["python", "train.py", "--lr", "{lr}"])  # doctest: +SKIP
+    >>> extend_sweep(ctx, "toy", spec.id, spec.seeds).counts["total"]  # doctest: +SKIP
+    2
+    """
+    draft = _draft(project, task, host, grid, random, seeds, command, created_by, commit, diff)
+    _resolve_repo(ctx, project, task, repo, remote=remote)
+    with _created(ctx, draft, command_id) as (spec, _):
+        return spec
+
+
+def _draft(
+    project: str,
+    task: str | None,
+    host: str | None,
+    grid: list[SweepParam],
+    random: int | None,
+    seeds: list[int],
+    command: list[str],
+    created_by: str,
+    commit: str | None,
+    diff: str | None,
+) -> SweepSpec:
+    """A checked sweep definition without its id (``pending``)."""
     try:
         draft = SweepSpec(
             id="pending",
@@ -1395,9 +1517,22 @@ def launch_sweep(
     except ValidationError as exc:
         raise SweepError(f"invalid sweep: {_brief(exc)}") from exc
     _check_launchable(draft)
-    repo_path = _resolve_repo(ctx, project, task, repo, remote=launch is not None)
-    # one command id at a time: its claim lookup, id reservation, and claim are one step,
-    # so two racing calls never make two sweeps (and two run sets) for one command
+    return draft
+
+
+@contextmanager
+def _created(
+    ctx: Context, draft: SweepSpec, command_id: str | None
+) -> Iterator[tuple[SweepSpec, bool]]:
+    """
+    Give ``draft`` its id and store it, then hold its sweep lock.
+
+    One command id at a time: its claim lookup, id reservation, and claim are
+    one step, so two racing calls never make two sweeps (and two run sets) for
+    one command. Yields the stored spec and whether ``command_id`` had claimed
+    a sweep already (a retry: the stored definition wins).
+    """
+    project = draft.project
     with _command_lock(ctx.layout, project, command_id):
         claimed = _claimed_sweep(ctx.layout, project, command_id)
         spec = draft.model_copy(update={"id": claimed or new_sweep_id(ctx.layout, project)})
@@ -1407,27 +1542,7 @@ def launch_sweep(
             else:
                 save_sweep(ctx.layout, spec)
                 _claim_sweep(ctx.layout, project, command_id, spec.id)  # before any run starts
-            requests = _requests(
-                spec,
-                spec.seeds,
-                repo_path,
-                owner=ctx.descriptor.environment_id,
-                hypothesis=hypothesis,
-                gpus=gpus,
-                queue=queue,
-                commit=spec.commit,
-                diff=spec.diff,
-            )
-            requested: list[str] = []
-            try:
-                _issue(ctx, spec, launch or _local_launcher(ctx, spec.id), requests, requested)
-            except BaseException:
-                # once a request went out its outcome is unknown (an accepted run whose answer
-                # was lost): the definition stays. Only a failure before any request removes it.
-                if not requested and claimed is None:
-                    sweep_path(ctx.layout, project, spec.id).unlink(missing_ok=True)
-                raise
-    return summarize_sweep(ctx, project, spec.id)
+            yield spec, claimed is not None
 
 
 # cancel and extend -------------------------------------------------------------------

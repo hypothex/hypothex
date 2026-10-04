@@ -1350,6 +1350,35 @@ def test_local_extend_after_a_new_commit_joins_the_same_seed_groups(
     assert added[0].git.commit == first.git.commit
 
 
+def test_create_sweep_stores_the_definition_and_an_extend_launches_it(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # DF-48: the hub answers with the sweep at once and launches its runs afterwards
+    ctx.register_project(toy_repo)
+    args: dict[str, Any] = {
+        "project": "toy",
+        "grid": [LR],
+        "seeds": [1, 2],
+        "command": CMD[:4],
+        "host": "gpu1",
+        "remote": True,
+        "command_id": "cmd-1",
+        "commit": "d" * 40,
+    }
+    spec = sweeps_module.create_sweep(ctx, **args)
+    assert load_sweep(ctx.layout, "toy", spec.id) == spec
+    assert summarize_sweep(ctx, "toy", spec.id).run_ids == []
+    assert sweeps_module.create_sweep(ctx, **args).id == spec.id  # a retry: the same sweep
+    fake = FakeLauncher(ctx)
+    summary = extend_sweep(
+        ctx, "toy", spec.id, spec.seeds, gpus=1, queue=True, hypothesis="lr", launch=fake
+    )
+    assert len(summary.run_ids) == 4 and summary.spec.seeds == [1, 2]
+    assert all((r.commit, r.gpus, r.queue) == ("d" * 40, 1, True) for r in fake.requests)
+    with pytest.raises(SweepError, match="duplicate seeds"):
+        sweeps_module.create_sweep(ctx, **{**args, "seeds": [1, 1], "command_id": None})
+
+
 def test_launch_refuses_a_diff_without_its_commit(ctx: Context, toy_repo: Path) -> None:
     fake = FakeLauncher(ctx)
     with pytest.raises(SweepError, match="a diff needs the commit"):

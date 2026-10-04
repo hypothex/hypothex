@@ -51,5 +51,9 @@ def test_ui_page_covers_phase2_screens() -> None:
         "environment.json",
         "run.lost",
         "shutdown-check.ts",
+        "Resend seed N",
+        "archived runs",
+        "ui/e2e/.runs/run-XXXXXX",
+        "HX_E2E_RUN_DIR",
     ):
         assert text in page, text

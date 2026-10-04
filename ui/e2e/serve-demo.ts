@@ -25,7 +25,7 @@
  * exits (the backend plan, ruling S9), stops the demo runs over the fake gpu1 server's
  * HTTP API, then the fake hosts. Killing the fake hosts first would orphan the demo runs'
  * supervisors. Only then, or after `SHUTDOWN_WAIT_MS`, or when the hub dies by itself, does
- * this script SIGKILL every process the run still owns (`e2e/procs.ts`): the fake hosts and
+ * this script SIGKILL every process its home still owns (`e2e/procs.ts`): the fake hosts and
  * supervisors run in their own sessions, so a hub that crashed or hung leaves them behind.
  * Then it removes its home and demo file. `bun e2e/shutdown-check.ts` checks all three ends.
  */
@@ -48,7 +48,7 @@ import {
   SHUTDOWN_WAIT_MS,
   UI_DIST_INDEX,
 } from "./paths";
-import { killOwned, listProcs, type Owner } from "./procs";
+import { demoOwner, killOwned, listProcs, type Owner } from "./procs";
 
 const withHosts = process.argv.includes("--with-hosts");
 const home = withHosts ? HOSTS_HOME_DIR : HOME_DIR;
@@ -116,16 +116,12 @@ server.on("exit", () => {
   exited = true;
 });
 
-const owner: Owner = {
-  marker: `${RUN_DIR}/`,
-  roots: server.pid === undefined ? [] : [server.pid],
-  groups: server.pid === undefined ? [] : [server.pid],
-  exclude: [process.pid],
-};
+// this server's own home, not RUN_DIR: the other demo server of the run has its hub there too
+const owner: Owner = demoOwner(home, server.pid, process.pid);
 
 /**
  * SIGKILL every process this invocation owns: the hub, its group, and every fake host,
- * supervisor and run command started under this run's directory (they run in their own
+ * supervisor and run command started under this server's home (they run in their own
  * sessions, so a hub that crashed or hung leaves them behind). Then remove this server's
  * home and demo file, and the run's directory once the other server has removed its own.
  */

@@ -3,10 +3,12 @@
  *
  * `hx serve` starts its fake hosts, and each host its run supervisors, in their own
  * sessions (`start_new_session`), so they are not in the hub's process group and outlive a
- * hub that crashes or is killed. They are found instead by the invocation's own directory
- * (`RUN_DIR` in `paths.ts`): every one of them has a `--home` under it on its command line.
- * A run's command names no home, so the descendants of every owned process are owned too.
- * Another suite's directory is a different one, so its processes are never matched.
+ * hub that crashes or is killed. They are found instead by the demo server's own home
+ * (`HOME_DIR` or `HOSTS_HOME_DIR` in `paths.ts`, both in the run's own directory): every
+ * one of them has a `--home` under it on its command line. A run's command names no home,
+ * so the descendants of every owned process are owned too. The other demo server of the
+ * same run, and another suite's directory, have other homes, so their processes are never
+ * matched.
  */
 import { spawnSync } from "node:child_process";
 
@@ -45,6 +47,17 @@ export interface Owner {
   groups: number[];
   /** Never owned (the caller itself). */
   exclude: number[];
+}
+
+/**
+ * What one `serve-demo.ts` owns: its hub `hub` (and the hub's process group) and every
+ * process whose command line names a path under its own `home`; never `self`. Not the run
+ * directory: both demo servers of a run share it, and one must not kill the other's hub
+ * before that hub's own graceful shutdown.
+ */
+export function demoOwner(home: string, hub: number | undefined, self: number): Owner {
+  const mine = hub === undefined ? [] : [hub];
+  return { marker: `${home}/`, roots: mine, groups: [...mine], exclude: [self] };
 }
 
 /** The processes of `procs` that `owner` owns, with every descendant of each. */

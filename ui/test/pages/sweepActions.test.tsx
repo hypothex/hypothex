@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { SweepActions } from "../../src/pages/components/SweepActions";
 import { sweepCli } from "../../src/pages/components/SweepModel";
@@ -123,5 +124,42 @@ describe("SweepActions", () => {
     const ids = sent.map((c) => (c.body as { command_id: string }).command_id);
     expect(ids[0]).toBe(ids[1] as string);
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  test("a failed extend keeps its seeds: after the summary shows them saved, the retry sends them again, not the next ones", async () => {
+    // the hub saves seeds 3, 4 in the sweep before it issues their runs; then a host fails
+    let fail = true;
+    const calls = mockApi({
+      [`POST ${BASE}/extend`]: () => {
+        if (fail) {
+          fail = false;
+          return new HttpReply(503, { error: "gpu1 is not connected", type: "HostUnavailableError" });
+        }
+        return makeSummary();
+      },
+    });
+    const { client, rerender } = renderActions();
+    fireEvent.click(screen.getByRole("button", { name: "Add seeds" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add 8 runs" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("gpu1 is not connected");
+    // the summary refetch now lists seeds 1-4
+    const saved = { ...SPEC, seeds: [1, 2, 3, 4] };
+    rerender(
+      <QueryClientProvider client={client}>
+        <SweepActions project={PROJECT} sweepId={SWEEP_ID} spec={saved} queued={1} cellCount={4} runs={RUNS} />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText("3, 4 × 4 cells = 8 runs")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Add 8 runs" }));
+    await waitFor(() => expect(calls.filter((c) => c.url === `${BASE}/extend`)).toHaveLength(2));
+    const sent = calls.filter((c) => c.url === `${BASE}/extend`);
+    expect(sent.map((c) => (c.body as { seeds: number[] }).seeds)).toEqual([
+      [3, 4],
+      [3, 4],
+    ]);
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Add seeds" })).toBeNull());
+    // once it went through, the next Add seeds proposes the seeds after them
+    fireEvent.click(screen.getByRole("button", { name: "Add seeds" }));
+    expect(screen.getByText("5, 6 × 4 cells = 8 runs")).toBeTruthy();
   });
 });

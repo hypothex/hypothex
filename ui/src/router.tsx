@@ -1,7 +1,7 @@
 /**
  * Code-defined routes (contract section 4):
  * `/` Overview, `/t/$project/$task?view=` Task, `/t/$project/$task/edit/$view` View editor
- * (`new` for a new view), `/r/$runId` Run, `/x/$a/$b?metric=` Examples.
+ * (`new` for a new view), `/r/$runId` Run, `/x/$a/$b?metric=` Examples, `/s/$project/$id` Sweep.
  *
  * Each screen replaces its `ScreenPending` component below with the real screen. Screens
  * read params with `getRouteApi("<route id>")` to avoid importing this module.
@@ -20,6 +20,7 @@ import { type ReactElement, useState } from "react";
 import { ExamplesPage } from "./pages/Examples";
 import { OverviewPage } from "./pages/Overview";
 import { RunPage } from "./pages/Run";
+import { SweepPage } from "./pages/Sweep";
 import { TaskPage } from "./pages/Task";
 import { ViewEditor } from "./pages/ViewEditor";
 import { CommandPalette } from "./shell/CommandPalette";
@@ -117,6 +118,12 @@ function ExamplesScreen(): ReactElement {
   return <ExamplesPage a={a} b={b} metric={metric} />;
 }
 
+/** `/s/$project/$id`: the Sweep page; keyed so a new sweep starts with fresh UI state. */
+function SweepScreen(): ReactElement {
+  const { project, id } = sweepRoute.useParams();
+  return <SweepPage key={`${project}/${id}`} project={project} sweepId={id} />;
+}
+
 /** `/t/$project/$task/edit/$view`: the view editor; Save opens the saved view's tab. */
 function ViewEditorScreen(): ReactElement {
   const { project, task, view } = viewEditorRoute.useParams();
@@ -170,12 +177,19 @@ export const examplesRoute = createRoute({
   component: ExamplesScreen,
 });
 
+export const sweepRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/s/$project/$id",
+  component: SweepScreen,
+});
+
 export const routeTree = rootRoute.addChildren([
   overviewRoute,
   taskRoute,
   viewEditorRoute,
   runRoute,
   examplesRoute,
+  sweepRoute,
 ]);
 
 /** Build the router; tests pass a memory history. */

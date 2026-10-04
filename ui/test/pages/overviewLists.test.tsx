@@ -9,9 +9,14 @@ import {
   ideaSub,
   pct,
 } from "../../src/pages/components/IdeaList";
-import { FailureList, ProjectsTable, RunningList } from "../../src/pages/components/OverviewLists";
+import {
+  FailureList,
+  ProjectsTable,
+  RunningList,
+  groupFailures,
+} from "../../src/pages/components/OverviewLists";
 import { PAGES_CSS } from "../../src/pages/components/styles";
-import type { IdeaRow } from "../../src/pages/components/types";
+import type { FailureRow, IdeaRow } from "../../src/pages/components/types";
 import { RUN_FAILED, RUN_SVM, STORE, makeOverview, makeRecord } from "./fixtures";
 import { mockClipboard } from "./helpers";
 
@@ -35,6 +40,9 @@ describe("idea helpers", () => {
     expect([ideaScore(rf), ideaSub(rf)]).toEqual(["0.8852", "± 0.0064"]);
     const running: IdeaRow = { ...failed, statuses: ["running", "finished"] };
     expect(ideaScore(running)).toBe("running");
+    // queued alone is waiting, not running; one running seed makes the group running
+    expect(ideaScore({ ...failed, statuses: ["queued", "queued"] })).toBe("queued");
+    expect(ideaScore({ ...failed, statuses: ["queued", "running"] })).toBe("running");
     const one: IdeaRow = { ...rf, primary: { mean: 0.5, std: 0, n: 1, ci_low: null, ci_high: null } };
     expect(ideaSub(one)).toBe("1 seed");
     const fast: IdeaRow = { ...rf, unit: "ms", primary: { mean: 165.6, std: 2.8, n: 3, ci_low: null, ci_high: null } };
@@ -140,6 +148,35 @@ test("IdeaList draws one axis per task, so accuracy rows keep a visible best ban
   expect(within(groups[0] as HTMLElement).getByText("0.9222")).toBeTruthy();
 });
 
+test("IdeaList marks queued seeds apart from running ones", () => {
+  const [, failed] = ideas as [IdeaRow, IdeaRow];
+  const row: IdeaRow = { ...failed, primary: null, statuses: ["queued", "running", "queued"] };
+  const { container } = render(<IdeaList ideas={[row]} />);
+  const marks = [...container.querySelectorAll("[data-seed]")].map((m) => m.getAttribute("data-seed"));
+  expect(marks).toEqual(["queued", "running", "queued"]);
+});
+
+test("RunningList puts queued runs in a waiting group after the running ones", () => {
+  const runs = [
+    makeRecord({ run_id: "q1", status: "queued", ended_at: null, hypothesis: "queued one" }),
+    makeRecord({ run_id: "r1", status: "running", ended_at: null, hypothesis: "running one" }),
+    makeRecord({ run_id: "q2", status: "queued", ended_at: null, hypothesis: "queued two" }),
+  ];
+  render(<RunningList runs={runs} />);
+  const names = (label: string) =>
+    within(screen.getByRole("list", { name: label }))
+      .getAllByRole("link")
+      .map((a) => a.textContent);
+  expect(names("running")).toEqual(["running one"]);
+  expect(names("waiting")).toEqual(["queued one", "queued two"]);
+  expect(screen.getByText("waiting 2")).toBeTruthy();
+  cleanup();
+  // only queued runs: no running list, just the waiting group
+  render(<RunningList runs={[runs[0]!]} />);
+  expect(screen.queryByRole("list", { name: "running" })).toBeNull();
+  expect(names("waiting")).toEqual(["queued one"]);
+});
+
 test("RunningList shows none, or one link per run", () => {
   const { rerender } = render(<RunningList runs={[]} />);
   expect(screen.getByText("none")).toBeTruthy();
@@ -157,6 +194,68 @@ test("FailureList links to stderr and copies its path", async () => {
   expect(open.getAttribute("href")).toBe(`/r/${RUN_FAILED}?log=stderr`);
   fireEvent.click(screen.getByRole("button", { name: "Copy stderr path" }));
   await waitFor(() => expect(written).toEqual([`${STORE}/${RUN_FAILED}/logs/stderr.log`]));
+});
+
+const fail = (run_id: string, label: string, exit_code: number | null, at: string): FailureRow => ({
+  run_id,
+  label,
+  exit_code,
+  created_at: `2026-10-03T${at}Z`,
+  stderr_path: `${STORE}/${run_id}/logs/stderr.log`,
+  retried_ok: true,
+});
+const FAILS = [
+  fail("svm-3", "RBF-kernel SVM", 2, "03:02:02"),
+  fail("cache-1", "cache-enabled", 1, "02:00:00"),
+  fail("svm-2", "RBF-kernel SVM", 2, "03:02:01"),
+  fail("svm-x", "RBF-kernel SVM", 1, "03:01:59"),
+  fail("svm-1", "RBF-kernel SVM", 2, "03:01:58"),
+];
+
+test("groupFailures joins rows with the same label and exit code, in first-seen order", () => {
+  expect(groupFailures(FAILS).map((g) => g.map((f) => f.run_id))).toEqual([
+    ["svm-3", "svm-2", "svm-1"],
+    ["cache-1"],
+    ["svm-x"],
+  ]);
+  expect(groupFailures([])).toEqual([]);
+});
+
+test("FailureList shows one block per group with a ×N count, newest row first", () => {
+  const { container } = render(<FailureList failures={FAILS} />);
+  const blocks = [...container.querySelectorAll(".fail-b")];
+  expect(blocks.map((b) => b.querySelector(".x")?.textContent)).toEqual(["×3", "×", "×"]);
+  expect(blocks[0]?.querySelector("b")?.textContent).toBe("RBF-kernel SVM, exit 2");
+  expect(within(blocks[0] as HTMLElement).getByRole("link", { name: "Open stderr" }).getAttribute("href")).toBe(
+    "/r/svm-3?log=stderr",
+  );
+  expect(blocks[0]?.getAttribute("title")).toBe("svm-3 03:02:02 UTC\nsvm-2 03:02:01 UTC\nsvm-1 03:01:58 UTC");
+  expect(blocks[1]?.getAttribute("title")).toBeNull();
+});
+
+test("FailureList shows retry ok only when every row was retried, else retried ×k", () => {
+  const rows = (flags: boolean[]): FailureRow[] =>
+    flags.map((ok, i) => ({ ...fail(`svm-${i}`, "RBF-kernel SVM", 2, `03:02:0${i}`), retried_ok: ok }));
+  const small = (flags: boolean[]): string | null | undefined => {
+    const { container } = render(<FailureList failures={rows(flags)} />);
+    const text = container.querySelector(".fail-b .small")?.textContent;
+    cleanup();
+    return text;
+  };
+  expect(small([true, true, true])).toBe("03:02:00 UTC, retry ok");
+  expect(small([true, false, true])).toBe("03:02:00 UTC, retried ×2");
+  expect(small([false, false, false])).toBe("03:02:00 UTC");
+  expect(small([true])).toBe("03:02:00 UTC, retry ok");
+});
+
+test("FailureList paths break only after a slash", () => {
+  const { container } = render(<FailureList failures={makeOverview().failures} />);
+  const path = container.querySelector(".fail-b .p") as HTMLElement;
+  // …/<id>/logs/stderr.log: a break chance after each of the 3 slashes, none inside a word
+  expect(path.querySelectorAll("wbr")).toHaveLength(3);
+  expect(path.style.wordBreak).toBe("normal");
+  expect(path.textContent).toBe(`…/${RUN_FAILED}/logs/stderr.log`);
+  expect(path.getAttribute("title")).toBe(`${STORE}/${RUN_FAILED}/logs/stderr.log`);
 });
 
 test("ProjectsTable links each task and shows runs and best", () => {

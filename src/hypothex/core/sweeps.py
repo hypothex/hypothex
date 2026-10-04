@@ -37,7 +37,12 @@ from hypothex.core.fsutil import atomic_write_text, read_yaml, write_yaml
 from hypothex.core.headlines import NO_RUNS, fmt_metric, fmt_metric_delta, fmt_p
 from hypothex.core.ids import utcnow
 from hypothex.core.layout import Layout
-from hypothex.core.leaderboard import Leaderboard, LeaderboardRow, build_leaderboard
+from hypothex.core.leaderboard import (
+    Leaderboard,
+    LeaderboardRow,
+    build_leaderboard,
+    cached_leaderboard,
+)
 from hypothex.core.queries import primary_examples
 from hypothex.core.records import RunRecord, RunStatus
 
@@ -610,9 +615,15 @@ def _board(
     """The task leaderboard restricted to ``runs``, or None without a known task."""
     if spec.task is None or config is None:
         return None
-    scores = ctx.index.scores_for(r.run_id for r in runs)
-    per_example = primary_examples(ctx, config, spec.task, runs, None)
-    return build_leaderboard(spec.project, spec.task, config, runs, scores, per_example=per_example)
+    task = spec.task
+
+    def build() -> Leaderboard:
+        scores = ctx.index.scores_for(r.run_id for r in runs)
+        per_example = primary_examples(ctx, config, task, runs, None)
+        return build_leaderboard(spec.project, task, config, runs, scores, per_example=per_example)
+
+    ids = ("sweep", tuple(r.run_id for r in runs))
+    return cached_leaderboard(ctx, spec.project, task, config, build, variant=ids)
 
 
 def _cell(

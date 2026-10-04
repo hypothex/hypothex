@@ -7,6 +7,7 @@ import {
   fmtMoney,
   gpuCells,
   gpuColumns,
+  gpuCountLabel,
   gpuSpec,
   hostRowForRun,
   hostTotals,
@@ -60,6 +61,12 @@ describe("formatting", () => {
     expect(gpuSpec(dgx.gpus)).toBe("2×H100 80GB");
     expect(gpuSpec([gpu(0), gpu(1, { name: "NVIDIA H100 80GB HBM3" })])).toBe("2 GPUs");
     expect(gpuSpec([])).toBe("");
+  });
+
+  test("gpuCountLabel: any count named after a set of GPUs", () => {
+    expect(gpuCountLabel(2, gpu1.gpus)).toBe("2×A100 80GB");
+    expect(gpuCountLabel(1, [gpu(0), gpu(1, { name: "NVIDIA H100 80GB HBM3" })])).toBe("1 GPU");
+    expect(gpuCountLabel(3, [])).toBe("3 GPUs");
   });
 });
 
@@ -200,6 +207,18 @@ test("useNow re-renders with a later time every interval", async () => {
   const { result, unmount } = renderHook(() => useNow(20));
   const first = result.current;
   expect(Math.abs(first - Date.now())).toBeLessThan(1000);
+  await waitFor(() => expect(result.current).toBeGreaterThan(first));
+  unmount();
+});
+
+test("useNow stands still while disabled and reads the time once enabled", async () => {
+  const { result, rerender, unmount } = renderHook(({ on }: { on: boolean }) => useNow(20, on), {
+    initialProps: { on: false },
+  });
+  const first = result.current;
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  expect(result.current).toBe(first);
+  rerender({ on: true });
   await waitFor(() => expect(result.current).toBeGreaterThan(first));
   unmount();
 });

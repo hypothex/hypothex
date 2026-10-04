@@ -44,3 +44,30 @@ Commit locally with these changes; push and main integration remain with the par
 
 Evidence logs live in `/tmp/hx-handoff-evidence/`. The two initial reproductions are
 `gate-concurrent-identity-review.json` and `gate-restart-identity-review.json` there.
+
+## Main integration
+
+- [x] Merge backend audit and UI fixes from `origin/main` at `5c02037`, preserving both
+  branches' regressions and the unchanged-config refresh optimization.
+- [x] Existing dataset-overlap regression fails after the merge, then passes when the shared
+  gate supplies its repo (`gate-merge-overlap-red.log`, `gate-merge-overlap-green.log`).
+- [x] Preserve historical mirror provenance while preferring configured aliases. The full
+  suite reproduced removed-host curation and re-evaluation failures; stale seen-alias coverage
+  also failed before the correction (`gate-merge-alias-red.log`). Final targeted routing,
+  host, identity, and MCP tests: 80 passed (`gate-merge-routing-green.log`).
+- [x] Centralize MCP sweep pin lookup and cover local, host-copy, missing, and explicit repos.
+  Query and MCP helper tests: 44 passed (`gate-merge-queries-mcp-green.log`).
+- [x] Final complete API subset: 177 passed (`gate-merge-final-api.log`).
+- [x] UI unit tests: 848 passed; build, UI and e2e types passed; Playwright: 44 passed;
+  demo shutdown check passed (`gate-merge-ui-*.log`, `gate-merge-e2e*.log`,
+  `gate-merge-shutdown.log`).
+- [x] Mandatory Docker SSH and SLURM suite on the final code: 11 passed in 185.92s
+  (`gate-merge-final-docker.log`).
+- [x] Ruff check/format, ty, and Sphinx with warnings as errors passed
+  (`gate-merge-final-{ruff,format,ty,docs}.log`).
+- [x] Review the complete production diff against `origin/main`; no remaining blocker.
+- [x] Final full Python suite after integration corrections: 1767 passed, 3 skipped,
+  11 Docker tests deselected, in 457.52s (`gate-merge-final-full.log`).
+
+The first integrated full run recorded 1762 passed, 3 skipped, and the three failures
+described above (`gate-merge-full.log`). The successful final full run supersedes it.

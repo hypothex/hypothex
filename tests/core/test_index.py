@@ -140,6 +140,14 @@ def test_metric_points_for_filters_names_with_the_composite_index(tmp_path: Path
     assert "ix_metric_points_run_name_step" in text and "TEMP B-TREE" not in text
 
 
+def test_metric_names_reads_distinct_names_only(tmp_path: Path) -> None:
+    idx = Index(tmp_path / "i.db")
+    points = [MetricPoint(name=n, step=s, value=1.0) for n in ("lr", "acc") for s in range(3)]
+    idx.replace_metric_points("r1", points)
+    assert idx.metric_names("r1") == ["acc", "lr"]
+    assert idx.metric_names("zz") == []
+
+
 def test_downsample_keeps_last_point_and_limit() -> None:
     points = [MetricPoint(name="loss", step=i, value=float(i)) for i in range(2500)]
     points.append(MetricPoint(name="acc", step=0, value=1.0))
@@ -148,6 +156,15 @@ def test_downsample_keeps_last_point_and_limit() -> None:
     assert len(loss) <= 1000
     assert loss[-1].step == 2499
     assert [p.name for p in out].count("acc") == 1
+
+
+def test_downsample_keeps_a_one_step_spike() -> None:
+    # every-n-th sampling dropped it, so the indexed curve of an ended run lost its spike
+    points = [MetricPoint(name="loss", step=i, value=1.0) for i in range(5000)]
+    points[2501] = MetricPoint(name="loss", step=2501, value=50.0)
+    out = downsample(points, limit=1000)
+    assert len(out) == 1000 and out[0].step == 0 and out[-1].step == 4999
+    assert any(p.step == 2501 and p.value == 50.0 for p in out)
 
 
 def test_schema_version_mismatch_triggers_rebuild(tmp_path: Path) -> None:

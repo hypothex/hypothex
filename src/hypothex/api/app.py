@@ -12,7 +12,7 @@ import re
 import stat
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -32,19 +32,20 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 from starlette.types import Scope
 
 from hypothex._version import __version__
-from hypothex.api.security import OriginGuard, TokenGuard, allowed_hosts
+from hypothex.api.security import OriginGuard, TokenGuard, allowed_hosts, bearer_matches
 from hypothex.core import control
 from hypothex.core import queries as q
 from hypothex.core.config import load_project_config, parse_metric_version
 from hypothex.core.context import Context
 from hypothex.core.cost import cost_since, today_start
 from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
-from hypothex.core.evaluation import reeval
+from hypothex.core.evaluation import EvalReport, reeval
 from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import RunRequest
 from hypothex.core.fsutil import atomic_write_text
@@ -107,6 +108,9 @@ SCHEDULER_INTERVAL_SECONDS = 5.0
 ENV_KINDS = ("local", "ssh", "slurm")
 COST_WINDOW_DAYS = 7
 MIRROR_WAIT_SECONDS = 10.0
+REEVAL_FORWARD_SECONDS = 600.0
+"""Read timeout of a reeval sent to a host: scoring can outlast the client's 10 s, and a
+timeout counts the host as unreachable (a task reeval then skips its other runs)."""
 PULL_MAX_BYTES = 64 * 1024**3
 PULL_REMOTE_PATH = re.compile(r"^/[A-Za-z0-9_.+@/=-]+$")
 """An absolute host path that ``pull`` may hand to ``scp``: shell-safe characters only."""
@@ -121,6 +125,13 @@ NO_UI_FALLBACK = frozenset({"api", "mcp", ".well-known", "assets"})
 FILE_MAX_BYTES = 200 * 1024 * 1024
 FILE_CHUNK_BYTES = 64 * 1024
 GPU_CACHE_SECONDS = 10.0
+PUBLIC_DESCRIPTOR_FIELDS = ("environment_id", "protocol_version", "hx_version")
+"""What the descriptor tells a client without the bearer token (``start.sh`` needs the id)."""
+GZIP_MIN_BYTES = 2048
+"""Responses at least this big are gzipped for clients that accept it (JSON compresses ~8x)."""
+GZIP_LEVEL = 6
+GZIP_SKIP_TYPES = (*DEFAULT_EXCLUDED_CONTENT_TYPES, "application/octet-stream")
+"""Run files (``application/octet-stream``, up to ``FILE_MAX_BYTES``) are sent as they are."""
 _OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
@@ -246,10 +257,20 @@ class PullBody(ActionBody):
 
 
 class SubscribeMessage(BaseModel):
-    """The first WebSocket message: ``{type: subscribe, after_sequence: N}``."""
+    """
+    The first WebSocket message: ``{type: subscribe, after_sequence, max_replay?}``.
+
+    ``after_sequence`` is the last sequence the client has (``0`` replays the whole
+    log) or ``"latest"``: no replay, live events from now on (a page that has just
+    loaded its data). ``max_replay`` caps the replay: when more than that many
+    events are missing, the server sends ``{type: reset, last_sequence}`` instead
+    of them, and the client reloads its data. Without it every missing event is
+    replayed, which the hub's mirror needs.
+    """
 
     type: Literal["subscribe"]
-    after_sequence: int = Field(default=0, ge=0)
+    after_sequence: Annotated[int, Field(ge=0)] | Literal["latest"] = 0
+    max_replay: int | None = Field(default=None, ge=1)
 
 
 class ReinferBody(ActionBody):
@@ -330,6 +351,45 @@ async def client_left(ws: WebSocket, seconds: float) -> bool:
     except TimeoutError:
         return False
     return message["type"] == "websocket.disconnect"
+
+
+def validation_detail(problems: Sequence[Any]) -> list[dict[str, Any]]:
+    """
+    Turn FastAPI's validation problems into JSON-safe dicts for a ``422`` body.
+
+    ``input`` is left out: for a body that is not JSON it is the raw bytes, and
+    it echoes whatever the client sent. ``ctx`` values that are not plain JSON
+    scalars (such as the ``ValueError`` a model validator raised) become text.
+
+    Parameters
+    ----------
+    problems : sequence of dict
+        ``RequestValidationError.errors()``.
+
+    Returns
+    -------
+    list of dict
+        Each problem's ``type``, ``loc``, ``msg`` and ``ctx`` (and any other key
+        but ``input``).
+
+    Examples
+    --------
+    >>> validation_detail([{"type": "dict_type", "loc": ("body",), "msg": "bad", "input": b"{}"}])
+    [{'type': 'dict_type', 'loc': ['body'], 'msg': 'bad'}]
+    >>> validation_detail([{"type": "value_error", "loc": ("body", "grid"), "msg": "bad",
+    ...                     "ctx": {"error": ValueError("bad")}}])[0]["ctx"]
+    {'error': 'bad'}
+    """
+    out: list[dict[str, Any]] = []
+    for problem in problems:
+        item = {k: v for k, v in problem.items() if k != "input"}
+        if isinstance(item.get("ctx"), dict):
+            item["ctx"] = {
+                k: v if v is None or isinstance(v, str | int | float | bool) else str(v)
+                for k, v in item["ctx"].items()
+            }
+        out.append(to_jsonable(item))
+    return out
 
 
 async def _repair_loop(ctx: Context) -> None:
@@ -717,8 +777,41 @@ class HubManager:
             for name in self.names():
                 if name not in self.disabled:
                     self.state(name)
-        name = self._seen.get(environment_id) or self._cursor_host(environment_id)
-        return name if name in self.names() else None
+        configured = self.names()
+        seen = self._seen.get(environment_id)
+        name = seen if seen in configured else self._cursor_host(environment_id)
+        return name if name in configured else None
+
+    def mirrored_from(self, environment_id: str) -> str | None:
+        """
+        Return the host this hub mirrored an environment's runs from, configured or not.
+
+        Unlike :meth:`host_for_environment`, a host since removed from
+        ``environments.yaml`` still counts: its mirror cursor stays, and the
+        host's copy of each run replaces the hub's whenever it is mirrored again.
+
+        Parameters
+        ----------
+        environment_id : str
+
+        Returns
+        -------
+        str or None
+            The host name; None for this hub's own runs and for environments
+            never mirrored here (such as demo or imported runs).
+
+        Examples
+        --------
+        >>> manager.mirrored_from("env-of-a-removed-host")  # doctest: +SKIP
+        'gpu-old'
+        """
+        if environment_id == self.ctx.descriptor.environment_id:
+            return None
+        return (
+            self.host_for_environment(environment_id)
+            or self._seen.get(environment_id)
+            or self._cursor_host(environment_id)
+        )
 
     def environment_ids(self, state: HostState) -> list[str]:
         """
@@ -757,7 +850,9 @@ class HubManager:
         except OperationalError:
             return None
         configured = self.names()
-        return next((name for name in hosts if name in configured), None)
+        # Prefer the active alias, but retain a removed owner for mirrored_from:
+        # curation must still refuse a host's mirror when no alias is configured.
+        return next((name for name in hosts if name in configured), next(iter(hosts), None))
 
 
 def environment_runs(ctx: Context, environment_id: str) -> list[RunRecord]:
@@ -991,6 +1086,39 @@ def local_diff(repo: str | None) -> str | None:
             f"uncommitted changes in {repo} are not UTF-8 text; "
             "commit them before launching on a host"
         ) from exc
+
+
+def pin_checkout(repo: str | None) -> tuple[str | None, str | None]:
+    """
+    Return the commit and diff that pin a hub checkout's code as it is now (spec 8A.4).
+
+    Parameters
+    ----------
+    repo : str or None
+        Checkout path on the hub.
+
+    Returns
+    -------
+    tuple of (str or None, str or None)
+        ``(HEAD, uncommitted diff or None)``; ``(None, None)`` when ``repo`` is
+        None, not a folder, or not a git repository with a commit (nothing to pin).
+
+    Raises
+    ------
+    RunError
+        If the diff is larger than ``DIFF_LIMIT_BYTES`` or is not UTF-8 text.
+
+    Examples
+    --------
+    >>> pin_checkout(None)
+    (None, None)
+    """
+    if repo is None or not Path(repo).is_dir():
+        return None, None
+    head = head_commit(Path(repo))
+    if head is None:
+        return None, None
+    return head, local_diff(repo)
 
 
 def _slurm_for(host: str, spec: HostSpec, body: RunFields) -> dict[str, Any] | None:
@@ -1681,6 +1809,13 @@ def create_app(
     app.state.hub = manager
     app.state.mcp = mcp_server
     hosts = allowed_hosts(host)
+    # innermost: the guards answer first, and the hub's tunnels carry compressed JSON
+    app.add_middleware(
+        GZipMiddleware,
+        minimum_size=GZIP_MIN_BYTES,
+        compresslevel=GZIP_LEVEL,
+        exclude_content_types=GZIP_SKIP_TYPES,
+    )
     app.add_middleware(OriginGuard, hosts=hosts)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
     if auth_token:
@@ -1731,7 +1866,7 @@ def create_app(
             content={
                 "error": f"{where}: {message}" if where else message,
                 "type": "RequestValidationError",
-                "detail": to_jsonable(problems),
+                "detail": validation_detail(problems),
             },
         )
 
@@ -1753,28 +1888,28 @@ def create_app(
             record = ctx.find_record(run_id)
             host = manager.host_for_environment(record.environment_id)
             if host is None:
+                source = manager.mirrored_from(record.environment_id)
                 foreign = record.environment_id != ctx.descriptor.environment_id
-                if remote_only and foreign:
-                    # its pids and paths belong to another machine: never act on them here
+                # remote_only: its pids and paths belong to another machine. A mirrored run:
+                # the host's copy replaces the hub's on its next mirror, so an edit made
+                # here (tags, star, archive, notes) would be lost without a word
+                if foreign and (remote_only or source is not None):
+                    mirrored = f" (mirrored from host {source})" if source else ""
                     raise HostUnavailableError(
-                        f"run {run_id} belongs to environment {record.environment_id}, which "
-                        f"no configured host serves; {action} must run on that host "
+                        f"run {run_id} belongs to environment {record.environment_id}{mirrored}, "
+                        f"which no configured host serves; {action} must run on that host "
                         "(`hx hosts add` / `hx hosts connect`)"
                     )
                 return local()
             payload = body.model_dump(mode="json")
-            return manager.client(host).post_json(f"/api/v1/runs/{run_id}/{action}", payload)
+            timeout = REEVAL_FORWARD_SECONDS if action == "reeval" else None
+            return manager.client(host).post_json(
+                f"/api/v1/runs/{run_id}/{action}", payload, timeout=timeout
+            )
 
         return once(body, act)
 
-    def launcher_for(
-        host: str | None,
-        launched: list[str],
-        *,
-        project: str,
-        commit: str | None = None,
-        diff: str | None = None,
-    ) -> Launcher | None:
+    def launcher_for(host: str | None, launched: list[str], *, project: str) -> Launcher | None:
         # None: the sweep engine launches here; a host name: forward each run to it.
         # `launched` collects the run ids the host answers with (settled() waits for them)
         if not is_remote(host):
@@ -1788,14 +1923,16 @@ def create_app(
             # never a host's copy, whose repo path may also name a folder here
             local = _registered_checkout(ctx, project) is not None and req.repo.is_dir()
             if "commit" not in pinned:
-                # spec 8A.4: one commit for every run of this call; the host fetches it
-                head = head_commit(req.repo) if local else None
-                pinned["commit"] = commit or head
-                # the client's diff, else the hub checkout's, taken against that commit
-                if commit is not None:
-                    pinned["diff"] = diff
+                # spec 8A.4: one commit for every run of this call; the host fetches it.
+                # The sweep's stored pin (SweepSpec.commit/diff, so an extend runs the
+                # sweep's code); a sweep file that pins nothing: the hub checkout now
+                if req.commit is not None:
+                    diff = req.diff.decode("utf-8") if isinstance(req.diff, bytes) else req.diff
+                    pinned.update(commit=req.commit, diff=diff)
                 else:
-                    pinned["diff"] = local_diff(str(req.repo)) if local else None
+                    pinned["commit"], pinned["diff"] = pin_checkout(
+                        str(req.repo) if local else None
+                    )
             body = HostLaunchBody(
                 repo=str(req.repo) if local else None,
                 project=project,
@@ -1838,6 +1975,11 @@ def create_app(
 
         return stop
 
+    def host_state_of(environment_id: str) -> str | None:
+        # the connection state of the host serving a run's environment; None: a hub run
+        host = manager.host_for_environment(environment_id)
+        return None if host is None else manager.state(host).state
+
     def settled(spec: SweepSpec, launched: list[str]) -> SweepSummary:
         # members are indexed runs: wait until this call's remote runs are mirrored
         if is_remote(spec.host):
@@ -1846,8 +1988,12 @@ def create_app(
 
     # environment -----------------------------------------------------------------
     @app.get("/.well-known/hypothex/environment")
-    def environment() -> dict[str, Any]:
-        return ctx.descriptor.model_dump(mode="json")
+    def environment(request: Request) -> dict[str, Any]:
+        full = ctx.descriptor.model_dump(mode="json")
+        if auth_token and not bearer_matches(request.headers.get("authorization"), auth_token):
+            # open so start.sh can find its server; host facts only for the token holder
+            return {k: full[k] for k in PUBLIC_DESCRIPTOR_FIELDS}
+        return full
 
     # hosts (hub) ---------------------------------------------------------------------
     @app.get("/api/v1/hosts")
@@ -1915,9 +2061,68 @@ def create_app(
 
     @app.post("/api/v1/tasks/{project}/{task}/reeval")
     def task_reeval(project: str, task: str, body: ReevalBody) -> dict[str, Any]:
-        return once(
-            body,
-            lambda: reeval(ctx, project=project, task=task, metric=body.metric, force=body.force),
+        # spec 8A.3: a mirrored run is re-scored on its host (the mirror replaces the hub's
+        # scores.jsonl with the host's whole file); only the hub's own runs, and runs no
+        # host ever mirrored here (demo, imported), are scored here
+        def act() -> EvalReport:
+            runs = ctx.index.list_runs(
+                project=project,
+                task=task,
+                status=RunStatus.FINISHED,
+                include_archived=True,
+                limit=None,
+            )
+            hosts = {e: _mirror_host(e) for e in {r.environment_id for r in runs}}
+            if not any(hosts.values()):
+                return reeval(ctx, project=project, task=task, metric=body.metric, force=body.force)
+            # the hub's own runs in one core call, then each mirrored run on its host
+            here = [r.run_id for r in runs if hosts[r.environment_id] is None]
+            report = reeval(
+                ctx,
+                project=project,
+                task=task,
+                metric=body.metric,
+                force=body.force,
+                run_ids=here,
+            )
+            down: dict[str, str] = {}  # host -> why nothing more is sent to it
+            for record in reversed(runs):  # oldest first, as core reeval
+                host = hosts[record.environment_id]
+                if host is None:
+                    continue
+                if host in down:
+                    report.skipped[record.run_id] = down[host]
+                    continue
+                try:
+                    part = EvalReport.model_validate(_reeval_on(host, record.run_id, body))
+                except (HostUnavailableError, EnvUnreachableError) as exc:
+                    down[host] = report.skipped[record.run_id] = f"host {host}: {exc}"[:500]
+                    continue
+                except EnvRequestError as exc:
+                    report.skipped[record.run_id] = f"host {host}: {exc}"[:500]
+                    continue
+                report.evaluated += part.evaluated
+                report.skipped.update(part.skipped)
+                report.warnings += [w for w in part.warnings if w not in report.warnings]
+            return report
+
+        return once(body, act)
+
+    def _mirror_host(environment_id: str) -> str | None:
+        # None: re-score here; else the host the run was mirrored from (configured or not)
+        return manager.host_for_environment(environment_id) or manager.mirrored_from(environment_id)
+
+    def _reeval_on(host: str, run_id: str, body: ReevalBody) -> Any:
+        if host not in manager.names():
+            raise HostUnavailableError(
+                f"it is no longer in environments.yaml; re-evaluate run {run_id} there "
+                "(`hx hosts add`)"
+            )
+        payload = body.model_dump(mode="json")
+        # one command id per run, so a retried task reeval re-scores each run at most once
+        payload["command_id"] = f"{body.command_id}:{run_id}" if body.command_id else None
+        return manager.client(host).post_json(
+            f"/api/v1/runs/{run_id}/reeval", payload, timeout=REEVAL_FORWARD_SECONDS
         )
 
     @app.get("/api/v1/tasks/{project}/{task}/kind")
@@ -1963,10 +2168,19 @@ def create_app(
         environment_id: str | None = None,
         archived: bool = False,
         limit: Annotated[int, Query(ge=1)] = 200,
+        before_created_at: datetime | None = None,
+        before_run_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        # no cap below `limit`: the UI pages through a host's queue or a sweep with a
-        # growing limit, starting at 1000
-        return to_jsonable(
+        # no cap below `limit`. Keyset paging: the next page starts after the last row of
+        # this one (`before_created_at`, `before_run_id`), so a page costs `limit` rows
+        if (before_created_at is None) != (before_run_id is None):
+            raise RunError("give before_created_at and before_run_id together")
+        before = None
+        if before_created_at is not None and before_run_id is not None:
+            if before_created_at.tzinfo is None:
+                before_created_at = before_created_at.replace(tzinfo=UTC)
+            before = (before_created_at.astimezone(UTC), before_run_id)
+        rows = to_jsonable(
             ctx.index.list_runs(
                 project=project,
                 task=task,
@@ -1975,8 +2189,17 @@ def create_app(
                 environment_id=environment_id,
                 include_archived=archived,
                 limit=limit,
+                before=before,
             )
         )
+        # like the run detail: the CLI and MCP list runs through the hub and see a stale host
+        states: dict[str, str | None] = {}
+        for row in rows:
+            env = row["environment_id"]
+            if env not in states:
+                states[env] = host_state_of(env)
+            row["host_state"] = states[env]
+        return rows
 
     @app.post("/api/v1/runs")
     def launch(body: LaunchBody) -> dict[str, Any]:
@@ -1986,13 +2209,17 @@ def create_app(
     def run_detail(run_id: str) -> dict[str, Any]:
         detail = q.show_run(ctx, run_id)
         out = to_jsonable(detail)
-        host = manager.host_for_environment(detail.record.environment_id)
-        out["host_state"] = None if host is None else manager.state(host).state
+        out["host_state"] = host_state_of(detail.record.environment_id)
         return out
 
     @app.get("/api/v1/runs/{run_id}/metrics")
-    def run_metrics(run_id: str) -> list[dict[str, Any]]:
-        return to_jsonable(q.metric_history(ctx, run_id))
+    def run_metrics(
+        run_id: str,
+        names: Annotated[list[str] | None, Query()] = None,
+        max_points: Annotated[int | None, Query(ge=2)] = None,
+    ) -> list[dict[str, Any]]:
+        # a chart asks for the names it shows, at about its width in points (PERF-F9)
+        return to_jsonable(q.metric_history(ctx, run_id, names=names, max_points=max_points))
 
     @app.get("/api/v1/runs/{run_id}/traces")
     def run_traces(run_id: str) -> list[dict[str, Any]]:
@@ -2108,6 +2335,12 @@ def create_app(
             remote = is_remote(body.host)
             if remote:
                 remote_checkout(ctx, str(body.host), body.project)  # unknown host or no map
+            # spec 8A.4: the sweep stores its code, so an extend runs the same commit and
+            # diff: the client's (`hx sweep --host` from a laptop), else the hub checkout's
+            if body.commit is not None:
+                commit, diff = body.commit, body.diff
+            else:
+                commit, diff = pin_checkout(_registered_checkout(ctx, body.project))
             launched: list[str] = []
             summary = launch_sweep(
                 ctx,
@@ -2122,18 +2355,17 @@ def create_app(
                 gpus=body.gpus,
                 queue=body.queue,
                 created_by=body.created_by,
-                launch=launcher_for(
-                    body.host,
-                    launched,
-                    project=body.project,
-                    commit=body.commit,
-                    diff=body.diff,
-                ),
+                launch=launcher_for(body.host, launched, project=body.project),
                 command_id=body.command_id,  # a retry resumes this sweep (Task 40)
+                commit=commit,
+                diff=diff,
             )
             return settled(summary.spec, launched)
 
-        return once(body, act)
+        # no command receipt: launch_sweep resumes the sweep a command id made (its claim
+        # file) and issues only the missing runs, even after a hub crash mid-launch, where
+        # a receipt would be `__interrupted__` and refuse the retry
+        return to_jsonable(act())
 
     @app.get("/api/v1/sweeps/{sweep_id}")
     def sweep_get_by_id(sweep_id: str) -> dict[str, Any]:
@@ -2208,12 +2440,20 @@ def create_app(
                     {
                         "type": "error",
                         "error": "first message must be {type: subscribe, after_sequence: N}"
-                        " with N an integer >= 0",
+                        ' with N an integer >= 0 or "latest" (and an optional max_replay >= 1)',
                     }
                 )
                 await ws.close()
                 return
-            last = sub.after_sequence
+            head = await asyncio.to_thread(ctx.events.last_sequence)
+            if sub.after_sequence == "latest":
+                last = head
+            elif sub.max_replay is not None and head - sub.after_sequence > sub.max_replay:
+                # too far behind to replay cheaply: the client reloads, then goes on live
+                await ws.send_json({"type": "reset", "last_sequence": head})
+                last = head
+            else:
+                last = sub.after_sequence
             ready = False
             while True:
                 batch = await asyncio.to_thread(ctx.events.since, last, WS_BATCH)

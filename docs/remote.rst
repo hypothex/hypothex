@@ -17,6 +17,11 @@ How it fits together
   your own ``ssh`` and ``~/.ssh/config``. The env server listens on ``127.0.0.1`` only.
 - The hub subscribes to each host's event stream and **mirrors** the runs: it copies
   the small files of each run to the hub as they change. Big files stay on the host.
+  The hub keeps its place in each host's stream (a *cursor*), so after a reconnect it
+  reads only what it missed. When a host's event log starts again (its ``events.db``
+  was deleted or restored from a backup, but the host kept its id), the hub sees that
+  the host is behind the cursor and reads the whole log again; nothing is copied
+  twice.
 
 The env server asks for a bearer token on every request. See :doc:`security`.
 
@@ -27,8 +32,10 @@ Before you start
   Hypothex runs ``ssh`` with ``-o BatchMode=yes``, so it never asks for a password.
 - The host has a git checkout of your project, and can ``git fetch`` the commits you
   launch (push them first).
-- The host has ``uv``, or ``curl``/``wget`` and network access to install it. The
-  install also needs access to the package index for Hypothex's dependencies.
+- The host has ``uv`` on ``PATH`` or in ``~/.local/bin`` or ``~/.cargo/bin``. Hypothex
+  does not install ``uv`` unless you ask for it with ``--install-uv``; then the host
+  needs ``curl`` or ``wget`` and network access to ``astral.sh``. The install also
+  needs access to the package index for Hypothex's dependencies.
 - A SLURM host: run the env server on a login node, and give it a home on a shared
   filesystem that supports ``flock`` (see :doc:`slurm`).
 
@@ -67,6 +74,10 @@ Add a host
      - The Hypothex home on the host (default ``~/.hypothex``).
    * - ``--usd-per-gpu-hour X``
      - The price of one GPU hour, for :doc:`cost`.
+   * - ``--install-uv``
+     - When the host has no ``uv``, run the official ``uv`` installer
+       (``https://astral.sh/uv/install.sh``) there. Without it, a host without ``uv``
+       is not added, and the error tells you to install ``uv``.
    * - ``--json``
      - Print machine-readable JSON.
 
@@ -85,7 +96,10 @@ What ``hx hosts add --ssh`` does
    a source checkout, or downloads that release from PyPI for a hub installed with
    ``uv tool install``. It copies the wheel with ``scp`` and installs it with
    ``uv tool install --force`` into ``~/.hypothex/runtime`` on the host. If the host
-   has no ``uv``, the official installer puts one into ``~/.local/bin``.
+   has no ``uv``, the install stops before the wheel is copied, with
+   ``uv is missing on the host``. Only with ``--install-uv`` does the official
+   installer put ``uv`` into ``~/.local/bin`` (its log is
+   ``~/.hypothex/runtime/uv-install.log``).
 3. **Start**: it starts ``hx serve --host 127.0.0.1 --port 0`` on the host, or reuses
    a healthy env server for that home. The port and the token go into
    ``~/.hypothex/serve/server.json`` on the host (mode 0600).
@@ -142,6 +156,7 @@ Manage hosts
    hx hosts disconnect gpu-box   # stop watching gpu-box; its runs keep going
    hx hosts connect gpu-box      # watch it again (also clears an error)
    hx hosts upgrade gpu-box      # install this Hypothex version and restart its server
+                                 # (--install-uv: also install uv when the host has none)
    hx hosts rm gpu-box           # forget it; its env server and runs keep going
 
 ``hx hosts status`` columns: host, kind, state, since, GPUs busy (busy/total), queue,
@@ -225,7 +240,16 @@ Act on remote runs
 ``note`` on a remote run go through the hub to the run's host, with one command id, so
 a repeated call still acts once. They never change only the hub's copy. When the
 run's host is no longer in ``environments.yaml``, stop, rerun, re-infer, and
-re-evaluate answer ``503``. ``--foreground`` is refused for a remote run.
+re-evaluate answer ``503``. So do tag, star, archive, and note when the hub mirrored the
+run from that host: the host's copy would replace the hub's when the host is added
+back. ``--foreground`` is refused for a remote run.
+
+A task re-evaluation through the hub (``POST /api/v1/tasks/{project}/{task}/reeval``)
+scores the hub's own runs on the hub in one pass and sends each remote run to its
+host. The hub waits up to 600 s for each host's answer (``REEVAL_FORWARD_SECONDS``),
+as scoring can take long. A run whose host is down or gone is listed in ``skipped``,
+and so are the host's later runs in that call. The hub never scores a mirrored run
+itself: the host does, and the mirror then copies the host's ``scores.jsonl``.
 
 What the hub copies
 -------------------

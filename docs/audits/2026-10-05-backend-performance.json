@@ -1,0 +1,821 @@
+{
+  "baseline_commit": "738c711",
+  "measured_commit": "8e1a1ef",
+  "measurement_started_utc": "2026-10-04T22:00:15Z",
+  "baseline_http": [
+    {
+      "label": "Runs, limit 200",
+      "median_ms": 8,
+      "min_ms": 8,
+      "decoded_mb": 0.37,
+      "source_line": "GET  /api/v1/runs?limit=200                                                 200 median        8 ms  min        8     0.37MB"
+    },
+    {
+      "label": "Runs, project/task/status filter",
+      "median_ms": 22,
+      "min_ms": 20,
+      "decoded_mb": 0.37,
+      "source_line": "GET  /api/v1/runs?project=p00&task=agent&status=finished&limit=200          200 median       22 ms  min       20     0.37MB"
+    },
+    {
+      "label": "Runs, tag filter",
+      "median_ms": 68,
+      "min_ms": 47,
+      "decoded_mb": 0.37,
+      "source_line": "GET  /api/v1/runs?tag=g3&limit=200                                          200 median       68 ms  min       47     0.37MB"
+    },
+    {
+      "label": "Runs, limit 1,000",
+      "median_ms": 77,
+      "min_ms": 73,
+      "decoded_mb": 1.86,
+      "source_line": "GET  /api/v1/runs?limit=1000                                                200 median       77 ms  min       73     1.86MB"
+    },
+    {
+      "label": "Runs, limit 16,000",
+      "median_ms": 1235,
+      "min_ms": 1185,
+      "decoded_mb": 29.75,
+      "source_line": "GET  /api/v1/runs?limit=16000                                               200 median     1235 ms  min     1185    29.75MB"
+    },
+    {
+      "label": "Projects",
+      "median_ms": 89,
+      "min_ms": 88,
+      "decoded_mb": 0.0,
+      "source_line": "GET  /api/v1/projects                                                       200 median       89 ms  min       88     0.00MB"
+    },
+    {
+      "label": "Tasks",
+      "median_ms": 2436,
+      "min_ms": 2380,
+      "decoded_mb": 0.01,
+      "source_line": "GET  /api/v1/tasks                                                          200 median     2436 ms  min     2380     0.01MB"
+    },
+    {
+      "label": "Task p00/agent",
+      "median_ms": 251,
+      "min_ms": 244,
+      "decoded_mb": 0.0,
+      "source_line": "GET  /api/v1/tasks/p00/agent                                                200 median      251 ms  min      244     0.00MB"
+    },
+    {
+      "label": "Leaderboard p00/train",
+      "median_ms": 184,
+      "min_ms": 175,
+      "decoded_mb": 0.78,
+      "source_line": "GET  /api/v1/tasks/p00/train/leaderboard                                    200 median      184 ms  min      175     0.78MB"
+    },
+    {
+      "label": "Leaderboard p00/agent",
+      "median_ms": 2292,
+      "min_ms": 2177,
+      "decoded_mb": 0.81,
+      "source_line": "GET  /api/v1/tasks/p00/agent/leaderboard                                    200 median     2292 ms  min     2177     0.81MB"
+    },
+    {
+      "label": "Leaderboard p00/qa",
+      "median_ms": 13174,
+      "min_ms": 13127,
+      "decoded_mb": 0.41,
+      "source_line": "GET  /api/v1/tasks/p00/qa/leaderboard                                       200 median    13174 ms  min    13127     0.41MB"
+    },
+    {
+      "label": "Leaderboard p07/eval",
+      "median_ms": 97,
+      "min_ms": 95,
+      "decoded_mb": 0.09,
+      "source_line": "GET  /api/v1/tasks/p07/eval/leaderboard                                     200 median       97 ms  min       95     0.09MB"
+    },
+    {
+      "label": "Overview, default window",
+      "median_ms": 24221,
+      "min_ms": 23655,
+      "decoded_mb": 1.41,
+      "source_line": "GET  /api/v1/overview                                                       200 median    24221 ms  min    23655     1.41MB"
+    },
+    {
+      "label": "Run page, p00/agent",
+      "median_ms": 238,
+      "min_ms": 233,
+      "decoded_mb": 0.0,
+      "source_line": "GET  /api/v1/runs/20260120-104017-agent-00fa0                               200 median      238 ms  min      233     0.00MB"
+    },
+    {
+      "label": "Run page, p07/train",
+      "median_ms": 31,
+      "min_ms": 18,
+      "decoded_mb": 0.0,
+      "source_line": "GET  /api/v1/runs/20260210-201413-train-020d2                               200 median       31 ms  min       18     0.00MB"
+    },
+    {
+      "label": "Long-run metrics, all 200 names",
+      "median_ms": 1140,
+      "min_ms": 1023,
+      "decoded_mb": 7.71,
+      "source_line": "GET  /api/v1/runs/20260101-000750-train-00001/metrics                       200 median     1140 ms  min     1023     7.71MB"
+    },
+    {
+      "label": "Normal-run metrics",
+      "median_ms": 10,
+      "min_ms": 9,
+      "decoded_mb": 0.08,
+      "source_line": "GET  /api/v1/runs/20260210-201413-train-020d2/metrics                       200 median       10 ms  min        9     0.08MB"
+    },
+    {
+      "label": "Traces",
+      "median_ms": 5,
+      "min_ms": 5,
+      "decoded_mb": 0.0,
+      "source_line": "GET  /api/v1/runs/20260120-104017-agent-00fa0/traces                        200 median        5 ms  min        5     0.00MB"
+    },
+    {
+      "label": "View definitions, p07/train",
+      "median_ms": 7,
+      "min_ms": 7,
+      "decoded_mb": 0.0,
+      "source_line": "GET  /api/v1/tasks/p07/train/views                                          200 median        7 ms  min        7     0.00MB"
+    },
+    {
+      "label": "View p07/train",
+      "median_ms": 2816,
+      "min_ms": 2771,
+      "decoded_mb": 1.56,
+      "source_line": "POST /api/v1/tasks/p07/train/views/query                                    200 median     2816 ms  min     2771     1.56MB"
+    },
+    {
+      "label": "View p00/train",
+      "median_ms": 45670,
+      "min_ms": 43209,
+      "decoded_mb": 15.93,
+      "source_line": "POST /api/v1/tasks/p00/train/views/query                                    200 median    45670 ms  min    43209    15.93MB"
+    },
+    {
+      "label": "View p00/agent",
+      "median_ms": 16789,
+      "min_ms": 16393,
+      "decoded_mb": 18.49,
+      "source_line": "POST /api/v1/tasks/p00/agent/views/query                                    200 median    16789 ms  min    16393    18.49MB"
+    },
+    {
+      "label": "View p00/qa",
+      "median_ms": 26364,
+      "min_ms": 26073,
+      "decoded_mb": 0.41,
+      "source_line": "POST /api/v1/tasks/p00/qa/views/query                                       200 median    26364 ms  min    26073     0.41MB"
+    }
+  ],
+  "http_after": {
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/api/v1/runs?limit=200",
+        "first_ms": 37.04987501259893,
+        "warm_ms": 9.91516700014472,
+        "samples_ms": [
+          37.04987501259893,
+          10.841542039997876,
+          9.91516700014472,
+          9.788832976482809
+        ],
+        "decoded_bytes": 375054,
+        "wire_bytes": 18952,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/runs?project=p00&task=agent&status=finished&limit=200",
+        "first_ms": 118.92491701291874,
+        "warm_ms": 37.20283304573968,
+        "samples_ms": [
+          118.92491701291874,
+          38.26312505407259,
+          36.06574999867007,
+          37.20283304573968
+        ],
+        "decoded_bytes": 377287,
+        "wire_bytes": 18774,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/runs?tag=g3&limit=200",
+        "first_ms": 70.35504200030118,
+        "warm_ms": 29.236792004667222,
+        "samples_ms": [
+          70.35504200030118,
+          30.081207980401814,
+          29.07712501473725,
+          29.236792004667222
+        ],
+        "decoded_bytes": 375677,
+        "wire_bytes": 18995,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/runs?limit=1000",
+        "first_ms": 79.65437497477978,
+        "warm_ms": 70.07350004278123,
+        "samples_ms": [
+          79.65437497477978,
+          75.6592089892365,
+          45.975958986673504,
+          70.07350004278123
+        ],
+        "decoded_bytes": 1877972,
+        "wire_bytes": 90206,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/runs?limit=16000",
+        "first_ms": 1360.7095829793252,
+        "warm_ms": 1229.8774169757962,
+        "samples_ms": [
+          1360.7095829793252,
+          1383.451875008177,
+          1164.9550409638323,
+          1229.8774169757962
+        ],
+        "decoded_bytes": 30041757,
+        "wire_bytes": 1427646,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/projects",
+        "first_ms": 68.28179198782891,
+        "warm_ms": 28.486291994340718,
+        "samples_ms": [
+          68.28179198782891,
+          28.30287499818951,
+          28.78991700708866,
+          28.486291994340718
+        ],
+        "decoded_bytes": 3187,
+        "wire_bytes": 288,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/tasks",
+        "first_ms": 3283.421250001993,
+        "warm_ms": 33.75445801066235,
+        "samples_ms": [
+          3283.421250001993,
+          35.30262503772974,
+          33.75445801066235,
+          33.626291959080845
+        ],
+        "decoded_bytes": 14176,
+        "wire_bytes": 1190,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/tasks/p00/agent",
+        "first_ms": 201.54766703490168,
+        "warm_ms": 1.9911250565201044,
+        "samples_ms": [
+          201.54766703490168,
+          2.4756250204518437,
+          1.9911250565201044,
+          1.8008750048466027
+        ],
+        "decoded_bytes": 784,
+        "wire_bytes": 784,
+        "encoding": null,
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/tasks/p00/train/leaderboard",
+        "first_ms": 280.6644169613719,
+        "warm_ms": 35.58929200517014,
+        "samples_ms": [
+          280.6644169613719,
+          35.58929200517014,
+          34.36541702831164,
+          67.47108302079141
+        ],
+        "decoded_bytes": 778977,
+        "wire_bytes": 168401,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/tasks/p00/agent/leaderboard",
+        "first_ms": 2526.2532079941593,
+        "warm_ms": 38.3610840071924,
+        "samples_ms": [
+          2526.2532079941593,
+          38.3610840071924,
+          64.04829199891537,
+          37.647707969881594
+        ],
+        "decoded_bytes": 814009,
+        "wire_bytes": 179105,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/tasks/p00/qa/leaderboard",
+        "first_ms": 2536.0416249604896,
+        "warm_ms": 21.01575001142919,
+        "samples_ms": [
+          2536.0416249604896,
+          21.01575001142919,
+          21.844458009582013,
+          19.71849997062236
+        ],
+        "decoded_bytes": 409323,
+        "wire_bytes": 89859,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/tasks/p07/eval/leaderboard",
+        "first_ms": 136.2584590096958,
+        "warm_ms": 6.574791972525418,
+        "samples_ms": [
+          136.2584590096958,
+          6.639584025833756,
+          6.574791972525418,
+          6.396665994543582
+        ],
+        "decoded_bytes": 90344,
+        "wire_bytes": 21097,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/overview",
+        "first_ms": 2663.2261249469593,
+        "warm_ms": 478.5624169744551,
+        "samples_ms": [
+          2663.2261249469593,
+          478.5624169744551,
+          527.8299169731326,
+          455.75050002662465
+        ],
+        "decoded_bytes": 1414207,
+        "wire_bytes": 77374,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/runs/20260120-104017-agent-00fa0",
+        "first_ms": 43.16254204604775,
+        "warm_ms": 2.448041981551796,
+        "samples_ms": [
+          43.16254204604775,
+          2.726375008933246,
+          2.448041981551796,
+          2.2350000217556953
+        ],
+        "decoded_bytes": 4867,
+        "wire_bytes": 1570,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/runs/20260210-201413-train-020d2",
+        "first_ms": 38.97733299527317,
+        "warm_ms": 2.4839590187184513,
+        "samples_ms": [
+          38.97733299527317,
+          2.5680410326458514,
+          2.4839590187184513,
+          2.2633750340901315
+        ],
+        "decoded_bytes": 4399,
+        "wire_bytes": 1464,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/runs/20260101-000750-train-00001/metrics",
+        "first_ms": 1601.331999991089,
+        "warm_ms": 526.2235830305144,
+        "samples_ms": [
+          1601.331999991089,
+          502.9943330446258,
+          526.2235830305144,
+          538.0365409655496
+        ],
+        "decoded_bytes": 7712535,
+        "wire_bytes": 1592313,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/runs/20260210-201413-train-020d2/metrics",
+        "first_ms": 33.72445801505819,
+        "warm_ms": 5.601458018645644,
+        "samples_ms": [
+          33.72445801505819,
+          6.123874976765364,
+          5.601458018645644,
+          5.352334002964199
+        ],
+        "decoded_bytes": 75348,
+        "wire_bytes": 14621,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/runs/20260120-104017-agent-00fa0/traces",
+        "first_ms": 7.573792012408376,
+        "warm_ms": 3.554958035238087,
+        "samples_ms": [
+          7.573792012408376,
+          3.554958035238087,
+          34.676457988098264,
+          2.9157500248402357
+        ],
+        "decoded_bytes": 971,
+        "wire_bytes": 971,
+        "encoding": null,
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/tasks/p07/train/views",
+        "first_ms": 5.674500018358231,
+        "warm_ms": 4.71000000834465,
+        "samples_ms": [
+          5.674500018358231,
+          4.71000000834465,
+          28.46758399391547,
+          4.477082984521985
+        ],
+        "decoded_bytes": 88,
+        "wire_bytes": 88,
+        "encoding": null,
+        "status": 200
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/tasks/p07/train/views/query",
+        "first_ms": 3013.1893340148963,
+        "warm_ms": 235.31695798737928,
+        "samples_ms": [
+          3013.1893340148963,
+          313.7334590428509,
+          235.31695798737928,
+          218.19074999075383
+        ],
+        "decoded_bytes": 1560274,
+        "wire_bytes": 184089,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/tasks/p00/train/views/query",
+        "first_ms": 37693.16833297489,
+        "warm_ms": 2918.5419579735026,
+        "samples_ms": [
+          37693.16833297489,
+          3687.8085829666816,
+          2918.5419579735026,
+          2777.5482909637503
+        ],
+        "decoded_bytes": 15934316,
+        "wire_bytes": 1735937,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/tasks/p00/agent/views/query",
+        "first_ms": 9082.95516698854,
+        "warm_ms": 6150.33658297034,
+        "samples_ms": [
+          9082.95516698854,
+          6184.583291003946,
+          6121.71108298935,
+          6150.33658297034
+        ],
+        "decoded_bytes": 18504159,
+        "wire_bytes": 1612401,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/tasks/p00/qa/views/query",
+        "first_ms": 2634.7242500050925,
+        "warm_ms": 78.32670799689367,
+        "samples_ms": [
+          2634.7242500050925,
+          46.39874998247251,
+          78.32670799689367,
+          83.78124999580905
+        ],
+        "decoded_bytes": 409506,
+        "wire_bytes": 89981,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/runs/20260101-000750-train-00001/metrics?names=train%2Floss&names=val%2Floss&max_points=500",
+        "first_ms": 40.47616699244827,
+        "warm_ms": 5.852999980561435,
+        "samples_ms": [
+          40.47616699244827,
+          7.368332997430116,
+          5.852999980561435,
+          5.7731669512577355
+        ],
+        "decoded_bytes": 81052,
+        "wire_bytes": 16286,
+        "encoding": "gzip",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/overview?since=2026-01-01T00%3A00%3A00Z",
+        "first_ms": 19975.898167002015,
+        "warm_ms": 8403.39741599746,
+        "samples_ms": [
+          19975.898167002015,
+          7935.648207960185,
+          8403.39741599746,
+          8420.387000020128
+        ],
+        "decoded_bytes": 8939088,
+        "wire_bytes": 916603,
+        "encoding": "gzip",
+        "status": 200
+      }
+    ],
+    "websocket": [
+      {
+        "after_sequence": 0,
+        "max_replay": null,
+        "frames": {
+          "event": 1000000
+        },
+        "ms": 14969.679290952627
+      },
+      {
+        "after_sequence": "latest",
+        "max_replay": null,
+        "frames": {},
+        "ms": 3.1766669708304107
+      },
+      {
+        "after_sequence": 0,
+        "max_replay": 1000,
+        "frames": {
+          "reset": 1
+        },
+        "ms": 1.4900420210324228
+      }
+    ]
+  },
+  "before_counts": {
+    "index": {
+      "bytes": 2367979520,
+      "counts": {
+        "runs": 19993,
+        "scores": 54642,
+        "projects": 30,
+        "metric_points": 22072000
+      },
+      "dates": [
+        "2026-01-01T00:07:50.665311+00:00",
+        "2026-04-08T04:31:33.239881+00:00"
+      ],
+      "statuses": {
+        "failed": 1531,
+        "finished": 17061,
+        "killed": 592,
+        "queued": 407,
+        "running": 402
+      }
+    },
+    "events": {
+      "bytes": 227516416,
+      "counts": {
+        "events": 1000000
+      }
+    }
+  },
+  "rebuilt_counts": {
+    "index": {
+      "bytes": 2367979520,
+      "page_bytes": 2367979520,
+      "live_page_bytes": 63221760,
+      "free_page_bytes": 2304757760,
+      "counts": {
+        "runs": 19993,
+        "scores": 54642,
+        "projects": 30,
+        "metric_points": 0,
+        "metric_points_pending": 19993
+      },
+      "dates": [
+        "2026-01-01T00:07:50.665311+00:00",
+        "2026-04-08T04:31:33.239881+00:00"
+      ],
+      "statuses": {
+        "failed": 1531,
+        "finished": 17061,
+        "killed": 592,
+        "queued": 407,
+        "running": 402
+      }
+    },
+    "events": {
+      "bytes": 227516416,
+      "page_bytes": 227516416,
+      "live_page_bytes": 227516416,
+      "free_page_bytes": 0,
+      "counts": {
+        "events": 1000000
+      }
+    }
+  },
+  "after_counts": {
+    "index": {
+      "bytes": 2367979520,
+      "page_bytes": 2367979520,
+      "live_page_bytes": 494063616,
+      "free_page_bytes": 1873915904,
+      "counts": {
+        "runs": 19993,
+        "scores": 54642,
+        "projects": 30,
+        "metric_points": 3777000,
+        "metric_points_pending": 17899
+      },
+      "dates": [
+        "2026-01-01T00:07:50.665311+00:00",
+        "2026-04-08T04:31:33.239881+00:00"
+      ],
+      "statuses": {
+        "failed": 1531,
+        "finished": 17061,
+        "killed": 592,
+        "queued": 407,
+        "running": 402
+      }
+    },
+    "events": {
+      "bytes": 227516416,
+      "page_bytes": 227516416,
+      "live_page_bytes": 227516416,
+      "free_page_bytes": 0,
+      "counts": {
+        "events": 1000000
+      }
+    }
+  },
+  "invalidation_after": [
+    {
+      "label": "cold p00/qa board",
+      "ms": 2582.3528330074623,
+      "bytes": 441901
+    },
+    {
+      "label": "warm p00/qa board",
+      "ms": 15.364334045443684,
+      "bytes": 441901
+    },
+    {
+      "label": "warm p00/qa board",
+      "ms": 23.8930830382742,
+      "bytes": 441901
+    },
+    {
+      "label": "warm p00/qa board",
+      "ms": 14.809000014793128,
+      "bytes": 441901
+    },
+    {
+      "label": "p00/qa after unrelated p05 index write",
+      "ms": 743.9297499950044,
+      "bytes": 441901
+    },
+    {
+      "label": "warm p00/qa after write",
+      "ms": 15.331000031437725,
+      "bytes": 441901
+    },
+    {
+      "label": "warm p00/qa after write",
+      "ms": 14.597249974031001,
+      "bytes": 441901
+    },
+    {
+      "label": "warm p00/qa after write",
+      "ms": 25.3230839734897,
+      "bytes": 441901
+    }
+  ],
+  "cli_after": [
+    {
+      "command": [
+        "hx",
+        "runs"
+      ],
+      "samples_ms": [
+        780.0900420406833,
+        625.24945900077,
+        615.4887080192566
+      ],
+      "median_ms": 625.24945900077
+    },
+    {
+      "command": [
+        "hx",
+        "runs",
+        "--limit",
+        "200",
+        "--json"
+      ],
+      "samples_ms": [
+        619.1128329955973,
+        611.7301249760203,
+        615.1132910163142
+      ],
+      "median_ms": 615.1132910163142
+    },
+    {
+      "command": [
+        "hx",
+        "runs",
+        "--project",
+        "p00",
+        "--task",
+        "agent"
+      ],
+      "samples_ms": [
+        628.7693749764003,
+        623.5424170154147,
+        611.3463750225492
+      ],
+      "median_ms": 623.5424170154147
+    },
+    {
+      "command": [
+        "hx",
+        "projects"
+      ],
+      "samples_ms": [
+        322.26791698485613,
+        312.54600000102073,
+        306.88416701741517
+      ],
+      "median_ms": 312.54600000102073
+    },
+    {
+      "command": [
+        "hx",
+        "leaderboard",
+        "p00/train"
+      ],
+      "samples_ms": [
+        514.9709160323255,
+        452.47445796849206,
+        452.89800001773983
+      ],
+      "median_ms": 452.89800001773983
+    },
+    {
+      "command": [
+        "hx",
+        "show",
+        "20260120-104017-agent-00fa0"
+      ],
+      "samples_ms": [
+        700.8498749928549,
+        605.6312079890631,
+        616.50958401151
+      ],
+      "median_ms": 616.50958401151
+    }
+  ],
+  "rebuild_after_log": "rebuilt 19993 runs in 30.28s maxrss=68MB",
+  "sdk_after_log": "Run.log(200 metrics) x 200 steps: 0.09s = 0.5 ms per step, 437421 values/s\nbatched prototype: 0.44 ms per step"
+}

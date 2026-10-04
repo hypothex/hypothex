@@ -365,7 +365,10 @@ class _FakeUvicorn:
         for sock in sockets or []:
             sock.close()
         host, port = self._asked
-        self.calls.append({"app": server.config.app, "host": host, "port": port})
+        # server.json exists only while the server runs: keep its token for the test
+        info = Path(os.environ["HYPOTHEX_HOME"]) / "serve" / "server.json"
+        token = json.loads(info.read_text())["token"] if info.is_file() else None
+        self.calls.append({"app": server.config.app, "host": host, "port": port, "token": token})
 
 
 @pytest.fixture
@@ -441,7 +444,10 @@ def test_env_server_makes_a_token_when_none_is_given(
     [call] = fake_uvicorn.calls
     with TestClient(call["app"], base_url="http://127.0.0.1:7777") as c:  # type: ignore[arg-type]
         assert c.get("/api/v1/runs").status_code == 401
-        assert c.get("/.well-known/hypothex/environment").json()["kind"] == "slurm"
+        descriptor = "/.well-known/hypothex/environment"
+        assert "kind" not in c.get(descriptor).json()  # host facts only for the token holder
+        good = {"Authorization": f"Bearer {call['token']}"}
+        assert c.get(descriptor, headers=good).json()["kind"] == "slurm"
 
 
 def test_show_says_untracked_files_only(in_repo: Path) -> None:

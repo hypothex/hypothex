@@ -381,13 +381,17 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
             assert [row["x"] for row in cost.rows] == [f"v{i}" for i in range(1, 10)]
             # v1 (data.js): $74.28, $79.57, $75.70 for 80 solved targets in each seed
             assert cost.rows[0]["y"] == pytest.approx((74.28 + 79.57 + 75.70) / 240)
-            # regressions (contract 1.6). Solved: no drop is outside the best earlier
-            # version's CI (the largest, v6 0.558 vs v5 0.607, is inside v5's interval).
+            # regressions (contract 1.6): each version against the one just before it.
+            # Solved: no drop is outside the intervals (the largest, v6 0.558 vs v5 0.607,
+            # has y_hi 0.627 above v5's y_lo 0.536).
             assert not any(row["regression"] for row in solved.rows)
             # $ per solved is lower-is-better (usage.*), seed t-intervals over 3 seeds:
-            # v3 is the cheapest (0.918, hi 1.004); v4..v9 all have y_lo above 1.004
-            # (v4 1.127, v9 1.056), so each is flagged
-            assert [row["regression"] for row in cost.rows] == [False] * 3 + [True] * 6
+            # v4 (y_lo 1.127) costs more than v3 (y_hi 1.004) and v5 (1.314) more than v4
+            # (1.142); v6 (1.521) is inside v5's interval (hi 1.565); v7..v9 are cheaper
+            # than the version before them, so they are not flagged
+            assert [row["regression"] for row in cost.rows] == [False] * 3 + [True] * 2 + [
+                False
+            ] * 4
             # Changes: one row per version with only what changed (kinds/agent_iteration)
             changes = results["Changes"].rows
             assert [row["version"] for row in changes] == [f"v{i}" for i in range(1, 10)]
@@ -416,6 +420,15 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
             assert all(lo is not None and lo <= hi for d in deltas for _, lo, hi in d.values())
             # async: repeat p95s 163-169 ms vs baseline 231-235 ms, about -29%
             assert min(d["p95"][0] for d in deltas) < -0.25
+            # throughput: one chart of sweep/rps rows, named by config, over concurrency
+            throughput = results["Throughput vs concurrency"]
+            assert {row["name"] for row in throughput.rows} == {"sweep/rps"}
+            assert {row["label"] for row in throughput.rows} == {
+                "baseline",
+                "cache-enabled",
+                "async-worker",
+            }
+            assert min(row["step"] for row in throughput.rows) >= 1  # log2 axis
             # utilisation small multiples: one per config, its 3 repeats inside it
             util = results["Utilisation"]
             assert [g["label"] for g in util.meta["groups"]] == [
@@ -435,6 +448,14 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
                 assert {row["label"] for row in results[title].rows} == names
                 assert results[title].meta["spec"]["encoding"]["y"]["field"] == "label"
         if kind == "agent_eval":
+            # cost per attempt, the stat strip's unit: Opus 5.5 spent $332.25 on 3 x 200
+            cost = {row["label"]: row for row in results["Cost vs solved"].rows}
+            assert cost["Opus 5.5"]["x"] == pytest.approx(
+                (108.2754 + 106.1396 + 117.8305) / 600, abs=1e-6
+            )
+            assert all(row["x"] < 1 for row in cost.values())
+            meta = results["Cost vs solved"].meta
+            assert (meta["x"], meta["x_unit"], meta["scale"]) == ("usage.usd/attempt", "$", "log")
             failures = results["Failures"]
             assert failures.meta["spec"]["encoding"]["y"]["field"] == "label"
             assert {row["label"] for row in failures.rows} == {

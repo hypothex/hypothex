@@ -1,8 +1,20 @@
 import { defineConfig, devices } from "@playwright/test";
 import type { ThemeOptions } from "./e2e/fixtures";
-import { PORT } from "./e2e/paths";
+// Loading paths.ts picks this run's two free ports and puts them in process.env, which the
+// workers and both web servers inherit (never a fixed port, ruling S1).
+import { HOSTS_PORT, IDENTITY_ROUTE, PORT } from "./e2e/paths";
 
 const WRITES = /(editor|live)\.spec\.ts$/;
+/** Specs against the `hx demo --with-hosts` hub; `launch` starts runs, so it runs last. */
+const HOSTS_READS = /hosts\.spec\.ts$/;
+const HOSTS_WRITES = /launch\.spec\.ts$/;
+const HOSTS_URL = `http://127.0.0.1:${HOSTS_PORT}`;
+/**
+ * SIGTERM, then SIGKILL after 90 s: `serve-demo.ts` forwards the SIGTERM to `hx serve`,
+ * whose lifespan shutdown stops the demo runs and fake hosts (its own wait is 60 s).
+ * Without this Playwright SIGKILLs the group at once.
+ */
+const GRACEFUL = { signal: "SIGTERM", timeout: 90_000 } as const;
 
 export default defineConfig<ThemeOptions>({
   testDir: "./e2e",
@@ -23,12 +35,12 @@ export default defineConfig<ThemeOptions>({
   projects: [
     {
       name: "light",
-      testIgnore: WRITES,
+      testIgnore: [WRITES, HOSTS_READS, HOSTS_WRITES],
       use: { ...devices["Desktop Chrome"], colorScheme: "light", theme: "light" },
     },
     {
       name: "dark",
-      testIgnore: WRITES,
+      testIgnore: [WRITES, HOSTS_READS, HOSTS_WRITES],
       use: { ...devices["Desktop Chrome"], colorScheme: "dark", theme: "dark" },
     },
     {
@@ -46,13 +58,53 @@ export default defineConfig<ThemeOptions>({
       dependencies: ["light", "dark", "light-edit"],
       use: { ...devices["Desktop Chrome"], colorScheme: "dark", theme: "dark" },
     },
+    {
+      name: "hosts-light",
+      testMatch: HOSTS_READS,
+      use: { ...devices["Desktop Chrome"], baseURL: HOSTS_URL, colorScheme: "light", theme: "light" },
+    },
+    {
+      name: "hosts-dark",
+      testMatch: HOSTS_READS,
+      use: { ...devices["Desktop Chrome"], baseURL: HOSTS_URL, colorScheme: "dark", theme: "dark" },
+    },
+    {
+      // Launches add queued runs to a fake host, so they wait for the read-only specs.
+      name: "hosts-light-edit",
+      testMatch: HOSTS_WRITES,
+      dependencies: ["hosts-light", "hosts-dark"],
+      use: { ...devices["Desktop Chrome"], baseURL: HOSTS_URL, colorScheme: "light", theme: "light" },
+    },
+    {
+      name: "hosts-dark-edit",
+      testMatch: HOSTS_WRITES,
+      dependencies: ["hosts-light", "hosts-dark", "hosts-light-edit"],
+      use: { ...devices["Desktop Chrome"], baseURL: HOSTS_URL, colorScheme: "dark", theme: "dark" },
+    },
   ],
-  webServer: {
-    command: "bun e2e/serve-demo.ts",
-    url: `http://127.0.0.1:${PORT}/.well-known/hypothex/environment`,
-    reuseExistingServer: !process.env.CI,
-    timeout: 180_000,
-    stdout: "pipe",
-    stderr: "pipe",
-  },
+  // Both ports are random per run. Never reuse a server that answers on one anyway: an
+  // `hx serve` there may run on the real ~/.hypothex, and live.spec.ts posts notes
+  // (forwarded to real hosts in phase 2) and launch.spec.ts starts runs. Playwright fails at
+  // start instead, a web server whose command exits stops the run at once, and every test
+  // checks the hub's identity first (`isolatedHub` in e2e/fixtures.ts).
+  webServer: [
+    {
+      command: "bun e2e/serve-demo.ts",
+      url: `http://127.0.0.1:${PORT}${IDENTITY_ROUTE}`,
+      reuseExistingServer: false,
+      gracefulShutdown: GRACEFUL,
+      timeout: 180_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    {
+      command: "bun e2e/serve-demo.ts --with-hosts",
+      url: `${HOSTS_URL}${IDENTITY_ROUTE}`,
+      reuseExistingServer: false,
+      gracefulShutdown: GRACEFUL,
+      timeout: 180_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  ],
 });

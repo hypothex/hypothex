@@ -20,8 +20,14 @@ A browser on your machine can still reach ``127.0.0.1``. Two checks block web pa
 - **Host allow-list**: the ``Host`` header must be ``127.0.0.1``, ``localhost``,
   ``[::1]``, or the ``--host`` address (when it is not a wildcard). Anything else gets
   ``400``. This blocks DNS rebinding.
-- **Origin check**: a ``POST`` or WebSocket handshake whose ``Origin`` is not one of
-  those hosts gets ``403``. A web page cannot start runs through your browser.
+- **Origin check**: a ``POST`` or WebSocket handshake whose ``Origin`` is not the
+  server's own (the host and port the request was sent to, one of those hosts) gets
+  ``403``. A page on another local server, such as Jupyter on ``localhost:8888``,
+  is refused too. The Vite dev server forwards the browser's ``Host``, so its pages
+  pass.
+- **JSON posts**: a ``POST`` needs ``Content-Type: application/json`` or an
+  ``X-Hypothex-Client`` header, else ``415``. A browser sends neither to another
+  origin without a CORS preflight, which the server never grants.
 
 These checks are not authentication: any program that is not a browser can send
 ``Host: localhost``.
@@ -32,7 +38,9 @@ Bearer token
 With a token, every request except the descriptor
 ``/.well-known/hypothex/environment`` needs ``Authorization: Bearer <token>``. A
 missing or wrong token gets ``401`` (``{"type": "AuthError"}``); a WebSocket is closed
-with code ``1008``.
+with code ``1008``. Without the token the descriptor names only ``environment_id``,
+``protocol_version`` and ``hx_version`` (``start.sh`` needs the id); the host name, OS,
+GPUs and the rest are for the token holder.
 
 **Env servers** (``hx serve --kind ssh|slurm``) always have a token, because on a
 shared GPU box or a SLURM login node other users can reach ``127.0.0.1`` too.
@@ -80,6 +88,17 @@ SSH
   patterns before they reach a shell. ``hx pull`` runs ``scp -s`` (SFTP mode), so the
   host's shell never reads a path.
 
+Project checkout paths
+----------------------
+
+``Context.local_repo`` is the shared gate for operations that read a registered
+project's checkout or run code from it. A project copied from a host retains that
+host's repo path for display, but the hub never reads it as a local checkout,
+even when the same path exists here. Evaluation, datasets, view files, local
+launches, reruns, and git pins use the gate. Read-only views can still use the
+copied config's presets and inline definitions. Registering a checkout here
+replaces the host copy without retaining its paths in local repo history.
+
 Host identities
 ---------------
 
@@ -114,6 +133,9 @@ name, the hub updates that environment's run-claim source labels before any new
 data is mirrored. A different host cannot overwrite a claim while its old name
 remains configured. Existing conflicting configured owners are refused rather
 than choosing one arbitrarily.
+Forwarding prefers the current configured alias; historical cursor ownership is
+still retained so edits to a removed host's mirrored runs cannot silently become
+local-only changes.
 
 No secrets in run files
 -----------------------

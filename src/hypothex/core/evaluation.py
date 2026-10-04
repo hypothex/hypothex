@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -262,6 +263,7 @@ def reeval(
     task: str | None = None,
     metric: str | None = None,
     force: bool = False,
+    run_ids: Collection[str] | None = None,
 ) -> EvalReport:
     """
     Re-score saved predictions without rerunning inference.
@@ -277,6 +279,10 @@ def reeval(
         ``name`` or ``name@version``; the version must be the current one.
     force : bool
         Re-score even runs already scored at the current version.
+    run_ids : collection of str, optional
+        With ``project`` and ``task``: score only these of the task's finished
+        runs (the hub scores its own runs here and sends mirrored ones to their
+        hosts). ``None`` scores them all.
 
     Returns
     -------
@@ -306,6 +312,9 @@ def reeval(
                 )
             )
         )
+        if run_ids is not None:
+            keep = set(run_ids)
+            targets = [t for t in targets if t.run_id in keep]
     else:
         raise EvalError("give a run id, or a project and a task")
     report = EvalReport()

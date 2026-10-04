@@ -129,12 +129,19 @@ def test_cursor_hosts_includes_zero_sequence_reservations(identity_context: Cont
     assert index.cursor_hosts("missing") == []
 
 
-def test_removed_cursor_alias_does_not_hide_current_owner(identity_context: Context) -> None:
+@pytest.mark.parametrize("seen", [False, True])
+def test_removed_cursor_alias_does_not_hide_current_owner(
+    identity_context: Context, seen: bool
+) -> None:
     ctx = identity_context
     ctx.index.set_cursor("a", ENVIRONMENT, 7)
     ctx.index.set_cursor("b", ENVIRONMENT, 0)
     save_hosts(ctx.layout, hosts("b"))
-    assert HubManager(ctx).host_for_environment(ENVIRONMENT) == "b"
+    manager = HubManager(ctx)
+    if seen:
+        manager._seen[ENVIRONMENT] = "a"
+    assert manager.host_for_environment(ENVIRONMENT) == "b"
+    assert manager.mirrored_from(ENVIRONMENT) == "b"
 
 
 def test_legacy_claim_only_owner_is_preserved(identity_context: Context, tmp_path: Path) -> None:

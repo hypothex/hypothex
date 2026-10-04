@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Placement, placementRows } from "../../src/pages/components/Placement";
-import { QueuePanel, gpuCells, queueRows, queuedRunsQuery } from "../../src/pages/components/QueuePanel";
+import { QueuePanel, queueRows, queuedRunsQuery } from "../../src/pages/components/QueuePanel";
 import { REMOTE_CSS } from "../../src/pages/components/remoteStyles";
 import { StateBanner } from "../../src/pages/components/StateBanner";
 import { StatusLine, placeParts } from "../../src/pages/components/StatusLine";
@@ -151,11 +151,21 @@ describe("queue", () => {
     ]);
   });
 
-  test("gpuCells: held by a run, used outside hx, free", () => {
-    expect(gpuCells(GPU1)).toEqual([
-      { index: 0, label: "6b0e", util: 92, kind: "run" },
-      { index: 1, label: "ext", util: 63, kind: "ext" },
-      { index: 2, label: "free", util: 0, kind: "free" },
+  test("QueuePanel GPU cells are the hosts grid's: index order, one wide cell per run, run over external", () => {
+    const g = GPU1.gpus[0]!;
+    const run = "20261003-150000-toy-test-ab12";
+    const gpus = [
+      { ...g, index: 3, run_id: null, external: false, util: 0 },
+      { ...g, index: 1, run_id: run, external: false, util: 80 },
+      { ...g, index: 0, run_id: null, external: true, util: 40 },
+      { ...g, index: 2, run_id: run, external: true, util: 61 },
+    ];
+    renderWithClient(<QueuePanel host={{ ...GPU1, gpus }} hostName="gpu1" runId={QUEUED_ID} rows={[]} />);
+    const cells = [...document.querySelectorAll<HTMLElement>(".gpu-cells li")];
+    expect(cells.map((c) => [c.className, c.textContent, c.style.gridColumn, c.title])).toEqual([
+      ["c ext", "ext40%", "", "GPU 0: process outside hx, 40% busy"],
+      ["c run", "ab1271% ×2", "span 2", "GPU 1–2: hx run, 71% busy"],
+      ["c free", "free0%", "", "GPU 3: free, 0% busy"],
     ]);
   });
 

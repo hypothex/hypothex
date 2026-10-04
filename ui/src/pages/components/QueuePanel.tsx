@@ -1,8 +1,10 @@
 /**
  * Run panel "Queue" for a run waiting on an SSH host (spec 8A.5; mockup shot-run-queued):
  * the host's GPUs (held by a run, used outside hx, or free) and its hx queue in order.
+ * The GPU cells are the hosts grid's (`gpuCells` in HostsPanel), so both read a GPU alike.
  */
 import { DASH, firstClause, isAgent, shortId } from "./format";
+import { type CellKind, gpuCells, gpuRange, meanUtil } from "./HostsPanel";
 import { AppLink, hrefs } from "./links";
 import { fmtWait, secondsSince } from "./remote";
 import type { HostRow, RunRecord, RunsQuery } from "./types";
@@ -58,24 +60,17 @@ export function queueRows(
     .sort((a, b) => (a.position ?? LAST) - (b.position ?? LAST));
 }
 
-export interface GpuCell {
-  index: number;
-  label: string;
-  util: number;
-  kind: "run" | "ext" | "free";
+/** The queue's class for a hosts-grid cell kind: any hx run, a process outside hx, or free. */
+type QueueCellKind = "run" | "ext" | "free";
+
+function queueKind(kind: CellKind): QueueCellKind {
+  return kind === "free" ? "free" : kind === "other" ? "ext" : "run";
 }
 
-export function gpuCells(host: HostRow): GpuCell[] {
-  return [...host.gpus]
-    .sort((a, b) => a.index - b.index)
-    .map((g) => {
-      const kind: GpuCell["kind"] = g.run_id ? "run" : g.external ? "ext" : "free";
-      const label = g.run_id ? shortId(g.run_id) : kind;
-      return { index: g.index, label, util: Math.round(g.util), kind };
-    });
-}
+const CELL_TIP: Record<QueueCellKind, string> = { run: "hx run", ext: "process outside hx", free: "free" };
 
-const CELL_TIP: Record<GpuCell["kind"], string> = { run: "hx run", ext: "process outside hx", free: "free" };
+/** No run records here: every hx run reads `run` (the hosts grid's unknown-launcher kind). */
+const NO_RUNS: ReadonlyMap<string, RunRecord> = new Map();
 
 export interface QueuePanelProps {
   host: HostRow | null;
@@ -85,17 +80,26 @@ export interface QueuePanelProps {
 }
 
 export function QueuePanel({ host, hostName, runId, rows }: QueuePanelProps) {
-  const cells = host ? gpuCells(host) : [];
+  const cells = host ? gpuCells(host.gpus, NO_RUNS) : [];
   return (
     <div className="queue">
       {cells.length > 0 ? (
         <ol className="gpu-cells" aria-label={`GPUs on ${hostName}`}>
-          {cells.map((c) => (
-            <li key={c.index} className={`c ${c.kind}`} title={`GPU ${c.index}: ${CELL_TIP[c.kind]}, ${c.util}% busy`}>
-              {c.label}
-              <small>{`${c.util}%`}</small>
-            </li>
-          ))}
+          {cells.map((c) => {
+            const kind = queueKind(c.kind);
+            const util = meanUtil(c);
+            return (
+              <li
+                key={c.index}
+                className={`c ${kind}`}
+                style={c.span > 1 ? { gridColumn: `span ${c.span}` } : undefined}
+                title={`${gpuRange(c)}: ${CELL_TIP[kind]}, ${util}% busy`}
+              >
+                {c.runId ? shortId(c.runId) : kind}
+                <small>{c.span > 1 ? `${util}% ×${c.span}` : `${util}%`}</small>
+              </li>
+            );
+          })}
         </ol>
       ) : null}
       {rows.length === 0 ? (

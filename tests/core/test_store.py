@@ -411,3 +411,23 @@ def test_concurrent_metric_reads_cannot_evict_a_warning_during_refresh(
         assert len(oldest.result(timeout=5)) == MAX_METRIC_NAMES
         assert len(newest.result(timeout=5)) == MAX_METRIC_NAMES
     assert len(store._name_cap_warned) <= 2
+
+
+def test_bounded_history_does_not_retain_a_long_name_copy_for_every_point(store: RunStore) -> None:
+    store.create_run(make_record())
+    path = store.layout.run_dir("toy", "r1") / "metrics.jsonl"
+    names = [f"metric-{i}-" + "x" * 32_000 for i in range(4)]
+    with path.open("w") as stream:
+        for step in range(200):
+            for name in names:
+                stream.write(json.dumps({"name": name, "step": step, "value": step % 17}) + "\n")
+    tracemalloc.start()
+    try:
+        kept = store.read_metric_points_bounded("toy", "r1", limit=50)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert {point.name for point in kept} == set(names)
+    assert len(kept) <= 4 * 50
+    # A valid near-cap name is retained once per series, not once per buffered row.
+    assert peak < 2 * 1024 * 1024

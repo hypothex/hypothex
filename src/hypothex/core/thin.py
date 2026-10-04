@@ -106,7 +106,8 @@ class HistoryThinner:
     so far, so those of the whole history survive, in any file order. At most
     ``max_names`` names are held, the first ones seen; a point of any other name
     is dropped and counted (``dropped_rows``), so memory stays under
-    ``2 * limit * max_names`` points whatever the file holds.
+    ``2 * limit * max_names`` points whatever the file holds. Buffered points
+    share one string per name, including names close to the metric row byte cap.
 
     Parameters
     ----------
@@ -157,6 +158,10 @@ class HistoryThinner:
                 self.dropped_rows += 1
                 return
             series = self._series[point.name] = []
+        elif series and point.name is not series[0].name:
+            # JSON decoding allocates a new name string per row. Share retained
+            # names without mutating a point that the caller might still own.
+            point = point.model_copy(update={"name": series[0].name})
         series.append(point)
         if len(series) >= 2 * self.limit:
             self._series[point.name] = _thin_series(series, self.limit)

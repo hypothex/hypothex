@@ -9,6 +9,7 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from hypothex.core.records import RunStatus
 from hypothex.core.seeds import Stats, t_critical
 from hypothex.core.stats import Z95
 
@@ -716,6 +717,13 @@ def _bench_strip(
 
 
 # overview headline --------------------------------------------------------------------
+class ActiveLike(Protocol):
+    """What ``overview_headline`` reads from an active run (``RunRecord``)."""
+
+    @property
+    def status(self) -> RunStatus: ...
+
+
 class IdeaLike(Protocol):
     """What ``overview_headline`` reads from an idea row (``overview.IdeaRow``)."""
 
@@ -746,7 +754,7 @@ class SummaryLike(Protocol):
     """What ``overview_headline`` reads from ``overview.OverviewSummary``."""
 
     @property
-    def running(self) -> Sequence[object]: ...
+    def running(self) -> Sequence[ActiveLike]: ...
     @property
     def ideas(self) -> Sequence[IdeaLike]: ...
     @property
@@ -768,15 +776,24 @@ def overview_headline(summary: SummaryLike, *, board: Leaderboard | None = None)
     Returns
     -------
     str
-        For example ``"Idle. SVM leads toy-test by 0.037, p = 0.15"`` or
-        ``"2 running. SVM leads toy-test by 0.037"``. A ``system_bench`` board
-        leads with its task headline: ``"Idle. async-worker p95 −29% vs baseline
-        [−32, −26]"``.
+        The active runs first: running and queued (``waiting``) runs are
+        counted apart, as in ``"4 running, 3 waiting."``, ``"3 waiting."`` or
+        ``"Idle."``. Then the lead, for example ``"Idle. SVM leads toy-test by
+        0.037, p = 0.15"`` or ``"2 running. SVM leads toy-test by 0.037"``. A
+        ``system_bench`` board leads with its task headline: ``"Idle.
+        async-worker p95 −29% vs baseline [−32, −26]"``.
     """
-    n = len(summary.running)
-    prefix = "Idle." if n == 0 else f"{n} running."
     lead = _board_lead(board) if board is not None else _summary_lead(summary)
-    return f"{prefix} {lead}"
+    return f"{_activity(summary.running)} {lead}"
+
+
+def _activity(active: Sequence[ActiveLike]) -> str:
+    """``"4 running, 3 waiting."``, ``"3 waiting."`` or ``"Idle."`` (as ``hostsHeadline``)."""
+    running = sum(1 for r in active if r.status == RunStatus.RUNNING)
+    waiting = sum(1 for r in active if r.status == RunStatus.QUEUED)
+    parts = [f"{running} running" if running else "", f"{waiting} waiting" if waiting else ""]
+    said = ", ".join(p for p in parts if p)
+    return f"{said}." if said else "Idle."
 
 
 def _board_lead(board: Leaderboard) -> str:

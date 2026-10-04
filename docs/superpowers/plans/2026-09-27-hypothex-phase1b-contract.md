@@ -144,7 +144,7 @@ class Leaderboard(...):              # add
 
 ```python
 def task_headline(board: Leaderboard) -> str: ...   # per kind, e.g. "SVM +0.037 over rf, p = 0.15"; system_bench: "<best> p95 −29% vs baseline [−31, −27]"; agent_iteration: "<best> 0.663, +0.263 over <first> [0.206, 0.321]"; no runs: "No scored runs yet"
-def overview_headline(summary: "OverviewSummary") -> str: ...   # e.g. "Idle. SVM leads toy-test by 0.037, p = 0.15" / "2 running. ..."
+def overview_headline(summary: "OverviewSummary") -> str: ...   # e.g. "Idle. SVM leads toy-test by 0.037, p = 0.15" / "2 running. ..." / "4 running, 3 waiting. ..." (queued runs count as waiting)
 ```
 Formatting: 3 significant decimals for metrics in [0,1], `p = 0.15` two decimals (`p < 0.001` when tiny).
 

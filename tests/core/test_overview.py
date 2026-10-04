@@ -362,3 +362,15 @@ def test_overview_sums_cost_in_the_window_and_today(ctx: Context, toy_repo: Path
     summary = build_overview(ctx)
     assert summary.cost_usd == 1.5  # c2 was created before the 24 h window
     assert summary.cost_today_usd == 1.5
+
+
+def test_headline_counts_queued_runs_as_waiting(ctx: Context, toy_repo: Path) -> None:
+    # UI-F5a: 2 queued runs and 1 running run read "3 running." before the fix
+    now = utcnow()
+    _run(ctx, toy_repo, "q1", ago=timedelta(minutes=3), now=now, status=RunStatus.QUEUED)
+    _run(ctx, toy_repo, "q2", ago=timedelta(minutes=2), now=now, status=RunStatus.QUEUED)
+    _run(ctx, toy_repo, "r1", ago=timedelta(minutes=1), now=now, status=RunStatus.RUNNING)
+    summary = build_overview(ctx)
+    assert [r.run_id for r in summary.running] == ["r1", "q2", "q1"]
+    assert (summary.counts["running"], summary.counts["queued"]) == (1, 2)
+    assert summary.headline == "1 running, 2 waiting. No scored runs yet"

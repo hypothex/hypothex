@@ -23,7 +23,7 @@ from hypothex.core.headlines import (
 )
 from hypothex.core.ids import utcnow
 from hypothex.core.leaderboard import Leaderboard, LeaderboardRow, NoiseInterval, VersusBest
-from hypothex.core.records import UsageTotals
+from hypothex.core.records import RunStatus, UsageTotals
 from hypothex.core.seeds import Stats, summarize
 
 
@@ -392,8 +392,13 @@ class Proj:
 
 
 @dataclass
+class Active:
+    status: RunStatus = RunStatus.RUNNING
+
+
+@dataclass
 class Summary:
-    running: list[object] = field(default_factory=list)
+    running: list[Active] = field(default_factory=list)
     ideas: list[Idea] = field(default_factory=list)
     projects: list[Proj] = field(default_factory=list)
 
@@ -403,11 +408,20 @@ def test_overview_headline_from_board() -> None:
     rf = row("rf", [0.885], vs=sign(-0.037, 9, 3, 0.1467))
     b = board("generic", [svm, rf])
     assert overview_headline(Summary(), board=b) == "Idle. SVM leads toy-test by 0.037, p = 0.15"
-    busy = Summary(running=[object(), object()])
+    busy = Summary(running=[Active(), Active()])
     assert overview_headline(busy, board=b) == "2 running. SVM leads toy-test by 0.037, p = 0.15"
     assert overview_headline(Summary(), board=board("generic", [svm])) == (
         "Idle. SVM leads toy-test at 0.922"
     )
+
+
+def test_overview_headline_counts_running_and_waiting_runs_apart() -> None:
+    # UI-F5a: 3 queued runs and none running read "3 running." before the fix
+    queued = Active(RunStatus.QUEUED)
+    assert overview_headline(Summary(running=[queued] * 3)) == "3 waiting. No scored runs yet"
+    mixed = Summary(running=[Active()] * 4 + [queued] * 3)
+    assert overview_headline(mixed) == "4 running, 3 waiting. No scored runs yet"
+    assert overview_headline(Summary(running=[Active()])) == "1 running. No scored runs yet"
 
 
 def test_overview_headline_for_system_bench_uses_the_task_headline() -> None:
@@ -416,7 +430,7 @@ def test_overview_headline_for_system_bench_uses_the_task_headline() -> None:
     b = board("system_bench", [fast, base], primary="lat/p95", higher=False)
     b.headline = task_headline(b, reference=base.group_id)
     assert b.headline.startswith("async-worker p95 −29% vs baseline [")
-    assert overview_headline(Summary(running=[object()]), board=b) == f"1 running. {b.headline}"
+    assert overview_headline(Summary(running=[Active()]), board=b) == f"1 running. {b.headline}"
 
 
 def test_overview_headline_from_summary() -> None:
@@ -428,7 +442,7 @@ def test_overview_headline_from_summary() -> None:
         Idea("other", "old", "x", summarize([0.1]), T0 - timedelta(days=1)),
     ]
     projects = [Proj("toy", "toy-test", 0.922), Proj("other", "old", 0.5)]
-    summary = Summary(running=[object()], ideas=ideas, projects=projects)
+    summary = Summary(running=[Active()], ideas=ideas, projects=projects)
     assert overview_headline(summary) == "1 running. SVM leads toy-test by 0.037"
     lone = Summary(ideas=[ideas[1]], projects=projects)
     assert overview_headline(lone) == "Idle. SVM leads toy-test at 0.922"

@@ -12,6 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
@@ -179,7 +180,7 @@ _DATA_TABLES = (
     MetricPointRow,
     PointsPendingRow,
 )
-_CARRIED_TABLES = (HostCursorRow, ScoresStaleRow)
+_CARRIED_TABLES = (HostCursorRow, ScoresStaleRow, RunChangeRow)
 """Rows a rebuild copies from the old index: they are not derived from run folders."""
 
 _BUMP_GENERATION = text(
@@ -1296,13 +1297,11 @@ def _generation_or_zero(index: Index) -> int:
 def _rebuild_locked(index: Index, store: RunStore) -> int:
     # read before the scan: every write after it is caught up in _swap_in
     since = _generation_or_zero(index)
-    fresh = index.path.with_name(index.path.name + ".tmp")
-    try:
+    # Some filesystems cannot flock: concurrent rebuilds must never share staging.
+    with TemporaryDirectory(prefix=index.path.name + ".tmp-", dir=index.path.parent) as staging:
+        fresh = Path(staging) / index.path.name
         count = _build_fresh(fresh, store)
         _swap_in(index, store, fresh, since)
-    finally:
-        for leftover in (fresh, fresh.with_name(fresh.name + "-journal")):
-            leftover.unlink(missing_ok=True)
     index.engine.dispose()  # pooled connections re-read the new schema
     return count
 
@@ -1311,14 +1310,16 @@ def rebuild_index(index: Index, store: RunStore) -> int:
     """
     Rebuild the whole index from files, atomically.
 
-    The runs are written into ``<index>.tmp`` first, without any lock on the
+    The runs are written into a unique ``<index>.tmp-*`` directory first, without a lock on the
     live index; then one write transaction re-reads the runs written to the
     live index meanwhile, copies the hub's mirror cursors, and replaces every
     table. Readers (other processes too) see the old index until that
     transaction commits, then the new one, never a part of it; a write that
     lands during the rebuild is kept. Metric points are not read here:
     ``Index.metric_points`` reads a run's file on first use. One rebuild runs
-    at a time (a lock file next to the index).
+    at a time (a lock file next to the index) where advisory locks are available;
+    otherwise separate staging directories keep concurrent rebuilds isolated,
+    and carried change markers retain writes across overlapping swaps.
 
     Parameters
     ----------

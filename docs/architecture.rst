@@ -20,12 +20,14 @@ re-evaluation only appends.
 disposable, Hypothex stores a schema version and rebuilds it automatically when
 that version changes.
 
-A rebuild is atomic. It writes every run into ``index.db.tmp`` first; then one
+A rebuild is atomic. It writes every run into a unique ``index.db.tmp-*`` directory first; then one
 write transaction on ``index.db`` re-reads the runs that changed meanwhile and
 replaces every table. Other processes (``hx serve``, the GPU scheduler, CLI
 commands) read the old index until that commit and the new one after it, never
 a part of it, and writes made during the rebuild are kept. One rebuild runs at a
-time. A rebuild does not read ``metrics.jsonl``: a run's downsampled points are
+time where advisory file locks are available. Otherwise, independent staging
+directories and retained change markers preserve writes across overlapping rebuilds.
+A rebuild does not read ``metrics.jsonl``: a run's downsampled points are
 indexed the first time they are asked for. 20,000 runs rebuild in about 15 s.
 
 A run's metric curve is indexed as at most 500 points per metric, thinned with

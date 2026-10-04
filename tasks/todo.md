@@ -34,3 +34,13 @@ Decisions and evidence
 - Main merge conflict in bootstrap statistics: retain audit cached resampling and main
   undefined mixed-infinity handling. Main property regressions failed (2 failed,
   6 passed) with the audit-only behavior before retaining the NaN guard.
+
+- Launch-id collision review: reserved each checkout directory exclusively; a deterministic
+  competing-worktree test failed before the fix and passes with 143 related tests.
+- Unsupported advisory locking review: overlapping rebuilds now use independent staging
+  directories and carry run-change markers (including deletion tombstones) across swaps.
+  Deterministic update/create/delete cases failed before the marker fix; all 45 affected
+  index/context tests pass afterward. Ruff and ty pass.
+- First merged-main Python run: 1721 passed, 3 skipped, 11 deselected; the sole failure
+  was a property model that did not account for intentional SLURM array refusal.
+  Updated the independent option model and added an explicit example; 150 affected tests pass.

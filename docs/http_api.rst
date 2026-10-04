@@ -182,6 +182,10 @@ Other routes
   ``GET /api/v1/tasks/{project}/{task}/leaderboard`` (rows have ``cost``),
   ``POST /api/v1/tasks/{project}/{task}/reeval``, ``GET .../kind``, and the views
   routes under ``/api/v1/tasks/{project}/{task}/views``.
+- The task ``reeval`` scores the hub's own runs on the hub and sends each mirrored
+  run's re-evaluation to its host (command id ``<command_id>:<run_id>``). A run whose
+  host is not connected or no longer configured is listed in ``skipped`` with the
+  reason.
 - ``GET /api/v1/compare?ids=a,b``, ``GET /api/v1/compare/examples?a=&b=&metric=``,
   ``GET /api/v1/datasets/check``.
 - ``/mcp/``: the MCP server over streamable HTTP (see :doc:`mcp`).

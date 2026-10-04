@@ -229,6 +229,10 @@ re-evaluate answer ``503``. So do tag, star, archive, and note when the hub mirr
 run from that host: the host's copy would replace the hub's when the host is added
 back. ``--foreground`` is refused for a remote run.
 
+A task re-evaluation through the hub (``POST /api/v1/tasks/{project}/{task}/reeval``)
+scores the hub's own runs on the hub and sends each remote run to its host. A run whose
+host is down or gone is listed in ``skipped``.
+
 What the hub copies
 -------------------
 

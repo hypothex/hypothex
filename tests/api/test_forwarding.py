@@ -12,7 +12,7 @@ from hypothex.core.execution import RunRequest
 from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus
 from hypothex.remote.config import SlurmDefaults, load_hosts, save_hosts
 from tests.api.envserver import remote_hub, wait_until
-from tests.factories import git, make_record, seed_finished_run
+from tests.factories import PREDS_075, git, make_record, seed_finished_run
 
 PY = sys.executable
 
@@ -200,6 +200,39 @@ def test_curation_of_a_run_mirrored_from_a_removed_host_is_refused(tmp_path: Pat
         record = r.hub.find_record("m1")
         assert (record.tags, record.starred, record.archived) == ([], False, False)
         assert "hub-only note" not in r.hub.store.read_notes("toy", "m1")
+
+
+def _score_rows(ctx: Context, run_id: str) -> int:
+    path = ctx.run_dir(ctx.find_record(run_id)) / "scores.jsonl"
+    return len(path.read_text().splitlines()) if path.exists() else 0
+
+
+def test_task_reeval_scores_mirrored_runs_on_their_host(tmp_path: Path) -> None:
+    with remote_hub(tmp_path) as r:
+        seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
+        seed_finished_run(r.hub, r.hub_repo, "h1", predictions=PREDS_075)
+        for rid, env in (("d1", "demo:mac"), ("m1", "env-old")):
+            done = make_record(rid, task="toy-acc", environment_id=env, status=RunStatus.FINISHED)
+            r.hub.create_run(done)
+        r.hub.index.set_cursor("gpu-old", "env-old", 3)  # mirrored from a host since removed
+        wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
+        body = {"force": True, "command_id": "E1"}
+        out = r.client.post("/api/v1/tasks/toy/toy-acc/reeval", json=body).json()
+        assert sorted(out["evaluated"]) == ["e1", "h1"]
+        assert "gpu-old" in out["skipped"]["m1"] and "d1" in out["skipped"]  # scored here
+        # the host scored its own run; the hub's copy only changes through the mirror
+        assert _score_rows(r.env, "e1") == 1
+        wait_until(lambda: _score_rows(r.hub, "e1") == 1, timeout=30)
+        assert _score_rows(r.hub, "h1") == 1 and _score_rows(r.hub, "m1") == 0
+        # one more host score: the mirror copies the host's file, and nothing is lost
+        r.client.post("/api/v1/runs/e1/reeval", json={"force": True, "command_id": "E2"})
+        wait_until(lambda: _score_rows(r.hub, "e1") == 2, timeout=30)
+        again = r.client.post("/api/v1/tasks/toy/toy-acc/reeval", json=body).json()
+        assert again == out  # the receipt: nothing is scored twice
+        assert _score_rows(r.env, "e1") == 2
+        r.client.post("/api/v1/hosts/gpu1/disconnect", json={})
+        down = r.client.post("/api/v1/tasks/toy/toy-acc/reeval", json={"force": True}).json()
+        assert down["evaluated"] == ["h1"] and "hx hosts connect gpu1" in down["skipped"]["e1"]
 
 
 def test_launch_on_a_host_runs_the_hub_commit_the_host_lacks(tmp_path: Path) -> None:

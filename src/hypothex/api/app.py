@@ -44,7 +44,7 @@ from hypothex.core.config import load_project_config, parse_metric_version
 from hypothex.core.context import Context
 from hypothex.core.cost import cost_since, today_start
 from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
-from hypothex.core.evaluation import reeval
+from hypothex.core.evaluation import EvalReport, reeval
 from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import RunRequest
 from hypothex.core.fsutil import atomic_write_text
@@ -2012,10 +2012,59 @@ def create_app(
 
     @app.post("/api/v1/tasks/{project}/{task}/reeval")
     def task_reeval(project: str, task: str, body: ReevalBody) -> dict[str, Any]:
-        return once(
-            body,
-            lambda: reeval(ctx, project=project, task=task, metric=body.metric, force=body.force),
-        )
+        # spec 8A.3: a mirrored run is re-scored on its host (the mirror replaces the hub's
+        # scores.jsonl with the host's whole file); only the hub's own runs, and runs no
+        # host ever mirrored here (demo, imported), are scored here
+        def act() -> EvalReport:
+            runs = ctx.index.list_runs(
+                project=project,
+                task=task,
+                status=RunStatus.FINISHED,
+                include_archived=True,
+                limit=None,
+            )
+            hosts = {e: _mirror_host(e) for e in {r.environment_id for r in runs}}
+            if not any(hosts.values()):
+                return reeval(ctx, project=project, task=task, metric=body.metric, force=body.force)
+            report = EvalReport()
+            down: dict[str, str] = {}  # host -> why nothing more is sent to it
+            for record in reversed(runs):  # oldest first, as core reeval
+                host = hosts[record.environment_id]
+                if host is None:
+                    part = reeval(ctx, run_id=record.run_id, metric=body.metric, force=body.force)
+                elif host in down:
+                    report.skipped[record.run_id] = down[host]
+                    continue
+                else:
+                    try:
+                        part = EvalReport.model_validate(_reeval_on(host, record.run_id, body))
+                    except (HostUnavailableError, EnvUnreachableError) as exc:
+                        down[host] = report.skipped[record.run_id] = f"host {host}: {exc}"[:500]
+                        continue
+                    except EnvRequestError as exc:
+                        report.skipped[record.run_id] = f"host {host}: {exc}"[:500]
+                        continue
+                report.evaluated += part.evaluated
+                report.skipped.update(part.skipped)
+                report.warnings += [w for w in part.warnings if w not in report.warnings]
+            return report
+
+        return once(body, act)
+
+    def _mirror_host(environment_id: str) -> str | None:
+        # None: re-score here; else the host the run was mirrored from (configured or not)
+        return manager.host_for_environment(environment_id) or manager.mirrored_from(environment_id)
+
+    def _reeval_on(host: str, run_id: str, body: ReevalBody) -> Any:
+        if host not in manager.names():
+            raise HostUnavailableError(
+                f"it is no longer in environments.yaml; re-evaluate run {run_id} there "
+                "(`hx hosts add`)"
+            )
+        payload = body.model_dump(mode="json")
+        # one command id per run, so a retried task reeval re-scores each run at most once
+        payload["command_id"] = f"{body.command_id}:{run_id}" if body.command_id else None
+        return manager.client(host).post_json(f"/api/v1/runs/{run_id}/reeval", payload)
 
     @app.get("/api/v1/tasks/{project}/{task}/kind")
     def task_kind(project: str, task: str) -> dict[str, Any]:

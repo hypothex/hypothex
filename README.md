@@ -57,7 +57,7 @@ Build the docs locally: `uv run sphinx-build -b html docs docs/_build/html`.
 
 ## For agents
 
-- Copy [`skills/hypothex/`](skills/hypothex/) into `~/.claude/skills/` (Claude Code), or reference it from `AGENTS.md` (Codex).
+- Copy [`skills/hypothex/`](skills/hypothex/) into `~/.claude/skills/` (Claude Code), or reference it from `AGENTS.md` (Codex). The installed package carries the same file at `hypothex/skills/hypothex/SKILL.md`.
 - MCP over stdio: `claude mcp add hypothex -- hx mcp`.
 
 ## Contributing

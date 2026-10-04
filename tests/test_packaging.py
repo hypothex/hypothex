@@ -61,3 +61,15 @@ def test_wheel_built_from_the_sdist_has_the_ui(built: tuple[list[str], list[str]
     assert "src/hypothex/ui_dist/index.html" in sdist
     assert "hypothex/ui_dist/index.html" in wheel
     assert "hypothex/ui_dist/assets/app.js" in wheel
+
+
+def test_sdist_leaves_out_internal_docs(built: tuple[list[str], list[str]]) -> None:
+    sdist, _ = built
+    assert "docs/index.rst" in sdist
+    for prefix in ("docs/superpowers/", "docs/mockups/", ".superpowers/"):
+        assert not [n for n in sdist if n.startswith(prefix)], prefix
+
+
+def test_wheel_ships_the_skill_file(built: tuple[list[str], list[str]]) -> None:
+    _, wheel = built
+    assert "hypothex/skills/hypothex/SKILL.md" in wheel

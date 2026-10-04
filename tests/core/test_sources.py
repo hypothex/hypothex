@@ -186,6 +186,29 @@ def test_metrics_source_reads_the_file_of_a_live_or_lost_run(
     ]
 
 
+def test_metrics_source_keeps_a_bounded_history_of_a_live_run(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core.thin import MAX_POINTS_PER_METRIC
+
+    rec = _run(ctx, toy_repo, "r1", status=RunStatus.RUNNING)
+    n = 5 * MAX_POINTS_PER_METRIC
+    _jsonl(
+        ctx.run_dir(rec) / "metrics.jsonl",
+        [{"name": "loss", "step": s, "value": 7.0 if s == 4321 else 1.0} for s in range(n)],
+    )
+
+    def no_full_read(*_: Any) -> None:
+        raise AssertionError("a live run's metrics.jsonl was parsed in full")
+
+    monkeypatch.setattr(ctx.store, "read_metric_points", no_full_read)
+    rows = list(iter_rows(ctx, [rec], "metrics"))
+    steps = [r["step"] for r in rows]
+    assert len(rows) == MAX_POINTS_PER_METRIC
+    assert {0, 4321, n - 1} <= set(steps)
+    assert len(metric_points(ctx, [rec])["r1"]) == MAX_POINTS_PER_METRIC
+
+
 def test_metrics_source_keeps_only_the_given_names(ctx: Context, toy_repo: Path) -> None:
     done = _run(ctx, toy_repo, "r1")
     live = _run(ctx, toy_repo, "r2", minute=1, status=RunStatus.RUNNING)
@@ -217,6 +240,7 @@ def test_metric_points_reads_ended_runs_from_the_index_in_one_query(
         raise AssertionError("an ended run's metrics.jsonl was parsed")
 
     monkeypatch.setattr(ctx.store, "read_metric_points", no_file)
+    monkeypatch.setattr(ctx.store, "read_metric_points_bounded", no_file)
     calls: list[list[str]] = []
     real = ctx.index.metric_points_for
 

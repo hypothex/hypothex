@@ -27,6 +27,11 @@ commands) read the old index until that commit and the new one after it, never
 a part of it, and writes made during the rebuild are kept. One rebuild runs at a
 time. A rebuild does not read ``metrics.jsonl``: a run's downsampled points are
 indexed the first time they are asked for. 20,000 runs rebuild in about 15 s.
+An ended run's points are indexed from its whole file (at most 1,000 evenly spaced
+points per name, the last one kept). A queued, running or lost run may still be
+writing its file, so the index (and every view) reads it one line at a time into a
+bounded copy: at most 1,000 points per name, the first, last, lowest and highest
+kept, the rest by LTTB.
 
 Every write of indexed data adds 1 to the index *generation* (a ``meta`` row
 written in the same transaction). ``hypothex.core.index.index_generation(ctx)``

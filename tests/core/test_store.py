@@ -1,5 +1,7 @@
 import fcntl
+import json
 import math
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -85,6 +87,7 @@ def test_scores_points_artifacts_notes(store: RunStore) -> None:
     append_jsonl(run_dir / "metrics.jsonl", {"name": "loss", "step": 0, "value": 1.5, "t": 1.0})
     append_jsonl(run_dir / "metrics.jsonl", {"name": "loss", "value": "bad"})
     assert [p.value for p in store.read_metric_points("toy", "r1")] == [1.5]
+    assert store.read_metric_points_bounded("toy", "r1") == store.read_metric_points("toy", "r1")
     append_jsonl(run_dir / "artifacts.jsonl", {"kind": "checkpoint", "path": "/m.pt"})
     assert store.read_artifacts("toy", "r1")[0].kind == "checkpoint"
     store.append_note("toy", "r1", "looks good", "alice")
@@ -263,3 +266,28 @@ def test_read_samples(store: RunStore) -> None:
         "latency_ms": [12.5, 15.0],
         "ttft": [3.0],
     }
+
+
+def test_read_metric_points_bounded_streams_a_huge_live_file(store: RunStore) -> None:
+    from hypothex.core.thin import MAX_POINTS_PER_METRIC
+
+    store.create_run(make_record())
+    n = 20_000
+    with (store.layout.run_dir("toy", "r1") / "metrics.jsonl").open("w") as fh:
+        for s in range(n):
+            value = 9.0 if s == 13_337 else 1.0 / (s + 1)
+            fh.write(json.dumps({"name": "loss", "step": s, "value": value}) + "\n")
+            fh.write(json.dumps({"name": "lr", "step": s, "value": 0.1}) + "\n")
+        fh.write('{"name": "loss", "step": 1, "value": "' + "x" * (2 << 20) + '"}\n')
+    tracemalloc.start()
+    try:
+        kept = store.read_metric_points_bounded("toy", "r1")
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # the full read holds all 40k parsed points (~35 MiB); the bounded one a few thousand
+    assert peak < 6 * 2**20, f"peak {peak / 2**20:.1f} MiB"
+    loss = [p for p in kept if p.name == "loss"]
+    assert len(loss) == MAX_POINTS_PER_METRIC
+    assert len(kept) == 2 * MAX_POINTS_PER_METRIC
+    assert {0, 13_337, n - 1} <= {p.step for p in loss}

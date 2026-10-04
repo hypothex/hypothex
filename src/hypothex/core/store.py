@@ -23,6 +23,7 @@ from hypothex.core.fsutil import (
     append_jsonl,
     append_note_file,
     atomic_write_text,
+    iter_jsonl,
     read_jsonl,
     read_yaml,
     write_yaml,
@@ -37,11 +38,14 @@ from hypothex.core.records import (
     ScoreRecord,
     UsageTotals,
 )
+from hypothex.core.thin import MAX_POINTS_PER_METRIC, HistoryThinner
 
 log = logging.getLogger(__name__)
 _M = TypeVar("_M", bound=BaseModel)
 
 RUN_SUBDIRS = ("logs", "predictions", "env")
+MAX_METRIC_LINE_BYTES = 64 * 1024
+"""Longest ``metrics.jsonl`` line a bounded read parses; a longer line is skipped unread."""
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
 _HASH_TAIL = re.compile(r"-[0-9a-f]{8}\Z")
 
@@ -555,7 +559,11 @@ class RunStore:
 
     def read_metric_points(self, project: str, run_id: str) -> list[MetricPoint]:
         """
-        Read the logged metric history for a run.
+        Read the logged metric history for a run, every point.
+
+        Memory grows with the file: use it where every point matters (an
+        ended run's history before the index downsamples it) and
+        ``read_metric_points_bounded`` for a live run.
 
         Parameters
         ----------
@@ -570,6 +578,45 @@ class RunStore:
             Points in the order written; malformed rows are skipped.
         """
         return _parse_rows(MetricPoint, self.layout.run_dir(project, run_id) / "metrics.jsonl")
+
+    def read_metric_points_bounded(
+        self, project: str, run_id: str, limit: int = MAX_POINTS_PER_METRIC
+    ) -> list[MetricPoint]:
+        """
+        Read a bounded copy of a run's metric history, one line at a time.
+
+        For a live run, whose file may still grow without limit: memory stays
+        bounded by ``2 * limit`` points per name whatever the file size
+        (``thin.HistoryThinner``), and lines over ``MAX_METRIC_LINE_BYTES``
+        are skipped unread. A history of at most ``limit`` points per name is
+        read whole, as ``read_metric_points`` reads it.
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+        run_id : str
+            Run id.
+        limit : int
+            Most points kept per name, at least 5.
+
+        Returns
+        -------
+        list of MetricPoint
+            At most ``limit`` points per name, ordered by name then step: the
+            first and last step and the lowest and highest value of each name,
+            the rest picked by LTTB. Malformed rows are skipped.
+
+        Examples
+        --------
+        >>> store.read_metric_points_bounded("toy", "r1")  # doctest: +SKIP
+        [MetricPoint(name='loss', step=0, value=2.3, t=None)]
+        """
+        path = self.layout.run_dir(project, run_id) / "metrics.jsonl"
+        thinner = HistoryThinner(limit)
+        for point in _iter_rows(MetricPoint, path, MAX_METRIC_LINE_BYTES):
+            thinner.add(point)
+        return thinner.points()
 
     def read_nonfinite_points(self, project: str, run_id: str) -> list[NonFiniteMetric]:
         """
@@ -833,6 +880,31 @@ def _brief(exc: Exception) -> str:
     return (lines[0] if lines else type(exc).__name__)[:200]
 
 
+def _iter_rows(model: type[_M], path: Path, max_line_bytes: int | None = None) -> Iterator[_M]:
+    """
+    Parse each JSONL row of ``path`` into ``model`` one at a time, skipping invalid rows.
+
+    Parameters
+    ----------
+    model : type
+        Pydantic model to validate each row against.
+    path : Path
+        JSONL file to read.
+    max_line_bytes : int, optional
+        Longest line to parse (``fsutil.iter_jsonl``); ``None`` parses every line.
+
+    Yields
+    ------
+    model
+        Successfully parsed rows, in file order.
+    """
+    for raw in iter_jsonl(path, max_line_bytes):
+        try:
+            yield model.model_validate(raw)
+        except ValidationError:
+            continue
+
+
 def _parse_rows(model: type[_M], path: Path) -> list[_M]:
     """
     Parse each JSONL row of ``path`` into ``model``, skipping invalid rows.
@@ -849,13 +921,7 @@ def _parse_rows(model: type[_M], path: Path) -> list[_M]:
     list
         Successfully parsed rows, in file order.
     """
-    rows: list[_M] = []
-    for raw in read_jsonl(path):
-        try:
-            rows.append(model.model_validate(raw))
-        except ValidationError:
-            continue
-    return rows
+    return list(_iter_rows(model, path))
 
 
 def _parse_steps(raws: list[dict[str, Any]]) -> list[TraceStep]:

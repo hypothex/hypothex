@@ -13,6 +13,7 @@ from hypothex.core.fsutil import (
     append_note_file,
     atomic_write_bytes,
     atomic_write_text,
+    iter_jsonl,
     open_jsonl_append,
     read_jsonl,
     read_yaml,
@@ -86,6 +87,22 @@ def test_open_jsonl_append_creates_file_without_leading_newline(tmp_path: Path) 
 
 def test_read_jsonl_missing_file_is_empty(tmp_path: Path) -> None:
     assert read_jsonl(tmp_path / "nope.jsonl") == []
+
+
+def test_iter_jsonl_splits_on_newlines_only_and_skips_bad_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "m.jsonl"
+    # a raw U+2028 inside a string is valid JSON; str.splitlines() used to cut that row in two
+    path.write_bytes('{"a": "x\u2028y"}\r\n'.encode() + b'{"a": "\xff"}\n[1]\n{"a": 2}')
+    assert list(iter_jsonl(path)) == [{"a": "x\u2028y"}, {"a": 2}]
+    assert read_jsonl(path) == [{"a": "x\u2028y"}, {"a": 2}]
+
+
+def test_iter_jsonl_skips_lines_over_the_byte_limit_without_holding_them(tmp_path: Path) -> None:
+    path = tmp_path / "m.jsonl"
+    long_row = '{"a": "' + "x" * 5000 + '"}'
+    path.write_text(f'{{"a": 1}}\n{long_row}\n{{"a": 3}}\n{long_row}')
+    assert list(iter_jsonl(path, max_line_bytes=100)) == [{"a": 1}, {"a": 3}]
+    assert len(list(iter_jsonl(path))) == 4
 
 
 def test_yaml_roundtrip_and_errors(tmp_path: Path) -> None:

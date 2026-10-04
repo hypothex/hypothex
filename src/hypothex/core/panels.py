@@ -19,7 +19,6 @@ from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, HypothexError
 from hypothex.core.fsutil import read_jsonl
 from hypothex.core.headlines import MINUS, fmt_metric, metric_unit
-from hypothex.core.index import MAX_POINTS_PER_METRIC
 from hypothex.core.leaderboard import (
     Leaderboard,
     _natural_key,
@@ -29,11 +28,12 @@ from hypothex.core.leaderboard import (
     pick_field,
 )
 from hypothex.core.queries import primary_examples, refresh_project
-from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
+from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.seeds import summarize
 from hypothex.core.sources import group_labels, iter_rows, metric_points, select_fields
 from hypothex.core.stats import ecdf_points, quantile
 from hypothex.core.store import ProjectEntry
+from hypothex.core.thin import lttb
 from hypothex.core.views import (
     VERSION_REF,
     PanelSpec,
@@ -78,6 +78,42 @@ class PanelResult(BaseModel):
 
 
 @dataclass
+class _RunFiles:
+    """
+    One run's files that per-run values (``_run_value``) read, each parsed once.
+
+    ``scores.jsonl``, the ``samples/`` series, and the per-example score files
+    (keyed by metric name and version, ``id`` dropped).
+    """
+
+    run: RunRecord
+    _scores: list[ScoreRecord] | None = None
+    _samples: dict[str, list[float]] | None = None
+    _examples: dict[tuple[str, str], list[dict[str, Any]]] = field(default_factory=dict)
+
+    def scores(self, ctx: Context) -> list[ScoreRecord]:
+        """``RunStore.read_scores`` of the run."""
+        if self._scores is None:
+            self._scores = ctx.store.read_scores(self.run.project, self.run.run_id)
+        return self._scores
+
+    def samples(self, ctx: Context) -> dict[str, list[float]]:
+        """``RunStore.read_samples`` of the run."""
+        if self._samples is None:
+            self._samples = ctx.store.read_samples(self.run.project, self.run.run_id)
+        return self._samples
+
+    def examples(self, ctx: Context, name: str, version: str) -> list[dict[str, Any]]:
+        """Rows of ``predictions/scores.<name>@<version>.jsonl`` without ``id``."""
+        key = (name, version)
+        if key not in self._examples:
+            path = ctx.run_dir(self.run) / "predictions" / f"scores.{name}@{version}.jsonl"
+            rows = read_jsonl(path)
+            self._examples[key] = [{k: v for k, v in r.items() if k != "id"} for r in rows]
+        return self._examples[key]
+
+
+@dataclass
 class _ViewCache:
     """
     Data the panels of one view share, so each piece is built once per view.
@@ -93,6 +129,20 @@ class _ViewCache:
     labels: dict[_BoardKey, dict[str, str]] = field(default_factory=dict)
     points: dict[tuple[str, frozenset[str] | None], list[MetricPoint]] = field(default_factory=dict)
     files: dict[str, list[MetricPoint]] = field(default_factory=dict)
+    last_run: _RunFiles | None = None
+
+    def run_files(self, run: RunRecord) -> _RunFiles:
+        """
+        The parsed files of ``run`` (``_RunFiles``), kept for the last run asked for only.
+
+        A panel asks for every value of one run before the next run
+        (``_stat_strip`` loops runs, then references), so each run's files are
+        read once per panel, not once per reference, while memory holds the
+        files of one run, never of all runs.
+        """
+        if self.last_run is None or self.last_run.run.run_id != run.run_id:
+            self.last_run = _RunFiles(run)
+        return self.last_run
 
     def runs_of(self, ctx: Context, entry: ProjectEntry, task: str) -> list[RunRecord]:
         """A new list of the task's unarchived runs, oldest first (read once)."""
@@ -135,16 +185,17 @@ class _ViewCache:
         ``sources.metric_points`` of ``runs``; each run and name set is read once.
 
         A live run's ``metrics.jsonl`` is parsed once per view, whatever names
-        the panels ask for, and only its thinned history (``thin_history``) is
-        kept: like an ended run's indexed history, at most
-        ``MAX_POINTS_PER_METRIC`` points per name, so the cache never holds the
-        full files of all live runs at once.
+        the panels ask for, one line at a time into a bounded copy
+        (``RunStore.read_metric_points_bounded``): like an ended run's indexed
+        history, at most ``MAX_POINTS_PER_METRIC`` points per name, so neither
+        the read nor the cache ever holds a whole file.
         """
 
         def read_file(run: RunRecord) -> list[MetricPoint]:
             if run.run_id not in self.files:
-                full = ctx.store.read_metric_points(run.project, run.run_id)
-                self.files[run.run_id] = thin_history(full)
+                self.files[run.run_id] = ctx.store.read_metric_points_bounded(
+                    run.project, run.run_id
+                )
             return self.files[run.run_id]
 
         wanted = None if names is None else frozenset(names)
@@ -383,6 +434,8 @@ def _stat_strip(scope: _Scope, panel: PanelSpec) -> PanelResult:
 
     With ``data.metrics`` each item is the mean of ``_run_value`` over the
     selected runs (after ``data.filter`` and ``data.pick``) that have a value.
+    Values are read run by run, each reference once, so a run's files are
+    parsed once (``_ViewCache.run_files``), however many references there are.
     """
     board = scope.board()
     rows: list[dict[str, Any]] = []
@@ -391,8 +444,13 @@ def _stat_strip(scope: _Scope, panel: PanelSpec) -> PanelResult:
     else:
         groups = _groups(scope, panel)
         only = f" of {groups[0][1]}" if len(groups) == 1 else ""
+        found: dict[str, list[float]] = {ref: [] for ref in panel.data.metrics}
+        for r in scope.runs:
+            for ref, got in found.items():
+                if (v := _run_value(scope, r, ref)) is not None:
+                    got.append(v)
         for ref in panel.data.metrics:
-            values = [v for r in scope.runs if (v := _run_value(scope, r, ref)) is not None]
+            values = found[ref]
             if not values:
                 tooltip = f"No value in the {len(scope.runs)} selected runs"
                 rows.append({"label": ref, "value": "—", "unit": "", "tooltip": tooltip})
@@ -829,103 +887,6 @@ def _merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]
     return merged
 
 
-def lttb(xs: list[float], ys: list[float], limit: int) -> list[int]:
-    """
-    Indices of at most ``limit`` points that keep a line's shape (LTTB).
-
-    Largest-Triangle-Three-Buckets: the first and last points are always kept.
-    The points between them are cut into ``limit - 2`` buckets in order; from
-    each bucket the point that makes the largest triangle with the point kept
-    before it and the mean of the next bucket is kept, so peaks such as a loss
-    spike survive the thinning.
-
-    Parameters
-    ----------
-    xs : list of float
-        x of each point, in drawing order.
-    ys : list of float
-        y of each point.
-    limit : int
-        Most points to keep; a series that is not longer is kept whole, and a
-        limit below 3 keeps every point.
-
-    Returns
-    -------
-    list of int
-        Increasing indices into ``xs`` / ``ys``.
-
-    Examples
-    --------
-    >>> lttb([0, 1, 2, 3, 4], [0, 0, 9, 0, 0], 3)
-    [0, 2, 4]
-    >>> lttb([0, 1], [5, 6], 3)
-    [0, 1]
-    """
-    n = len(xs)
-    if n <= limit or limit < 3:
-        return list(range(n))
-    out = [0]
-    size = (n - 2) / (limit - 2)
-    kept = 0
-    for b in range(limit - 2):
-        start, end = int(b * size) + 1, int((b + 1) * size) + 1
-        nxt_start, nxt_end = end, min(int((b + 2) * size) + 1, n)
-        if nxt_start >= nxt_end:
-            nxt_start, nxt_end = n - 1, n
-        # mean of the next bucket: values near the float limit make sum() inf
-        # (a poor pick for absurd data), where math.fsum would raise
-        k = nxt_end - nxt_start
-        mx, my = sum(xs[nxt_start:nxt_end]) / k, sum(ys[nxt_start:nxt_end]) / k
-        ax, ay = xs[kept], ys[kept]
-        dx, dy = ax - mx, my - ay
-        best, kept = -1.0, start
-        for j in range(start, end):
-            area = abs(dx * (ys[j] - ay) - (ax - xs[j]) * dy)
-            if area > best:
-                best, kept = area, j
-        out.append(kept)
-    out.append(n - 1)
-    return out
-
-
-def thin_history(
-    points: list[MetricPoint], limit: int = MAX_POINTS_PER_METRIC
-) -> list[MetricPoint]:
-    """
-    At most ``limit`` points per metric name, picked by ``lttb`` on each series.
-
-    Bounds what is kept of a live run's history to what the index keeps of an
-    ended run's, while the first, last and peak points survive.
-
-    Parameters
-    ----------
-    points : list of MetricPoint
-        A run's history, in any order.
-    limit : int
-        Most points to keep per name.
-
-    Returns
-    -------
-    list of MetricPoint
-        The kept points, ordered by name then step.
-
-    Examples
-    --------
-    >>> pts = [MetricPoint(name="loss", step=s, value=9.0 if s == 5 else 1.0) for s in range(10)]
-    >>> [p.step for p in thin_history(pts, 3)]
-    [0, 5, 9]
-    """
-    by_name: dict[str, list[MetricPoint]] = defaultdict(list)
-    for p in points:
-        by_name[p.name].append(p)
-    out: list[MetricPoint] = []
-    for name in sorted(by_name):
-        series = sorted(by_name[name], key=lambda p: p.step)
-        kept = lttb([p.step for p in series], [p.value for p in series], limit)
-        out.extend(series[i] for i in kept)
-    return out
-
-
 def short_step(x: float) -> str:
     """
     A step or x value in at most four characters: ``950``, ``9.5k``, ``14k``, ``1.2M``.
@@ -1132,15 +1093,12 @@ def _samples(scope: _Scope, run: RunRecord, name: str) -> list[float]:
     """A run's raw samples of series ``name`` (the name given to ``log_samples``)."""
     if not name:
         return []
-    return scope.ctx.store.read_samples(run.project, run.run_id).get(name, [])
+    return scope.cache.run_files(run).samples(scope.ctx).get(name, [])
 
 
 def _example_values(scope: _Scope, run: RunRecord, name: str, version: str) -> list[float]:
     """Per-example values of a metric: the field ``pick_field`` chooses, one per example."""
-    path = scope.ctx.run_dir(run) / "predictions" / f"scores.{name}@{version}.jsonl"
-    if not path.is_file():
-        return []
-    rows = [{k: v for k, v in row.items() if k != "id"} for row in read_jsonl(path)]
+    rows = scope.cache.run_files(run).examples(scope.ctx, name, version)
     picked = pick_field(rows, name)
     if picked is None:
         return []
@@ -1159,8 +1117,7 @@ def _solved(scope: _Scope, run: RunRecord) -> int | None:
     spec = scope.entry.config.metrics.get(name)
     if spec is None:
         return None
-    path = scope.ctx.run_dir(run) / "predictions" / f"scores.{name}@{spec.version}.jsonl"
-    rows = [{k: v for k, v in row.items() if k != "id"} for row in read_jsonl(path)]
+    rows = scope.cache.run_files(run).examples(scope.ctx, name, spec.version)
     picked = pick_field(rows, name)
     if picked is None or not picked[1]:
         return None
@@ -1223,7 +1180,7 @@ def _resolve_value(scope: _Scope, run: RunRecord, ref: str) -> float | None:
         version = version or metrics[name].version
         key = key or "value"
         found: float | None = None
-        for s in scope.ctx.store.read_scores(run.project, run.run_id):
+        for s in scope.cache.run_files(run).scores(scope.ctx):
             if (s.metric, s.version, s.key) == (name, version, key) and s.error is None:
                 found = s.value
         if found is None and key in AGGREGATES:

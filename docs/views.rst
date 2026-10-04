@@ -74,13 +74,18 @@ Panels
 ============== ==========================================================================
 Type           Shows
 ============== ==========================================================================
-stat_strip     A row of headline numbers.
+stat_strip     A row of headline numbers; with ``data.metrics``, one item per reference
+               (the mean over the selected runs). Each run's scores and samples are
+               read once per panel, however many references the panel lists.
 leaderboard    Seed groups ranked by the primary metric, with seed and test-set noise.
 curves         Metric history by step; seeds faint, mean bold, checkpoints and spikes.
                Rows follow ``data.metrics`` order (a name listed twice is drawn once);
                each run's series is thinned to 500 points that keep its shape (LTTB).
                Like the index for an ended run, a live run keeps at most 1,000 points
-               per name (also LTTB) before that. A loss spike is one event per episode,
+               per name before that: its ``metrics.jsonl`` is read one line at a time
+               into a bounded copy (the first, last, lowest and highest point, the rest
+               by LTTB), so a file that grows without limit never fills the hub's
+               memory. A loss spike is one event per episode,
                labelled with its step (``spike 9k``); so is a kill (``killed 14k``).
                A ``NaN`` or infinite value the run logged is marked too (``NaN 9k``).
                ``group_by: run`` draws one column per run, named ``baseline r1``.
@@ -105,7 +110,9 @@ Sources for ``table`` and ``vega_lite``: ``runs``, ``scores``, ``metrics``,
 per-run sources has ``run_id``,
 ``group_id``, ``label`` (the seed group's short name, as on the leaderboard), and
 ``seed``. ``metrics`` rows of finished, failed and killed runs come from the index (at
-most 1,000 points per name, the last one always kept); a ``filter`` on ``name`` is
+most 1,000 points per name, the last one always kept); rows of queued, running and lost
+runs come from the same bounded read of ``metrics.jsonl`` as ``curves`` (at most 1,000
+points per name). A ``filter`` on ``name`` is
 applied in the index query, so a chart of one metric over many runs stays fast. Encode
 charts by ``label`` so they show config names:
 
@@ -145,7 +152,8 @@ A view is checked before it is saved: the schema, metric names (with a nearest-n
 suggestion), sources, fields, and the Vega-Lite spec shape. Every issue has a line
 number. An invalid view is never saved. YAML anchors and aliases (``&name``, ``*name``,
 ``<<: *name``) are not allowed, YAML may nest at most 64 levels (and hold at most 100,000
-parser events), and a Vega-Lite spec may hold at most 10,000 values. Inline views in
+parser events), a Vega-Lite spec may hold at most 10,000 values, and one panel's
+``data.metrics`` may list at most 100 references. Inline views in
 ``hypothex.yaml`` follow the same rule: an anchor or alias under ``tasks.<task>.views`` is a
 config error; anchors elsewhere in the file are fine as long as they form no cycle.
 

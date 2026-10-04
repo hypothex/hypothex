@@ -12,6 +12,7 @@ from hypothex.core.index import (
     SCHEMA_VERSION,
     Index,
     downsample,
+    index_run,
     rebuild_index,
     rebuild_index_if_stale,
     repair_index_gaps,
@@ -148,6 +149,48 @@ def test_downsample_keeps_last_point_and_limit() -> None:
     assert len(loss) <= 1000
     assert loss[-1].step == 2499
     assert [p.name for p in out].count("acc") == 1
+
+
+def _store_with_long_runs(tmp_path: Path) -> RunStore:
+    """A store with a running and a finished run, each 3,000 loss points peaking at step 1234."""
+    layout = Layout(tmp_path / "home")
+    layout.ensure()
+    store = RunStore(layout)
+    store.register_project(ProjectConfig(project="toy"), tmp_path)
+    for rid, status in (("live", RunStatus.RUNNING), ("done", RunStatus.FINISHED)):
+        store.create_run(make_record(rid, status=status))
+        path = layout.run_dir("toy", rid) / "metrics.jsonl"
+        for s in range(3000):
+            append_jsonl(path, {"name": "loss", "step": s, "value": 50.0 if s == 1234 else 1.0})
+    return store
+
+
+@pytest.mark.parametrize("via", ["index_run", "rebuild"])
+def test_a_live_runs_points_are_indexed_from_a_bounded_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, via: str
+) -> None:
+    store = _store_with_long_runs(tmp_path)
+    idx = Index(tmp_path / "i.db", store=store)
+    exact = downsample(store.read_metric_points("toy", "done"))
+    full_reads: list[str] = []
+    real = store.read_metric_points
+
+    def spy(project: str, run_id: str) -> list[MetricPoint]:
+        full_reads.append(run_id)
+        return real(project, run_id)
+
+    monkeypatch.setattr(store, "read_metric_points", spy)
+    if via == "index_run":
+        for record in store.iter_records():
+            index_run(idx, store, record)
+    else:  # a rebuild skips the files; the first read indexes them
+        rebuild_index(idx, store)
+        assert full_reads == []
+    live, done = idx.metric_points("live"), idx.metric_points("done")
+    assert full_reads == ["done"]  # an ended run's history stays exact (downsample of all)
+    assert done == exact
+    assert len(live) == 1000
+    assert {0, 1234, 2999} <= {p.step for p in live}  # the live run's peak survives
 
 
 def test_schema_version_mismatch_triggers_rebuild(tmp_path: Path) -> None:

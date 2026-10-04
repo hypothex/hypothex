@@ -186,29 +186,60 @@ def append_jsonl(path: Path, obj: dict[str, Any]) -> None:
         fh.write((line + "\n").encode("utf-8"))
 
 
+def iter_jsonl(path: Path, max_line_bytes: int | None = None) -> Iterator[dict[str, Any]]:
+    """
+    Yield the objects of a JSONL file one line at a time, skipping bad lines.
+
+    Only ``\\n`` ends a line. Blank lines, lines that are not a JSON object
+    (malformed, partial, or not UTF-8), and lines longer than
+    ``max_line_bytes`` are skipped; a long line is read in pieces, never held.
+
+    Parameters
+    ----------
+    path : Path
+        JSONL file; a missing file yields nothing.
+    max_line_bytes : int, optional
+        Longest line to parse, in bytes; ``None`` parses every line.
+
+    Yields
+    ------
+    dict
+        The parsed objects, in file order.
+
+    Examples
+    --------
+    >>> list(iter_jsonl(Path("missing.jsonl")))
+    []
+    """
+    if not path.is_file():
+        return
+    cap = -1 if max_line_bytes is None else max_line_bytes + 1
+    with path.open("rb") as fh:
+        while line := fh.readline(cap):
+            if cap > 0 and len(line) == cap and not line.endswith(b"\n"):
+                while (rest := fh.readline(cap)) and not rest.endswith(b"\n"):
+                    pass
+                continue
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:  # JSONDecodeError, or bytes that are not UTF-8
+                continue
+            if isinstance(obj, dict):
+                yield obj
+
+
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     """
-    Read a JSONL file, skipping blank, malformed, and partial lines.
+    Read a JSONL file, skipping blank, malformed, and partial lines (``iter_jsonl``).
 
     Returns
     -------
     list of dict
         Parsed objects; ``[]`` if the file does not exist.
     """
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            obj = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            rows.append(obj)
-    return rows
+    return list(iter_jsonl(path))
 
 
 def append_note_file(path: Path, text: str, author: str, now: datetime | None = None) -> None:

@@ -80,6 +80,8 @@ VEGA_BLOCKED_KEYS = frozenset({"url", "href", "embedOptions"})
 VERSION_REF = "version"
 VEGA_MAX_DEPTH = 64
 VEGA_MAX_NODES = 10_000
+MAX_PANEL_REFS = 100
+"""Most entries in one panel's ``data.metrics``; each one is a value per run."""
 NO_ANCHORS = "YAML anchors and aliases are not allowed"
 
 Loc = tuple[str | int, ...]
@@ -146,6 +148,14 @@ class PanelData(BaseModel):
     run_id: str | None = None
     example_id: str | None = None
     step_metric: str | None = None
+
+    @field_validator("metrics")
+    @classmethod
+    def _few_metrics(cls, value: list[str] | None) -> list[str] | None:
+        """Reject more than ``MAX_PANEL_REFS`` metric references."""
+        if value is not None and len(value) > MAX_PANEL_REFS:
+            raise ValueError(f"a panel lists at most {MAX_PANEL_REFS} metrics, not {len(value)}")
+        return value
 
 
 def _default_noise() -> list[Noise]:

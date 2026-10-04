@@ -26,6 +26,13 @@ ACTIVE_STATUSES = frozenset({RunStatus.QUEUED, RunStatus.RUNNING})
 TERMINAL_STATUSES = frozenset(
     {RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED, RunStatus.LOST}
 )
+INDEXED_POINT_STATUSES = frozenset({RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED})
+"""Run states whose indexed metric history is final.
+
+A run's points are indexed in full (then downsampled) when it ends
+(``execute_run``, SLURM, the hub's mirror). A queued, running, or lost run may
+log more since; its file is only ever read bounded
+(``RunStore.read_metric_points_bounded``), by the index and the views alike."""
 
 
 class RunKind(StrEnum):

@@ -37,14 +37,20 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from hypothex.core.errors import RunNotFoundError
-from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.records import (
+    INDEXED_POINT_STATUSES,
+    MetricPoint,
+    RunRecord,
+    RunStatus,
+    ScoreRecord,
+)
 from hypothex.core.store import ProjectEntry, RunStore, run_lock
+from hypothex.core.thin import MAX_POINTS_PER_METRIC
 
 if TYPE_CHECKING:
     from hypothex.core.context import Context
 
 SCHEMA_VERSION = 3
-MAX_POINTS_PER_METRIC = 1000
 _IN_CHUNK = 450
 """Most values bound in one ``IN (...)`` list of an index query."""
 GENERATION_KEY = "generation"
@@ -883,17 +889,18 @@ class Index:
         """Index the metric files of the runs whose points a rebuild skipped."""
         if self.store is None or not run_ids:
             return
-        pending: list[tuple[str, str]] = []
+        pending: list[tuple[str, str, str]] = []
         with Session(self.engine) as session:
             for start in range(0, len(run_ids), 500):
                 stmt = (
-                    select(RunRow.run_id, RunRow.project)
+                    select(RunRow.run_id, RunRow.project, RunRow.status)
                     .join(PointsPendingRow, PointsPendingRow.run_id == RunRow.run_id)
                     .where(RunRow.run_id.in_(run_ids[start : start + 500]))
                 )
-                pending.extend((r, p) for r, p in session.execute(stmt))
-        for run_id, project in pending:
-            self.replace_metric_points(run_id, self.store.read_metric_points(project, run_id))
+                pending.extend((r, p, st) for r, p, st in session.execute(stmt))
+        for run_id, project, status in pending:
+            points = points_to_index(self.store, project, run_id, status)
+            self.replace_metric_points(run_id, points)
 
     # host cursors -------------------------------------------------------------
     def get_cursor(self, host: str, environment_id: str) -> int:
@@ -983,9 +990,47 @@ class Index:
             session.execute(stmt)
 
 
+def points_to_index(
+    store: RunStore, project: str, run_id: str, status: RunStatus | str
+) -> list[MetricPoint]:
+    """
+    Read the metric history to index for a run in state ``status``.
+
+    A run that ended (``INDEXED_POINT_STATUSES``) is read in full, so its
+    indexed history is exactly ``downsample`` of every point. Any other run may
+    still be writing its file, without limit (a remote host can fill it), so it
+    is read bounded (``RunStore.read_metric_points_bounded``); its end indexes
+    it again in full.
+
+    Parameters
+    ----------
+    store : RunStore
+        File store to read from.
+    project : str
+        Project name.
+    run_id : str
+        Run id.
+    status : RunStatus or str
+        The run's state.
+
+    Returns
+    -------
+    list of MetricPoint
+        The points to pass to ``Index.replace_metric_points``.
+
+    Examples
+    --------
+    >>> points_to_index(store, "toy", "r1", RunStatus.RUNNING)  # doctest: +SKIP
+    [MetricPoint(name='loss', step=0, value=2.3, t=None)]
+    """
+    if RunStatus(status) in INDEXED_POINT_STATUSES:
+        return store.read_metric_points(project, run_id)
+    return store.read_metric_points_bounded(project, run_id)
+
+
 def index_run(index: Index, store: RunStore, record: RunRecord) -> None:
     """
-    Index a run, its scores, and its metric points from files.
+    Index a run, its scores, and its metric points from files (``points_to_index``).
 
     Parameters
     ----------
@@ -998,9 +1043,8 @@ def index_run(index: Index, store: RunStore, record: RunRecord) -> None:
     """
     index.upsert_run(record)
     index.replace_scores(record.run_id, store.read_scores(record.project, record.run_id))
-    index.replace_metric_points(
-        record.run_id, store.read_metric_points(record.project, record.run_id)
-    )
+    points = points_to_index(store, record.project, record.run_id, record.status)
+    index.replace_metric_points(record.run_id, points)
 
 
 def index_generation(ctx: Context) -> int:

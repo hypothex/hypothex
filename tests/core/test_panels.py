@@ -1,5 +1,6 @@
 import json
 import math
+import tracemalloc
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,15 @@ from hypothex.core.records import (
     UsageTotals,
 )
 from hypothex.core.store import safe_stem
-from hypothex.core.views import GROUP_FIELDS, PanelData, PanelSpec, RunFilter, ViewSpec
+from hypothex.core.thin import MAX_POINTS_PER_METRIC
+from hypothex.core.views import (
+    GROUP_FIELDS,
+    MAX_PANEL_REFS,
+    PanelData,
+    PanelSpec,
+    RunFilter,
+    ViewSpec,
+)
 from tests.factories import make_record
 
 T0 = utcnow()
@@ -1320,6 +1329,7 @@ def test_view_reads_ended_runs_metrics_from_the_index_by_name(
         raise AssertionError("an ended run's metrics.jsonl was parsed")
 
     monkeypatch.setattr(ctx.store, "read_metric_points", no_file)
+    monkeypatch.setattr(ctx.store, "read_metric_points_bounded", no_file)
     asked: list[frozenset[str] | None] = []
     real = ctx.index.metric_points_for
 
@@ -1396,13 +1406,13 @@ def test_view_parses_a_live_runs_metrics_file_once_for_all_curves(
         [{"name": n, "step": 0, "value": 1.0} for n in ("train/loss", "lr", "sys/gpu_util")],
     )
     reads: list[str] = []
-    real = ctx.store.read_metric_points
+    real = ctx.store.read_metric_points_bounded
 
     def spy(project: str, run_id: str) -> Any:
         reads.append(run_id)
         return real(project, run_id)
 
-    monkeypatch.setattr(ctx.store, "read_metric_points", spy)
+    monkeypatch.setattr(ctx.store, "read_metric_points_bounded", spy)
     view = ViewSpec(
         title="v",
         panels=[
@@ -1467,15 +1477,13 @@ def test_a_step_the_index_cannot_hold_is_skipped_not_a_failed_view(
 def test_curves_draw_a_repeated_metric_name_once(ctx: Context, toy_repo: Path) -> None:
     rec = _run(ctx, toy_repo, "r1")
     _metrics(ctx, rec, [{"name": "loss", "step": s, "value": 1.0} for s in range(10)])
-    panel = _panel("curves", data={"metrics": ["loss"] * 1000})
+    panel = _panel("curves", data={"metrics": ["loss"] * MAX_PANEL_REFS})
     result = query_panel(ctx, "toy", "toy-acc", panel)
     assert len(result.rows) == 10
     assert result.meta["metrics"] == ["loss"]
 
 
 def test_view_cache_keeps_a_bounded_history_of_each_live_run(ctx: Context, toy_repo: Path) -> None:
-    from hypothex.core.index import MAX_POINTS_PER_METRIC
-
     rec = _run(ctx, toy_repo, "r1", status=RunStatus.RUNNING)
     n = 3 * MAX_POINTS_PER_METRIC
     _jsonl(
@@ -1512,3 +1520,67 @@ def test_scatter_of_a_history_metric_reads_the_points_once(
     result = query_panel(ctx, "toy", "toy-acc", panel)
     assert len(result.rows) == 30
     assert calls == [30]  # one read for x and y of every run, not one scan per run
+
+
+def test_a_view_of_a_huge_live_metrics_file_holds_a_bounded_history(
+    ctx: Context, toy_repo: Path
+) -> None:
+    rec = _run(ctx, toy_repo, "r1", status=RunStatus.RUNNING)
+    n = 30_000
+    with (ctx.run_dir(rec) / "metrics.jsonl").open("w") as fh:
+        for s in range(n):
+            fh.write(json.dumps({"name": "loss", "step": s, "value": 1.0 / (s + 1)}) + "\n")
+    view = ViewSpec(
+        title="v",
+        panels=[
+            _panel("curves", data={"metrics": ["loss"]}),
+            _panel("stat_strip", data={"metrics": ["loss"]}),
+            _panel("vega_lite", data={"source": "metrics"}, spec={"mark": "line"}),
+        ],
+    )
+    tracemalloc.start()
+    try:
+        curves, strip, table = query_view(ctx, "toy", "toy-acc", view)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # parsing the whole file held all 30k points at once (~28 MiB)
+    assert peak < 8 * 2**20, f"peak {peak / 2**20:.1f} MiB"
+    assert curves.rows[-1]["step"] == n - 1
+    assert strip.rows[0]["tooltip"].startswith("Mean of 1 run")
+    assert len(table.rows) == MAX_POINTS_PER_METRIC
+
+
+def test_stat_strip_reads_each_runs_samples_and_scores_once(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for i in range(4):
+        rec = _run(ctx, toy_repo, f"r{i}", f"g{i:03d}", minute=i)
+        _score(ctx, rec, 0.5 + i / 10)
+        _jsonl(
+            ctx.run_dir(rec) / "samples" / "lat.jsonl",
+            [{"name": "lat", "value": float(v)} for v in range(10)],
+        )
+    counts = {"read_samples": 0, "read_scores": 0}
+    for name in counts:
+        real = getattr(ctx.store, name)
+
+        def spy(project: str, run_id: str, _real: Any = real, _name: str = name) -> Any:
+            counts[_name] += 1
+            return _real(project, run_id)
+
+        monkeypatch.setattr(ctx.store, name, spy)
+    refs = ["accuracy", "lat", "lat/p50", "lat/max", "accuracy/median"] * 4
+    view = ViewSpec(
+        title="v",
+        panels=[
+            _panel("stat_strip", data={"metrics": refs}),
+            _panel("scatter", data={"x": "lat/p50", "y": "accuracy", "group_by": "run"}),
+        ],
+    )
+    strip, scatter = query_view(ctx, "toy", "toy-acc", view)
+    assert [r["value"] for r in strip.rows[:5]] == ["0.650", "4.5", "4.5", "9", "—"]
+    assert len(strip.rows) == len(refs)
+    assert len(scatter.rows) == 4
+    # once per run and panel (4 runs x 2 panels); it was once per run and reference
+    assert counts == {"read_samples": 8, "read_scores": 8}

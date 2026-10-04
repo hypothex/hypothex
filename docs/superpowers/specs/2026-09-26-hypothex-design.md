@@ -248,7 +248,9 @@ processes it owns. Execution always happens inside an environment, never in a cl
   which submits to SLURM).
 - **Identity is not the route.** Each environment has a stable `environment_id` created once
   and stored in `~/.hypothex/environment.json`. How the hub reaches it (local, SSH tunnel,
-  Tailscale, direct URL) can change without changing identity.
+  Tailscale, direct URL) can change without changing identity. If the file is lost, the id
+  of this host's runs in the store (`host` = hostname) is used again, with a warning; when
+  those runs name two ids, hx stops and asks for the right one.
 - **Descriptor:** `GET /.well-known/hypothex/environment` returns
   `{environment_id, label, os, arch, hostname, hx_version, protocol_version, kind:
   local|ssh|slurm, gpus, capabilities: [...]}`. The hub refuses to talk to an env with an

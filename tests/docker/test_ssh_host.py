@@ -141,7 +141,11 @@ def test_hosts_add_bootstraps_a_managed_server(sshd_box: SshBox, hub_ctx: Contex
     assert info["hx_version"] == __version__
     assert info["protocol_version"] == PROTOCOL_VERSION
     sshd_box.exec("kill", "-0", str(info["pid"]))  # alive (raises if not)
-    descriptor = json.loads(sshd_box.exec("python3", "-c", DESCRIPTOR_PY, str(info["port"])))
+    # the env server shows its host facts only to a caller with its token
+    port, token = str(info["port"]), info["token"]
+    public = json.loads(sshd_box.exec("python3", "-c", DESCRIPTOR_PY, port))
+    assert "kind" not in public and public["hx_version"] == __version__
+    descriptor = json.loads(sshd_box.exec("python3", "-c", DESCRIPTOR_PY, port, token))
     assert descriptor["kind"] == "ssh"
     assert descriptor["hx_version"] == __version__
     assert descriptor["hostname"] == sshd_box.exec("hostname").strip()
@@ -179,7 +183,9 @@ def test_hub_tunnels_launches_and_mirrors(sshd_box: SshBox, hub_ctx: Context) ->
         assert state.hx_version == __version__
         assert state.local_port is not None
         url = f"http://127.0.0.1:{state.local_port}/.well-known/hypothex/environment"
-        descriptor = httpx.get(url, timeout=10).json()  # through the ssh -L tunnel
+        token = server_json(sshd_box)["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        descriptor = httpx.get(url, headers=auth, timeout=10).json()  # through ssh -L
         assert descriptor["environment_id"] == state.environment_id
         assert descriptor["hostname"] == sshd_box.exec("hostname").strip()
 

@@ -58,8 +58,12 @@ BOOTSTRAP_TIMEOUT = 600.0  # first install downloads hypothex's dependencies fro
 DESCRIPTOR_PY = (
     "import sys, urllib.request; "
     "url = 'http://127.0.0.1:' + sys.argv[1] + '/.well-known/hypothex/environment'; "
-    "print(urllib.request.urlopen(url, timeout=10).read().decode())"
+    "auth = {'Authorization': 'Bearer ' + sys.argv[2]} if len(sys.argv) > 2 else {}; "
+    "req = urllib.request.Request(url, headers=auth); "
+    "print(urllib.request.urlopen(req, timeout=10).read().decode())"
 )
+"""``python3 -c`` code: print the descriptor at port ``argv[1]``. Without the
+server's token (``argv[2]``) it holds only the public fields."""
 SSH_CONFIG = """\
 Host {alias}
   HostName 127.0.0.1

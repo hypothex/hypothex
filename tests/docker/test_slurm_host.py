@@ -65,7 +65,11 @@ def test_hosts_add_slurm_bootstraps_the_login_node(
     info = json.loads(slurm_cluster.sh("cat ~/.hypothex/serve/server.json"))
     assert info["managed"] is True
     assert info["hx_version"] == __version__
-    descriptor = json.loads(slurm_cluster.exec("python3", "-c", DESCRIPTOR_PY, str(info["port"])))
+    # the env server shows its host facts only to a caller with its token
+    port, token = str(info["port"]), info["token"]
+    public = json.loads(slurm_cluster.exec("python3", "-c", DESCRIPTOR_PY, port))
+    assert "kind" not in public and public["hx_version"] == __version__
+    descriptor = json.loads(slurm_cluster.exec("python3", "-c", DESCRIPTOR_PY, port, token))
     assert descriptor["kind"] == "slurm"
     assert descriptor["hostname"] == "slurmctld"
     # the runtime sits on the shared /home, so the compute node sees the same install

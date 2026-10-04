@@ -6,7 +6,6 @@ import contextlib
 import errno
 import fcntl
 import json
-import math
 import sqlite3
 import time
 from collections import defaultdict
@@ -38,6 +37,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from hypothex.core.errors import RunNotFoundError
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.stats import lttb
 from hypothex.core.store import ProjectEntry, RunStore, run_lock
 
 if TYPE_CHECKING:
@@ -236,19 +236,28 @@ def _score_values(run_id: str, score: ScoreRecord) -> dict[str, Any]:
 
 def downsample(points: list[MetricPoint], limit: int = MAX_POINTS_PER_METRIC) -> list[MetricPoint]:
     """
-    Keep at most ``limit`` evenly spaced points per metric name, always keeping the last.
+    Keep at most ``limit`` points per metric name, chosen by LTTB (``stats.lttb``).
+
+    The first and last points of each series are always kept, and so are its
+    peaks: a one-step loss spike survives, unlike every-n-th sampling.
 
     Parameters
     ----------
     points : list of MetricPoint
         Full history.
     limit : int
-        Maximum points per name.
+        Maximum points per name, at least 2.
 
     Returns
     -------
     list of MetricPoint
         Downsampled points grouped by name, ordered by step.
+
+    Examples
+    --------
+    >>> pts = [MetricPoint(name="loss", step=i, value=9.0 if i == 3 else 0.0) for i in range(9)]
+    >>> [p.step for p in downsample(pts, limit=3)]
+    [0, 3, 8]
     """
     by_name: dict[str, list[MetricPoint]] = defaultdict(list)
     for point in points:
@@ -256,12 +265,8 @@ def downsample(points: list[MetricPoint], limit: int = MAX_POINTS_PER_METRIC) ->
     out: list[MetricPoint] = []
     for name in sorted(by_name):
         series = sorted(by_name[name], key=lambda p: p.step)
-        if len(series) > limit:
-            kept = series[:: math.ceil(len(series) / limit)]
-            if kept[-1] is not series[-1]:
-                kept = kept[: limit - 1] + [series[-1]]
-            series = kept
-        out.extend(series)
+        keep = lttb([p.step for p in series], [p.value for p in series], limit)
+        out.extend(series[i] for i in keep)
     return out
 
 

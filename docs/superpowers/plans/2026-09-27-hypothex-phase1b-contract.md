@@ -121,7 +121,7 @@ Row shapes (keys exact):
 - `table`, `vega_lite`: rows from `iter_rows`, then `data.filter` on the full row (the panels of one view share the task's runs, leaderboards and metric points, so each is read once per view), then restricted to `fields`; `vega_lite` adds `meta.spec` (the spec with `data.values` left empty; the UI injects rows). Every `runs` row gets the synthetic field `version` (the `version_param` param, else the group's first-run creation time) on the full row before the filter, whatever `fields` lists, so `{source: runs, fields: [status], filter: {version: p10}}` selects the p10 runs.
 - `trace`: `{turn, tool, args, result, tokens_in, tokens_out, seconds, error}`; `meta.run_id`, `meta.example_id`, `meta.failed_turn`.
 - `markdown`: `[]`; `meta.text`.
-Spike detection for curves: a point is a spike if `value > 5 × median(previous 20 values)` for metrics whose name contains `loss` (applied exactly: a zero median makes any positive value a spike); it runs on the series the panel reads (the indexed series for a run that ended, so beyond 1,000 steps on its downsampled points), before LTTB thinning.
+Spike detection for curves: a point is a spike if `value > 5 × median(previous 20 values)` for metrics whose name contains `loss` (applied exactly: a zero median makes any positive value a spike); it runs on the series the panel reads (the indexed series for a run that ended, so beyond 1,000 steps on its points downsampled by LTTB, which keeps peaks), before LTTB thinning.
 
 ### 1.7 `hypothex.core.leaderboard` changes
 

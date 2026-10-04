@@ -8,9 +8,11 @@ Values marked "numpy" come from numpy 2.5 ``numpy.quantile`` (default ``"linear"
 """
 
 import math
+import random
 
 import pytest
 
+from hypothex.core import stats
 from hypothex.core.stats import (
     Z95,
     _regularized_beta,
@@ -139,6 +141,48 @@ def test_paired_bootstrap_p() -> None:
     assert paired_bootstrap_p(diffs, [0.0] * 400) == p
     assert paired_bootstrap_p([], []) == 1.0
     assert paired_bootstrap_p([1.0, math.nan], [0.0, 5.0]) == pytest.approx(2 / 1001)
+
+
+def _choices_interval(xs: list[float]) -> tuple[float, float]:
+    """The bootstrap interval as a plain ``rng.choices`` loop (the reference)."""
+    rng = random.Random(0)
+    means = [sum(rng.choices(xs, k=len(xs))) / len(xs) for _ in range(1000)]
+    return quantile(means, 0.025), quantile(means, 0.975)
+
+
+def _choices_p(diffs: list[float]) -> float:
+    """The paired bootstrap p-value as a plain ``rng.choices`` loop (the reference)."""
+    rng = random.Random(0)
+    sums = [sum(rng.choices(diffs, k=len(diffs))) for _ in range(1000)]
+    below = sum(s / len(diffs) <= 0.0 for s in sums)
+    above = sum(s / len(diffs) >= 0.0 for s in sums)
+    return min(1.0, 2.0 * (min(below, above) + 1) / 1001)
+
+
+@pytest.mark.parametrize("cache_max", [stats.RESAMPLE_CACHE_MAX, 0])
+@pytest.mark.parametrize("n", [1, 2, 7, 500])
+def test_bootstraps_equal_a_choices_loop_bit_for_bit(
+    n: int, cache_max: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(stats, "RESAMPLE_CACHE_MAX", cache_max)  # 0: never keep positions
+    rng = random.Random(n)
+    a = [rng.gauss(0.5, 0.3) for _ in range(n)]
+    b = [rng.gauss(0.45, 0.3) for _ in range(n)]
+    assert bootstrap_mean_interval(a) == _choices_interval(a)
+    assert bootstrap_mean_interval(a) == _choices_interval(a)  # kept positions, same result
+    assert paired_bootstrap_p(a, b) == _choices_p([x - y for x, y in zip(a, b, strict=True)])
+
+
+def test_bootstrap_positions_are_drawn_once_per_sample_size() -> None:
+    stats._draws.cache_clear()
+    rng = random.Random(3)
+    for _ in range(5):  # five seed groups over the same 40 examples
+        a = [rng.random() for _ in range(40)]
+        bootstrap_mean_interval(a)
+        paired_bootstrap_p(a, [rng.random() for _ in range(40)])
+    info = stats._draws.cache_info()
+    assert (info.misses, info.hits) == (1, 9)
+    assert info.maxsize == 4  # at most 4 sizes are kept
 
 
 def test_paired_bootstrap_p_rejects_length_mismatch() -> None:

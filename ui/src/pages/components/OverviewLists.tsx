@@ -4,10 +4,9 @@ import { firstClause, fmtClock, fmtScoreUnit, fmtTime, shortId, tailPath } from 
 import { AppLink, hrefs } from "./links";
 import type { FailureRow, ProjectRow, RunRecord } from "./types";
 
-export function RunningList({ runs }: { runs: RunRecord[] }) {
-  if (runs.length === 0) return <p className="small">none</p>;
+function RunRows({ runs, label }: { runs: RunRecord[]; label: string }) {
   return (
-    <ul className="plain">
+    <ul className="plain" aria-label={label}>
       {runs.map((run) => (
         <li key={run.run_id}>
           <AppLink href={hrefs.run(run.run_id)}>
@@ -19,6 +18,24 @@ export function RunningList({ runs }: { runs: RunRecord[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** Active runs: running ones first, then queued ones under `waiting N` (they hold no GPU yet). */
+export function RunningList({ runs }: { runs: RunRecord[] }) {
+  if (runs.length === 0) return <p className="small">none</p>;
+  const running = runs.filter((r) => r.status !== "queued");
+  const waiting = runs.filter((r) => r.status === "queued");
+  return (
+    <>
+      {running.length > 0 ? <RunRows runs={running} label="running" /> : null}
+      {waiting.length > 0 ? (
+        <>
+          <p className="small" title="Queued: waiting for a host or GPUs">{`waiting ${waiting.length}`}</p>
+          <RunRows runs={waiting} label="waiting" />
+        </>
+      ) : null}
+    </>
   );
 }
 

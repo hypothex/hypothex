@@ -35,6 +35,9 @@ describe("idea helpers", () => {
     expect([ideaScore(rf), ideaSub(rf)]).toEqual(["0.8852", "± 0.0064"]);
     const running: IdeaRow = { ...failed, statuses: ["running", "finished"] };
     expect(ideaScore(running)).toBe("running");
+    // queued alone is waiting, not running; one running seed makes the group running
+    expect(ideaScore({ ...failed, statuses: ["queued", "queued"] })).toBe("queued");
+    expect(ideaScore({ ...failed, statuses: ["queued", "running"] })).toBe("running");
     const one: IdeaRow = { ...rf, primary: { mean: 0.5, std: 0, n: 1, ci_low: null, ci_high: null } };
     expect(ideaSub(one)).toBe("1 seed");
     const fast: IdeaRow = { ...rf, unit: "ms", primary: { mean: 165.6, std: 2.8, n: 3, ci_low: null, ci_high: null } };
@@ -138,6 +141,35 @@ test("IdeaList draws one axis per task, so accuracy rows keep a visible best ban
   // latency rows show their unit, accuracy rows none
   expect(within(groups[1] as HTMLElement).getByText("172 ms")).toBeTruthy();
   expect(within(groups[0] as HTMLElement).getByText("0.9222")).toBeTruthy();
+});
+
+test("IdeaList marks queued seeds apart from running ones", () => {
+  const [, failed] = ideas as [IdeaRow, IdeaRow];
+  const row: IdeaRow = { ...failed, primary: null, statuses: ["queued", "running", "queued"] };
+  const { container } = render(<IdeaList ideas={[row]} />);
+  const marks = [...container.querySelectorAll("[data-seed]")].map((m) => m.getAttribute("data-seed"));
+  expect(marks).toEqual(["queued", "running", "queued"]);
+});
+
+test("RunningList puts queued runs in a waiting group after the running ones", () => {
+  const runs = [
+    makeRecord({ run_id: "q1", status: "queued", ended_at: null, hypothesis: "queued one" }),
+    makeRecord({ run_id: "r1", status: "running", ended_at: null, hypothesis: "running one" }),
+    makeRecord({ run_id: "q2", status: "queued", ended_at: null, hypothesis: "queued two" }),
+  ];
+  render(<RunningList runs={runs} />);
+  const names = (label: string) =>
+    within(screen.getByRole("list", { name: label }))
+      .getAllByRole("link")
+      .map((a) => a.textContent);
+  expect(names("running")).toEqual(["running one"]);
+  expect(names("waiting")).toEqual(["queued one", "queued two"]);
+  expect(screen.getByText("waiting 2")).toBeTruthy();
+  cleanup();
+  // only queued runs: no running list, just the waiting group
+  render(<RunningList runs={[runs[0]!]} />);
+  expect(screen.queryByRole("list", { name: "running" })).toBeNull();
+  expect(names("waiting")).toEqual(["queued one"]);
 });
 
 test("RunningList shows none, or one link per run", () => {

@@ -384,3 +384,28 @@ def test_a_host_copy_is_never_read_from_its_repo_path(ctx: Context, toy_repo: Pa
     assert q.get_predictions(ctx, "r1").rows[1].reference is None
     with pytest.raises(ConfigError, match="copied from host gpu1"):
         q.dataset_overlap(ctx, "toy", "toyset")
+
+
+def test_get_leaderboard_reuses_the_board_until_the_index_changes(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PERF-F1 handoff: the task board comes from leaderboard.cached_leaderboard
+    seed_finished_run(ctx, toy_repo, "a", predictions=PREDS_075)
+    evaluate_run(ctx, "a")
+    builds: list[str] = []
+    real = q.build_leaderboard
+
+    def spy(*args: Any, **kw: Any) -> Any:
+        builds.append(args[1])
+        return real(*args, **kw)
+
+    monkeypatch.setattr(q, "build_leaderboard", spy)
+    first = q.get_leaderboard(ctx, "toy-acc")
+    first.rows.clear()  # a caller's change must not reach the cache
+    again = q.get_leaderboard(ctx, "toy-acc")
+    assert len(builds) == 1 and len(again.rows) == 1
+    q.get_leaderboard(ctx, "toy-acc", examples=False)
+    assert len(builds) == 2  # examples=False is its own board
+    seed_finished_run(ctx, toy_repo, "b", predictions=ALL_RIGHT, config_hash="sha256:bbbb")
+    evaluate_run(ctx, "b")
+    assert len(q.get_leaderboard(ctx, "toy-acc").rows) == 2 and len(builds) == 3

@@ -402,6 +402,26 @@ def test_summary_counts_cells_best_and_cost(ctx: Context, toy_sweep: SweepSpec) 
     assert summary.total_usd == pytest.approx(1.25 + 1.25 + 0.5 + 1.0 + 1.0)
 
 
+def test_summary_reuses_its_boards_until_the_index_changes(
+    ctx: Context, toy_sweep: SweepSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PERF-F1 handoff: the sweep board and the headline's pair board are cached
+    builds: list[int] = []
+    real = sweeps_module.build_leaderboard
+
+    def spy(*args: Any, **kw: Any) -> Any:
+        builds.append(len(args[3]))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(sweeps_module, "build_leaderboard", spy)
+    first = summarize_sweep(ctx, "toy", "s-0001")
+    assert builds == [6, 4]  # the sweep's runs, then the headline's two cells
+    assert summarize_sweep(ctx, "toy", "s-0001") == first and builds == [6, 4]
+    add_run(ctx, "b3", "3e-4", 3, RunStatus.FINISHED, 0.86)
+    assert summarize_sweep(ctx, "toy", "s-0001").run_ids != first.run_ids
+    assert builds == [6, 4, 7, 5]
+
+
 def test_headline_p_compares_the_two_cells_it_names(ctx: Context, toy_sweep: SweepSpec) -> None:
     # a third lr 3e-4 run at another commit forms its own group: one run, the board's
     # top row, but not the row the cell shows (the cell keeps its larger group)

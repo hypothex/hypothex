@@ -23,6 +23,7 @@ from hypothex.core.leaderboard import (
     Leaderboard,
     _natural_key,
     build_leaderboard,
+    cached_leaderboard,
     group_id_for,
     group_label,
     pick_field,
@@ -352,11 +353,16 @@ def _row_matches(row: dict[str, Any], flt: dict[str, Any]) -> bool:
 def _build_board(
     ctx: Context, entry: ProjectEntry, task: str, runs: list[RunRecord]
 ) -> Leaderboard:
-    per_example = primary_examples(ctx, entry.config, task, runs, None)
-    scores = ctx.index.scores_for(r.run_id for r in runs)
-    return build_leaderboard(
-        entry.project, task, entry.config, runs, scores, per_example=per_example or None
-    )
+    def build() -> Leaderboard:
+        per_example = primary_examples(ctx, entry.config, task, runs, None)
+        scores = ctx.index.scores_for(r.run_id for r in runs)
+        return build_leaderboard(
+            entry.project, task, entry.config, runs, scores, per_example=per_example or None
+        )
+
+    # a view's runs are a filtered list of the task's runs: they are part of the key
+    ids = ("view", tuple(r.run_id for r in runs))
+    return cached_leaderboard(ctx, entry.project, task, entry.config, build, variant=ids)
 
 
 def _markdown(panel: PanelSpec) -> PanelResult:

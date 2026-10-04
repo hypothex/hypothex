@@ -32,7 +32,7 @@ from hypothex.core.datasets import (
 from hypothex.core.errors import ConfigError, EvalError, RunError, StoreError
 from hypothex.core.fsutil import read_jsonl, read_yaml
 from hypothex.core.index import Index
-from hypothex.core.leaderboard import Leaderboard, build_leaderboard
+from hypothex.core.leaderboard import Leaderboard, build_leaderboard, cached_leaderboard
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import ProjectEntry
 
@@ -300,11 +300,26 @@ def _board(
     *,
     examples: bool,
 ) -> Leaderboard:
-    runs = ctx.index.list_runs(project=entry.project, task=task, include_archived=True, limit=None)
-    scores = ctx.index.scores_for(r.run_id for r in runs)
-    per_example = primary_examples(ctx, entry.config, task, runs, versions) if examples else None
-    return build_leaderboard(
-        entry.project, task, entry.config, runs, scores, versions, per_example=per_example
+    def build() -> Leaderboard:
+        runs = ctx.index.list_runs(
+            project=entry.project, task=task, include_archived=True, limit=None
+        )
+        scores = ctx.index.scores_for(r.run_id for r in runs)
+        per_example = (
+            primary_examples(ctx, entry.config, task, runs, versions) if examples else None
+        )
+        return build_leaderboard(
+            entry.project, task, entry.config, runs, scores, versions, per_example=per_example
+        )
+
+    return cached_leaderboard(
+        ctx,
+        entry.project,
+        task,
+        entry.config,
+        build,
+        versions=versions,
+        variant=("examples", examples),
     )
 
 

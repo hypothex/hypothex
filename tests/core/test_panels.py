@@ -1317,6 +1317,32 @@ def test_query_view_builds_one_board_and_lists_runs_once(
     assert (len(boards), len(lists)) == (1, 1)
 
 
+def test_views_reuse_boards_across_requests_until_the_index_changes(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PERF-F1 handoff: a view board comes from leaderboard.cached_leaderboard, keyed
+    # by the panel's run ids, so a narrowed panel gets its own board
+    for i, group in enumerate(("aaaa", "bbbb")):
+        _score(ctx, _run(ctx, toy_repo, f"r{i}", group, minute=i), 0.5 + i / 10)
+    builds: list[int] = []
+    real = panels.build_leaderboard
+
+    def spy(*args: Any, **kw: Any) -> Any:
+        builds.append(len(args[3]))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(panels, "build_leaderboard", spy)
+    view = ViewSpec(title="v", panels=[_panel("leaderboard")])
+    (first,) = query_view(ctx, "toy", "toy-acc", view)
+    (again,) = query_view(ctx, "toy", "toy-acc", view)
+    assert builds == [2] and again.rows == first.rows
+    narrowed = query_panel(ctx, "toy", "toy-acc", view.panels[0], RunFilter(created_by="nobody"))
+    assert builds == [2, 0] and narrowed.rows == []
+    _score(ctx, _run(ctx, toy_repo, "r2", "cccc", minute=2), 0.9)
+    (later,) = query_view(ctx, "toy", "toy-acc", view)
+    assert builds == [2, 0, 3] and len(later.rows) == 3
+
+
 def test_view_reads_ended_runs_metrics_from_the_index_by_name(
     ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

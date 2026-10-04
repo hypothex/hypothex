@@ -326,3 +326,15 @@ def test_log_with_a_non_number_writes_nothing_and_keeps_steps(run_env: Path) -> 
     run.log({"loss": 0.25})
     rows = _lines(run_env / "metrics.jsonl")
     assert [(r["name"], r["step"]) for r in rows] == [("loss", 0)]
+
+
+@pytest.mark.parametrize("name", ["", "x" * 257, 3])
+def test_log_rejects_a_bad_metric_name_and_writes_nothing(run_env: Path, name: object) -> None:
+    # An empty or 2M-character name made the run page millions of pixels wide.
+    run = hx.current()
+    with pytest.raises(ValueError, match="metric name"):
+        run.log({"loss": 0.5, name: 1.0})  # type: ignore[dict-item]
+    assert not (run_env / "metrics.jsonl").exists()
+    run.log({"loss": 0.25, "x" * 256: 1.0})
+    rows = _lines(run_env / "metrics.jsonl")
+    assert [(r["name"][:4], r["step"]) for r in rows] == [("loss", 0), ("xxxx", 0)]

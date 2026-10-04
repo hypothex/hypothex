@@ -6,7 +6,7 @@ import yaml
 from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.datasets import FingerprintCache
-from hypothex.core.errors import ConfigError
+from hypothex.core.errors import ConfigError, EvalError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.records import DatasetRef
 from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
@@ -180,3 +180,27 @@ def test_predictions_unknown_metric_is_an_error(ctx: Context, toy_repo: Path) ->
     with pytest.raises(ConfigError, match="unknown metric 'nonexistent'"):
         q.get_predictions(ctx, "r1", metric="nonexistent@v1")
     assert q.get_predictions(ctx, "r1", metric="accuracy").rows[0].scores["accuracy@v1"]
+
+
+def test_predictions_bare_metric_is_current_version(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    write_toy_project(toy_repo, accuracy_version="v2")
+    evaluate_run(ctx, "r1")
+    page = q.get_predictions(ctx, "r1", metric="accuracy")
+    assert list(page.rows[0].scores) == ["accuracy@v2"]
+    old = q.get_predictions(ctx, "r1", metric="accuracy@v1")
+    assert list(old.rows[0].scores) == ["accuracy@v1"]
+
+
+def test_failures_and_examples_need_a_known_field(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "a", predictions=PREDS_075)
+    seed_finished_run(ctx, toy_repo, "b", predictions=ALL_RIGHT)
+    evaluate_run(ctx, "a")
+    evaluate_run(ctx, "b")
+    with pytest.raises(EvalError, match="no per-example field 'brier'.*fields: correct"):
+        q.get_predictions(ctx, "a", failures_only=True, field="brier")
+    with pytest.raises(EvalError, match="no per-example field 'brier'.*fields: correct"):
+        q.compare_examples(ctx, "a", "b", "accuracy", field="brier")
+    with pytest.raises(ConfigError, match="unknown metric 'nope'"):
+        q.compare_examples(ctx, "a", "b", "nope")

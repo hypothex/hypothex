@@ -138,3 +138,15 @@ def test_atomic_write_bytes_keeps_raw_bytes(tmp_path: Path) -> None:
     atomic_write_bytes(target, b"caf\xe9\xff\n")
     assert target.read_bytes() == b"caf\xe9\xff\n"
     assert [p.name for p in target.parent.iterdir()] == ["blob.bin"]
+
+
+def test_atomic_write_follows_the_umask_like_appended_files(tmp_path: Path) -> None:
+    old = os.umask(0o022)
+    try:
+        atomic_write_text(tmp_path / "run.yaml", "a: 1\n")
+        append_jsonl(tmp_path / "metrics.jsonl", {"a": 1})
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((tmp_path / "run.yaml").stat().st_mode) == 0o644
+    assert stat.S_IMODE((tmp_path / "metrics.jsonl").stat().st_mode) == 0o644
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []

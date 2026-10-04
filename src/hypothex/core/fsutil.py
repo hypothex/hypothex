@@ -5,7 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
-import tempfile
+import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -42,7 +42,9 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
 
     The data goes to a temp file in the same folder, which is flushed
     (``os.fsync``) and renamed over ``path``; then the folder is flushed
-    (``fsync_dir``) so the rename itself survives a crash.
+    (``fsync_dir``) so the rename itself survives a crash. The file mode is
+    ``0666`` minus the umask, as for any new file (``0644`` with the usual
+    umask); write secrets with a mode of their own.
 
     On macOS, ``os.fsync`` hands the data to the drive but does not flush
     the drive's own cache (``F_FULLFSYNC`` does). That is not used here: it
@@ -62,12 +64,15 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     --------
     >>> import tempfile
     >>> target = Path(tempfile.mkdtemp()) / "blob.bin"
-    >>> atomic_write_bytes(target, b"caf\xe9")
+    >>> atomic_write_bytes(target, b"caf\\xe9")
     >>> target.read_bytes()
-    b'caf\xe9'
+    b'caf\\xe9'
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    # not mkstemp: its 0600 would make run.yaml and the like unreadable to the
+    # other users of a shared store; 0666 minus the umask matches appended files
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)

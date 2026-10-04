@@ -15,7 +15,22 @@
 **Mockups:** `docs/mockups/phase3/` (`index.html`, `data.js`, `shot-pair-{ready,done,invalid}-*`, `shot-settings-*`, `shot-settings-collab-*`, `shot-storage-*`, `shot-storage-confirm-*`, `shot-storage-result-*`, `shot-notebook-*`, `shot-notebook-conflict-*`, `shot-task-export-*`, `shot-run-*`, `shot-gate-*`).
 
 **Depends on:**
-- The phase 2 frontend plan (`docs/superpowers/plans/2026-10-03-hypothex-phase2-frontend.md`) merged to `main` in full: the Sweep page (`/s/$project/$id`), the Launch dialog, and Tasks 23–29 (`remote.ts`, the phase 2 `StatusLine.tsx`, `RunActions.tsx` and `Run.tsx`, the `hosts-*` Playwright projects, random e2e ports, `expectIsolatedHub`). Every "as left by phase 2 Task N" anchor below is that plan's final text.
+- The phase 2 frontend plan (`docs/superpowers/plans/2026-10-03-hypothex-phase2-frontend.md`) merged to `main` in full: the Sweep page (`/s/$project/$id`), the Launch dialog, and Tasks 23–29 (`remote.ts`, the phase 2 `StatusLine.tsx`, `RunActions.tsx` and `Run.tsx`, the `hosts-*` Playwright projects, random e2e ports, `expectIsolatedHub`). Every "as left by phase 2 Task N" anchor below is that plan's final text. State when this plan was reviewed (round 1): `main` at `e27a3a2` holds the phase 2 frontend through `083bb1a` (Sweep page, Launch dialog, `remote.ts`, `remoteStats.ts`; the `StatusLine.tsx`, `RunActions.tsx`, `Leaderboard.tsx` and `Task.tsx` anchors below already match it), while phase 2 Task 28 (the `hosts-*` Playwright projects, `HOSTS_PORT`, random e2e ports, `expectIsolatedHub` in `ui/e2e/serve-demo.ts`, `ui/e2e/fixtures.ts`, `ui/e2e/paths.ts`) is still on branch `phase-2` and not merged. Do not start until it is. Then record the merge commit (`git log --oneline -1 main`) here and run the pre-flight check below; it must print `anchors ok`:
+
+```bash
+uv run python - <<'PY'
+import pathlib
+import re
+
+plan = pathlib.Path("docs/superpowers/plans/2026-10-04-hypothex-phase3-frontend.md").read_text()
+anchor = re.compile(r"`(ui/[^`]+)` \(as left by phase 2 Task \d+\), replace\n\n```[a-z]*\n(.*?)\n```", re.S)
+found = anchor.findall(plan)
+bad = [f for f, block in found if not pathlib.Path(f).is_file() or block not in pathlib.Path(f).read_text()]
+print(f"{len(found)} anchors", "anchors ok" if not bad else f"MISSING in {bad}")
+PY
+```
+
+Run from the repo root. Expected: `6 anchors anchors ok`. A `MISSING` file means its phase 2 task changed the text after this plan was written: re-read that file on `main` and update the matching "replace" block here before running the task.
 - The phase 3 backend plan (`docs/superpowers/plans/2026-10-04-hypothex-phase3-backend.md`) merged: the contract section 3 routes in `/api/openapi.json`, `RunRecord.owner`, `RunDetail.cleaned`, `Leaderboard.baselines`, the section 2 events, the `4401` close code, `hx serve --auth`, and `hx demo --with-team` (contract 11: owner `sv` admin and `alice` launch, two projects with notebook days and one weekly summary, baselines on `toy-classifier/toy-test`, 6 archived runs with artifacts, outbox entries in every state, one connected fake host, the local session token in `<home>/serve/server.json`).
 - The mockups in `docs/mockups/phase3/` approved.
 
@@ -25,7 +40,7 @@
 - Paths: commands run from `ui/` unless the step says "repo root" (`/Users/shreyasv/Desktop/code/research_dash`). Unit and component tests live in `ui/test/`, mirroring `ui/src/`; Playwright specs in `ui/e2e/`.
 - Generated file: `ui/src/api/types.ts` comes from `bunx openapi-typescript` against a running hub, is checked in, and is never edited by hand. Response bodies are typed by `ui/src/api/models.ts`, the only hand-written copy of the contract shapes.
 - Contract names (exact): `Scope` (`read | launch | admin`), `Principal` (the `/auth/me` body), `SessionRow`, `UserRow`, `PairingOffer` (`{offer_id, url, expires_at, qr}`), `NotifyStatus`, `OutboxEntry`, `ProjectRule`, `Digest`, `TaskChange`, `NotebookDay`, `RunChip`, `BaselineRow`, `StorageReport`, `StorageItem`, `CleanPolicy`, `CleanPlan`, `CleanResult`, `CleanedArtifact`; additive optional fields `RunRecord.owner?`, `RunDetail.cleaned?`, `Leaderboard.baselines?` (an older hub omits them). Event types `notebook.updated`, `run.artifacts_cleaned`, `storage.plan_created`, `storage.cleaned`, `notify.sent`, `notify.failed`, `digest.sent`, `auth.session_created`, `auth.session_revoked`.
-- Routes (exact): UI routes `/pair`, `/settings`, `/storage`, `/n/$project`, `/n/$project/$day` (contract `/n/:project`, `/n/:project/:day`). API the UI calls: `GET /api/v1/auth/me`, `POST /api/v1/auth/ws-ticket`, `POST /api/v1/auth/pair`, `POST /api/v1/auth/pairings`, `GET /api/v1/auth/sessions`, `POST /api/v1/auth/sessions/{id}/revoke`, `GET /api/v1/auth/users`, `POST /api/v1/auth/users/{name}/disable`, `GET|POST|PUT /api/v1/projects/{project}/notebook[/{day}]`, `GET /api/v1/tasks/{project}/{task}/export`, `GET /api/v1/notify`, `POST /api/v1/notify/test`, `GET /api/v1/storage`, `POST /api/v1/storage/plan`, `POST /api/v1/storage/plans/{plan_id}/apply`, and `GET /api/v1/runs?owner=me`. `POST /api/v1/auth/logout`, `GET /api/v1/compare/export`, `GET /api/v1/projects/{project}/digest` and `POST .../digest/send` exist on the hub (Task 2's `types.ts` test checks them) but no screen uses them, so the client has no function for them.
+- Routes (exact): UI routes `/pair`, `/settings`, `/storage`, `/n/$project`, `/n/$project/$day` (contract `/n/:project`, `/n/:project/:day`). API the UI calls: `GET /api/v1/auth/me`, `POST /api/v1/auth/ws-ticket`, `POST /api/v1/auth/pair`, `POST /api/v1/auth/pairings`, `GET /api/v1/auth/sessions`, `POST /api/v1/auth/sessions/{session_id}/revoke`, `GET /api/v1/auth/users`, `POST /api/v1/auth/users/{name}/disable`, `GET|POST|PUT /api/v1/projects/{project}/notebook[/{day}]`, `GET /api/v1/tasks/{project}/{task}/export`, `GET /api/v1/notify`, `POST /api/v1/notify/test`, `GET /api/v1/storage`, `POST /api/v1/storage/plan`, `POST /api/v1/storage/plans/{plan_id}/apply`, and `GET /api/v1/runs?owner=me`. `POST /api/v1/auth/logout`, `GET /api/v1/compare/export`, `GET /api/v1/projects/{project}/digest` and `POST .../digest/send` exist on the hub (Task 2's `types.ts` test checks them) but no screen uses them, so the client has no function for them.
 - Auth (contract 1.10): every request sends `credentials: "same-origin"` (the `hx_session` cookie is `HttpOnly; SameSite=Strict`, so script never reads it). Any `401` sets the auth store to `locked`; the shell then shows the 401 gate (`401 · pair this device: hx pair`) until a full page load. The event stream gets `?ticket=<t>` from `POST /api/v1/auth/ws-ticket` before each connect when `/auth/me` says `auth: "on"`; a long-lived token never appears in a URL; close code `4401` locks the app and stops reconnecting. `/pair` renders without the header and never calls `/auth/me` or opens the event stream; it strips the `#<offer>.<secret>` fragment from the address bar (`history.replaceState`) before it sends anything, and sends the secret only in the `POST /api/v1/auth/pair` body.
 - Scopes in the UI are hints, never the gate: the server decides (403 shows as an error line). Admin-only reads (`/auth/users`, `/notify`, `/storage`) are never requested for a non-admin principal, so a collaborator's console stays free of 403s; the header hides `storage` for them.
 - Actions: every new write sends only `{command_id, ...its fields}`; `created_by`, `owner` and `author` are set by the server from the principal (contract 1.2, 7). Phase 1–2 actions keep `action()` (`command_id`, `created_by: "human"`). Writes go through `useAction` (`ui/src/pages/components/useAction.ts`) so a retry after a dropped connection reuses the same `command_id`.
@@ -157,7 +172,7 @@ Create `ui/test/api/phase3-fixtures.ts`:
  * Typed against `src/api/models.ts`, so `bun run typecheck` fails when a model drifts from
  * the contract. Numbers match docs/mockups/phase3/data.js where both have them: owner `sv`
  * (admin) and collaborator `alice` (launch) share the hub `hub.tail1234.ts.net`; the storage
- * report is 1.84 TB over four hosts; the clean plan deletes 412.3 GB in 37 files on 3 hosts.
+ * report is 1.84 TB over four hosts; the clean plan deletes 412.3 GB in 3 paths on 3 hosts.
  * `NOW` is the instant every age and countdown in the tests is measured from.
  */
 import type {
@@ -343,13 +358,17 @@ export const NOTEBOOK_DAYS: NotebookDayInfo[] = [
   { day: "2026-09-29", bytes: 880, entries: 1 },
 ];
 
-/** The weekly summary the hub saved at 09:00, then two entries; one chip names an unknown run. */
+/**
+ * The weekly summary the hub saved at 09:00 (exactly `render_digest_markdown`'s shape, backend
+ * Task 18: `**<week>** · <headline>`, then `- <task> before→after ▲ · N runs`), then two entries;
+ * one chip names an unknown run.
+ */
 export const NOTEBOOK_TEXT = [
   "## 2026-10-04T09:00:02Z — digest",
-  "### week 2026-W40 · deepretro",
-  "▲12 ✓9 ✗2 ?1 · 41.2 GPU-h $86.5",
   "",
-  "- uspto50k-topk 0.598→0.613 ▲",
+  "**2026-W40** · ▲12 ✓9 ✗2 ?1 · 41.2 GPU-h $86.5 · uspto50k-topk 0.598→0.613 ▲",
+  "",
+  "- uspto50k-topk 0.598→0.613 ▲ · 12 runs",
   "",
   "## 2026-10-04T09:14:31Z — human:alice",
   "Beam 10 holds at lr 3e-4: [[run:01J8Z3K7-clf-a1b2]] is inside the best band.",
@@ -1067,7 +1086,7 @@ const PHASE_3_ROUTES = [
   "/api/v1/auth/ws-ticket",
   "/api/v1/auth/pairings",
   "/api/v1/auth/sessions",
-  "/api/v1/auth/sessions/{id}/revoke",
+  "/api/v1/auth/sessions/{session_id}/revoke",
   "/api/v1/auth/users",
   "/api/v1/auth/users/{name}/disable",
   "/api/v1/projects/{project}/notebook",
@@ -1379,7 +1398,7 @@ Expected: the header contains `This file was auto-generated by openapi-typescrip
 "/api/v1/auth/pair"
 "/api/v1/auth/pairings"
 "/api/v1/auth/sessions"
-"/api/v1/auth/sessions/{id}/revoke"
+"/api/v1/auth/sessions/{session_id}/revoke"
 "/api/v1/auth/users"
 "/api/v1/auth/users/{name}/disable"
 "/api/v1/auth/ws-ticket"
@@ -1396,7 +1415,7 @@ Expected: the header contains `This file was auto-generated by openapi-typescrip
 "/api/v1/tasks/{project}/{task}/export"
 ```
 
-(plus `/api/v1/storage/delete` and `/api/v1/storage/usage` if the hub also registers its env routes; the UI calls neither). If a path is missing, stop: the backend plan is not merged. If a path exists with another placeholder name (for example `{session_id}` where this plan has `{id}`), the backend spelling wins: use it in `PHASE_3_ROUTES` (Step 1), in `ROUTES` and in the matching `params` keys (Step 5). `bun run typecheck` fails until they agree.
+(plus `/api/v1/storage/delete` and `/api/v1/storage/usage` if the hub also registers its env routes; the UI calls neither). If a path is missing, stop: the backend plan is not merged. If a path exists with another placeholder name (for example `{sid}` where this plan has `{session_id}`), the backend spelling wins: use it in `PHASE_3_ROUTES` (Step 1), in `ROUTES` and in the matching `params` keys (Step 5). `bun run typecheck` fails until they agree.
 
 - [ ] **Step 4: Write the auth store**
 
@@ -1511,7 +1530,7 @@ with
   authPair: "/api/v1/auth/pair",
   authPairings: "/api/v1/auth/pairings",
   authSessions: "/api/v1/auth/sessions",
-  authSessionRevoke: "/api/v1/auth/sessions/{id}/revoke",
+  authSessionRevoke: "/api/v1/auth/sessions/{session_id}/revoke",
   authUsers: "/api/v1/auth/users",
   authUserDisable: "/api/v1/auth/users/{name}/disable",
   notebookDays: "/api/v1/projects/{project}/notebook",
@@ -1684,7 +1703,10 @@ with
   /** Own sessions; every session for an admin. */
   sessions: (signal?: AbortSignal) => get<M.SessionRow[]>(ROUTES.authSessions, { signal }),
   revokeSession: (id: string, opts?: M.ActionOptions) =>
-    post<M.SessionRow>(ROUTES.authSessionRevoke, { params: { id }, body: command(opts) }),
+    post<M.SessionRow>(ROUTES.authSessionRevoke, {
+      params: { session_id: id },
+      body: command(opts),
+    }),
   users: (signal?: AbortSignal) => get<M.UserRow[]>(ROUTES.authUsers, { signal }),
   disableUser: (name: string, opts?: M.ActionOptions) =>
     post<M.UserRow>(ROUTES.authUserDisable, { params: { name }, body: command(opts) }),
@@ -3925,7 +3947,9 @@ git commit -m "feat(ui): header notebook, storage and settings links and the use
 - Create: `ui/src/pages/components/owner.ts`
 - Modify: `ui/src/pages/components/StatusLine.tsx` (after the launcher span)
 - Modify: `ui/src/pages/components/RunActions.tsx` (imports; the `Cancel` button; the `Stop` button of the other phases)
-- Modify: `ui/src/pages/components/OverviewLists.tsx` (`RunningList` small line)
+- Modify: `ui/src/pages/components/OverviewLists.tsx` (`RunningList` small line; `FailureList` small line)
+- Modify: `ui/src/pages/components/IdeaList.tsx` (`IdeaLine` meta line)
+- Modify: `ui/src/api/models.ts` (`owner?` at the end of `TimelineItem`, `IdeaRow`, `FailureRow`)
 - Modify: `ui/src/pages/Overview.tsx` (imports; the `d Running` figure)
 - Create: `ui/test/pages/owner.test.tsx`
 
@@ -3935,7 +3959,7 @@ git commit -m "feat(ui): header notebook, storage and settings links and the use
   - `owner.ts`: `ownerLabel(owner): string | null` (`@alice`); `interface Permit { ok: boolean; why: string | null }`; `mayStop(principal, owner): Permit` (contract 1.3: no principal or auth off → ok, the server decides; below `launch` → no; admin → ok; `owner === user` → ok; otherwise `owned by @sv; stop needs owner or admin`, and an owner-less run is the hub owner's: `owned by the hub owner; …`).
   - `StatusLine` shows `@owner` (title `owner`) after the launcher when the record has one.
   - `RunActions` disables `Cancel` (queued/pending) and `Stop` for a principal that `mayStop` refuses, with the reason as the tooltip.
-  - Overview: `@owner` at the end of each running row's small line; with auth on, a `mine` toggle (`aria-pressed`) in the Running figure that lists `GET /api/v1/runs?owner=me&status=running` instead.
+  - Overview: `@owner` at the end of each running row's small line, each recent idea's meta line and each failure's small line (backend Task 27 adds `owner` to `TimelineItem`, `IdeaRow`, `FailureRow`; models gain `owner?: string | null` on the three); with auth on, a `mine` toggle (`aria-pressed`) in the Running figure that lists `GET /api/v1/runs?owner=me&status=running` instead.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4053,6 +4077,19 @@ describe("overview", () => {
     await waitFor(() => expect(within(panel).getAllByRole("listitem")).toHaveLength(1));
     expect(within(panel).getByRole("button", { name: "mine" }).getAttribute("aria-pressed")).toBe("true");
     expect(calls.some((c) => c.url === "/api/v1/runs?owner=me&status=running")).toBe(true);
+  });
+
+  test("recent ideas and failures end with @owner", async () => {
+    const base = makeOverview();
+    const summary = {
+      ...base,
+      ideas: base.ideas.map((idea, i) => (i === 0 ? { ...idea, owner: "alice" } : idea)),
+      failures: base.failures.map((f, i) => (i === 0 ? { ...f, owner: "sv" } : f)),
+    };
+    mockApi({ "GET /api/v1/overview": summary, "GET /api/v1/hosts": [] });
+    renderWithClient(as(ME_ADMIN, <OverviewPage />));
+    await waitFor(() => expect(screen.getAllByText(/, @alice$/)).toHaveLength(1));
+    expect(screen.getAllByText(/, @sv$/)).toHaveLength(1);
   });
 
   test("auth off: no mine toggle", async () => {
@@ -4218,6 +4255,90 @@ with
             }`}
 ```
 
+and replace
+
+```tsx
+          <span className="small">{`${fmtTime(f.created_at)}${f.retried_ok ? ", retry ok" : ""}`}</span>
+```
+
+with
+
+```tsx
+          <span className="small">{`${fmtTime(f.created_at)}${f.retried_ok ? ", retry ok" : ""}${
+            f.owner ? `, @${f.owner}` : ""
+          }`}</span>
+```
+
+In `ui/src/pages/components/IdeaList.tsx`, replace
+
+```tsx
+        <div className="meta">{`${idea.created_by}, ${fmtClock(idea.created_at)}`}</div>
+```
+
+with
+
+```tsx
+        <div className="meta">{`${idea.created_by}, ${fmtClock(idea.created_at)}${idea.owner ? `, @${idea.owner}` : ""}`}</div>
+```
+
+In `ui/src/api/models.ts`, replace
+
+```ts
+  is_best: boolean;
+  label: string;
+}
+```
+
+with
+
+```ts
+  is_best: boolean;
+  label: string;
+  /** Phase 3: the run's owner; absent from an older hub, null with auth off. */
+  owner?: string | null;
+}
+```
+
+replace
+
+```ts
+  /** Display unit of the task's primary metric (`""`, `ms`, `$`, `tokens`, `s`). */
+  unit: string;
+}
+
+export interface FailureRow {
+```
+
+with
+
+```ts
+  /** Display unit of the task's primary metric (`""`, `ms`, `$`, `tokens`, `s`). */
+  unit: string;
+  /** Phase 3: the owner of the group's first run (as `created_by`). */
+  owner?: string | null;
+}
+
+export interface FailureRow {
+```
+
+and replace
+
+```ts
+  stderr_path: string;
+  retried_ok: boolean;
+}
+```
+
+with
+
+```ts
+  stderr_path: string;
+  retried_ok: boolean;
+  /** Phase 3: the run's owner. */
+  owner?: string | null;
+}
+```
+
 In `ui/src/pages/Overview.tsx`, replace
 
 ```tsx
@@ -4292,12 +4413,12 @@ with
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `bun test test/pages && bun run typecheck`
-Expected: `owner.test.tsx` 7 pass; the phase 1b/2 page tests (`runActions.test.tsx`, `remoteActions.test.tsx`, `remoteParts.test.tsx`, `Overview.test.tsx`, `overviewLists.test.tsx`) pass unchanged (no principal in their trees, and their records have no owner); `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `owner.test.tsx` 8 pass; the phase 1b/2 page tests (`runActions.test.tsx`, `remoteActions.test.tsx`, `remoteParts.test.tsx`, `Overview.test.tsx`, `overviewLists.test.tsx`) pass unchanged (no principal in their trees, and their records have no owner); `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 6: Commit (repo root)**
 
 ```bash
-git add ui/src/pages/components/owner.ts ui/src/pages/components/StatusLine.tsx ui/src/pages/components/RunActions.tsx ui/src/pages/components/OverviewLists.tsx ui/src/pages/Overview.tsx ui/test/pages/owner.test.tsx
+git add ui/src/api/models.ts ui/src/pages/components/owner.ts ui/src/pages/components/StatusLine.tsx ui/src/pages/components/RunActions.tsx ui/src/pages/components/OverviewLists.tsx ui/src/pages/components/IdeaList.tsx ui/src/pages/Overview.tsx ui/test/pages/owner.test.tsx
 git commit -m "feat(ui): run owner on the run page and overview; owner-only stop; mine toggle"
 ```
 
@@ -4921,7 +5042,7 @@ git commit -m "feat(ui): settings sessions and users panels with revoke and disa
 
 **Interfaces:**
 - Consumes: Task 9 `countdown`, `secondsLeft`, `activeUsers`, `userNameError`; Task 7 `SCOPES`, `covers`; `api.createPairing`; `useAction`, `CopyButton`, `ErrorBox`, `useNow` (`pages/components/HostsPanel`).
-- Produces: `AddDevice({ principal, users, now? })`. `users` is the admin's user list (null for a collaborator: no picker, the link is for the caller). Scopes above the caller's are disabled (`title="above your scope"`; pairing never widens scope). `link` posts `{scope}` (collaborator), `{user, scope}` (admin, existing user) or `{user, new_user: true, scope}` (admin, `+ new`). The offer shows the QR (`aria-label="QR code"`), the URL with a copy button, `alice · launch · one use`, and `4:59 left`, ticking each second; at 0 it reads `expired`.
+- Produces: `AddDevice({ principal, users, now? })`. `users` is the admin's user list (null for a collaborator: no picker, the link is for the caller). Scopes above the caller's are disabled (`title="above your scope"`; pairing never widens scope). `link` posts `{scope}` (collaborator), `{user, scope}` (admin, existing user) or `{user, new_user: true, scope}` (admin, `+ new`). The offer shows the QR (`aria-label="QR code"`), the URL with a copy button, `alice · launch · one use`, and `4:59 left`, ticking each second; at 0 it reads `expired`. The `user · scope` label is taken from the request body that was sent (the action returns `{offer, user, scope}`), so changing the pickers while the request is in flight never relabels the link.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4968,6 +5089,20 @@ test("an admin pairs an existing user at a chosen scope", async () => {
   await screen.findByLabelText("QR code");
   expect(calls[0]?.body).toEqual({ user: "alice", scope: "read" });
   expect(screen.getByText("alice · read · one use")).toBeTruthy();
+});
+
+test("the link keeps the user and scope it was made for, even if the form changes in flight", async () => {
+  mockApi({ "POST /api/v1/auth/pairings": OFFER });
+  renderWithClient(<AddDevice principal={ME_ADMIN} users={USERS} now={NOW} />);
+  const select = screen.getByLabelText("User") as HTMLSelectElement;
+  fireEvent.change(select, { target: { value: "alice" } });
+  fireEvent.click(scopeButton("admin"));
+  fireEvent.click(screen.getByRole("button", { name: "link" }));
+  fireEvent.change(select, { target: { value: "bo" } }); // before the answer lands
+  fireEvent.click(scopeButton("read"));
+  await screen.findByLabelText("QR code");
+  expect(screen.getByText("alice · admin · one use")).toBeTruthy();
+  expect(screen.queryByText("bo · read · one use")).toBeNull();
 });
 
 test("+ new: a valid unused name, sent with new_user", async () => {
@@ -5053,11 +5188,16 @@ export function AddDevice({ principal, users, now }: AddDeviceProps) {
   const [made, setMade] = useState<Made | null>(null);
   const admin = users !== null;
   const nameError = adding ? userNameError(name, users ?? []) : null;
-  const target = adding ? name : user;
 
-  const create = useAction<PairingOffer, PairingRequest>({
-    send: (body) => api.createPairing(body),
-    onSuccess: (offer) => setMade({ offer, user: target, scope }),
+  // The label comes from the body that was sent, never from the form after the click:
+  // a user or scope changed while the request is in flight must not relabel the link.
+  const create = useAction<Made, PairingRequest>({
+    send: async (sent) => ({
+      offer: await api.createPairing(sent),
+      user: sent.user ?? principal.user,
+      scope: sent.scope,
+    }),
+    onSuccess: setMade,
   });
   const body = (): PairingRequest => {
     if (!admin) return { scope };
@@ -5159,7 +5299,7 @@ export function AddDevice({ principal, users, now }: AddDeviceProps) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/settings && bun run typecheck`
-Expected: `addDevice.test.tsx` 5 pass; the other settings files pass; `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `addDevice.test.tsx` 6 pass; the other settings files pass; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Commit (repo root)**
 
@@ -6237,7 +6377,7 @@ git commit -m "feat(ui): storage bars by project and host and the largest-items 
 
 **Interfaces:**
 - Consumes: Task 14 (`artifactKinds`, `defaultPolicy`, `planFacts`, `planExpired`, `confirmText`, `confirmUnit`, `confirmMatches`, `resultLine`, `fmtBytes3`); `api.planClean`, `api.applyClean`, `STORAGE_EVENT_INVALIDATES`; `useAction`, `ErrorBox`, `fmtClock`, `shortId`, `tailPath`.
-- Produces: `CleanPanel({ items, now })`. The policy bar: `older than [30] d` (`aria-label="Days"`, whole numbers ≥ 0, else `aria-invalid` and `dry run` disabled), one chip per artifact kind plus `pulled` (`aria-pressed`), `dry run`, `apply`. `dry run` posts the policy and shows the plan line (`412.3 GB`, `3 paths`, `3 hosts`, plan id, `until 15:32` or `expired`), the items (the first 50, then `+ N more`) and the refused rows (`⊘ <reason>`). `apply` is disabled without a plan and for an expired one (`title="plan expired: dry run again"`). It opens `role="dialog"` `delete 412.3 GB`, `3 paths · 3 hosts · cp-8e41c0d2`, `type 412.3 [   ] GB`; `delete` is enabled only on an exact match and posts `confirm_bytes = plan.total_bytes`. Success shows `✓ freed …` and clears the plan; a refusal shows the hub's message in the dialog and keeps the plan.
+- Produces: `CleanPanel({ items, now })`. The policy bar: `older than [30] d` (`aria-label="Days"`, whole numbers ≥ 0, else `aria-invalid` and `dry run` disabled), one chip per artifact kind plus `pulled` (`aria-pressed`), `dry run`, `apply`. `dry run` posts the policy and shows the plan line (`412.3 GB`, `3 paths`, `3 hosts`, plan id, `until 15:32` or `expired`), the items (the first 50, then `+ N more`) and the refused rows (`⊘ <reason>`). `apply` is disabled without a plan and for an expired one (`title="plan expired: dry run again"`). It opens `role="dialog"` `delete 412.3 GB`, `3 paths · 3 hosts · cp-8e41c0d2`, `type 412.3 [   ] GB`; `delete` is enabled only on an exact match and posts `confirm_bytes = plan.total_bytes`. Success shows `✓ freed …` and clears the plan; a refusal shows the hub's message in the dialog and keeps the plan. The dialog confirms the plan as it was when `apply` was clicked (a frozen copy): `dry run` is disabled while the dialog is open, and `apply` is disabled while a dry run is in flight (`title="dry run in flight"`), so a new plan can never slip under a typed confirmation.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6324,6 +6464,30 @@ describe("apply", () => {
     expect(applied?.body).toMatchObject({ confirm_bytes: 412_300_000_000 });
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByText("cp-8e41c0d2")).toBeNull();
+  });
+
+  test("the dialog's plan is frozen: no dry run while it is open, no apply while one is in flight", async () => {
+    let release: () => void = () => {};
+    let second = false;
+    mockApi({
+      [PLAN]: async () => {
+        if (second) await new Promise<void>((done) => (release = done));
+        second = true;
+        return CLEAN_PLAN;
+      },
+    });
+    renderWithClient(<CleanPanel items={STORAGE_ITEMS} now={NOW} />);
+    await dryRun();
+    fireEvent.click(button("apply"));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(button("dry run").disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(button("dry run")); // the second dry run hangs until release()
+    await waitFor(() => expect(button("apply").disabled).toBe(true));
+    expect(button("apply").title).toBe("dry run in flight");
+    release();
+    await waitFor(() => expect(button("apply").disabled).toBe(false));
   });
 
   test("an expired plan disables apply", async () => {
@@ -6457,7 +6621,9 @@ export function CleanPanel({ items, now }: CleanPanelProps) {
   const [kinds, setKinds] = useState<string[]>(base.kinds);
   const [pulled, setPulled] = useState(base.include_pulled);
   const [plan, setPlan] = useState<CleanPlan | null>(null);
-  const [confirming, setConfirming] = useState(false);
+  // The plan the open dialog confirms, frozen when `apply` was clicked: no dry run may
+  // replace it under a typed confirmation (the same total could hide other items).
+  const [confirming, setConfirming] = useState<CleanPlan | null>(null);
   const [result, setResult] = useState<CleanResult | null>(null);
   const daysOk = /^\d+$/.test(days.trim());
   const choices = artifactKinds(items);
@@ -6478,7 +6644,14 @@ export function CleanPanel({ items, now }: CleanPanelProps) {
   const toggle = (kind: string) => setKinds(kinds.includes(kind) ? kinds.filter((k) => k !== kind) : [...kinds, kind]);
   const expired = plan !== null && planExpired(plan, now);
   const facts = plan ? planFacts(plan) : null;
-  const applyTitle = plan === null ? "dry run first" : expired ? "plan expired: dry run again" : "Delete the plan's items";
+  const applyTitle =
+    plan === null
+      ? "dry run first"
+      : expired
+        ? "plan expired: dry run again"
+        : dry.pending
+          ? "dry run in flight"
+          : "Delete the plan's items";
 
   return (
     <div>
@@ -6507,15 +6680,20 @@ export function CleanPanel({ items, now }: CleanPanelProps) {
           pulled
         </button>
         <span className="r">
-          <button type="button" className="btn" disabled={!daysOk || dry.pending} onClick={() => dry.run(policy())}>
+          <button
+            type="button"
+            className="btn"
+            disabled={!daysOk || dry.pending || confirming !== null}
+            onClick={() => dry.run(policy())}
+          >
             dry run
           </button>
           <button
             type="button"
             className="btn primary"
-            disabled={plan === null || expired}
+            disabled={plan === null || expired || dry.pending}
             title={applyTitle}
-            onClick={() => setConfirming(true)}
+            onClick={() => setConfirming(plan)}
           >
             apply
           </button>
@@ -6588,12 +6766,12 @@ export function CleanPanel({ items, now }: CleanPanelProps) {
           <span className="ok">✓</span> {resultLine(result)}
         </p>
       ) : null}
-      {confirming && plan ? (
+      {confirming ? (
         <ConfirmDialog
-          plan={plan}
-          onCancel={() => setConfirming(false)}
+          plan={confirming}
+          onCancel={() => setConfirming(null)}
           onApplied={(done) => {
-            setConfirming(false);
+            setConfirming(null);
             setPlan(null);
             setResult(done);
           }}
@@ -6607,7 +6785,7 @@ export function CleanPanel({ items, now }: CleanPanelProps) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/storage && bun run typecheck`
-Expected: `cleanPanel.test.tsx` 6 pass; the other storage files pass; `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `cleanPanel.test.tsx` 7 pass; the other storage files pass; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Commit (repo root)**
 
@@ -6826,7 +7004,7 @@ The notebook (mockups `shot-notebook-*`, `shot-notebook-conflict-*`): left the d
 **Interfaces:**
 - Consumes: `parseNotes`, `NoteEntry` (`pages/components/Notes`, the `## <iso> — <author>` format of `fsutil.append_note_file`); `ApiError`; `shortId`, `fmtClock`, `isAgent`, `parseTime`; Task 1 `RunChip`, `NotebookDay`, `NotebookDayInfo`.
 - Produces:
-  - `notebook/model.ts`: `RUN_LINK` (contract regex, global); `type Segment`; `splitRunLinks(text)`; `parseDay(text)` (= `parseNotes`); `isDigest(entry)` (its first line names an ISO week, `2026-W40`); `interface ChipView { id; short; glyph; cls; primary; known; title }` and `chipView(id, chips)`; `authorLabel(author)` (`human:alice` → `@alice`); `stamp(at)` (`09:14`, `""` without a stamp); `runCount(text)`; `interface DiffRow { left; right; kind: "same" | "change" | "del" | "add" }` and `lineDiff(theirs, mine)`; `conflictOf(err)` (the `current` day of a 409 `NotebookConflictError`, else null); `todayUtc(now)`; `withToday(days, today)`.
+  - `notebook/model.ts`: `RUN_LINK` (contract regex, global); `type Segment`; `splitRunLinks(text)`; `parseDay(text)` (= `parseNotes`); `isDigest(entry)` (its first line names an ISO week, `2026-W40`); `interface ChipView { id; short; glyph; cls; primary; known; title }` and `chipView(id, chips)`; `authorLabel(author)` (`human:alice` → `@alice`); `stamp(at)` (`09:14`, `""` without a stamp); `runCount(text)`; `interface DiffRow { left; right; kind: "same" | "change" | "del" | "add" }` and `lineDiff(theirs, mine)`; `conflictOf(err)` (the `current` day of a 409 `NotebookConflictError`, else null); `withToday(days, today)` (`today` is the hub's date from `GET .../notebook/today`, contract 1.4, never the browser's).
   - `panels/Markdown.tsx`: `type InlineRenderer = (text: string, key: string) => ReactNode[]`; `renderMarkdown(src, inline = renderInline): ReactNode[]` (the panel uses it with the default).
 
 - [ ] **Step 1: Write the failing tests**
@@ -6846,10 +7024,9 @@ import {
   runCount,
   splitRunLinks,
   stamp,
-  todayUtc,
   withToday,
 } from "../../src/notebook/model";
-import { NOTEBOOK_DAY, NOTEBOOK_DAYS, NOTEBOOK_TEXT, NOW } from "../api/phase3-fixtures";
+import { NOTEBOOK_DAY, NOTEBOOK_DAYS, NOTEBOOK_TEXT } from "../api/phase3-fixtures";
 
 describe("text", () => {
   test("splitRunLinks cuts text around [[run:<id>]]; a malformed link stays text", () => {
@@ -6931,8 +7108,7 @@ describe("conflicts and days", () => {
     expect(conflictOf(new Error("x"))).toBeNull();
   });
 
-  test("today in UTC, listed first when its file does not exist yet", () => {
-    expect(todayUtc(NOW)).toBe("2026-10-04");
+  test("today (the hub's date) is listed first when its file does not exist yet", () => {
     expect(withToday(NOTEBOOK_DAYS, "2026-10-04")).toEqual(NOTEBOOK_DAYS);
     expect(withToday(NOTEBOOK_DAYS, "2026-10-05").map((d) => [d.day, d.entries])).toEqual([
       ["2026-10-05", 0],
@@ -7106,7 +7282,7 @@ export function parseDay(text: string): NoteEntry[] {
 
 const WEEK = /\b\d{4}-W\d{2}\b/;
 
-/** The weekly summary the hub saves: its first line names the ISO week (`### week 2026-W40 · deepretro`). */
+/** The weekly summary the hub saves: its first line names the ISO week (`**2026-W40** · ▲12 ✓9 …`). */
 export function isDigest(entry: NoteEntry): boolean {
   const first = entry.text.split("\n").find((line) => line.trim() !== "") ?? "";
   return WEEK.test(first);
@@ -7243,15 +7419,11 @@ export function conflictOf(err: unknown): NotebookDay | null {
   return current as NotebookDay;
 }
 
-const pad = (n: number): string => String(n).padStart(2, "0");
-
-/** `YYYY-MM-DD` of `now` in UTC (the UI's times are UTC). */
-export function todayUtc(now: number): string {
-  const d = new Date(now);
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
-}
-
-/** The days, newest first, with `today` first (0 entries) when its file does not exist yet. */
+/**
+ * The days, newest first, with `today` first (0 entries) when its file does not exist yet.
+ * `today` is the hub's date (`GET .../notebook/today`), so the UI, `hx note` and the digest
+ * agree on the day near midnight.
+ */
 export function withToday(days: readonly NotebookDayInfo[], today: string): NotebookDayInfo[] {
   if (days.some((d) => d.day === today)) return [...days];
   return [{ day: today, bytes: 0, entries: 0 }, ...days];
@@ -7331,7 +7503,8 @@ describe("view", () => {
     ]);
     expect(screen.getByRole("link", { name: "01J8…77fe ✗" })).toBeTruthy();
     expect(screen.getByTitle("unknown run 01J7AAAA-old-0001").textContent).toBe("?01J7…");
-    expect(within(entries[0] as HTMLElement).getByText("▲12 ✓9 ✗2 ?1 · 41.2 GPU-h $86.5")).toBeTruthy();
+    expect(within(entries[0] as HTMLElement).getByText(/· ▲12 ✓9 ✗2 \?1 · 41\.2 GPU-h \$86\.5 ·/)).toBeTruthy();
+    expect(within(entries[0] as HTMLElement).getByText("2026-W40").tagName).toBe("B");
   });
 
   test("+ entry appends and clears", async () => {
@@ -7747,7 +7920,7 @@ git commit -m "feat(ui): notebook day with run chips, append, whole-day edit and
 
 **Interfaces:**
 - Consumes: Tasks 18–19; Task 3 `useNotebookDays`, `useNotebookDay`; `AppLink`, `hrefs`; `PageStyles`, `ErrorBox`, `Loading`, `Unbroken`, `useNow`, `fmtClock`.
-- Produces: `NotebookPage({ project, day?, now? })`: crumb `<project> / notebook`, headline `<project> · <day>`, metaline (`N days`, `M entries`, `edited HH:MM @x` from the open day), the day list (`aria-label="Days"`, newest first, today first with `0` when it has no file, the open day `aria-current="page"`), and `DayView` keyed by day. Without `day` it opens today. Router: `notebookRoute` (`/n/$project`) and `notebookDayRoute` (`/n/$project/$day`).
+- Produces: `NotebookPage({ project, day?, now? })`: crumb `<project> / notebook`, headline `<project> · <day>`, metaline (`N days`, `M entries`, `edited HH:MM @x` from the open day), the day list (`aria-label="Days"`, newest first, today first with `0` when it has no file, the open day `aria-current="page"`), and `DayView` keyed by day. "Today" is the hub's date: the page reads `GET .../notebook/today` (backend Task 29: the hub answers the `NotebookDay` of `hub_today`, contract 1.4) and uses its `day`; it never computes a date in the browser. Without `day` it opens that day, and `DayView` writes to it by its explicit date. Router: `notebookRoute` (`/n/$project`) and `notebookDayRoute` (`/n/$project/$day`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -7769,9 +7942,10 @@ const days = () =>
     .map((a) => [a.textContent, a.getAttribute("href"), a.getAttribute("aria-current")]);
 
 test("without a day: today opens; the list is newest first; the metaline sums it up", async () => {
-  mockApi({ [`GET ${BASE}`]: NOTEBOOK_DAYS, [`GET ${BASE}/2026-10-04`]: NOTEBOOK_DAY });
+  const calls = mockApi({ [`GET ${BASE}`]: NOTEBOOK_DAYS, [`GET ${BASE}/today`]: NOTEBOOK_DAY });
   renderWithClient(<NotebookPage project="deepretro" now={NOW} />);
   await waitFor(() => expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("deepretro · 2026-10-04"));
+  expect(calls.some((c) => c.url === `${BASE}/2026-10-04`)).toBe(false); // the hub named the day
   expect(days()).toEqual([
     ["2026-10-043", "/n/deepretro/2026-10-04", "page"],
     ["2026-10-035", "/n/deepretro/2026-10-03", null],
@@ -7786,20 +7960,24 @@ test("without a day: today opens; the list is newest first; the metaline sums it
   );
 });
 
-test("today without a file is listed with 0 and opens empty", async () => {
-  const next = Date.parse("2026-10-05T08:00:00Z");
+test("today is the hub's date, not the browser's; without a file it is listed with 0 and opens empty", async () => {
+  // the browser clock still says 2026-10-04 (UTC); the hub's zone has reached the 5th
   mockApi({
     [`GET ${BASE}`]: NOTEBOOK_DAYS,
-    [`GET ${BASE}/2026-10-05`]: { project: "deepretro", day: "2026-10-05", text: "", hash: "", runs: [], updated_at: null },
+    [`GET ${BASE}/today`]: { project: "deepretro", day: "2026-10-05", text: "", hash: "", runs: [], updated_at: null },
   });
-  renderWithClient(<NotebookPage project="deepretro" now={next} />);
+  renderWithClient(<NotebookPage project="deepretro" now={NOW} />);
   await screen.findByText("none");
   expect(days()[0]).toEqual(["2026-10-050", "/n/deepretro/2026-10-05", "page"]);
   expect(screen.getByLabelText("New entry")).toBeTruthy();
 });
 
 test("a day from the URL opens that day", async () => {
-  mockApi({ [`GET ${BASE}`]: NOTEBOOK_DAYS, [`GET ${BASE}/2026-10-03`]: { ...NOTEBOOK_DAY, day: "2026-10-03" } });
+  mockApi({
+    [`GET ${BASE}`]: NOTEBOOK_DAYS,
+    [`GET ${BASE}/today`]: NOTEBOOK_DAY,
+    [`GET ${BASE}/2026-10-03`]: { ...NOTEBOOK_DAY, day: "2026-10-03" },
+  });
   renderWithClient(<NotebookPage project="deepretro" day="2026-10-03" now={NOW} />);
   await waitFor(() => expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("deepretro · 2026-10-03"));
   expect(days()[1]?.[2]).toBe("page");
@@ -7833,7 +8011,7 @@ Create `ui/src/pages/Notebook.tsx`:
 import type { ReactNode } from "react";
 import { useNotebookDay, useNotebookDays } from "../api/queries";
 import { DayView } from "../notebook/DayView";
-import { authorLabel, parseDay, todayUtc, withToday } from "../notebook/model";
+import { authorLabel, parseDay, withToday } from "../notebook/model";
 import { NotebookStyles } from "../notebook/styles";
 import { fmtClock } from "./components/format";
 import { Unbroken } from "./components/Headline";
@@ -7844,7 +8022,7 @@ import { PageStyles } from "./components/styles";
 
 export interface NotebookPageProps {
   project: string;
-  /** `YYYY-MM-DD`; default today (UTC). */
+  /** `YYYY-MM-DD`; default the hub's today. */
   day?: string;
   /** Fixed clock (tests). */
   now?: number;
@@ -7853,17 +8031,23 @@ export interface NotebookPageProps {
 export function NotebookPage({ project, day, now }: NotebookPageProps) {
   const ticking = useNow(60_000);
   const at = now ?? ticking;
-  const today = todayUtc(at);
-  const active = day ?? today;
+  // "today" is the hub's date (contract 1.4: DigestSettings.timezone, else the hub's zone);
+  // the hub resolves it, so the UI, `hx note` and the digest write the same file
+  const hubToday = useNotebookDay(project, "today");
+  const today = hubToday.data?.day ?? null;
   const days = useNotebookDays(project);
-  const page = useNotebookDay(project, active);
-  const list = days.data ? withToday(days.data, today) : null;
+  const page = useNotebookDay(project, day ?? "today"); // one query with hubToday when no day
+  const active = day ?? today;
+  const list = days.data ? (today ? withToday(days.data, today) : days.data) : null;
   const last = page.data ? parseDay(page.data.text).at(-1) : undefined;
 
   let body: ReactNode;
   if (page.error) body = <ErrorBox error={page.error} />;
   else if (page.data === undefined) body = <Loading />;
-  else body = <DayView key={`${project}/${active}`} project={project} day={active} data={page.data} now={at} />;
+  else
+    body = (
+      <DayView key={`${project}/${page.data.day}`} project={project} day={page.data.day} data={page.data} now={at} />
+    );
 
   return (
     <div className="page notebook">
@@ -7875,7 +8059,7 @@ export function NotebookPage({ project, day, now }: NotebookPageProps) {
         notebook
       </p>
       <h1 className="headline">
-        <Unbroken text={`${project} · ${active}`} />
+        <Unbroken text={`${project} · ${active ?? "·"}`} />
       </h1>
       <p className="metaline">
         {days.data ? <span>{`${days.data.length} days`}</span> : null}
@@ -7966,7 +8150,7 @@ The Task page gets `export ▾` in the leaderboard panel's title (mockup `shot-t
 
 **Interfaces:**
 - Consumes: Task 2 `api.exportTaskUrl`; Task 3 `useExportText`; `ErrorBox`, `Loading`.
-- Produces: `EXPORT_FORMATS` (`latex` LaTeX `tex`, `markdown` Markdown `md`, `csv` CSV `csv`); `NOISE_MODES`; `DIGITS` (0–6); `exportFilename(task, format)`; `previewLines(text, n = 6)`; `lineCount(text)`. `ExportMenu({ project, task })`: a button `export ▾` (`aria-expanded`); open, a `role="dialog"` `aria-label="Export"` popover with the format buttons (`aria-pressed`), `Digits` and `Noise` selects, a `Preview` of the first six lines, `N lines`, `Copy` (`Copied` after a write, `blocked` when the clipboard refuses) and the download link `↓ .tex` (`download="<task>.tex"`, the same query). Escape and a click outside close it; nothing is fetched while it is closed.
+- Produces: `EXPORT_FORMATS` (`latex` LaTeX `tex`, `markdown` Markdown `md`, `csv` CSV `csv`); `NOISE_MODES`; `DIGITS` (0–6); `exportFilename(task, format)`; `previewLines(text, n = 6)`; `lineCount(text)`. `ExportMenu({ project, task })`: a button `export ▾` (`aria-expanded`); open, a `role="dialog"` `aria-label="Export"` popover with the format buttons (`aria-pressed`), `Digits` and `Noise` selects, a `Preview` of the first six lines, `N lines`, `Copy` (`Copied` after a write, `blocked` when the clipboard refuses; disabled while the preview still shows the previous options' text, `isPlaceholderData`) and the download link `↓ .tex` (`download="<task>.tex"`, the same query). Escape and a click outside close it; nothing is fetched while it is closed.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -8054,6 +8238,28 @@ describe("ExportMenu", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy" }));
     await waitFor(() => expect(written).toEqual([LATEX]));
     expect(screen.getByRole("button", { name: "Copied" })).toBeTruthy();
+  });
+
+  test("Copy waits for the new format: the previous text is never copied", async () => {
+    let release: () => void = () => {};
+    mockApi({
+      [`GET ${BASE}?format=latex&noise=both&digits=3`]: LATEX,
+      [`GET ${BASE}?format=csv&noise=both&digits=3`]: async () => {
+        await new Promise<void>((done) => (release = done));
+        return "method,n\n";
+      },
+    });
+    const written = mockClipboard();
+    renderWithClient(<ExportMenu project="toy-classifier" task="toy-test" />);
+    fireEvent.click(screen.getByRole("button", { name: "export ▾" }));
+    await screen.findByLabelText("Preview");
+    fireEvent.click(screen.getByRole("button", { name: "CSV" }));
+    const copyButton = () => screen.getByRole("button", { name: "Copy" }) as HTMLButtonElement;
+    await waitFor(() => expect(copyButton().disabled).toBe(true)); // LaTeX still shown, CSV not here
+    fireEvent.click(copyButton());
+    expect(written).toEqual([]);
+    release();
+    await waitFor(() => expect(copyButton().disabled).toBe(false));
   });
 
   test("Escape and a click outside close the menu", () => {
@@ -8166,6 +8372,9 @@ export function ExportMenu({ project, task }: ExportMenuProps) {
   const box = useRef<HTMLSpanElement>(null);
   const opts: ExportOptions = { format, noise, digits };
   const text = useExportText(project, task, opts, open);
+  // keepPreviousData shows the last format while the new one loads; that text must
+  // never be copied as if it were the format now selected
+  const stale = text.data === undefined || text.isPlaceholderData;
 
   useEffect(() => {
     if (!open) return;
@@ -8248,7 +8457,7 @@ export function ExportMenu({ project, task }: ExportMenuProps) {
           <div className="row">
             <span className="small">{text.data === undefined ? "" : `${lineCount(text.data)} lines`}</span>
             <span className="sp" />
-            <button type="button" className="btn s" disabled={text.data === undefined} onClick={doCopy}>
+            <button type="button" className="btn s" disabled={stale} onClick={doCopy}>
               {copy === "copied" ? "Copied" : copy === "failed" ? "blocked" : "Copy"}
             </button>
             <a
@@ -8270,7 +8479,7 @@ export function ExportMenu({ project, task }: ExportMenuProps) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/pages/exportMenu.test.tsx && bun run typecheck`
-Expected: 5 pass, `0 fail`; `tsc --noEmit` prints nothing.
+Expected: 6 pass, `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Commit (repo root)**
 
@@ -9152,7 +9361,7 @@ git commit -m "feat(ui): run page strikes through artifacts a storage cleanup de
 
 ## Group 7: Playwright against `hx demo --with-team`, and docs (Tasks 25–26)
 
-A third demo hub, `hx demo --with-team` with auth on, served by `serve-demo.ts --with-team` on its own random port and fresh home, checked by identity before every test like the other two. Every browser signs in through the real `/pair` page with a link the spec makes from that home's own local session token (`<home>/serve/server.json`, written by `hx serve` with auth on), so the specs exercise pairing, cookies, tickets and scopes end to end. Read-only specs run in `team-light`/`team-dark`; the writes (notebook, cleanup) run serially in `team-light-edit` then `team-dark-edit`, and the cleanup itself runs once.
+A third demo hub, `hx demo --with-team` with auth on, served by `serve-demo.ts --with-team` on its own random port and fresh home, checked by identity before every test like the other two. Every browser signs in through the real `/pair` page with a link the spec makes from that home's own local session token (`<home>/serve/server.json`, written by `hx serve` with auth on), so the specs exercise pairing, cookies, tickets and scopes end to end. All browsers reach the hub from `127.0.0.1`, so the hub's pairing limit (10 per minute per address) would trip if it counted successes; it counts only failed pairings (backend Task 25, contract 3), and only `a used pairing link reads invalid` fails one (once per theme project), so parallel workers never get a 429. Read-only specs run in `team-light`/`team-dark`; the writes (notebook, cleanup) run serially in `team-light-edit` then `team-dark-edit`, and the cleanup itself runs once.
 
 Demo requirements this group reads (backend plan, contract 11): users `sv` (admin) and `alice` (launch); at least one run with `owner: "alice"`; two projects with notebook days; baselines on `toy-classifier/toy-test`, whose preset view has a leaderboard panel; archived runs whose dry run (default policy) has items, one `protected` refusal and one `used by <id>` refusal; outbox entries that include `sent`, `failed` and `skipped`; the local token in `serve/server.json`.
 
@@ -9891,12 +10100,12 @@ All automated:
 
 ## Assembly notes
 
-1. **Contract gap: what `/pair` can show before redeeming.** Contract 10.1 asks for `user · scope · 4:12` in the pair page's ready state, but the link carries only `<offer_id>.<secret>` (contract 1.10 `pairing_url`) and no route reads an offer. The page shows the hub and the offer id; user and scope appear after `pair` (`✓ alice · launch`). The mockup `shot-pair-ready-*` follows this. A read route (`GET /api/v1/auth/pairings/{offer_id}` returning user, scope and expiry, public, rate limited) would allow the countdown; that is a backend contract change, so it is left as a follow-up.
+1. **What `/pair` shows before redeeming.** The link carries only `<offer_id>.<secret>` (contract 1.10 `pairing_url`) and no route reads an offer, so the ready state shows the hub and the offer id; user and scope appear after `pair` (`✓ alice · launch`). Contract 10.1 was amended to say so in review round 1 (a public read of an offer would tell anyone with a leaked offer id whom it pairs). The mockup `shot-pair-ready-*` follows this.
 2. **Contract gap: the baseline version badge.** `BaselineRow` has `version_match` but not the paper's version, so the badge reads `≠v1` (our version) instead of the mockup requirement's `v1≠v2`. Adding `metric_version_equivalent` to `BaselineRow` would allow the full badge (backend follow-up). The mockup shows `≠v2`.
-3. **Contract gap: file counts.** `CleanItem` has no file count, so the confirm dialog reads `412.3 GB · 37 paths · 3 hosts`, not `37 files`. The mockup says `paths`.
+3. **Paths, not files.** `CleanItem` has no file count, so the confirm dialog reads `412.3 GB · 3 paths · 3 hosts`; contract 10.1 says `paths` since review round 1, and so does the mockup.
 4. **Baselines reach the panel through the Task page.** The view query's leaderboard panel `meta` has no `baselines`; the Task page copies `GET .../leaderboard`'s into every leaderboard result (`withBaselines`, Task 23). A leaderboard panel drawn elsewhere shows none. Moving `baselines` into the panel `meta` on the backend would make this step unnecessary.
-5. **`@owner` on the Overview.** Only running rows carry `owner` (`RunRecord`); timeline items, ideas and failures do not, so "recent rows" show no owner. `mine` swaps the Running panel to `GET /api/v1/runs?owner=me&status=running`.
-6. **Encodings the backend must accept.** Export `metrics` and `groups` go as comma lists (`metrics=accuracy/value,macro_f1/value`), like the CLI's `--metrics a,b`; the contract names the parameters but not their encoding. The weekly summary is found by its first line naming the ISO week (`### week 2026-W40 · deepretro`), so `render_digest_markdown` must start that way; any other format still renders, only without the summary block style.
+5. **`@owner` on the Overview.** Running rows carry `owner` (`RunRecord`); backend Task 27 adds `owner` to `TimelineItem`, `IdeaRow` and `FailureRow`, so recent ideas and failures end with `@owner` too (contract 1.12, review round 1). `mine` swaps the Running panel to `GET /api/v1/runs?owner=me&status=running`.
+6. **Encodings the backend must accept.** Export `metrics` and `groups` go as comma lists (`metrics=accuracy/value,macro_f1/value`), like the CLI's `--metrics a,b`; the contract names the parameters but not their encoding. The weekly summary is found by its first line naming the ISO week; `render_digest_markdown` (backend Task 18) starts `**2026-W40** · <headline>` and lists task changes as `- <task> before→after ▲ · N runs` (no Markdown table: the UI's renderer has none), and `NOTEBOOK_TEXT` is that exact shape. Any other format still renders, only without the summary block style.
 7. **Event-stream URL.** `eventsUrl()` calls `/auth/me` before each connect (reconnects are rare: 3/4/8/16 s backoff) so a hub that switches auth on between connects is handled; a phase 2 hub answers 404 and gets the plain URL. A ticket request that answers 401 locks the app and stops the stream, so a revoked session never loops.
 8. **Scopes are hints.** The UI hides `storage`, disables Stop/Cancel for non-owners and limits pairing scopes, but every decision is the server's; a 403 shows as an error line. Admin-only reads are never requested for a non-admin, so the browser console stays clean (Playwright's console guard enforces it).
 9. **Kept out of scope.** No client function for `POST /api/v1/auth/logout` (no screen has a logout button yet; revoking the session in Settings does it), `GET /api/v1/compare/export` (no compare screen exports yet), or the digest routes (the digest shows up as a notebook entry). Their routes are checked in `types.test.ts`.

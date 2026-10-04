@@ -12,7 +12,7 @@
 
 **Contract:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-contract.md`, sections 1–9 and 11. Every name, field, route, and file listed there is exact. This plan adds private helpers, a few public helpers (each task's Interfaces lists them), and optional keyword arguments (`AuthStore(session_days=)`, `leaderboard_table(directions=)`, `send_slack(transport=)`, `send_email(ssl_context=)`, `Notifier(ssl_context=)`, `send_digest(since=)`, `upsert(keep_max=)`, `hub_call(text=)`, `create_app(auth=, public_url=, notifier=)`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the contract was ambiguous or silent and how this plan reads it.
 
-**Prerequisite:** `main` at `738c711` (phases 1a, 1b, 2). No frontend code is touched. **Frontend:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-frontend.md` (contract section 10) starts after this plan is merged and uses `hx demo --with-team` for fixtures.
+**Prerequisite:** `main` at `e27a3a2` (phases 1a, 1b, 2, plus `p2-backend-minors`, `p2-docs-ci` (`6ace21d`), `p2-property-tests`, and the phase 2 frontend so far). Every "replace X with Y" anchor below was re-checked against `e27a3a2`; the drift from the first base `738c711` that touches this plan: `cli/main.py::_write_private` is hardened (Task 2 moves that version into `core.settings`), `launch --gpus` is `LaunchGpusOpt` (no task edits `launch`'s signature), `mcp/server.py` `launch_sweep` sends `sweep_checkout(...)` in its remote body (Task 32 Step 4.6 adds `created_by`/`owner` next to it), `api/app.py`'s lifespan `finally` nests the joins in a second `try/finally` (Task 30 adds the notifier thread before the loop that *starts* the threads), `remote/hub.py` `_SAFE_NAME`/`_halt` changed (no task edits them), and `docs/index.rst`'s User guide toctree ends `remote, gpus, slurm, sweeps, cost` (Task 46). If `main` has moved on when this plan starts, re-run `git diff e27a3a2 main -- src docs/index.rst` and re-check each anchor the diff touches. No frontend code is touched. **Frontend:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-frontend.md` (contract section 10) starts after this plan is merged and uses `hx demo --with-team` for fixtures.
 
 ## Global Constraints
 
@@ -470,12 +470,13 @@ git commit -m "test: block non-loopback network access and secret variables in e
 
 **Files:**
 - Create: `src/hypothex/core/settings.py`
+- Modify: `src/hypothex/cli/main.py` (`_write_private` becomes the shared `write_private`)
 - Test: `tests/core/test_settings.py`
 
 **Interfaces:**
 - Consumes: `scan_yaml`, `has_cycle`, `YAML_CYCLE` (`hypothex.core.config`), `ConfigError`, `Layout`.
 - Produces (contract 1.1, exact): `SETTINGS_FILENAME`, `ENV_NAME`, `NotifyEvent`, `Channel`, `Weekday`, `SlackSettings`, `EmailSettings`, `ProjectRule`, `NotifySettings`, `DigestSettings`, `ServerSettings`, `StorageSettings`, `Settings`, `settings_path(layout)`, `load_settings(layout)`, `save_settings(layout, settings)`.
-- Produces (public helpers): `is_loopback_host(host: str) -> bool`; `redact_url(url: str) -> str` (password in a URL → `***`); `LITERAL_SECRET_KEYS`; `write_private(path: Path, text: str) -> None` (atomic, 0600, parent 0700).
+- Produces (public helpers): `is_loopback_host(host: str) -> bool`; `redact_url(url: str) -> str` (password in a URL → `***`); `LITERAL_SECRET_KEYS`; `write_private(path: Path, text: str) -> None` (atomic, 0600, parent 0700; main's hardened `cli/main.py::_write_private` moved here: a stale temp file is unlinked and the new one opened `O_EXCL`, the temp file is removed on any error, plus an `fsync`; the CLI then imports it, so there is one copy).
 - Rules: a literal secret key under `notify.slack` or `notify.email` (`webhook`, `webhook_url`, `password`, `token`, `secret`, `url`) is refused before pydantic sees it, with the line and the hint `use webhook_env: NAME (the variable holding it)` (Slack) or `use password_env: NAME (...)` (email); the value is never echoed. `server.index_url` with a password is refused with the URL redacted. `security: none` with a `username` is refused unless `host` is loopback. Validation errors list `path: message` only (no input values).
 
 - [ ] **Step 1: Write the failing test**
@@ -501,6 +502,7 @@ from hypothex.core.settings import (
     redact_url,
     save_settings,
     settings_path,
+    write_private,
 )
 
 FULL = """\
@@ -652,6 +654,18 @@ def test_save_round_trips_with_mode_0600(tmp_path: Path) -> None:
     assert load_settings(layout) == settings
     assert "storage" not in path.read_text()  # defaults are left out
     assert os.access(path, os.R_OK)
+
+
+def test_write_private_ignores_a_stale_temp_file(tmp_path: Path) -> None:
+    path = tmp_path / "home" / "server.json"
+    path.parent.mkdir()
+    stale = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    stale.write_text("old")
+    stale.chmod(0o644)  # os.replace would carry this mode onto the token file
+    write_private(path, "{}")
+    assert path.read_text() == "{}" and stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert not stale.exists()
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1011,6 +1025,9 @@ def write_private(path: Path, text: str) -> None:
     """
     Atomically write ``path`` as mode 0600 inside a 0700 folder.
 
+    The parent folder is set to 0700 on every call: the first ``config.yaml``
+    write makes the Hypothex home 0700 (``docs/team.rst`` says so).
+
     Parameters
     ----------
     path : Path
@@ -1021,12 +1038,17 @@ def write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    tmp.unlink(missing_ok=True)  # a stale tmp keeps its old mode, which os.replace carries
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def save_settings(layout: Layout, settings: Settings) -> None:
@@ -1044,20 +1066,31 @@ def save_settings(layout: Layout, settings: Settings) -> None:
     write_private(settings_path(layout), yaml.safe_dump(data, sort_keys=False))
 ```
 
-Note: `write_private` chmods the parent to 0700; the parent of `config.yaml` is the Hypothex home, which phase 1 already creates for the user alone.
+Note: `write_private` chmods the parent to 0700; the parent of `config.yaml` is the Hypothex home, which phase 1 already creates for the user alone. Task 46 documents it in `docs/team.rst` (a lab-server home other users must read is not supported).
+
+In `src/hypothex/cli/main.py`, delete the whole `def _write_private(path: Path, text: str) -> None:` function (main's hardened copy, the one with `tmp.unlink(missing_ok=True)` and `os.O_EXCL`) and add to the imports:
+
+```python
+from hypothex.core.settings import write_private as _write_private
+```
+
+Every existing `_write_private(...)` call in the CLI keeps working and now shares the one implementation. Check that no copy is left:
+
+Run: `grep -c "def _write_private" src/hypothex/cli/main.py`
+Expected: `0`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/core/test_settings.py -v`
-Expected: `19 passed`.
+Run: `uv run pytest tests/core/test_settings.py tests/cli -v`
+Expected: `tests/core/test_settings.py` `20 passed`; `tests/cli` still passes.
 
-Run: `uv run python -m doctest src/hypothex/core/settings.py && uv run ruff check src/hypothex/core/settings.py tests/core/test_settings.py && uv run ruff format --check src/hypothex/core/settings.py tests/core/test_settings.py && uv run ty check src`
-Expected: no doctest output, `All checks passed!`, `2 files already formatted`, `All checks passed!`.
+Run: `uv run python -m doctest src/hypothex/core/settings.py && uv run ruff check src/hypothex/core/settings.py src/hypothex/cli/main.py tests/core/test_settings.py && uv run ruff format --check src/hypothex/core/settings.py src/hypothex/cli/main.py tests/core/test_settings.py && uv run ty check src`
+Expected: no doctest output, `All checks passed!`, `3 files already formatted`, `All checks passed!`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hypothex/core/settings.py tests/core/test_settings.py
+git add src/hypothex/core/settings.py src/hypothex/cli/main.py tests/core/test_settings.py
 git commit -m "feat(settings): hub config.yaml with secrets named by variable, never by value"
 ```
 
@@ -1073,7 +1106,7 @@ git commit -m "feat(settings): hub config.yaml with secrets named by variable, n
 **Interfaces:**
 - Produces (contract 1.1, exact): `SECRETS_FILENAME = "secrets.env"`, `resolve_secret(layout, name) -> SecretStr | None`, `class SecretsFileError(ConfigError)`.
 - Produces (public helpers): `secrets_path(layout) -> Path`; `check_secrets_file(layout) -> None` (raises `SecretsFileError` when the file exists with group/other bits or another owner; `hx serve` calls it at start, Task 39); `DEFAULT_SECRET_VARS: tuple[str, ...]`; `secret_env_names(settings: Settings) -> set[str]`; `scrub_env(env: Mapping[str, str], names: Iterable[str]) -> dict[str, str]`.
-- `_execute` (phase 1) removes `secret_env_names(load_settings(...))` from the environment it passes to the run's command (a bad `config.yaml` falls back to the default names).
+- `_execute` (phase 1) removes `secret_env_names(load_settings(...))` from the environment it passes to the run's command (a bad `config.yaml` falls back to the default names). The defaults include the bearer secrets `HYPOTHEX_SERVE_TOKEN` and `HYPOTHEX_HUB_TOKEN`; Task 38 adds every configured host's `token_env`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1149,7 +1182,10 @@ def test_secret_env_names_cover_configured_and_default_names() -> None:
         )
     )
     names = secret_env_names(settings)
-    assert {"LAB_HOOK", "LAB_SMTP", "HYPOTHEX_INDEX_PASSWORD", "HYPOTHEX_SLACK_WEBHOOK"} <= names
+    assert {
+        "LAB_HOOK", "LAB_SMTP", "HYPOTHEX_INDEX_PASSWORD", "HYPOTHEX_SLACK_WEBHOOK",
+        "HYPOTHEX_SERVE_TOKEN", "HYPOTHEX_HUB_TOKEN",
+    } <= names  # fmt: skip
     assert scrub_env({"LAB_HOOK": "x", "PATH": "/bin"}, names) == {"PATH": "/bin"}
 
 
@@ -1170,15 +1206,17 @@ def test_run_environment_never_holds_secret_variables(
     )
     monkeypatch.setenv("LAB_HOOK", "https://hooks.example/SECRETXYZ")
     monkeypatch.setenv("HYPOTHEX_SMTP_PASSWORD", "hunter2")
+    monkeypatch.setenv("HYPOTHEX_HUB_TOKEN", "hxs_s_000000000000_bearer")
     monkeypatch.setenv("KEEP_ME", "visible")
     code = (
         "import os; print(os.environ.get('LAB_HOOK', '-'), "
-        "os.environ.get('HYPOTHEX_SMTP_PASSWORD', '-'), os.environ.get('KEEP_ME', '-'))"
+        "os.environ.get('HYPOTHEX_SMTP_PASSWORD', '-'), "
+        "os.environ.get('HYPOTHEX_HUB_TOKEN', '-'), os.environ.get('KEEP_ME', '-'))"
     )
     record = prepare_run(ctx, RunRequest(repo=toy_repo, command=[sys.executable, "-c", code]))
     execute_run(ctx, record.run_id)
     stdout = (ctx.run_dir(record) / "logs" / "stdout.log").read_text()
-    assert stdout.strip() == "- - visible"
+    assert stdout.strip() == "- - - visible"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1197,6 +1235,7 @@ DEFAULT_SECRET_VARS = (
     "HYPOTHEX_SMTP_PASSWORD",
     "HYPOTHEX_INDEX_PASSWORD",
     "HYPOTHEX_SERVE_TOKEN",
+    "HYPOTHEX_HUB_TOKEN",
 )
 """Variable names that always count as secrets, whatever ``config.yaml`` says."""
 
@@ -1380,7 +1419,7 @@ with
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_settings.py tests/core/test_execution.py -v`
-Expected: `tests/core/test_settings.py` `29 passed`; every test in `tests/core/test_execution.py` passes, including `test_run_environment_never_holds_secret_variables`.
+Expected: `tests/core/test_settings.py` `30 passed`; every test in `tests/core/test_execution.py` passes, including `test_run_environment_never_holds_secret_variables`.
 
 Run: `uv run python -m doctest src/hypothex/core/settings.py && uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: no doctest output, `All checks passed!`, all files formatted, `All checks passed!`.
@@ -1945,7 +1984,7 @@ git commit -m "feat(auth): scopes, principals, and run ownership rules"
 - Consumes: Task 5 models and errors; `utcnow`; `Layout`.
 - Produces (contract 1.10, exact): `AuthStore(layout, *, now=utcnow)` with `ensure_owner`, `users`, `get_user`, `disable_user`, `create_offer`, `redeem`, `authenticate`, `sessions`, `revoke`, `mint_local`. Tickets are Task 7.
 - Produces (additive): `AuthStore(..., session_days: int = 90)` (`hx serve` passes `server.session_days`); `AuthStore.path` (`<home>/auth/auth.db`); `parse_token(token) -> tuple[str, str] | None`.
-- Rules (contract 1.10, 7): `<home>/auth` is 0700, `auth.db` 0600; secrets are stored as `sha256` hex and compared with `hmac.compare_digest`. Token format `hxs_<session id>_<43-char secret>` with session id `s_<12 hex>`; offer id `p_<12 hex>`. A pairing offer is one use, at most 300 s, burned after 5 wrong secrets, and every failure raises `PairingError(PAIRING_INVALID)`. `create_offer` derives `new_user` from whether `user` exists; a new user or another user needs `admin`; the offer's scope never exceeds the issuer's scope or the target user's role. Sessions slide: `authenticate` moves `last_seen_at` and `expires_at = last_seen_at + session_days` at most once per 60 s. `sessions()` lists active sessions (not revoked, not expired), newest first.
+- Rules (contract 1.10, 7): `<home>/auth` is 0700, `auth.db` 0600; secrets are stored as `sha256` hex and compared with `hmac.compare_digest`. Token format `hxs_<session id>_<43-char secret>` with session id `s_<12 hex>`; offer id `p_<12 hex>`. A pairing offer is one use, at most 300 s, burned after 5 wrong secrets, and every failure raises `PairingError(PAIRING_INVALID)`. `create_offer` derives `new_user` from whether `user` exists; a new user or another user needs `admin`; the offer's scope never exceeds the issuer's scope or the target user's role. `redeem(client="host")` needs an `admin` offer (a host session forwards other users' identities, contract 1.2), else `PairingError` without using the offer. Sessions slide: `authenticate` moves `last_seen_at` and `expires_at = last_seen_at + session_days` at most once per 60 s. `sessions()` lists active sessions (not revoked, not expired), newest first.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2047,6 +2086,21 @@ def test_pairing_never_widens_scope(store: AuthStore) -> None:
     assert offer.scope == "read" and not offer.new_user
     with pytest.raises(ScopeError, match="role"):
         store.create_offer(issuer=admin, user="alice", scope="admin")  # wider than her role
+
+
+def test_host_sessions_need_an_admin_offer(store: AuthStore) -> None:
+    admin = owner(store)
+    alice = store.authenticate(pair(store, admin, "alice", "launch"))
+    assert alice is not None
+    offer, secret = store.create_offer(issuer=alice, user="alice", scope="launch")
+    with pytest.raises(PairingError) as info:
+        store.redeem(offer.id, secret, client="host", device="forged-hub")
+    assert str(info.value) == PAIRING_INVALID
+    session, _ = store.redeem(offer.id, secret, client="cli", device="laptop")  # not used up
+    assert session.client == "cli"
+    offer, secret = store.create_offer(issuer=admin, user="sv", scope="admin")
+    session, _ = store.redeem(offer.id, secret, client="host", device="hub:lab")
+    assert session.client == "host" and session.scope == "admin"
 
 
 def test_ttl_is_at_most_five_minutes(store: AuthStore) -> None:
@@ -2490,7 +2544,9 @@ class AuthStore:
         secret : str
             The link's secret.
         client : Client
-            ``browser``, ``cli``, ``agent``, or ``host``.
+            ``browser``, ``cli``, ``agent``, or ``host``. A ``host`` session is
+            trusted to forward ``created_by``/``owner`` for other users, so only
+            an ``admin`` offer (issued by an admin) may be redeemed as ``host``.
         device : str
             A label shown in the sessions list (cut to 64 characters).
 
@@ -2502,7 +2558,8 @@ class AuthStore:
         Raises
         ------
         PairingError
-            Unknown, expired, used, burned, or wrong secret: always the same message.
+            Unknown, expired, used, burned, or wrong secret, or ``client="host"``
+            on an offer below ``admin``: always the same message.
         """
         if client not in ("browser", "cli", "agent", "host"):
             raise PairingError(PAIRING_INVALID)
@@ -2537,6 +2594,8 @@ class AuthStore:
         if not _same(secret, row["secret_hash"]):
             conn.execute("UPDATE offers SET failures = failures + 1 WHERE id = ?", (offer_id,))
             raise PairingError(PAIRING_INVALID)
+        if client == "host" and row["scope"] != "admin":
+            raise PairingError(PAIRING_INVALID)  # only an admin may mint a forwarding credential
         user = conn.execute("SELECT * FROM users WHERE name = ?", (row["user"],)).fetchone()
         if row["new_user"]:
             if user is not None:
@@ -2722,7 +2781,7 @@ Note the `Literal` import is already used by `Client`; `threading` is used for t
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/auth -v`
-Expected: `tests/auth/test_scopes.py` `23 passed`, `tests/auth/test_store.py` `15 passed`.
+Expected: `tests/auth/test_scopes.py` `23 passed`, `tests/auth/test_store.py` `16 passed`.
 
 Run: `uv run python -m doctest src/hypothex/auth/store.py && uv run ruff check src/hypothex/auth tests/auth && uv run ruff format --check src/hypothex/auth tests/auth && uv run ty check src`
 Expected: no doctest output, clean lint, format, and types.
@@ -3152,7 +3211,7 @@ Contract 1.4, 1.5, 1.6. All three are hub-local reads and files; the routes come
 **Interfaces:**
 - Consumes: `Context`, `group_label` (leaderboard), `parse_metric_key`, `atomic_write_bytes`, `RunStore.project_lock`, `EventLog.append`.
 - Produces (contract 1.4, exact): `NOTEBOOK_DIR`, `DAY_PATTERN`, `RUN_LINK`, `NOTEBOOK_MAX_BYTES`, `RunChip`, `NotebookDay`, `NotebookConflictError` (with `.current`), `NotebookTooLargeError`, `notebook_dir`, `today`, `list_days`, `read_day`, `append_entry`, `write_day`, `run_links`.
-- Produces (public helpers): `ENTRY_STAMP` (regex of `## <iso> — <author>`); `run_primary(ctx, record) -> float | None` (used by notices, Task 14); `day_path(layout, project, day) -> Path`; `parse_day(text) -> date` (`ConfigError` for anything but `YYYY-MM-DD`); `parse_entries(text) -> list[tuple[datetime, str, str]]` (stamp, author, body; used by the digest, Task 18).
+- Produces (public helpers): `ENTRY_STAMP` (regex of `## <iso> — <author>`); `run_primary(ctx, record) -> float | None` (used by notices, Task 14); `day_path(layout, project, day) -> Path`; `hub_today(ctx, now=None) -> date` (`today(now, DigestSettings.timezone)` read from the hub's `config.yaml`, the machine's zone when unset or unreadable: the one "today" of contract 1.4 for `append_entry`, the routes' `today` day, MCP, and the CLI); `parse_day(text) -> date` (`ConfigError` for anything but `YYYY-MM-DD`); `parse_entries(text) -> list[tuple[datetime, str, str]]` (stamp, author, body; used by the digest, Task 18).
 - Rules: unknown project → `StoreError`; both writes hold the project lock and emit `notebook.updated` `{project, day, author}` with `project=` set; an empty `write_day` text deletes the day file; `write_day` with a stale `base_hash` raises `NotebookConflictError` carrying the current day; a day file never grows past `NOTEBOOK_MAX_BYTES`. A chip of an unknown run id has `status=None` and `label=run_id`; a known run's label is its hypothesis clause (`group_label`), else its id; `primary` is its newest score of the task's primary metric at the current version.
 
 - [ ] **Step 1: Write the failing test**
@@ -3178,6 +3237,7 @@ from hypothex.core.notebook import (
     NotebookTooLargeError,
     append_entry,
     day_path,
+    hub_today,
     list_days,
     parse_day,
     parse_entries,
@@ -3187,6 +3247,7 @@ from hypothex.core.notebook import (
     write_day,
 )
 from hypothex.core.records import RunStatus
+from hypothex.core.settings import settings_path
 from tests.factories import PREDS_075, seed_finished_run
 
 T = datetime(2026, 10, 4, 9, 14, tzinfo=UTC)
@@ -3298,6 +3359,15 @@ def test_today_follows_the_timezone() -> None:
     assert today(late, "UTC") == date(2026, 10, 4)
 
 
+def test_hub_today_uses_the_configured_zone_for_appends(toy: Context) -> None:
+    late = datetime(2026, 10, 4, 23, 30, tzinfo=UTC)
+    settings_path(toy.layout).write_text("digest: {timezone: Asia/Tokyo}\n")
+    assert hub_today(toy, late) == date(2026, 10, 5)
+    assert append_entry(toy, "toy", "late", "human:sv", now=late).day == date(2026, 10, 5)
+    settings_path(toy.layout).write_text("digest: [broken\n")
+    assert hub_today(toy, late) == today(late)  # a bad config.yaml falls back to this machine
+
+
 def test_parse_day_and_entries() -> None:
     assert parse_day("2026-10-04") == DAY
     for bad in ("2026-13-01", "04-10-2026", "../x"):
@@ -3351,6 +3421,7 @@ from hypothex.core.ids import utcnow
 from hypothex.core.layout import Layout
 from hypothex.core.leaderboard import group_label
 from hypothex.core.records import RunRecord, RunStatus
+from hypothex.core.settings import load_settings
 
 NOTEBOOK_DIR = "notebook"
 DAY_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
@@ -3474,6 +3545,32 @@ def today(now: datetime | None = None, tz: str | None = None) -> date:
     """
     moment = now or utcnow()
     return (moment.astimezone(ZoneInfo(tz)) if tz else moment.astimezone()).date()
+
+
+def hub_today(ctx: Context, now: datetime | None = None) -> date:
+    """
+    Return the hub's "today" for the notebook (contract 1.4).
+
+    The UI, ``hx note``, MCP, and the digest all use this one date, so an entry
+    written near midnight lands on the same day file whoever writes it.
+
+    Parameters
+    ----------
+    ctx : Context
+    now : datetime, optional
+        The moment (default now).
+
+    Returns
+    -------
+    date
+        ``today(now, DigestSettings.timezone)``; this machine's zone when the
+        timezone is unset or ``config.yaml`` cannot be read.
+    """
+    try:
+        tz = load_settings(ctx.layout).digest.timezone
+    except ConfigError:
+        tz = None
+    return today(now, tz)
 
 
 def _hash(data: bytes) -> str:
@@ -3692,7 +3789,7 @@ def append_entry(
     author : str
         ``human:<user>``, ``agent:<agent>@<user>``, ``digest``, ...
     day : date, optional
-        Default: the date of ``now`` on this machine.
+        Default: ``hub_today(ctx, now)``.
     now : datetime, optional
         Entry time (default now).
 
@@ -3715,7 +3812,7 @@ def append_entry(
     if not body:
         raise ConfigError("empty notebook entry")
     moment = now or utcnow()
-    when = day or today(moment)
+    when = day or hub_today(ctx, moment)
     entry = f"\n## {moment.isoformat()} — {author}\n\n{body}\n".encode()
     path = day_path(ctx.layout, project, when)
     with ctx.store.project_lock(project):
@@ -3788,7 +3885,7 @@ def write_day(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_notebook.py -v`
-Expected: `12 passed`.
+Expected: `13 passed`.
 
 Run: `uv run python -m doctest src/hypothex/core/notebook.py && uv run ruff check src/hypothex/core/notebook.py tests/core/test_notebook.py && uv run ruff format --check src/hypothex/core/notebook.py tests/core/test_notebook.py && uv run ty check src`
 Expected: no doctest output, `All checks passed!`, `2 files already formatted`, `All checks passed!`.
@@ -5194,7 +5291,7 @@ git commit -m "feat(export): render booktabs LaTeX, Markdown, and CSV with golde
 - Consumes: `get_leaderboard`, `resolve_task` (`hypothex.core.queries`), `Context`, `group_label`.
 - Produces (contract 1.6, exact): `compare_table(ctx, run_ids, opts)`, `export_task(ctx, task, project, opts)`, `export_compare(ctx, run_ids, opts)`.
 - Produces (public helper): `task_table(ctx, task, project, opts) -> ExportTable` (the table `export_task` renders; `hx export --json` returns it, Task 43); `COMPARE_MAX_RUNS = 20`.
-- Rules: `compare_table` takes 2 to 20 runs (else `RunError`); one row per run (`kind="run"`, `n=1`, label = hypothesis clause or run id, key = run id); scores are each run's newest valid score at its project's current metric versions; columns are `opts.metrics` or the first run's task primary, then every other key, sorted; directions from each metric's `higher_is_better`; no seed or test-set noise; `percent` multiplies by 100; footnotes `metric versions: ...` and `one run per row`. `export_task` passes the task's metric directions to `leaderboard_table`.
+- Rules: `compare_table` takes 2 to 20 runs (else `RunError`); one row per run (`kind="run"`, `n=1`, label = hypothesis clause or run id, key = run id); scores are each run's newest valid score at its project's current metric versions; columns are `opts.metrics` or the first run's task primary, then every other key, sorted; directions from each metric's `higher_is_better`; a shown metric whose version or direction differs between the compared runs' projects is refused (`RunError` "accuracy is accuracy@v1 in toy and accuracy@v2 in toy2; compare runs at one metric version"), never merged into one column; no seed or test-set noise; `percent` multiplies by 100; footnotes `metric versions: ...` and `one run per row`. `export_task` passes the task's metric directions to `leaderboard_table`.
 
 - [ ] **Step 1: Create the golden files**
 
@@ -5220,7 +5317,7 @@ run,r2,r2,1,accuracy/value,0.25,,false,,,,,false,false,false,
 
 - [ ] **Step 2: Write the failing test**
 
-Append to `tests/core/test_export.py` (and add `from hypothex.core.context import Context`, `from hypothex.core.errors import RunError`, `from hypothex.core.evaluation import evaluate_run`, `from tests.factories import PREDS_075, seed_finished_run`, plus `compare_table, export_compare, export_task` to the `hypothex.core.export` import):
+Append to `tests/core/test_export.py` (and add `import yaml`, `from hypothex.core.context import Context`, `from hypothex.core.errors import RunError`, `from hypothex.core.evaluation import evaluate_run`, `from tests.factories import PREDS_075, seed_finished_run, write_toy_project`, plus `compare_table, export_compare, export_task` to the `hypothex.core.export` import):
 
 ```python
 PREDS_025 = [{"id": f"ex-{i}", "prediction": 1} for i in range(4)]  # 1 of 4 correct
@@ -5246,6 +5343,17 @@ def test_compare_table_rows(scored: Context) -> None:
     assert [(r.kind, r.key, r.n) for r in table.rows] == [("run", "r2", 1), ("run", "r1", 1)]
     assert table.rows[1].cells["accuracy/value"].best
     assert table.title == "compare"
+
+
+def test_compare_refuses_two_versions_of_one_metric(scored: Context, tmp_path: Path) -> None:
+    other = write_toy_project(tmp_path / "toy2", accuracy_version="v2", use_git=False)
+    config = yaml.safe_load((other / "hypothex.yaml").read_text())
+    config["project"] = "toy2"
+    (other / "hypothex.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    seed_finished_run(scored, other, "r3", predictions=PREDS_075)
+    evaluate_run(scored, "r3")
+    with pytest.raises(RunError, match="accuracy is accuracy@v1 in toy and accuracy@v2 in toy2"):
+        compare_table(scored, ["r1", "r3"], ExportOptions())
 
 
 def test_compare_needs_two_to_twenty_runs(scored: Context) -> None:
@@ -5274,6 +5382,7 @@ In `src/hypothex/core/export.py`, add to the imports:
 
 ```python
 import math
+from collections import defaultdict
 
 from hypothex.core.config import ProjectConfig
 from hypothex.core.context import Context
@@ -5308,7 +5417,8 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
     Raises
     ------
     RunError
-        Fewer than 2 or more than 20 runs.
+        Fewer than 2 or more than 20 runs, or a shown metric with different
+        versions or directions in the runs' projects.
     RunNotFoundError
         An unknown run id.
     """
@@ -5323,6 +5433,8 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
     values: dict[str, dict[str, float]] = {}
     versions: dict[str, str] = {}
     directions: dict[str, bool] = {}
+    # metric -> (version, higher_is_better) -> the first project that scores it so
+    seen: dict[str, dict[tuple[str, bool], str]] = defaultdict(dict)
     for record in records:
         config = configs[record.project]
         current: dict[str, float] = {}
@@ -5339,6 +5451,7 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
             current[f"{score.metric}/{score.key}"] = score.value
             versions[score.metric] = metric.version
             directions[score.metric] = metric.higher_is_better
+            seen[score.metric].setdefault((metric.version, metric.higher_is_better), record.project)
         values[record.run_id] = current
     primary = next(
         (
@@ -5354,6 +5467,10 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
         present = {key for v in values.values() for key in v}
         first = [primary] if primary is not None and primary in present else []
         columns = [*first, *sorted(present - set(first))]
+    for name in dict.fromkeys(parse_metric_key(c)[0] for c in columns):
+        if len(seen.get(name, {})) > 1:  # one column must mean one metric definition
+            forms = " and ".join(f"{name}@{v} in {p}" for (v, _), p in seen[name].items())
+            raise RunError(f"{name} is {forms}; compare runs at one metric version")
     scale = 100.0 if opts.percent else 1.0
     higher = {c: directions.get(parse_metric_key(c)[0], True) for c in columns}
     rows: list[ExportRow] = []
@@ -6674,7 +6791,7 @@ def send_slack(
         raise ChannelError("bad_webhook", permanent=True) from None
     local = parts.scheme == "http" and is_loopback_host(parts.hostname or "")
     if parts.scheme != "https" and not local:
-        raise ChannelError("insecure_webhook", permanent=True)
+        raise ChannelError("insecure_webhook", permanent=True) from None
     try:
         with (
             _quiet(parts.path or url),
@@ -6690,8 +6807,8 @@ def send_slack(
     error = f"http_{resp.status_code}"
     if resp.status_code == 429 or resp.status_code >= 500:
         retry = _retry_after(resp.headers.get("Retry-After"))
-        raise ChannelError(error, permanent=False, retry_after=retry)
-    raise ChannelError(error, permanent=True)
+        raise ChannelError(error, permanent=False, retry_after=retry) from None
+    raise ChannelError(error, permanent=True) from None
 
 
 def send_email(
@@ -6786,7 +6903,7 @@ git commit -m "feat(notify): slack and smtp delivery with retryable and permanen
 - Produces (contract 1.7, exact): `NOTIFY_DIR`, `RETRY_DELAYS`, `TERMINAL_EVENTS`, `OutboxEntry`, `Notifier(ctx, settings, *, now=utcnow, transport=None)` with `scan()`.
 - Produces (additive): `Notifier(..., ssl_context=None)`; `Notifier.enqueue(notice, channels) -> list[OutboxEntry]` (idempotent per `(notice.id, channel)`; only configured channels; used by the digest, Task 19); `Notifier.secret_values() -> list[SecretStr]`; `SENDING_RETRY_SECONDS = 60.0`.
 - Files (contract 2): `<home>/notify/cursor.json` `{last_sequence}`, `outbox/<id>.<channel>.json` (one `OutboxEntry`, rewritten atomically), `sent.jsonl` (final entries) — all 0600.
-- Rules: the first scan sets the cursor to the log's last sequence and enqueues nothing (no backlog flood). A run notifies on `run.finished|failed|killed|lost`, or on `mirror.run_updated` whose `original_type` is one of them. Its project's rule is `notify.projects[project]`, else `notify.default`, else nothing. A run that ended more than `max_age_hours` before now gets nothing. With `fold_sweeps` and a `sweep_id` whose sweep file is on this hub, nothing is sent while the sweep has a queued or running run; when none is left, one sweep notice (the same id for every final event, so one entry). Otherwise the run's status must be in `rule.events`, and a finished run shorter than `min_seconds` is skipped. Notices are redacted (every configured secret value) before they are written.
+- Rules: the first scan sets the cursor to the log's last sequence and enqueues nothing (no backlog flood). A run notifies on `run.finished|failed|killed|lost`, or on `mirror.run_updated` whose `original_type` is one of them. Its project's rule is `notify.projects[project]`, else `notify.default`, else nothing. A run that ended more than `max_age_hours` before now gets nothing. With `fold_sweeps` and a `sweep_id` whose sweep file is on this hub, nothing is sent while the sweep has a queued or running run; when none is left, one sweep notice (the same id for every final event, so one entry) if at least one of its runs ended with a status in `rule.events` (a failure-only rule hears only about sweeps with a failure; `events: []` hears nothing). Otherwise the run's status must be in `rule.events`, and a finished run shorter than `min_seconds` is skipped. Notices are redacted (every configured secret value) before they are written.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -7051,6 +7168,43 @@ def test_sweep_gives_one_notice_when_its_last_run_ends(
     (entry,) = notifier.scan()
     assert entry.notice.kind == "sweep" and entry.notice.title == "✗ toy sweep s-0001 200/200"
     assert entry.notice.lines[0].startswith("✓196 ✗4 ?0 ⊘0")
+
+
+def test_folded_sweeps_follow_the_rule_events(
+    toy: Context, hook: FakeWebhook, clock: Clock
+) -> None:
+    def sweep(sweep_id: str, statuses: list[RunStatus]) -> None:
+        values = [str(i) for i in range(len(statuses))]
+        spec = SweepSpec(
+            id=sweep_id, project="toy", task="toy-acc", host=None,
+            grid=[SweepParam(name="x", values=values)], seeds=[1],
+            command_template=["echo", "{x}"], created_by="human:sv", created_at=T0,
+        )  # fmt: skip
+        save_sweep(toy.layout, spec)
+        tag = sweep_tag(toy.descriptor.environment_id, sweep_id)
+        for i, status in enumerate(statuses):
+            run_id = f"x{sweep_id[-1]}{i}"
+            toy.create_run(
+                make_record(
+                    run_id, task="toy-acc", status=RunStatus.QUEUED, tags=[tag],
+                    environment_id=toy.descriptor.environment_id, sweep_id=sweep_id,
+                )
+            )  # fmt: skip
+            toy.update_run(
+                run_id,
+                f"run.{status.value}",
+                lambda r, s=status: r.model_copy(update={"status": s, "ended_at": T0}),
+            )
+
+    notifier = primed(toy, settings_for(events=["failed", "lost"]), clock)
+    sweep("s-0002", [RunStatus.FINISHED, RunStatus.FINISHED])
+    assert notifier.scan() == []  # all finished: a failure-only rule hears nothing
+    sweep("s-0003", [RunStatus.FINISHED, RunStatus.FAILED])
+    (entry,) = notifier.scan()
+    assert entry.notice.kind == "sweep" and entry.notice.sweep_id == "s-0003"
+    notifier.settings = settings_for(events=[])
+    sweep("s-0004", [RunStatus.FAILED])
+    assert notifier.scan() == []
 
 
 def test_unconfigured_channels_are_not_enqueued(
@@ -7388,8 +7542,11 @@ class Notifier:
         base = self.settings.server.public_url
         summary = self._sweep(record) if rule.fold_sweeps and record.sweep_id else None
         if summary is not None:
-            if summary.counts.get("queued", 0) + summary.counts.get("running", 0) > 0:
+            counts = summary.counts
+            if counts.get("queued", 0) + counts.get("running", 0) > 0:
                 return []
+            if not any(counts.get(wanted, 0) for wanted in rule.events):
+                return []  # the sweep's outcome holds no status this rule asks for
             notice = sweep_notice(self.ctx, summary, base_url=base)
         else:
             if status not in rule.events:
@@ -7407,7 +7564,7 @@ class Notifier:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/notify/test_notifier.py -v`
-Expected: `9 passed`.
+Expected: `10 passed`.
 
 Run: `uv run ruff check src/hypothex/notify tests/notify && uv run ruff format --check src/hypothex/notify tests/notify && uv run ty check src`
 Expected: clean.
@@ -7763,7 +7920,7 @@ def run_notifier_loop(ctx: Context, stop: threading.Event, *, interval: float = 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/notify -v`
-Expected: `tests/notify/test_notifier.py` `18 passed`; the other notify files still pass.
+Expected: `tests/notify/test_notifier.py` `19 passed`; the other notify files still pass.
 
 Run: `uv run ruff check src/hypothex/notify tests/notify && uv run ruff format --check src/hypothex/notify tests/notify && uv run ty check src`
 Expected: clean.
@@ -7961,9 +8118,7 @@ def test_markdown_and_notice(week: Context) -> None:
     assert render_digest_markdown(digest) == (
         "**2026-W41** · ▲4 ✓1 ✗1 ?1 · 1.5 GPU-h $2.00 · toy-acc 0.600→0.700 ▲\n"
         "\n"
-        "| task | primary | before | after | runs |\n"
-        "|:--|:--|--:|--:|--:|\n"
-        "| toy-acc | accuracy/value | 0.600 | 0.700 ▲ | 1 |\n"
+        "- toy-acc 0.600→0.700 ▲ · 1 runs\n"
         "\n"
         "notes\n"
         "- 10-04 21:00 @sv plan [[run:new1]]\n"
@@ -7975,7 +8130,11 @@ def test_markdown_and_notice(week: Context) -> None:
     notice = digest_notice(digest, base_url="https://hub.ts.net")
     assert notice.kind == "digest" and notice.project == "toy"
     assert notice.title == "Σ toy 2026-W41 · " + digest.headline
-    assert notice.lines == ["toy-acc 0.600→0.700 ▲ · 1 runs"]
+    assert notice.lines == [
+        "toy-acc 0.600→0.700 ▲ · 1 runs",
+        "✎ 10-04 21:00 @sv plan [[run:new1]]",
+        "✎ 10-04 09:00 @alice [[run:new1]] found the bug",
+    ]  # the top notes travel with the Slack/email summary (spec 9), not only the notebook
     assert notice.url == "https://hub.ts.net/n/toy"
 
 
@@ -8270,6 +8429,20 @@ def _who(author: str) -> str:
     return "@" + author.removeprefix("human:") if author.startswith("human:") else author
 
 
+def _task_line(change: TaskChange) -> str:
+    """One task change as ``toy-acc 0.600→0.700 ▲ · 1 runs`` (notebook and notices alike)."""
+    best = " ▲" if change.new_best else ""
+    moved = f"{_fmt(change.before)}→{_fmt(change.after)}{best}"
+    return f"{change.task} {moved} · {change.n_new_runs} runs"
+
+
+def _note_line(note: NoteItem) -> str:
+    """One note as ``10-04 09:00 @alice [[run:<id>]] <text on one line>``."""
+    text = " ".join(note.text.split())
+    link = f" [[run:{note.run_id}]]" if note.run_id else ""
+    return f"{note.at:%m-%d %H:%M} {_who(note.author)}{link} {text}"
+
+
 def render_digest_markdown(digest: Digest) -> str:
     """
     Render a digest as the Markdown block saved to the notebook.
@@ -8281,27 +8454,15 @@ def render_digest_markdown(digest: Digest) -> str:
     Returns
     -------
     str
-        The headline, then a task table, notes, and sweeps (each only when present).
+        ``**<week>** · <headline>``, then a list of task changes, notes, and
+        sweeps (each only when present).
     """
     blocks = [f"**{digest.week}** · {digest.headline}"]
     if digest.tasks:
-        rows = [
-            "| task | primary | before | after | runs |",
-            "|:--|:--|--:|--:|--:|",
-            *(
-                f"| {t.task} | {t.primary} | {_fmt(t.before)} | "
-                f"{_fmt(t.after)}{' ▲' if t.new_best else ''} | {t.n_new_runs} |"
-                for t in digest.tasks
-            ),
-        ]
-        blocks.append("\n".join(rows))
+        # a list, not a table: the UI's Markdown (and contract 10.1's summary block) has no tables
+        blocks.append("\n".join(f"- {_task_line(t)}" for t in digest.tasks))
     if digest.notes:
-        lines = ["notes"]
-        for note in digest.notes:
-            text = " ".join(note.text.split())
-            link = f" [[run:{note.run_id}]]" if note.run_id else ""
-            lines.append(f"- {note.at:%m-%d %H:%M} {_who(note.author)}{link} {text}")
-        blocks.append("\n".join(lines))
+        blocks.append("\n".join(["notes", *(f"- {_note_line(n)}" for n in digest.notes)]))
     if digest.sweeps:
         lines = ["sweeps"]
         for sweep in digest.sweeps:
@@ -8327,12 +8488,11 @@ def digest_notice(digest: Digest, *, base_url: str | None) -> Notice:
     Returns
     -------
     Notice
+        ``lines``: one per task change, then one ``✎`` line per top note
+        (``top_notes`` of the build, newest first).
     """
-    lines = [
-        f"{t.task} {_fmt(t.before)}→{_fmt(t.after)}{' ▲' if t.new_best else ''} · "
-        f"{t.n_new_runs} runs"
-        for t in digest.tasks
-    ]
+    lines = [_task_line(t) for t in digest.tasks]
+    lines += [f"✎ {_note_line(note)}" for note in digest.notes]
     return Notice(
         id=notice_id("digest", digest.project, digest.week, digest.until.isoformat()),
         kind="digest",
@@ -8602,7 +8762,7 @@ and replace `tick` with:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_digest.py tests/notify/test_notifier.py -v`
-Expected: `tests/core/test_digest.py` `13 passed`, `tests/notify/test_notifier.py` `19 passed`.
+Expected: `tests/core/test_digest.py` `13 passed`, `tests/notify/test_notifier.py` `20 passed`.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -8674,6 +8834,7 @@ def ended_run(
     status: RunStatus = RunStatus.FINISHED,
     parent: str | None = None,
     environment_id: str | None = None,
+    vars: dict[str, Any] | None = None,
 ) -> RunRecord:
     ended = utcnow() - timedelta(days=days_ago)
     record = make_record(
@@ -8682,6 +8843,7 @@ def ended_run(
         archived=archived,
         starred=starred,
         parent=parent,
+        vars=vars or {},
         started_at=ended - timedelta(hours=1),
         ended_at=None if status == RunStatus.RUNNING else ended,
         artifacts=[Artifact(kind=k, path=str(p)) for k, p in artifacts or []],
@@ -9234,8 +9396,8 @@ git commit -m "feat(storage): measure runs, artifacts, and pulled files here and
 
 **Interfaces:**
 - Produces (contract 1.9, exact): `plan_clean(ctx, hosts, policy, *, created_by, settings, now=None) -> CleanPlan`.
-- Produces (public helpers): `PLAN_ID` (regex `^cp-[0-9a-f]{8}$`); `plans_dir(layout) -> Path` (`<home>/storage/plans`); `eligible(item, cutoff) -> bool`.
-- Rules: an item is planned when its run is archived, unstarred, ended, `ended_at <= now − older_than_days`, it exists, its kind is in `kinds` (`["*"]` = every kind) or it is a `pulled` item (with `include_pulled`), and it matches `projects`/`hosts`. It is **refused** (listed in `refused` as `{path, run_id, reason}`) when another run that is not eligible records the same path on the same host (`used by <run_id>`, e.g. an unarchived `reinfer` child), or the path is protected: here by `protected_reason`; for a host by what the hub knows (`/`, inside that host's run folder outside `artifacts/`/`pulled/`, a mapped checkout or the host's absolute Hypothex home, or an ancestor of one) — the host checks again at delete. A path two eligible runs share is planned once. The plan expires after `settings.plan_ttl_minutes`, is written 0600, older expired plans are pruned, and `storage.plan_created` `{plan_id, total_bytes, n_items}` is emitted.
+- Produces (public helpers): `PLAN_ID` (regex `^cp-[0-9a-f]{8}$`); `plans_dir(layout) -> Path` (`<home>/storage/plans`); `eligible(item, cutoff) -> bool`; `input_paths(record) -> list[str]` (paths a run reads but does not own: `vars["checkpoint"]` when a non-empty string); `overlaps(a, b) -> bool` (one path is the other or inside it).
+- Rules: an item is planned when its run is archived, unstarred, ended, `ended_at <= now − older_than_days`, it exists, its kind is in `kinds` (`["*"]` = every kind) or it is a `pulled` item (with `include_pulled`), and it matches `projects`/`hosts`. It is **refused** (listed in `refused` as `{path, run_id, reason}`) when another run that is not eligible records the same path on the same host as an artifact, or reads it (or a path inside or above it) as an input (`input_paths`: `vars["checkpoint"]`, which `control.reinfer` sets and never records as an artifact) — `used by <run_id>`, e.g. an unarchived or queued `reinfer` child; a reader whose host the hub cannot tell blocks the path on every host — or the path is protected: here by `protected_reason`; for a host by what the hub knows (`/`, inside that host's run folder outside `artifacts/`/`pulled/`, a mapped checkout or the host's absolute Hypothex home, or an ancestor of one) — the host checks again at delete. A path two eligible runs share is planned once. The plan expires after `settings.plan_ttl_minutes`, is written 0600, older expired plans are pruned, and `storage.plan_created` `{plan_id, total_bytes, n_items}` is emitted.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -9259,7 +9421,8 @@ def lab(toy: Context, tmp_path: Path) -> Context:
     ended_run(toy, "logs", artifacts=[("log", write(scratch / "train.log"))])
     shared = write(scratch / "shared.pt")
     ended_run(toy, "parent", artifacts=[("checkpoint", shared)])
-    ended_run(toy, "child", archived=False, parent="parent", artifacts=[("checkpoint", shared)])
+    # what control.reinfer really writes: the input in vars, no child artifact
+    ended_run(toy, "child", archived=False, parent="parent", vars={"checkpoint": str(shared)})
     return toy
 
 
@@ -9407,6 +9570,83 @@ def eligible(item: StorageItem, cutoff: datetime) -> bool:
     )
 
 
+def input_paths(record: RunRecord) -> list[str]:
+    """
+    List the paths a run reads but does not own.
+
+    ``control.reinfer`` passes the parent's checkpoint in ``vars["checkpoint"]``
+    and records no artifact for it, so artifact lists alone miss this use.
+
+    Parameters
+    ----------
+    record : RunRecord
+
+    Returns
+    -------
+    list of str
+        ``[vars["checkpoint"]]`` when it is a non-empty string, else ``[]``.
+
+    Examples
+    --------
+    >>> from tests.factories import make_record  # doctest: +SKIP
+    >>> input_paths(make_record(vars={"checkpoint": "/s/p.pt"}))  # doctest: +SKIP
+    ['/s/p.pt']
+    """
+    value = record.vars.get("checkpoint")
+    return [value] if isinstance(value, str) and value else []
+
+
+def overlaps(a: str, b: str) -> bool:
+    """
+    Tell whether deleting one path touches the other (equal, or one inside the other).
+
+    Parameters
+    ----------
+    a, b : str
+        POSIX paths.
+
+    Returns
+    -------
+    bool
+
+    Examples
+    --------
+    >>> overlaps("/s/ckpt", "/s/ckpt/model.pt"), overlaps("/s/a.pt", "/s/b.pt")
+    (True, False)
+    """
+    pa, pb = Path(os.path.normpath(a)).parts, Path(os.path.normpath(b)).parts
+    n = min(len(pa), len(pb))
+    return pa[:n] == pb[:n]
+
+
+def _settled_by(record: RunRecord, cutoff: datetime) -> bool:
+    return (
+        record.archived
+        and not record.starred
+        and record.status in TERMINAL_STATUSES
+        and record.ended_at is not None
+        and record.ended_at <= cutoff
+    )
+
+
+def _input_readers(
+    ctx: Context, hosts: HostClients | None
+) -> dict[str, list[tuple[str, RunRecord]]]:
+    """Host name (``"*"`` when unknown) -> ``[(input path, run)]`` for runs that read inputs."""
+    own = ctx.descriptor.environment_id
+    out: dict[str, list[tuple[str, RunRecord]]] = defaultdict(list)
+    for record in ctx.index.list_runs(include_archived=True, limit=None):
+        paths = input_paths(record)
+        if not paths:
+            continue
+        if record.environment_id == own:
+            host: str | None = LOCAL_HOST
+        else:
+            host = hosts.host_for_environment(record.environment_id) if hosts else None
+        out[host or "*"] += [(path, record) for path in paths]
+    return out
+
+
 def _wanted(item: StorageItem, policy: CleanPolicy) -> bool:
     if item.kind == "run" or not item.exists:
         return False
@@ -9498,6 +9738,7 @@ def plan_clean(
     for item in report.items:
         if item.kind != "run":
             users[(item.host, item.path)].append(item)
+    readers = _input_readers(ctx, hosts)
     items: list[CleanItem] = []
     refused: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -9505,9 +9746,16 @@ def plan_clean(
         if not _wanted(item, policy) or not eligible(item, cutoff):
             continue
         key = (item.host, item.path)
-        blockers = [o for o in users[key] if o.run_id != item.run_id and not eligible(o, cutoff)]
+        blockers = [
+            o.run_id for o in users[key] if o.run_id != item.run_id and not eligible(o, cutoff)
+        ]
+        blockers += [
+            r.run_id
+            for path, r in [*readers.get(item.host, []), *readers.get("*", [])]
+            if r.run_id != item.run_id and overlaps(path, item.path) and not _settled_by(r, cutoff)
+        ]
         if blockers:
-            reason = f"used by {blockers[0].run_id}"
+            reason = f"used by {blockers[0]}"
             refused.append({"path": item.path, "run_id": item.run_id, "reason": reason})
             continue
         if item.host == LOCAL_HOST:
@@ -9578,7 +9826,7 @@ git commit -m "feat(storage): dry-run cleanup plans with shared-checkpoint and p
 **Interfaces:**
 - Produces (contract 1.9, exact): `apply_clean(ctx, hosts, plan_id, *, confirm_bytes, actor, now=None) -> CleanResult`, `delete_artifacts(ctx, items, *, actor, plan_id) -> CleanResult`, `cleaned_artifacts(ctx, record) -> list[CleanedArtifact]`, `RunDetail.cleaned: list[CleanedArtifact] = []`.
 - Produces (public helper): `CLEANED_FILE = "cleaned.json"`; `record_cleaned(ctx, run_id, items, *, actor, plan_id) -> None` (appends to `<run_dir>/.hx/cleaned.json` under the run lock and emits `run.artifacts_cleaned` `{paths, freed_bytes, plan_id}`; the hub calls it for mirrored runs after a host deleted).
-- Rules: `apply_clean` refuses (`CleanRefusedError`, nothing deleted) an id that is not `cp-<8 hex>` or has no plan file, an expired plan (the file is removed), and a `confirm_bytes` that is not the plan's `total_bytes` (the plan stays). Otherwise it removes the plan file first (one use), deletes local items with `delete_artifacts`, sends each host's items to that host's `POST /api/v1/storage/delete` (command id `<plan_id>:<host>`) and records the deleted ones on the hub's mirrored runs, puts an unreachable host in `errors` while other hosts go on, and emits `storage.cleaned` `{plan_id, freed_bytes, n_deleted, n_skipped}`. `delete_artifacts` re-checks every item where the file lives: run known, archived, unstarred, ended; the path still a recorded artifact of that run with that kind (or inside its `pulled/`); no other run that is not archived-unstarred-ended records it (`used by <id>`); not protected; still there; bytes and mtime unchanged (`changed since plan`). A failing check puts `{path, run_id, host, reason}` in `skipped`. A symlink is unlinked, never its target; a folder is removed with `shutil.rmtree` (which unlinks symlinks inside it). `run.yaml` is never written.
+- Rules: `apply_clean` refuses (`CleanRefusedError`, nothing deleted) an id that is not `cp-<8 hex>` or has no plan file, an expired plan (the file is removed), and a `confirm_bytes` that is not the plan's `total_bytes` (the plan stays). Otherwise it removes the plan file first (one use), deletes local items with `delete_artifacts`, sends each host's items to that host's `POST /api/v1/storage/delete` (command id `<plan_id>:<host>`) and records the deleted ones on the hub's mirrored runs, puts an unreachable host in `errors` while other hosts go on, and emits `storage.cleaned` `{plan_id, freed_bytes, n_deleted, n_skipped}`. `delete_artifacts` re-checks every item where the file lives: run known, archived, unstarred, ended; the path still a recorded artifact of that run with that kind (or inside its `pulled/`); no other run that is not archived-unstarred-ended records it (`used by <id>`); not protected; still there; bytes and mtime unchanged (`changed since plan`). The `used by` check also covers runs that read the path as an input (`input_paths`, `overlaps`), so a `reinfer` child queued after the plan keeps its checkpoint. A failing check puts `{path, run_id, host, reason}` in `skipped`. A symlink is unlinked, never its target; a folder is removed with `shutil.rmtree` (which unlinks symlinks inside it). `run.yaml` is never written.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -9651,6 +9899,24 @@ def test_changed_or_unarchived_items_are_skipped_at_apply(toy: Context, tmp_path
     assert [i.run_id for i in done.deleted] == ["d"] and not (scratch / "d.pt").exists()
     assert all((scratch / f"{r}.pt").exists() for r in "abc")
     assert done.freed_bytes == done.deleted[0].bytes
+
+
+def test_a_reinfer_child_queued_after_the_plan_keeps_its_input(
+    toy: Context, tmp_path: Path
+) -> None:
+    checkpoint = write(tmp_path / "scratch" / "p.pt")
+    ended_run(toy, "parent", artifacts=[("checkpoint", checkpoint)])
+    result = plan(toy)
+    assert [i.run_id for i in result.items] == ["parent"]
+    ended_run(
+        toy, "child", archived=False, status=RunStatus.RUNNING, parent="parent",
+        vars={"checkpoint": str(checkpoint)},
+    )  # fmt: skip
+    done = apply_clean(toy, None, result.plan_id, confirm_bytes=result.total_bytes, actor="x")
+    assert done.deleted == [] and checkpoint.exists()
+    assert done.skipped == [
+        {"path": str(checkpoint), "run_id": "parent", "host": "local", "reason": "used by child"}
+    ]
 
 
 def test_symlink_artifact_removes_the_link_only(toy: Context, tmp_path: Path) -> None:
@@ -9796,7 +10062,12 @@ def _settled(record: RunRecord) -> bool:
     return record.archived and not record.starred and record.status in TERMINAL_STATUSES
 
 
-def _recheck(ctx: Context, item: CleanItem, users: dict[str, list[RunRecord]]) -> str | None:
+def _recheck(
+    ctx: Context,
+    item: CleanItem,
+    users: dict[str, list[RunRecord]],
+    readers: list[tuple[str, RunRecord]],
+) -> str | None:
     try:
         record = ctx.find_record(item.run_id)
     except StoreError:
@@ -9820,6 +10091,9 @@ def _recheck(ctx: Context, item: CleanItem, users: dict[str, list[RunRecord]]) -
     for other in users.get(item.path, []):
         if other.run_id != record.run_id and not _settled(other):
             return f"used by {other.run_id}"
+    for path, reader in readers:
+        if reader.run_id != record.run_id and overlaps(path, item.path) and not _settled(reader):
+            return f"used by {reader.run_id}"
     why = protected_reason(ctx, item.path)
     if why is not None:
         return why
@@ -9864,13 +10138,15 @@ def delete_artifacts(
         and the freed bytes.
     """
     users: dict[str, list[RunRecord]] = defaultdict(list)
+    readers: list[tuple[str, RunRecord]] = []
     for record in ctx.index.list_runs(include_archived=True, limit=None):
         for path in {a.path for a in record.artifacts}:
             users[path].append(record)
+        readers += [(path, record) for path in input_paths(record)]
     deleted: list[CleanItem] = []
     skipped: list[dict[str, Any]] = []
     for item in items:
-        why = _recheck(ctx, item, users) or _remove(item.path)
+        why = _recheck(ctx, item, users, readers) or _remove(item.path)
         if why is not None:
             skipped.append(
                 {"path": item.path, "run_id": item.run_id, "host": item.host, "reason": why}
@@ -9939,7 +10215,10 @@ def apply_clean(
         raise CleanRefusedError(
             f"confirm_bytes {confirm_bytes} does not match the plan's {plan.total_bytes}"
         )
-    path.unlink()  # one use, before anything is deleted
+    try:
+        path.unlink()  # one use, before anything is deleted
+    except FileNotFoundError:
+        raise unknown from None  # a concurrent apply of the same plan won the race
     local = [i for i in plan.items if i.host == LOCAL_HOST]
     result = delete_artifacts(ctx, local, actor=actor, plan_id=plan_id)
     deleted, skipped, errors = list(result.deleted), list(result.skipped), list(result.errors)
@@ -10002,7 +10281,7 @@ and in `show_run`, add `cleaned=cleaned_artifacts(ctx, record),` after `children
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_storage.py tests/core/test_queries.py -v`
-Expected: `tests/core/test_storage.py` `18 passed`; `tests/core/test_queries.py` still passes.
+Expected: `tests/core/test_storage.py` `19 passed`; `tests/core/test_queries.py` still passes.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -10441,11 +10720,13 @@ def identity(conn: HTTPConnection, *, created_by: str, owner: str | None) -> tup
     Returns
     -------
     tuple of (str, str or None)
-        The body's values from a hub forwarding (``client == "host"``); with
-        auth off ``(created_by, None)``; else the principal's identity and user.
+        The body's values from a hub forwarding (``client == "host"`` with
+        ``admin`` scope: ``HOST_PRINCIPAL`` or a host session redeemed from an
+        admin offer); with auth off ``(created_by, None)``; else the principal's
+        identity and user.
     """
     principal = principal_of(conn)
-    if principal.client == "host":
+    if principal.client == "host" and principal.scope == "admin":
         return created_by, owner
     if not auth_on(conn):
         return created_by, None
@@ -10527,6 +10808,11 @@ class AuthGuard:
         send : Send
         """
         if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        if not str(scope.get("path", "")).startswith(GUARDED_PREFIXES):
+            # static UI files, /pair, /.well-known: public and never read a principal,
+            # so skip the auth.db lookup (a thread hop and a SQLite read per asset)
             await self.app(scope, receive, send)
             return
         principal = await asyncio.to_thread(self._resolve, scope)
@@ -10922,8 +11208,8 @@ git commit -m "feat(api): declare a scope on every route and the websocket"
 
 **Interfaces:**
 - Consumes: `AuthStore` (Tasks 6–7), `pairing_url`, `qr_text`, `principal_of`, `PUBLIC`/`READ`/`ADMIN`.
-- Produces (contract 3, exact): `POST /api/v1/auth/pair` (public), `GET /api/v1/auth/me` (read), `POST /api/v1/auth/logout` (read), `POST /api/v1/auth/ws-ticket` (read), `POST /api/v1/auth/pairings` (read + scope rule), `GET /api/v1/auth/sessions` (read; `?user=` needs admin for others), `POST /api/v1/auth/sessions/{id}/revoke` (read; own, or admin), `GET /api/v1/auth/users` (admin), `POST /api/v1/auth/users/{name}/disable` (admin).
-- Produces (public helpers): `register_auth_routes(app, ctx, store)`; `PairLimiter(now)` with `allow(address) -> bool` (10 attempts per 60 s per client address); `PAIR_ATTEMPTS_PER_MINUTE = 10`.
+- Produces (contract 3, exact): `POST /api/v1/auth/pair` (public), `GET /api/v1/auth/me` (read), `POST /api/v1/auth/logout` (read), `POST /api/v1/auth/ws-ticket` (read), `POST /api/v1/auth/pairings` (read + scope rule), `GET /api/v1/auth/sessions` (read; `?user=` needs admin for others), `POST /api/v1/auth/sessions/{session_id}/revoke` (read; own, or admin), `GET /api/v1/auth/users` (admin), `POST /api/v1/auth/users/{name}/disable` (admin).
+- Produces (public helpers): `register_auth_routes(app, ctx, store)`; `PairLimiter(now)` with `blocked(address) -> bool` and `fail(address) -> None` (10 failed attempts per 60 s per client address; a successful pairing is not counted); `PAIR_ATTEMPTS_PER_MINUTE = 10`; `pair_client_key(peer, headers, *, behind_proxy) -> str` (the address the limit counts: behind a loopback proxy such as `tailscale serve`, i.e. `public_url` set and the peer loopback, the `Tailscale-User-Login` header, else the last `X-Forwarded-For` hop the proxy appended, else the peer; so one person's bad attempts never lock pairing for the whole lab, and a header sent from a non-loopback peer is ignored).
 - Rules: a browser pair sets `hx_session` (`HttpOnly; SameSite=Strict; Path=/`, `Secure` when `public_url` is https, lifetime `session_days`) and returns `{user, scope, scopes, session_id}`; other clients get `{token, ...}` too. Pairing and `pairings` answer 400 when auth is off. `pairings` defaults `user` to the caller; `new_user` must match whether the user exists; the link uses `public_url`, else the request's base URL; its result is never stored in a command receipt (it holds the secret). Session changes emit `auth.session_created` / `auth.session_revoked` `{session_id, user, client}`.
 
 - [ ] **Step 1: Write the failing test**
@@ -10939,6 +11225,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hypothex.api.app import create_app
+from hypothex.api.routes_auth import PAIR_ATTEMPTS_PER_MINUTE, pair_client_key
 from hypothex.auth.pairing import parse_pairing_url
 from hypothex.auth.store import PAIRING_INVALID, AuthStore
 from tests.api.authkit import BASE, auth_app, bearer, token_for
@@ -11036,6 +11323,24 @@ def test_pairing_attempts_are_rate_limited(client: TestClient) -> None:
     assert codes == [400] * 10 + [429]
 
 
+def test_successful_pairings_do_not_count(app: FastAPI, client: TestClient) -> None:
+    token = owner_token(app)
+    for i in range(PAIR_ATTEMPTS_PER_MINUTE + 2):  # a lab pairing a dozen devices in a minute
+        _, offer_id, secret = parse_pairing_url(pair_link(client, token, scope="read"))
+        body = {"offer_id": offer_id, "secret": secret, "device": f"d{i}", "client": "cli"}
+        assert client.post("/api/v1/auth/pair", json=body).status_code == 200
+
+
+def test_the_pairing_limit_counts_people_behind_a_proxy() -> None:
+    ts = {"tailscale-user-login": "alice@lab.org", "x-forwarded-for": "100.64.0.7"}
+    assert pair_client_key("127.0.0.1", ts, behind_proxy=True) == "ts:alice@lab.org"
+    xff = {"x-forwarded-for": "203.0.113.9, 100.64.0.7"}
+    assert pair_client_key("127.0.0.1", xff, behind_proxy=True) == "100.64.0.7"
+    assert pair_client_key("127.0.0.1", {}, behind_proxy=True) == "127.0.0.1"
+    assert pair_client_key("10.0.0.5", ts, behind_proxy=True) == "10.0.0.5"  # not from the proxy
+    assert pair_client_key("127.0.0.1", ts, behind_proxy=False) == "127.0.0.1"
+
+
 def test_logout_revokes_and_clears_the_cookie(app: FastAPI, client: TestClient) -> None:
     token = token_for(app.state.auth, "alice", "read")
     before = app.state.ctx.events.last_sequence()
@@ -11092,7 +11397,7 @@ def test_auth_off_answers_as_local_owner(home: Path) -> None:
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/api/test_auth_routes.py -v`
-Expected: FAIL: every test gets `404` from `/api/v1/auth/...` (for example `assert 404 == 200`).
+Expected: FAIL at collection with `ModuleNotFoundError: No module named 'hypothex.api.routes_auth'` (the module and its routes come in Step 3).
 
 - [ ] **Step 3: Write the routes**
 
@@ -11105,7 +11410,7 @@ from __future__ import annotations
 
 import threading
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
@@ -11116,10 +11421,17 @@ from starlette.responses import JSONResponse
 from hypothex.api.auth import ADMIN, PUBLIC, READ, SESSION_COOKIE, principal_of
 from hypothex.auth.pairing import pairing_url, qr_text
 from hypothex.auth.scopes import Scope, scopes_of
-from hypothex.auth.store import TICKET_TTL_SECONDS, AuthStore, ScopeError, Session
+from hypothex.auth.store import (
+    TICKET_TTL_SECONDS,
+    AuthStore,
+    PairingError,
+    ScopeError,
+    Session,
+)
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError
 from hypothex.core.jsonutil import to_jsonable
+from hypothex.core.settings import is_loopback_host
 
 PAIR_ATTEMPTS_PER_MINUTE = 10
 
@@ -11150,9 +11462,52 @@ class CommandBody(BaseModel):
     command_id: str | None = None
 
 
+def pair_client_key(peer: str, headers: Mapping[str, str], *, behind_proxy: bool) -> str:
+    """
+    Choose the address the pairing rate limit counts.
+
+    Behind ``tailscale serve`` (``public_url`` set) every request reaches the hub
+    from ``127.0.0.1``; counting the peer would let one person's typos lock
+    pairing for the whole lab. Headers count only when the peer is loopback (the
+    proxy), so a remote caller cannot pick its own key.
+
+    Parameters
+    ----------
+    peer : str
+        The TCP peer address.
+    headers : mapping of str to str
+        Request headers (lower-case keys, as Starlette gives them).
+    behind_proxy : bool
+        The hub has a ``public_url``.
+
+    Returns
+    -------
+    str
+        ``ts:<login>`` from ``Tailscale-User-Login``, else the last
+        ``X-Forwarded-For`` hop (the one the proxy appended), else ``peer``.
+
+    Examples
+    --------
+    >>> pair_client_key("127.0.0.1", {"x-forwarded-for": "a, 100.64.0.7"}, behind_proxy=True)
+    '100.64.0.7'
+    """
+    if behind_proxy and is_loopback_host(peer):
+        login = headers.get("tailscale-user-login", "").strip()
+        if login:
+            return f"ts:{login}"
+        hops = [h.strip() for h in headers.get("x-forwarded-for", "").split(",") if h.strip()]
+        if hops:
+            return hops[-1]
+    return peer
+
+
 class PairLimiter:
     """
-    At most ``PAIR_ATTEMPTS_PER_MINUTE`` pairing attempts per client address and minute.
+    At most ``PAIR_ATTEMPTS_PER_MINUTE`` failed pairing attempts per client address and minute.
+
+    Only failures count: a success used up a fresh one-use secret that only the
+    offer's issuer could hand out, so it is no guessing. A lab pairing several
+    devices in a minute (or a test suite) is never locked out; a guesser is.
 
     Parameters
     ----------
@@ -11162,12 +11517,19 @@ class PairLimiter:
 
     def __init__(self, now: Callable[[], datetime]) -> None:
         self.now = now
-        self._hits: dict[str, deque[datetime]] = defaultdict(deque)
+        self._fails: dict[str, deque[datetime]] = defaultdict(deque)
         self._lock = threading.Lock()
 
-    def allow(self, address: str) -> bool:
+    def _recent(self, address: str) -> deque[datetime]:
+        now = self.now()
+        fails = self._fails[address]
+        while fails and now - fails[0] >= timedelta(minutes=1):
+            fails.popleft()
+        return fails
+
+    def blocked(self, address: str) -> bool:
         """
-        Count one attempt; tell whether it may go on.
+        Tell whether ``address`` has used up its failed attempts for this minute.
 
         Parameters
         ----------
@@ -11178,14 +11540,18 @@ class PairLimiter:
         bool
         """
         with self._lock:
-            now = self.now()
-            hits = self._hits[address]
-            while hits and now - hits[0] >= timedelta(minutes=1):
-                hits.popleft()
-            if len(hits) >= PAIR_ATTEMPTS_PER_MINUTE:
-                return False
-            hits.append(now)
-            return True
+            return len(self._recent(address)) >= PAIR_ATTEMPTS_PER_MINUTE
+
+    def fail(self, address: str) -> None:
+        """
+        Count one failed attempt of ``address``.
+
+        Parameters
+        ----------
+        address : str
+        """
+        with self._lock:
+            self._recent(address).append(self.now())
 
 
 def register_auth_routes(app: FastAPI, ctx: Context, store: AuthStore) -> None:
@@ -11209,15 +11575,21 @@ def register_auth_routes(app: FastAPI, ctx: Context, store: AuthStore) -> None:
     def pair(body: PairBody, request: Request) -> JSONResponse:
         if not request.app.state.auth_on:
             raise ConfigError("auth is off on this hub; there is nothing to pair")
-        address = request.client.host if request.client else "unknown"
-        if not limiter.allow(address):
+        peer = request.client.host if request.client else "unknown"
+        behind_proxy = request.app.state.public_url is not None
+        address = pair_client_key(peer, request.headers, behind_proxy=behind_proxy)
+        if limiter.blocked(address):
             return JSONResponse(
                 {"error": "too many pairing attempts; wait a minute", "type": "RateLimitError"},
                 status_code=429,
             )
-        session, token = store.redeem(
-            body.offer_id, body.secret, client=body.client, device=body.device
-        )
+        try:
+            session, token = store.redeem(
+                body.offer_id, body.secret, client=body.client, device=body.device
+            )
+        except PairingError:
+            limiter.fail(address)
+            raise
         session_event("auth.session_created", session)
         out = {
             "user": session.user,
@@ -11349,7 +11721,7 @@ with
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/api/test_auth_routes.py tests/api/test_route_scopes.py -v`
-Expected: `tests/api/test_auth_routes.py` `11 passed`; `tests/api/test_route_scopes.py` still `4 passed` (the new routes declare their scopes).
+Expected: `tests/api/test_auth_routes.py` `13 passed`; `tests/api/test_route_scopes.py` still `4 passed` (the new routes declare their scopes).
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -11582,12 +11954,14 @@ git commit -m "feat(api): websocket tickets, 4401 on revoked sessions, admin-onl
 
 **Files:**
 - Modify: `src/hypothex/api/app.py` (`ActionBody.owner`, `run_request`, `stamp`, `launcher_for`, routes `POST /api/v1/runs`, `POST /api/v1/hosts/{host}/runs`, rerun, reinfer, stop, archive, notes, sweeps POST and cancel, `GET /api/v1/runs`)
+- Modify: `src/hypothex/core/overview.py` (`owner` on `TimelineItem`, `IdeaRow`, `FailureRow`)
 - Test: `tests/api/test_ownership_api.py`
 
 **Interfaces:**
 - Consumes: `identity`, `principal_of` (Task 23), `require_act` (Task 5), `RunRequest.owner`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)` (Task 4).
 - Produces (contract 1.2, exact): `ActionBody.owner: str | None = None`; `GET /api/v1/runs?owner=` (`me` = the caller).
 - Produces (public helper): `stamp(conn, body) -> body` (a copy with `created_by`/`owner` from `identity`).
+- Produces (additive, contract 1.12 "the Overview shows `owner`" on running and recent rows): `TimelineItem.owner`, `IdeaRow.owner` (the group's first run's, like its `created_by`), `FailureRow.owner`, each `str | None = None`.
 - Rules: launches, host launches, reruns, reinfers, and sweeps get `created_by`/`owner` from `identity` (a collaborator's body values are ignored; a hub's are kept); a note's `author` becomes the caller's identity; stop and archive need `require_act(..., record.owner, ...)` and sweep cancel `require_act(..., spec.owner, "cancel_queued")`; forwarded bodies carry `created_by` and `owner` to the host.
 
 - [ ] **Step 1: Write the failing test**
@@ -11722,6 +12096,23 @@ def test_owner_me_filters_runs(hub: tuple[FastAPI, TestClient, Context]) -> None
     assert [r["run_id"] for r in mine] == ["a1"]
     theirs = client.get("/api/v1/runs?owner=sv", headers=bearer(alice)).json()
     assert [r["run_id"] for r in theirs] == ["s1"]
+
+
+def test_overview_rows_name_their_owner(hub: tuple[FastAPI, TestClient, Context]) -> None:
+    app, client, ctx = hub
+    reader = token_for(app.state.auth, "bo", "read")
+    queued(ctx, "al-fail", "alice")
+    ctx.update_run(
+        "al-fail",
+        "run.failed",
+        lambda r: r.model_copy(update={"status": RunStatus.FAILED, "ended_at": r.created_at}),
+    )
+    queued(ctx, "sv-q", "sv")
+    body = client.get("/api/v1/overview", headers=bearer(reader)).json()
+    assert {t["run_id"]: t["owner"] for t in body["timeline"]} == {"al-fail": "alice", "sv-q": "sv"}
+    assert [(f["run_id"], f["owner"]) for f in body["failures"]] == [("al-fail", "alice")]
+    assert body["ideas"] and all(i["owner"] in ("alice", "sv") for i in body["ideas"])
+    assert [r["owner"] for r in body["running"]] == ["sv"]
 
 
 def test_note_author_is_the_caller(hub: tuple[FastAPI, TestClient, Context]) -> None:
@@ -11937,10 +12328,19 @@ Replace `sweep_cancel` with:
         return once(action, act)
 ```
 
+In `src/hypothex/core/overview.py`, add this field as the last field of `TimelineItem` (after `label: str`), of `IdeaRow` (after its `unit` docstring), and of `FailureRow` (after `retried_ok: bool`):
+
+```python
+    owner: str | None = None
+    """The run's owner (``RunRecord.owner``); None with auth off or before phase 3."""
+```
+
+then pass it where `build_overview` builds them: `owner=run.owner,` after `label=label(run),` in `TimelineItem(...)`; `owner=members[0].owner,` after `created_by=members[0].created_by,` in `IdeaRow(...)`; `owner=run.owner,` after `retried_ok=_retried_ok(run, everything),` in `FailureRow(...)`. (`running` is a list of `RunRecord`, which carries `owner` since Task 4.)
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/api -v`
-Expected: `tests/api/test_ownership_api.py` `8 passed`; every phase 1–2 API test (forwarding, sweeps, hosts) still passes: with auth off `identity` keeps the body's `created_by`, and the hub's forwarded bodies now also carry `owner`.
+Expected: `tests/api/test_ownership_api.py` `9 passed`; every phase 1–2 API test (forwarding, sweeps, hosts) still passes: with auth off `identity` keeps the body's `created_by`, and the hub's forwarded bodies now also carry `owner`.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -11948,7 +12348,7 @@ Expected: clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hypothex/api/app.py tests/api/test_ownership_api.py
+git add src/hypothex/api/app.py src/hypothex/core/overview.py tests/api/test_ownership_api.py
 git commit -m "feat(api): server-set run identity, owner-only stop and archive, owner filter"
 ```
 
@@ -12031,7 +12431,7 @@ Contract 3 (new routes), 1.12 (what a collaborator sees). The route groups live 
 - Consumes: `hypothex.core.notebook` (Task 8), `hypothex.core.export` (Tasks 10–12), `hypothex.core.digest` (Tasks 18–19), `principal_of`, `auth_on`.
 - Produces (contract 3, exact): `GET /api/v1/projects/{project}/notebook` (read), `GET|POST|PUT /api/v1/projects/{project}/notebook/{day}` (read | launch | launch), `GET /api/v1/tasks/{project}/{task}/export` (read), `GET /api/v1/compare/export` (read), `GET /api/v1/projects/{project}/digest` (read), `POST /api/v1/projects/{project}/digest/send` (admin). `GET .../leaderboard` already carries `baselines` (Task 9) and `GET /api/v1/runs/{id}` carries `cleaned` and `record.owner` (Tasks 4, 22).
 - Produces (public helper): `register_team_routes(app, ctx)`; `notebook_author(conn) -> str` (`human:<user>` / `agent:<agent>@<user>` with auth on, `human` with auth off).
-- Rules: `NotebookConflictError` → 409 `{error, type, current}`; `NotebookTooLargeError` → 413. Export options are query parameters (`metrics` and `groups` comma-separated); the answer is `text/plain; charset=utf-8` (LaTeX, Markdown) or `text/csv; charset=utf-8` with `Content-Disposition: attachment; filename="<task>.<ext>"` (`compare.<ext>`); `run_ids` takes 2 to 20 ids. The digest window defaults to the last 7 days; naive datetimes are UTC.
+- Rules: `{day}` is `YYYY-MM-DD` or `today` (the hub's date, `hub_today`: the UI and `hx note` in client mode never compute it themselves); `NotebookConflictError` → 409 `{error, type, current}`; `NotebookTooLargeError` → 413. Export options are query parameters (`metrics` and `groups` comma-separated); the answer is `text/plain; charset=utf-8` (LaTeX, Markdown) or `text/csv; charset=utf-8` with `Content-Disposition: attachment; filename="<task>.<ext>"` (`compare.<ext>`); `run_ids` takes 2 to 20 ids. The digest window defaults to the last 7 days; naive datetimes are UTC.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -12047,7 +12447,7 @@ from fastapi.testclient import TestClient
 
 from hypothex.core.context import Context
 from hypothex.core.evaluation import evaluate_run
-from hypothex.core.notebook import NOTEBOOK_MAX_BYTES
+from hypothex.core.notebook import NOTEBOOK_MAX_BYTES, hub_today
 from tests.api.authkit import BASE, auth_app, bearer, token_for
 from tests.factories import PREDS_075, seed_finished_run
 
@@ -12068,7 +12468,7 @@ def team(home: Path, toy_repo: Path) -> Iterator[tuple[FastAPI, TestClient, Cont
 
 
 def test_notebook_round_trip(team: tuple[FastAPI, TestClient, Context]) -> None:
-    app, client, _ = team
+    app, client, ctx = team
     alice = bearer(token_for(app.state.auth, "alice", "launch"))
     day = client.post(f"{NOTEBOOK}/2026-10-04", json={"text": "see [[run:r1]]"}, headers=alice)
     assert day.status_code == 200 and "— human:alice" in day.json()["text"]
@@ -12096,6 +12496,8 @@ def test_notebook_round_trip(team: tuple[FastAPI, TestClient, Context]) -> None:
     )
     assert big.status_code == 413
     assert client.get(f"{NOTEBOOK}/04-10-2026", headers=alice).status_code == 400
+    now_day = client.get(f"{NOTEBOOK}/today", headers=alice).json()["day"]
+    assert now_day == hub_today(ctx).isoformat()  # the hub names "today", not the caller
 
 
 def test_task_export_downloads(team: tuple[FastAPI, TestClient, Context]) -> None:
@@ -12163,7 +12565,7 @@ Create `src/hypothex/api/routes_team.py`:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Query, Request
@@ -12185,7 +12587,15 @@ from hypothex.core.export import (
 )
 from hypothex.core.ids import utcnow
 from hypothex.core.jsonutil import to_jsonable
-from hypothex.core.notebook import append_entry, list_days, parse_day, read_day, today, write_day
+from hypothex.core.notebook import (
+    append_entry,
+    hub_today,
+    list_days,
+    parse_day,
+    read_day,
+    today,
+    write_day,
+)
 from hypothex.core.settings import Channel, load_settings
 
 
@@ -12255,19 +12665,24 @@ def register_team_routes(app: FastAPI, ctx: Context) -> None:
     ctx : Context
     """
 
+    def the_day(day: str) -> date:
+        # `today` is the hub's date (contract 1.4), so a browser or a client in another
+        # zone never picks the day file; anything else must be YYYY-MM-DD
+        return hub_today(ctx) if day == "today" else parse_day(day)
+
     @app.get("/api/v1/projects/{project}/notebook", dependencies=READ)
     def notebook_days(project: str) -> list[dict[str, Any]]:
         return list_days(ctx, project)
 
     @app.get("/api/v1/projects/{project}/notebook/{day}", dependencies=READ)
     def notebook_day(project: str, day: str) -> dict[str, Any]:
-        return to_jsonable(read_day(ctx, project, parse_day(day)))
+        return to_jsonable(read_day(ctx, project, the_day(day)))
 
     @app.post("/api/v1/projects/{project}/notebook/{day}", dependencies=LAUNCH)
     def notebook_append(
         project: str, day: str, body: NotebookAppendBody, request: Request
     ) -> dict[str, Any]:
-        when = parse_day(day)
+        when = the_day(day)
         author = notebook_author(request)
         return ctx.events.run_once(
             body.command_id,
@@ -12278,7 +12693,7 @@ def register_team_routes(app: FastAPI, ctx: Context) -> None:
     def notebook_write(
         project: str, day: str, body: NotebookWriteBody, request: Request
     ) -> dict[str, Any]:
-        when = parse_day(day)
+        when = the_day(day)
         author = notebook_author(request)
         return ctx.events.run_once(
             body.command_id,
@@ -12627,13 +13042,19 @@ def notify_status(ctx: Context, settings: Settings) -> dict[str, Any]:
     }
 ```
 
-Append to `register_team_routes` in `src/hypothex/api/routes_team.py` (and add `from hypothex.notify.notifier import Notifier, notify_status` to its imports):
+In `src/hypothex/api/routes_team.py`, add `from hypothex.notify.notifier import Notifier, notify_status` to its imports and this body model at module scope, after `DigestSendBody`:
 
 ```python
-    class NotifyTestBody(BaseModel):
-        channel: Channel
-        command_id: str | None = None
+class NotifyTestBody(BaseModel):
+    """Body of ``POST /api/v1/notify/test``."""
 
+    channel: Channel
+    command_id: str | None = None
+```
+
+Then append to `register_team_routes`:
+
+```python
     @app.get("/api/v1/notify", dependencies=ADMIN)
     def notify_route() -> dict[str, Any]:
         return notify_status(ctx, load_settings(ctx.layout))
@@ -12644,7 +13065,7 @@ Append to `register_team_routes` in `src/hypothex/api/routes_team.py` (and add `
         return ctx.events.run_once(body.command_id, lambda: notifier.send_test(body.channel))
 ```
 
-(`NotifyTestBody` is a body model local to `register_team_routes`; FastAPI resolves it like any other.)
+(`NotifyTestBody` must live at module scope: the module uses `from __future__ import annotations`, so FastAPI resolves the annotation `NotifyTestBody` from the module's globals; a class local to `register_team_routes` is not found there and FastAPI reads `body` as a required query parameter, answering the documented JSON body with 422. Every other body model of the plan is module-level for the same reason.)
 
 In `src/hypothex/api/app.py`:
 
@@ -12675,7 +13096,7 @@ NOTIFY_INTERVAL_SECONDS = 5.0
 
 (Task 23 put `store = ...` after the `kind` override, so `ctx.descriptor.kind` is final here.)
 
-4. In `lifespan`, before `for loop in loops:` add:
+4. In `lifespan`, right before the first `for loop in loops:` (the one that calls `loop.start()`, above the `SlurmPoller`; not the join loop inside the nested `finally`) add:
 
 ```python
         if run_notifier:
@@ -12982,8 +13403,8 @@ Contract 1.10 (`scoped`), 5 (tools and scopes), 7. Over `/mcp` with auth on, the
 
 **Interfaces:**
 - Produces (contract 1.10, exact): `scoped(scope) -> Callable[[F], F]` (tool decorator), `tool_scopes(server) -> dict[str, Scope]`.
-- Produces (public helpers): `acting_as(principal)` (context manager: the principal of in-process tool calls, e.g. tests and stdio); `caller() -> Principal` (inside a tool); `caller_token() -> str | None` (the caller's bearer token over HTTP, so the tool's own hub calls act as the caller); `TOOL_SCOPE_ATTR = "__hx_scope__"`.
-- Rules: the wrapper finds the principal in `ctx.request_context.request.scope["hx.principal"]` (an HTTP call through `AuthGuard`/`TokenGuard`), else the `acting_as` principal, else `LOCAL_OWNER`; a tool whose scope the caller does not hold raises a tool error `403 · <scope> scope needed; you hold <scope>`. List/get tools are `read`; `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact` are `launch`. A session principal launches as `agent:<agent>@<user>` with `owner=<user>`; `LOCAL_OWNER` keeps `agent:<agent>` and no owner.
+- Produces (public helpers): `acting_as(principal)` (context manager: the principal of in-process tool calls, e.g. tests and stdio); `caller() -> Principal` (inside a tool); `caller_token() -> str | None` (the caller's own credential over HTTP: the bearer token, else the `hx_session` cookie value, so the tool's own hub calls act as the caller); `tool_hub_token(fallback) -> str | None` (over HTTP `caller_token()` and never the fallback; in-process/stdio `fallback()`); `TOOL_SCOPE_ATTR = "__hx_scope__"`.
+- Rules: the wrapper finds the principal in `ctx.request_context.request.scope["hx.principal"]` (an HTTP call through `AuthGuard`/`TokenGuard`), else the `acting_as` principal, else `LOCAL_OWNER`; a tool whose scope the caller does not hold raises a tool error `403 · <scope> scope needed; you hold <scope>`. List/get tools are `read`; `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact` are `launch`. A session principal launches as `agent:<agent>@<user>` with `owner=<user>`; `LOCAL_OWNER` keeps `agent:<agent>` and no owner. Over HTTP a tool's hub calls carry only the caller's credential: a cookie caller forwards its cookie's session token, and a caller without one gets no token, never `hub_token` or the local admin token (that fallback would let any caller act with the server's own rights). Tools apply the same ownership rules as HTTP (contract 1.3): `stop_run` on a local run calls `require_act(caller(), record.owner, "stop")` and `cancel_sweep` on a local sweep `require_act(caller(), spec.owner, "cancel_queued")` before acting; forwarded calls are checked by the hub, which sees the caller's own token.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -13001,8 +13422,18 @@ from fastapi.testclient import TestClient
 from hypothex.auth.store import Principal
 from hypothex.core import control
 from hypothex.core.context import Context
-from hypothex.mcp.server import acting_as, build_server, caller, caller_token, scoped, tool_scopes
+from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep
+from hypothex.mcp.server import (
+    acting_as,
+    build_server,
+    caller,
+    caller_token,
+    scoped,
+    tool_hub_token,
+    tool_scopes,
+)
 from tests.api.authkit import BASE, auth_app
+from tests.factories import make_record
 from tests.mcp.test_server import call
 
 PY = sys.executable
@@ -13062,19 +13493,58 @@ def test_local_owner_keeps_phase_2_identity(home: Path, toy_repo: Path) -> None:
     control.wait_for_run(Context.open(home), out["run"]["run_id"], timeout=30)
 
 
+def fake_http(headers: dict[str, str], cookies: dict[str, str]) -> SimpleNamespace:
+    request = SimpleNamespace(scope={"hx.principal": ALICE}, headers=headers, cookies=cookies)
+    return SimpleNamespace(request_context=SimpleNamespace(request=request))
+
+
 def test_http_principal_and_token_reach_the_tool() -> None:
     def who() -> dict[str, str | None]:
-        return {"user": caller().user, "token": caller_token()}
+        return {
+            "user": caller().user,
+            "token": caller_token(),
+            "hub": tool_hub_token(lambda: "SERVER-ADMIN"),
+        }
 
     wrapped = scoped("read")(who)
-    request = SimpleNamespace(
-        scope={"hx.principal": ALICE}, headers={"authorization": "Bearer hxs_abc"}
-    )
-    fake = SimpleNamespace(request_context=SimpleNamespace(request=request))
-    assert wrapped(hx_mcp_ctx=fake) == {"user": "alice", "token": "hxs_abc"}
-    assert wrapped(hx_mcp_ctx=None) == {"user": "local", "token": None}
+    bearer_call = fake_http({"authorization": "Bearer hxs_abc"}, {})
+    expected = {"user": "alice", "token": "hxs_abc", "hub": "hxs_abc"}
+    assert wrapped(hx_mcp_ctx=bearer_call) == expected
+    cookie_call = fake_http({}, {"hx_session": "hxs_cookie"})
+    assert wrapped(hx_mcp_ctx=cookie_call)["hub"] == "hxs_cookie"  # never the server's token
+    bare_call = fake_http({}, {})
+    assert wrapped(hx_mcp_ctx=bare_call)["hub"] is None
+    local = wrapped(hx_mcp_ctx=None)
+    assert local == {"user": "local", "token": None, "hub": "SERVER-ADMIN"}  # stdio
     with pytest.raises(Exception, match="admin scope needed"):
-        scoped("admin")(who)(hx_mcp_ctx=fake)
+        scoped("admin")(who)(hx_mcp_ctx=bearer_call)
+
+
+def test_tools_keep_the_ownership_rules(home: Path, toy_repo: Path) -> None:
+    ctx = Context.open(home)
+    ctx.register_project(toy_repo)
+    ctx.create_run(make_record("svs", owner="sv", environment_id=ctx.descriptor.environment_id))
+    save_sweep(
+        ctx.layout,
+        SweepSpec(
+            id="sw-sv",
+            project="toy",
+            task=None,
+            host=None,
+            grid=[SweepParam(name="x", values=["1"])],
+            seeds=[1],
+            command_template=["echo", "{x}"],
+            created_by="human:sv",
+            created_at=make_record().created_at,
+            owner="sv",
+        ),
+    )
+    with acting_as(ALICE):
+        err, message = call(home, "stop_run", {"run_id": "svs"})
+        assert err and message == "run owned by sv; stop needs owner or admin"
+        err, message = call(home, "cancel_sweep", {"project": "toy", "sweep_id": "sw-sv"})
+        assert err and message == "run owned by sv; cancel_queued needs owner or admin"
+    assert ctx.find_record("svs").status.value == "queued"
 
 
 def test_mcp_over_http_needs_a_session(home: Path) -> None:
@@ -13101,11 +13571,13 @@ from typing import TypeVar, cast
 
 from mcp.server.mcpserver import Context as McpContext
 
+from hypothex.api.auth import SESSION_COOKIE
+from hypothex.auth.ownership import require_act
 from hypothex.auth.scopes import Scope, covers
 from hypothex.auth.store import LOCAL_OWNER, Principal
 ```
 
-(merge with the existing `collections.abc`, `contextlib`, and `typing` imports), and add after `_expose_errors`:
+(merge with the existing `collections.abc`, `contextlib`, and `typing` imports; `hypothex.api.auth` imports only FastAPI, Starlette, and `hypothex.auth`, so there is no cycle with `hypothex.api.app`), and add after `_expose_errors`:
 
 ```python
 F = TypeVar("F", bound=Callable[..., Any])
@@ -13114,6 +13586,7 @@ _CTX_PARAM = "hx_mcp_ctx"
 _ACTING: ContextVar[Principal | None] = ContextVar("hx_mcp_acting", default=None)
 _CALLER: ContextVar[Principal] = ContextVar("hx_mcp_caller", default=LOCAL_OWNER)
 _CALLER_TOKEN: ContextVar[str | None] = ContextVar("hx_mcp_caller_token", default=None)
+_OVER_HTTP: ContextVar[bool] = ContextVar("hx_mcp_over_http", default=False)
 
 
 @contextmanager
@@ -13149,11 +13622,13 @@ def caller() -> Principal:
 
 def caller_token() -> str | None:
     """
-    Return the caller's bearer token over HTTP, so a tool's hub calls act as the caller.
+    Return the caller's credential over HTTP, so a tool's hub calls act as the caller.
 
     Returns
     -------
     str or None
+        The bearer token, else the ``hx_session`` cookie's session token; None
+        in-process, over stdio, or for an HTTP caller with neither.
     """
     return _CALLER_TOKEN.get()
 
@@ -13177,12 +13652,36 @@ def _principal_from(request: Any) -> Principal:
     return acting if acting is not None else LOCAL_OWNER
 
 
-def _bearer_from(request: Any) -> str | None:
+def _credential_from(request: Any) -> str | None:
+    # the caller's own session token: the bearer header, else the hx_session cookie
     headers = getattr(request, "headers", None)
     given = headers.get("authorization", "") if headers is not None else ""
-    if not given.startswith("Bearer "):
-        return None
-    return given.removeprefix("Bearer ").strip() or None
+    if given.startswith("Bearer "):
+        return given.removeprefix("Bearer ").strip() or None
+    cookies = getattr(request, "cookies", None)
+    found = cookies.get(SESSION_COOKIE) if cookies is not None else None
+    return found or None
+
+
+def tool_hub_token(fallback: Callable[[], str | None]) -> str | None:
+    """
+    Choose the bearer token a tool's own hub calls send.
+
+    Parameters
+    ----------
+    fallback : callable
+        The server's token (``hub_token`` or ``resolve_hub_token``); used only
+        for in-process and stdio calls.
+
+    Returns
+    -------
+    str or None
+        Over HTTP the caller's credential (``caller_token()``), even when it is
+        None: a caller never borrows the server's own rights.
+    """
+    if _OVER_HTTP.get():
+        return caller_token()
+    return fallback()
 
 
 def scoped(scope: Scope) -> Callable[[F], F]:
@@ -13212,10 +13711,12 @@ def scoped(scope: Scope) -> Callable[[F], F]:
             if not covers(principal.scope, scope):
                 raise ToolError(f"403 · {scope} scope needed; you hold {principal.scope}")
             who = _CALLER.set(principal)
-            token = _CALLER_TOKEN.set(_bearer_from(request))
+            token = _CALLER_TOKEN.set(_credential_from(request))
+            over_http = _OVER_HTTP.set(request is not None)
             try:
                 return fn(*args, **kwargs)
             finally:
+                _OVER_HTTP.reset(over_http)
                 _CALLER_TOKEN.reset(token)
                 _CALLER.reset(who)
 
@@ -13265,8 +13766,9 @@ In `build_server`:
 
 ```python
     def auth() -> str | None:
-        # over HTTP the caller's own token, so the hub sees who acts
-        return caller_token() or hub_token or resolve_hub_token(hub_url, ctx().layout.home)
+        # over HTTP only the caller's own credential (the hub sees who acts and
+        # applies their scope and ownership); the server's token only in-process/stdio
+        return tool_hub_token(lambda: hub_token or resolve_hub_token(hub_url, ctx().layout.home))
 ```
 
 2. Add after `def dump(...)`:
@@ -13304,10 +13806,28 @@ In `build_server`:
         return {"ok": True}
 ```
 
+8. In `stop_run`, check ownership before stopping a local run (a forwarded stop is checked by the hub, which sees the caller's token):
+
+```python
+        out = via_hub(run_id, "stop", {})
+        if out is not None:
+            return {"run": out}
+        c = ctx()
+        require_act(caller(), c.find_record(run_id).owner, "stop")
+        return {"run": dump(control.stop_run(c, run_id))}
+```
+
+9. In `cancel_sweep`, replace the last line (`return dump(core_sweeps.cancel_queued(c, spec.project, spec.id))`) with:
+
+```python
+        require_act(caller(), spec.owner, "cancel_queued")
+        return dump(core_sweeps.cancel_queued(c, spec.project, spec.id))
+```
+
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/mcp -v`
-Expected: `tests/mcp/test_scoped_tools.py` `6 passed`; `tests/mcp/test_server.py`, `test_remote_tools.py`, and `test_remote_helpers.py` still pass (stdio and in-memory calls run as `LOCAL_OWNER`).
+Expected: `tests/mcp/test_scoped_tools.py` `7 passed`; `tests/mcp/test_server.py`, `test_remote_tools.py`, and `test_remote_helpers.py` still pass (stdio and in-memory calls run as `LOCAL_OWNER`).
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -13513,8 +14033,9 @@ and add these tools at the end of `build_server`, before `return mcp`:
     @_expose_errors
     def get_notebook(project: str, day: str | None = None) -> dict[str, Any]:
         """Read one day of the project's lab notebook (default today) with run chips."""
-        when = core_notebook.parse_day(day) if day else core_notebook.today()
-        return dump(core_notebook.read_day(ctx(), project, when))
+        c = ctx()
+        when = core_notebook.parse_day(day) if day else core_notebook.hub_today(c)
+        return dump(core_notebook.read_day(c, project, when))
 
     @mcp.tool()
     @scoped("launch")
@@ -13611,13 +14132,14 @@ Contract 1.11, 8 (failure mode 13), 9 (Docker test). The index is the only thing
 **Interfaces:**
 - Produces (contract 1.11, exact): `Index.__init__(target: Path | str, *, password: SecretStr | None = None)`, `Index.dialect`, `upsert(session, model, values, keys)`, `open_index(layout, settings)`, `IndexUnavailableError` (API 503), `IndexSchemaError` (a `ConfigError`: "run hx db upgrade").
 - Produces (additive): `upsert(..., *, keep_max: str | None = None)` (keeps the larger value of one column, for `set_cursor`); `upsert_statement(dialect, model, values, keys, *, keep_max=None)`; `Index.json_text(column, key)` (`json_extract` on SQLite, `json_extract_path_text` on Postgres); `HEAD_REVISION = "0001_phase3"`.
-- Rules: a `Path` target is SQLite exactly as before; a `postgresql+psycopg://` URL opens a pooled engine (`pool_pre_ping=True`) with the password from `server.index_password_env`, never from the URL, and checks that the Alembic revision is `HEAD_REVISION` (`IndexSchemaError` otherwise). A server that does not answer raises `IndexUnavailableError` naming the URL with `***` for any password. Mid-request index failures answer 503 `{error, type: "IndexUnavailableError"}`; run files are written before the index, so `repair_index_gaps` indexes them on the next open.
+- Rules: a `Path` target is SQLite exactly as before; a `postgresql+psycopg://` URL opens a pooled engine (`pool_pre_ping=True`) with the password from `server.index_password_env`, never from the URL, and checks that the Alembic revision is `HEAD_REVISION` (`IndexSchemaError` otherwise). A server that does not answer raises `IndexUnavailableError` naming the URL with `***` for any password. A Postgres URL without `psycopg` installed raises `ConfigError` "a Postgres index needs psycopg: uv tool install 'hypothex[server]'" (never a bare `ModuleNotFoundError` from SQLAlchemy). Mid-request index failures answer 503 `{error, type: "IndexUnavailableError"}`; run files are written before the index, so `repair_index_gaps` indexes them on the next open.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/core/test_index_dialects.py`:
 
 ```python
+import sys
 from pathlib import Path
 
 import pytest
@@ -13629,6 +14151,7 @@ from sqlalchemy.orm import Session
 
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
+from hypothex.core.errors import ConfigError
 from hypothex.core.index import (
     HostCursorRow,
     Index,
@@ -13701,6 +14224,12 @@ def test_unreachable_postgres_names_the_url_without_the_password(
         open_index(Layout(tmp_path), ServerSettings(index_url=DEAD_PG))
     message = str(info.value)
     assert "127.0.0.1:1" in message and "hx@" in message and "SECRETXYZ" not in message
+
+
+def test_postgres_without_psycopg_says_what_to_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "psycopg", None)  # as on an install without the extra
+    with pytest.raises(ConfigError, match=r"needs psycopg: uv tool install 'hypothex\[server\]'"):
+        Index(DEAD_PG)
 
 
 def test_context_open_uses_config_yaml(home: Path) -> None:
@@ -13875,7 +14404,12 @@ def upsert(
         url = make_url(target)
         if password is not None:
             url = url.set(password=password.get_secret_value())
-        self.engine = create_engine(url, pool_pre_ping=True)
+        try:
+            self.engine = create_engine(url, pool_pre_ping=True)  # imports the driver
+        except ImportError:
+            raise ConfigError(
+                "a Postgres index needs psycopg: uv tool install 'hypothex[server]'"
+            ) from None
         self.dialect = "postgresql"
         self.rebuilt_schema = False  # Alembic owns the schema; never dropped here
         self._check_revision(redact_url(target))
@@ -14039,7 +14573,7 @@ In `src/hypothex/api/app.py`:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_index_dialects.py tests/core/test_index.py tests/core/test_context.py -v`
-Expected: `tests/core/test_index_dialects.py` `8 passed`; the phase 1–2 index and context tests still pass.
+Expected: `tests/core/test_index_dialects.py` `9 passed`; the phase 1–2 index and context tests still pass.
 
 Run: `uv run pytest -q && uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: every test passes; clean.
@@ -14984,15 +15518,17 @@ git commit -m "feat(remote): tailscale serve for hub https, with a fake tailscal
 ### Task 38: Paired `route: url` hosts — `token_env`, `host-tokens.json`, and the re-pair message
 
 **Files:**
-- Modify: `src/hypothex/remote/config.py` (`HostSpec.token_env`, `HOST_TOKENS_FILE`, `host_token`, `save_host_token`, `forget_host_token`, `load_host_tokens`)
+- Modify: `src/hypothex/remote/config.py` (`HostSpec.token_env`, `HOST_TOKENS_FILE`, `host_token`, `save_host_token`, `forget_host_token`, `load_host_tokens`, `same_origin`, `host_token_env_names`)
 - Modify: `src/hypothex/remote/hub.py` (a `route: url` session sends `host_token(...)`; an auth failure says how to re-pair)
+- Modify: `src/hypothex/core/execution.py` (`_secret_names` also drops every host's `token_env`)
 - Modify: `tests/remote/test_hub.py` (the message of `test_an_auth_failure_stops_retrying_until_connect`)
+- Modify: `tests/core/test_execution.py` (append)
 - Test: `tests/remote/test_host_pairing.py`
 
 **Interfaces:**
 - Produces (contract 1.13, exact): `HostSpec.token_env: str | None` (pattern `ENV_NAME`, `route: url` only), `HOST_TOKENS_FILE = "auth/host-tokens.json"`, `host_token(layout, name, spec) -> SecretStr | None` (the file first, then `resolve_secret(token_env)`).
-- Produces (public helpers): `load_host_tokens(layout) -> dict[str, str]`, `save_host_token(layout, name, token) -> None` (0600), `forget_host_token(layout, name) -> None`.
-- Rules: each session of a `route: url` host reads its token again (so `hx hosts pair` + reconnect uses the new one). A 401/403 from a `route: url` host stops retrying with state `error` and message `auth failed: hx hosts pair <name> <pairing-url>` (spec 5.3, contract failure mode 17); `route: ssh` keeps the phase 2 message (its token is re-read from `server.json` on `connect`).
+- Produces (public helpers): `load_host_tokens(layout) -> dict[str, dict[str, str]]` (`{host: {"url", "token"}}`), `save_host_token(layout, name, url, token) -> None` (0600), `forget_host_token(layout, name) -> None`, `same_origin(a, b) -> bool`, `host_token_env_names(layout) -> set[str]` (the `token_env` of every configured host; `set()` when `hosts.yaml` is missing or bad).
+- Rules: runs never see a host's bearer token: `_execute` scrubs `host_token_env_names(...)` next to Task 3's names. A paired token is bound to the URL it was redeemed at: `host_token` returns it only while `spec.url` is that same origin (scheme, host, port), so editing `hosts.yaml` to point the name at another server never sends it there; it then falls back to `token_env`. Each session of a `route: url` host reads its token again (so `hx hosts pair` + reconnect uses the new one). A 401/403 from a `route: url` host stops retrying with state `error` and message `auth failed: hx hosts pair <name> <pairing-url>` (spec 5.3, contract failure mode 17); `route: ssh` keeps the phase 2 message (its token is re-read from `server.json` on `connect`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -15013,6 +15549,7 @@ from hypothex.remote.config import (
     forget_host_token,
     host_token,
     load_host_tokens,
+    same_origin,
     save_host_token,
 )
 from tests.api.authkit import token_for
@@ -15039,14 +15576,29 @@ def test_host_token_prefers_the_paired_file(
     monkeypatch.setenv("LAB_TOKEN", "from-env")
     token = host_token(layout, "lab", spec)
     assert token is not None and token.get_secret_value() == "from-env"
-    save_host_token(layout, "lab", "hxs_paired")
+    save_host_token(layout, "lab", "http://h:1/", "hxs_paired")
     path = tmp_path / "auth" / "host-tokens.json"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert load_host_tokens(layout) == {"lab": "hxs_paired"}
+    assert load_host_tokens(layout) == {"lab": {"url": "http://h:1", "token": "hxs_paired"}}
     paired = host_token(layout, "lab", spec)
     assert paired is not None and paired.get_secret_value() == "hxs_paired"
     forget_host_token(layout, "lab")
     assert load_host_tokens(layout) == {}
+
+
+def test_a_paired_token_never_goes_to_another_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = Layout(tmp_path)
+    save_host_token(layout, "lab", "http://lab-a:8000", "hxs_for_a")
+    moved = HostSpec(route="url", url="http://lab-b:8000")
+    assert host_token(layout, "lab", moved) is None
+    monkeypatch.setenv("LAB_TOKEN", "from-env")
+    moved_env = HostSpec(route="url", url="http://lab-b:8000", token_env="LAB_TOKEN")
+    token = host_token(layout, "lab", moved_env)
+    assert token is not None and token.get_secret_value() == "from-env"
+    assert same_origin("http://lab-a:8000/", "HTTP://LAB-A:8000")
+    assert not same_origin("http://lab-a:8000", "https://lab-a:8000")
 
 
 def test_hub_sends_the_token_of_a_url_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -15078,9 +15630,24 @@ def test_a_paired_host_session_on_a_lab_server(tmp_path: Path) -> None:
     with serve_app(lab) as url:
         hub_home = tmp_path / "hub"
         write_hosts(hub_home, {"lab": HostSpec(route="url", url=url)})
-        save_host_token(Layout(hub_home), "lab", token)
+        save_host_token(Layout(hub_home), "lab", url, token)
         with TestClient(create_app(hub_home, background_repair=False), base_url=BASE) as hub:
             wait_until(lambda: host_state(hub, "lab") == "connected", timeout=30)
+```
+
+Append to `tests/core/test_execution.py` (add `from hypothex.remote.config import HostSpec` and `from tests.api.envserver import write_hosts`):
+
+```python
+def test_run_environment_never_holds_a_host_token(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lab = HostSpec(route="url", url="http://127.0.0.1:9", token_env="LAB_TOKEN")
+    write_hosts(ctx.layout.home, {"lab": lab})
+    monkeypatch.setenv("LAB_TOKEN", "hxs_s_000000000000_hosttoken")
+    code = "import os; print(os.environ.get('LAB_TOKEN', '-'))"
+    record = prepare_run(ctx, RunRequest(repo=toy_repo, command=[sys.executable, "-c", code]))
+    execute_run(ctx, record.run_id)
+    assert (ctx.run_dir(record) / "logs" / "stdout.log").read_text().strip() == "-"
 ```
 
 In `tests/remote/test_hub.py`, in `test_an_auth_failure_stops_retrying_until_connect`, replace
@@ -15109,6 +15676,7 @@ In `src/hypothex/remote/config.py`:
 
 ```python
 import json
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
@@ -15133,10 +15701,39 @@ from hypothex.core.settings import ENV_NAME, resolve_secret, write_private
 
 ```python
 HOST_TOKENS_FILE = "auth/host-tokens.json"
-"""``<hub home>/auth/host-tokens.json`` (0600): ``{host: token}`` from ``hx hosts pair``."""
+"""``<hub home>/auth/host-tokens.json`` (0600): ``{host: {url, token}}`` from ``hx hosts pair``."""
 
 
-def load_host_tokens(layout: Layout) -> dict[str, str]:
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    port = parts.port or {"http": 80, "https": 443}.get(scheme)
+    return scheme, (parts.hostname or "").lower(), port
+
+
+def same_origin(a: str, b: str) -> bool:
+    """
+    Tell whether two URLs name the same server (scheme, host, port).
+
+    Parameters
+    ----------
+    a, b : str
+
+    Returns
+    -------
+    bool
+
+    Examples
+    --------
+    >>> same_origin("http://lab:8000/", "HTTP://LAB:8000")
+    True
+    >>> same_origin("http://lab:8000", "https://lab:8000")
+    False
+    """
+    return _origin(a) == _origin(b)
+
+
+def load_host_tokens(layout: Layout) -> dict[str, dict[str, str]]:
     """
     Read the paired host tokens.
 
@@ -15147,29 +15744,38 @@ def load_host_tokens(layout: Layout) -> dict[str, str]:
 
     Returns
     -------
-    dict of str to str
-        Host name to token; ``{}`` when the file is missing or unreadable.
+    dict of str to dict
+        Host name to ``{"url": <url it was paired at>, "token": ...}``; ``{}``
+        when the file is missing or unreadable. Entries without both keys are dropped.
     """
     try:
         raw = json.loads((layout.home / HOST_TOKENS_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(k): {"url": str(v["url"]), "token": str(v["token"])}
+        for k, v in raw.items()
+        if isinstance(v, dict) and v.get("url") and v.get("token")
+    }
 
 
-def save_host_token(layout: Layout, name: str, token: str) -> None:
+def save_host_token(layout: Layout, name: str, url: str, token: str) -> None:
     """
-    Store the token a host pairing returned (mode 0600).
+    Store the token a host pairing returned, bound to the URL it came from (mode 0600).
 
     Parameters
     ----------
     layout : Layout
     name : str
         Host name.
+    url : str
+        The base URL of the pairing link (the server that issued the token).
     token : str
     """
     tokens = load_host_tokens(layout)
-    tokens[name] = token
+    tokens[name] = {"url": url.rstrip("/"), "token": token}
     write_private(layout.home / HOST_TOKENS_FILE, json.dumps(tokens, indent=2, sort_keys=True))
 
 
@@ -15187,6 +15793,26 @@ def forget_host_token(layout: Layout, name: str) -> None:
         write_private(layout.home / HOST_TOKENS_FILE, json.dumps(tokens, indent=2, sort_keys=True))
 
 
+def host_token_env_names(layout: Layout) -> set[str]:
+    """
+    Return the ``token_env`` names of every configured host (kept out of runs).
+
+    Parameters
+    ----------
+    layout : Layout
+
+    Returns
+    -------
+    set of str
+        Empty when ``hosts.yaml`` is missing or invalid.
+    """
+    try:
+        hosts = load_hosts(layout)
+    except ConfigError:
+        return set()
+    return {spec.token_env for spec in hosts.environments.values() if spec.token_env}
+
+
 def host_token(layout: Layout, name: str, spec: HostSpec) -> SecretStr | None:
     """
     Return the bearer token the hub sends to a ``route: url`` host.
@@ -15202,12 +15828,21 @@ def host_token(layout: Layout, name: str, spec: HostSpec) -> SecretStr | None:
     Returns
     -------
     SecretStr or None
-        ``host-tokens.json`` first, then the ``token_env`` variable; None without either.
+        ``host-tokens.json`` first (only while ``spec.url`` is the origin it was
+        paired at), then the ``token_env`` variable; None without either.
     """
     paired = load_host_tokens(layout).get(name)
-    if paired:
-        return SecretStr(paired)
+    if paired and spec.url is not None and same_origin(paired["url"], spec.url):
+        return SecretStr(paired["token"])
     return resolve_secret(layout, spec.token_env) if spec.token_env else None
+```
+
+In `src/hypothex/core/execution.py`, replace the last line of `_secret_names` (`return secret_env_names(settings)`) with:
+
+```python
+    from hypothex.remote.config import host_token_env_names  # lazy: remote imports core
+
+    return secret_env_names(settings) | host_token_env_names(ctx.layout)
 ```
 
 In `src/hypothex/remote/hub.py`:
@@ -15262,8 +15897,8 @@ with
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/remote/test_host_pairing.py tests/remote/test_hub.py tests/remote/test_config.py -v`
-Expected: `tests/remote/test_host_pairing.py` `5 passed`; the hub and config tests still pass.
+Run: `uv run pytest tests/remote/test_host_pairing.py tests/remote/test_hub.py tests/remote/test_config.py tests/core/test_execution.py -v`
+Expected: `tests/remote/test_host_pairing.py` `6 passed`; `test_run_environment_never_holds_a_host_token` passes; the hub, config, and execution tests still pass.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -15271,7 +15906,7 @@ Expected: clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hypothex/remote/config.py src/hypothex/remote/hub.py tests/remote/test_host_pairing.py tests/remote/test_hub.py
+git add src/hypothex/remote/config.py src/hypothex/remote/hub.py src/hypothex/core/execution.py tests/remote/test_host_pairing.py tests/remote/test_hub.py tests/core/test_execution.py
 git commit -m "feat(remote): paired or env-held tokens for url hosts and a re-pair message"
 ```
 
@@ -15303,7 +15938,8 @@ import httpx
 import pytest
 
 from hypothex.auth.store import AuthStore
-from hypothex.cli.main import owner_name
+from hypothex.cli.main import _serve_token, owner_name
+from hypothex.core.errors import ConfigError
 from hypothex.core.layout import Layout
 from tests.api.envserver import wait_until
 from tests.fakes import install_fake_tailscale
@@ -15392,7 +16028,8 @@ def test_tailscale_publishes_and_unpublishes(
     assert fake.state()["serve"] == {}
 
 
-def test_open_bind_needs_auth_or_a_token(tmp_path: Path) -> None:
+def test_open_bind_needs_auth_or_a_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # the refusal comes before any socket is opened, so nothing listens on 0.0.0.0
     done = subprocess.run(
         [*HX, "--home", str(tmp_path / "h"), "serve", "--host", "0.0.0.0", "--port", "0"],
         capture_output=True,
@@ -15401,12 +16038,12 @@ def test_open_bind_needs_auth_or_a_token(tmp_path: Path) -> None:
     )
     assert done.returncode == 1
     assert "server.auth: on" in done.stderr and "HYPOTHEX_SERVE_TOKEN" in done.stderr
-    home = tmp_path / "open"
-    proc = start(home, "--auth", "--host", "0.0.0.0", env={"USER": "sv"})
-    try:
-        assert info_of(home)["token"].startswith("hxs_")
-    finally:
-        stop(proc)
+    # with auth on the open bind is allowed; checked on the decision itself, never by
+    # listening on every interface of the developer's machine
+    monkeypatch.delenv("HYPOTHEX_SERVE_TOKEN", raising=False)
+    assert _serve_token("0.0.0.0", "local", False, auth_on=True) is None
+    with pytest.raises(ConfigError, match="server.auth: on"):
+        _serve_token("0.0.0.0", "local", False, auth_on=False)
 
 
 def test_readable_secrets_file_stops_the_start(tmp_path: Path) -> None:
@@ -15854,6 +16491,9 @@ def test_pair_prints_a_qr_code_and_the_link(tmp_path: Path, hub: tuple[str, Auth
         env=owner_env(store),
     )  # fmt: skip
     assert result.exit_code == 0 and "█" in result.stdout and "/pair#p_" in result.stdout
+    # a host link must be admin: the hub would refuse to redeem anything less as host
+    message = fails(tmp_path / "o", "pair", "--client", "host", "--scope", "launch")
+    assert message == "--client host needs --scope admin"
 
 
 def test_agent_login_is_an_agent_session(tmp_path: Path, hub: tuple[str, AuthStore]) -> None:
@@ -16068,6 +16708,8 @@ def pair(
         raise ConfigError(f"--scope must be one of {', '.join(SCOPES)}")
     if client not in ("browser", "cli", "host"):
         raise ConfigError("--client must be browser, cli, or host")
+    if client == "host" and scope != "admin":
+        raise ConfigError("--client host needs --scope admin")  # AuthStore.redeem refuses less
     base = (url or hub_url()).rstrip("/")
     body = {
         "user": user,
@@ -16204,13 +16846,16 @@ def test_hosts_pair_and_add_with_a_token_env(tmp_path: Path) -> None:
     lab_store.ensure_owner("sv")
     with serve_app(lab) as lab_url:
         hub_home = tmp_path / "hub-home"
-        write_hosts(hub_home, {"lab": HostSpec(route="url", url=lab_url)})
+        other = HostSpec(route="url", url="http://127.0.0.1:9")
+        write_hosts(hub_home, {"lab": HostSpec(route="url", url=lab_url), "other": other})
         offer, secret = lab_store.create_offer(issuer=OWNER, user="sv", scope="admin")
         link = pairing_url(lab_url, offer.id, secret)
-        out = hx(hub_home, "hosts", "pair", "lab", link)
+        assert "the link is for" in fails(hub_home, "hosts", "pair", "other", link)
+        out = hx(hub_home, "hosts", "pair", "lab", link)  # the refused try did not use it
         assert (out["name"], out["user"], out["scope"]) == ("lab", "sv", "admin")
-        token = load_host_tokens(Context.open(hub_home).layout)["lab"]
-        assert lab_store.authenticate(token) is not None
+        paired = load_host_tokens(Context.open(hub_home).layout)["lab"]
+        assert paired["url"] == lab_url.rstrip("/")
+        assert lab_store.authenticate(paired["token"]) is not None
         added = hx(hub_home, "hosts", "add", "lab2", "--url", lab_url, "--token-env", "LAB_TOKEN")
         assert added["host"]["token_env"] == "LAB_TOKEN"
         offer2, secret2 = lab_store.create_offer(issuer=OWNER, user="sv", scope="admin")
@@ -16394,7 +17039,7 @@ def list_runs_cmd(
    pass `token_env=token_env,` to `HostSpec(...)`, and right after `save_hosts(...)` add:
 
 ```python
-    paired = _pair_host(c, name, pair_link) if pair_link else None
+    paired = _pair_host(c, name, url, pair_link) if pair_link and url else None
 ```
 
    and add `"paired": paired,` to the JSON output dict.
@@ -16402,12 +17047,17 @@ def list_runs_cmd(
 5. Add the helper and the command:
 
 ```python
-def _pair_host(c: Context, name: str, link: str) -> dict[str, Any]:
-    """Redeem a host's pairing link as `host` and keep the token in host-tokens.json."""
-    from hypothex.remote.config import save_host_token
+def _pair_host(c: Context, name: str, host_url: str, link: str) -> dict[str, Any]:
+    """Redeem a host's pairing link as `host`; keep the token bound to that host's URL."""
+    from hypothex.auth.pairing import parse_pairing_url
+    from hypothex.remote.config import same_origin, save_host_token
 
+    base, _, _ = parse_pairing_url(link)
+    if not same_origin(base, host_url):
+        # never redeem (or later send) one server's token for another host name
+        raise ConfigError(f"the link is for {base}, but {name} is {host_url}")
     _, data = _redeem(link, "host", f"hub:{_device()}")
-    save_host_token(c.layout, name, data["token"])
+    save_host_token(c.layout, name, base, data["token"])
     return {"user": data["user"], "scope": data["scope"], "session_id": data["session_id"]}
 
 
@@ -16422,7 +17072,7 @@ def hosts_pair(
     spec = _known_host(hosts, name)
     if spec.route != "url":
         raise ConfigError(f"{name} is reached over ssh; it needs no pairing")
-    paired = _pair_host(c, name, pairing)
+    paired = _pair_host(c, name, str(spec.url), pairing)
     state = _hub_try("POST", f"/api/v1/hosts/{name}/connect", {})
     out = {"name": name, **paired, "state": state}
     text = f"✓ {name} paired · {paired['user']} · {paired['scope']}"
@@ -16733,7 +17383,7 @@ def note(
         raise ConfigError("usage: hx note --project P TEXT")
     when = notebook.parse_day(day) if day else None
     if _client_hub() is not None:
-        target = (when or notebook.today()).isoformat()
+        target = when.isoformat() if when else "today"  # the hub picks its own today
         path = f"/api/v1/projects/{project}/notebook/{target}"
         out = _hub("POST", path, {"text": args[0], "command_id": new_command_id()})
     else:
@@ -16769,11 +17419,13 @@ def notebook_show(
     """Show one notebook day, then its run chips as `run status primary`."""
     from hypothex.core import notebook
 
-    when = notebook.parse_day(day) if day else notebook.today()
+    when = notebook.parse_day(day) if day else None
     if _client_hub() is not None:
-        data = _hub("GET", f"/api/v1/projects/{project}/notebook/{when.isoformat()}")
+        target = when.isoformat() if when else "today"  # the hub picks its own today
+        data = _hub("GET", f"/api/v1/projects/{project}/notebook/{target}")
     else:
-        data = to_jsonable(notebook.read_day(_ctx(), project, when))
+        c = _ctx()
+        data = to_jsonable(notebook.read_day(c, project, when or notebook.hub_today(c)))
     if as_json:
         _print_json(data)
         return
@@ -17540,7 +18192,9 @@ def _storage_runs(ctx: Context, root: Path, project: str, task: str) -> list[str
     repo = ctx.store.load_project(project).repo
     ckpt = root / "checkpoints"
 
-    def ended(run_id: str, days: int, owner: str, by: str, artifact: str, **extra: Any) -> None:
+    def ended(
+        run_id: str, days: int, owner: str, by: str, artifact: str | None, **extra: Any
+    ) -> None:
         at = now - timedelta(days=days)
         digest = hashlib.sha256(run_id.encode()).hexdigest()[:16]
         ctx.create_run(
@@ -17558,7 +18212,7 @@ def _storage_runs(ctx: Context, root: Path, project: str, task: str) -> list[str
                 created_at=at - timedelta(hours=2),
                 started_at=at - timedelta(hours=2),
                 ended_at=at,
-                artifacts=[Artifact(kind="checkpoint", path=artifact)],
+                artifacts=[Artifact(kind="checkpoint", path=artifact)] if artifact else [],
                 archived=extra.pop("archived", True),
                 created_by=by,
                 owner=owner,
@@ -17578,9 +18232,9 @@ def _storage_runs(ctx: Context, root: Path, project: str, task: str) -> list[str
     ended("st-prot", 50, "sv", "agent:claude@sv", repo, hypothesis="checkpoint saved into the repo")
     shared = str(_blob(ckpt / "st-parent.pt", 5))
     ended("st-parent", 70, "sv", "human:sv", shared, hypothesis="rbf kernel, C=10")
-    ended(
-        "st-child", 3, "alice", "human:alice", shared, archived=False, parent="st-parent",
-        kind=RunKind.INFER, hypothesis="Re-infer of st-parent",
+    ended(  # as control.reinfer writes it: the parent's checkpoint in vars, no artifact
+        "st-child", 3, "alice", "human:alice", None, archived=False, parent="st-parent",
+        kind=RunKind.INFER, vars={"checkpoint": shared}, hypothesis="Re-infer of st-parent",
     )  # fmt: skip
     ended("st-star", 80, "alice", "human:alice", str(_blob(ckpt / "st-star.pt", 2)), starred=True)
     gone = str(ckpt / "st-done.pt")
@@ -18044,6 +18698,10 @@ Turn auth on
 ``hx serve`` then makes you the owner (``admin``) and writes a session for this
 machine's CLI into ``~/.hypothex/serve/server.json`` (readable only by you).
 
+``config.yaml`` and every token file are written with mode 0600, and their folder, the
+Hypothex home, is set to 0700 on each write. A home that other accounts must read (one
+shared lab account) is not supported: give each person their own account and pair them.
+
 Pair a device
 -------------
 
@@ -18095,8 +18753,11 @@ Run ``hx serve --auth`` on the lab server, then pair the hub with it:
    hx hosts add lab --url https://lab.tail1234.ts.net
    hx hosts pair lab 'https://lab.tail1234.ts.net/pair#p_...'   # on the hub
 
-``token_env: LAB_TOKEN`` in ``environments.yaml`` is the other way to give the hub a
-token. When the lab server stops accepting the hub, the host shows
+Only an ``admin`` link can be redeemed as a host (a host session vouches for who launched
+each run). ``hx hosts pair`` refuses a link whose URL is not the host's, and the token is
+only ever sent to the URL it was paired at: point ``lab`` somewhere else and the hub stops
+sending it. ``token_env: LAB_TOKEN`` in ``environments.yaml`` is the other way to give the
+hub a token. When the lab server stops accepting the hub, the host shows
 ``auth failed: hx hosts pair lab <pairing-url>`` and the hub stops retrying.
 
 Postgres
@@ -18236,11 +18897,11 @@ skipped (``changed since plan``). A symlink is removed, never its target. Cleanu
 admin-only and never through MCP: agents may plan it, a person applies it.
 ```
 
-In `docs/index.rst`, replace
+In `docs/index.rst` (on `main` the User guide toctree reads `... ui`, `remote`, `gpus`, `slurm`, `sweeps`, `cost`), replace
 
 ```
    remote
-   sdk
+   gpus
 ```
 
 with
@@ -18251,7 +18912,7 @@ with
    notifications
    export
    storage
-   sdk
+   gpus
 ```
 
 Append to `docs/cli.rst`:
@@ -18320,7 +18981,7 @@ git commit -m "docs: team hub, notifications, paper tables, and storage; skill s
 
 **Interfaces:**
 - Consumes: every secret path of the plan: settings (Tasks 2–3), channels and notifier (Tasks 15–17), run environments (Task 3), the API (Tasks 25, 30), the CLI (Task 44), `hx serve` (Task 39), the auth store (Task 6).
-- Produces: contract 9's scan: after successful sends, each failure class (Slack 404, 429, 500; SMTP 535; the timeout class is covered by Task 15), a run that prints its environment, `GET /api/v1/notify`, `POST /api/v1/notify/test`, `hx notify status --json`, `hx notify test --json`, pairing and session use, and a failing `hx serve` start, no secret (webhook URL and path, SMTP password, index password, `secrets.env` value, session token secret, pairing secret) appears in any file under the home (except the four places meant to hold them: `secrets.env`, `serve/server.json`, `auth/hub-tokens.json`, `auth/host-tokens.json`), any event payload, any log line captured at DEBUG, any CLI output, or any API answer other than the pairing link and token answers to their owner.
+- Produces: contract 9's scan: after successful sends, each failure class (Slack 404, 429, 500; SMTP 535; the timeout class is covered by Task 15), a run that prints its environment, `GET /api/v1/notify`, `POST /api/v1/notify/test`, `hx notify status --json`, `hx notify test --json`, pairing and session use, and a failing `hx serve` start, no secret (webhook URL and path, SMTP password, index password, `HYPOTHEX_HUB_TOKEN`, a host's `token_env` value, `secrets.env` value, session token secret, pairing secret) appears in any file under the home (except the four places meant to hold them: `secrets.env`, `serve/server.json`, `auth/hub-tokens.json`, `auth/host-tokens.json`), any event payload, any log line captured at DEBUG, any CLI output, or any API answer other than the pairing link and token answers to their owner.
 
 - [ ] **Step 1: Write the test**
 
@@ -18355,7 +19016,9 @@ from hypothex.core.settings import (
     save_settings,
 )
 from hypothex.notify.notifier import Notifier
+from hypothex.remote.config import HostSpec
 from tests.api.authkit import BASE, auth_app, bearer, token_for
+from tests.api.envserver import write_hosts
 from tests.factories import make_record
 from tests.fakes.smtp import FakeSmtp
 from tests.fakes.webhook import FakeWebhook, Reply
@@ -18397,8 +19060,12 @@ def test_no_secret_reaches_any_file_event_log_or_output(
     caplog.set_level(logging.DEBUG)
     password = "SECRETSMTP-" + secrets.token_hex(6)
     index_password = "SECRETPG-" + secrets.token_hex(6)
+    hub_token = "SECRETHUB-" + secrets.token_hex(6)
+    host_token = "SECRETHOST-" + secrets.token_hex(6)
     monkeypatch.setenv("HX_LEAK_SMTP", password)
     monkeypatch.setenv("HYPOTHEX_INDEX_PASSWORD", index_password)
+    monkeypatch.setenv("HYPOTHEX_HUB_TOKEN", hub_token)
+    monkeypatch.setenv("HX_LEAK_HOST", host_token)
     ctx = Context.open(home)
     ctx.register_project(toy_repo)
     outputs: list[str] = []
@@ -18433,6 +19100,8 @@ def test_no_secret_reaches_any_file_event_log_or_output(
             notifier.scan()
             notifier.deliver()
         settings.notify.email = email
+        lab = HostSpec(route="url", url="http://127.0.0.1:9", token_env="HX_LEAK_HOST")
+        write_hosts(home, {"lab": lab})
         record = prepare_run(
             ctx,
             RunRequest(
@@ -18441,6 +19110,7 @@ def test_no_secret_reaches_any_file_event_log_or_output(
             ),
         )
         execute_run(ctx, record.run_id)
+        write_hosts(home, {})  # the hub below has no host to dial
         app = auth_app(home)
         with TestClient(app, base_url=BASE) as client:
             admin = token_for(app.state.auth, "sv", "admin")
@@ -18494,7 +19164,7 @@ def test_no_secret_reaches_any_file_event_log_or_output(
     outputs += [start.stdout, start.stderr]
     needles = [
         hook.secret, hook.url, password, index_password, file_secret, pairing_secret,
-        session_secret,
+        session_secret, hub_token, host_token,
     ]  # fmt: skip
     events = "\n".join(e.model_dump_json() for e in ctx.events.since(0, limit=100_000))
     assert file_hits(home, needles) == []
@@ -18774,7 +19444,7 @@ The user's manual steps after this plan: a first send to the real Slack workspac
 
 ## Assembly notes
 
-Inputs: the phase 3 contract, spec sections 3.4, 5.3, 5.4, 7.2–7.4, 9, 12, 13, 14, and the code on `main` at `738c711`. Where the contract was ambiguous or silent, this plan decided as follows.
+Inputs: the phase 3 contract, spec sections 3.4, 5.3, 5.4, 7.2–7.4, 9, 12, 13, 14, and the code on `main` at `e27a3a2` (first written against `738c711`; see the Prerequisite for the drift). Where the contract was ambiguous or silent, this plan decided as follows.
 
 **Contract readings.**
 
@@ -18784,7 +19454,7 @@ Inputs: the phase 3 contract, spec sections 3.4, 5.3, 5.4, 7.2–7.4, 9, 12, 13,
 - **CSV export and test-set intervals** are kept from the contract (the spec names only LaTeX and Markdown). `noise` drops data from the table itself (not only from the rendering), so CSV follows the same choice. `percent` scales the table's numbers (CSV too) and adds the footnote `values ×100`; for a leaderboard only when `value_format == "fraction"`, for a comparison whenever asked. Baseline rows show `—`/`--` in the `n` column and `n = 0` in CSV.
 - **Metric directions in export.** A `Leaderboard` knows only the primary's direction, so `leaderboard_table` takes `directions=` (metric name → higher is better); `task_table`/`export_task` pass the project's metrics (Tasks 10, 12).
 - **Route scope keys** use FastAPI's `path_format` (`/api/v1/runs/{run_id}/files/{path}`), as OpenAPI does, so the matrix test can fill parameters with one regex (Tasks 23, 24, 28).
-- **`/mcp` principal.** Tools read the principal from the MCP SDK's request context (`ctx.request_context.request.scope["hx.principal"]`) through a hidden `hx_mcp_ctx` parameter that `@scoped` adds; in-process calls use `acting_as`, else `LOCAL_OWNER`. Over HTTP a tool's own hub calls carry the caller's bearer token (`caller_token`), so the hub sees who acts. `tool_scopes` reads the SDK's tool registry (`_tool_manager`), the only place the decorated functions are kept (Task 32).
+- **`/mcp` principal.** Tools read the principal from the MCP SDK's request context (`ctx.request_context.request.scope["hx.principal"]`) through a hidden `hx_mcp_ctx` parameter that `@scoped` adds; in-process calls use `acting_as`, else `LOCAL_OWNER`. Over HTTP a tool's own hub calls carry the caller's credential (`caller_token`: the bearer token, else the `hx_session` cookie) and never the server's `hub_token` or local admin token (`tool_hub_token`), so the hub sees who acts and applies their scope and ownership; `stop_run` and `cancel_sweep` check `require_act` on local runs and sweeps (Task 32). `tool_scopes` reads the SDK's tool registry (`_tool_manager`), the only place the decorated functions are kept (Task 32).
 - **Auth failure message** `auth failed: hx hosts pair <name> <pairing-url>` is used for `route: url` hosts; `route: ssh` hosts keep phase 2's `hx hosts connect` message, because their token is re-read from `server.json` on connect (Task 38). The phase 2 test of that message is updated.
 - **`owner` with auth off** stays `None` even when a body sends one, except from a hub forwarding to a host (the host principal), where both `owner` and `created_by` are kept (Task 23 `identity`).
 - **`hx pair` default scope** is `launch` (the contract gives none); a caller with less gets 403.
@@ -18802,5 +19472,14 @@ Inputs: the phase 3 contract, spec sections 3.4, 5.3, 5.4, 7.2–7.4, 9, 12, 13,
 - `hx serve --auth` revokes earlier `local` sessions of the owner before it mints a new one, so a crashed start leaves no live extra admin session behind (Task 39).
 - A demo with the team but without `--with-hosts` has no fake GPU host; `demo_hosts_running` now skips the live sweep runs in that case instead of failing (Task 45).
 - The network guard wraps `psycopg.connect` because libpq connects in C, below Python's `socket` (Task 1).
+
+**Changes after review round 1** (contract section "Changes after review round 1" has the rulings).
+
+- Host forwarding is trusted only from an `admin` host principal; `redeem(client="host")` needs an `admin` offer and `hx pair --client host` needs `--scope admin` (Tasks 6, 23, 41).
+- Paired host tokens are bound to the origin they came from (`same_origin`, `{host: {url, token}}`), and runs never see `HYPOTHEX_HUB_TOKEN` or a host's `token_env` (Tasks 3, 38, 42, 47).
+- Cleanup counts `vars["checkpoint"]` as a use (`input_paths`, `overlaps`) at plan and at delete; a concurrent second apply of one plan is refused, not a 500 (Tasks 21, 22, 45).
+- Export refuses a comparison that would merge two versions of one metric (Task 12). Folded sweeps follow `rule.events` (Task 16). Digest notices carry the top notes, and the notebook block lists task changes as lines (Task 18).
+- `hub_today` and the API's `today` day make one "today" for the UI, the CLI, MCP, and the digest (Tasks 8, 29, 33, 43).
+- The pairing limit counts failures only, keyed per person behind `tailscale serve` (Task 25). `AuthGuard` skips the session lookup for paths outside `/api/` and `/mcp` (Task 23). `NotifyTestBody` is module-level (Task 30). Overview rows carry `owner` (Task 27). A Postgres URL without `psycopg` is a `ConfigError` (Task 34). The open-bind test checks the decision instead of listening on `0.0.0.0` (Task 39). `write_private` is main's hardened version and the CLI shares it (Task 2).
 
 **Order.** Parts 3 (notebook, baselines, export), 4–5 (notify, digest), 6 (storage), and 10 (Postgres) depend only on Parts 1–2 and may run in parallel. Part 7 needs Part 2; Part 8 needs Parts 3–7; Part 9 needs Parts 3–7; Part 11 needs Parts 1, 2, and 7; Part 12 needs Parts 7–9 and 11; Part 13 needs everything.

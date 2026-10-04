@@ -85,7 +85,7 @@ class RunRequest(...):  # add
 class ActionBody(...):  # add
     owner: str | None = None        # honoured only from the host principal (a hub forwarding); else replaced by the caller
 ```
-`created_by` with auth on is set by the server from the principal, never from the request body: `human:<user>` for browser and CLI sessions, `agent:<agent>@<user>` when the request carries `X-Hypothex-Agent: <agent>` (CLI sends it when `HYPOTHEX_AGENT` is set; MCP sends `mcp` or the tool's `agent` argument). Existing readers that test `created_by.startswith("agent")` keep working. With auth off, phase 1–2 behaviour is unchanged (`human`, `agent:<name>`). A hub forwards `owner` and `created_by` to hosts in `HostLaunchBody`/`SweepBody`; an env server accepts those two fields only from the host principal (its `TokenGuard` token or a `client: "host"` session), else ignores them.
+`created_by` with auth on is set by the server from the principal, never from the request body: `human:<user>` for browser and CLI sessions, `agent:<agent>@<user>` when the request carries `X-Hypothex-Agent: <agent>` (CLI sends it when `HYPOTHEX_AGENT` is set; MCP sends `mcp` or the tool's `agent` argument). Existing readers that test `created_by.startswith("agent")` keep working. With auth off, phase 1–2 behaviour is unchanged (`human`, `agent:<name>`). A hub forwards `owner` and `created_by` to hosts in `HostLaunchBody`/`SweepBody`; an env server accepts those two fields only from the host principal (its `TokenGuard` token or a `client: "host"` session with `admin` scope; `AuthStore.redeem` refuses `client="host"` on an offer below `admin`), else ignores them.
 
 ### 1.3 `hypothex.auth.ownership`
 
@@ -110,13 +110,14 @@ class NotebookConflictError(HypothexError): current: NotebookDay   # API 409 wit
 class NotebookTooLargeError(HypothexError): ...                    # API 413
 def notebook_dir(layout: Layout, project: str) -> Path: ...
 def today(now: datetime | None = None, tz: str | None = None) -> date: ...    # hub-local date (DigestSettings.timezone when set)
+def hub_today(ctx: Context, now: datetime | None = None) -> date: ...         # today(now, config.yaml digest.timezone): the one "today" of append_entry, the API's `today` day, MCP, CLI, UI
 def list_days(ctx: Context, project: str) -> list[dict[str, Any]]: ...       # [{day, bytes, entries}] newest first
 def read_day(ctx: Context, project: str, day: date) -> NotebookDay: ...
 def append_entry(ctx: Context, project: str, text: str, author: str, *, day: date | None = None, now: datetime | None = None) -> NotebookDay: ...   # project lock; fsutil.append_note_file format "## <iso> — <author>"
 def write_day(ctx: Context, project: str, day: date, text: str, *, base_hash: str, author: str) -> NotebookDay: ...   # whole-file replace; NotebookConflictError when the file hash != base_hash
 def run_links(text: str) -> list[str]: ...              # unique ids in order of first use
 ```
-Unknown project → `StoreError` (404). Both writes emit `notebook.updated` `{project, day, author}` with `project=` set. Notebook files are hub-local (never mirrored to hosts) and are files of record: `hx reindex` does not touch them.
+Unknown project → `StoreError` (404). The API's `{day}` is `YYYY-MM-DD` or `today` (resolved by the hub with `hub_today`; clients never compute it). Both writes emit `notebook.updated` `{project, day, author}` with `project=` set. Notebook files are hub-local (never mirrored to hosts) and are files of record: `hx reindex` does not touch them.
 
 ### 1.5 Paper baselines (`hypothex.core.config`, `hypothex.core.leaderboard`)
 
@@ -155,7 +156,7 @@ class ExportCell(BaseModel): mean: float | None; std: float | None; n: int; iden
 class ExportRow(BaseModel): kind: Literal["group", "run", "baseline"]; label: str; key: str; n: int; cells: dict[str, ExportCell]; within_noise: bool; version_mismatch: bool; source: str | None
 class ExportTable(BaseModel): title: str; columns: list[str]; higher_is_better: dict[str, bool]; rows: list[ExportRow]; footnotes: list[str]
 def leaderboard_table(board: Leaderboard, opts: ExportOptions) -> ExportTable: ...
-def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> ExportTable: ...   # one row per run (kind "run"), n = 1, scores at the task's current versions
+def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> ExportTable: ...   # one row per run (kind "run"), n = 1, scores at the task's current versions; RunError when a shown metric has different versions or directions across the runs' projects (never merged into one column)
 def render(table: ExportTable, opts: ExportOptions) -> str: ...
 def export_task(ctx: Context, task: str, project: str | None, opts: ExportOptions) -> str: ...
 def export_compare(ctx: Context, run_ids: list[str], opts: ExportOptions) -> str: ...
@@ -208,7 +209,7 @@ class Notifier:
     def recent(self, limit: int = 50) -> list[OutboxEntry]: ...
 def run_notifier_loop(ctx: Context, stop: threading.Event, *, interval: float = 5.0) -> None: ...   # re-reads config.yaml each tick
 ```
-The notifier runs only in the hub's `hx serve` (kind `local`), as a thread started in the lifespan like the scheduler. First start sets the cursor to the current last sequence (no backlog flood). A run mirrored from a host notifies from its `mirror.run_updated` event; a host never notifies. Delivery is at least once: an entry left `sending` by a crash is retried after 60 s. Events `notify.sent`/`notify.failed` `{entry_id, channel, kind, run_id, attempts, error_class}` (no secret, no message body).
+The notifier runs only in the hub's `hx serve` (kind `local`), as a thread started in the lifespan like the scheduler. A folded sweep notifies only when at least one of its runs ended with a status in `rule.events` (a failure-only rule hears only about sweeps with a failure; `events: []` hears nothing). First start sets the cursor to the current last sequence (no backlog flood). A run mirrored from a host notifies from its `mirror.run_updated` event; a host never notifies. Delivery is at least once: an entry left `sending` by a crash is retried after 60 s. Events `notify.sent`/`notify.failed` `{entry_id, channel, kind, run_id, attempts, error_class}` (no secret, no message body).
 
 ### 1.8 `hypothex.core.digest` — weekly summary
 
@@ -224,12 +225,12 @@ class Digest(BaseModel):
     tasks: list[TaskChange]; notes: list[NoteItem]; sweeps: list[SweepLine]; headline: str
 def build_digest(ctx: Context, project: str, *, since: datetime, until: datetime | None = None, top_notes: int = 5) -> Digest: ...
 def render_digest_markdown(digest: Digest) -> str: ...
-def digest_notice(digest: Digest, *, base_url: str | None) -> Notice: ...
+def digest_notice(digest: Digest, *, base_url: str | None) -> Notice: ...   # lines: one per task change, then one "✎ <MM-DD HH:MM> @who [[run:<id>]] <text>" per top note
 def week_key(moment: datetime) -> str: ...
 def digest_due(settings: DigestSettings, last_sent: str | None, now: datetime) -> str | None: ...   # the week key when now >= this week's weekday/hour in the timezone and last_sent != it
 def send_digest(ctx: Context, settings: Settings, project: str, *, now: datetime, channels: list[Channel] | None = None) -> list[str]: ...   # enqueues one Notice per channel; appends the markdown to the notebook day of `until` when save_to_notebook
 ```
-`before` is the leaderboard built from runs and scores created before `since` (same `build_leaderboard`, filtered inputs); `after` from everything up to `until`. Notes come from run `notes.md` sections and notebook entries whose `## <iso> — <author>` stamp falls in the window, newest first. A hub that was off at the due time sends once at its next start in the same week; missed earlier weeks are not sent. State `<home>/notify/digest.json` `{project: last_week_key}`. Event `digest.sent` `{project, week, channels}`.
+`before` is the leaderboard built from runs and scores created before `since` (same `build_leaderboard`, filtered inputs); `after` from everything up to `until`. Notes come from run `notes.md` sections and notebook entries whose `## <iso> — <author>` stamp falls in the window, newest first; the top `top_notes` travel in the Slack/email notice too, not only the notebook block. `render_digest_markdown` starts `**<week>** · <headline>` and lists task changes as `- <task> before→after ▲ · N runs` (no Markdown table). A hub that was off at the due time sends once at its next start in the same week; missed earlier weeks are not sent. State `<home>/notify/digest.json` `{project: last_week_key}`. Event `digest.sent` `{project, week, channels}`.
 
 ### 1.9 `hypothex.core.storage` — report and cleanup
 
@@ -263,7 +264,7 @@ def apply_clean(ctx: Context, hosts: HostClients | None, plan_id: str, *, confir
 def delete_artifacts(ctx: Context, items: list[CleanItem], *, actor: str, plan_id: str) -> CleanResult: ...   # env side and hub side; re-checks every item
 def cleaned_artifacts(ctx: Context, record: RunRecord) -> list[CleanedArtifact]: ...   # <run_dir>/.hx/cleaned.json
 ```
-Eligibility (all must hold, checked at plan and again at delete): run archived, not starred, status terminal, `ended_at <= now - older_than_days`; the path is a recorded `Artifact.path` of that run with a kind in `kinds` (or a file under the hub's `<run dir>/pulled/`); no run that fails these rules records the same path (a `reinfer` child uses its parent's checkpoint: reason "used by <run_id>"); the path is not protected. Protected: `/`, the user's home, the Hypothex home, any registered repo root, any of their ancestors, and inside a run folder everything except `artifacts/**` and `pulled/**`. Apply needs `confirm_bytes == plan.total_bytes` and an unexpired plan (`plan_ttl_minutes`); an item whose bytes or mtime changed is skipped ("changed since plan"). A symlink is removed, never its target. Remote items go to their host's env route `POST /api/v1/storage/delete`; an unreachable host lands in `errors` and other hosts proceed. Each deletion appends to `<run_dir>/.hx/cleaned.json` (on the host and, for mirrored runs, on the hub) and emits `run.artifacts_cleaned` `{paths, freed_bytes, plan_id}` (status unchanged). `run.yaml` is never rewritten by cleanup. `RunDetail` adds `cleaned: list[CleanedArtifact] = []`.
+Eligibility (all must hold, checked at plan and again at delete): run archived, not starred, status terminal, `ended_at <= now - older_than_days`; the path is a recorded `Artifact.path` of that run with a kind in `kinds` (or a file under the hub's `<run dir>/pulled/`); no run that fails these rules records the same path as an artifact or reads it, or a path inside or above it, as an input (`vars["checkpoint"]`, which `control.reinfer` sets without recording an artifact: a queued or unarchived `reinfer` child keeps its parent's checkpoint, reason "used by <run_id>"); the path is not protected. Protected: `/`, the user's home, the Hypothex home, any registered repo root, any of their ancestors, and inside a run folder everything except `artifacts/**` and `pulled/**`. Apply needs `confirm_bytes == plan.total_bytes` and an unexpired plan (`plan_ttl_minutes`); an item whose bytes or mtime changed is skipped ("changed since plan"). A symlink is removed, never its target. Remote items go to their host's env route `POST /api/v1/storage/delete`; an unreachable host lands in `errors` and other hosts proceed. Each deletion appends to `<run_dir>/.hx/cleaned.json` (on the host and, for mirrored runs, on the hub) and emits `run.artifacts_cleaned` `{paths, freed_bytes, plan_id}` (status unchanged). `run.yaml` is never rewritten by cleanup. `RunDetail` adds `cleaned: list[CleanedArtifact] = []`.
 
 ### 1.10 `hypothex.auth` — users, pairing, sessions, scopes
 
@@ -292,7 +293,7 @@ class AuthStore:
     def get_user(self, name: str) -> User | None: ...
     def disable_user(self, name: str, *, by: Principal) -> User: ...     # admin; revokes every session of the user
     def create_offer(self, *, issuer: Principal, user: str, scope: Scope, ttl_seconds: int = PAIRING_TTL_SECONDS) -> tuple[PairingOffer, str]: ...   # ScopeError when scope or a new user's role exceeds issuer.scope; ttl <= 300
-    def redeem(self, offer_id: str, secret: str, *, client: Client, device: str) -> tuple[Session, str]: ...   # one use; burns the offer after PAIRING_MAX_FAILURES; token "hxs_<session id>_<43-char secret>"
+    def redeem(self, offer_id: str, secret: str, *, client: Client, device: str) -> tuple[Session, str]: ...   # one use; burns the offer after PAIRING_MAX_FAILURES; token "hxs_<session id>_<43-char secret>"; client "host" needs an admin offer (else PairingError, offer kept)
     def authenticate(self, token: str) -> Principal | None: ...           # sha256 of the secret, hmac.compare_digest; None if revoked/expired/user disabled; last_seen at most once per 60 s
     def sessions(self, user: str | None = None) -> list[Session]: ...
     def revoke(self, session_id: str, *, by: Principal) -> Session: ...   # own session or admin
@@ -312,6 +313,8 @@ class AuthGuard:                                     # ASGI; resolves cookie, Be
 def route_scopes(app: FastAPI) -> dict[str, ScopeOrPublic]: ...   # "METHOD path" -> declared scope for every APIRoute/WebSocketRoute; undeclared routes are absent (the unit test fails on them)
 # hypothex.mcp.server
 def scoped(scope: Scope) -> Callable[[F], F]: ...     # tool decorator; tool_scopes(server) -> dict[str, Scope]
+def caller_token() -> str | None: ...                 # over HTTP: the caller's bearer token, else its hx_session cookie value
+def tool_hub_token(fallback: Callable[[], str | None]) -> str | None: ...   # over HTTP caller_token() only (never hub_token or the local admin token); in-process/stdio fallback()
 ```
 Auth is on when `server.auth: on` (or `hx serve --auth`). Then every HTTP route and the WebSocket need a principal except `public` routes (`/.well-known/hypothex/environment`, `POST /api/v1/auth/pair`, the UI's static files and `/pair`). Cookie: `HttpOnly; SameSite=Strict; Path=/`, plus `Secure` when `public_url` is https; lifetime `session_days` (sliding via `last_seen_at`). Bearer tokens for `cli`/`agent`/`host`. Browsers open `/api/v1/ws?ticket=<t>` after `POST /api/v1/auth/ws-ticket`; long-lived tokens never appear in a URL. An open WebSocket re-checks its session every 30 s and closes with code `4401` when it is revoked or expired. With auth off, every request runs as `LOCAL_OWNER` and phase 1–2 guards (`OriginGuard`, `TrustedHostMiddleware`, optional `TokenGuard`) are unchanged. `hx serve` with auth on: `ensure_owner($USER lowercased, else "owner")` on first start, `mint_local` writes the local token into `<home>/serve/server.json` (0600) so `resolve_hub_token` keeps working for the CLI on that machine. A non-loopback bind requires auth on or `HYPOTHEX_SERVE_TOKEN` (the existing refusal text names both).
 
@@ -348,10 +351,10 @@ def unserve(https_port: int = 443) -> None: ...       # `tailscale serve --https
 # hypothex.remote.config
 class HostSpec(...):   # add
     token_env: str | None = Field(None, pattern=ENV_NAME)    # route url: variable holding the env server's bearer token
-HOST_TOKENS_FILE = "auth/host-tokens.json"             # <hub home>/auth/host-tokens.json, 0600: {host: token} from `hx hosts pair`
-def host_token(layout: Layout, name: str, spec: HostSpec) -> SecretStr | None: ...   # host-tokens.json first, then resolve_secret(token_env)
+HOST_TOKENS_FILE = "auth/host-tokens.json"             # <hub home>/auth/host-tokens.json, 0600: {host: {url, token}} from `hx hosts pair`
+def host_token(layout: Layout, name: str, spec: HostSpec) -> SecretStr | None: ...   # host-tokens.json first (only while spec.url is the origin it was paired at), then resolve_secret(token_env)
 ```
-`hx serve --tailscale` requires auth on (else `ConfigError` "tailscale needs server.auth: on"), binds `127.0.0.1`, calls `serve_https`, uses the returned URL as `public_url` for this process (allowed `Host`/`Origin`, `Secure` cookie, pairing links), and calls `unserve` at shutdown only for the mapping it set. A lab server is an env server started with `server.auth: on` (any reachable bind, e.g. behind `tailscale serve`); its owner runs `hx pair --client host --scope admin` there and the hub runs `hx hosts pair <name> <pairing-url>`. The hub supervisor sends `host_token(...)` for `route: url`; a 401/403 puts the host in `error` with message `auth failed: hx hosts pair <name> <pairing-url>` and stops retrying until `connect` (existing rule).
+`hx serve --tailscale` requires auth on (else `ConfigError` "tailscale needs server.auth: on"), binds `127.0.0.1`, calls `serve_https`, uses the returned URL as `public_url` for this process (allowed `Host`/`Origin`, `Secure` cookie, pairing links), and calls `unserve` at shutdown only for the mapping it set. A lab server is an env server started with `server.auth: on` (any reachable bind, e.g. behind `tailscale serve`); its owner runs `hx pair --client host --scope admin` there (`--client host` refuses any other scope) and the hub runs `hx hosts pair <name> <pairing-url>`, which refuses a link whose origin is not the host's `url` and stores the token bound to that origin. The hub supervisor sends `host_token(...)` for `route: url`; a 401/403 puts the host in `error` with message `auth failed: hx hosts pair <name> <pairing-url>` and stops retrying until `connect` (existing rule).
 
 ### 1.14 SDK (`hypothex.sdk`)
 
@@ -368,7 +371,7 @@ class NoopRun: # add the same no-op
 | `<home>/config.yaml` | hub, env servers | YAML, `Settings` | 0600 | secrets only as env var names |
 | `<home>/secrets.env` | user | `KEY=VALUE` lines | must be 0600, own uid | optional; `resolve_secret` fallback |
 | `<home>/auth/auth.db` | `hx serve` | SQLite: `users`, `sessions`, `offers` | dir 0700, file 0600 | state, not index: `hx reindex` never touches it; secrets stored as sha256 |
-| `<home>/auth/host-tokens.json` | hub | `{host: token}` | 0600 | from `hx hosts pair` |
+| `<home>/auth/host-tokens.json` | hub | `{host: {url, token}}` | 0600 | from `hx hosts pair`; sent only to `url`'s origin |
 | `<home>/auth/hub-tokens.json` | CLI client | `{hub_url: {token, user, scope, session_id}}` | 0600 | from `hx login`; read by `resolve_hub_token` after `$HYPOTHEX_HUB_TOKEN` |
 | `<home>/serve/server.json` | `hx serve` | existing + `token` = local session token when auth on | 0600 | unchanged shape |
 | `<home>/notify/cursor.json` | notifier | `{last_sequence}` | 0600 | |
@@ -390,18 +393,18 @@ Every route (old and new) declares a scope; the table gives it for new routes. E
 
 | Method | Path | Scope | Body / query | Returns |
 |---|---|---|---|---|
-| POST | `/api/v1/auth/pair` | public | `{offer_id, secret, device, client: "browser"\|"cli"\|"agent"\|"host"}` | browser: `Set-Cookie` + `{user, scope, scopes, session_id}`; others: `{token, user, scope, scopes, session_id}`; 400 `PairingError`; 429 after 10 attempts/min per client address |
+| POST | `/api/v1/auth/pair` | public | `{offer_id, secret, device, client: "browser"\|"cli"\|"agent"\|"host"}` | browser: `Set-Cookie` + `{user, scope, scopes, session_id}`; others: `{token, user, scope, scopes, session_id}`; 400 `PairingError`; 429 after 10 failed attempts/min per client address (successes are not counted; behind `tailscale serve` the address is `Tailscale-User-Login`, else the proxy's `X-Forwarded-For` hop) |
 | GET | `/api/v1/auth/me` | read | | `{user, scope, scopes, session_id, client, auth: "on"\|"off", public_url}` (auth off: `local`, `admin`) |
 | POST | `/api/v1/auth/logout` | read | | `{ok}`; revokes the calling session, clears the cookie |
 | POST | `/api/v1/auth/ws-ticket` | read | | `{ticket, expires_in: 30}` |
 | POST | `/api/v1/auth/pairings` | read (+ scope rule) | `{user?, new_user?: bool, scope, ttl_seconds?: <=300, client_hint?}` | `{offer_id, url, expires_at, qr}` (`qr` = `qr_text`); 403 when it would widen scope; 400 when auth is off |
 | GET | `/api/v1/auth/sessions` | read | `?user=` (admin for others) | `list[Session]` (own; all for admin) |
-| POST | `/api/v1/auth/sessions/{id}/revoke` | read (own) / admin | `{command_id?}` | `Session` |
+| POST | `/api/v1/auth/sessions/{session_id}/revoke` | read (own) / admin | `{command_id?}` | `Session` |
 | GET | `/api/v1/auth/users` | admin | | `list[User]` |
 | POST | `/api/v1/auth/users/{name}/disable` | admin | `{command_id?}` | `User` |
 | GET | `/api/v1/runs` | read | phase 2 filters + `owner?` (`me` = caller) | `list[RunRecord]` |
 | GET | `/api/v1/projects/{project}/notebook` | read | | `[{day, bytes, entries}]` |
-| GET | `/api/v1/projects/{project}/notebook/{day}` | read | | `NotebookDay` |
+| GET | `/api/v1/projects/{project}/notebook/{day}` | read | `{day}` = `YYYY-MM-DD` or `today` (the hub's date, 1.4) | `NotebookDay` |
 | POST | `/api/v1/projects/{project}/notebook/{day}` | launch | `{text, command_id?}` (author = principal) | `NotebookDay` (append) |
 | PUT | `/api/v1/projects/{project}/notebook/{day}` | launch | `{text, base_hash, command_id?}` | `NotebookDay`; 409 `{error, type: "NotebookConflictError", current}`; 413 |
 | GET | `/api/v1/tasks/{project}/{task}/export` | read | `format, metrics?, noise?, digits?, percent?, top?, groups?, baselines?, caption?, label?, standalone?` | `text/plain; charset=utf-8` (LaTeX, Markdown) or `text/csv`; `Content-Disposition: attachment; filename="<task>.<tex\|md\|csv>"` |
@@ -450,7 +453,7 @@ The CLI sends `X-Hypothex-Agent` when `HYPOTHEX_AGENT` is set. Duration flags ac
 
 ## 5. MCP additions
 
-Tools (with scope): `export_table(task, format="markdown", project=None, metrics=None, noise="both", digits=3) -> {text}` (read); `export_compare(run_ids, format="markdown") -> {text}` (read); `get_baselines(task, project=None) -> {baselines}` (read); `get_notebook(project, day=None) -> NotebookDay` (read); `add_notebook_entry(project, text, agent="mcp") -> NotebookDay` (launch; author `agent:<agent>@<user>`); `get_digest(project, days=7) -> Digest` (read); `storage_report(project=None) -> StorageReport` (admin); `plan_storage_clean(older_than_days=30, kinds=None, project=None) -> CleanPlan` (admin; dry run only); `whoami() -> {user, scope}` (read). There is no MCP tool that applies a cleanup, sends notifications, or manages users or sessions (agents never delete; skill rule 6). Every tool, old and new, carries `@scoped(...)`: list/get tools `read`; launch/rerun/reinfer/reevaluate/stop/add_note/tag/add_view/sweep tools/pull `launch`. Over `/mcp` with auth on, the bearer's principal applies; stdio `hx mcp` runs as `LOCAL_OWNER`. `skills/hypothex/SKILL.md` gains: export a table for a paper, write findings to the notebook, never apply storage cleanup.
+Tools (with scope): `export_table(task, format="markdown", project=None, metrics=None, noise="both", digits=3) -> {text}` (read); `export_compare(run_ids, format="markdown") -> {text}` (read); `get_baselines(task, project=None) -> {baselines}` (read); `get_notebook(project, day=None) -> NotebookDay` (read); `add_notebook_entry(project, text, agent="mcp") -> NotebookDay` (launch; author `agent:<agent>@<user>`); `get_digest(project, days=7) -> Digest` (read); `storage_report(project=None) -> StorageReport` (admin); `plan_storage_clean(older_than_days=30, kinds=None, project=None) -> CleanPlan` (admin; dry run only); `whoami() -> {user, scope}` (read). There is no MCP tool that applies a cleanup, sends notifications, or manages users or sessions (agents never delete; skill rule 6). Every tool, old and new, carries `@scoped(...)`: list/get tools `read`; launch/rerun/reinfer/reevaluate/stop/add_note/tag/add_view/sweep tools/pull `launch`. Over `/mcp` with auth on, the caller's principal (bearer or cookie) applies; stdio `hx mcp` runs as `LOCAL_OWNER`. Over HTTP a tool's own hub calls carry only the caller's credential (`tool_hub_token`), never `hub_token` or the local admin token; tools apply the HTTP ownership rules (1.3): `stop_run` on a local run and `cancel_sweep` on a local sweep call `require_act` first. `skills/hypothex/SKILL.md` gains: export a table for a paper, write findings to the notebook, never apply storage cleanup.
 
 ## 6. Config keys (full `config.yaml`)
 
@@ -477,7 +480,7 @@ storage: {older_than_days: 30, kinds: [checkpoint], plan_ttl_minutes: 60}
 
 ## 7. Security model
 
-- **Secrets** (Slack webhook URL, SMTP password, Postgres password, session and pairing secrets, host tokens) live only in environment variables, `secrets.env` (0600, own uid), `auth.db` (hashed), `host-tokens.json`/`hub-tokens.json`/`server.json` (0600). They never appear in `config.yaml`, run folders, `env/` captures, the event log, the index, API responses, CLI `--json` output, log lines, exception messages, notices, or the outbox. Mechanisms: `SecretStr` end to end; `redact()` on every error string that leaves `hypothex.notify` and on stderr lines quoted in notices; `ENV_ALLOWLIST` stays an allow-list and a test asserts no `*_WEBHOOK`, `*_PASSWORD`, `*_TOKEN`, `*_SECRET` name is ever on it; `hx serve` pops `HYPOTHEX_SERVE_TOKEN` (existing) and strips the configured secret variable names from the environment it passes to run subprocesses.
+- **Secrets** (Slack webhook URL, SMTP password, Postgres password, session and pairing secrets, host tokens) live only in environment variables, `secrets.env` (0600, own uid), `auth.db` (hashed), `host-tokens.json`/`hub-tokens.json`/`server.json` (0600). They never appear in `config.yaml`, run folders, `env/` captures, the event log, the index, API responses, CLI `--json` output, log lines, exception messages, notices, or the outbox. Mechanisms: `SecretStr` end to end; `redact()` on every error string that leaves `hypothex.notify` and on stderr lines quoted in notices; `ENV_ALLOWLIST` stays an allow-list and a test asserts no `*_WEBHOOK`, `*_PASSWORD`, `*_TOKEN`, `*_SECRET` name is ever on it; `hx serve` pops `HYPOTHEX_SERVE_TOKEN` (existing) and strips the configured secret variable names, `HYPOTHEX_SERVE_TOKEN`, `HYPOTHEX_HUB_TOKEN`, and every host's `token_env` from the environment it passes to run subprocesses.
 - **Webhooks** must be `https://` unless the host is loopback (tests). SMTP uses STARTTLS or SSL by default; `security: none` with a `username` is refused (`ConfigError`) unless `host` is loopback, so a password never crosses the network in clear text.
 - **Authentication**: sessions from one-time pairing only (no passwords). Pairing secret: 32 random bytes in the URL fragment (never sent in an HTTP request line or logged), 5 min, one use, burned after 5 wrong secrets; session secret: 32 random bytes, stored as sha256, compared in constant time. Cookies `HttpOnly; SameSite=Strict` (+`Secure` on https). Writes from browsers also pass `OriginGuard` with `public_url`'s host allowed. WebSocket: single-use 30 s tickets; re-check every 30 s.
 - **Authorization**: scopes `read ⊂ launch ⊂ admin`; every API route, the WebSocket, and every MCP tool declares one (unit tests fail on a missing declaration); a principal can issue pairings only up to its own scope; ownership rules in 1.3; body fields `created_by`/`owner`/`author` are overwritten from the principal when auth is on.
@@ -496,7 +499,7 @@ storage: {older_than_days: 30, kinds: [checkpoint], plan_ttl_minutes: 60}
 7. `secrets.env` group-readable → `hx serve` refuses at start naming `chmod 600 <path>`; `config.yaml` with a literal `webhook:` → `ConfigError` with the `_env` hint, value not echoed.
 8. Export: missing scores → `—`; n=1 → no ±, `¹`; identical seeds → `◇×n`; no per-example data → no CI; labels with `_ & % $ #` → escaped; empty leaderboard → header-only table, exit 0.
 9. Storage: artifact rewritten after the plan → skipped "changed since plan"; run unarchived or starred after the plan → skipped; plan older than `plan_ttl_minutes` or `confirm_bytes` wrong → 400, nothing deleted; host unreachable → its items in `errors`, others deleted; a checkpoint shared with an unarchived reinfer child → refused "used by <id>"; an artifact path equal to `/`, home, the repo, or the Hypothex home → refused "protected"; a symlink artifact → the link is removed, the target kept.
-10. Pairing link reused, expired, or with a wrong secret → the same 400 message; 5 wrong secrets burn the offer; 10 attempts/min per address → 429.
+10. Pairing link reused, expired, or with a wrong secret → the same 400 message; 5 wrong secrets burn the offer; 10 failed attempts/min per address → 429.
 11. Session revoked or user disabled while the UI is open → next HTTP call 401 (UI shows the 401 gate), open WebSocket closed with `4401` within 30 s.
 12. A collaborator posts `created_by: "human:sv"` or `owner: "sv"` → ignored; the run records their own identity. A collaborator stops the owner's run → 403; their own → ok.
 13. Postgres down at start → `IndexUnavailableError` naming the host (no password), `hx serve` exits 1; down mid-request → 503, run files still written (file first), `repair_index_gaps` indexes them later; schema behind → `IndexSchemaError` "run hx db upgrade".
@@ -528,16 +531,16 @@ Additions in `ui/` (same stack and rules as phase 1b and 2; terse: numbers and g
 - Header: right side `notebook` (last project), `storage` (admin only), `⚙` settings, user chip `@user` with scope glyph (`r`/`l`/`a`); auth off: no chip.
 - Task page: `export ▾` in the leaderboard panel title (LaTeX / Markdown / CSV; each Copy and ↓ download; options digits and noise in the menu); baseline rows in the leaderboard (dashed rule above, `◆ name`, value, `↗` source link, `v1≠v2` badge when `version_match` false, never in the best band).
 - Run page: `@owner` in the status line; cleaned artifacts in "where everything is" struck through with `✕ <date> <bytes>`.
-- Overview: `@owner` on running and recent rows; a `mine` toggle filters by `owner=me` (hidden when auth off).
+- Overview: `@owner` on running and recent rows (`TimelineItem`, `IdeaRow`, `FailureRow` gain `owner: str | None = None`; `IdeaRow.owner` is its first run's, like `created_by`); a `mine` toggle filters by `owner=me` (hidden when auth off).
 - `ui/src/pages/components/AuthGate.tsx`: on `locked`, one line `401 · pair this device: hx pair` plus a copy button for the command.
 - Live updates: `notebook.updated` invalidates notebook queries; `run.artifacts_cleaned`/`storage.*` invalidate storage, runs, run detail; `notify.*` invalidates the notify status; `auth.*` invalidates sessions and users.
 
 ### 10.1 Mockup requirements (`docs/mockups/phase3/`: `index.html`, `data.js`, `shot-<screen>-{light,dark}.png`)
 
 Made before the frontend plan, same design system as `ui-v4`/`phase2` (lettered panels, hairlines, no cards, numbers right-aligned, monospace only for paths, commands, tokens). Each screen shows real-looking numbers from `data.js`; no lorem ipsum, no help text.
-1. **pair** — three states: ready (device field prefilled `MacBook`, `pair` button, `user · scope · 4:12` countdown), done (`✓ alice · launch`), invalid (`✗ link invalid or expired`). Centred, no header.
+1. **pair** — three states: ready (device field prefilled `MacBook`, `pair` button, the hub and the offer id `p_3f9a…`), done (`✓ alice · launch`), invalid (`✗ link invalid or expired`). Centred, no header. (User, scope and countdown are not shown before redeeming: the link carries only `<offer>.<secret>`, and no public route reads an offer; see "Changes after review round 1".)
 2. **settings** (admin) — headline `3 users · 5 sessions · slack ● email ○`; a sessions (device, user, client, scope, last seen `2m`, `revoke ×`), b users (name, role, sessions, `disable`), c add device (scope picker, user picker / `+ new`, then QR + URL + countdown `4:59`), d notifications (channels `● set`/`○ unset` with variable name in tooltip, per-project rules table: project, events as glyphs `✓ ✗ ? ⊘`, channels, `min`, recent sends: time, run, channel, `✓/✗/…`, attempts, error class; `test` buttons). Collaborator view: only a (own sessions) and c limited to own scope.
-3. **storage** — headline `1.84 TB · 412 GB cleanable (archived, >30d)`; a bytes by project (horizontal bars, local vs remote split), b bytes by host, c largest items table (run, host, kind, path, bytes, age, `★`/`archived` glyphs), d clean: `older than [30] d`, kinds chips, `dry run` button → plan table (run, host, path, bytes, reason) with refused rows greyed (reason `protected`, `used by 01J…`), total, `apply` disabled until a plan exists; confirm dialog `delete 412.3 GB · 37 files · 3 hosts` with the number typed back; result `freed 409.8 GB · 2 skipped`.
+3. **storage** — headline `1.84 TB · 412 GB cleanable (archived, >30d)`; a bytes by project (horizontal bars, local vs remote split), b bytes by host, c largest items table (run, host, kind, path, bytes, age, `★`/`archived` glyphs), d clean: `older than [30] d`, kinds chips, `dry run` button → plan table (run, host, path, bytes, reason) with refused rows greyed (reason `protected`, `used by 01J…`), total, `apply` disabled until a plan exists; confirm dialog `delete 412.3 GB · 3 paths · 3 hosts` (a `CleanItem` is a path, with no file count) with the number typed back; result `freed 409.8 GB · 2 skipped`.
 4. **notebook** — left: day list (`2026-10-04 · 3`), right: rendered Markdown with run chips (`01J8…a1b2 ✓ 0.913`, unknown id as `? 01J…`), entry stamps `09:14 @alice`, `+ entry` box, `edit` → textarea, `save`/`discard`; conflict state: `409 · changed by @sv 1m` with a side-by-side diff and `use theirs`/`keep mine`. Weekly summary entry shown as one block with counts row `▲12 ✓9 ✗2 ?1 · 41.2 GPU-h $86.5` and task changes `uspto50k-topk 0.598→0.613 ▲`.
 5. **task export + baselines** — the leaderboard with two baseline rows (one with `v1≠v2`), the `export ▾` menu open showing LaTeX preview (first 6 lines, monospace), Copy and ↓ buttons, digits `3`, noise `both`.
 6. **run** — owner `@alice` in the status line, one cleaned checkpoint struck through `✕ 2026-10-04 4.2 GB`.
@@ -559,3 +562,24 @@ Done when, all automated and green in CI (Docker job for marker `docker`):
 7. Postgres (Docker): `hx db upgrade`, then reindex equivalence with SQLite.
 8. Playwright smoke of every new screen in both modes against `hx demo --with-team`.
 9. `uv run pytest`, `uv run ruff check`, `uv run ruff format --check`, `uv run ty check`, `bun test`, `bun run typecheck` clean. A first send to the user's real Slack/SMTP and a first Tailscale exposure are the user's manual steps.
+
+## Changes after review round 1
+
+Codex and Fable reviewed the three plans against this contract and the code on `main`. Every finding was fixed; where the fix differs from the reviewer's suggestion, or the contract changed, the ruling is one line here.
+
+- **Host sessions (Codex 1, Fable 1).** `redeem(client="host")` needs an `admin` offer, and `identity()` honours body `created_by`/`owner` only for `client == "host"` with `admin` scope; `hx pair --client host` refuses any scope but `admin` (1.2, 1.10, 1.13).
+- **MCP over HTTP (Codex 2, 3).** Tools carry the caller's own credential (bearer, else the `hx_session` cookie) and never fall back to the server's token; `stop_run`/`cancel_sweep` call `require_act` on local runs and sweeps (1.10, 5).
+- **Host tokens are origin-bound (Codex 4).** `host-tokens.json` is `{host: {url, token}}`; `host_token` sends a paired token only to the origin it was redeemed at; `hx hosts pair` refuses a link for another origin (1.13, 2).
+- **Run environments (Codex 5).** `HYPOTHEX_HUB_TOKEN` joins the default secret names and every host's `token_env` is scrubbed from runs (7).
+- **Re-inference inputs (Codex 6).** Cleanup treats `vars["checkpoint"]` (what `control.reinfer` really writes) as a use of that path, at plan and at delete (1.9).
+- **Compare export (Codex 9).** A shown metric with two versions or directions across the compared runs is refused, not merged (1.6).
+- **Folded sweeps (Codex 10).** The sweep notice follows `rule.events` (1.7).
+- **Digest notices (Codex 11).** The top notes are in the Slack/email notice; the notebook block lists task changes as lines, not a Markdown table, so the UI renders it (1.8). Fable 12 asked only to align the UI fixture; both sides now share one format.
+- **Notebook "today" (Codex 14).** `hub_today` is the one date; the API accepts `today` for `{day}`, and the UI and `hx note` in client mode ask the hub instead of computing a date (1.4, 3).
+- **Pairing limit (Codex 15, Fable 7).** The limit counts failed attempts only (a success spends a fresh one-use secret), keyed by `Tailscale-User-Login` or the proxy's `X-Forwarded-For` hop behind `tailscale serve`. Ruling: this fixes the e2e 429s at the source instead of isolating hubs per test, and still stops guessing (3, 8.10).
+- **Overview owners (Codex 16).** `TimelineItem`, `IdeaRow`, `FailureRow` gain `owner` (10).
+- **Revoke route (Fable 5).** The path parameter is `{session_id}` in the contract and both plans (3).
+- **Pair page (Fable 13).** Ruling: the ready state shows the hub and offer id, not `user · scope · 4:12`; a public read of an offer by id would tell anyone holding a leaked offer id whom it pairs and at what scope, and the countdown adds nothing the 5-minute link does not already say (10.1).
+- **Confirm dialog (Fable 14).** `3 paths`, not `37 files`: a `CleanItem` is a path with no file count (10.1).
+- **Base commit (Fable 3, 4).** The backend plan's base is `main` at `e27a3a2` (it includes `6ace21d`); its anchors were re-checked there. Ruling: the frontend plan cannot name the phase 2 merge commit yet (phase 2 Task 28 is still on `phase-2`), so it gets a pre-flight script that checks every "as left by phase 2" anchor on `main` before Task 1.
+- Plan-only fixes, no contract change: `NotifyTestBody` at module scope (Codex 8), `from None` on every `ChannelError` (Fable 2), frozen cleanup plan in the confirm dialog (Codex 12), Copy disabled on placeholder export text (Codex 13), the pairing label from the sent body (Codex 7), a concurrent apply of one plan refused instead of a 500 (Fable 6), `AuthGuard` skips the session lookup for static paths (Fable 8), a Postgres URL without `psycopg` is a `ConfigError` (Fable 9), the open-bind test never listens on `0.0.0.0` (Fable 10), and `docs/team.rst` says the home becomes 0700 (Fable 11).

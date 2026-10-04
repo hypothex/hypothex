@@ -1,4 +1,5 @@
 /** Overview side panels: running runs, failures, projects. */
+import { Fragment } from "react";
 import { CopyButton } from "./CopyButton";
 import { firstClause, fmtClock, fmtScoreUnit, fmtTime, shortId, tailPath } from "./format";
 import { AppLink, hrefs } from "./links";
@@ -39,26 +40,65 @@ export function RunningList({ runs }: { runs: RunRecord[] }) {
   );
 }
 
+/** Failures with the same label and exit code, in first-seen order (rows come newest first). */
+export function groupFailures(failures: FailureRow[]): FailureRow[][] {
+  const groups = new Map<string, FailureRow[]>();
+  for (const f of failures) {
+    const key = JSON.stringify([f.label, f.exit_code]);
+    const group = groups.get(key);
+    if (group) group.push(f);
+    else groups.set(key, [f]);
+  }
+  return [...groups.values()];
+}
+
+/** A path that wraps only after a `/`, never inside a name. */
+function SlashPath({ path, title, className }: { path: string; title: string; className: string }) {
+  const parts = path.split("/");
+  return (
+    <div className={className} title={title} style={{ wordBreak: "normal", overflowWrap: "break-word" }}>
+      {parts.map((part, i) => (
+        // segments repeat ("…", "logs") and never reorder, so the index is the key
+        <Fragment key={i}>
+          {part}
+          {i < parts.length - 1 ? (
+            <>
+              /<wbr />
+            </>
+          ) : null}
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
 export function FailureList({ failures }: { failures: FailureRow[] }) {
   if (failures.length === 0) return <p className="small">none</p>;
   return (
     <div>
-      {failures.map((f) => (
-        <div key={f.run_id} className="fail-b">
-          <span className="x">×</span>
-          <b>{f.exit_code !== null ? `${f.label}, exit ${f.exit_code}` : f.label}</b>{" "}
-          <span className="small">{`${fmtTime(f.created_at)}${f.retried_ok ? ", retry ok" : ""}`}</span>
-          <div className="p" title={f.stderr_path}>
-            {tailPath(f.stderr_path)}
+      {groupFailures(failures).map((rows) => {
+        const f = rows[0] as FailureRow;
+        const many = rows.length > 1;
+        const retried = rows.every((r) => r.retried_ok);
+        return (
+          <div
+            key={f.run_id}
+            className="fail-b"
+            title={many ? rows.map((r) => `${r.run_id} ${fmtTime(r.created_at)}`).join("\n") : undefined}
+          >
+            <span className="x">{many ? `×${rows.length}` : "×"}</span>
+            <b>{f.exit_code !== null ? `${f.label}, exit ${f.exit_code}` : f.label}</b>{" "}
+            <span className="small">{`${fmtTime(f.created_at)}${retried ? ", retry ok" : ""}`}</span>
+            <SlashPath className="p" path={tailPath(f.stderr_path)} title={f.stderr_path} />
+            <div className="row">
+              <AppLink className="btn" href={hrefs.run(f.run_id, { log: "stderr" })}>
+                Open stderr
+              </AppLink>
+              <CopyButton text={f.stderr_path} label="stderr path" />
+            </div>
           </div>
-          <div className="row">
-            <AppLink className="btn" href={hrefs.run(f.run_id, { log: "stderr" })}>
-              Open stderr
-            </AppLink>
-            <CopyButton text={f.stderr_path} label="stderr path" />
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

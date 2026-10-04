@@ -9,9 +9,14 @@ import {
   ideaSub,
   pct,
 } from "../../src/pages/components/IdeaList";
-import { FailureList, ProjectsTable, RunningList } from "../../src/pages/components/OverviewLists";
+import {
+  FailureList,
+  ProjectsTable,
+  RunningList,
+  groupFailures,
+} from "../../src/pages/components/OverviewLists";
 import { PAGES_CSS } from "../../src/pages/components/styles";
-import type { IdeaRow } from "../../src/pages/components/types";
+import type { FailureRow, IdeaRow } from "../../src/pages/components/types";
 import { RUN_FAILED, RUN_SVM, STORE, makeOverview, makeRecord } from "./fixtures";
 import { mockClipboard } from "./helpers";
 
@@ -189,6 +194,53 @@ test("FailureList links to stderr and copies its path", async () => {
   expect(open.getAttribute("href")).toBe(`/r/${RUN_FAILED}?log=stderr`);
   fireEvent.click(screen.getByRole("button", { name: "Copy stderr path" }));
   await waitFor(() => expect(written).toEqual([`${STORE}/${RUN_FAILED}/logs/stderr.log`]));
+});
+
+const fail = (run_id: string, label: string, exit_code: number | null, at: string): FailureRow => ({
+  run_id,
+  label,
+  exit_code,
+  created_at: `2026-10-03T${at}Z`,
+  stderr_path: `${STORE}/${run_id}/logs/stderr.log`,
+  retried_ok: true,
+});
+const FAILS = [
+  fail("svm-3", "RBF-kernel SVM", 2, "03:02:02"),
+  fail("cache-1", "cache-enabled", 1, "02:00:00"),
+  fail("svm-2", "RBF-kernel SVM", 2, "03:02:01"),
+  fail("svm-x", "RBF-kernel SVM", 1, "03:01:59"),
+  fail("svm-1", "RBF-kernel SVM", 2, "03:01:58"),
+];
+
+test("groupFailures joins rows with the same label and exit code, in first-seen order", () => {
+  expect(groupFailures(FAILS).map((g) => g.map((f) => f.run_id))).toEqual([
+    ["svm-3", "svm-2", "svm-1"],
+    ["cache-1"],
+    ["svm-x"],
+  ]);
+  expect(groupFailures([])).toEqual([]);
+});
+
+test("FailureList shows one block per group with a ×N count, newest row first", () => {
+  const { container } = render(<FailureList failures={FAILS} />);
+  const blocks = [...container.querySelectorAll(".fail-b")];
+  expect(blocks.map((b) => b.querySelector(".x")?.textContent)).toEqual(["×3", "×", "×"]);
+  expect(blocks[0]?.querySelector("b")?.textContent).toBe("RBF-kernel SVM, exit 2");
+  expect(within(blocks[0] as HTMLElement).getByRole("link", { name: "Open stderr" }).getAttribute("href")).toBe(
+    "/r/svm-3?log=stderr",
+  );
+  expect(blocks[0]?.getAttribute("title")).toBe("svm-3 03:02:02 UTC\nsvm-2 03:02:01 UTC\nsvm-1 03:01:58 UTC");
+  expect(blocks[1]?.getAttribute("title")).toBeNull();
+});
+
+test("FailureList paths break only after a slash", () => {
+  const { container } = render(<FailureList failures={makeOverview().failures} />);
+  const path = container.querySelector(".fail-b .p") as HTMLElement;
+  // …/<id>/logs/stderr.log: a break chance after each of the 3 slashes, none inside a word
+  expect(path.querySelectorAll("wbr")).toHaveLength(3);
+  expect(path.style.wordBreak).toBe("normal");
+  expect(path.textContent).toBe(`…/${RUN_FAILED}/logs/stderr.log`);
+  expect(path.getAttribute("title")).toBe(`${STORE}/${RUN_FAILED}/logs/stderr.log`);
 });
 
 test("ProjectsTable links each task and shows runs and best", () => {

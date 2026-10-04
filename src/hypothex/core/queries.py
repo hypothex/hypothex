@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
+import math
 import shlex
+import weakref
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +31,7 @@ from hypothex.core.datasets import (
 )
 from hypothex.core.errors import ConfigError, EvalError, RunError, StoreError
 from hypothex.core.fsutil import read_jsonl, read_yaml
+from hypothex.core.index import Index
 from hypothex.core.leaderboard import Leaderboard, build_leaderboard
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import ProjectEntry
@@ -129,14 +133,30 @@ def refresh_project(ctx: Context, project: str) -> ProjectEntry:
     Returns
     -------
     ProjectEntry
-        The refreshed entry, or the stored snapshot if the repo is gone or
-        the file is invalid.
+        The refreshed entry, or the stored snapshot if the repo is gone, the
+        file is invalid, or the entry is a copy from a host
+        (``remote_host``): its repo path is on that host, so it is never read
+        here.
+
+    Notes
+    -----
+    The project is registered again only when the parsed config or the repo
+    path changed. A read never rewrites an unchanged ``project.json``: that
+    write would change ``registered_at``, bump the index generation, and
+    change the project folder's mtime, which makes the next ``Context.open``
+    scan every run folder.
     """
     entry = ctx.store.load_project(project)
+    if entry.remote_host is not None:
+        return entry
+    repo = Path(entry.repo)
     try:
-        return ctx.register_project(Path(entry.repo))
+        config = load_project_config(repo)
     except ConfigError:
         return entry
+    if config == entry.config and str(repo.resolve()) == entry.repo:
+        return entry
+    return ctx.register_project(repo)
 
 
 def list_projects(ctx: Context) -> list[ProjectEntry]:
@@ -269,6 +289,17 @@ def get_leaderboard(
     Leaderboard
     """
     entry, task = resolve_task(ctx, ref, project)
+    return _board(ctx, entry, task, versions, examples=examples)
+
+
+def _board(
+    ctx: Context,
+    entry: ProjectEntry,
+    task: str,
+    versions: dict[str, str] | None,
+    *,
+    examples: bool,
+) -> Leaderboard:
     runs = ctx.index.list_runs(project=entry.project, task=task, include_archived=True, limit=None)
     scores = ctx.index.scores_for(r.run_id for r in runs)
     per_example = primary_examples(ctx, entry.config, task, runs, versions) if examples else None
@@ -277,13 +308,53 @@ def get_leaderboard(
     )
 
 
+class _Ranked(NamedTuple):
+    """What a task summary takes from the index, and the state it was read at."""
+
+    generation: int
+    config: ProjectConfig
+    primary: str
+    higher_is_better: bool
+    best: float | None
+    n_runs: int
+
+
+_RANKED: weakref.WeakKeyDictionary[Index, dict[tuple[str, str], _Ranked]] = (
+    weakref.WeakKeyDictionary()
+)
+"""Per index, the last ``_Ranked`` of each ``(project, task)``."""
+
+
+def _ranked(ctx: Context, entry: ProjectEntry, name: str) -> _Ranked:
+    """
+    Rank a task's runs, or reuse the last ranking while nothing it reads changed.
+
+    The ranking reads only the index and the project config, so it is reused
+    while the index generation and the config are the same (a task list
+    request then builds no leaderboard).
+    """
+    memo = _RANKED.setdefault(ctx.index, {})
+    generation = ctx.index.generation()  # read first: a write during the build reruns it
+    cached = memo.get((entry.project, name))
+    if cached is not None and cached.generation == generation and cached.config == entry.config:
+        return cached
+    board = _board(ctx, entry, name, None, examples=False)
+    top = board.rows[0].primary if board.rows else None
+    ranked = _Ranked(
+        generation=generation,
+        config=entry.config,
+        primary=board.primary,
+        higher_is_better=board.higher_is_better,
+        best=top.mean if top else None,
+        n_runs=ctx.index.count_runs(project=entry.project, task=name, status=RunStatus.FINISHED),
+    )
+    memo[(entry.project, name)] = ranked
+    return ranked
+
+
 def _summary(ctx: Context, entry: ProjectEntry, name: str) -> TaskSummary:
     spec = entry.config.tasks[name]
-    board = get_leaderboard(ctx, name, entry.project, examples=False)
-    best = board.rows[0].primary.mean if board.rows and board.rows[0].primary else None
-    n_runs = len(
-        ctx.index.list_runs(project=entry.project, task=name, status=RunStatus.FINISHED, limit=None)
-    )
+    ranked = _ranked(ctx, entry, name)
     return TaskSummary(
         project=entry.project,
         name=name,
@@ -292,10 +363,10 @@ def _summary(ctx: Context, entry: ProjectEntry, name: str) -> TaskSummary:
         dataset_version=entry.config.datasets[spec.dataset].version,
         split=spec.split,
         metrics={m: entry.config.metrics[m].version for m in spec.metrics},
-        primary=board.primary,
-        higher_is_better=board.higher_is_better,
-        n_runs=n_runs,
-        best=best,
+        primary=ranked.primary,
+        higher_is_better=ranked.higher_is_better,
+        n_runs=ranked.n_runs,
+        best=ranked.best,
     )
 
 
@@ -383,11 +454,6 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
         paths[f"dataset:{ref.name}"] = f"{ref.host}:{ref.path}"
     for i, art in enumerate(record.artifacts):
         paths[f"artifact:{art.kind}:{i}"] = f"{art.host}:{art.path}"
-    children = [
-        r.run_id
-        for r in ctx.index.list_runs(project=record.project, include_archived=True, limit=None)
-        if r.parent == run_id
-    ]
     return RunDetail(
         record=record,
         scores=ctx.store.read_scores(record.project, run_id),
@@ -395,11 +461,75 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
         notes=ctx.store.read_notes(record.project, run_id),
         has_diff=(run_dir / "git.diff").is_file(),
         metric_names=sorted({p.name for p in ctx.index.metric_points(run_id)}),
-        children=sorted(children),
+        children=sorted(ctx.index.child_run_ids(run_id)),
     )
 
 
-def metric_history(ctx: Context, run_id: str) -> list[MetricPoint]:
+def lttb(series: list[MetricPoint], limit: int) -> list[MetricPoint]:
+    """
+    Downsample one series with Largest-Triangle-Three-Buckets.
+
+    The first and last points are always kept. The points in between are
+    split into ``limit - 2`` buckets, and from each bucket the point that
+    makes the largest triangle with the point kept before it and the mean of
+    the next bucket is kept. Peaks and dips survive, unlike every-n-th
+    sampling. Kept points are returned as they are (no averaging).
+
+    Parameters
+    ----------
+    series : list of MetricPoint
+        One metric's points, ordered by step.
+    limit : int
+        Maximum points to return; at least 2.
+
+    Returns
+    -------
+    list of MetricPoint
+        ``series`` itself when it has at most ``limit`` points.
+
+    Raises
+    ------
+    RunError
+        If ``limit`` is less than 2.
+
+    Examples
+    --------
+    >>> pts = [MetricPoint(name="loss", step=i, value=v) for i, v in enumerate([0, 1, 9, 1, 0])]
+    >>> [p.value for p in lttb(pts, 3)]
+    [0.0, 9.0, 0.0]
+    """
+    if limit < 2:
+        raise RunError(f"max_points must be at least 2, not {limit}")
+    n = len(series)
+    if n <= limit:
+        return series
+    inner = limit - 2
+    out = [series[0]]
+    kept = series[0]
+    for i in range(inner):
+        # bucket i holds series[start:stop]; integer bounds give equal-size buckets
+        start = i * (n - 2) // inner + 1
+        stop = (i + 1) * (n - 2) // inner + 1
+        after = series[stop : (i + 2) * (n - 2) // inner + 1]  # last bucket: the last point
+        mean_x = math.fsum(p.step for p in after) / len(after)
+        mean_y = math.fsum(p.value for p in after) / len(after)
+        x0, y0 = kept.step, kept.value
+        kept, largest = series[start], -1.0
+        for p in series[start:stop]:
+            area = abs((x0 - mean_x) * (p.value - y0) - (x0 - p.step) * (mean_y - y0))
+            if area > largest:
+                kept, largest = p, area
+        out.append(kept)
+    out.append(series[-1])
+    return out
+
+
+def metric_history(
+    ctx: Context,
+    run_id: str,
+    names: Iterable[str] | None = None,
+    max_points: int | None = None,
+) -> list[MetricPoint]:
     """
     Return a run's indexed (downsampled) metric history.
 
@@ -409,13 +539,39 @@ def metric_history(ctx: Context, run_id: str) -> list[MetricPoint]:
         Open Hypothex context.
     run_id : str
         Run id to look up.
+    names : iterable of str, optional
+        Metric names to return; ``None`` returns every name. The filter runs
+        in SQL, so a chart of two names reads only their rows.
+    max_points : int, optional
+        Keep at most this many points per name (at least 2), picked with
+        ``lttb``. ``None`` returns the indexed points (up to
+        ``MAX_POINTS_PER_METRIC`` per name).
 
     Returns
     -------
     list of MetricPoint
+        Ordered by name, then step.
+
+    Raises
+    ------
+    RunError
+        If ``max_points`` is less than 2.
+
+    Examples
+    --------
+    >>> metric_history(ctx, run_id, names=["train/loss"], max_points=500)  # doctest: +SKIP
+    [MetricPoint(name='train/loss', step=0, value=2.3, t=None), ...]
     """
+    if max_points is not None and max_points < 2:
+        raise RunError(f"max_points must be at least 2, not {max_points}")
     ctx.find_record(run_id)
-    return ctx.index.metric_points(run_id)
+    points = ctx.index.metric_points_for([run_id], names).get(run_id, [])
+    if max_points is None:
+        return points
+    out: list[MetricPoint] = []
+    for _, series in itertools.groupby(points, key=lambda p: p.name):
+        out.extend(lttb(list(series), max_points))
+    return out
 
 
 def _flatten(prefix: str, value: Any, out: dict[str, Any]) -> None:
@@ -491,7 +647,10 @@ def _references(ctx: Context, record: RunRecord) -> dict[str, Any]:
     if record.task is None:
         return {}
     try:
-        repo = Path(ctx.store.load_project(record.project).repo)
+        entry = ctx.store.load_project(record.project)
+        if entry.remote_host is not None:
+            return {}  # the repo path is on that host: never read a dataset from it here
+        repo = Path(entry.repo)
         config = load_project_config(repo)
         spec = config.tasks[record.task]
     except (StoreError, ConfigError, KeyError):
@@ -778,6 +937,41 @@ def add_note(ctx: Context, run_id: str, text: str, author: str = "human") -> Non
     ctx.emit("run.note_added", record, {"author": author})
 
 
+# sweeps ----------------------------------------------------------------------------
+def list_sweeps(ctx: Context, project: str | None = None) -> list[dict[str, Any]]:
+    """
+    List sweeps of one project or of all projects, newest first.
+
+    The rows are those of ``hx sweeps --json``: ``GET
+    /api/v1/projects/{project}/sweeps`` rows plus the project.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    project : str, optional
+        Restrict to one project; ``None`` lists every registered project.
+
+    Returns
+    -------
+    list of dict
+        ``{project, id, created_at, n_runs, best}`` per sweep; ``best`` is the
+        best cell (``None`` before any run is scored). Unreadable sweep files
+        are skipped.
+
+    Examples
+    --------
+    >>> list_sweeps(ctx, "toy")  # doctest: +SKIP
+    [{'project': 'toy', 'id': 's-0002', 'created_at': datetime(...), 'n_runs': 6, 'best': {...}}]
+    """
+    from hypothex.core.sweeps import list_sweeps as project_sweeps  # sweeps imports this module
+
+    projects = [project] if project else [e.project for e in ctx.store.list_projects()]
+    rows = [{"project": p, **s} for p in projects for s in project_sweeps(ctx, p)]
+    rows.sort(key=lambda s: (s["created_at"], s["id"]), reverse=True)
+    return rows
+
+
 # datasets --------------------------------------------------------------------------
 def check_datasets(ctx: Context, project: str | None = None) -> list[DatasetDrift]:
     """
@@ -822,9 +1016,15 @@ def dataset_overlap(
     Raises
     ------
     ConfigError
-        If the project has no such dataset.
+        If the project has no such dataset, or is a copy from a host
+        (``remote_host``), whose dataset files are on that host.
     """
     entry = refresh_project(ctx, project)
+    if entry.remote_host is not None:
+        raise ConfigError(
+            f"project {project!r} was copied from host {entry.remote_host} and its data is "
+            f"on that host; check overlap there, or `hx register` a checkout here"
+        )
     if dataset not in entry.config.datasets:
         raise ConfigError(f"project {project!r} has no dataset {dataset!r}")
     return overlap(dataset, entry.config.datasets[dataset], Path(entry.repo), key_field)

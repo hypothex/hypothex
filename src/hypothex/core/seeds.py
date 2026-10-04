@@ -72,13 +72,27 @@ def run_fingerprint(
     Returns
     -------
     dict
-        Canonical description of what the run does.
+        Canonical description of what the run does. A param equal to the var of
+        the same name is left out, so a sweep run (which stores each grid value
+        in both) and a manual run with the same ``--var`` hash alike.
+
+    Examples
+    --------
+    >>> swept = run_fingerprint(
+    ...     command_template=["t"], stage=None, user_config=None,
+    ...     params={"C": "1"}, vars={"C": "1"},
+    ... )
+    >>> manual = run_fingerprint(
+    ...     command_template=["t"], stage=None, user_config=None, params={}, vars={"C": "1"}
+    ... )
+    >>> swept == manual
+    True
     """
     return {
         "command": list(command_template),
         "stage": stage,
         "config": {k: v for k, v in (user_config or {}).items() if k != "seed"},
-        "params": {k: v for k, v in params.items() if k != "seed"},
+        "params": {k: v for k, v in params.items() if k != "seed" and vars.get(k) != v},
         "vars": dict(vars),
     }
 

@@ -64,3 +64,22 @@ def test_clamp_keeps_the_interval_in_range() -> None:
     assert low.ci_low == 0.0
     one = summarize([1.0])
     assert clamp(one, 0.0, 1.0) == one  # no interval to clip
+
+
+def test_run_fingerprint_ignores_params_that_repeat_a_var() -> None:
+    def fp(params: dict[str, str], vars: dict[str, str]) -> str:
+        return config_hash(
+            run_fingerprint(
+                command_template=["python", "t.py", "--C", "{C}"],
+                stage="train",
+                user_config=None,
+                params=params,
+                vars=vars,
+            )
+        )
+
+    swept = fp({"C": "1.0"}, {"C": "1.0"})  # a sweep stores the grid value in both
+    assert swept == fp({}, {"C": "1.0"})  # a manual --var C=1.0 joins the cell
+    assert swept != fp({}, {"C": "10"})
+    assert fp({"C": "2"}, {"C": "1.0"}) != swept  # a param that differs still counts
+    assert fp({"version": "v2"}, {"C": "1.0"}) != swept

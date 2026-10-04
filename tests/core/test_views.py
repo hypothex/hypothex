@@ -392,6 +392,37 @@ panels:
     ]
 
 
+def test_filter_keys_and_metric_names_are_checked() -> None:
+    fields = {
+        **KNOWN_FIELDS,
+        "scores": {"metric", "version", "key", "value", "run_id", "group_id", "label", "seed"},
+        "metrics": set(),
+    }
+    text = """\
+title: t
+panels:
+  - type: table
+    data: {source: scores, filter: {metric: solved, key: value}}
+  - type: vega_lite
+    data: {source: scores, filter: {metric: [solved, slovd], kye: value}}
+    spec: {mark: bar}
+  - type: table
+    data: {source: metrics, filter: {name: tokns, anything: 1}}
+  - type: table
+    data: {source: runs, filter: {version: p10, label: a, params.depth: 3}}
+  - type: leaderboard
+    data: {filter: {status: finished, version: p10}}
+"""
+    _, issues = validate_view_text(text, KNOWN_METRICS, fields)
+    assert [(i.line, i.path, i.message, i.suggestion) for i in issues] == [
+        (6, "panels[1].data.filter.metric", "unknown metric slovd", "solved"),
+        (6, "panels[1].data.filter.kye", "unknown filter key kye in scores", "key"),
+        (9, "panels[2].data.filter.name", "unknown metric tokns", "tokens"),
+        (13, "panels[4].data.filter.version", "unknown filter key version in runs", None),
+    ]
+    assert validate_view_text(text, set(), {})[1] == []  # nothing known: skipped
+
+
 def test_duplicate_panel_titles() -> None:
     text = """\
 title: t

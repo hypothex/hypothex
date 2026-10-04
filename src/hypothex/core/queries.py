@@ -334,16 +334,23 @@ def get_task(ctx: Context, ref: str, project: str | None = None) -> dict[str, An
     Returns
     -------
     dict
+        ``dataset`` holds the config as written; a dataset on this host also
+        has ``resolved_path`` and ``resolved_splits`` (absolute paths).
     """
     entry, name = resolve_task(ctx, ref, project)
     spec = entry.config.tasks[name]
+    ds = entry.config.datasets[spec.dataset]
+    dataset: dict[str, Any] = {"name": spec.dataset, **ds.model_dump(mode="json")}
+    if ds.host in ("local", ctx.descriptor.label):
+        repo = Path(entry.repo)
+        dataset["resolved_path"] = str(resolve_dataset_path(repo, ds.path))
+        dataset["resolved_splits"] = {
+            k: str(resolve_dataset_path(repo, v)) for k, v in ds.splits.items()
+        }
     return {
         "summary": _summary(ctx, entry, name).model_dump(mode="json"),
         "repo": entry.repo,
-        "dataset": {
-            "name": spec.dataset,
-            **entry.config.datasets[spec.dataset].model_dump(mode="json"),
-        },
+        "dataset": dataset,
         "metrics": {m: entry.config.metrics[m].model_dump(mode="json") for m in spec.metrics},
         "stages": entry.config.stages,
     }
@@ -364,6 +371,8 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
     Returns
     -------
     RunDetail
+        ``paths`` also names ``run_yaml``, ``scores``, ``metrics``, ``notes``,
+        ``config`` and ``diff`` when the run has those files.
     """
     record = ctx.find_record(run_id)
     run_dir = ctx.run_dir(record)
@@ -377,8 +386,17 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
     }
     with contextlib.suppress(StoreError):
         paths["repo"] = ctx.store.load_project(record.project).repo
-    if (run_dir / "config.yaml").is_file():
-        paths["config"] = str(run_dir / "config.yaml")
+    files = {
+        "run_yaml": "run.yaml",
+        "config": "config.yaml",
+        "scores": "scores.jsonl",
+        "metrics": "metrics.jsonl",
+        "notes": "notes.md",
+        "diff": "git.diff",
+    }
+    for key, name in files.items():
+        if (run_dir / name).is_file():
+            paths[key] = str(run_dir / name)
     for ref in record.datasets:
         paths[f"dataset:{ref.name}"] = f"{ref.host}:{ref.path}"
     for i, art in enumerate(record.artifacts):
@@ -393,7 +411,7 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
         scores=ctx.store.read_scores(record.project, run_id),
         paths=paths,
         notes=ctx.store.read_notes(record.project, run_id),
-        has_diff=(run_dir / "git.diff").is_file(),
+        has_diff="diff" in paths,
         metric_names=sorted({p.name for p in ctx.index.metric_points(run_id)}),
         children=sorted(children),
     )
@@ -430,6 +448,9 @@ def compare_runs(ctx: Context, run_ids: list[str]) -> Comparison:
     """
     Compare runs: only fields that differ, plus the latest score per metric version.
 
+    Fields cover the task, commit, ``dirty`` (uncommitted changes), seed,
+    stage, command, hypothesis, ``params.*``, ``vars.*`` and ``config.*``.
+
     Parameters
     ----------
     ctx : Context
@@ -454,6 +475,7 @@ def compare_runs(ctx: Context, run_ids: list[str]) -> Comparison:
         f: dict[str, Any] = {
             "task": rec.task,
             "commit": rec.git.commit,
+            "dirty": rec.git.dirty,
             "seed": rec.seed,
             "stage": rec.stage,
             "command": shlex.join(rec.command_template),
@@ -515,6 +537,73 @@ def _per_example(run_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
     return out
 
 
+def _resolve_metric(
+    ctx: Context, record: RunRecord, per: dict[str, Any], metric: str
+) -> tuple[str, str | None]:
+    """
+    Check a metric name for a run and give a bare name its current version.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    record : RunRecord
+        The run whose per-example scores are read.
+    per : dict
+        The run's per-example scores, keyed by ``name@version``.
+    metric : str
+        ``name`` or ``name@version`` asked for.
+
+    Returns
+    -------
+    tuple of (str, str or None)
+        Metric name and version. A bare name gets the version in
+        ``hypothex.yaml``; ``None`` only when the metric is no longer there.
+
+    Raises
+    ------
+    ConfigError
+        If the name is neither a metric of the run's task nor scored on
+        disk; the message lists the known names.
+    """
+    name, version = parse_metric_version(metric)
+    known = {parse_metric_version(k)[0] for k in per}
+    current: dict[str, str] = {}
+    with contextlib.suppress(StoreError):
+        config = refresh_project(ctx, record.project).config
+        spec = config.tasks.get(record.task or "")
+        known.update(spec.metrics if spec else ())
+        current = {m: c.version for m, c in config.metrics.items()}
+    if name not in known:
+        names = ", ".join(sorted(known)) or "none"
+        raise ConfigError(f"unknown metric {name!r} for run {record.run_id}; known: {names}")
+    return name, version or current.get(name)
+
+
+def _require_field(per: dict[str, dict[str, dict[str, Any]]], field: str) -> None:
+    """
+    Raise unless some per-example row of ``per`` has ``field``.
+
+    Parameters
+    ----------
+    per : dict
+        ``name@version`` -> example id -> per-example fields.
+    field : str
+        Per-example field that marks success.
+
+    Raises
+    ------
+    EvalError
+        If no row has ``field``; the message lists the fields there are.
+    """
+    fields = {k for rows in per.values() for row in rows.values() for k in row}
+    if field not in fields:
+        raise EvalError(
+            f"no per-example field {field!r} in {', '.join(sorted(per))}; "
+            f"fields: {', '.join(sorted(fields)) or 'none'}"
+        )
+
+
 def _is_failure(value: Any) -> bool:
     return value is False or (isinstance(value, int | float) and value == 0)
 
@@ -543,7 +632,8 @@ def get_predictions(
     limit : int
         Maximum rows to return.
     metric : str, optional
-        ``name`` or ``name@version`` to limit which per-example scores are shown.
+        ``name`` (current version) or ``name@version`` to limit which
+        per-example scores are shown.
     failures_only : bool
         Keep rows where ``field`` is False or 0 in a shown metric.
     field : str
@@ -555,14 +645,22 @@ def get_predictions(
 
     Raises
     ------
+    ConfigError
+        ``metric`` is neither a metric of the run's task nor scored on disk.
     EvalError
-        ``failures_only`` without any per-example scores.
+        ``failures_only`` without any per-example scores, or with a
+        ``field`` that no shown metric has.
     """
     record = ctx.find_record(run_id)
     run_dir = ctx.run_dir(record)
     per = _per_example(run_dir)
     if metric is not None:
-        per = {k: v for k, v in per.items() if k == metric or k.split("@")[0] == metric}
+        name, version = _resolve_metric(ctx, record, per, metric)
+        per = {
+            k: v
+            for k, v in per.items()
+            if k == f"{name}@{version}" or (version is None and k.split("@")[0] == name)
+        }
     refs = _references(ctx, record)
     rows = [
         PredictionRow(
@@ -577,6 +675,7 @@ def get_predictions(
     if failures_only:
         if not per:
             raise EvalError("no per-example scores for this run; run `hx reeval` first")
+        _require_field(per, field)
         rows = [
             row
             for row in rows
@@ -613,17 +712,25 @@ def compare_examples(
     Returns
     -------
     ExampleDiff
+
+    Raises
+    ------
+    ConfigError
+        Unknown metric name, or a bare name no longer in ``hypothex.yaml``.
+    EvalError
+        A run without per-example scores for the metric, or without ``field``.
     """
     rec_a = ctx.find_record(a)
-    name, version = parse_metric_version(metric)
+    name, version = _resolve_metric(ctx, rec_a, _per_example(ctx.run_dir(rec_a)), metric)
     if version is None:
-        version = refresh_project(ctx, rec_a.project).config.metrics[name].version
+        raise ConfigError(f"metric {name!r} is not in hypothex.yaml; pass {name}@<version>")
     ref = f"{name}@{version}"
     passed: list[dict[str, bool]] = []
     for rid in (a, b):
         per = _per_example(ctx.run_dir(ctx.find_record(rid))).get(ref)
         if per is None:
             raise EvalError(f"run {rid} has no per-example scores for {ref}")
+        _require_field({ref: per}, field)
         passed.append({i: not _is_failure(v.get(field)) for i, v in per.items() if field in v})
     pa, pb = passed
     ids = sorted(pa.keys() & pb.keys())
@@ -691,6 +798,9 @@ def tag_run(
     """
     Add and remove tags.
 
+    Sweep tags (``sweep:<owner>:<id>``) hold sweep membership, so only the
+    sweep code sets them.
+
     Parameters
     ----------
     ctx : Context
@@ -705,8 +815,21 @@ def tag_run(
     Returns
     -------
     RunRecord
+
+    Raises
+    ------
+    RunError
+        If a tag to add or remove is a sweep tag.
     """
+    from hypothex.core.sweeps import SWEEP_TAG_PREFIX  # sweeps imports this module
+
     add_set, remove_set = set(add), set(remove)
+    sweep_tags = sorted(t for t in add_set | remove_set if t.startswith(SWEEP_TAG_PREFIX))
+    if sweep_tags:
+        raise RunError(
+            f"cannot add or remove sweep tag {', '.join(sweep_tags)}: "
+            "sweep membership is set by `hx sweep`"
+        )
     return ctx.update_run(
         run_id,
         "run.tagged",

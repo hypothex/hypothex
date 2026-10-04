@@ -6,7 +6,7 @@ import yaml
 from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.datasets import FingerprintCache
-from hypothex.core.errors import ConfigError
+from hypothex.core.errors import ConfigError, EvalError, RunError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.records import DatasetRef
 from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
@@ -169,3 +169,81 @@ def test_leaderboard_examples_follow_version_override(ctx: Context, toy_repo: Pa
     assert q.get_leaderboard(ctx, "toy-acc").rows[0].test_interval is None
     old = q.get_leaderboard(ctx, "toy-acc", versions={"accuracy": "v1"})
     assert old.rows[0].test_interval is not None and old.rows[0].test_interval.n == 4
+
+
+def test_predictions_unknown_metric_is_an_error(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    for failures_only in (False, True):
+        with pytest.raises(ConfigError, match="unknown metric 'nonexistent'.*accuracy"):
+            q.get_predictions(ctx, "r1", metric="nonexistent", failures_only=failures_only)
+    with pytest.raises(ConfigError, match="unknown metric 'nonexistent'"):
+        q.get_predictions(ctx, "r1", metric="nonexistent@v1")
+    assert q.get_predictions(ctx, "r1", metric="accuracy").rows[0].scores["accuracy@v1"]
+
+
+def test_predictions_bare_metric_is_current_version(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    write_toy_project(toy_repo, accuracy_version="v2")
+    evaluate_run(ctx, "r1")
+    page = q.get_predictions(ctx, "r1", metric="accuracy")
+    assert list(page.rows[0].scores) == ["accuracy@v2"]
+    old = q.get_predictions(ctx, "r1", metric="accuracy@v1")
+    assert list(old.rows[0].scores) == ["accuracy@v1"]
+
+
+def test_failures_and_examples_need_a_known_field(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "a", predictions=PREDS_075)
+    seed_finished_run(ctx, toy_repo, "b", predictions=ALL_RIGHT)
+    evaluate_run(ctx, "a")
+    evaluate_run(ctx, "b")
+    with pytest.raises(EvalError, match="no per-example field 'brier'.*fields: correct"):
+        q.get_predictions(ctx, "a", failures_only=True, field="brier")
+    with pytest.raises(EvalError, match="no per-example field 'brier'.*fields: correct"):
+        q.compare_examples(ctx, "a", "b", "accuracy", field="brier")
+    with pytest.raises(ConfigError, match="unknown metric 'nope'"):
+        q.compare_examples(ctx, "a", "b", "nope")
+
+
+def test_show_run_lists_every_run_file(ctx: Context, toy_repo: Path) -> None:
+    rec = seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    run_dir = ctx.run_dir(rec)
+    paths = q.show_run(ctx, "r1").paths
+    assert paths["run_yaml"] == str(run_dir / "run.yaml")
+    assert paths["scores"] == str(run_dir / "scores.jsonl")
+    assert not {"metrics", "notes", "diff"} & paths.keys()
+    (run_dir / "metrics.jsonl").write_text("")
+    (run_dir / "git.diff").write_text("diff --git a/x b/x\n")
+    q.add_note(ctx, "r1", "hi")
+    paths = q.show_run(ctx, "r1").paths
+    assert paths["metrics"] == str(run_dir / "metrics.jsonl")
+    assert paths["notes"] == str(run_dir / "notes.md")
+    assert paths["diff"] == str(run_dir / "git.diff")
+
+
+def test_get_task_resolves_local_dataset_paths(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    dataset = q.get_task(ctx, "toy-acc")["dataset"]
+    assert dataset["path"] == "data/test.jsonl"
+    assert dataset["resolved_path"] == str(toy_repo.resolve() / "data" / "test.jsonl")
+    assert dataset["resolved_splits"] == {
+        k: str(toy_repo.resolve() / v) for k, v in dataset["splits"].items()
+    }
+
+
+def test_tag_run_refuses_sweep_tags(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    q.tag_run(ctx, "r1", add=["keep"])
+    for add, remove in ((["sweep:me:s-1"], []), ([], ["sweep:me:s-1"])):
+        with pytest.raises(RunError, match="sweep tag"):
+            q.tag_run(ctx, "r1", add=add, remove=remove)
+    assert ctx.find_record("r1").tags == ["keep"]
+
+
+def test_compare_runs_shows_a_dirty_tree(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    ctx.create_run(make_record("a", git={"commit": "c1"}))
+    ctx.create_run(make_record("b", git={"commit": "c1", "dirty": True}))
+    assert q.compare_runs(ctx, ["a", "b"]).fields == {"dirty": [False, True]}

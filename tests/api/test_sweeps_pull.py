@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -57,6 +58,22 @@ def test_local_sweep_routes(client: TestClient, ctx: Context) -> None:
     statuses = {ctx.find_record(rid).status for rid in cancelled["run_ids"]}
     assert statuses == {RunStatus.FINISHED}
     assert client.get("/api/v1/sweeps/toy/s-000000").status_code == 404
+
+
+def test_a_sweep_retried_after_a_hub_crash_resumes(client: TestClient, ctx: Context) -> None:
+    first = client.post("/api/v1/sweeps", json=_body(command_id="S9")).json()
+    for rid in first["run_ids"]:
+        control.wait_for_run(ctx, rid, timeout=60)
+    # what a hub that died mid-call leaves behind: a receipt claimed by a dead process
+    with sqlite3.connect(ctx.events.path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO receipts(command_id, result, created_at) VALUES (?, ?, ?)",
+            ("S9", "__interrupted__:2026-10-04T00:00:00+00:00", "2026-10-04T00:00:00+00:00"),
+        )
+    again = client.post("/api/v1/sweeps", json=_body(command_id="S9"))
+    assert again.status_code == 200
+    assert again.json()["spec"]["id"] == first["spec"]["id"]
+    assert sorted(again.json()["run_ids"]) == sorted(first["run_ids"])  # no second run set
 
 
 def test_a_sweep_is_found_by_id_alone(client: TestClient, ctx: Context) -> None:

@@ -2326,7 +2326,10 @@ def create_app(
             )
             return settled(summary.spec, launched)
 
-        return once(body, act)
+        # no command receipt: launch_sweep resumes the sweep a command id made (its claim
+        # file) and issues only the missing runs, even after a hub crash mid-launch, where
+        # a receipt would be `__interrupted__` and refuse the retry
+        return to_jsonable(act())
 
     @app.get("/api/v1/sweeps/{sweep_id}")
     def sweep_get_by_id(sweep_id: str) -> dict[str, Any]:

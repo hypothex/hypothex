@@ -125,7 +125,9 @@ Sweeps
        queue?, commit?, diff?, command_id?}``. ``grid`` is a list of
        ``{name, values}`` or ``{name, low, high, log}``. The sweep pins its code in
        ``spec.commit`` and ``spec.diff``: the body's ``commit`` (with its ``diff``),
-       else the hub checkout's ``HEAD`` and uncommitted diff. Answers the sweep summary.
+       else the hub checkout's ``HEAD`` and uncommitted diff. A repeated
+       ``command_id`` resumes the same sweep and issues only its missing runs, also
+       after the hub stopped mid-launch. Answers the sweep summary.
    * - ``GET /api/v1/sweeps/{id}``
      - The summary of a sweep in any project.
    * - ``GET /api/v1/sweeps/{project}/{id}``

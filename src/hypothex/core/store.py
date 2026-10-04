@@ -309,7 +309,9 @@ class RunStore:
         -------
         ProjectEntry
             The stored entry. The latest registration wins; when the repo
-            path changed, the old path is kept in ``previous_repos``.
+            path changed, the old path is kept in ``previous_repos``. A copy
+            from a host (``remote_host``) leaves no history: its paths are on
+            that host, chosen by it.
         """
         repo_path = str(repo.resolve())
         previous: list[str] = []
@@ -317,7 +319,7 @@ class RunStore:
             old = self.load_project(config.project)
         except StoreError:  # new project, or an unreadable file being replaced
             old = None
-        if old is not None:
+        if old is not None and old.remote_host is None:
             history = (
                 [old.repo, *old.previous_repos] if old.repo != repo_path else old.previous_repos
             )

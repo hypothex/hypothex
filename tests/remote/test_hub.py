@@ -26,9 +26,11 @@ from starlette.responses import JSONResponse
 import hypothex.remote.hub as hub_mod
 from hypothex._version import __version__
 from hypothex.api.app import create_app
+from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.environment import PROTOCOL_VERSION
-from hypothex.core.errors import StoreError
+from hypothex.core.errors import RemoteProjectError, StoreError
+from hypothex.core.evaluation import reeval
 from hypothex.core.events import Event, EventLog
 from hypothex.core.fsutil import append_jsonl
 from hypothex.core.ids import utcnow
@@ -47,6 +49,7 @@ from hypothex.remote.bootstrap import BootstrapError, ServerInfo
 from hypothex.remote.client import EnvUnreachableError, RemoteFile
 from hypothex.remote.config import EnvironmentsFile, HostSpec
 from hypothex.remote.hub import (
+    CLAIMS_DIR,
     Backoff,
     HostState,
     HostUnavailableError,
@@ -2188,3 +2191,97 @@ def test_the_token_never_reaches_states_events_or_logs(
     events = json.dumps([e.payload for e in hub_ctx.events.since(0, 100_000)])
     assert sentinel not in events
     assert sentinel not in caplog.text
+
+
+# a host never acts with the hub's own identity or paths -------------------------------
+
+
+def test_a_run_reported_under_the_hubs_environment_id_is_never_mirrored(
+    pair: tuple[Context, Context],
+) -> None:
+    # a mirrored run with the hub's id would pass as the hub's own run: rerun and
+    # reinfer would run its host-written command here, and repair would signal its pids
+    hub, remote = pair
+    seed_run(remote, "r1")
+    own = hub.descriptor.environment_id
+    assert hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", own, "toy", "r1") is None  # type: ignore[arg-type]
+    mirror_event(hub, FakeClient(remote), "gpu1", own, run_event(remote, "r1"))  # type: ignore[arg-type]
+    assert hub.index.get_run("r1") is None
+    assert not hub.layout.run_dir("toy", "r1").exists()
+    assert not (hub.layout.store / CLAIMS_DIR / "r1.json").exists()
+
+
+def test_a_host_copy_whose_repo_path_exists_here_never_runs_code_here(
+    pair: tuple[Context, Context], toy_repo: Path
+) -> None:
+    # the host reports a repo path that is also a checkout on the hub (SEC-5): listing
+    # projects must not register it here, so re-evaluation never imports its metric code
+    hub, remote = pair
+    remote.register_project(toy_repo)
+    seed_run(remote, "r1")
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert [(e.repo, e.remote_host) for e in q.list_projects(hub)] == [
+        (str(toy_repo.resolve()), "gpu1")
+    ]
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        reeval(hub, run_id="r1")
+    assert hub.store.load_project("toy").remote_host == "gpu1"
+
+
+def test_a_host_that_reports_the_hubs_own_environment_is_refused(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer]
+) -> None:
+    a, b = servers
+    seed_run(a.ctx, "a-1")
+    hub_ctx = Context.open(a.home)  # the same home: the host's environment is the hub's
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, hosts_for(a, b)))
+        await hub.start()
+        try:
+            await until(lambda: hub.state("a").state == "error")
+            assert "this hub's own environment" in hub.state("a").message
+            await until(lambda: hub.state("b").state == "connected")
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert not [e for e in hub_ctx.events.since(0) if e.type == "mirror.run_updated"]
+
+
+def test_a_host_that_reports_another_hosts_environment_is_refused(tmp_path: Path) -> None:
+    # b's home carries a's identity (a cloned home, or a host lying about who it is): its
+    # runs would pass as a's, overwrite a's mirrored runs, and take a's forwarded actions
+    a = EnvServer(tmp_path / "host-a")
+    a.start()
+    b_layout = Context.open(tmp_path / "host-b").layout
+    identity = json.loads(a.ctx.layout.environment_json.read_text(encoding="utf-8"))
+    identity["label"] = "b"
+    b_layout.environment_json.write_text(json.dumps(identity), encoding="utf-8")
+    b = EnvServer(tmp_path / "host-b")
+    b.start()
+    assert b.ctx.descriptor.environment_id == a.ctx.descriptor.environment_id
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(
+            Hub(hub_ctx, EnvironmentsFile(environments={"a": HostSpec(route="url", url=a.url)}))
+        )
+        await hub.start()
+        try:
+            await until(lambda: hub.state("a").state == "connected")
+            await hub.add_host("b", HostSpec(route="url", url=b.url))
+            await until(lambda: hub.state("b").state == "error")
+            assert "host a" in hub.state("b").message
+            seed_run(b.ctx, "b-1")
+            await asyncio.sleep(0.5)
+            assert hub_ctx.index.get_run("b-1") is None
+            assert hub.state("a").state == "connected"
+        finally:
+            await hub.stop()
+
+    try:
+        asyncio.run(main())
+    finally:
+        a.stop()
+        b.stop()

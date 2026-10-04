@@ -495,11 +495,13 @@ def rerun(
         If the saved diff was too large to reproduce, the commit cannot be
         checked out, the working directory does not exist in the
         (possibly moved) repo, or the parent belongs to another environment.
+    RemoteProjectError
+        If the project is a copy from a host (its repo path is on that host).
     """
     parent = ctx.find_record(run_id)
     _require_own(ctx, parent, "rerun")
+    repo = ctx.local_repo(parent.project)  # never a host's copy
     entry = ctx.store.load_project(parent.project)
-    repo = Path(entry.repo)
     parent_dir = ctx.run_dir(parent)
     if (parent_dir / "git.diff.too_large").exists():
         raise RunError(
@@ -579,10 +581,12 @@ def reinfer(
     RunError
         If there is no ``infer`` stage or no checkpoint, or the parent belongs
         to another environment.
+    RemoteProjectError
+        If the project is a copy from a host (its repo path is on that host).
     """
     parent = ctx.find_record(run_id)
     _require_own(ctx, parent, "reinfer")
-    repo = Path(ctx.store.load_project(parent.project).repo)
+    repo = ctx.local_repo(parent.project)  # never a host's copy
     config = load_project_config(repo)
     if "infer" not in config.stages:
         raise RunError("project has no `infer` stage in hypothex.yaml; add one to use re-infer")

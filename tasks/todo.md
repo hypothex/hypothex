@@ -87,3 +87,10 @@ types, Ruff, source ty, and Sphinx. Review regressions additionally cover lazy h
 after terminal publication and after a rebuild, terminal-before-metrics execution order,
 and loss-peak preservation near int64 step limits. Independent review has no remaining
 actionable blocker. PR publication and current-head CI merge remain pending.
+
+Merged the repository-path gate from main `3b696f1`: production files merged cleanly;
+three appended-test conflicts retain both regression groups. Combined validation:
+1,853 Python passed / 3 skipped / 11 Docker deselected; separate Docker 11 passed;
+Playwright 44 passed; shutdown, Sphinx, Ruff, source ty, and diff checks pass.
+Unchanged UI unit/type/build evidence remains valid. Updated-head CI is required
+before the final merge.

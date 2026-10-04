@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
 from hypothex.api import app as app_module
+from hypothex.api.app import create_app
 from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
@@ -17,6 +19,7 @@ from tests.api.envserver import remote_hub, wait_until, write_fake_gpus
 from tests.factories import PREDS_075, git, make_record, seed_finished_run
 
 PY = sys.executable
+BASE = "http://127.0.0.1:7777"
 
 
 def test_launch_on_a_host_runs_there_once_per_command_id(tmp_path: Path) -> None:
@@ -356,6 +359,57 @@ def test_launch_by_project_name_pins_the_hub_checkout(
         assert (second.commit, second.diff) == (head, None)  # the given commit, no hub diff
         assert third.commit == head and "+# local edit" in (third.diff or "")
         assert all(req.repo.resolve() == r.env_repo.resolve() for req in seen)
+
+
+def _copy_from_host(ctx: Context) -> None:
+    """Make the hub's toy entry a copy from gpu1; its repo path still exists on the hub."""
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+
+
+def test_a_launch_here_never_runs_in_a_host_copys_repo_path(
+    home: Path, ctx: Context, toy_repo: Path
+) -> None:
+    ctx.register_project(toy_repo)
+    _copy_from_host(ctx)
+    body = {"project": "toy", "command": [PY, "-c", "pass"], "hypothesis": "h"}
+    with TestClient(create_app(home, background_repair=False), base_url=BASE) as client:
+        resp = client.post("/api/v1/hosts/local/runs", json=body)
+    assert resp.status_code == 400 and "copied from host gpu1" in resp.json()["error"]
+    assert ctx.index.list_runs(limit=None) == []
+    assert ctx.store.load_project("toy").remote_host == "gpu1"
+
+
+def test_a_host_sweep_never_sends_the_diff_of_a_host_copys_repo_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gpu1 reported the hub's own checkout as its repo path: that folder's commit and
+    # uncommitted changes must not be read, let alone sent to the host
+    seen: list[RunRequest] = []
+
+    def fake_launch(c: Context, req: RunRequest) -> RunRecord:
+        seen.append(req)
+        return c.create_run(
+            make_record(f"fake{len(seen)}", environment_id=c.descriptor.environment_id)
+        )
+
+    monkeypatch.setattr(control, "launch_run", fake_launch)
+    with remote_hub(tmp_path) as r:
+        _copy_from_host(r.hub)
+        with (r.hub_repo / "toymetrics.py").open("a") as fh:
+            fh.write("# hub secret\n")
+        body = {
+            "project": "toy",
+            "host": "gpu1",
+            "grid": [{"name": "x", "values": ["1"]}],
+            "seeds": [1],
+            "command": [PY, "-c", "import sys", "{x}", "{seed}"],
+            "hypothesis": "h",
+        }
+        resp = r.client.post("/api/v1/sweeps", json=body)
+        assert resp.status_code == 200, resp.text
+        [req] = seen
+        assert (req.commit, req.diff) == (None, None)
 
 
 # spec 13, phase 2 done: a run launched through the hub on a host is mirrored, scored,

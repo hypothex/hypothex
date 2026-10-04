@@ -19,6 +19,7 @@ from hypothex.core.ids import utcnow
 from hypothex.core.layout import Layout
 from hypothex.core.records import ScoreRecord, UsageTotals
 from hypothex.core.store import (
+    ProjectEntry,
     RunStore,
     TraceStep,
     UsageRow,
@@ -431,3 +432,23 @@ def test_bounded_history_does_not_retain_a_long_name_copy_for_every_point(store:
     assert len(kept) <= 4 * 50
     # A valid near-cap name is retained once per series, not once per buffered row.
     assert peak < 2 * 1024 * 1024
+
+
+def test_registering_over_a_hosts_copy_forgets_the_hosts_paths(
+    store: RunStore, tmp_path: Path
+) -> None:
+    # the copy's repo and previous_repos are paths on the host, chosen by it: they are
+    # not this hub's history (rerun maps a run's cwd through previous_repos)
+    cfg = ProjectConfig(project="toy")
+    copy = ProjectEntry(
+        project="toy",
+        repo="/on/the/host",
+        config=cfg,
+        registered_at=utcnow(),
+        previous_repos=["/on/the/host/old"],
+        remote_host="gpu1",
+    )
+    store.save_project(copy)
+    entry = store.register_project(cfg, tmp_path / "a")
+    assert (entry.remote_host, entry.previous_repos) == (None, [])
+    assert store.load_project("toy").previous_repos == []

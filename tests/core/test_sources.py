@@ -443,3 +443,15 @@ def test_metrics_rows_hold_one_runs_points_at_a_time(
     assert calls == [["r0"]]  # a table over many runs never holds every run's history
     assert [r["run_id"] for r in rows] == ["r1", "r2"]
     assert calls == [["r0"], ["r1"], ["r2"]]
+
+
+def test_predictions_of_a_host_copy_never_read_its_repo_path(ctx: Context, toy_repo: Path) -> None:
+    # the repo path of a project copied from a host is the host's: no references from it
+    rec = _run(ctx, toy_repo, "r1")
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    _jsonl(
+        ctx.run_dir(rec) / "predictions" / "predictions.jsonl", [{"id": "ex-1", "prediction": 0}]
+    )
+    [row] = list(iter_rows(ctx, [rec], "predictions"))
+    assert row["reference"] is None

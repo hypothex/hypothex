@@ -88,6 +88,55 @@ SSH
   patterns before they reach a shell. ``hx pull`` runs ``scp -s`` (SFTP mode), so the
   host's shell never reads a path.
 
+Project checkout paths
+----------------------
+
+``Context.local_repo`` is the shared gate for operations that read a registered
+project's checkout or run code from it. A project copied from a host retains that
+host's repo path for display, but the hub never reads it as a local checkout,
+even when the same path exists here. Evaluation, datasets, view files, local
+launches, reruns, and git pins use the gate. Read-only views can still use the
+copied config's presets and inline definitions. Registering a checkout here
+replaces the host copy without retaining its paths in local repo history.
+
+Host identities
+---------------
+
+A host must report an environment identity different from the hub and from every
+other configured host. The hub reserves the identity before reading the event
+cursor or starting a mirror. The reservation uses the existing ``host_cursors``
+row, including sequence zero, and survives disconnects, restarts, event-log
+resets, and index rebuilds. Disabled hosts remain owners while they are configured.
+Run claims with a host label also preserve ownership when no cursor was saved.
+
+On upgrade, older run claims may contain only ``project`` and ``environment_id``.
+The hub adds their ``host`` label only when existing cursor metadata identifies
+exactly one original owner. It checks that ownership under the claim lock before
+writing either a label or a new reservation. The first host to reconnect is never
+assumed to be the owner.
+All hostless claims are first labelled with that original owner before adding a
+new alias cursor. A shutdown during normalization or alias transfer can therefore
+resume without turning a known owner into an ambiguous one.
+
+If those older claims have no saved cursor owner, or have several, the connection
+is refused with a recovery message. Stop the hub and restore the original cursor
+metadata from a trusted backup, or verify the source environment and add the
+correct ``host`` label to its affected ``<store>/.claims/<run_id>.json`` files,
+preserving their project and environment fields. Then reconnect. Removing claims
+or accepting the first connecting host would discard the ownership evidence.
+
+Changing a host's connection settings does not release its current or previously
+seen identities. To move an environment to another host name, remove the old
+name with ``hx hosts rm OLD`` and add the new one. The old supervisor's pending
+mirror writes finish before the identity is released. On accepting the new
+name, the hub updates that environment's run-claim source labels before any new
+data is mirrored. A different host cannot overwrite a claim while its old name
+remains configured. Existing conflicting configured owners are refused rather
+than choosing one arbitrarily.
+Forwarding prefers the current configured alias; historical cursor ownership is
+still retained so edits to a removed host's mirrored runs cannot silently become
+local-only changes.
+
 No secrets in run files
 -----------------------
 

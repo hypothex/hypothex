@@ -26,6 +26,7 @@ from hypothex.mcp.server import (
     parse_seeds,
     resolve_hub_token,
     ssh_target,
+    sweep_pin,
 )
 from hypothex.remote.config import HostSpec
 from hypothex.remote.ssh import SshTarget, copy_from, copy_to
@@ -58,6 +59,18 @@ def _saved_sweep(ctx: Context, sweep_id: str = "s-ab12") -> SweepSpec:
 def test_is_remote() -> None:
     assert not is_remote(None) and not is_remote("") and not is_remote("local")
     assert is_remote("gpu1")
+
+
+def test_sweep_pin_reads_only_a_local_checkout(toy: Context, toy_repo: Path) -> None:
+    head = subprocess.check_output(
+        ["git", "-C", str(toy_repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+    assert sweep_pin(toy, "toy", None) == (head, None)
+    entry = toy.store.load_project("toy")
+    toy.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    assert sweep_pin(toy, "toy", None) == (None, None)
+    assert sweep_pin(toy, "missing", None) == (None, None)
+    assert sweep_pin(toy, "toy", str(toy_repo)) == (head, None)
 
 
 def test_ssh_target_uses_the_env_binaries() -> None:

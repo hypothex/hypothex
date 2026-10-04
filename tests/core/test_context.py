@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from hypothex.core.context import Context
-from hypothex.core.errors import RunNotFoundError
+from hypothex.core.errors import ConfigError, RemoteProjectError, RunNotFoundError
 from hypothex.core.ids import utcnow
 from hypothex.core.records import RunStatus, ScoreRecord
 from tests.factories import make_record
@@ -123,3 +123,17 @@ def test_a_stale_mark_of_a_deleted_run_is_dropped(home: Path) -> None:
     Context.open(home)
     assert ctx.index.stale_score_runs() == []
     assert not ctx.layout.run_dir("toy", "gone").exists()
+
+
+def test_local_repo_is_the_registered_checkout(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    assert ctx.local_repo("toy") == toy_repo.resolve()
+
+
+def test_local_repo_refuses_a_project_copied_from_a_host(ctx: Context, toy_repo: Path) -> None:
+    # the host reported this path; it also exists here, but it is never used here
+    entry = ctx.register_project(toy_repo)
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        ctx.local_repo("toy")
+    assert issubclass(RemoteProjectError, ConfigError)

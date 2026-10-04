@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hypothex.core.config import load_project_config
@@ -286,15 +285,12 @@ def _dataset_references(ctx: Context, project: str, task: str | None) -> dict[st
     if task is None:
         return {}
     try:
-        entry = ctx.store.load_project(project)
-        if entry.remote_host is not None:
-            return {}
-        repo = Path(entry.repo)
+        repo = ctx.local_repo(project)
         config = load_project_config(repo)
         spec = config.tasks[task]
         ds = config.datasets[spec.dataset]
         path = resolve_dataset_path(repo, ds.path_for(spec.split))
-    except (StoreError, ConfigError, KeyError):
+    except (StoreError, ConfigError, KeyError):  # ConfigError includes a host's copy
         return {}
     return {
         str(r[ds.id_field]): r.get(ds.reference_field) for r in read_jsonl(path) if ds.id_field in r

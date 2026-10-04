@@ -1354,3 +1354,29 @@ def test_cancel_takes_the_claim_so_a_supervisor_on_its_way_never_runs(
     psutil.Process(pid).wait(timeout=60)
     assert not out.exists()
     assert ctx.find_record(rec.run_id).status == RunStatus.KILLED
+
+
+def test_a_sweep_never_uses_a_host_copys_repo_path_even_when_it_exists_here(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # the host reported a repo path that is also a folder on the hub: a local sweep
+    # must not run there, and a host sweep must not read hypothex.yaml from it
+    entry = ctx.register_project(toy_repo)
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    with pytest.raises(SweepError, match="no checkout here"):
+        launch_sweep(ctx, project="toy", grid=[LR], seeds=[1], command=CMD[:4])
+    assert ctx.index.list_runs(limit=None) == []
+    (toy_repo / "hypothex.yaml").write_text("project: [not, valid\n")  # never read
+    fake = FakeLauncher(ctx)
+    summary = launch_sweep(
+        ctx,
+        project="toy",
+        task="toy-acc",
+        host="gpu1",
+        grid=[LR],
+        seeds=[1],
+        command=CMD[:4],
+        launch=fake,
+    )
+    assert len(summary.run_ids) == 2
+    assert ctx.store.load_project("toy").remote_host == "gpu1"

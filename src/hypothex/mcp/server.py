@@ -383,6 +383,8 @@ def require_agent_hypothesis(created_by: str, hypothesis: str) -> None:
 
 # hub client and sweep option parsers (shared by the API, CLI, and MCP) ------------
 DEFAULT_HUB_URL = "http://127.0.0.1:7777"
+TASK_REEVAL_SECONDS = 3600.0
+"""Wait for a task reeval through the hub: it scores every run, some on their hosts."""
 LOCAL_HOST = "local"
 
 
@@ -748,6 +750,37 @@ def acts_through_hub(ctx: Context, run_id: str) -> bool:
     return record.environment_id != ctx.descriptor.environment_id
 
 
+def task_acts_through_hub(ctx: Context, project: str, task: str) -> bool:
+    """
+    Tell whether a task reeval must go through the hub.
+
+    True when a finished run of the task belongs to another environment. Such
+    a run was mirrored from a host: the hub sends it to that host to score
+    (spec 8A.3), because a score written into the hub's copy is lost when the
+    mirror next replaces the run's ``scores.jsonl``.
+
+    Parameters
+    ----------
+    ctx : Context
+    project : str
+    task : str
+
+    Returns
+    -------
+    bool
+
+    Examples
+    --------
+    >>> task_acts_through_hub(ctx, "toy", "toy-acc")  # doctest: +SKIP
+    False
+    """
+    own = ctx.descriptor.environment_id
+    runs = ctx.index.list_runs(
+        project=project, task=task, status=RunStatus.FINISHED, include_archived=True, limit=None
+    )
+    return any(r.environment_id != own for r in runs)
+
+
 def client_checkout(root: Path) -> tuple[dict[str, str | None], list[str]]:
     """
     The project, HEAD, and uncommitted diff of a checkout here, for a host launch.
@@ -992,8 +1025,10 @@ def build_server(
     def auth() -> str | None:
         return hub_token or resolve_hub_token(hub_url, ctx().layout.home)
 
-    def hub(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-        return hub_call(method, path, body, url=hub_url, token=auth())
+    def hub(
+        method: str, path: str, body: dict[str, Any] | None = None, timeout: float = 120.0
+    ) -> Any:
+        return hub_call(method, path, body, url=hub_url, token=auth(), timeout=timeout)
 
     def via_hub(run_id: str, action: str, body: dict[str, Any], agent: str = "mcp") -> Any:
         # a mirrored run is acted on by its host: the hub forwards it (Task 45)
@@ -1168,7 +1203,10 @@ def build_server(
         metric: str | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
-        """Re-score saved predictions with current metric versions (one run or a whole task)."""
+        """
+        Re-score saved predictions with current metric versions (one run or a whole
+        task). Runs from a host are scored there, through the hub.
+        """
         c = ctx()
         if run_id is not None:
             out = via_hub(run_id, "reeval", {"metric": metric, "force": force})
@@ -1178,6 +1216,16 @@ def build_server(
         if task is None:
             raise ValueError("give run_id or task")
         entry, name = q.resolve_task(c, task, project)
+        if task_acts_through_hub(c, entry.project, name):
+            # the hub scores its own runs and sends each mirrored run to its host
+            body = {
+                "metric": metric,
+                "force": force,
+                "command_id": new_command_id(),
+                "created_by": "agent:mcp",
+            }
+            path = f"/api/v1/tasks/{entry.project}/{name}/reeval"
+            return hub("POST", path, body, timeout=TASK_REEVAL_SECONDS)
         return dump(reeval(c, project=entry.project, task=name, metric=metric, force=force))
 
     @mcp.tool()

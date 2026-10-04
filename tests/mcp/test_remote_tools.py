@@ -10,10 +10,11 @@ from hypothex.api import app as app_module
 from hypothex.api.app import create_app
 from hypothex.core import control
 from hypothex.core.context import Context
+from hypothex.core.records import RunStatus
 from hypothex.core.sweeps import list_sweeps
 from hypothex.mcp.server import MCPServer, _text, build_server
 from tests.api.envserver import remote_hub, serve_app, wait_until
-from tests.factories import PREDS_075, git, seed_finished_run, write_toy_project
+from tests.factories import PREDS_075, git, make_record, seed_finished_run, write_toy_project
 from tests.mcp.test_server import call
 
 PY = sys.executable
@@ -322,3 +323,40 @@ def test_launch_run_sends_slurm_fields_to_the_host(
     err, message = call(home, "launch_run", {**base, "partition": "gpu"})  # runs here
     assert err and "need host=" in message
     assert len(sent) == 3
+
+
+def _score_rows(ctx: Context, run_id: str) -> int:
+    path = ctx.run_dir(ctx.find_record(run_id)) / "scores.jsonl"
+    return len(path.read_text().splitlines()) if path.exists() else 0
+
+
+def test_task_reevaluate_scores_host_runs_on_their_host(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with remote_hub(tmp_path, threaded=True, hub_home=home) as r:
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
+        seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
+        seed_finished_run(r.hub, r.hub_repo, "h1", predictions=PREDS_075)
+        wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
+        args = {"task": "toy-acc", "project": "toy", "force": True}
+        err, report = call(home, "reevaluate", args)
+        assert not err, report
+        assert sorted(report["evaluated"]) == ["e1", "h1"]
+        # spec 8A.3: the host scored its own run; the hub's copy changes only by the mirror,
+        # so the next mirror of e1's scores.jsonl keeps this score
+        assert _score_rows(r.env, "e1") == 1
+        wait_until(lambda: _score_rows(r.hub, "e1") == 1, timeout=30)
+        assert _score_rows(r.hub, "h1") == 1
+
+
+def test_task_reevaluate_with_host_runs_needs_the_hub(
+    home: Path, ctx: Context, toy_repo: Path
+) -> None:
+    seed_finished_run(ctx, toy_repo, "h1", predictions=PREDS_075)
+    mirrored = make_record(
+        "m1", task="toy-acc", environment_id="env-gpu1", status=RunStatus.FINISHED
+    )
+    ctx.create_run(mirrored)
+    err, message = call(home, "reevaluate", {"task": "toy-acc", "project": "toy"})
+    assert err and "hx serve" in message  # never scored into the hub's copy of m1
+    assert _score_rows(ctx, "m1") == 0 and _score_rows(ctx, "h1") == 0

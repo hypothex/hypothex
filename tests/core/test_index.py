@@ -231,3 +231,19 @@ def test_schema_version_is_none_only_for_a_missing_table(
     monkeypatch.setattr(idx, "get_meta", locked)
     with pytest.raises(OperationalError):
         idx.schema_version()  # a busy index is not mistaken for a new one
+
+
+def test_metric_points_for_takes_more_names_than_sqlite_has_variables(tmp_path: Path) -> None:
+    idx = Index(tmp_path / "i.db")
+    for rid in ("r1", "r2"):
+        idx.replace_metric_points(
+            rid,
+            [MetricPoint(name=n, step=s, value=1.0) for n in ("loss", "acc", "lr") for s in (0, 1)],
+        )
+    names = [f"m{i:05d}" for i in range(40_000)] + ["lr", "acc"]
+    got = idx.metric_points_for(["r1", "r2"], names=names)
+    want = [("acc", 0), ("acc", 1), ("lr", 0), ("lr", 1)]
+    assert {rid: [(p.name, p.step) for p in pts] for rid, pts in got.items()} == {
+        "r1": want,
+        "r2": want,
+    }

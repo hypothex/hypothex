@@ -45,6 +45,8 @@ if TYPE_CHECKING:
 
 SCHEMA_VERSION = 3
 MAX_POINTS_PER_METRIC = 1000
+_IN_CHUNK = 450
+"""Most values bound in one ``IN (...)`` list of an index query."""
 GENERATION_KEY = "generation"
 """``meta`` row holding the index generation (see ``index_generation``)."""
 
@@ -854,17 +856,27 @@ class Index:
             MetricPointRow.value,
             MetricPointRow.t,
         )
+        # Both lists are cut into chunks: a statement binds at most 2 x _IN_CHUNK
+        # values, under SQLite's oldest limit of 999. Sorted name chunks, read in
+        # order, keep each run's points ordered by name then step.
+        name_chunks: list[list[str] | None] = (
+            [None]
+            if wanted is None
+            else [wanted[i : i + _IN_CHUNK] for i in range(0, len(wanted), _IN_CHUNK)]
+        )
         with Session(self.engine) as session:
-            for start in range(0, len(ids), 500):
-                stmt = select(*cols).where(MetricPointRow.run_id.in_(ids[start : start + 500]))
-                if wanted is not None:
-                    stmt = stmt.where(MetricPointRow.name.in_(wanted))
-                stmt = stmt.order_by(
-                    MetricPointRow.run_id, MetricPointRow.name, MetricPointRow.step
-                )
-                for run_id, name, step, value, t in session.execute(stmt):
-                    point = MetricPoint(name=name, step=step, value=value, t=t)
-                    out.setdefault(run_id, []).append(point)
+            for start in range(0, len(ids), _IN_CHUNK):
+                chunk = ids[start : start + _IN_CHUNK]
+                for name_chunk in name_chunks:
+                    stmt = select(*cols).where(MetricPointRow.run_id.in_(chunk))
+                    if name_chunk is not None:
+                        stmt = stmt.where(MetricPointRow.name.in_(name_chunk))
+                    stmt = stmt.order_by(
+                        MetricPointRow.run_id, MetricPointRow.name, MetricPointRow.step
+                    )
+                    for run_id, name, step, value, t in session.execute(stmt):
+                        point = MetricPoint(name=name, step=step, value=value, t=t)
+                        out.setdefault(run_id, []).append(point)
         return out
 
     def _fill_pending_points(self, run_ids: list[str]) -> None:

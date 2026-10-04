@@ -232,11 +232,13 @@ class MetricPoint(BaseModel):
     One step of a logged metric history; stored in ``metrics.jsonl``.
 
     ``value`` is finite: a ``NaN`` or infinite row (a diverged loss written by
-    an old SDK) fails validation, so readers skip it.
+    an old SDK) fails validation, so readers skip it. ``step`` fits a 64-bit
+    signed integer, the widest the index can store; a larger step fails
+    validation too, so one bad row never stops a run's points from being indexed.
     """
 
     name: str
-    step: int
+    step: int = Field(ge=-(2**63), le=2**63 - 1)
     value: float = Field(allow_inf_nan=False)
     t: float | None = None
 

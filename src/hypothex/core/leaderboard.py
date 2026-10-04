@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import statistics
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import datetime
@@ -390,6 +391,27 @@ def pick_field(rows: Iterable[dict[str, Any]], key: str = "value") -> tuple[str,
     return None
 
 
+def _mean(values: list[float]) -> float:
+    """
+    Average finite values without overflowing the intermediate sum.
+
+    Parameters
+    ----------
+    values : list of float
+        Nonempty finite values.
+
+    Returns
+    -------
+    float
+        Their mean. Normal values use fsum; overflowing sums use the standard
+        library's exact rational summation before conversion back to float.
+    """
+    try:
+        return math.fsum(values) / len(values)
+    except OverflowError:
+        return statistics.mean(values)
+
+
 def _pool_runs(run_ids: list[str], per_example: PerExample, field: str) -> dict[str, float]:
     seen: dict[str, list[float]] = defaultdict(list)
     for rid in run_ids:
@@ -397,7 +419,7 @@ def _pool_runs(run_ids: list[str], per_example: PerExample, field: str) -> dict[
             v = fields.get(field)
             if isinstance(v, bool | int | float) and math.isfinite(v):
                 seen[ex].append(float(v))
-    return {ex: math.fsum(vs) / len(vs) for ex, vs in seen.items()}
+    return {ex: _mean(vs) for ex, vs in seen.items()}
 
 
 def _pool(seeds: list[list[str]], per_example: PerExample, field: str) -> dict[str, float]:
@@ -406,7 +428,7 @@ def _pool(seeds: list[list[str]], per_example: PerExample, field: str) -> dict[s
     for run_ids in seeds:
         for ex, v in _pool_runs(run_ids, per_example, field).items():
             seen[ex].append(v)
-    return {ex: math.fsum(vs) / len(vs) for ex, vs in seen.items()}
+    return {ex: _mean(vs) for ex, vs in seen.items()}
 
 
 def _test_interval(pooled: dict[str, float], binary: bool) -> NoiseInterval | None:
@@ -528,7 +550,7 @@ def _seed_values(
         for bucket in buckets:
             values = [per_run[m.run_id][k] for m in bucket if k in per_run[m.run_id]]
             if values:
-                out[k].append(math.fsum(values) / len(values))
+                out[k].append(_mean(values))
     return out
 
 

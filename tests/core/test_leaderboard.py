@@ -6,7 +6,7 @@ import pytest
 from hypothex.core import stats
 from hypothex.core.config import ProjectConfig
 from hypothex.core.ids import utcnow
-from hypothex.core.leaderboard import build_leaderboard, group_label, pick_field
+from hypothex.core.leaderboard import _pool, build_leaderboard, group_label, pick_field
 from hypothex.core.records import (
     CostTotals,
     GitInfo,
@@ -603,6 +603,38 @@ def test_reruns_of_a_seed_are_one_sample() -> None:
     # the same seed twice is one seed: single-seed badge, no t-interval
     assert single.n == 1 and single.single_seed and single.run_ids == ["x0", "x1"]
     assert single.primary is not None and single.primary.ci_low is None
+
+
+def test_rerun_seed_means_do_not_overflow_when_the_mean_is_finite() -> None:
+    runs = [drun(f"r{i}", GitInfo(commit="c1"), seed=i % 2, minute=i) for i in range(40)]
+    scores = {r.run_id: acc(1e307 if r.seed == 0 else -1e307) for r in runs}
+
+    row = build_leaderboard("toy", "t", CFG, runs, scores).rows[0]
+
+    assert row.n == 2
+    assert row.seed_values == {"acc/value": [1e307, -1e307]}
+    assert row.primary is not None
+    assert row.primary.mean == 0.0
+    assert row.primary.std == pytest.approx(2**0.5 * 1e307)
+    assert row.primary.ci_low == pytest.approx(-12.706 * 1e307)
+    assert row.primary.ci_high == pytest.approx(12.706 * 1e307)
+
+
+@pytest.mark.parametrize(
+    ("values", "repeats", "expected"),
+    [([1e307, -1e307], 20, 0.0), ([1e308, 1e308], 1, 1e308), ([5e-324, 5e-324], 1, 5e-324)],
+)
+def test_example_seed_pool_does_not_overflow_when_the_mean_is_finite(
+    values: list[float], repeats: int, expected: float
+) -> None:
+    seeds = [[f"s{seed}r{i}" for i in range(repeats)] for seed in range(2)]
+    examples = {
+        rid: {"example": {"value": values[seed]}}
+        for seed, run_ids in enumerate(seeds)
+        for rid in run_ids
+    }
+
+    assert _pool(seeds, examples, "value") == {"example": expected}
 
 
 def test_within_noise_follows_the_paired_test_not_seed_intervals() -> None:

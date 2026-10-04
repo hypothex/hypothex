@@ -146,17 +146,16 @@ export interface KindPanelsProps {
 }
 
 export function KindPanels({ project, task, runId, specs, example, startIndex }: KindPanelsProps) {
-  const { regular, trace } = splitRunView(specs);
+  // `specs` is memoized by the caller, so `regular` and `results` keep their identity across renders
+  const { regular, trace } = useMemo(() => splitRunView(specs), [specs]);
   const panels = useViewQuery(
     project,
     task,
     regular.length > 0 ? { view: { title: "run", panels: regular.map((p) => scopeToRun(p, runId)) } } : null,
   );
-  // `regular` is a new array on every render; its metric lists are what the filter reads
-  const listed = JSON.stringify(regular.map((p) => p.data?.metrics ?? null));
   const results = useMemo(
     () => panels.data?.panels.map((result, i) => withoutSweeps(result, regular[i])),
-    [panels.data, listed],
+    [panels.data, regular],
   );
   if (specs.length === 0) return null;
   return (

@@ -57,3 +57,10 @@ describe("command palette rows (UI-F8)", () => {
     }
   });
 });
+
+describe("curves value strip", () => {
+  test("the strip in a panel drops the page-level stats margin", async () => {
+    const css = await read("../../src/panels/panels.css");
+    expect(rule(css, ".page .curves .stats")).toContain("margin: 0;");
+  });
+});

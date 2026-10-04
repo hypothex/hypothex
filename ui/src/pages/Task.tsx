@@ -192,9 +192,14 @@ function SweepsLine({ project }: { project: string }) {
   );
 }
 
-/** The first 404 among the task's own reads: the project or the task does not exist. */
+/** A 404 (unknown project), or the server's 400 `ConfigError` for an unknown task in a known project. */
+const isGone = (e: Error | null): boolean =>
+  e instanceof ApiError &&
+  (e.status === 404 || (e.status === 400 && e.type === "ConfigError" && /^unknown task\b/.test(e.message)));
+
+/** The first not-found among the task's own reads: the project or the task does not exist. */
 function notFound(...errors: (Error | null)[]): Error | null {
-  return errors.find((e) => e instanceof ApiError && e.status === 404) ?? null;
+  return errors.find(isGone) ?? null;
 }
 
 export function TaskPage({ project, task, view }: TaskPageProps) {

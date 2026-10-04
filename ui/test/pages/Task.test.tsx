@@ -434,6 +434,35 @@ describe("TaskPage", () => {
     expect(screen.getByRole("link", { name: "All projects" }).getAttribute("href")).toBe("/");
   });
 
+  test("an unknown task in a known project (400 ConfigError) shows the same not-found state", async () => {
+    const gone = new HttpReply(400, { error: "unknown task 'nope' in project 'toy-classifier'", type: "ConfigError" });
+    const NOPE = "/api/v1/tasks/toy-classifier/nope";
+    mockApi({
+      [`GET ${NOPE}/leaderboard`]: gone,
+      [`GET ${NOPE}/views`]: gone,
+      [`GET ${NOPE}/views/overview`]: gone,
+      [`POST ${NOPE}/views/query`]: gone,
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="nope" />, { registry });
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Not found"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.getAllByRole("alert").map((a) => a.textContent)).toEqual([
+      "unknown task 'nope' in project 'toy-classifier'",
+    ]);
+    expect(screen.queryByRole("navigation", { name: "Views" })).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  test("another 400 ConfigError is not a not-found state", async () => {
+    mockApi({
+      ...routes("overview"),
+      [`GET ${BASE}/leaderboard`]: new HttpReply(400, { error: "bad metric 'x'", type: "ConfigError" }),
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    expect((await screen.findByRole("alert")).textContent).toBe("bad metric 'x'");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).not.toBe("Not found");
+  });
+
   test("a server error on the board is not a not-found state", async () => {
     mockApi({
       ...routes("overview"),

@@ -2,6 +2,7 @@
  * Run screen (spec 8.3.3): hypothesis as title, status, stat strip, the task kind's run
  * panels (spec 8.4), where everything is, scores by metric version, notes, and actions.
  */
+import { useMemo } from "react";
 import { useLeaderboard, useRun, useRunTraces, useTaskKind } from "../api/queries";
 import { Figure, panelLetter } from "./components/Figure";
 import { firstClause, shortId } from "./components/format";
@@ -44,8 +45,10 @@ export function RunPage({ runId, log, example }: RunPageProps) {
   // Idle for a run without a task.
   const kind = useTaskKind(project, task, { enabled: hasTask });
   const board = useLeaderboard(project, task, [], { enabled: hasTask });
-  const kindSpecs = kind.data?.run_view ?? [];
+  const kindSpecs = useMemo(() => kind.data?.run_view ?? [], [kind.data]);
   const traces = useRunTraces(runId, kindSpecs.some(readsTraces));
+  const traceCount = traces.data?.length;
+  const specs = useMemo(() => runViewPanels(kindSpecs, traceCount), [kindSpecs, traceCount]);
 
   if (run.error) {
     return (
@@ -67,7 +70,6 @@ export function RunPage({ runId, log, example }: RunPageProps) {
   const detail = run.data;
   const row = board.data?.rows.find((r) => r.run_ids.includes(runId)) ?? null;
   const primary = primaryRef(board.data ?? null, row);
-  const specs = runViewPanels(kindSpecs, traces.data?.length);
   const stream = asLogStream(log);
   const label = row?.label ?? firstClause(record.hypothesis, `run ${shortId(runId)}`);
   const title = record.hypothesis || label;

@@ -79,7 +79,8 @@ export function FailureList({ failures }: { failures: FailureRow[] }) {
       {groupFailures(failures).map((rows) => {
         const f = rows[0] as FailureRow;
         const many = rows.length > 1;
-        const retried = rows.every((r) => r.retried_ok);
+        const retried = rows.filter((r) => r.retried_ok).length;
+        const retry = retried === 0 ? "" : retried === rows.length ? ", retry ok" : `, retried ×${retried}`;
         return (
           <div
             key={f.run_id}
@@ -88,7 +89,7 @@ export function FailureList({ failures }: { failures: FailureRow[] }) {
           >
             <span className="x">{many ? `×${rows.length}` : "×"}</span>
             <b>{f.exit_code !== null ? `${f.label}, exit ${f.exit_code}` : f.label}</b>{" "}
-            <span className="small">{`${fmtTime(f.created_at)}${retried ? ", retry ok" : ""}`}</span>
+            <span className="small">{`${fmtTime(f.created_at)}${retry}`}</span>
             <SlashPath className="p" path={tailPath(f.stderr_path)} title={f.stderr_path} />
             <div className="row">
               <AppLink className="btn" href={hrefs.run(f.run_id, { log: "stderr" })}>

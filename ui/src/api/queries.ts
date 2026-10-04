@@ -382,6 +382,7 @@ export async function fetchAllRuns(query: Omit<M.RunsQuery, "limit">, signal?: A
     const size = cursor ? Math.min(limit, ALL_RUNS_MAX - runs.length) : limit;
     const params: M.RunsQuery & Partial<RunsCursor> = { ...query, limit: size, ...cursor };
     const page = await api.runs(params, signal);
+    // TODO(PERF-F13c): drop the overlap sniffing (and the growing-limit branch) once the server pages by cursor
     const seen = new Set(runs.map((r) => r.run_id));
     if (cursor && !page.some((r) => seen.has(r.run_id))) {
       runs = runs.concat(page);

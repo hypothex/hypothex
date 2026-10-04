@@ -233,6 +233,21 @@ test("FailureList shows one block per group with a ×N count, newest row first",
   expect(blocks[1]?.getAttribute("title")).toBeNull();
 });
 
+test("FailureList shows retry ok only when every row was retried, else retried ×k", () => {
+  const rows = (flags: boolean[]): FailureRow[] =>
+    flags.map((ok, i) => ({ ...fail(`svm-${i}`, "RBF-kernel SVM", 2, `03:02:0${i}`), retried_ok: ok }));
+  const small = (flags: boolean[]): string | null | undefined => {
+    const { container } = render(<FailureList failures={rows(flags)} />);
+    const text = container.querySelector(".fail-b .small")?.textContent;
+    cleanup();
+    return text;
+  };
+  expect(small([true, true, true])).toBe("03:02:00 UTC, retry ok");
+  expect(small([true, false, true])).toBe("03:02:00 UTC, retried ×2");
+  expect(small([false, false, false])).toBe("03:02:00 UTC");
+  expect(small([true])).toBe("03:02:00 UTC, retry ok");
+});
+
 test("FailureList paths break only after a slash", () => {
   const { container } = render(<FailureList failures={makeOverview().failures} />);
   const path = container.querySelector(".fail-b .p") as HTMLElement;

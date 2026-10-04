@@ -46,3 +46,5 @@
 
 /* curves: small multiples, one column per group */
 .curves { display: flex; flex-direction: column; gap: 28px; }
+/* the value strip sits at the panel top; the flex gap spaces it, not the page-level `.page .stats` margin */
+.page .curves .stats { margin: 0; }

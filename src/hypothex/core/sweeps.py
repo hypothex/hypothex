@@ -30,7 +30,7 @@ from hypothex.core.config import (
 )
 from hypothex.core.context import Context
 from hypothex.core.control import cancel_if_queued, launch_run
-from hypothex.core.errors import HypothexError, RunError, StoreError
+from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import COMMIT_PATTERN, RunRequest
 from hypothex.core.fsutil import atomic_write_text, read_yaml, write_yaml
@@ -53,6 +53,46 @@ SAMPLE_DIGITS = 4
 
 class SweepError(HypothexError):
     """A sweep request is invalid: bad grid, seeds, size, or command template."""
+
+
+class SweepIncompleteError(SweepError):
+    """
+    A sweep launch or extend stopped part way: the sweep exists, some runs are missing.
+
+    The message names the sweep, how many of its runs exist, the host, the
+    cause, and the ``hx sweep extend`` command that issues the rest (an extend
+    with the sweep's own seeds starts only the missing runs).
+
+    Parameters
+    ----------
+    spec : SweepSpec
+        The sweep (its seeds include every seed asked for).
+    launched : int
+        Runs of the sweep that exist (started before or by this call).
+    total : int
+        Runs the sweep plans (``planned_runs``).
+    cause : Exception
+        The launch error.
+
+    Examples
+    --------
+    >>> err = SweepIncompleteError(spec, 3, 8, RuntimeError("connection reset"))  # doctest: +SKIP
+    >>> err.sweep_id, err.launched, err.total  # doctest: +SKIP
+    ('s-0001', 3, 8)
+    """
+
+    def __init__(self, spec: SweepSpec, launched: int, total: int, cause: Exception) -> None:
+        self.sweep_id = spec.id
+        self.project = spec.project
+        self.host = spec.host
+        self.launched = launched
+        self.total = total
+        self.hint = f"hx sweep extend {spec.id} --seeds {','.join(map(str, spec.seeds))}"
+        where = f"host {spec.host!r}" if spec.host else "the launch"
+        super().__init__(
+            f"sweep {spec.id}: {launched} of {total} runs launched; {where} failed: "
+            f"{_brief(cause)}. Start the rest with `{self.hint}`"
+        )
 
 
 class SweepParam(BaseModel):
@@ -119,8 +159,10 @@ class SweepSpec(BaseModel, extra="forbid"):
     ``commit`` and ``diff`` pin the sweep's code (spec 8A.4): every run, the
     runs an extend adds included, gets them, so new seeds join the same seed
     groups. ``diff`` is ``git diff HEAD --binary`` text applied on top of
-    ``commit``. Both are None for a sweep that pins nothing (older files too):
-    its runs use the checkout as it is.
+    ``commit``. Both are None when the launch pinned nothing (a local launch
+    from the CLI or MCP, and older files): the launch uses the checkout as it
+    is, and an extend pins the code of the sweep's first run (its
+    ``git.commit`` and saved ``git.diff``).
     """
 
     id: str = Field(pattern=SWEEP_ID_PATTERN)
@@ -509,6 +551,56 @@ def new_sweep_id(layout: Layout, project: str) -> str:
 
 # summary ------------------------------------------------------------------------------
 STATUS_KEYS = tuple(s.value for s in RunStatus)
+MAX_CANCEL_ERRORS = 5
+
+
+class CancelResult(BaseModel):
+    """
+    The outcome of stopping a sweep's queued runs (``cancel_queued``, ``stop_queued_runs``).
+
+    Examples
+    --------
+    >>> CancelResult(asked=3, failed=1, errors=["host 'gpu1' is not connected"]).failed
+    1
+    """
+
+    asked: int = 0
+    """Queued runs asked to stop."""
+    failed: int = 0
+    """Runs whose stop raised; they may still be queued."""
+    errors: list[str] = Field(default_factory=list)
+    """Distinct error messages, at most ``MAX_CANCEL_ERRORS``."""
+
+    def add_failure(self, count: int, exc: Exception) -> None:
+        """
+        Count ``count`` runs as failed with the error ``exc``.
+
+        Parameters
+        ----------
+        count : int
+            Runs the error covers (one, or a whole batch).
+        exc : Exception
+            The error; its first line is kept once.
+        """
+        self.failed += count
+        message = _brief(exc)
+        if message not in self.errors and len(self.errors) < MAX_CANCEL_ERRORS:
+            self.errors.append(message)
+
+    def merge(self, other: CancelResult) -> None:
+        """
+        Add another result's counts and errors to this one.
+
+        Parameters
+        ----------
+        other : CancelResult
+            E.g. a host's answer for one batch.
+        """
+        self.asked += other.asked
+        self.failed += other.failed
+        for message in other.errors:
+            if message not in self.errors and len(self.errors) < MAX_CANCEL_ERRORS:
+                self.errors.append(message)
 
 
 class SweepSummary(BaseModel):
@@ -517,9 +609,11 @@ class SweepSummary(BaseModel):
 
     ``cells`` holds one dict per param combination: ``params``, ``group_id``,
     ``n`` (scored seeds), ``mean``, ``lo``/``hi`` (95% interval: test-set when
-    per-example scores exist, else over seeds), ``std``, ``run_ids``, and
-    ``runs`` (``run_id``, ``status``, ``seed`` of each run). ``best`` is the
-    best scored cell.
+    per-example scores exist, else over seeds), ``std``, ``uncounted`` (the
+    cell's scored runs in another seed group, e.g. another commit: not in
+    ``n`` or ``mean``; shown as ``n=3 +2``), ``run_ids``, and ``runs``
+    (``run_id``, ``status``, ``seed`` of each run). ``best`` is the best
+    scored cell.
     """
 
     spec: SweepSpec
@@ -532,6 +626,8 @@ class SweepSummary(BaseModel):
     """The sweep's members (runs tagged ``tag``), in launch order; derived."""
     tag: str = ""
     """The sweep's member tag ``sweep:<owner8>:<id>`` (ask ``GET /api/v1/runs?tag=``)."""
+    cancel: CancelResult | None = None
+    """What ``cancel_queued`` asked and what failed; None for any other summary."""
 
 
 def sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]:
@@ -618,8 +714,15 @@ def _board(
 def _cell(
     params: dict[str, str], members: list[RunRecord], rows: list[LeaderboardRow]
 ) -> dict[str, Any]:
-    """One heat-table cell from its runs and the leaderboard rows they fall in."""
+    """
+    One heat-table cell from its runs and the scored leaderboard rows they fall in.
+
+    The stats come from ``rows[0]``; the cell's runs scored in the other rows
+    (another commit or config: another seed group) are ``uncounted``.
+    """
     row = rows[0] if rows else None
+    ids = {m.run_id for m in members}
+    uncounted = len(ids & {rid for other in rows[1:] for rid in other.run_ids})
     primary = row.primary if row is not None else None
     lo = hi = None
     if row is not None and row.test_interval is not None:
@@ -634,6 +737,7 @@ def _cell(
         "lo": lo,
         "hi": hi,
         "std": primary.std if primary is not None and primary.n > 1 else None,
+        "uncounted": uncounted,
         "run_ids": [m.run_id for m in members],
         "runs": [{"run_id": m.run_id, "status": m.status.value, "seed": m.seed} for m in members],
     }
@@ -1005,6 +1109,8 @@ def _requests(
     hypothesis: str,
     gpus: int,
     queue: bool,
+    commit: str | None,
+    diff: str | bytes | None,
 ) -> Iterator[tuple[int, RunRequest]]:
     """One request per seed and combination, seed-major (seed 1 of every cell first)."""
     combos = sweep_combos(spec)
@@ -1025,8 +1131,8 @@ def _requests(
                     created_by=spec.created_by,
                     gpus=gpus,
                     queue=queue,
-                    commit=spec.commit,
-                    diff=spec.diff,
+                    commit=commit,
+                    diff=diff,
                 ),
             )
 
@@ -1147,7 +1253,6 @@ def _issue(
     spec: SweepSpec,
     launch: Launcher,
     requests: Iterable[tuple[int, RunRequest]],
-    started: list[str],
     requested: list[str] | None = None,
 ) -> None:
     """
@@ -1156,15 +1261,23 @@ def _issue(
     Each run gets its ``run_command_id``, so a run that exists but is not
     indexed yet (its answer lost, or not mirrored) comes back from the
     launcher's receipt instead of starting twice (``_launch_run``: an
-    interrupted receipt moves on to the run's next id). ``started`` collects
-    the run ids as they come back; ``requested`` collects each command id
-    before its request goes out (the caller then knows a request was made).
+    interrupted receipt moves on to the run's next id). ``requested`` collects
+    each command id before its request goes out (the caller then knows a
+    request was made).
+
+    Raises
+    ------
+    SweepIncompleteError
+        A launch failed: it names how many runs exist and how to start the rest.
     """
-    have = {(r.seed, _combo_key(r.params)) for r in sweep_runs(ctx, spec)}
-    for seed, req in requests:
-        if (seed, _combo_key(req.params)) in have:
+    members = {(r.seed, _combo_key(r.params)) for r in sweep_runs(ctx, spec)}
+    for done, (seed, req) in enumerate(requests):
+        if (seed, _combo_key(req.params)) in members:
             continue
-        started.append(_launch_run(ctx, spec, launch, seed, req, requested).run_id)
+        try:
+            _launch_run(ctx, spec, launch, seed, req, requested)
+        except HypothexError as exc:
+            raise SweepIncompleteError(spec, done, planned_runs(spec), exc) from exc
 
 
 def launch_sweep(
@@ -1193,9 +1306,11 @@ def launch_sweep(
     Every run gets tag ``sweep:<owner8>:<id>`` (``sweep_tag``; this environment
     owns the sweep), params ``k=v`` (also as template vars, so ``{k}`` in the
     command is filled), and its seed. Runs are launched seed-major.
-    If a launch fails, the error is raised and the sweep file stays, even when
-    the first request failed (a lost answer may hide an accepted run); only an
-    error before any launch request leaves no file.
+    If a launch fails, ``SweepIncompleteError`` (the sweep id, runs launched,
+    the host, and the ``hx sweep extend`` command that starts the rest) is
+    raised from the launch error and the sweep file stays, even when the first
+    request failed (a lost answer may hide an accepted run); only an error
+    before any launch request leaves no file.
 
     Parameters
     ----------
@@ -1247,6 +1362,8 @@ def launch_sweep(
     ------
     SweepError
         Invalid grid, seeds, size, command fields, task, or repo.
+    SweepIncompleteError
+        A run launch failed; the sweep exists with the runs launched so far.
     StoreError
         ``project`` is not registered and no ``repo`` was given.
 
@@ -1260,6 +1377,128 @@ def launch_sweep(
     """
     if gpus < 0:
         raise SweepError("gpus must be 0 or more")
+    draft = _draft(project, task, host, grid, random, seeds, command, created_by, commit, diff)
+    repo_path = _resolve_repo(ctx, project, task, repo, remote=launch is not None)
+    with _created(ctx, draft, command_id) as (spec, resumed):
+        requests = _requests(
+            spec,
+            spec.seeds,
+            repo_path,
+            owner=ctx.descriptor.environment_id,
+            hypothesis=hypothesis,
+            gpus=gpus,
+            queue=queue,
+            commit=spec.commit,
+            diff=spec.diff,
+        )
+        requested: list[str] = []
+        try:
+            _issue(ctx, spec, launch or _local_launcher(ctx, spec.id), requests, requested)
+        except BaseException:
+            # once a request went out its outcome is unknown (an accepted run whose answer
+            # was lost): the definition stays. Only a failure before any request removes it.
+            if not requested and not resumed:
+                sweep_path(ctx.layout, project, spec.id).unlink(missing_ok=True)
+            raise
+    return summarize_sweep(ctx, project, spec.id)
+
+
+def create_sweep(
+    ctx: Context,
+    *,
+    project: str,
+    grid: list[SweepParam],
+    seeds: list[int],
+    command: list[str],
+    task: str | None = None,
+    host: str | None = None,
+    random: int | None = None,
+    created_by: str = "human",
+    repo: Path | None = None,
+    remote: bool = False,
+    command_id: str | None = None,
+    commit: str | None = None,
+    diff: str | None = None,
+) -> SweepSpec:
+    """
+    Check and store a sweep's definition without launching any run.
+
+    The first half of ``launch_sweep``, for a caller that answers at once and
+    launches later (the hub, for a big sweep): ``extend_sweep`` with the
+    spec's own seeds (and the launch's ``gpus``, ``queue``, ``hypothesis``)
+    then issues every run, and a repeat of it issues only the missing ones.
+    Arguments are as in ``launch_sweep``; the same ``command_id`` returns the
+    sweep it created before.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    project : str
+        Project name.
+    grid : list of SweepParam
+        Grid and range params.
+    seeds : list of int
+        Seeds; each combination runs once per seed.
+    command : list of str
+        Command template with ``{param}`` and ``{seed}`` fields.
+    task : str, optional
+        Task the runs are scored on.
+    host : str, optional
+        Host name recorded on the sweep.
+    random : int, optional
+        Number of random samples (see ``expand``).
+    created_by : str
+        ``human`` or ``agent:<name>``.
+    repo : Path, optional
+        Project repo; default the registered repo of ``project``.
+    remote : bool
+        The runs go to a host: the hub needs no checkout of its own.
+    command_id : str, optional
+        The client's command id.
+    commit : str, optional
+        Commit every run pins (``SweepSpec.commit``).
+    diff : str, optional
+        Uncommitted changes on top of ``commit``.
+
+    Returns
+    -------
+    SweepSpec
+        The stored definition (the earlier one for a repeated ``command_id``).
+
+    Raises
+    ------
+    SweepError
+        Invalid grid, seeds, size, command fields, task, or repo.
+    StoreError
+        ``project`` is not registered and no ``repo`` was given.
+
+    Examples
+    --------
+    >>> spec = create_sweep(ctx, project="toy", grid=[SweepParam(name="lr", values=["1e-4"])],
+    ...     seeds=[1, 2], command=["python", "train.py", "--lr", "{lr}"])  # doctest: +SKIP
+    >>> extend_sweep(ctx, "toy", spec.id, spec.seeds).counts["total"]  # doctest: +SKIP
+    2
+    """
+    draft = _draft(project, task, host, grid, random, seeds, command, created_by, commit, diff)
+    _resolve_repo(ctx, project, task, repo, remote=remote)
+    with _created(ctx, draft, command_id) as (spec, _):
+        return spec
+
+
+def _draft(
+    project: str,
+    task: str | None,
+    host: str | None,
+    grid: list[SweepParam],
+    random: int | None,
+    seeds: list[int],
+    command: list[str],
+    created_by: str,
+    commit: str | None,
+    diff: str | None,
+) -> SweepSpec:
+    """A checked sweep definition without its id (``pending``)."""
     try:
         draft = SweepSpec(
             id="pending",
@@ -1278,10 +1517,22 @@ def launch_sweep(
     except ValidationError as exc:
         raise SweepError(f"invalid sweep: {_brief(exc)}") from exc
     _check_launchable(draft)
-    repo_path = _resolve_repo(ctx, project, task, repo, remote=launch is not None)
-    started: list[str] = []
-    # one command id at a time: its claim lookup, id reservation, and claim are one step,
-    # so two racing calls never make two sweeps (and two run sets) for one command
+    return draft
+
+
+@contextmanager
+def _created(
+    ctx: Context, draft: SweepSpec, command_id: str | None
+) -> Iterator[tuple[SweepSpec, bool]]:
+    """
+    Give ``draft`` its id and store it, then hold its sweep lock.
+
+    One command id at a time: its claim lookup, id reservation, and claim are
+    one step, so two racing calls never make two sweeps (and two run sets) for
+    one command. Yields the stored spec and whether ``command_id`` had claimed
+    a sweep already (a retry: the stored definition wins).
+    """
+    project = draft.project
     with _command_lock(ctx.layout, project, command_id):
         claimed = _claimed_sweep(ctx.layout, project, command_id)
         spec = draft.model_copy(update={"id": claimed or new_sweep_id(ctx.layout, project)})
@@ -1291,27 +1542,7 @@ def launch_sweep(
             else:
                 save_sweep(ctx.layout, spec)
                 _claim_sweep(ctx.layout, project, command_id, spec.id)  # before any run starts
-            requests = _requests(
-                spec,
-                spec.seeds,
-                repo_path,
-                owner=ctx.descriptor.environment_id,
-                hypothesis=hypothesis,
-                gpus=gpus,
-                queue=queue,
-            )
-            requested: list[str] = []
-            try:
-                _issue(
-                    ctx, spec, launch or _local_launcher(ctx, spec.id), requests, started, requested
-                )
-            except BaseException:
-                # once a request went out its outcome is unknown (an accepted run whose answer
-                # was lost): the definition stays. Only a failure before any request removes it.
-                if not requested and claimed is None:
-                    sweep_path(ctx.layout, project, spec.id).unlink(missing_ok=True)
-                raise
-    return summarize_sweep(ctx, project, spec.id)
+            yield spec, claimed is not None
 
 
 # cancel and extend -------------------------------------------------------------------
@@ -1337,15 +1568,60 @@ def stop_if_queued(ctx: Context, run_id: str) -> RunRecord:
     return cancel_if_queued(ctx, run_id)  # one conditional step: never a check, then a stop
 
 
+CANCEL_BATCH = 50
+"""Runs per ``stop_batch`` call of ``cancel_queued``: one host request stops this many."""
+
+
+def stop_queued_runs(ctx: Context, run_ids: Iterable[str]) -> CancelResult:
+    """
+    Stop each run that is still queued; a failed stop never ends the loop.
+
+    The host side of a batched cancel: one request stops many runs, and each
+    stop is one conditional step (``stop_if_queued``), so a run that started a
+    moment ago keeps running.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    run_ids : iterable of str
+        Runs of this environment.
+
+    Returns
+    -------
+    CancelResult
+        ``asked`` is the number of ids; ``failed`` counts the stops that raised.
+
+    Examples
+    --------
+    >>> stop_queued_runs(ctx, ["20261004-101500-t1-00ab12cd"]).failed  # doctest: +SKIP
+    0
+    """
+    result = CancelResult()
+    for run_id in run_ids:
+        result.asked += 1
+        try:
+            stop_if_queued(ctx, run_id)
+        except HypothexError as exc:
+            log.warning("could not stop queued run %s: %s", run_id, exc)
+            result.add_failure(1, exc)
+    return result
+
+
 def cancel_queued(
     ctx: Context,
     project: str,
     sweep_id: str,
     *,
     stop: Callable[[str], object] | None = None,
+    stop_batch: Callable[[list[str]], CancelResult] | None = None,
 ) -> SweepSummary:
     """
     Stop every queued run of a sweep; running and finished runs are left alone.
+
+    A stop that fails (a host error, a run of another environment) is counted
+    and the rest are still stopped: one bad run or host error never leaves the
+    others queued.
 
     Parameters
     ----------
@@ -1356,13 +1632,16 @@ def cancel_queued(
     sweep_id : str
         Sweep id.
     stop : callable, optional
-        ``run_id -> Any``; default ``stop_if_queued`` here (queued runs end
-        ``killed``). The hub passes a forwarder for runs on remote hosts.
+        ``run_id -> Any``, one call per run; default ``stop_if_queued`` here
+        (queued runs end ``killed``).
+    stop_batch : callable, optional
+        ``run_ids -> CancelResult``, one call per ``CANCEL_BATCH`` runs; the hub
+        passes a forwarder to the host's ``stop_queued_runs``. Wins over ``stop``.
 
     Returns
     -------
     SweepSummary
-        The sweep after the stops.
+        The sweep after the stops; ``cancel`` holds the counts and errors.
 
     Raises
     ------
@@ -1370,15 +1649,59 @@ def cancel_queued(
         If the sweep does not exist.
     """
     spec = load_sweep(ctx.layout, project, sweep_id)
-    do_stop = stop or (lambda run_id: stop_if_queued(ctx, run_id))
-    for record in sweep_runs(ctx, spec):
-        if record.status != RunStatus.QUEUED:
-            continue
-        try:
-            do_stop(record.run_id)
-        except RunError as exc:  # ended or started between the read and the stop
-            log.info("not stopping %s: %s", record.run_id, exc)
-    return summarize_sweep(ctx, project, sweep_id)
+    queued = [r.run_id for r in sweep_runs(ctx, spec) if r.status == RunStatus.QUEUED]
+    result = CancelResult()
+    if stop_batch is not None:
+        for i in range(0, len(queued), CANCEL_BATCH):
+            batch = queued[i : i + CANCEL_BATCH]
+            try:
+                result.merge(stop_batch(batch))
+            except HypothexError as exc:
+                log.warning(
+                    "could not stop %d queued runs of sweep %s: %s", len(batch), sweep_id, exc
+                )
+                result.asked += len(batch)
+                result.add_failure(len(batch), exc)
+    elif stop is None:
+        result = stop_queued_runs(ctx, queued)
+    else:
+        for run_id in queued:
+            result.asked += 1
+            try:
+                stop(run_id)
+            except HypothexError as exc:
+                log.warning("could not stop queued run %s: %s", run_id, exc)
+                result.add_failure(1, exc)
+    summary = summarize_sweep(ctx, project, sweep_id)
+    return summary.model_copy(update={"cancel": result})
+
+
+def _pinned_code(
+    ctx: Context, spec: SweepSpec, first: RunRecord | None
+) -> tuple[str | None, str | bytes | None]:
+    """
+    The commit and diff an extend pins: the spec's, else the first run's.
+
+    A sweep whose launch pinned nothing (``spec.commit`` None) ran the checkout
+    as it was; its first run recorded that code (``git.commit`` and the saved
+    ``git.diff``), so new seeds run it again instead of the current HEAD and
+    join the same seed groups.
+
+    Raises
+    ------
+    SweepError
+        If the first run's diff was too large to save: its code is not known.
+    """
+    if spec.commit is not None or first is None or first.git.commit is None:
+        return spec.commit, spec.diff
+    run_dir = ctx.run_dir(first)
+    if (run_dir / "git.diff.too_large").exists():
+        raise SweepError(
+            f"the sweep's first run {first.run_id} had uncommitted changes too large to "
+            "save; its code cannot be pinned for new seeds"
+        )
+    saved = run_dir / "git.diff"
+    return first.git.commit, saved.read_bytes() if saved.is_file() else None
 
 
 def extend_sweep(
@@ -1427,9 +1750,18 @@ def extend_sweep(
     Raises
     ------
     SweepError
-        No seeds, or the sweep would grow past ``MAX_SWEEP_RUNS``.
+        No seeds, the sweep would grow past ``MAX_SWEEP_RUNS``, or the sweep
+        pins no code and its first run's diff was too large to save.
+    SweepIncompleteError
+        A run launch failed; the seeds are saved, so the same extend resumes.
     StoreError
         If the sweep does not exist.
+
+    Notes
+    -----
+    New runs pin the sweep's ``commit``/``diff``; a sweep that pins none runs
+    its first run's code again (``git.commit`` and ``git.diff``), never the
+    current HEAD, so new seeds join the cells' seed groups.
 
     Examples
     --------
@@ -1453,6 +1785,7 @@ def extend_sweep(
         if hypothesis is None:
             hypothesis = first.hypothesis if first else ""
         repo_path = _resolve_repo(ctx, project, spec.task, repo, remote=launch is not None)
+        commit, diff = _pinned_code(ctx, spec, first)
         save_sweep(ctx.layout, grown)  # the definition first: a retry knows every seed
         requests = _requests(
             grown,
@@ -1462,6 +1795,8 @@ def extend_sweep(
             hypothesis=hypothesis,
             gpus=n_gpus,
             queue=queue if queue is not None else n_gpus > 0,
+            commit=commit,
+            diff=diff,
         )
-        _issue(ctx, grown, launch or _local_launcher(ctx, sweep_id), requests, [])
+        _issue(ctx, grown, launch or _local_launcher(ctx, sweep_id), requests)
     return summarize_sweep(ctx, project, sweep_id)

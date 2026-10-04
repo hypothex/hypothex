@@ -4,6 +4,12 @@ A run waits in the queue while it is ``queued`` and its folder holds
 ``queue.json``. Each ``tick`` starts, in queue order, every run whose GPU
 count fits the GPUs that are free right now (no hx run holds them and
 ``nvidia-smi`` shows no process on them).
+
+A run's ``executor.queue_position`` is its queue ticket: written once, when it
+joins, one above every ticket still waiting. So ticket order is queue order,
+and a start or a stop never rewrites the runs behind it. The live 1-based
+place is the rank of the ticket among the waiting runs: ``positions()`` here,
+and the same rank by ticket on a hub that mirrors the runs.
 """
 
 from __future__ import annotations
@@ -72,13 +78,15 @@ def assign_gpus(indices: list[int]) -> Callable[[RunRecord], RunRecord]:
 
 
 def _release_gpus(r: RunRecord) -> RunRecord:
-    """Drop a reservation that a crashed start left behind; keep the queue position."""
+    """Drop a reservation that a crashed start left behind (the run keeps its queue place)."""
     return r.model_copy(update={"executor": r.executor.model_copy(update={"gpus": []})})
 
 
-def _set_position(position: int) -> Callable[[RunRecord], RunRecord]:
+def _set_ticket(ticket: int) -> Callable[[RunRecord], RunRecord]:
+    """Build an ``update_run`` mutator that sets ``executor.queue_position`` (the ticket)."""
+
     def mutate(r: RunRecord) -> RunRecord:
-        executor = r.executor.model_copy(update={"queue_position": position})
+        executor = r.executor.model_copy(update={"queue_position": ticket})
         return r.model_copy(update={"executor": executor})
 
     return mutate
@@ -93,6 +101,7 @@ class _Entry:
     run_id: str
     enqueued_at: datetime
     gpus: int
+    ticket: int | None
 
 
 def _enqueued_at(marker: Path, record: RunRecord) -> datetime:
@@ -127,7 +136,12 @@ class Scheduler:
             if record.environment_id != mine or not marker.is_file():
                 continue
             entries.append(
-                _Entry(record.run_id, _enqueued_at(marker, record), record.gpus_requested)
+                _Entry(
+                    record.run_id,
+                    _enqueued_at(marker, record),
+                    record.gpus_requested,
+                    record.executor.queue_position,
+                )
             )
         return sorted(entries, key=lambda e: (e.enqueued_at, e.run_id))
 
@@ -142,20 +156,27 @@ class Scheduler:
         """
         return {e.run_id: i for i, e in enumerate(self._entries(), start=1)}
 
-    def _reposition(self, new: str | None = None) -> None:
-        """Write changed positions to the runs (call with the lock held)."""
-        for position, entry in enumerate(self._entries(), start=1):
-            if self.ctx.find_record(entry.run_id).executor.queue_position == position:
-                continue
-            event = "run.enqueued" if entry.run_id == new else "run.queue_moved"
-            self.ctx.update_run(
-                entry.run_id, event, _set_position(position), {"position": position}
-            )
+    def _renumber(self) -> None:
+        """
+        Give the waiting runs tickets 1..n in queue order (call with the lock held).
+
+        Only crash recovery needs it: a start that never committed cleared its
+        run's ticket, and the run keeps its old place in the queue. Runs whose
+        ticket is already right are not written.
+        """
+        for ticket, entry in enumerate(self._entries(), start=1):
+            if entry.ticket != ticket:
+                self.ctx.update_run(
+                    entry.run_id, "run.queue_moved", _set_ticket(ticket), {"position": ticket}
+                )
 
     def refresh_positions(self) -> None:
-        """Rewrite ``executor.queue_position`` of waiting runs whose place changed."""
-        with scheduler_lock(self.ctx):
-            self._reposition()
+        """
+        Do nothing: positions are ranks computed on read (``positions``).
+
+        Kept so older callers still work; a start or a stop never rewrites the
+        runs behind it.
+        """
 
     def _recover_starts(self) -> None:
         """
@@ -184,6 +205,7 @@ class Scheduler:
         else:
             markers = list(self.ctx.layout.store.glob(f"*/runs/*/{QUEUE_FILE}"))
             self._swept = True
+        released = False
         for marker in sorted(markers):
             if not marker.is_file():
                 continue
@@ -200,6 +222,9 @@ class Scheduler:
                 marker.unlink(missing_ok=True)
             elif record.executor.gpus:
                 self.ctx.update_run(record.run_id, "run.gpus_released", _release_gpus, {"gpus": []})
+                released = True
+        if released:
+            self._renumber()  # the start that was cut short cleared the run's ticket
 
     def _keep_fifo(self, record: RunRecord, run_dir: Path) -> None:
         """
@@ -230,6 +255,12 @@ class Scheduler:
         int
             The run's 1-based queue position.
 
+        Notes
+        -----
+        A run that joins gets its ticket (``executor.queue_position``, event
+        ``run.enqueued {position}``) here, once; a run already waiting is left
+        as it is.
+
         Raises
         ------
         RunError
@@ -254,10 +285,14 @@ class Scheduler:
                 )
             if not (run_dir / QUEUE_FILE).is_file():
                 write_queue_marker(run_dir)
-            if record.executor.queue_position is None:  # joining, not already waiting
-                self._keep_fifo(record, run_dir)
-            self._reposition(new=run_id)
-            return self.positions()[run_id]
+            if record.executor.queue_position is not None:  # already waiting
+                return self.positions()[run_id]
+            self._keep_fifo(record, run_dir)
+            entries = self._entries()
+            ticket = max((e.ticket or 0 for e in entries if e.run_id != run_id), default=0) + 1
+            position = next(i for i, e in enumerate(entries, start=1) if e.run_id == run_id)
+            self.ctx.update_run(run_id, "run.enqueued", _set_ticket(ticket), {"position": position})
+            return position
 
     def tick(self) -> list[str]:
         """
@@ -312,7 +347,6 @@ class Scheduler:
                     continue
                 marker.unlink(missing_ok=True)
                 started.append(entry.run_id)
-            self._reposition()
         return started
 
 

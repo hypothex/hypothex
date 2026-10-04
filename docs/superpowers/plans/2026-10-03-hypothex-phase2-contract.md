@@ -157,7 +157,7 @@ Hub (and env servers where marked *env*):
 | GET | `/api/v1/sweeps/{project}/{id}` | | `SweepSummary` |
 | GET | `/api/v1/sweeps/{id}` | | `SweepSummary` (any project; for clients on another machine) |
 | GET | `/api/v1/projects/{project}/sweeps` | | `list[{id, created_at, n_runs, best}]` |
-| POST | `/api/v1/sweeps/{project}/{id}/cancel_queued` | `{command_id?}` | `SweepSummary` (queued runs of the sweep stopped as `killed`) |
+| POST | `/api/v1/sweeps/{project}/{id}/cancel_queued` | `{command_id?}` | `SweepSummary` (queued runs of the sweep stopped as `killed`; `cancel: {asked, failed, errors}` counts the stops that failed, DF-49) |
 | POST | `/api/v1/sweeps/{project}/{id}/extend` | `{seeds: list[int], command_id?}` | `SweepSummary` (adds runs for every param combination × new seeds) |
 | POST | `/api/v1/runs/{id}/pull` | `{artifact: kind or path, command_id?}` | `{local_path}`; 400 when the destination name starts with `.hx-` |
 

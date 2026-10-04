@@ -12,6 +12,7 @@ from hypothex.core.ids import utcnow
 from hypothex.core.layout import Layout
 from hypothex.core.records import ScoreRecord, UsageTotals
 from hypothex.core.store import (
+    ProjectEntry,
     RunStore,
     TraceStep,
     UsageRow,
@@ -263,3 +264,23 @@ def test_read_samples(store: RunStore) -> None:
         "latency_ms": [12.5, 15.0],
         "ttft": [3.0],
     }
+
+
+def test_registering_over_a_hosts_copy_forgets_the_hosts_paths(
+    store: RunStore, tmp_path: Path
+) -> None:
+    # the copy's repo and previous_repos are paths on the host, chosen by it: they are
+    # not this hub's history (rerun maps a run's cwd through previous_repos)
+    cfg = ProjectConfig(project="toy")
+    copy = ProjectEntry(
+        project="toy",
+        repo="/on/the/host",
+        config=cfg,
+        registered_at=utcnow(),
+        previous_repos=["/on/the/host/old"],
+        remote_host="gpu1",
+    )
+    store.save_project(copy)
+    entry = store.register_project(cfg, tmp_path / "a")
+    assert (entry.remote_host, entry.previous_repos) == (None, [])
+    assert store.load_project("toy").previous_repos == []

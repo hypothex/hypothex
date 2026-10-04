@@ -11,9 +11,18 @@ from mcp.types import TextContent
 
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
-from hypothex.core.errors import ConfigError, RunError, StoreError
+from hypothex.core.errors import ConfigError, RemoteProjectError, RunError, StoreError
 from hypothex.core.evaluation import evaluate_run
-from hypothex.mcp.server import MCPServer, build_server, require_agent_hypothesis
+from hypothex.mcp.server import (
+    MCPServer,
+    build_server,
+    list_task_views,
+    put_view,
+    query_task_view,
+    remove_view,
+    require_agent_hypothesis,
+    view_document,
+)
 from tests.factories import PREDS_075, seed_finished_run
 
 EXPECTED_TOOLS = {
@@ -200,6 +209,40 @@ def test_view_tools(home: Path, ctx: Context, toy_repo: Path) -> None:
         home, "add_view", {"task": "toy-acc", "name": "overview", "yaml_text": GOOD_VIEW}
     )
     assert err and "preset view" in message
+
+
+def test_views_are_never_written_under_a_host_copys_repo_path(ctx: Context, toy_repo: Path) -> None:
+    # the repo path of a project copied from a host is the host's, even when it is a
+    # folder here: a view is never saved into it or deleted from it
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    put_view(ctx, "toy-acc", "kept", GOOD_VIEW)
+    kept = toy_repo.resolve() / ".hypothex" / "views" / "toy-acc" / "kept.yaml"
+    entry = ctx.store.load_project("toy").model_copy(update={"remote_host": "gpu1"})
+    ctx.store.save_project(entry)
+    ctx.index.upsert_project(entry)
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        put_view(ctx, "toy-acc", "acc", GOOD_VIEW)
+    assert not kept.with_name("acc.yaml").exists()
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        remove_view(ctx, "toy-acc", "kept")
+    assert kept.read_text() == GOOD_VIEW
+
+
+def test_views_are_never_read_from_a_host_copys_repo_path(ctx: Context, toy_repo: Path) -> None:
+    # the view files and hypothex.yaml under a host copy's repo path are the host's, even
+    # when the path is a folder here: only the snapshot's preset and inline views are served
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    put_view(ctx, "toy-acc", "kept", GOOD_VIEW)
+    entry = ctx.store.load_project("toy").model_copy(update={"remote_host": "gpu1"})
+    ctx.store.save_project(entry)
+    ctx.index.upsert_project(entry)
+    (toy_repo / "hypothex.yaml").write_text("project: [not, valid\n")  # never parsed
+    views = [(v.name, v.origin) for v in list_task_views(ctx, "toy-acc")]
+    assert views == [("overview", "preset")]
+    with pytest.raises(StoreError, match="unknown view 'kept'"):
+        view_document(ctx, "toy-acc", "kept")
+    panels = query_task_view(ctx, "toy-acc")["panels"]
+    assert [p["type"] for p in panels] and all("error" not in p for p in panels)
 
 
 def test_views_of_a_host_copy_never_use_a_folder_at_its_repo_path(

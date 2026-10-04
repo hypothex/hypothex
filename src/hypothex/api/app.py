@@ -575,7 +575,11 @@ class HubManager:
         async with self._lock:
             if self.hub is None:
                 self._read_file()  # fresh: `hx demo` rewrites URLs before the server starts
-                self.hub = Hub(self.ctx, EnvironmentsFile(environments=self._enabled()))
+                self.hub = Hub(
+                    self.ctx,
+                    EnvironmentsFile(environments=self._enabled()),
+                    configured_hosts=self.names,
+                )
                 await self.hub.start()
 
     async def stop(self) -> None:
@@ -773,8 +777,10 @@ class HubManager:
             for name in self.names():
                 if name not in self.disabled:
                     self.state(name)
-        name = self._seen.get(environment_id) or self._cursor_host(environment_id)
-        return name if name in self.names() else None
+        configured = self.names()
+        seen = self._seen.get(environment_id)
+        name = seen if seen in configured else self._cursor_host(environment_id)
+        return name if name in configured else None
 
     def mirrored_from(self, environment_id: str) -> str | None:
         """
@@ -801,7 +807,11 @@ class HubManager:
         """
         if environment_id == self.ctx.descriptor.environment_id:
             return None
-        return self._seen.get(environment_id) or self._cursor_host(environment_id)
+        return (
+            self.host_for_environment(environment_id)
+            or self._seen.get(environment_id)
+            or self._cursor_host(environment_id)
+        )
 
     def environment_ids(self, state: HostState) -> list[str]:
         """
@@ -836,14 +846,13 @@ class HubManager:
 
     def _cursor_host(self, environment_id: str) -> str | None:
         try:
-            with self.ctx.index.engine.connect() as conn:
-                row = conn.execute(
-                    text("SELECT host FROM host_cursors WHERE environment_id = :e LIMIT 1"),
-                    {"e": environment_id},
-                ).first()
+            hosts = self.ctx.index.cursor_hosts(environment_id)
         except OperationalError:
             return None
-        return None if row is None else str(row[0])
+        configured = self.names()
+        # Prefer the active alias, but retain a removed owner for mirrored_from:
+        # curation must still refuse a host's mirror when no alias is configured.
+        return next((name for name in hosts if name in configured), next(iter(hosts), None))
 
 
 def environment_runs(ctx: Context, environment_id: str) -> list[RunRecord]:
@@ -988,12 +997,10 @@ def _project_of(body: HostLaunchBody) -> str:
 def _registered_checkout(ctx: Context, project: str) -> str | None:
     """The registered repo of ``project`` when it is a folder on the hub, else None."""
     try:
-        entry = ctx.store.load_project(project)
-    except StoreError:
+        repo = ctx.local_repo(project)
+    except (StoreError, ConfigError):  # a host's copy (RemoteProjectError): its repo is there
         return None
-    if entry.remote_host is not None or not Path(entry.repo).is_dir():
-        return None  # a project copied from a host: its repo path is on that host
-    return entry.repo
+    return str(repo) if repo.is_dir() else None
 
 
 def remote_checkout(ctx: Context, host: str, project: str) -> tuple[HostSpec, str]:
@@ -1161,7 +1168,8 @@ def launch_on_host(
     Raises
     ------
     ConfigError
-        Unknown host.
+        Unknown host, or (``local``) a project copied from a host
+        (``RemoteProjectError``: its repo path is on that host).
     RunError
         No project, no checkout on the host, an agent launch without a
         hypothesis, SLURM fields for a non-SLURM host, or an unusable diff.
@@ -1173,7 +1181,7 @@ def launch_on_host(
     >>> launch_on_host(ctx, manager, "gpu1", HostLaunchBody(project="toy"))  # doctest: +SKIP
     """
     if not is_remote(host):
-        repo = _hub_checkout(body) or ctx.store.load_project(_project_of(body)).repo
+        repo = _hub_checkout(body) or str(ctx.local_repo(_project_of(body)))
         return to_jsonable(launch_here(ctx, body, repo))
     project = _project_of(body)
     spec, checkout = remote_checkout(ctx, host, project)
@@ -1912,7 +1920,8 @@ def create_app(
         def launch(req: RunRequest, run_command_id: str) -> RunRecord:
             parsed = [p for p in map(parse_sweep_tag, req.tags) if p is not None]
             sweep_id = parsed[0][1] if parsed else None
-            local = req.repo.is_dir()  # False for a project copied from a host
+            # never a host's copy, whose repo path may also name a folder here
+            local = _registered_checkout(ctx, project) is not None and req.repo.is_dir()
             if "commit" not in pinned:
                 # spec 8A.4: one commit for every run of this call; the host fetches it.
                 # The sweep's stored pin (SweepSpec.commit/diff, so an extend runs the

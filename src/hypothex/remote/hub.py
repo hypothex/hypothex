@@ -20,7 +20,7 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -255,7 +255,7 @@ def _claim_path(ctx: Context, run_id: str) -> Path:
 
 
 def _claim_owner(ctx: Context, run_id: str) -> dict[str, str] | None:
-    """The ``{project, environment_id}`` that claimed ``run_id``, or None."""
+    """The project, environment, and host that claimed ``run_id``, or None."""
     try:
         data = json.loads(_claim_path(ctx, run_id).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -264,10 +264,18 @@ def _claim_owner(ctx: Context, run_id: str) -> dict[str, str] | None:
         data = None
     if not isinstance(data, dict):  # unreadable: never taken over
         return {"project": "?", "environment_id": "?"}
-    return {"project": str(data.get("project")), "environment_id": str(data.get("environment_id"))}
+    owner = {
+        "project": str(data.get("project")),
+        "environment_id": str(data.get("environment_id")),
+    }
+    if isinstance(data.get("host"), str) and data["host"]:
+        owner["host"] = data["host"]
+    return owner
 
 
-def _conflict(ctx: Context, environment_id: str, project: str, run_id: str) -> str | None:
+def _conflict(
+    ctx: Context, environment_id: str, project: str, run_id: str, host: str
+) -> str | None:
     """
     Return why a remote run must not be written here, or None.
 
@@ -276,11 +284,18 @@ def _conflict(ctx: Context, environment_id: str, project: str, run_id: str) -> s
     """
     owner = _claim_owner(ctx, run_id)
     if owner is not None:
-        if owner != {"project": project, "environment_id": environment_id}:
+        if owner.get("project") != project or owner.get("environment_id") != environment_id:
             return (
                 f"run {run_id} is claimed by environment {owner['environment_id']} "
                 f"in project {owner['project']!r}"
             )
+        if "host" not in owner:
+            return (
+                f"run {run_id} has a legacy claim without a verified host; "
+                "reconnect its saved cursor owner to migrate the claim"
+            )
+        if owner["host"] != host:
+            return f"run {run_id} is claimed by host {owner.get('host')}"
         return None
     store = ctx.layout.store
     for folder in sorted(store.iterdir()) if store.is_dir() else []:
@@ -312,7 +327,7 @@ def _claim(ctx: Context, environment_id: str, project: str, run_id: str, host: s
         Why the run must not be installed here, or None when the claim is ours.
     """
     with dir_lock(ctx.layout.store / CLAIMS_DIR):
-        reason = _conflict(ctx, environment_id, project, run_id)
+        reason = _conflict(ctx, environment_id, project, run_id, host)
         if reason is None and _claim_owner(ctx, run_id) is None:
             owner = {"project": project, "environment_id": environment_id, "host": host}
             atomic_write_text(_claim_path(ctx, run_id), json.dumps(owner))
@@ -380,7 +395,7 @@ def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) ->
     the hub. A project registered on the hub (or copied from another host) is
     never replaced; a later ``hx register`` of a checkout on the hub replaces
     the copy. The copy's ``repo`` is the path the host reported, on the host:
-    hub code must never read or write under it (check ``remote_host`` first).
+    hub code must never read or write under it (``Context.local_repo`` refuses it).
     """
     known: ProjectEntry | None = None
     with contextlib.suppress(StoreError):
@@ -453,12 +468,17 @@ def mirror_run(
     -------
     tuple of (RunRecord, bool) or None
         The mirrored record and whether any file changed; None when the run was
-        skipped (unsafe name, owned by another environment, or gone).
+        skipped (unsafe name, owned by another environment, reported under the
+        hub's own environment id, or gone).
     """
     if not (_safe_name(project) and _safe_name(run_id)):
         log.warning("host %s: skipping run with unsafe name %r/%r", host, project, run_id)
         return None
-    reason = _conflict(ctx, environment_id, project, run_id)
+    if environment_id == ctx.descriptor.environment_id:
+        # it would pass as the hub's own run: rerun/reinfer would run its command here
+        log.warning("host %s reports this hub's own environment id; run %s skipped", host, run_id)
+        return None
+    reason = _conflict(ctx, environment_id, project, run_id, host)
     if reason is not None:
         log.warning("host %s: not mirroring: %s", host, reason)
         return None
@@ -810,6 +830,10 @@ class _UpgradeRequiredError(Exception):
     """The host speaks another protocol version; retrying cannot help."""
 
 
+class _EnvironmentTakenError(Exception):
+    """The host reports the hub's own or another host's environment id; retrying cannot help."""
+
+
 AUTH_FAILURE_STATUSES = frozenset({401, 403})
 """HTTP answers of an env server that does not accept the hub's token (spec 5.3)."""
 
@@ -903,11 +927,22 @@ class Hub:
         ``mirror.run_updated`` events go here.
     hosts : EnvironmentsFile
         Parsed ``environments.yaml``.
+    configured_hosts : callable, optional
+        Names still configured, including disabled hosts with no supervisor. The
+        manager supplies a live lookup so reloads preserve identity reservations.
+        Defaults to the names in ``hosts``.
     """
 
-    def __init__(self, ctx: Context, hosts: EnvironmentsFile) -> None:
+    def __init__(
+        self,
+        ctx: Context,
+        hosts: EnvironmentsFile,
+        *,
+        configured_hosts: Callable[[], Iterable[str]] | None = None,
+    ) -> None:
         self.ctx = ctx
         self.hosts = hosts
+        self._configured_hosts = configured_hosts or (lambda: self.hosts.environments)
         self.backoff_delays: tuple[float, ...] = BACKOFF_SECONDS
         self.stable_after = STABLE_AFTER_SECONDS
         self.stale_after = STALE_AFTER_SECONDS
@@ -1004,10 +1039,10 @@ class Hub:
             Host name; unknown names are ignored.
         """
         async with self._owned(name) as sup:
-            self._sups.pop(name, None)
-            self.hosts.environments.pop(name, None)
             if sup is not None:
                 await self._halt(sup)
+            self._sups.pop(name, None)
+            self.hosts.environments.pop(name, None)
 
     async def connect(self, name: str) -> HostState:
         """
@@ -1209,6 +1244,9 @@ class Hub:
             except _UpgradeRequiredError as exc:
                 self._set(sup, "upgrade", str(exc))
                 return
+            except _EnvironmentTakenError as exc:
+                self._set(sup, "error", str(exc))
+                return
             except EnvRequestError as exc:
                 status = _auth_failure(exc)
                 if status is not None:  # retrying with the same token cannot help
@@ -1287,6 +1325,14 @@ class Hub:
                     f"hub speaks {PROTOCOL_VERSION}"
                 )
             env_id = desc.environment_id
+            if env_id == self.ctx.descriptor.environment_id:
+                # its runs would pass as the hub's own (mirror_run skips them anyway)
+                raise _EnvironmentTakenError(
+                    f"{sup.name} reports this hub's own environment id {env_id}; "
+                    "a host must be another hx home (remove it: hx hosts rm "
+                    f"{sup.name})"
+                )
+            self._reserve_environment(env_id, sup.name)
             cursor = await asyncio.to_thread(self._read_cursor, sup, env_id)
             if cursor:
                 cursor = await asyncio.to_thread(self._check_cursor, sup, client, env_id, cursor)
@@ -1330,6 +1376,80 @@ class Hub:
             self._close_route(sup)
             if cancel is not None:
                 raise cancel
+
+    def _reserve_environment(self, env_id: str, name: str) -> None:
+        """
+        Reserve an identity durably before the session yields or mirrors anything.
+
+        The existing claim lock serializes the ownership check and the cursor-zero
+        write, including across hub processes. Cursors survive restarts and index
+        rebuilds; labelled run claims protect owners whose first cursor was never
+        written. Older claims without host labels migrate only when the saved
+        cursors identify one owner, never from the newly connecting descriptor.
+        Only removing the old name from the configured hosts releases its identity.
+        Reusing it under another name then transfers the claim labels before that
+        host can supply new run data.
+
+        Parameters
+        ----------
+        env_id : str
+            Environment identity from the checked descriptor.
+        name : str
+            Host whose session is connecting.
+
+        Raises
+        ------
+        _EnvironmentTakenError
+            If another configured host owns this identity, or an older claim's
+            owner cannot be established from the saved cursors.
+        """
+        # A removed supervisor stays an owner until its in-flight mirror writes
+        # have drained, even if the manager already loaded the new host file.
+        configured = set(self._configured_hosts()) | self._sups.keys()
+        claims_dir = self.ctx.layout.store / CLAIMS_DIR
+        with dir_lock(claims_dir):
+            claims: list[tuple[Path, dict[str, Any]]] = []
+            unlabelled: list[tuple[Path, dict[str, Any]]] = []
+            cursor_owners = set(self.ctx.index.cursor_hosts(env_id))
+            owners = set(cursor_owners)
+            for path in sorted(claims_dir.glob("*.json")):
+                try:
+                    claim = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue  # _conflict refuses an unreadable run claim
+                if isinstance(claim, dict) and claim.get("environment_id") == env_id:
+                    host = claim.get("host")
+                    if isinstance(host, str) and host:
+                        owners.add(host)
+                    else:
+                        if len(cursor_owners) != 1:
+                            raise _EnvironmentTakenError(
+                                f"{name}: legacy claims for environment {env_id} lack a verified "
+                                "host owner; saved cursor ownership is absent or ambiguous. "
+                                "Restore verified claim host labels or original cursor metadata "
+                                "before reconnecting."
+                            )
+                        unlabelled.append((path, claim))
+                    claims.append((path, claim))
+            holders = sorted((owners & configured) - {name})
+            if holders:
+                raise _EnvironmentTakenError(
+                    f"{name} reports the environment id {env_id} of host {holders[0]}; "
+                    f"every host must be its own hx home (remove one: hx hosts rm {name})"
+                )
+            if unlabelled:
+                # Finish normalization before adding a second alias cursor. A
+                # crash partway through leaves one unambiguous saved owner;
+                # after this, an interrupted alias transfer has no hostless rows.
+                [original_owner] = cursor_owners
+                for path, claim in unlabelled:
+                    claim["host"] = original_owner
+                    atomic_write_text(path, json.dumps(claim))
+            self.ctx.index.set_cursor(name, env_id, 0)
+            for path, claim in claims:
+                if claim.get("host") != name:
+                    claim["host"] = name
+                    atomic_write_text(path, json.dumps(claim))
 
     def _read_cursor(self, sup: _Supervisor, env_id: str) -> int:
         with sup.lock:

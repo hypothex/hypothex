@@ -722,7 +722,9 @@ def _info(
     )
 
 
-def list_views(repo: Path, config: ProjectConfig, task: str) -> list[ViewInfo]:
+def list_views(
+    repo: Path, config: ProjectConfig, task: str, *, files: bool = True
+) -> list[ViewInfo]:
     """
     List a task's views: the kind's preset as ``overview``, then inline, then files.
 
@@ -739,6 +741,10 @@ def list_views(repo: Path, config: ProjectConfig, task: str) -> list[ViewInfo]:
         Parsed ``hypothex.yaml``.
     task : str
         Task name.
+    files : bool
+        Whether to read ``<repo>/.hypothex/views/``; False when ``repo`` is not
+        on this machine (a project copied from a host), so only the preset and
+        the inline views of ``config`` are listed.
 
     Returns
     -------
@@ -759,23 +765,25 @@ def list_views(repo: Path, config: ProjectConfig, task: str) -> list[ViewInfo]:
             kind=spec.kind,
         )
     ]
-    files: dict[str, ViewInfo] = {}
+    on_disk: dict[str, ViewInfo] = {}
     directory = views_dir(repo, task)
-    if directory.is_dir():
+    if files and directory.is_dir():
         for path in sorted(directory.glob("*.yaml")):
             if _valid_name(path.stem):
                 body = _file_body(path)
-                files[path.stem] = _info(path.stem, body, "file", path)
+                on_disk[path.stem] = _info(path.stem, body, "file", path)
     infos.extend(
         _info(name, body, "inline", repo / CONFIG_FILENAME)
         for name, body in spec.views.items()
-        if _valid_name(name) and name not in files
+        if _valid_name(name) and name not in on_disk
     )
-    infos.extend(files.values())
+    infos.extend(on_disk.values())
     return infos
 
 
-def get_view(repo: Path, config: ProjectConfig, task: str, name: str) -> ViewSpec:
+def get_view(
+    repo: Path, config: ProjectConfig, task: str, name: str, *, files: bool = True
+) -> ViewSpec:
     """
     Load one view of a task and resolve its ``from``.
 
@@ -789,6 +797,9 @@ def get_view(repo: Path, config: ProjectConfig, task: str, name: str) -> ViewSpe
         Task name.
     name : str
         View name; ``overview`` is the preset of the task's kind.
+    files : bool
+        Whether a view file under ``repo`` may answer; False when ``repo`` is
+        not on this machine (``list_views``).
 
     Returns
     -------
@@ -808,7 +819,7 @@ def get_view(repo: Path, config: ProjectConfig, task: str, name: str) -> ViewSpe
         return load_preset(spec.kind)
     if _valid_name(name):
         path = views_dir(repo, task) / f"{name}.yaml"
-        if path.is_file():
+        if files and path.is_file():
             try:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:

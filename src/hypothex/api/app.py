@@ -108,6 +108,9 @@ SCHEDULER_INTERVAL_SECONDS = 5.0
 ENV_KINDS = ("local", "ssh", "slurm")
 COST_WINDOW_DAYS = 7
 MIRROR_WAIT_SECONDS = 10.0
+REEVAL_FORWARD_SECONDS = 600.0
+"""Read timeout of a reeval sent to a host: scoring can outlast the client's 10 s, and a
+timeout counts the host as unreachable (a task reeval then skips its other runs)."""
 PULL_MAX_BYTES = 64 * 1024**3
 PULL_REMOTE_PATH = re.compile(r"^/[A-Za-z0-9_.+@/=-]+$")
 """An absolute host path that ``pull`` may hand to ``scp``: shell-safe characters only."""
@@ -1891,7 +1894,10 @@ def create_app(
                     )
                 return local()
             payload = body.model_dump(mode="json")
-            return manager.client(host).post_json(f"/api/v1/runs/{run_id}/{action}", payload)
+            timeout = REEVAL_FORWARD_SECONDS if action == "reeval" else None
+            return manager.client(host).post_json(
+                f"/api/v1/runs/{run_id}/{action}", payload, timeout=timeout
+            )
 
         return once(body, act)
 
@@ -2106,7 +2112,9 @@ def create_app(
         payload = body.model_dump(mode="json")
         # one command id per run, so a retried task reeval re-scores each run at most once
         payload["command_id"] = f"{body.command_id}:{run_id}" if body.command_id else None
-        return manager.client(host).post_json(f"/api/v1/runs/{run_id}/reeval", payload)
+        return manager.client(host).post_json(
+            f"/api/v1/runs/{run_id}/reeval", payload, timeout=REEVAL_FORWARD_SECONDS
+        )
 
     @app.get("/api/v1/tasks/{project}/{task}/kind")
     def task_kind(project: str, task: str) -> dict[str, Any]:

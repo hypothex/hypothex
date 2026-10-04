@@ -11,6 +11,7 @@ from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.execution import RunRequest
 from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus
+from hypothex.remote.client import EnvClient
 from hypothex.remote.config import SlurmDefaults, load_hosts, save_hosts
 from tests.api.envserver import remote_hub, wait_until
 from tests.factories import PREDS_075, git, make_record, seed_finished_run
@@ -235,6 +236,15 @@ def test_task_reeval_scores_mirrored_runs_on_their_host(
         return real_reeval(*args, **kw)
 
     monkeypatch.setattr(app_module, "reeval", spy)
+    timeouts: list[float | None] = []
+    real_post = EnvClient.post_json
+
+    def post_spy(self: EnvClient, path: str, body: dict, *, timeout: float | None = None) -> Any:
+        if path.endswith("/reeval"):
+            timeouts.append(timeout)
+        return real_post(self, path, body, timeout=timeout)
+
+    monkeypatch.setattr(EnvClient, "post_json", post_spy)
     with remote_hub(tmp_path) as r:
         seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
         seed_finished_run(r.hub, r.hub_repo, "h1", predictions=PREDS_075)
@@ -250,6 +260,8 @@ def test_task_reeval_scores_mirrored_runs_on_their_host(
         # the hub's own runs (h1, and d1 of a demo host never mirrored) in one core call
         # (the host's own server runs in this process too: its call has a run_id)
         assert [sorted(c["run_ids"]) for c in calls if "task" in c] == [["d1", "h1"]]
+        # a host's scoring may outlast the client's 10 s: a timeout would skip the host
+        assert timeouts == [app_module.REEVAL_FORWARD_SECONDS]
         # the host scored its own run; the hub's copy only changes through the mirror
         assert _score_rows(r.env, "e1") == 1
         wait_until(lambda: _score_rows(r.hub, "e1") == 1, timeout=30)

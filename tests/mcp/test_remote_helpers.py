@@ -128,6 +128,12 @@ def test_hub_call_maps_answers_and_errors(home: Path, toy: Context) -> None:
         hub_call("GET", "/api/v1/projects")  # the autouse fixture points at a dead port
 
 
+def test_hub_call_posts_json_even_without_a_body(home: Path, toy: Context) -> None:
+    with serve_app(create_app(home, background_repair=False)) as url:
+        # the hub answers 415 to a POST that is not JSON: no body is sent as {}
+        assert hub_call("POST", "/api/v1/hosts/reload", url=url)[0]["name"] == "local"
+
+
 HUB_TOKEN = "hub-secret"
 
 

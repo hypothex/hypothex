@@ -292,7 +292,9 @@ def reeval(
     metric : str, optional
         ``name`` or ``name@version``; the version must be the current one.
     force : bool
-        Re-score even runs already scored at the current version.
+        Re-score every selected metric, also those a run already has a
+        score for at the current version. Without it a run is scored only
+        with the selected metrics it has no error-free current score for.
 
     Returns
     -------
@@ -351,15 +353,17 @@ def reeval(
     existing = ctx.index.scores_for([t.run_id for t in targets])
     for record in targets:
         have = existing.get(record.run_id, [])
-        done = all(
-            any(s.metric == n and s.version == v and s.error is None for s in have)
+        missing = [
+            n
             for n, v in wanted.items()
-        )
-        if done and not force:
+            if not any(s.metric == n and s.version == v and s.error is None for s in have)
+        ]
+        todo = names if force else missing  # a current score is never appended twice
+        if not todo:  # evaluate_run reads an empty list as "all metrics"
             report.skipped[record.run_id] = "already scored at the current version"
             continue
         try:
-            _, warnings = evaluate_run(ctx, record.run_id, metrics=names, from_checkout=False)
+            _, warnings = evaluate_run(ctx, record.run_id, metrics=todo, from_checkout=False)
         except NoPredictionsError:
             report.skipped[record.run_id] = "no predictions"
             continue

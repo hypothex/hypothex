@@ -105,6 +105,33 @@ def test_version_bump_rescores_and_keeps_old(ctx: Context, toy_repo: Path) -> No
     assert versions == ["v1", "v2"]
 
 
+def _scored(ctx: Context, run_id: str) -> list[tuple[str, str]]:
+    return [(s.metric, s.version) for s in ctx.store.read_scores("toy", run_id)]
+
+
+def test_reeval_scores_only_the_stale_metrics(ctx: Context, toy_repo: Path) -> None:
+    cfg_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["metrics"]["acc2"] = {"version": "v1", "fn": "toymetrics:accuracy"}
+    cfg["tasks"]["toy-acc"]["metrics"] = ["accuracy", "acc2"]
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    cfg["metrics"]["accuracy"]["version"] = "v2"
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    assert reeval(ctx, run_id="r1").evaluated == ["r1"]
+    assert _scored(ctx, "r1") == [("accuracy", "v1"), ("acc2", "v1"), ("accuracy", "v2")]
+    assert reeval(ctx, run_id="r1", force=True).evaluated == ["r1"]
+    assert _scored(ctx, "r1")[3:] == [("accuracy", "v2"), ("acc2", "v1")]
+
+
+def test_reeval_retries_only_the_failing_metric(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", task="toy-broken", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    assert reeval(ctx, run_id="r1").evaluated == ["r1"]
+    assert _scored(ctx, "r1") == [("accuracy", "v1"), ("broken", "v1"), ("broken", "v1")]
+
+
 def test_reeval_rejects_non_current_version(ctx: Context, toy_repo: Path) -> None:
     seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
     with pytest.raises(EvalError, match="only the current version"):

@@ -49,6 +49,11 @@ packages = ["src/hypothex"]
 # the build ("Forced include not found") on a checkout without a UI build.
 artifacts = ["src/hypothex/ui_dist/**"]
 
+[tool.hatch.build.targets.sdist]
+# A plain `uv build` builds the wheel from the sdist, so the sdist must carry the
+# git-ignored UI build too, or the wheel has no UI and `hx serve` answers 404 at `/`.
+artifacts = ["src/hypothex/ui_dist/**"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

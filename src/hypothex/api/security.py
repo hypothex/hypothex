@@ -8,12 +8,20 @@ from this machine. A web page in the user's browser can reach
   browser then sends ``Host: attacker.example``; the ``Host`` allow-list
   (Starlette's ``TrustedHostMiddleware``) rejects it with ``400``.
 * **Cross-origin writes** - the page posts to ``http://127.0.0.1:7777``
-  directly. The browser sends ``Origin: https://attacker.example``;
+  directly. The browser sends ``Origin: https://attacker.example`` (or
+  ``http://localhost:8888`` for another local server, such as Jupyter);
   :class:`OriginGuard` rejects state-changing requests and WebSocket
-  handshakes whose ``Origin`` host is not local with ``403``.
+  handshakes whose ``Origin`` is not the server's own (the ``Host`` the
+  request was sent to) with ``403``.
+
+A ``POST`` must also send a JSON body (``Content-Type: application/json``)
+or the ``X-Hypothex-Client`` header. A browser sends neither across origins
+without asking the server first (a CORS preflight, which this server never
+grants), so a page cannot reach the API with a "simple" form or ``fetch``
+post, even from a browser that leaves out ``Origin``.
 
 Non-browser clients (CLI, MCP clients, ``curl``) send no ``Origin`` header
-and are unaffected.
+and are unaffected by the origin check.
 
 Neither check is authentication: any client that is not a browser can send
 ``Host: localhost``. So ``hx serve`` binds a non-loopback address only with a
@@ -34,6 +42,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 WILDCARD_BINDS = frozenset({"", "0.0.0.0", "::", "[::]", "*"})
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+CLIENT_HEADER = "x-hypothex-client"
+"""A ``POST`` with this header (any value) may send a body that is not JSON."""
+DEFAULT_PORTS = {"http": 80, "https": 443}
 PUBLIC_PREFIX = "/.well-known/hypothex/"
 """The descriptor stays open: ``start.sh`` and the hub read it to find the server."""
 
@@ -142,13 +153,86 @@ def origin_allowed(origin: str, hosts: list[str]) -> bool:
     return hostname in hosts
 
 
+def same_origin(origin: str, host_header: str | None) -> bool:
+    """
+    Tell whether an ``Origin`` names the host and port a request was sent to.
+
+    A page the server itself served (or the Vite dev server, which forwards the
+    browser's ``Host``) has the request's own origin. Any other local server
+    (``localhost:8888``) does not.
+
+    Parameters
+    ----------
+    origin : str
+        Value of the ``Origin`` header, e.g. ``http://127.0.0.1:7777``.
+    host_header : str or None
+        Value of the request's ``Host`` header, e.g. ``127.0.0.1:7777``.
+
+    Returns
+    -------
+    bool
+        ``True`` when host names and ports match (a missing port is the
+        scheme's default).
+
+    Examples
+    --------
+    >>> same_origin("http://127.0.0.1:7777", "127.0.0.1:7777")
+    True
+    >>> same_origin("http://localhost:8888", "127.0.0.1:7777")
+    False
+    >>> same_origin("http://localhost", "localhost:80")
+    True
+    """
+    if not host_header:
+        return False
+    try:
+        page = urlsplit(origin)
+        server = urlsplit(f"//{host_header}")
+        default = DEFAULT_PORTS.get(page.scheme)
+        return (
+            page.hostname is not None
+            and page.hostname == server.hostname
+            and (page.port or default) == (server.port or default)
+        )
+    except ValueError:
+        return False
+
+
+def is_json(content_type: str | None) -> bool:
+    """
+    Tell whether a ``Content-Type`` is JSON (``application/json`` or ``application/*+json``).
+
+    Parameters
+    ----------
+    content_type : str or None
+        The header value; parameters such as ``charset`` are ignored.
+
+    Returns
+    -------
+    bool
+
+    Examples
+    --------
+    >>> is_json("application/json; charset=utf-8"), is_json("text/plain"), is_json(None)
+    (True, False, False)
+    """
+    media = (content_type or "").partition(";")[0].strip().lower()
+    return media == "application/json" or (
+        media.startswith("application/") and media.endswith("+json")
+    )
+
+
 class OriginGuard:
     """
     ASGI middleware that rejects cross-origin writes and WebSocket handshakes.
 
-    Requests without an ``Origin`` header pass. Safe HTTP methods (``GET``,
-    ``HEAD``, ``OPTIONS``) pass, because the browser's same-origin policy
-    already keeps their responses from a foreign page.
+    Requests without an ``Origin`` header pass the origin check; one with an
+    ``Origin`` must name an allowed host and be the request's own origin
+    (:func:`same_origin`), else ``403`` (a WebSocket is closed with ``1008``).
+    Safe HTTP methods (``GET``, ``HEAD``, ``OPTIONS``) pass, because the
+    browser's same-origin policy already keeps their responses from a foreign
+    page. A ``POST`` must carry a JSON body or the ``X-Hypothex-Client``
+    header, else ``415`` (``{error, type: "UnsupportedMediaTypeError"}``).
 
     Parameters
     ----------
@@ -174,12 +258,32 @@ class OriginGuard:
         """
         kind = scope["type"]
         if kind == "websocket" or (kind == "http" and scope["method"] not in SAFE_METHODS):
-            origin = Headers(scope=scope).get("origin")
-            if origin is not None and not origin_allowed(origin, self.hosts):
+            headers = Headers(scope=scope)
+            origin = headers.get("origin")
+            if origin is not None and not (
+                origin_allowed(origin, self.hosts) and same_origin(origin, headers.get("host"))
+            ):
                 if kind == "websocket":
                     await send({"type": "websocket.close", "code": 1008})
                     return
                 response = PlainTextResponse("Cross-origin request rejected", status_code=403)
+                await response(scope, receive, send)
+                return
+            if (
+                kind == "http"
+                and scope["method"] == "POST"
+                and not is_json(headers.get("content-type"))
+                and CLIENT_HEADER not in headers
+            ):
+                # a browser sends a POST without JSON or a custom header without a preflight
+                response = JSONResponse(
+                    {
+                        "error": "a POST needs a JSON body (Content-Type: application/json) "
+                        "or an X-Hypothex-Client header",
+                        "type": "UnsupportedMediaTypeError",
+                    },
+                    status_code=415,
+                )
                 await response(scope, receive, send)
                 return
         await self.app(scope, receive, send)

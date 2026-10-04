@@ -20,8 +20,14 @@ A browser on your machine can still reach ``127.0.0.1``. Two checks block web pa
 - **Host allow-list**: the ``Host`` header must be ``127.0.0.1``, ``localhost``,
   ``[::1]``, or the ``--host`` address (when it is not a wildcard). Anything else gets
   ``400``. This blocks DNS rebinding.
-- **Origin check**: a ``POST`` or WebSocket handshake whose ``Origin`` is not one of
-  those hosts gets ``403``. A web page cannot start runs through your browser.
+- **Origin check**: a ``POST`` or WebSocket handshake whose ``Origin`` is not the
+  server's own (the host and port the request was sent to, one of those hosts) gets
+  ``403``. A page on another local server, such as Jupyter on ``localhost:8888``,
+  is refused too. The Vite dev server forwards the browser's ``Host``, so its pages
+  pass.
+- **JSON posts**: a ``POST`` needs ``Content-Type: application/json`` or an
+  ``X-Hypothex-Client`` header, else ``415``. A browser sends neither to another
+  origin without a CORS preflight, which the server never grants.
 
 These checks are not authentication: any program that is not a browser can send
 ``Host: localhost``.

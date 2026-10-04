@@ -243,12 +243,37 @@ def test_cross_origin_writes_and_ws_are_rejected(client: TestClient) -> None:
     assert client.get("/api/v1/runs", headers=evil).status_code == 200
     with pytest.raises(WebSocketDisconnect), client.websocket_connect(WS_URL, headers=evil):
         pass
-    local = {"Origin": "http://localhost:5173"}
-    note = client.post("/api/v1/runs/nope/notes", headers=local, json={"text": "x"})
+    # the page this server served: its origin is the request's own host and port
+    own = {"Origin": "http://127.0.0.1:7777"}
+    note = client.post("/api/v1/runs/nope/notes", headers=own, json={"text": "x"})
     assert note.status_code == 404
-    with client.websocket_connect(WS_URL, headers=local) as ws:
+    with client.websocket_connect(WS_URL, headers=own) as ws:
         ws.send_json({"type": "subscribe", "after_sequence": 0})
         assert ws.receive_json()["type"] == "ready"
+    # the Vite dev server forwards the browser's Host, so its pages are same-origin too
+    dev = {"Origin": "http://localhost:5173", "Host": "localhost:5173"}
+    assert (
+        client.post("/api/v1/runs/nope/notes", headers=dev, json={"text": "x"}).status_code == 404
+    )
+
+
+def test_other_local_servers_and_simple_posts_are_rejected(client: TestClient) -> None:
+    # a page on another local server (Jupyter, a docs preview) is not this server's origin
+    jupyter = {"Origin": "http://localhost:8888"}
+    note = client.post("/api/v1/runs/nope/notes", headers=jupyter, json={"text": "x"})
+    assert note.status_code == 403
+    with pytest.raises(WebSocketDisconnect), client.websocket_connect(WS_URL, headers=jupyter):
+        pass
+    # a POST a browser sends without a preflight: no JSON type and no custom header
+    for headers in ({"Content-Type": "text/plain"}, {}):
+        simple = client.post("/api/v1/hosts/reload", content=b"{}", headers=headers)
+        assert simple.status_code == 415, headers
+        assert simple.json()["type"] == "UnsupportedMediaTypeError"
+    # a custom header needs a preflight too: the request reaches the route (which wants JSON)
+    custom = {"Content-Type": "text/plain", "X-Hypothex-Client": "script"}
+    reached = client.post("/api/v1/hosts/reload", content=b"{}", headers=custom)
+    assert reached.status_code == 422 and reached.json()["type"] == "RequestValidationError"
+    assert client.post("/api/v1/hosts/reload", json={}).status_code == 200
 
 
 def test_view_list_put_get_delete(client: TestClient, ctx: Context, toy_repo: Path) -> None:

@@ -12,11 +12,13 @@ Conventions
 - Errors are JSON: ``{"error": "...", "type": "..."}``. ``400`` for a bad request,
   ``401`` for a missing or wrong bearer token, ``404`` for an unknown run, project, or
   file, ``409`` for an interrupted command, ``413`` for a file larger than
-  ``max_bytes``, ``422`` for a body that does not match the schema, and ``503`` when a
+  ``max_bytes``, ``415`` for a ``POST`` without JSON, ``422`` for a body that does not match the schema, and ``503`` when a
   host is not connected (or no configured host serves the run).
 - Answers of 2 KiB or more are gzipped when the client sends
   ``Accept-Encoding: gzip`` (browsers, ``httpx`` and ``curl --compressed`` do). Run
   files (``application/octet-stream``) are sent as they are.
+- A ``POST`` needs a JSON body (``Content-Type: application/json``, ``{}`` when
+  there is nothing to send) or an ``X-Hypothex-Client`` header; else ``415``.
 - Every ``POST`` body takes an optional ``command_id``. A repeated ``command_id``
   returns the first result and does the work only once. ``created_by`` names the
   author (``agent:<name>`` for agents; such launches need a ``hypothesis``).

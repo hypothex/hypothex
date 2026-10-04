@@ -46,7 +46,7 @@ def test_disconnect_and_connect(tmp_path: Path) -> None:
         out = r.client.post("/api/v1/hosts/gpu1/disconnect", json={}).json()
         assert (out["name"], out["state"]) == ("gpu1", "disabled")
         assert host_state(r.client, "gpu1") == "disabled"
-        assert r.client.post("/api/v1/hosts/gpu1/connect").json()["name"] == "gpu1"
+        assert r.client.post("/api/v1/hosts/gpu1/connect", json={}).json()["name"] == "gpu1"
         wait_until(lambda: host_state(r.client, "gpu1") == "connected", timeout=30)
         resp = r.client.post("/api/v1/hosts/nope/connect", json={})
         assert resp.status_code == 400 and "hx hosts add nope" in resp.json()["error"]

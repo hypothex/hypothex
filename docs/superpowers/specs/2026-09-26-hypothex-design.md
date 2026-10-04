@@ -123,7 +123,10 @@ Validation: `hx validate` checks schema, that every `fn` imports, and that every
 dataset/metric exists. Built-in template variables are `run_id, run_dir, repo, task, seed,
 config, checkpoint, dataset.name, dataset.version, dataset.path`; any other `{name}` must be
 passed with `--var name=value` (validate warns; launch fails before creating a run if a
-value is missing).
+value is missing). `seed`, `config`, `task`/`dataset.*` and `checkpoint` have a value only
+when the run sets them (`--seed`, `--config`, `--task`, `hx reinfer` or
+`--var checkpoint=...`); the error for a missing variable names the option, and the API
+(`vars`) or MCP (`template_vars`) field, that sets it.
 
 ### 3.2 Run folder
 
@@ -186,7 +189,8 @@ change; `metrics.jsonl` and `scores.jsonl` are append-only.
 
 SQLite (WAL mode) at `~/.hypothex/index.db`. Because the index is disposable, phase 1 stores
 a schema version and rebuilds the index from files when it changes; Alembic arrives with
-Postgres in phase 3.
+Postgres in phase 3. An `index.db` that SQLite cannot read is moved aside
+(`index.db.corrupt-<time>`) and rebuilt the same way.
 Tables: `projects, datasets, metrics, tasks, runs, scores, metric_points, tags, hosts,
 queue, sweeps, notes`. `metric_points` stores downsampled history for fast charts; full
 history stays in `metrics.jsonl`.
@@ -248,7 +252,9 @@ processes it owns. Execution always happens inside an environment, never in a cl
   which submits to SLURM).
 - **Identity is not the route.** Each environment has a stable `environment_id` created once
   and stored in `~/.hypothex/environment.json`. How the hub reaches it (local, SSH tunnel,
-  Tailscale, direct URL) can change without changing identity.
+  Tailscale, direct URL) can change without changing identity. If the file is lost, the id
+  of this host's runs in the store (`host` = hostname) is used again, with a warning; when
+  those runs name two ids, hx stops and asks for the right one.
 - **Descriptor:** `GET /.well-known/hypothex/environment` returns
   `{environment_id, label, os, arch, hostname, hx_version, protocol_version, kind:
   local|ssh|slurm, gpus, capabilities: [...]}`. The hub refuses to talk to an env with an

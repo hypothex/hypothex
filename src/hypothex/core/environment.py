@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import platform
 import socket
 import uuid
+from pathlib import Path
+from typing import Any
 
+import yaml
 from pydantic import BaseModel
 
 from hypothex._version import __version__
-from hypothex.core.fsutil import atomic_write_text
+from hypothex.core.errors import ConfigError, StoreError
+from hypothex.core.fsutil import atomic_write_text, read_yaml
 from hypothex.core.layout import Layout
+
+log = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 1
 CAPABILITIES: tuple[str, ...] = (
@@ -53,7 +60,6 @@ def count_gpus() -> int:
         GPU count; 0 if ``nvidia-smi`` is missing, times out, or fails, or the
         fake GPU file is unreadable.
     """
-    from hypothex.core.errors import ConfigError
     from hypothex.core.gpus import query_gpus  # lazy: gpus imports Context
 
     try:
@@ -62,9 +68,82 @@ def count_gpus() -> int:
         return 0
 
 
+def _read_identity(path: Path) -> dict[str, Any]:
+    """
+    Read ``environment.json``.
+
+    Raises
+    ------
+    StoreError
+        If the file cannot be read, is not JSON, or has no string
+        ``environment_id`` and ``label``. The file is left as it is.
+    """
+    try:
+        identity = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        problem = str(exc)
+    else:
+        if isinstance(identity, dict) and all(
+            isinstance(identity.get(key), str) for key in ("environment_id", "label")
+        ):
+            return identity
+        problem = "expected an object with string environment_id and label"
+    raise StoreError(
+        f"{path} is unreadable ({problem}); fix it, or delete it and Hypothex takes "
+        "the id back from this host's runs"
+    )
+
+
+def _local_environment_ids(layout: Layout, hostname: str) -> set[str]:
+    """The environment ids of the runs in the store that ran on ``hostname``."""
+    found: set[str] = set()
+    for path in layout.store.glob("*/runs/*/run.yaml"):
+        try:
+            data = read_yaml(path)
+        except (OSError, ValueError, yaml.YAMLError):  # an unreadable run is skipped
+            continue
+        if data.get("host") == hostname and isinstance(data.get("environment_id"), str):
+            found.add(data["environment_id"])
+    return found
+
+
+def _recover_identity(layout: Layout) -> dict[str, str]:
+    """
+    Make the identity for a missing ``environment.json``.
+
+    The id of this host's runs in the store (``host`` is this hostname) is
+    used again, so a lost file does not make every old local run foreign. With
+    no such run a new id is made.
+
+    Raises
+    ------
+    ConfigError
+        If this host's runs name more than one environment id.
+    """
+    path = layout.environment_json
+    hostname = socket.gethostname()
+    ids = sorted(_local_environment_ids(layout, hostname))
+    if len(ids) > 1:
+        raise ConfigError(
+            f"{path} is missing and the runs of host {hostname} name {len(ids)} environment "
+            f"ids ({', '.join(ids)}); write the right one to {path} as "
+            f'{{"environment_id": "<id>", "label": "{hostname}"}}'
+        )
+    if ids:
+        log.warning(
+            "%s was missing; took environment id %s back from this host's runs", path, ids[0]
+        )
+    return {"environment_id": ids[0] if ids else uuid.uuid4().hex, "label": hostname}
+
+
 def load_descriptor(layout: Layout) -> EnvironmentDescriptor:
     """
     Load this environment's descriptor, creating a stable id on first use.
+
+    When ``environment.json`` is missing and the store has runs of this host
+    (``host`` is this hostname), their id is used again and a warning is
+    logged; with no such run a new id is made. The id is then written to the
+    file.
 
     Parameters
     ----------
@@ -75,12 +154,26 @@ def load_descriptor(layout: Layout) -> EnvironmentDescriptor:
     -------
     EnvironmentDescriptor
         Descriptor with the persisted id, label, and kind, and live system facts.
+
+    Raises
+    ------
+    ConfigError
+        If the file is missing and this host's runs name more than one id.
+    StoreError
+        If the file is there but unreadable; it is never reset.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> home = Layout(Path(tempfile.mkdtemp()))
+    >>> load_descriptor(home).environment_id == load_descriptor(home).environment_id
+    True
     """
     path = layout.environment_json
     if path.is_file():
-        identity = json.loads(path.read_text(encoding="utf-8"))
+        identity = _read_identity(path)
     else:
-        identity = {"environment_id": uuid.uuid4().hex, "label": socket.gethostname()}
+        identity = _recover_identity(layout)
         atomic_write_text(path, json.dumps(identity, indent=2))
     return EnvironmentDescriptor(
         environment_id=identity["environment_id"],

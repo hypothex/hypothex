@@ -621,3 +621,19 @@ def test_cancel_many_repositions_the_queue_once_and_goes_past_errors(
     moved = [e for e in ctx.events.since(mark, limit=10_000) if e.type == "run.queue_moved"]
     assert sorted(e.run_id for e in moved) == sorted(ids[3:])  # once each, not once per cancel
     assert [ctx.find_record(i).executor.queue_position for i in ids[3:]] == [1, 2]
+
+
+def test_reinfer_takes_vars_for_the_infer_stage(ctx: Context, toy_repo: Path) -> None:
+    # DF-22: an infer stage with a new var could not be re-inferred
+    import yaml
+
+    config = yaml.safe_load((toy_repo / "hypothex.yaml").read_text())
+    config["stages"]["infer"] += " --temperature {temperature}"
+    (toy_repo / "hypothex.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    parent, _ = _sweep_tagged_parent(ctx, toy_repo)
+    with pytest.raises(RunError, match="temperature"):
+        reinfer(ctx, parent, background=False)
+    child = reinfer(ctx, parent, vars={"temperature": "2", "checkpoint": "x"}, background=False)
+    assert child.kind == RunKind.INFER and child.parent == parent
+    assert child.vars == {"temperature": "2", "checkpoint": "/tmp/model.pt"}
+    assert child.command[-2:] == ["--temperature", "2"]

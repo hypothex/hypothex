@@ -678,6 +678,7 @@ def reinfer(
     run_id: str,
     *,
     checkpoint: str | None = None,
+    vars: dict[str, str] | None = None,
     background: bool = True,
     created_by: str = "human",
     stdout_sink: BinaryIO | None = None,
@@ -697,6 +698,10 @@ def reinfer(
         The parent run to re-infer from.
     checkpoint : str, optional
         Checkpoint path; defaults to the parent's most recent checkpoint artifact.
+    vars : dict of str to str, optional
+        Template values for the ``infer`` stage, on top of the parent's
+        (e.g. a ``{temperature}`` the stage gained since); ``checkpoint``
+        always comes from ``checkpoint``.
     background : bool
         Run in a detached supervisor process.
     created_by : str
@@ -712,8 +717,14 @@ def reinfer(
     Raises
     ------
     RunError
-        If there is no ``infer`` stage or no checkpoint, or the parent belongs
-        to another environment.
+        If there is no ``infer`` stage or no checkpoint, a var the stage
+        needs is missing (or one Hypothex sets is given), or the parent
+        belongs to another environment.
+
+    Examples
+    --------
+    >>> reinfer(ctx, run_id, vars={"temperature": "2"}).kind.value  # doctest: +SKIP
+    'infer'
     """
     parent = ctx.find_record(run_id)
     _require_own(ctx, parent, "reinfer")
@@ -734,7 +745,7 @@ def reinfer(
         seed=parent.seed,
         tags=_inherited_tags(parent.tags),
         config_path=config_file if config_file.is_file() else None,
-        vars={**parent.vars, "checkpoint": chosen},
+        vars={**parent.vars, **(vars or {}), "checkpoint": chosen},
         kind=RunKind.INFER,
         parent=parent.run_id,
         created_by=created_by,

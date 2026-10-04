@@ -7,6 +7,7 @@ from hypothex.core.thin import (
     MAX_METRIC_NAMES,
     MAX_POINTS_PER_METRIC,
     HistoryThinner,
+    lttb,
     thin_history,
 )
 
@@ -94,3 +95,24 @@ def test_thinner_keeps_the_first_max_metric_names_and_counts_the_rest() -> None:
 def test_thinner_rejects_a_nonpositive_metric_name_limit() -> None:
     with pytest.raises(ValueError, match="max_names must be at least 1"):
         HistoryThinner(max_names=0)
+
+
+def test_lttb_last_bucket_includes_the_last_interior_peak() -> None:
+    values = [0.0] * 17
+    values[15] = 10.0
+    kept = lttb(list(range(17)), values, 13)
+    assert 15 in kept
+    assert kept == sorted(set(kept))
+    assert len(kept) == 13
+
+
+@pytest.mark.parametrize("offset", [0.0, 1.6e308])
+def test_lttb_preserves_peaks_near_float_limits(offset: float) -> None:
+    values = [0.0] * 100
+    values[31], values[77] = 5.0, -4.0
+    xs = [step * 1e306 for step in range(100)]
+    ys = [offset + value * 1e306 for value in values]
+    kept = lttb(xs, ys, 10)
+    assert {0, 31, 77, 99} <= set(kept)
+    assert kept == sorted(set(kept))
+    assert len(kept) == 10

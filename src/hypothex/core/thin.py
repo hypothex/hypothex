@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
 
 from hypothex.core.records import MetricPoint
@@ -26,7 +27,9 @@ def lttb(xs: Sequence[float], ys: Sequence[float], limit: int) -> list[int]:
     The points between them are cut into ``limit - 2`` buckets in order; from
     each bucket the point that makes the largest triangle with the point kept
     before it and the mean of the next bucket is kept, so peaks such as a loss
-    spike survive the thinning.
+    spike survive the thinning. Integer bucket boundaries include every interior
+    point. Coordinates are rescaled per axis before computing triangle areas,
+    preserving their ordering without overflowing on large finite values.
 
     Parameters
     ----------
@@ -53,18 +56,20 @@ def lttb(xs: Sequence[float], ys: Sequence[float], limit: int) -> list[int]:
     n = len(xs)
     if n <= limit or limit < 3:
         return list(range(n))
+    x_scale = max(abs(x) for x in xs) or 1.0
+    y_scale = max(abs(y) for y in ys) or 1.0
+    xs = [x / x_scale for x in xs]
+    ys = [y / y_scale for y in ys]
     out = [0]
-    size = (n - 2) / (limit - 2)
+    inner = limit - 2
     kept = 0
-    for b in range(limit - 2):
-        start, end = int(b * size) + 1, int((b + 1) * size) + 1
-        nxt_start, nxt_end = end, min(int((b + 2) * size) + 1, n)
+    for b in range(inner):
+        start, end = b * (n - 2) // inner + 1, (b + 1) * (n - 2) // inner + 1
+        nxt_start, nxt_end = end, min((b + 2) * (n - 2) // inner + 1, n)
         if nxt_start >= nxt_end:
             nxt_start, nxt_end = n - 1, n
-        # mean of the next bucket: values near the float limit make sum() inf
-        # (a poor pick for absurd data), where math.fsum would raise
         k = nxt_end - nxt_start
-        mx, my = sum(xs[nxt_start:nxt_end]) / k, sum(ys[nxt_start:nxt_end]) / k
+        mx, my = math.fsum(xs[nxt_start:nxt_end]) / k, math.fsum(ys[nxt_start:nxt_end]) / k
         ax, ay = xs[kept], ys[kept]
         dx, dy = ax - mx, my - ay
         best, kept = -1.0, start

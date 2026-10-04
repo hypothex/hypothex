@@ -409,3 +409,18 @@ def test_get_leaderboard_reuses_the_board_until_the_index_changes(
     seed_finished_run(ctx, toy_repo, "b", predictions=ALL_RIGHT, config_hash="sha256:bbbb")
     evaluate_run(ctx, "b")
     assert len(q.get_leaderboard(ctx, "toy-acc").rows) == 2 and len(builds) == 3
+
+
+def test_show_run_lists_metric_names_without_reading_the_points(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    points = [MetricPoint(name=n, step=s, value=1.0) for n in ("lr", "acc") for s in range(50)]
+    ctx.index.replace_metric_points("r1", points)
+
+    def no_points(*args: Any, **kw: Any) -> Any:
+        raise AssertionError("show_run read every metric point")
+
+    monkeypatch.setattr(ctx.index, "metric_points", no_points)
+    monkeypatch.setattr(ctx.index, "metric_points_for", no_points)
+    assert q.show_run(ctx, "r1").metric_names == ["acc", "lr"]

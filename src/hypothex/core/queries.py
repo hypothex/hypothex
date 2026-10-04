@@ -475,7 +475,7 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
         paths=paths,
         notes=ctx.store.read_notes(record.project, run_id),
         has_diff=(run_dir / "git.diff").is_file(),
-        metric_names=sorted({p.name for p in ctx.index.metric_points(run_id)}),
+        metric_names=ctx.index.metric_names(run_id),
         children=sorted(ctx.index.child_run_ids(run_id)),
     )
 

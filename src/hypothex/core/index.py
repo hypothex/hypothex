@@ -872,6 +872,39 @@ class Index:
                     out.setdefault(run_id, []).append(point)
         return out
 
+    def metric_names(self, run_id: str) -> list[str]:
+        """
+        Return the names of one run's indexed metrics, sorted.
+
+        Reads only the names through the ``(run_id, name, step)`` index, not
+        every point. Points a rebuild skipped are read first, as in
+        ``metric_points``.
+
+        Parameters
+        ----------
+        run_id : str
+            Run id.
+
+        Returns
+        -------
+        list of str
+            Distinct metric names; empty for a run with no points.
+
+        Examples
+        --------
+        >>> idx.metric_names("r1")  # doctest: +SKIP
+        ['loss', 'lr']
+        """
+        self._fill_pending_points([run_id])
+        stmt = (
+            select(MetricPointRow.name)
+            .where(MetricPointRow.run_id == run_id)
+            .distinct()
+            .order_by(MetricPointRow.name)
+        )
+        with Session(self.engine) as session:
+            return list(session.scalars(stmt))
+
     def _fill_pending_points(self, run_ids: list[str]) -> None:
         """Index the metric files of the runs whose points a rebuild skipped."""
         if self.store is None or not run_ids:

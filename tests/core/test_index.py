@@ -140,6 +140,14 @@ def test_metric_points_for_filters_names_with_the_composite_index(tmp_path: Path
     assert "ix_metric_points_run_name_step" in text and "TEMP B-TREE" not in text
 
 
+def test_metric_names_reads_distinct_names_only(tmp_path: Path) -> None:
+    idx = Index(tmp_path / "i.db")
+    points = [MetricPoint(name=n, step=s, value=1.0) for n in ("lr", "acc") for s in range(3)]
+    idx.replace_metric_points("r1", points)
+    assert idx.metric_names("r1") == ["acc", "lr"]
+    assert idx.metric_names("zz") == []
+
+
 def test_downsample_keeps_last_point_and_limit() -> None:
     points = [MetricPoint(name="loss", step=i, value=float(i)) for i in range(2500)]
     points.append(MetricPoint(name="acc", step=0, value=1.0))

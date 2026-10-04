@@ -940,6 +940,36 @@ class Index:
         with Session(self.engine) as session, session.begin():
             session.execute(stmt)
 
+    def reset_cursor(self, host: str, environment_id: str) -> None:
+        """
+        Forget the mirror cursor of one host environment.
+
+        ``set_cursor`` only moves forward, so a host whose event log restarted
+        (its last sequence is below the cursor) needs this to be replayed from
+        the start. Like ``set_cursor`` it does not change ``generation``.
+
+        Parameters
+        ----------
+        host : str
+            Host name from ``environments.yaml``.
+        environment_id : str
+            The host's stable environment id.
+
+        Examples
+        --------
+        >>> import tempfile
+        >>> idx = Index(Path(tempfile.mkdtemp()) / "i.db")
+        >>> idx.set_cursor("gpu1", "env-a", 42)
+        >>> idx.reset_cursor("gpu1", "env-a")
+        >>> idx.get_cursor("gpu1", "env-a")
+        0
+        """
+        stmt = delete(HostCursorRow).where(
+            HostCursorRow.host == host, HostCursorRow.environment_id == environment_id
+        )
+        with Session(self.engine) as session, session.begin():
+            session.execute(stmt)
+
 
 def index_run(index: Index, store: RunStore, record: RunRecord) -> None:
     """

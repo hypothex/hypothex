@@ -78,6 +78,18 @@ def test_cursor_never_moves_back(tmp_path: Path) -> None:
     assert idx.get_cursor("a", "env-1") == 7
 
 
+def test_reset_cursor_drops_only_that_pair_and_lets_it_start_over(tmp_path: Path) -> None:
+    idx = Index(tmp_path / "i.db")
+    idx.set_cursor("a", "env-1", 7)
+    idx.set_cursor("a", "env-2", 9)
+    generation = idx.generation()
+    idx.reset_cursor("a", "env-1")
+    assert (idx.get_cursor("a", "env-1"), idx.get_cursor("a", "env-2")) == (0, 9)
+    idx.set_cursor("a", "env-1", 3)  # a restarted host log counts from 1 again
+    assert idx.get_cursor("a", "env-1") == 3
+    assert idx.generation() == generation  # bookkeeping, like set_cursor
+
+
 def test_clear_keeps_cursors(tmp_path: Path) -> None:
     idx = Index(tmp_path / "i.db")
     idx.set_cursor("a", "env-1", 5)

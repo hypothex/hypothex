@@ -28,8 +28,6 @@ from typing import Any, Literal, TypeVar
 
 import yaml
 from pydantic import BaseModel
-from sqlalchemy import delete
-from sqlalchemy.orm import Session
 
 from hypothex.core.context import Context
 from hypothex.core.cost import price_record
@@ -38,7 +36,7 @@ from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.events import Event
 from hypothex.core.fsutil import atomic_write_text, read_yaml
 from hypothex.core.ids import utcnow
-from hypothex.core.index import HostCursorRow, index_run
+from hypothex.core.index import index_run
 from hypothex.core.layout import HX_DIR, reserved_run_path
 from hypothex.core.records import ACTIVE_STATUSES, Artifact, RunRecord
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
@@ -864,16 +862,6 @@ def _host_sequence(client: EnvClient) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _reset_cursor(ctx: Context, host: str, environment_id: str) -> None:
-    """Forget the mirror cursor of one host environment (``set_cursor`` only moves forward)."""
-    with Session(ctx.index.engine) as session, session.begin():
-        session.execute(
-            delete(HostCursorRow).where(
-                HostCursorRow.host == host, HostCursorRow.environment_id == environment_id
-            )
-        )
-
-
 # supervisors -------------------------------------------------------------------------
 REPLAY_BATCH_EVENTS = 500
 """Most events one ``_apply`` call mirrors; each run in a batch is mirrored once."""
@@ -1367,7 +1355,7 @@ class Hub:
             cursor,
         )
         with sup.lock:
-            _reset_cursor(self.ctx, sup.name, env_id)
+            self.ctx.index.reset_cursor(sup.name, env_id)
         return 0
 
     def _apply(

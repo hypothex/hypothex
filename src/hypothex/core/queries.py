@@ -794,6 +794,9 @@ def tag_run(
     """
     Add and remove tags.
 
+    Sweep tags (``sweep:<owner>:<id>``) hold sweep membership, so only the
+    sweep code sets them.
+
     Parameters
     ----------
     ctx : Context
@@ -808,8 +811,21 @@ def tag_run(
     Returns
     -------
     RunRecord
+
+    Raises
+    ------
+    RunError
+        If a tag to add or remove is a sweep tag.
     """
+    from hypothex.core.sweeps import SWEEP_TAG_PREFIX  # sweeps imports this module
+
     add_set, remove_set = set(add), set(remove)
+    sweep_tags = sorted(t for t in add_set | remove_set if t.startswith(SWEEP_TAG_PREFIX))
+    if sweep_tags:
+        raise RunError(
+            f"cannot add or remove sweep tag {', '.join(sweep_tags)}: "
+            "sweep membership is set by `hx sweep`"
+        )
     return ctx.update_run(
         run_id,
         "run.tagged",

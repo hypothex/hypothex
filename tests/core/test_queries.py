@@ -6,7 +6,7 @@ import yaml
 from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.datasets import FingerprintCache
-from hypothex.core.errors import ConfigError, EvalError
+from hypothex.core.errors import ConfigError, EvalError, RunError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.records import DatasetRef
 from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
@@ -231,3 +231,12 @@ def test_get_task_resolves_local_dataset_paths(ctx: Context, toy_repo: Path) -> 
     assert dataset["resolved_splits"] == {
         k: str(toy_repo.resolve() / v) for k, v in dataset["splits"].items()
     }
+
+
+def test_tag_run_refuses_sweep_tags(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    q.tag_run(ctx, "r1", add=["keep"])
+    for add, remove in ((["sweep:me:s-1"], []), ([], ["sweep:me:s-1"])):
+        with pytest.raises(RunError, match="sweep tag"):
+            q.tag_run(ctx, "r1", add=add, remove=remove)
+    assert ctx.find_record("r1").tags == ["keep"]

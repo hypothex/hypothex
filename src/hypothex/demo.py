@@ -2065,19 +2065,57 @@ import time
 
 time.sleep(float(os.environ.get("HX_DEMO_SLEEP", "900")))
 '''
+# demo stand-ins: `.jobs` holds queued jobs as `id|comment` (they stay PENDING, nothing
+# runs); `scancel` moves a job to `.cancelled`, which `sacct` reports as CANCELLED. The
+# lock waits at most 5 s, so a lock left by a killed script never blocks the demo.
+_FAKE_SLURM_LOCK = (
+    'd="$(dirname "$0")"\n'
+    "i=0\n"
+    'while ! mkdir "$d/.lock" 2>/dev/null && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.05; done\n'
+    "trap 'rmdir \"$d/.lock\"' EXIT\n"
+)
 _FAKE_SLURM = {
     "sbatch": (
         "#!/bin/sh\n"
-        "# demo stand-in: accept the job, print an id, run nothing\n"
-        'f="$(dirname "$0")/.jobid"\n'
-        'n=$(cat "$f" 2>/dev/null || echo 48213000)\n'
+        "# demo stand-in: queue the job (it stays PENDING), print its id, run nothing\n"
+        + _FAKE_SLURM_LOCK
+        + 'comment=""\n'
+        'for a in "$@"; do case "$a" in --comment=*) comment="${a#--comment=}";; esac; done\n'
+        'n=$(cat "$d/.jobid" 2>/dev/null || echo 48213000)\n'
         "n=$((n + 1))\n"
-        'echo "$n" > "$f"\n'
+        'echo "$n" > "$d/.jobid"\n'
+        'echo "$n|$comment" >> "$d/.jobs"\n'
         'echo "$n"\n'
     ),
-    "squeue": "#!/bin/sh\n# demo stand-in: the queue is empty\nexit 0\n",
-    "sacct": "#!/bin/sh\n# demo stand-in: no accounting records\nexit 0\n",
-    "scancel": "#!/bin/sh\nexit 0\n",
+    "squeue": (
+        "#!/bin/sh\n"
+        "# demo stand-in: every queued job is PENDING on no node\n"
+        'd="$(dirname "$0")"\n'
+        '[ -f "$d/.jobs" ] || exit 0\n'
+        "while IFS='|' read -r id comment; do\n"
+        '  case "$*" in *%k*) echo "$id|PENDING||$comment";; *) echo "$id|PENDING|";; esac\n'
+        'done < "$d/.jobs"\n'
+    ),
+    "sacct": (
+        "#!/bin/sh\n"
+        "# demo stand-in: only cancelled jobs have accounting records\n"
+        'd="$(dirname "$0")"\n'
+        '[ -f "$d/.cancelled" ] || exit 0\n'
+        'row="CANCELLED by 0|0:0|None assigned"\n'
+        "while IFS='|' read -r id comment; do\n"
+        '  case "$*" in *Comment*) echo "$id|$row|$comment";; *) echo "$id|$row";; esac\n'
+        'done < "$d/.cancelled"\n'
+    ),
+    "scancel": (
+        "#!/bin/sh\n"
+        "# demo stand-in: a queued job leaves the queue as CANCELLED; others are ignored\n"
+        + _FAKE_SLURM_LOCK
+        + 'for a in "$@"; do case "$a" in -*) ;; *) id="$a";; esac; done\n'
+        'job=$(grep "^$id|" "$d/.jobs" 2>/dev/null) || exit 0\n'
+        'grep -v "^$id|" "$d/.jobs" > "$d/.jobs.new"\n'
+        'mv "$d/.jobs.new" "$d/.jobs"\n'
+        'echo "$job" >> "$d/.cancelled"\n'
+    ),
     "scontrol": (
         "#!/bin/sh\n# demo stand-in: accounting keeps job comments\n"
         'echo "AccountingStoreFlags    = job_comment"\n'

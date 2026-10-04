@@ -15,7 +15,7 @@
 **Mockups:** `docs/mockups/phase3/` (`index.html`, `data.js`, `shot-pair-{ready,done,invalid}-*`, `shot-settings-*`, `shot-settings-collab-*`, `shot-storage-*`, `shot-storage-confirm-*`, `shot-storage-result-*`, `shot-notebook-*`, `shot-notebook-conflict-*`, `shot-task-export-*`, `shot-run-*`, `shot-gate-*`).
 
 **Depends on:**
-- The phase 2 frontend plan (`docs/superpowers/plans/2026-10-03-hypothex-phase2-frontend.md`) merged to `main` in full: the Sweep page (`/s/$project/$id`), the Launch dialog, and Tasks 23–29 (`remote.ts`, the phase 2 `StatusLine.tsx`, `RunActions.tsx` and `Run.tsx`, the `hosts-*` Playwright projects, random e2e ports, `expectIsolatedHub`). Every "as left by phase 2 Task N" anchor below is that plan's final text. State when this plan was reviewed (round 2): `main` at `e27a3a2` holds the phase 2 frontend through `083bb1a` (Sweep page, Launch dialog, `remote.ts`, `remoteStats.ts`; the `StatusLine.tsx`, `Leaderboard.tsx` and `Task.tsx` anchors below already match it), while phase 2 Task 26 (`RunActions.tsx`: the `Cancel` button and the indented `Stop` block; `main` still has phase 1b's `a2887e5` version) and Task 28 (the `hosts-*` Playwright projects, `HOSTS_PORT`, random e2e ports, `expectIsolatedHub` in `ui/e2e/serve-demo.ts`, `ui/e2e/fixtures.ts`, `ui/e2e/paths.ts`) are still on branch `phase-2` and not merged. Do not start until it is. Then record the merge commit (`git log --oneline -1 main`) here and run the pre-flight check below; it must print `anchors ok`:
+- The phase 2 frontend plan (`docs/superpowers/plans/2026-10-03-hypothex-phase2-frontend.md`) merged to `main` in full: the Sweep page (`/s/$project/$id`), the Launch dialog, and Tasks 23–29 (`remote.ts`, the phase 2 `StatusLine.tsx`, `RunActions.tsx` and `Run.tsx`, the `hosts-*` Playwright projects, random e2e ports, `expectIsolatedHub`). Every "as left by phase 2 Task N" anchor below is that plan's final text. Merged: `main` at `8df4760` ("Merge pull request #12 from hypothex/phase-2") holds the whole phase 2 frontend, Tasks 26 and 28 included (`RunActions.tsx` with `Cancel`, the `hosts-*` projects, random ports, `expectIsolatedHub`, and the per-run `RUN_DIR` of `9341413`); every anchor below was re-copied from it at review round 3. Before starting, run the pre-flight check below; it must print `anchors ok`:
 
 ```bash
 uv run python - <<'PY'
@@ -30,7 +30,7 @@ print(f"{len(found)} anchors", "anchors ok" if not bad else f"MISSING in {bad}")
 PY
 ```
 
-Run from the repo root. Expected: `12 anchors anchors ok`. A `MISSING` file means its phase 2 task changed the text after this plan was written: re-read that file on `main` and update the matching "replace" block here before running the task. Known drift at review round 2: phase 2 commit `9341413` moved the e2e homes and demo files under a per-run `RUN_DIR` (`e2e/.runs/run-XXXXXX`, `procs.ts`) after Task 25 was written, and `phase-2` still has uncommitted e2e edits, so Task 25's `serve-demo.ts`/`fixtures.ts` anchors and its whole-file `ui/playwright.config.ts` are re-synced to the merged files at this check: the team home and demo file go under `RUN_DIR` like the others (`join(RUN_DIR, "home-team")`, `join(RUN_DIR, "demo-team.json")`, no `.gitignore` lines), and `playwright.config.ts` keeps everything phase 2 added, plus the `team-*` server and projects.
+Run from the repo root. Expected: `12 anchors anchors ok` (true on `8df4760`). A `MISSING` file means `main` changed that file after `8df4760`: re-read it and update the matching "replace" block here before running the task. Task 25 puts the team home and demo file under the run's own `RUN_DIR` like the other two hubs (`join(RUN_DIR, "home-team")`, `join(RUN_DIR, "demo-team.json")`; `e2e/.gitignore` already ignores `.runs/`), and its whole-file `ui/playwright.config.ts` is `main`'s file plus the `team-*` server and projects.
 - The phase 3 backend plan (`docs/superpowers/plans/2026-10-04-hypothex-phase3-backend.md`) merged: the contract section 3 routes in `/api/openapi.json`, `RunRecord.owner`, `RunDetail.cleaned`, `Leaderboard.baselines`, the section 2 events, the `4401` close code, `hx serve --auth`, and `hx demo --with-team` (contract 11: owner `sv` admin and `alice` launch, two projects with notebook days and one weekly summary, baselines on `toy-classifier/toy-test`, 6 archived runs with artifacts, outbox entries in every state, one connected fake host, the local session token in `<home>/serve/server.json`).
 - The mockups in `docs/mockups/phase3/` approved.
 
@@ -117,7 +117,7 @@ ui/
     notebook/model.test.ts dayView.test.tsx pages/Notebook.test.tsx panels/Markdown.test.tsx      (Tasks 18–20)
     pages/exportMenu.test.tsx panels/Leaderboard.test.tsx pages/Task.test.tsx panelGrid.test.tsx   (Tasks 21–23)
     pages/whereList.test.tsx                                                                       (Task 24)
-  e2e/paths.ts serve-demo.ts fixtures.ts team-fixtures.ts team.spec.ts team-edit.spec.ts .gitignore playwright.config.ts README.md (Task 25)
+  e2e/paths.ts serve-demo.ts fixtures.ts team-fixtures.ts team.spec.ts team-edit.spec.ts playwright.config.ts README.md (Task 25)
 docs/ui.rst  tests/test_docs_ui.py                                                                 (Task 26)
 ```
 
@@ -7009,7 +7009,7 @@ The notebook (mockups `shot-notebook-*`, `shot-notebook-conflict-*`): left the d
 **Interfaces:**
 - Consumes: `parseNotes`, `NoteEntry` (`pages/components/Notes`, the `## <iso> — <author>` format of `fsutil.append_note_file`); `ApiError`; `shortId`, `fmtClock`, `isAgent`, `parseTime`; Task 1 `RunChip`, `NotebookDay`, `NotebookDayInfo`.
 - Produces:
-  - `notebook/model.ts`: `RUN_LINK` (contract regex, global); `type Segment`; `splitRunLinks(text)`; `parseDay(text)` (= `parseNotes`); `isDigest(entry)` (its first line names an ISO week, `2026-W40`); `interface ChipView { id; short; glyph; cls; primary; known; title }` and `chipView(id, chips)`; `authorLabel(author)` (`human:alice` → `@alice`); `stamp(at)` (`09:14`, `""` without a stamp); `runCount(text)`; `interface DiffRow { left; right; kind: "same" | "change" | "del" | "add" }` and `lineDiff(theirs, mine)`; `conflictOf(err)` (the `current` day of a 409 `NotebookConflictError`, else null); `withToday(days, today)` (`today` is the hub's date from `GET .../notebook/today`, contract 1.4, never the browser's).
+  - `notebook/model.ts`: `RUN_LINK` (contract regex, global); `type Segment`; `splitRunLinks(text)`; `parseDay(text)` (`parseNotes`, plus the free text before the first stamped entry as an entry without a stamp: a day saved as free text and then appended to keeps its text); `isDigest(entry)` (its first line names an ISO week, `2026-W40`); `interface ChipView { id; short; glyph; cls; primary; known; title }` and `chipView(id, chips)`; `authorLabel(author)` (`human:alice` → `@alice`); `stamp(at)` (`09:14`, `""` without a stamp); `runCount(text)`; `interface DiffRow { left; right; kind: "same" | "change" | "del" | "add" }` and `lineDiff(theirs, mine)`; `conflictOf(err)` (the `current` day of a 409 `NotebookConflictError`, else null); `withToday(days, today)` (`today` is the hub's date from `GET .../notebook/today`, contract 1.4, never the browser's).
   - `panels/Markdown.tsx`: `type InlineRenderer = (text: string, key: string) => ReactNode[]`; `renderMarkdown(src, inline = renderInline): ReactNode[]` (the panel uses it with the default).
 
 - [ ] **Step 1: Write the failing tests**
@@ -7056,6 +7056,15 @@ describe("text", () => {
     ]);
     expect([authorLabel("agent:claude@alice"), authorLabel("human"), authorLabel("")]).toEqual(["agent:claude@alice", "human", ""]);
     expect(stamp("")).toBe("");
+  });
+
+  test("parseDay keeps free text written before the first stamped entry", () => {
+    const day = "plan for today\n\n## 2026-10-04T09:14:00+00:00 — human:alice\n\nlater\n";
+    expect(parseDay(day).map((e) => [e.at, e.author, e.text])).toEqual([
+      ["", "", "plan for today"],
+      ["2026-10-04T09:14:00+00:00", "human:alice", "later"],
+    ]);
+    expect(parseDay("only free text\n")).toEqual([{ at: "", author: "", text: "only free text" }]);
   });
 });
 
@@ -7280,9 +7289,18 @@ export function runCount(text: string): number {
   return new Set([...text.matchAll(RUN_LINK)].map((m) => m[1])).size;
 }
 
-/** The day's entries (`## <iso> — <author>` headers, as `fsutil.append_note_file` writes them). */
+const ENTRY_HEAD = /^## \S+ — .+$/m;
+
+/**
+ * The day's entries (`## <iso> — <author>` headers, as `fsutil.append_note_file` writes them).
+ * Text before the first header (a day saved as free text, then appended to) comes first, as an
+ * entry without a stamp: `parseNotes` alone drops it.
+ */
 export function parseDay(text: string): NoteEntry[] {
-  return parseNotes(text);
+  const entries = parseNotes(text);
+  const first = text.search(ENTRY_HEAD);
+  const head = first > 0 ? text.slice(0, first).trim() : "";
+  return head ? [{ at: "", author: "", text: head }, ...entries] : entries;
 }
 
 const WEEK = /\b\d{4}-W\d{2}\b/;
@@ -7438,7 +7456,7 @@ export function withToday(days: readonly NotebookDayInfo[], today: string): Note
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `bun test test/notebook/model.test.ts test/panels && bun run typecheck`
-Expected: `model.test.ts` 6 pass, `markdownInline.test.tsx` 1 pass; `Markdown.test.tsx` (phase 1b) passes unchanged; `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `model.test.ts` 7 pass, `markdownInline.test.tsx` 1 pass; `Markdown.test.tsx` (phase 1b) passes unchanged; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 6: Commit (repo root)**
 
@@ -7936,7 +7954,7 @@ export function DayView({ project, day, data, now }: DayViewProps) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/notebook && bun run typecheck`
-Expected: `dayView.test.tsx` 7 pass, `model.test.ts` 6 pass; `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `dayView.test.tsx` 7 pass, `model.test.ts` 7 pass; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Commit (repo root)**
 
@@ -9485,7 +9503,6 @@ Demo requirements this group reads (backend plan, contract 11): users `sv` (admi
 - Modify: `ui/e2e/paths.ts` (append)
 - Modify: `ui/e2e/serve-demo.ts` (doc comment; imports; mode selection; demo and serve arguments)
 - Modify: `ui/e2e/fixtures.ts` (imports; `OWN_HUBS`)
-- Modify: `ui/e2e/.gitignore` (append two lines)
 - Modify: `ui/playwright.config.ts` (whole file)
 - Create: `ui/e2e/team-fixtures.ts`
 - Create: `ui/e2e/team.spec.ts`
@@ -9494,7 +9511,7 @@ Demo requirements this group reads (backend plan, contract 11): users `sv` (admi
 
 **Interfaces:**
 - Consumes: `freePort`-based `runPort`, `readIdentity`, `expectIsolatedHub`, `expectTheme`, the `consoleErrors` fixture (phase 1b/2); the accessible names of Tasks 5–24 (`pair this device:`, `device`, `pair`, `overview →`, `@sva` chip title, regions `a Sessions` … `d Notifications`, tables `Recent sends`, `Plan items`, `Confirm size`, `export ▾`, dialog `Export`, `Preview`, `New entry`, `Day text`, `theirs`, `keep mine`, `li.cleaned`, `.frow.bl`).
-- Produces: `TEAM_PORT` (`HX_E2E_TEAM_PORT`), `TEAM_HOME_DIR` (`HX_E2E_TEAM_HOME` overrides), `TEAM_DEMO_FILE`, `TEAM_DEMO_LABEL = "hx-e2e-team"`, `SERVER_JSON`, `readLocalToken(home)` (paths.ts); `serve-demo.ts --with-team` (`hx demo --with-team --json`, then `hx serve --auth`); `ownerHeaders()`, `ownerGet(request, path)`, `ownerPost(request, path, data)`, `pairBrowser(page, request, user, scope)` → `{ user, scope, sessionId, fragment }`, `allowStatus(errors, ...statuses)` (team-fixtures.ts); Playwright projects `team-light`, `team-dark`, `team-light-edit`, `team-dark-edit`.
+- Produces: `TEAM_PORT` (`HX_E2E_TEAM_PORT`), `TEAM_HOME_DIR` (`<RUN_DIR>/home-team`), `TEAM_DEMO_FILE` (`<RUN_DIR>/demo-team.json`), `TEAM_DEMO_LABEL = "hx-e2e-team"`, `SERVER_JSON`, `readLocalToken(home)` (paths.ts); `serve-demo.ts --with-team` (`hx demo --with-team --json`, then `hx serve --auth`); `ownerHeaders()`, `ownerGet(request, path)`, `ownerPost(request, path, data)`, `pairBrowser(page, request, user, scope)` → `{ user, scope, sessionId, fragment }`, `allowStatus(errors, ...statuses)` (team-fixtures.ts); Playwright projects `team-light`, `team-dark`, `team-light-edit`, `team-dark-edit`.
 
 - [ ] **Step 1: Team paths and the local token reader**
 
@@ -9504,10 +9521,13 @@ Append to `ui/e2e/paths.ts`:
 
 /** Port of the `hx demo --with-team` hub (auth on; projects team-*). Random per run, like the others. */
 export const TEAM_PORT = runPort("HX_E2E_TEAM_PORT");
-/** Hub home for the team demo, wiped on every start. `HX_E2E_TEAM_HOME` moves it. */
-export const TEAM_HOME_DIR = process.env.HX_E2E_TEAM_HOME ?? join(E2E_DIR, ".home-team");
+/**
+ * Hub home of the `hx demo --with-team` server (auth on), wiped on every start. In the run's
+ * own directory like the other two, so `serve-demo.ts` wipes and `procs.ts` kills only there.
+ */
+export const TEAM_HOME_DIR = join(RUN_DIR, "home-team");
 /** `hx demo --with-team --json` output. */
-export const TEAM_DEMO_FILE = join(E2E_DIR, ".demo-team.json");
+export const TEAM_DEMO_FILE = join(RUN_DIR, "demo-team.json");
 export const TEAM_DEMO_LABEL = "hx-e2e-team";
 /** Where `hx serve` with auth on keeps its own local admin session token (contract section 2). */
 export const SERVER_JSON = join("serve", "server.json");
@@ -9529,29 +9549,23 @@ export function readLocalToken(home: string): string | null {
 }
 ```
 
-Append to `ui/e2e/.gitignore`:
-
-```
-.home-team/
-.demo-team.json
-```
-
 - [ ] **Step 2: Let `serve-demo.ts` seed and serve the team demo**
 
 In `ui/e2e/serve-demo.ts` (as left by phase 2 Task 28), replace
 
 ```ts
- * connection. `PORT` and `HOSTS_PORT` are the run's random ports (`e2e/paths.ts`).
+ * connection. `PORT` and `HOSTS_PORT` are the run's random ports.
 ```
 
 with
 
 ```ts
- * connection. `PORT` and `HOSTS_PORT` are the run's random ports (`e2e/paths.ts`).
+ * connection. `PORT` and `HOSTS_PORT` are the run's random ports.
  *
- * With `--with-team`: `hx demo --with-team --json` into `TEAM_HOME_DIR`, label
- * `TEAM_DEMO_LABEL`, output in `e2e/.demo-team.json`, served with `hx serve --auth` on
- * `TEAM_PORT`. Auth is on: the identity route stays public, everything else needs a session.
+ * With `--with-team`: `hx demo --with-team --json` into `TEAM_HOME_DIR` (`home-team` in the
+ * run's directory), label `TEAM_DEMO_LABEL`, output in `TEAM_DEMO_FILE`, served with
+ * `hx serve --auth` on `TEAM_PORT`. Auth is on: the identity route stays public, everything
+ * else needs a session.
 ```
 
 In `ui/e2e/serve-demo.ts` (as left by phase 2 Task 28), replace
@@ -9561,9 +9575,11 @@ In `ui/e2e/serve-demo.ts` (as left by phase 2 Task 28), replace
   IDENTITY_FILE,
   PORT,
   REPO_ROOT,
+  RUN_DIR,
   SHUTDOWN_WAIT_MS,
   UI_DIST_INDEX,
 } from "./paths";
+import { demoOwner, killOwned, listProcs, type Owner } from "./procs";
 
 const withHosts = process.argv.includes("--with-hosts");
 const home = withHosts ? HOSTS_HOME_DIR : HOME_DIR;
@@ -9579,6 +9595,7 @@ with
   IDENTITY_FILE,
   PORT,
   REPO_ROOT,
+  RUN_DIR,
   SHUTDOWN_WAIT_MS,
   TEAM_DEMO_FILE,
   TEAM_DEMO_LABEL,
@@ -9586,6 +9603,7 @@ with
   TEAM_PORT,
   UI_DIST_INDEX,
 } from "./paths";
+import { demoOwner, killOwned, listProcs, type Owner } from "./procs";
 
 const withHosts = process.argv.includes("--with-hosts");
 const withTeam = process.argv.includes("--with-team");
@@ -10050,11 +10068,12 @@ Append to `ui/README.md`:
 ## The team demo (phase 3)
 
 `bunx playwright test` also starts `bun e2e/serve-demo.ts --with-team`: `hx demo --with-team`
-seeds a fresh home in `e2e/.home-team` (auth on, owner `sv`, collaborator `alice`, notebook days,
-paper baselines, cleanable archived runs, outbox entries), and `hx serve --auth` serves it on a
-random port (`HX_E2E_TEAM_PORT`). The specs read that home's local token from
-`e2e/.home-team/serve/server.json` to make pairing links and sign every browser in through
-`/pair`. Projects: `team-light`, `team-dark` (read-only), then `team-light-edit` and
+seeds a fresh home, `home-team` in the run's own directory (`e2e/.runs/run-XXXXXX`; auth on,
+owner `sv`, collaborator `alice`, notebook days, paper baselines, cleanable archived runs,
+outbox entries), and `hx serve --auth` serves it on a random port (`HX_E2E_TEAM_PORT`). The
+specs read that home's local token from its `serve/server.json` to make pairing links and
+sign every browser in through `/pair`. Like the other two, the server removes its home when
+it stops and kills only processes under it. Projects: `team-light`, `team-dark` (read-only), then `team-light-edit` and
 `team-dark-edit` (notebook writes; the cleanup runs once, in `team-light-edit`).
 ```
 
@@ -10094,7 +10113,7 @@ Open the printed link (only after the identity check passed), press `pair`, then
 - [ ] **Step 11: Commit (repo root)**
 
 ```bash
-git add ui/e2e/paths.ts ui/e2e/serve-demo.ts ui/e2e/fixtures.ts ui/e2e/.gitignore ui/playwright.config.ts ui/e2e/team-fixtures.ts ui/e2e/team.spec.ts ui/e2e/team-edit.spec.ts ui/README.md
+git add ui/e2e/paths.ts ui/e2e/serve-demo.ts ui/e2e/fixtures.ts ui/playwright.config.ts ui/e2e/team-fixtures.ts ui/e2e/team.spec.ts ui/e2e/team-edit.spec.ts ui/README.md
 git commit -m "test(ui): playwright against hx demo --with-team: pairing, settings, storage, notebook, export, 401"
 ```
 
@@ -10185,8 +10204,8 @@ Append to the end of `docs/ui.rst`:
 
 ```rst
 
-The suite also starts ``hx demo --with-team`` (auth on) in ``ui/e2e/.home-team`` on a
-random port (``HX_E2E_TEAM_PORT``). Each browser signs in through ``/pair`` with a link the
+The suite also starts ``hx demo --with-team`` (auth on) in ``home-team`` in the same run
+directory, on a random port (``HX_E2E_TEAM_PORT``). Each browser signs in through ``/pair`` with a link the
 specs make from that fresh home's own local token; nothing reads ``~/.hypothex`` or talks to
 a real Slack, SMTP or Tailscale service.
 ```

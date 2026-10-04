@@ -527,7 +527,7 @@ function renderStorage(state) {
     $("#ovl").hidden = false;
     $("#ovl").innerHTML = `<div class="dlg" role="dialog" aria-label="Confirm delete"><div class="dlg-h"><h2>delete ${bytes1(P.total)}</h2></div>
       <div class="dlg-b"><div>${P.paths} paths · ${P.hosts.length} hosts · <span class="mono">${P.plan_id}</span></div>
-      <div class="row"><span>type</span><b class="mono">412.3</b><input class="in w-m" value="412.3" aria-label="Confirm size in GB"><span>GB</span></div></div>
+      <div class="row"><span>type</span><b class="mono">412.3</b><input class="in w-m" value="412.3" aria-label="Confirm size"><span>GB</span></div></div>
       <div class="dlg-f"><span class="small">2 refused · not deleted</span><span class="sp"></span><button class="btn" type="button">cancel</button><button class="btn danger" type="button">delete</button></div></div>`;
   }
 }

@@ -12,7 +12,7 @@
 
 **Contract:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-contract.md`, sections 1–9 and 11. Every name, field, route, and file listed there is exact. This plan adds private helpers, a few public helpers (each task's Interfaces lists them), and optional keyword arguments (`AuthStore(session_days=)`, `leaderboard_table(directions=)`, `send_slack(transport=)`, `send_email(ssl_context=)`, `Notifier(ssl_context=)`, `send_digest(since=)`, `upsert(keep_max=)`, `hub_call(text=)`, `create_app(auth=, public_url=, notifier=)`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the contract was ambiguous or silent and how this plan reads it.
 
-**Prerequisite:** `main` at `e27a3a2` (phases 1a, 1b, 2, plus `p2-backend-minors`, `p2-docs-ci` (`6ace21d`), `p2-property-tests`, and the phase 2 frontend so far). Every "replace X with Y" anchor below was re-checked against `e27a3a2`; the drift from the first base `738c711` that touches this plan: `cli/main.py::_write_private` is hardened (Task 2 moves that version into `core.settings`), `launch --gpus` is `LaunchGpusOpt` (no task edits `launch`'s signature), `mcp/server.py` `launch_sweep` sends `sweep_checkout(...)` in its remote body (Task 32 Step 4.6 adds `created_by`/`owner` next to it), `api/app.py`'s lifespan `finally` nests the joins in a second `try/finally` (Task 30 adds the notifier thread before the loop that *starts* the threads), `remote/hub.py` `_SAFE_NAME`/`_halt` changed (no task edits them), and `docs/index.rst`'s User guide toctree ends `remote, gpus, slurm, sweeps, cost` (Task 46). If `main` has moved on when this plan starts, re-run `git diff e27a3a2 main -- src docs/index.rst` and re-check each anchor the diff touches. No frontend code is touched. **Frontend:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-frontend.md` (contract section 10) starts after this plan is merged and uses `hx demo --with-team` for fixtures.
+**Prerequisite:** `main` at `e27a3a2` (phases 1a, 1b, 2, plus `p2-backend-minors`, `p2-docs-ci` (`6ace21d`), `p2-property-tests`, and the phase 2 frontend so far). Every "replace X with Y" anchor below was re-checked against `e27a3a2`; the drift from the first base `738c711` that touches this plan: `cli/main.py::_write_private` is hardened (Task 2 moves that version into `core.settings`), `launch --gpus` is `LaunchGpusOpt` (no task edits `launch`'s signature), `mcp/server.py` `launch_sweep` sends `sweep_checkout(...)` in its remote body (Task 32 Step 4.6 adds `created_by`/`owner` next to it), `api/app.py`'s lifespan `finally` nests the joins in a second `try/finally` (Task 30 adds the notifier thread before the loop that *starts* the threads), `remote/hub.py` `_SAFE_NAME`/`_halt` changed (no task edits them), and `docs/index.rst`'s User guide toctree ends `remote, gpus, slurm, sweeps, cost` (Task 46). Review round 3: `main` is now `8df4760` (the phase 2 frontend merge, PR #12), and `git diff e27a3a2 8df4760 -- src docs/index.rst` is empty, so every anchor still holds. If `main` has moved on when this plan starts, re-run `git diff 8df4760 main -- src docs/index.rst` and re-check each anchor the diff touches. No frontend code is touched. **Frontend:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-frontend.md` (contract section 10) starts after this plan is merged and uses `hx demo --with-team` for fixtures.
 
 ## Global Constraints
 
@@ -34,9 +34,9 @@ Five failure modes the contract implies that are easy to miss, most likely first
 
 1. **A secret leaks through an error path.** A revoked webhook makes httpx raise an error whose text holds the full URL; an SMTP 535 echoes the user name; a bad `config.yaml` makes pydantic print the literal value. Every one must reach the outbox, the event log, the API, the CLI, and the logs as `error_class` only. Test: Task 47 `test_no_secret_reaches_any_file_event_log_or_output` (code: `redact`, `ChannelError`, `_settings_errors`).
 2. **The hub crashes between the send and the record.** The outbox entry is left `sending`; it must be sent again after 60 s (at least once), never dropped, and never sent a third time once recorded; a crash after the record but before the outbox file is removed must not resend. Tests: Task 17 `test_entry_left_sending_by_a_crash_is_retried_once`, `test_an_entry_recorded_before_a_crash_is_not_sent_again`.
-3. **A collaborator widens their own access.** A `launch` principal asks for an `admin` pairing, posts `created_by: "human:sv"` or `owner: "sv"`, stops the owner's run, or starts a run on the hub's own machine, whose command could read the owner's token in `server.json`. Every case is refused or overwritten. Tests: Task 6 `test_pairing_never_widens_scope`, Task 27 `test_body_identity_is_ignored_with_auth_on`, `test_only_owner_or_admin_may_stop`, `test_launch_scope_never_runs_code_on_the_hub`, Task 32 `test_session_principal_launches_as_agent_at_user`.
-4. **An artifact changes between plan and apply** (a training job rewrote `last.pt`, or someone unarchived the run). It must be skipped, not deleted, and the freed total must say so; so must a path that a run made during the apply reads, or that a run inside the policy's age uses. Tests: Task 22 `test_changed_or_unarchived_items_are_skipped_at_apply`, `test_apply_keeps_the_plan_age_for_runs_made_after_it`, `test_a_run_that_reads_an_input_waits_for_a_cleanup_in_progress`.
-5. **A 200-run sweep finishes.** One notice for the sweep, not 200, counting its failures, and no notice at all while any member is still queued or running, also when the last run ends between two event batches. Tests: Task 16 `test_sweep_gives_one_notice_when_its_last_run_ends`, `test_a_sweep_that_ends_between_scan_batches_still_notifies`.
+3. **A collaborator widens their own access.** A `launch` principal asks for an `admin` pairing, posts `created_by: "human:sv"` or `owner: "sv"`, stops the owner's run, or starts a run on the hub's own machine, whose command could read the owner's token in `server.json`. Every case is refused or overwritten. Tests: Task 6 `test_pairing_never_widens_scope`, Task 27 `test_body_identity_is_ignored_with_auth_on`, `test_only_owner_or_admin_may_stop`, `test_launch_scope_never_runs_code_on_the_hub`, Task 32 `test_session_principal_launches_as_agent_at_user`. A command id replayed by another caller or on another route runs as a new command (`command_key`): Task 23 `test_command_key_binds_the_caller_and_the_route`, Task 27 `test_a_command_id_is_bound_to_its_caller_and_route`.
+4. **An artifact changes between plan and apply** (a training job rewrote `last.pt`, or someone unarchived the run). It must be skipped, not deleted, and the freed total must say so; so must a path that a run made during the apply reads, or that a run inside the policy's age uses. Tests: Task 22 `test_changed_or_unarchived_items_are_skipped_at_apply`, `test_apply_keeps_the_plan_age_for_runs_made_after_it`, `test_a_run_that_reads_an_input_waits_for_a_cleanup_in_progress`. A folder artifact that holds a kept run's file is refused and skipped: Task 21 `test_a_folder_artifact_holding_a_kept_file_is_refused`, Task 22 `test_apply_skips_a_folder_that_holds_a_kept_file`.
+5. **A 200-run sweep finishes.** One notice for the sweep, not 200, counting its failures, and no notice at all while any member is still queued or running, also when the last run ends between two event batches. Tests: Task 16 `test_sweep_gives_one_notice_when_its_last_run_ends`, `test_a_sweep_that_ends_between_scan_batches_still_notifies`. Never `1/1` while launches are still issued, and never folded into another hub's sweep with the same id: Task 16 `test_a_sweep_still_launching_waits_for_its_last_run`, `test_a_foreign_sweep_with_the_same_id_is_not_folded`.
 
 ---
 
@@ -2882,7 +2882,7 @@ Note the `Literal` import is already used by `Client`; `threading` is used for t
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/auth -v`
-Expected: `tests/auth/test_scopes.py` `23 passed`, `tests/auth/test_store.py` `16 passed`.
+Expected: `tests/auth/test_scopes.py` `24 passed`, `tests/auth/test_store.py` `16 passed`.
 
 Run: `uv run python -m doctest src/hypothex/auth/store.py && uv run ruff check src/hypothex/auth tests/auth && uv run ruff format --check src/hypothex/auth tests/auth && uv run ty check src`
 Expected: no doctest output, clean lint, format, and types.
@@ -5422,7 +5422,7 @@ git commit -m "feat(export): render booktabs LaTeX, Markdown, and CSV with golde
 - Consumes: `get_leaderboard`, `resolve_task` (`hypothex.core.queries`), `Context`, `group_label`.
 - Produces (contract 1.6, exact): `compare_table(ctx, run_ids, opts)`, `export_task(ctx, task, project, opts)`, `export_compare(ctx, run_ids, opts)`.
 - Produces (public helper): `task_table(ctx, task, project, opts) -> ExportTable` (the table `export_task` renders; `hx export --json` returns it, Task 43); `COMPARE_MAX_RUNS = 20`; `leaderboard.metric_higher_is_better(config, kind, ref) -> bool` (the leaderboard's one direction rule, now shared: a percentile key of a `system_bench` task, e.g. `latency/p95`, ranks lower-first whatever the metric says; else the metric's `higher_is_better`).
-- Rules: `compare_table` takes 2 to 20 runs (else `RunError`); one row per run (`kind="run"`, `n=1`, label = hypothesis clause or run id, key = run id); scores are each run's newest valid score at its project's current metric versions; columns are `opts.metrics` or the first run's task primary, then every other key, sorted; each column's direction is `metric_higher_is_better` for the run's task kind, so a benchmark's latency 300 is best over 440, as on the leaderboard; a shown metric whose version or direction differs between the compared runs' projects is refused (`RunError` "accuracy is accuracy@v1 in toy and accuracy@v2 in toy2; compare runs at one metric version"), and so is a column that ranks lower-first for some runs and higher-first for others; never merged into one column; no seed or test-set noise; `percent` multiplies by 100; footnotes `metric versions: ...` and `one run per row`. `export_task` passes every column's `metric_higher_is_better` to `leaderboard_table` (a `system_bench` task's other percentile keys rank lower-first too).
+- Rules: `compare_table` takes 2 to 20 runs (else `RunError`); one row per run (`kind="run"`, `n=1`, label = hypothesis clause or run id, key = run id); scores are each run's newest valid score at its project's current metric versions; columns are `opts.metrics` or the first run's task primary, then every other key, sorted; each column's direction is `metric_higher_is_better` for the run's task kind, so a benchmark's latency 300 is best over 440, as on the leaderboard; a shown metric whose version or direction differs between the compared runs' projects is refused (`RunError` "accuracy is accuracy@v1 in toy and accuracy@v2 in toy2; compare runs at one metric version"), and so is a column that ranks lower-first for some runs and higher-first for others; never merged into one column; no seed or test-set noise; `percent` multiplies a column by 100 only when it is a fraction (`headlines.value_format` of its unit and values is `fraction`, the leaderboard's rule; a latency of 440 ms stays 440) and the footnote `values ×100` appears only when a column was scaled; footnotes `metric versions: ...` and `one run per row`. `export_task` passes every column's `metric_higher_is_better` to `leaderboard_table` (a `system_bench` task's other percentile keys rank lower-first too).
 
 - [ ] **Step 1: Create the golden files**
 
@@ -5534,6 +5534,18 @@ def test_compare_ranks_benchmark_percentiles_like_the_leaderboard(bench: Context
     assert [r.cells["lat/p95"].best for r in table.rows] == [False, True]  # 300 beats 440
     text = export_compare(bench, ["base", "fast"], ExportOptions())
     assert text.startswith("| run | n | lat/p95 ↓ |")
+
+
+def test_compare_percent_scales_fractions(scored: Context) -> None:
+    table = compare_table(scored, ["r1", "r2"], ExportOptions(percent=True))
+    assert [r.cells["accuracy/value"].mean for r in table.rows] == [75.0, 25.0]
+    assert "values ×100" in table.footnotes
+
+
+def test_compare_percent_leaves_latency_alone(bench: Context) -> None:
+    table = compare_table(bench, ["base", "fast"], ExportOptions(percent=True))
+    assert [r.cells["lat/p95"].mean for r in table.rows] == [440.0, 300.0]
+    assert "values ×100" not in table.footnotes
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
@@ -5593,6 +5605,7 @@ from collections import defaultdict
 from hypothex.core.config import ProjectConfig
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
+from hypothex.core.headlines import metric_unit, value_format
 from hypothex.core.leaderboard import group_label, metric_higher_is_better
 from hypothex.core.queries import get_leaderboard, resolve_task
 ```
@@ -5638,6 +5651,7 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
     scores = ctx.index.scores_for(run_ids)
     values: dict[str, dict[str, float]] = {}
     versions: dict[str, str] = {}
+    units: dict[str, str] = {}
     # metric -> (version, higher_is_better) -> the first project that scores it so
     seen: dict[str, dict[tuple[str, bool], str]] = defaultdict(dict)
     # column -> effective direction (the leaderboard's rule, per run's task kind) -> a run
@@ -5659,6 +5673,7 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
                 continue
             ref = f"{score.metric}/{score.key}"
             current[ref] = score.value
+            units[ref] = metric_unit(ref, metric.unit)
             versions[score.metric] = metric.version
             seen[score.metric].setdefault((metric.version, metric.higher_is_better), record.project)
             ranks[ref].setdefault(metric_higher_is_better(config, kind, ref), record.run_id)
@@ -5687,8 +5702,16 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
                 f"{column} ranks lower-first for {ranks[column][False]} and higher-first for "
                 f"{ranks[column][True]}; compare runs of one task kind"
             )
-    scale = 100.0 if opts.percent else 1.0
     higher = {c: next(iter(ranks[c])) if ranks.get(c) else True for c in columns}
+    # contract 1.6: x100 only for fractions (no unit, every value in [0, 1]), column by
+    # column, with the leaderboard's own value_format rule; a latency of 440 ms stays 440
+    scaled = {
+        c
+        for c in columns
+        if opts.percent
+        and value_format(units.get(c, ""), (v[c] for v in values.values() if c in v), higher[c])
+        == "fraction"
+    }
     rows: list[ExportRow] = []
     for record in records:
         cells: dict[str, ExportCell] = {}
@@ -5696,7 +5719,8 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
             value = values[record.run_id].get(column)
             cell = _empty_cell()
             if value is not None:
-                cell = cell.model_copy(update={"mean": value * scale, "n": 1})
+                mean = value * 100.0 if column in scaled else value
+                cell = cell.model_copy(update={"mean": mean, "n": 1})
             cells[column] = cell
         label = group_label(record.hypothesis, record.tags, record.run_id).removeprefix("group ")
         rows.append(
@@ -5722,7 +5746,7 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
             {m: v for m, v in versions.items() if m in shown},
             rows,
             opts,
-            scaled=opts.percent,
+            scaled=bool(scaled),
             extra=["one run per row"],
         ),
     )
@@ -5793,7 +5817,7 @@ def export_compare(ctx: Context, run_ids: list[str], opts: ExportOptions) -> str
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_export.py tests/core/test_leaderboard.py -v`
-Expected: `tests/core/test_export.py` `26 passed` (19 from Tasks 10–11, then 7 here); the leaderboard tests still pass (`test_system_bench_percentile_is_lower_is_better` now goes through `metric_higher_is_better`).
+Expected: `tests/core/test_export.py` `28 passed` (19 from Tasks 10–11, then 9 here); the leaderboard tests still pass (`test_system_bench_percentile_is_lower_is_better` now goes through `metric_higher_is_better`).
 
 Run: `uv run ruff check src/hypothex/core tests/core/test_export.py && uv run ruff format --check src/hypothex/core tests/core/test_export.py && uv run ty check src`
 Expected: clean.
@@ -7112,20 +7136,22 @@ git commit -m "feat(notify): slack and smtp delivery with retryable and permanen
 
 **Files:**
 - Create: `src/hypothex/notify/notifier.py`
+- Modify: `src/hypothex/core/sweeps.py` (`sweep_issuing`)
 - Test: `tests/notify/test_notifier.py`
 
 **Interfaces:**
-- Consumes: `EventLog.since/last_sequence`, `Context.find_record`, `summarize_sweep`, `run_notice`, `sweep_notice`, `redact`, `resolve_secret`, `write_private`, `Settings`.
+- Consumes: `EventLog.since/last_sequence`, `Context.find_record`, `summarize_sweep`, `sweep_combos`, `sweep_tag`, `run_notice`, `sweep_notice`, `redact`, `resolve_secret`, `write_private`, `Settings`.
 - Produces (contract 1.7, exact): `NOTIFY_DIR`, `RETRY_DELAYS`, `TERMINAL_EVENTS`, `OutboxEntry`, `Notifier(ctx, settings, *, now=utcnow, transport=None)` with `scan()`.
-- Produces (additive): `Notifier(..., ssl_context=None)`; `Notifier.enqueue(notice, channels) -> list[OutboxEntry]` (idempotent per `(notice.id, channel)`; only configured channels; used by the digest, Task 19); `Notifier.secret_values() -> list[SecretStr]`; `SENDING_RETRY_SECONDS = 60.0`.
+- Produces (additive): `Notifier(..., ssl_context=None)`; `Notifier.enqueue(notice, channels) -> list[OutboxEntry]` (redacts the notice itself, so no caller can skip it; idempotent per `(notice.id, channel)`; only configured channels; used by the digest, Task 19); `hypothex.core.sweeps.sweep_issuing(layout, project, sweep_id) -> bool` (True while `launch_sweep` or `extend_sweep` holds the sweep's lock to issue runs); `Notifier.secret_values() -> list[SecretStr]`; `SENDING_RETRY_SECONDS = 60.0`.
 - Files (contract 2): `<home>/notify/cursor.json` `{last_sequence}`, `outbox/<id>.<channel>.json` (one `OutboxEntry`, rewritten atomically), `sent.jsonl` (final entries) — all 0600.
-- Rules: the first scan sets the cursor to the log's last sequence and enqueues nothing (no backlog flood). A run notifies on `run.finished|failed|killed|lost`, or on `mirror.run_updated` whose `original_type` is one of them. Its project's rule is `notify.projects[project]`, else `notify.default`, else nothing. A run that ended more than `max_age_hours` before now gets nothing. With `fold_sweeps` and a `sweep_id` whose sweep file is on this hub, nothing is sent while the sweep has a queued or running run; when none is left, one sweep notice (the same id for every final event, so one entry) if at least one of its runs ended with a status in `rule.events` (a failure-only rule hears only about sweeps with a failure; `events: []` hears nothing); the sweep's summary is read once per event batch, after the batch is fetched, never kept across batches (a sweep whose last run ends between two batches still notifies). Otherwise the run's status must be in `rule.events`, and a finished run shorter than `min_seconds` is skipped. Notices are redacted (every configured secret value) before they are written.
+- Rules: the first scan sets the cursor to the log's last sequence and enqueues nothing (no backlog flood). A run notifies on `run.finished|failed|killed|lost`, or on `mirror.run_updated` whose `original_type` is one of them. Its project's rule is `notify.projects[project]`, else `notify.default`, else nothing. A run that ended more than `max_age_hours` before now gets nothing. With `fold_sweeps` and a `sweep_id` whose sweep file is on this hub and whose run carries this hub's member tag `sweep:<owner8>:<id>` (a mirrored run of another hub's sweep with the same id is not a member and is notified as a run), nothing is sent while the sweep has a queued or running run, nor while it has fewer members than `len(sweep_combos(spec)) * len(spec.seeds)` and `sweep_issuing` says its launch is still issuing runs (a short first run ending before the last launch must not read `1/1`); when none of that holds, one sweep notice (the same id for every final event, so one entry) if at least one of its runs ended with a status in `rule.events` (a failure-only rule hears only about sweeps with a failure; `events: []` hears nothing); the sweep's summary is read once per event batch, after the batch is fetched, never kept across batches (a sweep whose last run ends between two batches still notifies). Otherwise the run's status must be in `rule.events`, and a finished run shorter than `min_seconds` is skipped. Notices are redacted (every configured secret value) by `enqueue` before they are written, whatever enqueues them (run, sweep, digest).
 
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/notify/test_notifier.py`:
 
 ```python
+import fcntl
 import json
 import stat
 from collections.abc import Iterator
@@ -7144,7 +7170,14 @@ from hypothex.core.settings import (
     Settings,
     SlackSettings,
 )
-from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep, sweep_tag
+from hypothex.core.sweeps import (
+    SweepParam,
+    SweepSpec,
+    save_sweep,
+    sweep_issuing,
+    sweep_path,
+    sweep_tag,
+)
 from hypothex.notify.notifier import Notifier, OutboxEntry
 from tests.factories import make_record
 from tests.fakes.smtp import FakeSmtp
@@ -7466,6 +7499,57 @@ def test_folded_sweeps_follow_the_rule_events(
     assert notifier.scan() == []
 
 
+def small_sweep(ctx: Context, sweep_id: str, n: int) -> str:
+    spec = SweepSpec(
+        id=sweep_id, project="toy", task="toy-acc", host=None,
+        grid=[SweepParam(name="x", values=[str(i) for i in range(n)])], seeds=[1],
+        command_template=["echo", "{x}"], created_by="human:sv", created_at=T0,
+    )  # fmt: skip
+    save_sweep(ctx.layout, spec)
+    return sweep_tag(ctx.descriptor.environment_id, sweep_id)
+
+
+def test_a_foreign_sweep_with_the_same_id_is_not_folded(
+    toy: Context, hook: FakeWebhook, clock: Clock
+) -> None:
+    mine = small_sweep(toy, "s-0005", 2)
+    toy.create_run(
+        make_record(
+            "own0", task="toy-acc", status=RunStatus.QUEUED, tags=[mine],
+            environment_id=toy.descriptor.environment_id, sweep_id="s-0005",
+        )
+    )  # fmt: skip
+    notifier = primed(toy, settings_for(), clock)
+    # another hub's sweep s-0005, mirrored here from a host both hubs use
+    foreign = sweep_tag("ffffffff00000000", "s-0005")
+    end_run(toy, "far0", "failed", tags=[foreign], sweep_id="s-0005")
+    (entry,) = notifier.scan()
+    assert entry.notice.kind == "run" and entry.notice.run_id == "far0"
+
+
+def test_a_sweep_still_launching_waits_for_its_last_run(
+    toy: Context, hook: FakeWebhook, clock: Clock
+) -> None:
+    tag = small_sweep(toy, "s-0006", 2)
+    notifier = primed(toy, settings_for(), clock)
+    lock = sweep_path(toy.layout, "toy", "s-0006").with_suffix(".lock")
+    with lock.open("a") as fh:  # launch_sweep holds the sweep's lock while it issues runs
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        assert sweep_issuing(toy.layout, "toy", "s-0006")
+        end_run(toy, "q0", "finished", tags=[tag], sweep_id="s-0006")  # a short first run
+        assert notifier.scan() == []  # 1 of 2 runs exists: never "1/1"
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    assert not sweep_issuing(toy.layout, "toy", "s-0006")
+    end_run(toy, "q1", "finished", tags=[tag], sweep_id="s-0006")
+    (entry,) = notifier.scan()
+    assert entry.notice.title == "✓ toy sweep s-0006 2/2"
+    # a launch that failed after one run: nothing is issuing, so what exists is final
+    part = small_sweep(toy, "s-0007", 3)
+    end_run(toy, "p0", "failed", tags=[part], sweep_id="s-0007")
+    (partial,) = notifier.scan()
+    assert partial.notice.title == "✗ toy sweep s-0007 1/1"
+
+
 def test_unconfigured_channels_are_not_enqueued(
     toy: Context, hook: FakeWebhook, clock: Clock
 ) -> None:
@@ -7492,9 +7576,50 @@ def test_stored_notices_are_redacted(toy: Context, hook: FakeWebhook, clock: Clo
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/notify/test_notifier.py -v`
-Expected: FAIL at collection with `ModuleNotFoundError: No module named 'hypothex.notify.notifier'`.
+Expected: FAIL at collection with `ImportError: cannot import name 'sweep_issuing' from 'hypothex.core.sweeps'`.
 
 - [ ] **Step 3: Write the implementation**
+
+In `src/hypothex/core/sweeps.py`, insert after `_sweep_lock` (it uses the same lock file; `fcntl` is already imported):
+
+```python
+def sweep_issuing(layout: Layout, project: str, sweep_id: str) -> bool:
+    """
+    Tell whether a launch or extend of a sweep is issuing its runs right now.
+
+    ``launch_sweep`` and ``extend_sweep`` hold the sweep's lock while they
+    issue runs one by one; this tries the lock without waiting. The notifier
+    uses it so a short first run that ends before the last launch does not
+    read as a finished sweep.
+
+    Parameters
+    ----------
+    layout : Layout
+    project : str
+    sweep_id : str
+
+    Returns
+    -------
+    bool
+        True while another open file holds the lock (this process included:
+        ``flock`` locks belong to the open file, not the process).
+
+    Examples
+    --------
+    >>> sweep_issuing(ctx.layout, "toy", "s-0001")  # doctest: +SKIP
+    False
+    """
+    path = sweep_path(layout, project, sweep_id).with_suffix(".lock")
+    if not path.is_file():
+        return False
+    with path.open("a") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    return False
+```
 
 Create `src/hypothex/notify/notifier.py`:
 
@@ -7536,7 +7661,13 @@ from hypothex.core.settings import (
     resolve_secret,
     write_private,
 )
-from hypothex.core.sweeps import SweepSummary, summarize_sweep
+from hypothex.core.sweeps import (
+    SweepSummary,
+    summarize_sweep,
+    sweep_combos,
+    sweep_issuing,
+    sweep_tag,
+)
 from hypothex.notify.channels import ChannelError, redact, send_email, send_slack
 from hypothex.notify.messages import Notice, render_email, render_slack, run_notice, sweep_notice
 
@@ -7718,10 +7849,14 @@ class Notifier:
         """
         Write one pending entry per configured channel, unless one exists already.
 
+        Every configured secret value is redacted here, before anything is
+        written: run, sweep, and digest notices (a note quoting a webhook URL)
+        all pass through this one place.
+
         Parameters
         ----------
         notice : Notice
-            Redacted notice.
+            The notice as built.
         channels : iterable of Channel
             Wanted channels; unconfigured ones are dropped.
 
@@ -7730,6 +7865,7 @@ class Notifier:
         list of OutboxEntry
             The new entries (empty when every one was queued or sent before).
         """
+        notice = self._redact(notice)
         made: list[OutboxEntry] = []
         now = self.now()
         for channel in dict.fromkeys(channels):
@@ -7779,6 +7915,10 @@ class Notifier:
                 return made
 
     def _sweep(self, record: RunRecord) -> SweepSummary | None:
+        # a member carries this hub's tag (sweep_runs matches it exactly): a mirrored run of
+        # another hub's sweep with the same id is not one, and is notified as a run
+        if sweep_tag(self.ctx.descriptor.environment_id, str(record.sweep_id)) not in record.tags:
+            return None
         key = (record.project, str(record.sweep_id))
         if key not in self._sweeps:
             try:
@@ -7807,6 +7947,12 @@ class Notifier:
             counts = summary.counts
             if counts.get("queued", 0) + counts.get("running", 0) > 0:
                 return []
+            spec = summary.spec
+            planned = len(sweep_combos(spec)) * len(spec.seeds)
+            if counts.get("total", 0) < planned and sweep_issuing(
+                self.ctx.layout, spec.project, spec.id
+            ):
+                return []  # launches still going out: the last run's ending notifies
             if not any(counts.get(wanted, 0) for wanted in rule.events):
                 return []  # the sweep's outcome holds no status this rule asks for
             notice = sweep_notice(self.ctx, summary, base_url=base)
@@ -7820,21 +7966,21 @@ class Notifier:
                 if wall < rule.min_seconds:
                     return []
             notice = run_notice(self.ctx, record, base_url=base)
-        return self.enqueue(self._redact(notice), rule.channels)
+        return self.enqueue(notice, rule.channels)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/notify/test_notifier.py -v`
-Expected: `11 passed`.
+Expected: `13 passed`.
 
-Run: `uv run ruff check src/hypothex/notify tests/notify && uv run ruff format --check src/hypothex/notify tests/notify && uv run ty check src`
+Run: `uv run ruff check src/hypothex/notify src/hypothex/core/sweeps.py tests/notify && uv run ruff format --check src/hypothex/notify src/hypothex/core/sweeps.py tests/notify && uv run ty check src`
 Expected: clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hypothex/notify/notifier.py tests/notify/test_notifier.py
+git add src/hypothex/notify/notifier.py src/hypothex/core/sweeps.py tests/notify/test_notifier.py
 git commit -m "feat(notify): notifier scans the event log into a per-channel outbox"
 ```
 
@@ -8203,7 +8349,7 @@ def run_notifier_loop(ctx: Context, stop: threading.Event, *, interval: float = 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/notify -v`
-Expected: `tests/notify/test_notifier.py` `21 passed`; the other notify files still pass.
+Expected: `tests/notify/test_notifier.py` `23 passed`; the other notify files still pass.
 
 Run: `uv run ruff check src/hypothex/notify tests/notify && uv run ruff format --check src/hypothex/notify tests/notify && uv run ty check src`
 Expected: clean.
@@ -8814,7 +8960,7 @@ git commit -m "feat(digest): weekly project digest with counts, cost, best chang
 **Interfaces:**
 - Produces (contract 1.8, exact): `digest_due(settings, last_sent, now) -> str | None`, `send_digest(ctx, settings, project, *, now, channels=None) -> list[str]`, `Notifier.digests() -> list[str]`.
 - Produces (additive): `send_digest(..., since: datetime | None = None)` (the API's `since?`; default `now − 7 days`); `digest_due_at(settings, now) -> datetime` (this week's send time in the digest's zone).
-- Rules: `digest_due` returns this week's key when `now`, in `DigestSettings.timezone` (or the hub's zone), is at or after this ISO week's `weekday` at `hour:00` and `last_sent` is not that key; missed earlier weeks are never returned. `send_digest` builds the digest, enqueues one notice per wanted and configured channel (`channels` or `digest.channels`), appends `render_digest_markdown` to the notebook day of `now` (author `digest`) when `save_to_notebook`, emits `digest.sent` `{project, week, channels}`, and returns the channels it enqueued. `send_digest` skips the notebook append when the day already holds that entry's stamp (`## <now iso> — digest`). `Notifier.digests()` sends each due project (`digest.projects`, `all` = every project) with `now` = `digest_due_at` (the week's send time, so a resend after a crash before the checkpoint has the same notice id and stamp: queued and saved once) and records `{project: week}` in `<home>/notify/digest.json` (0600). `tick()` is now scan, digests, deliver (a digest goes out on the tick it was made).
+- Rules: `digest_due` returns this week's key when `now`, in `DigestSettings.timezone` (or the hub's zone), is at or after this ISO week's `weekday` at `hour:00` and `last_sent` is not that key; missed earlier weeks are never returned. `send_digest` builds the digest, enqueues one notice per wanted and configured channel (`channels` or `digest.channels`), appends `render_digest_markdown` to the notebook day of `now` (author `digest`) when `save_to_notebook`, emits `digest.sent` `{project, week, channels}`, and returns the channels it enqueued. `send_digest` skips the notebook append when the day already holds that entry's stamp (`## <now iso> — digest`). `Notifier.digests()` sends each due project (`digest.projects`, `all` = every project) with `now` = `digest_due_at` (the week's send time, so a resend after a crash before the checkpoint has the same notice id and stamp: queued and saved once) and records `{project: week}` in `<home>/notify/digest.json` (0600). `tick()` is now scan, digests, deliver (a digest goes out on the tick it was made); an error in `digests()` is logged by type name and never stops `deliver()`. A full notebook day (`NotebookTooLargeError`) skips the notebook copy with a warning; the digest is still queued and checkpointed, so no tick retries the week. The digest notice is redacted like every notice (`enqueue` redacts, Task 16): a top note that quotes a secret reaches no outbox, history, or channel.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -8857,7 +9003,7 @@ def test_send_digest_enqueues_and_saves_to_the_notebook(
     assert sent[0].payload == {"project": "toy", "week": "2026-W41", "channels": ["slack"]}
 ```
 
-Append to `tests/notify/test_notifier.py` (and add `date` to the `datetime` import, `from hypothex.core.notebook import read_day`, and `DigestSettings` to the `hypothex.core.settings` import):
+Append to `tests/notify/test_notifier.py` (and add `date` to the `datetime` import, `import hypothex.core.notebook as notebook_module`, `from hypothex.core.notebook import append_entry, read_day`, and `DigestSettings` to the `hypothex.core.settings` import):
 
 ```python
 def test_digest_goes_out_once_per_week(
@@ -8893,6 +9039,37 @@ def test_a_digest_sent_again_after_a_crash_is_queued_and_saved_once(
     assert Notifier(toy, settings, now=clock).digests() == ["toy"]
     assert len(list((toy.layout.home / "notify" / "outbox").glob("*.slack.json"))) == 1
     assert read_day(toy, "toy", date(2026, 10, 4)).text.count("— digest") == 1
+
+
+def test_a_digest_note_never_carries_a_secret(
+    toy: Context, hook: FakeWebhook, clock: Clock
+) -> None:
+    settings = settings_for()
+    settings.digest = DigestSettings(
+        enabled=True, weekday="sun", hour=0, timezone="UTC", channels=["slack"]
+    )
+    when = clock() - timedelta(days=1)
+    append_entry(toy, "toy", f"hook is {hook.url}", "human:sv", day=when.date(), now=when)
+    assert primed(toy, settings, clock).digests() == ["toy"]
+    (path,) = (toy.layout.home / "notify" / "outbox").glob("*.slack.json")
+    assert hook.secret not in path.read_text() and "***" in path.read_text()
+
+
+def test_a_full_notebook_day_never_stops_digests_or_delivery(
+    toy: Context, hook: FakeWebhook, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = settings_for()
+    settings.digest = DigestSettings(
+        enabled=True, weekday="sun", hour=0, timezone="UTC", channels=["slack"]
+    )
+    notifier = primed(toy, settings, clock)
+    monkeypatch.setattr(notebook_module, "NOTEBOOK_MAX_BYTES", 10)  # today's page is full
+    end_run(toy, "r1", "failed")
+    notifier.tick()
+    assert sorted(r["body"]["text"][:1] for r in hook.requests) == ["Σ", "✗"]
+    state = json.loads((toy.layout.home / "notify" / "digest.json").read_text())
+    assert state == {"toy": "2026-W40"}  # sent once: the next tick does not retry the week
+    assert "— digest" not in read_day(toy, "toy", date(2026, 10, 4)).text
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -8905,13 +9082,14 @@ Expected: FAIL at collection with `ImportError: cannot import name 'digest_due' 
 In `src/hypothex/core/digest.py`, add to the imports:
 
 ```python
+import logging
 from zoneinfo import ZoneInfo
 
-from hypothex.core.notebook import append_entry, read_day, today
+from hypothex.core.notebook import NotebookTooLargeError, append_entry, read_day, today
 from hypothex.core.settings import Channel, DigestSettings, Settings
 ```
 
-(merge `append_entry`, `read_day`, `today` into the existing `hypothex.core.notebook` import), and append:
+(merge `NotebookTooLargeError`, `append_entry`, `read_day`, `today` into the existing `hypothex.core.notebook` import), add `log = logging.getLogger(__name__)` below the imports, and append:
 
 ```python
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -9005,7 +9183,9 @@ def send_digest(
     Returns
     -------
     list of str
-        Channels a notice was enqueued on.
+        Channels a notice was enqueued on. A notebook day that is full
+        (``NotebookTooLargeError``) loses the copy, never the digest: it is
+        logged and the digest still counts as sent.
 
     Raises
     ------
@@ -9030,7 +9210,11 @@ def send_digest(
         stamp = f"## {now.isoformat()} — {DIGEST_AUTHOR}\n"  # append_entry's entry header
         if stamp not in read_day(ctx, project, day).text:  # a resend after a crash: saved once
             body = render_digest_markdown(digest)
-            append_entry(ctx, project, body, DIGEST_AUTHOR, day=day, now=now)
+            try:
+                append_entry(ctx, project, body, DIGEST_AUTHOR, day=day, now=now)
+            except NotebookTooLargeError:
+                # the notice is queued already; a retry would hit the same full day each tick
+                log.warning("digest of %s not saved: notebook day %s is full", project, day)
     ctx.events.append(
         "digest.sent",
         project=project,
@@ -9087,16 +9271,25 @@ and replace `tick` with:
 
 ```python
     def tick(self) -> None:
-        """Scan the event log, send due digests, then deliver what is due."""
+        """
+        Scan the event log, send due digests, then deliver what is due.
+
+        A digest that fails (an unreadable project file, a full disk) is logged
+        by its type name and tried again next tick; it never stops delivery of
+        the notices already queued.
+        """
         self.scan()
-        self.digests()
+        try:
+            self.digests()
+        except Exception as exc:  # noqa: BLE001 - delivery must not wait on a digest
+            log.warning("digest failed: %s", type(exc).__name__)
         self.deliver()
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_digest.py tests/notify/test_notifier.py -v`
-Expected: `tests/core/test_digest.py` `13 passed`, `tests/notify/test_notifier.py` `23 passed`.
+Expected: `tests/core/test_digest.py` `13 passed`, `tests/notify/test_notifier.py` `27 passed`.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -9753,7 +9946,7 @@ git commit -m "feat(storage): measure runs, artifacts, and pulled files here and
 **Interfaces:**
 - Produces (contract 1.9, exact): `plan_clean(ctx, hosts, policy, *, created_by, settings, now=None) -> CleanPlan`.
 - Produces (public helpers): `PLAN_ID` (regex `^cp-[0-9a-f]{8}$`); `plans_dir(layout) -> Path` (`<home>/storage/plans`); `eligible(item, cutoff) -> bool`; `input_paths(record) -> list[str]` (paths a run reads but does not own: `vars["checkpoint"]` when a non-empty string); `overlaps(a, b) -> bool` (one path is the other or inside it).
-- Rules: an item is planned when its run is archived, unstarred, ended, `ended_at <= now − older_than_days`, it exists, its kind is in `kinds` (`["*"]` = every kind) or it is a `pulled` item (with `include_pulled`), and it matches `projects`/`hosts`. It is **refused** (listed in `refused` as `{path, run_id, reason}`) when another run that is not eligible records the same path on the same host as an artifact, or reads it (or a path inside or above it) as an input (`input_paths`: `vars["checkpoint"]`, which `control.reinfer` sets and never records as an artifact) — `used by <run_id>`, e.g. an unarchived or queued `reinfer` child; a reader whose host the hub cannot tell blocks the path on every host — or the path is protected: here by `protected_reason`; for a host by what the hub knows (`/`, inside that host's run folder outside `artifacts/`/`pulled/`, a mapped checkout or the host's absolute Hypothex home, or an ancestor of one) — the host checks again at delete. A path two eligible runs share is planned once. The plan expires after `settings.plan_ttl_minutes`, is written 0600, older expired plans are pruned, and `storage.plan_created` `{plan_id, total_bytes, n_items}` is emitted.
+- Rules: an item is planned when its run is archived, unstarred, ended, `ended_at <= now − older_than_days`, it exists, its kind is in `kinds` (`["*"]` = every kind) or it is a `pulled` item (with `include_pulled`), and it matches `projects`/`hosts`. It is **refused** (listed in `refused` as `{path, run_id, reason}`) when another run that is not eligible records, on the same host, the same path as an artifact or a path inside or above it (`overlaps`: an archived run that owns the folder `/scratch/models` must not take a starred run's `/scratch/models/best.pt` with it), or reads it (or a path inside or above it) as an input (`input_paths`: `vars["checkpoint"]`, which `control.reinfer` sets and never records as an artifact) — `used by <run_id>`, e.g. an unarchived or queued `reinfer` child; a reader whose host the hub cannot tell blocks the path on every host — or the path is protected: here by `protected_reason`; for a host by what the hub knows (`/`, inside that host's run folder outside `artifacts/`/`pulled/`, a mapped checkout or the host's absolute Hypothex home, or an ancestor of one) — the host checks again at delete. A path two eligible runs share is planned once. The plan expires after `settings.plan_ttl_minutes`, is written 0600, older expired plans are pruned, and `storage.plan_created` `{plan_id, total_bytes, n_items}` is emitted.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -9792,6 +9985,16 @@ def test_plan_lists_only_eligible_artifacts(lab: Context) -> None:
     assert result.total_bytes == result.items[0].bytes
     assert sorted(i.run_id for i in plan(lab, kinds=["*"]).items) == ["logs", "old"]
     assert sorted(i.run_id for i in plan(lab, older_than_days=7).items) == ["old", "recent"]
+
+
+def test_a_folder_artifact_holding_a_kept_file_is_refused(toy: Context, tmp_path: Path) -> None:
+    models = tmp_path / "scratch" / "models"
+    best = write(models / "best.pt")
+    ended_run(toy, "old", artifacts=[("checkpoint", models)])
+    ended_run(toy, "kept", starred=True, artifacts=[("checkpoint", best)])
+    result = plan(toy)
+    assert result.items == []
+    assert result.refused == [{"path": str(models), "run_id": "old", "reason": "used by kept"}]
 
 
 def test_protected_artifacts_are_refused(toy: Context, toy_repo: Path) -> None:
@@ -10090,10 +10293,12 @@ def plan_clean(
     _prune_plans(ctx.layout, moment)
     report = storage_report(ctx, hosts)
     cutoff = moment - timedelta(days=policy.older_than_days)
-    users: dict[tuple[str, str], list[StorageItem]] = defaultdict(list)
+    # host -> every recorded artifact or pulled file there; a folder artifact that holds
+    # another run's file (or sits inside one) is "used" as much as the same path is
+    users: dict[str, list[StorageItem]] = defaultdict(list)
     for item in report.items:
         if item.kind != "run":
-            users[(item.host, item.path)].append(item)
+            users[item.host].append(item)
     readers = _input_readers(ctx, hosts)
     items: list[CleanItem] = []
     refused: list[dict[str, str]] = []
@@ -10103,7 +10308,9 @@ def plan_clean(
             continue
         key = (item.host, item.path)
         blockers = [
-            o.run_id for o in users[key] if o.run_id != item.run_id and not eligible(o, cutoff)
+            o.run_id
+            for o in users[item.host]
+            if o.run_id != item.run_id and overlaps(o.path, item.path) and not eligible(o, cutoff)
         ]
         blockers += [
             r.run_id
@@ -10159,7 +10366,7 @@ def plan_clean(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_storage.py -v`
-Expected: `12 passed`.
+Expected: `13 passed`.
 
 Run: `uv run ruff check src/hypothex/core/storage.py tests/core/test_storage.py && uv run ruff format --check src/hypothex/core/storage.py tests/core/test_storage.py && uv run ty check src`
 Expected: clean.
@@ -10183,7 +10390,7 @@ git commit -m "feat(storage): dry-run cleanup plans with shared-checkpoint and p
 **Interfaces:**
 - Produces (contract 1.9, exact): `apply_clean(ctx, hosts, plan_id, *, confirm_bytes, actor, now=None) -> CleanResult`, `delete_artifacts(ctx, items, *, actor, plan_id, older_than_days) -> CleanResult`, `cleaned_artifacts(ctx, record) -> list[CleanedArtifact]`, `cleanup_lock(layout)`, `RunDetail.cleaned: list[CleanedArtifact] = []`.
 - Produces (public helper): `CLEANED_FILE = "cleaned.json"`; `record_cleaned(ctx, run_id, items, *, actor, plan_id) -> None` (appends to `<run_dir>/.hx/cleaned.json` under the run lock and emits `run.artifacts_cleaned` `{paths, freed_bytes, plan_id}`; the hub calls it for mirrored runs after a host deleted).
-- Rules: `apply_clean` refuses (`CleanRefusedError`, nothing deleted) an id that is not `cp-<8 hex>` or has no plan file, an expired plan (the file is removed), and a `confirm_bytes` that is not the plan's `total_bytes` (the plan stays). Otherwise it removes the plan file first (one use), deletes local items with `delete_artifacts`, sends each host's items to that host's `POST /api/v1/storage/delete` (command id `<plan_id>:<host>`) and records the deleted ones on the hub's mirrored runs, puts an unreachable host in `errors` while other hosts go on, and emits `storage.cleaned` `{plan_id, freed_bytes, n_deleted, n_skipped}`. `delete_artifacts` re-checks every item where the file lives, with the plan's own `older_than_days` (apply passes `plan.policy.older_than_days` to it and to each host's delete route): run known, archived, unstarred, ended, and ended at or before `now − older_than_days` (`too recent`); the path still a recorded artifact of that run with that kind (or inside its `pulled/`); no other run that is not archived-unstarred-ended-by-that-cutoff records it (`used by <id>`); not protected; still there; bytes and mtime unchanged (`changed since plan`). The `used by` check also covers runs that read the path as an input (`input_paths`, `overlaps`), so a `reinfer` child queued after the plan keeps its checkpoint, and so does an archived child that ended yesterday under a 30-day policy. The whole check-and-delete runs under `cleanup_lock` (`<home>/storage/.lock`, cross-process) with the index read inside it; creating a run that reads an input (`execution._prepare_in`), `star_run`, and `archive_run` take the same lock, so a reader or owner made or changed during an apply waits for it to end instead of slipping between a check and its deletion (deleting files takes seconds; these are rare user actions). A failing check puts `{path, run_id, host, reason}` in `skipped`. A symlink is unlinked, never its target; a folder is removed with `shutil.rmtree` (which unlinks symlinks inside it). `run.yaml` is never written.
+- Rules: `apply_clean` refuses (`CleanRefusedError`, nothing deleted) an id that is not `cp-<8 hex>` or has no plan file, an expired plan (the file is removed), and a `confirm_bytes` that is not the plan's `total_bytes` (the plan stays). Otherwise it removes the plan file first (one use), deletes local items with `delete_artifacts`, sends each host's items to that host's `POST /api/v1/storage/delete` (command id `<plan_id>:<host>`) and records the deleted ones on the hub's mirrored runs, puts an unreachable host in `errors` while other hosts go on, and emits `storage.cleaned` `{plan_id, freed_bytes, n_deleted, n_skipped}`. `delete_artifacts` re-checks every item where the file lives, with the plan's own `older_than_days` (apply passes `plan.policy.older_than_days` to it and to each host's delete route): run known, archived, unstarred, ended, and ended at or before `now − older_than_days` (`too recent`); the path still a recorded artifact of that run with that kind (or inside its `pulled/`); no other run that is not archived-unstarred-ended-by-that-cutoff records it, or a path inside or above it (`overlaps`), as an artifact (`used by <id>`); not protected; still there; bytes and mtime unchanged (`changed since plan`). The `used by` check also covers runs that read the path as an input (`input_paths`, `overlaps`), so a `reinfer` child queued after the plan keeps its checkpoint, and so does an archived child that ended yesterday under a 30-day policy. The whole check-and-delete runs under `cleanup_lock` (`<home>/storage/.lock`, cross-process) with the index read inside it; creating a run that reads an input (`execution._prepare_in`), `star_run`, and `archive_run` take the same lock, so a reader or owner made or changed during an apply waits for it to end instead of slipping between a check and its deletion (deleting files takes seconds; these are rare user actions). A failing check puts `{path, run_id, host, reason}` in `skipped`. A symlink is unlinked, never its target; a folder is removed with `shutil.rmtree` (which unlinks symlinks inside it). `run.yaml` is never written.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -10274,6 +10481,19 @@ def test_a_reinfer_child_queued_after_the_plan_keeps_its_input(
     assert done.skipped == [
         {"path": str(checkpoint), "run_id": "parent", "host": "local", "reason": "used by child"}
     ]
+
+
+def test_apply_skips_a_folder_that_holds_a_kept_file(toy: Context, tmp_path: Path) -> None:
+    models = tmp_path / "scratch" / "models"
+    best = write(models / "best.pt")
+    ended_run(toy, "old", artifacts=[("checkpoint", models)])
+    result = plan(toy)
+    assert [i.path for i in result.items] == [str(models)]
+    # starred after the plan: a run that records a file inside the planned folder
+    ended_run(toy, "kept", starred=True, artifacts=[("checkpoint", best)])
+    done = apply_clean(toy, None, result.plan_id, confirm_bytes=result.total_bytes, actor="x")
+    assert done.deleted == [] and best.exists()
+    assert [s["reason"] for s in done.skipped] == ["used by kept"]
 
 
 def test_symlink_artifact_removes_the_link_only(toy: Context, tmp_path: Path) -> None:
@@ -10501,8 +10721,7 @@ def record_cleaned(
 def _recheck(
     ctx: Context,
     item: CleanItem,
-    users: dict[str, list[RunRecord]],
-    readers: list[tuple[str, RunRecord]],
+    users: list[tuple[str, RunRecord]],
     cutoff: datetime,
 ) -> str | None:
     try:
@@ -10527,16 +10746,13 @@ def _recheck(
         pulled = ctx.run_dir(record) / "pulled"
         if not Path(os.path.abspath(item.path)).is_relative_to(pulled):
             return "not in pulled/"
-    for other in users.get(item.path, []):
-        if other.run_id != record.run_id and not _settled_by(other, cutoff):
-            return f"used by {other.run_id}"
-    for path, reader in readers:
+    for path, other in users:  # owners and readers; a folder holding the path counts too
         if (
-            reader.run_id != record.run_id
+            other.run_id != record.run_id
             and overlaps(path, item.path)
-            and not _settled_by(reader, cutoff)
+            and not _settled_by(other, cutoff)
         ):
-            return f"used by {reader.run_id}"
+            return f"used by {other.run_id}"
     why = protected_reason(ctx, item.path)
     if why is not None:
         return why
@@ -10589,14 +10805,13 @@ def delete_artifacts(
     skipped: list[dict[str, Any]] = []
     with cleanup_lock(ctx.layout):
         # read under the lock: a run created, starred, or unarchived later waits for us
-        users: dict[str, list[RunRecord]] = defaultdict(list)
-        readers: list[tuple[str, RunRecord]] = []
+        # (path, run) for every artifact a run records and every input it reads
+        users: list[tuple[str, RunRecord]] = []
         for record in ctx.index.list_runs(include_archived=True, limit=None):
-            for path in {a.path for a in record.artifacts}:
-                users[path].append(record)
-            readers += [(path, record) for path in input_paths(record)]
+            users += [(path, record) for path in {a.path for a in record.artifacts}]
+            users += [(path, record) for path in input_paths(record)]
         for item in items:
-            why = _recheck(ctx, item, users, readers, cutoff) or _remove(item.path)
+            why = _recheck(ctx, item, users, cutoff) or _remove(item.path)
             if why is not None:
                 skipped.append(
                     {"path": item.path, "run_id": item.run_id, "host": item.host, "reason": why}
@@ -10768,7 +10983,7 @@ with
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_storage.py tests/core/test_queries.py tests/core/test_execution.py -v`
-Expected: `tests/core/test_storage.py` `23 passed`; `tests/core/test_queries.py` and `tests/core/test_execution.py` still pass.
+Expected: `tests/core/test_storage.py` `25 passed`; `tests/core/test_queries.py` and `tests/core/test_execution.py` still pass.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -10797,7 +11012,7 @@ Contract 1.2 (identity), 1.3, 1.10 (guard, scopes, tickets), 3 (auth routes), 7 
 **Interfaces:**
 - Consumes: `AuthStore`, `Principal`, `LOCAL_OWNER`, `HOST_PRINCIPAL`, `covers`, `load_settings`.
 - Produces (contract 1.10, exact): `SESSION_COOKIE = "hx_session"`, `AGENT_HEADER = "X-Hypothex-Agent"`, `SCOPE_KEY = "x-hx-scope"`, `requires(scope)`, `principal_of(request | websocket)`, `AuthGuard(app, store, *, host_token=None)`, `route_scopes(app)`.
-- Produces (public helpers): `PRINCIPAL_KEY = "hx.principal"` (ASGI scope key); `PUBLIC`, `READ`, `LAUNCH`, `ADMIN` (`[requires(...)]` lists for `dependencies=`); `annotate_scopes(app)` (copies each route's scope into `openapi_extra[SCOPE_KEY]`); `auth_on(conn) -> bool`; `identity(conn, *, created_by, owner) -> tuple[str, str | None]`.
+- Produces (public helpers): `PRINCIPAL_KEY = "hx.principal"` (ASGI scope key); `PUBLIC`, `READ`, `LAUNCH`, `ADMIN` (`[requires(...)]` lists for `dependencies=`); `annotate_scopes(app)` (copies each route's scope into `openapi_extra[SCOPE_KEY]`); `auth_on(conn) -> bool`; `identity(conn, *, created_by, owner) -> tuple[str, str | None]`; `command_key(conn, command_id) -> str | None` (the receipt key of a client command id: `<user>|<scope>|<METHOD> <path>|<command_id>`; every route passes it to `EventLog.run_once` instead of the raw id, because `run_once` hands a stored result to anyone who repeats an id without running the route's checks again).
 - Produces (additive, `create_app`): `auth: bool | None = None` (None = `server.auth` of `config.yaml`), `public_url: str | None = None` (None = `server.public_url`); `app.state.auth` (`AuthStore`), `app.state.auth_on`, `app.state.public_url`.
 - Rules: with auth on, `AuthGuard` (outermost) turns a `Bearer` token (or the env server's `host_token`, which becomes `HOST_PRINCIPAL`), the `hx_session` cookie, or for a WebSocket a `?ticket=` into `scope["hx.principal"]`, and adds `agent` from `X-Hypothex-Agent` (a name matching `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`). Paths under `/api/` and `/mcp` without a principal get 401 `{error, type: "AuthError"}` with `WWW-Authenticate: Bearer realm="hypothex"` (a WebSocket is closed with 4401 before accept), except the public ones: `/.well-known/hypothex/...` and `POST /api/v1/auth/pair`. Every other path (the UI, `/pair`) is public. `identity` returns `(created_by, owner)`: the body's values from the host principal (a hub forwarding), `(created_by, None)` with auth off, else `(principal.identity(), principal.user)`. `AuthError` → 401, `ScopeError` → 403, `PairingError` → 400.
 
@@ -10865,6 +11080,7 @@ from hypothex.api.auth import (
     SESSION_COOKIE,
     AuthGuard,
     annotate_scopes,
+    command_key,
     identity,
     principal_of,
     requires,
@@ -10964,6 +11180,28 @@ def test_identity_rules() -> None:
     off = request_as(None, on=False)
     assert identity(off, created_by="agent:claude", owner="sv") == ("agent:claude", None)
     assert identity(request_as(HOST_PRINCIPAL, on=False), created_by="h", owner="o") == ("h", "o")
+
+
+def test_command_key_binds_the_caller_and_the_route() -> None:
+    def key(principal: Principal, path: str, command_id: str | None = "c1") -> str | None:
+        app = FastAPI()
+        app.state.auth_on = True
+        scope: dict = {"type": "http", "app": app, "headers": [], "method": "POST", "path": path}
+        scope[PRINCIPAL_KEY] = principal
+        return command_key(Request(scope), command_id)
+
+    mine = key(ALICE, "/api/v1/runs/r1/tags")
+    assert mine == "alice|launch|POST /api/v1/runs/r1/tags|c1"
+    assert key(ALICE, "/api/v1/runs/r1/tags") == mine  # a retry finds its receipt
+    admin = ALICE.model_copy(update={"scope": "admin"})
+    others = {
+        key(ALICE, "/api/v1/runs/r2/tags"),  # another target
+        key(ALICE, "/api/v1/auth/logout"),  # another operation
+        key(admin, "/api/v1/runs/r1/tags"),  # the same user's admin session
+        key(HOST_PRINCIPAL, "/api/v1/runs/r1/tags"),  # a hub forwarding
+    }
+    assert len(others) == 4 and mine not in others
+    assert key(ALICE, "/api/v1/runs/r1/tags", None) is None
 
 
 def test_route_scopes_and_openapi() -> None:
@@ -11220,6 +11458,45 @@ def identity(conn: HTTPConnection, *, created_by: str, owner: str | None) -> tup
     return principal.identity(), principal.user
 
 
+def command_key(conn: HTTPConnection, command_id: str | None) -> str | None:
+    """
+    Bind a client's command id to the caller and the route it was sent to.
+
+    ``EventLog.run_once`` hands a stored result to anyone who repeats a
+    command id, without running the route's scope or ownership checks again.
+    A raw id would let a reader send an admin's id to a read route and get the
+    admin's result back. Every route therefore stores its receipt under this
+    key: the caller's user and scope, the method, and the path (operation and
+    target). Only the same caller retrying the same call finds it. The body is
+    left out on purpose: a retry with an edited body still gets the first
+    result (phase 1 rule, ``test_put_view_is_idempotent_by_command_id``).
+
+    Parameters
+    ----------
+    conn : HTTPConnection
+        The request.
+    command_id : str or None
+        The body's ``command_id``.
+
+    Returns
+    -------
+    str or None
+        ``<user>|<scope>|<METHOD> <path>|<command_id>``; None when
+        ``command_id`` is None (no idempotency).
+
+    Examples
+    --------
+    >>> command_key(request, "c1")  # doctest: +SKIP
+    'alice|launch|POST /api/v1/runs/r1/tags|c1'
+    """
+    if command_id is None:
+        return None
+    principal = principal_of(conn)
+    method = str(conn.scope.get("method", ""))
+    path = str(conn.scope.get("path", ""))
+    return f"{principal.user}|{principal.scope}|{method} {path}|{command_id}"
+
+
 def _cookie(header: str | None, name: str) -> str | None:
     if not header:
         return None
@@ -11464,7 +11741,7 @@ with
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/api/test_auth_guard.py tests/api/test_security.py tests/api/test_app.py -v`
-Expected: `tests/api/test_auth_guard.py` `8 passed`; the phase 1–2 API tests still pass.
+Expected: `tests/api/test_auth_guard.py` `9 passed`; the phase 1–2 API tests still pass.
 
 Run: `uv run python -m doctest src/hypothex/api/auth.py && uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -11905,7 +12182,7 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 
-from hypothex.api.auth import ADMIN, PUBLIC, READ, SESSION_COOKIE, principal_of
+from hypothex.api.auth import ADMIN, PUBLIC, READ, SESSION_COOKIE, command_key, principal_of
 from hypothex.auth.pairing import pairing_url, qr_text
 from hypothex.auth.scopes import Scope, scopes_of
 from hypothex.auth.store import (
@@ -12170,7 +12447,8 @@ def register_auth_routes(app: FastAPI, ctx: Context, store: AuthStore) -> None:
             session_event("auth.session_revoked", session)
             return to_jsonable(session)
 
-        return ctx.events.run_once((body or CommandBody()).command_id, act)
+        key = command_key(request, (body or CommandBody()).command_id)
+        return ctx.events.run_once(key, act)
 
     @app.get("/api/v1/auth/users", dependencies=ADMIN)
     def users() -> list[dict[str, Any]]:
@@ -12187,7 +12465,8 @@ def register_auth_routes(app: FastAPI, ctx: Context, store: AuthStore) -> None:
                 session_event("auth.session_revoked", session)
             return to_jsonable(user)
 
-        return ctx.events.run_once((body or CommandBody()).command_id, act)
+        key = command_key(request, (body or CommandBody()).command_id)
+        return ctx.events.run_once(key, act)
 ```
 
 In `src/hypothex/api/app.py`, add `from hypothex.api.routes_auth import register_auth_routes` to the imports and replace
@@ -12440,16 +12719,16 @@ git commit -m "feat(api): websocket tickets, 4401 on revoked sessions, admin-onl
 ### Task 27: Identity from the principal, run ownership, and `owner=me`
 
 **Files:**
-- Modify: `src/hypothex/api/app.py` (`ActionBody.owner`, `run_request`, `stamp`, `launcher_for`, routes `POST /api/v1/runs`, `POST /api/v1/hosts/{host}/runs`, rerun, reinfer, stop, archive, notes, sweeps POST and cancel, `GET /api/v1/runs`)
+- Modify: `src/hypothex/api/app.py` (`ActionBody.owner`, `run_request`, `stamp`, `launcher_for`, `once` and `forward` keyed by `command_key`, routes `POST /api/v1/runs`, `POST /api/v1/hosts/{host}/runs`, rerun, reinfer, reeval, stop, tags, star, archive, notes, pull, task reeval, view PUT, sweeps POST, extend and cancel, `GET /api/v1/runs`)
 - Modify: `src/hypothex/core/overview.py` (`owner` on `TimelineItem`, `IdeaRow`, `FailureRow`)
 - Test: `tests/api/test_ownership_api.py`
 
 **Interfaces:**
-- Consumes: `identity`, `principal_of` (Task 23), `require_act` (Task 5), `RunRequest.owner`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)` (Task 4).
-- Produces (contract 1.2, exact): `ActionBody.owner: str | None = None`; `GET /api/v1/runs?owner=` (`me` = the caller).
+- Consumes: `identity`, `principal_of`, `command_key` (Task 23), `require_act` (Task 5), `RunRequest.owner`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)` (Task 4).
+- Produces (contract 1.2, exact): `ActionBody.owner: str | None = None`; `GET /api/v1/runs?owner=` (`me` = the caller; with auth off `me` filters nothing, since runs then have no owner).
 - Produces (public helper): `stamp(conn, body) -> body` (a copy with `created_by`/`owner` from `identity`).
 - Produces (additive, contract 1.12 "the Overview shows `owner`" on running and recent rows): `TimelineItem.owner`, `IdeaRow.owner` (the group's first run's, like its `created_by`), `FailureRow.owner`, each `str | None = None`.
-- Rules: a run that would execute on this machine (`POST /api/v1/runs`, a host launch to `local`, a rerun or reinfer of a local run, a sweep or sweep extension placed here) needs `require_local_exec` (admin; contract 1.3, 7): its command runs as the server's Unix user and could read the owner's token in `server.json`, so a `launch` collaborator launches on hosts only, and gets 403 `runs on this machine need admin; launch on a host` here; launches, host launches, reruns, reinfers, and sweeps get `created_by`/`owner` from `identity` (a collaborator's body values are ignored; a hub's are kept); a note's `author` becomes the caller's identity; stop and archive need `require_act(..., record.owner, ...)` and sweep cancel `require_act(..., spec.owner, "cancel_queued")`; forwarded bodies carry `created_by` and `owner` to the host.
+- Rules: a run that would execute on this machine (`POST /api/v1/runs`, a host launch to `local`, a rerun or reinfer of a local run, a sweep or sweep extension placed here) needs `require_local_exec` (admin; contract 1.3, 7): its command runs as the server's Unix user and could read the owner's token in `server.json`, so a `launch` collaborator launches on hosts only, and gets 403 `runs on this machine need admin; launch on a host` here; launches, host launches, reruns, reinfers, and sweeps get `created_by`/`owner` from `identity` (a collaborator's body values are ignored; a hub's are kept); a note's `author` becomes the caller's identity; stop and archive need `require_act(..., record.owner, ...)` and sweep cancel `require_act(..., spec.owner, "cancel_queued")`; forwarded bodies carry `created_by` and `owner` to the host. Every receipt is stored under `command_key(request, command_id)` (Task 23): `once(conn, body, fn)` and `forward(conn, ...)` take the request; a forwarded body, a host launch, a sweep's own claim, and a cancel's per-run stops carry the hub's key instead of the raw id, so the host's receipts are per hub caller too. The same caller retrying gets the stored result even with an edited body (phase 1); another caller, or another route, with the same id runs its own command.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -12613,6 +12892,16 @@ def test_owner_me_filters_runs(hub: tuple[FastAPI, TestClient, Context]) -> None
     assert [r["run_id"] for r in theirs] == ["s1"]
 
 
+def test_owner_me_with_auth_off_lists_every_run(home: Path) -> None:
+    app = create_app(home, background_repair=False, hub=False, ui_dir=home / "no-ui")
+    ctx: Context = app.state.ctx
+    queued(ctx, "a1", "alice")
+    queued(ctx, "n1", None)  # what an auth-off launch records
+    with TestClient(app, base_url=BASE) as client:
+        mine = client.get("/api/v1/runs?owner=me").json()
+    assert {r["run_id"] for r in mine} == {"a1", "n1"}
+
+
 def test_overview_rows_name_their_owner(hub: tuple[FastAPI, TestClient, Context]) -> None:
     app, client, ctx = hub
     reader = token_for(app.state.auth, "bo", "read")
@@ -12639,6 +12928,34 @@ def test_note_author_is_the_caller(hub: tuple[FastAPI, TestClient, Context]) -> 
         "ok": True
     }
     assert "— human:alice" in ctx.store.read_notes("toy", "svs")
+
+
+def test_a_command_id_is_bound_to_its_caller_and_route(
+    hub: tuple[FastAPI, TestClient, Context],
+) -> None:
+    app, client, ctx = hub
+    admin = bearer(token_for(app.state.auth, "sv", "admin"))
+    alice = bearer(token_for(app.state.auth, "alice", "launch"))
+    reader = token_for(app.state.auth, "bo", "read")
+    queued(ctx, "r1", "sv")
+    tags = "/api/v1/runs/r1/tags"
+    first = client.post(tags, json={"add": ["a"], "command_id": "c1"}, headers=admin).json()
+    assert first["tags"] == ["a"]
+    # the same caller retrying gets the stored result, even with an edited body (phase 1)
+    again = client.post(tags, json={"add": ["z"], "command_id": "c1"}, headers=admin).json()
+    assert again["tags"] == ["a"]
+    # another caller with the same id runs their own command
+    hers = client.post(tags, json={"add": ["b"], "command_id": "c1"}, headers=alice).json()
+    assert hers["tags"] == ["a", "b"]
+    # a reader replaying the id on a read route gets that route's answer, not the admin's
+    session = app.state.auth.authenticate(reader)
+    assert session is not None
+    out = client.post(
+        f"/api/v1/auth/sessions/{session.session_id}/revoke",
+        json={"command_id": "c1"},
+        headers=bearer(reader),
+    ).json()
+    assert "tags" not in out and out["user"] == "bo"
 
 
 def test_rerun_belongs_to_the_caller(
@@ -12669,7 +12986,7 @@ Expected: FAIL: `test_body_identity_is_ignored_with_auth_on` with `('human:sv', 
 
 In `src/hypothex/api/app.py`:
 
-1. Add `from typing import TypeVar` (merge into the `typing` import), `from starlette.requests import HTTPConnection`, `identity` to the `hypothex.api.auth` import, and `from hypothex.auth.ownership import require_act, require_local_exec`.
+1. Add `from typing import TypeVar` (merge into the `typing` import), `from starlette.requests import HTTPConnection`, `auth_on`, `command_key` and `identity` to the `hypothex.api.auth` import, and `from hypothex.auth.ownership import require_act, require_local_exec`.
 
 2. Replace `ActionBody` with:
 
@@ -12717,7 +13034,103 @@ def stamp(conn: HTTPConnection, body: _Body) -> _Body:
 
 5. In `launcher_for`, in the `HostLaunchBody(...)` call, add `owner=req.owner,` after `created_by=req.created_by,`.
 
-6. Replace these route functions (decorators from Task 24 unchanged):
+6. Key every receipt by `command_key` (Task 23). Replace `once` and `forward` with:
+
+```python
+    def once(conn: HTTPConnection, body: ActionBody, fn: Callable[[], Any]) -> dict[str, Any]:
+        # keyed by caller and route: another caller's id, or this id on another route, is new
+        return ctx.events.run_once(command_key(conn, body.command_id), lambda: to_jsonable(fn()))
+
+    def forward(
+        conn: HTTPConnection,
+        run_id: str,
+        action: str,
+        body: ActionBody,
+        local: Callable[[], Any],
+        *,
+        remote_only: bool = False,
+    ) -> dict[str, Any]:
+        # A run mirrored from a host is acted on by that host; same body, and the hub's
+        # receipt key as its command_id, so the host's receipt is per hub caller too.
+        # The run is looked up inside the receipt, so a replayed command_id gets its
+        # receipt first (as in phase 1); an error releases the claim, so a retry runs again.
+        key = command_key(conn, body.command_id)
+
+        def act() -> Any:
+            record = ctx.find_record(run_id)
+            host = manager.host_for_environment(record.environment_id)
+            if host is None:
+                foreign = record.environment_id != ctx.descriptor.environment_id
+                if remote_only and foreign:
+                    # its pids and paths belong to another machine: never act on them here
+                    raise HostUnavailableError(
+                        f"run {run_id} belongs to environment {record.environment_id}, which "
+                        f"no configured host serves; {action} must run on that host "
+                        "(`hx hosts add` / `hx hosts connect`)"
+                    )
+                return local()
+            payload = {**body.model_dump(mode="json"), "command_id": key}
+            return manager.client(host).post_json(f"/api/v1/runs/{run_id}/{action}", payload)
+
+        return ctx.events.run_once(key, lambda: to_jsonable(act()))
+```
+
+and replace these routes, which item 7 does not replace, so that they pass the request:
+
+```python
+    @app.post("/api/v1/tasks/{project}/{task}/reeval", dependencies=LAUNCH)
+    def task_reeval(project: str, task: str, body: ReevalBody, request: Request) -> dict[str, Any]:
+        return once(
+            request,
+            body,
+            lambda: reeval(ctx, project=project, task=task, metric=body.metric, force=body.force),
+        )
+```
+
+```python
+    @app.put("/api/v1/tasks/{project}/{task}/views/{name}", dependencies=LAUNCH)
+    def view_put(
+        project: str, task: str, name: str, body: ViewPutBody, request: Request
+    ) -> dict[str, Any]:
+        return once(request, body, lambda: put_view(ctx, task, name, body.text, project))
+```
+
+```python
+    @app.post("/api/v1/runs/{run_id}/reeval", dependencies=LAUNCH)
+    def run_reeval(run_id: str, body: ReevalBody, request: Request) -> dict[str, Any]:
+        return forward(
+            request,
+            run_id,
+            "reeval",
+            body,
+            lambda: reeval(ctx, run_id=run_id, metric=body.metric, force=body.force),
+            remote_only=True,
+        )
+```
+
+```python
+    @app.post("/api/v1/runs/{run_id}/tags", dependencies=LAUNCH)
+    def run_tags(run_id: str, body: TagBody, request: Request) -> dict[str, Any]:
+        def act() -> RunRecord:
+            return q.tag_run(ctx, run_id, body.add, body.remove)
+
+        return forward(request, run_id, "tags", body, act)
+
+    @app.post("/api/v1/runs/{run_id}/star", dependencies=LAUNCH)
+    def run_star(run_id: str, body: FlagBody, request: Request) -> dict[str, Any]:
+        return forward(request, run_id, "star", body, lambda: q.star_run(ctx, run_id, body.on))
+```
+
+```python
+    @app.post("/api/v1/runs/{run_id}/pull", dependencies=LAUNCH)
+    def run_pull(run_id: str, body: PullBody, request: Request) -> dict[str, Any]:
+        def act() -> dict[str, str]:
+            return {"local_path": str(pull_artifact(ctx, manager, run_id, body.artifact))}
+
+        return once(request, body, act)
+```
+
+7. Replace these route functions (decorators from Task 24 unchanged):
 
 ```python
     @app.post("/api/v1/hosts/{host}/runs", dependencies=LAUNCH)
@@ -12725,7 +13138,9 @@ def stamp(conn: HTTPConnection, body: _Body) -> _Body:
         if not is_remote(host):
             require_local_exec(principal_of(request))  # `local`: the run executes here
         body = stamp(request, body)
-        return once(body, lambda: launch_on_host(ctx, manager, host, body))
+        # the host keeps its receipt under the hub's key: one per hub caller
+        sent = body.model_copy(update={"command_id": command_key(request, body.command_id)})
+        return once(request, body, lambda: launch_on_host(ctx, manager, host, sent))
 ```
 
 ```python
@@ -12743,7 +13158,9 @@ def stamp(conn: HTTPConnection, body: _Body) -> _Body:
     ) -> list[dict[str, Any]]:
         # no cap below `limit`: the UI pages through a host's queue or a sweep with a
         # growing limit, starting at 1000
-        who = principal_of(request).user if owner == "me" else owner
+        who = owner
+        if owner == "me":  # with auth off runs have no owner: every run is the caller's
+            who = principal_of(request).user if auth_on(request) else None
         return to_jsonable(
             ctx.index.list_runs(
                 project=project,
@@ -12761,7 +13178,7 @@ def stamp(conn: HTTPConnection, body: _Body) -> _Body:
     def launch(body: LaunchBody, request: Request) -> dict[str, Any]:
         require_local_exec(principal_of(request))  # the command runs as this server's user
         body = stamp(request, body)
-        return once(body, lambda: launch_here(ctx, body, body.repo))
+        return once(request, body, lambda: launch_here(ctx, body, body.repo))
 ```
 
 ```python
@@ -12774,7 +13191,7 @@ def stamp(conn: HTTPConnection, body: _Body) -> _Body:
             require_local_exec(principal)
             return control.rerun(ctx, run_id, created_by=body.created_by, owner=body.owner)
 
-        return forward(run_id, "rerun", body, here, remote_only=True)
+        return forward(request, run_id, "rerun", body, here, remote_only=True)
 
     @app.post("/api/v1/runs/{run_id}/reinfer", dependencies=LAUNCH)
     def run_reinfer(run_id: str, body: ReinferBody, request: Request) -> dict[str, Any]:
@@ -12791,7 +13208,7 @@ def stamp(conn: HTTPConnection, body: _Body) -> _Body:
                 owner=body.owner,
             )
 
-        return forward(run_id, "reinfer", body, here, remote_only=True)
+        return forward(request, run_id, "reinfer", body, here, remote_only=True)
 ```
 
 ```python
@@ -12804,14 +13221,16 @@ def stamp(conn: HTTPConnection, body: _Body) -> _Body:
                 return stop_if_queued(ctx, run_id)
             return control.stop_run(ctx, run_id)
 
-        return forward(run_id, "stop", body, act, remote_only=True)
+        return forward(request, run_id, "stop", body, act, remote_only=True)
 ```
 
 ```python
     @app.post("/api/v1/runs/{run_id}/archive", dependencies=LAUNCH)
     def run_archive(run_id: str, body: FlagBody, request: Request) -> dict[str, Any]:
         require_act(principal_of(request), ctx.find_record(run_id).owner, "archive")
-        return forward(run_id, "archive", body, lambda: q.archive_run(ctx, run_id, body.on))
+        return forward(
+            request, run_id, "archive", body, lambda: q.archive_run(ctx, run_id, body.on)
+        )
 
     @app.post("/api/v1/runs/{run_id}/notes", dependencies=LAUNCH)
     def run_note(run_id: str, body: NoteBody, request: Request) -> dict[str, Any]:
@@ -12822,7 +13241,7 @@ def stamp(conn: HTTPConnection, body: _Body) -> _Body:
             q.add_note(ctx, run_id, body.text, body.author)
             return {"ok": True}
 
-        return forward(run_id, "notes", body, act)
+        return forward(request, run_id, "notes", body, act)
 ```
 
 In `sweep_create`, change the signature to `def sweep_create(body: SweepBody, request: Request) -> dict[str, Any]:`, add as its first lines
@@ -12833,7 +13252,7 @@ In `sweep_create`, change the signature to `def sweep_create(body: SweepBody, re
         body = stamp(request, body)
 ```
 
-and in the `launch_sweep(...)` call add `owner=body.owner,` after `created_by=body.created_by,`.
+in the `launch_sweep(...)` call add `owner=body.owner,` after `created_by=body.created_by,` and replace `command_id=body.command_id,  # a retry resumes this sweep (Task 40)` with `command_id=command_key(request, body.command_id),  # a retry by this caller resumes it`, and replace its last line `return once(body, act)` with `return once(request, body, act)`.
 
 Replace `sweep_extend` with:
 
@@ -12853,7 +13272,7 @@ Replace `sweep_extend` with:
             more = extend_sweep(ctx, spec.project, spec.id, body.seeds, launch=launch)
             return settled(more.spec, launched)
 
-        return once(body, act)
+        return once(request, body, act)
 ```
 
 Replace `sweep_cancel` with:
@@ -12869,10 +13288,10 @@ Replace `sweep_cancel` with:
         def act() -> SweepSummary:
             spec = find_sweep(ctx, sweep_id, project)
             require_act(principal, spec.owner, "cancel_queued")
-            stop = stopper_for(spec.host, action.command_id)
+            stop = stopper_for(spec.host, command_key(request, action.command_id))
             return cancel_queued(ctx, spec.project, spec.id, stop=stop)
 
-        return once(action, act)
+        return once(request, action, act)
 ```
 
 In `src/hypothex/core/overview.py`, add this field as the last field of `TimelineItem` (after `label: str`), of `IdeaRow` (after its `unit` docstring), and of `FailureRow` (after `retried_ok: bool`):
@@ -12887,7 +13306,7 @@ then pass it where `build_overview` builds them: `owner=run.owner,` after `label
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/api -v`
-Expected: `tests/api/test_ownership_api.py` `10 passed`; every phase 1–2 API test (forwarding, sweeps, hosts) still passes: with auth off `identity` keeps the body's `created_by` and every caller is `LOCAL_OWNER` (admin, so local runs are allowed), and the hub's forwarded bodies now also carry `owner`.
+Expected: `tests/api/test_ownership_api.py` `12 passed`; every phase 1–2 API test (forwarding, sweeps, hosts, `test_put_view_is_idempotent_by_command_id`) still passes: with auth off `identity` keeps the body's `created_by` and every caller is `LOCAL_OWNER` (admin, so local runs are allowed), and the hub's forwarded bodies now also carry `owner`.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -13120,7 +13539,7 @@ from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 from starlette.responses import Response
 
-from hypothex.api.auth import ADMIN, LAUNCH, READ, auth_on, principal_of
+from hypothex.api.auth import ADMIN, LAUNCH, READ, auth_on, command_key, principal_of
 from hypothex.core.context import Context
 from hypothex.core.digest import build_digest, send_digest
 from hypothex.core.errors import RunError
@@ -13232,7 +13651,7 @@ def register_team_routes(app: FastAPI, ctx: Context) -> None:
         when = the_day(day)
         author = notebook_author(request)
         return ctx.events.run_once(
-            body.command_id,
+            command_key(request, body.command_id),
             lambda: to_jsonable(append_entry(ctx, project, body.text, author, day=when)),
         )
 
@@ -13243,7 +13662,7 @@ def register_team_routes(app: FastAPI, ctx: Context) -> None:
         when = the_day(day)
         author = notebook_author(request)
         return ctx.events.run_once(
-            body.command_id,
+            command_key(request, body.command_id),
             lambda: to_jsonable(
                 write_day(ctx, project, when, body.text, base_hash=body.base_hash, author=author)
             ),
@@ -13332,7 +13751,7 @@ def register_team_routes(app: FastAPI, ctx: Context) -> None:
         return to_jsonable(build_digest(ctx, project, since=start, until=end, top_notes=top_notes))
 
     @app.post("/api/v1/projects/{project}/digest/send", dependencies=ADMIN)
-    def digest_send(project: str, body: DigestSendBody) -> dict[str, Any]:
+    def digest_send(project: str, body: DigestSendBody, request: Request) -> dict[str, Any]:
         settings = load_settings(ctx.layout)
 
         def act() -> dict[str, Any]:
@@ -13343,7 +13762,7 @@ def register_team_routes(app: FastAPI, ctx: Context) -> None:
             day = today(now, settings.digest.timezone) if settings.digest.save_to_notebook else None
             return {"channels": channels, "notebook_day": None if day is None else day.isoformat()}
 
-        return ctx.events.run_once(body.command_id, act)
+        return ctx.events.run_once(command_key(request, body.command_id), act)
 ```
 
 In `src/hypothex/api/app.py`:
@@ -13607,9 +14026,10 @@ Then append to `register_team_routes`:
         return notify_status(ctx, load_settings(ctx.layout))
 
     @app.post("/api/v1/notify/test", dependencies=ADMIN)
-    def notify_test(body: NotifyTestBody) -> dict[str, Any]:
+    def notify_test(body: NotifyTestBody, request: Request) -> dict[str, Any]:
         notifier = Notifier(ctx, load_settings(ctx.layout))
-        return ctx.events.run_once(body.command_id, lambda: notifier.send_test(body.channel))
+        key = command_key(request, body.command_id)
+        return ctx.events.run_once(key, lambda: notifier.send_test(body.channel))
 ```
 
 (`NotifyTestBody` must live at module scope: the module uses `from __future__ import annotations`, so FastAPI resolves the annotation `NotifyTestBody` from the module's globals; a class local to `register_team_routes` is not found there and FastAPI reads `body` as a required query parameter, answering the documented JSON body with 422. Every other body model of the plan is module-level for the same reason.)
@@ -13815,7 +14235,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
 
-from hypothex.api.auth import ADMIN, identity
+from hypothex.api.auth import ADMIN, command_key, identity
 from hypothex.core.context import Context
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.settings import load_settings
@@ -13879,7 +14299,7 @@ def register_storage_routes(app: FastAPI, ctx: Context, hosts: HostClients | Non
         settings = load_settings(ctx.layout).storage
         created_by = who(request)
         return ctx.events.run_once(
-            body.command_id,
+            command_key(request, body.command_id),
             lambda: to_jsonable(
                 plan_clean(ctx, hosts, policy, created_by=created_by, settings=settings)
             ),
@@ -13889,7 +14309,7 @@ def register_storage_routes(app: FastAPI, ctx: Context, hosts: HostClients | Non
     def apply(plan_id: str, body: ApplyBody, request: Request) -> dict[str, Any]:
         actor = who(request)
         return ctx.events.run_once(
-            body.command_id,
+            command_key(request, body.command_id),
             lambda: to_jsonable(
                 apply_clean(ctx, hosts, plan_id, confirm_bytes=body.confirm_bytes, actor=actor)
             ),
@@ -13900,9 +14320,9 @@ def register_storage_routes(app: FastAPI, ctx: Context, hosts: HostClients | Non
         return to_jsonable(local_usage(ctx, project=project))
 
     @app.post("/api/v1/storage/delete", dependencies=ADMIN)
-    def delete(body: DeleteBody) -> dict[str, Any]:
+    def delete(body: DeleteBody, request: Request) -> dict[str, Any]:
         return ctx.events.run_once(
-            body.command_id,
+            command_key(request, body.command_id),
             lambda: to_jsonable(
                 delete_artifacts(
                     ctx,
@@ -14694,7 +15114,7 @@ Contract 1.11, 8 (failure mode 13), 9 (Docker test). The index is the only thing
 **Interfaces:**
 - Produces (contract 1.11, exact): `Index.__init__(target: Path | str, *, password: SecretStr | None = None)`, `Index.dialect`, `upsert(session, model, values, keys)`, `open_index(layout, settings)`, `IndexUnavailableError` (API 503), `IndexSchemaError` (a `ConfigError`: "run hx db upgrade").
 - Produces (additive): `upsert(..., *, keep_max: str | None = None)` (keeps the larger value of one column, for `set_cursor`); `upsert_statement(dialect, model, values, keys, *, keep_max=None)`; `Index.json_text(column, key)` (`json_extract` on SQLite, `json_extract_path_text` on Postgres); `HEAD_REVISION = "0001_phase3"`; `INDEX_PENDING_FILE = "index-pending.txt"`; `Index.pending: Path | None` (set by `open_index` to `<home>/index-pending.txt`); `repair_pending(index, store) -> list[str]`.
-- Rules: a `Path` target is SQLite exactly as before; a `postgresql+psycopg://` URL opens a pooled engine (`pool_pre_ping=True`) with the password from `server.index_password_env`, never from the URL, and checks that the Alembic revision is `HEAD_REVISION` (`IndexSchemaError` otherwise). A server that does not answer raises `IndexUnavailableError` naming the URL with `***` for any password. A Postgres URL without `psycopg` installed raises `ConfigError` "a Postgres index needs psycopg: uv tool install 'hypothex[server]'" (never a bare `ModuleNotFoundError` from SQLAlchemy). Mid-request index failures answer 503 `{error, type: "IndexUnavailableError"}`. Run files are written before the index, so a failed write leaves the index row missing (a new run: `repair_index_gaps` adds it) or stale (an archive, star, status change, or score append on an indexed run, which `repair_index_gaps` never looks at): every run write of `Index` (`upsert_run`, `add_score`, `replace_scores`, `replace_metric_points`, `delete_run`) that fails with `OperationalError`/`InterfaceError` appends its run id to `Index.pending` before re-raising, and `repair_pending` re-indexes those runs from their files (drops the ones whose folder is gone) on the next `Context.open` and every 30 s in the server's repair loop, so the index catches up once Postgres answers.
+- Rules: a `Path` target is SQLite exactly as before; a `postgresql+psycopg://` URL opens a pooled engine (`pool_pre_ping=True`) with the password from `server.index_password_env`, never from the URL, and checks that the Alembic revision is `HEAD_REVISION` (`IndexSchemaError` otherwise). A server that does not answer raises `IndexUnavailableError` naming the URL with `***` for any password. A Postgres URL without `psycopg` installed raises `ConfigError` "a Postgres index needs psycopg: uv tool install 'hypothex[server]'" (never a bare `ModuleNotFoundError` from SQLAlchemy). Mid-request index failures answer 503 `{error, type: "IndexUnavailableError"}`. Run files are written before the index, so a failed write leaves the index row missing (a new run: `repair_index_gaps` adds it) or stale (an archive, star, status change, or score append on an indexed run, which `repair_index_gaps` never looks at): every run write of `Index` (`upsert_run`, `add_score`, `replace_scores`, `replace_metric_points`, `delete_run`) that fails with `OperationalError`/`InterfaceError` appends its run id to `Index.pending` (under the file's `flock`, re-opening when a repair moved the file) before re-raising, and `repair_pending` re-indexes those runs from their files (drops the ones whose folder is gone) on the next `Context.open` and every 30 s in the server's repair loop, so the index catches up once Postgres answers. The claim is recoverable: the journal is moved to `index-pending.txt.<8 hex>.claim`, every claim file (a crashed process's too) is read, and each is removed only after all its runs are indexed. Each run is re-read and indexed under its `run_lock` (the lock `Context.update_run` holds), so a repair racing an archive never writes the old value back.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -14702,6 +15122,7 @@ Create `tests/core/test_index_dialects.py`:
 
 ```python
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -14711,10 +15132,10 @@ from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+import hypothex.core.index as index_module
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError
-import hypothex.core.index as index_module
 from hypothex.core.index import (
     HostCursorRow,
     Index,
@@ -14729,6 +15150,7 @@ from hypothex.core.index import (
 from hypothex.core.layout import Layout
 from hypothex.core.queries import archive_run
 from hypothex.core.settings import ServerSettings, Settings, save_settings
+from hypothex.core.store import run_lock
 from tests.factories import make_record
 
 DEAD_PG = "postgresql+psycopg://hx@127.0.0.1:1/hypothex"
@@ -14835,6 +15257,38 @@ def test_a_write_that_fails_at_the_index_is_repaired_from_files(
     fresh = reopened.index.get_run("r1")
     assert fresh is not None and fresh.archived
     assert repair_pending(reopened.index, reopened.store) == []
+
+
+def test_a_claim_left_by_a_crashed_repair_is_picked_up(home: Path) -> None:
+    ctx = Context.open(home)
+    ctx.create_run(make_record("r1", environment_id=ctx.descriptor.environment_id))
+    ctx.store.write_record(ctx.find_record("r1").model_copy(update={"archived": True}))
+    assert ctx.index.pending is not None
+    left = ctx.index.pending.with_name(f"{ctx.index.pending.name}.deadbeef.claim")
+    left.write_text("r1\n")  # moved out of the journal, then that process died
+    assert repair_pending(ctx.index, ctx.store) == ["r1"]
+    fresh = ctx.index.get_run("r1")
+    assert fresh is not None and fresh.archived and not left.exists()
+
+
+def test_repair_reads_and_indexes_under_the_run_lock(home: Path) -> None:
+    ctx = Context.open(home)
+    ctx.create_run(make_record("r1", environment_id=ctx.descriptor.environment_id))
+    assert ctx.index.pending is not None
+    ctx.index.pending.write_text("r1\n")  # an earlier write that failed at the index
+    done: list[list[str]] = []
+    worker = threading.Thread(target=lambda: done.append(repair_pending(ctx.index, ctx.store)))
+    record = ctx.find_record("r1")
+    with run_lock(ctx.run_dir(record)):  # Context.update_run archiving it, mid-write
+        worker.start()
+        worker.join(1)
+        assert worker.is_alive() and done == []
+        archived = record.model_copy(update={"archived": True})
+        ctx.store.write_record(archived)
+        ctx.index.upsert_run(archived)
+    worker.join(30)
+    fresh = ctx.index.get_run("r1")
+    assert done == [["r1"]] and fresh is not None and fresh.archived  # never the old value
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -14852,9 +15306,11 @@ In `src/hypothex/core/index.py`:
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import math
 import os
+import secrets
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
@@ -14885,11 +15341,10 @@ from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from hypothex.core.errors import ConfigError, HypothexError
-from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.layout import Layout
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.settings import ServerSettings, redact_url, resolve_secret
-from hypothex.core.store import ProjectEntry, RunStore
+from hypothex.core.store import ProjectEntry, RunStore, run_lock
 ```
 
 2. After `MAX_POINTS_PER_METRIC = 1000` add:
@@ -15128,20 +15583,38 @@ def upsert(
             yield
         except (OperationalError, InterfaceError):
             if self.pending is not None:
-                # one short O_APPEND write per failure: never torn, never locked
-                with contextlib.suppress(OSError), self.pending.open("a") as fh:
-                    fh.write(f"{run_id}\n")
+                with contextlib.suppress(OSError):
+                    _append_pending(self.pending, run_id)
             raise
 ```
 
 7. Add at the end of the module:
 
 ```python
-def _pending_ids(path: Path) -> set[str]:
+def _append_pending(path: Path, run_id: str) -> None:
+    """Add one id to the journal under its lock; follow the journal if a repair moved it."""
+    for _ in range(5):
+        with path.open("a") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)  # released when the file closes
+            try:
+                current = os.stat(path).st_ino == os.fstat(fh.fileno()).st_ino
+            except FileNotFoundError:
+                current = False
+            if current:
+                fh.write(f"{run_id}\n")
+                return
+        # a repair claimed the file between our open and our lock: write to the new one
+
+
+def _claim_ids(path: Path) -> set[str]:
+    """Read a claim file under its lock (a journal write still going in finishes first)."""
     try:
-        return {s for s in (x.strip() for x in path.read_text().splitlines()) if s}
+        with path.open("r") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+            text = fh.read()
     except FileNotFoundError:
         return set()
+    return {s for s in (x.strip() for x in text.splitlines()) if s}
 
 
 def repair_pending(index: Index, store: RunStore) -> list[str]:
@@ -15152,9 +15625,17 @@ def repair_pending(index: Index, store: RunStore) -> list[str]:
     went away mid-request) leaves the row stale, not missing, so
     ``repair_index_gaps`` never sees it. ``Index`` notes those run ids in
     ``index.pending``; this re-reads each one from its files (drops it when its
-    folder is gone). The ids are claimed first (a write failing meanwhile starts
-    a new file), and the claim stays until every id is done, so a repair that
-    fails is picked up by the next call.
+    folder is gone).
+
+    The journal is first moved to a claim file of its own,
+    ``index-pending.txt.<8 hex>.claim`` (a write failing meanwhile starts a new
+    journal). Then every claim file is read, those a crashed process left
+    included, and each is removed only after all of its runs are indexed. A
+    crash or an error at any step leaves a file the next call reads; two
+    repairs at once index some runs twice, which is harmless. Each run is
+    re-read and indexed under its run lock, the one ``Context.update_run``
+    holds, so a repair never writes back a value older than an update that
+    finished meanwhile.
 
     Parameters
     ----------
@@ -15169,23 +15650,24 @@ def repair_pending(index: Index, store: RunStore) -> list[str]:
     """
     if index.pending is None:
         return []
-    claimed = index.pending.with_name(index.pending.name + ".repairing")
-    taken = index.pending.with_name(f"{index.pending.name}.{os.getpid()}")
+    journal = index.pending
     with contextlib.suppress(FileNotFoundError):
-        os.replace(index.pending, taken)
-    ids = sorted(_pending_ids(claimed) | _pending_ids(taken))
-    if ids:
-        atomic_write_text(claimed, "".join(f"{run_id}\n" for run_id in ids))
-    taken.unlink(missing_ok=True)
-    if not ids:
-        return []
-    on_disk = store.list_run_ids()
+        os.replace(journal, journal.with_name(f"{journal.name}.{secrets.token_hex(4)}.claim"))
+    claims = sorted(journal.parent.glob(f"{journal.name}.*.claim"))
+    wanted: set[str] = set()
+    for claim in claims:
+        wanted |= _claim_ids(claim)
+    ids = sorted(wanted)
+    on_disk = store.list_run_ids() if ids else {}
     for run_id in ids:
         if run_id in on_disk:
-            index_run(index, store, store.read_record(on_disk[run_id], run_id))
+            project = on_disk[run_id]
+            with run_lock(store.layout.run_dir(project, run_id)):
+                index_run(index, store, store.read_record(project, run_id))
         else:
             index.delete_run(run_id)
-    claimed.unlink(missing_ok=True)
+    for claim in claims:
+        claim.unlink(missing_ok=True)
     return ids
 
 
@@ -15246,7 +15728,7 @@ with
         return ctx
 ```
 
-and add to its docstring: "The index is SQLite unless ``server.index_url`` in ``<home>/config.yaml`` names Postgres (``IndexUnavailableError`` when it does not answer, ``IndexSchemaError`` before ``hx db upgrade``)."
+and add to its docstring: "The index is SQLite unless ``server.index_url`` in ``<home>/config.yaml`` names Postgres (``IndexUnavailableError`` when it does not answer, ``IndexSchemaError`` before ``hx db upgrade``). ``config.yaml`` is read on every open, so an invalid file (``ConfigError`` naming the line) stops every ``hx`` command on this home, not only ``hx serve``: on purpose, so a typo never silently falls back to the SQLite index or to auth off."
 
 In `src/hypothex/api/app.py`:
 
@@ -15275,7 +15757,7 @@ In `src/hypothex/api/app.py`:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_index_dialects.py tests/core/test_index.py tests/core/test_context.py -v`
-Expected: `tests/core/test_index_dialects.py` `10 passed`; the phase 1–2 index and context tests still pass.
+Expected: `tests/core/test_index_dialects.py` `12 passed`; the phase 1–2 index and context tests still pass.
 
 Run: `uv run pytest -q && uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: every test passes; clean.
@@ -17654,7 +18136,7 @@ git commit -m "feat(cli): pair, login, logout, whoami, sessions, and users"
 - Consumes: `hub_login` (Task 7), `save_host_token` (Task 38), `_redeem` (Task 41).
 - Produces (contract 4, exact): `hx runs --owner me|NAME`; `hx hosts add <name> --url URL [--token-env VAR | --pair PAIRING_URL]`; `hx hosts pair <name> <pairing-url>` (redeems as `host`, writes `host-tokens.json`, reconnects the host through a running hub).
 - Produces (public helper): `_client_hub() -> str | None` (the hub URL when this home holds a login for it).
-- Rules: in client mode `projects`, `tasks`, and `runs` print the hub's data in the same shape as phase 1; `--owner me` asks the hub who "me" is (client mode, or a hub running on this machine), else it is an error.
+- Rules: in client mode `projects`, `tasks`, and `runs` print the hub's data in the same shape as phase 1; `--owner me` asks the hub who "me" is (client mode, or a hub running on this machine), else it is an error; a hub with auth off answers `auth: "off"`, and `me` then filters nothing (runs have no owner; every run is the caller's), like the API.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -17734,12 +18216,17 @@ def _client_hub() -> str | None:
     return url if hub_login(Layout(_home_path()), url) is not None else None
 
 
-def _me() -> str:
-    """The caller's user name on the hub (client mode, or a hub on this machine)."""
+def _me() -> str | None:
+    """
+    The caller's user name on the hub (client mode, or a hub on this machine).
+
+    None when the hub has auth off: runs then have no owner and every run is
+    the caller's, so ``--owner me`` filters nothing (the API does the same).
+    """
     me = _hub_try("GET", "/api/v1/auth/me")
     if me is None:
         raise ConfigError("--owner me needs a hub: run hx serve, or hx login <pairing-url>")
-    return str(me["user"])
+    return None if me.get("auth") == "off" else str(me["user"])
 ```
 
 2. Replace the bodies of `projects` and `tasks` with:
@@ -18716,7 +19203,7 @@ def storage_clean(
     hosts = len({i["host"] for i in plan["items"]})
     typer.echo(
         f"plan {plan['plan_id']} · {st.fmt_bytes(plan['total_bytes'])} · {len(plan['items'])} "
-        f"files · {hosts} hosts · hx storage clean --apply {plan['plan_id']}"
+        f"paths · {hosts} hosts · hx storage clean --apply {plan['plan_id']}"
     )
 ```
 
@@ -19037,11 +19524,15 @@ def _blob(path: Path, megabytes: int) -> Path:
     return path
 
 
-def _storage_runs(ctx: Context, root: Path, project: str, task: str) -> list[str]:
+def _storage_runs(ctx: Context, project: str, task: str) -> list[str]:
     now = utcnow()
     eid = ctx.descriptor.environment_id
     repo = ctx.store.load_project(project).repo
-    ckpt = root / "checkpoints"
+
+    def own(run_id: str) -> str:
+        # the run's artifacts/: the only part of the Hypothex home cleanup may delete
+        # (protected_reason), so <home>/demo-team/... would never be cleanable
+        return str(ctx.layout.run_dir(project, run_id) / "artifacts" / "model.pt")
 
     def ended(
         run_id: str, days: int, owner: str, by: str, artifact: str | None, **extra: Any
@@ -19071,24 +19562,19 @@ def _storage_runs(ctx: Context, root: Path, project: str, task: str) -> list[str
             )
         )
 
-    ended("st-a", 45, "sv", "human:sv", str(_blob(ckpt / "st-a.pt", 6)), hypothesis="wider MLP")
-    ended(
-        "st-b",
-        60,
-        "alice",
-        "human:alice",
-        str(_blob(ckpt / "st-b.pt", 4)),
-        hypothesis="dropout 0.3",
-    )
+    ended("st-a", 45, "sv", "human:sv", own("st-a"), hypothesis="wider MLP")
+    ended("st-b", 60, "alice", "human:alice", own("st-b"), hypothesis="dropout 0.3")
     ended("st-prot", 50, "sv", "agent:claude@sv", repo, hypothesis="checkpoint saved into the repo")
-    shared = str(_blob(ckpt / "st-parent.pt", 5))
+    shared = own("st-parent")
     ended("st-parent", 70, "sv", "human:sv", shared, hypothesis="rbf kernel, C=10")
     ended(  # as control.reinfer writes it: the parent's checkpoint in vars, no artifact
         "st-child", 3, "alice", "human:alice", None, archived=False, parent="st-parent",
         kind=RunKind.INFER, vars={"checkpoint": shared}, hypothesis="Re-infer of st-parent",
     )  # fmt: skip
-    ended("st-star", 80, "alice", "human:alice", str(_blob(ckpt / "st-star.pt", 2)), starred=True)
-    gone = str(ckpt / "st-done.pt")
+    ended("st-star", 80, "alice", "human:alice", own("st-star"), starred=True)
+    for run_id, megabytes in (("st-a", 6), ("st-b", 4), ("st-parent", 5), ("st-star", 2)):
+        _blob(Path(own(run_id)), megabytes)  # after create_run, which makes the run folder
+    gone = own("st-done")  # cleaned: the file is not there
     ended("st-done", 90, "sv", "human:sv", gone, hypothesis="first baseline")
     item = CleanItem(
         project=project, run_id="st-done", host="local", environment_id=eid, kind="artifact",
@@ -19264,7 +19750,7 @@ def seed_demo_team(home: Path) -> dict[str, Any]:
     _baselines(ctx, generic, generic_task)
     made = {
         "users": {OWNER: "admin", COLLABORATOR: "launch"},
-        "storage_runs": _storage_runs(ctx, root, generic, generic_task),
+        "storage_runs": _storage_runs(ctx, generic, generic_task),
         "notebook_days": _notebook(ctx, generic, training),
         "outbox": _outbox(ctx, generic, generic_task),
         "host": _shared_host(ctx, generic),
@@ -19605,6 +20091,10 @@ machine's CLI into ``~/.hypothex/serve/server.json`` (readable only by you).
 ``config.yaml`` and every token file are written with mode 0600, and their folder, the
 Hypothex home, is set to 0700 on each write. A home that other accounts must read (one
 shared lab account) is not supported: give each person their own account and pair them.
+
+Every ``hx`` command reads ``config.yaml``. If it is invalid, every command on that home
+stops with the line and the problem (never a silent fallback to auth off or to SQLite);
+fix the file, and the next command runs.
 
 Pair a device
 -------------
@@ -20128,7 +20618,7 @@ import json
 import socket
 import sys
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20140,7 +20630,6 @@ from hypothex.auth.store import AuthStore
 from hypothex.cli import main as cli_main
 from hypothex.cli.main import app
 from hypothex.core.context import Context
-from hypothex.core.layout import Layout
 from hypothex.core.records import RunStatus
 from hypothex.core.settings import (
     EmailSettings,
@@ -20361,7 +20850,7 @@ Inputs: the phase 3 contract, spec sections 3.4, 5.3, 5.4, 7.2–7.4, 9, 12, 13,
 - **Retries.** Contract 1.7 says `RETRY_DELAYS = (30, 120, 600)` "after attempts 1, 2, 3; then failed", and failure mode 1 says "after 3 failed attempts the entry is failed". The task summary says "retries at 30 s, 2 min and 10 min". This plan makes four attempts: the first, then retries after 30 s, 2 min, and 10 min; the fourth failure is final (Task 17 `test_three_retries_then_failed`). A server's `Retry-After` can only lengthen a wait.
 - **Literal-secret hint.** Contract 1.1 says the hint is "use <key>_env: NAME". For `webhook`/`password` that is exactly the real field; for `url`, `token`, `secret`, and `webhook_url` the plan names the real field (`webhook_env` under Slack, `password_env` under email), since `url_env` does not exist.
 - **Remote storage sizes** come from each host's env route `GET /api/v1/storage/usage` (contract 1.9), not `du` over SSH (spec 9), so they also work for `route: url` hosts. The hub can only partly check a host path for protection (`/`, the host's run folders, mapped checkouts, an absolute host home); the host checks everything again at delete, and refusals there come back in `skipped` (Tasks 21–22).
-- **CSV export and test-set intervals** are kept from the contract (the spec names only LaTeX and Markdown). `noise` drops data from the table itself (not only from the rendering), so CSV follows the same choice. `percent` scales the table's numbers (CSV too) and adds the footnote `values ×100`; for a leaderboard only when `value_format == "fraction"`, for a comparison whenever asked. Baseline rows show `—`/`--` in the `n` column and `n = 0` in CSV.
+- **CSV export and test-set intervals** are kept from the contract (the spec names only LaTeX and Markdown). `noise` drops data from the table itself (not only from the rendering), so CSV follows the same choice. `percent` scales the table's numbers (CSV too) and adds the footnote `values ×100`; for a leaderboard only when `value_format == "fraction"`, for a comparison per column, only for the columns whose `value_format` is `fraction` (contract 1.6). Baseline rows show `—`/`--` in the `n` column and `n = 0` in CSV.
 - **Metric directions in export.** A `Leaderboard` knows only the primary's direction, so `leaderboard_table` takes `directions=` (column ref, else metric name → higher is better); `task_table`/`export_task` and `compare_table` use `leaderboard.metric_higher_is_better`, the leaderboard's own rule (a `system_bench` percentile key ranks lower-first), so an export never ranks against its leaderboard (Tasks 10, 12).
 - **Route scope keys** use FastAPI's `path_format` (`/api/v1/runs/{run_id}/files/{path}`), as OpenAPI does, so the matrix test can fill parameters with one regex (Tasks 23, 24, 28).
 - **`/mcp` principal.** Tools read the principal from the MCP SDK's request context (`ctx.request_context.request.scope["hx.principal"]`) through a hidden `hx_mcp_ctx` parameter that `@scoped` adds; in-process calls use `acting_as`, else `LOCAL_OWNER`. Over HTTP a tool's own hub calls carry the caller's credential (`caller_token`: the bearer token, else the `hx_session` cookie) and never the server's `hub_token` or local admin token (`tool_hub_token`), so the hub sees who acts and applies their scope and ownership; `stop_run` and `cancel_sweep` check `require_act` on local runs and sweeps (Task 32). `tool_scopes` reads the SDK's tool registry (`_tool_manager`), the only place the decorated functions are kept (Task 32).
@@ -20373,14 +20862,15 @@ Inputs: the phase 3 contract, spec sections 3.4, 5.3, 5.4, 7.2–7.4, 9, 12, 13,
 - **The fake `tailscale`** is `tests/fakes/fake_tailscale.py`; `install_fake_tailscale` writes the `sh` wrapper the contract names (`<base>/tailscale`) that runs it with this Python, like phase 2's fake `ssh` (Task 37).
 - **Notifier tick order** is scan, digests, deliver, so a digest goes out on the tick that made it (contract 1.7 says so since review round 2).
 - **Local runs need admin with auth on.** A run executes as the serving machine's Unix user and can read `serve/server.json`; `require_local_exec` (Tasks 5, 27, 32) keeps `launch` collaborators on hosts. Separating execution by Unix account (a `run_as` user) would let collaborators run on the hub's own machine, but needs privileged setup that tests cannot fake; a lab runs its shared GPU box as a host under its own account instead (`docs/team.rst`).
-- **Failed index writes** are journaled per run (`Index.pending`) and re-indexed from files by `repair_pending` on open and every 30 s; `repair_index_gaps` alone only finds missing rows, not stale ones (Task 34).
+- **Failed index writes** are journaled per run (`Index.pending`) and re-indexed from files by `repair_pending` on open and every 30 s; `repair_index_gaps` alone only finds missing rows, not stale ones. A claim is a file of its own (`index-pending.txt.<8 hex>.claim`) that stays until its runs are indexed, so a crash never strands it, and each run is re-indexed under its `run_lock` (Task 34).
 - **Sweep folding** needs the sweep file on the hub; a run whose sweep file is elsewhere (a sweep made directly on a host) is notified on its own (Task 16).
-- **Demo team counts.** The six archived runs with artifacts are `st-a`, `st-b` (cleanable), `st-prot` (protected), `st-parent` (shared with the unarchived child `st-child`), `st-star` (starred), and `st-done` (already cleaned; its `cleaned.json` records a 4.2 GB checkpoint). The cleanable files are a few MB, so the demo stays small (Task 45).
+- **Demo team counts.** The six archived runs with artifacts are `st-a`, `st-b` (cleanable), `st-prot` (protected), `st-parent` (shared with the unarchived child `st-child`), `st-star` (starred), and `st-done` (already cleaned; its `cleaned.json` records a 4.2 GB checkpoint). Each checkpoint is `<run_dir>/artifacts/model.pt`, the only place in the Hypothex home that cleanup may delete. The cleanable files are a few MB, so the demo stays small (Task 45).
 
 **Safety additions beyond the contract text.**
 
 - httpx logs every request URL at INFO; while a webhook call runs, records of `httpx`/`httpcore` that quote the webhook path are dropped (Task 15), and the leak scan captures logs at DEBUG (Task 47).
 - `POST /api/v1/auth/pairings` never stores its answer as a command receipt (`events.db` would then hold a pairing secret) (Task 25).
+- Command receipts are keyed by `command_key` (caller, method, path), on phase 1–2 routes too, so a command id replayed by another caller or on another route never returns a stored result it could not have produced (Tasks 23, 25, 27, 29–31).
 - `hx serve --auth` revokes earlier `local` sessions of the owner before it mints a new one, so a crashed start leaves no live extra admin session behind (Task 39).
 - A demo with the team but without `--with-hosts` has no fake GPU host; `demo_hosts_running` now skips the live sweep runs in that case instead of failing (Task 45).
 - The network guard wraps `psycopg.connect` because libpq connects in C, below Python's `socket` (Task 1).

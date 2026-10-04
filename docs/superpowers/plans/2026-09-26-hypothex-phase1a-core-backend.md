@@ -335,7 +335,7 @@ def test_layout_paths(tmp_path: Path) -> None:
 def test_new_run_id_format_and_uniqueness() -> None:
     when = datetime(2026, 9, 26, 14, 32, 5, tzinfo=UTC)
     rid = new_run_id("USPTO 50k Top-K!", now=when)
-    assert re.fullmatch(r"20260926-143205-uspto-50k-top-k-[0-9a-f]{4}", rid)
+    assert re.fullmatch(r"20260926-143205-uspto-50k-top-k-[0-9a-f]{8}", rid)
     assert new_run_id(None, now=when).split("-")[2] == "explore"
     assert len({new_run_id("t", now=when) for _ in range(50)}) > 40
     assert re.fullmatch(r"[0-9a-f]{16}", new_command_id())
@@ -464,7 +464,7 @@ def new_run_id(task: str | None, now: datetime | None = None) -> str:
     Returns
     -------
     str
-        ``YYYYMMDD-HHMMSS-<slug>-<4 hex>``.
+        ``YYYYMMDD-HHMMSS-<slug>-<8 hex>`` (32 random bits; INT-F7).
 
     Examples
     --------
@@ -473,7 +473,7 @@ def new_run_id(task: str | None, now: datetime | None = None) -> str:
     """
     stamp = (now or utcnow()).strftime("%Y%m%d-%H%M%S")
     slug = _SLUG.sub("-", (task or "explore").lower()).strip("-")[:16].strip("-") or "run"
-    return f"{stamp}-{slug}-{secrets.token_hex(2)}"
+    return f"{stamp}-{slug}-{secrets.token_hex(4)}"
 
 
 def new_command_id() -> str:

@@ -63,10 +63,13 @@ def run_checkout(ctx: Context, record: RunRecord) -> Path | None:
     PosixPath('/home/me/.hypothex/store/toy/worktrees/20261003-101500-toy-acc-1a2b')
     """
     root = ctx.layout.worktrees_dir(record.project)
-    cwd = Path(record.cwd)
-    if not cwd.is_relative_to(root) or cwd == root:
+    # resolve first: ``cwd`` is text (a mirrored run's was written on a host), so ``..``
+    # or a symlink in it must not pass the containment check and name a tree elsewhere
+    real_root = root.resolve()
+    cwd = Path(record.cwd).resolve()
+    if not cwd.is_relative_to(real_root) or cwd == real_root:
         return None
-    tree = root / cwd.relative_to(root).parts[0]
+    tree = root / cwd.relative_to(real_root).parts[0]
     return tree if (tree / CONFIG_FILENAME).is_file() else None
 
 

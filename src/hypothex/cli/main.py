@@ -56,6 +56,7 @@ from hypothex.remote.config import (
 
 if TYPE_CHECKING:
     from hypothex.remote.bootstrap import ServerInfo
+    from hypothex.remote.ssh import SshTarget
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -556,7 +557,55 @@ def _known_host(hosts: EnvironmentsFile, name: str) -> HostSpec:
     return spec
 
 
-def _bootstrap(c: Context, name: str, spec: HostSpec) -> ServerInfo:
+InstallUvOpt = Annotated[
+    bool,
+    typer.Option(
+        "--install-uv",
+        help=(
+            "On a host without uv, allow hx to download and run the official uv "
+            "installer (https://astral.sh/uv/install.sh). Off: hx stops and asks for uv."
+        ),
+    ),
+]
+
+
+def _install(c: Context, target: SshTarget, home: str, *, install_uv: bool) -> None:
+    """
+    Build this hx's wheel and install it on a host (spec 8A.2 step 2).
+
+    uv is installed on a host only with the user's consent (``--install-uv``,
+    SEC-3): a missing uv otherwise stops the install, with a hint to the option.
+
+    Parameters
+    ----------
+    c : Context
+        This machine's context (the wheel cache is under its home).
+    target : SshTarget
+        The host.
+    home : str
+        The hx home on the host.
+    install_uv : bool
+        ``--install-uv``.
+
+    Raises
+    ------
+    BootstrapError
+        The install failed; when uv is missing, the message names ``--install-uv``.
+    """
+    from hypothex.remote import bootstrap
+
+    wheel = bootstrap.build_wheel(c.layout.home / "cache" / "wheels")
+    try:
+        bootstrap.install(target, home, wheel, install_uv=install_uv)
+    except bootstrap.BootstrapError as exc:
+        if install_uv or "uv is missing on the host" not in str(exc):
+            raise
+        raise bootstrap.BootstrapError(
+            f"{exc}; to let hx run that installer, add --install-uv"
+        ) from exc
+
+
+def _bootstrap(c: Context, name: str, spec: HostSpec, *, install_uv: bool) -> ServerInfo:
     # spec 8A.2 steps 1-3 over the user's own ssh: probe, install this hx, start the server
     from hypothex.mcp.server import ssh_target
     from hypothex.remote import bootstrap
@@ -565,8 +614,7 @@ def _bootstrap(c: Context, name: str, spec: HostSpec) -> ServerInfo:
     facts = bootstrap.probe(target, spec.home)
     if spec.kind == "slurm" and facts.slurm is None:
         raise ConfigError(f"{name} has no sbatch on PATH; drop --slurm or use the login node")
-    wheel = bootstrap.build_wheel(c.layout.home / "cache" / "wheels")
-    bootstrap.install(target, facts.home, wheel)
+    _install(c, target, facts.home, install_uv=install_uv)
     return bootstrap.ensure_server(target, facts.home, kind=spec.kind)
 
 
@@ -1770,6 +1818,7 @@ def hosts_add(
     usd: Annotated[
         float | None, typer.Option("--usd-per-gpu-hour", help="Price, for cost.")
     ] = None,
+    install_uv: InstallUvOpt = False,
     as_json: JsonFlag = False,
 ) -> None:
     """Add a host: for --ssh, install hx there and start its env server; the hub connects it."""
@@ -1798,7 +1847,9 @@ def hosts_add(
         )
     except ValidationError as exc:
         raise ConfigError(f"invalid host {name}: {exc.errors()[0]['msg']}") from exc
-    server = _bootstrap(c, name, spec) if spec.route == "ssh" else None
+    if install_uv and spec.route != "ssh":
+        raise ConfigError("--install-uv needs --ssh (hx installs nothing on a --url host)")
+    server = _bootstrap(c, name, spec, install_uv=install_uv) if spec.route == "ssh" else None
     environments = {**hosts.environments, name: spec}
     save_hosts(c.layout, hosts.model_copy(update={"environments": environments}))
     state = _hub_try("POST", f"/api/v1/hosts/{name}/connect", {})
@@ -1892,7 +1943,7 @@ def hosts_rm(name: str, as_json: JsonFlag = False) -> None:
 
 
 @hosts_app.command("upgrade")
-def hosts_upgrade(name: str, as_json: JsonFlag = False) -> None:
+def hosts_upgrade(name: str, install_uv: InstallUvOpt = False, as_json: JsonFlag = False) -> None:
     """Install this hx version on the host and restart its env server if needed."""
     from hypothex.mcp.server import ssh_target
     from hypothex.remote import bootstrap
@@ -1902,8 +1953,7 @@ def hosts_upgrade(name: str, as_json: JsonFlag = False) -> None:
     if spec.route != "ssh":
         raise ConfigError(f"host {name} is reached by {spec.route}; upgrade hx on it by hand")
     target = ssh_target(spec)
-    wheel = bootstrap.build_wheel(c.layout.home / "cache" / "wheels")
-    bootstrap.install(target, spec.home, wheel)
+    _install(c, target, spec.home, install_uv=install_uv)
     bootstrap.stop_server(target, spec.home)  # only a server hx started; an external one stays
     info = bootstrap.ensure_server(target, spec.home, kind=spec.kind)
     if info.hx_version != __version__:

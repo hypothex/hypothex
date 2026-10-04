@@ -78,7 +78,8 @@ Runs
      - Body and answer
    * - ``GET /api/v1/runs``
      - Query: ``project``, ``task``, ``status``, ``tag``, ``environment_id``,
-       ``archived``, ``limit`` (default 200). Answers run records.
+       ``archived``, ``limit`` (default 200). Answers run records, each with
+       ``host_state`` as in ``GET /api/v1/runs/{id}``.
    * - ``POST /api/v1/runs``
      - Launch here: ``repo`` plus the launch fields, ``gpus``, ``queue``. Answers the
        run record.

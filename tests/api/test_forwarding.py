@@ -174,6 +174,22 @@ def test_run_actions_are_forwarded_with_the_same_command_id(tmp_path: Path) -> N
         assert down.status_code == 503 and "hx hosts connect gpu1" in down.json()["error"]
 
 
+def test_run_lists_carry_the_host_state_of_each_run(tmp_path: Path) -> None:
+    with remote_hub(tmp_path) as r:
+        seed_finished_run(r.env, r.env_repo, "e1")
+        seed_finished_run(r.hub, r.hub_repo, "h1")
+        wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
+
+        def states() -> dict[str, str | None]:
+            rows = r.client.get("/api/v1/runs").json()
+            return {row["run_id"]: row["host_state"] for row in rows}
+
+        assert states() == {"e1": "connected", "h1": None}
+        r.client.post("/api/v1/hosts/gpu1/disconnect", json={})
+        assert states() == {"e1": "disabled", "h1": None}
+        assert r.client.get("/api/v1/runs/e1").json()["host_state"] == "disabled"
+
+
 def test_runs_of_unknown_environments_act_locally(tmp_path: Path) -> None:
     with remote_hub(tmp_path) as r:
         r.hub.create_run(make_record("d1", environment_id="demo:mac", status=RunStatus.FINISHED))

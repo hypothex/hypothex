@@ -1935,6 +1935,11 @@ def create_app(
 
         return stop
 
+    def host_state_of(environment_id: str) -> str | None:
+        # the connection state of the host serving a run's environment; None: a hub run
+        host = manager.host_for_environment(environment_id)
+        return None if host is None else manager.state(host).state
+
     def settled(spec: SweepSpec, launched: list[str]) -> SweepSummary:
         # members are indexed runs: wait until this call's remote runs are mirrored
         if is_remote(spec.host):
@@ -2112,7 +2117,7 @@ def create_app(
     ) -> list[dict[str, Any]]:
         # no cap below `limit`: the UI pages through a host's queue or a sweep with a
         # growing limit, starting at 1000
-        return to_jsonable(
+        rows = to_jsonable(
             ctx.index.list_runs(
                 project=project,
                 task=task,
@@ -2123,6 +2128,14 @@ def create_app(
                 limit=limit,
             )
         )
+        # like the run detail: the CLI and MCP list runs through the hub and see a stale host
+        states: dict[str, str | None] = {}
+        for row in rows:
+            env = row["environment_id"]
+            if env not in states:
+                states[env] = host_state_of(env)
+            row["host_state"] = states[env]
+        return rows
 
     @app.post("/api/v1/runs")
     def launch(body: LaunchBody) -> dict[str, Any]:
@@ -2132,8 +2145,7 @@ def create_app(
     def run_detail(run_id: str) -> dict[str, Any]:
         detail = q.show_run(ctx, run_id)
         out = to_jsonable(detail)
-        host = manager.host_for_environment(detail.record.environment_id)
-        out["host_state"] = None if host is None else manager.state(host).state
+        out["host_state"] = host_state_of(detail.record.environment_id)
         return out
 
     @app.get("/api/v1/runs/{run_id}/metrics")

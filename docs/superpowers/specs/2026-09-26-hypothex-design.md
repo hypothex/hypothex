@@ -392,6 +392,9 @@ def topk_accuracy(examples: list[Example], *, k: list[int]) -> MetricResult:
 - Version string comes from `hypothex.yaml`. Hypothex also stores a hash of the function's
   source. If the source hash changes but the version does not, `hx validate` and the UI
   warn: "metric code changed without a version bump".
+- Leaderboards expose `metric_drift: [name@version]` when selected-version scores
+  contain differing stored source hashes. This is a read-only provenance check; it does
+  not import current repository code or claim that unscored edits have been checked.
 - Old scores are never overwritten. Leaderboards default to the current version and show
   a badge with how many runs are on older versions, plus a "re-evaluate N runs" button.
 
@@ -399,7 +402,7 @@ def topk_accuracy(examples: list[Example], *, k: list[int]) -> MetricResult:
 
 - `config_hash` excludes `seed`. Runs in one task with the same `config_hash`, git
   commit and uncommitted diff (`git.diff_hash`) form a seed group. A dirty run's group
-  id ends in `+<diff hash[:4]>`; clean ids do not change.
+  id ends in `+<diff hash>`; clean ids do not change.
 - Leaderboard rows are seed groups: `mean ± std (n=3)`. Single runs show `n=1`. `n` counts
   distinct seeds: reruns of one seed are averaged into one sample (runs without a seed
   count one each), so a rerun never narrows the error bar.

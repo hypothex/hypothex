@@ -1965,17 +1965,16 @@ def create_app(
     ) -> list[dict[str, Any]]:
         # no cap below `limit`: the UI pages through a host's queue or a sweep with a
         # growing limit, starting at 1000
-        return to_jsonable(
-            ctx.index.list_runs(
-                project=project,
-                task=task,
-                status=status,
-                tag=tag,
-                environment_id=environment_id,
-                include_archived=archived,
-                limit=limit,
-            )
+        records = ctx.index.list_runs(
+            project=project,
+            task=task,
+            status=status,
+            tag=tag,
+            environment_id=environment_id,
+            include_archived=archived,
+            limit=limit,
         )
+        return to_jsonable(q.with_queue_positions(ctx, records))
 
     @app.post("/api/v1/runs")
     def launch(body: LaunchBody) -> dict[str, Any]:

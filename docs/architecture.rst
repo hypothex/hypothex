@@ -126,3 +126,39 @@ runs, event log, and supervisors, so a run keeps going and keeps being recorded
 even if the hub machine sleeps or the network drops. The hub reaches an
 environment over SSH tunnels or a direct URL, but the environment's identity
 (``environment_id``) is stable regardless of the route.
+
+Seed identity and repeated runs
+-------------------------------
+
+A seed group includes the configuration hash, commit and the recorded dirty-diff
+hash. Launch captures the first eight SHA-256 hex digits of ``git.diff``; if the
+diff exceeds the capture limit, the captured diff stat is hashed instead. The
+stat fallback identifies a summary, not exact content, and cannot support an
+exact rerun. Dirty group ids include all eight digits so distinct stored hashes
+cannot overwrite each other's paired-test data. Legacy dirty runs without a
+hash retain the ``+dirty`` suffix.
+
+Repeated runs of one seed are averaged before computing seed statistics and
+paired-test pools. Runs without a seed remain separate samples. Costs and run
+membership still include every run. ``metric_drift`` lists selected metric versions
+whose stored scores contain differing source hashes; reading a leaderboard does
+not execute repository code. ``within_noise_of_best`` is determined by
+the comparison p-value (``p >= 0.05``), or is unknown when no p-value is available.
+
+Queue tickets and remote paths
+------------------------------
+
+Queued runs retain a stable ticket in ``run.yaml``. Run-list and run-detail
+responses replace the ticket with its current one-based position across the
+entire environment queue, including when a response filters or limits runs.
+Batch cancellation takes one scheduler lock and does not rewrite the tickets
+of later runs.
+
+Pinned queued and SLURM runs use a staging checkout even when the requested
+revision initially matches the project working copy. Moving the working copy
+while the job waits therefore cannot change its recorded code. Each executing
+run still receives its own checkout.
+
+Mirrored run details show host-qualified run, repository, working-directory
+and captured-file paths. The hub's local mirror paths are used internally for
+reads, while displayed paths identify the files on the original host.

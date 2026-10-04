@@ -292,36 +292,12 @@ _unqueue = end_unstarted(RunStatus.KILLED)
 
 def _remove_from_queue(ctx: Context, run_id: str, run_dir: Path) -> RunRecord | None:
     """Kill a run still waiting in the GPU queue; None if the scheduler started it."""
-    return _remove_many_from_queue(ctx, {run_id: run_dir}).get(run_id)
-
-
-def _remove_many_from_queue(ctx: Context, waiting: dict[str, Path]) -> dict[str, RunRecord]:
-    """
-    Kill runs still waiting in the GPU queue: one lock, one reposition.
-
-    Parameters
-    ----------
-    ctx : Context
-    waiting : dict of str to Path
-        Run id to run folder of runs that were waiting a moment ago.
-
-    Returns
-    -------
-    dict of str to RunRecord
-        The runs killed; a run the scheduler started meanwhile is left out.
-    """
-    killed: dict[str, RunRecord] = {}
     with scheduler_lock(ctx):
-        for run_id, run_dir in waiting.items():
-            if _scheduler_held(run_dir):
-                (run_dir / QUEUE_FILE).unlink()
-                killed[run_id] = ctx.update_run(
-                    run_id, "run.killed", _unqueue, {"reason": "removed from queue"}
-                )
-    if killed:
-        Scheduler(ctx).refresh_positions()
-    for record in killed.values():
-        release_worktree(ctx, record)  # it never ran: execute_run will not clean up after it
+        if not _scheduler_held(run_dir):
+            return None
+        (run_dir / QUEUE_FILE).unlink()
+        killed = ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "removed from queue"})
+    release_worktree(ctx, killed)  # it never ran: execute_run will not clean up after it
     return killed
 
 
@@ -400,8 +376,8 @@ def cancel_many_if_queued(ctx: Context, run_ids: list[str]) -> CancelBatch:
     Stop many runs, each only if it has not started (``cancel_if_queued``).
 
     Runs waiting in the GPU queue are removed under one scheduler lock with
-    one reposition of the runs behind them, not one per run, so cancelling a
-    big sweep costs O(n). An error on one run never stops the others.
+    no reposition of the runs behind them, so cancelling a big sweep costs
+    O(n). Queue positions are computed on read. An error on one run never stops the others.
 
     Parameters
     ----------
@@ -433,7 +409,21 @@ def cancel_many_if_queued(ctx: Context, run_ids: list[str]) -> CancelBatch:
         run_dir = ctx.run_dir(record)
         if record.status == RunStatus.QUEUED and _scheduler_held(run_dir):
             waiting[run_id] = run_dir
-    killed = _remove_many_from_queue(ctx, waiting)
+    killed: dict[str, RunRecord] = {}
+    if waiting:
+        with scheduler_lock(ctx):
+            for run_id, run_dir in waiting.items():
+                if not _scheduler_held(run_dir):
+                    continue
+                try:
+                    (run_dir / QUEUE_FILE).unlink()
+                    killed[run_id] = ctx.update_run(
+                        run_id, "run.killed", _unqueue, {"reason": "removed from queue"}
+                    )
+                except HypothexError as exc:
+                    errors[run_id] = str(exc)
+        for record in killed.values():
+            release_worktree(ctx, record)
     records: list[RunRecord] = []
     for run_id in run_ids:
         if run_id in errors:

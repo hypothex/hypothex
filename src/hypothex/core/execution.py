@@ -28,6 +28,7 @@ from hypothex.core.config import (
     ProjectConfig,
     load_project_config,
     render_template,
+    template_var_hint,
 )
 from hypothex.core.context import Context
 from hypothex.core.cost import compute_cost
@@ -74,11 +75,8 @@ A process the command left running in the background (``cmd &``, a daemon) keeps
 the output pipes open; past this the run is recorded anyway (``run.warning``)."""
 PROVIDED_TEMPLATE_VARS = BUILTIN_TEMPLATE_VARS - {"checkpoint"}
 """Template values Hypothex fills in itself; ``--var`` cannot set them."""
-PROVIDED_VAR_HINTS = {
-    "seed": "give the seed itself (CLI --seed, API/MCP seed)",
-    "config": "give a config file with --config (local CLI runs only)",
-}
-"""How to set the provided values a caller may choose, named for CLI and API/MCP alike."""
+CHOSEN_PROVIDED_VARS = frozenset({"seed", "config"})
+"""Provided values a caller may still choose, through their own option (``template_var_hint``)."""
 RUN_ID_ATTEMPTS = 8
 """How many fresh run ids ``prepare_run`` draws before it gives up (ids clash very rarely)."""
 STAGING_DIR = "staging"
@@ -274,7 +272,9 @@ class _Pin:
         return f"{self.commit}-{hashlib.sha256(self.patch or b'').hexdigest()[:16]}"
 
 
-def _pin(repo: Path, commit: str | None, diff: str | bytes | None) -> _Pin | None:
+def _pin(
+    repo: Path, commit: str | None, diff: str | bytes | None, *, deferred: bool = False
+) -> _Pin | None:
     """
     Resolve the code a request pins with ``commit`` and/or ``diff`` (spec 8A.4).
 
@@ -286,13 +286,15 @@ def _pin(repo: Path, commit: str | None, diff: str | bytes | None) -> _Pin | Non
         Commit to run (full or abbreviated sha); None means the repo's HEAD.
     diff : str, bytes, or None
         Uncommitted changes to apply on top of ``commit``; empty or None means none.
+    deferred : bool
+        Whether execution may wait in a queue. A pinned deferred run always
+        uses a checkout, even if the project currently matches the pin.
 
     Returns
     -------
     _Pin or None
-        The full sha and the diff, or None when the repo already is at
-        ``commit`` with exactly ``diff`` (or nothing was pinned): the run
-        then needs no worktree.
+        The full sha and the diff, or None when nothing was pinned or an
+        immediate run already has ``commit`` with exactly ``diff`` in place.
 
     Raises
     ------
@@ -319,7 +321,7 @@ def _pin(repo: Path, commit: str | None, diff: str | bytes | None) -> _Pin | Non
                 "push it to a remote this host can fetch"
             )
     patch = (diff if isinstance(diff, bytes) else diff.encode("utf-8")) if diff else None
-    if head == resolved and capture_diff(repo).diff == patch:
+    if not deferred and head == resolved and capture_diff(repo).diff == patch:
         return None
     return _Pin(resolved, patch)
 
@@ -576,7 +578,7 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     provided = sorted(set(req.vars) & PROVIDED_TEMPLATE_VARS)
     if provided:
         name = provided[0]
-        hint = PROVIDED_VAR_HINTS.get(name)
+        hint = template_var_hint(name) if name in CHOSEN_PROVIDED_VARS else None
         raise RunError(
             f"template var {name} is set by Hypothex and cannot be given as a var "
             f"(Hypothex sets: {', '.join(sorted(PROVIDED_TEMPLATE_VARS))})"
@@ -591,7 +593,7 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         if req.gpus > total:
             raise RunError(f"asked for {req.gpus} GPUs; this host has {total}")
     project = host_config.project
-    pin = _pin(repo, req.commit, req.diff)
+    pin = _pin(repo, req.commit, req.diff, deferred=req.queue or req.slurm is not None)
     for _ in range(RUN_ID_ATTEMPTS):
         run_id = new_run_id(req.task)
         dest = ctx.layout.worktrees_dir(project) / run_id
@@ -764,6 +766,13 @@ def _prepare_in(
         params=req.params,
         vars=req.vars,
     )
+    diff = capture_diff(read_cwd)
+    git = git_info(read_cwd)
+    identity = diff.diff or (diff.stat.encode("utf-8") if diff.too_large else b"")
+    if identity:
+        git = git.model_copy(
+            update={"dirty": True, "diff_hash": hashlib.sha256(identity).hexdigest()[:8]}
+        )
     record = RunRecord(
         run_id=run_id,
         project=config.project,
@@ -784,7 +793,7 @@ def _prepare_in(
             pid_create_time=process_create_time(os.getpid()),
             host=ctx.descriptor.label,
         ),
-        git=git_info(read_cwd),
+        git=git,
         datasets=datasets,
         seed=req.seed,
         config_hash=config_hash(fingerprint),
@@ -804,7 +813,6 @@ def _prepare_in(
         _write_pin(run_dir, repo, pin)
     if user_config is not None:
         write_yaml(run_dir / "config.yaml", user_config)
-    diff = capture_diff(read_cwd)
     if diff.diff:
         atomic_write_bytes(run_dir / "git.diff", diff.diff)
     if diff.stat:
@@ -1267,7 +1275,7 @@ def score_finished_run(ctx: Context, record: RunRecord) -> None:
     The run itself finished, so scoring never fails it: an error becomes a
     ``run.eval_skipped`` event (scoring can be retried with ``hx reeval``),
     and each warning of the scoring (e.g. metric code changed without a
-    version bump) becomes a ``run.warning`` event.
+    version bump) becomes a ``run.warning`` event (``evaluate_run`` emits it).
 
     Parameters
     ----------
@@ -1280,16 +1288,13 @@ def score_finished_run(ctx: Context, record: RunRecord) -> None:
     >>> score_finished_run(ctx, ctx.find_record(run_id))  # doctest: +SKIP
     """
     try:
-        _, warnings = evaluate_run(ctx, record.run_id)
+        evaluate_run(ctx, record.run_id)
     except HypothexError as exc:
         ctx.emit("run.eval_skipped", record, {"reason": str(exc)[:500]})
         return
     except Exception as exc:  # noqa: BLE001 - e.g. a malformed worker result
         reason = f"{type(exc).__name__}: {exc}"
         ctx.emit("run.eval_skipped", record, {"reason": reason[:500]})
-        return
-    for warning in warnings:
-        ctx.emit("run.warning", record, {"message": warning[:500]})
 
 
 def _wait_unless_stopped(proc: subprocess.Popen[bytes], marker: Path) -> int:

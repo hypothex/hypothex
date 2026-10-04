@@ -1,3 +1,4 @@
+import hashlib
 import os
 import resource
 import sys
@@ -513,15 +514,15 @@ def test_release_worktree_ignores_the_top_level_venv(
     assert tree.exists() is not removed
 
 
-def test_auto_eval_warnings_become_run_warnings(
-    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # DF-6, DF-17: auto-eval dropped the warnings evaluate_run returned
-    drift = "metric 'accuracy' code changed but version v1 was not bumped"
-    monkeypatch.setattr(execution, "evaluate_run", lambda ctx, run_id: ([], [drift]))
-    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(WRITE_PREDS), task="toy-acc"))
+def test_auto_eval_warnings_become_run_warnings_once(ctx: Context, toy_repo: Path) -> None:
+    # DF-6, DF-17: auto-eval dropped the warnings of scoring; each must show up once
+    preds = WRITE_PREDS.replace("'ex-' + str(i)", "('ex-' if i < 3 else 'x') + str(i)")
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(preds), task="toy-acc"))
     assert done.status == RunStatus.FINISHED
-    assert [e.payload["message"] for e in _warning_events(ctx, done.run_id)] == [drift]
+    assert [e.payload["message"] for e in _warning_events(ctx, done.run_id)] == [
+        "1 of 4 prediction ids are not in dataset 'toyset' split 'test'; "
+        "they are scored with no reference"
+    ]
 
 
 def test_an_unknown_stage_is_refused_also_with_a_command(ctx: Context, toy_repo: Path) -> None:
@@ -541,4 +542,65 @@ def test_refusing_a_provided_var_names_how_to_set_it(ctx: Context, toy_repo: Pat
         prepare_run(ctx, req)
     message = str(err.value)
     assert message.startswith("template var seed is set by Hypothex")
-    assert "--seed" in message and "MCP seed" in message
+    assert message.endswith("; --seed N; API/MCP: seed")
+
+
+def test_prepared_runs_persist_their_actual_diff_identity(ctx: Context, toy_repo: Path) -> None:
+    from hypothex.core.leaderboard import group_id_for
+
+    req = RunRequest(repo=toy_repo, command=cmd("pass"), seed=1)
+    clean = prepare_run(ctx, req)
+    tracked = toy_repo / "identity.txt"
+    tracked.write_text("base\n")
+    git(toy_repo, "add", "identity.txt")
+    git(toy_repo, "commit", "-qm", "capture identity fixture")
+    tracked.write_text("first dirty model\n")
+    first = prepare_run(ctx, req)
+    same = prepare_run(ctx, req)
+    tracked.write_text("second dirty model\n")
+    other = prepare_run(ctx, req)
+    assert clean.git.model_dump().get("diff_hash") is None
+    for record in (first, same, other):
+        saved = ctx.run_dir(record) / "git.diff"
+        expected = hashlib.sha256(saved.read_bytes()).hexdigest()[:8]
+        assert record.git.model_dump().get("diff_hash") == expected
+        assert ctx.find_record(record.run_id).git.model_dump().get("diff_hash") == expected
+    assert group_id_for(first) == group_id_for(same)
+    assert group_id_for(first) != group_id_for(other)
+
+
+def test_oversized_diff_identity_uses_the_captured_stat(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core.gitinfo import DiffCapture
+
+    stat = "train.py | 2000000 +++++\n"
+    monkeypatch.setattr(execution, "capture_diff", lambda _: DiffCapture(None, stat, True))
+    record = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    assert record.git.model_dump().get("diff_hash") == hashlib.sha256(stat.encode()).hexdigest()[:8]
+    assert record.git.dirty
+    assert (ctx.run_dir(record) / "git.diff.too_large").is_file()
+
+
+def test_queued_pin_survives_checkout_changes_after_preparation(
+    ctx: Context, toy_repo: Path
+) -> None:
+    tracked = toy_repo / "queued-model.txt"
+    tracked.write_text("original model")
+    git(toy_repo, "add", "queued-model.txt")
+    git(toy_repo, "commit", "-qm", "pin queued model")
+    commit = git(toy_repo, "rev-parse", "HEAD")
+    record = prepare_run(
+        ctx,
+        RunRequest(
+            repo=toy_repo,
+            command=cmd("print(open('queued-model.txt').read())"),
+            commit=commit,
+            queue=True,
+        ),
+    )
+    tracked.write_text("different model")
+    git(toy_repo, "commit", "-qam", "change model while queued")
+    done = execute_run(ctx, record.run_id)
+    assert done.status == RunStatus.FINISHED
+    assert (ctx.run_dir(done) / "logs/stdout.log").read_text().strip() == "original model"

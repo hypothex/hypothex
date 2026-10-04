@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from hypothex.core import stats
 from hypothex.core.config import ProjectConfig, TaskKind, TaskSpec, parse_metric_key
@@ -109,6 +109,8 @@ class Leaderboard(BaseModel):
     primary: str
     higher_is_better: bool
     metric_versions: dict[str, str]
+    metric_drift: list[str] = Field(default_factory=list)
+    """Selected metric versions scored with more than one recorded source hash."""
     rows: list[LeaderboardRow]
     needs_reeval: list[str]
     unscored: list[str]
@@ -214,7 +216,7 @@ def group_id_for(run: RunRecord) -> str:
     str
         ``<first 8 hex of the config hash>@<first 7 chars of the commit>``;
         ``nogit`` replaces the commit when the run has no git info. A run with
-        uncommitted changes gets ``+<first 4 hex of its diff hash>`` (``+dirty``
+        uncommitted changes gets ``+<its full recorded diff hash>`` (``+dirty``
         when the record has no diff hash), so it never joins the clean group.
 
     Examples
@@ -226,7 +228,7 @@ def group_id_for(run: RunRecord) -> str:
     diff = diff_key(run.git)
     if diff is None:
         return base
-    return f"{base}+{diff if diff == LEGACY_DIRTY else diff[:4]}"
+    return f"{base}+{diff}"
 
 
 def diff_key(git: GitInfo) -> str | None:
@@ -630,6 +632,7 @@ def build_leaderboard(
         r for r in runs if r.task == task and r.status == RunStatus.FINISHED and not r.archived
     ]
 
+    source_hashes: dict[str, set[str]] = defaultdict(set)
     per_run: dict[str, dict[str, float]] = {}
     needs_reeval: list[str] = []
     unscored: list[str] = []
@@ -637,6 +640,8 @@ def build_leaderboard(
         run_scores = sorted(scores.get(r.run_id, []), key=lambda s: s.created_at)
         current: dict[tuple[str, str], float] = {}
         for s in run_scores:
+            if s.source_hash and s.metric in chosen and s.version == chosen[s.metric]:
+                source_hashes[f"{s.metric}@{s.version}"].add(s.source_hash)
             if (
                 s.metric in chosen
                 and s.version == chosen[s.metric]
@@ -705,6 +710,7 @@ def build_leaderboard(
         primary=primary,
         higher_is_better=higher,
         metric_versions=chosen,
+        metric_drift=sorted(ref for ref, hashes in source_hashes.items() if len(hashes) > 1),
         rows=rows,
         needs_reeval=needs_reeval,
         unscored=unscored,

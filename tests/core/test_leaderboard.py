@@ -532,12 +532,6 @@ def test_rows_sum_the_cost_of_their_runs() -> None:
 
 
 # dogfood fixes ---------------------------------------------------------------------------
-class DiffGit(GitInfo):
-    """``GitInfo`` with the launch-time diff hash (``GitInfo.diff_hash``)."""
-
-    diff_hash: str | None = None
-
-
 def drun(
     rid: str,
     git: GitInfo,
@@ -560,10 +554,10 @@ def drun(
 def test_uncommitted_changes_make_their_own_seed_group() -> None:
     clean = [drun(f"c{i}", GitInfo(commit="c1"), seed=i, hypothesis="baseline") for i in (1, 2)]
     dirty = [
-        drun(f"d{i}", DiffGit(commit="c1", dirty=True, diff_hash="9f3c2e1a"), seed=i, minute=1)
+        drun(f"d{i}", GitInfo(commit="c1", dirty=True, diff_hash="9f3c2e1a"), seed=i, minute=1)
         for i in (1, 2)
     ]
-    other = drun("o1", DiffGit(commit="c1", dirty=True, diff_hash="0badf00d"), seed=1)
+    other = drun("o1", GitInfo(commit="c1", dirty=True, diff_hash="0badf00d"), seed=1)
     legacy = drun("l1", GitInfo(commit="c1", dirty=True), seed=1)  # no diff hash recorded
     runs = [*clean, *dirty, other, legacy]
     scores = {"c1": acc(0.8), "c2": acc(0.8), "d1": acc(0.9), "d2": acc(0.9)}
@@ -571,9 +565,9 @@ def test_uncommitted_changes_make_their_own_seed_group() -> None:
     board = build_leaderboard("toy", "t", CFG, runs, scores)
     by_id = {r.group_id: r.run_ids for r in board.rows}
     assert by_id == {
-        "aaaaaaaa@c1+9f3c": ["d1", "d2"],
+        "aaaaaaaa@c1+9f3c2e1a": ["d1", "d2"],
         "aaaaaaaa@c1": ["c1", "c2"],
-        "aaaaaaaa@c1+0bad": ["o1"],
+        "aaaaaaaa@c1+0badf00d": ["o1"],
         "aaaaaaaa@c1+dirty": ["l1"],
     }
     clean_row = next(r for r in board.rows if r.group_id == "aaaaaaaa@c1")
@@ -677,3 +671,41 @@ def test_seed_intervals_of_fractions_stay_in_zero_one() -> None:
     timed.metrics["acc"].unit = "s"
     p = build_leaderboard("toy", "t", timed, runs, scores).rows[0].primary
     assert p is not None and p.ci_high is not None and p.ci_high > 1.0
+
+
+def test_distinct_dirty_hashes_with_same_prefix_keep_separate_paired_data() -> None:
+    runs = [
+        drun("best", GitInfo(commit="c1", dirty=True, diff_hash="abcd0001"), seed=1),
+        drun("other", GitInfo(commit="c1", dirty=True, diff_hash="abcd0002"), seed=1),
+    ]
+    board = build_leaderboard(
+        "toy",
+        "t",
+        CFG,
+        runs,
+        {"best": acc(1.0), "other": acc(0.0)},
+        per_example={"best": binary(20, set(range(20))), "other": binary(20, set())},
+    )
+    best, other = board.rows
+    assert other.vs_best is not None
+    assert other.vs_best.p == pytest.approx(2 / 2**20)
+    assert (other.vs_best.fixed, other.vs_best.broken) == (20, 0)
+    assert best.group_id != other.group_id
+    assert len(group_labels(runs)) == 2
+
+
+def test_leaderboard_names_mixed_metric_code_at_the_selected_version() -> None:
+    runs = [krun("a", "a"), krun("b", "b")]
+    old = score("acc", 0.8).model_copy(update={"source_hash": "sha256:first"})
+    new = score("acc", 0.9).model_copy(update={"source_hash": "sha256:second"})
+    board = build_leaderboard("toy", "t", CFG, runs, {"a": [old], "b": [new]})
+    assert board.model_dump().get("metric_drift") == ["acc@v2"]
+    # A different version is a different definition; missing hashes provide no evidence.
+    clean = build_leaderboard(
+        "toy",
+        "t",
+        CFG,
+        runs,
+        {"a": [old], "b": [new.model_copy(update={"version": "v1"}), score("acc", 0.9)]},
+    )
+    assert clean.model_dump().get("metric_drift") == []

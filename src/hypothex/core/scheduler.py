@@ -170,14 +170,6 @@ class Scheduler:
                     entry.run_id, "run.queue_moved", _set_ticket(ticket), {"position": ticket}
                 )
 
-    def refresh_positions(self) -> None:
-        """
-        Do nothing: positions are ranks computed on read (``positions``).
-
-        Kept so older callers still work; a start or a stop never rewrites the
-        runs behind it.
-        """
-
     def _recover_starts(self) -> None:
         """
         Finish or undo starts that a crash cut short (call with the lock held).

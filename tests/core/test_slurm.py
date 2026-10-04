@@ -2050,15 +2050,12 @@ def test_cancel_if_queued_cancels_only_a_pending_job(ctx: Context, slurm: FakeSl
 
 
 def test_reconcile_emits_the_warnings_of_scoring(
-    ctx: Context, toy_repo: Path, slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
 ) -> None:
     # DF-6, DF-17: a scoring warning (metric code changed, unmatched ids) was dropped
-    from hypothex.core import execution
-
-    drift = "metric 'accuracy' code changed but version v1 was not bumped"
-    monkeypatch.setattr(execution, "evaluate_run", lambda ctx, run_id: ([], [drift]))
+    preds = WRITE_PREDS.replace("'ex-' + str(i)", "('ex-' if i < 3 else 'x') + str(i)")
     slurm.set(mode="run")
-    record = _pinned_slurm_run(ctx, toy_repo, WRITE_PREDS, task="toy-acc")
+    record = _pinned_slurm_run(ctx, toy_repo, preds, task="toy-acc")
     assert control.wait_for_run(ctx, record.run_id, timeout=60).status == RunStatus.FINISHED
     reconcile(ctx)
     warnings = [
@@ -2066,4 +2063,7 @@ def test_reconcile_emits_the_warnings_of_scoring(
         for e in ctx.events.since(0, limit=10_000)
         if e.run_id == record.run_id and e.type == "run.warning"
     ]
-    assert warnings == [drift]
+    assert warnings == [
+        "1 of 4 prediction ids are not in dataset 'toyset' split 'test'; "
+        "they are scored with no reference"
+    ]

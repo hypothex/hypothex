@@ -33,7 +33,7 @@
 - Views: names match `^[a-z0-9][a-z0-9_-]*$`; `overview` is reserved for the kind preset; files live at `<repo>/.hypothex/views/<task>/<name>.yaml` (atomic write, text stored byte for byte); presets ship at `src/hypothex/views/presets/<kind>.yaml`; an invalid view is never saved.
 - Example-id and sample-name file stems: `[^A-Za-z0-9_.-]` → `_`, plus `-<sha1(name)[:8]>` when that changed the name or when the name already ends in `-` + 8 lowercase hex digits, through the one helper `store.safe_stem`. Files store the original id or name in every row, and writers call `store.check_stem_owner` first: an existing file that stores a different original raises `StoreError("id collision: ...")`.
 - Telemetry floats (usage `usd`/`seconds`, trace `seconds`) must be finite: `inf` is rejected like `nan` by the SDK and skipped by the readers.
-- Seed-group id: `<config hash hex[:8]>@<commit[:7]>` (`nogit` without git), plus `+<diff hash hex[:4]>` for a run with uncommitted changes (`+dirty` when the record has no `git.diff_hash`), through the one helper `leaderboard.group_id_for`. Group labels come from the one helper `leaderboard.group_label`.
+- Seed-group id: `<config hash hex[:8]>@<commit[:7]>` (`nogit` without git), plus `+<diff hash>` for a run with uncommitted changes (`+dirty` when the record has no `git.diff_hash`), through the one helper `leaderboard.group_id_for`. Group labels come from the one helper `leaderboard.group_label`.
 - Headlines are one line generated from data. Metrics in [0, 1] get 3 decimals; p-values read `p = 0.15` (two decimals), `p = 0.004` (three decimals when 0.001 ≤ p < 0.01, so a value never reads `p = 0.00`), or `p < 0.001` when tiny; negatives use U+2212 `−`.
 - Copy is terse: numbers, glyphs, short labels; explanations live only in tooltips (`stat_strip` rows carry `tooltip`). Identical seeds show `◇×N`, never a fake `± 0`.
 - Overview default window: the last 24 h. Naive datetimes are read as UTC everywhere (API `since`, view `runs.since`, `build_overview`).
@@ -3926,7 +3926,7 @@ git commit -m "feat: headline number formatting and welch intervals"
   - `LeaderboardRow` adds required fields `label: str`, `seed_values: dict[str, list[float]]` (per `metric/key`, one value per seed in run order), `identical_seeds: bool`, `test_interval: NoiseInterval | None`, `vs_best: VersusBest | None`, `created_by: list[str]` (sorted, unique), `usage: UsageTotals | None` (summed; None if no run has usage).
   - `Leaderboard` adds required fields `headline: str`, `kind: TaskKind`, `stat_strip: list[dict[str, Any]]`. Task 12 fills `headline` and `stat_strip`; until then they are `""` and `[]`.
   - `group_label(hypothesis: str, tags: Iterable[str], group_id: str) -> str`. The one label rule: the panel engine (Task 21) and the Overview (Task 24) reuse it.
-  - `group_id_for(run: RunRecord) -> str` = `<config hash hex[:8]>@<commit[:7] or "nogit">`, plus `+<diff hash hex[:4]>` (or `+dirty`) for a dirty run (`leaderboard.diff_key`). The one seed-group id helper: `core.sources` (re-export), `core.panels`, and `core.overview` import it.
+  - `group_id_for(run: RunRecord) -> str` = `<config hash hex[:8]>@<commit[:7] or "nogit">`, plus `+<diff hash>` (or `+dirty`) for a dirty run (`leaderboard.diff_key`). The one seed-group id helper: `core.sources` (re-export), `core.panels`, and `core.overview` import it.
   - `system_bench` with a percentile primary → `Leaderboard.higher_is_better is False`.
 
 - [ ] **Step 1: Write the failing tests**

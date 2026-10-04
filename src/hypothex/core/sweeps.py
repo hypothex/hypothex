@@ -29,8 +29,8 @@ from hypothex.core.config import (
     template_fields,
 )
 from hypothex.core.context import Context
-from hypothex.core.control import cancel_if_queued, launch_run
-from hypothex.core.errors import HypothexError, StoreError
+from hypothex.core.control import cancel_if_queued, cancel_many_if_queued, launch_run
+from hypothex.core.errors import HypothexError, RunError, StoreError
 from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import COMMIT_PATTERN, RunRequest
 from hypothex.core.fsutil import atomic_write_text, read_yaml, write_yaml
@@ -1576,9 +1576,9 @@ def stop_queued_runs(ctx: Context, run_ids: Iterable[str]) -> CancelResult:
     """
     Stop each run that is still queued; a failed stop never ends the loop.
 
-    The host side of a batched cancel: one request stops many runs, and each
-    stop is one conditional step (``stop_if_queued``), so a run that started a
-    moment ago keeps running.
+    The host side of a batched cancel: one request stops many runs under one
+    scheduler lock. Other queued runs use conditional cancellation, so a run
+    that started a moment ago keeps running.
 
     Parameters
     ----------
@@ -1597,14 +1597,12 @@ def stop_queued_runs(ctx: Context, run_ids: Iterable[str]) -> CancelResult:
     >>> stop_queued_runs(ctx, ["20261004-101500-t1-00ab12cd"]).failed  # doctest: +SKIP
     0
     """
-    result = CancelResult()
-    for run_id in run_ids:
-        result.asked += 1
-        try:
-            stop_if_queued(ctx, run_id)
-        except HypothexError as exc:
-            log.warning("could not stop queued run %s: %s", run_id, exc)
-            result.add_failure(1, exc)
+    ids = list(run_ids)
+    batch = cancel_many_if_queued(ctx, ids)
+    result = CancelResult(asked=len(ids))
+    for run_id, reason in batch.errors.items():
+        log.warning("could not stop queued run %s: %s", run_id, reason)
+        result.add_failure(1, RunError(reason))
     return result
 
 

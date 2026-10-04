@@ -247,3 +247,11 @@ def test_compare_runs_shows_a_dirty_tree(ctx: Context, toy_repo: Path) -> None:
     ctx.create_run(make_record("a", git={"commit": "c1"}))
     ctx.create_run(make_record("b", git={"commit": "c1", "dirty": True}))
     assert q.compare_runs(ctx, ["a", "b"]).fields == {"dirty": [False, True]}
+
+
+def test_compare_runs_distinguishes_two_dirty_models(ctx: Context) -> None:
+    from hypothex.core.records import GitInfo
+
+    ctx.create_run(make_record("a", git=GitInfo(commit="c1", dirty=True, diff_hash="abcd0001")))
+    ctx.create_run(make_record("b", git=GitInfo(commit="c1", dirty=True, diff_hash="abcd0002")))
+    assert q.compare_runs(ctx, ["a", "b"]).fields == {"diff": ["abcd0001", "abcd0002"]}

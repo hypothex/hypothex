@@ -2456,3 +2456,19 @@ def test_the_token_never_reaches_states_events_or_logs(
     events = json.dumps([e.payload for e in hub_ctx.events.since(0, 100_000)])
     assert sentinel not in events
     assert sentinel not in caplog.text
+
+
+def test_show_run_uses_host_paths_for_mirrored_files(
+    pair: tuple[Context, Context], toy_repo: Path
+) -> None:
+    hub, remote = pair
+    remote.register_project(toy_repo)
+    record = seed_run(remote, "r1")
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    paths = show_run(hub, "r1").paths
+    root = f"gpu1:{remote.run_dir(record)}"
+    assert paths["run_dir"] == root
+    assert paths["stdout"] == f"{root}/logs/stdout.log"
+    assert paths["run_yaml"] == f"{root}/run.yaml"
+    assert paths["repo"] == f"gpu1:{toy_repo}"
+    assert paths["cwd"] == f"gpu1:{record.cwd}"

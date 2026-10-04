@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import shlex
+from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -357,6 +358,54 @@ def get_task(ctx: Context, ref: str, project: str | None = None) -> dict[str, An
 
 
 # runs ----------------------------------------------------------------------------
+def with_queue_positions(ctx: Context, records: list[RunRecord]) -> list[RunRecord]:
+    """
+    Copy queued records with live positions instead of their stored queue tickets.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open context; ranking always includes the complete queue on each host.
+    records : list of RunRecord
+        Records selected for a response, possibly filtered or paginated.
+
+    Returns
+    -------
+    list of RunRecord
+        Response copies. Stored records and their stable tickets are unchanged.
+
+    Examples
+    --------
+    >>> with_queue_positions(ctx, [])  # doctest: +SKIP
+    []
+    """
+    if not any(r.status == RunStatus.QUEUED for r in records):
+        return records
+    from hypothex.core.scheduler import Scheduler
+
+    positions = Scheduler(ctx).positions()
+    remote: dict[str, list[RunRecord]] = defaultdict(list)
+    for record in ctx.index.list_runs(status=RunStatus.QUEUED, include_archived=True, limit=None):
+        if (
+            record.environment_id != ctx.descriptor.environment_id
+            and record.executor.queue_position is not None
+        ):
+            remote[record.environment_id].append(record)
+    for waiting in remote.values():
+        waiting.sort(key=lambda r: (r.executor.queue_position or 0, r.created_at, r.run_id))
+        positions.update({r.run_id: i for i, r in enumerate(waiting, start=1)})
+    return [
+        r.model_copy(
+            update={
+                "executor": r.executor.model_copy(update={"queue_position": positions[r.run_id]})
+            }
+        )
+        if r.run_id in positions
+        else r
+        for r in records
+    ]
+
+
 def show_run(ctx: Context, run_id: str) -> RunDetail:
     """
     Return a run with its scores, notes, children, and all file paths.
@@ -374,7 +423,7 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
         ``paths`` also names ``run_yaml``, ``scores``, ``metrics``, ``notes``,
         ``config`` and ``diff`` when the run has those files.
     """
-    record = ctx.find_record(run_id)
+    record = with_queue_positions(ctx, [ctx.find_record(run_id)])[0]
     run_dir = ctx.run_dir(record)
     paths = {
         "run_dir": str(run_dir),
@@ -397,6 +446,16 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
     for key, name in files.items():
         if (run_dir / name).is_file():
             paths[key] = str(run_dir / name)
+    from hypothex.remote.hub import host_paths
+
+    hosted = host_paths(ctx, record)
+    if "run_dir" in hosted:
+        for key, path in list(paths.items()):
+            local = Path(path)
+            if local.is_relative_to(run_dir):
+                relative = local.relative_to(run_dir)
+                paths[key] = hosted["run_dir"] + (f"/{relative}" if relative.parts else "")
+    paths.update(hosted)
     for ref in record.datasets:
         paths[f"dataset:{ref.name}"] = f"{ref.host}:{ref.path}"
     for i, art in enumerate(record.artifacts):
@@ -448,7 +507,7 @@ def compare_runs(ctx: Context, run_ids: list[str]) -> Comparison:
     """
     Compare runs: only fields that differ, plus the latest score per metric version.
 
-    Fields cover the task, commit, ``dirty`` (uncommitted changes), seed,
+    Fields cover the task, commit, ``dirty`` (uncommitted changes), ``diff`` hash, seed,
     stage, command, hypothesis, ``params.*``, ``vars.*`` and ``config.*``.
 
     Parameters
@@ -476,6 +535,7 @@ def compare_runs(ctx: Context, run_ids: list[str]) -> Comparison:
             "task": rec.task,
             "commit": rec.git.commit,
             "dirty": rec.git.dirty,
+            "diff": rec.git.diff_hash,
             "seed": rec.seed,
             "stage": rec.stage,
             "command": shlex.join(rec.command_template),

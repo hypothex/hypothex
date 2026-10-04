@@ -38,7 +38,7 @@ from hypothex.core.fsutil import atomic_write_text, read_yaml
 from hypothex.core.ids import utcnow
 from hypothex.core.index import index_run
 from hypothex.core.layout import HX_DIR, reserved_run_path
-from hypothex.core.records import ACTIVE_STATUSES, Artifact, RunRecord
+from hypothex.core.records import ACTIVE_STATUSES, Artifact, DatasetRef, RunRecord
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
 from hypothex.remote.bootstrap import BootstrapError, ensure_server
 from hypothex.remote.client import EnvClient, EnvRequestError, RemoteFile
@@ -77,6 +77,10 @@ and manifest; seen again (a replay, or the next hub start), the index is redone.
 SKIPS_FILE = f"{HX_DIR}/mirror-skips.json"
 """``<run_dir>/.hx/mirror-skips.json``: ``{path: {reason, size, max_bytes}}`` for every listed file
 the hub does not hold. ``.hx/`` is reserved (``reserved_run_path``): no host path can address it."""
+HOST_PATHS_FILE = f"{HX_DIR}/host-paths.json"
+"""``<run_dir>/.hx/host-paths.json``: ``{host, run_dir, repo}``, where a mirrored run lives on its
+host (the ``paths`` of the host's ``GET /api/v1/runs/{id}``); fetched once per run."""
+HOST_PATH_KEYS = ("run_dir", "repo")
 
 BACKOFF_SECONDS: tuple[float, ...] = (3.0, 4.0, 8.0, 16.0)
 STABLE_AFTER_SECONDS = 30.0
@@ -399,9 +403,73 @@ def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) ->
     ctx.index.upsert_project(entry)
 
 
-def _hosted(artifacts: list[Artifact], host: str) -> list[Artifact]:
-    """Mark the host's own artifacts (``host: local`` there) with the host's name."""
-    return [a.model_copy(update={"host": host}) if a.host == "local" else a for a in artifacts]
+_HostedT = TypeVar("_HostedT", Artifact, DatasetRef)
+
+
+def _hosted(items: list[_HostedT], host: str) -> list[_HostedT]:
+    """Mark the host's own artifacts and datasets (``host: local`` there) with the host's name."""
+    return [i.model_copy(update={"host": host}) if i.host == "local" else i for i in items]
+
+
+def _fetch_host_paths(client: EnvClient, host: str, run_id: str) -> dict[str, str] | None:
+    """
+    Ask the host where a run lives there: ``{host, run_dir, repo}`` (``repo`` when known).
+
+    Returns None when the host does not answer with a ``run_dir``; the next mirror asks again.
+    """
+    try:
+        paths = client.get_json(f"/api/v1/runs/{run_id}")["paths"]
+    except (HypothexError, ValueError, TypeError, KeyError) as exc:
+        log.info("host %s: paths of %s not known yet: %s", host, run_id, exc)
+        return None
+    found = {k: paths[k] for k in HOST_PATH_KEYS if isinstance(paths.get(k), str)}
+    return {"host": host, **found} if "run_dir" in found else None
+
+
+def host_paths(ctx: Context, record: RunRecord) -> dict[str, str]:
+    """
+    Return where a mirrored run lives on its host, as ``<host>:<path>``.
+
+    The hub's copy of a mirrored run is not where the run ran: its run folder,
+    project checkout, and working folder are on the host (spec 8.1, 8A.8).
+    Use these paths in place of the hub's own when showing the run.
+
+    Parameters
+    ----------
+    ctx : Context
+        The hub context.
+    record : RunRecord
+        Any run the hub holds.
+
+    Returns
+    -------
+    dict of str to str
+        ``run_dir`` and ``repo`` (each when the host reported it) and ``cwd``
+        (when the record has one), each prefixed with the host's name; ``{}``
+        for a run of this hub's own environment or one whose host is unknown.
+
+    Examples
+    --------
+    >>> host_paths(ctx, ctx.find_record("r1"))  # doctest: +SKIP
+    {'run_dir': 'gpu1:/home/me/.hypothex/store/toy/runs/r1', 'repo': 'gpu1:/home/me/toy',
+     'cwd': 'gpu1:/home/me/toy'}
+    """
+    if record.environment_id == ctx.descriptor.environment_id:
+        return {}
+    try:
+        data = json.loads((ctx.run_dir(record) / HOST_PATHS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict) or not isinstance(data.get("host"), str):
+        source = mirror_source(ctx, record) or ""
+        if not source.startswith("host:"):
+            return {}
+        data = {"host": source.removeprefix("host:")}
+    host = data["host"]
+    out = {k: f"{host}:{data[k]}" for k in HOST_PATH_KEYS if isinstance(data.get(k), str)}
+    if record.cwd:
+        out["cwd"] = f"{host}:{record.cwd}"
+    return out
 
 
 def mirror_run(
@@ -428,9 +496,11 @@ def mirror_run(
     fetch succeeded is the run id claimed hub-wide (``_claim``) and are the
     files installed, in one pass under the run lock (``_install``); nothing is
     ever appended. Artifacts the host recorded as ``local`` get the host's
-    name, and an ended run gets its ``cost`` at the host's price
-    (``price_record``). A project the hub does not know is copied from the
-    host first, and a copy from this host is refreshed (``_ensure_project``).
+    name, and so do datasets; an ended run gets its ``cost`` at the host's
+    price (``price_record``). A project the hub does not know is copied from
+    the host first, and a copy from this host is refreshed
+    (``_ensure_project``). Where the run lives on the host (``host_paths``) is
+    asked once, on the first mirror that gets an answer.
 
     Parameters
     ----------
@@ -476,6 +546,8 @@ def mirror_run(
             return None
         _ensure_project(ctx, client, host, project)
         manifest = _read_manifest(run_dir)
+        asked = (run_dir / HOST_PATHS_FILE).is_file()
+        where = None if asked else _fetch_host_paths(client, host, run_id)
         staged: list[tuple[RemoteFile, Path]] = []
         remote_only: list[Artifact] = []
         skipped: dict[str, dict[str, object]] = {}
@@ -522,6 +594,7 @@ def mirror_run(
                 update={
                     "environment_id": environment_id,
                     "artifacts": [*_hosted(record.artifacts, host), *remote_only],
+                    "datasets": _hosted(record.datasets, host),
                 }
             ),
             usd_per_gpu_hour,
@@ -532,7 +605,7 @@ def mirror_run(
             log.warning("host %s: not mirroring: %s", host, reason)
             return None
         with run_lock(run_dir):
-            changed = _install(ctx, run_dir, staged, manifest, record, gone, skipped)
+            changed = _install(ctx, run_dir, staged, manifest, record, gone, skipped, where)
     return record, changed
 
 
@@ -604,6 +677,7 @@ def _install(
     record: RunRecord,
     gone: list[str],
     skipped: dict[str, dict[str, object]],
+    where: dict[str, str] | None = None,
 ) -> bool:
     """
     Install fully fetched files, then ``run.yaml``, then re-index; caller holds the run lock.
@@ -616,7 +690,8 @@ def _install(
     (``gone``) before any install, with the folders that leaves empty, so a
     path that changed between file and folder on the host installs; skipped
     files are deleted too and listed in ``.hx/mirror-skips.json``
-    (``skipped``), never marked next to the file.
+    (``skipped``), never marked next to the file. ``where`` (the run's paths
+    on its host, when just fetched) is written to ``.hx/host-paths.json``.
 
     Returns
     -------
@@ -638,6 +713,9 @@ def _install(
             changed = True
         manifest[entry.path] = [entry.size, entry.mtime_ns]
     changed |= _write_skips(run_dir, skipped)
+    if where is not None:
+        (run_dir / HX_DIR).mkdir(parents=True, exist_ok=True)
+        atomic_write_text(run_dir / HOST_PATHS_FILE, json.dumps(where, sort_keys=True))
     if _read_local(ctx, record.project, record.run_id) != record:
         ctx.store.write_record(record)  # after the files: never terminal next to stale files
         changed = True

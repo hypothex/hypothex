@@ -34,9 +34,11 @@ from hypothex.core.fsutil import append_jsonl
 from hypothex.core.ids import utcnow
 from hypothex.core.index import SCHEMA_VERSION, Index, rebuild_index
 from hypothex.core.layout import Layout
+from hypothex.core.queries import show_run
 from hypothex.core.records import (
     Artifact,
     CostTotals,
+    DatasetRef,
     ExecutorInfo,
     RunRecord,
     RunStatus,
@@ -44,7 +46,7 @@ from hypothex.core.records import (
 )
 from hypothex.core.store import RunStore
 from hypothex.remote.bootstrap import BootstrapError, ServerInfo
-from hypothex.remote.client import EnvUnreachableError, RemoteFile
+from hypothex.remote.client import EnvRequestError, EnvUnreachableError, RemoteFile
 from hypothex.remote.config import EnvironmentsFile, HostSpec
 from hypothex.remote.hub import (
     Backoff,
@@ -191,6 +193,7 @@ class FakeClient:
     def __init__(self, remote: Context) -> None:
         self.remote = remote
         self.fetched: list[str] = []
+        self.gets: list[str] = []
 
     def _dir(self, run_id: str) -> Path:
         return self.remote.run_dir(self.remote.find_record(run_id))
@@ -233,6 +236,10 @@ class FakeClient:
         return True
 
     def get_json(self, path: str, **params: Any) -> Any:
+        self.gets.append(path)
+        if path.startswith("/api/v1/runs/"):
+            detail = show_run(self.remote, path.removeprefix("/api/v1/runs/"))
+            return detail.model_dump(mode="json")
         prefix, _, rest = path.removeprefix("/api/v1/projects/").partition("/")
         if rest != "entry":
             raise AssertionError(f"unexpected GET {path}")
@@ -488,6 +495,60 @@ def test_mirror_names_the_host_on_its_artifacts(pair: tuple[Context, Context]) -
     mirror_event(hub, FakeClient(remote), "gpu1", "env-remote", run_event(remote, "r1"))  # type: ignore[arg-type]
     [artifact] = hub.find_record("r1").artifacts
     assert (artifact.kind, artifact.host) == ("checkpoint", "gpu1")
+
+
+def test_mirror_names_the_host_on_its_datasets(pair: tuple[Context, Context]) -> None:
+    hub, remote = pair
+    seed_run(remote, "r1")
+    own = DatasetRef(name="dset", version="1", path="/home/hx/d.jsonl")
+    shared = DatasetRef(name="nfs", version="1", host="nfs-01", path="/data/nfs.jsonl")
+    remote.update_run(
+        "r1", "run.tagged", lambda r: r.model_copy(update={"datasets": [own, shared]})
+    )
+    mirror_event(hub, FakeClient(remote), "gpu1", "env-remote", run_event(remote, "r1"))  # type: ignore[arg-type]
+    datasets = hub.find_record("r1").datasets
+    assert [(d.name, d.host, d.path) for d in datasets] == [
+        ("dset", "gpu1", "/home/hx/d.jsonl"),  # was "local" on the host: it is the host's file
+        ("nfs", "nfs-01", "/data/nfs.jsonl"),
+    ]
+
+
+def test_host_paths_name_where_a_mirrored_run_lives_on_its_host(
+    pair: tuple[Context, Context], toy_repo: Path
+) -> None:
+    hub, remote = pair
+    remote.register_project(toy_repo)
+    record = seed_run(remote, "r1")
+    client = FakeClient(remote)
+    hub_mod.mirror_run(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    mirrored = hub.find_record("r1")
+    assert hub_mod.host_paths(hub, mirrored) == {
+        "run_dir": f"gpu1:{remote.run_dir(record)}",
+        "repo": f"gpu1:{toy_repo}",
+        "cwd": f"gpu1:{record.cwd}",
+    }
+    assert client.gets.count("/api/v1/runs/r1") == 1
+    hub_mod.mirror_run(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert client.gets.count("/api/v1/runs/r1") == 1  # asked once per run
+    own = seed_run(hub, "h1")
+    assert hub_mod.host_paths(hub, own) == {}
+
+
+def test_host_paths_are_asked_again_until_the_host_answers(pair: tuple[Context, Context]) -> None:
+    hub, remote = pair
+    record = seed_run(remote, "r1")
+
+    class NoDetail(FakeClient):
+        def get_json(self, path: str, **params: Any) -> Any:
+            if path.startswith("/api/v1/runs/"):
+                raise EnvRequestError("boom", status_code=500)
+            return super().get_json(path, **params)
+
+    hub_mod.mirror_run(hub, NoDetail(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    mirrored = hub.find_record("r1")
+    assert hub_mod.host_paths(hub, mirrored) == {"cwd": f"gpu1:{record.cwd}"}  # host from claim
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert hub_mod.host_paths(hub, mirrored)["run_dir"] == f"gpu1:{remote.run_dir(record)}"
 
 
 def test_mirror_copies_a_project_only_the_host_knows(
@@ -838,7 +899,7 @@ def test_the_mirror_never_fetches_the_reserved_folder(
     run = hub.layout.run_dir("toy", "r1")
     assert ".hx/mirror-skips.json" in [f.path for f in client.list_files("r1")]
     assert not any(p.startswith(".hx") for p in client.fetched)
-    assert not (run / ".hx").exists() and (run / "scores.jsonl").is_file()
+    assert not (run / hub_mod.SKIPS_FILE).exists() and (run / "scores.jsonl").is_file()
     assert ".hx/mirror-skips.json" not in json.loads((run / hub_mod.MANIFEST_NAME).read_text())
 
 

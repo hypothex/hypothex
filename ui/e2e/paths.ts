@@ -1,16 +1,45 @@
 /** Paths and constants shared by the Playwright config, the demo server, and the specs. */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const E2E_DIR = fileURLToPath(new URL(".", import.meta.url));
-/** Fresh Hypothex home, wiped and re-seeded on every server start. */
-export const HOME_DIR = join(E2E_DIR, ".home");
-/** `hx demo --json` output: `{kind: "project/task"}`. */
-export const DEMO_FILE = join(E2E_DIR, ".demo.json");
 export const REPO_ROOT = resolve(E2E_DIR, "..", "..");
 export const UI_DIST_INDEX = join(REPO_ROOT, "src", "hypothex", "ui_dist", "index.html");
+/** Parent of every run's own directory; nothing outside one run's directory is ever wiped. */
+export const RUNS_DIR = join(E2E_DIR, ".runs");
+
+/**
+ * This run's own directory, `e2e/.runs/run-XXXXXX`. Like the ports below, the first
+ * process that loads this file (the Playwright runner, or `shutdown-check.ts`) creates a
+ * fresh one and writes it into `HX_E2E_RUN_DIR`; every child inherits it, so the workers and
+ * both `serve-demo.ts` web servers use the same one. Two suites started in the same checkout
+ * get two directories, so neither wipes the other's homes or demo files. A given directory
+ * must lie inside `RUNS_DIR`, because `serve-demo.ts` wipes the homes in it.
+ */
+function runDir(): string {
+  const given = process.env.HX_E2E_RUN_DIR;
+  if (given) {
+    const dir = resolve(given);
+    const rel = relative(RUNS_DIR, dir);
+    if (rel === "" || rel.startsWith("..") || rel.includes("/")) {
+      throw new Error(`HX_E2E_RUN_DIR must be a directory directly in ${RUNS_DIR}, got ${given}`);
+    }
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+  mkdirSync(RUNS_DIR, { recursive: true });
+  const dir = mkdtempSync(join(RUNS_DIR, "run-"));
+  process.env.HX_E2E_RUN_DIR = dir;
+  return dir;
+}
+
+export const RUN_DIR = runDir();
+/** Hub home of the `hx demo` server, wiped and re-seeded on every server start. */
+export const HOME_DIR = join(RUN_DIR, "home");
+/** `hx demo --json` output: `{kind: "project/task"}`. */
+export const DEMO_FILE = join(RUN_DIR, "demo.json");
 
 /** Run by `node -e` or `bun -e`: bind port 0 on 127.0.0.1, print the port the OS gave, close. */
 const FREE_PORT_JS =
@@ -57,13 +86,10 @@ export const KINDS = [
 ] as const;
 export type Kind = (typeof KINDS)[number];
 
-/**
- * Hub home for the `hx demo --with-hosts` server (fake remote hosts), wiped on every start.
- * `HX_E2E_HOSTS_HOME` moves it (the shutdown check uses its own home).
- */
-export const HOSTS_HOME_DIR = process.env.HX_E2E_HOSTS_HOME ?? join(E2E_DIR, ".home-hosts");
+/** Hub home of the `hx demo --with-hosts` server (fake remote hosts), wiped on every start. */
+export const HOSTS_HOME_DIR = join(RUN_DIR, "home-hosts");
 /** `hx demo --with-hosts --json` output. */
-export const HOSTS_DEMO_FILE = join(E2E_DIR, ".demo-hosts.json");
+export const HOSTS_DEMO_FILE = join(RUN_DIR, "demo-hosts.json");
 /**
  * Labels `serve-demo.ts` writes into each fresh demo home's `environment.json`, with a new
  * `environment_id`; every check compares both with the hub's answer before it uses the hub.
@@ -72,8 +98,11 @@ export const DEMO_LABEL = "hx-e2e-demo";
 export const HOSTS_DEMO_LABEL = "hx-e2e-hosts";
 /** The environment identity file in a Hypothex home (`Layout.environment_json`). */
 export const IDENTITY_FILE = "environment.json";
-/** How long `serve-demo.ts` waits for `hx serve` to clean up after SIGTERM before SIGKILL. */
-export const SHUTDOWN_WAIT_MS = 60_000;
+/**
+ * How long `serve-demo.ts` waits for `hx serve` to clean up after SIGTERM before it kills
+ * every process of the run. `HX_E2E_SHUTDOWN_WAIT_MS` shortens it (the shutdown check).
+ */
+export const SHUTDOWN_WAIT_MS = Number(process.env.HX_E2E_SHUTDOWN_WAIT_MS ?? "") || 60_000;
 /** The route every Hypothex server answers without a token: its environment identity. */
 export const IDENTITY_ROUTE = "/.well-known/hypothex/environment";
 

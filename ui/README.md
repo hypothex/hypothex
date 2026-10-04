@@ -52,7 +52,14 @@ another server. If a demo server cannot start, the run stops at once. Run one gr
 bun run build && bunx playwright test --project=hosts-light --project=hosts-dark
 ```
 
+Each run keeps its homes and demo files in its own directory, `e2e/.runs/run-XXXXXX`, so two
+suites can run at once in one checkout without wiping each other's homes. A server removes
+its home when it stops.
+
 On stop, `serve-demo.ts` sends SIGTERM to the hub alone and waits for it: the hub's
-shutdown stops the demo runs on its fake hosts, then the fake hosts. `bun e2e/shutdown-check.ts`
-checks that order on its own random port, after it has verified the hub's identity, and
-fails if any demo process is left.
+shutdown stops the demo runs on its fake hosts, then the fake hosts. After that, after 60 s
+without an exit, or when the hub dies by itself, it kills every process still running from
+the run's directory (fake hosts, supervisors and their run commands; they run in their own
+sessions, so a crashed hub leaves them behind). `bun e2e/shutdown-check.ts` (also run in CI)
+checks three ends, each on its own random port after it has verified the hub's identity: a
+SIGTERM, a killed hub, and a hub that hangs. It fails if any demo process is left.

@@ -2188,8 +2188,13 @@ def create_app(
         return out
 
     @app.get("/api/v1/runs/{run_id}/metrics")
-    def run_metrics(run_id: str) -> list[dict[str, Any]]:
-        return to_jsonable(q.metric_history(ctx, run_id))
+    def run_metrics(
+        run_id: str,
+        names: Annotated[list[str] | None, Query()] = None,
+        max_points: Annotated[int | None, Query(ge=2)] = None,
+    ) -> list[dict[str, Any]]:
+        # a chart asks for the names it shows, at about its width in points (PERF-F9)
+        return to_jsonable(q.metric_history(ctx, run_id, names=names, max_points=max_points))
 
     @app.get("/api/v1/runs/{run_id}/traces")
     def run_traces(run_id: str) -> list[dict[str, Any]]:

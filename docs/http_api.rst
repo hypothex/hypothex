@@ -95,8 +95,11 @@ Runs
        such as ``"connected"``; ``null`` for a run of the hub).
    * - ``GET /api/v1/runs/{id}/metrics``, ``/traces``, ``/traces/{example_id}``,
        ``/logs``, ``/predictions``
-     - The run's metrics, traces, log tail (``stream``, ``offset``), and predictions
-       (``offset``, ``limit``, ``metric``, ``failures_only``, ``field``).
+     - The run's metrics (``names``, repeatable, keeps only those metrics;
+       ``max_points`` >= 2 thins each series to that many points with LTTB, keeping
+       its ends and peaks; without them, every indexed point), traces, log tail
+       (``stream``, ``offset``), and predictions (``offset``, ``limit``, ``metric``,
+       ``failures_only``, ``field``).
    * - ``POST /api/v1/runs/{id}/stop``
      - ``{only_queued?}``. Stops the run (``scancel`` on SLURM).
    * - ``POST /api/v1/runs/{id}/rerun``, ``/reinfer``, ``/reeval``

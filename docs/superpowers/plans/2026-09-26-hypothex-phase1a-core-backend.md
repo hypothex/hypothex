@@ -7564,7 +7564,7 @@ git commit -m "feat: hx CLI with --json on every command"
 - Produces: `hypothex.api.app.create_app(home: Path | None = None, *, background_repair: bool = True) -> FastAPI`. Routes:
   - `GET /.well-known/hypothex/environment` → `EnvironmentDescriptor`.
   - `GET /api/v1/projects`, `GET /api/v1/tasks?project=`, `GET /api/v1/tasks/{project}/{task}`, `GET /api/v1/tasks/{project}/{task}/leaderboard?metric=name@v` (repeatable), `POST /api/v1/tasks/{project}/{task}/reeval`.
-  - `GET /api/v1/runs?project&task&status&tag&archived&limit`, `POST /api/v1/runs` (launch), `GET /api/v1/runs/{id}`, `GET /api/v1/runs/{id}/metrics`, `GET /api/v1/runs/{id}/logs?stream&offset`, `GET /api/v1/runs/{id}/predictions?offset&limit&metric&failures_only&field`, `POST /api/v1/runs/{id}/{rerun|reinfer|reeval|stop|tags|star|archive|notes}`.
+  - `GET /api/v1/runs?project&task&status&tag&archived&limit`, `POST /api/v1/runs` (launch), `GET /api/v1/runs/{id}`, `GET /api/v1/runs/{id}/metrics?names&max_points` (repeatable `names`; `max_points >= 2` thins each series with LTTB; both optional, the default answer is unchanged), `GET /api/v1/runs/{id}/logs?stream&offset`, `GET /api/v1/runs/{id}/predictions?offset&limit&metric&failures_only&field`, `POST /api/v1/runs/{id}/{rerun|reinfer|reeval|stop|tags|star|archive|notes}`.
   - `GET /api/v1/compare?ids=a,b`, `GET /api/v1/compare/examples?a&b&metric&field`, `GET /api/v1/datasets/check?project=`.
   - `WS /api/v1/ws`: client sends `{"type":"subscribe","after_sequence":N}`; server sends `{"type":"event","event":{...}}` for each event after N, then `{"type":"ready","last_sequence":M}` once caught up, then live events.
   - Every POST body accepts `command_id` (idempotent via `EventLog.run_once`) and `created_by`.

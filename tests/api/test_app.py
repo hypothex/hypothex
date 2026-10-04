@@ -66,6 +66,29 @@ def test_projects_tasks_leaderboard(client: TestClient, ctx: Context, toy_repo: 
     assert client.get("/api/v1/tasks/toy/toy-acc").json()["dataset"]["name"] == "toyset"
 
 
+def test_run_metrics_filter_names_and_cap_points(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    # PERF-F9b: the run page asks only for the charts it shows, at plot width
+    from hypothex.core.records import MetricPoint
+
+    seed_finished_run(ctx, toy_repo, "r1")
+    points = [
+        MetricPoint(name=name, step=step, value=50.0 if step == 77 else 0.0)
+        for name in ("loss", "acc", "lr")
+        for step in range(300)
+    ]
+    ctx.index.replace_metric_points("r1", points)
+    url = "/api/v1/runs/r1/metrics"
+    assert len(client.get(url).json()) == 900
+    some = client.get(url, params={"names": ["loss", "lr"], "max_points": 20}).json()
+    assert {p["name"] for p in some} == {"loss", "lr"} and len(some) == 40
+    assert {"name": "loss", "step": 77, "value": 50.0} in [
+        {k: p[k] for k in ("name", "step", "value")} for p in some
+    ]
+    assert client.get(url, params={"max_points": 1}).status_code == 422
+
+
 def test_run_detail_logs_predictions_and_errors(
     client: TestClient, ctx: Context, toy_repo: Path
 ) -> None:

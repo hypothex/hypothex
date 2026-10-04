@@ -248,7 +248,14 @@ class TaskSpec(_Strict):
 
 
 class EnvSpec(_Strict):
-    """How to run code in the project's environment."""
+    """
+    How to run code in the project's environment.
+
+    ``python`` is the command that runs the project's Python, e.g.
+    ``[uv, run, python]``; Hypothex uses it to run the metric functions and to
+    record the environment. ``setup`` (e.g. ``uv sync``) is accepted and
+    stored, but nothing runs it yet.
+    """
 
     setup: str | None = None
     python: list[str] | None = None

@@ -55,6 +55,46 @@ class SweepError(HypothexError):
     """A sweep request is invalid: bad grid, seeds, size, or command template."""
 
 
+class SweepIncompleteError(SweepError):
+    """
+    A sweep launch or extend stopped part way: the sweep exists, some runs are missing.
+
+    The message names the sweep, how many of its runs exist, the host, the
+    cause, and the ``hx sweep extend`` command that issues the rest (an extend
+    with the sweep's own seeds starts only the missing runs).
+
+    Parameters
+    ----------
+    spec : SweepSpec
+        The sweep (its seeds include every seed asked for).
+    launched : int
+        Runs of the sweep that exist (started before or by this call).
+    total : int
+        Runs the sweep plans (``planned_runs``).
+    cause : Exception
+        The launch error.
+
+    Examples
+    --------
+    >>> err = SweepIncompleteError(spec, 3, 8, RuntimeError("connection reset"))  # doctest: +SKIP
+    >>> err.sweep_id, err.launched, err.total  # doctest: +SKIP
+    ('s-0001', 3, 8)
+    """
+
+    def __init__(self, spec: SweepSpec, launched: int, total: int, cause: Exception) -> None:
+        self.sweep_id = spec.id
+        self.project = spec.project
+        self.host = spec.host
+        self.launched = launched
+        self.total = total
+        self.hint = f"hx sweep extend {spec.id} --seeds {','.join(map(str, spec.seeds))}"
+        where = f"host {spec.host!r}" if spec.host else "the launch"
+        super().__init__(
+            f"sweep {spec.id}: {launched} of {total} runs launched; {where} failed: "
+            f"{_brief(cause)}. Start the rest with `{self.hint}`"
+        )
+
+
 class SweepParam(BaseModel):
     """
     One swept parameter: a list of grid ``values`` or a ``low``/``high`` range.
@@ -1213,7 +1253,6 @@ def _issue(
     spec: SweepSpec,
     launch: Launcher,
     requests: Iterable[tuple[int, RunRequest]],
-    started: list[str],
     requested: list[str] | None = None,
 ) -> None:
     """
@@ -1222,15 +1261,23 @@ def _issue(
     Each run gets its ``run_command_id``, so a run that exists but is not
     indexed yet (its answer lost, or not mirrored) comes back from the
     launcher's receipt instead of starting twice (``_launch_run``: an
-    interrupted receipt moves on to the run's next id). ``started`` collects
-    the run ids as they come back; ``requested`` collects each command id
-    before its request goes out (the caller then knows a request was made).
+    interrupted receipt moves on to the run's next id). ``requested`` collects
+    each command id before its request goes out (the caller then knows a
+    request was made).
+
+    Raises
+    ------
+    SweepIncompleteError
+        A launch failed: it names how many runs exist and how to start the rest.
     """
-    have = {(r.seed, _combo_key(r.params)) for r in sweep_runs(ctx, spec)}
-    for seed, req in requests:
-        if (seed, _combo_key(req.params)) in have:
+    members = {(r.seed, _combo_key(r.params)) for r in sweep_runs(ctx, spec)}
+    for done, (seed, req) in enumerate(requests):
+        if (seed, _combo_key(req.params)) in members:
             continue
-        started.append(_launch_run(ctx, spec, launch, seed, req, requested).run_id)
+        try:
+            _launch_run(ctx, spec, launch, seed, req, requested)
+        except HypothexError as exc:
+            raise SweepIncompleteError(spec, done, planned_runs(spec), exc) from exc
 
 
 def launch_sweep(
@@ -1259,9 +1306,11 @@ def launch_sweep(
     Every run gets tag ``sweep:<owner8>:<id>`` (``sweep_tag``; this environment
     owns the sweep), params ``k=v`` (also as template vars, so ``{k}`` in the
     command is filled), and its seed. Runs are launched seed-major.
-    If a launch fails, the error is raised and the sweep file stays, even when
-    the first request failed (a lost answer may hide an accepted run); only an
-    error before any launch request leaves no file.
+    If a launch fails, ``SweepIncompleteError`` (the sweep id, runs launched,
+    the host, and the ``hx sweep extend`` command that starts the rest) is
+    raised from the launch error and the sweep file stays, even when the first
+    request failed (a lost answer may hide an accepted run); only an error
+    before any launch request leaves no file.
 
     Parameters
     ----------
@@ -1313,6 +1362,8 @@ def launch_sweep(
     ------
     SweepError
         Invalid grid, seeds, size, command fields, task, or repo.
+    SweepIncompleteError
+        A run launch failed; the sweep exists with the runs launched so far.
     StoreError
         ``project`` is not registered and no ``repo`` was given.
 
@@ -1345,7 +1396,6 @@ def launch_sweep(
         raise SweepError(f"invalid sweep: {_brief(exc)}") from exc
     _check_launchable(draft)
     repo_path = _resolve_repo(ctx, project, task, repo, remote=launch is not None)
-    started: list[str] = []
     # one command id at a time: its claim lookup, id reservation, and claim are one step,
     # so two racing calls never make two sweeps (and two run sets) for one command
     with _command_lock(ctx.layout, project, command_id):
@@ -1370,9 +1420,7 @@ def launch_sweep(
             )
             requested: list[str] = []
             try:
-                _issue(
-                    ctx, spec, launch or _local_launcher(ctx, spec.id), requests, started, requested
-                )
+                _issue(ctx, spec, launch or _local_launcher(ctx, spec.id), requests, requested)
             except BaseException:
                 # once a request went out its outcome is unknown (an accepted run whose answer
                 # was lost): the definition stays. Only a failure before any request removes it.
@@ -1589,6 +1637,8 @@ def extend_sweep(
     SweepError
         No seeds, the sweep would grow past ``MAX_SWEEP_RUNS``, or the sweep
         pins no code and its first run's diff was too large to save.
+    SweepIncompleteError
+        A run launch failed; the seeds are saved, so the same extend resumes.
     StoreError
         If the sweep does not exist.
 
@@ -1633,5 +1683,5 @@ def extend_sweep(
             commit=commit,
             diff=diff,
         )
-        _issue(ctx, grown, launch or _local_launcher(ctx, sweep_id), requests, [])
+        _issue(ctx, grown, launch or _local_launcher(ctx, sweep_id), requests)
     return summarize_sweep(ctx, project, sweep_id)

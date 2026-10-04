@@ -33,6 +33,7 @@ from hypothex.core.seeds import config_hash
 from hypothex.core.sweeps import (
     MAX_SWEEP_RUNS,
     SweepError,
+    SweepIncompleteError,
     SweepParam,
     SweepSpec,
     cancel_queued,
@@ -803,7 +804,7 @@ def test_host_sweep_needs_no_checkout_on_the_hub(ctx: Context, toy_repo: Path) -
 def test_failed_launch_keeps_the_runs_already_started(ctx: Context, toy_repo: Path) -> None:
     ctx.register_project(toy_repo)
     fake = FakeLauncher(ctx, fail_at=3)
-    with pytest.raises(RunError, match="host refused"):
+    with pytest.raises(SweepIncompleteError, match="host refused"):
         launch_sweep(ctx, project="toy", grid=[LR], seeds=[1, 2], command=CMD[:4], launch=fake)
     (path,) = ctx.layout.project_dir("toy").glob("sweeps/*.yaml")
     spec = load_sweep(ctx.layout, "toy", path.stem)
@@ -811,10 +812,44 @@ def test_failed_launch_keeps_the_runs_already_started(ctx: Context, toy_repo: Pa
     assert spec.seeds == [1, 2]
 
 
+def test_a_host_that_drops_mid_launch_names_the_sweep_and_how_to_finish_it(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # DF-54: the raw host error said nothing of the sweep, so a retry made a second one
+    ctx.register_project(toy_repo)
+    fake = FakeLauncher(ctx, fail_at=3)
+    args: dict[str, Any] = {"project": "toy", "grid": [LR], "seeds": [1, 2], "command": CMD[:4]}
+    with pytest.raises(SweepIncompleteError) as raised:
+        launch_sweep(ctx, **args, host="gpu1", launch=fake)
+    err = raised.value
+    [listed] = list_sweeps(ctx, "toy")
+    assert (err.sweep_id, err.project, err.host) == (listed["id"], "toy", "gpu1")
+    assert (err.launched, err.total) == (3, 4)
+    assert err.hint == f"hx sweep extend {err.sweep_id} --seeds 1,2"
+    assert str(err) == (
+        f"sweep {err.sweep_id}: 3 of 4 runs launched; host 'gpu1' failed: host refused the "
+        f"run. Start the rest with `{err.hint}`"
+    )
+    assert isinstance(err.__cause__, RunError)
+    fake.fail_at = None
+    extend_sweep(ctx, "toy", err.sweep_id, [1, 2], launch=fake)  # the hint finishes it
+    assert len(summarize_sweep(ctx, "toy", err.sweep_id).run_ids) == 4
+
+
+def test_a_failed_extend_names_the_sweep_too(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    fake.fail_at = 3
+    with pytest.raises(SweepIncompleteError) as raised:
+        extend_sweep(ctx, "toy", sid, [2], launch=fake)
+    assert (raised.value.launched, raised.value.total) == (3, 4)
+    assert raised.value.hint == f"hx sweep extend {sid} --seeds 1,2"
+
+
 def test_a_failed_first_launch_keeps_the_definition(ctx: Context, toy_repo: Path) -> None:
     # the hub cannot know the host refused it: an error may hide an accepted run
     ctx.register_project(toy_repo)
-    with pytest.raises(RunError):
+    with pytest.raises(SweepIncompleteError):
         launch_sweep(
             ctx,
             project="toy",
@@ -842,7 +877,7 @@ def test_a_lost_first_response_keeps_the_definition_and_the_run(
         "launch": fake,
         "command_id": "cmd-1",
     }
-    with pytest.raises(RunError, match="answer was lost"):
+    with pytest.raises(SweepIncompleteError, match="answer was lost"):
         launch_sweep(ctx, **args)
     [listed] = list_sweeps(ctx, "toy")
     sid = listed["id"]
@@ -884,7 +919,7 @@ def test_a_retried_launch_resumes_the_same_sweep(ctx: Context, toy_repo: Path) -
         "launch": fake,
         "command_id": "cmd-1",
     }
-    with pytest.raises(RunError):
+    with pytest.raises(SweepIncompleteError):
         launch_sweep(ctx, **args)
     [first] = list_sweeps(ctx, "toy")
     fake.fail_at = None  # the client retries the same command
@@ -959,7 +994,7 @@ def test_a_run_whose_answer_was_lost_is_never_started_twice(ctx: Context, toy_re
         "launch": fake,
         "command_id": "cmd-1",
     }
-    with pytest.raises(RunError, match="answer was lost"):
+    with pytest.raises(SweepIncompleteError, match="answer was lost"):
         launch_sweep(ctx, **args)
     fake.lose_answer_at = None
     summary = launch_sweep(ctx, **args)  # every missing run again, with the same command ids
@@ -1024,7 +1059,7 @@ def test_an_interrupted_run_receipt_never_blocks_the_sweep_resume(
         "launch": with_receipts(ctx, fake),
         "command_id": "cmd-1",
     }
-    with pytest.raises(RunError):
+    with pytest.raises(SweepIncompleteError):
         launch_sweep(ctx, **args)
     [listed] = list_sweeps(ctx, "toy")
     sid, env = listed["id"], ctx.descriptor.environment_id
@@ -1093,11 +1128,12 @@ def test_interrupted_retries_are_bounded_and_other_errors_are_not_retried(
         raise CommandInterruptedError("interrupted")
 
     args: dict[str, Any] = {"project": "toy", "grid": [LR], "seeds": [1], "command": CMD[:4]}
-    with pytest.raises(CommandInterruptedError):
+    with pytest.raises(SweepIncompleteError) as raised:
         launch_sweep(ctx, **args, launch=crashing)
+    assert isinstance(raised.value.__cause__, CommandInterruptedError)
     assert len(tried) == len(set(tried)) == sweeps_module.MAX_RUN_ATTEMPTS
     fake = FakeLauncher(ctx, fail_at=0)
-    with pytest.raises(RunError, match="host refused"):
+    with pytest.raises(SweepIncompleteError, match="host refused"):
         launch_sweep(ctx, **args, launch=fake)
     assert fake.command_ids == []
 
@@ -1378,7 +1414,7 @@ def test_extend_partial_failure_then_retry_launches_only_missing_runs(
     fake = FakeLauncher(ctx)
     sid = launched(ctx, toy_repo, fake)
     fake.fail_at = 5  # 2 original runs + both of seed 2 + one of seed 3, then fail
-    with pytest.raises(RunError):
+    with pytest.raises(SweepIncompleteError):
         extend_sweep(ctx, "toy", sid, [2, 3], launch=fake)
     assert load_sweep(ctx.layout, "toy", sid).seeds == [1, 2, 3]  # the definition came first
     assert summarize_sweep(ctx, "toy", sid).run_ids == ["r01", "r02", "r03", "r04", "r05"]

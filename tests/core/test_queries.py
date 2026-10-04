@@ -13,6 +13,8 @@ from hypothex.core.errors import ConfigError, RunError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.index import store_fingerprint
 from hypothex.core.records import DatasetRef, MetricPoint, RunRecord, RunStatus
+from hypothex.core.sweeps import SweepSpec, save_sweep
+from hypothex.core.sweeps import list_sweeps as list_project_sweeps
 from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
 
 ALL_RIGHT = [{"id": f"ex-{i}", "prediction": r} for i, r in enumerate([0, 1, 0, 0])]
@@ -319,3 +321,43 @@ def test_metric_history_filters_names_and_caps_points(ctx: Context, toy_repo: Pa
     assert q.metric_history(ctx, "r1", names=["loss"], max_points=1000) == loss
     with pytest.raises(RunError, match="at least 2"):
         q.metric_history(ctx, "r1", max_points=1)
+
+
+def _sweep(project: str, sweep_id: str, created_at: str) -> SweepSpec:
+    return SweepSpec.model_validate(
+        {
+            "id": sweep_id,
+            "project": project,
+            "task": "toy-acc",
+            "host": None,
+            "grid": [{"name": "lr", "values": ["1e-4", "3e-4"]}],
+            "seeds": [1],
+            "command_template": ["python", "train.py", "--lr", "{lr}"],
+            "created_by": "human",
+            "created_at": created_at,
+        }
+    )
+
+
+def test_list_sweeps_spans_projects_newest_first(
+    ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    ctx.register_project(toy_repo)
+    other = write_toy_project(tmp_path / "toy2", use_git=False)
+    _set_project_name(other, "toy2")
+    ctx.register_project(other)
+    save_sweep(ctx.layout, _sweep("toy", "s-0001", "2026-10-01T00:00:00Z"))
+    save_sweep(ctx.layout, _sweep("toy2", "s-0001", "2026-10-03T00:00:00Z"))
+    save_sweep(ctx.layout, _sweep("toy", "s-0002", "2026-10-02T00:00:00Z"))
+    rows = q.list_sweeps(ctx)
+    assert [(r["project"], r["id"]) for r in rows] == [
+        ("toy2", "s-0001"),
+        ("toy", "s-0002"),
+        ("toy", "s-0001"),
+    ]
+    assert set(rows[0]) == {"project", "id", "created_at", "n_runs", "best"}
+    assert rows[0]["n_runs"] == 0 and rows[0]["best"] is None
+    only = q.list_sweeps(ctx, "toy")
+    assert only == [{"project": "toy", **s} for s in list_project_sweeps(ctx, "toy")]
+    assert [r["id"] for r in only] == ["s-0002", "s-0001"]
+    assert q.list_sweeps(ctx, "nothing-here") == []

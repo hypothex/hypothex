@@ -930,6 +930,41 @@ def add_note(ctx: Context, run_id: str, text: str, author: str = "human") -> Non
     ctx.emit("run.note_added", record, {"author": author})
 
 
+# sweeps ----------------------------------------------------------------------------
+def list_sweeps(ctx: Context, project: str | None = None) -> list[dict[str, Any]]:
+    """
+    List sweeps of one project or of all projects, newest first.
+
+    The rows are those of ``hx sweeps --json``: ``GET
+    /api/v1/projects/{project}/sweeps`` rows plus the project.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    project : str, optional
+        Restrict to one project; ``None`` lists every registered project.
+
+    Returns
+    -------
+    list of dict
+        ``{project, id, created_at, n_runs, best}`` per sweep; ``best`` is the
+        best cell (``None`` before any run is scored). Unreadable sweep files
+        are skipped.
+
+    Examples
+    --------
+    >>> list_sweeps(ctx, "toy")  # doctest: +SKIP
+    [{'project': 'toy', 'id': 's-0002', 'created_at': datetime(...), 'n_runs': 6, 'best': {...}}]
+    """
+    from hypothex.core.sweeps import list_sweeps as project_sweeps  # sweeps imports this module
+
+    projects = [project] if project else [e.project for e in ctx.store.list_projects()]
+    rows = [{"project": p, **s} for p in projects for s in project_sweeps(ctx, p)]
+    rows.sort(key=lambda s: (s["created_at"], s["id"]), reverse=True)
+    return rows
+
+
 # datasets --------------------------------------------------------------------------
 def check_datasets(ctx: Context, project: str | None = None) -> list[DatasetDrift]:
     """

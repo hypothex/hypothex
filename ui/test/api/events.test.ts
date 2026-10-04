@@ -1,13 +1,18 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { focusManager, QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
-import { act, render, renderHook, screen } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { queryKeys } from "../../src/api/queries";
+import { mockRoutes } from "./fetch-mock";
+import { HOSTS, LOCAL_ROW } from "./phase2-fixtures";
+
+const realFetch = globalThis.fetch;
 import {
   backoffDelay,
   type Clock,
   EventStream,
   FLUSH_MS,
+  HEAD_TIMEOUT_MS,
   type HxEvent,
   invalidateForEvents,
   LiveUpdates,
@@ -114,7 +119,7 @@ function ev(
   return { sequence, type, project, run_id, payload: {}, created_at: "2026-09-27T10:00:00Z" };
 }
 
-function harness(afterSequence?: number, resumeSequence?: number) {
+function harness(afterSequence?: number, resumeSequence?: number, head?: () => Promise<number | null>) {
   const clock = new FakeClock();
   const sockets: FakeSocket[] = [];
   const delivered: number[][] = [];
@@ -125,6 +130,7 @@ function harness(afterSequence?: number, resumeSequence?: number) {
     clock,
     afterSequence,
     resumeSequence,
+    head,
     createSocket: (url) => {
       const socket = new FakeSocket(url);
       sockets.push(socket);
@@ -579,6 +585,109 @@ describe("EventStream", () => {
   });
 });
 
+/** A head lookup the test resolves or rejects by hand. */
+function deferredHead() {
+  let resolve: (n: number | null) => void = () => {};
+  let reject: (e: unknown) => void = () => {};
+  const calls: number[] = [];
+  const head = (): Promise<number | null> => {
+    calls.push(1);
+    return new Promise((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+  };
+  return { head, calls, resolve: (n: number | null) => resolve(n), reject: (e: unknown) => reject(e) };
+}
+
+const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe("EventStream head (PERF-F10a)", () => {
+  test("a fresh stream subscribes after the current last sequence: no replay", async () => {
+    const d = deferredHead();
+    const h = harness(undefined, undefined, d.head);
+    h.stream.start();
+    expect(h.sockets.length).toBe(0);
+    expect(h.statuses).toEqual(["connecting"]);
+    d.resolve(1_000_000);
+    await tick();
+    h.last().open();
+    expect(h.last().sent).toEqual(['{"type":"subscribe","after_sequence":1000000}']);
+    h.last().receive({ type: "ready", last_sequence: 1_000_000 });
+    expect(h.delivered).toEqual([]);
+    expect(h.saved).toEqual([1_000_000]);
+    h.last().receive({ type: "event", event: ev(1_000_001) });
+    h.clock.advance(FLUSH_MS);
+    expect(h.delivered).toEqual([[1_000_001]]);
+  });
+
+  test("reconnects resume from the last sequence without a new lookup", async () => {
+    const d = deferredHead();
+    const h = harness(undefined, undefined, d.head);
+    h.stream.start();
+    d.resolve(50);
+    await tick();
+    h.last().open();
+    h.last().receive({ type: "ready", last_sequence: 50 });
+    h.last().drop();
+    h.clock.advance(3000);
+    h.last().open();
+    expect(h.last().sent).toEqual(['{"type":"subscribe","after_sequence":50}']);
+    expect(d.calls.length).toBe(1);
+  });
+
+  test("a failed, invalid or slow lookup falls back to sequence 0", async () => {
+    for (const outcome of ["reject", "null", "negative", "slow"] as const) {
+      const d = deferredHead();
+      const h = harness(undefined, undefined, d.head);
+      h.stream.start();
+      if (outcome === "reject") d.reject(new Error("404"));
+      if (outcome === "null") d.resolve(null);
+      if (outcome === "negative") d.resolve(-1);
+      if (outcome === "slow") {
+        h.clock.advance(HEAD_TIMEOUT_MS - 1);
+        expect(h.sockets.length).toBe(0);
+        h.clock.advance(1);
+      }
+      await tick();
+      expect(h.sockets.length).toBe(1);
+      h.last().open();
+      expect(h.last().sent).toEqual(['{"type":"subscribe","after_sequence":0}']);
+      // a late answer after the timeout changes nothing
+      d.resolve(99);
+      await tick();
+      expect(h.sockets.length).toBe(1);
+    }
+  });
+
+  test("a stored sequence resumes without a lookup; a stale one restarts from the head", async () => {
+    const d = deferredHead();
+    const h = harness(undefined, 41, d.head);
+    h.stream.start();
+    h.last().open();
+    expect(h.last().sent).toEqual(['{"type":"subscribe","after_sequence":40}']);
+    expect(d.calls.length).toBe(0);
+    h.last().receive({ type: "ready", last_sequence: 40 });
+    expect(d.calls.length).toBe(1);
+    expect(h.sockets.length).toBe(1);
+    d.resolve(7);
+    await tick();
+    h.last().open();
+    expect(h.last().sent).toEqual(['{"type":"subscribe","after_sequence":7}']);
+  });
+
+  test("stop() during the lookup opens no socket", async () => {
+    const d = deferredHead();
+    const h = harness(undefined, undefined, d.head);
+    h.stream.start();
+    h.stream.stop();
+    d.resolve(5);
+    await tick();
+    h.clock.advance(60_000);
+    expect(h.sockets.length).toBe(0);
+  });
+});
+
 describe("useEventStream", () => {
   test("invalidates the mapped keys, reports status, and closes on unmount", () => {
     const client = new QueryClient();
@@ -593,6 +702,7 @@ describe("useEventStream", () => {
           url: "ws://127.0.0.1:7777/api/v1/ws",
           clock,
           storage: null,
+          head: null,
           createSocket: (url) => {
             const socket = new FakeSocket(url);
             sockets.push(socket);
@@ -648,6 +758,7 @@ describe("useEventStream", () => {
           url: "ws://127.0.0.1:7777/api/v1/ws",
           clock: new FakeClock(),
           storage: null,
+          head: null,
           createSocket: (url) => {
             const socket = new FakeSocket(url);
             sockets.push(socket);
@@ -716,6 +827,39 @@ describe("useEventStream", () => {
   });
 });
 
+describe("useEventStream head", () => {
+  test("a new tab subscribes after the hub's last_sequence from GET /hosts (PERF-F10a)", async () => {
+    const calls = mockRoutes({ "/api/v1/hosts": HOSTS });
+    const client = new QueryClient();
+    const sockets: FakeSocket[] = [];
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+    try {
+      const { unmount } = renderHook(
+        () =>
+          useEventStream({
+            url: "ws://127.0.0.1:7777/api/v1/ws",
+            clock: new FakeClock(),
+            storage: null,
+            createSocket: (url) => {
+              const socket = new FakeSocket(url);
+              sockets.push(socket);
+              return socket;
+            },
+          }),
+        { wrapper },
+      );
+      await waitFor(() => expect(sockets.length).toBe(1));
+      act(() => sockets[0]?.open());
+      expect(sockets[0]?.sent).toEqual([`{"type":"subscribe","after_sequence":${LOCAL_ROW.state.last_sequence}}`]);
+      expect(calls.map((c) => c.url)).toEqual(["/api/v1/hosts"]);
+      unmount();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
 describe("LiveUpdates", () => {
   test("gives its children the stream status", () => {
     const client = new QueryClient();
@@ -735,6 +879,7 @@ describe("LiveUpdates", () => {
               url: "ws://127.0.0.1:7777/api/v1/ws",
               clock,
               storage: null,
+              head: null,
               createSocket: (url: string) => {
                 const socket = new FakeSocket(url);
                 sockets.push(socket);

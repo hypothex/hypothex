@@ -15,6 +15,7 @@ import {
   createQueryClient,
   fetchAllRuns,
   fetchHosts,
+  fetchLastSequence,
   keepLastKnown,
   queryKeys,
   shouldRetry,
@@ -260,6 +261,21 @@ describe("hooks", () => {
     const { result } = renderHook(() => useProjectSweeps("toy"), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.map((s) => [s.id, s.n_runs])).toEqual([["s-7f3a", 6]]);
+  });
+
+  test("fetchLastSequence reads the hub's last_sequence from its local host row (PERF-F10a)", async () => {
+    mockRoutes({ "/api/v1/hosts": HOSTS });
+    const { qc } = setup();
+    expect(await fetchLastSequence(qc)).toBe(1022);
+    // the rows land in the hosts query, so the Hosts panel does not fetch them again
+    expect(qc.getQueryData<HostRow[]>(queryKeys.hosts())?.length).toBe(HOSTS.length);
+    const local = HOSTS[0] as HostRow;
+    mockRoutes({ "/api/v1/hosts": [{ ...local, state: { ...local.state, last_sequence: -3 } }] });
+    expect(await fetchLastSequence(createQueryClient())).toBeNull();
+    mockRoutes({ "/api/v1/hosts": HOSTS.slice(1) });
+    expect(await fetchLastSequence(createQueryClient())).toBeNull();
+    mockRoutes({});
+    expect(await fetchLastSequence(createQueryClient())).toBeNull();
   });
 
   test("fetchAllRuns asks for 4x more while a page comes back full, so no run is cut", async () => {

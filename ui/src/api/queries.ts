@@ -137,6 +137,36 @@ export async function fetchHosts(qc: QueryClient, signal?: AbortSignal): Promise
   return out;
 }
 
+/**
+ * The newest event sequence of the server's log: the hub's own row of `GET /api/v1/hosts`
+ * (`kind: "local"`, `state.last_sequence`). A new tab subscribes to live events after it
+ * instead of replaying the whole log (the page fetches every query anyway). The rows are
+ * stored as the hosts query, so a Hosts panel on the same page reuses them.
+ *
+ * Returns null when the request fails or the row has no valid sequence; the caller then
+ * replays from 0.
+ *
+ * Examples
+ * --------
+ * >>> await fetchLastSequence(qc)
+ * 1022
+ */
+export async function fetchLastSequence(qc: QueryClient): Promise<number | null> {
+  try {
+    const rows = await qc.fetchQuery({
+      queryKey: queryKeys.hosts(),
+      queryFn: ({ signal }) => fetchHosts(qc, signal),
+      // always fresh: a cached head from before a store switch could skip new events
+      staleTime: 0,
+      retry: false,
+    });
+    const last = rows.find((row) => row.kind === "local")?.state?.last_sequence;
+    return typeof last === "number" && Number.isSafeInteger(last) && last >= 0 ? last : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Retry transient failures twice; never retry a 4xx (the answer will not change). */
 export function shouldRetry(failureCount: number, error: unknown): boolean {
   if (error instanceof ApiError && error.status >= 400 && error.status < 500) return false;

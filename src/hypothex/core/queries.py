@@ -395,11 +395,6 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
         paths[f"dataset:{ref.name}"] = f"{ref.host}:{ref.path}"
     for i, art in enumerate(record.artifacts):
         paths[f"artifact:{art.kind}:{i}"] = f"{art.host}:{art.path}"
-    children = [
-        r.run_id
-        for r in ctx.index.list_runs(project=record.project, include_archived=True, limit=None)
-        if r.parent == run_id
-    ]
     return RunDetail(
         record=record,
         scores=ctx.store.read_scores(record.project, run_id),
@@ -407,7 +402,7 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
         notes=ctx.store.read_notes(record.project, run_id),
         has_diff=(run_dir / "git.diff").is_file(),
         metric_names=sorted({p.name for p in ctx.index.metric_points(run_id)}),
-        children=sorted(children),
+        children=sorted(ctx.index.child_run_ids(run_id)),
     )
 
 

@@ -199,3 +199,21 @@ def test_refresh_registers_again_when_the_config_changed(ctx: Context, toy_repo:
     assert ctx.store.load_project("toy").config == entry.config
     assert ctx.index.get_project("toy") == entry
     assert entry.registered_at >= first.registered_at
+
+
+def test_show_run_finds_children_without_listing_the_project(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PERF-F8a: children come from the indexed parent column, archived ones too
+    seed_finished_run(ctx, toy_repo, "r1")
+    ctx.create_run(make_record("r3", parent="r1"))
+    ctx.create_run(make_record("r2", parent="r1"))
+    ctx.create_run(make_record("other"))
+    q.archive_run(ctx, "r3")
+
+    def no_listing(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("show_run listed the project's runs")
+
+    monkeypatch.setattr(ctx.index, "list_runs", no_listing)
+    assert q.show_run(ctx, "r1").children == ["r2", "r3"]
+    assert q.show_run(ctx, "other").children == []

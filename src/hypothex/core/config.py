@@ -479,6 +479,41 @@ def has_cycle(data: Any) -> bool:
     return False
 
 
+def validation_summary(exc: ValidationError) -> str:
+    """
+    Say what a pydantic validation error found, one ``loc: msg`` part per problem.
+
+    Unlike ``str(exc)`` it has no input dumps, types, or documentation links.
+    A problem of the whole model (a ``model_validator``) has no location, and
+    its ``ValueError`` text is given as it is.
+
+    Parameters
+    ----------
+    exc : ValidationError
+        The error to summarize.
+
+    Returns
+    -------
+    str
+        The problems, joined by ``"; "``.
+
+    Examples
+    --------
+    >>> try:
+    ...     ProjectConfig.model_validate({"project": "x", "bogus": 1, "env": {"python": 3}})
+    ... except ValidationError as exc:
+    ...     print(validation_summary(exc))
+    env.python: Input should be a valid list; bogus: Extra inputs are not permitted
+    """
+    parts = []
+    for error in exc.errors():
+        cause = error.get("ctx", {}).get("error")
+        msg = str(cause) if error["type"] == "value_error" and cause is not None else error["msg"]
+        where = ".".join(str(p) for p in error["loc"])
+        parts.append(f"{where}: {msg}" if where else msg)
+    return "; ".join(parts)
+
+
 def load_project_config(repo: Path) -> ProjectConfig:
     """
     Load and validate ``<repo>/hypothex.yaml``.
@@ -524,8 +559,8 @@ def load_project_config(repo: Path) -> ProjectConfig:
     else:
         try:
             return ProjectConfig.model_validate(data)
-        except (ValidationError, ValueError) as exc:
-            raise ConfigError(f"{path}: {exc}") from exc
+        except ValidationError as exc:
+            raise ConfigError(f"{path}: {validation_summary(exc)}") from exc
     where = "" if line is None else f" (line {line})"
     raise ConfigError(f"{path}: {message}{where}")
 

@@ -379,3 +379,32 @@ def test_task_reeval_from_another_machine_goes_to_the_hub(
         runner.invoke(app, ["reeval", "--task", "toy-acc"], catch_exceptions=False)
     with pytest.raises(StoreError, match="unknown project"):
         runner.invoke(app, ["reeval", "--task", "toy/toy-acc"], catch_exceptions=False)
+
+
+def test_task_reeval_waits_for_the_hubs_full_scoring_budget(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow task must not fall back locally while the hub is still scoring it."""
+    from hypothex.mcp import server
+
+    ctx.register_project(toy_repo)
+    observed: list[float] = []
+
+    def hub_call(
+        method: str,
+        path: str,
+        body: dict | None = None,
+        *,
+        token: str | None = None,
+        timeout: float = 120.0,
+    ) -> dict:
+        observed.append(timeout)
+        return {"evaluated": ["remote"], "skipped": {}, "warnings": []}
+
+    monkeypatch.setattr(server, "hub_call", hub_call)
+    # An explicit remote project is absent locally, so this takes the CLI-to-hub route.
+    report = cli_main._reeval_task(
+        ctx, "remote/toy-acc", None, {"metric": None, "force": False, "created_by": "human"}
+    )
+    assert report.evaluated == ["remote"]
+    assert observed == [server.TASK_REEVAL_SECONDS]

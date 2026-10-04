@@ -149,6 +149,7 @@
     "[].git.untracked_count",
     "[].gpus_requested",
     "[].host",
+    "[].host_state",
     "[].hypothesis",
     "[].kind",
     "[].params",
@@ -171,6 +172,7 @@
   "show": [
     "children",
     "has_diff",
+    "host_state",
     "metric_names",
     "notes",
     "paths",

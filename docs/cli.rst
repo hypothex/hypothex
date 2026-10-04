@@ -31,6 +31,9 @@ Show one task: dataset, metrics, stages, and repo.
    hx runs --json
 
 List runs, newest first, with filters for project, task, status, and tag.
+``runs --json`` rows and ``show --json`` include ``host_state`` from the hub
+(``null`` when unavailable or local), so clients can distinguish a run status from
+its host connection state.
 
 .. code-block:: bash
 
@@ -110,7 +113,8 @@ Run the ``infer`` stage again with this run's checkpoint, recording a new run wh
    hx reeval --task TASK --json
 
 Re-score saved predictions with the current metric versions; old scores are kept and
-new scores are appended.
+new scores are appended. A task re-evaluation sent through the hub waits up to
+one hour for scoring, matching the MCP task re-evaluation budget.
 
 Compare
 -------

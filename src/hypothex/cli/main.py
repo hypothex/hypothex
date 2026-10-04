@@ -402,17 +402,27 @@ def _hub_token() -> str | None:
     return resolve_hub_token(home=_home_path())
 
 
-def _hub(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+def _hub(
+    method: str, path: str, body: dict[str, Any] | None = None, *, timeout: float = 120.0
+) -> Any:
     # The hub client lives with the MCP helpers; import lazily to keep `hx` fast.
     from hypothex.mcp.server import hub_call
 
-    return hub_call(method, path, body, token=_hub_token())
+    return hub_call(method, path, body, token=_hub_token(), timeout=timeout)
 
 
-def _hub_try(method: str, path: str, body: dict[str, Any] | None = None) -> Any | None:
+def _hub_try(
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    timeout: float | None = None,
+) -> Any | None:
     from hypothex.mcp.server import HubUnavailableError
 
     try:
+        if timeout is not None:
+            return _hub(method, path, body, timeout=timeout)
         return _hub(method, path, body)
     except HubUnavailableError:
         return None
@@ -1261,7 +1271,11 @@ def _reeval_task(c: Context, ref: str, project: str | None, body: dict[str, Any]
 
     def through_hub(project_name: str, task_name: str) -> EvalReport | None:
         path = f"/api/v1/tasks/{project_name}/{task_name}/reeval"
-        out = _hub_try("POST", path, {**body, "command_id": new_command_id()})
+        from hypothex.mcp.server import TASK_REEVAL_SECONDS
+
+        out = _hub_try(
+            "POST", path, {**body, "command_id": new_command_id()}, timeout=TASK_REEVAL_SECONDS
+        )
         return None if out is None else EvalReport.model_validate(out)
 
     try:

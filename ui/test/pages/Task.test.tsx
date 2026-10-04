@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-libra
 import { PanelRegistryContext } from "../../src/pages/components/PanelGrid";
 import type { QueryResponse, ViewDetail, ViewInfo } from "../../src/pages/components/types";
 import type { RunRecord } from "../../src/api/models";
-import { TaskPage, boardMeta } from "../../src/pages/Task";
+import { TaskPage, boardMeta, reevalLine } from "../../src/pages/Task";
 import { REPO, RUN_RF, RUN_SVM, makeBoard, makeDetail, makeRecord } from "./fixtures";
 import { type Call, HttpReply, fakeRegistry, mockApi, renderWithClient, restoreFetch } from "./helpers";
 
@@ -54,7 +54,7 @@ function routes(view: string): Record<string, unknown> {
     [`GET ${BASE}/views`]: VIEWS,
     [`GET ${BASE}/views/${view}`]: detail(info),
     [`POST ${BASE}/views/query`]: PANELS,
-    [`POST ${BASE}/reeval`]: { evaluated: 12 },
+    [`POST ${BASE}/reeval`]: { evaluated: ["r1", "r2"], skipped: {}, warnings: [] },
     "GET /api/v1/projects/toy-classifier/sweeps": [],
   };
 }
@@ -64,6 +64,22 @@ const registry = fakeRegistry(["stat_strip", "leaderboard"]);
 test("boardMeta counts configs and runs and lists metric versions", () => {
   expect(boardMeta(makeBoard())).toEqual(["2 configs, 6 runs", "accuracy v1", "macro_f1 v1"]);
   expect(boardMeta({ ...makeBoard(), needs_reeval: ["r1"] }).at(-1)).toBe("1 need re-eval");
+});
+
+test("reevalLine counts re-scored and skipped runs, with each skip reason", () => {
+  expect(reevalLine({ evaluated: ["a", "b"], skipped: {}, warnings: [] })).toBe("2 re-scored");
+  expect(reevalLine({ evaluated: [], skipped: { a: "no predictions" }, warnings: [] })).toBe(
+    "0 re-scored · 1 skipped: no predictions",
+  );
+  expect(
+    reevalLine({
+      evaluated: ["a"],
+      skipped: { b: "no predictions", c: "no predictions", d: "metric failed" },
+      warnings: ["w1", "w2"],
+    }),
+  ).toBe("1 re-scored · 3 skipped: no predictions ×2, metric failed ×1 · 2 warnings");
+  // a partial answer must not break the line
+  expect(reevalLine({} as never)).toBe("0 re-scored");
 });
 
 describe("TaskPage", () => {
@@ -123,6 +139,20 @@ describe("TaskPage", () => {
     const body = calls.find((c) => c.url === `${BASE}/reeval`)?.body as Record<string, unknown>;
     expect(typeof body.command_id).toBe("string");
     expect(body.created_by).toBe("human");
+    expect((await screen.findByRole("status", { name: "Re-evaluate" })).textContent).toBe("2 re-scored");
+  });
+
+  test("Re-evaluate all says when it re-scored nothing, and why", async () => {
+    mockApi({
+      ...routes("overview"),
+      [`POST ${BASE}/reeval`]: { evaluated: [], skipped: { r9: "no predictions" }, warnings: [] },
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "Re-evaluate all" }));
+    const status = await screen.findByRole("status", { name: "Re-evaluate" });
+    expect(status.textContent).toBe("0 re-scored · 1 skipped: no predictions");
+    expect(status.getAttribute("title")).toBe("r9: no predictions");
   });
 
   const RUNS_URL = "GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=1000";
@@ -379,5 +409,35 @@ describe("TaskPage", () => {
     renderWithClient(<TaskPage project="toy-classifier" task="toy-test" view="nope" />, { registry });
     expect((await screen.findByRole("alert")).textContent).toBe("no view 'nope' for toy-test");
     expect(screen.queryByRole("region")).toBeNull();
+  });
+
+  test("an unknown project shows one not-found state with no actions", async () => {
+    const gone = new HttpReply(404, { error: "unknown project 'nope'", type: "StoreError" });
+    const NOPE = "/api/v1/tasks/nope/nope";
+    mockApi({
+      [`GET ${NOPE}/leaderboard`]: gone,
+      [`GET ${NOPE}/views`]: gone,
+      [`GET ${NOPE}/views/overview`]: gone,
+      [`POST ${NOPE}/views/query`]: gone,
+    });
+    renderWithClient(<TaskPage project="nope" task="nope" />, { registry });
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Not found"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.getAllByRole("alert").map((a) => a.textContent)).toEqual(["unknown project 'nope'"]);
+    expect(screen.queryByRole("navigation", { name: "Views" })).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.queryByRole("link", { name: "+ view" })).toBeNull();
+    expect(screen.getByRole("link", { name: "All projects" }).getAttribute("href")).toBe("/");
+  });
+
+  test("a server error on the board is not a not-found state", async () => {
+    mockApi({
+      ...routes("overview"),
+      [`GET ${BASE}/leaderboard`]: new HttpReply(500, { error: "index locked", type: "StoreError" }),
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    expect((await screen.findByRole("alert")).textContent).toBe("index locked");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("toy-test");
+    expect(screen.getByRole("button", { name: "Re-evaluate all" })).toBeTruthy();
   });
 });

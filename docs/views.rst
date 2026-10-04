@@ -61,7 +61,9 @@ Metric references use ``name@version/key`` (version and key are optional). The
 aggregates ``/mean``, ``/median``, and ``/p95`` apply to samples and per-example values.
 Run usage totals are ``usage.usd``, ``usage.seconds``, ``usage.tokens_in``,
 ``usage.tokens_out``, and ``usage.calls``; ``usage.usd/solved`` divides a run's total by the
-examples it solved on the task's primary metric (cost per success). A logged history
+examples it solved on the task's primary metric (cost per success), and
+``usage.usd/attempt`` by the examples it attempted (its per-example rows of the primary
+metric; the ``agent_eval`` preset plots this on a log axis, like the "$ / attempt" stat). A logged history
 metric is named in full (``val/top1``). ``version`` is the task's version ordering key: the
 run param ``version_param`` names (``version`` by default), or the creation time of the
 group's first run when that param is missing; it works as a scatter ``x``, as a
@@ -77,14 +79,15 @@ Type           Shows
 stat_strip     A row of headline numbers.
 leaderboard    Seed groups ranked by the primary metric, with seed and test-set noise.
 curves         Metric history by step; seeds faint, mean bold, checkpoints and spikes.
-               Rows follow ``data.metrics`` order. A loss spike is one event per episode,
+               Rows follow ``data.metrics`` order; each run's series is thinned to 500
+               points that keep its shape (LTTB). A loss spike is one event per episode,
                labelled with its step (``spike 9k``); so is a kill (``killed 14k``).
                A ``NaN`` or infinite value the run logged is marked too (``NaN 9k``).
                ``group_by: run`` draws one column per run, named ``baseline r1``.
 scatter        One metric against another per group, with an optional Pareto front. A
                non-numeric ``params.``/``vars.`` x (e.g. ``v9``) is an ordinal axis in
-               natural order; rows worse than the best earlier version by more than its
-               95% CI are marked as regressions.
+               natural order; rows worse than the version just before them by more than
+               their 95% CIs allow are marked as regressions.
 distribution   Sample distributions (ECDF) with p50, p95, p99; ``scale: log`` for latency.
                ``render: table`` draws the percentile table, with the change vs the task's
                ``baseline`` group and a 95% bootstrap CI over repeats.
@@ -101,7 +104,10 @@ Sources for ``table`` and ``vega_lite``: ``runs``, ``scores``, ``metrics``,
 ``predictions``, ``samples``, ``usage``, ``traces``, and ``groups``. Every row of the
 per-run sources has ``run_id``,
 ``group_id``, ``label`` (the seed group's short name, as on the leaderboard), and
-``seed``. Encode charts by ``label`` so they show config names:
+``seed``. ``metrics`` rows of finished, failed and killed runs come from the index (at
+most 1,000 points per name, the last one always kept); a ``filter`` on ``name`` is
+applied in the index query, so a chart of one metric over many runs stays fast. Encode
+charts by ``label`` so they show config names:
 
 .. code-block:: yaml
 

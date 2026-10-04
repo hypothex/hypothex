@@ -83,8 +83,8 @@ curves         Metric history by step; seeds faint, mean bold, checkpoints and s
                ``group_by: run`` draws one column per run, named ``baseline r1``.
 scatter        One metric against another per group, with an optional Pareto front. A
                non-numeric ``params.``/``vars.`` x (e.g. ``v9``) is an ordinal axis in
-               natural order; rows worse than the best earlier version by more than its
-               95% CI are marked as regressions.
+               natural order; rows worse than the version just before them by more than
+               their 95% CIs allow are marked as regressions.
 distribution   Sample distributions (ECDF) with p50, p95, p99; ``scale: log`` for latency.
                ``render: table`` draws the percentile table, with the change vs the task's
                ``baseline`` group and a 95% bootstrap CI over repeats.

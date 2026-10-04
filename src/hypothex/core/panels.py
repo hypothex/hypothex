@@ -1216,22 +1216,19 @@ def _y_higher_is_better(scope: _Scope, y_ref: str) -> bool:
 
 def _mark_regressions(rows: list[dict[str, Any]], higher: bool) -> None:
     """
-    Flag rows worse than the best earlier row by more than its interval allows.
+    Flag rows worse than the row just before them by more than the intervals allow.
 
-    ``rows`` are in axis order. Higher-is-better: a row regresses when its
-    ``y_hi`` is below the best earlier row's ``y_lo``; lower-is-better: when
-    its ``y_lo`` is above the best earlier row's ``y_hi``. A ``None`` bound on
-    either side flags nothing. Ties keep the earlier row as best.
+    ``rows`` are in axis order, so each version is compared with the previous
+    version, not with the best so far: a version that improves on a bad one is
+    never flagged. Higher-is-better: a row regresses when its ``y_hi`` is below
+    the previous row's ``y_lo``; lower-is-better: when its ``y_lo`` is above the
+    previous row's ``y_hi``. A ``None`` bound on either side flags nothing.
     """
-    best: dict[str, Any] | None = None
-    for row in rows:
-        if best is not None:
-            mine = row["y_hi"] if higher else row["y_lo"]
-            bound = best["y_lo"] if higher else best["y_hi"]
-            if mine is not None and bound is not None:
-                row["regression"] = mine < bound if higher else mine > bound
-        if best is None or (row["y"] > best["y"] if higher else row["y"] < best["y"]):
-            best = row
+    for prev, row in zip(rows, rows[1:], strict=False):
+        mine = row["y_hi"] if higher else row["y_lo"]
+        bound = prev["y_lo"] if higher else prev["y_hi"]
+        if mine is not None and bound is not None:
+            row["regression"] = mine < bound if higher else mine > bound
 
 
 def _usage_values(scope: _Scope, run: RunRecord, field_name: str) -> list[float]:

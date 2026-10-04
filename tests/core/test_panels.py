@@ -898,8 +898,9 @@ def test_scatter_flags_regressions_on_ordinal_x(ctx: Context, toy_repo: Path) ->
     assert solved.meta["x_type"] == "ordinal"
     # 3 seeds, stdev 0.01: 95% t half-width = 4.303 * 0.01 / sqrt(3) = 0.0248 (no test-set
     # interval: the runs have no per-example scores). Accuracy is higher-is-better.
-    # v4: y_hi 0.6248 < best earlier (v3) y_lo 0.6752 -> regression.
-    # v5: 0.68 is below v3 but its y_hi 0.7048 >= 0.6752 -> within noise, not flagged.
+    # Each version is compared with the one just before it.
+    # v4: y_hi 0.6248 < previous (v3) y_lo 0.6752 -> regression.
+    # v5: 0.68 improves on v4 (below v3, the best so far, but that does not count).
     assert [(r["x"], r["regression"]) for r in solved.rows] == [
         ("v1", False),
         ("v2", False),
@@ -909,13 +910,14 @@ def test_scatter_flags_regressions_on_ordinal_x(ctx: Context, toy_repo: Path) ->
     ]
     assert solved.rows[3]["y_hi"] == pytest.approx(0.60 + 4.303 * 0.01 / math.sqrt(3))
     cost = _panel("scatter", data={"x": "params.version", "y": "usage.usd"})
-    # usage is lower-is-better: v1 (0.50, y_hi 0.5248) stays the best; every later y_lo
-    # (0.5752, 0.6752, 0.5752, 0.6552) is above it
+    # usage is lower-is-better. v2 (y_lo 0.5752) and v3 (0.6752) cost more than the version
+    # before (y_hi 0.5248, 0.6248); v4 (0.60) costs less than v3, so it is not flagged even
+    # though it costs more than v1, the cheapest so far; v5 (y_lo 0.6552) > v4 y_hi 0.6248.
     assert [r["regression"] for r in query_panel(ctx, "toy", "toy-acc", cost).rows] == [
         False,
         True,
         True,
-        True,
+        False,
         True,
     ]
 

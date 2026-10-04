@@ -381,13 +381,17 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
             assert [row["x"] for row in cost.rows] == [f"v{i}" for i in range(1, 10)]
             # v1 (data.js): $74.28, $79.57, $75.70 for 80 solved targets in each seed
             assert cost.rows[0]["y"] == pytest.approx((74.28 + 79.57 + 75.70) / 240)
-            # regressions (contract 1.6). Solved: no drop is outside the best earlier
-            # version's CI (the largest, v6 0.558 vs v5 0.607, is inside v5's interval).
+            # regressions (contract 1.6): each version against the one just before it.
+            # Solved: no drop is outside the intervals (the largest, v6 0.558 vs v5 0.607,
+            # has y_hi 0.627 above v5's y_lo 0.536).
             assert not any(row["regression"] for row in solved.rows)
             # $ per solved is lower-is-better (usage.*), seed t-intervals over 3 seeds:
-            # v3 is the cheapest (0.918, hi 1.004); v4..v9 all have y_lo above 1.004
-            # (v4 1.127, v9 1.056), so each is flagged
-            assert [row["regression"] for row in cost.rows] == [False] * 3 + [True] * 6
+            # v4 (y_lo 1.127) costs more than v3 (y_hi 1.004) and v5 (1.314) more than v4
+            # (1.142); v6 (1.521) is inside v5's interval (hi 1.565); v7..v9 are cheaper
+            # than the version before them, so they are not flagged
+            assert [row["regression"] for row in cost.rows] == [False] * 3 + [True] * 2 + [
+                False
+            ] * 4
             # Changes: one row per version with only what changed (kinds/agent_iteration)
             changes = results["Changes"].rows
             assert [row["version"] for row in changes] == [f"v{i}" for i in range(1, 10)]

@@ -77,7 +77,8 @@ Type           Shows
 stat_strip     A row of headline numbers.
 leaderboard    Seed groups ranked by the primary metric, with seed and test-set noise.
 curves         Metric history by step; seeds faint, mean bold, checkpoints and spikes.
-               Rows follow ``data.metrics`` order. A loss spike is one event per episode,
+               Rows follow ``data.metrics`` order; each run's series is thinned to 500
+               points that keep its shape (LTTB). A loss spike is one event per episode,
                labelled with its step (``spike 9k``); so is a kill (``killed 14k``).
                A ``NaN`` or infinite value the run logged is marked too (``NaN 9k``).
                ``group_by: run`` draws one column per run, named ``baseline r1``.
@@ -101,7 +102,10 @@ Sources for ``table`` and ``vega_lite``: ``runs``, ``scores``, ``metrics``,
 ``predictions``, ``samples``, ``usage``, ``traces``, and ``groups``. Every row of the
 per-run sources has ``run_id``,
 ``group_id``, ``label`` (the seed group's short name, as on the leaderboard), and
-``seed``. Encode charts by ``label`` so they show config names:
+``seed``. ``metrics`` rows of finished, failed and killed runs come from the index (at
+most 1,000 points per name, the last one always kept); a ``filter`` on ``name`` is
+applied in the index query, so a chart of one metric over many runs stays fast. Encode
+charts by ``label`` so they show config names:
 
 .. code-block:: yaml
 

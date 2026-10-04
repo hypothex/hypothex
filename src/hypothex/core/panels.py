@@ -8,7 +8,7 @@ import random
 import statistics
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC
 from typing import Any
 
@@ -30,7 +30,7 @@ from hypothex.core.leaderboard import (
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
 from hypothex.core.seeds import summarize
-from hypothex.core.sources import group_labels, iter_rows, select_fields
+from hypothex.core.sources import group_labels, iter_rows, metric_points, select_fields
 from hypothex.core.stats import ecdf_points, quantile
 from hypothex.core.store import ProjectEntry
 from hypothex.core.views import (
@@ -48,6 +48,10 @@ SPIKE_FACTOR = 5.0
 AGGREGATES = ("mean", "median", "min", "max", "p50", "p90", "p95", "p99")
 PERCENTILES = (("p50", 0.50), ("p95", 0.95), ("p99", 0.99))
 BOOTSTRAP_RESAMPLES = 1000
+CURVE_POINTS = 500
+"""Most points per run and metric in a ``curves`` panel; longer series are thinned by LTTB."""
+
+_BoardKey = tuple[str, str, tuple[str, ...]]
 
 
 class PanelResult(BaseModel):
@@ -73,33 +77,101 @@ class PanelResult(BaseModel):
 
 
 @dataclass
+class _ViewCache:
+    """
+    Data the panels of one view share, so each piece is built once per view.
+
+    Boards and labels are keyed by project, task and the panel's run ids (in
+    order), so panels with the same runs share them and a panel whose
+    ``data.filter`` or ``data.pick`` narrows its runs gets its own.
+    """
+
+    entries: dict[str, ProjectEntry] = field(default_factory=dict)
+    task_runs: dict[tuple[str, str], list[RunRecord]] = field(default_factory=dict)
+    boards: dict[_BoardKey, Leaderboard] = field(default_factory=dict)
+    labels: dict[_BoardKey, dict[str, str]] = field(default_factory=dict)
+    points: dict[tuple[str, frozenset[str] | None], list[MetricPoint]] = field(default_factory=dict)
+    files: dict[str, list[MetricPoint]] = field(default_factory=dict)
+
+    def runs_of(self, ctx: Context, entry: ProjectEntry, task: str) -> list[RunRecord]:
+        """A new list of the task's unarchived runs, oldest first (read once)."""
+        key = (entry.project, task)
+        if key not in self.task_runs:
+            runs = ctx.index.list_runs(project=entry.project, task=task, limit=None)
+            runs.sort(key=lambda r: (r.created_at, r.run_id))
+            self.task_runs[key] = runs
+        return list(self.task_runs[key])
+
+    def board(
+        self, ctx: Context, entry: ProjectEntry, task: str, runs: list[RunRecord]
+    ) -> Leaderboard:
+        """Leaderboard over ``runs`` (built once per run set)."""
+        key = (entry.project, task, tuple(r.run_id for r in runs))
+        if key not in self.boards:
+            self.boards[key] = _build_board(ctx, entry, task, runs)
+        return self.boards[key]
+
+    def group_labels(
+        self, ctx: Context, entry: ProjectEntry, task: str, runs: list[RunRecord]
+    ) -> dict[str, str]:
+        """
+        Label per seed-group id of ``runs`` (built once per run set).
+
+        The leaderboard's label for groups on the board; ``sources.group_labels``
+        (the same rule) for groups that are not, such as running or unscored ones.
+        """
+        key = (entry.project, task, tuple(r.run_id for r in runs))
+        if key not in self.labels:
+            own = _task_labels(entry, task, runs)
+            board = self.board(ctx, entry, task, runs)
+            self.labels[key] = {**own, **{row.group_id: row.label for row in board.rows}}
+        return self.labels[key]
+
+    def metric_points(
+        self, ctx: Context, runs: list[RunRecord], names: Iterable[str] | None
+    ) -> dict[str, list[MetricPoint]]:
+        """
+        ``sources.metric_points`` of ``runs``; each run and name set is read once.
+
+        A live run's ``metrics.jsonl`` is parsed once per view, whatever names
+        the panels ask for.
+        """
+
+        def read_file(run: RunRecord) -> list[MetricPoint]:
+            if run.run_id not in self.files:
+                self.files[run.run_id] = ctx.store.read_metric_points(run.project, run.run_id)
+            return self.files[run.run_id]
+
+        wanted = None if names is None else frozenset(names)
+        missing = [r for r in runs if (r.run_id, wanted) not in self.points]
+        if missing:
+            read = metric_points(ctx, missing, wanted, read_file)
+            for r in missing:
+                self.points[(r.run_id, wanted)] = read.get(r.run_id, [])
+        return {r.run_id: self.points[(r.run_id, wanted)] for r in runs}
+
+
+@dataclass
 class _Scope:
-    """The runs a panel sees plus lazily built task-level data."""
+    """The runs a panel sees plus task-level data from the view's cache."""
 
     ctx: Context
     entry: ProjectEntry
     task: str
     runs: list[RunRecord]
-    _board: Leaderboard | None = None
-    _labels: dict[str, str] | None = None
+    cache: _ViewCache
 
     def board(self) -> Leaderboard:
-        """Leaderboard over this scope's runs (built once)."""
-        if self._board is None:
-            self._board = _build_board(self.ctx, self.entry, self.task, self.runs)
-        return self._board
+        """Leaderboard over this scope's runs (built once per view)."""
+        return self.cache.board(self.ctx, self.entry, self.task, self.runs)
 
     def labels(self) -> dict[str, str]:
-        """
-        Label per seed-group id of this scope's runs (built once).
+        """Label per seed-group id of this scope's runs (``_ViewCache.group_labels``)."""
+        return self.cache.group_labels(self.ctx, self.entry, self.task, self.runs)
 
-        The leaderboard's label for groups on the board; ``sources.group_labels``
-        (the same rule) for groups that are not, such as running or unscored ones.
-        """
-        if self._labels is None:
-            own = _task_labels(self.entry, self.task, self.runs)
-            self._labels = {**own, **{row.group_id: row.label for row in self.board().rows}}
-        return self._labels
+    def points(self, names: Iterable[str] | None) -> dict[str, list[MetricPoint]]:
+        """Metric history per run of this scope's runs, of ``names`` only (``None``: all)."""
+        return self.cache.metric_points(self.ctx, self.runs, names)
 
 
 def _task_labels(entry: ProjectEntry, task: str, runs: list[RunRecord]) -> dict[str, str]:
@@ -153,7 +225,7 @@ def query_panel(
     >>> query_panel(ctx, "toy", "toy-acc", panel).meta  # doctest: +SKIP
     {'text': 'hello'}
     """
-    return _panel(ctx, project, task, panel, runs_filter, {})
+    return _panel(ctx, project, task, panel, runs_filter, _ViewCache())
 
 
 def query_view(ctx: Context, project: str, task: str, view: ViewSpec) -> list[PanelResult]:
@@ -163,7 +235,8 @@ def query_view(ctx: Context, project: str, task: str, view: ViewSpec) -> list[Pa
     The view must already be resolved (``views.get_view`` returns resolved
     views). A panel that fails with a Hypothex error yields an empty result
     whose ``meta.error`` holds the message, so one bad panel never hides the
-    others.
+    others. The panels share one cache: the task's runs, each leaderboard, and
+    each run's metric points are read once per view, not once per panel.
 
     Parameters
     ----------
@@ -186,11 +259,11 @@ def query_view(ctx: Context, project: str, task: str, view: ViewSpec) -> list[Pa
     >>> [r.type for r in query_view(ctx, "toy", "toy-acc", view)]  # doctest: +SKIP
     ['stat_strip', 'leaderboard']
     """
-    entries: dict[str, ProjectEntry] = {}
+    cache = _ViewCache()
     out: list[PanelResult] = []
     for panel in view.panels:
         try:
-            out.append(_panel(ctx, project, task, panel, view.runs, entries))
+            out.append(_panel(ctx, project, task, panel, view.runs, cache))
         except HypothexError as exc:
             out.append(
                 PanelResult(type=panel.type, title=panel.title, rows=[], meta={"error": str(exc)})
@@ -204,16 +277,16 @@ def _panel(
     task: str,
     panel: PanelSpec,
     runs_filter: RunFilter | None,
-    entries: dict[str, ProjectEntry],
+    cache: _ViewCache,
 ) -> PanelResult:
-    """Dispatch one panel; ``entries`` caches refreshed projects across a view."""
+    """Dispatch one panel; ``cache`` holds what the panels of a view share."""
     if panel.type == "markdown":
         return _markdown(panel)
     if panel.type == "trace" and panel.data.run_id:
         return _trace_for(ctx, panel, panel.data.run_id, panel.data.example_id)
-    if project not in entries:
-        entries[project] = refresh_project(ctx, project)
-    return _query(ctx, entries[project], task, panel, runs_filter)
+    if project not in cache.entries:
+        cache.entries[project] = refresh_project(ctx, project)
+    return _query(ctx, cache.entries[project], task, panel, runs_filter, cache)
 
 
 def _query(
@@ -222,18 +295,18 @@ def _query(
     task: str,
     panel: PanelSpec,
     runs_filter: RunFilter | None,
+    cache: _ViewCache,
 ) -> PanelResult:
     if task not in entry.config.tasks:
         raise ConfigError(f"unknown task {task!r} in project {entry.project!r}")
-    runs = ctx.index.list_runs(project=entry.project, task=task, limit=None)
-    runs.sort(key=lambda r: (r.created_at, r.run_id))
+    runs = cache.runs_of(ctx, entry, task)
     if runs_filter is not None:
         runs = [r for r in runs if _run_matches(r, runs_filter)]
     if panel.data.filter and panel.type not in ("table", "vega_lite"):
-        labels = _task_labels(entry, task, runs)
         if "label" in panel.data.filter:
-            board = _build_board(ctx, entry, task, runs)
-            labels.update({row.group_id: row.label for row in board.rows})
+            labels = cache.group_labels(ctx, entry, task, runs)
+        else:
+            labels = _task_labels(entry, task, runs)
         keep = {
             row["run_id"]
             for row in iter_rows(ctx, runs, "runs", labels=labels)
@@ -244,10 +317,10 @@ def _query(
         latest = {group_id_for(r): r.run_id for r in runs}
         runs = [r for r in runs if r.run_id in set(latest.values())]
     elif panel.data.pick == "best":
-        board_rows = _build_board(ctx, entry, task, runs).rows
+        board_rows = cache.board(ctx, entry, task, runs).rows
         best = set(board_rows[0].run_ids) if board_rows else set()
         runs = [r for r in runs if r.run_id in best]
-    scope = _Scope(ctx=ctx, entry=entry, task=task, runs=runs)
+    scope = _Scope(ctx=ctx, entry=entry, task=task, runs=runs, cache=cache)
     return _HANDLERS[panel.type](scope, panel)
 
 
@@ -392,7 +465,8 @@ def _table_rows(scope: _Scope, panel: PanelSpec) -> tuple[list[dict[str, Any]], 
     if source == "groups":
         full: Iterable[dict[str, Any]] = group_rows(scope)
     else:
-        full = iter_rows(scope.ctx, scope.runs, source, labels=scope.labels())
+        names = _filter_names(panel.data.filter) if source == "metrics" else None
+        full = iter_rows(scope.ctx, scope.runs, source, labels=scope.labels(), names=names)
     for row in full:
         if versions:
             row[VERSION_REF] = versions[row["run_id"]][1]
@@ -410,6 +484,16 @@ def _table_rows(scope: _Scope, panel: PanelSpec) -> tuple[list[dict[str, Any]], 
     if total > MAX_TABLE_ROWS:
         meta["warnings"] = [f"showing the first {MAX_TABLE_ROWS} of {total} rows"]
     return rows, meta
+
+
+def _filter_names(flt: dict[str, Any] | None) -> list[str] | None:
+    """The metric names a ``metrics`` source ``data.filter`` keeps, or ``None`` for all."""
+    want = (flt or {}).get("name")
+    if isinstance(want, str):
+        return [want]
+    if isinstance(want, list) and all(isinstance(n, str) for n in want):
+        return want
+    return None
 
 
 def _version_text(members: list[RunRecord], versions: dict[str, tuple[bool, str]]) -> str:
@@ -731,6 +815,60 @@ def _merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]
     return merged
 
 
+def lttb(xs: list[float], ys: list[float], limit: int) -> list[int]:
+    """
+    Indices of at most ``limit`` points that keep a line's shape (LTTB).
+
+    Largest-Triangle-Three-Buckets: the first and last points are always kept.
+    The points between them are cut into ``limit - 2`` buckets in order; from
+    each bucket the point that makes the largest triangle with the point kept
+    before it and the mean of the next bucket is kept, so peaks such as a loss
+    spike survive the thinning.
+
+    Parameters
+    ----------
+    xs : list of float
+        x of each point, in drawing order.
+    ys : list of float
+        y of each point.
+    limit : int
+        Most points to keep; a series that is not longer is kept whole, and a
+        limit below 3 keeps every point.
+
+    Returns
+    -------
+    list of int
+        Increasing indices into ``xs`` / ``ys``.
+
+    Examples
+    --------
+    >>> lttb([0, 1, 2, 3, 4], [0, 0, 9, 0, 0], 3)
+    [0, 2, 4]
+    >>> lttb([0, 1], [5, 6], 3)
+    [0, 1]
+    """
+    n = len(xs)
+    if n <= limit or limit < 3:
+        return list(range(n))
+    out = [0]
+    size = (n - 2) / (limit - 2)
+    kept = 0
+    for b in range(limit - 2):
+        start, end = int(b * size) + 1, int((b + 1) * size) + 1
+        nxt_end = min(int((b + 2) * size) + 1, n)
+        nxt = range(end, nxt_end) if end < nxt_end else range(n - 1, n)
+        mx = math.fsum(xs[j] for j in nxt) / len(nxt)
+        my = math.fsum(ys[j] for j in nxt) / len(nxt)
+        ax, ay = xs[kept], ys[kept]
+        kept = max(
+            range(start, end),
+            key=lambda j: abs((ax - mx) * (ys[j] - ay) - (ax - xs[j]) * (my - ay)),
+        )
+        out.append(kept)
+    out.append(n - 1)
+    return out
+
+
 def short_step(x: float) -> str:
     """
     A step or x value in at most four characters: ``950``, ``9.5k``, ``14k``, ``1.2M``.
@@ -820,10 +958,11 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
         for r in members:
             group_of[r.run_id] = key
     names_seen: list[str] = []
+    needed = None if wanted is None else [*wanted, *([x_name] if x_name != "step" else [])]
+    history = scope.points(needed)
     for run in scope.runs:
-        points = scope.ctx.store.read_metric_points(run.project, run.run_id)
         by_name: dict[str, list[MetricPoint]] = defaultdict(list)
-        for p in points:
+        for p in history.get(run.run_id, []):
             by_name[p.name].append(p)
         x_of: dict[int, float] | None = None
         if x_name != "step":
@@ -836,19 +975,22 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
             series = sorted(by_name.get(name, []), key=lambda p: p.step)
             if series and name not in names_seen:
                 names_seen.append(name)
-            for p in series:
-                x = p.step if x_of is None else x_of.get(p.step)
-                if x is None:
-                    continue
-                last_x = x if last_x is None else max(last_x, x)
+            xy = [
+                (x, p.value)
+                for p in series
+                if (x := p.step if x_of is None else x_of.get(p.step)) is not None
+            ]
+            if xy:
+                last_x = max([x for x, _ in xy] + ([] if last_x is None else [last_x]))
+            for i in lttb([x for x, _ in xy], [v for _, v in xy], CURVE_POINTS):
                 rows.append(
                     {
                         "run_id": run.run_id,
                         "group_id": group_of[run.run_id],
                         "seed": run.seed,
                         "name": name,
-                        "step": x,
-                        "value": p.value,
+                        "step": xy[i][0],
+                        "value": xy[i][1],
                     }
                 )
             if "loss" in name.lower():
@@ -1034,8 +1176,7 @@ def _resolve_value(scope: _Scope, run: RunRecord, ref: str) -> float | None:
         return _aggregate(whole, "mean")
     if key in AGGREGATES:
         return _aggregate(_samples(scope, run, head), key)
-    history = scope.ctx.store.read_metric_points(run.project, run.run_id)
-    points = [p for p in history if p.name == ref]
+    points = scope.points([ref]).get(run.run_id, [])
     return max(points, key=lambda p: p.step).value if points else None
 
 

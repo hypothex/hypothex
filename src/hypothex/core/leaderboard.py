@@ -31,13 +31,15 @@ from hypothex.core.records import (
     ScoreRecord,
     UsageTotals,
 )
-from hypothex.core.seeds import Stats, intervals_overlap, summarize
+from hypothex.core.seeds import Stats, summarize
 
 PerExample = dict[str, dict[str, dict[str, Any]]]
 """run_id -> example_id -> per-example fields of the primary metric."""
 
 BINARY_FIELDS = ("correct", "solved")
 LABEL_MAX = 32
+NOISE_ALPHA = 0.05
+"""``within_noise_of_best`` is true when the test against the best gives ``p >= 0.05``."""
 LEGACY_DIRTY = "dirty"
 """``diff_key`` of a dirty run recorded without a diff hash."""
 _CLAUSE = re.compile(
@@ -83,6 +85,7 @@ class LeaderboardRow(BaseModel):
     primary: Stats | None
     single_seed: bool
     within_noise_of_best: bool | None = None
+    """``vs_best.p >= 0.05`` (not a real win yet); ``None`` for the best row or without a p."""
     label: str
     seed_values: dict[str, list[float]]
     identical_seeds: bool
@@ -657,9 +660,10 @@ def build_leaderboard(
         best = rows[0]
         for row in rows[1:]:
             if row.primary is not None and best.primary is not None:
-                row.within_noise_of_best = intervals_overlap(row.primary, best.primary)
                 binary = picked[1] if picked is not None else None
                 row.vs_best = _versus(row, best, pooled, binary, primary)
+                p = row.vs_best.p
+                row.within_noise_of_best = None if p is None else p >= NOISE_ALPHA
 
     by_id = {r.run_id: r for r in eligible}
     members_of = {row.group_id: [by_id[i] for i in row.run_ids] for row in rows}

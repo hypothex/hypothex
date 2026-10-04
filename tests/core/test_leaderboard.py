@@ -609,3 +609,32 @@ def test_reruns_of_a_seed_are_one_sample() -> None:
     # the same seed twice is one seed: single-seed badge, no t-interval
     assert single.n == 1 and single.single_seed and single.run_ids == ["x0", "x1"]
     assert single.primary is not None and single.primary.ci_low is None
+
+
+def test_within_noise_follows_the_paired_test_not_seed_intervals() -> None:
+    # wide seed intervals overlap, but the paired test on 40 examples is clear
+    runs = [krun(f"a{i}", "a", minute=i) for i in range(3)]
+    runs += [krun(f"b{i}", "b", minute=i) for i in range(3)]
+    scores = {"a0": acc(0.5), "a1": acc(1.0), "a2": acc(0.9), "b0": acc(0.4)}
+    scores |= {"b1": acc(0.9), "b2": acc(0.5)}
+    per_example = {f"a{i}": binary(40, set(range(30))) for i in range(3)}
+    per_example |= {f"b{i}": binary(40, set(range(10))) for i in range(3)}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    vs = board.rows[1].vs_best
+    assert vs is not None and vs.p is not None and vs.p < 1e-5
+    assert board.rows[1].within_noise_of_best is False
+    # identical seeds (std 0) do not make a real win when the paired p is large
+    runs = [krun(f"k{i}", "k", minute=i) for i in range(2)]
+    runs += [krun(f"l{i}", "l", minute=i) for i in range(2)]
+    scores = {"k0": acc(0.6), "k1": acc(0.6), "l0": acc(0.5), "l1": acc(0.5)}
+    per_example = {f"k{i}": binary(10, set(range(6))) for i in range(2)}
+    per_example |= {f"l{i}": binary(10, set(range(1, 6))) for i in range(2)}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    vs = board.rows[1].vs_best
+    assert vs is not None and vs.p == pytest.approx(1.0)
+    assert board.rows[1].within_noise_of_best is True
+    # no p (single seeds, no examples): unknown
+    runs = [krun("x", "x"), krun("y", "y")]
+    board = build_leaderboard("toy", "t", KINDS, runs, {"x": acc(0.9), "y": acc(0.1)})
+    assert board.rows[1].vs_best is not None and board.rows[1].vs_best.p is None
+    assert board.rows[1].within_noise_of_best is None

@@ -397,8 +397,11 @@ def topk_accuracy(examples: list[Example], *, k: list[int]) -> MetricResult:
 - Leaderboard rows are seed groups: `mean ± std (n=3)`. Single runs show `n=1`. `n` counts
   distinct seeds: reruns of one seed are averaged into one sample (runs without a seed
   count one each), so a rerun never narrows the error bar.
-- When two rows' 95% intervals overlap (t-interval; n ≥ 2 each), the UI marks the
-  difference "within noise". n=1 rows get a "single seed" badge.
+- A row whose test against the best row (8.5: sign test, paired bootstrap, or Welch over
+  seeds) gives `p ≥ 0.05` is marked "within noise" (`within_noise_of_best`); with no `p`
+  (no per-example data and n < 2) it is unknown. Seed t-intervals alone do not decide it:
+  wide seeds can hide a clear paired win, and zero-variance seeds can fake one. n=1 rows
+  get a "single seed" badge.
 
 ## 7. Interfaces
 

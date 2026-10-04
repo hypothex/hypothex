@@ -5,10 +5,10 @@ Scope: finish handover queue step 2 on `audit-fixes`; parent coordinates merge.
 - [x] Read handover, audit summary and original performance method.
 - [x] Confirm Wave 3 CLI uv opt-in and SLURM/uv documentation handoffs exist.
 - [x] Complete baseline Python/UI/docs checks; test first for integration fixes.
-- [ ] Review branch implementation and merge origin/main without discarding either side.
-- [ ] Remeasure the original 19,993-run synthetic store; distinguish cold, warm and semantics.
-- [ ] Run final required checks and review final diff.
-- [ ] Commit, push, open and link backend audit PR; report CI to parent.
+- [x] Review branch implementation and merge origin/main without discarding either side.
+- [x] Remeasure the original 19,993-run synthetic store; distinguish cold, warm and semantics.
+- [x] Run final required checks and review final diff.
+- [x] Commit report and prepare a reviewed PR body; parent owns push/open/link and CI.
 - [x] Remove integrated area worktrees only if ordinary removal preserves all data.
 
 Decisions and evidence
@@ -44,3 +44,21 @@ Decisions and evidence
 - First merged-main Python run: 1721 passed, 3 skipped, 11 deselected; the sole failure
   was a property model that did not account for intentional SLURM array refusal.
   Updated the independent option model and added an explicit example; 150 affected tests pass.
+- Before performance measurement, found a second stale af-O process tree from
+  pytest-1295: five orphaned supervisors and five gate-wait children, all over seven
+  hours old. Confirmed command/cwd evidence and terminated only those processes;
+  retained `stale-processes-1295.json` beside the earlier cleanup evidence.
+
+- Final code `8e1a1ef` includes main through PR #14. Python: 1727 passed,
+  3 skipped, 11 deselected (493.38 s); Docker: 11 passed (200.55 s).
+  UI: 848 unit tests, both TypeScript checks, production build, 44 Playwright tests,
+  and all three demo shutdown cases pass. Ruff lint/format, ty and Sphinx pass.
+- Performance measured in an isolated clone during a quiet window beginning
+  2026-10-04 22:00:15 UTC. Full report and raw samples are committed under
+  `docs/audits/2026-10-05-backend-performance.{md,json}`. Historical baseline is
+  explicitly identified, cold hydration and CLI regressions retained, and the
+  original fixture is preserved. New harnesses and complete logs remain under
+  `/tmp/hx-af-perf-after`.
+- Parent independently reviewed `44a6b58`, `aa5da40`, and `0234e93` with no new issue.
+  PR body/title prepared in `/tmp/hx-handoff-evidence/backend-pr-body.md` and
+  `backend-pr-title.txt`; parent will inspect, push, open/link, and monitor CI.

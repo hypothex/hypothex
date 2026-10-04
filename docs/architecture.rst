@@ -28,12 +28,14 @@ a part of it, and writes made during the rebuild are kept. One rebuild runs at a
 time where advisory file locks are available. Otherwise, independent staging
 directories and retained change markers preserve writes across overlapping rebuilds.
 A rebuild does not read ``metrics.jsonl``: a run's downsampled points are
-indexed the first time they are asked for. 20,000 runs rebuild in about 15 s.
+indexed the first time they are asked for, so rebuild time excludes reading
+metric histories.
 
-A run's metric curve is indexed as at most 500 points per metric, thinned with
+A run's metric curve is indexed as at most 1,000 points per metric, thinned with
 LTTB (largest triangle three buckets), which keeps the peaks: a one-step spike in
 the loss stays on the curve. Points indexed by an older Hypothex keep their old
-thinning until the run is indexed again (``hx reindex``).
+thinning until the run is indexed again (``hx reindex``). View curves further
+limit each series to 500 points; the metrics API accepts a separate ``max_points`` limit.
 
 Every write of indexed data adds 1 to the index *generation* (a ``meta`` row
 written in the same transaction). Setting a mirror cursor or marking scores stale

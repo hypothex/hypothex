@@ -6432,6 +6432,26 @@ describe("dry run", () => {
     expect(rows.slice(3).map((r) => r.className)).toEqual(["refused", "refused"]);
   });
 
+  test("owner preflight refusals remain outside the confirmation total", async () => {
+    const plan = {
+      ...CLEAN_PLAN,
+      items: CLEAN_PLAN.items.slice(0, 1),
+      total_bytes: 96_400_000_000,
+      refused: [
+        { path: "/host/alias/parent.pt", run_id: "parent", reason: "used by reader" },
+        { path: "/host/unavailable.pt", run_id: "other", reason: "host check failed: unavailable" },
+      ],
+    };
+    mockApi({ [PLAN]: plan });
+    renderWithClient(<CleanPanel items={STORAGE_ITEMS} now={NOW} />);
+    await dryRun();
+    expect(screen.getByText("⊘ used by reader")).toBeTruthy();
+    expect(screen.getByText("⊘ host check failed: unavailable")).toBeTruthy();
+    fireEvent.click(button("apply"));
+    const dialog = screen.getByRole("dialog", { name: "delete 96.4 GB" });
+    expect(within(dialog).getByText("1 paths · 1 hosts · cp-8e41c0d2")).toBeTruthy();
+  });
+
   test("kinds: a chip per artifact kind; pulled toggles include_pulled; days must be whole", async () => {
     const calls = mockApi({ [PLAN]: CLEAN_PLAN });
     renderWithClient(<CleanPanel items={STORAGE_ITEMS} now={NOW} />);
@@ -10243,3 +10263,12 @@ All automated:
 8. **Scopes are hints.** The UI hides `storage`, disables Stop/Cancel for non-owners and limits pairing scopes, but every decision is the server's; a 403 shows as an error line. Since review round 2 a run on the hub's own machine needs admin (contract 1.3): a `launch` collaborator who picks `local` in the phase 2 Launch dialog gets the hub's 403 (`runs on this machine need admin; launch on a host`) as an error line, and a host placement works as before. Admin-only reads are never requested for a non-admin, so the browser console stays clean (Playwright's console guard enforces it).
 9. **Kept out of scope.** No client function for `POST /api/v1/auth/logout` (no screen has a logout button yet; revoking the session in Settings does it), `GET /api/v1/compare/export` (no compare screen exports yet), or the digest routes (the digest shows up as a notebook entry). Their routes are checked in `types.test.ts`.
 10. **Dry run of this plan.** Every task's code was applied, in order, to a copy of the `phase-2` branch as of `1b5de39` (phase 2 Tasks 1–22), with phase 2's final `RunActions.tsx` and Task 28 e2e files taken from the phase 2 plan, and with the phase 3 paths added to a copy of `types.ts` (Task 2 Step 3 needs the backend). Result: `bun test` 858 of 859 pass (the one failure, `tokens.css`, only needs `docs/mockups/ui-v4/` next to the copy), `tsc --noEmit` and `tsc -p e2e` print nothing, and `playwright test --list` shows the 20 team tests (19 run, 1 skipped) and no team spec in the other projects. The dry run found and fixed three plan bugs before this version: `exportMenu.ts` next to `ExportMenu.tsx` clashed on macOS's case-insensitive file system (now `exportFormats.ts`); adding `["export"]` to `RUN_EVENT_INVALIDATES` broke the phase 2 event tests (dropped; since review round 2 the export key lives under `["leaderboard", project]` instead, so run events refresh it with no list change); and testing-library joins a chip's spans with spaces in its accessible name (`01J8…a1b2 ✓ 0.913`).
+
+
+## Review round 4 integration notes
+
+- Storage continues to display the server's `CleanPlan.refused` and `CleanResult.skipped` reasons. The hub now preflights remote candidates through the owning environment's read-only `/api/v1/storage/check`; the browser does not call that env endpoint. Relative or aliased checkpoint readers therefore appear as `used by <run_id>`, and an unavailable preflight appears as a refusal before confirmation. Task 16 adds a storage regression with both refusal reasons and checks that the confirmation total contains only accepted items.
+- The export endpoint returns text. `ExportMenu` previews/copies/downloads that text without interpreting metric values; no `ExportTable` browser schema is introduced. Backend Tasks 10 and 12 add mixed-unit/primary-swap regressions and name scaled columns in the footnote. Existing frontend exact-text copy/download tests remain applicable.
+- MCP cookie fallback is resolved in server middleware; private authenticated-credential state is never a frontend model or response field. Deferred sweep triggers likewise remain server-private; existing notification status/events continue to drive the UI after issuance ends.
+
+During the final baseline refresh, regenerate OpenAPI types from the assembled backend so the admin-only env preflight appears in the schema, and recheck phase-2 anchors against the then-current main. The queued default-token design may change bootstrap/auth integration; apply its final contract only after step 9 is complete.

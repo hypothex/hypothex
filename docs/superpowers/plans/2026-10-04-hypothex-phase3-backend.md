@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-26-hypothex-design.md`, sections **9** and **13** (phase 3), 3.4 (Postgres + Alembic), 5.3 (auth failures stop retrying until re-pair), 5.4 (`route: url` lab server), 7.2 (`hx export`, `hx storage`), 7.3 (phase 3 auth), 7.4 (`/mcp`), 12 (notifier in the daemon), 14 (decisions log).
 
-**Contract:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-contract.md`, sections 1–9 and 11. Every name, field, route, and file listed there is exact. This plan adds private helpers, a few public helpers (each task's Interfaces lists them), and optional keyword arguments (`AuthStore(session_days=)`, `leaderboard_table(directions=)`, `send_slack(transport=)`, `send_email(ssl_context=)`, `Notifier(ssl_context=)`, `send_digest(since=)`, `upsert(keep_max=)`, `hub_call(text=)`, `create_app(auth=, public_url=, notifier=)`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the contract was ambiguous or silent and how this plan reads it.
+**Contract:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-contract.md`, sections 1–9 and 11. Every name, field, route, and file listed there is exact. This plan adds private helpers, a few public helpers (each task's Interfaces lists them), and optional keyword arguments (`AuthStore(session_days=)`, `leaderboard_table(directions=, value_formats=)`, `send_slack(transport=)`, `send_email(ssl_context=)`, `Notifier(ssl_context=)`, `send_digest(since=)`, `upsert(keep_max=)`, `hub_call(text=, discover_token=)`, `create_app(auth=, public_url=, notifier=)`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the contract was ambiguous or silent and how this plan reads it.
 
 **Prerequisite:** `main` at `e27a3a2` (phases 1a, 1b, 2, plus `p2-backend-minors`, `p2-docs-ci` (`6ace21d`), `p2-property-tests`, and the phase 2 frontend so far). Every "replace X with Y" anchor below was re-checked against `e27a3a2`; the drift from the first base `738c711` that touches this plan: `cli/main.py::_write_private` is hardened (Task 2 moves that version into `core.settings`), `launch --gpus` is `LaunchGpusOpt` (no task edits `launch`'s signature), `mcp/server.py` `launch_sweep` sends `sweep_checkout(...)` in its remote body (Task 32 Step 4.6 adds `created_by`/`owner` next to it), `api/app.py`'s lifespan `finally` nests the joins in a second `try/finally` (Task 30 adds the notifier thread before the loop that *starts* the threads), `remote/hub.py` `_SAFE_NAME`/`_halt` changed (no task edits them), and `docs/index.rst`'s User guide toctree ends `remote, gpus, slurm, sweeps, cost` (Task 46). Review round 3: `main` is now `8df4760` (the phase 2 frontend merge, PR #12), and `git diff e27a3a2 8df4760 -- src docs/index.rst` is empty, so every anchor still holds. If `main` has moved on when this plan starts, re-run `git diff 8df4760 main -- src docs/index.rst` and re-check each anchor the diff touches. No frontend code is touched. **Frontend:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-frontend.md` (contract section 10) starts after this plan is merged and uses `hx demo --with-team` for fixtures.
 
@@ -4426,9 +4426,9 @@ git commit -m "feat(leaderboard): paper baselines per task with version match an
 **Interfaces:**
 - Consumes: `Leaderboard`, `LeaderboardRow`, `BaselineRow`, `NoiseInterval` (Task 9 / phase 1b), `metric_ref`, `parse_metric_key`, `Stats`.
 - Produces (contract 1.6, exact): `ExportFormat`, `NoiseMode`, `ExportOptions`, `ExportCell`, `ExportRow`, `ExportTable`, `leaderboard_table(board, opts)`.
-- Produces (additive keyword): `leaderboard_table(board, opts, *, directions: dict[str, bool] | None = None)` — metric name → higher is better for columns other than the primary (a `Leaderboard` knows only the primary's direction; `export_task` passes the project's metrics, Task 12). Default `True`.
+- Produces (additive keyword): `leaderboard_table(board, opts, *, directions: dict[str, bool] | None = None, value_formats: dict[str, str] | None = None)` — metric name → higher is better for columns other than the primary (a `Leaderboard` knows only the primary's direction; `export_task` passes the project's metrics, Task 12). Default `True`.
 - Produces (public helpers): `EXTENSIONS = {"latex": "tex", "markdown": "md", "csv": "csv"}`, `MARK_SINGLE = "¹"`, `MARK_NOISE = "†"`, `MARK_VERSION = "‡"`, `IDENTICAL = "◇"`; `mark_best(rows, higher_is_better) -> None`; `footnotes(versions, rows, opts, *, scaled, extra=None) -> list[str]` (shared by `compare_table`, Task 12).
-- Rules: columns are `opts.metrics` (normalized `metric/key`) or the primary, then every other key a group has, sorted. Group cells take `Stats` of the row; `std` only when `noise` is `both`/`seed` and `n > 1`; `identical` when `noise` is `both`/`seed` and every seed value of that column is equal (`n > 1`); `lo`/`hi`/`method`/`n_examples` only on the primary column, from `row.test_interval`, when `noise` is `both`/`test`. `best` marks the best group mean per column (ties all). `percent=True` multiplies every number by 100 when `board.value_format == "fraction"` and adds the footnote `values ×100`. Baseline rows (`kind="baseline"`, `n=0`) come after the groups, never best; `version_mismatch` when a shown metric's `version_match` is false. Footnotes, in order: `metric versions: m@v, ...` (shown metrics), the legend of the marks present (`¹ single seed`, `◇×n identical seeds`, `† within noise of best` when `mark_noise`, `‡ metric version differs from the paper`) joined with ` · `, `[lo, hi] 95% test-set interval (<methods>)`, `values ×100`, `baselines: <name> — <source>; ...`.
+- Rules: columns are `opts.metrics` (normalized `metric/key`) or the primary, then every other key a group has, sorted. Group cells take `Stats` of the row; `std` only when `noise` is `both`/`seed` and `n > 1`; `identical` when `noise` is `both`/`seed` and every seed value of that column is equal (`n > 1`); `lo`/`hi`/`method`/`n_examples` only on the primary column, from `row.test_interval`, when `noise` is `both`/`test`. `best` marks the best group mean per column (ties all). `percent=True` scales each column independently where its format is `fraction`, including mean, std, interval, and baseline cells; Task 12 derives formats from each metric unit and values. Unspecified secondary formats default to `number`. The footnote names the scaled columns (`values ×100: acc/value`). Baseline rows (`kind="baseline"`, `n=0`) come after the groups, never best; `version_mismatch` when a shown metric's `version_match` is false. Footnotes, in order: `metric versions: m@v, ...` (shown metrics), the legend of the marks present (`¹ single seed`, `◇×n identical seeds`, `† within noise of best` when `mark_noise`, `‡ metric version differs from the paper`) joined with ` · `, `[lo, hi] 95% test-set interval (<methods>)`, `values ×100: <columns>`, `baselines: <name> — <source>; ...`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4596,11 +4596,40 @@ def test_percent_scales_fraction_boards() -> None:
     table = leaderboard_table(make_board(), ExportOptions(percent=True))
     cell = table.rows[0].cells["acc/value"]
     assert cell.mean == pytest.approx(92.0) and cell.std == pytest.approx(1.0)
-    assert cell.lo == pytest.approx(87.1) and "values ×100" in table.footnotes
+    assert cell.lo == pytest.approx(87.1) and "values ×100: acc/value" in table.footnotes
     board = make_board()
     board.value_format = "number"
     plain = leaderboard_table(board, ExportOptions(percent=True))
     assert plain.rows[0].cells["acc/value"].mean == 0.92
+
+
+@pytest.mark.parametrize("primary", ["acc/value", "latency/p95"])
+def test_percent_scales_only_fraction_columns_in_groups_and_baselines(primary: str) -> None:
+    board = make_board()
+    for row in board.rows:
+        row.scores["latency/p95"] = Stats(n=2, mean=440.0, std=10.0)
+        row.seed_values["latency/p95"] = [430.0, 450.0]
+    board.baselines[0].values["latency/p95"] = 400.0
+    board.baselines[0].std["latency/p95"] = 5.0
+    board.primary = primary
+    board.value_format = "fraction" if primary == "acc/value" else "number"
+    board.higher_is_better = primary == "acc/value"
+    table = leaderboard_table(
+        board,
+        ExportOptions(percent=True, metrics=["acc/value", "latency/p95"]),
+        directions={"acc/value": True, "latency/p95": False},
+        value_formats={"acc/value": "fraction", "latency/p95": "number"},
+    )
+    assert table.rows[0].cells["acc/value"].mean == pytest.approx(92.0)
+    assert table.rows[0].cells["acc/value"].std == pytest.approx(1.0)
+    assert table.rows[0].cells["latency/p95"].mean == 440.0
+    assert table.rows[0].cells["latency/p95"].std == 10.0
+    baseline = next(row for row in table.rows if row.kind == "baseline")
+    assert baseline.cells["acc/value"].mean == pytest.approx(90.0)
+    assert baseline.cells["acc/value"].std == pytest.approx(0.4)
+    assert baseline.cells["latency/p95"].mean == 400.0
+    assert baseline.cells["latency/p95"].std == 5.0
+    assert "values ×100: acc/value" in table.footnotes
 
 
 def test_no_baselines_option_and_empty_board() -> None:
@@ -4751,11 +4780,12 @@ def _group_cell(
 
 
 def _baseline_row(
-    base: BaselineRow, columns: list[str], opts: ExportOptions, scale: float
+    base: BaselineRow, columns: list[str], opts: ExportOptions, scales: dict[str, float]
 ) -> ExportRow:
     cells: dict[str, ExportCell] = {}
     shown: set[str] = set()
     for column in columns:
+        scale = scales[column]
         value = base.values.get(column)
         if value is None:
             cells[column] = _empty_cell()
@@ -4864,7 +4894,11 @@ def footnotes(
 
 
 def leaderboard_table(
-    board: Leaderboard, opts: ExportOptions, *, directions: dict[str, bool] | None = None
+    board: Leaderboard,
+    opts: ExportOptions,
+    *,
+    directions: dict[str, bool] | None = None,
+    value_formats: dict[str, str] | None = None,
 ) -> ExportTable:
     """
     Turn a leaderboard into an export table.
@@ -4878,6 +4912,9 @@ def leaderboard_table(
     directions : dict of str to bool, optional
         Column ref (``latency/p95``), else metric name -> higher is better, for
         columns other than the primary.
+    value_formats : dict of str to str, optional
+        Column ref -> format. The primary defaults to ``board.value_format``;
+        unspecified secondary columns default to ``number`` (never guess a unit).
 
     Returns
     -------
@@ -4892,8 +4929,9 @@ def leaderboard_table(
         else given.get(c, given.get(parse_metric_key(c)[0], True))
         for c in columns
     }
-    scaled = opts.percent and board.value_format == "fraction"
-    scale = 100.0 if scaled else 1.0
+    formats = {board.primary: board.value_format, **(value_formats or {})}
+    scales = {c: 100.0 if opts.percent and formats.get(c) == "fraction" else 1.0 for c in columns}
+    scaled = [c for c in columns if scales[c] == 100.0]
     chosen = board.rows
     if opts.groups:
         wanted = set(opts.groups)
@@ -4906,7 +4944,7 @@ def leaderboard_table(
             label=row.label,
             key=row.group_id,
             n=row.n,
-            cells={c: _group_cell(row, c, board.primary, opts, scale) for c in columns},
+            cells={c: _group_cell(row, c, board.primary, opts, scales[c]) for c in columns},
             within_noise=row.within_noise_of_best is True,
             version_mismatch=False,
             source=None,
@@ -4915,7 +4953,7 @@ def leaderboard_table(
     ]
     mark_best(rows, higher)
     if opts.baselines:
-        rows += [_baseline_row(b, columns, opts, scale) for b in board.baselines]
+        rows += [_baseline_row(b, columns, opts, scales) for b in board.baselines]
     shown = {parse_metric_key(c)[0] for c in columns}
     versions = {m: v for m, v in board.metric_versions.items() if m in shown}
     return ExportTable(
@@ -4923,14 +4961,20 @@ def leaderboard_table(
         columns=columns,
         higher_is_better=higher,
         rows=rows,
-        footnotes=footnotes(versions, rows, opts, scaled=scaled),
+        footnotes=footnotes(
+            versions,
+            rows,
+            opts,
+            scaled=False,
+            extra=["values ×100: " + ", ".join(scaled)] if scaled else [],
+        ),
     )
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_export.py -v`
-Expected: `10 passed`.
+Expected: all cases pass, including the round-4 regressions.
 
 Run: `uv run ruff check src/hypothex/core/export.py tests/core/test_export.py && uv run ruff format --check src/hypothex/core/export.py tests/core/test_export.py && uv run ty check src`
 Expected: clean.
@@ -5396,7 +5440,7 @@ def render(table: ExportTable, opts: ExportOptions) -> str:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_export.py -v`
-Expected: `19 passed`.
+Expected: all cases pass, including the earlier round-4 regressions.
 
 Run: `uv run python -m doctest src/hypothex/core/export.py && uv run ruff check src/hypothex/core/export.py tests/core/test_export.py && uv run ruff format --check src/hypothex/core/export.py tests/core/test_export.py && uv run ty check src`
 Expected: clean.
@@ -5422,7 +5466,7 @@ git commit -m "feat(export): render booktabs LaTeX, Markdown, and CSV with golde
 - Consumes: `get_leaderboard`, `resolve_task` (`hypothex.core.queries`), `Context`, `group_label`.
 - Produces (contract 1.6, exact): `compare_table(ctx, run_ids, opts)`, `export_task(ctx, task, project, opts)`, `export_compare(ctx, run_ids, opts)`.
 - Produces (public helper): `task_table(ctx, task, project, opts) -> ExportTable` (the table `export_task` renders; `hx export --json` returns it, Task 43); `COMPARE_MAX_RUNS = 20`; `leaderboard.metric_higher_is_better(config, kind, ref) -> bool` (the leaderboard's one direction rule, now shared: a percentile key of a `system_bench` task, e.g. `latency/p95`, ranks lower-first whatever the metric says; else the metric's `higher_is_better`).
-- Rules: `compare_table` takes 2 to 20 runs (else `RunError`); one row per run (`kind="run"`, `n=1`, label = hypothesis clause or run id, key = run id); scores are each run's newest valid score at its project's current metric versions; columns are `opts.metrics` or the first run's task primary, then every other key, sorted; each column's direction is `metric_higher_is_better` for the run's task kind, so a benchmark's latency 300 is best over 440, as on the leaderboard; a shown metric whose version or direction differs between the compared runs' projects is refused (`RunError` "accuracy is accuracy@v1 in toy and accuracy@v2 in toy2; compare runs at one metric version"), and so is a column that ranks lower-first for some runs and higher-first for others; never merged into one column; no seed or test-set noise; `percent` multiplies a column by 100 only when it is a fraction (`headlines.value_format` of its unit and values is `fraction`, the leaderboard's rule; a latency of 440 ms stays 440) and the footnote `values ×100` appears only when a column was scaled; footnotes `metric versions: ...` and `one run per row`. `export_task` passes every column's `metric_higher_is_better` to `leaderboard_table` (a `system_bench` task's other percentile keys rank lower-first too).
+- Rules: `compare_table` takes 2 to 20 runs (else `RunError`); one row per run (`kind="run"`, `n=1`, label = hypothesis clause or run id, key = run id); scores are each run's newest valid score at its project's current metric versions; columns are `opts.metrics` or the first run's task primary, then every other key, sorted; each column's direction is `metric_higher_is_better` for the run's task kind, so a benchmark's latency 300 is best over 440, as on the leaderboard; a shown metric whose version or direction differs between the compared runs' projects is refused (`RunError` "accuracy is accuracy@v1 in toy and accuracy@v2 in toy2; compare runs at one metric version"), and so is a column that ranks lower-first for some runs and higher-first for others; never merged into one column; no seed or test-set noise; `percent` multiplies a column by 100 only when it is a fraction (`headlines.value_format` of its unit and values is `fraction`, the leaderboard's rule; a latency of 440 ms stays 440) and the footnote `values ×100` appears only when a column was scaled; footnotes `metric versions: ...` and `one run per row`. `export_task` passes every column's `metric_higher_is_better` and independently computed `value_format(metric_unit(...), values, direction)` to `leaderboard_table` (a `system_bench` task's other percentile keys rank lower-first too).
 
 - [ ] **Step 1: Create the golden files**
 
@@ -5540,6 +5584,35 @@ def test_compare_percent_scales_fractions(scored: Context) -> None:
     table = compare_table(scored, ["r1", "r2"], ExportOptions(percent=True))
     assert [r.cells["accuracy/value"].mean for r in table.rows] == [75.0, 25.0]
     assert "values ×100" in table.footnotes
+
+
+def test_task_percent_derives_each_columns_unit(scored: Context, toy_repo: Path) -> None:
+    config = yaml.safe_load((toy_repo / "hypothex.yaml").read_text())
+    config["metrics"]["latency"] = {
+        "version": "v1",
+        "fn": "toymetrics:accuracy",
+        "unit": "ms",
+        "higher_is_better": False,
+    }
+    config["tasks"]["toy-acc"]["metrics"].append("latency")
+    (toy_repo / "hypothex.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    scored.register_project(toy_repo)
+    for run_id in ("r1", "r2"):
+        scored.add_score(
+            scored.find_record(run_id),
+            ScoreRecord(
+                metric="latency",
+                version="v1",
+                key="value",
+                value=440.0,
+                created_at=utcnow(),
+            ),
+        )
+    from hypothex.core.export import task_table
+
+    table = task_table(scored, "toy-acc", "toy", ExportOptions(percent=True))
+    assert table.rows[0].cells["accuracy/value"].mean == pytest.approx(50.0)
+    assert table.rows[0].cells["latency/value"].mean == 440.0
 
 
 def test_compare_percent_leaves_latency_alone(bench: Context) -> None:
@@ -5774,7 +5847,14 @@ def task_table(ctx: Context, task: str, project: str | None, opts: ExportOptions
     board = get_leaderboard(ctx, name, entry.project)
     kind = entry.config.tasks[name].kind
     directions = {c: metric_higher_is_better(entry.config, kind, c) for c in _columns(board, opts)}
-    return leaderboard_table(board, opts, directions=directions)
+    formats: dict[str, str] = {}
+    for column in _columns(board, opts):
+        metric = entry.config.metrics.get(parse_metric_key(column)[0])
+        unit = metric_unit(column, metric.unit) if metric is not None else ""
+        values = [r.scores[column].mean for r in board.rows if column in r.scores]
+        values += [b.values[column] for b in board.baselines if column in b.values]
+        formats[column] = value_format(unit, values, directions[column])
+    return leaderboard_table(board, opts, directions=directions, value_formats=formats)
 
 
 def export_task(ctx: Context, task: str, project: str | None, opts: ExportOptions) -> str:
@@ -7143,7 +7223,7 @@ git commit -m "feat(notify): slack and smtp delivery with retryable and permanen
 - Consumes: `EventLog.since/last_sequence`, `Context.find_record`, `summarize_sweep`, `sweep_combos`, `sweep_tag`, `run_notice`, `sweep_notice`, `redact`, `resolve_secret`, `write_private`, `Settings`.
 - Produces (contract 1.7, exact): `NOTIFY_DIR`, `RETRY_DELAYS`, `TERMINAL_EVENTS`, `OutboxEntry`, `Notifier(ctx, settings, *, now=utcnow, transport=None)` with `scan()`.
 - Produces (additive): `Notifier(..., ssl_context=None)`; `Notifier.enqueue(notice, channels) -> list[OutboxEntry]` (redacts the notice itself, so no caller can skip it; idempotent per `(notice.id, channel)`; only configured channels; used by the digest, Task 19); `hypothex.core.sweeps.sweep_issuing(layout, project, sweep_id) -> bool` (True while `launch_sweep` or `extend_sweep` holds the sweep's lock to issue runs); `Notifier.secret_values() -> list[SecretStr]`; `SENDING_RETRY_SECONDS = 60.0`.
-- Files (contract 2): `<home>/notify/cursor.json` `{last_sequence}`, `outbox/<id>.<channel>.json` (one `OutboxEntry`, rewritten atomically), `sent.jsonl` (final entries) — all 0600.
+- Files (contract 2): `<home>/notify/pending-sweeps.json` (sweep key → terminal `Event`, persisted before cursor advancement; retried each scan and after restart until settled or excluded by current notification policy), `<home>/notify/cursor.json` `{last_sequence}`, `outbox/<id>.<channel>.json` (one `OutboxEntry`, rewritten atomically), `sent.jsonl` (final entries) — all 0600.
 - Rules: the first scan sets the cursor to the log's last sequence and enqueues nothing (no backlog flood). A run notifies on `run.finished|failed|killed|lost`, or on `mirror.run_updated` whose `original_type` is one of them. Its project's rule is `notify.projects[project]`, else `notify.default`, else nothing. A run that ended more than `max_age_hours` before now gets nothing. With `fold_sweeps` and a `sweep_id` whose sweep file is on this hub and whose run carries this hub's member tag `sweep:<owner8>:<id>` (a mirrored run of another hub's sweep with the same id is not a member and is notified as a run), nothing is sent while the sweep has a queued or running run, nor while it has fewer members than `len(sweep_combos(spec)) * len(spec.seeds)` and `sweep_issuing` says its launch is still issuing runs (a short first run ending before the last launch must not read `1/1`); when none of that holds, one sweep notice (the same id for every final event, so one entry) if at least one of its runs ended with a status in `rule.events` (a failure-only rule hears only about sweeps with a failure; `events: []` hears nothing); the sweep's summary is read once per event batch, after the batch is fetched, never kept across batches (a sweep whose last run ends between two batches still notifies). Otherwise the run's status must be in `rule.events`, and a finished run shorter than `min_seconds` is skipped. Notices are redacted (every configured secret value) by `enqueue` before they are written, whatever enqueues them (run, sweep, digest).
 
 - [ ] **Step 1: Write the failing test**
@@ -7550,6 +7630,37 @@ def test_a_sweep_still_launching_waits_for_its_last_run(
     assert partial.notice.title == "✗ toy sweep s-0007 1/1"
 
 
+def test_partial_sweep_notifies_after_issuance_failure_without_new_events(
+    toy: Context, hook: FakeWebhook, clock: Clock
+) -> None:
+    tag = small_sweep(toy, "s-0008", 3)
+    settings = settings_for()
+    notifier = primed(toy, settings, clock)
+    lock = sweep_path(toy.layout, "toy", "s-0008").with_suffix(".lock")
+    with lock.open("a") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        end_run(toy, "partial0", "failed", tags=[tag], sweep_id="s-0008")
+        assert notifier.scan() == []
+        cursor = toy.events.last_sequence()
+        pending = toy.layout.home / "notify" / "pending-sweeps.json"
+        assert json.loads(pending.read_text())
+        assert stat.S_IMODE(pending.stat().st_mode) == 0o600
+        toy.events.append("run.created", project="toy", run_id="partial0", payload={})
+        assert notifier.scan() == []
+        assert json.loads(pending.read_text())  # unrelated nonterminal event cannot erase it
+        cursor = toy.events.last_sequence()
+        # Restart while still issuing. It must neither lose the trigger nor emit early.
+        notifier = Notifier(toy, settings, now=clock)
+        assert notifier.scan() == []
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)  # later launch failed, no further run exists
+    assert toy.events.last_sequence() == cursor
+    (entry,) = notifier.scan()
+    assert entry.notice.title == "✗ toy sweep s-0008 1/1"
+    assert json.loads(pending.read_text()) == {}
+    assert notifier.scan() == []
+    assert Notifier(toy, settings, now=clock).scan() == []
+
+
 def test_unconfigured_channels_are_not_enqueued(
     toy: Context, hook: FakeWebhook, clock: Clock
 ) -> None:
@@ -7757,6 +7868,7 @@ class Notifier:
         self.outbox = self.root / "outbox"
         self._sent: set[str] | None = None
         self._sweeps: dict[tuple[str, str], SweepSummary | None] = {}
+        self._pending = self._read_pending()
 
     # files ---------------------------------------------------------------------------
     def _path(self, entry_id: str, channel: str) -> Path:
@@ -7773,6 +7885,21 @@ class Notifier:
 
     def _save_cursor(self, sequence: int) -> None:
         write_private(self.root / "cursor.json", json.dumps({"last_sequence": sequence}))
+
+    def _read_pending(self) -> dict[str, Event]:
+        try:
+            raw = json.loads((self.root / "pending-sweeps.json").read_text())
+            return {key: Event.model_validate(value) for key, value in raw.items()}
+        except (OSError, ValueError, TypeError, AttributeError):
+            return {}
+
+    def _save_pending(self) -> None:
+        write_private(
+            self.root / "pending-sweeps.json",
+            json.dumps(
+                {key: event.model_dump(mode="json") for key, event in self._pending.items()}
+            ),
+        )
 
     def _sent_keys(self) -> set[str]:
         if self._sent is None:
@@ -7900,7 +8027,12 @@ class Notifier:
         if last is None:
             self._save_cursor(self.ctx.events.last_sequence())
             return []
+        self._sweeps = {}
         made: list[OutboxEntry] = []
+        # Retry before fetching events, even with an empty log or after restart. If a
+        # later launch failed there may never be another member-ending event.
+        for event in list(self._pending.values()):
+            made += self._consider(event)
         while True:
             batch = self.ctx.events.since(last, SCAN_BATCH)
             # one summary per sweep per batch, read after the batch was fetched, so it holds
@@ -7928,51 +8060,78 @@ class Notifier:
         return self._sweeps[key]
 
     def _consider(self, event: Event) -> list[OutboxEntry]:
+        if _status_of(event) is None or event.run_id is None:
+            return []
+        made, deferred = self._consider_now(event)
+        # One trigger per sweep is sufficient; it is only used to find the live summary.
+        try:
+            record = self.ctx.find_record(event.run_id) if event.run_id else None
+        except StoreError:
+            record = None
+        owns_sweep = (
+            record is not None
+            and record.sweep_id is not None
+            and (sweep_tag(self.ctx.descriptor.environment_id, str(record.sweep_id)) in record.tags)
+        )
+        key = (
+            f"{record.project}/{record.sweep_id}"
+            if owns_sweep
+            else next((k for k, saved in self._pending.items() if saved.run_id == event.run_id), "")
+        )
+        if deferred:
+            self._pending[key] = event
+            self._save_pending()  # durable before scan can advance its event cursor
+        elif key in self._pending:
+            del self._pending[key]
+            self._save_pending()  # after enqueue: deterministic IDs make replay safe
+        return made
+
+    def _consider_now(self, event: Event) -> tuple[list[OutboxEntry], bool]:
         status = _status_of(event)
         if status is None or event.run_id is None:
-            return []
+            return [], False
         try:
             record = self.ctx.find_record(event.run_id)
         except StoreError:
-            return []
+            return [], False
         rule = self._rule(record.project)
         if rule is None:
-            return []
+            return [], False
         max_age = timedelta(hours=self.settings.notify.max_age_hours)
         if record.ended_at is not None and self.now() - record.ended_at > max_age:
-            return []
+            return [], False
         base = self.settings.server.public_url
         summary = self._sweep(record) if rule.fold_sweeps and record.sweep_id else None
         if summary is not None:
             counts = summary.counts
             if counts.get("queued", 0) + counts.get("running", 0) > 0:
-                return []
+                return [], True
             spec = summary.spec
             planned = len(sweep_combos(spec)) * len(spec.seeds)
             if counts.get("total", 0) < planned and sweep_issuing(
                 self.ctx.layout, spec.project, spec.id
             ):
-                return []  # launches still going out: the last run's ending notifies
+                return [], True  # durable retry after issuance ends, even without another event
             if not any(counts.get(wanted, 0) for wanted in rule.events):
-                return []  # the sweep's outcome holds no status this rule asks for
+                return [], False  # the sweep's outcome holds no status this rule asks for
             notice = sweep_notice(self.ctx, summary, base_url=base)
         else:
             if status not in rule.events:
-                return []
+                return [], False
             if status == "finished" and rule.min_seconds > 0:
                 wall = 0.0
                 if record.started_at is not None and record.ended_at is not None:
                     wall = (record.ended_at - record.started_at).total_seconds()
                 if wall < rule.min_seconds:
-                    return []
+                    return [], False
             notice = run_notice(self.ctx, record, base_url=base)
-        return self.enqueue(notice, rule.channels)
+        return self.enqueue(notice, rule.channels), False
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/notify/test_notifier.py -v`
-Expected: `13 passed`.
+Expected: all cases pass, including the round-4 regressions.
 
 Run: `uv run ruff check src/hypothex/notify src/hypothex/core/sweeps.py tests/notify && uv run ruff format --check src/hypothex/notify src/hypothex/core/sweeps.py tests/notify && uv run ty check src`
 Expected: clean.
@@ -9362,6 +9521,7 @@ def ended_run(
     parent: str | None = None,
     environment_id: str | None = None,
     vars: dict[str, Any] | None = None,
+    cwd: str | None = None,
 ) -> RunRecord:
     ended = utcnow() - timedelta(days=days_ago)
     record = make_record(
@@ -9371,6 +9531,7 @@ def ended_run(
         starred=starred,
         parent=parent,
         vars=vars or {},
+        **({"cwd": cwd} if cwd is not None else {}),
         started_at=ended - timedelta(hours=1),
         ended_at=None if status == RunStatus.RUNNING else ended,
         artifacts=[Artifact(kind=k, path=str(p)) for k, p in artifacts or []],
@@ -9400,6 +9561,8 @@ class FakeHost:
         ]
 
     def post_json(self, path: str, body: dict[str, Any]) -> Any:
+        if path == "/api/v1/storage/check":
+            return []  # read-only preflight; dedicated tests inject alias refusals
         assert path == "/api/v1/storage/delete"
         self.posted.append(body)
         return {"plan_id": body["plan_id"], "deleted": body["items"], "skipped": [],
@@ -9939,14 +10102,16 @@ git commit -m "feat(storage): measure runs, artifacts, and pulled files here and
 
 ### Task 21: Cleanup plans (`plan_clean`)
 
+The remote preflight call introduced here is served by Task 31 using Task 22's `check_artifacts`. Task 21 unit tests use `FakeHost`; assembled remote tests run after Task 31. A host without the check route is refused during planning, never assumed safe.
+
 **Files:**
 - Modify: `src/hypothex/core/storage.py`
 - Test: `tests/core/test_storage.py` (append)
 
 **Interfaces:**
 - Produces (contract 1.9, exact): `plan_clean(ctx, hosts, policy, *, created_by, settings, now=None) -> CleanPlan`.
-- Produces (public helpers): `PLAN_ID` (regex `^cp-[0-9a-f]{8}$`); `plans_dir(layout) -> Path` (`<home>/storage/plans`); `eligible(item, cutoff) -> bool`; `input_paths(record) -> list[str]` (paths a run reads but does not own: `vars["checkpoint"]` when a non-empty string); `overlaps(a, b) -> bool` (one path is the other or inside it).
-- Rules: an item is planned when its run is archived, unstarred, ended, `ended_at <= now − older_than_days`, it exists, its kind is in `kinds` (`["*"]` = every kind) or it is a `pulled` item (with `include_pulled`), and it matches `projects`/`hosts`. It is **refused** (listed in `refused` as `{path, run_id, reason}`) when another run that is not eligible records, on the same host, the same path as an artifact or a path inside or above it (`overlaps`: an archived run that owns the folder `/scratch/models` must not take a starred run's `/scratch/models/best.pt` with it), or reads it (or a path inside or above it) as an input (`input_paths`: `vars["checkpoint"]`, which `control.reinfer` sets and never records as an artifact) — `used by <run_id>`, e.g. an unarchived or queued `reinfer` child; a reader whose host the hub cannot tell blocks the path on every host — or the path is protected: here by `protected_reason`; for a host by what the hub knows (`/`, inside that host's run folder outside `artifacts/`/`pulled/`, a mapped checkout or the host's absolute Hypothex home, or an ancestor of one) — the host checks again at delete. A path two eligible runs share is planned once. The plan expires after `settings.plan_ttl_minutes`, is written 0600, older expired plans are pruned, and `storage.plan_created` `{plan_id, total_bytes, n_items}` is emitted.
+- Produces (public helpers): `PLAN_ID` (regex `^cp-[0-9a-f]{8}$`); `plans_dir(layout) -> Path` (`<home>/storage/plans`); `eligible(item, cutoff) -> bool`; `input_paths(record, *, local=False) -> list[str]` (checkpoint paths relative to recorded cwd; locally also resolved reader targets); `overlaps(a, b, *, local=False) -> bool` (equal/ancestor paths; locally parent-resolved aliases, preserving deletion-leaf symlinks). Remote candidates require the read-only owning-environment preflight from Tasks 22 and 31; a failed/unavailable check refuses those candidates.
+- Rules: an item is planned when its run is archived, unstarred, ended, `ended_at <= now − older_than_days`, it exists, its kind is in `kinds` (`["*"]` = every kind) or it is a `pulled` item (with `include_pulled`), and it matches `projects`/`hosts`. It is **refused** (listed in `refused` as `{path, run_id, reason}`) when another run that is not eligible records, on the same host, the same path as an artifact or a path inside or above it (`overlaps`: an archived run that owns the folder `/scratch/models` must not take a starred run's `/scratch/models/best.pt` with it), or reads it (or a path inside or above it) as an input (`input_paths`: `vars["checkpoint"]`, which `control.reinfer` sets and never records as an artifact) — `used by <run_id>`, e.g. an unarchived or queued `reinfer` child; a reader whose host the hub cannot tell blocks the path on every host — or the path is protected: here by `protected_reason`; for a host by what the hub knows (`/`, inside that host's run folder outside `artifacts/`/`pulled/`, a mapped checkout or the host's absolute Hypothex home, or an ancestor of one) — the owning host also preflights every remaining candidate through `/storage/check`, resolving its own aliases; it checks again at delete. A path two eligible runs share is planned once. The plan expires after `settings.plan_ttl_minutes`, is written 0600, older expired plans are pruned, and `storage.plan_created` `{plan_id, total_bytes, n_items}` is emitted.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -9997,6 +10162,25 @@ def test_a_folder_artifact_holding_a_kept_file_is_refused(toy: Context, tmp_path
     assert result.refused == [{"path": str(models), "run_id": "old", "reason": "used by kept"}]
 
 
+@pytest.mark.parametrize("alias", ["relative", "parent-symlink", "leaf-symlink"])
+def test_plan_protects_checkpoint_input_aliases(toy: Context, tmp_path: Path, alias: str) -> None:
+    checkpoint = write(tmp_path / "data" / "p.pt")
+    parent = tmp_path / "alias"
+    parent.symlink_to(checkpoint.parent, target_is_directory=True)
+    leaf = tmp_path / "input.pt"
+    leaf.symlink_to(checkpoint)
+    value = {
+        "relative": "data/p.pt",
+        "parent-symlink": str(parent / "p.pt"),
+        "leaf-symlink": str(leaf),
+    }[alias]
+    ended_run(toy, "parent", artifacts=[("checkpoint", checkpoint)])
+    ended_run(toy, "reader", archived=False, vars={"checkpoint": value}, cwd=str(tmp_path))
+    result = plan(toy)
+    assert result.items == [] and checkpoint.exists()
+    assert [row["reason"] for row in result.refused] == ["used by reader"]
+
+
 def test_protected_artifacts_are_refused(toy: Context, toy_repo: Path) -> None:
     ended_run(toy, "bad", artifacts=[("checkpoint", toy_repo)])
     result = plan(toy)
@@ -10035,6 +10219,18 @@ def test_plan_file_event_and_expiry(lab: Context) -> None:
 def test_project_and_host_filters(lab: Context) -> None:
     assert plan(lab, projects=["other"]).items == []
     assert plan(lab, hosts=["gpu1"]).items == []
+
+
+def test_unavailable_remote_preflight_refuses_candidates(toy: Context) -> None:
+    class NoCheck(FakeHost):
+        def post_json(self, path: str, body: dict[str, Any]) -> Any:
+            if path == "/api/v1/storage/check":
+                raise EnvUnreachableError("check unavailable")
+            return super().post_json(path, body)
+
+    result = plan(toy, FakeHosts(NoCheck([remote_row("g1", "/scratch/g1.pt")])))
+    assert result.items == [] and result.total_bytes == 0
+    assert result.refused[0]["reason"].startswith("host check failed:")
 
 
 def test_remote_items_and_remote_protection(toy: Context) -> None:
@@ -10129,53 +10325,52 @@ def eligible(item: StorageItem, cutoff: datetime) -> bool:
     )
 
 
-def input_paths(record: RunRecord) -> list[str]:
-    """
-    List the paths a run reads but does not own.
-
-    ``control.reinfer`` passes the parent's checkpoint in ``vars["checkpoint"]``
-    and records no artifact for it, so artifact lists alone miss this use.
+def input_paths(record: RunRecord, *, local: bool = False) -> list[str]:
+    """List checkpoint inputs, relative to the run's recorded working directory.
 
     Parameters
     ----------
     record : RunRecord
+    local : bool
+        Resolve filesystem aliases only on the environment that owns the run.
+        Readers follow a final symlink; artifact deletion only unlinks that leaf.
 
     Returns
     -------
     list of str
-        ``[vars["checkpoint"]]`` when it is a non-empty string, else ``[]``.
-
-    Examples
-    --------
-    >>> from tests.factories import make_record  # doctest: +SKIP
-    >>> input_paths(make_record(vars={"checkpoint": "/s/p.pt"}))  # doctest: +SKIP
-    ['/s/p.pt']
+        Absolute lexical path and, locally, its resolved input target.
     """
     value = record.vars.get("checkpoint")
-    return [value] if isinstance(value, str) and value else []
+    if not isinstance(value, str) or not value:
+        return []
+    path = Path(value)
+    if not path.is_absolute():
+        path = Path(record.cwd) / path
+    paths = {os.path.normpath(str(path))}
+    if local:
+        with contextlib.suppress(OSError, RuntimeError):
+            paths.add(str(path.resolve()))
+    return sorted(paths)
 
 
-def overlaps(a: str, b: str) -> bool:
-    """
-    Tell whether deleting one path touches the other (equal, or one inside the other).
+def overlaps(a: str, b: str, *, local: bool = False) -> bool:
+    """Compare equal/ancestor paths, resolving parent aliases only on their owner.
 
     Parameters
     ----------
     a, b : str
-        POSIX paths.
+        Absolute POSIX paths; reader targets have already passed ``input_paths``.
+    local : bool
+        Include parent-resolved forms without following the deletion leaf.
 
     Returns
     -------
     bool
-
-    Examples
-    --------
-    >>> overlaps("/s/ckpt", "/s/ckpt/model.pt"), overlaps("/s/a.pt", "/s/b.pt")
-    (True, False)
+        Whether deleting either path touches the other.
     """
-    pa, pb = Path(os.path.normpath(a)).parts, Path(os.path.normpath(b)).parts
-    n = min(len(pa), len(pb))
-    return pa[:n] == pb[:n]
+    left = _forms(a) if local else {Path(os.path.normpath(a))}
+    right = _forms(b) if local else {Path(os.path.normpath(b))}
+    return any(x == y or x in y.parents or y in x.parents for x in left for y in right)
 
 
 def _settled_by(record: RunRecord, cutoff: datetime) -> bool:
@@ -10195,7 +10390,7 @@ def _input_readers(
     own = ctx.descriptor.environment_id
     out: dict[str, list[tuple[str, RunRecord]]] = defaultdict(list)
     for record in ctx.index.list_runs(include_archived=True, limit=None):
-        paths = input_paths(record)
+        paths = input_paths(record, local=record.environment_id == own)
         if not paths:
             continue
         if record.environment_id == own:
@@ -10310,12 +10505,20 @@ def plan_clean(
         blockers = [
             o.run_id
             for o in users[item.host]
-            if o.run_id != item.run_id and overlaps(o.path, item.path) and not eligible(o, cutoff)
+            if o.run_id != item.run_id
+            and overlaps(o.path, item.path, local=item.host == LOCAL_HOST)
+            and not eligible(o, cutoff)
         ]
         blockers += [
             r.run_id
             for path, r in [*readers.get(item.host, []), *readers.get("*", [])]
-            if r.run_id != item.run_id and overlaps(path, item.path) and not _settled_by(r, cutoff)
+            if r.run_id != item.run_id
+            and overlaps(
+                path,
+                item.path,
+                local=item.host == LOCAL_HOST and r.environment_id == ctx.descriptor.environment_id,
+            )
+            and not _settled_by(r, cutoff)
         ]
         if blockers:
             reason = f"used by {blockers[0]}"
@@ -10346,6 +10549,39 @@ def plan_clean(
                 reason=f"archived {(moment - item.ended_at).days}d",
             )
         )
+    # The hub cannot resolve aliases in a host filesystem. Ask each owner to
+    # perform the same read-only checks it will repeat under the delete lock.
+    remote: dict[str, list[CleanItem]] = defaultdict(list)
+    for candidate in items:
+        if candidate.host != LOCAL_HOST:
+            remote[candidate.host].append(candidate)
+    for host, candidates in remote.items():
+        try:
+            if hosts is None:
+                raise HypothexError(f"host {host} is not connected")
+            answer = hosts.client(host).post_json(
+                "/api/v1/storage/check",
+                {
+                    "items": [i.model_dump(mode="json") for i in candidates],
+                    "older_than_days": policy.older_than_days,
+                },
+            )
+            if not isinstance(answer, list) or any(
+                not isinstance(row, dict)
+                or not all(isinstance(row.get(k), str) for k in ("path", "run_id", "reason"))
+                for row in answer
+            ):
+                raise ValueError("invalid storage check response")
+            blocked = {(row["run_id"], row["path"]): row["reason"] for row in answer}
+        except (HypothexError, ValueError, TypeError) as exc:
+            blocked = {(i.run_id, i.path): f"host check failed: {_brief(exc)}" for i in candidates}
+        for candidate in candidates:
+            reason = blocked.get((candidate.run_id, candidate.path))
+            if reason is not None:
+                items.remove(candidate)
+                refused.append(
+                    {"path": candidate.path, "run_id": candidate.run_id, "reason": reason}
+                )
     result = CleanPlan(
         plan_id=f"cp-{secrets.token_hex(4)}",
         policy=policy,
@@ -10366,7 +10602,7 @@ def plan_clean(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_storage.py -v`
-Expected: `13 passed`.
+Expected: all cases pass, including the round-4 regressions.
 
 Run: `uv run ruff check src/hypothex/core/storage.py tests/core/test_storage.py && uv run ruff format --check src/hypothex/core/storage.py tests/core/test_storage.py && uv run ty check src`
 Expected: clean.
@@ -10382,7 +10618,7 @@ git commit -m "feat(storage): dry-run cleanup plans with shared-checkpoint and p
 ### Task 22: Apply a plan, delete with re-checks, and record cleaned artifacts
 
 **Files:**
-- Modify: `src/hypothex/core/storage.py` (`cleanup_lock`, `delete_artifacts`, `apply_clean`, `cleaned_artifacts`)
+- Modify: `src/hypothex/core/storage.py` (`cleanup_lock`, `check_artifacts`, `delete_artifacts`, `apply_clean`, `cleaned_artifacts`)
 - Modify: `src/hypothex/core/queries.py` (`RunDetail.cleaned`, filled by `show_run`; `star_run`/`archive_run` under `cleanup_lock`)
 - Modify: `src/hypothex/core/execution.py` (`_prepare_in` creates a run that reads an input under `cleanup_lock`)
 - Test: `tests/core/test_storage.py` (append)
@@ -10481,6 +10717,35 @@ def test_a_reinfer_child_queued_after_the_plan_keeps_its_input(
     assert done.skipped == [
         {"path": str(checkpoint), "run_id": "parent", "host": "local", "reason": "used by child"}
     ]
+
+
+@pytest.mark.parametrize("alias", ["relative", "parent-symlink", "leaf-symlink"])
+def test_apply_rechecks_new_readers_through_aliases(
+    toy: Context, tmp_path: Path, alias: str
+) -> None:
+    checkpoint = write(tmp_path / "data" / "p.pt")
+    ended_run(toy, "parent", artifacts=[("checkpoint", checkpoint)])
+    planned = plan(toy)
+    parent = tmp_path / "alias"
+    parent.symlink_to(checkpoint.parent, target_is_directory=True)
+    leaf = tmp_path / "input.pt"
+    leaf.symlink_to(checkpoint)
+    value = {
+        "relative": "data/p.pt",
+        "parent-symlink": str(parent / "p.pt"),
+        "leaf-symlink": str(leaf),
+    }[alias]
+    ended_run(
+        toy,
+        "reader",
+        archived=False,
+        status=RunStatus.RUNNING,
+        vars={"checkpoint": value},
+        cwd=str(tmp_path),
+    )
+    done = apply_clean(toy, None, planned.plan_id, confirm_bytes=planned.total_bytes, actor="x")
+    assert done.deleted == [] and checkpoint.exists()
+    assert [row["reason"] for row in done.skipped] == ["used by reader"]
 
 
 def test_apply_skips_a_folder_that_holds_a_kept_file(toy: Context, tmp_path: Path) -> None:
@@ -10749,7 +11014,7 @@ def _recheck(
     for path, other in users:  # owners and readers; a folder holding the path counts too
         if (
             other.run_id != record.run_id
-            and overlaps(path, item.path)
+            and overlaps(path, item.path, local=True)
             and not _settled_by(other, cutoff)
         ):
             return f"used by {other.run_id}"
@@ -10762,6 +11027,42 @@ def _recheck(
     if size != item.bytes or mtime != item.mtime:
         return "changed since plan"
     return None
+
+
+def check_artifacts(
+    ctx: Context, items: list[CleanItem], *, older_than_days: int
+) -> list[dict[str, str]]:
+    """Check candidate artifacts on their owning environment without deleting.
+
+    Parameters
+    ----------
+    ctx : Context
+    items : list of CleanItem
+    older_than_days : int
+        Cleanup policy age cutoff.
+
+    Returns
+    -------
+    list of dict
+        Refused items with path, run_id, host, and reason.
+    """
+    cutoff = utcnow() - timedelta(days=older_than_days)
+    refused: list[dict[str, str]] = []
+    with cleanup_lock(ctx.layout):
+        users: list[tuple[str, RunRecord]] = []
+        own = ctx.descriptor.environment_id
+        for record in ctx.index.list_runs(include_archived=True, limit=None):
+            if record.environment_id != own:
+                continue
+            users += [(a.path, record) for a in record.artifacts]
+            users += [(path, record) for path in input_paths(record, local=True)]
+        for item in items:
+            why = _recheck(ctx, item, users, cutoff)
+            if why is not None:
+                refused.append(
+                    {"path": item.path, "run_id": item.run_id, "host": item.host, "reason": why}
+                )
+    return refused
 
 
 def _remove(path: str) -> str | None:
@@ -10808,8 +11109,10 @@ def delete_artifacts(
         # (path, run) for every artifact a run records and every input it reads
         users: list[tuple[str, RunRecord]] = []
         for record in ctx.index.list_runs(include_archived=True, limit=None):
+            if record.environment_id != ctx.descriptor.environment_id:
+                continue
             users += [(path, record) for path in {a.path for a in record.artifacts}]
-            users += [(path, record) for path in input_paths(record)]
+            users += [(path, record) for path in input_paths(record, local=True)]
         for item in items:
             why = _recheck(ctx, item, users, cutoff) or _remove(item.path)
             if why is not None:
@@ -10983,7 +11286,7 @@ with
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_storage.py tests/core/test_queries.py tests/core/test_execution.py -v`
-Expected: `tests/core/test_storage.py` `25 passed`; `tests/core/test_queries.py` and `tests/core/test_execution.py` still pass.
+Expected: all storage regression cases pass; `tests/core/test_queries.py` and `tests/core/test_execution.py` still pass.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -11285,6 +11588,7 @@ SESSION_COOKIE = "hx_session"
 AGENT_HEADER = "X-Hypothex-Agent"
 SCOPE_KEY = "x-hx-scope"
 PRINCIPAL_KEY = "hx.principal"
+CREDENTIAL_KEY = "hx.credential"  # private ASGI scope state, never a response field
 AGENT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 PUBLIC_PREFIX = "/.well-known/hypothex/"
 PUBLIC_ROUTES = frozenset({("POST", "/api/v1/auth/pair")})
@@ -11539,18 +11843,28 @@ class AuthGuard:
         self._host = f"Bearer {host_token}".encode() if host_token else None
 
     def _resolve(self, scope: AsgiScope) -> Principal | None:
+        scope.pop(CREDENTIAL_KEY, None)
         headers = Headers(scope=scope)
         given = headers.get("authorization", "")
+        credential: str | None = None
         principal: Principal | None = None
         if given:
             if self._host is not None and hmac.compare_digest(given.encode(), self._host):
                 principal = HOST_PRINCIPAL
+                credential = given.removeprefix("Bearer ")
             elif given.startswith("Bearer "):
-                principal = self.store.authenticate(given.removeprefix("Bearer ").strip())
+                token = given.removeprefix("Bearer ").strip()
+                principal = self.store.authenticate(token)
+                if principal is not None:
+                    credential = token
         if principal is None:
             token = _cookie(headers.get("cookie"), SESSION_COOKIE)
             if token:
                 principal = self.store.authenticate(token)
+                if principal is not None:
+                    credential = token
+        if principal is not None and credential is not None:
+            scope[CREDENTIAL_KEY] = credential
         if principal is None and scope["type"] == "websocket":
             query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
             ticket = query.get("ticket", [""])[0]
@@ -11614,6 +11928,7 @@ with
 ```python
         if hmac.compare_digest(given, self._expected):
             scope["hx.principal"] = HOST_PRINCIPAL  # api.auth.PRINCIPAL_KEY: a hub forwarding
+            scope["hx.credential"] = given.decode().removeprefix("Bearer ")
             await self.app(scope, receive, send)
             return
 ```
@@ -14103,8 +14418,8 @@ git commit -m "feat(api): notification status and test routes; notifier thread i
 - Test: `tests/api/test_storage_routes.py`
 
 **Interfaces:**
-- Consumes: `storage_report`, `plan_clean`, `apply_clean`, `local_usage`, `delete_artifacts` (Tasks 20–22); `HubManager` (phase 2; it has `names`, `client`, `host_for_environment`, so it satisfies `HostClients`).
-- Produces (contract 3, exact): `GET /api/v1/storage` (admin, `project?`, `remote?=true`) → `StorageReport`; `POST /api/v1/storage/plan` (admin, `CleanPolicy` + `command_id?`) → `CleanPlan`; `POST /api/v1/storage/plans/{plan_id}/apply` (admin, `{confirm_bytes, command_id?}`) → `CleanResult` (400 `CleanRefusedError`); env routes `GET /api/v1/storage/usage` (admin, `project?`) → `list[StorageItem]` and `POST /api/v1/storage/delete` (admin, `{items, plan_id, actor, older_than_days, command_id?}`) → `CleanResult`.
+- Consumes: `storage_report`, `plan_clean`, `apply_clean`, `local_usage`, `check_artifacts`, `delete_artifacts` (Tasks 20–22); `HubManager` (phase 2; it has `names`, `client`, `host_for_environment`, so it satisfies `HostClients`).
+- Produces (contract 3, exact): `GET /api/v1/storage` (admin, `project?`, `remote?=true`) → `StorageReport`; `POST /api/v1/storage/plan` (admin, `CleanPolicy` + `command_id?`) → `CleanPlan`; `POST /api/v1/storage/plans/{plan_id}/apply` (admin, `{confirm_bytes, command_id?}`) → `CleanResult` (400 `CleanRefusedError`); env routes `GET /api/v1/storage/usage` (admin, `project?`) → `list[StorageItem]` and `POST /api/v1/storage/check` (admin, `{items, older_than_days}`) → `list[{path, run_id, host, reason}]` (read-only refusals), and `POST /api/v1/storage/delete` (admin, `{items, plan_id, actor, older_than_days, command_id?}`) → `CleanResult`.
 - Produces (public helper): `register_storage_routes(app, ctx, hosts)`.
 - Rules: `created_by`/`actor` are the caller's identity (`human` with auth off). There is no MCP path to apply or delete (Task 33).
 
@@ -14194,8 +14509,60 @@ def test_env_routes_list_and_delete(home: Path, tmp_path: Path) -> None:
             "actor": "human:sv",
             "older_than_days": 30,
         }
+        checked = client.post(
+            "/api/v1/storage/check",
+            json={
+                "items": body["items"],
+                "older_than_days": 30,
+            },
+        )
+        assert checked.status_code == 200 and checked.json() == []
+        assert Path(item["path"]).exists()  # preflight is read-only
         done = client.post("/api/v1/storage/delete", json=body).json()
     assert [d["run_id"] for d in done["deleted"]] == ["old"] and done["skipped"] == []
+
+
+@pytest.mark.parametrize("after_plan", [False, True])
+def test_host_checks_checkpoint_alias_on_its_own_filesystem(
+    tmp_path: Path, after_plan: bool
+) -> None:
+    with remote_hub(tmp_path) as r:
+        checkpoint = tmp_path / "host-data" / "parent.pt"
+        archived(r.env, "parent", checkpoint)
+        wait_until(lambda: "parent" in r.hub.index.run_ids(), timeout=30)
+        alias = tmp_path / "host-alias"
+        alias.symlink_to(checkpoint.parent, target_is_directory=True)
+
+        def reader() -> None:
+            r.env.create_run(
+                make_record(
+                    "reader",
+                    archived=False,
+                    status=RunStatus.QUEUED,
+                    environment_id=r.env.descriptor.environment_id,
+                    cwd=str(tmp_path),
+                    vars={"checkpoint": "host-alias/parent.pt"},
+                )
+            )
+
+        if not after_plan:
+            reader()  # host check must see this without waiting for a mirrored reader
+        result = r.client.post("/api/v1/storage/plan", json={}).json()
+        if after_plan:
+            assert len(result["items"]) == 1
+            reader()
+            response = r.client.post(
+                f"/api/v1/storage/plans/{result['plan_id']}/apply",
+                json={
+                    "confirm_bytes": result["total_bytes"],
+                },
+            ).json()
+            assert response["deleted"] == []
+            assert any(row["reason"] == "used by reader" for row in response["skipped"])
+        else:
+            assert result["items"] == []
+            assert any(row["reason"] == "used by reader" for row in result["refused"])
+        assert checkpoint.exists()
 
 
 def test_hub_cleans_a_hosts_artifacts(tmp_path: Path) -> None:
@@ -14244,6 +14611,7 @@ from hypothex.core.storage import (
     CleanPolicy,
     HostClients,
     apply_clean,
+    check_artifacts,
     delete_artifacts,
     local_usage,
     plan_clean,
@@ -14262,6 +14630,13 @@ class ApplyBody(BaseModel):
 
     confirm_bytes: int = Field(ge=0)
     command_id: str | None = None
+
+
+class CheckBody(BaseModel):
+    """Read-only owning-environment cleanup preflight."""
+
+    items: list[CleanItem]
+    older_than_days: int = Field(ge=0)
 
 
 class DeleteBody(BaseModel):
@@ -14319,6 +14694,10 @@ def register_storage_routes(app: FastAPI, ctx: Context, hosts: HostClients | Non
     def usage(project: str | None = None) -> list[dict[str, Any]]:
         return to_jsonable(local_usage(ctx, project=project))
 
+    @app.post("/api/v1/storage/check", dependencies=ADMIN)
+    def check(body: CheckBody) -> list[dict[str, str]]:
+        return check_artifacts(ctx, body.items, older_than_days=body.older_than_days)
+
     @app.post("/api/v1/storage/delete", dependencies=ADMIN)
     def delete(body: DeleteBody, request: Request) -> dict[str, Any]:
         return ctx.events.run_once(
@@ -14353,7 +14732,7 @@ with
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/api/test_storage_routes.py tests/api/test_route_scopes.py -v`
-Expected: `tests/api/test_storage_routes.py` `4 passed`; `tests/api/test_route_scopes.py` `8 passed`.
+Expected: all storage-route regression cases pass; `tests/api/test_route_scopes.py` `8 passed`.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -14378,7 +14757,7 @@ Contract 1.10 (`scoped`), 5 (tools and scopes), 7. Over `/mcp` with auth on, the
 
 **Interfaces:**
 - Produces (contract 1.10, exact): `scoped(scope) -> Callable[[F], F]` (tool decorator), `tool_scopes(server) -> dict[str, Scope]`.
-- Produces (public helpers): `acting_as(principal)` (context manager: the principal of in-process tool calls, e.g. tests and stdio); `caller() -> Principal` (inside a tool); `caller_token() -> str | None` (the caller's own credential over HTTP: the bearer token, else the `hx_session` cookie value, so the tool's own hub calls act as the caller); `tool_hub_token(fallback) -> str | None` (over HTTP `caller_token()` and never the fallback; in-process/stdio `fallback()`); `TOOL_SCOPE_ATTR = "__hx_scope__"`.
+- Produces (public helpers): `acting_as(principal)` (context manager: the principal of in-process tool calls, e.g. tests and stdio); `caller() -> Principal` (inside a tool); `caller_token() -> str | None` (the exact credential selected by the guard in private ASGI state, so the tool's own hub calls act as the caller); `tool_hub_token(fallback) -> str | None` (over HTTP `caller_token()` and never the fallback; in-process/stdio `fallback()`); `TOOL_SCOPE_ATTR = "__hx_scope__"`.
 - Rules: the wrapper finds the principal in `ctx.request_context.request.scope["hx.principal"]` (an HTTP call through `AuthGuard`/`TokenGuard`), else the `acting_as` principal, else `LOCAL_OWNER`; a tool whose scope the caller does not hold raises a tool error `403 · <scope> scope needed; you hold <scope>`. List/get tools are `read`; `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact` are `launch`. A session principal launches as `agent:<agent>@<user>` with `owner=<user>`; `LOCAL_OWNER` keeps `agent:<agent>` and no owner. Over HTTP a tool's hub calls carry only the caller's credential: a cookie caller forwards its cookie's session token, and a caller without one gets no token, never `hub_token` or the local admin token (that fallback would let any caller act with the server's own rights). Tools apply the same ownership rules as HTTP (contract 1.3): `stop_run` on a local run calls `require_act(caller(), record.owner, "stop")` and `cancel_sweep` on a local sweep `require_act(caller(), spec.owner, "cancel_queued")` before acting, and `launch_run`, `rerun`, `reinfer`, `launch_sweep`, `extend_sweep` call `require_local_exec(caller())` before a run that executes on this machine (a `launch` caller launches on hosts only); forwarded calls are checked by the hub, which sees the caller's own token. Tool errors reach the client as `Error executing tool <name>: <message>` (the SDK's prefix), so tests match the message's end.
 
 - [ ] **Step 1: Write the failing test**
@@ -14465,8 +14844,8 @@ def test_local_owner_keeps_phase_2_identity(home: Path, toy_repo: Path) -> None:
     control.wait_for_run(Context.open(home), out["run"]["run_id"], timeout=30)
 
 
-def fake_http(headers: dict[str, str], cookies: dict[str, str]) -> SimpleNamespace:
-    request = SimpleNamespace(scope={"hx.principal": ALICE}, headers=headers, cookies=cookies)
+def fake_http(credential: str | None) -> SimpleNamespace:
+    request = SimpleNamespace(scope={"hx.principal": ALICE, "hx.credential": credential})
     return SimpleNamespace(request_context=SimpleNamespace(request=request))
 
 
@@ -14479,17 +14858,87 @@ def test_http_principal_and_token_reach_the_tool() -> None:
         }
 
     wrapped = scoped("read")(who)
-    bearer_call = fake_http({"authorization": "Bearer hxs_abc"}, {})
+    bearer_call = fake_http("hxs_abc")
     expected = {"user": "alice", "token": "hxs_abc", "hub": "hxs_abc"}
     assert wrapped(hx_mcp_ctx=bearer_call) == expected
-    cookie_call = fake_http({}, {"hx_session": "hxs_cookie"})
+    cookie_call = fake_http("hxs_cookie")
     assert wrapped(hx_mcp_ctx=cookie_call)["hub"] == "hxs_cookie"  # never the server's token
-    bare_call = fake_http({}, {})
+    bare_call = fake_http(None)
     assert wrapped(hx_mcp_ctx=bare_call)["hub"] is None
     local = wrapped(hx_mcp_ctx=None)
     assert local == {"user": "local", "token": None, "hub": "SERVER-ADMIN"}  # stdio
     with pytest.raises(Exception, match="admin scope needed"):
         scoped("admin")(who)(hx_mcp_ctx=bearer_call)
+
+
+@pytest.mark.parametrize("authorization", [None, b"Bearer rejected", b"Bearer ", b"Bearer \xa0"])
+@pytest.mark.parametrize("tool_name", ["stop_run", "get_sweep", "cancel_sweep", "extend_sweep"])
+def test_registered_http_tool_forwards_only_authenticated_cookie(
+    home: Path, monkeypatch: pytest.MonkeyPatch, authorization: bytes | None, tool_name: str
+) -> None:
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    from hypothex.api.auth import AuthGuard
+    from tests.api.authkit import token_for
+
+    app = auth_app(home)
+    token = token_for(app.state.auth, "alice", "launch")
+    server = build_server(home, hub_url=BASE, hub_token="SERVER-ADMIN")
+    tool = next(t for t in server._tool_manager.list_tools() if t.name == tool_name)
+    args = (
+        {"run_id": "remote-run"}
+        if tool_name == "stop_run"
+        else {
+            "project": "toy",
+            "sweep_id": "s-0001",
+        }
+    )
+    if tool_name == "extend_sweep":
+        args["seeds"] = [2]
+    spec = SweepSpec(
+        id="s-0001",
+        project="toy",
+        task=None,
+        host=None,
+        grid=[SweepParam(name="x", values=["1"])],
+        seeds=[1],
+        command_template=["echo", "{x}"],
+        created_by="human:alice",
+        created_at=make_record().created_at,
+        owner="alice",
+    )
+    sent: list[dict[str, str]] = []
+
+    def request(method: str, url: str, **kwargs: object) -> httpx.Response:
+        assert url.startswith(BASE + "/api/v1/")
+        sent.append(dict(kwargs["headers"]))
+        return httpx.Response(200, json={"spec": spec.model_dump(mode="json")})
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("HTTP caller must never discover the server credential")
+
+    monkeypatch.setattr("hypothex.mcp.server.httpx.request", request)
+    monkeypatch.setattr("hypothex.mcp.server.resolve_hub_token", forbidden)
+
+    async def invoke(request: Request) -> JSONResponse:
+        mcp_ctx = SimpleNamespace(request_context=SimpleNamespace(request=request))
+        return JSONResponse(tool.fn(**args, hx_mcp_ctx=mcp_ctx))
+
+    endpoint = Starlette(routes=[Route("/mcp/", invoke, methods=["POST"])])
+    with TestClient(AuthGuard(endpoint, app.state.auth), base_url=BASE) as client:
+        headers = [(b"cookie", f"hx_session={token}".encode())]
+        if authorization is not None:
+            headers.append((b"authorization", authorization))
+        assert client.post("/mcp/", headers=headers).status_code == 200
+    assert sent and all(headers["Authorization"] == f"Bearer {token}" for headers in sent)
+    # Even a principal-only HTTP context cannot activate either discovery layer.
+    sent.clear()
+    tool.fn(**args, hx_mcp_ctx=fake_http(None))
+    assert sent and all("Authorization" not in headers for headers in sent)
 
 
 def test_tools_keep_the_ownership_rules(home: Path, toy_repo: Path) -> None:
@@ -14543,7 +14992,6 @@ from typing import TypeVar, cast
 
 from mcp.server.mcpserver import Context as McpContext
 
-from hypothex.api.auth import SESSION_COOKIE
 from hypothex.auth.ownership import require_act, require_local_exec
 from hypothex.auth.scopes import Scope, covers
 from hypothex.auth.store import LOCAL_OWNER, Principal
@@ -14599,8 +15047,8 @@ def caller_token() -> str | None:
     Returns
     -------
     str or None
-        The bearer token, else the ``hx_session`` cookie's session token; None
-        in-process, over stdio, or for an HTTP caller with neither.
+        The exact bearer or cookie credential the guard authenticated; None
+        in-process, over stdio, or for an HTTP caller with no selected credential.
     """
     return _CALLER_TOKEN.get()
 
@@ -14625,14 +15073,11 @@ def _principal_from(request: Any) -> Principal:
 
 
 def _credential_from(request: Any) -> str | None:
-    # the caller's own session token: the bearer header, else the hx_session cookie
-    headers = getattr(request, "headers", None)
-    given = headers.get("authorization", "") if headers is not None else ""
-    if given.startswith("Bearer "):
-        return given.removeprefix("Bearer ").strip() or None
-    cookies = getattr(request, "cookies", None)
-    found = cookies.get(SESSION_COOKIE) if cookies is not None else None
-    return found or None
+    # Forward exactly the credential AuthGuard/TokenGuard authenticated, not a second
+    # interpretation of the headers. A rejected bearer can coexist with a valid cookie.
+    scope = getattr(request, "scope", None)
+    found = scope.get("hx.credential") if isinstance(scope, dict) else None
+    return found if isinstance(found, str) and found else None
 
 
 def tool_hub_token(fallback: Callable[[], str | None]) -> str | None:
@@ -14743,6 +15188,23 @@ In `build_server`:
         return tool_hub_token(lambda: hub_token or resolve_hub_token(hub_url, ctx().layout.home))
 ```
 
+Before adding tool helpers, add `discover_token: bool = True` to `hub_call`'s keyword arguments and document it: local/stdio callers may discover a saved token, while authenticated HTTP forwarding disables discovery. Replace `auth = token or resolve_hub_token(base)` with:
+
+```python
+    auth = (token or resolve_hub_token(base)) if discover_token else token
+```
+
+In `build_server`'s existing `hub` helper, pass `discover_token=not _OVER_HTTP.get()` along with `token=auth()`. Keep this argument when Task 41 replaces the helper. This explicit transport flag must reach the actual `hub_call`; returning `None` from `tool_hub_token` alone does not disable the client's token discovery.
+
+Carry the same flag through the other existing forwarding path: add keyword-only `discover_token: bool = True` to both `sweep_summary` and `locate_sweep`, and document it with the same meaning as `hub_call`. In `sweep_summary`'s missing-local-sweep branch, replace credential resolution and forwarding with:
+
+```python
+        auth = (token or resolve_hub_token(url, ctx.layout.home)) if discover_token else token
+        return hub_call("GET", path, url=url, token=auth, discover_token=discover_token)
+```
+
+In `locate_sweep`, pass `discover_token=discover_token` to `sweep_summary`. In the registered `get_sweep`, `cancel_sweep`, and `extend_sweep` tools, pass `discover_token=not _OVER_HTTP.get()` to their `sweep_summary` / `locate_sweep` calls. Thus both the sweep pre-read and its subsequent mutation use the caller credential only. Stdio and ordinary CLI helper calls keep the default discovery behavior. During the final baseline refresh, apply this same propagation to any new forwarding helpers added on main (including host-state lookups); audit every `token=auth()` call and every `resolve_hub_token` call reached by an HTTP tool.
+
 2. Add after `def dump(...)`:
 
 ```python
@@ -14799,7 +15261,7 @@ In `build_server`:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/mcp -v`
-Expected: `tests/mcp/test_scoped_tools.py` `7 passed`; `tests/mcp/test_server.py`, `test_remote_tools.py`, and `test_remote_helpers.py` still pass (stdio and in-memory calls run as `LOCAL_OWNER`).
+Expected: all scoped-tool regression cases pass; `tests/mcp/test_server.py`, `test_remote_tools.py`, and `test_remote_helpers.py` still pass (stdio and in-memory calls run as `LOCAL_OWNER`).
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -17698,7 +18160,7 @@ git commit -m "feat(sdk): run.log_cost for api spend"
 - Consumes: `parse_pairing_url` (Task 7), `HubLogin`/`save_hub_login`/`hub_login`/`forget_hub_login` (Task 7), the auth routes (Task 25).
 - Produces (contract 4, exact): `hx pair [--user NAME] [--new-user] [--scope read|launch|admin] [--client browser|cli|host] [--ttl 300] [--url HUB]` (prints the QR code and the URL; `--json` the offer); `hx login <pairing-url> [--device NAME]` (as `cli`, or `agent` when `HYPOTHEX_AGENT` is set; stores the token in `hub-tokens.json`; never prints it); `hx logout [--hub URL]`; `hx whoami`; `hx sessions list [--all]` / `hx sessions revoke <id>`; `hx users list` / `hx users disable <name>`.
 - Produces (contract 2): `resolve_hub_token(url, home)` order: `$HYPOTHEX_HUB_TOKEN`, then the `hub-tokens.json` login for that URL, then (loopback only) `serve/server.json`.
-- Produces (additive): `hub_call(..., text: bool = False, agent: str | None = None)` (`text`: return the body as text, for exports; `agent`: the `X-Hypothex-Agent` header, default `$HYPOTHEX_AGENT`); the CLI sends `X-Hypothex-Agent: $HYPOTHEX_AGENT`; an MCP tool's hub call sends the tool's own `agent` argument (default `mcp`), because an authenticated hub takes the agent from that header and overwrites the body's `created_by` (contract 1.2), so `launch_run(agent="claude", host=...)` by alice is `agent:claude@alice`, not `human:alice`.
+- Produces (additive): `hub_call(..., text: bool = False, agent: str | None = None, discover_token: bool = True)` (`text`: return the body as text, for exports; `agent`: the `X-Hypothex-Agent` header, default `$HYPOTHEX_AGENT`); the CLI sends `X-Hypothex-Agent: $HYPOTHEX_AGENT`; an MCP tool's hub call sends the tool's own `agent` argument (default `mcp`), because an authenticated hub takes the agent from that header and overwrites the body's `created_by` (contract 1.2), so `launch_run(agent="claude", host=...)` by alice is `agent:claude@alice`, not `human:alice`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -17868,7 +18330,7 @@ In `src/hypothex/mcp/server.py`:
     return token if isinstance(token, str) and token else None
 ```
 
-3. In `hub_call`, add `text: bool = False,` and `agent: str | None = None,` after `token: str | None = None,`, document them ("text : bool — return the body as text (exports) instead of JSON." and "agent : str, optional — the agent this call acts for (``X-Hypothex-Agent``); default ``$HYPOTHEX_AGENT``."), replace
+3. In `hub_call`, preserve Task 32's `discover_token` argument and conditional credential selection; add `text: bool = False,` and `agent: str | None = None,` after `token: str | None = None,`, document them ("text : bool — return the body as text (exports) instead of JSON." and "agent : str, optional — the agent this call acts for (``X-Hypothex-Agent``); default ``$HYPOTHEX_AGENT``."), replace
 
 ```python
     headers = {"Authorization": f"Bearer {auth}"} if auth else {}
@@ -17901,11 +18363,18 @@ with
 4. In `build_server`, let every tool's hub call carry the tool's agent. Replace `hub` and `via_hub` with:
 
 ```python
-    def hub(
-        method: str, path: str, body: dict[str, Any] | None = None, agent: str = "mcp"
-    ) -> Any:
+    def hub(method: str, path: str, body: dict[str, Any] | None = None, agent: str = "mcp") -> Any:
         # a tool always acts for an agent: the hub stamps agent:<agent>@<user> from the header
-        return hub_call(method, path, body, url=hub_url, token=auth(), agent=agent)
+        return hub_call(
+            method,
+            path,
+            body,
+            url=hub_url,
+            token=auth(),
+            agent=agent,
+            discover_token=not _OVER_HTTP.get(),
+        )
+
 
     def via_hub(run_id: str, action: str, body: dict[str, Any], agent: str = "mcp") -> Any:
         # a mirrored run is acted on by its host: the hub forwards it (Task 45)
@@ -20849,8 +21318,8 @@ Inputs: the phase 3 contract, spec sections 3.4, 5.3, 5.4, 7.2–7.4, 9, 12, 13,
 
 - **Retries.** Contract 1.7 says `RETRY_DELAYS = (30, 120, 600)` "after attempts 1, 2, 3; then failed", and failure mode 1 says "after 3 failed attempts the entry is failed". The task summary says "retries at 30 s, 2 min and 10 min". This plan makes four attempts: the first, then retries after 30 s, 2 min, and 10 min; the fourth failure is final (Task 17 `test_three_retries_then_failed`). A server's `Retry-After` can only lengthen a wait.
 - **Literal-secret hint.** Contract 1.1 says the hint is "use <key>_env: NAME". For `webhook`/`password` that is exactly the real field; for `url`, `token`, `secret`, and `webhook_url` the plan names the real field (`webhook_env` under Slack, `password_env` under email), since `url_env` does not exist.
-- **Remote storage sizes** come from each host's env route `GET /api/v1/storage/usage` (contract 1.9), not `du` over SSH (spec 9), so they also work for `route: url` hosts. The hub can only partly check a host path for protection (`/`, the host's run folders, mapped checkouts, an absolute host home); the host checks everything again at delete, and refusals there come back in `skipped` (Tasks 21–22).
-- **CSV export and test-set intervals** are kept from the contract (the spec names only LaTeX and Markdown). `noise` drops data from the table itself (not only from the rendering), so CSV follows the same choice. `percent` scales the table's numbers (CSV too) and adds the footnote `values ×100`; for a leaderboard only when `value_format == "fraction"`, for a comparison per column, only for the columns whose `value_format` is `fraction` (contract 1.6). Baseline rows show `—`/`--` in the `n` column and `n = 0` in CSV.
+- **Remote storage sizes** come from each host's env route `GET /api/v1/storage/usage` (contract 1.9), not `du` over SSH (spec 9), so they also work for `route: url` hosts. The hub can only partly check a host path for protection (`/`, the host's run folders, mapped checkouts, an absolute host home); the hub also calls the owner's read-only `POST /api/v1/storage/check` before including remote candidates. The owner resolves input aliases, then repeats all checks under the deletion lock at apply; failures there return `skipped` (Tasks 21–22, 31).
+- **CSV export and test-set intervals** are kept from the contract (the spec names only LaTeX and Markdown). `noise` drops data from the table itself (not only from the rendering), so CSV follows the same choice. `percent` scales the table's numbers (CSV too) per column, only when that column's `value_format` is `fraction`, for both leaderboard and comparison tables. Leaderboard footnotes name the scaled columns (`values ×100: <columns>`); comparisons retain `values ×100` (contract 1.6). Baseline rows show `—`/`--` in the `n` column and `n = 0` in CSV.
 - **Metric directions in export.** A `Leaderboard` knows only the primary's direction, so `leaderboard_table` takes `directions=` (column ref, else metric name → higher is better); `task_table`/`export_task` and `compare_table` use `leaderboard.metric_higher_is_better`, the leaderboard's own rule (a `system_bench` percentile key ranks lower-first), so an export never ranks against its leaderboard (Tasks 10, 12).
 - **Route scope keys** use FastAPI's `path_format` (`/api/v1/runs/{run_id}/files/{path}`), as OpenAPI does, so the matrix test can fill parameters with one regex (Tasks 23, 24, 28).
 - **`/mcp` principal.** Tools read the principal from the MCP SDK's request context (`ctx.request_context.request.scope["hx.principal"]`) through a hidden `hx_mcp_ctx` parameter that `@scoped` adds; in-process calls use `acting_as`, else `LOCAL_OWNER`. Over HTTP a tool's own hub calls carry the caller's credential (`caller_token`: the bearer token, else the `hx_session` cookie) and never the server's `hub_token` or local admin token (`tool_hub_token`), so the hub sees who acts and applies their scope and ownership; `stop_run` and `cancel_sweep` check `require_act` on local runs and sweeps (Task 32). `tool_scopes` reads the SDK's tool registry (`_tool_manager`), the only place the decorated functions are kept (Task 32).

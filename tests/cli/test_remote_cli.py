@@ -10,11 +10,12 @@ from hypothex.cli import main as cli_main
 from hypothex.cli.main import app
 from hypothex.core import control
 from hypothex.core.context import Context
-from hypothex.core.errors import HypothexError, RunError
+from hypothex.core.errors import HypothexError, RunError, StoreError
 from hypothex.core.execution import RunRequest
 from hypothex.core.leaderboard import group_id_for
 from hypothex.core.records import RunRecord
 from hypothex.core.sweeps import SweepError
+from hypothex.mcp.server import HubUnavailableError
 from tests.api.envserver import remote_hub, wait_until
 from tests.factories import PREDS_075, git, make_record, seed_finished_run
 
@@ -244,3 +245,72 @@ def test_sweep_on_a_host_and_pull(
         pulled = hx("pull", "e1", "--artifact", "predictions/predictions.jsonl")
         expected = (r.env.run_dir(record) / "predictions" / "predictions.jsonl").read_text()
         assert Path(pulled["local_path"]).read_text() == expected
+
+
+def test_a_cli_on_another_machine_reads_back_what_it_launched(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CONF-5: this CLI's home is not the hub's (spec 5.2); show, logs, runs, sweeps and
+    # leaderboard ask the hub for what this store does not have
+    with remote_hub(tmp_path, threaded=True) as r:
+        laptop = tmp_path / "laptop"
+        git(tmp_path, "clone", "-q", str(tmp_path / "origin.git"), str(laptop))
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
+        monkeypatch.chdir(laptop)
+        rid = hx(
+            "launch", "--host", "gpu1", "-t", "toy-acc", "-H", "from a laptop",
+            "--", PY, "-c", "print('hello from gpu1')",
+        )["run_id"]  # fmt: skip
+        wait_until(lambda: r.hub.index.get_run(rid) is not None, timeout=30)
+        assert not (home / "store" / "toy").exists()  # nothing of it in this store
+        detail = hx("show", rid)
+        assert detail["record"]["run_id"] == rid and "stdout" in str(detail["paths"])
+        assert "from a laptop" in runner.invoke(app, ["show", rid]).stdout
+        wait_until(lambda: "hello from gpu1" in hx("logs", rid)["text"], timeout=60)
+        followed = runner.invoke(app, ["logs", rid, "--follow"], catch_exceptions=False)
+        assert followed.exit_code == 0 and "hello from gpu1" in followed.stdout
+        assert [row["run_id"] for row in hx("runs")] == [rid]
+        assert hx("runs", "--status", "finished", "-p", "toy")[0]["run_id"] == rid
+        board = hx("leaderboard", "toy-acc")
+        assert board["project"] == "toy" and rid in board["unscored"]
+        assert hx("leaderboard", "toy/toy-acc")["task"] == "toy-acc"
+        made = hx(
+            "sweep", "--host", "gpu1", "-t", "toy-acc", "-H", "s",
+            "--grid", "x=1", "--seeds", "1", "--", *SWEEP_CMD,
+        )  # fmt: skip
+        assert [s["id"] for s in hx("sweeps")] == [made["spec"]["id"]]
+        assert hx("sweeps", "-p", "toy")[0]["project"] == "toy"
+        assert made["spec"]["id"] in runner.invoke(app, ["sweeps"]).stdout
+        # this machine's own runs are listed with the hub's, newest first
+        seed_finished_run(Context.open(home), laptop, "l1")
+        rows = hx("runs", "--limit", "500")
+        assert {"l1", rid} <= {row["run_id"] for row in rows}
+        stamps = [(row["created_at"], row["run_id"]) for row in rows]
+        assert stamps == sorted(stamps, reverse=True)
+        assert len(hx("runs", "--limit", "1")) == 1
+    # without a hub, an unknown run is still this store's clean "no run" error
+    with pytest.raises(StoreError, match="no run"):
+        runner.invoke(app, ["show", "nope"], catch_exceptions=False)
+    with pytest.raises(StoreError, match="no run"):
+        runner.invoke(app, ["logs", "nope"], catch_exceptions=False)
+
+
+def test_hub_read_is_quiet_without_a_hub_and_warns_on_a_hub_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def refuse(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+        raise errors.pop()
+
+    errors: list[Exception] = [
+        HypothexError("hub answered 401"),
+        StoreError("no run"),
+        HubUnavailableError("down"),
+    ]
+    monkeypatch.setattr(cli_main, "_hub", refuse)
+    assert cli_main._hub_read("/api/v1/runs") is None  # no hub
+    assert cli_main._hub_read("/api/v1/runs/x") is None  # 404
+    assert capsys.readouterr().err == ""
+    assert cli_main._hub_read("/api/v1/runs") is None  # 401: this store's answer still prints
+    assert "warning: the hub did not answer /api/v1/runs: hub answered 401" in (
+        capsys.readouterr().err
+    )

@@ -11,10 +11,12 @@ import secrets
 import socket
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast, get_args
+from urllib.parse import urlencode
 
 import typer
 import yaml
@@ -43,6 +45,7 @@ from hypothex.core.ids import new_command_id
 from hypothex.core.index import rebuild_index
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import Layout, default_home
+from hypothex.core.leaderboard import Leaderboard
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
 from hypothex.remote.config import (
     HOST_NAME,
@@ -415,6 +418,130 @@ def _hub_try(method: str, path: str, body: dict[str, Any] | None = None) -> Any 
         return None
 
 
+def _query(path: str, params: dict[str, Any]) -> str:
+    """``path`` with the params that are not None as a query string (lists repeat)."""
+    pairs = urlencode({k: v for k, v in params.items() if v is not None}, doseq=True)
+    return f"{path}?{pairs}" if pairs else path
+
+
+def _hub_read(path: str) -> Any | None:
+    """
+    GET ``path`` from the hub for a read command; None when the hub cannot help.
+
+    A CLI on another machine than the hub (spec 5.2) has only its own runs in its
+    store: ``show``, ``logs``, ``runs``, ``leaderboard`` and ``sweeps`` ask the hub
+    for the rest (CONF-5). No hub (or no such item there, 404) gives None; any
+    other hub error is printed as a warning, so this store's answer still prints.
+
+    Parameters
+    ----------
+    path : str
+        API path with its query string.
+
+    Returns
+    -------
+    Any or None
+        The hub's JSON answer.
+    """
+    from hypothex.mcp.server import HubUnavailableError
+
+    try:
+        return _hub("GET", path)
+    except (HubUnavailableError, StoreError):
+        return None
+    except HypothexError as exc:
+        typer.secho(f"warning: the hub did not answer {path}: {exc}", fg="yellow", err=True)
+        return None
+
+
+def _run_detail(c: Context, run_id: str) -> q.RunDetail:
+    """
+    A run's detail from the hub for a run of another environment, else from this store.
+
+    The hub has a run this store lacks (a CLI on a laptop), and the live copy of
+    a mirrored run; without a hub, this store's copy (or its "no run" error) stands.
+    """
+    from hypothex.mcp.server import acts_through_hub
+
+    if acts_through_hub(c, run_id):
+        out = _hub_read(f"/api/v1/runs/{run_id}")
+        if out is not None:
+            return q.RunDetail.model_validate(out)
+    return q.show_run(c, run_id)
+
+
+def _log_reader(
+    c: Context, run_id: str, stream: str
+) -> tuple[Callable[[int | None], q.LogChunk], Callable[[], bool]]:
+    """
+    Read a run's log from ``offset``, and tell whether the run ended.
+
+    From this store, else from the hub for a run this store does not have.
+
+    Raises
+    ------
+    StoreError
+        Neither this store nor a hub has the run.
+    """
+    try:
+        c.find_record(run_id)
+    except StoreError:
+        if _hub_read(f"/api/v1/runs/{run_id}") is None:
+            raise
+
+        def hub_read(offset: int | None) -> q.LogChunk:
+            path = _query(f"/api/v1/runs/{run_id}/logs", {"stream": stream, "offset": offset})
+            return q.LogChunk.model_validate(_hub("GET", path))
+
+        def hub_ended() -> bool:
+            record = RunRecord.model_validate(_hub("GET", f"/api/v1/runs/{run_id}")["record"])
+            return record.status in TERMINAL_STATUSES
+
+        return hub_read, hub_ended
+
+    def read(offset: int | None) -> q.LogChunk:
+        return q.read_log(c, run_id, stream, offset)
+
+    def ended() -> bool:
+        return c.find_record(run_id).status in TERMINAL_STATUSES
+
+    return read, ended
+
+
+def _hub_task(ref: str, project: str | None) -> tuple[str, str] | None:
+    """
+    The hub's ``(project, task)`` for ``task`` or ``project/task``; None if unknown there.
+
+    Raises
+    ------
+    ConfigError
+        The task name is in several of the hub's projects.
+    """
+    if project is None and "/" in ref:
+        project, ref = ref.split("/", 1)
+    if project is not None:
+        return project, ref
+    tasks = _hub_read("/api/v1/tasks") or []
+    owners = sorted({t["project"] for t in tasks if t["name"] == ref})
+    if len(owners) > 1:
+        raise ConfigError(f"task {ref!r} exists in several projects ({', '.join(owners)})")
+    return (owners[0], ref) if owners else None
+
+
+def _hub_sweeps(project: str | None) -> list[dict[str, Any]]:
+    """The hub's sweep rows (as ``q.list_sweeps``) of one project or of all; [] without a hub."""
+    if project is not None:
+        projects = [project]
+    else:
+        projects = [e["project"] for e in _hub_read("/api/v1/projects") or []]
+    rows = []
+    for name in projects:
+        for row in _hub_read(f"/api/v1/projects/{name}/sweeps") or []:
+            created = datetime.fromisoformat(row["created_at"])
+            rows.append({"project": name, **row, "created_at": created})
+    return rows
+
+
 def _client_checkout(root: Path) -> dict[str, str | None]:
     """
     The project, HEAD, and uncommitted diff of the checkout here, for a host launch.
@@ -740,7 +867,7 @@ def leaderboard(
         if version is None:
             raise RunError(f"--metric needs name@version, got {item!r}")
         versions[name] = version
-    board = q.get_leaderboard(_ctx(), ref, project, versions or None)
+    board = _board(ref, project, versions, metric or [])
     if as_json:
         _print_json(board)
         return
@@ -772,6 +899,38 @@ def leaderboard(
         typer.secho(f"{len(board.unscored)} finished runs have no scores", fg="yellow")
 
 
+def _board(
+    ref: str, project: str | None, versions: dict[str, str], metric: list[str]
+) -> Leaderboard:
+    """
+    A task's board from this store, else (unknown or without runs here) from the hub.
+
+    Raises
+    ------
+    ConfigError, StoreError
+        This store's error, when the hub has no board either.
+    """
+    try:
+        board = q.get_leaderboard(_ctx(), ref, project, versions or None)
+    except (ConfigError, StoreError):
+        hub = _hub_board(ref, project, metric)
+        if hub is None:
+            raise
+        return hub
+    if board.rows or board.unscored or board.needs_reeval:
+        return board
+    return _hub_board(ref, project, metric) or board
+
+
+def _hub_board(ref: str, project: str | None, metric: list[str]) -> Leaderboard | None:
+    where = _hub_task(ref, project)
+    if where is None:
+        return None
+    path = _query(f"/api/v1/tasks/{where[0]}/{where[1]}/leaderboard", {"metric": metric or None})
+    out = _hub_read(path)
+    return None if out is None else Leaderboard.model_validate(out)
+
+
 # runs ---------------------------------------------------------------------------
 @app.command("runs")
 def list_runs_cmd(
@@ -783,10 +942,25 @@ def list_runs_cmd(
     limit: Annotated[int, typer.Option(help="Maximum rows.")] = 50,
     as_json: JsonFlag = False,
 ) -> None:
-    """List runs, newest first."""
+    """List runs, newest first: this store's, and the hub's when one answers."""
     records = _ctx().index.list_runs(
         project=project, task=task, status=status, tag=tag, include_archived=archived, limit=limit
     )
+    filters = {
+        "project": project,
+        "task": task,
+        "status": None if status is None else status.value,
+        "tag": tag,
+        "archived": "true" if archived else None,
+        "limit": limit,
+    }
+    hub = _hub_read(_query("/api/v1/runs", filters)) or []
+    if hub:
+        # a CLI on another machine than the hub (spec 5.2): its own runs and the hub's
+        merged = {r.run_id: r for r in records}
+        merged.update((row["run_id"], RunRecord.model_validate(row)) for row in hub)
+        records = sorted(merged.values(), key=lambda r: (r.created_at, r.run_id), reverse=True)
+        records = records[:limit]
     if as_json:
         _print_json(records)
         return
@@ -808,7 +982,7 @@ def list_runs_cmd(
 @app.command()
 def show(run_id: str, as_json: JsonFlag = False) -> None:
     """Show everything about a run, including where every file lives."""
-    detail = q.show_run(_ctx(), run_id)
+    detail = _run_detail(_ctx(), run_id)
     if as_json:
         _print_json(detail)
         return
@@ -1154,18 +1328,18 @@ def logs(
     as_json: JsonFlag = False,
 ) -> None:
     """Print a run's log (tail), optionally following it."""
-    c = _ctx()
-    chunk = q.read_log(c, run_id, stream)
+    read, ended = _log_reader(_ctx(), run_id, stream)
+    chunk = read(None)
     if as_json:
         _print_json(chunk)
         return
     typer.echo(chunk.text, nl=False)
     while follow:
-        if c.find_record(run_id).status in TERMINAL_STATUSES:
-            typer.echo(q.read_log(c, run_id, stream, chunk.offset).text, nl=False)
+        if ended():
+            typer.echo(read(chunk.offset).text, nl=False)
             return
         time.sleep(1)
-        chunk = q.read_log(c, run_id, stream, chunk.offset)
+        chunk = read(chunk.offset)
         typer.echo(chunk.text, nl=False)
 
 
@@ -1349,13 +1523,11 @@ def sweep_extend(
 
 @app.command("sweeps")
 def sweeps_cmd(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
-    """List sweeps, newest first."""
-    from hypothex.core.sweeps import list_sweeps
-
-    c = _ctx()
-    projects = [project] if project else [e.project for e in c.store.list_projects()]
-    rows: list[dict[str, Any]] = [{"project": p, **s} for p in projects for s in list_sweeps(c, p)]
-    rows.sort(key=lambda s: s["created_at"], reverse=True)
+    """List sweeps, newest first: this store's, and the hub's when one answers."""
+    merged = {(s["project"], s["id"]): s for s in q.list_sweeps(_ctx(), project)}
+    for row in _hub_sweeps(project):
+        merged.setdefault((row["project"], row["id"]), row)
+    rows = sorted(merged.values(), key=lambda s: (s["created_at"], s["id"]), reverse=True)
     if as_json:
         _print_json(rows)
         return

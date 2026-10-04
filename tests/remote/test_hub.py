@@ -1410,7 +1410,8 @@ def test_host_goes_stale_without_pings_and_recovers(
         if e.type == "host.state" and e.payload["name"] == "a"
     ]
     assert "stale" in states
-    assert states[-1] == "connected"
+    assert "connected" in states[states.index("stale") :]  # then hub.stop() ends the session
+    assert states[-1] == "connecting"
 
 
 def test_protocol_mismatch_marks_upgrade_and_stops_retrying(
@@ -1891,6 +1892,44 @@ def test_a_halt_during_the_session_drain_still_closes_clients_and_route(
             assert len(created) == 2
             assert all(c._http.is_closed for c in created)  # no socket leaks
             assert FakeTunnel.stopped and sup.tunnel is None  # no orphan tunnel
+        finally:
+            release.set()
+            await hub.stop()
+
+    asyncio.run(main())
+
+
+def test_a_draining_session_is_not_shown_as_connected(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, _ = servers
+    seed_run(a.ctx, "a-1")
+    hub_ctx = Context.open(tmp_path / "hub")
+    started, release = threading.Event(), threading.Event()
+    real = hub_mod.mirror_run
+
+    def blocked_mirror(*args: Any, **kwargs: Any) -> Any:
+        started.set()
+        release.wait(10)
+        return real(*args, **kwargs)
+
+    async def failing_watch(self: Hub, sup: Any, *args: Any) -> None:
+        await until(started.is_set)
+        raise RuntimeError("no answer")  # the session ends on its own mid-mirror
+
+    monkeypatch.setattr(hub_mod, "mirror_run", blocked_mirror)
+    monkeypatch.setattr(hub_mod.Hub, "_watch", failing_watch)
+    only_a = EnvironmentsFile(environments={"a": HostSpec(route="url", url=a.url)})
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, only_a))
+        await hub.start()
+        try:
+            sup = hub._sups["a"]
+            await until(lambda: started.is_set() and sup.client is None)  # in its drain
+            assert hub.state("a").state == "connecting"
+            with pytest.raises(HostUnavailableError, match="is connecting"):
+                hub.client("a")
         finally:
             release.set()
             await hub.stop()

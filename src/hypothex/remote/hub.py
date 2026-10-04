@@ -1399,6 +1399,8 @@ class Hub:
                 task.result()
         finally:
             sup.client = None
+            if sup.state.state == "connected":  # no client while the session drains
+                self._set(sup, "connecting", "session ended")
             # the shielded apply/refresh threads still use `client`: wait for them, even
             # through a cancel (_halt lands here when the session ended on its own), then
             # close both clients and the route, then let the cancel go on

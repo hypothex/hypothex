@@ -1,6 +1,7 @@
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -223,7 +224,17 @@ def _score_rows(ctx: Context, run_id: str) -> int:
     return len(path.read_text().splitlines()) if path.exists() else 0
 
 
-def test_task_reeval_scores_mirrored_runs_on_their_host(tmp_path: Path) -> None:
+def test_task_reeval_scores_mirrored_runs_on_their_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+    real_reeval = app_module.reeval
+
+    def spy(*args: Any, **kw: Any) -> Any:
+        calls.append(kw)
+        return real_reeval(*args, **kw)
+
+    monkeypatch.setattr(app_module, "reeval", spy)
     with remote_hub(tmp_path) as r:
         seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
         seed_finished_run(r.hub, r.hub_repo, "h1", predictions=PREDS_075)
@@ -236,6 +247,9 @@ def test_task_reeval_scores_mirrored_runs_on_their_host(tmp_path: Path) -> None:
         out = r.client.post("/api/v1/tasks/toy/toy-acc/reeval", json=body).json()
         assert sorted(out["evaluated"]) == ["e1", "h1"]
         assert "gpu-old" in out["skipped"]["m1"] and "d1" in out["skipped"]  # scored here
+        # the hub's own runs (h1, and d1 of a demo host never mirrored) in one core call
+        # (the host's own server runs in this process too: its call has a run_id)
+        assert [sorted(c["run_ids"]) for c in calls if "task" in c] == [["d1", "h1"]]
         # the host scored its own run; the hub's copy only changes through the mirror
         assert _score_rows(r.env, "e1") == 1
         wait_until(lambda: _score_rows(r.hub, "e1") == 1, timeout=30)

@@ -2060,24 +2060,32 @@ def create_app(
             hosts = {e: _mirror_host(e) for e in {r.environment_id for r in runs}}
             if not any(hosts.values()):
                 return reeval(ctx, project=project, task=task, metric=body.metric, force=body.force)
-            report = EvalReport()
+            # the hub's own runs in one core call, then each mirrored run on its host
+            here = [r.run_id for r in runs if hosts[r.environment_id] is None]
+            report = reeval(
+                ctx,
+                project=project,
+                task=task,
+                metric=body.metric,
+                force=body.force,
+                run_ids=here,
+            )
             down: dict[str, str] = {}  # host -> why nothing more is sent to it
             for record in reversed(runs):  # oldest first, as core reeval
                 host = hosts[record.environment_id]
                 if host is None:
-                    part = reeval(ctx, run_id=record.run_id, metric=body.metric, force=body.force)
-                elif host in down:
+                    continue
+                if host in down:
                     report.skipped[record.run_id] = down[host]
                     continue
-                else:
-                    try:
-                        part = EvalReport.model_validate(_reeval_on(host, record.run_id, body))
-                    except (HostUnavailableError, EnvUnreachableError) as exc:
-                        down[host] = report.skipped[record.run_id] = f"host {host}: {exc}"[:500]
-                        continue
-                    except EnvRequestError as exc:
-                        report.skipped[record.run_id] = f"host {host}: {exc}"[:500]
-                        continue
+                try:
+                    part = EvalReport.model_validate(_reeval_on(host, record.run_id, body))
+                except (HostUnavailableError, EnvUnreachableError) as exc:
+                    down[host] = report.skipped[record.run_id] = f"host {host}: {exc}"[:500]
+                    continue
+                except EnvRequestError as exc:
+                    report.skipped[record.run_id] = f"host {host}: {exc}"[:500]
+                    continue
                 report.evaluated += part.evaluated
                 report.skipped.update(part.skipped)
                 report.warnings += [w for w in part.warnings if w not in report.warnings]

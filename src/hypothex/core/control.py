@@ -448,6 +448,34 @@ def _start(
     return execute_run(ctx, record.run_id, stdout_sink=stdout_sink, stderr_sink=stderr_sink)
 
 
+def _inherited_tags(tags: list[str]) -> list[str]:
+    """
+    The tags a child run (rerun, re-infer) takes from its parent.
+
+    A sweep tag is left out: a sweep's members are the runs with its tag, so a
+    child that kept it would join the sweep (a seed counted twice, a re-infer
+    as a cell of its own). User tags are kept.
+
+    Parameters
+    ----------
+    tags : list of str
+        The parent's tags.
+
+    Returns
+    -------
+    list of str
+        ``tags`` without ``sweep:*`` tags.
+
+    Examples
+    --------
+    >>> _inherited_tags(["best", "sweep:0a1b2c3d:s-7f3a"])
+    ['best']
+    """
+    from hypothex.core.sweeps import SWEEP_TAG_PREFIX  # sweeps imports this module
+
+    return [t for t in tags if not t.startswith(SWEEP_TAG_PREFIX)]
+
+
 def rerun(
     ctx: Context,
     run_id: str,
@@ -467,7 +495,8 @@ def rerun(
     resolve inside that checkout. If the repo moved since the parent ran (the
     project was re-registered at a new path), the working directory is mapped
     onto the new location; a parent that ran in a worktree keeps its
-    subdirectory.
+    subdirectory. The child keeps the parent's tags except a sweep tag, so it
+    never joins the parent's sweep.
 
     Parameters
     ----------
@@ -519,7 +548,7 @@ def rerun(
         task=parent.task,
         hypothesis=f"Rerun of {parent.run_id}: {parent.hypothesis}".strip(),
         seed=parent.seed,
-        tags=list(parent.tags),
+        tags=_inherited_tags(parent.tags),
         config_path=config_file if config_file.is_file() else None,
         params=dict(parent.params),
         vars=dict(parent.vars),
@@ -550,7 +579,8 @@ def reinfer(
     Run the project's ``infer`` stage with a run's checkpoint as a child run.
 
     The parent's ``config.yaml`` (if it had one) is passed on, so ``{config}``
-    works in the ``infer`` stage.
+    works in the ``infer`` stage. The child keeps the parent's tags except a
+    sweep tag, so it never joins the parent's sweep.
 
     Parameters
     ----------
@@ -594,7 +624,7 @@ def reinfer(
         task=parent.task,
         hypothesis=f"Re-infer of {parent.run_id}: {parent.hypothesis}".strip(),
         seed=parent.seed,
-        tags=list(parent.tags),
+        tags=_inherited_tags(parent.tags),
         config_path=config_file if config_file.is_file() else None,
         vars={**parent.vars, "checkpoint": chosen},
         kind=RunKind.INFER,

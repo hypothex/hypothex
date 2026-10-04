@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from hypothex.core.execution import (
     process_create_time,
 )
 from hypothex.core.ids import utcnow
-from hypothex.core.records import ExecutorInfo, RunKind, RunStatus
+from hypothex.core.records import ExecutorInfo, RunKind, RunRecord, RunStatus
 from tests.factories import git, make_record
 
 PY = sys.executable
@@ -527,3 +528,27 @@ def test_stop_run_signals_a_child_its_first_read_missed(
         if child.poll() is None:
             os.killpg(child.pid, signal.SIGKILL)
             child.wait()
+
+
+def _sweep_tagged_parent(ctx: Context, toy_repo: Path) -> tuple[str, str]:
+    """A finished run with a checkpoint, a user tag, and a sweep tag."""
+    code = (
+        "import json, os; d = os.environ['HYPOTHEX_RUN_DIR']; "
+        "open(d + '/artifacts.jsonl', 'a').write(json.dumps("
+        "{'kind': 'checkpoint', 'path': '/tmp/model.pt'}) + '\\n')"
+    )
+    tag = "sweep:0a1b2c3d:s-1"
+    req = RunRequest(repo=toy_repo, command=cmd(code), task="toy-acc", tags=["keep", tag])
+    return execute_run(ctx, prepare_run(ctx, req).run_id).run_id, tag
+
+
+@pytest.mark.parametrize("make_child", [rerun, reinfer])
+def test_child_runs_do_not_join_the_parents_sweep(
+    ctx: Context, toy_repo: Path, make_child: Callable[..., RunRecord]
+) -> None:
+    # DF-2: a rerun or re-infer copied the sweep tag, so it counted in the sweep
+    parent, tag = _sweep_tagged_parent(ctx, toy_repo)
+    child = make_child(ctx, parent, background=False)
+    assert child.tags == ["keep"]
+    members = ctx.index.list_runs(project="toy", tag=tag, include_archived=True, limit=None)
+    assert [r.run_id for r in members] == [parent]

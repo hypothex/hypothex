@@ -5,9 +5,10 @@ from __future__ import annotations
 import contextlib
 import json
 import shlex
+import weakref
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,7 @@ from hypothex.core.datasets import (
 )
 from hypothex.core.errors import ConfigError, EvalError, RunError, StoreError
 from hypothex.core.fsutil import read_jsonl, read_yaml
+from hypothex.core.index import Index
 from hypothex.core.leaderboard import Leaderboard, build_leaderboard
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import ProjectEntry
@@ -281,6 +283,17 @@ def get_leaderboard(
     Leaderboard
     """
     entry, task = resolve_task(ctx, ref, project)
+    return _board(ctx, entry, task, versions, examples=examples)
+
+
+def _board(
+    ctx: Context,
+    entry: ProjectEntry,
+    task: str,
+    versions: dict[str, str] | None,
+    *,
+    examples: bool,
+) -> Leaderboard:
     runs = ctx.index.list_runs(project=entry.project, task=task, include_archived=True, limit=None)
     scores = ctx.index.scores_for(r.run_id for r in runs)
     per_example = primary_examples(ctx, entry.config, task, runs, versions) if examples else None
@@ -289,13 +302,53 @@ def get_leaderboard(
     )
 
 
+class _Ranked(NamedTuple):
+    """What a task summary takes from the index, and the state it was read at."""
+
+    generation: int
+    config: ProjectConfig
+    primary: str
+    higher_is_better: bool
+    best: float | None
+    n_runs: int
+
+
+_RANKED: weakref.WeakKeyDictionary[Index, dict[tuple[str, str], _Ranked]] = (
+    weakref.WeakKeyDictionary()
+)
+"""Per index, the last ``_Ranked`` of each ``(project, task)``."""
+
+
+def _ranked(ctx: Context, entry: ProjectEntry, name: str) -> _Ranked:
+    """
+    Rank a task's runs, or reuse the last ranking while nothing it reads changed.
+
+    The ranking reads only the index and the project config, so it is reused
+    while the index generation and the config are the same (a task list
+    request then builds no leaderboard).
+    """
+    memo = _RANKED.setdefault(ctx.index, {})
+    generation = ctx.index.generation()  # read first: a write during the build reruns it
+    cached = memo.get((entry.project, name))
+    if cached is not None and cached.generation == generation and cached.config == entry.config:
+        return cached
+    board = _board(ctx, entry, name, None, examples=False)
+    top = board.rows[0].primary if board.rows else None
+    ranked = _Ranked(
+        generation=generation,
+        config=entry.config,
+        primary=board.primary,
+        higher_is_better=board.higher_is_better,
+        best=top.mean if top else None,
+        n_runs=ctx.index.count_runs(project=entry.project, task=name, status=RunStatus.FINISHED),
+    )
+    memo[(entry.project, name)] = ranked
+    return ranked
+
+
 def _summary(ctx: Context, entry: ProjectEntry, name: str) -> TaskSummary:
     spec = entry.config.tasks[name]
-    board = get_leaderboard(ctx, name, entry.project, examples=False)
-    best = board.rows[0].primary.mean if board.rows and board.rows[0].primary else None
-    n_runs = len(
-        ctx.index.list_runs(project=entry.project, task=name, status=RunStatus.FINISHED, limit=None)
-    )
+    ranked = _ranked(ctx, entry, name)
     return TaskSummary(
         project=entry.project,
         name=name,
@@ -304,10 +357,10 @@ def _summary(ctx: Context, entry: ProjectEntry, name: str) -> TaskSummary:
         dataset_version=entry.config.datasets[spec.dataset].version,
         split=spec.split,
         metrics={m: entry.config.metrics[m].version for m in spec.metrics},
-        primary=board.primary,
-        higher_is_better=board.higher_is_better,
-        n_runs=n_runs,
-        best=best,
+        primary=ranked.primary,
+        higher_is_better=ranked.higher_is_better,
+        n_runs=ranked.n_runs,
+        best=ranked.best,
     )
 
 

@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -9,7 +10,7 @@ from hypothex.core.datasets import FingerprintCache
 from hypothex.core.errors import ConfigError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.index import store_fingerprint
-from hypothex.core.records import DatasetRef
+from hypothex.core.records import DatasetRef, RunRecord, RunStatus
 from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
 
 ALL_RIGHT = [{"id": f"ex-{i}", "prediction": r} for i, r in enumerate([0, 1, 0, 0])]
@@ -217,3 +218,45 @@ def test_show_run_finds_children_without_listing_the_project(
     monkeypatch.setattr(ctx.index, "list_runs", no_listing)
     assert q.show_run(ctx, "r1").children == ["r2", "r3"]
     assert q.show_run(ctx, "other").children == []
+
+
+def test_list_tasks_counts_finished_runs_and_follows_new_scores(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # PERF-F7: n_runs is a COUNT; the ranking is reused only while the index is unchanged
+    seed_finished_run(ctx, toy_repo, "a", predictions=PREDS_075)
+    evaluate_run(ctx, "a")
+    ctx.create_run(make_record("queued", task="toy-acc", status=RunStatus.QUEUED))
+    seed_finished_run(ctx, toy_repo, "hidden", predictions=ALL_RIGHT)
+    q.archive_run(ctx, "hidden")
+    first = {t.name: t for t in q.list_tasks(ctx)}["toy-acc"]
+    assert (first.n_runs, first.best) == (1, 0.75)
+    seed_finished_run(ctx, toy_repo, "b", predictions=ALL_RIGHT, config_hash="sha256:bbbb")
+    evaluate_run(ctx, "b")
+    second = {t.name: t for t in q.list_tasks(ctx)}["toy-acc"]
+    assert (second.n_runs, second.best) == (2, 1.0)
+    write_toy_project(toy_repo, accuracy_version="v2")
+    bumped = {t.name: t for t in q.list_tasks(ctx)}["toy-acc"]
+    assert (bumped.n_runs, bumped.best, bumped.metrics) == (2, None, {"accuracy": "v2"})
+
+
+def test_list_tasks_reads_runs_once_per_task_and_not_again_when_unchanged(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_finished_run(ctx, toy_repo, "a", predictions=PREDS_075)
+    evaluate_run(ctx, "a")
+    listed: list[object] = []
+    real = ctx.index.list_runs
+
+    def counting(**kwargs: Any) -> list[RunRecord]:
+        listed.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(ctx.index, "list_runs", counting)
+    tasks = q.list_tasks(ctx)
+    assert len(listed) == len(tasks)
+    listed.clear()
+    assert q.list_tasks(ctx) == tasks
+    assert listed == []
+    assert q.get_task(ctx, "toy-acc")["summary"]["best"] == 0.75
+    assert listed == []

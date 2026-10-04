@@ -609,13 +609,39 @@ def _prepare_in(
 
 
 def _pump(
-    src: IO[bytes] | None, log_path: Path, sink: BinaryIO | None, stop: threading.Event
+    src: IO[bytes] | None,
+    log_path: Path,
+    sink: BinaryIO | None,
+    stop: threading.Event,
+    failures: list[str],
 ) -> threading.Thread:
     """
     Copy a pipe to a log file (and ``sink``) until EOF or until ``stop`` is set.
 
     ``stop`` lets the run end when a process the command left behind still
-    holds the pipe open, so EOF never comes.
+    holds the pipe open, so EOF never comes. The pipe is read to the end even
+    when the log cannot be written (a full disk): the bytes are dropped and the
+    first error is appended to ``failures``, so the command never blocks on a
+    full pipe.
+
+    Parameters
+    ----------
+    src : binary file or None
+        The child's stdout or stderr pipe; None does nothing.
+    log_path : Path
+        The log file, opened for append.
+    sink : binary file or None
+        Where to echo the output as well (a terminal); dropped once it fails.
+    stop : threading.Event
+        Set to stop reading before EOF.
+    failures : list of str
+        Gets ``"<log name>: <error>"`` when the log could not be opened or
+        written; nothing more is written to that log.
+
+    Returns
+    -------
+    threading.Thread
+        The started daemon thread.
     """
 
     def run() -> None:
@@ -623,23 +649,40 @@ def _pump(
             return
         out = sink
         fd = src.fileno()
-        # a selector (poll/epoll/kqueue), not select(): that fails for fds >= 1024
-        with selectors.DefaultSelector() as sel, log_path.open("ab") as fh:
-            sel.register(fd, selectors.EVENT_READ)
-            while not stop.is_set():
-                if not sel.select(0.1):
-                    continue
-                chunk = os.read(fd, 65536)
-                if not chunk:
-                    return
-                fh.write(chunk)
-                fh.flush()
-                if out is not None:
-                    try:
-                        out.write(chunk)
-                        out.flush()
-                    except (OSError, ValueError):
-                        out = None
+        try:
+            fh: BinaryIO | None = log_path.open("ab")
+        except OSError as exc:
+            failures.append(f"{log_path.name}: {exc}")
+            fh = None
+        try:
+            # a selector (poll/epoll/kqueue), not select(): that fails for fds >= 1024
+            with selectors.DefaultSelector() as sel:
+                sel.register(fd, selectors.EVENT_READ)
+                while not stop.is_set():
+                    if not sel.select(0.1):
+                        continue
+                    chunk = os.read(fd, 65536)
+                    if not chunk:
+                        return
+                    if fh is not None:
+                        try:
+                            fh.write(chunk)
+                            fh.flush()
+                        except OSError as exc:  # keep draining: a full pipe blocks the child
+                            failures.append(f"{log_path.name}: {exc}")
+                            with contextlib.suppress(OSError):
+                                fh.close()
+                            fh = None
+                    if out is not None:
+                        try:
+                            out.write(chunk)
+                            out.flush()
+                        except (OSError, ValueError):
+                            out = None
+        finally:
+            if fh is not None:
+                with contextlib.suppress(OSError):
+                    fh.close()
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
@@ -713,7 +756,9 @@ def execute_run(
     The run ends when the command exits. Output still flowing from processes
     it left running is captured for ``PUMP_DRAIN_SECONDS`` more, then the run
     is recorded with a ``run.warning``. A failure to read or index what the
-    run logged also becomes a ``run.warning``, never a run stuck ``running``.
+    run logged also becomes a ``run.warning``, never a run stuck ``running``,
+    and so does a log file that cannot be written (a full disk): the output is
+    still read, so the command never blocks, but it is dropped.
 
     After scoring, the git worktree the run executed in (spec 8A.4) is
     removed when the run left nothing in it (``release_worktree``).
@@ -896,9 +941,14 @@ def _execute(
             raise
         _open_gate(proc)  # child_pid is saved: only now may the command run
         stop_pumps = threading.Event()
+        log_failures: list[str] = []
         pumps = [
-            _pump(proc.stdout, run_dir / "logs" / "stdout.log", stdout_sink, stop_pumps),
-            _pump(proc.stderr, run_dir / "logs" / "stderr.log", stderr_sink, stop_pumps),
+            _pump(
+                proc.stdout, run_dir / "logs" / "stdout.log", stdout_sink, stop_pumps, log_failures
+            ),
+            _pump(
+                proc.stderr, run_dir / "logs" / "stderr.log", stderr_sink, stop_pumps, log_failures
+            ),
         ]
         interrupted = False
         try:
@@ -916,6 +966,9 @@ def _execute(
                 f"left running?); output after {PUMP_DRAIN_SECONDS:g}s is not captured"
             },
         )
+    if log_failures:
+        message = f"log write failed; later output was not saved ({'; '.join(log_failures)})"
+        ctx.emit("run.warning", record, {"message": message[:500]})
 
     stopped = interrupted or term.signalled or (run_dir / STOP_MARKER).exists()
     if stopped:

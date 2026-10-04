@@ -358,7 +358,7 @@ def test_pump_reads_a_pipe_on_a_file_descriptor_above_1024(tmp_path: Path) -> No
         os.close(r)
         src = os.fdopen(high, "rb", buffering=0)
         log = tmp_path / "out.log"
-        thread = execution._pump(src, log, None, threading.Event())
+        thread = execution._pump(src, log, None, threading.Event(), [])
         os.write(w, b"hello\n")
         os.close(w)
         w = -1
@@ -392,3 +392,59 @@ def test_stop_marker_written_while_the_child_runs_kills_it(ctx: Context, toy_rep
     done = result[0]
     assert done.status == RunStatus.KILLED
     assert not execution.process_alive(done.executor.child_pid, None)
+
+
+class _FullDisk:
+    """A log file on a full disk: every write fails with ENOSPC."""
+
+    def write(self, data: bytes) -> int:
+        raise OSError(28, "No space left on device")
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_full_disk_does_not_block_a_chatty_command(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DF-69: the log thread died on ENOSPC; nobody read the pipe, so the child
+    # blocked on write and the run never ended
+    real_open = Path.open
+
+    def open_full(self: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+        if self.name == "stdout.log" and mode == "ab":
+            return _FullDisk()
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_full)
+    chatty = cmd("import sys; sys.stdout.write('x' * 4_000_000)")
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=chatty))
+    result: list = []
+    worker = threading.Thread(target=lambda: result.append(execute_run(ctx, rec.run_id)))
+    worker.start()
+    worker.join(timeout=60)
+    if worker.is_alive():  # the old bug: unblock the child so the test run can end
+        execution.terminate_group(ctx.find_record(rec.run_id).executor.child_pid or 0, grace=1)
+        worker.join(timeout=30)
+        pytest.fail("the run hung on a full disk")
+    assert result[0].status == RunStatus.FINISHED
+    warnings = [e.payload["message"] for e in _warning_events(ctx, rec.run_id)]
+    assert len(warnings) == 1 and "log write failed" in warnings[0]
+    assert "stdout.log" in warnings[0] and "No space left" in warnings[0]
+
+
+def test_pump_drains_a_pipe_whose_log_cannot_be_opened(tmp_path: Path) -> None:
+    r, w = os.pipe()
+    src = os.fdopen(r, "rb", buffering=0)
+    failures: list[str] = []
+    thread = execution._pump(src, tmp_path / "no" / "dir.log", None, threading.Event(), failures)
+    writer = threading.Thread(target=lambda: (os.write(w, b"x" * 1_000_000), os.close(w)))
+    writer.start()
+    writer.join(timeout=10)
+    thread.join(timeout=10)
+    src.close()
+    assert not writer.is_alive() and not thread.is_alive()
+    assert len(failures) == 1 and failures[0].startswith("dir.log: ")

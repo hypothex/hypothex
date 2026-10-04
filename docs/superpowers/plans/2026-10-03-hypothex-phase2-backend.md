@@ -19925,7 +19925,8 @@ git commit -m "feat(remote): hub supervisors with cursor replay, stale detection
 - Consumes:
   - `SshTarget(alias=..., ssh_bin=..., scp_bin=...)`.
   - `ensure_server(target, home, *, kind=None) -> ServerInfo` (`port`, `protocol_version`; Task 11). The hub passes the host's `kind`, so a server it starts runs as `hx serve --kind ssh|slurm`.
-  - `Tunnel(target, remote_port)` with `start()`, `alive()`, `stop()`, `local_port`.
+  - `Tunnel(target, remote_port, *, registry=<home>/hub/tunnels)` with `start()`, `alive()`, `stop()`, `local_port`; while its `ssh` runs it keeps `<registry>/<pid>.json` (`{pid, owner, argv}`).
+  - `reap_stale_tunnels(registry) -> list[int]`: `Hub.start` calls it first; it sends SIGTERM to each recorded `ssh` whose owner process is gone and whose pid still runs the recorded command line, and drops those records (dogfood DF-55).
   - env `HYPOTHEX_SSH` / `HYPOTHEX_SCP` (defaults `ssh` / `scp`).
 - Produces, for `route: ssh` hosts:
   - The state is `bootstrapping` while `ensure_server` runs on the first connect only (no contact yet); a reconnect stays `connecting` (dogfood DF-53). A host whose last contact is `stale_after` old turns `stale` even while an attempt still runs.

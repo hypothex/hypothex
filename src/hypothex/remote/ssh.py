@@ -21,7 +21,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import IO, Any
 
@@ -437,6 +437,11 @@ class Tunnel:
         Port on the host (the env server binds to 127.0.0.1 there).
     local_port : int, optional
         Local port; a free one is picked when omitted.
+    registry : Path, optional
+        Folder for ``<pid>.json`` (``{pid, owner, argv}``) while the ``ssh``
+        process runs, so a later process can stop it with
+        :func:`reap_stale_tunnels` after this one died without :meth:`stop`
+        (the hub passes ``<home>/hub/tunnels``).
 
     Examples
     --------
@@ -447,12 +452,21 @@ class Tunnel:
     >>> tunnel.stop()  # doctest: +SKIP
     """
 
-    def __init__(self, target: SshTarget, remote_port: int, local_port: int | None = None) -> None:
+    def __init__(
+        self,
+        target: SshTarget,
+        remote_port: int,
+        local_port: int | None = None,
+        *,
+        registry: Path | None = None,
+    ) -> None:
         self.target = target
         self.remote_port = remote_port
         self.local_port: int = local_port if local_port is not None else _free_port()
+        self.registry = registry
         self._proc: subprocess.Popen[bytes] | None = None
         self._stderr: IO[bytes] | None = None
+        self._record: Path | None = None
 
     def argv(self) -> list[str]:
         """
@@ -505,6 +519,8 @@ class Tunnel:
         except FileNotFoundError as exc:
             self._close()
             raise SshError(f"{self.target.ssh_bin} not found; is OpenSSH installed?") from exc
+        if self.registry is not None:
+            self._record = _register_tunnel(self.registry, self._proc.pid, self.argv())
         deadline = time.monotonic() + self.target.connect_timeout + 5
         while time.monotonic() < deadline:
             code = self._proc.poll()
@@ -561,6 +577,9 @@ class Tunnel:
         if self._stderr is not None:
             self._stderr.close()
             self._stderr = None
+        if self._record is not None:
+            self._record.unlink(missing_ok=True)
+            self._record = None
         self._proc = None
 
     def __enter__(self) -> Tunnel:
@@ -569,3 +588,93 @@ class Tunnel:
 
     def __exit__(self, *exc: Any) -> None:
         self.stop()
+
+
+def _register_tunnel(registry: Path, pid: int, argv: list[str]) -> Path:
+    """Write ``<registry>/<pid>.json`` (``{pid, owner, argv}``) for :func:`reap_stale_tunnels`."""
+    registry.mkdir(parents=True, exist_ok=True)
+    record = registry / f"{pid}.json"
+    tmp = registry / f".{pid}.json.tmp"
+    tmp.write_text(json.dumps({"pid": pid, "owner": os.getpid(), "argv": argv}), encoding="utf-8")
+    os.replace(tmp, record)
+    return record
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # alive, owned by another user
+        return True
+    return True
+
+
+def _runs_argv(pid: int, argv: list[str]) -> bool:
+    """
+    Tell whether process ``pid`` still runs this tunnel's ``ssh`` command line.
+
+    Its arguments must end with ``argv[1:]`` (which hold the unique ``-L``
+    forward), so an ``ssh`` started through a wrapper (``$HYPOTHEX_SSH``)
+    matches and a pid reused by another program does not.
+    """
+    try:
+        res = subprocess.run(
+            ["ps", "-ww", "-o", "args=", "-p", str(pid)],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    line = res.stdout.decode("utf-8", "replace").strip()
+    tail = " ".join(argv[1:])
+    return res.returncode == 0 and bool(tail) and (line == tail or line.endswith(f" {tail}"))
+
+
+def reap_stale_tunnels(registry: Path) -> list[int]:
+    """
+    Stop the ``ssh -L`` tunnels a dead process left behind.
+
+    A hub killed with ``kill -9`` never stops its tunnels: the ``ssh``
+    processes keep running and keep their ports. Each tunnel started with a
+    ``registry`` left ``<registry>/<pid>.json``. A record whose owner process
+    is gone is removed; its ``ssh`` gets SIGTERM only when that pid still runs
+    the recorded command line. Records of a live owner are left alone.
+
+    Parameters
+    ----------
+    registry : Path
+        The folder passed to :class:`Tunnel` as ``registry``.
+
+    Returns
+    -------
+    list of int
+        The pids that were sent SIGTERM.
+
+    Examples
+    --------
+    >>> reap_stale_tunnels(Path("~/.hypothex/hub/tunnels").expanduser())  # doctest: +SKIP
+    [48213]
+    """
+    reaped: list[int] = []
+    for record in sorted(registry.glob("*.json")) if registry.is_dir() else []:
+        try:
+            data = json.loads(record.read_text(encoding="utf-8"))
+            pid, owner, argv = int(data["pid"]), int(data["owner"]), data["argv"]
+        except (OSError, ValueError, TypeError, KeyError):
+            record.unlink(missing_ok=True)  # unreadable: nothing can be checked against it
+            continue
+        if owner == os.getpid() or _pid_alive(owner):
+            continue  # a live process still owns (and stops) this tunnel
+        if (
+            record.stem == str(pid)
+            and isinstance(argv, list)
+            and all(isinstance(a, str) for a in argv)
+            and _runs_argv(pid, argv)
+        ):
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGTERM)
+                reaped.append(pid)
+        record.unlink(missing_ok=True)
+    return reaped

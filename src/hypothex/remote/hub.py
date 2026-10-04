@@ -43,7 +43,7 @@ from hypothex.core.store import ProjectEntry, dir_lock, run_lock
 from hypothex.remote.bootstrap import BootstrapError, ensure_server
 from hypothex.remote.client import EnvClient, EnvRequestError, RemoteFile
 from hypothex.remote.config import EnvironmentsFile, HostKind, HostSpec
-from hypothex.remote.ssh import SshTarget, Tunnel
+from hypothex.remote.ssh import SshTarget, Tunnel, reap_stale_tunnels
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +88,9 @@ STALE_AFTER_SECONDS = 60.0
 PING_INTERVAL_SECONDS = 10.0
 PING_TIMEOUT_SECONDS = 5.0
 STALE_CHECK_SECONDS = 1.0
+TUNNELS_DIR = "hub/tunnels"
+"""``<home>/hub/tunnels/<pid>.json``: one record per running ``ssh -L`` tunnel of the hub, so the
+next hub start stops the tunnels of a hub that was killed (``reap_stale_tunnels``)."""
 REMOTE_FILE_KIND = "remote_file"
 MANIFEST_NAME = ".mirror.json"
 # No leading dot: dot folders are skipped by the cross-project scan, and "." / ".." escape
@@ -999,6 +1002,7 @@ class Hub:
         self.stale_after = STALE_AFTER_SECONDS
         self.ping_interval = PING_INTERVAL_SECONDS
         self._started = False
+        self._tunnels = ctx.layout.home / TUNNELS_DIR
         self._sups: dict[str, _Supervisor] = {}
         for name, spec in sorted(hosts.environments.items()):
             self._sups[name] = self._new_supervisor(name, spec)
@@ -1024,12 +1028,20 @@ class Hub:
         """
         Start one supervisor task per remote host (no-op when already started).
 
-        First re-indexes mirrored runs a cut-short mirror left with
-        ``.mirror-index-pending`` (``reindex_pending``).
+        First stops the ``ssh -L`` tunnels a killed hub left running
+        (``reap_stale_tunnels``), and re-indexes mirrored runs a cut-short
+        mirror left with ``.mirror-index-pending`` (``reindex_pending``).
         """
         if self._started:
             return
         self._started = True
+        try:
+            reaped = await asyncio.to_thread(reap_stale_tunnels, self._tunnels)
+        except Exception:  # noqa: BLE001 - an orphan tunnel only holds a port
+            log.exception("stopping the tunnels of a previous hub failed")
+        else:
+            if reaped:
+                log.info("stopped ssh tunnels a previous hub left: %s", reaped)
         try:
             repaired = reindex_pending(self.ctx)
         except Exception:  # noqa: BLE001 - each run's next mirror redoes it anyway
@@ -1371,7 +1383,7 @@ class Hub:
                 f"upgrade hx on {sup.name}: protocol {info.protocol_version}, "
                 f"hub speaks {PROTOCOL_VERSION}"
             )
-        tunnel = Tunnel(target, info.port)
+        tunnel = Tunnel(target, info.port, registry=self._tunnels)
         sup.tunnel = tunnel
         sup.token = info.token  # the env server's bearer token, read from server.json over ssh
         # tracked: a disconnect waits for start() before the session's cleanup stops it

@@ -2158,9 +2158,17 @@ class FakeTunnel:
 
     instances: list[FakeTunnel] = []
 
-    def __init__(self, target: Any, remote_port: int, local_port: int | None = None) -> None:
+    def __init__(
+        self,
+        target: Any,
+        remote_port: int,
+        local_port: int | None = None,
+        *,
+        registry: Path | None = None,
+    ) -> None:
         self.target = target
         self.local_port = remote_port
+        self.registry = registry
         self.started = self.stopped = self.dead = False
         FakeTunnel.instances.append(self)
 
@@ -2277,6 +2285,47 @@ def test_an_ssh_reconnect_is_not_bootstrapping_and_goes_stale_mid_attempt(
     assert states[:2] == ["bootstrapping", "connected"]
     assert "bootstrapping" not in states[2:]  # nothing is bootstrapped again
     assert "stale" in states
+
+
+def test_hub_start_reaps_old_tunnels_and_records_its_own(
+    tmp_path: Path,
+    servers: tuple[EnvServer, EnvServer],
+    fake_ssh: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a, _ = servers
+    reaped: list[Path] = []
+
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        return ServerInfo(
+            pid=1,
+            port=a.port,
+            managed=True,
+            hx_version=__version__,
+            protocol_version=PROTOCOL_VERSION,
+        )
+
+    def reap(registry: Path) -> list[int]:
+        assert FakeTunnel.instances == []  # before any tunnel of this hub opens
+        reaped.append(registry)
+        return [4242]
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+    monkeypatch.setattr(hub_mod, "reap_stale_tunnels", reap)
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, ssh_hosts()))
+        await hub.start()
+        try:
+            await until(lambda: hub.state("gpu1").state == "connected")
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    registry = hub_ctx.layout.home / "hub" / "tunnels"
+    assert reaped == [registry]
+    assert [t.registry for t in FakeTunnel.instances] == [registry]
 
 
 def test_ssh_bootstrap_failure_is_error_and_retried(

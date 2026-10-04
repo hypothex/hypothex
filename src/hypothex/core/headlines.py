@@ -461,6 +461,26 @@ def _find(rows: list[LeaderboardRow], group_id: str | None) -> LeaderboardRow | 
     return next((r for r in rows if r.group_id == group_id), None)
 
 
+def _name(row: LeaderboardRow) -> str:
+    """
+    A row's label for a sentence: a hypothesis clause cut to fit a table is given whole.
+
+    ``LeaderboardRow.label`` cuts a long first clause at ``LABEL_MAX`` and adds
+    "…"; ``distinct_labels`` may append `` · <vars>``. Inside a headline the "…"
+    reads like part of a number ("0.915… +0.002"), so the cut clause is swapped
+    for the whole one and any suffix is kept. Labels that are not a cut clause
+    of ``row.hypothesis`` (versions, tags) are returned as they are.
+    """
+    if "…" not in row.label:
+        return row.label
+    from hypothex.core.leaderboard import group_label  # leaderboard imports this module
+
+    cut = group_label(row.hypothesis, [], row.group_id)
+    if not cut.endswith("…") or not row.label.startswith(cut):
+        return row.label
+    return group_label(row.hypothesis, [], row.group_id, limit=None) + row.label[len(cut) :]
+
+
 def _mean(row: LeaderboardRow) -> float:
     assert row.primary is not None
     return row.primary.mean
@@ -521,19 +541,19 @@ def task_headline(
     if board.kind == "system_bench":
         return _bench_headline(board, best, ref)
     if board.kind == "agent_iteration":
-        head = f"{best.label} {_fmt(board, _mean(best))}"
+        head = f"{_name(best)} {_fmt(board, _mean(best))}"
         if ref is None or ref.group_id == best.group_id:
             return head
-        text = f"{head}, {_dfmt(board, _mean(best) - _mean(ref), _mean(ref))} over {ref.label}"
+        text = f"{head}, {_dfmt(board, _mean(best) - _mean(ref), _mean(ref))} over {_name(ref)}"
         ci = _gain_interval(best, ref, board.primary, gain_interval)
         if ci is not None:
             text += f" [{_fmt(board, ci[0], suffix=False)}, {_fmt(board, ci[1], suffix=False)}]"
         return text
     if len(rows) == 1:
-        return f"{best.label} {_fmt(board, _mean(best))}"
+        return f"{_name(best)} {_fmt(board, _mean(best))}"
     runner = rows[1]
     gain = _dfmt(board, _mean(best) - _mean(runner), _mean(runner))
-    text = f"{best.label} {gain} over {runner.label}"
+    text = f"{_name(best)} {gain} over {_name(runner)}"
     if runner.vs_best is not None and runner.vs_best.p is not None:
         text += f", {fmt_p(runner.vs_best.p)}"
     return text
@@ -541,7 +561,7 @@ def task_headline(
 
 def _bench_headline(board: Leaderboard, best: LeaderboardRow, base: LeaderboardRow | None) -> str:
     pct = percentile_of(board.primary) or board.primary.split("/")[0]
-    plain = f"{best.label} {pct} {_fmt(board, _mean(best))}"
+    plain = f"{_name(best)} {pct} {_fmt(board, _mean(best))}"
     if base is None or base.group_id == best.group_id:
         return plain
     change = welch_interval(
@@ -550,7 +570,7 @@ def _bench_headline(board: Leaderboard, best: LeaderboardRow, base: LeaderboardR
     if change is None:
         return plain
     r, lo, hi = change
-    text = f"{best.label} {pct} {fmt_pct(r)} vs baseline"
+    text = f"{_name(best)} {pct} {fmt_pct(r)} vs baseline"
     if lo is not None and hi is not None:
         text += f" [{_signed_int(lo * 100)}, {_signed_int(hi * 100)}]"
     return text
@@ -564,11 +584,11 @@ def _stat(label: str, value: str, tooltip: str, unit: str = "") -> dict[str, Any
 def _seed_sigma(board: Leaderboard, row: LeaderboardRow, word: str = "seed") -> dict[str, Any]:
     assert row.primary is not None
     if row.n < 2:
-        return _stat(f"{word} σ", "—", f"{row.label}: single {word}")
+        return _stat(f"{word} σ", "—", f"{_name(row)}: single {word}")
     if row.identical_seeds:
-        return _stat(f"{word} σ", f"◇×{row.n}", f"{row.label}: all {row.n} {word}s gave one score")
+        return _stat(f"{word} σ", f"◇×{row.n}", f"{_name(row)}: all {row.n} {word}s gave one score")
     std = row.primary.std
-    tip = f"Std of {row.label} over {row.n} {word}s"
+    tip = f"Std of {_name(row)} over {row.n} {word}s"
     if board.value_format != "fraction" or board.unit:
         return _stat(f"{word} σ", _fmt(board, std, suffix=False), tip, _unit_field(board))
     return _stat(f"{word} σ", f"{std:.4f}" if std < 1 else fmt_value(std), tip)
@@ -624,14 +644,16 @@ def _compare_strip(
     out: list[dict[str, Any]] = []
     vs = runner.vs_best if runner is not None else None
     if runner is not None:
-        tip = f"{best.label} minus {runner.label}, mean {name}"
+        tip = f"{_name(best)} minus {_name(runner)}, mean {name}"
         delta = _dfmt(board, _mean(best) - _mean(runner), _mean(runner), suffix=False)
         out.append(_stat(f"Δ {name}", delta, tip, _unit_field(board, relative=True)))
         p = _p_stat(best, runner)
         if p is not None:
             out.append(p)
         if vs is not None and vs.fixed is not None and vs.broken is not None:
-            tip = f"Examples {best.label} gets right and {runner.label} gets wrong, and the reverse"
+            tip = (
+                f"Examples {_name(best)} gets right and {_name(runner)} gets wrong, and the reverse"
+            )
             out.append(_stat("fixed / broken", f"{vs.fixed} / {vs.broken}", tip))
     if best.test_interval is not None:
         ti = best.test_interval
@@ -647,7 +669,7 @@ def _compare_strip(
     out.append(_seed_sigma(board, best))
     if board.kind == "agent_eval" and best.usage is not None:
         attempts = best.n * (best.test_interval.n if best.test_interval else 1)
-        tip = f"{best.label}: ${best.usage.usd:.2f} over {attempts} attempts"
+        tip = f"{_name(best)}: ${best.usage.usd:.2f} over {attempts} attempts"
         out.append(_stat("$ / attempt", fmt_metric(best.usage.usd / attempts, "$"), tip))
     if vs is not None and vs.examples_needed is not None:
         tip = "Test examples needed at the same flip rate to reach p < 0.05"
@@ -664,7 +686,7 @@ def _iteration_strip(
     if first is not None and first.group_id != best.group_id:
         vs = first.vs_best
         if vs is not None and vs.fixed is not None and vs.broken is not None:
-            tip = f"Examples {first.label} missed and {best.label} solved, and the reverse"
+            tip = f"Examples {_name(first)} missed and {_name(best)} solved, and the reverse"
             out.append(_stat(f"fixed / broken vs {first.label}", f"{vs.fixed} / {vs.broken}", tip))
         p = _p_stat(best, first)
         if p is not None:
@@ -673,7 +695,7 @@ def _iteration_strip(
     if best.usage is not None and best.test_interval is not None:
         solved = _mean(best) * best.test_interval.n * best.n
         if solved > 0:
-            tip = f"{best.label}: ${best.usage.usd:.2f} over {solved:g} solved examples"
+            tip = f"{_name(best)}: ${best.usage.usd:.2f} over {solved:g} solved examples"
             out.append(_stat("$ / solved", fmt_metric(best.usage.usd / solved, "$"), tip))
     out.append(_stat("versions", str(len(board.rows)), "Seed groups in this task"))
     return out
@@ -692,7 +714,7 @@ def _bench_strip(
             _fmt(board, _mean(base), suffix=False),
         )
         value = f"{mine} vs {theirs}"
-        tip = f"{best.label} vs baseline {base.label}, mean of repeats"
+        tip = f"{_name(best)} vs baseline {_name(base)}, mean of repeats"
         out.append(_stat(pct, value, tip, unit))
         keys = [
             k
@@ -709,9 +731,9 @@ def _bench_strip(
                 tip += f", 95% CI {_signed_int(lo * 100)} to {_signed_int(hi * 100)}%"
             out.append(_stat(f"Δ {percentile_of(key)}", fmt_pct(r), tip))
     else:
-        tip = f"{best.label}, mean of repeats"
+        tip = f"{_name(best)}, mean of repeats"
         out.append(_stat(pct, _fmt(board, _mean(best), suffix=False), tip, unit))
-    out.append(_stat("repeats", str(best.n), f"Repeats of {best.label}"))
+    out.append(_stat("repeats", str(best.n), f"Repeats of {_name(best)}"))
     out.append(_seed_sigma(board, best, word="repeat"))
     return out
 
@@ -805,10 +827,10 @@ def _board_lead(board: Leaderboard) -> str:
         return board.headline
     best = rows[0]
     if len(rows) == 1:
-        return f"{best.label} leads {board.task} at {_fmt(board, _mean(best))}"
+        return f"{_name(best)} leads {board.task} at {_fmt(board, _mean(best))}"
     runner = rows[1]
     gap = _dfmt(board, abs(_mean(best) - _mean(runner)), _mean(runner)).removeprefix("+")
-    text = f"{best.label} leads {board.task} by {gap}"
+    text = f"{_name(best)} leads {board.task} by {gap}"
     if runner.vs_best is not None and runner.vs_best.p is not None:
         text += f", {fmt_p(runner.vs_best.p)}"
     return text

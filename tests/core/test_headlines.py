@@ -22,7 +22,13 @@ from hypothex.core.headlines import (
     welch_interval,
 )
 from hypothex.core.ids import utcnow
-from hypothex.core.leaderboard import Leaderboard, LeaderboardRow, NoiseInterval, VersusBest
+from hypothex.core.leaderboard import (
+    Leaderboard,
+    LeaderboardRow,
+    NoiseInterval,
+    VersusBest,
+    group_label,
+)
 from hypothex.core.records import RunStatus, UsageTotals
 from hypothex.core.seeds import Stats, summarize
 
@@ -448,3 +454,28 @@ def test_overview_headline_from_summary() -> None:
     assert overview_headline(lone) == "Idle. SVM leads toy-test at 0.922"
     moved = Summary(ideas=[ideas[0]], projects=projects)
     assert overview_headline(moved) == "Idle. toy-test best 0.922"
+
+
+def test_headlines_name_groups_with_the_whole_clause() -> None:
+    # UI-F6: the 32-character label's "…" landed inside the sentence ("0.915… +0.002")
+    aug = row("aug", [0.917, 0.918])
+    aug.hypothesis = "40k steps lifts +aug past 0.915 top-1, as in the paper"
+    aug.label = group_label(aug.hypothesis, [], aug.group_id)
+    assert aug.label == "40k steps lifts +aug past 0.915…"
+    sweep = row("sweep", [0.915, 0.916], vs=welch(-0.002, 0.04))
+    sweep.hypothesis = "a long lr x beam sweep over many settings: why not"
+    sweep.label = group_label(sweep.hypothesis, [], sweep.group_id) + " · beam 10"  # distinct
+    b = board("training", [aug, sweep])
+    assert task_headline(b) == (
+        "40k steps lifts +aug past 0.915 top-1 +0.002 over "
+        "a long lr x beam sweep over many settings · beam 10, p = 0.04"
+    )
+    assert overview_headline(Summary(), board=b) == (
+        "Idle. 40k steps lifts +aug past 0.915 top-1 leads toy-test by 0.002, p = 0.04"
+    )
+    tips = [s["tooltip"] for s in task_stat_strip(b)]
+    assert "Std of 40k steps lifts +aug past 0.915 top-1 over 2 seeds" in tips
+    assert not any("…" in tip for tip in tips)
+    version = row("v2", [0.5])  # a version label is not the hypothesis: kept as it is
+    version.hypothesis = "a hypothesis much longer than thirty-two characters"
+    assert task_headline(board("generic", [version])) == "v2 0.500"

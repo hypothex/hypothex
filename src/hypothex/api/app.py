@@ -2114,9 +2114,18 @@ def create_app(
         environment_id: str | None = None,
         archived: bool = False,
         limit: Annotated[int, Query(ge=1)] = 200,
+        before_created_at: datetime | None = None,
+        before_run_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        # no cap below `limit`: the UI pages through a host's queue or a sweep with a
-        # growing limit, starting at 1000
+        # no cap below `limit`. Keyset paging: the next page starts after the last row of
+        # this one (`before_created_at`, `before_run_id`), so a page costs `limit` rows
+        if (before_created_at is None) != (before_run_id is None):
+            raise RunError("give before_created_at and before_run_id together")
+        before = None
+        if before_created_at is not None and before_run_id is not None:
+            if before_created_at.tzinfo is None:
+                before_created_at = before_created_at.replace(tzinfo=UTC)
+            before = (before_created_at.astimezone(UTC), before_run_id)
         rows = to_jsonable(
             ctx.index.list_runs(
                 project=project,
@@ -2126,6 +2135,7 @@ def create_app(
                 environment_id=environment_id,
                 include_archived=archived,
                 limit=limit,
+                before=before,
             )
         )
         # like the run detail: the CLI and MCP list runs through the hub and see a stale host

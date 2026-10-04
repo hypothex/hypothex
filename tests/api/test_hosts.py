@@ -183,6 +183,28 @@ def test_runs_filter_by_environment_and_honour_large_limits(home: Path, ctx: Con
         assert len(only_b) == 502 and {r["environment_id"] for r in only_b} == {"env-b"}
 
 
+def test_runs_page_by_keyset_without_gaps_or_repeats(home: Path, ctx: Context) -> None:
+    start = utcnow().replace(microsecond=123456)
+    for i in range(11):  # pairs share a created_at: run_id breaks the tie
+        when = start + timedelta(seconds=i // 2)
+        ctx.index.upsert_run(make_record(f"r{i:02d}", environment_id="env-a", created_at=when))
+    with TestClient(create_app(home, background_repair=False, hub=False), base_url=BASE_URL) as c:
+        everything = [r["run_id"] for r in c.get("/api/v1/runs").json()]
+        pages: list[list[str]] = []
+        cursor: dict[str, str] = {}
+        for _ in range(len(everything) + 1):  # bounded: a cursor that is ignored never ends
+            page = c.get("/api/v1/runs", params={"limit": 3, **cursor}).json()
+            if not page:
+                break
+            pages.append([r["run_id"] for r in page])
+            last = page[-1]
+            cursor = {"before_created_at": last["created_at"], "before_run_id": last["run_id"]}
+        assert [len(p) for p in pages] == [3, 3, 3, 2]
+        assert [rid for p in pages for rid in p] == everything
+        half = c.get("/api/v1/runs", params={"before_run_id": "r05"})
+        assert half.status_code == 400 and "together" in half.json()["error"]
+
+
 def test_disconnected_hosts_stay_disconnected_after_a_restart(tmp_path: Path) -> None:
     with remote_hub(tmp_path) as r:
         r.client.post("/api/v1/hosts/gpu1/disconnect", json={})

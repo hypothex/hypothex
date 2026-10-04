@@ -274,13 +274,18 @@ export function hostsMetaline(totals: HostTotals, hubVersion: string | null, nHo
   ];
 }
 
-/** The current time, refreshed every `intervalMs` (stale ages tick without a refetch). */
-export function useNow(intervalMs = 30_000): number {
+/**
+ * The current time, refreshed every `intervalMs` (stale ages tick without a refetch). With
+ * `enabled` false the clock stands still; turned on, it reads the time at once.
+ */
+export function useNow(intervalMs = 30_000, enabled = true): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (!enabled) return;
+    setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), intervalMs);
     return () => clearInterval(id);
-  }, [intervalMs]);
+  }, [intervalMs, enabled]);
   return now;
 }
 

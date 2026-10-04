@@ -363,6 +363,22 @@ def test_mirror_rejects_unsafe_names(
     assert hub.events.since(0) == []
 
 
+@pytest.mark.parametrize(("project", "run_id"), [(".claims", "r1"), ("toy", ".r1")])
+def test_mirror_rejects_a_leading_dot_name(
+    pair: tuple[Context, Context], project: str, run_id: str
+) -> None:
+    hub, remote = pair
+    remote.create_run(
+        make_record(run_id, project=project, environment_id=remote.descriptor.environment_id)
+    )
+    client: Any = FakeClient(remote)
+    mirror_event(hub, client, "gpu1", "env-remote", run_event(remote, run_id))
+    assert not hub.layout.project_dir(project).exists()
+    assert hub.index.run_ids() == set()
+    assert hub.events.since(0) == []
+    assert client.fetched == []
+
+
 def test_mirror_skips_run_deleted_on_host(pair: tuple[Context, Context]) -> None:
     hub, remote = pair
     event = Event(
@@ -1556,6 +1572,64 @@ def test_sessions_close_their_http_clients(
     # at least two sessions of a and one of b, each with a client and a pinger
     assert len(created) >= 6
     assert all(c._http.is_closed for c in created)  # no socket leaks on reconnect
+
+
+def test_a_halt_keeps_a_cancel_aimed_at_its_caller(tmp_path: Path) -> None:
+    hub = Hub(Context.open(tmp_path / "hub"), EnvironmentsFile(environments={}))
+    sup = hub._new_supervisor("a", HostSpec(route="url", url="http://127.0.0.1:9"))
+    entered = asyncio.Event()
+
+    async def slow_to_cancel() -> None:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            entered.set()
+            await asyncio.sleep(0.2)  # still unwinding when the caller is cancelled
+            raise
+
+    async def main() -> None:
+        sup.task = asyncio.create_task(slow_to_cancel())
+        await asyncio.sleep(0)
+        caller = asyncio.create_task(hub._halt(sup))
+        await entered.wait()
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert caller.cancelled()
+
+    asyncio.run(main())
+
+
+def test_a_stop_in_a_cancelled_callers_finally_halts_every_host(tmp_path: Path) -> None:
+    hub = Hub(Context.open(tmp_path / "hub"), EnvironmentsFile(environments={}))
+    sups = [
+        hub._new_supervisor(name, HostSpec(route="url", url="http://127.0.0.1:9"))
+        for name in ("a", "b")
+    ]
+    hub._sups.update({sup.name: sup for sup in sups})
+
+    async def main() -> None:
+        tasks = [asyncio.create_task(asyncio.sleep(60)) for _ in sups]
+        for sup, task in zip(sups, tasks, strict=True):
+            sup.task = task
+        started = asyncio.Event()
+
+        async def caller() -> None:
+            try:
+                started.set()
+                await asyncio.sleep(60)
+            finally:
+                await hub.stop()  # runs while the caller's own cancel is being handled
+
+        outer = asyncio.create_task(caller())
+        await started.wait()
+        outer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await outer
+        assert all(task.cancelled() for task in tasks)  # the second host is halted too
+        assert all(sup.task is None for sup in sups)
+
+    asyncio.run(main())
 
 
 def test_a_halt_during_the_session_drain_still_closes_clients_and_route(

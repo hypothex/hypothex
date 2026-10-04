@@ -233,7 +233,7 @@ class ProjectConfig(_Strict):
         """Cross-check task references to datasets, metrics, and splits."""
         errors: list[str] = []
         for name, task in self.tasks.items():
-            if not re.match(NAME_PATTERN, name):
+            if not re.fullmatch(NAME_PATTERN, name):
                 errors.append(f"task name {name!r} must match {NAME_PATTERN}")
             dataset = self.datasets.get(task.dataset)
             if dataset is None:
@@ -251,7 +251,7 @@ class ProjectConfig(_Strict):
             if primary_metric not in task.metrics:
                 errors.append(f"task {name!r}: primary {task.primary!r} is not one of its metrics")
             for view in task.views:
-                if not re.match(VIEW_NAME_PATTERN, view):
+                if not re.fullmatch(VIEW_NAME_PATTERN, view):
                     errors.append(
                         f"task {name!r}: view name {view!r} must match {VIEW_NAME_PATTERN}"
                     )

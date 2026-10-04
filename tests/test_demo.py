@@ -774,3 +774,65 @@ def test_runs_launched_before_a_failed_launch_are_stopped(
         pass
     assert len(launched) == 1
     assert stopped == launched
+
+
+def _gpu_host(tmp_path: Path) -> Any:
+    import hypothex.demo as demo
+
+    return demo._DemoHost(
+        name="gpu1", kind="ssh", home=str(tmp_path / "gpu1"), repo=str(tmp_path), fake_gpus="x"
+    )
+
+
+def test_live_run_launch_fails_loudly_on_an_error_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    import hypothex.demo as demo
+
+    def error_get(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        body = {"error": "store busy", "type": "StoreError"}
+        return httpx.Response(503, json=body, request=httpx.Request("GET", url))
+
+    def no_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        raise AssertionError("no run may be launched")
+
+    monkeypatch.setattr(httpx, "get", error_get)
+    monkeypatch.setattr(httpx, "post", no_post)
+    host = _gpu_host(tmp_path)
+    with pytest.raises(httpx.HTTPStatusError):
+        demo._launch_live_runs(tmp_path / "hub", [host], {"gpu1": "http://gpu1"}, [])
+
+
+def test_live_run_launch_and_stop_send_command_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    import hypothex.demo as demo
+
+    home = tmp_path / "hub"
+    Context.open(home)
+    (home / DEMO_HOSTS_DIR).mkdir()
+    bodies: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    def empty_get(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(200, json=[], request=httpx.Request("GET", url))
+
+    def record_post(url: str, *args: Any, json: dict[str, Any], **kwargs: Any) -> httpx.Response:
+        bodies[url.rsplit("/", 1)[-1]].append(json)
+        answer = {"run_id": f"r{len(bodies['runs'])}"}
+        return httpx.Response(200, json=answer, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "get", empty_get)
+    monkeypatch.setattr(httpx, "post", record_post)
+    run_ids: list[str] = []
+    demo._launch_live_runs(home, [_gpu_host(tmp_path)], {"gpu1": "http://gpu1"}, run_ids)
+    first = [b["command_id"] for b in bodies.pop("runs")]
+    assert len(first) == len(set(first)) == len(run_ids) == 6
+    demo._launch_live_runs(home, [_gpu_host(tmp_path)], {"gpu1": "http://gpu1"}, [])
+    assert not set(first) & {b["command_id"] for b in bodies.pop("runs")}  # a new start
+    demo._stop_runs("http://gpu1", run_ids)
+    stops = [b["command_id"] for b in bodies["stop"]]
+    assert len(stops) == len(set(stops)) == 6

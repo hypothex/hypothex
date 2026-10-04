@@ -25,8 +25,9 @@ from hypothex.core.leaderboard import (
     build_leaderboard,
     cached_leaderboard,
     group_id_for,
-    group_label,
     pick_field,
+    seed_group_label,
+    seed_group_labels,
 )
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
@@ -707,12 +708,6 @@ def _empty_trace(
     )
 
 
-def _own_label(members: list[RunRecord], key: str) -> str:
-    """``group_label`` of the newest non-empty hypothesis and the group's tags."""
-    hypothesis = next((r.hypothesis for r in reversed(members) if r.hypothesis.strip()), "")
-    return group_label(hypothesis, (t for r in members for t in r.tags), key)
-
-
 def _groups(scope: _Scope, panel: PanelSpec) -> list[tuple[str, str, list[RunRecord]]]:
     """
     Return ``(key, label, members)`` per group, in order of first run.
@@ -732,7 +727,12 @@ def _groups(scope: _Scope, panel: PanelSpec) -> list[tuple[str, str, list[RunRec
         else:
             key = group_id_for(r)
         members[key].append(r)
-    labels = scope.labels() if by in ("group", "run") else {}
+    if by in ("group", "run"):
+        labels = scope.labels()
+    elif by == "config":
+        labels = seed_group_labels(members)  # the board's rule, over these config groups
+    else:
+        labels = {}
     repeat = _repeats(scope.runs) if by == "run" else {}
     out: list[tuple[str, str, list[RunRecord]]] = []
     for key, runs in members.items():
@@ -740,7 +740,7 @@ def _groups(scope: _Scope, panel: PanelSpec) -> list[tuple[str, str, list[RunRec
             label: str | None = f"{labels[group_id_for(runs[0])]} r{repeat[key]}"
         else:
             label = f"seed {runs[0].seed}" if by == "seed" else labels.get(key)
-        out.append((key, label or _own_label(runs, key), runs))
+        out.append((key, label or seed_group_label(runs, key), runs))
     return out
 
 

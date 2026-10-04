@@ -654,6 +654,16 @@ def test_group_by_run_labels_each_repeat_of_its_config(ctx: Context, toy_repo: P
     ]
 
 
+def test_group_by_config_labels_follow_the_board_rule(ctx: Context, toy_repo: Path) -> None:
+    # two configs of one sweep share a hypothesis: they get the vars that differ
+    for rid, group, lr in [("a1", "aaaa", "1e-3"), ("b1", "bbbb", "1e-4")]:
+        rec = _run(ctx, toy_repo, rid, group, hypothesis="lr sweep", vars={"lr": lr})
+        _metrics(ctx, rec, [{"name": "gpu_pct", "step": 0, "value": 40}])
+    curves = _panel("curves", data={"metrics": ["gpu_pct"], "group_by": "config"})
+    groups = query_panel(ctx, "toy", "toy-acc", curves).meta["groups"]
+    assert [g["label"] for g in groups] == ["lr sweep · lr 1e-3", "lr sweep · lr 1e-4"]
+
+
 def test_checkpoints_use_the_step_metric_x(ctx: Context, toy_repo: Path) -> None:
     rec = _run(ctx, toy_repo, "c1")
     _metrics(

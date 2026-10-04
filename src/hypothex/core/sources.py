@@ -11,7 +11,7 @@ from hypothex.core.context import Context
 from hypothex.core.datasets import resolve_dataset_path
 from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.fsutil import read_jsonl
-from hypothex.core.leaderboard import group_id_for, seed_group_label
+from hypothex.core.leaderboard import group_id_for, seed_group_labels
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus
 
 if TYPE_CHECKING:
@@ -44,10 +44,12 @@ def group_labels(runs: list[RunRecord], version_param: str | None = None) -> dic
     """
     Short name per seed group of the given runs.
 
-    ``leaderboard.seed_group_label`` per group, the rule of ``LeaderboardRow.label``:
-    the group's ``version_param`` value when ``version_param`` is given and a run has
+    ``leaderboard.seed_group_labels``, the rule of ``LeaderboardRow.label``: the
+    group's ``version_param`` value when ``version_param`` is given and a run has
     it (``agent_iteration`` tasks); else ``group_label`` of the newest non-empty
-    hypothesis and the group's tags.
+    hypothesis and the group's tags. Groups that would share a label get the
+    ``vars`` that differ (then their group id), as on the board; with the same
+    groups the labels equal the board's.
 
     Parameters
     ----------
@@ -69,7 +71,7 @@ def group_labels(runs: list[RunRecord], version_param: str | None = None) -> dic
     members: dict[str, list[RunRecord]] = {}
     for r in sorted(runs, key=lambda r: (r.created_at, r.run_id)):
         members.setdefault(group_id_for(r), []).append(r)
-    return {key: seed_group_label(group, key, version_param) for key, group in members.items()}
+    return seed_group_labels(members, version_param)
 
 
 def metric_points(

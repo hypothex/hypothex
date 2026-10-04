@@ -695,6 +695,7 @@ def test_groups_that_share_a_label_get_the_vars_that_differ() -> None:
     ]
     members = {r.group_id: [m for m in runs if m.run_id in r.run_ids] for r in board.rows}
     assert seed_group_labels(members) == {r.group_id: r.label for r in board.rows}
+    assert group_labels(runs) == {r.group_id: r.label for r in board.rows}  # views too
 
 
 def test_distinct_labels_leaves_out_vars_a_group_does_not_have() -> None:

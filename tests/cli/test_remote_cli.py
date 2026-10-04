@@ -12,6 +12,7 @@ from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.errors import HypothexError, RunError
 from hypothex.core.execution import RunRequest
+from hypothex.core.leaderboard import group_id_for
 from hypothex.core.records import RunRecord
 from hypothex.core.sweeps import SweepError
 from tests.api.envserver import remote_hub, wait_until
@@ -151,6 +152,26 @@ def test_local_sweep_commands(in_repo: Path, ctx: Context) -> None:
     text = runner.invoke(app, ["sweep", "show", sid]).stdout
     assert sid in text and "mean" in text
     assert "show" in runner.invoke(app, ["sweep", "--help"]).stdout
+
+
+def test_local_sweep_pins_its_commit_and_diff_for_extend(in_repo: Path, ctx: Context) -> None:
+    # H-3: an extend after a new commit must run the sweep's code, not the new HEAD
+    head = git(in_repo, "rev-parse", "HEAD").strip()
+    (in_repo / "infer.py").write_text((in_repo / "infer.py").read_text() + "# edit\n")
+    out = hx(
+        "sweep", "-t", "toy-acc", "-H", "pinned", "--grid", "x=1", "--seeds", "1",
+        "--", *SWEEP_CMD,
+    )  # fmt: skip
+    assert out["spec"]["commit"] == head and "+# edit" in out["spec"]["diff"]
+    for rid in out["run_ids"]:
+        control.wait_for_run(ctx, rid, timeout=60)
+    git(in_repo, "commit", "-qam", "move HEAD on")
+    more = hx("sweep", "extend", out["spec"]["id"], "--seeds", "2")
+    [new] = set(more["run_ids"]) - set(out["run_ids"])
+    record = control.wait_for_run(ctx, new, timeout=60)
+    assert record.git.commit == head
+    groups = {group_id_for(ctx.find_record(i)) for i in more["run_ids"]}
+    assert len(groups) == 1  # the new seed joined the sweep's seed group
 
 
 def test_sweep_input_errors(in_repo: Path) -> None:

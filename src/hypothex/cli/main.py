@@ -1275,8 +1275,13 @@ def sweep_create(
         }
         _sweep_out(_hub("POST", "/api/v1/sweeps", body), as_json)
         return
+    from hypothex.api.app import pin_checkout  # lazy: the API is slow to import
+
     c = _ctx()
     c.register_project(root)
+    # spec 8A.4: the sweep stores the checkout's HEAD and diff, so an extend after more
+    # commits (or edits) runs the same code and its seeds join the same groups
+    commit, diff = pin_checkout(str(root))
     summary = launch_sweep(
         c,
         project=project,
@@ -1290,6 +1295,8 @@ def sweep_create(
         queue=queue,
         created_by=_created_by(),
         repo=root,
+        commit=commit,
+        diff=diff,
     )
     _sweep_out(to_jsonable(summary), as_json)
 

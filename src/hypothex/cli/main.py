@@ -79,7 +79,8 @@ hosts_app = typer.Typer(
 )
 app.add_typer(hosts_app, name="hosts")
 KindOpt = Annotated[
-    str | None, typer.Option("--kind", help="What this machine is to the hub: ssh or slurm.")
+    str | None,
+    typer.Option("--kind", help="What this machine is to the hub: ssh, slurm, or local."),
 ]
 
 JsonFlag = Annotated[bool, typer.Option("--json", help="Print machine-readable JSON.")]
@@ -1500,25 +1501,35 @@ def repair(as_json: JsonFlag = False) -> None:
         typer.echo(f"marked {len(lost)} runs lost")
 
 
-SERVE_KINDS = ("ssh", "slurm")
+SERVE_KINDS = ("ssh", "slurm")  # the env server kinds: a token always, a GPU queue or sbatch
+KINDS = ("local", *SERVE_KINDS)
 
 
 def check_serve_kind(kind: str | None) -> None:
     """
     Check a ``--kind`` option.
 
+    ``local`` is accepted so that a home once served with ``--kind ssh`` (or
+    ``slurm``) can serve as the hub (or a plain machine) again: the kind is saved.
+
     Parameters
     ----------
     kind : str or None
-        ``ssh``, ``slurm``, or None (not given).
+        ``local``, ``ssh``, ``slurm``, or None (not given).
 
     Raises
     ------
     ConfigError
         For any other value.
+
+    Examples
+    --------
+    >>> check_serve_kind("local")  # the hub again, after a trial `--kind ssh`
     """
-    if kind is not None and kind not in SERVE_KINDS:
-        raise ConfigError(f"--kind must be ssh or slurm, got {kind!r}")
+    if kind is not None and kind not in KINDS:
+        raise ConfigError(
+            f"--kind must be ssh or slurm, got {kind!r}; or local to serve as the hub"
+        )
 
 
 def resolve_serve_kind(home: Path, kind: str | None) -> str:
@@ -1531,6 +1542,8 @@ def resolve_serve_kind(home: Path, kind: str | None) -> str:
         The Hypothex home of this env server.
     kind : str or None
         ``--kind``; None reuses the kind saved in ``environment.json``.
+        ``local`` saves ``local`` again (a home served with ``--kind ssh`` once
+        is the hub again, without a required token).
 
     Returns
     -------
@@ -1541,13 +1554,18 @@ def resolve_serve_kind(home: Path, kind: str | None) -> str:
     Raises
     ------
     ConfigError
-        If ``kind`` is not ``ssh`` or ``slurm``.
+        If ``kind`` is not ``local``, ``ssh`` or ``slurm``.
 
     Examples
     --------
     >>> import tempfile
-    >>> resolve_serve_kind(Path(tempfile.mkdtemp()), None)
+    >>> home = Path(tempfile.mkdtemp())
+    >>> resolve_serve_kind(home, None)
     'local'
+    >>> resolve_serve_kind(home, "ssh"), resolve_serve_kind(home, None)
+    ('ssh', 'ssh')
+    >>> resolve_serve_kind(home, "local"), resolve_serve_kind(home, None)
+    ('local', 'local')
     """
     check_serve_kind(kind)
     layout = Layout(home.expanduser().resolve())
@@ -1626,7 +1644,10 @@ def serve(
         str | None,
         typer.Option(
             "--kind",
-            help="Run as a host's env server: ssh (GPU queue) or slurm. Default: the saved kind.",
+            help=(
+                "Run as a host's env server: ssh (GPU queue) or slurm; local serves as the "
+                "hub again. Default: the saved kind."
+            ),
         ),
     ] = None,
     no_auth: Annotated[

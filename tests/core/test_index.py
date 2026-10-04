@@ -1,3 +1,4 @@
+import shutil
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
@@ -214,6 +215,18 @@ def test_repair_index_gaps(tmp_path: Path) -> None:
     assert repair_index_gaps(idx, store) == ["r1", "r2"]
     assert repair_index_gaps(idx, store) == []
     assert idx.get_project("toy") is not None
+
+
+def test_repair_index_gaps_drops_runs_whose_folder_is_gone(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+    idx = Index(tmp_path / "i.db")
+    repair_index_gaps(idx, store)
+    shutil.rmtree(store.layout.run_dir("toy", "r1"))
+    assert repair_index_gaps(idx, store) == []
+    assert idx.run_ids() == {"r2"}
+    assert idx.get_run("r1") is None
+    assert idx.scores_for(["r1"]) == {}
+    assert [r.run_id for r in idx.list_runs()] == ["r2"]
 
 
 def test_schema_version_is_none_only_for_a_missing_table(

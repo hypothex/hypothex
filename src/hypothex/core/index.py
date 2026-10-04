@@ -1326,7 +1326,12 @@ def rebuild_index_if_stale(index: Index, store: RunStore) -> int | None:
 
 def repair_index_gaps(index: Index, store: RunStore) -> list[str]:
     """
-    Index projects and run folders that have no index row yet.
+    Index projects and run folders that have no index row yet, and drop gone runs.
+
+    A run row whose ``run.yaml`` is gone (its folder was deleted or moved) is
+    deleted, so it leaves listings, counts, and leaderboards without a
+    ``hx reindex``. The index ids are read before the store is listed: a run
+    created during the scan is never taken for a gone one.
 
     Parameters
     ----------
@@ -1343,7 +1348,10 @@ def repair_index_gaps(index: Index, store: RunStore) -> list[str]:
     for entry in store.list_projects():
         if index.get_project(entry.project) is None:
             index.upsert_project(entry)
+    indexed = index.run_ids()  # before the listing: a run made during it is not "gone"
     on_disk = store.list_run_ids()
+    for run_id in sorted(indexed - set(on_disk)):
+        index.delete_run(run_id)
     missing = sorted(set(on_disk) - index.run_ids())
     added: list[str] = []
     for run_id in missing:

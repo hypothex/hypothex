@@ -7,19 +7,28 @@
 .panel-empty { margin: 0; font-size: 13px; color: var(--ink-3); }
 
 /* leaderboard: one grid row per seed group; the plot column is an SVG per row */
-.forest { position: relative; }
+.forest { position: relative; container-type: inline-size; }
+/* name and plot both flex (about 1:3, the mockup's 194:600 at full width); the name never
+   drops below 140px. Rows grow when meta wraps instead of running into the next row. */
 .frow {
-  display: grid; grid-template-columns: minmax(0, 1fr) 118px minmax(240px, 600px) 84px 128px;
+  display: grid; grid-template-columns: minmax(140px, 1fr) 118px minmax(160px, 3fr) 84px 128px;
   gap: 0 24px; align-items: start; border-bottom: 1px solid var(--rule-2);
-  box-sizing: border-box; height: 105px; padding: 16px 0 14px; /* plot SVG = 105 - 1 border = 104 */
+  box-sizing: border-box; min-height: 105px; padding: 16px 0 0;
+  /* plot SVG = 105 - 1 border = 104; name + 3 meta lines = 86px fit the 88px content box */
 }
-.frow.head { height: auto; padding: 0 0 10px; border-bottom: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); align-items: end; }
+.frow.head { min-height: 0; padding: 0 0 10px; border-bottom: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); align-items: end; }
 .frow.head .hd { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.frow.axisrow { border-bottom: 0; height: 48px; padding: 0; }
-.frow .fplot { align-self: stretch; margin: -16px 0 -14px; min-width: 0; }
+.frow.axisrow { border-bottom: 0; min-height: 0; height: 48px; padding: 0; }
+/* narrow card (span < 12, small window): 3 columns, no f1, vs best under the plot */
+@container (max-width: 760px) {
+  .frow { grid-template-columns: minmax(120px, 1fr) 96px minmax(140px, 2fr); gap: 0 16px; }
+  .frow .f1, .frow.head > :last-child, .frow.axisrow > :nth-child(n+4) { display: none; }
+  .frow .vd { grid-column: 3; padding-top: 2px; }
+}
+.frow .fplot { align-self: stretch; margin: -16px 0 0; min-width: 0; }
 .frow.axisrow .fplot { margin: 0; }
 .frow .nm { font-weight: 600; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.frow .meta { font-size: 12.5px; color: var(--ink-3); margin-top: 5px; display: flex; flex-direction: column; gap: 2px; }
+.frow .meta { font-size: 12.5px; line-height: 1.4; color: var(--ink-3); margin-top: 5px; display: flex; flex-direction: column; gap: 2px; }
 .frow .acc { text-align: right; }
 .frow .big { font: 400 24px/1.05 var(--sans); letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
 .frow .sd { font-size: 13px; color: var(--ink-3); margin-top: 5px; font-variant-numeric: tabular-nums; display: flex; justify-content: flex-end; align-items: center; gap: 5px; }

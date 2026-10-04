@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import time
 from collections import Counter, defaultdict
 from datetime import timedelta
@@ -12,6 +14,7 @@ from typer.testing import CliRunner
 from hypothex.api.app import _run_view, create_app
 from hypothex.cli.main import app as cli_app
 from hypothex.core import queries as q
+from hypothex.core import slurm
 from hypothex.core.context import Context
 from hypothex.core.control import repair_runs
 from hypothex.core.errors import ConfigError, StoreError
@@ -538,6 +541,34 @@ def test_seed_demo_hosts_refuses_twice_and_needs_training(hosts_home: Path, tmp_
     seed_demo(other, ["generic"])
     with pytest.raises(ConfigError, match="--kinds training"):
         seed_demo_hosts(other)
+
+
+def test_fake_slurm_keeps_a_submitted_job_pending_until_scancel(
+    hosts_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty fake squeue made every new demo SLURM launch `lost` within a minute.
+    bin_dir = tmp_path / "bin"
+    shutil.copytree(hosts_home / DEMO_HOSTS_DIR / "cluster-bin", bin_dir)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    first = slurm.submit("#!/bin/sh\n", tmp_path, comment="hx-a")
+    second = slurm.submit("#!/bin/sh\n", tmp_path, comment="hx-b")
+    assert int(second) == int(first) + 1
+    jobs = slurm.poll([first, second])
+    assert {j: (s.state, s.node) for j, s in jobs.items()} == {
+        first: ("PENDING", None),
+        second: ("PENDING", None),
+    }
+    assert slurm.comment_accounting(refresh=True)
+    found, known = slurm.find_submitted("hx-b")
+    assert known and found is not None and (found.job_id, found.state) == (second, "PENDING")
+    slurm.cancel(first)
+    after = slurm.poll([first, second])
+    assert after[first].state == "CANCELLED" and slurm.is_finished(after[first])
+    assert after[second].state == "PENDING"
+    gone, known = slurm.find_submitted("hx-a")
+    assert known and gone is not None and gone.state == "CANCELLED"
+    slurm.cancel("48211932")  # a job the fake never queued: scancel says nothing
+    assert slurm.poll(["48211932"]) == {}
 
 
 def test_demo_hosts_running_does_nothing_without_the_marker(tmp_path: Path) -> None:

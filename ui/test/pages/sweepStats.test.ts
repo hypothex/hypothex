@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { SweepParam, SweepSpec } from "../../src/api/models";
 import {
+  SORT_MEAN,
+  SORT_N,
   type SweepCellRow,
   defaultSort,
   etaSeconds,
@@ -179,16 +181,45 @@ describe("table sort", () => {
     expect(lrs(sortCells(TABLE, defaultSort(false)))).toEqual(["1e-4", "3e-5", "3e-4", "1e-3"]);
     expect(lrs(sortCells(TABLE, { key: "lr", dir: "asc" }))).toEqual(["3e-5", "1e-4", "3e-4", "1e-3"]);
     expect(lrs(sortCells(TABLE, { key: "lr", dir: "desc" }))).toEqual(["1e-3", "3e-4", "1e-4", "3e-5"]);
-    expect(lrs(sortCells(TABLE, { key: "n", dir: "asc" }))).toEqual(["1e-3", "3e-5", "1e-4", "3e-4"]);
+    expect(lrs(sortCells(TABLE, { key: SORT_N, dir: "asc" }))).toEqual(["1e-3", "3e-5", "1e-4", "3e-4"]);
     expect(lrs(sortCells(TABLE, { key: "warmup", dir: "asc" }))).toEqual(["1e-3", "3e-5", "1e-4", "3e-4"]);
   });
 
   test("nextSort flips the active column and starts others ascending", () => {
-    expect(defaultSort(true)).toEqual({ key: "mean", dir: "desc" });
-    expect(nextSort(defaultSort(true), "mean", true)).toEqual({ key: "mean", dir: "asc" });
+    expect(defaultSort(true)).toEqual({ key: SORT_MEAN, dir: "desc" });
+    expect(nextSort(defaultSort(true), SORT_MEAN, true)).toEqual({ key: SORT_MEAN, dir: "asc" });
     expect(nextSort(defaultSort(true), "lr", true)).toEqual({ key: "lr", dir: "asc" });
     expect(nextSort({ key: "lr", dir: "asc" }, "lr", true)).toEqual({ key: "lr", dir: "desc" });
-    expect(nextSort({ key: "lr", dir: "asc" }, "mean", false)).toEqual({ key: "mean", dir: "asc" });
+    expect(nextSort({ key: "lr", dir: "asc" }, SORT_MEAN, false)).toEqual({ key: SORT_MEAN, dir: "asc" });
+  });
+
+  // a sweep may name a param `n` or `mean`: those must not hit the built-in columns
+  const named = (n: string, mean: string, scored: number, score: number): unknown => ({
+    params: { n, mean },
+    group_id: `g-${n}-${mean}`,
+    n: scored,
+    mean: score,
+    lo: null,
+    hi: null,
+    std: null,
+    run_ids: [],
+    runs: [],
+  });
+  const NAMED = parseCells([named("3", "b", 1, 0.5), named("1", "c", 3, 0.9), named("2", "a", 2, 0.7)]);
+  const ns = (key: string): (string | undefined)[] => sortCells(NAMED, { key, dir: "asc" }).map((c) => c.params.n);
+
+  test("params named n and mean sort by the param, the built-in keys by count and score", () => {
+    expect(ns("n")).toEqual(["1", "2", "3"]);
+    expect(ns("mean")).toEqual(["2", "3", "1"]);
+    expect(ns(SORT_N)).toEqual(["3", "2", "1"]);
+    expect(ns(SORT_MEAN)).toEqual(["3", "2", "1"]);
+  });
+
+  test("a param named mean starts ascending; the metric starts best first", () => {
+    const prev = { key: SORT_N, dir: "asc" as const };
+    expect(nextSort(prev, "mean", true)).toEqual({ key: "mean", dir: "asc" });
+    expect(nextSort(prev, SORT_MEAN, true)).toEqual({ key: SORT_MEAN, dir: "desc" });
+    expect(nextSort(prev, "n", true)).toEqual({ key: "n", dir: "asc" });
   });
 });
 

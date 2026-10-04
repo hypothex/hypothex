@@ -58,6 +58,8 @@ jobs:
         run: bunx playwright install --with-deps chromium
       - name: Playwright smoke tests
         run: bunx playwright test
+      - name: Demo shutdown check
+        run: bun e2e/shutdown-check.ts
       - name: Upload Playwright report
         if: failure()
         uses: actions/upload-artifact@v7

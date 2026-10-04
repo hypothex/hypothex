@@ -9,7 +9,11 @@
  * a retry after a refused seed never starts a seed twice (spec 5.3). The seeds that did
  * start are remembered and never sent again, even after an edit gives a new attempt id.
  * The form is locked while seeds are sent, and after a seed whose outcome is unknown (no
- * answer: it may have started): only a resend under the same ids can settle that seed.
+ * answer: it may have started): only a resend under the same id can settle that seed.
+ * Resend sends that seed alone and skips the GPU plan, which counts it as not started
+ * although it may hold its GPU already; the seeds after it wait for the form, unlocked
+ * again once the seed is settled. A refused resend keeps the seed unknown: the first try
+ * may still have started it.
  */
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -415,7 +419,7 @@ export function LaunchDialog({
   const hosts = useLaunchHosts();
   const [draft, setDraft] = useState<LaunchDraft>(() => ({ ...DEFAULT_DRAFT, ...initial }));
   const [attempt, setAttempt] = useState<string>(() => newCommandId());
-  const [progress, setProgress] = useState<number | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [failure, setFailure] = useState<Failure | null>(null);
   const [launched, setLaunched] = useState<Launched>(NOTHING_LAUNCHED);
   const [copy, setCopy] = useState<CopyState>("idle");
@@ -447,6 +451,8 @@ export function LaunchDialog({
   // an edit gives every seed a new command id: never while seeds are sent, nor while a seed
   // that may have started waits for its resend
   const locked = busy || failure?.unknown === true;
+  // the seed that may have started: the only one Launch (as Resend) sends until it is settled
+  const resend = failure?.unknown === true ? failure.seed : null;
   // the started seeds and the rest must share one host: onLaunched names a single host
   const blockers =
     launched.host !== null && draft.host !== launched.host
@@ -493,15 +499,19 @@ export function LaunchDialog({
   };
 
   const launch = async (): Promise<void> => {
-    if (inFlight.current || spec === null || blocked || pending.length === 0) return;
+    if (inFlight.current || spec === null) return;
+    if (resend === null && (blocked || pending.length === 0)) return;
+    const toSend = resend === null ? pending : [resend];
     inFlight.current = true;
     setFailure(null);
-    setProgress(0);
-    const out = await launchSeeds(spec, pending, attempt, { onProgress: setProgress });
+    setProgress({ done: 0, total: toSend.length });
+    const out = await launchSeeds(spec, toSend, attempt, {
+      onProgress: (n) => setProgress({ done: n, total: toSend.length }),
+    });
     inFlight.current = false;
     setProgress(null);
     for (const queryKey of REMOTE_RUN_INVALIDATES) void client.invalidateQueries({ queryKey });
-    const seeds = [...launched.seeds, ...pending.slice(0, out.records.length)];
+    const seeds = [...launched.seeds, ...toSend.slice(0, out.records.length)];
     const done: Launched = {
       // lock the host only once a seed runs there: if none started, the user may pick another host
       host: seeds.length > 0 ? spec.host.name : null,
@@ -509,17 +519,19 @@ export function LaunchDialog({
       records: [...launched.records, ...out.records],
     };
     setLaunched(done);
+    const left = pending.filter((seed) => !seeds.includes(seed)).length;
     if (out.failed !== null) {
       setFailure({
         seed: out.failed.seed,
         message: out.failed.error.message,
-        unknown: out.failed.unknown,
+        // a refused resend answers only the resend: the first try may still have started it
+        unknown: out.failed.unknown || out.failed.seed === resend,
         done: done.seeds.length,
-        left: pending.length - out.records.length,
+        left,
       });
       return;
     }
-    onLaunched(done.records, spec.host.name);
+    if (left === 0) onLaunched(done.records, spec.host.name);
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
@@ -557,7 +569,7 @@ export function LaunchDialog({
                 project={project}
                 now={now}
                 lockedTo={launched.host}
-                onPick={(h) => update({ host: h.name, gpus: gpusForHost(draft.gpus, h) })}
+                onPick={(h) => update({ host: h.name, gpus: gpusForHost(draft.gpus, h, host) })}
               />
             )}
           </div>
@@ -608,7 +620,7 @@ export function LaunchDialog({
           <p className="err" role="alert">
             seed {failure.seed}: {failure.message}. {failure.done} of {failure.done + failure.left} launched;{" "}
             {failure.unknown
-              ? `seed ${failure.seed} may have started: the form is locked and Launch re-sends it under the same id.`
+              ? `seed ${failure.seed} may have started: the form is locked; Resend seed ${failure.seed} sends it again under the same id.`
               : `Launch sends the other ${failure.left}.`}
           </p>
         ) : null}
@@ -631,11 +643,21 @@ export function LaunchDialog({
           <button
             type="button"
             className="btn primary"
-            disabled={busy || blocked || pending.length === 0}
-            title={blocked ? blockers.join("; ") : `Launch ${pending.length} on ${host?.name ?? ""}`}
+            disabled={busy || (resend === null ? blocked || pending.length === 0 : spec === null)}
+            title={
+              resend !== null
+                ? `Send seed ${resend} again under the same id`
+                : blocked
+                  ? blockers.join("; ")
+                  : `Launch ${pending.length} on ${host?.name ?? ""}`
+            }
             onClick={() => void launch()}
           >
-            {progress !== null ? `Launching ${progress}/${pending.length}` : `Launch ${pending.length}`}
+            {progress !== null
+              ? `Launching ${progress.done}/${progress.total}`
+              : resend !== null
+                ? `Resend seed ${resend}`
+                : `Launch ${pending.length}`}
           </button>
         </div>
       </div>

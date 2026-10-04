@@ -149,7 +149,10 @@ def quantile(values: Sequence[float], q: float) -> float:
     """
     Quantile with linear interpolation (numpy's default ``"linear"`` method).
 
-    NaN values are ignored.
+    NaN values are ignored. The result always lies between the two values it
+    interpolates: equal neighbours give that value (``inf`` for two ``inf``),
+    and a gap too wide for a float (``-1e308`` to ``1e308``) does not overflow.
+    Only a step from ``-inf`` to ``inf`` gives NaN.
 
     Parameters
     ----------
@@ -182,7 +185,13 @@ def quantile(values: Sequence[float], q: float) -> float:
     lo = math.floor(h)
     if lo + 1 >= len(xs):
         return xs[-1]
-    return xs[lo] + (h - lo) * (xs[lo + 1] - xs[lo])
+    a, b, frac = xs[lo], xs[lo + 1], h - lo
+    if frac == 0.0 or a == b:
+        return a  # also inf for two equal infinities, where the step below gives NaN
+    gap = b - a
+    if math.isfinite(gap):
+        return a + frac * gap
+    return a * (1.0 - frac) + b * frac  # the gap overflowed, or one side is infinite
 
 
 @lru_cache(maxsize=4)
@@ -236,7 +245,10 @@ def bootstrap_mean_interval(
     Percentile bootstrap 95% interval for the mean.
 
     NaN values are ignored. Resampling uses ``random.Random(seed)``, so the
-    result is deterministic for a given input.
+    result is deterministic for a given input. If any resample holds both
+    ``inf`` and ``-inf``, its mean is undefined, so the interval is undefined
+    too and ``(nan, nan)`` is returned (dropping those resamples would bias
+    the interval).
 
     Parameters
     ----------
@@ -250,7 +262,8 @@ def bootstrap_mean_interval(
     Returns
     -------
     tuple of (float, float)
-        The 2.5th and 97.5th percentiles of the resampled means.
+        The 2.5th and 97.5th percentiles of the resampled means;
+        ``(nan, nan)`` when a resampled mean is undefined.
 
     Raises
     ------
@@ -261,6 +274,8 @@ def bootstrap_mean_interval(
     --------
     >>> bootstrap_mean_interval([0.5, 0.5, 0.5])
     (0.5, 0.5)
+    >>> bootstrap_mean_interval([math.inf, -math.inf])
+    (nan, nan)
     """
     xs = _clean(values)
     if not xs:
@@ -269,6 +284,8 @@ def bootstrap_mean_interval(
         raise ValueError(f"resamples must be >= 1, got {resamples}")
     n = len(xs)
     means = [total / n for total in _resample_sums(xs, resamples, seed)]
+    if any(math.isnan(m) for m in means):
+        return (math.nan, math.nan)
     return (quantile(means, 0.025), quantile(means, 0.975))
 
 
@@ -612,7 +629,10 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
     """
     Two-sided Welch t-test p-value for a difference in means.
 
-    NaN values are ignored. Degrees of freedom follow Welch-Satterthwaite.
+    NaN values are ignored. Degrees of freedom follow Welch-Satterthwaite. Each
+    sample is scaled by its own power of two (exact), so values near the float
+    limits never overflow and a tiny spread never underflows to zero variance,
+    even next to a sample of a very different size.
 
     Parameters
     ----------
@@ -622,8 +642,8 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
     Returns
     -------
     float or None
-        The p-value, or None when either sample has fewer than 2 values or
-        both samples have zero variance.
+        The p-value, or None when either sample has fewer than 2 values,
+        both samples have zero variance, or a value is infinite.
 
     Examples
     --------
@@ -634,13 +654,48 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
     ys = _clean(b)
     if len(xs) < 2 or len(ys) < 2:
         return None
-    na, nb = len(xs), len(ys)
-    ma, mb = sum(xs) / na, sum(ys) / nb
-    va = sum((x - ma) ** 2 for x in xs) / (na - 1)
-    vb = sum((y - mb) ** 2 for y in ys) / (nb - 1)
+    if not all(math.isfinite(v) for v in (*xs, *ys)):
+        return None  # an infinite mean or variance has no t statistic
+    # Each sample is scaled by its own power of two (exact), so its sum, squares
+    # and deviations neither overflow nor underflow, whatever the other sample's
+    # scale. The variances and the mean difference are then put on one scale.
+    ma, va, ea = _scaled_moments(xs)
+    mb, vb, eb = _scaled_moments(ys)
     if va == 0.0 and vb == 0.0:
-        return None
-    sa, sb = va / na, vb / nb
-    t = (ma - mb) / math.sqrt(sa + sb)
+        return None  # both samples are constant
+    na, nb = len(xs), len(ys)
+    wa, wb = va / na, vb / nb  # var/n of each sample is w * 4**e
+    f = max(math.frexp(w)[1] + 2 * e for w, e in ((wa, ea), (wb, eb)) if w > 0.0)
+    f += f % 2  # even, so the square root of 2**f is exact
+    sa, sb = math.ldexp(wa, 2 * ea - f), math.ldexp(wb, 2 * eb - f)  # larger in [0.25, 1)
+    # a zero mean (an all-zero sample) has no scale: it must not push the
+    # other mean below the smallest float
+    g = max((e for m, e in ((ma, ea), (mb, eb)) if m != 0.0), default=0)
+    diff = math.ldexp(ma, ea - g) - math.ldexp(mb, eb - g)  # (mean_a - mean_b) / 2**g
+    u = diff / math.sqrt(sa + sb)  # t / 2**shift, |u| <= 4
+    shift = g - f // 2
+    if u == 0.0:
+        t = 0.0
+    elif math.frexp(u)[1] + shift > 1024:
+        t = math.copysign(math.inf, u)  # beyond the largest float
+    else:
+        t = math.ldexp(u, shift)
     df = (sa + sb) ** 2 / (sa * sa / (na - 1) + sb * sb / (nb - 1))
     return _t_two_sided_p(t, df)
+
+
+def _scaled_moments(xs: list[float]) -> tuple[float, float, int]:
+    """
+    Mean and sample variance of finite ``xs``, scaled by a power of two.
+
+    Returns ``(m, v, e)`` with mean ``m * 2**e`` and variance ``v * 4**e``,
+    where ``2**e`` is the power of two just above the largest magnitude.
+    """
+    biggest = max(abs(x) for x in xs)
+    e = math.frexp(biggest)[1] if biggest else 0
+    ys = [math.ldexp(x, -e) for x in xs]
+    if all(y == ys[0] for y in ys):
+        return ys[0], 0.0, e  # sum / n can miss a constant by an ulp
+    m = sum(ys) / len(ys)
+    v = sum((y - m) ** 2 for y in ys) / (len(ys) - 1)
+    return m, v, e

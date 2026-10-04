@@ -30,3 +30,7 @@ Decisions and evidence
   preserving ignored files in `/tmp/hx-handoff-evidence/af-area-archive/`. Terminated
   only ten confirmed orphaned af-O synthetic fixture processes (command/cwd evidence
   retained in `stale-processes.txt`).
+
+- Main merge conflict in bootstrap statistics: retain audit cached resampling and main
+  undefined mixed-infinity handling. Main property regressions failed (2 failed,
+  6 passed) with the audit-only behavior before retaining the NaN guard.

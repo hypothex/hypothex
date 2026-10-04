@@ -26,6 +26,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidSta
 from hypothex.core.environment import EnvironmentDescriptor
 from hypothex.core.errors import HypothexError
 from hypothex.core.events import Event
+from hypothex.core.fsutil import temp_prefix
 
 DIR_HEADER = "X-Hypothex-Dir"
 SIZE_HEADER = "X-Hypothex-Size"
@@ -469,7 +470,9 @@ class EnvClient:
         if dest.is_dir() and not dest.is_symlink():
             raise IsADirectoryError(f"{dest} is a folder; cannot fetch a file onto it")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".part", dir=dest.parent)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=temp_prefix(dest.name), suffix=".part", dir=dest.parent
+        )
         done = False
         try:
             with os.fdopen(fd, "wb") as fh:

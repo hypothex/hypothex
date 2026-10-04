@@ -44,6 +44,8 @@ const rowOf = (name: string): HTMLLabelElement => radio(name).closest("label") a
 const gpuLine = (): HTMLElement => screen.getByTitle("Seeds that start now, and seeds that wait in the hx queue");
 const launchButton = (n: number): HTMLButtonElement =>
   screen.getByRole("button", { name: `Launch ${n}` }) as HTMLButtonElement;
+const resendButton = (seed: number): HTMLButtonElement =>
+  screen.getByRole("button", { name: `Resend seed ${seed}` }) as HTMLButtonElement;
 const typeHypothesis = (text: string): void => {
   fireEvent.change(screen.getByLabelText("Hypothesis"), { target: { value: text } });
 };
@@ -109,6 +111,26 @@ describe("host picker", () => {
 });
 
 describe("GPUs and queue", () => {
+  test("a CPU template (0 GPUs) stays at 0 on GPU and SLURM hosts and sends gpus 0", async () => {
+    const calls = mockApi({ ...HOSTS, "POST /api/v1/hosts/gpu1/runs": (c: Call) => rec(seedOf(c)) });
+    renderDialog({ initial: { command: CMD, seeds: "4", gpus: 0 } });
+    await ready("gpu1");
+    expect(screen.getByLabelText("GPUs per run").textContent).toBe("0");
+    fireEvent.click(radio("mccleary"));
+    expect(screen.getByLabelText("GPUs per job").textContent).toBe("0");
+    fireEvent.click(radio("gpu1"));
+    expect(screen.getByLabelText("GPUs per run").textContent).toBe("0");
+    // a 0 the hub forced (no GPUs there) goes back to 1 on a GPU host
+    fireEvent.click(radio("local"));
+    fireEvent.click(radio("gpu1"));
+    expect(screen.getByLabelText("GPUs per run").textContent).toBe("1");
+    fireEvent.click(screen.getByRole("button", { name: "Fewer GPUs per run" }));
+    typeHypothesis("cpu only");
+    fireEvent.click(launchButton(1));
+    await waitFor(() => expect(posts(calls)).toHaveLength(1));
+    expect(posts(calls)[0]?.body).toMatchObject({ gpus: 0 });
+  });
+
   test("shows the GPU plan, the queue position, the preview and the summary", async () => {
     mockApi(HOSTS);
     renderDialog();
@@ -398,12 +420,12 @@ describe("Launch", () => {
     typeHypothesis("two seeds on the hub");
     fireEvent.click(launchButton(2));
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "seed 5: index busy. 1 of 2 launched; seed 5 may have started: the form is locked and Launch re-sends it under the same id.",
+      "seed 5: index busy. 1 of 2 launched; seed 5 may have started: the form is locked; Resend seed 5 sends it again under the same id.",
     );
-    // the hub now has 1 free GPU and 1 seed to send: Launch stays enabled
+    // the hub now has 1 free GPU and 1 seed to send
     await waitFor(() => expect(gpuLine().textContent).toBe("1 now, CUDA_VISIBLE_DEVICES=1"));
-    expect(launchButton(1).disabled).toBe(false);
-    fireEvent.click(launchButton(1));
+    expect(resendButton(5).disabled).toBe(false);
+    fireEvent.click(resendButton(5));
     await waitFor(() => expect(onLaunched).toHaveBeenCalledTimes(1));
     const seeds = posts(calls).map(seedOf);
     expect(seeds).toEqual([4, 5, 5]);
@@ -572,7 +594,7 @@ describe("Launch", () => {
     expect(ids[1]).not.toBe(ids[0]);
   });
 
-  test("a launch whose answer is lost locks the form; Launch re-sends it with the same ids, so no seed starts twice", async () => {
+  test("a launch whose answer is lost locks the form; Resend sends it again with the same id, so no seed starts twice", async () => {
     const started: number[] = [];
     const byId = new Map<string, RunRecord>();
     let drops = 3;
@@ -598,7 +620,7 @@ describe("Launch", () => {
     typeHypothesis("beam 10 holds");
     fireEvent.click(launchButton(3));
     expect((await screen.findByRole("alert", {}, { timeout: 3000 })).textContent).toBe(
-      "seed 4: Cannot reach hx serve. 0 of 3 launched; seed 4 may have started: the form is locked and Launch re-sends it under the same id.",
+      "seed 4: Cannot reach hx serve. 0 of 3 launched; seed 4 may have started: the form is locked; Resend seed 4 sends it again under the same id.",
     );
     // an edit would give seed 4 a new command id and start it a second time
     const hyp = screen.getByLabelText("Hypothesis") as HTMLInputElement;
@@ -609,7 +631,13 @@ describe("Launch", () => {
     expect(radio("gpu1").checked).toBe(true);
     // pasted lines would start seed 4 again too
     expect((screen.getByRole("button", { name: "Copy as CLI" }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(launchButton(3));
+    // Resend settles seed 4 alone; then the form is free again and Launch sends the rest
+    fireEvent.click(resendButton(4));
+    await waitFor(() => expect(launchButton(2).disabled).toBe(false));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(posts(calls).slice(3).map(seedOf)).toEqual([4]);
+    expect(onLaunched).not.toHaveBeenCalled();
+    fireEvent.click(launchButton(2));
     await waitFor(() => expect(onLaunched).toHaveBeenCalledTimes(1));
     expect(started).toEqual([4, 5, 6]);
     const ids = posts(calls).map(idOf);
@@ -617,6 +645,84 @@ describe("Launch", () => {
     const [records, host] = onLaunched.mock.calls[0] as [RunRecord[], string];
     expect(records.map((r) => r.seed)).toEqual([4, 5, 6]);
     expect(host).toBe("gpu1");
+  });
+
+  test("a seed that may have started stays locked when its resend finds the host gone; it starts once", async () => {
+    const started: number[] = [];
+    const byId = new Map<string, RunRecord>();
+    let drops = 3;
+    let hostDown = false;
+    const calls = mockApi({
+      ...HOSTS,
+      "POST /api/v1/hosts/gpu1/runs": (c: Call) => {
+        if (hostDown) return new HttpReply(503, { error: "gpu1 is not connected", type: "HostUnavailableError" });
+        let r = byId.get(idOf(c));
+        if (r === undefined) {
+          r = rec(seedOf(c));
+          byId.set(idOf(c), r);
+          started.push(seedOf(c));
+        }
+        if (drops > 0) {
+          drops -= 1;
+          if (drops === 0) hostDown = true; // the connection to gpu1 drops with the last answer
+          throw new TypeError("connection reset");
+        }
+        return r;
+      },
+    });
+    const { onLaunched } = renderDialog({ initial: { command: CMD, seeds: "4" } });
+    await ready();
+    typeHypothesis("beam 10 holds");
+    fireEvent.click(launchButton(1));
+    await screen.findByRole("alert", {}, { timeout: 3000 });
+    fireEvent.click(resendButton(4));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toStartWith("seed 4: gpu1 is not connected."));
+    // the refusal answers the resend, not the first try: seed 4 may still run, so no edit may give it a new id
+    expect(screen.getByRole("alert").textContent).toContain("seed 4 may have started");
+    const hyp = screen.getByLabelText("Hypothesis") as HTMLInputElement;
+    expect((hyp.closest("fieldset") as HTMLFieldSetElement).disabled).toBe(true);
+    typeHypothesis("beam 10 holds, take 2");
+    expect(hyp.value).toBe("beam 10 holds");
+    hostDown = false;
+    fireEvent.click(resendButton(4));
+    await waitFor(() => expect(onLaunched).toHaveBeenCalledTimes(1));
+    expect(started).toEqual([4]);
+    expect(new Set(posts(calls).map(idOf)).size).toBe(1);
+  });
+
+  test("a seed that may have started and took the last free GPU can still be resent, alone", async () => {
+    let held = false;
+    let drops = 3;
+    const calls = mockApi({
+      ...HOSTS,
+      // the hub has two GPUs; once seed 4 starts it holds GPU 0
+      "GET /api/v1/gpus": () => (held ? [gpu(0, { run_id: "r-s4" }), gpu(1)] : [gpu(0), gpu(1)]),
+      "POST /api/v1/runs": (c: Call) => {
+        if (seedOf(c) === 4) held = true;
+        if (seedOf(c) === 4 && drops > 0) {
+          drops -= 1;
+          throw new TypeError("connection reset"); // seed 4 started; its answer is lost
+        }
+        return rec(seedOf(c));
+      },
+    });
+    const { onLaunched } = renderDialog({ initial: { command: CMD, seeds: "4, 5", host: "local" } });
+    await ready("local");
+    typeHypothesis("two seeds on the hub");
+    fireEvent.click(launchButton(2));
+    await screen.findByRole("alert", {}, { timeout: 3000 });
+    // GPU 0 is taken (by seed 4, maybe): a plan for seeds 4 and 5 has room for one only
+    await waitFor(() => expect(gpuLine().textContent).toContain("1 won't start"));
+    expect(resendButton(4).disabled).toBe(false);
+    fireEvent.click(resendButton(4));
+    // only seed 4 is sent; seed 5 waits for a plan of its own
+    await waitFor(() => expect(launchButton(1).disabled).toBe(false));
+    expect(posts(calls).map(seedOf)).toEqual([4, 4, 4, 4]);
+    expect(onLaunched).not.toHaveBeenCalled();
+    fireEvent.click(launchButton(1));
+    await waitFor(() => expect(onLaunched).toHaveBeenCalledTimes(1));
+    expect((onLaunched.mock.calls[0] as [RunRecord[], string])[0].map((r) => r.seed)).toEqual([4, 5]);
+    expect(new Set(posts(calls).filter((c) => seedOf(c) === 4).map(idOf)).size).toBe(1);
   });
 
   test("while seeds are sent, the host and the fields are locked to the launch in progress", async () => {

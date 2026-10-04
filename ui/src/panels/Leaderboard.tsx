@@ -30,7 +30,7 @@ import {
 } from "../charts/Scale";
 import { useTooltip, type Tooltip } from "../charts/Tooltip";
 import { fmtDuration, valueFormatter, type ValueFormatter } from "../charts/valueFormat";
-import type { LeaderboardRow, NoiseInterval, Stats, UsageTotals, VersusBest } from "../api/models";
+import type { CostTotals, LeaderboardRow, NoiseInterval, Stats, UsageTotals, VersusBest } from "../api/models";
 import type { PanelProps } from "./index";
 
 /** `hypothex.core.seeds.Stats` as JSON. */
@@ -108,6 +108,30 @@ export function examplesHref(a: string, b: string, metric: string): string {
 /** Short column label for a score key: `accuracy/value` → `accuracy`, `lat/p95` → `lat p95`. */
 export function metricLabel(key: string): string {
   return key.replace(/\/value$/, "").replace("/", " ");
+}
+
+/** GPU hours: one decimal below 10, whole from 10. */
+function fmtGpuHours(hours: number): string {
+  return hours < 10 ? hours.toFixed(1) : hours.toFixed(0);
+}
+
+/**
+ * A group's cost in its meta line (spec 8A.7): `$6.51 · 11 GPU-h · 4m 10s`. Dollars always;
+ * GPU hours and agent time only when there are any.
+ */
+export function costText(cost: CostTotals, usage: UsageTotals | null): string {
+  const parts = [`$${cost.total_usd.toFixed(2)}`];
+  if (cost.gpu_hours > 0) parts.push(`${fmtGpuHours(cost.gpu_hours)} GPU-h`);
+  if (usage && usage.seconds > 0) parts.push(fmtDuration(usage.seconds));
+  return parts.join(" · ");
+}
+
+/** What the cost is made of, then the usage calls and tokens. */
+export function costTitle(cost: CostTotals, usage: UsageTotals | null): string {
+  const head =
+    `GPU $${cost.gpu_usd.toFixed(2)} + API $${cost.api_usd.toFixed(2)} over the group's runs, ` +
+    `${cost.gpu_hours.toFixed(2)} GPU h`;
+  return usage ? `${head}\n${usage.calls} calls, ${usage.tokens_in} tokens in, ${usage.tokens_out} out` : head;
 }
 
 /** The best group's band: its test-set interval, else its seed t-interval. */
@@ -383,6 +407,7 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
           const s = row.primary;
           const second = secondKey ? row.scores[secondKey] : undefined;
           const u = row.usage;
+          const c = row.cost ?? null;
           const ci = rowInterval(row, showTest, showSeeds);
           return (
             <div className="frow" data-row={i} key={row.group_id}>
@@ -395,7 +420,11 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
                   <span>
                     <a href={`/r/${encodeURIComponent(row.latest_run_id)}`}>{row.group_id}</a>
                   </span>
-                  {u && (u.usd > 0 || u.seconds > 0) ? (
+                  {c && (c.total_usd > 0 || c.gpu_hours > 0) ? (
+                    <span className="cost" title={costTitle(c, u)}>
+                      {costText(c, u)}
+                    </span>
+                  ) : u && (u.usd > 0 || u.seconds > 0) ? (
                     <span title={`${u.calls} calls, ${u.tokens_in} tokens in, ${u.tokens_out} out`}>
                       ${u.usd.toFixed(2)} · {fmtDuration(u.seconds)}
                     </span>

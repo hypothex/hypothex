@@ -182,6 +182,26 @@ def test_runs_of_unknown_environments_act_locally(tmp_path: Path) -> None:
         assert r.client.get("/api/v1/runs/d1").json()["host_state"] is None
 
 
+def test_curation_of_a_run_mirrored_from_a_removed_host_is_refused(tmp_path: Path) -> None:
+    # the host is gone from environments.yaml, but its mirror cursor stays: when it is
+    # added back, the host's run.yaml and notes.md replace the hub's copies
+    with remote_hub(tmp_path) as r:
+        r.hub.create_run(make_record("m1", environment_id="env-old", status=RunStatus.FINISHED))
+        r.hub.index.set_cursor("gpu-old", "env-old", 7)
+        for action, body in (
+            ("tags", {"add": ["hub-only"]}),
+            ("star", {"on": True}),
+            ("archive", {"on": True}),
+            ("notes", {"text": "hub-only note"}),
+        ):
+            resp = r.client.post(f"/api/v1/runs/m1/{action}", json=body)
+            assert resp.status_code == 503, action
+            assert "mirrored from host gpu-old" in resp.json()["error"]
+        record = r.hub.find_record("m1")
+        assert (record.tags, record.starred, record.archived) == ([], False, False)
+        assert "hub-only note" not in r.hub.store.read_notes("toy", "m1")
+
+
 def test_launch_on_a_host_runs_the_hub_commit_the_host_lacks(tmp_path: Path) -> None:
     with remote_hub(tmp_path) as r:
         (r.hub_repo / "marker.txt").write_text("from the hub\n")

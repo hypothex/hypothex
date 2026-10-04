@@ -225,7 +225,9 @@ Act on remote runs
 ``note`` on a remote run go through the hub to the run's host, with one command id, so
 a repeated call still acts once. They never change only the hub's copy. When the
 run's host is no longer in ``environments.yaml``, stop, rerun, re-infer, and
-re-evaluate answer ``503``. ``--foreground`` is refused for a remote run.
+re-evaluate answer ``503``. So do tag, star, archive, and note when the hub mirrored the
+run from that host: the host's copy would replace the hub's when the host is added
+back. ``--foreground`` is refused for a remote run.
 
 What the hub copies
 -------------------

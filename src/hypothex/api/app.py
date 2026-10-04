@@ -755,6 +755,33 @@ class HubManager:
         name = self._seen.get(environment_id) or self._cursor_host(environment_id)
         return name if name in self.names() else None
 
+    def mirrored_from(self, environment_id: str) -> str | None:
+        """
+        Return the host this hub mirrored an environment's runs from, configured or not.
+
+        Unlike :meth:`host_for_environment`, a host since removed from
+        ``environments.yaml`` still counts: its mirror cursor stays, and the
+        host's copy of each run replaces the hub's whenever it is mirrored again.
+
+        Parameters
+        ----------
+        environment_id : str
+
+        Returns
+        -------
+        str or None
+            The host name; None for this hub's own runs and for environments
+            never mirrored here (such as demo or imported runs).
+
+        Examples
+        --------
+        >>> manager.mirrored_from("env-of-a-removed-host")  # doctest: +SKIP
+        'gpu-old'
+        """
+        if environment_id == self.ctx.descriptor.environment_id:
+            return None
+        return self._seen.get(environment_id) or self._cursor_host(environment_id)
+
     def environment_ids(self, state: HostState) -> list[str]:
         """
         Return every environment id a host is known to have served.
@@ -1792,12 +1819,16 @@ def create_app(
             record = ctx.find_record(run_id)
             host = manager.host_for_environment(record.environment_id)
             if host is None:
+                source = manager.mirrored_from(record.environment_id)
                 foreign = record.environment_id != ctx.descriptor.environment_id
-                if remote_only and foreign:
-                    # its pids and paths belong to another machine: never act on them here
+                # remote_only: its pids and paths belong to another machine. A mirrored run:
+                # the host's copy replaces the hub's on its next mirror, so an edit made
+                # here (tags, star, archive, notes) would be lost without a word
+                if foreign and (remote_only or source is not None):
+                    mirrored = f" (mirrored from host {source})" if source else ""
                     raise HostUnavailableError(
-                        f"run {run_id} belongs to environment {record.environment_id}, which "
-                        f"no configured host serves; {action} must run on that host "
+                        f"run {run_id} belongs to environment {record.environment_id}{mirrored}, "
+                        f"which no configured host serves; {action} must run on that host "
                         "(`hx hosts add` / `hx hosts connect`)"
                     )
                 return local()

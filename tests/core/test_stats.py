@@ -328,3 +328,19 @@ def test_welch_p_none_cases_and_nan() -> None:
         0.021311641128756713, rel=1e-9
     )
     assert welch_p([1.0, math.nan], [2.0, 3.0]) is None
+
+
+def test_lttb_is_the_one_thinning_rule_of_curves_history_and_the_index() -> None:
+    xs = [float(i) for i in range(100)]
+    ys = [0.0] * 100
+    ys[37], ys[80] = 5.0, -4.0
+    kept = stats.lttb(xs, ys, 10)
+    assert len(kept) == 10 and kept == sorted(set(kept))
+    assert (kept[0], kept[-1]) == (0, 99) and {37, 80} <= set(kept)
+    assert stats.lttb(xs, ys, 2) == [0, 99]
+    assert stats.lttb(xs[:10], ys[:10], 10) == list(range(10))
+    with pytest.raises(ValueError, match="at least 2"):
+        stats.lttb(xs, ys, 1)
+    from hypothex.core import panels
+
+    assert panels.lttb is stats.lttb

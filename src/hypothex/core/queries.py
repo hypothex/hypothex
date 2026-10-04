@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
-import math
 import shlex
 import weakref
 from collections.abc import Iterable
@@ -14,6 +13,7 @@ from typing import Any, NamedTuple
 
 from pydantic import BaseModel, Field
 
+from hypothex.core import stats
 from hypothex.core.config import (
     ProjectConfig,
     load_project_config,
@@ -467,13 +467,11 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
 
 def lttb(series: list[MetricPoint], limit: int) -> list[MetricPoint]:
     """
-    Downsample one series with Largest-Triangle-Three-Buckets.
+    Downsample one series with Largest-Triangle-Three-Buckets (``stats.lttb``).
 
-    The first and last points are always kept. The points in between are
-    split into ``limit - 2`` buckets, and from each bucket the point that
-    makes the largest triangle with the point kept before it and the mean of
-    the next bucket is kept. Peaks and dips survive, unlike every-n-th
-    sampling. Kept points are returned as they are (no averaging).
+    The first and last points are always kept, and peaks and dips survive,
+    unlike every-n-th sampling. Kept points are returned as they are (no
+    averaging).
 
     Parameters
     ----------
@@ -500,28 +498,8 @@ def lttb(series: list[MetricPoint], limit: int) -> list[MetricPoint]:
     """
     if limit < 2:
         raise RunError(f"max_points must be at least 2, not {limit}")
-    n = len(series)
-    if n <= limit:
-        return series
-    inner = limit - 2
-    out = [series[0]]
-    kept = series[0]
-    for i in range(inner):
-        # bucket i holds series[start:stop]; integer bounds give equal-size buckets
-        start = i * (n - 2) // inner + 1
-        stop = (i + 1) * (n - 2) // inner + 1
-        after = series[stop : (i + 2) * (n - 2) // inner + 1]  # last bucket: the last point
-        mean_x = math.fsum(p.step for p in after) / len(after)
-        mean_y = math.fsum(p.value for p in after) / len(after)
-        x0, y0 = kept.step, kept.value
-        kept, largest = series[start], -1.0
-        for p in series[start:stop]:
-            area = abs((x0 - mean_x) * (p.value - y0) - (x0 - p.step) * (mean_y - y0))
-            if area > largest:
-                kept, largest = p, area
-        out.append(kept)
-    out.append(series[-1])
-    return out
+    keep = stats.lttb([p.step for p in series], [p.value for p in series], limit)
+    return series if len(keep) == len(series) else [series[i] for i in keep]
 
 
 def metric_history(

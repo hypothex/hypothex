@@ -1399,7 +1399,7 @@ def test_lttb_keeps_ends_peaks_and_short_series() -> None:
     assert (kept[0], kept[-1]) == (0, 99)
     assert {37, 80} <= set(kept)
     assert panels.lttb(xs[:10], ys[:10], 10) == list(range(10))
-    assert panels.lttb(xs, ys, 2) == list(range(100))
+    assert panels.lttb(xs, ys, 2) == [0, 99]
 
 
 def test_view_parses_a_live_runs_metrics_file_once_for_all_curves(

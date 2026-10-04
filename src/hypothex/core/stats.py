@@ -451,6 +451,69 @@ def ecdf_points(values: Sequence[float], max_points: int = 200) -> list[tuple[fl
     return points
 
 
+def lttb(xs: Sequence[float], ys: Sequence[float], limit: int) -> list[int]:
+    """
+    Indices of at most ``limit`` points that keep a line's shape (LTTB).
+
+    Largest-Triangle-Three-Buckets: the first and last points are always kept.
+    The points between them are cut into ``limit - 2`` buckets of near-equal
+    size (exact integer bounds); from each bucket the point that makes the
+    largest triangle with the point kept before it and the mean of the next
+    bucket is kept (the first on a tie), so peaks such as a loss spike survive
+    the thinning, unlike every-n-th sampling.
+
+    Parameters
+    ----------
+    xs : sequence of float
+        x of each point, in drawing order.
+    ys : sequence of float
+        y of each point.
+    limit : int
+        Most points to keep, at least 2; a series that is not longer is kept whole.
+
+    Returns
+    -------
+    list of int
+        Increasing indices into ``xs`` / ``ys``.
+
+    Raises
+    ------
+    ValueError
+        If ``limit`` is less than 2.
+
+    Examples
+    --------
+    >>> lttb([0, 1, 2, 3, 4], [0, 0, 9, 0, 0], 3)
+    [0, 2, 4]
+    >>> lttb([0, 1], [5, 6], 3)
+    [0, 1]
+    """
+    if limit < 2:
+        raise ValueError(f"lttb keeps at least 2 points, not {limit}")
+    n = len(xs)
+    if n <= limit:
+        return list(range(n))
+    inner = limit - 2
+    out = [0]
+    kept = 0
+    for b in range(inner):
+        # bucket b is [start, stop); the next bucket (the last point after the
+        # last bucket) gives the mean the triangle is drawn to
+        start = b * (n - 2) // inner + 1
+        stop = (b + 1) * (n - 2) // inner + 1
+        after = range(stop, min((b + 2) * (n - 2) // inner + 1, n)) or range(n - 1, n)
+        mean_x = math.fsum(xs[j] for j in after) / len(after)
+        mean_y = math.fsum(ys[j] for j in after) / len(after)
+        x0, y0 = xs[kept], ys[kept]
+        kept = max(
+            range(start, stop),
+            key=lambda j: abs((x0 - mean_x) * (ys[j] - y0) - (x0 - xs[j]) * (mean_y - y0)),
+        )
+        out.append(kept)
+    out.append(n - 1)
+    return out
+
+
 _BETACF_MAX_ITER = 300
 _BETACF_EPS = 3.0e-16
 _BETACF_FPMIN = 1.0e-300

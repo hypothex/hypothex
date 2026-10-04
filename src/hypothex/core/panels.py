@@ -31,7 +31,7 @@ from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
 from hypothex.core.seeds import summarize
 from hypothex.core.sources import group_labels, iter_rows, metric_points, select_fields
-from hypothex.core.stats import ecdf_points, quantile
+from hypothex.core.stats import ecdf_points, lttb, quantile
 from hypothex.core.store import ProjectEntry
 from hypothex.core.views import (
     VERSION_REF,
@@ -813,60 +813,6 @@ def _merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]
         else:
             merged.append((start, end))
     return merged
-
-
-def lttb(xs: list[float], ys: list[float], limit: int) -> list[int]:
-    """
-    Indices of at most ``limit`` points that keep a line's shape (LTTB).
-
-    Largest-Triangle-Three-Buckets: the first and last points are always kept.
-    The points between them are cut into ``limit - 2`` buckets in order; from
-    each bucket the point that makes the largest triangle with the point kept
-    before it and the mean of the next bucket is kept, so peaks such as a loss
-    spike survive the thinning.
-
-    Parameters
-    ----------
-    xs : list of float
-        x of each point, in drawing order.
-    ys : list of float
-        y of each point.
-    limit : int
-        Most points to keep; a series that is not longer is kept whole, and a
-        limit below 3 keeps every point.
-
-    Returns
-    -------
-    list of int
-        Increasing indices into ``xs`` / ``ys``.
-
-    Examples
-    --------
-    >>> lttb([0, 1, 2, 3, 4], [0, 0, 9, 0, 0], 3)
-    [0, 2, 4]
-    >>> lttb([0, 1], [5, 6], 3)
-    [0, 1]
-    """
-    n = len(xs)
-    if n <= limit or limit < 3:
-        return list(range(n))
-    out = [0]
-    size = (n - 2) / (limit - 2)
-    kept = 0
-    for b in range(limit - 2):
-        start, end = int(b * size) + 1, int((b + 1) * size) + 1
-        nxt_end = min(int((b + 2) * size) + 1, n)
-        nxt = range(end, nxt_end) if end < nxt_end else range(n - 1, n)
-        mx = math.fsum(xs[j] for j in nxt) / len(nxt)
-        my = math.fsum(ys[j] for j in nxt) / len(nxt)
-        ax, ay = xs[kept], ys[kept]
-        kept = max(
-            range(start, end),
-            key=lambda j: abs((ax - mx) * (ys[j] - ay) - (ax - xs[j]) * (my - ay)),
-        )
-        out.append(kept)
-    out.append(n - 1)
-    return out
 
 
 def short_step(x: float) -> str:

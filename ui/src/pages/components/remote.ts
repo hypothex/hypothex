@@ -157,6 +157,29 @@ export function costNote(cost: CostTotals): string {
   return `${cost.gpu_hours.toFixed(2)} GPU h, API ${fmtUsd(cost.api_usd)}`;
 }
 
+/** A cost as the run page shows it: the total (or `—`) and what it is made of. */
+export interface CostShown {
+  value: string;
+  note: string;
+  /** GPU hours on a host with no GPU rate: the total is unknown. */
+  unpriced: boolean;
+}
+
+/**
+ * How the run page shows a run's cost (spec 8A.7), in the stat strip and the Placement
+ * panel alike. No cost, or an all-zero one (a hub or CPU run), is nothing to show. GPU
+ * hours left unpriced because the host row says it has no rate (`null`) make the total
+ * unknown (`—`); zero GPU dollars alone prove nothing (free GPUs, a tiny charge rounded).
+ * `host` is the run's hosts row, or null without the hosts list.
+ */
+export function costShown(cost: CostTotals | null | undefined, host: HostRow | null): CostShown | null {
+  if (!cost || (cost.total_usd <= 0 && cost.gpu_hours <= 0)) return null;
+  const unpriced = host?.usd_per_gpu_hour === null && cost.gpu_hours > 0 && cost.gpu_usd === 0;
+  return unpriced
+    ? { value: "—", note: `${costNote(cost)}, no GPU rate for this host`, unpriced }
+    : { value: fmtUsd(cost.total_usd), note: costNote(cost), unpriced };
+}
+
 /** Characters of the hub's environment id a sweep tag names (the backend's `SWEEP_OWNER_CHARS`). */
 export const SWEEP_OWNER_CHARS = 8;
 const OWNED_SWEEP_TAG = /^sweep:([^:]+):(.+)$/;

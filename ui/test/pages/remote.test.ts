@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   costNote,
+  costShown,
   fmtWait,
   freeGpus,
   gpuLabel,
@@ -187,4 +188,30 @@ test("sweepCrumb links only a sweep this hub owns (its owner-qualified tag)", ()
   // the hub's id not known yet (descriptor loading or failed): plain text, no reason
   expect(sweepCrumb(mine, null)).toEqual({ id: "s-7f3a", href: null, why: null });
   expect(sweepCrumb(runningRecord(), hub)).toBeNull();
+});
+
+describe("costShown", () => {
+  const priced = { gpu_hours: 1.5, gpu_usd: 3, api_usd: 0.42, total_usd: 3.42 };
+  const unpriced = { gpu_hours: 1.5, gpu_usd: 0, api_usd: 0.42, total_usd: 0.42 };
+  const rated = { usd_per_gpu_hour: 2 } as HostRow;
+  const noRate = { usd_per_gpu_hour: null } as HostRow;
+
+  test("no cost, or an all-zero one, is nothing to show", () => {
+    expect(costShown(null, rated)).toBeNull();
+    expect(costShown({ gpu_hours: 0, gpu_usd: 0, api_usd: 0, total_usd: 0 }, rated)).toBeNull();
+  });
+
+  test("the total, with what it is made of", () => {
+    expect(costShown(priced, rated)).toEqual({ value: "$3.42", note: "1.50 GPU h, API $0.42", unpriced: false });
+    // without the host row the rate is not known to be missing
+    expect(costShown(unpriced, null)).toEqual({ value: "$0.42", note: "1.50 GPU h, API $0.42", unpriced: false });
+  });
+
+  test("GPU hours on a host with no rate: the total is unknown", () => {
+    expect(costShown(unpriced, noRate)).toEqual({
+      value: "—",
+      note: "1.50 GPU h, API $0.42, no GPU rate for this host",
+      unpriced: true,
+    });
+  });
 });

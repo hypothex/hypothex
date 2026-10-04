@@ -74,6 +74,11 @@ A process the command left running in the background (``cmd &``, a daemon) keeps
 the output pipes open; past this the run is recorded anyway (``run.warning``)."""
 PROVIDED_TEMPLATE_VARS = BUILTIN_TEMPLATE_VARS - {"checkpoint"}
 """Template values Hypothex fills in itself; ``--var`` cannot set them."""
+PROVIDED_VAR_HINTS = {
+    "seed": "give the seed itself (CLI --seed, API/MCP seed)",
+    "config": "give a config file with --config (local CLI runs only)",
+}
+"""How to set the provided values a caller may choose, named for CLI and API/MCP alike."""
 RUN_ID_ATTEMPTS = 8
 """How many fresh run ids ``prepare_run`` draws before it gives up (ids clash very rarely)."""
 STAGING_DIR = "staging"
@@ -570,9 +575,12 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         raise RunError("agents must give a hypothesis (--hypothesis): why does this run exist?")
     provided = sorted(set(req.vars) & PROVIDED_TEMPLATE_VARS)
     if provided:
+        name = provided[0]
+        hint = PROVIDED_VAR_HINTS.get(name)
         raise RunError(
-            f"--var {provided[0]} is set by Hypothex and cannot be overridden "
+            f"template var {name} is set by Hypothex and cannot be given as a var "
             f"(Hypothex sets: {', '.join(sorted(PROVIDED_TEMPLATE_VARS))})"
+            + (f"; {hint}" if hint else "")
         )
     if req.config_path is not None and not req.config_path.is_file():
         raise RunError(f"config file not found: {req.config_path}")

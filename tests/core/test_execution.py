@@ -532,3 +532,13 @@ def test_an_unknown_stage_is_refused_also_with_a_command(ctx: Context, toy_repo:
     assert ctx.store.list_run_ids() == {}
     ok = prepare_run(ctx, RunRequest(repo=toy_repo, stage="infer", command=cmd("print(1)")))
     assert ok.stage == "infer" and ok.command == cmd("print(1)")
+
+
+def test_refusing_a_provided_var_names_how_to_set_it(ctx: Context, toy_repo: Path) -> None:
+    # DF-12: the refusal said "--var seed ...", a CLI flag name, and gave no way out
+    req = RunRequest(repo=toy_repo, command=cmd("print(1)"), vars={"seed": "3"})
+    with pytest.raises(RunError) as err:
+        prepare_run(ctx, req)
+    message = str(err.value)
+    assert message.startswith("template var seed is set by Hypothex")
+    assert "--seed" in message and "MCP seed" in message

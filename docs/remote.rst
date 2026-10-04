@@ -17,6 +17,11 @@ How it fits together
   your own ``ssh`` and ``~/.ssh/config``. The env server listens on ``127.0.0.1`` only.
 - The hub subscribes to each host's event stream and **mirrors** the runs: it copies
   the small files of each run to the hub as they change. Big files stay on the host.
+  The hub keeps its place in each host's stream (a *cursor*), so after a reconnect it
+  reads only what it missed. When a host's event log starts again (its ``events.db``
+  was deleted or restored from a backup, but the host kept its id), the hub sees that
+  the host is behind the cursor and reads the whole log again; nothing is copied
+  twice.
 
 The env server asks for a bearer token on every request. See :doc:`security`.
 
@@ -240,8 +245,11 @@ run from that host: the host's copy would replace the hub's when the host is add
 back. ``--foreground`` is refused for a remote run.
 
 A task re-evaluation through the hub (``POST /api/v1/tasks/{project}/{task}/reeval``)
-scores the hub's own runs on the hub and sends each remote run to its host. A run whose
-host is down or gone is listed in ``skipped``.
+scores the hub's own runs on the hub in one pass and sends each remote run to its
+host. The hub waits up to 600 s for each host's answer (``REEVAL_FORWARD_SECONDS``),
+as scoring can take long. A run whose host is down or gone is listed in ``skipped``,
+and so are the host's later runs in that call. The hub never scores a mirrored run
+itself: the host does, and the mirror then copies the host's ``scores.jsonl``.
 
 What the hub copies
 -------------------

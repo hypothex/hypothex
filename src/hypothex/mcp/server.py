@@ -1281,8 +1281,8 @@ def build_server(
         `ranges`, e.g. {"lr": "1e-5:1e-3:log"}) and seed. The command must use every
         param as {name}; {seed} is optional. host=None runs here; a host name runs there
         with this checkout's commit and uncommitted diff (repo, default the project's
-        registered checkout). Returns the summary: spec (with run_ids), counts, cells,
-        best, total_usd.
+        registered checkout). Returns the summary: spec, run_ids, tag, counts, cells,
+        best, headline, total_usd.
         """
         require_agent_hypothesis(f"agent:{agent}", hypothesis)
         params = [SweepParam(name=k, values=[_text(v) for v in vs]) for k, vs in grid.items()]
@@ -1343,8 +1343,9 @@ def build_server(
         project: str, sweep_id: str, seeds: list[int], agent: str = "mcp"
     ) -> dict[str, Any]:
         """
-        Add runs for every combination x the new seeds. A seed whose runs all exist
-        is refused; a seed with missing runs (an earlier extend failed) gets only those.
+        Add runs for every combination x the given seeds. Seeds already in the sweep
+        start only their missing runs (an earlier extend failed midway), so a repeated
+        call is safe.
         """
         c = ctx()
         spec, here = locate_sweep(c, sweep_id, project, url=hub_url, token=auth())

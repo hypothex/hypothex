@@ -1,15 +1,17 @@
+import asyncio
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+from mcp import Client
 
 from hypothex.api import app as app_module
 from hypothex.api.app import create_app
 from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.sweeps import list_sweeps
-from hypothex.mcp.server import MCPServer, _text
+from hypothex.mcp.server import MCPServer, _text, build_server
 from tests.api.envserver import remote_hub, serve_app, wait_until
 from tests.factories import PREDS_075, git, seed_finished_run, write_toy_project
 from tests.mcp.test_server import call
@@ -79,6 +81,9 @@ def test_local_sweep_tools(home: Path, ctx: Context, toy_repo: Path) -> None:
     assert not err and len(more["run_ids"]) == 4
     for rid in more["run_ids"]:
         control.wait_for_run(ctx, rid, timeout=60)
+    # a seed already in the sweep is not refused: it starts only its missing runs (none)
+    err, again = call(home, "extend_sweep", {"project": "toy", "sweep_id": sid, "seeds": [1, 2]})
+    assert not err and sorted(again["run_ids"]) == sorted(more["run_ids"])
     err, cancelled = call(home, "cancel_sweep", {"project": "toy", "sweep_id": sid})
     assert not err and cancelled["spec"]["id"] == sid
     err, message = call(
@@ -254,3 +259,17 @@ def test_create_app_gives_mcp_its_own_url(home: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(app_module, "build_server", spy)
     create_app(home, background_repair=False, hub_url="http://127.0.0.1:5555", auth_token="t")
     assert seen == {"hub_url": "http://127.0.0.1:5555", "hub_token": "t"}
+
+
+def test_sweep_tool_texts_match_the_contract(home: Path) -> None:
+    async def descriptions() -> dict[str, str]:
+        async with Client(build_server(home)) as client:
+            return {t.name: t.description or "" for t in (await client.list_tools()).tools}
+
+    texts = asyncio.run(descriptions())
+    # SweepSpec has no run_ids (contract round 2): they are on the summary
+    assert "spec (with run_ids)" not in texts["launch_sweep"]
+    assert "spec, run_ids" in texts["launch_sweep"]
+    # extend is idempotent: a seed already in the sweep is never refused
+    assert "refused" not in texts["extend_sweep"]
+    assert "only their missing runs" in texts["extend_sweep"]

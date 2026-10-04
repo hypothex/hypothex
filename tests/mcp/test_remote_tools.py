@@ -273,3 +273,32 @@ def test_sweep_tool_texts_match_the_contract(home: Path) -> None:
     # extend is idempotent: a seed already in the sweep is never refused
     assert "refused" not in texts["extend_sweep"]
     assert "only their missing runs" in texts["extend_sweep"]
+
+
+def test_launch_run_sends_slurm_fields_to_the_host(
+    home: Path, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hypothex.mcp.server as server_mod
+
+    sent: list[dict[str, Any]] = []
+
+    def record_hub(method: str, path: str, body: dict[str, Any], **kwargs: Any) -> Any:
+        sent.append(body)
+        return {"run_id": "r1"}
+
+    monkeypatch.setattr(server_mod, "hub_call", record_hub)
+    base = {"repo": str(toy_repo), "hypothesis": "longer", "command": [PY, "-c", "1"]}
+    err, _ = call(
+        home,
+        "launch_run",
+        {**base, "host": "hpc", "partition": "gpu", "time": "1-00:00:00", "account": "lab"},
+    )
+    assert not err
+    assert sent[-1]["slurm"] == {"partition": "gpu", "time": "1-00:00:00", "account": "lab"}
+    err, _ = call(home, "launch_run", {**base, "host": "hpc", "time": "04:00:00"})
+    assert not err and sent[-1]["slurm"] == {"time": "04:00:00"}  # unset ones keep the defaults
+    err, _ = call(home, "launch_run", {**base, "host": "hpc"})
+    assert not err and sent[-1]["slurm"] is None
+    err, message = call(home, "launch_run", {**base, "partition": "gpu"})  # runs here
+    assert err and "need host=" in message
+    assert len(sent) == 3

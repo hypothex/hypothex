@@ -1078,15 +1078,27 @@ def build_server(
         host: str | None = None,
         gpus: int = 0,
         queue: bool = False,
+        partition: str | None = None,
+        time: str | None = None,
+        account: str | None = None,
     ) -> dict[str, Any]:
         """
         Start a run in the background. Give a command (argv list; may use {seed},
         {run_dir}, {dataset.path}, ...) or a stage name from hypothex.yaml. A
         hypothesis is required. host runs it on that host (see list_hosts) with its
         checkout of the project; gpus and queue=True wait for free GPUs there.
+        partition, time (SLURM format, e.g. 1-00:00:00) and account override a
+        SLURM host's defaults for this run.
         """
         created_by = f"agent:{agent}"
         require_agent_hypothesis(created_by, hypothesis)
+        slurm = {
+            k: v
+            for k, v in {"partition": partition, "time": time, "account": account}.items()
+            if v is not None
+        }
+        if slurm and not is_remote(host):
+            raise RunError("partition, time, and account need host=<a SLURM host>")
         if is_remote(host):
             fields, _ = client_checkout(Path(repo))  # never a path: the hub may be elsewhere
             body = {
@@ -1101,6 +1113,7 @@ def build_server(
                 "vars": template_vars or {},
                 "gpus": gpus,
                 "queue": queue,
+                "slurm": slurm or None,
                 "created_by": created_by,
                 "command_id": new_command_id(),
             }

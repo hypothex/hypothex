@@ -93,7 +93,8 @@ SLURM jobs, cost today).
 - A host that the hub cannot reach shows `stale` or `error` in `hx hosts status`.
   Its runs keep going there and are not lost: do not rerun them. Wait, or run
   `hx hosts connect <host>`.
-- MCP: `list_hosts`, `launch_run(host=..., gpus=..., queue=True)`, `launch_sweep`,
+- MCP: `list_hosts`, `launch_run(host=..., gpus=..., queue=True)` (SLURM hosts also
+  take `partition=`, `time=`, `account=`), `launch_sweep`,
   `get_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`.
 
 ## Where things are

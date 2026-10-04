@@ -486,7 +486,7 @@ def test_tick_starts_runs_fifo_first_fit_with_their_gpus(
     assert ctx.find_record(b).executor.queue_position is None
     assert not (ctx.run_dir(ctx.find_record(b)) / QUEUE_FILE).exists()
     assert sched.positions() == {a: 1, d: 2}
-    assert ctx.find_record(d).executor.queue_position == 2
+    assert ctx.find_record(d).executor.queue_position == 4  # its ticket: never rewritten
     assert [wait_for_run(ctx, r, timeout=60).status for r in (b, c)] == [RunStatus.FINISHED] * 2
     assert stdout_of(ctx, b) == "1,2"
     assert stdout_of(ctx, c) == "3"
@@ -615,6 +615,48 @@ def test_crash_between_gpu_assignment_and_spawn_frees_the_gpus(
     assert stdout_of(ctx, rid) == "0"
     types = [e.type for e in ctx.events.since(0) if e.run_id == rid]
     assert types.count("run.gpus_released") == 1 and types.count("run.launched") == 1
+
+
+def test_a_run_whose_start_was_cut_short_gets_a_ticket_ahead_of_later_runs(
+    ctx: Context, toy_repo: Path, gpus: SetGpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gpus([{"index": 0}])
+    first = queue_run(ctx, toy_repo, 1)
+    second = queue_run(ctx, toy_repo, 1)
+
+    def crash(c: Context, r: RunRecord) -> int:
+        raise Crash
+
+    monkeypatch.setattr(scheduler_module, "spawn_supervisor", crash)
+    with pytest.raises(Crash):
+        Scheduler(ctx).tick()
+    assert ctx.find_record(first).executor.queue_position is None  # the start cleared it
+    gpus([{"index": 0, "external": True}])  # the restarted server starts nothing
+    assert Scheduler(ctx).tick() == []
+    assert Scheduler(ctx).positions() == {first: 1, second: 2}
+    tickets = [ctx.find_record(r).executor.queue_position for r in (first, second)]
+    assert tickets == [1, 2]
+
+
+def test_starts_and_stops_never_rewrite_the_runs_behind(
+    ctx: Context, toy_repo: Path, gpus: SetGpus
+) -> None:
+    # DF-46: each start used to rewrite every waiting run (n(n-1)/2 events for n runs)
+    gpus([{"index": 0, "external": True}])  # nothing starts while the queue fills
+    ids = [queue_run(ctx, toy_repo, 1, code="pass") for _ in range(8)]
+    assert [ctx.find_record(r).executor.queue_position for r in ids] == list(range(1, 9))
+    stop_run(ctx, ids[0])
+    gpus([{"index": 0}])
+    sched = Scheduler(ctx)
+    for expected in ids[1:]:
+        assert sched.positions()[expected] == 1
+        assert sched.tick() == [expected]
+        assert wait_for_run(ctx, expected, timeout=60).status == RunStatus.FINISHED
+    types = [e.type for e in ctx.events.since(0)]
+    assert types.count("run.queue_moved") == 0
+    assert types.count("run.enqueued") == 8
+    late = queue_run(ctx, toy_repo, 1, code="pass")
+    assert ctx.find_record(late).executor.queue_position == 1  # an empty queue starts over
 
 
 def test_crash_after_spawn_never_starts_the_run_twice(
@@ -778,7 +820,7 @@ def test_stop_removes_a_queued_run_from_the_queue(
     assert [e.payload["reason"] for e in killed] == ["removed from queue"]
     sched = Scheduler(ctx)
     assert sched.positions() == {second.run_id: 1}
-    assert ctx.find_record(second.run_id).executor.queue_position == 1
+    assert ctx.find_record(second.run_id).executor.queue_position == 2  # the ticket stays
     gpus([{"index": 0}])
     assert sched.tick() == [second.run_id]
     assert wait_for_run(ctx, second.run_id, timeout=60).status == RunStatus.FINISHED

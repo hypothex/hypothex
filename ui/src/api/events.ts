@@ -79,6 +79,8 @@ export interface EventStreamOptions {
    * failure, an invalid answer, or no answer within `HEAD_TIMEOUT_MS` means 0.
    */
   head?: () => Promise<number | null>;
+  /** Refresh reads taken before an accepted head: events up to it will not replay. */
+  onHead?: () => void;
 }
 
 export interface EventStreamHookOptions {
@@ -316,6 +318,7 @@ export class EventStream {
       this.headTimer = null;
       this.needHead = false;
       this.lastSequence = sequence ?? 0;
+      if (sequence !== null) this.options.onHead?.();
       this.open();
     };
     this.headTimer = this.clock.setTimeout(() => finish(null), HEAD_TIMEOUT_MS);
@@ -492,6 +495,17 @@ export function useEventStream(options: EventStreamHookOptions = {}): StreamStat
       onSequence: (sequence) => writeSequence(storage, sequence),
       resumeSequence: readSequence(storage),
       head: head ?? undefined,
+      onHead: () => {
+        // A page can finish its first read before /hosts chooses the head. Cancel
+        // even initial reads still in flight, then refresh after that boundary;
+        // otherwise a skipped event can leave the page stale until another event.
+        // As with replayed events, leave the view editor's source alone.
+        const keys = [...RUN_EVENT_INVALIDATES, ...HOST_EVENT_INVALIDATES];
+        const filters = {
+          predicate: (query: { queryKey: QueryKey }) => keys.some((key) => partialMatchKey(query.queryKey, key)),
+        };
+        void client.cancelQueries(filters).then(() => client.invalidateQueries(filters));
+      },
       createSocket,
       clock,
     });

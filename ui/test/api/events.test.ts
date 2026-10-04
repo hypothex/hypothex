@@ -828,6 +828,66 @@ describe("useEventStream", () => {
 });
 
 describe("useEventStream head", () => {
+  test.each([false, true])("refreshes page reads from before the head lookup (in flight: %s)", async (inFlight) => {
+    const client = new QueryClient();
+    const d = deferredHead();
+    const sockets: FakeSocket[] = [];
+    let calls = 0;
+    let resolveOld: (value: string) => void = () => {};
+    const observer = new QueryObserver(client, {
+      queryKey: queryKeys.run("r1"),
+      staleTime: Infinity,
+      queryFn: () => {
+        calls += 1;
+        if (calls === 1) {
+          return inFlight ? new Promise<string>((resolve) => { resolveOld = resolve; }) : Promise.resolve("running");
+        }
+        return Promise.resolve("finished");
+      },
+    });
+    const unsubscribe = observer.subscribe(() => {});
+    let viewReads = 0;
+    const view = new QueryObserver(client, {
+      queryKey: queryKeys.view("toy", "acc", "overview"),
+      staleTime: Infinity,
+      queryFn: async () => { viewReads += 1; return "saved view"; },
+    });
+    const unsubscribeView = view.subscribe(() => {});
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+    const { unmount } = renderHook(
+      () => useEventStream({
+        storage: null,
+        head: d.head,
+        createSocket: (url) => {
+          const socket = new FakeSocket(url);
+          sockets.push(socket);
+          return socket;
+        },
+      }),
+      { wrapper },
+    );
+    try {
+      await waitFor(() => expect(calls).toBe(1));
+      // run.finished is sequence 10. It happened after the page request took its
+      // snapshot and before /hosts selected the head, so it is not replayed.
+      await act(async () => { d.resolve(10); await tick(); });
+      act(() => {
+        sockets[0]?.open();
+        sockets[0]?.receive({ type: "ready", last_sequence: 10 });
+      });
+      await act(async () => { resolveOld("running"); await tick(); });
+      await waitFor(() => expect(observer.getCurrentResult().data).toBe("finished"));
+      expect(calls).toBe(2);
+      expect(viewReads).toBe(1); // Run/host events never reload the editor's source.
+    } finally {
+      unmount();
+      unsubscribe();
+      unsubscribeView();
+      client.clear();
+    }
+  });
+
   test("a new tab subscribes after the hub's last_sequence from GET /hosts (PERF-F10a)", async () => {
     const calls = mockRoutes({ "/api/v1/hosts": HOSTS });
     const client = new QueryClient();

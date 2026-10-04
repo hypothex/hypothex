@@ -1509,6 +1509,45 @@ def test_running_runs_refresh_metrics_without_events(
     assert refreshes[0].payload["remote_sequence"] is None
 
 
+class CountingLock:
+    """A lock that counts how often it was taken."""
+
+    def __init__(self) -> None:
+        self.inner = threading.Lock()
+        self.taken = 0
+
+    def __enter__(self) -> None:
+        self.inner.acquire()
+        self.taken += 1
+
+    def __exit__(self, *exc: object) -> None:
+        self.inner.release()
+
+
+def test_refresh_re_mirrors_only_running_runs_one_lock_per_run(
+    pair: tuple[Context, Context], toy_repo: Path
+) -> None:
+    hub_ctx, remote = pair
+    remote.register_project(toy_repo)
+    seed_run(remote, "r1", status=RunStatus.RUNNING)
+    seed_run(remote, "r2", status=RunStatus.RUNNING)
+    for i in range(3):
+        seed_run(remote, f"q{i}", status=RunStatus.QUEUED)
+    hub = Hub(
+        hub_ctx,
+        EnvironmentsFile(environments={"gpu1": HostSpec(route="url", url="http://127.0.0.1:9")}),
+    )
+    sup = hub._sups["gpu1"]
+    events = [e for e in remote.events.since(0) if e.type.startswith("run.")]
+    hub._apply(sup, FakeClient(remote), "env-remote", events)  # type: ignore[arg-type]
+    client = FakeClient(remote)
+    sup.lock = CountingLock()  # type: ignore[assignment]
+    hub._refresh_active(sup, client, "env-remote")  # type: ignore[arg-type]
+    assert client.fetched.count("run.yaml") == 2  # r1 and r2; no queued run
+    assert client.gets == []  # the project and the host paths are not asked again
+    assert sup.lock.taken == 2  # type: ignore[attr-defined]
+
+
 def test_apply_mirrors_each_sequence_once(pair: tuple[Context, Context]) -> None:
     hub_ctx, remote = pair
     seed_run(remote, "r1")

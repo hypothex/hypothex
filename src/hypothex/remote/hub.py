@@ -38,7 +38,7 @@ from hypothex.core.fsutil import atomic_write_text, read_yaml
 from hypothex.core.ids import utcnow
 from hypothex.core.index import index_run
 from hypothex.core.layout import HX_DIR, reserved_run_path
-from hypothex.core.records import ACTIVE_STATUSES, Artifact, DatasetRef, RunRecord
+from hypothex.core.records import Artifact, DatasetRef, RunRecord, RunStatus
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
 from hypothex.remote.bootstrap import BootstrapError, ensure_server
 from hypothex.remote.client import EnvClient, EnvRequestError, RemoteFile
@@ -373,7 +373,9 @@ def _read_remote_record(path: Path) -> RunRecord | None:
         return None
 
 
-def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) -> None:
+def _ensure_project(
+    ctx: Context, client: EnvClient, host: str, project: str, *, refresh: bool = True
+) -> None:
     """
     Copy a project from the host, or refresh this host's copy (spec 5.2: the hub holds the index).
 
@@ -385,11 +387,12 @@ def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) ->
     never replaced; a later ``hx register`` of a checkout on the hub replaces
     the copy. The copy's ``repo`` is the path the host reported, on the host:
     hub code must never read or write under it (check ``remote_host`` first).
+    With ``refresh`` False, a project the hub already has is not fetched again.
     """
     known: ProjectEntry | None = None
     with contextlib.suppress(StoreError):
         known = ctx.store.load_project(project)
-    if known is not None and known.remote_host != host:
+    if known is not None and (known.remote_host != host or not refresh):
         return
     try:
         data = client.get_json(f"/api/v1/projects/{project}/entry")
@@ -481,6 +484,7 @@ def mirror_run(
     run_id: str,
     *,
     usd_per_gpu_hour: float | None = None,
+    refresh_project: bool = True,
 ) -> tuple[RunRecord, bool] | None:
     """
     Copy one remote run's small files into the hub store and index it.
@@ -518,6 +522,9 @@ def mirror_run(
         Run id.
     usd_per_gpu_hour : float, optional
         The host's price per GPU hour from ``environments.yaml``.
+    refresh_project : bool
+        Fetch this host's copy of the project again even when the hub has it
+        (False for the periodic refresh of running runs: one GET less per run).
 
     Returns
     -------
@@ -544,7 +551,7 @@ def mirror_run(
         if record is None or record.run_id != run_id or record.project != project:
             log.warning("host %s: run.yaml of %s is unreadable or mismatched", host, run_id)
             return None
-        _ensure_project(ctx, client, host, project)
+        _ensure_project(ctx, client, host, project, refresh=refresh_project)
         manifest = _read_manifest(run_dir)
         asked = (run_dir / HOST_PATHS_FILE).is_file()
         where = None if asked else _fetch_host_paths(client, host, run_id)
@@ -1540,22 +1547,27 @@ class Hub:
             await self._shielded(sup, self._refresh_active, sup, client, env_id)
 
     def _refresh_active(self, sup: _Supervisor, client: EnvClient, env_id: str) -> None:
-        """Re-mirror this host's queued/running runs; SDK metric writes emit no event."""
-        with sup.lock:
-            for status in sorted(ACTIVE_STATUSES):
-                for record in self.ctx.index.list_runs(
-                    status=status, include_archived=True, limit=None
-                ):
-                    if record.environment_id != env_id:
-                        continue
-                    mirrored = mirror_run(
-                        self.ctx,
-                        client,
-                        sup.name,
-                        env_id,
-                        record.project,
-                        record.run_id,
-                        usd_per_gpu_hour=sup.spec.usd_per_gpu_hour,
-                    )
-                    if mirrored is not None and mirrored[1]:
-                        _emit_mirror(self.ctx, sup.name, env_id, mirrored[0], "refresh", None)
+        """
+        Re-mirror this host's running runs: SDK metric and log writes emit no event.
+
+        Queued runs are left out (every change of theirs is an event), the
+        project is not fetched again, and ``sup.lock`` is taken per run, so
+        events wait for at most one run, not for the whole pass.
+        """
+        running = self.ctx.index.list_runs(
+            status=RunStatus.RUNNING, environment_id=env_id, include_archived=True, limit=None
+        )
+        for record in running:
+            with sup.lock:
+                mirrored = mirror_run(
+                    self.ctx,
+                    client,
+                    sup.name,
+                    env_id,
+                    record.project,
+                    record.run_id,
+                    usd_per_gpu_hour=sup.spec.usd_per_gpu_hour,
+                    refresh_project=False,
+                )
+                if mirrored is not None and mirrored[1]:
+                    _emit_mirror(self.ctx, sup.name, env_id, mirrored[0], "refresh", None)

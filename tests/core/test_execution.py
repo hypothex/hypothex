@@ -522,3 +522,13 @@ def test_auto_eval_warnings_become_run_warnings(
     done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(WRITE_PREDS), task="toy-acc"))
     assert done.status == RunStatus.FINISHED
     assert [e.payload["message"] for e in _warning_events(ctx, done.run_id)] == [drift]
+
+
+def test_an_unknown_stage_is_refused_also_with_a_command(ctx: Context, toy_repo: Path) -> None:
+    # DF-58: with a command, --stage was not checked and a misspelled stage was saved
+    req = RunRequest(repo=toy_repo, stage="infre", command=cmd("print(1)"))
+    with pytest.raises(RunError, match="no stage 'infre'"):
+        prepare_run(ctx, req)
+    assert ctx.store.list_run_ids() == {}
+    ok = prepare_run(ctx, RunRequest(repo=toy_repo, stage="infer", command=cmd("print(1)")))
+    assert ok.stage == "infer" and ok.command == cmd("print(1)")

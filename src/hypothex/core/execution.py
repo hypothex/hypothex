@@ -679,13 +679,12 @@ def _prepare_in(
         )
     if req.task is not None and req.task not in config.tasks:
         raise RunError(f"unknown task {req.task!r}; known tasks: {sorted(config.tasks)}")
+    if req.stage is not None and req.stage not in config.stages:
+        # also with a command (a rerun sends both): a misspelled stage is never saved
+        raise RunError(f"project has no stage {req.stage!r}; known stages: {sorted(config.stages)}")
     if req.command is None:
         if req.stage is None:
             raise RunError("give a command or a stage")
-        if req.stage not in config.stages:
-            raise RunError(
-                f"project has no stage {req.stage!r}; known stages: {sorted(config.stages)}"
-            )
         template = shlex.split(config.stages[req.stage])
     else:
         template = list(req.command)

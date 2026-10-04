@@ -484,3 +484,30 @@ def test_a_pinned_run_reads_tracked_data_from_its_checkout(ctx: Context, toy_rep
     assert done.command[-1].startswith(str(ctx.layout.worktrees_dir("toy")))
     assert done.datasets[0].path == done.command[-1]
     assert (ctx.run_dir(done) / "logs" / "stdout.log").read_text().strip() == "4"
+
+
+def _old_commit(repo: Path) -> str:
+    """Commit once more so the current HEAD is an older commit; return it."""
+    old = git(repo, "rev-parse", "HEAD")
+    (repo / "infer.py").write_text("print('new')\n")
+    git(repo, "commit", "-qam", "move on")
+    return old
+
+
+@pytest.mark.parametrize(
+    ("venv", "removed"), [(".venv", True), ("sub/.venv", False)], ids=["top", "nested"]
+)
+def test_release_worktree_ignores_the_top_level_venv(
+    ctx: Context, toy_repo: Path, venv: str, removed: bool
+) -> None:
+    # DF-19: `uv run --project <worktree>` (env capture, scoring) makes .venv/,
+    # and the worktree was then kept forever
+    make = (
+        "import os, sys; d = sys.argv[1]; os.makedirs(d + '/bin'); "
+        "open(d + '/bin/python', 'w').write('x'); open(d + '/.gitignore', 'w').write('*')"
+    )
+    req = RunRequest(repo=toy_repo, command=cmd(make, venv), commit=_old_commit(toy_repo))
+    done = run_fg(ctx, req)
+    assert done.status == RunStatus.FINISHED
+    tree = ctx.layout.worktrees_dir("toy") / done.run_id
+    assert tree.exists() is not removed

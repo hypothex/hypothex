@@ -823,8 +823,9 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
     Remove the git worktree an ended run executed in, if the run left nothing there.
 
     The worktree is kept when it holds anything the run may have made: an
-    untracked or ignored file (other than Python bytecode caches), or tracked
-    changes other than the diff the run started with (``git.diff``).
+    untracked or ignored file (other than Python bytecode caches and the
+    top-level ``.venv/``, see ``_disposable``), or tracked changes other than
+    the diff the run started with (``git.diff``).
 
     Parameters
     ----------
@@ -863,7 +864,7 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
             code, path = entry[:2], entry[3:]
             if code[:1] in (b"R", b"C"):
                 return False  # a staged rename: the run changed the tree
-            if code in (b"??", b"!!") and not _bytecode(path):
+            if code in (b"??", b"!!") and not _disposable(path):
                 return False
         _discard_worktree(Path(ctx.store.load_project(record.project).repo), tree)
     except (OSError, HypothexError):
@@ -871,8 +872,31 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
     return True
 
 
-def _bytecode(path: bytes) -> bool:
-    """True for a Python bytecode cache file, which a run may always leave behind."""
+def _disposable(path: bytes) -> bool:
+    """
+    True for a file a run may always leave in its worktree: it is rebuilt on demand.
+
+    Python bytecode caches anywhere, and the project's virtual environment at
+    the top of the tree (``.venv/``), which ``uv run --project <worktree>``
+    creates when the environment is captured or the run is scored.
+
+    Parameters
+    ----------
+    path : bytes
+        A path from ``git status --porcelain -z``, relative to the tree root.
+
+    Returns
+    -------
+    bool
+        True when removing the worktree loses nothing the run made.
+
+    Examples
+    --------
+    >>> _disposable(b".venv/bin/python"), _disposable(b"pkg/.venv/x")
+    (True, False)
+    """
+    if path == b".venv" or path.startswith(b".venv/"):
+        return True
     return b"__pycache__/" in path or path.endswith((b".pyc", b"__pycache__"))
 
 

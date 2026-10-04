@@ -58,3 +58,27 @@ def test_capture_env_pip_freeze_ignores_stderr_noise(
     requirements = (env_dir / "requirements.txt").read_text()
     assert requirements == "numpy==1.26.4\n"
     assert "DeprecationWarning" not in requirements
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        ("Python 3.12.4\n", "Creating virtual environment at: .venv\n", "Python 3.12.4"),
+        ("", "Python 2.7.18\n", "Python 2.7.18"),
+    ],
+)
+def test_capture_env_project_python_ignores_wrapper_noise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str, stderr: str, expected: str
+) -> None:
+    # DF-19: uv's "Creating virtual environment" text on stderr went into project_python
+    def fake_run(
+        cmd: list[str], capture_output: bool, text: bool, timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[-1] == "--version":
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(envcapture.subprocess, "run", fake_run)
+    capture_env(tmp_path, tmp_path / "env", ["uv", "run", "python"])
+    system = json.loads((tmp_path / "env" / "system.json").read_text())
+    assert system["project_python"] == expected

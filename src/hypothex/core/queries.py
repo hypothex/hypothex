@@ -131,12 +131,24 @@ def refresh_project(ctx: Context, project: str) -> ProjectEntry:
     ProjectEntry
         The refreshed entry, or the stored snapshot if the repo is gone or
         the file is invalid.
+
+    Notes
+    -----
+    The project is registered again only when the parsed config or the repo
+    path changed. A read never rewrites an unchanged ``project.json``: that
+    write would change ``registered_at``, bump the index generation, and
+    change the project folder's mtime, which makes the next ``Context.open``
+    scan every run folder.
     """
     entry = ctx.store.load_project(project)
+    repo = Path(entry.repo)
     try:
-        return ctx.register_project(Path(entry.repo))
+        config = load_project_config(repo)
     except ConfigError:
         return entry
+    if config == entry.config and str(repo.resolve()) == entry.repo:
+        return entry
+    return ctx.register_project(repo)
 
 
 def list_projects(ctx: Context) -> list[ProjectEntry]:

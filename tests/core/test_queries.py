@@ -8,6 +8,7 @@ from hypothex.core.context import Context
 from hypothex.core.datasets import FingerprintCache
 from hypothex.core.errors import ConfigError
 from hypothex.core.evaluation import evaluate_run
+from hypothex.core.index import store_fingerprint
 from hypothex.core.records import DatasetRef
 from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
 
@@ -169,3 +170,32 @@ def test_leaderboard_examples_follow_version_override(ctx: Context, toy_repo: Pa
     assert q.get_leaderboard(ctx, "toy-acc").rows[0].test_interval is None
     old = q.get_leaderboard(ctx, "toy-acc", versions={"accuracy": "v1"})
     assert old.rows[0].test_interval is not None and old.rows[0].test_interval.n == 4
+
+
+def test_reads_leave_an_unchanged_project_alone(ctx: Context, toy_repo: Path) -> None:
+    # PERF-F5: a read-only refresh must not rewrite project.json, bump the index
+    # generation, or change the project folder's mtime (the store fingerprint)
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    project_file = ctx.layout.store / "toy" / "project.json"
+    before = project_file.read_bytes()
+    stamp = (project_file.stat().st_mtime_ns, project_file.parent.stat().st_mtime_ns)
+    generation = ctx.index.generation()
+    fingerprint = store_fingerprint(ctx.store)[0]
+    q.list_projects(ctx)
+    q.list_tasks(ctx)
+    q.resolve_task(ctx, "toy/toy-acc")
+    q.get_leaderboard(ctx, "toy-acc")
+    assert project_file.read_bytes() == before
+    assert (project_file.stat().st_mtime_ns, project_file.parent.stat().st_mtime_ns) == stamp
+    assert ctx.index.generation() == generation
+    assert store_fingerprint(ctx.store)[0] == fingerprint
+
+
+def test_refresh_registers_again_when_the_config_changed(ctx: Context, toy_repo: Path) -> None:
+    first = ctx.register_project(toy_repo)
+    write_toy_project(toy_repo, accuracy_version="v2")
+    entry = q.refresh_project(ctx, "toy")
+    assert entry.config.metrics["accuracy"].version == "v2"
+    assert ctx.store.load_project("toy").config == entry.config
+    assert ctx.index.get_project("toy") == entry
+    assert entry.registered_at >= first.registered_at

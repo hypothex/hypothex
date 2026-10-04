@@ -14,8 +14,10 @@ from hypothex.core.leaderboard import (
     build_leaderboard,
     cached_leaderboard,
     clear_caches,
+    distinct_labels,
     group_label,
     pick_field,
+    seed_group_labels,
 )
 from hypothex.core.records import (
     CostTotals,
@@ -651,3 +653,63 @@ def test_caches_drop_the_least_recently_used_entry() -> None:
     assert computed == ["a", "b", "c", "b"]
     assert leaderboard._BOARDS.size == leaderboard.BOARD_CACHE_SIZE
     assert leaderboard._INTERVALS.size == leaderboard._PAIRED_P.size == leaderboard.STATS_CACHE_SIZE
+
+
+def sweep_runs() -> tuple[list[RunRecord], dict[str, list[ScoreRecord]]]:
+    """Four configs of one sweep hypothesis; two share their vars (other commits)."""
+    grid = [
+        ("a", {"lr": "1e-3", "beam": "10"}, "c1", 0.9),
+        ("b", {"lr": "1e-3", "beam": "5"}, "c1", 0.8),
+        ("c", {"lr": "1e-4", "beam": "5"}, "c1", 0.7),
+        ("d", {"lr": "1e-4", "beam": "5"}, "c2", 0.6),
+    ]
+    runs, scores = [], {}
+    for i, (group, sweep_vars, commit, value) in enumerate(grid):
+        runs.append(
+            make_record(
+                group,
+                task="t",
+                status=RunStatus.FINISHED,
+                config_hash=f"sha256:{group * 8}",
+                git=GitInfo(commit=commit),
+                created_at=T0 + timedelta(minutes=i),
+                hypothesis="lr x beam, a small sweep",
+                vars=sweep_vars,
+            )
+        )
+        scores[group] = acc(value)
+    return runs, scores
+
+
+def test_groups_that_share_a_label_get_the_vars_that_differ() -> None:
+    runs, scores = sweep_runs()
+    runs.append(krun("solo", "solo", minute=9, hypothesis="bigger model", vars={"lr": "1e-3"}))
+    scores["solo"] = acc(0.5)
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    assert [r.label for r in board.rows] == [
+        "lr x beam · lr 1e-3, beam 10",
+        "lr x beam · lr 1e-3, beam 5",
+        "lr x beam · lr 1e-4, beam 5 · cccccccc@c1",  # same vars as d: group id too
+        "lr x beam · lr 1e-4, beam 5 · dddddddd@c2",
+        "bigger model",  # a label no other group has stays as it is
+    ]
+    members = {r.group_id: [m for m in runs if m.run_id in r.run_ids] for r in board.rows}
+    assert seed_group_labels(members) == {r.group_id: r.label for r in board.rows}
+
+
+def test_distinct_labels_leaves_out_vars_a_group_does_not_have() -> None:
+    one = [krun("x", "x", vars={"lr": "1e-3"})]
+    two = [krun("y", "y", vars={"lr": "1e-3", "beam": "5"})]
+    none = [krun("z", "z")]
+    labels = distinct_labels(
+        {"x": "same", "y": "same", "z": "same"}, {"x": one, "y": two, "z": none}
+    )
+    assert labels == {"x": "same · lr 1e-3", "y": "same · lr 1e-3, beam 5", "z": "same"}
+
+
+def test_group_label_keeps_the_whole_clause_without_a_limit() -> None:
+    hypothesis = "40k steps with heavier augmentation lifts top-1, as in the paper"
+    assert group_label(hypothesis, [], "g") == "40k steps with heavier…"
+    assert group_label(hypothesis, [], "g", limit=None) == (
+        "40k steps with heavier augmentation lifts top-1"
+    )

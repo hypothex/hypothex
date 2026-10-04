@@ -6,7 +6,7 @@ import math
 import re
 import threading
 from array import array
-from collections import OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Callable, Hashable, Iterable, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
@@ -112,7 +112,9 @@ class Leaderboard(BaseModel):
 
 
 # labels and ordering -------------------------------------------------------------
-def group_label(hypothesis: str, tags: Iterable[str], group_id: str) -> str:
+def group_label(
+    hypothesis: str, tags: Iterable[str], group_id: str, *, limit: int | None = LABEL_MAX
+) -> str:
     """
     Derive a short name for a seed group.
 
@@ -124,13 +126,17 @@ def group_label(hypothesis: str, tags: Iterable[str], group_id: str) -> str:
         Tags of the group's runs.
     group_id : str
         The group id, used when there is nothing else.
+    limit : int or None
+        Longest clause kept whole (default ``LABEL_MAX``, 32); a longer one is cut
+        at a word and ends in "…". ``None`` keeps the whole clause, for prose such
+        as headlines.
 
     Returns
     -------
     str
         The hypothesis's first clause (cut at ``, ; : ( )``, a dash, a full stop,
-        or words like "because"/"should"), at most 32 characters; else the first
-        tag in sorted order; else ``"group <id>"``.
+        or words like "because"/"should"), at most ``limit`` characters; else the
+        first tag in sorted order; else ``"group <id>"``.
 
     Examples
     --------
@@ -138,13 +144,17 @@ def group_label(hypothesis: str, tags: Iterable[str], group_id: str) -> str:
     'RBF-kernel SVM'
     >>> group_label("", ["svm"], "g")
     'svm'
+    >>> group_label("40k steps with heavier augmentation lifts accuracy", [], "g")
+    '40k steps with heavier…'
+    >>> group_label("40k steps with heavier augmentation lifts accuracy", [], "g", limit=None)
+    '40k steps with heavier augmentation lifts accuracy'
     """
     parts = [p.strip() for p in _CLAUSE.split(hypothesis.strip())]
     clause = next((p for p in parts if p), "")
     if clause:
-        if len(clause) <= LABEL_MAX:
+        if limit is None or len(clause) <= limit:
             return clause
-        cut = clause[:LABEL_MAX].rsplit(" ", 1)[0].rstrip() or clause[:LABEL_MAX]
+        cut = clause[:limit].rsplit(" ", 1)[0].rstrip() or clause[:limit]
         return cut + "…"
     tag_list = sorted({t for t in tags if t})
     return tag_list[0] if tag_list else f"group {group_id}"
@@ -183,6 +193,90 @@ def seed_group_label(
         return version
     hypothesis = next((r.hypothesis for r in reversed(members) if r.hypothesis.strip()), "")
     return group_label(hypothesis, (t for m in members for t in m.tags), group_id)
+
+
+def distinct_labels(
+    labels: Mapping[str, str], members_of: Mapping[str, list[RunRecord]]
+) -> dict[str, str]:
+    """
+    Make the labels of seed groups that share one label different.
+
+    Groups of a sweep often share a hypothesis, so ``seed_group_label`` gives
+    them one name. Each such group gets ``" · "`` and the ``vars`` that differ
+    between those groups (``"lr x beam · lr 1e-3, beam 10"``; a var the group
+    does not have is left out). Groups whose names still match get
+    ``" · <group id>"`` as well. A label no other group has is kept.
+
+    Parameters
+    ----------
+    labels : mapping of str to str
+        Label per group id (``seed_group_label``).
+    members_of : mapping of str to list of RunRecord
+        The runs of each group id, oldest first; the newest run's ``vars`` count.
+
+    Returns
+    -------
+    dict of str to str
+        Label per group id, in the order of ``labels``.
+
+    Examples
+    --------
+    >>> a = [make_record(vars={"lr": "1e-3", "beam": "10"})]  # doctest: +SKIP
+    >>> b = [make_record(vars={"lr": "1e-3", "beam": "5"})]  # doctest: +SKIP
+    >>> same = {"g1": "lr x beam", "g2": "lr x beam"}
+    >>> distinct_labels(same, {"g1": a, "g2": b})  # doctest: +SKIP
+    {'g1': 'lr x beam · beam 10', 'g2': 'lr x beam · beam 5'}
+    """
+    out = dict(labels)
+    shared: dict[str, list[str]] = defaultdict(list)
+    for group_id, label in labels.items():
+        shared[label].append(group_id)
+    for label, group_ids in shared.items():
+        if len(group_ids) < 2:
+            continue
+        vars_of = {g: members_of[g][-1].vars for g in group_ids}
+        keys = list(dict.fromkeys(k for g in sorted(group_ids) for k in vars_of[g]))
+        differ = [k for k in keys if len({vars_of[g].get(k) for g in group_ids}) > 1]
+        for g in group_ids:
+            parts = [f"{k} {vars_of[g][k]}" for k in differ if k in vars_of[g]]
+            out[g] = f"{label} · {', '.join(parts)}" if parts else label
+        counts = Counter(out[g] for g in group_ids)
+        for g in group_ids:
+            if counts[out[g]] > 1:
+                out[g] = f"{out[g]} · {g}"
+    return out
+
+
+def seed_group_labels(
+    members_of: Mapping[str, list[RunRecord]], version_param: str | None = None
+) -> dict[str, str]:
+    """
+    Label every seed group: ``seed_group_label``, then ``distinct_labels``.
+
+    This is the label rule of ``LeaderboardRow.label`` for the groups of one
+    board, and of ``sources.group_labels`` for the groups of a view.
+
+    Parameters
+    ----------
+    members_of : mapping of str to list of RunRecord
+        The runs of each group id, oldest first.
+    version_param : str, optional
+        The task's ``version_param`` (``agent_iteration`` tasks only), else ``None``.
+
+    Returns
+    -------
+    dict of str to str
+        A label per group id; groups that would share one get the vars that
+        differ, else their group id.
+
+    Examples
+    --------
+    >>> runs = [make_record(hypothesis="svm, rbf kernel")]  # doctest: +SKIP
+    >>> seed_group_labels({"g": runs})  # doctest: +SKIP
+    {'g': 'svm'}
+    """
+    labels = {g: seed_group_label(m, g, version_param) for g, m in members_of.items()}
+    return distinct_labels(labels, members_of)
 
 
 def group_id_for(run: RunRecord) -> str:
@@ -703,6 +797,9 @@ def build_leaderboard(
 
     by_id = {r.run_id: r for r in eligible}
     members_of = {row.group_id: [by_id[i] for i in row.run_ids] for row in rows}
+    labels = distinct_labels({row.group_id: row.label for row in rows}, members_of)
+    for row in rows:
+        row.label = labels[row.group_id]
     reference = None
     gain_interval = None
     if spec.kind == "system_bench":

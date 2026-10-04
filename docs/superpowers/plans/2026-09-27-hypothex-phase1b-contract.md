@@ -129,7 +129,7 @@ Spike detection for curves: a point is a spike if `value > 5 × median(previous 
 class NoiseInterval(BaseModel): lo: float; hi: float; method: Literal["wilson","bootstrap"]; n: int
 class VersusBest(BaseModel): delta: float; p: float | None; fixed: int | None; broken: int | None; test: Literal["sign","paired_bootstrap","welch"] | None; examples_needed: int | None
 class LeaderboardRow(...):           # add
-    label: str                         # short name: for agent_iteration tasks, the group's `version_param` value when set; otherwise group hypothesis first clause, or tag, or "group <id>"
+    label: str                         # short name: for agent_iteration tasks, the group's `version_param` value when set; otherwise group hypothesis first clause, or tag, or "group <id>". Groups of one board that would share a label get " · " and the `vars` that differ ("lr x beam · lr 1e-3, beam 10"), then " · <group id>" if still equal (`leaderboard.seed_group_labels`)
     seed_values: dict[str, list[float]]   # per metric/key, one value per seed (run order)
     identical_seeds: bool              # n>1 and all primary seed values equal
     test_interval: NoiseInterval | None

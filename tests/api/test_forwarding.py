@@ -13,7 +13,7 @@ from hypothex.core.execution import RunRequest
 from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus
 from hypothex.remote.client import EnvClient
 from hypothex.remote.config import SlurmDefaults, load_hosts, save_hosts
-from tests.api.envserver import remote_hub, wait_until
+from tests.api.envserver import remote_hub, wait_until, write_fake_gpus
 from tests.factories import PREDS_075, git, make_record, seed_finished_run
 
 PY = sys.executable
@@ -356,3 +356,123 @@ def test_launch_by_project_name_pins_the_hub_checkout(
         assert (second.commit, second.diff) == (head, None)  # the given commit, no hub diff
         assert third.commit == head and "+# local edit" in (third.diff or "")
         assert all(req.repo.resolve() == r.env_repo.resolve() for req in seen)
+
+
+# spec 13, phase 2 done: a run launched through the hub on a host is mirrored, scored,
+# and on the hub's leaderboard; a sweep on a fake 8-GPU host queues and gives out GPUs
+WRITE_PREDS_075 = (
+    "import json, os, pathlib; d = pathlib.Path(os.environ['HYPOTHEX_RUN_DIR']) / 'predictions'; "
+    "d.mkdir(exist_ok=True); f = open(d / 'predictions.jsonl', 'w'); "
+    "[f.write(json.dumps(dict(id='ex-' + str(i), prediction=i % 2)) + chr(10)) for i in range(4)]"
+)  # no braces: a command's `{name}` is a template variable
+# waits for `<dir>/go-<x>`, so the test says when each sweep member ends
+WAIT_FOR_GO = (
+    "import pathlib, sys, time\n"
+    "go = pathlib.Path(sys.argv[1]) / ('go-' + sys.argv[2])\n"
+    "while not go.exists():\n"
+    "    time.sleep(0.05)\n"
+)
+
+
+def _board_row(client: Any, run_id: str) -> dict[str, Any] | None:
+    rows = client.get("/api/v1/tasks/toy/toy-acc/leaderboard").json()["rows"]
+    return next((row for row in rows if run_id in row["run_ids"]), None)
+
+
+def test_a_host_run_launched_through_the_hub_is_scored_on_its_leaderboard(
+    tmp_path: Path,
+) -> None:
+    with remote_hub(tmp_path) as r:
+        body = {
+            "project": "toy",
+            "task": "toy-acc",
+            "command": [PY, "-c", WRITE_PREDS_075],
+            "hypothesis": "scored on gpu1",
+        }
+        rid = r.client.post("/api/v1/hosts/gpu1/runs", json=body).json()["run_id"]
+        assert r.env.find_record(rid).task == "toy-acc"  # it ran on the host
+        row = wait_until(lambda: _board_row(r.client, rid), timeout=60)
+        assert row["primary"]["mean"] == 0.75  # references [0, 1, 0, 0], predictions 0 1 0 1
+        assert row["cost"] is not None  # gpu1 has a price (usd_per_gpu_hour)
+        # the host scored it; the hub shows the host's scores, it never scored the run itself
+        assert _score_rows(r.env, rid) == 1 and _score_rows(r.hub, rid) == 1
+        assert r.hub.find_record(rid).environment_id == r.env.descriptor.environment_id
+
+
+def test_a_sweep_on_a_fake_8_gpu_host_queues_and_gives_each_run_its_own_gpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # all 8 GPUs start busy with another user's work, so the whole sweep queues first
+    busy = write_fake_gpus(tmp_path / "gpus.json", 8, external=tuple(range(8)))
+    monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(busy))
+    monkeypatch.setattr(app_module, "SCHEDULER_INTERVAL_SECONDS", 0.2)
+    gates = tmp_path / "gates"
+    gates.mkdir()
+    with remote_hub(tmp_path, env_background=True) as r:
+        body = {
+            "project": "toy",
+            "host": "gpu1",
+            "grid": [{"name": "x", "values": ["1", "2", "3", "4", "5"]}],
+            "seeds": [1],
+            "command": [PY, "-c", WAIT_FOR_GO, str(gates), "{x}", "{seed}"],
+            "hypothesis": "two GPUs each",
+            "gpus": 2,
+            "queue": True,
+        }
+        out = r.client.post("/api/v1/sweeps", json=body).json()
+        ids = out["run_ids"]
+        assert len(ids) == 5
+
+        def hub_view() -> dict[str, RunRecord]:
+            return {rid: r.hub.find_record(rid) for rid in ids}
+
+        def split(view: dict[str, RunRecord]) -> tuple[list[RunRecord], list[RunRecord]]:
+            running = [x for x in view.values() if x.status == RunStatus.RUNNING]
+            waiting = [x for x in view.values() if x.status == RunStatus.QUEUED]
+            return running, waiting
+
+        def all_in(status: RunStatus) -> dict[str, RunRecord] | None:
+            view = hub_view()
+            return view if all(x.status == status for x in view.values()) else None
+
+        def in_line() -> dict[str, RunRecord] | None:
+            view = all_in(RunStatus.QUEUED)
+            places = sorted(x.executor.queue_position or 0 for x in (view or {}).values())
+            return view if places == [1, 2, 3, 4, 5] else None
+
+        queued = wait_until(in_line, timeout=60)  # the mirror may show a place a bit later
+        assert all(x.executor.gpus == [] for x in queued.values())
+
+        # the GPUs come free; 2 per run: four start at once, the fifth waits first in line
+        write_fake_gpus(busy, 8)
+
+        def four_and_one() -> tuple[list[RunRecord], list[RunRecord]] | None:
+            running, waiting = split(hub_view())
+            first_in_line = [x.executor.queue_position for x in waiting] == [1]
+            return (running, waiting) if len(running) == 4 and first_in_line else None
+
+        running, waiting = wait_until(four_and_one, timeout=60)
+        held = [g for x in running for g in x.executor.gpus]
+        assert all(len(x.executor.gpus) == 2 for x in running)
+        assert sorted(held) == list(range(8))  # disjoint, and all 8 in use
+        [last] = waiting
+        assert last.executor.gpus == []
+        # the host's records agree with the hub's mirror
+        assert {x.run_id: x.executor.gpus for x in running} == {
+            x.run_id: r.env.find_record(x.run_id).executor.gpus for x in running
+        }
+
+        # one run ends: the waiting run starts on exactly the two GPUs it gave back
+        first = running[0]
+        (gates / f"go-{first.params['x']}").touch()
+        started = wait_until(
+            lambda: (x := r.hub.find_record(last.run_id)).status == RunStatus.RUNNING and x,
+            timeout=60,
+        )
+        assert sorted(started.executor.gpus) == sorted(first.executor.gpus)
+        assert started.executor.queue_position is None
+        wait_until(lambda: r.hub.find_record(first.run_id).status == RunStatus.FINISHED)
+
+        for x in "12345":
+            (gates / f"go-{x}").touch()
+        wait_until(lambda: all_in(RunStatus.FINISHED), timeout=60)

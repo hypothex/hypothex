@@ -19,15 +19,22 @@ from tests.docker.conftest import (
     DESCRIPTOR_PY,
     REMOTE_PROJECT,
     REMOTE_STORE,
+    REMOTE_TOY,
+    WRITE_PREDS_075,
     HubThread,
     SlurmCluster,
+    add_host,
+    board_row,
+    hub_app,
     launch,
     mirrored_text,
     remote_record,
     wait_mirrored,
     wait_remote_status,
     wait_until,
+    write_scored_toy_project,
 )
+from tests.factories import git
 from tests.fakes import DEAD_HUB
 
 pytestmark = pytest.mark.docker
@@ -142,6 +149,45 @@ def test_submit_runs_on_the_compute_node_and_mirrors(
     assert mirrored.executor.node == "c1"
     text = mirrored_text(slurm_hub.ctx, run_id, "logs/stdout.log", "slurm-ok", timeout=60)
     assert text == "slurm-ok\nc1\n"
+
+
+def test_a_job_launched_through_the_hub_is_scored_on_its_leaderboard(
+    slurm_cluster: SlurmCluster, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # spec 13, phase 2 done: launched through the hub's route (as the UI does), run as
+    # a SLURM job on c1, scored on the cluster, mirrored, and on the hub's leaderboard
+    home = tmp_path / "hub"
+    monkeypatch.setenv("HYPOTHEX_HOME", str(home))
+    ctx = Context.open(home)
+    repo = write_scored_toy_project(tmp_path / "toy")
+    slurm_cluster.put(repo, REMOTE_TOY)  # shared /home: the login node and c1 see it
+    ctx.register_project(repo)
+    options = ["--slurm", "--partition", "normal", "--time", "00:05:00", "--gpus", "0"]
+    alias = slurm_cluster.access.alias
+    add_host(home, "cluster", alias, *options, projects={"toy": REMOTE_TOY})
+    assert load_hosts(ctx.layout).environments["cluster"].slurm == DEFAULTS
+    with hub_app(ctx, "cluster", timeout=BOOTSTRAP_TIMEOUT) as client:
+        body = {
+            "project": "toy",
+            "task": "toy-acc",
+            "command": ["python3", "-c", WRITE_PREDS_075],
+            "hypothesis": "scored on the cluster",
+        }
+        resp = client.post("/api/v1/hosts/cluster/runs", json=body)
+        assert resp.status_code == 200, resp.text
+        run = resp.json()
+        run_id = run["run_id"]
+        assert run["git"]["commit"] == git(repo, "rev-parse", "HEAD")
+        row = wait_until(
+            lambda: board_row(client, "toy", "toy-acc", run_id),
+            timeout=6 * SLURM_POLL,
+            what=f"{run_id} on the hub leaderboard",
+        )
+        assert row["primary"]["mean"] == 0.75  # references 0 1 0 0, predictions 0 1 0 1
+        mirrored = ctx.store.read_record("toy", run_id)
+        assert mirrored.executor.node == "c1" and mirrored.executor.slurm_job_id
+        scores = slurm_cluster.exec("cat", f"{REMOTE_STORE}/toy/runs/{run_id}/scores.jsonl")
+        assert len(scores.splitlines()) == 1  # scored once, on the cluster
 
 
 def test_env_server_restart_keeps_the_job_and_stop_cancels_it(

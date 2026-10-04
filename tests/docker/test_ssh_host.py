@@ -30,10 +30,15 @@ from tests.docker.conftest import (
     REMOTE_HOME,
     REMOTE_PROJECT,
     REMOTE_STORE,
+    REMOTE_TOY,
+    WRITE_PREDS_075,
     HubThread,
     SshBox,
+    add_host,
+    board_row,
     docker_skip_reason,
     host_cursor,
+    hub_app,
     launch,
     make_ssh_access,
     mirrored_text,
@@ -41,7 +46,9 @@ from tests.docker.conftest import (
     wait_mirrored,
     wait_until,
     write_hosts,
+    write_scored_toy_project,
 )
+from tests.factories import git
 
 runner = CliRunner()
 
@@ -186,6 +193,42 @@ def test_hub_tunnels_launches_and_mirrors(sshd_box: SshBox, hub_ctx: Context) ->
         remote_log = f"{REMOTE_STORE}/dock/runs/{run_id}/logs/stdout.log"
         assert sshd_box.exec("cat", remote_log) == "hello-from-docker\n"
         assert hub_ctx.index.get_run(run_id) is not None
+
+
+@pytest.mark.docker
+def test_a_run_launched_through_the_hub_is_scored_on_its_leaderboard(
+    sshd_box: SshBox, hub_ctx: Context, tmp_path: Path
+) -> None:
+    # spec 13, phase 2 done: launched through the hub's route (as the UI does), run on
+    # the sshd host, scored there, mirrored, and shown on the hub's leaderboard
+    repo = write_scored_toy_project(tmp_path / "toy")
+    sshd_box.put(repo, REMOTE_TOY)  # the host's checkout has the hub's commit
+    hub_ctx.register_project(repo)
+    alias = sshd_box.access.alias
+    projects = {"toy": REMOTE_TOY}
+    add_host(hub_ctx.layout.home, "box", alias, "--usd-per-gpu-hour", "2", projects=projects)
+    with hub_app(hub_ctx, "box", timeout=BOOTSTRAP_TIMEOUT) as client:
+        body = {
+            "project": "toy",
+            "task": "toy-acc",
+            "command": ["python3", "-c", WRITE_PREDS_075],
+            "hypothesis": "scored on the box",
+        }
+        resp = client.post("/api/v1/hosts/box/runs", json=body)
+        assert resp.status_code == 200, resp.text
+        run = resp.json()
+        run_id = run["run_id"]
+        assert run["cwd"] == REMOTE_TOY
+        assert run["git"]["commit"] == git(repo, "rev-parse", "HEAD")
+        row = wait_until(
+            lambda: board_row(client, "toy", "toy-acc", run_id),
+            timeout=180,
+            what=f"{run_id} on the hub leaderboard",
+        )
+        assert row["primary"]["mean"] == 0.75  # references 0 1 0 0, predictions 0 1 0 1
+        assert row["cost"] is not None  # the box has a price
+        scores = sshd_box.exec("cat", f"{REMOTE_STORE}/toy/runs/{run_id}/scores.jsonl")
+        assert len(scores.splitlines()) == 1  # scored once, on the host
 
 
 @pytest.mark.docker

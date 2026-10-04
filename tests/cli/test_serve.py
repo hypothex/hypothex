@@ -202,3 +202,18 @@ def test_write_private_removes_its_tmp_when_the_write_fails(
         cli_main._write_private(path, "{}")
     assert not path.with_name(f".{path.name}.{os.getpid()}.tmp").exists()
     assert not path.exists()
+
+
+def test_serve_kind_goes_back_to_local_after_a_trial_ssh(tmp_path: Path) -> None:
+    # CONF-12b: one `hx serve --kind ssh` must not make every later plain `hx serve` an
+    # env server whose fresh token locks the browser UI out (401 on every call)
+    home = tmp_path / "h"
+    assert cli_main.resolve_serve_kind(home, "ssh") == "ssh"
+    assert cli_main.resolve_serve_kind(home, None) == "ssh"  # the saved kind sticks
+    cli_main.check_serve_kind("local")
+    assert cli_main.resolve_serve_kind(home, "local") == "local"
+    assert cli_main.resolve_serve_kind(home, None) == "local"
+    assert json.loads((home / "environment.json").read_text())["kind"] == "local"
+    assert cli_main._serve_token("127.0.0.1", "local", False) is None
+    with pytest.raises(cli_main.ConfigError, match="or local to serve as the hub"):
+        cli_main.check_serve_kind("gpu")

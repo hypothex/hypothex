@@ -11,10 +11,12 @@ import secrets
 import socket
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast, get_args
+from urllib.parse import urlencode
 
 import typer
 import yaml
@@ -35,7 +37,7 @@ from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
 from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
-from hypothex.core.evaluation import reeval, validate_project
+from hypothex.core.evaluation import EvalReport, reeval, validate_project
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gitinfo import git_state_label
@@ -43,6 +45,7 @@ from hypothex.core.ids import new_command_id
 from hypothex.core.index import rebuild_index
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import Layout, default_home
+from hypothex.core.leaderboard import Leaderboard
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
 from hypothex.remote.config import (
     HOST_NAME,
@@ -56,6 +59,7 @@ from hypothex.remote.config import (
 
 if TYPE_CHECKING:
     from hypothex.remote.bootstrap import ServerInfo
+    from hypothex.remote.ssh import SshTarget
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -79,7 +83,8 @@ hosts_app = typer.Typer(
 )
 app.add_typer(hosts_app, name="hosts")
 KindOpt = Annotated[
-    str | None, typer.Option("--kind", help="What this machine is to the hub: ssh or slurm.")
+    str | None,
+    typer.Option("--kind", help="What this machine is to the hub: ssh, slurm, or local."),
 ]
 
 JsonFlag = Annotated[bool, typer.Option("--json", help="Print machine-readable JSON.")]
@@ -413,6 +418,145 @@ def _hub_try(method: str, path: str, body: dict[str, Any] | None = None) -> Any 
         return None
 
 
+def _query(path: str, params: dict[str, Any]) -> str:
+    """``path`` with the params that are not None as a query string (lists repeat)."""
+    pairs = urlencode({k: v for k, v in params.items() if v is not None}, doseq=True)
+    return f"{path}?{pairs}" if pairs else path
+
+
+def _hub_read(path: str) -> Any | None:
+    """
+    GET ``path`` from the hub for a read command; None when the hub cannot help.
+
+    A CLI on another machine than the hub (spec 5.2) has only its own runs in its
+    store: ``show``, ``logs``, ``runs``, ``leaderboard`` and ``sweeps`` ask the hub
+    for the rest (CONF-5). No hub (or no such item there, 404) gives None; any
+    other hub error is printed as a warning, so this store's answer still prints.
+
+    Parameters
+    ----------
+    path : str
+        API path with its query string.
+
+    Returns
+    -------
+    Any or None
+        The hub's JSON answer.
+    """
+    from hypothex.mcp.server import HubUnavailableError
+
+    try:
+        return _hub("GET", path)
+    except (HubUnavailableError, StoreError):
+        return None
+    except HypothexError as exc:
+        typer.secho(f"warning: the hub did not answer {path}: {exc}", fg="yellow", err=True)
+        return None
+
+
+def _run_detail(c: Context, run_id: str) -> tuple[q.RunDetail, str | None]:
+    """
+    A run's detail and ``host_state``: from the hub for a run of another environment.
+
+    The hub has a run this store lacks (a CLI on a laptop), and the connection
+    state of a mirrored run's host (CONF-4b: a run on a ``stale`` host is not
+    known to be running). Without a hub, this store's copy (or its "no run"
+    error) stands, with ``host_state`` None.
+    """
+    from hypothex.mcp.server import acts_through_hub
+
+    if acts_through_hub(c, run_id):
+        out = _hub_read(f"/api/v1/runs/{run_id}")
+        if out is not None:
+            return q.RunDetail.model_validate(out), out.get("host_state")
+    return q.show_run(c, run_id), None
+
+
+def _status_text(record: RunRecord, host_state: str | None) -> str:
+    """
+    A run's status, marked when its host is not connected and the run has not ended.
+
+    A running run on a ``stale`` host shows as ``running (host stale)``: it is
+    not lost, but nothing says it is still going (spec 5.6).
+    """
+    status = record.status.value
+    if host_state in (None, "connected") or record.status in TERMINAL_STATUSES:
+        return status
+    return f"{status} (host {host_state})"
+
+
+def _log_reader(
+    c: Context, run_id: str, stream: str
+) -> tuple[Callable[[int | None], q.LogChunk], Callable[[], bool]]:
+    """
+    Read a run's log from ``offset``, and tell whether the run ended.
+
+    From this store, else from the hub for a run this store does not have.
+
+    Raises
+    ------
+    StoreError
+        Neither this store nor a hub has the run.
+    """
+    try:
+        c.find_record(run_id)
+    except StoreError:
+        if _hub_read(f"/api/v1/runs/{run_id}") is None:
+            raise
+
+        def hub_read(offset: int | None) -> q.LogChunk:
+            path = _query(f"/api/v1/runs/{run_id}/logs", {"stream": stream, "offset": offset})
+            return q.LogChunk.model_validate(_hub("GET", path))
+
+        def hub_ended() -> bool:
+            record = RunRecord.model_validate(_hub("GET", f"/api/v1/runs/{run_id}")["record"])
+            return record.status in TERMINAL_STATUSES
+
+        return hub_read, hub_ended
+
+    def read(offset: int | None) -> q.LogChunk:
+        return q.read_log(c, run_id, stream, offset)
+
+    def ended() -> bool:
+        return c.find_record(run_id).status in TERMINAL_STATUSES
+
+    return read, ended
+
+
+def _hub_task(ref: str, project: str | None) -> tuple[str, str] | None:
+    """
+    The hub's ``(project, task)`` for ``task`` or ``project/task``; None if unknown there.
+
+    Raises
+    ------
+    ConfigError
+        The task name is in several of the hub's projects.
+    """
+    if project is None and "/" in ref:
+        project, ref = ref.split("/", 1)
+    if project is not None:
+        return project, ref
+    tasks = _hub_read("/api/v1/tasks") or []
+    owners = sorted({t["project"] for t in tasks if t["name"] == ref})
+    if len(owners) > 1:
+        raise ConfigError(f"task {ref!r} exists in several projects ({', '.join(owners)})")
+    return (owners[0], ref) if owners else None
+
+
+def _hub_sweeps(project: str | None) -> list[dict[str, Any]]:
+    """The hub's sweep rows (as ``q.list_sweeps``) of one project or of all; [] without a hub."""
+    if project is not None:
+        projects = [project]
+    else:
+        projects = [e["project"] for e in _hub_read("/api/v1/projects") or []]
+    rows = []
+    for name in projects:
+        for row in _hub_read(f"/api/v1/projects/{name}/sweeps") or []:
+            created = datetime.fromisoformat(row["created_at"])
+            rows.append({"project": name, **row, "created_at": created})
+    return rows
+
+
 def _client_checkout(root: Path) -> dict[str, str | None]:
     """
     The project, HEAD, and uncommitted diff of the checkout here, for a host launch.
@@ -555,7 +699,55 @@ def _known_host(hosts: EnvironmentsFile, name: str) -> HostSpec:
     return spec
 
 
-def _bootstrap(c: Context, name: str, spec: HostSpec) -> ServerInfo:
+InstallUvOpt = Annotated[
+    bool,
+    typer.Option(
+        "--install-uv",
+        help=(
+            "On a host without uv, allow hx to download and run the official uv "
+            "installer (https://astral.sh/uv/install.sh). Off: hx stops and asks for uv."
+        ),
+    ),
+]
+
+
+def _install(c: Context, target: SshTarget, home: str, *, install_uv: bool) -> None:
+    """
+    Build this hx's wheel and install it on a host (spec 8A.2 step 2).
+
+    uv is installed on a host only with the user's consent (``--install-uv``,
+    SEC-3): a missing uv otherwise stops the install, with a hint to the option.
+
+    Parameters
+    ----------
+    c : Context
+        This machine's context (the wheel cache is under its home).
+    target : SshTarget
+        The host.
+    home : str
+        The hx home on the host.
+    install_uv : bool
+        ``--install-uv``.
+
+    Raises
+    ------
+    BootstrapError
+        The install failed; when uv is missing, the message names ``--install-uv``.
+    """
+    from hypothex.remote import bootstrap
+
+    wheel = bootstrap.build_wheel(c.layout.home / "cache" / "wheels")
+    try:
+        bootstrap.install(target, home, wheel, install_uv=install_uv)
+    except bootstrap.BootstrapError as exc:
+        if install_uv or "uv is missing on the host" not in str(exc):
+            raise
+        raise bootstrap.BootstrapError(
+            f"{exc}; to let hx run that installer, add --install-uv"
+        ) from exc
+
+
+def _bootstrap(c: Context, name: str, spec: HostSpec, *, install_uv: bool) -> ServerInfo:
     # spec 8A.2 steps 1-3 over the user's own ssh: probe, install this hx, start the server
     from hypothex.mcp.server import ssh_target
     from hypothex.remote import bootstrap
@@ -564,8 +756,7 @@ def _bootstrap(c: Context, name: str, spec: HostSpec) -> ServerInfo:
     facts = bootstrap.probe(target, spec.home)
     if spec.kind == "slurm" and facts.slurm is None:
         raise ConfigError(f"{name} has no sbatch on PATH; drop --slurm or use the login node")
-    wheel = bootstrap.build_wheel(c.layout.home / "cache" / "wheels")
-    bootstrap.install(target, facts.home, wheel)
+    _install(c, target, facts.home, install_uv=install_uv)
     return bootstrap.ensure_server(target, facts.home, kind=spec.kind)
 
 
@@ -691,7 +882,7 @@ def leaderboard(
         if version is None:
             raise RunError(f"--metric needs name@version, got {item!r}")
         versions[name] = version
-    board = q.get_leaderboard(_ctx(), ref, project, versions or None)
+    board = _board(ref, project, versions, metric or [])
     if as_json:
         _print_json(board)
         return
@@ -723,6 +914,38 @@ def leaderboard(
         typer.secho(f"{len(board.unscored)} finished runs have no scores", fg="yellow")
 
 
+def _board(
+    ref: str, project: str | None, versions: dict[str, str], metric: list[str]
+) -> Leaderboard:
+    """
+    A task's board from this store, else (unknown or without runs here) from the hub.
+
+    Raises
+    ------
+    ConfigError, StoreError
+        This store's error, when the hub has no board either.
+    """
+    try:
+        board = q.get_leaderboard(_ctx(), ref, project, versions or None)
+    except (ConfigError, StoreError):
+        hub = _hub_board(ref, project, metric)
+        if hub is None:
+            raise
+        return hub
+    if board.rows or board.unscored or board.needs_reeval:
+        return board
+    return _hub_board(ref, project, metric) or board
+
+
+def _hub_board(ref: str, project: str | None, metric: list[str]) -> Leaderboard | None:
+    where = _hub_task(ref, project)
+    if where is None:
+        return None
+    path = _query(f"/api/v1/tasks/{where[0]}/{where[1]}/leaderboard", {"metric": metric or None})
+    out = _hub_read(path)
+    return None if out is None else Leaderboard.model_validate(out)
+
+
 # runs ---------------------------------------------------------------------------
 @app.command("runs")
 def list_runs_cmd(
@@ -734,12 +957,30 @@ def list_runs_cmd(
     limit: Annotated[int, typer.Option(help="Maximum rows.")] = 50,
     as_json: JsonFlag = False,
 ) -> None:
-    """List runs, newest first."""
+    """List runs, newest first: this store's, and the hub's when one answers."""
     records = _ctx().index.list_runs(
         project=project, task=task, status=status, tag=tag, include_archived=archived, limit=limit
     )
+    filters = {
+        "project": project,
+        "task": task,
+        "status": None if status is None else status.value,
+        "tag": tag,
+        "archived": "true" if archived else None,
+        "limit": limit,
+    }
+    hub = _hub_read(_query("/api/v1/runs", filters)) or []
+    states: dict[str, str | None] = {}  # run id -> host_state, from the hub (CONF-4b)
+    if hub:
+        # a CLI on another machine than the hub (spec 5.2): its own runs and the hub's
+        merged = {r.run_id: r for r in records}
+        for row in hub:
+            states[row["run_id"]] = row.get("host_state")
+            merged[row["run_id"]] = RunRecord.model_validate(row)
+        records = sorted(merged.values(), key=lambda r: (r.created_at, r.run_id), reverse=True)
+        records = records[:limit]
     if as_json:
-        _print_json(records)
+        _print_json([{**to_jsonable(r), "host_state": states.get(r.run_id)} for r in records])
         return
     _table(
         ["run", "task", "status", "created", "hypothesis"],
@@ -747,7 +988,7 @@ def list_runs_cmd(
             [
                 r.run_id,
                 r.task,
-                r.status.value,
+                _status_text(r, states.get(r.run_id)),
                 r.created_at.strftime("%Y-%m-%d %H:%M"),
                 r.hypothesis[:50],
             ]
@@ -759,12 +1000,13 @@ def list_runs_cmd(
 @app.command()
 def show(run_id: str, as_json: JsonFlag = False) -> None:
     """Show everything about a run, including where every file lives."""
-    detail = q.show_run(_ctx(), run_id)
+    detail, host_state = _run_detail(_ctx(), run_id)
     if as_json:
-        _print_json(detail)
+        _print_json({**to_jsonable(detail), "host_state": host_state})
         return
     r = detail.record
-    typer.secho(f"{r.run_id}  [{r.status.value}]  {r.project}/{r.task or 'exploratory'}", bold=True)
+    status = _status_text(r, host_state)
+    typer.secho(f"{r.run_id}  [{status}]  {r.project}/{r.task or 'exploratory'}", bold=True)
     typer.echo(f"hypothesis: {r.hypothesis or '—'}")
     typer.echo(f"command:    {r.command_display}")
     typer.echo(f"git:        {r.git.commit or '—'}  {git_state_label(r.git)}")
@@ -980,6 +1222,81 @@ def reinfer_cmd(
     _started(record, foreground, as_json)
 
 
+HOST_RUN_SKIPPED = (
+    "runs on a host and the hub did not answer; start the hub (`hx serve`) to "
+    "re-evaluate it on its host"
+)
+
+
+def _reeval_task(c: Context, ref: str, project: str | None, body: dict[str, Any]) -> EvalReport:
+    """
+    Re-score a task's finished runs; through the hub when some are another environment's.
+
+    Scores written into a mirrored run's copy here would be replaced by the host's
+    ``scores.jsonl`` at the next mirror (CONF-2), so the hub scores its own runs and
+    sends each mirrored run to its host (spec 8A.3). Without a hub, only this
+    environment's runs are scored; the others are skipped with ``HOST_RUN_SKIPPED``.
+
+    Parameters
+    ----------
+    c : Context
+        This machine's context.
+    ref : str
+        ``task`` or ``project/task``.
+    project : str or None
+        ``--project``.
+    body : dict
+        ``metric``, ``force`` and ``created_by`` of the reeval.
+
+    Returns
+    -------
+    EvalReport
+        This store's report, or the hub's.
+
+    Raises
+    ------
+    ConfigError, StoreError
+        The task (or its project) is unknown here and on the hub.
+    """
+
+    def through_hub(project_name: str, task_name: str) -> EvalReport | None:
+        path = f"/api/v1/tasks/{project_name}/{task_name}/reeval"
+        out = _hub_try("POST", path, {**body, "command_id": new_command_id()})
+        return None if out is None else EvalReport.model_validate(out)
+
+    try:
+        entry, name = q.resolve_task(c, ref, project)
+    except (ConfigError, StoreError) as exc:
+        where = _hub_task(ref, project)  # a CLI on another machine than the hub
+        report = None if where is None else through_hub(*where)
+        if report is None:
+            raise exc
+        return report
+    runs = c.index.list_runs(
+        project=entry.project,
+        task=name,
+        status=RunStatus.FINISHED,
+        include_archived=True,
+        limit=None,
+    )
+    own = c.descriptor.environment_id
+    mirrored = [r.run_id for r in runs if r.environment_id != own]
+    if mirrored:
+        report = through_hub(entry.project, name)
+        if report is not None:
+            return report
+    report = reeval(
+        c,
+        project=entry.project,
+        task=name,
+        metric=body["metric"],
+        force=body["force"],
+        run_ids=[r.run_id for r in runs if r.environment_id == own] if mirrored else None,
+    )
+    report.skipped.update(dict.fromkeys(mirrored, HOST_RUN_SKIPPED))
+    return report
+
+
 @app.command("reeval")
 def reeval_cmd(
     run_id: Annotated[str | None, typer.Argument(help="One run; or use --task.")] = None,
@@ -993,19 +1310,15 @@ def reeval_cmd(
     from hypothex.mcp.server import acts_through_hub
 
     c = _ctx()
+    body = {"metric": metric, "force": force, "created_by": _created_by()}
     if run_id is not None and acts_through_hub(c, run_id):
-        body = {"metric": metric, "force": force, "command_id": new_command_id()}
-        out = _hub("POST", f"/api/v1/runs/{run_id}/reeval", {**body, "created_by": _created_by()})
-        if as_json:
-            _print_json(out)
-        else:
-            typer.echo(f"evaluated {len(out['evaluated'])}, skipped {len(out['skipped'])}")
-        return
-    if run_id is not None:
+        path = f"/api/v1/runs/{run_id}/reeval"
+        out = _hub("POST", path, {**body, "command_id": new_command_id()})
+        report = EvalReport.model_validate(out)
+    elif run_id is not None:
         report = reeval(c, run_id=run_id, metric=metric, force=force)
     elif task is not None:
-        entry, name = q.resolve_task(c, task, project)
-        report = reeval(c, project=entry.project, task=name, metric=metric, force=force)
+        report = _reeval_task(c, task, project, body)
     else:
         raise RunError("give a run id or --task")
     if as_json:
@@ -1105,18 +1418,18 @@ def logs(
     as_json: JsonFlag = False,
 ) -> None:
     """Print a run's log (tail), optionally following it."""
-    c = _ctx()
-    chunk = q.read_log(c, run_id, stream)
+    read, ended = _log_reader(_ctx(), run_id, stream)
+    chunk = read(None)
     if as_json:
         _print_json(chunk)
         return
     typer.echo(chunk.text, nl=False)
     while follow:
-        if c.find_record(run_id).status in TERMINAL_STATUSES:
-            typer.echo(q.read_log(c, run_id, stream, chunk.offset).text, nl=False)
+        if ended():
+            typer.echo(read(chunk.offset).text, nl=False)
             return
         time.sleep(1)
-        chunk = q.read_log(c, run_id, stream, chunk.offset)
+        chunk = read(chunk.offset)
         typer.echo(chunk.text, nl=False)
 
 
@@ -1226,8 +1539,13 @@ def sweep_create(
         }
         _sweep_out(_hub("POST", "/api/v1/sweeps", body), as_json)
         return
+    from hypothex.api.app import pin_checkout  # lazy: the API is slow to import
+
     c = _ctx()
     c.register_project(root)
+    # spec 8A.4: the sweep stores the checkout's HEAD and diff, so an extend after more
+    # commits (or edits) runs the same code and its seeds join the same groups
+    commit, diff = pin_checkout(str(root))
     summary = launch_sweep(
         c,
         project=project,
@@ -1241,6 +1559,8 @@ def sweep_create(
         queue=queue,
         created_by=_created_by(),
         repo=root,
+        commit=commit,
+        diff=diff,
     )
     _sweep_out(to_jsonable(summary), as_json)
 
@@ -1293,13 +1613,11 @@ def sweep_extend(
 
 @app.command("sweeps")
 def sweeps_cmd(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
-    """List sweeps, newest first."""
-    from hypothex.core.sweeps import list_sweeps
-
-    c = _ctx()
-    projects = [project] if project else [e.project for e in c.store.list_projects()]
-    rows: list[dict[str, Any]] = [{"project": p, **s} for p in projects for s in list_sweeps(c, p)]
-    rows.sort(key=lambda s: s["created_at"], reverse=True)
+    """List sweeps, newest first: this store's, and the hub's when one answers."""
+    merged = {(s["project"], s["id"]): s for s in q.list_sweeps(_ctx(), project)}
+    for row in _hub_sweeps(project):
+        merged.setdefault((row["project"], row["id"]), row)
+    rows = sorted(merged.values(), key=lambda s: (s["created_at"], s["id"]), reverse=True)
     if as_json:
         _print_json(rows)
         return
@@ -1500,25 +1818,35 @@ def repair(as_json: JsonFlag = False) -> None:
         typer.echo(f"marked {len(lost)} runs lost")
 
 
-SERVE_KINDS = ("ssh", "slurm")
+SERVE_KINDS = ("ssh", "slurm")  # the env server kinds: a token always, a GPU queue or sbatch
+KINDS = ("local", *SERVE_KINDS)
 
 
 def check_serve_kind(kind: str | None) -> None:
     """
     Check a ``--kind`` option.
 
+    ``local`` is accepted so that a home once served with ``--kind ssh`` (or
+    ``slurm``) can serve as the hub (or a plain machine) again: the kind is saved.
+
     Parameters
     ----------
     kind : str or None
-        ``ssh``, ``slurm``, or None (not given).
+        ``local``, ``ssh``, ``slurm``, or None (not given).
 
     Raises
     ------
     ConfigError
         For any other value.
+
+    Examples
+    --------
+    >>> check_serve_kind("local")  # the hub again, after a trial `--kind ssh`
     """
-    if kind is not None and kind not in SERVE_KINDS:
-        raise ConfigError(f"--kind must be ssh or slurm, got {kind!r}")
+    if kind is not None and kind not in KINDS:
+        raise ConfigError(
+            f"--kind must be ssh or slurm, got {kind!r}; or local to serve as the hub"
+        )
 
 
 def resolve_serve_kind(home: Path, kind: str | None) -> str:
@@ -1531,6 +1859,8 @@ def resolve_serve_kind(home: Path, kind: str | None) -> str:
         The Hypothex home of this env server.
     kind : str or None
         ``--kind``; None reuses the kind saved in ``environment.json``.
+        ``local`` saves ``local`` again (a home served with ``--kind ssh`` once
+        is the hub again, without a required token).
 
     Returns
     -------
@@ -1541,13 +1871,18 @@ def resolve_serve_kind(home: Path, kind: str | None) -> str:
     Raises
     ------
     ConfigError
-        If ``kind`` is not ``ssh`` or ``slurm``.
+        If ``kind`` is not ``local``, ``ssh`` or ``slurm``.
 
     Examples
     --------
     >>> import tempfile
-    >>> resolve_serve_kind(Path(tempfile.mkdtemp()), None)
+    >>> home = Path(tempfile.mkdtemp())
+    >>> resolve_serve_kind(home, None)
     'local'
+    >>> resolve_serve_kind(home, "ssh"), resolve_serve_kind(home, None)
+    ('ssh', 'ssh')
+    >>> resolve_serve_kind(home, "local"), resolve_serve_kind(home, None)
+    ('local', 'local')
     """
     check_serve_kind(kind)
     layout = Layout(home.expanduser().resolve())
@@ -1626,7 +1961,10 @@ def serve(
         str | None,
         typer.Option(
             "--kind",
-            help="Run as a host's env server: ssh (GPU queue) or slurm. Default: the saved kind.",
+            help=(
+                "Run as a host's env server: ssh (GPU queue) or slurm; local serves as the "
+                "hub again. Default: the saved kind."
+            ),
         ),
     ] = None,
     no_auth: Annotated[
@@ -1749,6 +2087,7 @@ def hosts_add(
     usd: Annotated[
         float | None, typer.Option("--usd-per-gpu-hour", help="Price, for cost.")
     ] = None,
+    install_uv: InstallUvOpt = False,
     as_json: JsonFlag = False,
 ) -> None:
     """Add a host: for --ssh, install hx there and start its env server; the hub connects it."""
@@ -1777,7 +2116,9 @@ def hosts_add(
         )
     except ValidationError as exc:
         raise ConfigError(f"invalid host {name}: {exc.errors()[0]['msg']}") from exc
-    server = _bootstrap(c, name, spec) if spec.route == "ssh" else None
+    if install_uv and spec.route != "ssh":
+        raise ConfigError("--install-uv needs --ssh (hx installs nothing on a --url host)")
+    server = _bootstrap(c, name, spec, install_uv=install_uv) if spec.route == "ssh" else None
     environments = {**hosts.environments, name: spec}
     save_hosts(c.layout, hosts.model_copy(update={"environments": environments}))
     state = _hub_try("POST", f"/api/v1/hosts/{name}/connect", {})
@@ -1871,7 +2212,7 @@ def hosts_rm(name: str, as_json: JsonFlag = False) -> None:
 
 
 @hosts_app.command("upgrade")
-def hosts_upgrade(name: str, as_json: JsonFlag = False) -> None:
+def hosts_upgrade(name: str, install_uv: InstallUvOpt = False, as_json: JsonFlag = False) -> None:
     """Install this hx version on the host and restart its env server if needed."""
     from hypothex.mcp.server import ssh_target
     from hypothex.remote import bootstrap
@@ -1881,8 +2222,7 @@ def hosts_upgrade(name: str, as_json: JsonFlag = False) -> None:
     if spec.route != "ssh":
         raise ConfigError(f"host {name} is reached by {spec.route}; upgrade hx on it by hand")
     target = ssh_target(spec)
-    wheel = bootstrap.build_wheel(c.layout.home / "cache" / "wheels")
-    bootstrap.install(target, spec.home, wheel)
+    _install(c, target, spec.home, install_uv=install_uv)
     bootstrap.stop_server(target, spec.home)  # only a server hx started; an external one stays
     info = bootstrap.ensure_server(target, spec.home, kind=spec.kind)
     if info.hx_version != __version__:

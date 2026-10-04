@@ -10,10 +10,12 @@ from hypothex.cli import main as cli_main
 from hypothex.cli.main import app
 from hypothex.core import control
 from hypothex.core.context import Context
-from hypothex.core.errors import HypothexError, RunError
+from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
 from hypothex.core.execution import RunRequest
-from hypothex.core.records import RunRecord
+from hypothex.core.leaderboard import group_id_for
+from hypothex.core.records import RunRecord, RunStatus
 from hypothex.core.sweeps import SweepError
+from hypothex.mcp.server import HubUnavailableError
 from tests.api.envserver import remote_hub, wait_until
 from tests.factories import PREDS_075, git, make_record, seed_finished_run
 
@@ -153,6 +155,26 @@ def test_local_sweep_commands(in_repo: Path, ctx: Context) -> None:
     assert "show" in runner.invoke(app, ["sweep", "--help"]).stdout
 
 
+def test_local_sweep_pins_its_commit_and_diff_for_extend(in_repo: Path, ctx: Context) -> None:
+    # H-3: an extend after a new commit must run the sweep's code, not the new HEAD
+    head = git(in_repo, "rev-parse", "HEAD").strip()
+    (in_repo / "infer.py").write_text((in_repo / "infer.py").read_text() + "# edit\n")
+    out = hx(
+        "sweep", "-t", "toy-acc", "-H", "pinned", "--grid", "x=1", "--seeds", "1",
+        "--", *SWEEP_CMD,
+    )  # fmt: skip
+    assert out["spec"]["commit"] == head and "+# edit" in out["spec"]["diff"]
+    for rid in out["run_ids"]:
+        control.wait_for_run(ctx, rid, timeout=60)
+    git(in_repo, "commit", "-qam", "move HEAD on")
+    more = hx("sweep", "extend", out["spec"]["id"], "--seeds", "2")
+    [new] = set(more["run_ids"]) - set(out["run_ids"])
+    record = control.wait_for_run(ctx, new, timeout=60)
+    assert record.git.commit == head
+    groups = {group_id_for(ctx.find_record(i)) for i in more["run_ids"]}
+    assert len(groups) == 1  # the new seed joined the sweep's seed group
+
+
 def test_sweep_input_errors(in_repo: Path) -> None:
     with pytest.raises(SweepError, match=r"never uses \{x\}"):
         runner.invoke(
@@ -223,3 +245,137 @@ def test_sweep_on_a_host_and_pull(
         pulled = hx("pull", "e1", "--artifact", "predictions/predictions.jsonl")
         expected = (r.env.run_dir(record) / "predictions" / "predictions.jsonl").read_text()
         assert Path(pulled["local_path"]).read_text() == expected
+
+
+def test_a_cli_on_another_machine_reads_back_what_it_launched(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CONF-5: this CLI's home is not the hub's (spec 5.2); show, logs, runs, sweeps and
+    # leaderboard ask the hub for what this store does not have
+    with remote_hub(tmp_path, threaded=True) as r:
+        laptop = tmp_path / "laptop"
+        git(tmp_path, "clone", "-q", str(tmp_path / "origin.git"), str(laptop))
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
+        monkeypatch.chdir(laptop)
+        rid = hx(
+            "launch", "--host", "gpu1", "-t", "toy-acc", "-H", "from a laptop",
+            "--", PY, "-c", "print('hello from gpu1')",
+        )["run_id"]  # fmt: skip
+        wait_until(lambda: r.hub.index.get_run(rid) is not None, timeout=30)
+        assert not (home / "store" / "toy").exists()  # nothing of it in this store
+        detail = hx("show", rid)
+        assert detail["record"]["run_id"] == rid and "stdout" in str(detail["paths"])
+        assert "from a laptop" in runner.invoke(app, ["show", rid]).stdout
+        wait_until(lambda: "hello from gpu1" in hx("logs", rid)["text"], timeout=60)
+        followed = runner.invoke(app, ["logs", rid, "--follow"], catch_exceptions=False)
+        assert followed.exit_code == 0 and "hello from gpu1" in followed.stdout
+        assert [row["run_id"] for row in hx("runs")] == [rid]
+        assert hx("runs", "--status", "finished", "-p", "toy")[0]["run_id"] == rid
+        board = hx("leaderboard", "toy-acc")
+        assert board["project"] == "toy" and rid in board["unscored"]
+        assert hx("leaderboard", "toy/toy-acc")["task"] == "toy-acc"
+        made = hx(
+            "sweep", "--host", "gpu1", "-t", "toy-acc", "-H", "s",
+            "--grid", "x=1", "--seeds", "1", "--", *SWEEP_CMD,
+        )  # fmt: skip
+        assert [s["id"] for s in hx("sweeps")] == [made["spec"]["id"]]
+        assert hx("sweeps", "-p", "toy")[0]["project"] == "toy"
+        assert made["spec"]["id"] in runner.invoke(app, ["sweeps"]).stdout
+        # this machine's own runs are listed with the hub's, newest first
+        seed_finished_run(Context.open(home), laptop, "l1")
+        rows = hx("runs", "--limit", "500")
+        assert {"l1", rid} <= {row["run_id"] for row in rows}
+        stamps = [(row["created_at"], row["run_id"]) for row in rows]
+        assert stamps == sorted(stamps, reverse=True)
+        assert len(hx("runs", "--limit", "1")) == 1
+    # without a hub, an unknown run is still this store's clean "no run" error
+    with pytest.raises(StoreError, match="no run"):
+        runner.invoke(app, ["show", "nope"], catch_exceptions=False)
+    with pytest.raises(StoreError, match="no run"):
+        runner.invoke(app, ["logs", "nope"], catch_exceptions=False)
+
+
+def test_hub_read_is_quiet_without_a_hub_and_warns_on_a_hub_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def refuse(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+        raise errors.pop()
+
+    errors: list[Exception] = [
+        HypothexError("hub answered 401"),
+        StoreError("no run"),
+        HubUnavailableError("down"),
+    ]
+    monkeypatch.setattr(cli_main, "_hub", refuse)
+    assert cli_main._hub_read("/api/v1/runs") is None  # no hub
+    assert cli_main._hub_read("/api/v1/runs/x") is None  # 404
+    assert capsys.readouterr().err == ""
+    assert cli_main._hub_read("/api/v1/runs") is None  # 401: this store's answer still prints
+    assert "warning: the hub did not answer /api/v1/runs: hub answered 401" in (
+        capsys.readouterr().err
+    )
+
+
+def test_show_and_runs_mark_a_run_whose_host_is_not_connected(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CONF-4b: like GET /api/v1/runs/{id}, `hx show` and `hx runs` carry host_state, so
+    # a run on a stale or disabled host is not read as known to be running
+    with remote_hub(tmp_path, threaded=True, hub_home=home) as r:
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
+        env_id = r.env.descriptor.environment_id
+        r.env.create_run(make_record("e1", environment_id=env_id, status=RunStatus.RUNNING))
+        seed_finished_run(r.hub, r.hub_repo, "h1")
+        wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
+        assert hx("show", "e1")["host_state"] == "connected"
+        assert hx("show", "h1")["host_state"] is None
+        r.client.post("/api/v1/hosts/gpu1/disconnect", json={})
+        assert hx("show", "e1")["host_state"] == "disabled"
+        assert "[running (host disabled)]" in runner.invoke(app, ["show", "e1"]).stdout
+        rows = {row["run_id"]: row["host_state"] for row in hx("runs")}
+        assert rows == {"e1": "disabled", "h1": None}
+        text = runner.invoke(app, ["runs"]).stdout
+        assert "running (host disabled)" in text
+        assert "finished (host" not in text
+
+
+def _score_rows(ctx: Context, run_id: str) -> int:
+    path = ctx.run_dir(ctx.find_record(run_id)) / "scores.jsonl"
+    return len(path.read_text().splitlines()) if path.exists() else 0
+
+
+def test_task_reeval_scores_a_mirrored_run_on_its_host(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CONF-2b: scores written into the hub's mirror copy would be replaced by the host's
+    # scores.jsonl at the next mirror; the hub sends a mirrored run to its host instead
+    with remote_hub(tmp_path, threaded=True, hub_home=home) as r:
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
+        seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
+        seed_finished_run(r.hub, r.hub_repo, "h1", predictions=PREDS_075)
+        wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
+        out = hx("reeval", "--task", "toy/toy-acc")
+        assert sorted(out["evaluated"]) == ["e1", "h1"] and out["skipped"] == {}
+        assert _score_rows(r.env, "e1") == 1  # on the host, which owns the file
+        assert _score_rows(r.hub, "h1") == 1
+        wait_until(lambda: _score_rows(r.hub, "e1") == 1, timeout=30)  # mirrored back
+    # no hub: this environment's runs are scored, a host's run is skipped, not written here
+    out = hx("reeval", "--task", "toy-acc", "--force")
+    assert out["evaluated"] == ["h1"] and out["skipped"] == {"e1": cli_main.HOST_RUN_SKIPPED}
+    assert _score_rows(Context.open(home), "e1") == 1 and _score_rows(Context.open(home), "h1") == 2
+
+
+def test_task_reeval_from_another_machine_goes_to_the_hub(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with remote_hub(tmp_path, threaded=True) as r:  # this CLI's home is not the hub's
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
+        seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
+        wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
+        assert hx("reeval", "--task", "toy-acc")["evaluated"] == ["e1"]
+        assert hx("reeval", "--task", "toy/toy-acc", "--force")["evaluated"] == ["e1"]
+        assert _score_rows(r.env, "e1") == 2
+    with pytest.raises(ConfigError, match="unknown task"):  # and no hub: this store's error
+        runner.invoke(app, ["reeval", "--task", "toy-acc"], catch_exceptions=False)
+    with pytest.raises(StoreError, match="unknown project"):
+        runner.invoke(app, ["reeval", "--task", "toy/toy-acc"], catch_exceptions=False)

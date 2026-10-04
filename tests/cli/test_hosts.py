@@ -35,6 +35,7 @@ class FakeBootstrap:
 
     calls: list[tuple[Any, ...]] = field(default_factory=list)
     hx_version: str = __version__
+    has_uv: bool = True  # False: install fails as install.sh does unless install_uv
 
 
 @pytest.fixture
@@ -54,8 +55,16 @@ def fake_bootstrap(monkeypatch: pytest.MonkeyPatch) -> FakeBootstrap:
         fake.calls.append(("wheel", cache))
         return WHEEL
 
-    def install(target: SshTarget, remote_home: str, wheel: Path) -> None:
-        fake.calls.append(("install", target.alias, remote_home, wheel))
+    def install(
+        target: SshTarget, remote_home: str, wheel: Path, *, install_uv: bool = False
+    ) -> None:
+        fake.calls.append(("install", target.alias, remote_home, wheel, install_uv))
+        if not fake.has_uv and not install_uv:
+            raise bootstrap.BootstrapError(
+                f"{target.alias}: install failed: uv is missing on the host; install uv "
+                "(https://docs.astral.sh/uv/) on the host and retry, or allow hx to run the "
+                "official installer from https://astral.sh/uv/install.sh"
+            )
 
     def stop_server(target: SshTarget, remote_home: str) -> bool:
         fake.calls.append(("stop", target.alias, remote_home))
@@ -104,11 +113,11 @@ def test_add_list_map_rm_without_a_hub(home: Path, fake_bootstrap: FakeBootstrap
     assert fake_bootstrap.calls == [
         ("probe", "gpu1-alias", "~/.hypothex"),
         ("wheel", cache),
-        ("install", "gpu1-alias", "/home/sv/.hypothex", WHEEL),
+        ("install", "gpu1-alias", "/home/sv/.hypothex", WHEEL, False),
         ("start", "gpu1-alias", "/home/sv/.hypothex", "ssh"),
         ("probe", "login", "~/.hypothex"),
         ("wheel", cache),
-        ("install", "login", "/home/sv/.hypothex", WHEEL),
+        ("install", "login", "/home/sv/.hypothex", WHEEL, False),
         ("start", "login", "/home/sv/.hypothex", "slurm"),
     ]
     assert hx("hosts", "map", "toy", "gpu1", "/home/sv/toy")["path"] == "/home/sv/toy"
@@ -251,7 +260,7 @@ def test_upgrade_reinstalls_over_ssh(home: Path, fake_bootstrap: FakeBootstrap) 
     assert out["server"]["pid"] == 42 and out["state"] is None
     assert fake_bootstrap.calls == [
         ("wheel", Context.open(home).layout.home / "cache" / "wheels"),
-        ("install", "gpu1-alias", "/scratch/hx", WHEEL),
+        ("install", "gpu1-alias", "/scratch/hx", WHEEL, False),
         ("stop", "gpu1-alias", "/scratch/hx"),
         ("start", "gpu1-alias", "/scratch/hx", "ssh"),
     ]
@@ -261,3 +270,28 @@ def test_upgrade_reinstalls_over_ssh(home: Path, fake_bootstrap: FakeBootstrap) 
     hx("hosts", "add", "u", "--url", "http://127.0.0.1:9")
     with pytest.raises(ConfigError, match="by hand"):
         runner.invoke(app, ["hosts", "upgrade", "u"], catch_exceptions=False)
+
+
+def test_uv_is_installed_on_a_host_only_with_install_uv(
+    home: Path, fake_bootstrap: FakeBootstrap
+) -> None:
+    # SEC-3: adding a host must not run a downloaded installer the user did not ask for
+    fake_bootstrap.has_uv = False
+    with pytest.raises(bootstrap.BootstrapError, match="add --install-uv"):
+        runner.invoke(app, ["hosts", "add", "gpu1", "--ssh", "a"], catch_exceptions=False)
+    assert load_hosts(Context.open(home).layout).environments == {}  # nothing saved
+    out = hx("hosts", "add", "gpu1", "--ssh", "a", "--install-uv")
+    assert out["server"]["pid"] == 42
+    installs = [c for c in fake_bootstrap.calls if c[0] == "install"]
+    assert [c[-1] for c in installs] == [False, True]
+    with pytest.raises(bootstrap.BootstrapError, match="add --install-uv"):
+        runner.invoke(app, ["hosts", "upgrade", "gpu1"], catch_exceptions=False)
+    fake_bootstrap.calls.clear()
+    assert hx("hosts", "upgrade", "gpu1", "--install-uv")["server"]["pid"] == 42
+    assert fake_bootstrap.calls[1] == ("install", "a", "~/.hypothex", WHEEL, True)
+    with pytest.raises(ConfigError, match="--install-uv needs --ssh"):
+        runner.invoke(
+            app,
+            ["hosts", "add", "u", "--url", "http://127.0.0.1:9", "--install-uv"],
+            catch_exceptions=False,
+        )

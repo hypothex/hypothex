@@ -1,15 +1,21 @@
 /** The run page's stat strip: the few numbers that matter, tooltips for the rest. */
 import { valueFormatter } from "../../charts/valueFormat";
 import { fmtCount, fmtDuration, fmtInterval, fmtScore, fmtUsd, runSeconds } from "./format";
+import { costShown } from "./remote";
 import { type PrimaryRef, scoreFor } from "./ScoresList";
 import type { StatItem } from "./StatStrip";
-import type { LeaderboardRow, RunDetail } from "./types";
+import type { HostRow, LeaderboardRow, RunDetail } from "./types";
 
+/**
+ * `host` is the run's hosts row (`runHostRow`), or null without the hosts list; only its
+ * `usd_per_gpu_hour` is read, to tell a host with no GPU rate from a cost that is just small.
+ */
 export function runStats(
   detail: RunDetail,
   primary: PrimaryRef | null,
   row: LeaderboardRow | null,
   now: number = Date.now(),
+  host: HostRow | null = null,
 ): StatItem[] {
   const out: StatItem[] = [];
   const record = detail.record;
@@ -51,11 +57,15 @@ export function runStats(
   const seconds = runSeconds(record, now);
   if (seconds !== null) out.push({ label: "wall", value: fmtDuration(seconds) });
   const usage = record.usage;
+  // an all-zero cost (a hub or CPU run with no usage) is no cost: no stat, as before 8A.7
+  const cost = costShown(record.cost, host);
   if (usage) {
     out.push({ label: "tokens in", value: fmtCount(usage.tokens_in) });
     out.push({ label: "tokens out", value: fmtCount(usage.tokens_out) });
-    out.push({ label: "cost", value: fmtUsd(usage.usd), tooltip: `${usage.calls} calls` });
+    if (!cost) out.push({ label: "cost", value: fmtUsd(usage.usd), tooltip: `${usage.calls} calls` });
   }
+  // spec 8A.7: GPU hours × rate + API dollars, set when the run ends
+  if (cost) out.push({ label: "cost", value: cost.value, tooltip: cost.note });
   if (record.exit_code !== null && record.exit_code !== 0) {
     out.push({ label: "exit", value: String(record.exit_code) });
   }

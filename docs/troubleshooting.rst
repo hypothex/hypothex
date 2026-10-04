@@ -35,9 +35,14 @@ Adding a host
 **"... has no sbatch on PATH; drop --slurm or use the login node"**
    ``--slurm`` needs ``sbatch`` on the host. Point ``--ssh`` at a login node.
 
+**"uv is missing on the host; install uv ... and retry"**
+   The host has no ``uv``, and Hypothex does not install it unless you ask. Install
+   ``uv`` on the host (https://docs.astral.sh/uv/), or run ``hx hosts add`` again with
+   ``--install-uv`` to let it run the official installer from ``astral.sh``.
+
 **"uv is missing on the host and ... failed (no network?)"**
-   The host has no ``uv`` and could not download it. Install ``uv`` on the host by
-   hand, then run ``hx hosts add`` again. The install also needs access to the package
+   ``--install-uv`` could not download ``uv``. Install ``uv`` on the host by hand,
+   then run ``hx hosts add`` again. The install also needs access to the package
    index for Hypothex's dependencies.
 
 **The wheel cannot be downloaded**

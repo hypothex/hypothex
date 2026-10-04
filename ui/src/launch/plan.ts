@@ -203,11 +203,16 @@ export function gpuLimit(host: LaunchHost): number {
   return host.kind === "slurm" ? SLURM_MAX_GPUS : host.gpus.length;
 }
 
-/** GPUs per run after picking `host`: 0 on a host without GPUs, else `prev` within 1..limit. */
-export function gpusForHost(prev: number, host: LaunchHost): number {
+/**
+ * GPUs per run after picking `host` (coming `from` the host picked before, if any): 0 on a
+ * host without GPUs, else `prev` within 0..limit. A 0 that `from` forced (it had no GPUs)
+ * goes back to 1; a chosen 0 (a CPU run, e.g. a CPU template) stays 0.
+ */
+export function gpusForHost(prev: number, host: LaunchHost, from: LaunchHost | null = null): number {
   const limit = gpuLimit(host);
   if (limit === 0) return 0;
-  return Math.min(Math.max(prev, 1), limit);
+  const forced = prev <= 0 && from !== null && gpuLimit(from) === 0;
+  return Math.min(forced ? 1 : Math.max(prev, 0), limit);
 }
 
 /** The preferred host when it can take the run, else the available host with most free GPUs. */

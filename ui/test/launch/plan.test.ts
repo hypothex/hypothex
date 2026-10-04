@@ -116,7 +116,11 @@ test("gpuLimit and gpusForHost keep the stepper inside the host", () => {
   expect(gpuLimit(G1)).toBe(8);
   expect(gpuLimit(HUB_HOST)).toBe(0);
   expect(gpuLimit(SLURM_HOST)).toBe(8);
-  expect(gpusForHost(0, G1)).toBe(1);
+  // a 0 forced by a GPU-less host goes back to 1 on a GPU host; a chosen 0 (a CPU run) stays
+  expect(gpusForHost(0, G1, HUB_HOST)).toBe(1);
+  expect(gpusForHost(0, G1)).toBe(0);
+  expect(gpusForHost(0, G1, G1)).toBe(0);
+  expect(gpusForHost(0, SLURM_HOST, G1)).toBe(0);
   expect(gpusForHost(5, launchHost({ gpus: [gpu(0), gpu(1)] }))).toBe(2);
   expect(gpusForHost(3, HUB_HOST)).toBe(0);
   expect(gpusForHost(4, SLURM_HOST)).toBe(4);

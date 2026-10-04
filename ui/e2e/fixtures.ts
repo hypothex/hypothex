@@ -1,7 +1,19 @@
 /** Shared Playwright fixtures: theme per project, console-error guard, API helpers. */
 import { readFileSync } from "node:fs";
 import { type APIRequestContext, test as base, expect, type Page } from "@playwright/test";
-import { DEMO_FILE, type Kind } from "./paths";
+import {
+  DEMO_FILE,
+  DEMO_LABEL,
+  HOME_DIR,
+  HOSTS_DEMO_LABEL,
+  HOSTS_HOME_DIR,
+  HOSTS_PORT,
+  IDENTITY_FILE,
+  IDENTITY_ROUTE,
+  type Kind,
+  PORT,
+  readIdentity,
+} from "./paths";
 
 export { expect };
 
@@ -55,6 +67,36 @@ export interface OverviewLite {
 
 interface Fixtures {
   consoleErrors: string[];
+  isolatedHub: void;
+}
+
+/**
+ * The hubs this suite starts itself: base URL → the fresh home and the label it wrote.
+ * `PORT` and `HOSTS_PORT` are this run's random ports (every worker reads the same ones).
+ */
+const OWN_HUBS: Record<string, { home: string; label: string }> = {
+  [`http://127.0.0.1:${PORT}`]: { home: HOME_DIR, label: DEMO_LABEL },
+  [`http://127.0.0.1:${HOSTS_PORT}`]: { home: HOSTS_HOME_DIR, label: HOSTS_DEMO_LABEL },
+};
+
+/**
+ * Fail unless `baseURL` is a demo hub this run started: it must answer with the
+ * `environment_id` and label that `serve-demo.ts` wrote into its fresh home. Any other
+ * server (an `hx serve` the user left running, possibly on the real `~/.hypothex`) fails
+ * here, before a spec reads a host route, posts a note or launches a run through it.
+ */
+export async function expectIsolatedHub(request: APIRequestContext, baseURL: string | undefined): Promise<void> {
+  const own = baseURL === undefined ? undefined : OWN_HUBS[baseURL];
+  if (own === undefined) throw new Error(`${baseURL ?? "no baseURL"} is not a demo hub this run started`);
+  const wanted = readIdentity(own.home);
+  expect(wanted?.label, `${own.home}/${IDENTITY_FILE} was not written by serve-demo.ts`).toBe(own.label);
+  const response = await request.get(IDENTITY_ROUTE);
+  expect(response.status(), `GET ${baseURL}${IDENTITY_ROUTE}`).toBe(200);
+  const got = (await response.json()) as { environment_id: string; label: string };
+  expect([got.environment_id, got.label], `${baseURL} is not the isolated demo hub`).toEqual([
+    wanted?.environment_id,
+    own.label,
+  ]);
 }
 
 export const test = base.extend<ThemeOptions & Fixtures>({
@@ -65,6 +107,13 @@ export const test = base.extend<ThemeOptions & Fixtures>({
     }, theme);
     await use(page);
   },
+  isolatedHub: [
+    async ({ request, baseURL }, use) => {
+      await expectIsolatedHub(request, baseURL);
+      await use();
+    },
+    { auto: true },
+  ],
   consoleErrors: [
     async ({ page }, use) => {
       const errors: string[] = [];

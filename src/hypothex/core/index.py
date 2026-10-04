@@ -7,13 +7,13 @@ import errno
 import fcntl
 import json
 import logging
-import math
 import sqlite3
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
@@ -45,6 +45,7 @@ from hypothex.core.records import (
     RunStatus,
     ScoreRecord,
 )
+from hypothex.core.stats import lttb
 from hypothex.core.store import ProjectEntry, RunStore, run_lock
 from hypothex.core.thin import MAX_POINTS_PER_METRIC
 
@@ -189,7 +190,7 @@ _DATA_TABLES = (
     MetricPointRow,
     PointsPendingRow,
 )
-_CARRIED_TABLES = (HostCursorRow, ScoresStaleRow)
+_CARRIED_TABLES = (HostCursorRow, ScoresStaleRow, RunChangeRow)
 """Rows a rebuild copies from the old index: they are not derived from run folders."""
 
 _BUMP_GENERATION = text(
@@ -246,19 +247,28 @@ def _score_values(run_id: str, score: ScoreRecord) -> dict[str, Any]:
 
 def downsample(points: list[MetricPoint], limit: int = MAX_POINTS_PER_METRIC) -> list[MetricPoint]:
     """
-    Keep at most ``limit`` evenly spaced points per metric name, always keeping the last.
+    Keep at most ``limit`` points per metric name, chosen by LTTB (``stats.lttb``).
+
+    The first and last points of each series are always kept, and so are its
+    peaks: a one-step loss spike survives, unlike every-n-th sampling.
 
     Parameters
     ----------
     points : list of MetricPoint
         Full history.
     limit : int
-        Maximum points per name.
+        Maximum points per name, at least 2.
 
     Returns
     -------
     list of MetricPoint
         Downsampled points grouped by name, ordered by step.
+
+    Examples
+    --------
+    >>> pts = [MetricPoint(name="loss", step=i, value=9.0 if i == 3 else 0.0) for i in range(9)]
+    >>> [p.step for p in downsample(pts, limit=3)]
+    [0, 3, 8]
     """
     by_name: dict[str, list[MetricPoint]] = defaultdict(list)
     for point in points:
@@ -266,12 +276,8 @@ def downsample(points: list[MetricPoint], limit: int = MAX_POINTS_PER_METRIC) ->
     out: list[MetricPoint] = []
     for name in sorted(by_name):
         series = sorted(by_name[name], key=lambda p: p.step)
-        if len(series) > limit:
-            kept = series[:: math.ceil(len(series) / limit)]
-            if kept[-1] is not series[-1]:
-                kept = kept[: limit - 1] + [series[-1]]
-            series = kept
-        out.extend(series)
+        keep = lttb([p.step for p in series], [p.value for p in series], limit)
+        out.extend(series[i] for i in keep)
     return out
 
 
@@ -795,16 +801,35 @@ class Index:
         points : list of MetricPoint
             Full history to (down)sample and store.
         """
+        self._replace_metric_points(run_id, points, pending_status=None)
+
+    def _replace_metric_points(
+        self, run_id: str, points: list[MetricPoint], *, pending_status: str | None
+    ) -> bool:
+        """Install points if the pending marker and captured status still match."""
         rows = [
             {"run_id": run_id, "name": p.name, "step": p.step, "value": p.value, "t": p.t}
             for p in downsample(points)
         ]
         with Session(self.engine) as session, session.begin():
+            # This DELETE obtains the write lock and checks both conditions
+            # atomically. A terminal publisher clears the marker; a subsequent
+            # rebuild can recreate it, but must not authorize an old live read.
+            claim = delete(PointsPendingRow).where(PointsPendingRow.run_id == run_id)
+            if pending_status is not None:
+                claim = claim.where(
+                    select(RunRow.run_id)
+                    .where(RunRow.run_id == run_id, RunRow.status == pending_status)
+                    .exists()
+                )
+            pending = session.connection().execute(claim)
+            if pending_status is not None and pending.rowcount == 0:
+                return False
             _touch(session, run_id)
             session.execute(delete(MetricPointRow).where(MetricPointRow.run_id == run_id))
-            session.execute(delete(PointsPendingRow).where(PointsPendingRow.run_id == run_id))
             if rows:
                 session.execute(insert(MetricPointRow), rows)
+        return True
 
     def metric_points(self, run_id: str) -> list[MetricPoint]:
         """
@@ -887,6 +912,39 @@ class Index:
                         out.setdefault(run_id, []).append(point)
         return out
 
+    def metric_names(self, run_id: str) -> list[str]:
+        """
+        Return the names of one run's indexed metrics, sorted.
+
+        Reads only the names through the ``(run_id, name, step)`` index, not
+        every point. Points a rebuild skipped are read first, as in
+        ``metric_points``.
+
+        Parameters
+        ----------
+        run_id : str
+            Run id.
+
+        Returns
+        -------
+        list of str
+            Distinct metric names; empty for a run with no points.
+
+        Examples
+        --------
+        >>> idx.metric_names("r1")  # doctest: +SKIP
+        ['loss', 'lr']
+        """
+        self._fill_pending_points([run_id])
+        stmt = (
+            select(MetricPointRow.name)
+            .where(MetricPointRow.run_id == run_id)
+            .distinct()
+            .order_by(MetricPointRow.name)
+        )
+        with Session(self.engine) as session:
+            return list(session.scalars(stmt))
+
     def _fill_pending_points(self, run_ids: list[str]) -> None:
         """Index the metric files of the runs whose points a rebuild skipped."""
         if self.store is None or not run_ids:
@@ -901,8 +959,21 @@ class Index:
                 )
                 pending.extend((r, p, st) for r, p, st in session.execute(stmt))
         for run_id, project, status in pending:
-            points = points_to_index(self.store, project, run_id, status)
-            self.replace_metric_points(run_id, points)
+            while True:
+                points = points_to_index(self.store, project, run_id, status)
+                if self._replace_metric_points(run_id, points, pending_status=status):
+                    break
+                # Read outside the write transaction. A changed status can
+                # require exact terminal history instead of bounded live points.
+                with Session(self.engine) as session:
+                    current = session.execute(
+                        select(RunRow.project, RunRow.status)
+                        .join(PointsPendingRow, PointsPendingRow.run_id == RunRow.run_id)
+                        .where(RunRow.run_id == run_id)
+                    ).one_or_none()
+                if current is None:
+                    break
+                project, status = current
 
     # host cursors -------------------------------------------------------------
     def get_cursor(self, host: str, environment_id: str) -> int:
@@ -1345,13 +1416,11 @@ def _generation_or_zero(index: Index) -> int:
 def _rebuild_locked(index: Index, store: RunStore) -> int:
     # read before the scan: every write after it is caught up in _swap_in
     since = _generation_or_zero(index)
-    fresh = index.path.with_name(index.path.name + ".tmp")
-    try:
+    # Some filesystems cannot flock: concurrent rebuilds must never share staging.
+    with TemporaryDirectory(prefix=index.path.name + ".tmp-", dir=index.path.parent) as staging:
+        fresh = Path(staging) / index.path.name
         count = _build_fresh(fresh, store)
         _swap_in(index, store, fresh, since)
-    finally:
-        for leftover in (fresh, fresh.with_name(fresh.name + "-journal")):
-            leftover.unlink(missing_ok=True)
     index.engine.dispose()  # pooled connections re-read the new schema
     return count
 
@@ -1360,14 +1429,16 @@ def rebuild_index(index: Index, store: RunStore) -> int:
     """
     Rebuild the whole index from files, atomically.
 
-    The runs are written into ``<index>.tmp`` first, without any lock on the
+    The runs are written into a unique ``<index>.tmp-*`` directory first, without a lock on the
     live index; then one write transaction re-reads the runs written to the
     live index meanwhile, copies the hub's mirror cursors, and replaces every
     table. Readers (other processes too) see the old index until that
     transaction commits, then the new one, never a part of it; a write that
     lands during the rebuild is kept. Metric points are not read here:
     ``Index.metric_points`` reads a run's file on first use. One rebuild runs
-    at a time (a lock file next to the index).
+    at a time (a lock file next to the index) where advisory locks are available;
+    otherwise separate staging directories keep concurrent rebuilds isolated,
+    and carried change markers retain writes across overlapping swaps.
 
     Parameters
     ----------

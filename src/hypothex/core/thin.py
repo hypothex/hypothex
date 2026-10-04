@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 from hypothex.core.records import MetricPoint
+from hypothex.core.stats import lttb
 
 MAX_POINTS_PER_METRIC = 1000
 """Most points per metric name the index keeps of a run, and any read of a live run's file."""
@@ -17,69 +17,6 @@ With ``MAX_POINTS_PER_METRIC`` this bounds the memory of one live run's read
 (``HistoryThinner.dropped_rows``). An ended run's exact read is not capped."""
 _MIN_LIMIT = 5
 """Room for the first, last, lowest and highest point plus one more."""
-
-
-def lttb(xs: Sequence[float], ys: Sequence[float], limit: int) -> list[int]:
-    """
-    Indices of at most ``limit`` points that keep a line's shape (LTTB).
-
-    Largest-Triangle-Three-Buckets: the first and last points are always kept.
-    The points between them are cut into ``limit - 2`` buckets in order; from
-    each bucket the point that makes the largest triangle with the point kept
-    before it and the mean of the next bucket is kept, so peaks such as a loss
-    spike survive the thinning. Integer bucket boundaries include every interior
-    point. Coordinates are rescaled per axis before computing triangle areas,
-    preserving their ordering without overflowing on large finite values.
-
-    Parameters
-    ----------
-    xs : sequence of float
-        x of each point, in drawing order.
-    ys : sequence of float
-        y of each point.
-    limit : int
-        Most points to keep; a series that is not longer is kept whole, and a
-        limit below 3 keeps every point.
-
-    Returns
-    -------
-    list of int
-        Increasing indices into ``xs`` / ``ys``.
-
-    Examples
-    --------
-    >>> lttb([0, 1, 2, 3, 4], [0, 0, 9, 0, 0], 3)
-    [0, 2, 4]
-    >>> lttb([0, 1], [5, 6], 3)
-    [0, 1]
-    """
-    n = len(xs)
-    if n <= limit or limit < 3:
-        return list(range(n))
-    x_scale = max(abs(x) for x in xs) or 1.0
-    y_scale = max(abs(y) for y in ys) or 1.0
-    xs = [x / x_scale for x in xs]
-    ys = [y / y_scale for y in ys]
-    out = [0]
-    inner = limit - 2
-    kept = 0
-    for b in range(inner):
-        start, end = b * (n - 2) // inner + 1, (b + 1) * (n - 2) // inner + 1
-        nxt_start, nxt_end = end, min((b + 2) * (n - 2) // inner + 1, n)
-        if nxt_start >= nxt_end:
-            nxt_start, nxt_end = n - 1, n
-        k = nxt_end - nxt_start
-        mx, my = math.fsum(xs[nxt_start:nxt_end]) / k, math.fsum(ys[nxt_start:nxt_end]) / k
-        ax, ay = xs[kept], ys[kept]
-        dx, dy = ax - mx, my - ay
-        best, kept = -1.0, start
-        for j in range(start, end):
-            area = abs(dx * (ys[j] - ay) - (ax - xs[j]) * dy)
-            if area > best:
-                best, kept = area, j
-        out.append(kept)
-    out.append(n - 1)
-    return out
 
 
 def _thin_series(series: list[MetricPoint], limit: int) -> list[MetricPoint]:

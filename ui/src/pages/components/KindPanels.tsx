@@ -2,12 +2,14 @@
  * Kind-specific run detail (spec 8.4): the task kind's `run_view` panels from
  * `GET /tasks/{p}/{t}/kind`, scoped to one run, plus a trace section for agent kinds.
  */
+import { useMemo } from "react";
+
 import { useRunTrace, useRunTraces, useViewQuery } from "../../api/queries";
 import { Figure, panelLetter } from "./Figure";
 import { AppLink, hrefs } from "./links";
 import { PanelBody, PanelGrid } from "./PanelGrid";
 import { ErrorBox, Loading } from "./QueryState";
-import type { PanelSpec, TraceSummary } from "./types";
+import type { PanelResult, PanelSpec, TraceSummary } from "./types";
 
 /**
  * Panel types that compare runs, so they stay unscoped on the run page: the agent kinds'
@@ -25,6 +27,27 @@ export function scopeToRun(panel: PanelSpec, runId: string): PanelSpec {
   const data = { ...(panel.data ?? {}) };
   const filter = { ...((data.filter as Record<string, unknown> | undefined) ?? {}), run_id: runId };
   return { ...panel, data: { ...data, filter } };
+}
+
+/** Metrics a sweep logs with step = its swept value (e.g. concurrency), not time. */
+export const SWEEP_PREFIX = "sweep/";
+
+/**
+ * A run's curves are over time; a `sweep/*` metric is over its swept value, so a curves
+ * panel with no metric list (the system_bench "over time" panel) leaves it out. The task
+ * page plots sweeps. A panel that lists metrics keeps what it lists; other types are
+ * returned unchanged.
+ */
+export function withoutSweeps(result: PanelResult, spec: PanelSpec | undefined): PanelResult {
+  if (result.type !== "curves" || (spec?.data?.metrics?.length ?? 0) > 0) return result;
+  const isSweep = (name: unknown): boolean => typeof name === "string" && name.startsWith(SWEEP_PREFIX);
+  if (!result.rows.some((row) => isSweep(row.name))) return result;
+  const metrics = result.meta.metrics;
+  return {
+    ...result,
+    rows: result.rows.filter((row) => !isSweep(row.name)),
+    meta: Array.isArray(metrics) ? { ...result.meta, metrics: metrics.filter((m) => !isSweep(m)) } : result.meta,
+  };
 }
 
 /** Trace panels are drawn by the trace section; everything else goes through the query. */
@@ -123,18 +146,23 @@ export interface KindPanelsProps {
 }
 
 export function KindPanels({ project, task, runId, specs, example, startIndex }: KindPanelsProps) {
-  const { regular, trace } = splitRunView(specs);
+  // `specs` is memoized by the caller, so `regular` and `results` keep their identity across renders
+  const { regular, trace } = useMemo(() => splitRunView(specs), [specs]);
   const panels = useViewQuery(
     project,
     task,
     regular.length > 0 ? { view: { title: "run", panels: regular.map((p) => scopeToRun(p, runId)) } } : null,
   );
+  const results = useMemo(
+    () => panels.data?.panels.map((result, i) => withoutSweeps(result, regular[i])),
+    [panels.data, regular],
+  );
   if (specs.length === 0) return null;
   return (
     <>
       {panels.error ? <ErrorBox error={panels.error} /> : null}
-      {regular.length > 0 && panels.data ? (
-        <PanelGrid results={panels.data.panels} specs={regular} startIndex={startIndex} />
+      {regular.length > 0 && results ? (
+        <PanelGrid results={results} specs={regular} startIndex={startIndex} />
       ) : regular.length > 0 && !panels.error ? (
         <Loading />
       ) : null}

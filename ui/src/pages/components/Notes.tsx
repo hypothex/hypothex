@@ -1,5 +1,5 @@
 /** Run panel: notes (`notes.md`), newest first shown, with Add note. */
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { queryKeys } from "../../api/queries";
 import { fmtDate, isAgent } from "./format";
@@ -28,7 +28,29 @@ export function parseNotes(raw: string): NoteEntry[] {
   });
 }
 
-const LONG_NOTE = 280;
+/**
+ * Callback ref for the clamped note: true while CSS clips its text. Measured on attach,
+ * on resize, and when `text` changes, so More shows exactly when text is hidden.
+ */
+function useClipped(text: string): [(el: HTMLElement | null) => void, boolean] {
+  const [clipped, setClipped] = useState(false);
+  const observer = useRef<ResizeObserver | null>(null);
+  // `text` is a dep on purpose: a new callback re-attaches and re-measures.
+  const ref = useCallback(
+    (el: HTMLElement | null) => {
+      observer.current?.disconnect();
+      observer.current = null;
+      if (!el) return;
+      const read = (): void => setClipped(el.scrollHeight > el.clientHeight + 1);
+      read();
+      if (typeof ResizeObserver === "undefined") return;
+      observer.current = new ResizeObserver(read);
+      observer.current.observe(el);
+    },
+    [text],
+  );
+  return [ref, clipped];
+}
 
 export function Notes({ runId, notes }: { runId: string; notes: string }) {
   const entries = parseNotes(notes);
@@ -44,7 +66,8 @@ export function Notes({ runId, notes }: { runId: string; notes: string }) {
     },
   });
   const shown = all ? entries : entries.slice(-1);
-  const canExpand = entries.length > 1 || entries.some((e) => e.text.length > LONG_NOTE);
+  const [clipRef, clipped] = useClipped(entries.at(-1)?.text ?? "");
+  const canExpand = entries.length > 1 || all || clipped;
   return (
     <div>
       {entries.length === 0 && !editing ? <p className="small">none</p> : null}
@@ -61,7 +84,7 @@ export function Notes({ runId, notes }: { runId: string; notes: string }) {
               {entry.at ? <span>{fmtDate(entry.at)}</span> : null}
             </div>
           ) : null}
-          <p className={all ? undefined : "clip"}>{entry.text}</p>
+          {all ? <p>{entry.text}</p> : <p className="clip" ref={clipRef}>{entry.text}</p>}
         </div>
       ))}
       {editing ? (

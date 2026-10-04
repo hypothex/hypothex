@@ -106,6 +106,12 @@ def test_exact_jsonl_reads_preserve_universal_newlines(tmp_path: Path) -> None:
     assert list(iter_jsonl(path)) == expected
 
 
+def test_exact_jsonl_reads_preserve_outer_unicode_whitespace(tmp_path: Path) -> None:
+    path = tmp_path / "scores.jsonl"
+    path.write_text('\u00a0{"a": 1}\u00a0\n\t{"a": 2}\t\n', encoding="utf-8")
+    assert read_jsonl(path) == [{"a": 1}, {"a": 2}]
+
+
 def test_only_a_bounded_jsonl_read_skips_bytes_that_are_not_utf8(tmp_path: Path) -> None:
     path = tmp_path / "m.jsonl"
     path.write_bytes(b'{"a": 1}\n{"a": "\xff"}\n{"a": 3}\n')

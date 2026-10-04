@@ -77,7 +77,7 @@ RUN_ID_ATTEMPTS = 8
 
 
 class _RunIdTakenError(Exception):
-    """``ctx.create_run`` found a run folder with the new id; it wrote nothing."""
+    """Another launcher owns the new id's run folder or reserved worktree."""
 
 
 @dataclass
@@ -298,6 +298,11 @@ def _checkout(repo: Path, commit: str | None, diff: str | bytes | None, dest: Pa
     patch = (diff if isinstance(diff, bytes) else diff.encode("utf-8")) if diff else None
     if head == resolved and capture_diff(repo).diff == patch:
         return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.mkdir()  # exclusive reservation: cleanup below owns only this directory
+    except FileExistsError as exc:
+        raise _RunIdTakenError(dest.name) from exc
     try:
         return create_worktree(repo, resolved, dest, patch)
     except GitError as exc:
@@ -449,11 +454,12 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         dest = ctx.layout.worktrees_dir(host_config.project) / run_id
         if ctx.layout.run_dir(host_config.project, run_id).exists() or dest.exists():
             continue  # taken already: draw another id before any work
-        worktree = _checkout(repo, req.commit, req.diff, dest)
+        worktree = None
         try:
+            worktree = _checkout(repo, req.commit, req.diff, dest)
             return _prepare_in(ctx, req, repo, host_config, worktree, run_id)
         except _RunIdTakenError:
-            pass  # another launcher created the same id meanwhile: retry with a new one
+            pass  # another launcher claimed this id meanwhile: retry with a new one
         except BaseException:
             # any failure after the worktree exists removes it (spec 8A.4)
             if worktree is not None:
@@ -929,9 +935,6 @@ def _execute(
     try:  # nothing the run logged may keep it from ending
         logged = ctx.store.read_artifacts(record.project, record.run_id)
         usage = sum_usage(ctx.store.read_usage(record.project, record.run_id))
-        ctx.index.replace_metric_points(
-            record.run_id, ctx.store.read_metric_points(record.project, record.run_id)
-        )
     except Exception as exc:  # noqa: BLE001 - the run ends either way; the warning says why
         message = f"could not read or index what the run logged: {type(exc).__name__}: {exc}"
         ctx.emit("run.warning", record, {"message": message[:500]})
@@ -953,6 +956,15 @@ def _execute(
         return done.model_copy(update={"cost": compute_cost(done, None)})
 
     final = ctx.update_run(run_id, f"run.{status.value}", finish, {"exit_code": exit_code})
+    # Publish the terminal status first: a rebuild in this gap must hydrate
+    # exact terminal history, never replace the final points with a live sample.
+    try:
+        ctx.index.replace_metric_points(
+            final.run_id, ctx.store.read_metric_points(final.project, final.run_id)
+        )
+    except Exception as exc:  # noqa: BLE001 - the run ends either way; preserve its warning
+        message = f"could not read or index what the run logged: {type(exc).__name__}: {exc}"
+        ctx.emit("run.warning", final, {"message": message[:500]})
     if auto_evaluate and status == RunStatus.FINISHED and final.task:
         try:
             evaluate_run(ctx, run_id)

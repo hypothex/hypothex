@@ -26,6 +26,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidSta
 from hypothex.core.environment import EnvironmentDescriptor
 from hypothex.core.errors import HypothexError
 from hypothex.core.events import Event
+from hypothex.core.fsutil import temp_prefix
 
 DIR_HEADER = "X-Hypothex-Dir"
 SIZE_HEADER = "X-Hypothex-Size"
@@ -308,7 +309,7 @@ class EnvClient:
         query = {k: v for k, v in params.items() if v is not None}
         return self._request("GET", path, params=query)
 
-    def post_json(self, path: str, body: dict[str, Any]) -> Any:
+    def post_json(self, path: str, body: dict[str, Any], *, timeout: float | None = None) -> Any:
         """
         ``POST`` a JSON body to an endpoint.
 
@@ -318,6 +319,9 @@ class EnvClient:
             Path on the server, e.g. ``/api/v1/runs/r1/stop``.
         body : dict
             JSON body; keep the caller's ``command_id`` so retries stay idempotent.
+        timeout : float, optional
+            Seconds for this request instead of the client's ``timeout``, for
+            work that takes long on the server, such as a reeval.
 
         Returns
         -------
@@ -331,7 +335,9 @@ class EnvClient:
         EnvRequestError
             The server answered with a 4xx/5xx status.
         """
-        return self._request("POST", path, json=body)
+        if timeout is None:
+            return self._request("POST", path, json=body)
+        return self._request("POST", path, json=body, timeout=timeout)
 
     def list_files(self, run_id: str, rel_dir: str = "") -> list[RemoteFile]:
         """
@@ -464,7 +470,9 @@ class EnvClient:
         if dest.is_dir() and not dest.is_symlink():
             raise IsADirectoryError(f"{dest} is a folder; cannot fetch a file onto it")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".part", dir=dest.parent)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=temp_prefix(dest.name), suffix=".part", dir=dest.parent
+        )
         done = False
         try:
             with os.fdopen(fd, "wb") as fh:

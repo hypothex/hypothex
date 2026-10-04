@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from hypothex.core import sources
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError
 from hypothex.core.ids import utcnow
@@ -290,6 +291,22 @@ def test_predictions_source_joins_references_meta_and_scores(ctx: Context, toy_r
             "reference": 7,
         },
     ]
+
+
+def test_predictions_source_never_reads_the_repo_of_a_project_copied_from_a_host(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec = _run(ctx, toy_repo, "r1")
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    _jsonl(ctx.run_dir(rec) / "predictions" / "predictions.jsonl", [{"id": "ex-0"}])
+
+    def no_read(*_: Any) -> None:
+        raise AssertionError("read hypothex.yaml from a host's repo path")
+
+    monkeypatch.setattr(sources, "load_project_config", no_read)
+    (row,) = iter_rows(ctx, [rec], "predictions", fields=["id", "reference"])
+    assert (row["id"], row["reference"]) == ("ex-0", None)
 
 
 def test_samples_usage_and_traces_sources(ctx: Context, toy_repo: Path) -> None:

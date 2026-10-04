@@ -87,6 +87,10 @@ def config_hash(data: dict[str, Any]) -> str:
     """
     Hash a configuration dict, ignoring a top-level ``seed`` key.
 
+    Key order never matters, at any depth. Keys that ``json`` cannot sort or
+    write (mixed ``int`` and ``str`` keys, YAML date keys) are hashed through a
+    canonical form instead of raising ``TypeError``.
+
     Parameters
     ----------
     data : dict
@@ -101,10 +105,56 @@ def config_hash(data: dict[str, Any]) -> str:
     --------
     >>> config_hash({"lr": 1, "seed": 1}) == config_hash({"lr": 1, "seed": 2})
     True
+    >>> config_hash({"layers": {1: 64, "out": 10}}) == config_hash({"layers": {"out": 10, 1: 64}})
+    True
     """
     payload = {k: v for k, v in data.items() if k != "seed"}
-    blob = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    try:
+        blob = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    except TypeError:
+        # keys json cannot sort (``{1: a, b: c}``) or write (a YAML date key).
+        # The legacy text always starts with "{", so this prefix keeps the two
+        # forms from ever writing the same text.
+        canonical = json.dumps(_canonical(payload), default=str, separators=(",", ":"))
+        blob = _CANONICAL_PREFIX + canonical
     return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+_MAP_TAG = "\x00map"
+_CANONICAL_PREFIX = "canonical:"
+
+
+def _typed_key(key: Any) -> list[str]:
+    """
+    Write a mapping key as ``[type, text]``, so ``1`` and ``"1"`` stay apart.
+
+    The text is what ``json.dumps`` writes for JSON scalars and ``str`` otherwise
+    (a YAML date key).
+    """
+    if isinstance(key, str):
+        return ["str", key]
+    if key is None or isinstance(key, bool | int | float):
+        return [type(key).__name__, json.dumps(key)]
+    return [type(key).__name__, str(key)]
+
+
+def _canonical(value: Any) -> Any:
+    """
+    Make every mapping a tagged, key-sorted list of pairs, so any keys sort.
+
+    Only used for configs whose keys ``json.dumps(sort_keys=True)`` rejects, so
+    the hash of every config it accepts is unchanged. A mapping becomes
+    ``{"\\x00map": [[[type, key], value], ...]}``: objects appear only as that
+    wrapper and every key keeps its type, so two configs that differ give
+    different text (``{1: a, "1": b}`` is not ``{1: b, "1": a}``).
+    """
+    if isinstance(value, dict):
+        pairs = [[_typed_key(k), _canonical(v)] for k, v in value.items()]
+        pairs.sort(key=lambda kv: (kv[0], json.dumps(kv[1], default=str)))
+        return {_MAP_TAG: pairs}
+    if isinstance(value, list | tuple):
+        return [_canonical(v) for v in value]
+    return value
 
 
 class Stats(BaseModel):

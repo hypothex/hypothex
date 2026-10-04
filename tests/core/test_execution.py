@@ -3,7 +3,9 @@ import resource
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -11,8 +13,9 @@ from hypothex.core import execution
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
-from hypothex.core.records import RunStatus, UsageTotals
-from tests.factories import write_toy_project
+from hypothex.core.index import rebuild_index
+from hypothex.core.records import RunRecord, RunStatus, UsageTotals
+from tests.factories import git, write_toy_project
 
 PY = sys.executable
 WRITE_PREDS = (
@@ -101,6 +104,38 @@ def test_prepare_run_retries_when_another_launcher_takes_the_id(
     assert ctx.index.get_run(clash) is None
     assert not any(e.run_id == clash for e in ctx.events.since(0))
     assert list(ctx.layout.run_dir("toy", clash).iterdir()) == []  # the other run's folder
+
+
+def test_prepare_run_retries_without_removing_a_racing_launchers_worktree(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The destination check must not grant cleanup rights to another launcher's tree."""
+    clash, fresh = "20260101-000000-explore-0000000a", "20260101-000000-explore-0000000b"
+    _ids(monkeypatch, clash, fresh)
+    commit = git(toy_repo, "rev-parse", "HEAD")
+    # A clean pinned commit needs a worktree when the working checkout is dirty.
+    with (toy_repo / "toymetrics.py").open("a") as fh:
+        fh.write("# local change\n")
+    competitor = ctx.layout.worktrees_dir("toy") / clash
+    real_resolve = execution._resolve_commit
+    raced = False
+
+    def resolve_racing(repo: Path, wanted: str) -> str | None:
+        nonlocal raced
+        if not raced:
+            raced = True
+            execution.create_worktree(repo, commit, competitor, None)
+            (competitor / "owned.txt").write_text("other launcher")
+        return real_resolve(repo, wanted)
+
+    monkeypatch.setattr(execution, "_resolve_commit", resolve_racing)
+    try:
+        rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=commit))
+    finally:
+        assert (competitor / "owned.txt").is_file(), "another launcher's worktree was removed"
+    assert rec.run_id == fresh
+    assert (competitor / "owned.txt").read_text() == "other launcher"
+    assert str(competitor) in git(toy_repo, "worktree", "list", "--porcelain")
 
 
 def test_prepare_run_gives_up_after_run_id_attempts(
@@ -280,6 +315,38 @@ def test_non_finite_metric_values_do_not_break_the_run_or_the_index(
     reopened = Context.open(ctx.layout.home)
     assert reopened.index.get_run(done.run_id) is not None
     assert [p.value for p in reopened.index.metric_points(done.run_id)] == [0.5]
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_local_end_indexes_exact_history_after_an_intervening_rebuild(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int
+) -> None:
+    code = (
+        "import json,os; p=os.environ['HYPOTHEX_RUN_DIR']+'/metrics.jsonl'; "
+        "open(p,'w').write(''.join(json.dumps(dict(name=f'm{i:03d}',step=0,value=float(i)))"
+        "+chr(10) for i in range(257))); "
+        f"raise SystemExit({exit_code})"
+    )
+    original_update = ctx.update_run
+    seen: list[int] = []
+
+    def rebuild_before_end(
+        run_id: str,
+        event_type: str,
+        mutate: Callable[[RunRecord], RunRecord],
+        payload: dict[str, Any] | None = None,
+    ) -> RunRecord:
+        if event_type in {"run.finished", "run.failed"}:
+            # A concurrent rebuild sees RUNNING and its reader fills bounded points.
+            rebuild_index(ctx.index, ctx.store)
+            seen.append(len(ctx.index.metric_points(run_id)))
+        return original_update(run_id, event_type, mutate, payload)
+
+    monkeypatch.setattr(ctx, "update_run", rebuild_before_end)
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(code)))
+    assert done.status == (RunStatus.FINISHED if exit_code == 0 else RunStatus.FAILED)
+    assert seen == [256]
+    assert len(ctx.index.metric_points(done.run_id)) == 257
 
 
 def test_index_refresh_failure_still_finishes_the_run(

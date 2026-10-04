@@ -3,7 +3,7 @@ import { scaleLinear } from "d3-scale";
 import { fmtSig3 } from "../../charts/valueFormat";
 import { DASH, fmtClock, fmtInterval, fmtScore, fmtScoreUnit, isAgent, isNum } from "./format";
 import { AppLink, hrefs } from "./links";
-import { ACTIVE_STATUSES, FAILED_STATUSES, type IdeaRow, type RunStatus } from "./types";
+import { FAILED_STATUSES, type IdeaRow, type RunStatus } from "./types";
 
 const STRIP_H = 30;
 
@@ -73,7 +73,8 @@ export function groupIdeas(ideas: IdeaRow[]): IdeaGroup[] {
 /** The big number of a row, or what happened instead. */
 export function ideaScore(idea: IdeaRow): string {
   if (idea.primary) return fmtScoreUnit(idea.primary.mean, idea.unit);
-  if (idea.statuses.some((s) => ACTIVE_STATUSES.has(s))) return "running";
+  if (idea.statuses.includes("running")) return "running";
+  if (idea.statuses.includes("queued")) return "queued";
   if (idea.statuses.length > 0 && idea.statuses.every((s) => FAILED_STATUSES.has(s))) {
     return "failed";
   }
@@ -97,7 +98,15 @@ function SeedMark({ status, agent }: { status: RunStatus; agent: boolean }) {
       </svg>
     );
   }
-  if (ACTIVE_STATUSES.has(status)) {
+  if (status === "queued") {
+    // the phase 2 mockup's queued glyph: a plain hollow ring
+    return (
+      <svg width="12" height="12" viewBox="-6 -6 12 12" data-seed="queued" aria-hidden="true">
+        <circle r={4} fill="none" stroke="var(--ink-2)" strokeWidth={1.4} />
+      </svg>
+    );
+  }
+  if (status === "running") {
     return (
       <svg width="12" height="12" viewBox="-6 -6 12 12" data-seed="running" aria-hidden="true">
         <circle r={4.2} fill="none" stroke="var(--ink)" strokeWidth={1.4} strokeDasharray="2 2" />

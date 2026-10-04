@@ -97,6 +97,13 @@ def test_thinner_rejects_a_nonpositive_metric_name_limit() -> None:
         HistoryThinner(max_names=0)
 
 
+@pytest.mark.parametrize("offset", [2**62, 2**63 - 100])
+def test_lttb_preserves_shape_at_large_integer_steps(offset: int) -> None:
+    values = [10.0 if i == 31 else 0.0 for i in range(100)]
+    expected = lttb(list(range(100)), values, 10)
+    assert lttb([offset + i for i in range(100)], values, 10) == expected
+
+
 def test_lttb_last_bucket_includes_the_last_interior_peak() -> None:
     values = [0.0] * 17
     values[15] = 10.0

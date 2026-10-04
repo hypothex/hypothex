@@ -23,17 +23,18 @@ from hypothex.core.leaderboard import (
     Leaderboard,
     _natural_key,
     build_leaderboard,
+    cached_leaderboard,
     group_id_for,
-    group_label,
     pick_field,
+    seed_group_label,
+    seed_group_labels,
 )
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.seeds import summarize
 from hypothex.core.sources import group_labels, iter_rows, metric_points, select_fields
-from hypothex.core.stats import ecdf_points, quantile
+from hypothex.core.stats import ecdf_points, lttb, quantile
 from hypothex.core.store import ProjectEntry
-from hypothex.core.thin import lttb
 from hypothex.core.views import (
     VERSION_REF,
     PanelSpec,
@@ -417,11 +418,16 @@ def _row_matches(row: dict[str, Any], flt: dict[str, Any]) -> bool:
 def _build_board(
     ctx: Context, entry: ProjectEntry, task: str, runs: list[RunRecord]
 ) -> Leaderboard:
-    per_example = primary_examples(ctx, entry.config, task, runs, None)
-    scores = ctx.index.scores_for(r.run_id for r in runs)
-    return build_leaderboard(
-        entry.project, task, entry.config, runs, scores, per_example=per_example or None
-    )
+    def build() -> Leaderboard:
+        per_example = primary_examples(ctx, entry.config, task, runs, None)
+        scores = ctx.index.scores_for(r.run_id for r in runs)
+        return build_leaderboard(
+            entry.project, task, entry.config, runs, scores, per_example=per_example or None
+        )
+
+    # a view's runs are a filtered list of the task's runs: they are part of the key
+    ids = ("view", tuple(r.run_id for r in runs))
+    return cached_leaderboard(ctx, entry.project, task, entry.config, build, variant=ids)
 
 
 def _markdown(panel: PanelSpec) -> PanelResult:
@@ -773,12 +779,6 @@ def _empty_trace(
     )
 
 
-def _own_label(members: list[RunRecord], key: str) -> str:
-    """``group_label`` of the newest non-empty hypothesis and the group's tags."""
-    hypothesis = next((r.hypothesis for r in reversed(members) if r.hypothesis.strip()), "")
-    return group_label(hypothesis, (t for r in members for t in r.tags), key)
-
-
 def _groups(scope: _Scope, panel: PanelSpec) -> list[tuple[str, str, list[RunRecord]]]:
     """
     Return ``(key, label, members)`` per group, in order of first run.
@@ -798,7 +798,12 @@ def _groups(scope: _Scope, panel: PanelSpec) -> list[tuple[str, str, list[RunRec
         else:
             key = group_id_for(r)
         members[key].append(r)
-    labels = scope.labels() if by in ("group", "run") else {}
+    if by in ("group", "run"):
+        labels = scope.labels()
+    elif by == "config":
+        labels = seed_group_labels(members)  # the board's rule, over these config groups
+    else:
+        labels = {}
     repeat = _repeats(scope.runs) if by == "run" else {}
     out: list[tuple[str, str, list[RunRecord]]] = []
     for key, runs in members.items():
@@ -806,7 +811,7 @@ def _groups(scope: _Scope, panel: PanelSpec) -> list[tuple[str, str, list[RunRec
             label: str | None = f"{labels[group_id_for(runs[0])]} r{repeat[key]}"
         else:
             label = f"seed {runs[0].seed}" if by == "seed" else labels.get(key)
-        out.append((key, label or _own_label(runs, key), runs))
+        out.append((key, label or seed_group_label(runs, key), runs))
     return out
 
 
@@ -1106,6 +1111,32 @@ def _example_values(scope: _Scope, run: RunRecord, name: str, version: str) -> l
     return [float(row[field]) for row in rows if row.get(field) is not None]
 
 
+def _primary_rows(scope: _Scope, run: RunRecord) -> tuple[str, list[dict[str, Any]]] | None:
+    """
+    The primary metric's name and a run's per-example rows of it (without ``id``).
+
+    ``None`` when the primary is not a configured metric; no rows when the run
+    has no per-example file.
+    """
+    name = scope.board().primary.partition("/")[0]
+    spec = scope.entry.config.metrics.get(name)
+    if spec is None:
+        return None
+    return name, scope.cache.run_files(run).examples(scope.ctx, name, spec.version)
+
+
+def _attempts(scope: _Scope, run: RunRecord) -> int | None:
+    """
+    Count the examples a run attempted: its per-example rows of the primary metric.
+
+    The same count as the stat strip's ``$ / attempt``; ``None`` without rows.
+    """
+    primary = _primary_rows(scope, run)
+    if primary is None or not primary[1]:
+        return None
+    return len(primary[1])
+
+
 def _solved(scope: _Scope, run: RunRecord) -> int | None:
     """
     Count the examples a run solved on the task's primary metric.
@@ -1113,11 +1144,10 @@ def _solved(scope: _Scope, run: RunRecord) -> int | None:
     ``None`` when the run has no per-example file or its field (chosen by
     ``pick_field``, as for test-set noise) is not binary.
     """
-    name = scope.board().primary.partition("/")[0]
-    spec = scope.entry.config.metrics.get(name)
-    if spec is None:
+    primary = _primary_rows(scope, run)
+    if primary is None:
         return None
-    rows = scope.cache.run_files(run).examples(scope.ctx, name, spec.version)
+    name, rows = primary
     picked = pick_field(rows, name)
     if picked is None or not picked[1]:
         return None
@@ -1144,12 +1174,14 @@ def _run_value(scope: _Scope, run: RunRecord, ref: str) -> float | None:
     """
     Resolve a reference to one finite number for one run.
 
-    Order: ``usage.<field>`` (run totals) or ``usage.<field>/solved`` (the total
-    per example solved on the primary metric), ``params.<p>``/``vars.<p>`` (cast to
-    float), a configured metric ``name[@version][/key]`` (newest good score;
-    when no score has that key and the key is an aggregate such as ``median``,
-    the aggregate of the metric's per-example values), samples ``name[/agg]``,
-    then the last logged value of a history metric named exactly ``ref``.
+    Order: ``usage.<field>`` (run totals), ``usage.<field>/solved`` (the total
+    per example solved on the primary metric) or ``usage.<field>/attempt`` (the
+    total per example attempted: per-example rows of the primary),
+    ``params.<p>``/``vars.<p>`` (cast to float), a configured metric
+    ``name[@version][/key]`` (newest good score; when no score has that key and
+    the key is an aggregate such as ``median``, the aggregate of the metric's
+    per-example values), samples ``name[/agg]``, then the last logged value of
+    a history metric named exactly ``ref``.
     NaN and ±inf count as no value (``None``): they would become null points
     in JSON and make every Pareto comparison false.
     """
@@ -1161,15 +1193,17 @@ def _resolve_value(scope: _Scope, run: RunRecord, ref: str) -> float | None:
     """The raw value behind ``_run_value``; may be NaN or ±inf."""
     if ref.startswith("usage."):
         field, _, per = ref.removeprefix("usage.").partition("/")
-        if per not in ("", "solved"):
-            raise ConfigError("usage references are usage.<field> or usage.<field>/solved")
+        if per not in ("", "solved", "attempt"):
+            raise ConfigError(
+                "usage references are usage.<field>, usage.<field>/solved or usage.<field>/attempt"
+            )
         value = getattr(run.usage, field, None) if run.usage is not None else None
         if not isinstance(value, int | float):
             return None
         if not per:
             return float(value)
-        solved = _solved(scope, run)
-        return float(value) / solved if solved else None
+        count = _solved(scope, run) if per == "solved" else _attempts(scope, run)
+        return float(value) / count if count else None
     if ref.startswith(("params.", "vars.")):
         raw = _param_raw(run, ref)
         return None if raw is None else _as_float(raw)

@@ -119,6 +119,23 @@ def test_get_json_drops_none_params_and_post_json(
     assert again == tagged
 
 
+def test_post_json_can_wait_longer_than_the_client_timeout(
+    env: EnvClient, ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    seen: list[Any] = []
+    real = env._http.request
+
+    def spy(method: str, url: str, **kw: Any) -> httpx.Response:
+        seen.append(kw.get("timeout", "client default"))
+        return real(method, url, **kw)
+
+    monkeypatch.setattr(env._http, "request", spy)
+    env.post_json("/api/v1/runs/r1/star", {"on": True})
+    env.post_json("/api/v1/runs/r1/star", {"on": True}, timeout=600)
+    assert seen == ["client default", 600]
+
+
 def test_server_errors_keep_status_and_type(env: EnvClient) -> None:
     with pytest.raises(EnvRequestError) as missing:
         env.get_json("/api/v1/runs/ghost")

@@ -57,6 +57,7 @@ describe("lost reasons", () => {
           url: "ws://127.0.0.1:1/api/v1/ws",
           clock,
           storage: null,
+          head: null,
           createSocket: () => {
             const socket = new StubSocket();
             sockets.push(socket);

@@ -7,6 +7,8 @@ random loopback port, in a thread) or a fake; nothing connects to a real host.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import gc
 import json
 import logging
 import os
@@ -34,9 +36,11 @@ from hypothex.core.fsutil import append_jsonl
 from hypothex.core.ids import utcnow
 from hypothex.core.index import SCHEMA_VERSION, Index, rebuild_index
 from hypothex.core.layout import Layout
+from hypothex.core.queries import show_run
 from hypothex.core.records import (
     Artifact,
     CostTotals,
+    DatasetRef,
     ExecutorInfo,
     RunRecord,
     RunStatus,
@@ -44,7 +48,7 @@ from hypothex.core.records import (
 )
 from hypothex.core.store import RunStore
 from hypothex.remote.bootstrap import BootstrapError, ServerInfo
-from hypothex.remote.client import EnvUnreachableError, RemoteFile
+from hypothex.remote.client import EnvRequestError, EnvUnreachableError, RemoteFile
 from hypothex.remote.config import EnvironmentsFile, HostSpec
 from hypothex.remote.hub import (
     Backoff,
@@ -55,6 +59,7 @@ from hypothex.remote.hub import (
     mirror_source,
     wanted_path,
 )
+from hypothex.remote.ssh import SshError
 from tests.factories import make_record
 
 # index cursors -----------------------------------------------------------------------
@@ -191,6 +196,7 @@ class FakeClient:
     def __init__(self, remote: Context) -> None:
         self.remote = remote
         self.fetched: list[str] = []
+        self.gets: list[str] = []
 
     def _dir(self, run_id: str) -> Path:
         return self.remote.run_dir(self.remote.find_record(run_id))
@@ -233,6 +239,10 @@ class FakeClient:
         return True
 
     def get_json(self, path: str, **params: Any) -> Any:
+        self.gets.append(path)
+        if path.startswith("/api/v1/runs/"):
+            detail = show_run(self.remote, path.removeprefix("/api/v1/runs/"))
+            return detail.model_dump(mode="json")
         prefix, _, rest = path.removeprefix("/api/v1/projects/").partition("/")
         if rest != "entry":
             raise AssertionError(f"unexpected GET {path}")
@@ -488,6 +498,60 @@ def test_mirror_names_the_host_on_its_artifacts(pair: tuple[Context, Context]) -
     mirror_event(hub, FakeClient(remote), "gpu1", "env-remote", run_event(remote, "r1"))  # type: ignore[arg-type]
     [artifact] = hub.find_record("r1").artifacts
     assert (artifact.kind, artifact.host) == ("checkpoint", "gpu1")
+
+
+def test_mirror_names_the_host_on_its_datasets(pair: tuple[Context, Context]) -> None:
+    hub, remote = pair
+    seed_run(remote, "r1")
+    own = DatasetRef(name="dset", version="1", path="/home/hx/d.jsonl")
+    shared = DatasetRef(name="nfs", version="1", host="nfs-01", path="/data/nfs.jsonl")
+    remote.update_run(
+        "r1", "run.tagged", lambda r: r.model_copy(update={"datasets": [own, shared]})
+    )
+    mirror_event(hub, FakeClient(remote), "gpu1", "env-remote", run_event(remote, "r1"))  # type: ignore[arg-type]
+    datasets = hub.find_record("r1").datasets
+    assert [(d.name, d.host, d.path) for d in datasets] == [
+        ("dset", "gpu1", "/home/hx/d.jsonl"),  # was "local" on the host: it is the host's file
+        ("nfs", "nfs-01", "/data/nfs.jsonl"),
+    ]
+
+
+def test_host_paths_name_where_a_mirrored_run_lives_on_its_host(
+    pair: tuple[Context, Context], toy_repo: Path
+) -> None:
+    hub, remote = pair
+    remote.register_project(toy_repo)
+    record = seed_run(remote, "r1")
+    client = FakeClient(remote)
+    hub_mod.mirror_run(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    mirrored = hub.find_record("r1")
+    assert hub_mod.host_paths(hub, mirrored) == {
+        "run_dir": f"gpu1:{remote.run_dir(record)}",
+        "repo": f"gpu1:{toy_repo}",
+        "cwd": f"gpu1:{record.cwd}",
+    }
+    assert client.gets.count("/api/v1/runs/r1") == 1
+    hub_mod.mirror_run(hub, client, "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert client.gets.count("/api/v1/runs/r1") == 1  # asked once per run
+    own = seed_run(hub, "h1")
+    assert hub_mod.host_paths(hub, own) == {}
+
+
+def test_host_paths_are_asked_again_until_the_host_answers(pair: tuple[Context, Context]) -> None:
+    hub, remote = pair
+    record = seed_run(remote, "r1")
+
+    class NoDetail(FakeClient):
+        def get_json(self, path: str, **params: Any) -> Any:
+            if path.startswith("/api/v1/runs/"):
+                raise EnvRequestError("boom", status_code=500)
+            return super().get_json(path, **params)
+
+    hub_mod.mirror_run(hub, NoDetail(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    mirrored = hub.find_record("r1")
+    assert hub_mod.host_paths(hub, mirrored) == {"cwd": f"gpu1:{record.cwd}"}  # host from claim
+    hub_mod.mirror_run(hub, FakeClient(remote), "gpu1", "env-remote", "toy", "r1")  # type: ignore[arg-type]
+    assert hub_mod.host_paths(hub, mirrored)["run_dir"] == f"gpu1:{remote.run_dir(record)}"
 
 
 def test_mirror_copies_a_project_only_the_host_knows(
@@ -838,7 +902,7 @@ def test_the_mirror_never_fetches_the_reserved_folder(
     run = hub.layout.run_dir("toy", "r1")
     assert ".hx/mirror-skips.json" in [f.path for f in client.list_files("r1")]
     assert not any(p.startswith(".hx") for p in client.fetched)
-    assert not (run / ".hx").exists() and (run / "scores.jsonl").is_file()
+    assert not (run / hub_mod.SKIPS_FILE).exists() and (run / "scores.jsonl").is_file()
     assert ".hx/mirror-skips.json" not in json.loads((run / hub_mod.MANIFEST_NAME).read_text())
 
 
@@ -1349,7 +1413,8 @@ def test_host_goes_stale_without_pings_and_recovers(
         if e.type == "host.state" and e.payload["name"] == "a"
     ]
     assert "stale" in states
-    assert states[-1] == "connected"
+    assert "connected" in states[states.index("stale") :]  # then hub.stop() ends the session
+    assert states[-1] == "connecting"
 
 
 def test_protocol_mismatch_marks_upgrade_and_stops_retrying(
@@ -1446,6 +1511,45 @@ def test_running_runs_refresh_metrics_without_events(
     ]
     assert refreshes and refreshes[0].run_id == "a-live"
     assert refreshes[0].payload["remote_sequence"] is None
+
+
+class CountingLock:
+    """A lock that counts how often it was taken."""
+
+    def __init__(self) -> None:
+        self.inner = threading.Lock()
+        self.taken = 0
+
+    def __enter__(self) -> None:
+        self.inner.acquire()
+        self.taken += 1
+
+    def __exit__(self, *exc: object) -> None:
+        self.inner.release()
+
+
+def test_refresh_re_mirrors_only_running_runs_one_lock_per_run(
+    pair: tuple[Context, Context], toy_repo: Path
+) -> None:
+    hub_ctx, remote = pair
+    remote.register_project(toy_repo)
+    seed_run(remote, "r1", status=RunStatus.RUNNING)
+    seed_run(remote, "r2", status=RunStatus.RUNNING)
+    for i in range(3):
+        seed_run(remote, f"q{i}", status=RunStatus.QUEUED)
+    hub = Hub(
+        hub_ctx,
+        EnvironmentsFile(environments={"gpu1": HostSpec(route="url", url="http://127.0.0.1:9")}),
+    )
+    sup = hub._sups["gpu1"]
+    events = [e for e in remote.events.since(0) if e.type.startswith("run.")]
+    hub._apply(sup, FakeClient(remote), "env-remote", events)  # type: ignore[arg-type]
+    client = FakeClient(remote)
+    sup.lock = CountingLock()  # type: ignore[assignment]
+    hub._refresh_active(sup, client, "env-remote")  # type: ignore[arg-type]
+    assert client.fetched.count("run.yaml") == 2  # r1 and r2; no queued run
+    assert client.gets == []  # the project and the host paths are not asked again
+    assert sup.lock.taken == 2  # type: ignore[attr-defined]
 
 
 def test_apply_mirrors_each_sequence_once(pair: tuple[Context, Context]) -> None:
@@ -1798,6 +1902,75 @@ def test_a_halt_during_the_session_drain_still_closes_clients_and_route(
     asyncio.run(main())
 
 
+def test_a_draining_session_is_not_shown_as_connected(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, _ = servers
+    seed_run(a.ctx, "a-1")
+    hub_ctx = Context.open(tmp_path / "hub")
+    started, release = threading.Event(), threading.Event()
+    real = hub_mod.mirror_run
+
+    def blocked_mirror(*args: Any, **kwargs: Any) -> Any:
+        started.set()
+        release.wait(10)
+        return real(*args, **kwargs)
+
+    async def failing_watch(self: Hub, sup: Any, *args: Any) -> None:
+        await until(started.is_set)
+        raise RuntimeError("no answer")  # the session ends on its own mid-mirror
+
+    monkeypatch.setattr(hub_mod, "mirror_run", blocked_mirror)
+    monkeypatch.setattr(hub_mod.Hub, "_watch", failing_watch)
+    only_a = EnvironmentsFile(environments={"a": HostSpec(route="url", url=a.url)})
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, only_a))
+        await hub.start()
+        try:
+            sup = hub._sups["a"]
+            await until(lambda: started.is_set() and sup.client is None)  # in its drain
+            assert hub.state("a").state == "connecting"
+            with pytest.raises(HostUnavailableError, match="is connecting"):
+                hub.client("a")
+        finally:
+            release.set()
+            await hub.stop()
+
+    asyncio.run(main())
+
+
+def test_a_shielded_failure_after_its_caller_left_is_not_logged_as_unretrieved(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    hub = Hub(
+        Context.open(tmp_path / "hub"),
+        EnvironmentsFile(environments={"gpu1": HostSpec(route="url", url="http://127.0.0.1:9")}),
+    )
+    sup = hub._sups["gpu1"]
+    started, release = threading.Event(), threading.Event()
+
+    def fail() -> None:
+        started.set()
+        release.wait(10)
+        raise RuntimeError("mirror failed after the session ended")
+
+    async def main() -> None:
+        caller = asyncio.create_task(hub._shielded(sup, fail))
+        await until(started.is_set)
+        caller.cancel()  # the session ends; the thread goes on
+        with contextlib.suppress(asyncio.CancelledError):
+            await caller
+        release.set()
+        await hub._drain(sup)
+        assert not sup.pending
+
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        asyncio.run(main())
+        gc.collect()  # an unretrieved exception is logged when its task is collected
+    assert not [r for r in caplog.records if "never retrieved" in r.getMessage()]
+
+
 def live_session_counter(monkeypatch: pytest.MonkeyPatch) -> set[object]:
     """Swap ``Hub._session`` for one that stays open and takes a while to clean up."""
     live: set[object] = set()
@@ -1985,9 +2158,17 @@ class FakeTunnel:
 
     instances: list[FakeTunnel] = []
 
-    def __init__(self, target: Any, remote_port: int, local_port: int | None = None) -> None:
+    def __init__(
+        self,
+        target: Any,
+        remote_port: int,
+        local_port: int | None = None,
+        *,
+        registry: Path | None = None,
+    ) -> None:
         self.target = target
         self.local_port = remote_port
+        self.registry = registry
         self.started = self.stopped = self.dead = False
         FakeTunnel.instances.append(self)
 
@@ -2058,6 +2239,93 @@ def test_ssh_route_bootstraps_tunnels_and_mirrors(
     assert hub_ctx.index.get_run("a-1") is not None
     states = [e.payload["state"] for e in hub_ctx.events.since(0) if e.type == "host.state"]
     assert states[:2] == ["bootstrapping", "connected"]
+
+
+def test_an_ssh_reconnect_is_not_bootstrapping_and_goes_stale_mid_attempt(
+    tmp_path: Path,
+    servers: tuple[EnvServer, EnvServer],
+    fake_ssh: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a, _ = servers
+    hung = threading.Event()
+
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        fake_ssh.append((target.alias, home, target.ssh_bin))
+        if len(fake_ssh) > 1:  # the host is unreachable now: ssh hangs until its timeout
+            hung.wait(20)
+            raise SshError("ssh gpu1 timed out after 20s")
+        return ServerInfo(
+            pid=1,
+            port=a.port,
+            managed=True,
+            hx_version=__version__,
+            protocol_version=PROTOCOL_VERSION,
+        )
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, ssh_hosts()))
+        hub.stale_after = 0.6
+        await hub.start()
+        try:
+            await until(lambda: hub.state("gpu1").state == "connected")
+            FakeTunnel.instances[0].dead = True  # the ssh -L process died
+            await until(lambda: len(fake_ssh) == 2)
+            await until(lambda: hub.state("gpu1").state == "stale", timeout=5)
+            assert len(fake_ssh) == 2 and not hung.is_set()  # still inside the first retry
+        finally:
+            hung.set()
+            await hub.stop()
+
+    asyncio.run(main())
+    states = [e.payload["state"] for e in hub_ctx.events.since(0) if e.type == "host.state"]
+    assert states[:2] == ["bootstrapping", "connected"]
+    assert "bootstrapping" not in states[2:]  # nothing is bootstrapped again
+    assert "stale" in states
+
+
+def test_hub_start_reaps_old_tunnels_and_records_its_own(
+    tmp_path: Path,
+    servers: tuple[EnvServer, EnvServer],
+    fake_ssh: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a, _ = servers
+    reaped: list[Path] = []
+
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        return ServerInfo(
+            pid=1,
+            port=a.port,
+            managed=True,
+            hx_version=__version__,
+            protocol_version=PROTOCOL_VERSION,
+        )
+
+    def reap(registry: Path) -> list[int]:
+        assert FakeTunnel.instances == []  # before any tunnel of this hub opens
+        reaped.append(registry)
+        return [4242]
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+    monkeypatch.setattr(hub_mod, "reap_stale_tunnels", reap)
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, ssh_hosts()))
+        await hub.start()
+        try:
+            await until(lambda: hub.state("gpu1").state == "connected")
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    registry = hub_ctx.layout.home / "hub" / "tunnels"
+    assert reaped == [registry]
+    assert [t.registry for t in FakeTunnel.instances] == [registry]
 
 
 def test_ssh_bootstrap_failure_is_error_and_retried(

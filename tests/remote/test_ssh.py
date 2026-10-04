@@ -1,13 +1,17 @@
+import contextlib
 import functools
 import http.server
 import json
 import os
+import signal
 import socket
 import socketserver
+import subprocess
+import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
@@ -21,6 +25,7 @@ from hypothex.remote.ssh import (
     _free_port,
     copy_from,
     copy_to,
+    reap_stale_tunnels,
     run_remote,
 )
 from tests.fakes import DEAD_HUB, FakeRemote
@@ -305,10 +310,10 @@ def test_copy_from_missing_remote_leaves_nothing(
     fake_remote: FakeRemote, tmp_path: Path, work: Path
 ) -> None:
     fake_remote.add_host("gpu1")
-    out_dir = tmp_path / "out"
+    out_dir = tmp_path / "pulled" / "out"
     with pytest.raises(SshError, match="No such file or directory"):
         copy_from(fake_remote.target("gpu1"), "~/nope.pt", out_dir / "nope.pt", work=work)
-    assert list(out_dir.iterdir()) == []
+    assert not (tmp_path / "pulled").exists()  # no empty folder is left behind
     assert list((work / "stage").iterdir()) == []
 
 
@@ -675,3 +680,88 @@ def test_tunnel_missing_ssh_binary_raises(tmp_path: Path) -> None:
     target = SshTarget(alias="gpu1", ssh_bin=str(tmp_path / "no-ssh"))
     with pytest.raises(SshError, match="not found"):
         Tunnel(target, remote_port=40123).start()
+
+
+# --------------------------------------------------------------------------- orphan tunnels
+
+_HOLD_TUNNEL = """
+import sys, time
+from pathlib import Path
+from hypothex.remote.ssh import SshTarget, Tunnel
+target = SshTarget(alias="gpu1", ssh_bin=sys.argv[1])
+tunnel = Tunnel(target, remote_port=int(sys.argv[2]), registry=Path(sys.argv[3]))
+tunnel.start()
+print(tunnel.local_port, flush=True)
+time.sleep(120)
+"""
+
+
+def _wait_until(pred: Callable[[], bool], timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_a_tunnel_records_itself_while_it_runs(
+    fake_remote: FakeRemote, echo_port: int, tmp_path: Path
+) -> None:
+    fake_remote.add_host("gpu1")
+    registry = tmp_path / "tunnels"
+    tunnel = Tunnel(fake_remote.target("gpu1"), remote_port=echo_port, registry=registry)
+    tunnel.start()
+    try:
+        [record] = list(registry.glob("*.json"))
+        data = json.loads(record.read_text())
+        assert data == {"pid": int(record.stem), "owner": os.getpid(), "argv": tunnel.argv()}
+        assert reap_stale_tunnels(registry) == []  # its owner (this process) is alive
+        assert tunnel.alive()
+    finally:
+        tunnel.stop()
+    assert list(registry.iterdir()) == []
+
+
+def test_a_tunnel_left_by_a_killed_process_is_reaped(
+    fake_remote: FakeRemote, echo_port: int, tmp_path: Path
+) -> None:
+    fake_remote.add_host("gpu1")
+    registry = tmp_path / "tunnels"
+    owner = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_TUNNEL, fake_remote.ssh_bin, str(echo_port), str(registry)],
+        stdout=subprocess.PIPE,
+    )
+    assert owner.stdout is not None
+    port = int(owner.stdout.readline())
+    [record] = list(registry.glob("*.json"))
+    pid = int(record.stem)
+    try:
+        os.kill(owner.pid, signal.SIGKILL)  # the hub dies without stopping its tunnel
+        owner.wait()
+        assert _roundtrip(port, b"orphan") == b"orphan"  # the ssh -L process lives on
+        assert reap_stale_tunnels(registry) == [pid]
+        assert _wait_until(lambda: _refused(port))
+        assert list(registry.iterdir()) == []
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_reaping_never_kills_a_process_that_reused_the_pid(tmp_path: Path) -> None:
+    registry = tmp_path / "tunnels"
+    registry.mkdir()
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    other = subprocess.Popen(["sleep", "30"])  # took the pid of a tunnel that is gone
+    try:
+        argv = ["ssh", "-N", "-L", "127.0.0.1:5:127.0.0.1:6", "gpu1"]
+        record = {"pid": other.pid, "owner": dead.pid, "argv": argv}
+        (registry / f"{other.pid}.json").write_text(json.dumps(record))
+        (registry / "junk.json").write_text("{")
+        assert reap_stale_tunnels(registry) == []
+        assert other.poll() is None
+        assert list(registry.iterdir()) == []  # both records are dropped
+    finally:
+        other.kill()
+        other.wait()

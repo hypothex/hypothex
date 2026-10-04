@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
+import math
 import shlex
 import weakref
 from collections.abc import Iterable
@@ -459,7 +461,71 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
     )
 
 
-def metric_history(ctx: Context, run_id: str) -> list[MetricPoint]:
+def lttb(series: list[MetricPoint], limit: int) -> list[MetricPoint]:
+    """
+    Downsample one series with Largest-Triangle-Three-Buckets.
+
+    The first and last points are always kept. The points in between are
+    split into ``limit - 2`` buckets, and from each bucket the point that
+    makes the largest triangle with the point kept before it and the mean of
+    the next bucket is kept. Peaks and dips survive, unlike every-n-th
+    sampling. Kept points are returned as they are (no averaging).
+
+    Parameters
+    ----------
+    series : list of MetricPoint
+        One metric's points, ordered by step.
+    limit : int
+        Maximum points to return; at least 2.
+
+    Returns
+    -------
+    list of MetricPoint
+        ``series`` itself when it has at most ``limit`` points.
+
+    Raises
+    ------
+    RunError
+        If ``limit`` is less than 2.
+
+    Examples
+    --------
+    >>> pts = [MetricPoint(name="loss", step=i, value=v) for i, v in enumerate([0, 1, 9, 1, 0])]
+    >>> [p.value for p in lttb(pts, 3)]
+    [0.0, 9.0, 0.0]
+    """
+    if limit < 2:
+        raise RunError(f"max_points must be at least 2, not {limit}")
+    n = len(series)
+    if n <= limit:
+        return series
+    inner = limit - 2
+    out = [series[0]]
+    kept = series[0]
+    for i in range(inner):
+        # bucket i holds series[start:stop]; integer bounds give equal-size buckets
+        start = i * (n - 2) // inner + 1
+        stop = (i + 1) * (n - 2) // inner + 1
+        after = series[stop : (i + 2) * (n - 2) // inner + 1]  # last bucket: the last point
+        mean_x = math.fsum(p.step for p in after) / len(after)
+        mean_y = math.fsum(p.value for p in after) / len(after)
+        x0, y0 = kept.step, kept.value
+        kept, largest = series[start], -1.0
+        for p in series[start:stop]:
+            area = abs((x0 - mean_x) * (p.value - y0) - (x0 - p.step) * (mean_y - y0))
+            if area > largest:
+                kept, largest = p, area
+        out.append(kept)
+    out.append(series[-1])
+    return out
+
+
+def metric_history(
+    ctx: Context,
+    run_id: str,
+    names: Iterable[str] | None = None,
+    max_points: int | None = None,
+) -> list[MetricPoint]:
     """
     Return a run's indexed (downsampled) metric history.
 
@@ -469,13 +535,39 @@ def metric_history(ctx: Context, run_id: str) -> list[MetricPoint]:
         Open Hypothex context.
     run_id : str
         Run id to look up.
+    names : iterable of str, optional
+        Metric names to return; ``None`` returns every name. The filter runs
+        in SQL, so a chart of two names reads only their rows.
+    max_points : int, optional
+        Keep at most this many points per name (at least 2), picked with
+        ``lttb``. ``None`` returns the indexed points (up to
+        ``MAX_POINTS_PER_METRIC`` per name).
 
     Returns
     -------
     list of MetricPoint
+        Ordered by name, then step.
+
+    Raises
+    ------
+    RunError
+        If ``max_points`` is less than 2.
+
+    Examples
+    --------
+    >>> metric_history(ctx, run_id, names=["train/loss"], max_points=500)  # doctest: +SKIP
+    [MetricPoint(name='train/loss', step=0, value=2.3, t=None), ...]
     """
+    if max_points is not None and max_points < 2:
+        raise RunError(f"max_points must be at least 2, not {max_points}")
     ctx.find_record(run_id)
-    return ctx.index.metric_points(run_id)
+    points = ctx.index.metric_points_for([run_id], names).get(run_id, [])
+    if max_points is None:
+        return points
+    out: list[MetricPoint] = []
+    for _, series in itertools.groupby(points, key=lambda p: p.name):
+        out.extend(lttb(list(series), max_points))
+    return out
 
 
 def _flatten(prefix: str, value: Any, out: dict[str, Any]) -> None:

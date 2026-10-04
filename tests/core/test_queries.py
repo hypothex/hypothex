@@ -1,3 +1,5 @@
+import math
+import random
 from pathlib import Path
 from typing import Any
 
@@ -7,10 +9,10 @@ import yaml
 from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.datasets import FingerprintCache
-from hypothex.core.errors import ConfigError
+from hypothex.core.errors import ConfigError, RunError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.index import store_fingerprint
-from hypothex.core.records import DatasetRef, RunRecord, RunStatus
+from hypothex.core.records import DatasetRef, MetricPoint, RunRecord, RunStatus
 from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
 
 ALL_RIGHT = [{"id": f"ex-{i}", "prediction": r} for i, r in enumerate([0, 1, 0, 0])]
@@ -260,3 +262,60 @@ def test_list_tasks_reads_runs_once_per_task_and_not_again_when_unchanged(
     assert listed == []
     assert q.get_task(ctx, "toy-acc")["summary"]["best"] == 0.75
     assert listed == []
+
+
+def _reference_lttb(data: list[tuple[float, float]], threshold: int) -> list[int]:
+    """Indexes the published LTTB algorithm (Steinarsson 2013) keeps."""
+    every = (len(data) - 2) / (threshold - 2)
+    a, kept = 0, [0]
+    for i in range(threshold - 2):
+        lo, hi = int(math.floor((i + 1) * every) + 1), int(math.floor((i + 2) * every) + 1)
+        nxt = data[lo : min(hi, len(data))]
+        avg_x, avg_y = sum(x for x, _ in nxt) / len(nxt), sum(y for _, y in nxt) / len(nxt)
+        ax, ay = data[a]
+        start, stop = int(math.floor(i * every) + 1), int(math.floor((i + 1) * every) + 1)
+        areas = [
+            abs((ax - avg_x) * (data[j][1] - ay) - (ax - data[j][0]) * (avg_y - ay))
+            for j in range(start, stop)
+        ]
+        a = start + areas.index(max(areas))
+        kept.append(a)
+    return [*kept, len(data) - 1]
+
+
+def test_lttb_matches_the_reference_and_keeps_peaks() -> None:
+    rng = random.Random(7)
+    for n, limit in [(100, 10), (997, 50), (500, 499), (31, 3)]:
+        values = [rng.gauss(0, 1) for _ in range(n)]
+        series = [MetricPoint(name="m", step=i * 2, value=v) for i, v in enumerate(values)]
+        kept = q.lttb(series, limit)
+        expected = _reference_lttb([(p.step, p.value) for p in series], limit)
+        assert kept == [series[i] for i in expected]
+    spike = [MetricPoint(name="m", step=i, value=100.0 if i == 57 else 0.0) for i in range(200)]
+    assert any(p.value == 100.0 for p in q.lttb(spike, 20))
+    assert q.lttb(spike, 2) == [spike[0], spike[-1]]
+    assert q.lttb(spike[:5], 5) == spike[:5]
+    with pytest.raises(RunError, match="at least 2"):
+        q.lttb(spike, 1)
+
+
+def test_metric_history_filters_names_and_caps_points(ctx: Context, toy_repo: Path) -> None:
+    # PERF-F9a: the run page asks only for the charts it shows, at plot width
+    seed_finished_run(ctx, toy_repo, "r1")
+    points = [
+        MetricPoint(name=name, step=step, value=float(step % 7))
+        for name in ("loss", "acc", "sys/gpu")
+        for step in range(300)
+    ]
+    ctx.index.replace_metric_points("r1", points)
+    full = q.metric_history(ctx, "r1")
+    assert full == ctx.index.metric_points("r1") and len(full) == 900
+    loss = q.metric_history(ctx, "r1", names=["loss"])
+    assert {p.name for p in loss} == {"loss"} and len(loss) == 300
+    capped = q.metric_history(ctx, "r1", names=["loss", "acc"], max_points=40)
+    assert [p.name for p in capped] == ["acc"] * 40 + ["loss"] * 40
+    assert capped[0].step == 0 and capped[39].step == 299
+    assert q.metric_history(ctx, "r1", names=[]) == []
+    assert q.metric_history(ctx, "r1", names=["loss"], max_points=1000) == loss
+    with pytest.raises(RunError, match="at least 2"):
+        q.metric_history(ctx, "r1", max_points=1)

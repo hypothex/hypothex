@@ -69,6 +69,7 @@ export const PAGES_CSS = `
 .page .view-tabs > a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
 .page .view-tabs .r { margin-left: auto; display: flex; gap: 8px; align-items: center; padding-bottom: 6px; }
 .page .run-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 40px; align-items: start; }
+.page .run-top .err { width: 0; min-width: 100%; overflow-wrap: anywhere; }
 .page .actions { display: flex; gap: 8px; padding-top: 10px; }
 .page .status { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 18px; font-size: 14px; color: var(--ink-2); align-items: center; }
 .page .st { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; color: var(--ink); }

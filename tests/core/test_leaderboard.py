@@ -529,3 +529,46 @@ def test_rows_sum_the_cost_of_their_runs() -> None:
     best, other = build_leaderboard("toy", "t", CFG, runs, scores).rows
     assert best.cost == CostTotals(gpu_hours=1.5, gpu_usd=3.0, api_usd=0.25, total_usd=3.25)
     assert other.cost is None
+
+
+# dogfood fixes ---------------------------------------------------------------------------
+class DiffGit(GitInfo):
+    """``GitInfo`` with the launch-time diff hash (``GitInfo.diff_hash``)."""
+
+    diff_hash: str | None = None
+
+
+def drun(rid: str, git: GitInfo, *, minute: int = 0, **extra: Any) -> RunRecord:
+    return make_record(
+        rid,
+        task="t",
+        status=RunStatus.FINISHED,
+        config_hash="sha256:aaaaaaaabbbb",
+        git=git,
+        created_at=T0 + timedelta(minutes=minute),
+        **extra,
+    )
+
+
+def test_uncommitted_changes_make_their_own_seed_group() -> None:
+    clean = [drun(f"c{i}", GitInfo(commit="c1"), seed=i, hypothesis="baseline") for i in (1, 2)]
+    dirty = [
+        drun(f"d{i}", DiffGit(commit="c1", dirty=True, diff_hash="9f3c2e1a"), seed=i, minute=1)
+        for i in (1, 2)
+    ]
+    other = drun("o1", DiffGit(commit="c1", dirty=True, diff_hash="0badf00d"), seed=1)
+    legacy = drun("l1", GitInfo(commit="c1", dirty=True), seed=1)  # no diff hash recorded
+    runs = [*clean, *dirty, other, legacy]
+    scores = {"c1": acc(0.8), "c2": acc(0.8), "d1": acc(0.9), "d2": acc(0.9)}
+    scores |= {"o1": acc(0.7), "l1": acc(0.6)}
+    board = build_leaderboard("toy", "t", CFG, runs, scores)
+    by_id = {r.group_id: r.run_ids for r in board.rows}
+    assert by_id == {
+        "aaaaaaaa@c1+9f3c": ["d1", "d2"],
+        "aaaaaaaa@c1": ["c1", "c2"],
+        "aaaaaaaa@c1+0bad": ["o1"],
+        "aaaaaaaa@c1+dirty": ["l1"],
+    }
+    clean_row = next(r for r in board.rows if r.group_id == "aaaaaaaa@c1")
+    assert clean_row.label == "baseline" and clean_row.n == 2
+    assert group_labels(runs).keys() == by_id.keys()  # one id rule for board and sources

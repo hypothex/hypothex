@@ -391,8 +391,9 @@ def topk_accuracy(examples: list[Example], *, k: list[int]) -> MetricResult:
 
 ### 6.3 Seed groups and error bars
 
-- `config_hash` excludes `seed`. Runs in one task with the same `config_hash` and
-  git commit form a seed group.
+- `config_hash` excludes `seed`. Runs in one task with the same `config_hash`, git
+  commit and uncommitted diff (`git.diff_hash`) form a seed group. A dirty run's group
+  id ends in `+<diff hash[:4]>`; clean ids do not change.
 - Leaderboard rows are seed groups: `mean ± std (n=3)`. Single runs show `n=1`.
 - When two rows' 95% intervals overlap (t-interval; n ≥ 2 each), the UI marks the
   difference "within noise". n=1 rows get a "single seed" badge.

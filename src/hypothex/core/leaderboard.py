@@ -23,7 +23,14 @@ from hypothex.core.headlines import (
     task_stat_strip,
     value_format,
 )
-from hypothex.core.records import CostTotals, RunRecord, RunStatus, ScoreRecord, UsageTotals
+from hypothex.core.records import (
+    CostTotals,
+    GitInfo,
+    RunRecord,
+    RunStatus,
+    ScoreRecord,
+    UsageTotals,
+)
 from hypothex.core.seeds import Stats, intervals_overlap, summarize
 
 PerExample = dict[str, dict[str, dict[str, Any]]]
@@ -31,6 +38,8 @@ PerExample = dict[str, dict[str, dict[str, Any]]]
 
 BINARY_FIELDS = ("correct", "solved")
 LABEL_MAX = 32
+LEGACY_DIRTY = "dirty"
+"""``diff_key`` of a dirty run recorded without a diff hash."""
 _CLAUSE = re.compile(
     r"[,;:()]|\s[-–—]\s|\.(?:\s|$)|\s(?:because|should|so that|since|to see if|in order to)\s",
     re.IGNORECASE,
@@ -60,7 +69,7 @@ class VersusBest(BaseModel):
 
 
 class LeaderboardRow(BaseModel):
-    """One seed group: runs with the same config hash and commit."""
+    """One seed group: runs with the same config hash, commit and uncommitted diff."""
 
     group_id: str
     run_ids: list[str]
@@ -191,14 +200,48 @@ def group_id_for(run: RunRecord) -> str:
     -------
     str
         ``<first 8 hex of the config hash>@<first 7 chars of the commit>``;
-        ``nogit`` replaces the commit when the run has no git info.
+        ``nogit`` replaces the commit when the run has no git info. A run with
+        uncommitted changes gets ``+<first 4 hex of its diff hash>`` (``+dirty``
+        when the record has no diff hash), so it never joins the clean group.
 
     Examples
     --------
     >>> group_id_for(make_record(config_hash="sha256:0123456789"))  # doctest: +SKIP
     '01234567@nogit'
     """
-    return f"{run.config_hash.removeprefix('sha256:')[:8]}@{(run.git.commit or 'nogit')[:7]}"
+    base = f"{run.config_hash.removeprefix('sha256:')[:8]}@{(run.git.commit or 'nogit')[:7]}"
+    diff = diff_key(run.git)
+    if diff is None:
+        return base
+    return f"{base}+{diff if diff == LEGACY_DIRTY else diff[:4]}"
+
+
+def diff_key(git: GitInfo) -> str | None:
+    """
+    Identify the uncommitted code a run started with.
+
+    Parameters
+    ----------
+    git : GitInfo
+        The run's git state.
+
+    Returns
+    -------
+    str or None
+        ``git.diff_hash`` when set; ``"dirty"`` for a dirty record without
+        one (written before diff hashes existed); ``None`` for a clean run.
+
+    Examples
+    --------
+    >>> diff_key(GitInfo(commit="abc")) is None
+    True
+    >>> diff_key(GitInfo(commit="abc", dirty=True))
+    'dirty'
+    """
+    diff_hash: str | None = getattr(git, "diff_hash", None)
+    if diff_hash:
+        return diff_hash
+    return LEGACY_DIRTY if git.dirty else None
 
 
 def _version_of(members: list[RunRecord], param: str) -> str | None:
@@ -535,10 +578,10 @@ def build_leaderboard(
         elif not stale:
             unscored.append(r.run_id)
 
-    groups: dict[tuple[str, str | None], list[RunRecord]] = defaultdict(list)
+    groups: dict[tuple[str, str | None, str | None], list[RunRecord]] = defaultdict(list)
     for r in eligible:
         if r.run_id in per_run:
-            groups[(r.config_hash, r.git.commit)].append(r)
+            groups[(r.config_hash, r.git.commit, diff_key(r.git))].append(r)
 
     examples = {rid: ex for rid, ex in (per_example or {}).items() if rid in per_run}
     picked = pick_field((f for ex in examples.values() for f in ex.values()), primary_key)

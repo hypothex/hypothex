@@ -657,3 +657,23 @@ def test_rerun_and_reinfer_prefixes_do_not_rename_the_group() -> None:
     board = build_leaderboard("toy", "t", KINDS, runs, scores)
     assert board.rows[0].label == "svm wins"
     assert board.headline.startswith("svm wins ")
+
+
+def test_seed_intervals_of_fractions_stay_in_zero_one() -> None:
+    runs = [krun(f"a{i}", "a", minute=i) for i in range(3)]
+    runs += [krun(f"s{i}", g, task="sb", minute=i) for i, g in enumerate("sss")]
+    scores = {"a0": acc(0.98), "a1": acc(1.0), "a2": acc(1.0)}
+    for i, v in enumerate([810.0, 900.0, 900.0]):  # "lat" is unitless but not a fraction
+        scores[f"s{i}"] = [
+            ScoreRecord(metric="lat", version="v1", key="p95", value=v, created_at=T0)
+        ]
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    p = board.rows[0].primary
+    assert p is not None and p.ci_high == 1.0 and p.ci_low is not None and p.ci_low < 0.98
+    bench = build_leaderboard("toy", "sb", KINDS, runs, scores).rows[0].primary
+    assert bench is not None and bench.ci_high is not None and bench.ci_high > 900
+    # a unit means the values are not fractions: no clip even inside [0, 1]
+    timed = KINDS.model_copy(deep=True)
+    timed.metrics["acc"].unit = "s"
+    p = build_leaderboard("toy", "t", timed, runs, scores).rows[0].primary
+    assert p is not None and p.ci_high is not None and p.ci_high > 1.0

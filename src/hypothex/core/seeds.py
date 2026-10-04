@@ -157,6 +157,36 @@ def summarize(values: list[float]) -> Stats:
     return Stats(mean=mean, std=std, n=n, ci_low=mean - half, ci_high=mean + half)
 
 
+def clamp(stats: Stats, lo: float, hi: float) -> Stats:
+    """
+    Clip a t-interval to the range the metric can take.
+
+    Parameters
+    ----------
+    stats : Stats
+        A group's statistics.
+    lo, hi : float
+        The lowest and highest possible value.
+
+    Returns
+    -------
+    Stats
+        A copy with ``ci_low >= lo`` and ``ci_high <= hi``; ``stats`` itself when
+        it has no interval.
+
+    Examples
+    --------
+    >>> s = clamp(summarize([0.98, 1.0, 1.0]), 0.0, 1.0)
+    >>> s.ci_high
+    1.0
+    """
+    if stats.ci_low is None or stats.ci_high is None:
+        return stats
+    return stats.model_copy(
+        update={"ci_low": max(lo, stats.ci_low), "ci_high": min(hi, stats.ci_high)}
+    )
+
+
 def intervals_overlap(a: Stats, b: Stats) -> bool | None:
     """
     Return whether two 95% intervals overlap.

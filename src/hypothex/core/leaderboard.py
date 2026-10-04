@@ -31,7 +31,7 @@ from hypothex.core.records import (
     ScoreRecord,
     UsageTotals,
 )
-from hypothex.core.seeds import Stats, summarize
+from hypothex.core.seeds import Stats, clamp, summarize
 
 PerExample = dict[str, dict[str, dict[str, Any]]]
 """run_id -> example_id -> per-example fields of the primary metric."""
@@ -530,9 +530,18 @@ def _seed_values(
     return out
 
 
+def _summarize(values: list[float], unit: str) -> Stats:
+    """``summarize``, with the t-interval kept in [0, 1] for a unitless fraction."""
+    stats = summarize(values)
+    if unit == "" and all(0.0 <= v <= 1.0 for v in values):
+        return clamp(stats, 0.0, 1.0)
+    return stats
+
+
 def _make_row(
     members: list[RunRecord],
     per_run: dict[str, dict[str, float]],
+    config: ProjectConfig,
     spec: TaskSpec,
     primary: str,
 ) -> LeaderboardRow:
@@ -543,7 +552,10 @@ def _make_row(
     buckets = seed_buckets(members)
     n_seeds = len(buckets)
     seed_values = _seed_values(buckets, per_run)
-    summary = {k: summarize(v) for k, v in seed_values.items()}
+    summary = {
+        k: _summarize(v, metric_unit(k, config.metrics[k.split("/", 1)[0]].unit))
+        for k, v in seed_values.items()
+    }
     prim = seed_values.get(primary, [])
     param = spec.version_param if spec.kind == "agent_iteration" else None
     label = seed_group_label(members, group_id, param)
@@ -652,7 +664,7 @@ def build_leaderboard(
     rows: list[LeaderboardRow] = []
     pooled: dict[str, dict[str, float]] = {}
     for members in groups.values():
-        row = _make_row(members, per_run, spec, primary)
+        row = _make_row(members, per_run, config, spec, primary)
         if picked is not None:
             seeds = [[m.run_id for m in b] for b in seed_buckets(members)]
             pooled[row.group_id] = _pool(seeds, examples, picked[0])

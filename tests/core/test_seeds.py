@@ -2,7 +2,13 @@ import math
 
 import pytest
 
-from hypothex.core.seeds import config_hash, intervals_overlap, run_fingerprint, summarize
+from hypothex.core.seeds import (
+    clamp,
+    config_hash,
+    intervals_overlap,
+    run_fingerprint,
+    summarize,
+)
 
 
 def test_config_hash_ignores_seed_and_key_order() -> None:
@@ -46,3 +52,15 @@ def test_intervals_overlap() -> None:
     assert intervals_overlap(a, b) is True
     assert intervals_overlap(a, c) is False
     assert intervals_overlap(a, summarize([0.9])) is None
+
+
+def test_clamp_keeps_the_interval_in_range() -> None:
+    s = summarize([0.98, 1.0, 1.0])
+    assert s.ci_high is not None and s.ci_high > 1.0
+    c = clamp(s, 0.0, 1.0)
+    assert c.ci_high == 1.0 and c.ci_low == s.ci_low
+    assert (c.mean, c.std, c.n) == (s.mean, s.std, s.n)
+    low = clamp(summarize([0.0, 0.02, 0.0]), 0.0, 1.0)
+    assert low.ci_low == 0.0
+    one = summarize([1.0])
+    assert clamp(one, 0.0, 1.0) == one  # no interval to clip

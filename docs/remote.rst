@@ -27,8 +27,10 @@ Before you start
   Hypothex runs ``ssh`` with ``-o BatchMode=yes``, so it never asks for a password.
 - The host has a git checkout of your project, and can ``git fetch`` the commits you
   launch (push them first).
-- The host has ``uv``, or ``curl``/``wget`` and network access to install it. The
-  install also needs access to the package index for Hypothex's dependencies.
+- The host has ``uv`` on ``PATH`` or in ``~/.local/bin`` or ``~/.cargo/bin``. Hypothex
+  does not install ``uv`` unless you ask for it with ``--install-uv``; then the host
+  needs ``curl`` or ``wget`` and network access to ``astral.sh``. The install also
+  needs access to the package index for Hypothex's dependencies.
 - A SLURM host: run the env server on a login node, and give it a home on a shared
   filesystem that supports ``flock`` (see :doc:`slurm`).
 
@@ -67,6 +69,10 @@ Add a host
      - The Hypothex home on the host (default ``~/.hypothex``).
    * - ``--usd-per-gpu-hour X``
      - The price of one GPU hour, for :doc:`cost`.
+   * - ``--install-uv``
+     - When the host has no ``uv``, run the official ``uv`` installer
+       (``https://astral.sh/uv/install.sh``) there. Without it, a host without ``uv``
+       is not added, and the error tells you to install ``uv``.
    * - ``--json``
      - Print machine-readable JSON.
 
@@ -85,7 +91,10 @@ What ``hx hosts add --ssh`` does
    a source checkout, or downloads that release from PyPI for a hub installed with
    ``uv tool install``. It copies the wheel with ``scp`` and installs it with
    ``uv tool install --force`` into ``~/.hypothex/runtime`` on the host. If the host
-   has no ``uv``, the official installer puts one into ``~/.local/bin``.
+   has no ``uv``, the install stops before the wheel is copied, with
+   ``uv is missing on the host``. Only with ``--install-uv`` does the official
+   installer put ``uv`` into ``~/.local/bin`` (its log is
+   ``~/.hypothex/runtime/uv-install.log``).
 3. **Start**: it starts ``hx serve --host 127.0.0.1 --port 0`` on the host, or reuses
    a healthy env server for that home. The port and the token go into
    ``~/.hypothex/serve/server.json`` on the host (mode 0600).
@@ -142,6 +151,7 @@ Manage hosts
    hx hosts disconnect gpu-box   # stop watching gpu-box; its runs keep going
    hx hosts connect gpu-box      # watch it again (also clears an error)
    hx hosts upgrade gpu-box      # install this Hypothex version and restart its server
+                                 # (--install-uv: also install uv when the host has none)
    hx hosts rm gpu-box           # forget it; its env server and runs keep going
 
 ``hx hosts status`` columns: host, kind, state, since, GPUs busy (busy/total), queue,

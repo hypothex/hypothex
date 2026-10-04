@@ -87,6 +87,7 @@ STABLE_AFTER_SECONDS = 30.0
 STALE_AFTER_SECONDS = 60.0
 PING_INTERVAL_SECONDS = 10.0
 PING_TIMEOUT_SECONDS = 5.0
+STALE_CHECK_SECONDS = 1.0
 REMOTE_FILE_KIND = "remote_file"
 MANIFEST_NAME = ".mirror.json"
 # No leading dot: dot folders are skipped by the cross-project scan, and "." / ".." escape
@@ -1287,6 +1288,27 @@ class Hub:
         return await asyncio.shield(future)
 
     async def _supervise(self, sup: _Supervisor) -> None:
+        ticker = asyncio.create_task(self._mark_stale(sup))
+        try:
+            await self._reconnect(sup)
+        finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+
+    async def _mark_stale(self, sup: _Supervisor) -> None:
+        """
+        Mark the host ``stale`` once its last contact is ``stale_after`` old.
+
+        Runs for the whole supervisor, so a slow attempt (an unreachable host
+        holds ``ssh`` until its timeout) cannot delay ``stale``. A ``connected``
+        session decides itself: its pings end it once stale.
+        """
+        while True:
+            await asyncio.sleep(STALE_CHECK_SECONDS)
+            if sup.state.state not in ("stale", "connected") and self._is_stale(sup):
+                self._set(sup, "stale", sup.state.message, since=sup.last_ok_at)
+
+    async def _reconnect(self, sup: _Supervisor) -> None:
         while True:
             try:
                 await self._session(sup)
@@ -1318,14 +1340,7 @@ class Hub:
                 self._set(sup, "error", message)
             else:
                 self._set(sup, "connecting", message)
-            await self._wait(sup, delay)
-
-    async def _wait(self, sup: _Supervisor, delay: float) -> None:
-        end = time.monotonic() + delay
-        while (left := end - time.monotonic()) > 0:
-            await asyncio.sleep(min(left, 1.0))
-            if sup.state.state != "stale" and self._is_stale(sup):
-                self._set(sup, "stale", sup.state.message, since=sup.last_ok_at)
+            await asyncio.sleep(delay)  # _mark_stale goes on meanwhile
 
     async def _open_route(self, sup: _Supervisor) -> str:
         spec = sup.spec
@@ -1336,7 +1351,7 @@ class Hub:
         if not spec.ssh_alias:
             raise BootstrapError(f"host {sup.name!r} has route ssh but no ssh_alias")
         target = SshTarget(alias=spec.ssh_alias)  # ssh/scp from $HYPOTHEX_SSH/$HYPOTHEX_SCP
-        if sup.state.state != "stale":
+        if sup.last_ok is None:  # a reconnect is not a bootstrap: it stays connecting (or stale)
             self._set(sup, "bootstrapping")
         info = await self._shielded(sup, lambda: ensure_server(target, spec.home, kind=spec.kind))
         if info.protocol_version != PROTOCOL_VERSION:

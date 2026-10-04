@@ -19928,7 +19928,7 @@ git commit -m "feat(remote): hub supervisors with cursor replay, stale detection
   - `Tunnel(target, remote_port)` with `start()`, `alive()`, `stop()`, `local_port`.
   - env `HYPOTHEX_SSH` / `HYPOTHEX_SCP` (defaults `ssh` / `scp`).
 - Produces, for `route: ssh` hosts:
-  - The state is `bootstrapping` while `ensure_server` runs, unless the host is already `stale`.
+  - The state is `bootstrapping` while `ensure_server` runs on the first connect only (no contact yet); a reconnect stays `connecting` (dogfood DF-53). A host whose last contact is `stale_after` old turns `stale` even while an attempt still runs.
   - `BootstrapError` → state `error` with `retry in <delay>s: <error text>`, then backoff retries.
   - `ServerInfo.protocol_version != PROTOCOL_VERSION` → state `upgrade`, and no tunnel opens.
   - `HostState.local_port` = the tunnel's local port.

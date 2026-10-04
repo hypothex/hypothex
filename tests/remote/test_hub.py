@@ -57,6 +57,7 @@ from hypothex.remote.hub import (
     mirror_source,
     wanted_path,
 )
+from hypothex.remote.ssh import SshError
 from tests.factories import make_record
 
 # index cursors -----------------------------------------------------------------------
@@ -2197,6 +2198,52 @@ def test_ssh_route_bootstraps_tunnels_and_mirrors(
     assert hub_ctx.index.get_run("a-1") is not None
     states = [e.payload["state"] for e in hub_ctx.events.since(0) if e.type == "host.state"]
     assert states[:2] == ["bootstrapping", "connected"]
+
+
+def test_an_ssh_reconnect_is_not_bootstrapping_and_goes_stale_mid_attempt(
+    tmp_path: Path,
+    servers: tuple[EnvServer, EnvServer],
+    fake_ssh: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a, _ = servers
+    hung = threading.Event()
+
+    def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
+        fake_ssh.append((target.alias, home, target.ssh_bin))
+        if len(fake_ssh) > 1:  # the host is unreachable now: ssh hangs until its timeout
+            hung.wait(20)
+            raise SshError("ssh gpu1 timed out after 20s")
+        return ServerInfo(
+            pid=1,
+            port=a.port,
+            managed=True,
+            hx_version=__version__,
+            protocol_version=PROTOCOL_VERSION,
+        )
+
+    monkeypatch.setattr(hub_mod, "ensure_server", ensure)
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, ssh_hosts()))
+        hub.stale_after = 0.6
+        await hub.start()
+        try:
+            await until(lambda: hub.state("gpu1").state == "connected")
+            FakeTunnel.instances[0].dead = True  # the ssh -L process died
+            await until(lambda: len(fake_ssh) == 2)
+            await until(lambda: hub.state("gpu1").state == "stale", timeout=5)
+            assert len(fake_ssh) == 2 and not hung.is_set()  # still inside the first retry
+        finally:
+            hung.set()
+            await hub.stop()
+
+    asyncio.run(main())
+    states = [e.payload["state"] for e in hub_ctx.events.since(0) if e.type == "host.state"]
+    assert states[:2] == ["bootstrapping", "connected"]
+    assert "bootstrapping" not in states[2:]  # nothing is bootstrapped again
+    assert "stale" in states
 
 
 def test_ssh_bootstrap_failure_is_error_and_retried(

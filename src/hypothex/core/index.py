@@ -6,6 +6,7 @@ import contextlib
 import errno
 import fcntl
 import json
+import logging
 import sqlite3
 import time
 from collections import defaultdict
@@ -37,15 +38,24 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from hypothex.core.errors import RunNotFoundError
-from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.records import (
+    INDEXED_POINT_STATUSES,
+    MetricPoint,
+    RunRecord,
+    RunStatus,
+    ScoreRecord,
+)
 from hypothex.core.stats import lttb
 from hypothex.core.store import ProjectEntry, RunStore, run_lock
+from hypothex.core.thin import MAX_POINTS_PER_METRIC
 
 if TYPE_CHECKING:
     from hypothex.core.context import Context
 
+log = logging.getLogger(__name__)
 SCHEMA_VERSION = 3
-MAX_POINTS_PER_METRIC = 1000
+_IN_CHUNK = 450
+"""Most values bound in one ``IN (...)`` list of an index query."""
 GENERATION_KEY = "generation"
 """``meta`` row holding the index generation (see ``index_generation``)."""
 
@@ -791,16 +801,35 @@ class Index:
         points : list of MetricPoint
             Full history to (down)sample and store.
         """
+        self._replace_metric_points(run_id, points, pending_status=None)
+
+    def _replace_metric_points(
+        self, run_id: str, points: list[MetricPoint], *, pending_status: str | None
+    ) -> bool:
+        """Install points if the pending marker and captured status still match."""
         rows = [
             {"run_id": run_id, "name": p.name, "step": p.step, "value": p.value, "t": p.t}
             for p in downsample(points)
         ]
         with Session(self.engine) as session, session.begin():
+            # This DELETE obtains the write lock and checks both conditions
+            # atomically. A terminal publisher clears the marker; a subsequent
+            # rebuild can recreate it, but must not authorize an old live read.
+            claim = delete(PointsPendingRow).where(PointsPendingRow.run_id == run_id)
+            if pending_status is not None:
+                claim = claim.where(
+                    select(RunRow.run_id)
+                    .where(RunRow.run_id == run_id, RunRow.status == pending_status)
+                    .exists()
+                )
+            pending = session.connection().execute(claim)
+            if pending_status is not None and pending.rowcount == 0:
+                return False
             _touch(session, run_id)
             session.execute(delete(MetricPointRow).where(MetricPointRow.run_id == run_id))
-            session.execute(delete(PointsPendingRow).where(PointsPendingRow.run_id == run_id))
             if rows:
                 session.execute(insert(MetricPointRow), rows)
+        return True
 
     def metric_points(self, run_id: str) -> list[MetricPoint]:
         """
@@ -860,17 +889,27 @@ class Index:
             MetricPointRow.value,
             MetricPointRow.t,
         )
+        # Both lists are cut into chunks: a statement binds at most 2 x _IN_CHUNK
+        # values, under SQLite's oldest limit of 999. Sorted name chunks, read in
+        # order, keep each run's points ordered by name then step.
+        name_chunks: list[list[str] | None] = (
+            [None]
+            if wanted is None
+            else [wanted[i : i + _IN_CHUNK] for i in range(0, len(wanted), _IN_CHUNK)]
+        )
         with Session(self.engine) as session:
-            for start in range(0, len(ids), 500):
-                stmt = select(*cols).where(MetricPointRow.run_id.in_(ids[start : start + 500]))
-                if wanted is not None:
-                    stmt = stmt.where(MetricPointRow.name.in_(wanted))
-                stmt = stmt.order_by(
-                    MetricPointRow.run_id, MetricPointRow.name, MetricPointRow.step
-                )
-                for run_id, name, step, value, t in session.execute(stmt):
-                    point = MetricPoint(name=name, step=step, value=value, t=t)
-                    out.setdefault(run_id, []).append(point)
+            for start in range(0, len(ids), _IN_CHUNK):
+                chunk = ids[start : start + _IN_CHUNK]
+                for name_chunk in name_chunks:
+                    stmt = select(*cols).where(MetricPointRow.run_id.in_(chunk))
+                    if name_chunk is not None:
+                        stmt = stmt.where(MetricPointRow.name.in_(name_chunk))
+                    stmt = stmt.order_by(
+                        MetricPointRow.run_id, MetricPointRow.name, MetricPointRow.step
+                    )
+                    for run_id, name, step, value, t in session.execute(stmt):
+                        point = MetricPoint(name=name, step=step, value=value, t=t)
+                        out.setdefault(run_id, []).append(point)
         return out
 
     def metric_names(self, run_id: str) -> list[str]:
@@ -910,17 +949,31 @@ class Index:
         """Index the metric files of the runs whose points a rebuild skipped."""
         if self.store is None or not run_ids:
             return
-        pending: list[tuple[str, str]] = []
+        pending: list[tuple[str, str, str]] = []
         with Session(self.engine) as session:
             for start in range(0, len(run_ids), 500):
                 stmt = (
-                    select(RunRow.run_id, RunRow.project)
+                    select(RunRow.run_id, RunRow.project, RunRow.status)
                     .join(PointsPendingRow, PointsPendingRow.run_id == RunRow.run_id)
                     .where(RunRow.run_id.in_(run_ids[start : start + 500]))
                 )
-                pending.extend((r, p) for r, p in session.execute(stmt))
-        for run_id, project in pending:
-            self.replace_metric_points(run_id, self.store.read_metric_points(project, run_id))
+                pending.extend((r, p, st) for r, p, st in session.execute(stmt))
+        for run_id, project, status in pending:
+            while True:
+                points = points_to_index(self.store, project, run_id, status)
+                if self._replace_metric_points(run_id, points, pending_status=status):
+                    break
+                # Read outside the write transaction. A changed status can
+                # require exact terminal history instead of bounded live points.
+                with Session(self.engine) as session:
+                    current = session.execute(
+                        select(RunRow.project, RunRow.status)
+                        .join(PointsPendingRow, PointsPendingRow.run_id == RunRow.run_id)
+                        .where(RunRow.run_id == run_id)
+                    ).one_or_none()
+                if current is None:
+                    break
+                project, status = current
 
     # host cursors -------------------------------------------------------------
     def cursor_hosts(self, environment_id: str) -> list[str]:
@@ -1043,9 +1096,76 @@ class Index:
             session.execute(stmt)
 
 
+def points_to_index(
+    store: RunStore, project: str, run_id: str, status: RunStatus | str
+) -> list[MetricPoint]:
+    """
+    Read the metric history to index for a run in state ``status``.
+
+    A run that ended (``INDEXED_POINT_STATUSES``) is read in full, so its
+    indexed history is exactly ``downsample`` of every point. Any other run may
+    still be writing its file, without limit (a remote host can fill it), so it
+    is read bounded (``RunStore.read_metric_points_bounded``); its end indexes
+    it again in full.
+
+    Parameters
+    ----------
+    store : RunStore
+        File store to read from.
+    project : str
+        Project name.
+    run_id : str
+        Run id.
+    status : RunStatus or str
+        The run's state.
+
+    Returns
+    -------
+    list of MetricPoint
+        The points to pass to ``Index.replace_metric_points``.
+
+    Examples
+    --------
+    >>> points_to_index(store, "toy", "r1", RunStatus.RUNNING)  # doctest: +SKIP
+    [MetricPoint(name='loss', step=0, value=2.3, t=None)]
+    """
+    if RunStatus(status) in INDEXED_POINT_STATUSES:
+        return store.read_metric_points(project, run_id)
+    return store.read_metric_points_bounded(project, run_id)
+
+
+def index_run_points(index: Index, store: RunStore, record: RunRecord) -> None:
+    """
+    Re-index a run's metric points from its file after a status change, never failing.
+
+    Every end path calls this (or ``index_run``): a run that ends is indexed
+    from its whole file (``points_to_index``), replacing the bounded copy held
+    while it ran. A read or index error is logged, so nothing the run logged
+    keeps it from ending.
+
+    Parameters
+    ----------
+    index : Index
+        Target index.
+    store : RunStore
+        File store to read from.
+    record : RunRecord
+        The run as just written.
+
+    Examples
+    --------
+    >>> index_run_points(ctx.index, ctx.store, killed)  # doctest: +SKIP
+    """
+    try:
+        points = points_to_index(store, record.project, record.run_id, record.status)
+        index.replace_metric_points(record.run_id, points)
+    except Exception as exc:  # noqa: BLE001 - the run has ended either way
+        log.warning("run %s: could not index its metric points: %s", record.run_id, exc)
+
+
 def index_run(index: Index, store: RunStore, record: RunRecord) -> None:
     """
-    Index a run, its scores, and its metric points from files.
+    Index a run, its scores, and its metric points from files (``points_to_index``).
 
     Parameters
     ----------
@@ -1058,9 +1178,8 @@ def index_run(index: Index, store: RunStore, record: RunRecord) -> None:
     """
     index.upsert_run(record)
     index.replace_scores(record.run_id, store.read_scores(record.project, record.run_id))
-    index.replace_metric_points(
-        record.run_id, store.read_metric_points(record.project, record.run_id)
-    )
+    points = points_to_index(store, record.project, record.run_id, record.status)
+    index.replace_metric_points(record.run_id, points)
 
 
 def index_generation(ctx: Context) -> int:

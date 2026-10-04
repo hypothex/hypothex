@@ -3,7 +3,9 @@ import resource
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -11,7 +13,8 @@ from hypothex.core import execution
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
-from hypothex.core.records import RunStatus, UsageTotals
+from hypothex.core.index import rebuild_index
+from hypothex.core.records import RunRecord, RunStatus, UsageTotals
 from tests.factories import git, write_toy_project
 
 PY = sys.executable
@@ -312,6 +315,38 @@ def test_non_finite_metric_values_do_not_break_the_run_or_the_index(
     reopened = Context.open(ctx.layout.home)
     assert reopened.index.get_run(done.run_id) is not None
     assert [p.value for p in reopened.index.metric_points(done.run_id)] == [0.5]
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_local_end_indexes_exact_history_after_an_intervening_rebuild(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int
+) -> None:
+    code = (
+        "import json,os; p=os.environ['HYPOTHEX_RUN_DIR']+'/metrics.jsonl'; "
+        "open(p,'w').write(''.join(json.dumps(dict(name=f'm{i:03d}',step=0,value=float(i)))"
+        "+chr(10) for i in range(257))); "
+        f"raise SystemExit({exit_code})"
+    )
+    original_update = ctx.update_run
+    seen: list[int] = []
+
+    def rebuild_before_end(
+        run_id: str,
+        event_type: str,
+        mutate: Callable[[RunRecord], RunRecord],
+        payload: dict[str, Any] | None = None,
+    ) -> RunRecord:
+        if event_type in {"run.finished", "run.failed"}:
+            # A concurrent rebuild sees RUNNING and its reader fills bounded points.
+            rebuild_index(ctx.index, ctx.store)
+            seen.append(len(ctx.index.metric_points(run_id)))
+        return original_update(run_id, event_type, mutate, payload)
+
+    monkeypatch.setattr(ctx, "update_run", rebuild_before_end)
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(code)))
+    assert done.status == (RunStatus.FINISHED if exit_code == 0 else RunStatus.FAILED)
+    assert seen == [256]
+    assert len(ctx.index.metric_points(done.run_id)) == 257
 
 
 def test_index_refresh_failure_still_finishes_the_run(

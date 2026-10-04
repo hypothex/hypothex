@@ -37,6 +37,24 @@ the loss stays on the curve. Points indexed by an older Hypothex keep their old
 thinning until the run is indexed again (``hx reindex``). View curves further
 limit each series to 500 points; the metrics API accepts a separate ``max_points`` limit.
 
+An ended run's points are indexed from its whole file. A queued, running or lost
+run may still be writing its file, so the index (and every view) reads it one line
+at a time into a bounded copy: at most 1,000 points per name, with the first, last,
+lowest and highest kept and the rest chosen by LTTB. At most the first 256 distinct
+names in the file are retained; rows of further names are skipped, with warnings
+remembered for the most recent 1,024 runs per store. Lines over 64 KiB or containing
+invalid UTF-8 are skipped. Repeated points share their metric-name string, so long
+names consume memory once per name rather than once per buffered point.
+Exact reads of state files have no byte or name cap and reject invalid UTF-8.
+Every end path (the local supervisor, a SLURM end, ``hx stop`` of a run whose
+supervisor is gone, the hub's mirror of a host's end) indexes the run again from
+its whole file.
+The local supervisor publishes terminal status before installing that exact
+history, so a concurrent rebuild cannot leave the earlier live copy in place.
+Deferred index hydration installs a read only while its pending marker and run
+status still match. A read started before a run finished cannot overwrite its
+newer terminal history, including when an intervening rebuild recreated the marker.
+
 Every write of indexed data adds 1 to the index *generation* (a ``meta`` row
 written in the same transaction). Setting a mirror cursor or marking scores stale
 does not count. ``hypothex.core.index.index_generation(ctx)`` reads it, so a cache

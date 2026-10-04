@@ -30,7 +30,7 @@ from hypothex.core.leaderboard import (
     seed_group_labels,
 )
 from hypothex.core.queries import primary_examples, refresh_project
-from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus
+from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.seeds import summarize
 from hypothex.core.sources import group_labels, iter_rows, metric_points, select_fields
 from hypothex.core.stats import ecdf_points, lttb, quantile
@@ -79,6 +79,42 @@ class PanelResult(BaseModel):
 
 
 @dataclass
+class _RunFiles:
+    """
+    One run's files that per-run values (``_run_value``) read, each parsed once.
+
+    ``scores.jsonl``, the ``samples/`` series, and the per-example score files
+    (keyed by metric name and version, ``id`` dropped).
+    """
+
+    run: RunRecord
+    _scores: list[ScoreRecord] | None = None
+    _samples: dict[str, list[float]] | None = None
+    _examples: dict[tuple[str, str], list[dict[str, Any]]] = field(default_factory=dict)
+
+    def scores(self, ctx: Context) -> list[ScoreRecord]:
+        """``RunStore.read_scores`` of the run."""
+        if self._scores is None:
+            self._scores = ctx.store.read_scores(self.run.project, self.run.run_id)
+        return self._scores
+
+    def samples(self, ctx: Context) -> dict[str, list[float]]:
+        """``RunStore.read_samples`` of the run."""
+        if self._samples is None:
+            self._samples = ctx.store.read_samples(self.run.project, self.run.run_id)
+        return self._samples
+
+    def examples(self, ctx: Context, name: str, version: str) -> list[dict[str, Any]]:
+        """Rows of ``predictions/scores.<name>@<version>.jsonl`` without ``id``."""
+        key = (name, version)
+        if key not in self._examples:
+            path = ctx.run_dir(self.run) / "predictions" / f"scores.{name}@{version}.jsonl"
+            rows = read_jsonl(path)
+            self._examples[key] = [{k: v for k, v in r.items() if k != "id"} for r in rows]
+        return self._examples[key]
+
+
+@dataclass
 class _ViewCache:
     """
     Data the panels of one view share, so each piece is built once per view.
@@ -94,6 +130,20 @@ class _ViewCache:
     labels: dict[_BoardKey, dict[str, str]] = field(default_factory=dict)
     points: dict[tuple[str, frozenset[str] | None], list[MetricPoint]] = field(default_factory=dict)
     files: dict[str, list[MetricPoint]] = field(default_factory=dict)
+    last_run: _RunFiles | None = None
+
+    def run_files(self, run: RunRecord) -> _RunFiles:
+        """
+        The parsed files of ``run`` (``_RunFiles``), kept for the last run asked for only.
+
+        A panel asks for every value of one run before the next run
+        (``_stat_strip`` loops runs, then references), so each run's files are
+        read once per panel, not once per reference, while memory holds the
+        files of one run, never of all runs.
+        """
+        if self.last_run is None or self.last_run.run.run_id != run.run_id:
+            self.last_run = _RunFiles(run)
+        return self.last_run
 
     def runs_of(self, ctx: Context, entry: ProjectEntry, task: str) -> list[RunRecord]:
         """A new list of the task's unarchived runs, oldest first (read once)."""
@@ -136,12 +186,17 @@ class _ViewCache:
         ``sources.metric_points`` of ``runs``; each run and name set is read once.
 
         A live run's ``metrics.jsonl`` is parsed once per view, whatever names
-        the panels ask for.
+        the panels ask for, one line at a time into a bounded copy
+        (``RunStore.read_metric_points_bounded``): like an ended run's indexed
+        history, at most ``MAX_POINTS_PER_METRIC`` points per name, so neither
+        the read nor the cache ever holds a whole file.
         """
 
         def read_file(run: RunRecord) -> list[MetricPoint]:
             if run.run_id not in self.files:
-                self.files[run.run_id] = ctx.store.read_metric_points(run.project, run.run_id)
+                self.files[run.run_id] = ctx.store.read_metric_points_bounded(
+                    run.project, run.run_id
+                )
             return self.files[run.run_id]
 
         wanted = None if names is None else frozenset(names)
@@ -162,6 +217,7 @@ class _Scope:
     task: str
     runs: list[RunRecord]
     cache: _ViewCache
+    _points: dict[frozenset[str] | None, dict[str, list[MetricPoint]]] = field(default_factory=dict)
 
     def board(self) -> Leaderboard:
         """Leaderboard over this scope's runs (built once per view)."""
@@ -172,8 +228,16 @@ class _Scope:
         return self.cache.group_labels(self.ctx, self.entry, self.task, self.runs)
 
     def points(self, names: Iterable[str] | None) -> dict[str, list[MetricPoint]]:
-        """Metric history per run of this scope's runs, of ``names`` only (``None``: all)."""
-        return self.cache.metric_points(self.ctx, self.runs, names)
+        """
+        Metric history per run of this scope's runs, of ``names`` only (``None``: all).
+
+        Kept per name set, so a panel that asks once per run (``_resolve_value``)
+        reads every run once, not once per run.
+        """
+        key = None if names is None else frozenset(names)
+        if key not in self._points:
+            self._points[key] = self.cache.metric_points(self.ctx, self.runs, key)
+        return self._points[key]
 
 
 def _task_labels(entry: ProjectEntry, task: str, runs: list[RunRecord]) -> dict[str, str]:
@@ -376,6 +440,8 @@ def _stat_strip(scope: _Scope, panel: PanelSpec) -> PanelResult:
 
     With ``data.metrics`` each item is the mean of ``_run_value`` over the
     selected runs (after ``data.filter`` and ``data.pick``) that have a value.
+    Values are read run by run, each reference once, so a run's files are
+    parsed once (``_ViewCache.run_files``), however many references there are.
     """
     board = scope.board()
     rows: list[dict[str, Any]] = []
@@ -384,8 +450,13 @@ def _stat_strip(scope: _Scope, panel: PanelSpec) -> PanelResult:
     else:
         groups = _groups(scope, panel)
         only = f" of {groups[0][1]}" if len(groups) == 1 else ""
+        found: dict[str, list[float]] = {ref: [] for ref in panel.data.metrics}
+        for r in scope.runs:
+            for ref, got in found.items():
+                if (v := _run_value(scope, r, ref)) is not None:
+                    got.append(v)
         for ref in panel.data.metrics:
-            values = [v for r in scope.runs if (v := _run_value(scope, r, ref)) is not None]
+            values = found[ref]
             if not values:
                 tooltip = f"No value in the {len(scope.runs)} selected runs"
                 rows.append({"label": ref, "value": "—", "unit": "", "tooltip": tooltip})
@@ -893,7 +964,8 @@ def _checkpoints(scope: _Scope, run: RunRecord) -> list[Artifact]:
 
 
 def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
-    wanted = panel.data.metrics
+    # a name listed twice is drawn once: repeats would multiply the rows
+    wanted = None if panel.data.metrics is None else list(dict.fromkeys(panel.data.metrics))
     x_name = panel.data.step_metric or "step"
     rows: list[dict[str, Any]] = []
     checkpoints: list[dict[str, Any]] = []
@@ -909,7 +981,7 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
         groups.append(entry)
         for r in members:
             group_of[r.run_id] = key
-    names_seen: list[str] = []
+    names_seen: dict[str, None] = {}  # insertion-ordered set
     needed = None if wanted is None else [*wanted, *([x_name] if x_name != "step" else [])]
     history = scope.points(needed)
     for run in scope.runs:
@@ -925,8 +997,8 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
         last_x: float | None = None
         for name in names:
             series = sorted(by_name.get(name, []), key=lambda p: p.step)
-            if series and name not in names_seen:
-                names_seen.append(name)
+            if series:
+                names_seen.setdefault(name)
             xy = [
                 (x, p.value)
                 for p in series
@@ -961,7 +1033,7 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
         rows=rows,
         meta={
             "x": x_name,
-            "metrics": names_seen,
+            "metrics": list(names_seen),
             "checkpoints": checkpoints,
             "events": events,
             "groups": groups,
@@ -1026,15 +1098,12 @@ def _samples(scope: _Scope, run: RunRecord, name: str) -> list[float]:
     """A run's raw samples of series ``name`` (the name given to ``log_samples``)."""
     if not name:
         return []
-    return scope.ctx.store.read_samples(run.project, run.run_id).get(name, [])
+    return scope.cache.run_files(run).samples(scope.ctx).get(name, [])
 
 
 def _example_values(scope: _Scope, run: RunRecord, name: str, version: str) -> list[float]:
     """Per-example values of a metric: the field ``pick_field`` chooses, one per example."""
-    path = scope.ctx.run_dir(run) / "predictions" / f"scores.{name}@{version}.jsonl"
-    if not path.is_file():
-        return []
-    rows = [{k: v for k, v in row.items() if k != "id"} for row in read_jsonl(path)]
+    rows = scope.cache.run_files(run).examples(scope.ctx, name, version)
     picked = pick_field(rows, name)
     if picked is None:
         return []
@@ -1053,8 +1122,7 @@ def _primary_rows(scope: _Scope, run: RunRecord) -> tuple[str, list[dict[str, An
     spec = scope.entry.config.metrics.get(name)
     if spec is None:
         return None
-    path = scope.ctx.run_dir(run) / "predictions" / f"scores.{name}@{spec.version}.jsonl"
-    return name, [{k: v for k, v in row.items() if k != "id"} for row in read_jsonl(path)]
+    return name, scope.cache.run_files(run).examples(scope.ctx, name, spec.version)
 
 
 def _attempts(scope: _Scope, run: RunRecord) -> int | None:
@@ -1146,7 +1214,7 @@ def _resolve_value(scope: _Scope, run: RunRecord, ref: str) -> float | None:
         version = version or metrics[name].version
         key = key or "value"
         found: float | None = None
-        for s in scope.ctx.store.read_scores(run.project, run.run_id):
+        for s in scope.cache.run_files(run).scores(scope.ctx):
             if (s.metric, s.version, s.key) == (name, version, key) and s.error is None:
                 found = s.value
         if found is None and key in AGGREGATES:

@@ -938,9 +938,6 @@ def _execute(
     try:  # nothing the run logged may keep it from ending
         logged = ctx.store.read_artifacts(record.project, record.run_id)
         usage = sum_usage(ctx.store.read_usage(record.project, record.run_id))
-        ctx.index.replace_metric_points(
-            record.run_id, ctx.store.read_metric_points(record.project, record.run_id)
-        )
     except Exception as exc:  # noqa: BLE001 - the run ends either way; the warning says why
         message = f"could not read or index what the run logged: {type(exc).__name__}: {exc}"
         ctx.emit("run.warning", record, {"message": message[:500]})
@@ -962,6 +959,15 @@ def _execute(
         return done.model_copy(update={"cost": compute_cost(done, None)})
 
     final = ctx.update_run(run_id, f"run.{status.value}", finish, {"exit_code": exit_code})
+    # Publish the terminal status first: a rebuild in this gap must hydrate
+    # exact terminal history, never replace the final points with a live sample.
+    try:
+        ctx.index.replace_metric_points(
+            final.run_id, ctx.store.read_metric_points(final.project, final.run_id)
+        )
+    except Exception as exc:  # noqa: BLE001 - the run ends either way; preserve its warning
+        message = f"could not read or index what the run logged: {type(exc).__name__}: {exc}"
+        ctx.emit("run.warning", final, {"message": message[:500]})
     if auto_evaluate and status == RunStatus.FINISHED and final.task:
         try:
             evaluate_run(ctx, run_id)

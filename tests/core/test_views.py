@@ -159,6 +159,25 @@ def test_model_defaults_and_limits() -> None:
         RunFilter.model_validate({"stauts": "finished"})
 
 
+def test_a_panel_lists_at_most_max_panel_refs_metrics() -> None:
+    from hypothex.core.views import MAX_PANEL_REFS
+
+    assert PanelData(metrics=["acc"] * MAX_PANEL_REFS).metrics == ["acc"] * MAX_PANEL_REFS
+    with pytest.raises(ValidationError, match=f"at most {MAX_PANEL_REFS} metrics"):
+        PanelData(metrics=["acc"] * (MAX_PANEL_REFS + 1))
+    refs = ", ".join(["accuracy"] * (MAX_PANEL_REFS + 1))
+    text = f"title: t\npanels:\n  - type: stat_strip\n    data:\n      metrics: [{refs}]\n"
+    view, issues = validate_view_text(text, {"accuracy"}, {})
+    assert view is None
+    assert [(i.line, i.path, i.message) for i in issues] == [
+        (
+            5,
+            "panels[0].data.metrics",
+            f"metrics: a panel lists at most {MAX_PANEL_REFS} metrics, not {MAX_PANEL_REFS + 1}",
+        )
+    ]
+
+
 def test_run_filter_accepts_one_status_and_rejects_unknown() -> None:
     assert RunFilter.model_validate({"status": "finished"}).status == ["finished"]
     assert RunFilter.model_validate({"tags": "baseline"}).tags == ["baseline"]

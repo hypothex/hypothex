@@ -12,6 +12,7 @@ from hypothex.core.index import (
     SCHEMA_VERSION,
     Index,
     downsample,
+    index_run,
     rebuild_index,
     rebuild_index_if_stale,
     repair_index_gaps,
@@ -19,6 +20,7 @@ from hypothex.core.index import (
 from hypothex.core.layout import Layout
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import RunStore
+from hypothex.core.thin import MAX_METRIC_NAMES
 from tests.factories import make_record
 
 
@@ -158,6 +160,48 @@ def test_downsample_keeps_last_point_and_limit() -> None:
     assert [p.name for p in out].count("acc") == 1
 
 
+def _store_with_long_runs(tmp_path: Path) -> RunStore:
+    """A store with a running and a finished run, each 3,000 loss points peaking at step 1234."""
+    layout = Layout(tmp_path / "home")
+    layout.ensure()
+    store = RunStore(layout)
+    store.register_project(ProjectConfig(project="toy"), tmp_path)
+    for rid, status in (("live", RunStatus.RUNNING), ("done", RunStatus.FINISHED)):
+        store.create_run(make_record(rid, status=status))
+        path = layout.run_dir("toy", rid) / "metrics.jsonl"
+        for s in range(3000):
+            append_jsonl(path, {"name": "loss", "step": s, "value": 50.0 if s == 1234 else 1.0})
+    return store
+
+
+@pytest.mark.parametrize("via", ["index_run", "rebuild"])
+def test_a_live_runs_points_are_indexed_from_a_bounded_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, via: str
+) -> None:
+    store = _store_with_long_runs(tmp_path)
+    idx = Index(tmp_path / "i.db", store=store)
+    exact = downsample(store.read_metric_points("toy", "done"))
+    full_reads: list[str] = []
+    real = store.read_metric_points
+
+    def spy(project: str, run_id: str) -> list[MetricPoint]:
+        full_reads.append(run_id)
+        return real(project, run_id)
+
+    monkeypatch.setattr(store, "read_metric_points", spy)
+    if via == "index_run":
+        for record in store.iter_records():
+            index_run(idx, store, record)
+    else:  # a rebuild skips the files; the first read indexes them
+        rebuild_index(idx, store)
+        assert full_reads == []
+    live, done = idx.metric_points("live"), idx.metric_points("done")
+    assert full_reads == ["done"]  # an ended run's history stays exact (downsample of all)
+    assert done == exact
+    assert len(live) == 1000
+    assert {0, 1234, 2999} <= {p.step for p in live}  # the live run's peak survives
+
+
 def test_downsample_keeps_a_one_step_spike() -> None:
     # every-n-th sampling dropped it, so the indexed curve of an ended run lost its spike
     points = [MetricPoint(name="loss", step=i, value=1.0) for i in range(5000)]
@@ -248,3 +292,60 @@ def test_schema_version_is_none_only_for_a_missing_table(
     monkeypatch.setattr(idx, "get_meta", locked)
     with pytest.raises(OperationalError):
         idx.schema_version()  # a busy index is not mistaken for a new one
+
+
+def test_metric_points_for_takes_more_names_than_sqlite_has_variables(tmp_path: Path) -> None:
+    idx = Index(tmp_path / "i.db")
+    for rid in ("r1", "r2"):
+        idx.replace_metric_points(
+            rid,
+            [MetricPoint(name=n, step=s, value=1.0) for n in ("loss", "acc", "lr") for s in (0, 1)],
+        )
+    names = [f"m{i:05d}" for i in range(40_000)] + ["lr", "acc"]
+    got = idx.metric_points_for(["r1", "r2"], names=names)
+    want = [("acc", 0), ("acc", 1), ("lr", 0), ("lr", 1)]
+    assert {rid: [(p.name, p.step) for p in pts] for rid, pts in got.items()} == {
+        "r1": want,
+        "r2": want,
+    }
+
+
+@pytest.mark.parametrize("rebuild_after_publish", [False, True])
+def test_pending_live_metric_read_keeps_a_newer_terminal_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rebuild_after_publish: bool
+) -> None:
+    layout = Layout(tmp_path / "home")
+    layout.ensure()
+    store = RunStore(layout)
+    store.register_project(ProjectConfig(project="toy"), tmp_path)
+    record = make_record("r1", status=RunStatus.RUNNING)
+    store.create_run(record)
+    expected = [
+        MetricPoint(name=f"m{i:03d}", step=0, value=float(i)) for i in range(MAX_METRIC_NAMES + 1)
+    ]
+    for point in expected:
+        append_jsonl(layout.run_dir("toy", "r1") / "metrics.jsonl", point.model_dump())
+    idx = Index(layout.index_db, store=store)
+    rebuild_index(idx, store)
+    original_read = store.read_metric_points_bounded
+    published_generations: list[int] = []
+
+    def read_then_finish(project: str, run_id: str, limit: int = 1000) -> list[MetricPoint]:
+        bounded = original_read(project, run_id, limit)
+        assert len(bounded) == MAX_METRIC_NAMES
+        # The pending reader is paused while the terminal path publishes the exact history.
+        ended = record.model_copy(update={"status": RunStatus.FINISHED})
+        store.write_record(ended)
+        index_run(idx, store, ended)
+        assert idx.metric_points(run_id) == expected
+        if rebuild_after_publish:
+            # A fresh marker must not authorize a snapshot of the old RUNNING state.
+            rebuild_index(idx, store)
+        published_generations.append(idx.generation())
+        return bounded
+
+    monkeypatch.setattr(store, "read_metric_points_bounded", read_then_finish)
+    assert idx.metric_points("r1") == expected
+    assert idx.metric_points("r1") == expected
+    assert idx.generation() == published_generations[0] + int(rebuild_after_publish)
+    assert idx.get_run("r1") == store.read_record("toy", "r1")

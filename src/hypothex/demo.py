@@ -380,14 +380,14 @@ class _Seeder:
 
     def index_progress(self, record: RunRecord) -> None:
         """
-        Index a still-running run's logged metric history.
+        Index a still-running run's logged metric history (a bounded read).
 
         Parameters
         ----------
         record : RunRecord
             The running run.
         """
-        points = self.ctx.store.read_metric_points(record.project, record.run_id)
+        points = self.ctx.store.read_metric_points_bounded(record.project, record.run_id)
         self.ctx.index.replace_metric_points(record.run_id, points)
 
     def finish(

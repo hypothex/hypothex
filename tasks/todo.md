@@ -62,3 +62,35 @@ Decisions and evidence
 - Parent independently reviewed `44a6b58`, `aa5da40`, and `0234e93` with no new issue.
   PR body/title prepared in `/tmp/hx-handoff-evidence/backend-pr-body.md` and
   `backend-pr-title.txt`; parent will inspect, push, open/link, and monitor CI.
+
+# Bounded view integration (2026-10-05)
+
+Scope: preserve the merged audit behavior while bounding live metric reads and view work.
+
+- [x] Keep exact state readers strict on UTF-8 and compatible with universal newlines and
+  surrounding whitespace; only live metric reads apply byte/name/point caps.
+- [x] Prove per-name buffers and long-name memory stay bounded while reading.
+- [x] Merge audit SQL/primary-field/group-label behavior without dropping security bounds.
+- [x] Consolidate shared LTTB with exact integer buckets and overflow-safe finite axes.
+- [x] Reuse primary example data for stat-strip denominators instead of rereading per reference.
+- [x] Complete full Python, Docker, UI, e2e, static and Sphinx checks on the integrated branch.
+- [ ] Review branch, publish PR, and merge only after all current-head CI checks pass.
+
+Evidence: integration first produced five failures (large finite LTTB values and repeated
+primary-file reads); all 340 focused core tests now pass. A separate exact-read Unicode
+whitespace regression failed before restoring strip behavior; all 21 filesystem tests pass.
+Full validation and review logs are retained under `/tmp/hx-handoff-evidence/sec-integration-*`.
+
+Final integration: 1,813 Python passed / 3 skipped / 11 Docker deselected; separate
+final Docker run 11 passed. UI 848 and Playwright 44 passed, as did shutdown, build,
+types, Ruff, source ty, and Sphinx. Review regressions additionally cover lazy hydration
+after terminal publication and after a rebuild, terminal-before-metrics execution order,
+and loss-peak preservation near int64 step limits. Independent review has no remaining
+actionable blocker. PR publication and current-head CI merge remain pending.
+
+Merged the repository-path gate from main `3b696f1`: production files merged cleanly;
+three appended-test conflicts retain both regression groups. Combined validation:
+1,853 Python passed / 3 skipped / 11 Docker deselected; separate Docker 11 passed;
+Playwright 44 passed; shutdown, Sphinx, Ruff, source ty, and diff checks pass.
+Unchanged UI unit/type/build evidence remains valid. Updated-head CI is required
+before the final merge.

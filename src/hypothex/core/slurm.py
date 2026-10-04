@@ -49,7 +49,7 @@ from hypothex.core.execution import (
 )
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.ids import utcnow
-from hypothex.core.index import Index
+from hypothex.core.index import Index, index_run_points, points_to_index
 from hypothex.core.layout import Layout
 from hypothex.core.records import (
     ACTIVE_STATUSES,
@@ -1211,9 +1211,11 @@ def _end_if_active(
 
     ``Context.update_run`` emits its event even when ``mutate`` keeps a record
     that the compute node ended first (a ``run.lost`` carrying ``finished``).
-    Here the check, the write, the event, and the index update happen under
-    the run lock, and nothing is written or emitted for a run that ended: the
-    caller then publishes the node's own end (``sync_node_run``, Task 29).
+    Here the check, the write, the event, and the index update (the record,
+    then its metric points from the whole file, ``index_run_points``) happen
+    under the run lock, and nothing is written or emitted for a run that
+    ended: the caller then publishes the node's own end (``sync_node_run``,
+    Task 29).
     """
     project = ctx.find_record(run_id).project
     with run_lock(ctx.layout.run_dir(project, run_id)):
@@ -1229,6 +1231,7 @@ def _end_if_active(
             payload={"status": ended.status.value, **payload},
         )
         ctx.index.upsert_run(ended)
+        index_run_points(ctx.index, ctx.store, ended)
     return ended
 
 
@@ -1601,7 +1604,7 @@ def _sync_node_run(ctx: Context, current: RunRecord) -> RunRecord | None:
         ctx.index.upsert_run(current)
         changed = True
     if changed or current.status == RunStatus.RUNNING:
-        points = ctx.store.read_metric_points(current.project, current.run_id)
+        points = points_to_index(ctx.store, current.project, current.run_id, current.status)
         ctx.index.replace_metric_points(current.run_id, points)
     scored = bool(ctx.store.read_scores(current.project, current.run_id))
     if changed and current.status == RunStatus.FINISHED and current.task and not scored:
@@ -1822,7 +1825,7 @@ def _settle_node_end(
         changed = published is not None
         if ctx.index.get_run(run_id) != current:
             ctx.index.upsert_run(current)
-            points = ctx.store.read_metric_points(project, run_id)
+            points = points_to_index(ctx.store, project, run_id, current.status)
             ctx.index.replace_metric_points(run_id, points)
             ctx.events.append(
                 "run.slurm_state",

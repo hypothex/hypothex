@@ -1982,7 +1982,9 @@ def _pinned_slurm_run(ctx: Context, toy_repo: Path, code: str, **kw: Any) -> Run
     )
     record = control.launch_run(ctx, req)
     assert Path(record.cwd).is_relative_to(ctx.layout.worktrees_dir("toy"))
-    assert Path(record.cwd).is_dir()
+    assert Path(record.cwd).is_dir()  # made before sbatch: a compute node may have no git
+    staging = ctx.layout.project_dir("toy") / "staging"
+    assert not any(p.is_dir() for p in staging.iterdir())  # left once its own tree exists
     return record
 
 

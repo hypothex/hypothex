@@ -22,6 +22,7 @@ from hypothex.core.execution import (
     SUPERVISOR_PID_FILE,
     TERM_GRACE_SECONDS,
     RunRequest,
+    checkout_run_tree,
     execute_run,
     prepare_run,
     process_alive,
@@ -88,7 +89,9 @@ def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
             slurm.remember_slurm_defaults(ctx.layout, defaults)
         # no host queue marker: a queue.json would make the GPU scheduler start it here
         submitted = dataclasses.replace(req, slurm=defaults, queue=False)
-        return slurm.submit_run(ctx, prepare_run(ctx, submitted), defaults)
+        record = prepare_run(ctx, submitted)
+        _checkout_before_submit(ctx, record)
+        return slurm.submit_run(ctx, record, defaults)
     if req.queue:
         record = prepare_run(ctx, req)
         try:  # the only place a run joins the queue: marker, FIFO place, position at once
@@ -107,6 +110,21 @@ def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
     record = prepare_run(ctx, req)
     _start_supervisor(ctx, record)
     return ctx.find_record(record.run_id)
+
+
+def _checkout_before_submit(ctx: Context, record: RunRecord) -> None:
+    """
+    Make a pinned SLURM run's worktree here, before ``sbatch``.
+
+    The job runs on a compute node, which may have no git; ``execute_run``
+    there finds the worktree made. A checkout that fails fails the run.
+    """
+    try:
+        checkout_run_tree(ctx, record)
+    except (RunError, OSError) as exc:
+        failed = ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": str(exc)})
+        release_worktree(ctx, failed)
+        raise RunError(f"could not check out run {record.run_id}: {exc}") from exc
 
 
 def _prepare_on_free_gpus(
@@ -681,7 +699,13 @@ def repair_runs(ctx: Context) -> list[RunRecord]:
 
 
 def _repair_one(ctx: Context, current: RunRecord) -> RunRecord | None:
-    """Mark one active run of this environment lost if its supervisor is gone."""
+    """
+    Mark one active run of this environment lost if its supervisor is gone.
+
+    Its worktree is released like that of any ended run (``release_worktree``):
+    removed when the run left nothing in it, and a queued pinned run stops
+    using its staging checkout.
+    """
     if current.environment_id != ctx.descriptor.environment_id:
         return None
     if current.executor.type == slurm.SLURM_EXECUTOR:
@@ -699,4 +723,6 @@ def _repair_one(ctx: Context, current: RunRecord) -> RunRecord | None:
     if child is not None and process_alive(child, None):
         terminate_group(child)
         reason += "; orphaned process terminated"
-    return ctx.update_run(current.run_id, "run.lost", _mark(RunStatus.LOST), {"reason": reason})
+    lost = ctx.update_run(current.run_id, "run.lost", _mark(RunStatus.LOST), {"reason": reason})
+    release_worktree(ctx, lost)  # nothing executes it any more: also frees a staging checkout
+    return lost

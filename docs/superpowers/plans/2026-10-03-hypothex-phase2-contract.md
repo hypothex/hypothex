@@ -122,7 +122,7 @@ def cancel(job_id: str) -> None: ...
 # hypothex.core.cost
 def compute_cost(record: RunRecord, usd_per_gpu_hour: float | None) -> CostTotals: ...
 ```
-`hx serve --kind slurm|ssh` (default from `environment.json` / probe) enables the scheduler loop (ssh, every 5 s) or the SLURM poll loop (every 30 s). Run-start path: `prepare_run` accepts `gpus: int`, `queue: bool`, `slurm: SlurmDefaults | None`, `commit: str | None` (hex sha, fetched when missing), `diff: str | None` (applied on `commit` in a worktree, 8A.4). The hub always sends `commit` with `diff`.
+`hx serve --kind slurm|ssh` (default from `environment.json` / probe) enables the scheduler loop (ssh, every 5 s) or the SLURM poll loop (every 30 s). Run-start path: `prepare_run` accepts `gpus: int`, `queue: bool`, `slurm: SlurmDefaults | None`, `commit: str | None` (hex sha, fetched when missing), `diff: str | None` (applied on `commit` in a worktree, 8A.4). The hub always sends `commit` with `diff`. Changed (DF-50): a pinned run's own worktree `<store>/<project>/worktrees/<run_id>` (its `cwd` and `{repo}`) is made when the run starts (`execution.checkout_run_tree`, from `<run_dir>/.hx/checkout.json` and `.hx/checkout.diff`; a SLURM run gets it before `sbatch`), never while it waits. `prepare_run` reads config and captures from one staging checkout per (commit, diff) at `<store>/<project>/staging/<sha>-<diff hash>`, shared by the queued runs that pin it and removed when the last of them starts or ends.
 
 ### 1.7 Sweeps (`hypothex.core.sweeps`)
 

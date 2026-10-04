@@ -466,17 +466,27 @@ def _pinned_request(repo: Path, *, gpus: int = 0, queue: bool = False) -> RunReq
     return RunRequest(repo=repo, command=[PY, "train.py"], commit=old, gpus=gpus, queue=queue)
 
 
-def test_cancelling_an_unstarted_pinned_run_releases_its_worktree(
+def _staging(ctx: Context) -> list[Path]:
+    """The shared staging checkouts of project toy."""
+    root = ctx.layout.project_dir("toy") / "staging"
+    return sorted(p for p in root.iterdir() if p.is_dir() and "." not in p.name)
+
+
+def _git_worktrees(repo: Path) -> int:
+    return git(repo, "worktree", "list", "--porcelain").count("worktree ")
+
+
+def test_cancelling_an_unstarted_pinned_run_releases_its_staging_checkout(
     ctx: Context, toy_repo: Path
 ) -> None:
     rec = prepare_run(ctx, _pinned_request(toy_repo))
     tree = ctx.layout.worktrees_dir("toy") / rec.run_id
-    assert tree.is_dir()  # the checkout was made at prepare time
+    assert not tree.exists() and len(_staging(ctx)) == 1  # its own tree waits for the start
     assert control.cancel_if_queued(ctx, rec.run_id).status == RunStatus.KILLED
-    assert not tree.exists()  # no supervisor will ever run it: nothing else removes it
+    assert _staging(ctx) == [] and _git_worktrees(toy_repo) == 1
 
 
-def test_removing_a_pinned_run_from_the_gpu_queue_releases_its_worktree(
+def test_removing_a_pinned_run_from_the_gpu_queue_releases_its_staging_checkout(
     ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_gpus = tmp_path / "gpus.json"
@@ -484,10 +494,39 @@ def test_removing_a_pinned_run_from_the_gpu_queue_releases_its_worktree(
     monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(fake_gpus))
     rec = launch_run(ctx, _pinned_request(toy_repo, gpus=1, queue=True))
     assert rec.status == RunStatus.QUEUED
-    tree = ctx.layout.worktrees_dir("toy") / rec.run_id
-    assert tree.is_dir()
+    assert len(_staging(ctx)) == 1
     assert control.cancel_if_queued(ctx, rec.run_id).status == RunStatus.KILLED
-    assert not tree.exists()
+    assert _staging(ctx) == [] and _git_worktrees(toy_repo) == 1
+
+
+def test_queued_pinned_runs_share_one_checkout_until_they_start(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # DF-50: each queued pinned run made a full worktree at launch
+    req = _pinned_request(toy_repo)
+    first, second, third = (prepare_run(ctx, req) for _ in range(3))
+    trees = ctx.layout.worktrees_dir("toy")
+    assert len(_staging(ctx)) == 1 and _git_worktrees(toy_repo) == 2
+    assert not trees.exists() or list(trees.iterdir()) == []
+    assert first.cwd == str(trees / first.run_id)
+    done = execute_run(ctx, first.run_id)
+    assert done.status == RunStatus.FINISHED
+    assert (ctx.run_dir(done) / "logs" / "stdout.log").read_text().strip() == "train v1"
+    assert len(_staging(ctx)) == 1  # two runs still wait for it
+    assert execute_run(ctx, second.run_id).status == RunStatus.FINISHED
+    control.cancel_if_queued(ctx, third.run_id)
+    assert _staging(ctx) == [] and _git_worktrees(toy_repo) == 1
+
+
+def test_a_pinned_run_whose_commit_is_gone_at_start_fails(ctx: Context, toy_repo: Path) -> None:
+    rec = prepare_run(ctx, _pinned_request(toy_repo))
+    (ctx.run_dir(rec) / ".hx" / "checkout.json").write_text(
+        json.dumps({"repo": str(toy_repo), "commit": "0" * 40, "staging": "x"})
+    )
+    done = execute_run(ctx, rec.run_id)
+    assert done.status == RunStatus.FAILED and done.started_at is None
+    assert "could not check out" in (ctx.run_dir(done) / "logs" / "stderr.log").read_text()
+    assert not (ctx.layout.worktrees_dir("toy") / rec.run_id).exists()
 
 
 def test_stop_run_signals_a_child_its_first_read_missed(
@@ -552,3 +591,14 @@ def test_child_runs_do_not_join_the_parents_sweep(
     assert child.tags == ["keep"]
     members = ctx.index.list_runs(project="toy", tag=tag, include_archived=True, limit=None)
     assert [r.run_id for r in members] == [parent]
+
+
+def test_a_lost_queued_pinned_run_releases_its_staging_checkout(
+    ctx: Context, toy_repo: Path
+) -> None:
+    rec = prepare_run(ctx, _pinned_request(toy_repo))
+    old = utcnow() - timedelta(minutes=5)
+    ctx.update_run(rec.run_id, "test.aged", lambda r: r.model_copy(update={"created_at": old}))
+    _write_supervisor_pid(ctx, rec.run_id, dead_pid())
+    assert [r.run_id for r in repair_runs(ctx)] == [rec.run_id]
+    assert _staging(ctx) == [] and _git_worktrees(toy_repo) == 1

@@ -147,7 +147,8 @@ def iter_rows(
       indexed history of runs that ended, ``metrics.jsonl`` of the others),
       ordered by name then step.
     - ``predictions``: ``id``, ``prediction``, ``reference`` (joined from the
-      task dataset when the row has none), ``meta.*``, and every per-example
+      task dataset when the row has none, except for a project copied from a
+      host, whose repo is on that host), ``meta.*``, and every per-example
       score field as ``<metric>@<version>.<field>``.
     - ``samples``: ``name``, ``value`` (``RunStore.read_samples``).
     - ``usage``: ``example_id``, ``tokens_in``, ``tokens_out``, ``usd``, ``seconds``
@@ -274,10 +275,19 @@ def _metric_rows(points: list[MetricPoint]) -> Iterator[dict[str, Any]]:
 
 
 def _dataset_references(ctx: Context, project: str, task: str | None) -> dict[str, Any]:
+    """
+    Reference per example id from the task's dataset, or ``{}``.
+
+    A project copied from a host (``ProjectEntry.remote_host``) has its repo
+    path on that host, so it is never read here: its rows keep no reference.
+    """
     if task is None:
         return {}
     try:
-        repo = Path(ctx.store.load_project(project).repo)
+        entry = ctx.store.load_project(project)
+        if entry.remote_host is not None:
+            return {}
+        repo = Path(entry.repo)
         config = load_project_config(repo)
         spec = config.tasks[task]
         ds = config.datasets[spec.dataset]

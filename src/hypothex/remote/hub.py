@@ -380,7 +380,7 @@ def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) ->
     the hub. A project registered on the hub (or copied from another host) is
     never replaced; a later ``hx register`` of a checkout on the hub replaces
     the copy. The copy's ``repo`` is the path the host reported, on the host:
-    hub code must never read or write under it (check ``remote_host`` first).
+    hub code must never read or write under it (``Context.local_repo`` refuses it).
     """
     known: ProjectEntry | None = None
     with contextlib.suppress(StoreError):
@@ -453,10 +453,15 @@ def mirror_run(
     -------
     tuple of (RunRecord, bool) or None
         The mirrored record and whether any file changed; None when the run was
-        skipped (unsafe name, owned by another environment, or gone).
+        skipped (unsafe name, owned by another environment, reported under the
+        hub's own environment id, or gone).
     """
     if not (_safe_name(project) and _safe_name(run_id)):
         log.warning("host %s: skipping run with unsafe name %r/%r", host, project, run_id)
+        return None
+    if environment_id == ctx.descriptor.environment_id:
+        # it would pass as the hub's own run: rerun/reinfer would run its command here
+        log.warning("host %s reports this hub's own environment id; run %s skipped", host, run_id)
         return None
     reason = _conflict(ctx, environment_id, project, run_id)
     if reason is not None:
@@ -808,6 +813,10 @@ def mirror_event(
 
 class _UpgradeRequiredError(Exception):
     """The host speaks another protocol version; retrying cannot help."""
+
+
+class _OwnEnvironmentError(Exception):
+    """The host reports the hub's own environment id; retrying cannot help."""
 
 
 AUTH_FAILURE_STATUSES = frozenset({401, 403})
@@ -1209,6 +1218,9 @@ class Hub:
             except _UpgradeRequiredError as exc:
                 self._set(sup, "upgrade", str(exc))
                 return
+            except _OwnEnvironmentError as exc:
+                self._set(sup, "error", str(exc))
+                return
             except EnvRequestError as exc:
                 status = _auth_failure(exc)
                 if status is not None:  # retrying with the same token cannot help
@@ -1287,6 +1299,13 @@ class Hub:
                     f"hub speaks {PROTOCOL_VERSION}"
                 )
             env_id = desc.environment_id
+            if env_id == self.ctx.descriptor.environment_id:
+                # its runs would pass as the hub's own (mirror_run skips them anyway)
+                raise _OwnEnvironmentError(
+                    f"{sup.name} reports this hub's own environment id {env_id}; "
+                    "a host must be another hx home (remove it: hx hosts rm "
+                    f"{sup.name})"
+                )
             cursor = await asyncio.to_thread(self._read_cursor, sup, env_id)
             if cursor:
                 cursor = await asyncio.to_thread(self._check_cursor, sup, client, env_id, cursor)

@@ -3,7 +3,8 @@
  * runs by launcher; recent ideas; running; failures with a link to stderr; projects table.
  *
  * With hosts configured, the headline reads `12 running, 11 waiting. dgx stale 4m` and the
- * metaline shows free GPUs, cost today, the hub's hx version and the host count (mockup
+ * metaline shows free GPUs, cost today, the hub's hx version and the host count, one per
+ * row of the Hosts table with the hub's own row (mockup
  * `docs/mockups/phase2/shot-overview-*`). The hosts list always has the hub's own `local`
  * row; with no other host both stay as in phase 1 (plus `$N today` once runs cost money). A
  * host stale for longer than the hub's `stale_banner_hours` (default 24) gets a banner (spec
@@ -66,7 +67,7 @@ function OverviewBody({ summary }: { summary: OverviewSummary }) {
       </h1>
       <p className="metaline">
         {withHosts
-          ? hostsMetaline(totals, hubVersion, remote.length).map((text) => <span key={text}>{text}</span>)
+          ? hostsMetaline(totals, hubVersion, rows.length).map((text) => <span key={text}>{text}</span>)
           : [
               ...Object.entries(summary.counts).map(([key, value]) => <span key={key}>{`${value} ${key}`}</span>),
               ...(hubCost > 0 ? [<span key="cost today">{`${fmtMoney(hubCost)} today`}</span>] : []),

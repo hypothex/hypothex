@@ -3,7 +3,9 @@
  *
  * One column per seed group, one row per metric, on one shared step axis; a metric whose
  * steps span a very different range (e.g. a sweep logged with step = concurrency) goes
- * below the others with its own axis. A series with one point is a dot. Seeds are
+ * below the others with its own axis. A metric with fewer than 2 points in every group is
+ * no curve: it is shown as a value (the seed mean) above the rows. A series with one point
+ * next to longer ones is a dot. Seeds are
  * faint lines, the seed mean is bold. The best checkpoint of each run is a green
  * dot; loss spikes and non-finite values (`NaN <step>`) are dashed red lines with a
  * spike glyph, killed or failed runs end in a red cross. Values pushed off the panel by a spike get a red caret with
@@ -120,8 +122,12 @@ export interface PlacedCheckpoint extends CheckpointJson {
 
 /** Everything the panel draws, computed from the rows and meta. */
 export interface CurvesModel {
+  /** Groups with any points, curves or values. */
   groups: GroupJson[];
+  /** Metrics drawn as curves, one row each. */
   names: string[];
+  /** Metrics with fewer than 2 points (steps) in every group: shown as values, not rows. */
+  values: string[];
   cells: Map<string, Cell>;
   /** Last step of the shared axis. */
   maxStep: number;
@@ -260,7 +266,8 @@ function assignName(
  *     Groups in `meta.groups` order (unknown groups appended, groups with no points
  *     dropped), metric names in
  *     `meta.metrics` order (else first-seen), system metrics after the model's and
- *     learning-rate rows last, and per-row scales. Points of a
+ *     learning-rate rows last, and per-row scales. Metrics with fewer than 2 steps in
+ *     every group go to `values` (same order) instead of the rows. Points of a
  *     spiked run within {@link SPIKE_WINDOW} of the axis after the spike are left
  *     out of the y-domain so one spike does not flatten every other line. The
  *     shared step axis reaches the last `nonfinite` event of a drawn run, so a
@@ -277,6 +284,9 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
   const runGroup = new Map<string, string>();
   const byRun = new Map<string, Map<string, RunSeries>>();
   const rowMax: Record<string, number> = {};
+  const stepsOf = new Map<string, Set<number>>();
+  /** Metrics with 2 or more steps in some group: drawn as curves. */
+  const lined = new Set<string>();
   for (const p of rows) {
     if (!Number.isFinite(p.value) || !Number.isFinite(p.step)) continue;
     if (!known.has(p.group_id)) {
@@ -291,8 +301,15 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
     if (!rs) series.set(p.name, (rs = { run_id: p.run_id, seed: p.seed, points: [] }));
     rs.points.push([p.step, p.value]);
     rowMax[p.name] = Math.max(rowMax[p.name] ?? 0, p.step);
+    const key = cellKey(p.group_id, p.name);
+    const steps = stepsOf.get(key) ?? new Set<number>();
+    stepsOf.set(key, steps.add(p.step));
+    if (steps.size > 1) lined.add(p.name);
   }
-  const ownAxis = ownAxisNames(rowMax);
+  // a metric with one step in every group is a value: no line, no step axis of its own
+  const values = names.filter((n) => !lined.has(n));
+  names.splice(0, names.length, ...names.filter((n) => lined.has(n)));
+  const ownAxis = ownAxisNames(Object.fromEntries(names.map((n) => [n, rowMax[n] ?? 0])));
   const own = (n: string): number => (ownAxis.includes(n) ? 1 : 0);
   // the view's metric order when given; system metrics (`sys/...`) below the model's
   const listed = Array.isArray(meta?.metrics) ? (meta.metrics as unknown[]) : [];
@@ -300,13 +317,13 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
     const i = listed.indexOf(n);
     return i < 0 ? listed.length : i;
   };
-  names.sort(
-    (a, b) =>
-      own(a) - own(b) ||
-      Number(isLr(a)) - Number(isLr(b)) ||
-      Number(isSystem(a)) - Number(isSystem(b)) ||
-      at(a) - at(b),
-  );
+  const order = (a: string, b: string): number =>
+    own(a) - own(b) ||
+    Number(isLr(a)) - Number(isLr(b)) ||
+    Number(isSystem(a)) - Number(isSystem(b)) ||
+    at(a) - at(b);
+  names.sort(order);
+  values.sort(order);
   const shared = names.filter((n) => !ownAxis.includes(n));
   // a run that diverged and never logged again has its NaN past its last finite point
   const nanSteps = events
@@ -370,10 +387,11 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
     seedsByGroup.set(g, list);
   }
   // a group with no points at all (e.g. a run that failed before logging) gets no empty column
-  const drawn = groups.filter((g) => names.some((n) => cells.has(cellKey(g.group_id, n))));
+  const drawn = groups.filter((g) => [...names, ...values].some((n) => cells.has(cellKey(g.group_id, n))));
   return {
     groups: columnTitles(drawn, (id) => seedsByGroup.get(id) ?? []),
     names,
+    values,
     cells,
     maxStep,
     rowMax,
@@ -699,6 +717,45 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
   );
 }
 
+/** One value of {@link CurvesModel.values}: a metric's single point in one group. */
+export interface ValueStat {
+  name: string;
+  group_id: string;
+  /** `name`, plus the group's title when the panel has more than one group. */
+  label: string;
+  /** Mean over the group's runs. */
+  value: number;
+  /** Each run's value, `s1 0.8  s2 0.9` (seed, else the run id's last 4 characters). */
+  title: string;
+}
+
+/**
+ * The values to show for `model.values`, one per metric and group with points, in metric
+ * then group order.
+ *
+ * Examples
+ * --------
+ * >>> valueStats(buildCurves([{ run_id: "r", group_id: "g", seed: 1, name: "acc", step: 0, value: 0.9 }], {}))
+ * [{ name: "acc", group_id: "g", label: "acc", value: 0.9, title: "s1 0.9" }]
+ */
+export function valueStats(model: CurvesModel): ValueStat[] {
+  const several = model.groups.length > 1;
+  return model.values.flatMap((name) =>
+    model.groups.flatMap((g) => {
+      const cell = model.cells.get(cellKey(g.group_id, name));
+      const point = cell?.mean[0];
+      if (!cell || !point) return [];
+      const runs = cell.runs.map((r) => {
+        const v = r.points[0]?.[1];
+        return `${r.seed != null ? `s${r.seed}` : r.run_id.slice(-4)} ${v == null ? "—" : fmtValue(v)}`;
+      });
+      return [
+        { name, group_id: g.group_id, label: several ? `${name} ${g.label}` : name, value: point[1], title: runs.join("  ") },
+      ];
+    }),
+  );
+}
+
 /** Draw a `curves` panel result. */
 export function Curves({ result }: PanelProps): ReactElement {
   const [ref, width] = useElementWidth<HTMLDivElement>(960);
@@ -707,16 +764,37 @@ export function Curves({ result }: PanelProps): ReactElement {
     () => buildCurves(result.rows as unknown as CurvePoint[], result.meta),
     [result.rows, result.meta],
   );
-  if (model.names.length === 0) {
+  if (model.names.length === 0 && model.values.length === 0) {
     return (
       <div ref={ref}>
         <p className="panel-empty">No metric history yet</p>
       </div>
     );
   }
-  const cols = Math.min(MAX_COLS, model.groups.length);
+  const stats = valueStats(model);
+  const statStrip =
+    stats.length > 0 ? (
+      <dl className="stats">
+        {stats.map((st) => (
+          <div key={`${st.name}\u0000${st.group_id}`} title={st.title}>
+            <dt>{st.label}</dt>
+            <dd>{fmtValue(st.value)}</dd>
+          </div>
+        ))}
+      </dl>
+    ) : null;
+  if (model.names.length === 0) {
+    return (
+      <div className="curves" ref={ref}>
+        {statStrip}
+      </div>
+    );
+  }
+  // columns only for groups with a curve; a group with only values is in the strip
+  const curveGroups = model.groups.filter((g) => model.names.some((n) => model.cells.has(cellKey(g.group_id, n))));
+  const cols = Math.min(MAX_COLS, curveGroups.length);
   const bands: GroupJson[][] = [];
-  for (let i = 0; i < model.groups.length; i += MAX_COLS) bands.push(model.groups.slice(i, i + MAX_COLS));
+  for (let i = 0; i < curveGroups.length; i += MAX_COLS) bands.push(curveGroups.slice(i, i + MAX_COLS));
   const onHover = (text: string | null, x: number, y: number): void => {
     if (text) tip.show(text, x, y);
     else tip.hide();
@@ -737,6 +815,7 @@ export function Curves({ result }: PanelProps): ReactElement {
   }
   return (
     <div className="curves" ref={ref}>
+      {statStrip}
       {bands.map((groups) => (
         <CurveStack
           key={groups.map((g) => g.group_id).join("|")}

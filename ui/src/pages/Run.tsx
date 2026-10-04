@@ -5,6 +5,7 @@
  * notes, and actions.
  */
 import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
 import { api } from "../api/client";
 import { useLostReason } from "../api/lostReasons";
 import {
@@ -70,8 +71,10 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
   // Idle for a run without a task.
   const kind = useTaskKind(project, task, { enabled: hasTask });
   const board = useLeaderboard(project, task, [], { enabled: hasTask });
-  const kindSpecs = kind.data?.run_view ?? [];
+  const kindSpecs = useMemo(() => kind.data?.run_view ?? [], [kind.data]);
   const traces = useRunTraces(runId, kindSpecs.some(readsTraces));
+  const traceCount = traces.data?.length;
+  const specs = useMemo(() => runViewPanels(kindSpecs, traceCount), [kindSpecs, traceCount]);
   const phase = run.data ? runPhase(run.data) : "local";
   // A remote run: the hub reports its host's state. Hub runs have host_state null, even
   // though the backend sets executor.host (the machine's hostname) on every run.
@@ -115,7 +118,6 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
   const waiting = phase === "queued" || phase === "pending";
   const row = board.data?.rows.find((r) => r.run_ids.includes(runId)) ?? null;
   const primary = primaryRef(board.data ?? null, row);
-  const specs = runViewPanels(kindSpecs, traces.data?.length);
   const stream = asLogStream(log);
   const label = row?.label ?? firstClause(record.hypothesis, `run ${shortId(runId)}`);
   const title = stateTitle(label, phase, record, host) ?? (record.hypothesis || label);

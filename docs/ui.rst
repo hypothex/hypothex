@@ -6,6 +6,10 @@ Web UI
 over the ``/api/v1/ws`` event stream: a new run, score, note or status change refreshes
 the page you are looking at, without a reload.
 
+A new tab starts its event stream after the hub's newest event, then refreshes its
+page reads once. This covers changes made while the page was opening without
+replaying the whole event log. Reconnects resume after the last received event.
+
 .. code-block:: bash
 
    uv run hx serve

@@ -7,8 +7,8 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useRef, useState } from "react";
-import { api } from "../api/client";
-import type { RunRecord } from "../api/models";
+import { ApiError, api } from "../api/client";
+import type { EvalReport, RunRecord } from "../api/models";
 import {
   RUN_EVENT_INVALIDATES,
   queryKeys,
@@ -49,6 +49,34 @@ export function boardMeta(board: Leaderboard): string[] {
   ];
   if (board.needs_reeval.length > 0) out.push(`${board.needs_reeval.length} need re-eval`);
   return out;
+}
+
+/**
+ * What a re-evaluation did, in one line: `0 re-scored · 1 skipped: no predictions`.
+ * Skip reasons are counted (`×N`) when there is more than one kind.
+ */
+export function reevalLine(report: EvalReport): string {
+  const skipped = Object.values(report.skipped ?? {});
+  const warnings = report.warnings ?? [];
+  const out = [`${(report.evaluated ?? []).length} re-scored`];
+  if (skipped.length > 0) {
+    const reasons = new Map<string, number>();
+    for (const why of skipped) reasons.set(why, (reasons.get(why) ?? 0) + 1);
+    const many = reasons.size > 1;
+    const text = [...reasons].map(([why, n]) => (many ? `${why} ×${n}` : why)).join(", ");
+    out.push(`${skipped.length} skipped: ${text}`);
+  }
+  if (warnings.length > 0) out.push(plural(warnings.length, "warning", "warnings"));
+  return out.join(" · ");
+}
+
+/** The skipped runs and the warnings of a re-evaluation, one per line, for the tooltip. */
+function reevalDetail(report: EvalReport): string | undefined {
+  const lines = [
+    ...Object.entries(report.skipped ?? {}).map(([id, why]) => `${id}: ${why}`),
+    ...(report.warnings ?? []),
+  ];
+  return lines.length > 0 ? lines.join("\n") : undefined;
 }
 
 interface LaunchedRuns {
@@ -165,15 +193,27 @@ function SweepsLine({ project }: { project: string }) {
   );
 }
 
+/** A 404 (unknown project), or the server's 400 `ConfigError` for an unknown task in a known project. */
+const isGone = (e: Error | null): boolean =>
+  e instanceof ApiError &&
+  (e.status === 404 || (e.status === 400 && e.type === "ConfigError" && /^unknown task\b/.test(e.message)));
+
+/** The first not-found among the task's own reads: the project or the task does not exist. */
+function notFound(...errors: (Error | null)[]): Error | null {
+  return errors.find(isGone) ?? null;
+}
+
 export function TaskPage({ project, task, view }: TaskPageProps) {
   const active = view ? String(view) : "overview";
   const board = useLeaderboard(project, task);
   const views = useViews(project, task);
   const detail = useView(project, task, active);
   const panels = useViewQuery(project, task, { name: active });
+  const [reevalReport, setReevalReport] = useState<EvalReport | null>(null);
   const reeval = useAction({
     send: (_: void, opts) => api.reevalTask(project, task, {}, opts),
     invalidate: RUN_EVENT_INVALIDATES,
+    onSuccess: setReevalReport,
   });
   // the template run at the click (`undefined`: closed); the leaderboard keeps changing
   const [launching, setLaunching] = useState<string | null | undefined>(undefined);
@@ -186,16 +226,34 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
   // drawn with the new view's specs, so wait for the active view's own data.
   const ready = panels.data !== undefined && !panels.isPlaceholderData && !detail.isPending;
   const templateRunId = board.data?.rows[0]?.latest_run_id ?? null;
+  const crumb = (
+    <>
+      <AppLink href={hrefs.overview()}>All projects</AppLink>
+      <span className="sep">/</span>
+      {project}
+      <span className="sep">/</span>
+      {task}
+    </>
+  );
+
+  // one not-found state: no tabs or actions for a task that does not exist
+  const gone = notFound(board.error, views.error);
+  if (gone) {
+    return (
+      <div className="page">
+        <PageStyles />
+        <p className="crumb">{crumb}</p>
+        <h1 className="headline">Not found</h1>
+        <ErrorBox error={gone} />
+      </div>
+    );
+  }
 
   return (
     <div className="page">
       <PageStyles />
       <p className="crumb">
-        <AppLink href={hrefs.overview()}>All projects</AppLink>
-        <span className="sep">/</span>
-        {project}
-        <span className="sep">/</span>
-        {task}
+        {crumb}
         {board.data ? (
           <span className="tag" title="task kind">
             {board.data.kind}
@@ -246,7 +304,10 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
           <button
             type="button"
             className="btn"
-            onClick={() => reeval.run()}
+            onClick={() => {
+              setReevalReport(null);
+              reeval.run();
+            }}
             disabled={reeval.pending}
             title="Re-score every run's saved predictions with the current metric versions"
           >
@@ -264,6 +325,11 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
       </nav>
       {views.error ? <ErrorBox error={views.error} /> : null}
       {reeval.error ? <ErrorBox error={reeval.error} /> : null}
+      {reevalReport ? (
+        <p className="small" role="status" aria-label="Re-evaluate" title={reevalDetail(reevalReport)}>
+          {reevalLine(reevalReport)}
+        </p>
+      ) : null}
       {launched ? <LaunchedLine launched={launched} /> : null}
       <SweepsLine project={project} />
 

@@ -2,12 +2,15 @@
  * Sticky top bar from the ui-v4 mockup: brand, screen tabs, find button, theme toggle.
  *
  * Tabs: Overview always; Task, Run and Examples point at the last task, run and example
- * pair the user opened (kept in localStorage) and are hidden until there is one.
+ * pair the user opened (kept in localStorage) and are hidden until there is one. A target
+ * is saved only once the page's own read of it succeeds, so a 404 never becomes a tab.
  */
+import { type QueryKey, useQueryClient } from "@tanstack/react-query";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 import { useStreamStatus } from "../api/events";
+import { queryKeys } from "../api/queries";
 import { ThemeToggle } from "./ThemeToggle";
 
 export type Screen = "overview" | "task" | "run" | "examples";
@@ -84,9 +87,35 @@ function loadRecent(): RecentTargets {
   }
 }
 
+/**
+ * The reads whose success shows the target in `pathname` exists: the ones its page makes
+ * (Task and the view editor read the leaderboard; Run and Examples read their runs).
+ */
+export function confirmKeys(pathname: string): QueryKey[] {
+  const { task, run, examples } = updateRecent({}, pathname, {});
+  if (task) return [queryKeys.leaderboard(task.project, task.task)];
+  if (run) return [queryKeys.run(run.runId)];
+  if (examples) return [queryKeys.run(examples.a), queryKeys.run(examples.b)];
+  return [];
+}
+
+/**
+ * True once every read in `keys` has succeeded. It only watches the cache (an observer
+ * here would fetch, or pass its options on to the page's query).
+ */
+function useReadsOk(keys: QueryKey[]): boolean {
+  const client = useQueryClient();
+  const cache = client.getQueryCache();
+  const subscribe = useCallback((onChange: () => void) => cache.subscribe(onChange), [cache]);
+  const ok = () => keys.every((key) => client.getQueryState(key)?.status === "success");
+  return useSyncExternalStore(subscribe, ok, ok);
+}
+
 function useRecentTargets(pathname: string, search: Record<string, unknown>): RecentTargets {
-  const [recent, setRecent] = useState<RecentTargets>(() => updateRecent(loadRecent(), pathname, search));
+  const [recent, setRecent] = useState<RecentTargets>(loadRecent);
+  const confirmed = useReadsOk(confirmKeys(pathname));
   useEffect(() => {
+    if (!confirmed) return;
     setRecent((prev) => {
       const next = updateRecent(prev, pathname, search);
       try {
@@ -96,7 +125,7 @@ function useRecentTargets(pathname: string, search: Record<string, unknown>): Re
       }
       return next;
     });
-  }, [pathname, search]);
+  }, [confirmed, pathname, search]);
   return recent;
 }
 

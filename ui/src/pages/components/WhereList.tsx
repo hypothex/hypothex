@@ -4,6 +4,7 @@
  * children relative to it; copy buttons copy the full path.
  */
 import { CopyButton } from "./CopyButton";
+import { SlashPath } from "./SlashPath";
 import { displayPath, fmtBytes, isNum, relativeTo, shellJoin, splitHostPath, tailPath } from "./format";
 import { AppLink, hrefs } from "./links";
 import type { GitInfo, RunDetail } from "./types";
@@ -152,7 +153,7 @@ export function WhereList({ detail }: { detail: RunDetail }) {
           <div key={group.title}>
             <div className="root">
               <span className="k">{group.title}</span>
-              <span className="p">{root.display}</span>
+              <SlashPath className="p" path={root.display} title={root.title} />
               <span className="what">{root.note ?? ""}</span>
               <CopyButton text={root.copy} label={root.display} />
             </div>
@@ -168,11 +169,11 @@ export function WhereList({ detail }: { detail: RunDetail }) {
                     <span className="br">{row.indent ? (i === kids.length - 1 ? "└" : "├") : "·"}</span>
                     <span className="p" title={row.title}>
                       {row.href ? (
-                        <AppLink href={row.href} title="Open">
-                          {row.display}
+                        <AppLink href={row.href} title="Open" aria-label={row.display}>
+                          <SlashPath path={row.display} />
                         </AppLink>
                       ) : (
-                        row.display
+                        <SlashPath path={row.display} />
                       )}
                     </span>
                     <span className="what">{row.note ?? ""}</span>

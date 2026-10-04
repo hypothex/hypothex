@@ -383,6 +383,8 @@ export interface PanelLayout {
 
 export interface PanelData {
   metrics?: string[] | null;
+  /** Curves: final points per run/metric (2..500); absent/null keeps the server's 500. */
+  max_points?: number | null;
   x?: string | null;
   y?: string | null;
   group_by?: "group" | "config" | "run" | "seed" | null;

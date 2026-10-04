@@ -1,6 +1,6 @@
 /** Overview side panels: running runs, failures, projects. */
-import { Fragment } from "react";
 import { CopyButton } from "./CopyButton";
+import { SlashPath } from "./SlashPath";
 import { firstClause, fmtClock, fmtScoreUnit, fmtTime, shortId, tailPath } from "./format";
 import { AppLink, hrefs } from "./links";
 import type { FailureRow, ProjectRow, RunRecord } from "./types";
@@ -52,26 +52,6 @@ export function groupFailures(failures: FailureRow[]): FailureRow[][] {
   return [...groups.values()];
 }
 
-/** A path that wraps only after a `/`, never inside a name. */
-function SlashPath({ path, title, className }: { path: string; title: string; className: string }) {
-  const parts = path.split("/");
-  return (
-    <div className={className} title={title} style={{ wordBreak: "normal", overflowWrap: "break-word" }}>
-      {parts.map((part, i) => (
-        // segments repeat ("…", "logs") and never reorder, so the index is the key
-        <Fragment key={i}>
-          {part}
-          {i < parts.length - 1 ? (
-            <>
-              /<wbr />
-            </>
-          ) : null}
-        </Fragment>
-      ))}
-    </div>
-  );
-}
-
 export function FailureList({ failures }: { failures: FailureRow[] }) {
   if (failures.length === 0) return <p className="small">none</p>;
   return (
@@ -90,7 +70,9 @@ export function FailureList({ failures }: { failures: FailureRow[] }) {
             <span className="x">{many ? `×${rows.length}` : "×"}</span>
             <b>{f.exit_code !== null ? `${f.label}, exit ${f.exit_code}` : f.label}</b>{" "}
             <span className="small">{`${fmtTime(f.created_at)}${retry}`}</span>
-            <SlashPath className="p" path={tailPath(f.stderr_path)} title={f.stderr_path} />
+            <div>
+              <SlashPath className="p" path={tailPath(f.stderr_path)} title={f.stderr_path} />
+            </div>
             <div className="row">
               <AppLink className="btn" href={hrefs.run(f.run_id, { log: "stderr" })}>
                 Open stderr

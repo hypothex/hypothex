@@ -4,18 +4,19 @@
  * panels (spec 8.4), where everything is, placement on a host, scores by metric version,
  * notes, and actions.
  */
-import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { api } from "../api/client";
+import { ApiError } from "../api/client";
 import { useLostReason } from "../api/lostReasons";
 import {
   HOSTS_REFETCH_MS,
   useAllRuns,
   useHosts,
+  useHubEnvironment,
   useLeaderboard,
   useRun,
   useRunTraces,
   useTaskKind,
+  useTask,
 } from "../api/queries";
 import { Figure, panelLetter } from "./components/Figure";
 import { useNow } from "./components/HostsPanel";
@@ -70,11 +71,13 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
   const hasTask = task !== "";
   // Idle for a run without a task.
   const kind = useTaskKind(project, task, { enabled: hasTask });
+  const taskDetail = useTask(project, task, { enabled: hasTask });
   const board = useLeaderboard(project, task, [], { enabled: hasTask });
   const kindSpecs = useMemo(() => kind.data?.run_view ?? [], [kind.data]);
   const traces = useRunTraces(runId, kindSpecs.some(readsTraces));
   const traceCount = traces.data?.length;
-  const specs = useMemo(() => runViewPanels(kindSpecs, traceCount), [kindSpecs, traceCount]);
+  const metricNames = run.data?.metric_names;
+  const specs = useMemo(() => runViewPanels(kindSpecs, traceCount, metricNames), [kindSpecs, traceCount, metricNames]);
   const phase = run.data ? runPhase(run.data) : "local";
   // A remote run: the hub reports its host's state. Hub runs have host_state null, even
   // though the backend sets executor.host (the machine's hostname) on every run.
@@ -84,12 +87,7 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
   // the whole queue of the run's host (every page), never the newest page of all hosts
   const queued = useAllRuns(queuedRunsQuery(record?.environment_id ?? ""), phase === "queued");
   // the hub's descriptor (the Overview's key): its id says whose sweep a run's tag names
-  const hubEnv = useQuery({
-    queryKey: ["environment"],
-    enabled: Boolean(record?.sweep_id),
-    queryFn: ({ signal }) => api.environment(signal),
-    staleTime: Number.POSITIVE_INFINITY,
-  });
+  const hubEnv = useHubEnvironment({ enabled: Boolean(record?.sweep_id) });
   const hubEnvId = hubEnv.data?.environment_id;
   // queued, running and stale runs show times since a moment; an ended run's times are fixed
   const now = useNow(clockMs, record !== undefined && record.ended_at === null);
@@ -98,6 +96,12 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
     return (
       <div className="page">
         <PageStyles />
+        {run.error instanceof ApiError && run.error.status === 404 ? (
+          <>
+            <p className="crumb"><AppLink href={hrefs.overview()}>All projects</AppLink></p>
+            <h1 className="headline">Not found</h1>
+          </>
+        ) : null}
         <ErrorBox error={run.error} />
       </div>
     );
@@ -173,7 +177,12 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
         <h1 className={title.length > LONG_TITLE ? "headline long" : "headline"}>
           <Unbroken text={title} />
         </h1>
-        <RunActions record={record} phase={phase} hostName={host?.name ?? null} />
+        <RunActions
+          record={record}
+          phase={phase}
+          hostName={host?.name ?? null}
+          inferStage={!hasTask ? false : taskDetail.isSuccess ? Object.hasOwn(taskDetail.data.stages, "infer") : undefined}
+        />
       </div>
       <StatusLine record={record} phase={phase} host={host} now={now} />
       <StateBanner

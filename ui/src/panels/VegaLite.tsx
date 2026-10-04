@@ -12,7 +12,7 @@ import type { Loader } from "vega";
 import embed, { type EmbedOptions, type Result, type VisualizationSpec } from "vega-embed";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { type Theme, useTheme } from "../shell/ThemeToggle";
-import { FS } from "../charts/Scale";
+import { FS, useElementWidth } from "../charts/Scale";
 import { SERIES_DARK, SERIES_LIGHT } from "./Distribution";
 import type { PanelResult } from "./index";
 
@@ -178,6 +178,8 @@ export function themeConfig(t: Tokens, _theme: Theme): Obj {
       titleFontSize: FONT.tick,
       titleFontWeight: 400,
       symbolSize: 60,
+      // Geist's rendered SVG glyph bounds exceed Vega's fontSize-only row height.
+      rowPadding: 6,
     },
     header: {
       labelColor: t.ink2,
@@ -254,9 +256,29 @@ const S = {
   },
 } satisfies Record<string, CSSProperties>;
 
+/** Reduce only explicit horizontal legend columns in container-sized single views. */
+function narrowerLegends(spec: Obj, single: boolean): Obj | null {
+  if (isMultiView(spec) || (spec.width !== undefined && spec.width !== "container") || !isPlain(spec.encoding)) {
+    return null;
+  }
+  let changed = false;
+  const encoding = Object.fromEntries(Object.entries(spec.encoding).map(([channel, value]) => {
+    if (!isPlain(value) || !isPlain(value.legend)) return [channel, value];
+    const legend = value.legend;
+    if ((legend.orient !== "top" && legend.orient !== "bottom") ||
+      typeof legend.columns !== "number" || !Number.isFinite(legend.columns) || legend.columns <= 1) {
+      return [channel, value];
+    }
+    changed = true;
+    return [channel, { ...value, legend: { ...legend, columns: single ? 1 : legend.columns - 1 } }];
+  }));
+  return changed ? { ...spec, encoding } : null;
+}
+
 /** Vega-Lite panel. Reads `meta.spec`. */
 export function VegaLitePanel({ result }: { result: PanelResult }) {
   const ref = useRef<HTMLDivElement>(null);
+  const [sizeRef, width] = useElementWidth<HTMLDivElement>(0);
   const theme = useTheme();
   const [error, setError] = useState<string | null>(null);
   const meta = (result.meta ?? {}) as Obj;
@@ -271,13 +293,33 @@ export function VegaLitePanel({ result }: { result: PanelResult }) {
     setError(null);
     const config = themeConfig(readTokens(theme), theme);
     const fit = isRowFacet(spec);
-    const draw = (cellWidth?: number): Promise<void> =>
-      embed(el, buildSpec(spec, rows, config, cellWidth) as VisualizationSpec, EMBED_OPTIONS).then((r) => {
+    const draw = (cellWidth?: number, current = spec, legendFits = 0): Promise<void> =>
+      embed(el, buildSpec(current, rows, config, cellWidth) as VisualizationSpec, EMBED_OPTIONS).then((r) => {
         if (cancelled) {
           r.finalize();
           return;
         }
         view = r;
+        // Preserve requested columns unless their rendered legend actually overflows.
+        // Re-start from the original spec on resize, so a wider panel restores them.
+        const panelBounds = el.getBoundingClientRect();
+        const overflow = width > 0 && [...el.querySelectorAll(".role-legend")].some((legend) => {
+          const bounds = legend.getBoundingClientRect();
+          if (bounds.width <= 0) return false;
+          if (Number.isFinite(panelBounds.left) && Number.isFinite(panelBounds.right) &&
+            panelBounds.right > panelBounds.left && Number.isFinite(bounds.left) && Number.isFinite(bounds.right)) {
+            return bounds.left < panelBounds.left - 1 || bounds.right > panelBounds.right + 1;
+          }
+          // Layout-less test DOMs may report a width without viewport coordinates.
+          return bounds.width > width + 1;
+        });
+        // Specs are untrusted; cap fitting at three retries even for enormous columns.
+        const narrower = overflow ? narrowerLegends(current, legendFits >= 2) : null;
+        if (narrower) {
+          r.finalize();
+          view = null;
+          return draw(cellWidth, narrower, legendFits + 1);
+        }
         if (cellWidth !== PROBE_W) return;
         // A row facet: the chart is the cell plus labels and padding; fit it to the panel.
         const drawn = Number(el.querySelector("svg")?.getAttribute("width"));
@@ -294,7 +336,7 @@ export function VegaLitePanel({ result }: { result: PanelResult }) {
       cancelled = true;
       view?.finalize();
     };
-  }, [spec, rows, theme]);
+  }, [spec, rows, theme, width]);
 
   if (!spec)
     return (
@@ -303,7 +345,7 @@ export function VegaLitePanel({ result }: { result: PanelResult }) {
       </p>
     );
   return (
-    <div>
+    <div ref={sizeRef}>
       {error && (
         <p role="alert" style={S.err}>
           Vega-Lite: {error}

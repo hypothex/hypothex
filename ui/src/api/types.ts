@@ -1011,6 +1011,8 @@ export interface components {
             example_id?: string | null;
             /** Step Metric */
             step_metric?: string | null;
+            /** Max Points */
+            max_points?: number | null;
         };
         /**
          * PanelLayout
@@ -2027,6 +2029,8 @@ export interface operations {
                 environment_id?: string | null;
                 archived?: boolean;
                 limit?: number;
+                before_created_at?: string | null;
+                before_run_id?: string | null;
             };
             header?: never;
             path?: never;
@@ -2126,7 +2130,10 @@ export interface operations {
     };
     run_metrics_api_v1_runs__run_id__metrics_get: {
         parameters: {
-            query?: never;
+            query?: {
+                names?: string[] | null;
+                max_points?: number | null;
+            };
             header?: never;
             path: {
                 run_id: string;

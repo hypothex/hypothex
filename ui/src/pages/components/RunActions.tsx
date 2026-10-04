@@ -3,10 +3,13 @@
  * command_id. A run waiting in a queue can only be cancelled; a run on an unreachable host
  * offers Reconnect; a lost run makes Rerun the main action.
  */
+import { useState } from "react";
 import { api } from "../../api/client";
+import type { EvalReport } from "../../api/models";
 import { HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "../../api/queries";
 import { hrefs, useNavigateHref } from "./links";
 import { ErrorBox } from "./QueryState";
+import { ReevalSummary } from "./ReevalSummary";
 import type { RunPhase } from "./remote";
 import { ACTIVE_STATUSES, type HostState, type RunRecord, type RunRef } from "./types";
 import { useAction } from "./useAction";
@@ -20,9 +23,11 @@ export interface RunActionsProps {
    * `POST /api/v1/hosts/<hostname>/connect` names no configured host.
    */
   hostName?: string | null;
+  /** Only a successfully loaded task with an infer stage enables Re-infer. */
+  inferStage?: boolean;
 }
 
-export function RunActions({ record, phase = "local", hostName = null }: RunActionsProps) {
+export function RunActions({ record, phase = "local", hostName = null, inferStage }: RunActionsProps) {
   const navigate = useNavigateHref();
   const id = record.run_id;
   const label = hostName ?? record.host;
@@ -38,7 +43,15 @@ export function RunActions({ record, phase = "local", hostName = null }: RunActi
     invalidate: refresh,
     onSuccess: openNew,
   });
-  const reeval = useAction({ send: (_: void, opts) => api.reevalRun(id, {}, opts), invalidate: refresh });
+  const [report, setReport] = useState<{ runId: string; value: EvalReport } | null>(null);
+  const reeval = useAction({
+    send: async (_: void, opts) => {
+      const runId = id;
+      return { runId, value: await api.reevalRun(runId, {}, opts) };
+    },
+    invalidate: refresh,
+    onSuccess: setReport,
+  });
   const stop = useAction({ send: (_: void, opts) => api.stop(id, opts), invalidate: refresh });
   const reconnect = useAction<HostState>({
     send: (_: void, opts) => api.connectHost(hostName ?? "", opts),
@@ -100,9 +113,13 @@ export function RunActions({ record, phase = "local", hostName = null }: RunActi
             <button
               type="button"
               className="btn"
-              disabled={reinfer.pending}
+              disabled={reinfer.pending || inferStage !== true}
               onClick={() => reinfer.run()}
-              title="Run the infer stage again on this run's checkpoint"
+              title={
+                inferStage === true
+                  ? "Run the infer stage again on this run's checkpoint"
+                  : inferStage === false ? "Task has no infer stage" : "Infer stage not loaded"
+              }
             >
               Re-infer
             </button>
@@ -110,7 +127,10 @@ export function RunActions({ record, phase = "local", hostName = null }: RunActi
               type="button"
               className={lost ? "btn" : "btn primary"}
               disabled={reeval.pending}
-              onClick={() => reeval.run()}
+              onClick={() => {
+                setReport(null);
+                reeval.run();
+              }}
               title="Re-score saved predictions with the current metric versions"
             >
               Re-evaluate
@@ -128,6 +148,7 @@ export function RunActions({ record, phase = "local", hostName = null }: RunActi
         )}
       </div>
       {error ? <ErrorBox error={error} /> : null}
+      {report?.runId === id ? <ReevalSummary report={report.value} /> : null}
     </div>
   );
 }

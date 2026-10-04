@@ -20,6 +20,7 @@ import { ApiError, api } from "./client";
 import type * as M from "./models";
 
 export const queryKeys = {
+  environment: () => ["environment"] as const,
   overview: (since?: string) => ["overview", since ?? null] as const,
   projects: () => ["projects"] as const,
   tasks: (project?: string) => ["tasks", project ?? null] as const,
@@ -196,6 +197,15 @@ const readOptions = ({ enabled = true, keepPrevious = false }: ReadOptions) => (
   enabled,
   placeholderData: keepPrevious ? keepPreviousData : undefined,
 });
+
+/** The hub descriptor shared by Overview and owner-qualified run sweep links. */
+export const useHubEnvironment = (opts: ReadOptions = {}) =>
+  useQuery({
+    queryKey: queryKeys.environment(),
+    queryFn: ({ signal }) => api.environment(signal),
+    staleTime: Number.POSITIVE_INFINITY,
+    ...readOptions(opts),
+  });
 
 export const useOverview = (since?: string) =>
   useQuery({ queryKey: queryKeys.overview(since), queryFn: ({ signal }) => api.overview(since, signal) });

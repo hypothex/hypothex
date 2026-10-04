@@ -431,3 +431,22 @@ describe("hooks", () => {
     expect(result.current.panels.isFetching).toBe(true);
   });
 });
+
+test("useHubEnvironment shares one descriptor query and keeps disabled consumers idle", async () => {
+  const { useHubEnvironment } = await import("../../src/api/queries");
+  const calls = mockRoutes({ "/.well-known/hypothex/environment": { environment_id: "hub-owner", hx_version: "0.5.0" } });
+  const { qc, wrapper } = setup();
+  const disabled = renderHook(() => useHubEnvironment({ enabled: false }), { wrapper });
+  expect(disabled.result.current.fetchStatus).toBe("idle");
+  expect(calls).toHaveLength(0);
+  const first = renderHook(() => useHubEnvironment(), { wrapper });
+  const second = renderHook(() => useHubEnvironment(), { wrapper });
+  await waitFor(() => expect(second.result.current.isSuccess).toBe(true));
+  expect(first.result.current.data).toEqual({ environment_id: "hub-owner", hx_version: "0.5.0" });
+  expect(second.result.current.data).toBe(first.result.current.data);
+  expect(qc.getQueryData<Record<string, unknown>>(queryKeys.environment())).toBe(first.result.current.data);
+  expect(calls).toHaveLength(1);
+  disabled.unmount();
+  first.unmount();
+  second.unmount();
+});

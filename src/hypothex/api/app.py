@@ -1060,6 +1060,39 @@ def local_diff(repo: str | None) -> str | None:
         ) from exc
 
 
+def pin_checkout(repo: str | None) -> tuple[str | None, str | None]:
+    """
+    Return the commit and diff that pin a hub checkout's code as it is now (spec 8A.4).
+
+    Parameters
+    ----------
+    repo : str or None
+        Checkout path on the hub.
+
+    Returns
+    -------
+    tuple of (str or None, str or None)
+        ``(HEAD, uncommitted diff or None)``; ``(None, None)`` when ``repo`` is
+        None, not a folder, or not a git repository with a commit (nothing to pin).
+
+    Raises
+    ------
+    RunError
+        If the diff is larger than ``DIFF_LIMIT_BYTES`` or is not UTF-8 text.
+
+    Examples
+    --------
+    >>> pin_checkout(None)
+    (None, None)
+    """
+    if repo is None or not Path(repo).is_dir():
+        return None, None
+    head = head_commit(Path(repo))
+    if head is None:
+        return None, None
+    return head, local_diff(repo)
+
+
 def _slurm_for(host: str, spec: HostSpec, body: RunFields) -> dict[str, Any] | None:
     if spec.kind != "slurm":
         # `slurm.gpus` alone is harmless (``body.gpus`` rules here): `hx launch --gpus N`
@@ -1837,14 +1870,7 @@ def create_app(
 
         return once(body, act)
 
-    def launcher_for(
-        host: str | None,
-        launched: list[str],
-        *,
-        project: str,
-        commit: str | None = None,
-        diff: str | None = None,
-    ) -> Launcher | None:
+    def launcher_for(host: str | None, launched: list[str], *, project: str) -> Launcher | None:
         # None: the sweep engine launches here; a host name: forward each run to it.
         # `launched` collects the run ids the host answers with (settled() waits for them)
         if not is_remote(host):
@@ -1857,14 +1883,16 @@ def create_app(
             sweep_id = parsed[0][1] if parsed else None
             local = req.repo.is_dir()  # False for a project copied from a host
             if "commit" not in pinned:
-                # spec 8A.4: one commit for every run of this call; the host fetches it
-                head = head_commit(req.repo) if local else None
-                pinned["commit"] = commit or head
-                # the client's diff, else the hub checkout's, taken against that commit
-                if commit is not None:
-                    pinned["diff"] = diff
+                # spec 8A.4: one commit for every run of this call; the host fetches it.
+                # The sweep's stored pin (SweepSpec.commit/diff, so an extend runs the
+                # sweep's code); a sweep file that pins nothing: the hub checkout now
+                if req.commit is not None:
+                    diff = req.diff.decode("utf-8") if isinstance(req.diff, bytes) else req.diff
+                    pinned.update(commit=req.commit, diff=diff)
                 else:
-                    pinned["diff"] = local_diff(str(req.repo)) if local else None
+                    pinned["commit"], pinned["diff"] = pin_checkout(
+                        str(req.repo) if local else None
+                    )
             body = HostLaunchBody(
                 repo=str(req.repo) if local else None,
                 project=project,
@@ -2177,6 +2205,12 @@ def create_app(
             remote = is_remote(body.host)
             if remote:
                 remote_checkout(ctx, str(body.host), body.project)  # unknown host or no map
+            # spec 8A.4: the sweep stores its code, so an extend runs the same commit and
+            # diff: the client's (`hx sweep --host` from a laptop), else the hub checkout's
+            if body.commit is not None:
+                commit, diff = body.commit, body.diff
+            else:
+                commit, diff = pin_checkout(_registered_checkout(ctx, body.project))
             launched: list[str] = []
             summary = launch_sweep(
                 ctx,
@@ -2191,14 +2225,10 @@ def create_app(
                 gpus=body.gpus,
                 queue=body.queue,
                 created_by=body.created_by,
-                launch=launcher_for(
-                    body.host,
-                    launched,
-                    project=body.project,
-                    commit=body.commit,
-                    diff=body.diff,
-                ),
+                launch=launcher_for(body.host, launched, project=body.project),
                 command_id=body.command_id,  # a retry resumes this sweep (Task 40)
+                commit=commit,
+                diff=diff,
             )
             return settled(summary.spec, launched)
 

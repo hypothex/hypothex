@@ -115,7 +115,9 @@ Sweeps
    * - ``POST /api/v1/sweeps``
      - ``{project, task?, host?, grid, random?, seeds, command, hypothesis, gpus?,
        queue?, commit?, diff?, command_id?}``. ``grid`` is a list of
-       ``{name, values}`` or ``{name, low, high, log}``. Answers the sweep summary.
+       ``{name, values}`` or ``{name, low, high, log}``. The sweep pins its code in
+       ``spec.commit`` and ``spec.diff``: the body's ``commit`` (with its ``diff``),
+       else the hub checkout's ``HEAD`` and uncommitted diff. Answers the sweep summary.
    * - ``GET /api/v1/sweeps/{id}``
      - The summary of a sweep in any project.
    * - ``GET /api/v1/sweeps/{project}/{id}``
@@ -125,8 +127,9 @@ Sweeps
    * - ``POST /api/v1/sweeps/{project}/{id}/cancel_queued``
      - ``{command_id?}``. Stops the queued runs (``killed``) and answers the summary.
    * - ``POST /api/v1/sweeps/{project}/{id}/extend``
-     - ``{seeds, command_id?}``. Adds runs for every combination and new seed, and
-       answers the summary.
+     - ``{seeds, command_id?}``. Adds runs for every combination and new seed, at the
+       sweep's ``commit`` and ``diff`` (not the checkout as it is now), and answers the
+       summary.
 
 The summary is ``{spec, counts, cells, best, headline, total_usd, run_ids, tag}``. See
 :doc:`sweeps`.

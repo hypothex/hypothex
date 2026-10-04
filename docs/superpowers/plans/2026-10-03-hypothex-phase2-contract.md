@@ -158,7 +158,7 @@ Hub (and env servers where marked *env*):
 | GET | `/api/v1/sweeps/{id}` | | `SweepSummary` (any project; for clients on another machine) |
 | GET | `/api/v1/projects/{project}/sweeps` | | `list[{id, created_at, n_runs, best}]` |
 | POST | `/api/v1/sweeps/{project}/{id}/cancel_queued` | `{command_id?}` | `SweepSummary` (queued runs of the sweep stopped as `killed`) |
-| POST | `/api/v1/sweeps/{project}/{id}/extend` | `{seeds: list[int], command_id?}` | `SweepSummary` (adds runs for every param combination × new seeds) |
+| POST | `/api/v1/sweeps/{project}/{id}/extend` | `{seeds: list[int], command_id?}` | `SweepSummary` (adds runs for every param combination × new seeds, pinned to `spec.commit`/`spec.diff`: the client's commit and diff, else the hub checkout's at create time; audit CONF-1a) |
 | POST | `/api/v1/runs/{id}/pull` | `{artifact: kind or path, command_id?}` | `{local_path}`; 400 when the destination name starts with `.hx-` |
 
 Run actions on remote runs (stop, rerun, reinfer, reeval, tags, star, archive, notes) keep their routes; the hub forwards to the owning host by `environment_id`. A run of an environment no configured host serves gets `503` for stop, rerun, reinfer, and reeval; also for tags, star, archive, and notes when the hub mirrored it from a host (it has a `host_cursors` row), since the host's copy replaces the hub's on the next mirror (audit INT-F2a). `GET /api/v1/runs/{id}` adds `host_state: ConnState | null` (null = local).

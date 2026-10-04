@@ -154,3 +154,11 @@ runs, event log, and supervisors, so a run keeps going and keeps being recorded
 even if the hub machine sleeps or the network drops. The hub reaches an
 environment over SSH tunnels or a direct URL, but the environment's identity
 (``environment_id``) is stable regardless of the route.
+
+Run-id reservations
+-------------------
+
+A pinned launch reserves its worktree directory with an exclusive creation before
+checking out the commit. If another launcher claims the same run id between the
+initial existence check and checkout, Hypothex draws a new id. Cleanup removes only
+the directory this launch reserved, preserving the competing launch's worktree.

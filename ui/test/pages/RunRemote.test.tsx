@@ -75,12 +75,15 @@ test("a long queue: every page is read, the head is kept, and the run shows even
       executor: { ...queuedRecord().executor, queue_position: i < 1 ? 1 : i + 2 },
     }),
   );
+  const last = behind.at(-1);
+  const cursor = `before_created_at=${encodeURIComponent(last?.created_at ?? "")}&before_run_id=${last?.run_id}`;
+  const nextUrl = `${QUEUE_URL.replace("limit=1000", "limit=4000")}&${cursor}`;
   const calls = mockApi({
     [`GET /api/v1/runs/${QUEUED_ID}`]: remoteDetail(queuedRecord()),
     [HOSTS_ROUTE]: HOSTS,
-    // the hub answers newest first, so the head (position 1) is on the second page
+    // the hub answers newest first, so the head (position 1) is on the second (keyset) page
     [QUEUE_ROUTE]: behind.slice(200),
-    [`GET ${QUEUE_URL.replace("limit=1000", "limit=4000")}`]: behind,
+    [`GET ${nextUrl}`]: behind.slice(0, 200),
   });
   renderWithClient(<RunPage runId={QUEUED_ID} />, { registry });
   await waitFor(() => expect(document.querySelectorAll(".queue-t tbody tr").length).toBe(1201));
@@ -90,7 +93,7 @@ test("a long queue: every page is read, the head is kept, and the run shows even
   expect(document.querySelector('.queue-t tr[aria-current="true"] b')?.textContent).toBe("f2c8");
   expect(calls.filter((c) => c.url.startsWith("/api/v1/runs?")).map((c) => c.url)).toEqual([
     QUEUE_URL,
-    QUEUE_URL.replace("limit=1000", "limit=4000"),
+    nextUrl,
   ]);
 });
 

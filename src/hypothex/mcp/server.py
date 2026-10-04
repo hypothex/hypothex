@@ -8,13 +8,14 @@ import json
 import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 from urllib.parse import urlencode, urlsplit
 
 import httpx
 import yaml
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import ValidationError
 
 from hypothex.api.security import is_loopback_bind
 from hypothex.core import control
@@ -22,7 +23,7 @@ from hypothex.core import panels as core_panels
 from hypothex.core import queries as q
 from hypothex.core import sweeps as core_sweeps
 from hypothex.core import views as core_views
-from hypothex.core.config import load_project_config
+from hypothex.core.config import CONFIG_FILENAME, TaskKind, load_project_config
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
 from hypothex.core.evaluation import reeval
@@ -117,21 +118,75 @@ def list_task_views(ctx: Context, task: str, project: str | None = None) -> list
     Returns
     -------
     list of ViewInfo
+        For a project copied from a host (``remote_host``), only the preset and
+        the inline views of its config: its view files are in its repo on that host.
     """
     entry, name = q.resolve_task(ctx, task, project)
-    return core_views.list_views(Path(entry.repo), entry.config, name)
+    return _views(entry, name)
+
+
+def _views(entry: ProjectEntry, task: str) -> list[ViewInfo]:
+    if entry.remote_host is None:
+        return core_views.list_views(Path(entry.repo), entry.config, task)
+    # a copy from a host: its view files are in its repo there, and a folder at that
+    # path here is not it, so only the preset and the inline views of its config
+    spec = entry.config.tasks[task]
+    preset = core_views.load_preset(spec.kind)
+    infos = [
+        ViewInfo(name=PRESET_VIEW, title=preset.title, origin="preset", path=None, kind=spec.kind)
+    ]
+    for name, body in spec.views.items():
+        try:
+            core_views.check_view_name(name)
+        except ConfigError:
+            continue  # list_views skips it too
+        title, kind = body.get("title"), body.get("from")
+        infos.append(
+            ViewInfo(
+                name=name,
+                title=title if isinstance(title, str) else name,
+                origin="inline",
+                path=str(Path(entry.repo) / CONFIG_FILENAME),
+                kind=kind if kind in get_args(TaskKind) else None,
+            )
+        )
+    return infos
+
+
+def _load_view(entry: ProjectEntry, task: str, info: ViewInfo) -> ViewSpec:
+    if entry.remote_host is None:
+        return core_views.get_view(Path(entry.repo), entry.config, task, info.name)
+    spec = entry.config.tasks[task]
+    if info.origin == "preset":
+        return core_views.load_preset(spec.kind)
+    try:  # inline: core get_view would read a view file at the host's path here first
+        return core_views.resolve_view(ViewSpec.model_validate(spec.views[info.name]))
+    except ValidationError as exc:
+        raise ConfigError(f"tasks.{task}.views.{info.name}: {exc}") from exc
+
+
+def _view_repo(entry: ProjectEntry) -> Path:
+    """The checkout whose view files may be written: never a host copy's path."""
+    if entry.remote_host is not None:
+        raise ConfigError(
+            f"project {entry.project!r} was copied from host {entry.remote_host} and its "
+            "view files are in its repo there; change them there, or `hx register` a "
+            "checkout here"
+        )
+    return Path(entry.repo)
 
 
 def _find_view(
     ctx: Context, task: str, name: str, project: str | None
 ) -> tuple[ProjectEntry, str, ViewInfo]:
     entry, task_name = q.resolve_task(ctx, task, project)
-    for info in core_views.list_views(Path(entry.repo), entry.config, task_name):
+    for info in _views(entry, task_name):
         if info.name == name:
             return entry, task_name, info
-    # refresh_project keeps the last good config when hypothex.yaml is invalid, so
-    # a view that exists only in the broken file would be "unknown": report why
-    load_project_config(Path(entry.repo))  # raises ConfigError if the file is invalid
+    if entry.remote_host is None:
+        # refresh_project keeps the last good config when hypothex.yaml is invalid, so
+        # a view that exists only in the broken file would be "unknown": report why
+        load_project_config(Path(entry.repo))  # raises ConfigError if the file is invalid
     raise StoreError(f"unknown view {name!r} for task {entry.project}/{task_name}")
 
 
@@ -173,7 +228,7 @@ def view_document(ctx: Context, task: str, name: str, project: str | None = None
     entry, task_name, info = _find_view(ctx, task, name, project)
     spec = entry.config.tasks[task_name]
     # get_view first: it turns an unreadable or invalid file into a ConfigError
-    view = core_views.get_view(Path(entry.repo), entry.config, task_name, name)
+    view = _load_view(entry, task_name, info)
     if info.origin == "file" and info.path is not None:
         try:
             text = Path(info.path).read_text(encoding="utf-8")
@@ -253,19 +308,21 @@ def put_view(
     Raises
     ------
     ConfigError
-        Bad or reserved name.
+        Bad or reserved name, or a project copied from a host (its view files
+        are in its repo there).
     ViewValidationError
         The YAML is invalid; nothing was written.
     """
     core_views.check_view_name(name)
     entry, task_name = q.resolve_task(ctx, task, project)
+    repo = _view_repo(entry)
     view, issues = _check(ctx, entry, task_name, text)
     if view is None or issues:
         first = issues[0].message if issues else "not a view"
         raise ViewValidationError(f"invalid view {name!r}: {first}", issues)
-    core_views.save_view(Path(entry.repo), task_name, name, text)
+    core_views.save_view(repo, task_name, name, text)
     entry, task_name, info = _find_view(ctx, task_name, name, entry.project)
-    resolved = core_views.get_view(Path(entry.repo), entry.config, task_name, name)
+    resolved = core_views.get_view(repo, entry.config, task_name, name)
     return {"info": to_jsonable(info), "view": dump_view(resolved)}
 
 
@@ -292,16 +349,19 @@ def remove_view(ctx: Context, task: str, name: str, project: str | None = None) 
     Raises
     ------
     ConfigError
-        ``overview`` or an inline view (edit ``hypothex.yaml`` instead).
+        ``overview``, an inline view (edit ``hypothex.yaml`` instead), or a view
+        of a project copied from a host.
     StoreError
         No such view.
     """
     if name == PRESET_VIEW:
         raise ConfigError(f"{PRESET_VIEW!r} is the task's preset view and cannot be deleted")
-    entry, task_name, info = _find_view(ctx, task, name, project)
+    entry, task_name = q.resolve_task(ctx, task, project)
+    repo = _view_repo(entry)
+    entry, task_name, info = _find_view(ctx, task_name, name, entry.project)
     if info.origin != "file":
         raise ConfigError(f"view {name!r} is declared in hypothex.yaml; remove it there")
-    core_views.delete_view(Path(entry.repo), task_name, name)
+    core_views.delete_view(repo, task_name, name)
     return {"ok": True}
 
 
@@ -350,7 +410,7 @@ def query_task_view(
             chosen = core_views.resolve_view(view)
         else:
             entry, task_name, info = _find_view(ctx, task_name, name or PRESET_VIEW, entry.project)
-            chosen = core_views.get_view(Path(entry.repo), entry.config, task_name, info.name)
+            chosen = _load_view(entry, task_name, info)
         results = core_panels.query_view(ctx, entry.project, task_name, chosen)
     return {"panels": to_jsonable(results)}
 

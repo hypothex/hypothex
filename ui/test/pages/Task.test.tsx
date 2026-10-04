@@ -304,10 +304,14 @@ describe("TaskPage", () => {
       makeRecord({ run_id: `20261001-000000-toy-test-n${i}`, seed: 1, config_hash: "sha256:other" }),
     );
     const older = makeRecord({ run_id: "20260901-000000-toy-test-old4", seed: 4 });
+    const last = newest.at(-1);
+    const cursor = `before_created_at=${encodeURIComponent(last?.created_at ?? "")}&before_run_id=${last?.run_id}`;
     mockApi({
       ...newRunRoutes(),
       [RUNS_URL]: newest,
-      "GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=4000": [...newest, older],
+      // the next page after the newest 1,000 (keyset); a server without keyset paging
+      // answers the newest 4,000 instead, which fetchAllRuns also reads
+      [`GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=4000&${cursor}`]: [older],
     });
     renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
     await screen.findByRole("region", { name: "a Best" });

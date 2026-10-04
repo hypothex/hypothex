@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -163,7 +164,8 @@ def evaluate_run(
     scores : list of ScoreRecord
         New scores (an ``error`` row with key ``*`` for a metric that raised).
     warnings : list of str
-        E.g. metric code changed without a version bump.
+        E.g. metric code changed without a version bump. Each is also
+        emitted as a ``run.warning`` event of the run.
 
     Raises
     ------
@@ -214,9 +216,7 @@ def evaluate_run(
             ref = f"{r['name']}@{r['version']}"
             digest = r["source_hash"]
             if digest and ref in known and known[ref] != digest:
-                warnings.append(
-                    f"metric {r['name']} code changed without a version bump (still {r['version']})"
-                )
+                warnings.append(_drift_warning(ref))
             elif digest and ref not in known:
                 known[ref] = digest
         ctx.store.save_metric_hashes(record.project, known)
@@ -251,6 +251,8 @@ def evaluate_run(
         )
     for score in scores:
         ctx.add_score(record, score)
+    for warning in warnings:  # auto-eval callers keep no report; the run's events do
+        ctx.emit("run.warning", record, {"message": warning[:500]})
     return scores, warnings
 
 
@@ -283,6 +285,8 @@ def reeval(
     EvalReport
         A run that fails to evaluate (for any reason) is listed in
         ``skipped`` with the reason; the other runs are still scored.
+        ``warnings`` names each selected metric whose code changed without a
+        version bump (``metric_drift``), even when no run is re-scored.
 
     Raises
     ------
@@ -324,6 +328,12 @@ def reeval(
             )
         names = [name]
     wanted = {n: config.metrics[n].version for n in names}
+    try:  # also when every run is already scored: the stored scores came from the old code
+        report.warnings.extend(
+            _drift_warning(ref) for ref in metric_drift(ctx, repo, config, names)
+        )
+    except EvalError as exc:
+        report.warnings.append(f"could not check the metric code for changes: {exc}"[:500])
     existing = ctx.index.scores_for([t.run_id for t in targets])
     for record in targets:
         have = existing.get(record.run_id, [])
@@ -385,26 +395,127 @@ def validate_project(ctx: Context, repo: Path) -> ValidationReport:
             if not path.exists():
                 warnings.append(f"dataset {name!r}: path not found: {path}")
     if config.metrics:
-        request = {
-            "repo": str(repo),
-            "metrics": [{"name": n, "fn": m.fn} for n, m in config.metrics.items()],
-        }
         try:
-            described = run_worker("describe", request, default_python_cmd(repo, config), cwd=repo)[
-                "metrics"
-            ]
+            described = _describe_metrics(repo, config, list(config.metrics))
         except EvalError as exc:
             errors.append(f"could not run the metric worker: {exc}")
             described = {}
-        known = ctx.store.metric_hashes(config.project)
         for name, info in described.items():
-            spec = config.metrics[name]
             if not info["importable"]:
-                errors.append(f"metric {name!r}: cannot import {spec.fn}: {info['error']}")
-                continue
-            ref = f"{name}@{spec.version}"
-            if info["source_hash"] and known.get(ref) not in (None, info["source_hash"]):
-                warnings.append(
-                    f"metric {name!r} code changed without a version bump (still {spec.version})"
+                errors.append(
+                    f"metric {name!r}: cannot import {config.metrics[name].fn}: {info['error']}"
                 )
+        warnings.extend(_drift_warning(ref) for ref in _drifted(ctx, config, described))
     return ValidationReport(ok=not errors, errors=errors, warnings=warnings)
+
+
+def metric_drift(
+    ctx: Context, repo: Path, config: ProjectConfig, names: list[str] | None = None
+) -> list[str]:
+    """
+    Return the metrics whose code changed without a version bump.
+
+    The current source hash of each metric (from the metric worker, in the
+    project's environment) is compared with the hash recorded when
+    ``name@version`` was first scored. A metric never scored, or whose source
+    cannot be read, does not count as changed.
+
+    Parameters
+    ----------
+    ctx : Context
+    repo : Path
+        Repository root whose metric code is checked.
+    config : ProjectConfig
+        The project's parsed ``hypothex.yaml`` at ``repo``.
+    names : list of str, optional
+        Metrics to check; default all metrics of the project.
+
+    Returns
+    -------
+    list of str
+        ``name@version`` of each changed metric, in ``names`` order.
+
+    Raises
+    ------
+    EvalError
+        If the metric worker cannot run.
+
+    Examples
+    --------
+    >>> metric_drift(ctx, repo, load_project_config(repo))  # doctest: +SKIP
+    ['accuracy@v1']
+    """
+    return _drifted(ctx, config, _describe_metrics(repo, config, names or list(config.metrics)))
+
+
+def _describe_metrics(
+    repo: Path, config: ProjectConfig, names: list[str]
+) -> dict[str, dict[str, Any]]:
+    """
+    Import each metric in the project's environment and hash its source.
+
+    Parameters
+    ----------
+    repo : Path
+    config : ProjectConfig
+    names : list of str
+        Metrics of ``config`` to describe.
+
+    Returns
+    -------
+    dict of str to dict
+        ``{name: {"importable", "error", "source_hash"}}`` (see ``eval_worker.describe``).
+
+    Raises
+    ------
+    EvalError
+        If the metric worker cannot run.
+    """
+    request = {
+        "repo": str(repo),
+        "metrics": [{"name": n, "fn": config.metrics[n].fn} for n in names],
+    }
+    return run_worker("describe", request, default_python_cmd(repo, config), cwd=repo)["metrics"]
+
+
+def _drifted(
+    ctx: Context, config: ProjectConfig, described: dict[str, dict[str, Any]]
+) -> list[str]:
+    """
+    Return ``name@version`` of each described metric whose hash differs from the recorded one.
+
+    Parameters
+    ----------
+    ctx : Context
+    config : ProjectConfig
+    described : dict of str to dict
+        Output of ``_describe_metrics``.
+
+    Returns
+    -------
+    list of str
+    """
+    known = ctx.store.metric_hashes(config.project)
+    refs = []
+    for name, info in described.items():
+        ref = f"{name}@{config.metrics[name].version}"
+        if info["source_hash"] and known.get(ref) not in (None, info["source_hash"]):
+            refs.append(ref)
+    return refs
+
+
+def _drift_warning(ref: str) -> str:
+    """
+    Return the warning for a metric whose code changed without a version bump.
+
+    Parameters
+    ----------
+    ref : str
+        ``name@version``.
+
+    Returns
+    -------
+    str
+    """
+    name, version = parse_metric_version(ref)
+    return f"metric {name} code changed without a version bump (still {version})"

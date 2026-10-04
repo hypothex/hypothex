@@ -5,9 +5,10 @@ import pytest
 import yaml
 
 from hypothex.core import evaluation
+from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
 from hypothex.core.errors import EvalError
-from hypothex.core.evaluation import evaluate_run, reeval, validate_project
+from hypothex.core.evaluation import evaluate_run, metric_drift, reeval, validate_project
 from tests.factories import PREDS_075, seed_finished_run, write_toy_project
 
 
@@ -110,17 +111,53 @@ def test_reeval_rejects_non_current_version(ctx: Context, toy_repo: Path) -> Non
         reeval(ctx, run_id="r1", metric="accuracy@v9")
 
 
-def test_metric_code_change_without_bump_warns(ctx: Context, toy_repo: Path) -> None:
-    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
-    evaluate_run(ctx, "r1")
-    path = toy_repo / "toymetrics.py"
+def _tweak_accuracy(repo: Path) -> None:
+    """Change the accuracy metric's code without bumping its version."""
+    path = repo / "toymetrics.py"
     path.write_text(
         path.read_text().replace(
             "def accuracy(examples):\n", "def accuracy(examples):\n    # tweak\n"
         )
     )
+
+
+def test_metric_code_change_without_bump_warns(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    _tweak_accuracy(toy_repo)
     _, warnings = evaluate_run(ctx, "r1")
     assert any("without a version bump" in w for w in warnings)
+
+
+def test_metric_drift_warning_is_a_run_warning_event(ctx: Context, toy_repo: Path) -> None:
+    # auto-eval (execution, slurm) keeps no report: the warning must reach the run's events
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    _tweak_accuracy(toy_repo)
+    evaluate_run(ctx, "r1")
+    messages = [e.payload["message"] for e in ctx.events.since(0) if e.type == "run.warning"]
+    assert messages == ["metric accuracy code changed without a version bump (still v1)"]
+
+
+def test_metric_drift_names_changed_metrics(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", task="toy-broken", predictions=PREDS_075)
+    config = load_project_config(toy_repo)
+    assert metric_drift(ctx, toy_repo, config) == []  # nothing recorded yet
+    evaluate_run(ctx, "r1")
+    assert metric_drift(ctx, toy_repo, config) == []
+    _tweak_accuracy(toy_repo)
+    assert metric_drift(ctx, toy_repo, config) == ["accuracy@v1"]
+    assert metric_drift(ctx, toy_repo, config, ["broken"]) == []
+    assert any("without a version bump" in w for w in validate_project(ctx, toy_repo).warnings)
+
+
+def test_reeval_warns_about_metric_drift_without_force(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    _tweak_accuracy(toy_repo)
+    report = reeval(ctx, project="toy", task="toy-acc")
+    assert report.skipped == {"r1": "already scored at the current version"}
+    assert report.warnings == ["metric accuracy code changed without a version bump (still v1)"]
 
 
 def test_evaluate_removed_task_is_clear_error(ctx: Context, toy_repo: Path) -> None:

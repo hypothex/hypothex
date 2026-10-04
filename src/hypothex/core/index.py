@@ -6,6 +6,7 @@ import contextlib
 import errno
 import fcntl
 import json
+import logging
 import math
 import sqlite3
 import time
@@ -33,15 +34,18 @@ from sqlalchemy import (
 )
 from sqlalchemy import Index as SqlIndex
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DatabaseError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from hypothex.core.errors import RunNotFoundError
+from hypothex.core.ids import utcnow
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import ProjectEntry, RunStore, run_lock
 
 if TYPE_CHECKING:
     from hypothex.core.context import Context
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 3
 MAX_POINTS_PER_METRIC = 1000
@@ -299,7 +303,9 @@ class Index:
     ``SCHEMA_VERSION``, sets ``rebuilt_schema``: the caller then rebuilds it
     from files (``rebuild_index``). An old index is left as it is until that
     rebuild replaces it in one transaction, so readers never see it half
-    built. A new file gets empty tables at once.
+    built. A new file gets empty tables at once. A file SQLite cannot read as
+    a database (corrupt, or not SQLite) is moved aside to
+    ``<name>.corrupt-<time>`` with a warning and replaced by a new file.
 
     Parameters
     ----------
@@ -318,7 +324,7 @@ class Index:
             f"sqlite:///{path}", connect_args={"check_same_thread": False, "timeout": 10}
         )
         event.listen(self.engine, "connect", _sqlite_pragmas)
-        self.rebuilt_schema = self._ensure_schema()
+        self.rebuilt_schema = self._open_schema()
 
     def schema_version(self) -> str | None:
         """
@@ -335,6 +341,39 @@ class Index:
             if "no such table" in str(exc.orig):  # a new file: no meta table yet
                 return None
             raise
+
+    def _open_schema(self) -> bool:
+        """``_ensure_schema``, moving a file that is not a database aside first."""
+        try:
+            return self._ensure_schema()
+        except DatabaseError as exc:
+            if isinstance(exc, OperationalError):  # locked, read-only, ...: not corrupt
+                raise
+        with _rebuild_lock(self):
+            self.engine.dispose()
+            try:
+                return self._ensure_schema()  # another process moved it aside meanwhile
+            except DatabaseError as exc:
+                if isinstance(exc, OperationalError):
+                    raise
+                self._move_aside(exc)
+            return self._ensure_schema()
+
+    def _move_aside(self, exc: DatabaseError) -> None:
+        """Rename the unreadable index file and its WAL files to ``*.corrupt-<time>``."""
+        self.engine.dispose()
+        stamp = utcnow().strftime("%Y%m%dT%H%M%S%f")
+        for suffix in ("", "-wal", "-shm"):
+            source = self.path.with_name(self.path.name + suffix)
+            if source.exists():
+                source.replace(self.path.with_name(f"{self.path.name}.corrupt-{stamp}{suffix}"))
+        log.warning(
+            "index %s is not a readable database (%s); moved it to %s.corrupt-%s and rebuilding",
+            self.path,
+            exc.orig,
+            self.path.name,
+            stamp,
+        )
 
     def _ensure_schema(self) -> bool:
         """Create the tables of a new file; True when the caller must rebuild."""

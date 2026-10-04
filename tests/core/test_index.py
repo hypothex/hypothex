@@ -217,6 +217,33 @@ def test_repair_index_gaps(tmp_path: Path) -> None:
     assert idx.get_project("toy") is not None
 
 
+def test_a_corrupt_index_file_is_moved_aside_and_rebuilt(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+    path = tmp_path / "i.db"
+    path.write_bytes(b"garbage, not a database" * 100)
+    idx = Index(path, store=store)
+    assert idx.rebuilt_schema
+    assert [p.read_bytes()[:7] for p in tmp_path.glob("i.db.corrupt-*")] == [b"garbage"]
+    assert rebuild_index_if_stale(idx, store) == 2
+    assert idx.run_ids() == {"r1", "r2"}
+    assert not Index(path, store=store).rebuilt_schema  # the new file is used as it is
+
+
+def test_an_unopenable_index_is_not_moved_aside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "i.db"
+    Index(path)
+
+    def locked(_conn: object, _record: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("hypothex.core.index._sqlite_pragmas", locked)
+    with pytest.raises(OperationalError):
+        Index(path)
+    assert not list(tmp_path.glob("i.db.corrupt-*"))
+
+
 def test_repair_index_gaps_drops_runs_whose_folder_is_gone(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
     idx = Index(tmp_path / "i.db")

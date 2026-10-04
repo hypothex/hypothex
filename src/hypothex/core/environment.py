@@ -7,12 +7,14 @@ import logging
 import platform
 import socket
 import uuid
+from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import BaseModel
 
 from hypothex._version import __version__
-from hypothex.core.errors import ConfigError
+from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.fsutil import atomic_write_text, read_yaml
 from hypothex.core.layout import Layout
 
@@ -64,6 +66,32 @@ def count_gpus() -> int:
         return len(query_gpus())
     except ConfigError:
         return 0
+
+
+def _read_identity(path: Path) -> dict[str, Any]:
+    """
+    Read ``environment.json``.
+
+    Raises
+    ------
+    StoreError
+        If the file cannot be read, is not JSON, or has no string
+        ``environment_id`` and ``label``. The file is left as it is.
+    """
+    try:
+        identity = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        problem = str(exc)
+    else:
+        if isinstance(identity, dict) and all(
+            isinstance(identity.get(key), str) for key in ("environment_id", "label")
+        ):
+            return identity
+        problem = "expected an object with string environment_id and label"
+    raise StoreError(
+        f"{path} is unreadable ({problem}); fix it, or delete it and Hypothex takes "
+        "the id back from this host's runs"
+    )
 
 
 def _local_environment_ids(layout: Layout, hostname: str) -> set[str]:
@@ -131,18 +159,19 @@ def load_descriptor(layout: Layout) -> EnvironmentDescriptor:
     ------
     ConfigError
         If the file is missing and this host's runs name more than one id.
+    StoreError
+        If the file is there but unreadable; it is never reset.
 
     Examples
     --------
     >>> import tempfile
-    >>> from pathlib import Path
     >>> home = Layout(Path(tempfile.mkdtemp()))
     >>> load_descriptor(home).environment_id == load_descriptor(home).environment_id
     True
     """
     path = layout.environment_json
     if path.is_file():
-        identity = json.loads(path.read_text(encoding="utf-8"))
+        identity = _read_identity(path)
     else:
         identity = _recover_identity(layout)
         atomic_write_text(path, json.dumps(identity, indent=2))

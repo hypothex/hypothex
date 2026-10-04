@@ -186,7 +186,8 @@ change; `metrics.jsonl` and `scores.jsonl` are append-only.
 
 SQLite (WAL mode) at `~/.hypothex/index.db`. Because the index is disposable, phase 1 stores
 a schema version and rebuilds the index from files when it changes; Alembic arrives with
-Postgres in phase 3.
+Postgres in phase 3. An `index.db` that SQLite cannot read is moved aside
+(`index.db.corrupt-<time>`) and rebuilt the same way.
 Tables: `projects, datasets, metrics, tasks, runs, scores, metric_points, tags, hosts,
 queue, sweeps, notes`. `metric_points` stores downsampled history for fast charts; full
 history stays in `metrics.jsonl`.

@@ -6,7 +6,7 @@ import pytest
 
 from hypothex.core.config import ProjectConfig
 from hypothex.core.environment import load_descriptor
-from hypothex.core.errors import ConfigError
+from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.layout import Layout
 from hypothex.core.store import RunStore
 from tests.factories import make_record
@@ -53,3 +53,12 @@ def test_missing_file_with_two_local_ids_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="id-a, id-b"):
         load_descriptor(layout)
     assert not layout.environment_json.exists()
+
+
+@pytest.mark.parametrize("text", ['{"environment_id": "ab', "[1, 2]", '{"label": "mac"}'])
+def test_an_unreadable_file_is_a_store_error_and_is_kept(tmp_path: Path, text: str) -> None:
+    layout = _home_with_runs(tmp_path, {})
+    layout.environment_json.write_text(text, encoding="utf-8")
+    with pytest.raises(StoreError, match="environment.json"):
+        load_descriptor(layout)
+    assert layout.environment_json.read_text(encoding="utf-8") == text

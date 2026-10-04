@@ -119,8 +119,10 @@ class SweepSpec(BaseModel, extra="forbid"):
     ``commit`` and ``diff`` pin the sweep's code (spec 8A.4): every run, the
     runs an extend adds included, gets them, so new seeds join the same seed
     groups. ``diff`` is ``git diff HEAD --binary`` text applied on top of
-    ``commit``. Both are None for a sweep that pins nothing (older files too):
-    its runs use the checkout as it is.
+    ``commit``. Both are None when the launch pinned nothing (a local launch
+    from the CLI or MCP, and older files): the launch uses the checkout as it
+    is, and an extend pins the code of the sweep's first run (its
+    ``git.commit`` and saved ``git.diff``).
     """
 
     id: str = Field(pattern=SWEEP_ID_PATTERN)
@@ -1057,6 +1059,8 @@ def _requests(
     hypothesis: str,
     gpus: int,
     queue: bool,
+    commit: str | None,
+    diff: str | bytes | None,
 ) -> Iterator[tuple[int, RunRequest]]:
     """One request per seed and combination, seed-major (seed 1 of every cell first)."""
     combos = sweep_combos(spec)
@@ -1077,8 +1081,8 @@ def _requests(
                     created_by=spec.created_by,
                     gpus=gpus,
                     queue=queue,
-                    commit=spec.commit,
-                    diff=spec.diff,
+                    commit=commit,
+                    diff=diff,
                 ),
             )
 
@@ -1351,6 +1355,8 @@ def launch_sweep(
                 hypothesis=hypothesis,
                 gpus=gpus,
                 queue=queue,
+                commit=spec.commit,
+                diff=spec.diff,
             )
             requested: list[str] = []
             try:
@@ -1497,6 +1503,34 @@ def cancel_queued(
     return summary.model_copy(update={"cancel": result})
 
 
+def _pinned_code(
+    ctx: Context, spec: SweepSpec, first: RunRecord | None
+) -> tuple[str | None, str | bytes | None]:
+    """
+    The commit and diff an extend pins: the spec's, else the first run's.
+
+    A sweep whose launch pinned nothing (``spec.commit`` None) ran the checkout
+    as it was; its first run recorded that code (``git.commit`` and the saved
+    ``git.diff``), so new seeds run it again instead of the current HEAD and
+    join the same seed groups.
+
+    Raises
+    ------
+    SweepError
+        If the first run's diff was too large to save: its code is not known.
+    """
+    if spec.commit is not None or first is None or first.git.commit is None:
+        return spec.commit, spec.diff
+    run_dir = ctx.run_dir(first)
+    if (run_dir / "git.diff.too_large").exists():
+        raise SweepError(
+            f"the sweep's first run {first.run_id} had uncommitted changes too large to "
+            "save; its code cannot be pinned for new seeds"
+        )
+    saved = run_dir / "git.diff"
+    return first.git.commit, saved.read_bytes() if saved.is_file() else None
+
+
 def extend_sweep(
     ctx: Context,
     project: str,
@@ -1543,9 +1577,16 @@ def extend_sweep(
     Raises
     ------
     SweepError
-        No seeds, or the sweep would grow past ``MAX_SWEEP_RUNS``.
+        No seeds, the sweep would grow past ``MAX_SWEEP_RUNS``, or the sweep
+        pins no code and its first run's diff was too large to save.
     StoreError
         If the sweep does not exist.
+
+    Notes
+    -----
+    New runs pin the sweep's ``commit``/``diff``; a sweep that pins none runs
+    its first run's code again (``git.commit`` and ``git.diff``), never the
+    current HEAD, so new seeds join the cells' seed groups.
 
     Examples
     --------
@@ -1569,6 +1610,7 @@ def extend_sweep(
         if hypothesis is None:
             hypothesis = first.hypothesis if first else ""
         repo_path = _resolve_repo(ctx, project, spec.task, repo, remote=launch is not None)
+        commit, diff = _pinned_code(ctx, spec, first)
         save_sweep(ctx.layout, grown)  # the definition first: a retry knows every seed
         requests = _requests(
             grown,
@@ -1578,6 +1620,8 @@ def extend_sweep(
             hypothesis=hypothesis,
             gpus=n_gpus,
             queue=queue if queue is not None else n_gpus > 0,
+            commit=commit,
+            diff=diff,
         )
         _issue(ctx, grown, launch or _local_launcher(ctx, sweep_id), requests, [])
     return summarize_sweep(ctx, project, sweep_id)

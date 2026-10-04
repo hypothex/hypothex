@@ -53,7 +53,7 @@ from hypothex.core.sweeps import (
     sweep_tag,
     unknown_task_headline,
 )
-from tests.factories import make_record, write_toy_project
+from tests.factories import git, make_record, write_toy_project
 
 NOW = "2026-10-03T09:12:00Z"
 
@@ -1246,6 +1246,64 @@ def test_a_sweep_without_pinned_code_pins_nothing(ctx: Context, toy_repo: Path) 
     sid = launched(ctx, toy_repo, fake)
     extend_sweep(ctx, "toy", sid, [2], launch=fake)
     assert all((r.commit, r.diff) == (None, None) for r in fake.requests)
+
+
+def first_run_code(ctx: Context, sid: str, commit: str, diff: bytes | None) -> RunRecord:
+    """Give the sweep's first run the code a real launch would have recorded."""
+    first = summarize_sweep(ctx, "toy", sid).run_ids[0]
+    record = ctx.update_run(
+        first, "run.test_git", lambda r: r.model_copy(update={"git": GitInfo(commit=commit)})
+    )
+    if diff is not None:
+        (ctx.run_dir(record) / "git.diff").write_bytes(diff)
+    return record
+
+
+def test_extend_of_a_sweep_without_pinned_code_runs_its_first_runs_code(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # DF-9: a local sweep pins nothing, so an extend ran the current HEAD
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    commit, diff = "b" * 40, b"diff --git a/train.py b/train.py\n\xff"
+    first_run_code(ctx, sid, commit, diff)
+    extend_sweep(ctx, "toy", sid, [2], launch=fake)
+    added = fake.requests[2:]
+    assert len(added) == 2 and all((r.commit, r.diff) == (commit, diff) for r in added)
+    assert load_sweep(ctx.layout, "toy", sid).commit is None  # the file is not rewritten
+
+
+def test_extend_refuses_when_the_first_runs_diff_was_too_large(
+    ctx: Context, toy_repo: Path
+) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    record = first_run_code(ctx, sid, "c" * 40, None)
+    (ctx.run_dir(record) / "git.diff.too_large").write_text("too large\n")
+    with pytest.raises(SweepError, match="too large to save"):
+        extend_sweep(ctx, "toy", sid, [2], launch=fake)
+    assert len(fake.requests) == 2
+
+
+def test_local_extend_after_a_new_commit_joins_the_same_seed_groups(
+    ctx: Context, toy_repo: Path
+) -> None:
+    ctx.register_project(toy_repo)
+    summary = launch_sweep(
+        ctx,
+        project="toy",
+        grid=[SweepParam(name="lr", values=["0.1"])],
+        seeds=[1],
+        command=[sys.executable, "-c", "print('lr={lr} seed={seed}')"],
+    )
+    [first] = [wait_for_run(ctx, rid, timeout=60) for rid in summary.run_ids]
+    (toy_repo / "marker.txt").write_text("new code\n")
+    git(toy_repo, "add", "marker.txt")
+    git(toy_repo, "commit", "-qm", "new code")
+    grown = extend_sweep(ctx, "toy", summary.spec.id, [2])
+    added = [wait_for_run(ctx, rid, timeout=60) for rid in grown.run_ids if rid != first.run_id]
+    assert [r.status for r in added] == [RunStatus.FINISHED]
+    assert added[0].git.commit == first.git.commit
 
 
 def test_launch_refuses_a_diff_without_its_commit(ctx: Context, toy_repo: Path) -> None:

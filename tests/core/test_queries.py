@@ -240,3 +240,10 @@ def test_tag_run_refuses_sweep_tags(ctx: Context, toy_repo: Path) -> None:
         with pytest.raises(RunError, match="sweep tag"):
             q.tag_run(ctx, "r1", add=add, remove=remove)
     assert ctx.find_record("r1").tags == ["keep"]
+
+
+def test_compare_runs_shows_a_dirty_tree(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    ctx.create_run(make_record("a", git={"commit": "c1"}))
+    ctx.create_run(make_record("b", git={"commit": "c1", "dirty": True}))
+    assert q.compare_runs(ctx, ["a", "b"]).fields == {"dirty": [False, True]}

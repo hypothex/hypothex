@@ -448,6 +448,9 @@ def compare_runs(ctx: Context, run_ids: list[str]) -> Comparison:
     """
     Compare runs: only fields that differ, plus the latest score per metric version.
 
+    Fields cover the task, commit, ``dirty`` (uncommitted changes), seed,
+    stage, command, hypothesis, ``params.*``, ``vars.*`` and ``config.*``.
+
     Parameters
     ----------
     ctx : Context
@@ -472,6 +475,7 @@ def compare_runs(ctx: Context, run_ids: list[str]) -> Comparison:
         f: dict[str, Any] = {
             "task": rec.task,
             "commit": rec.git.commit,
+            "dirty": rec.git.dirty,
             "seed": rec.seed,
             "stage": rec.stage,
             "command": shlex.join(rec.command_template),

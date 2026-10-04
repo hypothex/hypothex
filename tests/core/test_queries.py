@@ -169,3 +169,14 @@ def test_leaderboard_examples_follow_version_override(ctx: Context, toy_repo: Pa
     assert q.get_leaderboard(ctx, "toy-acc").rows[0].test_interval is None
     old = q.get_leaderboard(ctx, "toy-acc", versions={"accuracy": "v1"})
     assert old.rows[0].test_interval is not None and old.rows[0].test_interval.n == 4
+
+
+def test_predictions_unknown_metric_is_an_error(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    for failures_only in (False, True):
+        with pytest.raises(ConfigError, match="unknown metric 'nonexistent'.*accuracy"):
+            q.get_predictions(ctx, "r1", metric="nonexistent", failures_only=failures_only)
+    with pytest.raises(ConfigError, match="unknown metric 'nonexistent'"):
+        q.get_predictions(ctx, "r1", metric="nonexistent@v1")
+    assert q.get_predictions(ctx, "r1", metric="accuracy").rows[0].scores["accuracy@v1"]

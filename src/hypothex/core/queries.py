@@ -515,6 +515,36 @@ def _per_example(run_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
     return out
 
 
+def _check_metric(ctx: Context, record: RunRecord, per: dict[str, Any], metric: str) -> None:
+    """
+    Raise unless ``metric``'s name is one of the run's task metrics or has scores on disk.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    record : RunRecord
+        The run whose predictions are read.
+    per : dict
+        The run's per-example scores, keyed by ``name@version``.
+    metric : str
+        ``name`` or ``name@version`` asked for.
+
+    Raises
+    ------
+    ConfigError
+        If the name is unknown; the message lists the known names.
+    """
+    name, _ = parse_metric_version(metric)
+    known = {parse_metric_version(k)[0] for k in per}
+    with contextlib.suppress(StoreError):
+        spec = refresh_project(ctx, record.project).config.tasks.get(record.task or "")
+        known.update(spec.metrics if spec else ())
+    if name not in known:
+        names = ", ".join(sorted(known)) or "none"
+        raise ConfigError(f"unknown metric {name!r} for run {record.run_id}; known: {names}")
+
+
 def _is_failure(value: Any) -> bool:
     return value is False or (isinstance(value, int | float) and value == 0)
 
@@ -555,6 +585,8 @@ def get_predictions(
 
     Raises
     ------
+    ConfigError
+        ``metric`` is neither a metric of the run's task nor scored on disk.
     EvalError
         ``failures_only`` without any per-example scores.
     """
@@ -562,6 +594,7 @@ def get_predictions(
     run_dir = ctx.run_dir(record)
     per = _per_example(run_dir)
     if metric is not None:
+        _check_metric(ctx, record, per, metric)
         per = {k: v for k, v in per.items() if k == metric or k.split("@")[0] == metric}
     refs = _references(ctx, record)
     rows = [

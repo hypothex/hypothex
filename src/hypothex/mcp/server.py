@@ -56,9 +56,9 @@ fix the returned issues and call again), query_view (panel data as rows).
 Remote hosts (need `hx serve` running on the hub): list_hosts (state, GPUs, queue,
 SLURM jobs, cost today); launch_run(host=..., gpus=..., queue=True) runs on a host;
 launch_sweep runs every grid combination x seed (the command uses {name} for each
-param; runs get $HYPOTHEX_SEED, or use {seed}); get_sweep, cancel_sweep (queued runs
-only), extend_sweep (more seeds); pull_artifact copies a big file such as a checkpoint
-from a host to the hub.
+param; runs get $HYPOTHEX_SEED, or use {seed}); list_sweeps, get_sweep, cancel_sweep
+(queued runs only), extend_sweep (more seeds); pull_artifact copies a big file such as
+a checkpoint from a host to the hub; connect_host retries a host in error.
 """
 
 PRESET_VIEW = core_views.RESERVED_VIEW
@@ -1274,6 +1274,16 @@ def build_server(
 
     @mcp.tool()
     @_expose_errors
+    def connect_host(name: str) -> dict[str, Any]:
+        """
+        Reconnect the hub to a host now (for a host in `error` or `stale`); returns
+        its new connection state. Its runs keep going there either way.
+        """
+        body = {"command_id": new_command_id(), "created_by": "agent:mcp"}
+        return {"state": hub("POST", f"/api/v1/hosts/{name}/connect", body)}
+
+    @mcp.tool()
+    @_expose_errors
     def launch_sweep(
         project: str,
         command: list[str],
@@ -1332,6 +1342,12 @@ def build_server(
             repo=Path(repo) if repo is not None else None,
         )
         return dump(summary)
+
+    @mcp.tool()
+    @_expose_errors
+    def list_sweeps(project: str | None = None) -> dict[str, Any]:
+        """Sweeps of one project (or all), newest first: id, created_at, n_runs, best cell."""
+        return {"sweeps": to_jsonable(q.list_sweeps(ctx(), project))}
 
     @mcp.tool()
     @_expose_errors

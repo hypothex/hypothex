@@ -92,10 +92,10 @@ SLURM jobs, cost today).
   `hx pull <run_id> --artifact checkpoint --json` (prints `local_path`).
 - A host that the hub cannot reach shows `stale` or `error` in `hx hosts status`.
   Its runs keep going there and are not lost: do not rerun them. Wait, or run
-  `hx hosts connect <host>`.
+  `hx hosts connect <host>` (MCP: `connect_host`).
 - MCP: `list_hosts`, `launch_run(host=..., gpus=..., queue=True)` (SLURM hosts also
-  take `partition=`, `time=`, `account=`), `launch_sweep`,
-  `get_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`.
+  take `partition=`, `time=`, `account=`), `launch_sweep`, `list_sweeps`,
+  `get_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`, `connect_host`.
 
 ## Where things are
 

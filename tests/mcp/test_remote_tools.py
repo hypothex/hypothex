@@ -42,6 +42,20 @@ def test_mounted_mcp_calls_its_own_hub_with_the_server_token(
         assert err and "bearer token" in message
 
 
+def test_connect_host_through_the_hub(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with remote_hub(tmp_path, threaded=True, hub_home=home) as r:
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
+        err, out = call(home, "connect_host", {"name": "gpu1"})
+        assert not err, out
+        assert out["state"]["name"] == "gpu1"
+        assert out["state"]["state"] in {"connecting", "bootstrapping", "connected"}
+        wait_until(lambda: call(home, "list_hosts")[1]["hosts"][1]["state"]["state"] == "connected")
+        err, message = call(home, "connect_host", {"name": "nope"})
+        assert err and "nope" in message
+
+
 def test_list_hosts_without_a_hub(home: Path) -> None:
     err, message = call(home, "list_hosts")
     assert err and "hx serve" in message
@@ -75,6 +89,12 @@ def test_local_sweep_tools(home: Path, ctx: Context, toy_repo: Path) -> None:
     assert sorted(ctx.find_record(i).params["x"] for i in ids) == ["0.1234567", "1"]
     for rid in ids:
         control.wait_for_run(ctx, rid, timeout=60)
+    err, listed = call(home, "list_sweeps", {"project": "toy"})
+    assert not err and [(s["project"], s["id"], s["n_runs"]) for s in listed["sweeps"]] == [
+        ("toy", sid, 2)
+    ]
+    err, everywhere = call(home, "list_sweeps")
+    assert not err and [s["id"] for s in everywhere["sweeps"]] == [sid]
     err, got = call(home, "get_sweep", {"project": "toy", "sweep_id": sid})
     assert not err and got["spec"]["id"] == sid
     err, more = call(home, "extend_sweep", {"project": "toy", "sweep_id": sid, "seeds": [2]})

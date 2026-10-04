@@ -36,6 +36,8 @@ EXPECTED_TOOLS = {
     "add_view",
     "query_view",
     "list_hosts",
+    "connect_host",
+    "list_sweeps",
     "launch_sweep",
     "get_sweep",
     "cancel_sweep",

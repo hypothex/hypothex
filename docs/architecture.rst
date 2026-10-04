@@ -64,7 +64,9 @@ replace this later without changing the file layout or the event schema.
 Clients subscribe with ``after_sequence=<last seen>``: the server replays missed
 events, then streams live ones, and the client drops anything it has already
 seen by sequence. This makes reconnecting after a dropped connection safe and
-lossless.
+lossless. A page that has just loaded its data subscribes with ``"latest"`` (no
+replay), and a client may cap the replay with ``max_replay``: past the cap it gets one
+``reset`` message and reloads instead of reading the whole log.
 
 Idempotent commands
 --------------------
@@ -101,9 +103,11 @@ Local-only API
 or the ``--host`` address when it is not a wildcard such as ``0.0.0.0``;
 anything else gets ``400``. This blocks DNS-rebinding attacks, where a web page
 makes its own host name resolve to ``127.0.0.1``. A ``POST`` or WebSocket
-handshake whose ``Origin`` is not one of those hosts gets ``403``, so a web page
-cannot start runs through the user's browser. Clients that send no ``Origin``
-(the CLI, MCP clients, ``curl``) are not affected.
+handshake whose ``Origin`` is not the server's own (the request's host and port)
+gets ``403``, so a web page, even one on another local port, cannot start runs
+through the user's browser. A ``POST`` must also send JSON (or an
+``X-Hypothex-Client`` header), else ``415``. Clients that send no ``Origin`` (the
+CLI, MCP clients, ``curl -H 'content-type: application/json'``) are not affected.
 
 These checks are not authentication: any client that is not a browser can send
 ``Host: localhost``. So ``hx serve`` refuses a non-loopback ``--host`` (such as

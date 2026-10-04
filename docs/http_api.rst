@@ -12,8 +12,13 @@ Conventions
 - Errors are JSON: ``{"error": "...", "type": "..."}``. ``400`` for a bad request,
   ``401`` for a missing or wrong bearer token, ``404`` for an unknown run, project, or
   file, ``409`` for an interrupted command, ``413`` for a file larger than
-  ``max_bytes``, ``422`` for a body that does not match the schema, and ``503`` when a
+  ``max_bytes``, ``415`` for a ``POST`` without JSON, ``422`` for a body that does not match the schema, and ``503`` when a
   host is not connected (or no configured host serves the run).
+- Answers of 2 KiB or more are gzipped when the client sends
+  ``Accept-Encoding: gzip`` (browsers, ``httpx`` and ``curl --compressed`` do). Run
+  files (``application/octet-stream``) are sent as they are.
+- A ``POST`` needs a JSON body (``Content-Type: application/json``, ``{}`` when
+  there is nothing to send) or an ``X-Hypothex-Client`` header; else ``415``.
 - Every ``POST`` body takes an optional ``command_id``. A repeated ``command_id``
   returns the first result and does the work only once. ``created_by`` names the
   author (``agent:<name>`` for agents; such launches need a ``hypothesis``).
@@ -78,7 +83,10 @@ Runs
      - Body and answer
    * - ``GET /api/v1/runs``
      - Query: ``project``, ``task``, ``status``, ``tag``, ``environment_id``,
-       ``archived``, ``limit`` (default 200). Answers run records.
+       ``archived``, ``limit`` (default 200), and the keyset cursor
+       ``before_created_at`` + ``before_run_id`` (both or neither: the ``created_at``
+       and ``run_id`` of the last row of the previous page). Answers run records,
+       newest first, each with ``host_state`` as in ``GET /api/v1/runs/{id}``.
    * - ``POST /api/v1/runs``
      - Launch here: ``repo`` plus the launch fields, ``gpus``, ``queue``. Answers the
        run record.
@@ -115,7 +123,11 @@ Sweeps
    * - ``POST /api/v1/sweeps``
      - ``{project, task?, host?, grid, random?, seeds, command, hypothesis, gpus?,
        queue?, commit?, diff?, command_id?}``. ``grid`` is a list of
-       ``{name, values}`` or ``{name, low, high, log}``. Answers the sweep summary.
+       ``{name, values}`` or ``{name, low, high, log}``. The sweep pins its code in
+       ``spec.commit`` and ``spec.diff``: the body's ``commit`` (with its ``diff``),
+       else the hub checkout's ``HEAD`` and uncommitted diff. A repeated
+       ``command_id`` resumes the same sweep and issues only its missing runs, also
+       after the hub stopped mid-launch. Answers the sweep summary.
    * - ``GET /api/v1/sweeps/{id}``
      - The summary of a sweep in any project.
    * - ``GET /api/v1/sweeps/{project}/{id}``
@@ -125,8 +137,9 @@ Sweeps
    * - ``POST /api/v1/sweeps/{project}/{id}/cancel_queued``
      - ``{command_id?}``. Stops the queued runs (``killed``) and answers the summary.
    * - ``POST /api/v1/sweeps/{project}/{id}/extend``
-     - ``{seeds, command_id?}``. Adds runs for every combination and new seed, and
-       answers the summary.
+     - ``{seeds, command_id?}``. Adds runs for every combination and new seed, at the
+       sweep's ``commit`` and ``diff`` (not the checkout as it is now), and answers the
+       summary.
 
 The summary is ``{spec, counts, cells, best, headline, total_usd, run_ids, tag}``. See
 :doc:`sweeps`.
@@ -156,7 +169,8 @@ bearer token.
    * - ``GET /.well-known/hypothex/environment``
      - The descriptor: ``environment_id``, ``label``, ``kind``, ``os``, ``arch``,
        ``hostname``, ``hx_version``, ``protocol_version``, ``gpus``, ``capabilities``.
-       Open without a token.
+       Open without a token, but then (on a server that has one) it names only
+       ``environment_id``, ``protocol_version`` and ``hx_version``.
    * - ``GET /api/v1/gpus``
      - ``[{index, name, util, mem_used_mb, mem_total_mb, external, run_id}]``.
    * - ``GET /api/v1/queue``
@@ -179,6 +193,10 @@ Other routes
   ``GET /api/v1/tasks/{project}/{task}/leaderboard`` (rows have ``cost``),
   ``POST /api/v1/tasks/{project}/{task}/reeval``, ``GET .../kind``, and the views
   routes under ``/api/v1/tasks/{project}/{task}/views``.
+- The task ``reeval`` scores the hub's own runs on the hub and sends each mirrored
+  run's re-evaluation to its host (command id ``<command_id>:<run_id>``). A run whose
+  host is not connected or no longer configured is listed in ``skipped`` with the
+  reason.
 - ``GET /api/v1/compare?ids=a,b``, ``GET /api/v1/compare/examples?a=&b=&metric=``,
   ``GET /api/v1/datasets/check``.
 - ``/mcp/``: the MCP server over streamable HTTP (see :doc:`mcp`).
@@ -188,6 +206,19 @@ Event stream
 
 ``/api/v1/ws`` is a WebSocket. Send ``{"type": "subscribe", "after_sequence": N}``
 first. The server sends every event after ``N`` as ``{"type": "event", "event":
-{...}}``, then ``{"type": "ready", "last_sequence": M}``, then live events. On the
+{...}}``, then ``{"type": "ready", "last_sequence": M}``, then live events.
+
+- ``"after_sequence": "latest"`` skips the replay: ``ready`` comes at once, then live
+  events. Use it on a page that has just loaded its data.
+- ``"max_replay": K`` (optional, ``K >= 1``) caps the replay. When more than ``K``
+  events are missing, the server sends ``{"type": "reset", "last_sequence": M}``
+  instead of them, then ``ready`` and live events; reload your data on ``reset``.
+  Without ``max_replay`` every missing event is replayed (the hub's mirror needs them).
+
+.. code-block:: json
+
+   {"type": "subscribe", "after_sequence": 41, "max_replay": 5000}
+
+On the
 hub, a change to a remote run arrives as ``mirror.run_updated`` with
 ``{host, environment_id, original_type, remote_sequence, status, reason?}``.

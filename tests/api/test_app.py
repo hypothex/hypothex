@@ -17,7 +17,7 @@ from hypothex.core.context import Context
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.views import get_view, load_preset
 from hypothex.sdk import Run
-from tests.factories import PREDS_075, seed_finished_run
+from tests.factories import PREDS_075, make_record, seed_finished_run
 
 WS_URL = "ws://127.0.0.1:7777/api/v1/ws"  # TestClient defaults to Host "testserver"
 
@@ -161,6 +161,63 @@ def test_ws_replays_then_signals_ready(client: TestClient, ctx: Context) -> None
         assert ws.receive_json()["event"]["sequence"] == last
 
 
+def test_ws_subscribe_latest_skips_the_replay(client: TestClient, ctx: Context) -> None:
+    for i in range(5):
+        ctx.events.append(f"test.old{i}")
+    last = ctx.events.last_sequence()
+    with client.websocket_connect(WS_URL) as ws:
+        ws.send_json({"type": "subscribe", "after_sequence": "latest"})
+        assert ws.receive_json() == {"type": "ready", "last_sequence": last}
+        ctx.events.append("test.live")
+        live = ws.receive_json()
+        assert live["event"]["type"] == "test.live" and live["event"]["sequence"] == last + 1
+
+
+def test_ws_max_replay_sends_reset_instead_of_a_long_replay(
+    client: TestClient, ctx: Context
+) -> None:
+    for i in range(10):
+        ctx.events.append(f"test.old{i}")
+    last = ctx.events.last_sequence()
+    with client.websocket_connect(WS_URL) as ws:  # too far behind: reset, then live
+        ws.send_json({"type": "subscribe", "after_sequence": 0, "max_replay": 4})
+        assert ws.receive_json() == {"type": "reset", "last_sequence": last}
+        assert ws.receive_json() == {"type": "ready", "last_sequence": last}
+        ctx.events.append("test.live")
+        assert ws.receive_json()["event"]["sequence"] == last + 1
+    with client.websocket_connect(WS_URL) as ws:  # within the cap: a normal replay
+        ws.send_json({"type": "subscribe", "after_sequence": last - 3, "max_replay": 4})
+        replay = [ws.receive_json() for _ in range(4)]
+        assert [m["event"]["sequence"] for m in replay] == list(range(last - 2, last + 2))
+        assert ws.receive_json() == {"type": "ready", "last_sequence": last + 1}
+    with client.websocket_connect(WS_URL) as ws:  # no cap (the hub's mirror): everything
+        ws.send_json({"type": "subscribe", "after_sequence": 0})
+        seen = [ws.receive_json()["type"] for _ in range(last + 1)]
+        assert seen == ["event"] * (last + 1)
+        assert ws.receive_json()["type"] == "ready"
+
+
+def test_big_json_answers_are_gzipped_but_run_files_are_not(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    for i in range(30):
+        ctx.index.upsert_run(make_record(f"r{i:02d}"))
+    gzip = {"Accept-Encoding": "gzip"}
+    big = client.get("/api/v1/runs", headers=gzip)
+    assert big.headers["content-encoding"] == "gzip" and len(big.json()) == 30
+    assert int(big.headers["content-length"]) < len(big.content) / 4  # sent vs decoded
+    plain = client.get("/api/v1/runs", headers={"Accept-Encoding": "identity"})
+    assert "content-encoding" not in plain.headers and plain.json() == big.json()
+    small = client.get("/.well-known/hypothex/environment", headers=gzip)
+    assert "content-encoding" not in small.headers  # under GZIP_MIN_BYTES
+    run = seed_finished_run(ctx, toy_repo, "f1")
+    text = "step=1 loss=0.5\n" * 1000
+    (ctx.run_dir(run) / "logs" / "stdout.log").write_text(text)
+    raw = client.get("/api/v1/runs/f1/files/logs/stdout.log", headers=gzip)
+    assert "content-encoding" not in raw.headers and raw.text == text
+    assert raw.headers["content-length"] == str(len(text))
+
+
 def test_foreign_host_is_rejected(client: TestClient) -> None:
     evil = {"Host": "attacker.example:7777", "Origin": "http://attacker.example:7777"}
     assert client.get("/api/v1/runs", headers={"Host": "attacker.example:7777"}).status_code == 400
@@ -186,12 +243,37 @@ def test_cross_origin_writes_and_ws_are_rejected(client: TestClient) -> None:
     assert client.get("/api/v1/runs", headers=evil).status_code == 200
     with pytest.raises(WebSocketDisconnect), client.websocket_connect(WS_URL, headers=evil):
         pass
-    local = {"Origin": "http://localhost:5173"}
-    note = client.post("/api/v1/runs/nope/notes", headers=local, json={"text": "x"})
+    # the page this server served: its origin is the request's own host and port
+    own = {"Origin": "http://127.0.0.1:7777"}
+    note = client.post("/api/v1/runs/nope/notes", headers=own, json={"text": "x"})
     assert note.status_code == 404
-    with client.websocket_connect(WS_URL, headers=local) as ws:
+    with client.websocket_connect(WS_URL, headers=own) as ws:
         ws.send_json({"type": "subscribe", "after_sequence": 0})
         assert ws.receive_json()["type"] == "ready"
+    # the Vite dev server forwards the browser's Host, so its pages are same-origin too
+    dev = {"Origin": "http://localhost:5173", "Host": "localhost:5173"}
+    assert (
+        client.post("/api/v1/runs/nope/notes", headers=dev, json={"text": "x"}).status_code == 404
+    )
+
+
+def test_other_local_servers_and_simple_posts_are_rejected(client: TestClient) -> None:
+    # a page on another local server (Jupyter, a docs preview) is not this server's origin
+    jupyter = {"Origin": "http://localhost:8888"}
+    note = client.post("/api/v1/runs/nope/notes", headers=jupyter, json={"text": "x"})
+    assert note.status_code == 403
+    with pytest.raises(WebSocketDisconnect), client.websocket_connect(WS_URL, headers=jupyter):
+        pass
+    # a POST a browser sends without a preflight: no JSON type and no custom header
+    for headers in ({"Content-Type": "text/plain"}, {}):
+        simple = client.post("/api/v1/hosts/reload", content=b"{}", headers=headers)
+        assert simple.status_code == 415, headers
+        assert simple.json()["type"] == "UnsupportedMediaTypeError"
+    # a custom header needs a preflight too: the request reaches the route (which wants JSON)
+    custom = {"Content-Type": "text/plain", "X-Hypothex-Client": "script"}
+    reached = client.post("/api/v1/hosts/reload", content=b"{}", headers=custom)
+    assert reached.status_code == 422 and reached.json()["type"] == "RequestValidationError"
+    assert client.post("/api/v1/hosts/reload", json={}).status_code == 200
 
 
 def test_view_list_put_get_delete(client: TestClient, ctx: Context, toy_repo: Path) -> None:
@@ -539,6 +621,8 @@ def test_api_refuses_an_agent_launch_without_a_hypothesis(
         {"type": "subscribe", "after_sequence": "abc"},
         {"type": "subscribe", "after_sequence": None},
         {"type": "subscribe", "after_sequence": -1},
+        {"type": "subscribe", "after_sequence": "newest"},
+        {"type": "subscribe", "after_sequence": 0, "max_replay": 0},
         ["subscribe"],
         "not json",
     ],
@@ -569,6 +653,24 @@ def test_api_errors_keep_the_error_and_type_shape(client: TestClient) -> None:
     assert body["detail"][0]["loc"] == ["body", "repo"]  # kept for older clients
     wrong_method = client.put("/api/v1/runs")
     assert wrong_method.status_code == 405 and wrong_method.json()["type"] == "HTTPError"
+
+
+def test_a_body_that_is_not_json_or_fails_a_validator_is_422_not_500(home: Path) -> None:
+    app = create_app(home, background_repair=False)
+    with TestClient(app, base_url="http://127.0.0.1:7777", raise_server_exceptions=False) as c:
+        # FastAPI hands the raw bytes to validation as `input`; they are not JSON
+        raw = c.post(
+            "/api/v1/runs/x/stop",
+            content=b"{}",
+            headers={"Content-Type": "text/plain", "X-Hypothex-Client": "test"},
+        )
+        assert raw.status_code == 422 and raw.json()["type"] == "RequestValidationError"
+        assert all("input" not in problem for problem in raw.json()["detail"])
+        # a model validator's ValueError sits in `ctx`
+        sweep = {"project": "toy", "grid": [{"name": "x"}], "seeds": [1], "command": ["a"]}
+        bad = c.post("/api/v1/sweeps", json={**sweep, "hypothesis": "h"})
+        assert bad.status_code == 422
+        assert all(isinstance(v, str) for p in bad.json()["detail"] for v in p["ctx"].values())
 
 
 def test_leaderboard_metric_pin_needs_a_version(

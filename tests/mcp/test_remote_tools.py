@@ -453,3 +453,27 @@ def test_host_run_text_is_marked_untrusted(
         err, board = call(home, "get_leaderboard", {"task": "toy-acc", "project": "toy"})
         rows = {tuple(row["run_ids"]): row.get("untrusted_source") for row in board["rows"]}
         assert not err and rows == {("e1",): "host:gpu1", ("h1",): None}
+
+
+def test_local_sweep_pins_its_code_for_every_extend(
+    home: Path, ctx: Context, toy_repo: Path
+) -> None:
+    ctx.register_project(toy_repo)
+    head = git(toy_repo, "rev-parse", "HEAD")
+    (toy_repo / "data" / "test.jsonl").write_text("{}\n")  # an uncommitted change
+    base = {"project": "toy", "task": "toy-acc", "hypothesis": "x helps", "seeds": [1]}
+    err, out = call(home, "launch_sweep", {**base, "command": SWEEP_CMD, "grid": {"x": [1]}})
+    assert not err, out
+    assert out["spec"]["commit"] == head and "test.jsonl" in out["spec"]["diff"]
+    for rid in out["run_ids"]:
+        control.wait_for_run(ctx, rid, timeout=60)
+    git(toy_repo, "add", "-A")
+    git(toy_repo, "commit", "-qm", "later work")  # HEAD moves on after the sweep started
+    args = {"project": "toy", "sweep_id": out["spec"]["id"], "seeds": [2]}
+    err, more = call(home, "extend_sweep", args)
+    assert not err, more
+    new = [rid for rid in more["run_ids"] if rid not in out["run_ids"]]
+    for rid in new:
+        control.wait_for_run(ctx, rid, timeout=60)
+    # the new seed joins the same seed group: same commit as the sweep's first runs
+    assert {ctx.find_record(rid).git.commit for rid in more["run_ids"]} == {head}

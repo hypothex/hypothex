@@ -960,6 +960,52 @@ def sweep_checkout(ctx: Context, project: str, repo: str | None) -> dict[str, st
     return {"commit": fields["commit"], "diff": fields["diff"]}
 
 
+def sweep_pin(ctx: Context, project: str, repo: str | None) -> tuple[str | None, str | None]:
+    """
+    The commit and diff a sweep on this machine pins: its checkout as it is now.
+
+    The sweep stores them (``SweepSpec.commit``/``diff``), so every run, and
+    every later extend, runs this code, not the checkout as it is then (spec
+    8A.4, audit CONF-1).
+
+    Parameters
+    ----------
+    ctx : Context
+    project : str
+        The sweep's project.
+    repo : str, optional
+        The checkout; default the registered repo of ``project``.
+
+    Returns
+    -------
+    tuple of (str or None, str or None)
+        ``(HEAD, uncommitted diff or None)``; ``(None, None)`` when there is no
+        git checkout with a commit here (a project copied from a host has its
+        repo on that host).
+
+    Raises
+    ------
+    RunError
+        If the diff is too large or not UTF-8 text.
+
+    Examples
+    --------
+    >>> sweep_pin(ctx, "toy", None)  # doctest: +SKIP
+    ('3f2a...', None)
+    """
+    from hypothex.api.app import pin_checkout  # lazy: hypothex.api.app imports this module
+
+    if repo is None:
+        try:
+            entry = ctx.store.load_project(project)
+        except StoreError:
+            return None, None
+        if entry.remote_host is not None:
+            return None, None  # its repo path is on that host
+        repo = entry.repo
+    return pin_checkout(repo)
+
+
 def sweep_summary(
     ctx: Context,
     sweep_id: str,
@@ -1527,6 +1573,8 @@ def build_server(
                 "command_id": new_command_id(),
             }
             return hub("POST", "/api/v1/sweeps", body)
+        # the sweep stores its code, so an extend runs the same commit and diff
+        commit, diff = sweep_pin(ctx(), project, repo)
         summary = core_sweeps.launch_sweep(
             ctx(),
             project=project,
@@ -1540,6 +1588,8 @@ def build_server(
             queue=queue,
             created_by=f"agent:{agent}",
             repo=Path(repo) if repo is not None else None,
+            commit=commit,
+            diff=diff,
         )
         return dump(summary)
 

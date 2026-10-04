@@ -10,7 +10,7 @@ from hypothex.cli import main as cli_main
 from hypothex.cli.main import app
 from hypothex.core import control
 from hypothex.core.context import Context
-from hypothex.core.errors import HypothexError, RunError, StoreError
+from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
 from hypothex.core.execution import RunRequest
 from hypothex.core.leaderboard import group_id_for
 from hypothex.core.records import RunRecord, RunStatus
@@ -337,3 +337,45 @@ def test_show_and_runs_mark_a_run_whose_host_is_not_connected(
         text = runner.invoke(app, ["runs"]).stdout
         assert "running (host disabled)" in text
         assert "finished (host" not in text
+
+
+def _score_rows(ctx: Context, run_id: str) -> int:
+    path = ctx.run_dir(ctx.find_record(run_id)) / "scores.jsonl"
+    return len(path.read_text().splitlines()) if path.exists() else 0
+
+
+def test_task_reeval_scores_a_mirrored_run_on_its_host(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CONF-2b: scores written into the hub's mirror copy would be replaced by the host's
+    # scores.jsonl at the next mirror; the hub sends a mirrored run to its host instead
+    with remote_hub(tmp_path, threaded=True, hub_home=home) as r:
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
+        seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
+        seed_finished_run(r.hub, r.hub_repo, "h1", predictions=PREDS_075)
+        wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
+        out = hx("reeval", "--task", "toy/toy-acc")
+        assert sorted(out["evaluated"]) == ["e1", "h1"] and out["skipped"] == {}
+        assert _score_rows(r.env, "e1") == 1  # on the host, which owns the file
+        assert _score_rows(r.hub, "h1") == 1
+        wait_until(lambda: _score_rows(r.hub, "e1") == 1, timeout=30)  # mirrored back
+    # no hub: this environment's runs are scored, a host's run is skipped, not written here
+    out = hx("reeval", "--task", "toy-acc", "--force")
+    assert out["evaluated"] == ["h1"] and out["skipped"] == {"e1": cli_main.HOST_RUN_SKIPPED}
+    assert _score_rows(Context.open(home), "e1") == 1 and _score_rows(Context.open(home), "h1") == 2
+
+
+def test_task_reeval_from_another_machine_goes_to_the_hub(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with remote_hub(tmp_path, threaded=True) as r:  # this CLI's home is not the hub's
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
+        seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
+        wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
+        assert hx("reeval", "--task", "toy-acc")["evaluated"] == ["e1"]
+        assert hx("reeval", "--task", "toy/toy-acc", "--force")["evaluated"] == ["e1"]
+        assert _score_rows(r.env, "e1") == 2
+    with pytest.raises(ConfigError, match="unknown task"):  # and no hub: this store's error
+        runner.invoke(app, ["reeval", "--task", "toy-acc"], catch_exceptions=False)
+    with pytest.raises(StoreError, match="unknown project"):
+        runner.invoke(app, ["reeval", "--task", "toy/toy-acc"], catch_exceptions=False)

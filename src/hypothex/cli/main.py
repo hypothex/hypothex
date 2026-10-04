@@ -37,7 +37,7 @@ from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
 from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
-from hypothex.core.evaluation import reeval, validate_project
+from hypothex.core.evaluation import EvalReport, reeval, validate_project
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gitinfo import git_state_label
@@ -1222,6 +1222,81 @@ def reinfer_cmd(
     _started(record, foreground, as_json)
 
 
+HOST_RUN_SKIPPED = (
+    "runs on a host and the hub did not answer; start the hub (`hx serve`) to "
+    "re-evaluate it on its host"
+)
+
+
+def _reeval_task(c: Context, ref: str, project: str | None, body: dict[str, Any]) -> EvalReport:
+    """
+    Re-score a task's finished runs; through the hub when some are another environment's.
+
+    Scores written into a mirrored run's copy here would be replaced by the host's
+    ``scores.jsonl`` at the next mirror (CONF-2), so the hub scores its own runs and
+    sends each mirrored run to its host (spec 8A.3). Without a hub, only this
+    environment's runs are scored; the others are skipped with ``HOST_RUN_SKIPPED``.
+
+    Parameters
+    ----------
+    c : Context
+        This machine's context.
+    ref : str
+        ``task`` or ``project/task``.
+    project : str or None
+        ``--project``.
+    body : dict
+        ``metric``, ``force`` and ``created_by`` of the reeval.
+
+    Returns
+    -------
+    EvalReport
+        This store's report, or the hub's.
+
+    Raises
+    ------
+    ConfigError, StoreError
+        The task (or its project) is unknown here and on the hub.
+    """
+
+    def through_hub(project_name: str, task_name: str) -> EvalReport | None:
+        path = f"/api/v1/tasks/{project_name}/{task_name}/reeval"
+        out = _hub_try("POST", path, {**body, "command_id": new_command_id()})
+        return None if out is None else EvalReport.model_validate(out)
+
+    try:
+        entry, name = q.resolve_task(c, ref, project)
+    except (ConfigError, StoreError) as exc:
+        where = _hub_task(ref, project)  # a CLI on another machine than the hub
+        report = None if where is None else through_hub(*where)
+        if report is None:
+            raise exc
+        return report
+    runs = c.index.list_runs(
+        project=entry.project,
+        task=name,
+        status=RunStatus.FINISHED,
+        include_archived=True,
+        limit=None,
+    )
+    own = c.descriptor.environment_id
+    mirrored = [r.run_id for r in runs if r.environment_id != own]
+    if mirrored:
+        report = through_hub(entry.project, name)
+        if report is not None:
+            return report
+    report = reeval(
+        c,
+        project=entry.project,
+        task=name,
+        metric=body["metric"],
+        force=body["force"],
+        run_ids=[r.run_id for r in runs if r.environment_id == own] if mirrored else None,
+    )
+    report.skipped.update(dict.fromkeys(mirrored, HOST_RUN_SKIPPED))
+    return report
+
+
 @app.command("reeval")
 def reeval_cmd(
     run_id: Annotated[str | None, typer.Argument(help="One run; or use --task.")] = None,
@@ -1235,19 +1310,15 @@ def reeval_cmd(
     from hypothex.mcp.server import acts_through_hub
 
     c = _ctx()
+    body = {"metric": metric, "force": force, "created_by": _created_by()}
     if run_id is not None and acts_through_hub(c, run_id):
-        body = {"metric": metric, "force": force, "command_id": new_command_id()}
-        out = _hub("POST", f"/api/v1/runs/{run_id}/reeval", {**body, "created_by": _created_by()})
-        if as_json:
-            _print_json(out)
-        else:
-            typer.echo(f"evaluated {len(out['evaluated'])}, skipped {len(out['skipped'])}")
-        return
-    if run_id is not None:
+        path = f"/api/v1/runs/{run_id}/reeval"
+        out = _hub("POST", path, {**body, "command_id": new_command_id()})
+        report = EvalReport.model_validate(out)
+    elif run_id is not None:
         report = reeval(c, run_id=run_id, metric=metric, force=force)
     elif task is not None:
-        entry, name = q.resolve_task(c, task, project)
-        report = reeval(c, project=entry.project, task=name, metric=metric, force=force)
+        report = _reeval_task(c, task, project, body)
     else:
         raise RunError("give a run id or --task")
     if as_json:

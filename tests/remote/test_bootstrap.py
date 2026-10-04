@@ -557,15 +557,30 @@ def test_install_bootstraps_missing_uv(host: FakeHost, wheel: Path, uv_env: str)
     host.add_tool(
         "curl", f'case "$*" in *astral.sh/uv/install.sh*) cat {script};; *) exit 7;; esac\n'
     )
-    bs.install(host.target, "~/.hypothex", wheel)
+    bs.install(host.target, "~/.hypothex", wheel, install_uv=True)
     assert (host.remote_home / ".local" / "bin" / "uv").is_file()
     assert _installed_version(host) == __version__
+
+
+def test_install_never_runs_the_uv_installer_unless_allowed(
+    host: FakeHost, wheel: Path, tmp_path: Path
+) -> None:
+    fetched = tmp_path / "curl-called"
+    host.add_tool("curl", f"touch {fetched}\nexit 7\n")
+    with pytest.raises(BootstrapError, match="uv is missing on the host") as info:
+        bs.install(host.target, "~/.hypothex", wheel)
+    message = str(info.value)
+    assert "install uv (https://docs.astral.sh/uv/) on the host" in message
+    assert "allow hx to run the official installer" in message
+    assert not fetched.exists()  # nothing downloaded, nothing run
+    assert [c[0] for c in host.calls()] == ["ssh"]  # failed before the wheel upload
+    assert not (host.hx_home / "runtime" / "bin" / "hx").exists()
 
 
 def test_install_without_uv_or_network(host: FakeHost, wheel: Path) -> None:
     host.add_tool("curl", 'echo "curl: (6) Could not resolve host: astral.sh" >&2\nexit 6\n')
     with pytest.raises(BootstrapError, match="uv is missing on the host") as info:
-        bs.install(host.target, "~/.hypothex", wheel)
+        bs.install(host.target, "~/.hypothex", wheel, install_uv=True)
     message = str(info.value)
     assert "https://astral.sh/uv/install.sh" in message
     assert "Could not resolve host" in message

@@ -425,7 +425,7 @@ def build_wheel(cache_dir: Path) -> Path:
             shutil.rmtree(staging, ignore_errors=True)
 
 
-def install(target: SshTarget, home: str, wheel: Path) -> None:
+def install(target: SshTarget, home: str, wheel: Path, *, install_uv: bool = False) -> None:
     """
     Install ``wheel`` on a host with ``uv tool install --force``.
 
@@ -433,7 +433,9 @@ def install(target: SshTarget, home: str, wheel: Path) -> None:
     name, then, under the lock dir ``<home>/runtime/.lock``, installs it into
     ``<home>/runtime/tools`` with the ``hx`` entry point in ``<home>/runtime/bin``.
     If the host has no ``uv`` (``PATH``, ``~/.local/bin``, ``~/.cargo/bin``), the
-    official installer puts one into ``~/.local/bin`` first.
+    install fails before the wheel is copied, unless ``install_uv`` allows the
+    official installer (``https://astral.sh/uv/install.sh``) to put one into
+    ``~/.local/bin`` first.
 
     Parameters
     ----------
@@ -443,20 +445,26 @@ def install(target: SshTarget, home: str, wheel: Path) -> None:
         Hypothex home on the host; ``~`` is expanded there.
     wheel : Path
         Local wheel from :func:`build_wheel`.
+    install_uv : bool
+        Allow downloading and running the official uv installer on a host
+        without ``uv``. Off by default: the user must agree to it.
 
     Raises
     ------
     BootstrapError
-        Wheel missing, lock held too long, uv missing and not installable, the
-        install failed, or the installed ``hx --version`` differs from the wheel.
+        Wheel missing, lock held too long, uv missing (and ``install_uv`` off,
+        or the installer failed), the install failed, or the installed
+        ``hx --version`` differs from the wheel.
 
     Examples
     --------
     >>> install(SshTarget(alias="gpu1"), "~/.hypothex", build_wheel(cache))  # doctest: +SKIP
+    >>> install(target, "~/.hypothex", wheel, install_uv=True)  # host without uv  # doctest: +SKIP
     """
     if not wheel.is_file():
         raise BootstrapError(f"wheel not found: {wheel}")
-    values, _ = _run_script(target, "install", HX_HOME=home, HX_STEP="prepare")
+    allow = "1" if install_uv else "0"
+    values, _ = _run_script(target, "install", HX_HOME=home, HX_STEP="prepare", HX_INSTALL_UV=allow)
     remote_home = values.get("home")
     if not remote_home:
         raise BootstrapError(f"{target.alias}: install prepare step reported no home")
@@ -468,6 +476,7 @@ def install(target: SshTarget, home: str, wheel: Path) -> None:
         timeout=900,
         HX_HOME=home,
         HX_STEP="install",
+        HX_INSTALL_UV=allow,
         HX_WHEEL=wheel.name,
         HX_UPLOAD=upload,
     )

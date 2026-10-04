@@ -133,6 +133,22 @@ def test_evaluate_removed_task_is_clear_error(ctx: Context, toy_repo: Path) -> N
         evaluate_run(ctx, "r1")
 
 
+def test_a_project_copied_from_a_host_is_never_evaluated_from_its_repo_path(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # the host reported a repo path that also exists here: its hypothex.yaml and
+    # metric code must not run on the hub (SEC-5)
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    with pytest.raises(EvalError, match="copied from host gpu1"):
+        evaluate_run(ctx, "r1")
+    with pytest.raises(EvalError, match="copied from host gpu1"):
+        reeval(ctx, project="toy", task="toy-acc")
+    assert ctx.store.read_scores("toy", "r1") == []
+    assert ctx.index.scores_for(["r1"]) == {}
+
+
 def test_validate_project(ctx: Context, toy_repo: Path) -> None:
     ok = validate_project(ctx, toy_repo)
     assert ok.ok and ok.errors == []

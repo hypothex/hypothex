@@ -28,6 +28,8 @@ from typing import Any, Literal, TypeVar
 
 import yaml
 from pydantic import BaseModel
+from sqlalchemy import delete
+from sqlalchemy.orm import Session
 
 from hypothex.core.context import Context
 from hypothex.core.cost import price_record
@@ -36,7 +38,7 @@ from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.events import Event
 from hypothex.core.fsutil import atomic_write_text, read_yaml
 from hypothex.core.ids import utcnow
-from hypothex.core.index import index_run
+from hypothex.core.index import HostCursorRow, index_run
 from hypothex.core.layout import HX_DIR, reserved_run_path
 from hypothex.core.records import ACTIVE_STATUSES, Artifact, RunRecord
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
@@ -62,12 +64,15 @@ MIRROR_FILES = (
     "git.diff",
     "git.stat",
 )
+"""Copied from each host as written there: text such as ``notes.md`` is untrusted on the hub
+(``mirror_source`` names where it came from)."""
 MIRROR_DIRS = ("predictions", "traces", "samples", "env", "logs")
 MIRROR_MAX_BYTES = 200 * 1024 * 1024
 LOG_TAIL_BYTES = 8 * 1024 * 1024
 """Logs are mirrored as tails (spec 5.3, 8A.3): at most the last 8 MiB of each, fetched whole."""
 CLAIMS_DIR = ".claims"
-"""``<store>/.claims/<run_id>.json``: the project and environment that own a mirrored run id."""
+"""``<store>/.claims/<run_id>.json``: the project, environment, and host that own a mirrored
+run id."""
 INDEX_PENDING = ".mirror-index-pending"
 """Written (durably) before a mirror first changes a run folder and removed after its index
 and manifest; seen again (a replay, or the next hub start), the index is redone."""
@@ -293,12 +298,13 @@ def _conflict(ctx: Context, environment_id: str, project: str, run_id: str) -> s
     return None
 
 
-def _claim(ctx: Context, environment_id: str, project: str, run_id: str) -> str | None:
+def _claim(ctx: Context, environment_id: str, project: str, run_id: str, host: str) -> str | None:
     """
     Claim ``run_id`` hub-wide for this project and environment, before any install.
 
     Under the shared claim lock the conflict check runs again and, when it
-    passes, ``<store>/.claims/<run_id>.json`` is written. The claim stays when a
+    passes, ``<store>/.claims/<run_id>.json`` is written (with the ``host`` the
+    run came from, for ``mirror_source``). The claim stays when a
     later install or index fails, so no other project or environment can take
     the id in between.
 
@@ -310,9 +316,52 @@ def _claim(ctx: Context, environment_id: str, project: str, run_id: str) -> str 
     with dir_lock(ctx.layout.store / CLAIMS_DIR):
         reason = _conflict(ctx, environment_id, project, run_id)
         if reason is None and _claim_owner(ctx, run_id) is None:
-            owner = {"project": project, "environment_id": environment_id}
+            owner = {"project": project, "environment_id": environment_id, "host": host}
             atomic_write_text(_claim_path(ctx, run_id), json.dumps(owner))
         return reason
+
+
+def mirror_source(ctx: Context, record: RunRecord) -> str | None:
+    """
+    Name where a run's text was written when it is not this hub's own run.
+
+    A mirrored run's files (``MIRROR_FILES``: ``notes.md``, the hypothesis,
+    tags, and command in ``run.yaml``, ``config.yaml``, ...) were written on a
+    host, by its code or its users. Show them to an agent as untrusted data
+    from this source, never as instructions (they can carry prompt injection).
+
+    Parameters
+    ----------
+    ctx : Context
+        The hub context.
+    record : RunRecord
+        Any run the hub holds.
+
+    Returns
+    -------
+    str or None
+        ``"host:<name>"`` for a run the hub mirrored from that host,
+        ``"environment:<id>"`` for another environment's run with no host on
+        record, and None for a run of this hub's own environment.
+
+    Examples
+    --------
+    >>> mirror_source(ctx, ctx.find_record("r1"))  # doctest: +SKIP
+    'host:gpu1'
+    """
+    if record.environment_id == ctx.descriptor.environment_id:
+        return None
+    try:
+        data = json.loads(_claim_path(ctx, record.run_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if (
+        isinstance(data, dict)
+        and data.get("environment_id") == record.environment_id
+        and isinstance(data.get("host"), str)
+    ):
+        return f"host:{data['host']}"
+    return f"environment:{record.environment_id}"
 
 
 def _read_remote_record(path: Path) -> RunRecord | None:
@@ -332,7 +381,8 @@ def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) ->
     on every mirror, so a task or metric version added on the host reaches
     the hub. A project registered on the hub (or copied from another host) is
     never replaced; a later ``hx register`` of a checkout on the hub replaces
-    the copy.
+    the copy. The copy's ``repo`` is the path the host reported, on the host:
+    hub code must never read or write under it (check ``remote_host`` first).
     """
     known: ProjectEntry | None = None
     with contextlib.suppress(StoreError):
@@ -479,7 +529,7 @@ def mirror_run(
             usd_per_gpu_hour,
         )
         # every file is here: claim the id hub-wide, then install everything at once
-        reason = _claim(ctx, environment_id, project, run_id)
+        reason = _claim(ctx, environment_id, project, run_id, host)
         if reason is not None:
             log.warning("host %s: not mirroring: %s", host, reason)
             return None
@@ -672,6 +722,7 @@ def _emit_mirror(
     original_type: str,
     remote_sequence: int | None,
     *,
+    remote_created_at: datetime | None = None,
     reason: str | None = None,
 ) -> None:
     payload: dict[str, object] = {
@@ -689,9 +740,11 @@ def _emit_mirror(
         )
         return
     # events.db and the cursor (index.db) are two databases: a crash between this event
-    # and the cursor write replays the remote event, and the key drops the repeat
+    # and the cursor write replays the remote event, and the key drops the repeat. The
+    # event's time is part of its identity: a host whose log restarted reuses sequences
+    stamp = f":{remote_created_at.isoformat()}" if remote_created_at is not None else ""
     ctx.events.append_once(
-        f"mirror:{host}:{environment_id}:{remote_sequence}",
+        f"mirror:{host}:{environment_id}:{remote_sequence}{stamp}",
         "mirror.run_updated",
         project=record.project,
         run_id=record.run_id,
@@ -744,7 +797,14 @@ def mirror_event(
     if mirrored is None:
         return
     _emit_mirror(
-        ctx, host, environment_id, mirrored[0], event.type, event.sequence, reason=_reason(event)
+        ctx,
+        host,
+        environment_id,
+        mirrored[0],
+        event.type,
+        event.sequence,
+        remote_created_at=event.created_at,
+        reason=_reason(event),
     )
 
 
@@ -776,6 +836,42 @@ def _run_key(event: Event) -> tuple[str, str] | None:
 def _brief(exc: BaseException) -> str:
     text = str(exc).strip() or type(exc).__name__
     return text[-_MESSAGE_LIMIT:]
+
+
+def _host_sequence(client: EnvClient) -> int | None:
+    """
+    Return the last sequence of the host's own event log, or None when unknown.
+
+    Read from the host's own (``kind: local``) row of its ``GET /api/v1/hosts``.
+
+    Parameters
+    ----------
+    client : EnvClient
+        Client of the host's env server.
+
+    Returns
+    -------
+    int or None
+        The host's ``events.last_sequence()``; None when the host does not
+        answer or sends no such row.
+    """
+    try:
+        rows = client.get_json("/api/v1/hosts")
+        [own] = [r for r in rows if r.get("kind") == "local"]
+        value = own["state"]["last_sequence"]
+    except (HypothexError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _reset_cursor(ctx: Context, host: str, environment_id: str) -> None:
+    """Forget the mirror cursor of one host environment (``set_cursor`` only moves forward)."""
+    with Session(ctx.index.engine) as session, session.begin():
+        session.execute(
+            delete(HostCursorRow).where(
+                HostCursorRow.host == host, HostCursorRow.environment_id == environment_id
+            )
+        )
 
 
 # supervisors -------------------------------------------------------------------------
@@ -1204,6 +1300,8 @@ class Hub:
                 )
             env_id = desc.environment_id
             cursor = await asyncio.to_thread(self._read_cursor, sup, env_id)
+            if cursor:
+                cursor = await asyncio.to_thread(self._check_cursor, sup, client, env_id, cursor)
             sup.client = client
             sup.failed_bootstrap = False
             self._mark_ok(sup)
@@ -1249,6 +1347,29 @@ class Hub:
         with sup.lock:
             return self.ctx.index.get_cursor(sup.name, env_id)
 
+    def _check_cursor(self, sup: _Supervisor, client: EnvClient, env_id: str, cursor: int) -> int:
+        """
+        Return the cursor to subscribe after, reset to 0 when the host's event log restarted.
+
+        Host sequences only grow, so a host whose last sequence is below the
+        cursor lost its ``events.db`` (deleted, or the home restored from a
+        backup) but kept its environment id. Its new events reuse sequences the
+        hub has already seen, so the cursor is dropped and the whole log is
+        replayed; mirroring is idempotent.
+        """
+        latest = _host_sequence(client)
+        if latest is None or latest >= cursor:
+            return cursor
+        log.warning(
+            "host %s: event log restarted (host at sequence %d, hub cursor %d); replaying it",
+            sup.name,
+            latest,
+            cursor,
+        )
+        with sup.lock:
+            _reset_cursor(self.ctx, sup.name, env_id)
+        return 0
+
     def _apply(
         self, sup: _Supervisor, client: EnvClient, env_id: str, events: list[Event]
     ) -> int | None:
@@ -1289,6 +1410,7 @@ class Hub:
                         record,
                         event.type,
                         event.sequence,
+                        remote_created_at=event.created_at,
                         reason=_reason(event),
                     )
             last = fresh[-1].sequence

@@ -203,7 +203,7 @@ MCP tools: `list_views(task, project=None)`, `get_view(task, name, project=None)
 
 - Bun + Vite + React 19 + TypeScript (strict). TanStack Router (file-free, code routes) + TanStack Query. CodeMirror 6 (`@codemirror/lang-yaml`, lint gutter) for the view editor. `vega-embed` for `vega_lite`. `d3-scale`, `d3-shape`, `d3-array`, `d3-format` for chart math. No Tailwind, no component kit.
 - Tests: `bun test` with `happy-dom` + `@testing-library/react` for components; Playwright (`bunx playwright test`) smoke tests against `hx serve` on a demo home.
-- Build: `bun run build` writes to `src/hypothex/ui_dist/` (git-ignored; built in CI and before packaging). `hatch` includes `ui_dist` in the wheel only when present, via `artifacts = ["src/hypothex/ui_dist/**"]` under `[tool.hatch.build.targets.wheel]` (not `force-include`, which fails the build when the folder is missing).
+- Build: `bun run build` writes to `src/hypothex/ui_dist/` (git-ignored; built in CI and before packaging). `hatch` includes `ui_dist` in the wheel only when present, via `artifacts = ["src/hypothex/ui_dist/**"]` under `[tool.hatch.build.targets.wheel]` and `[tool.hatch.build.targets.sdist]` (a plain `uv build` builds the wheel from the sdist; not `force-include`, which fails the build when the folder is missing).
 - Types: `ui/src/api/types.ts` generated from `/api/openapi.json` with `bunx openapi-typescript`, checked in; `bun run gen:types` regenerates.
 - Routes: `/` Overview, `/t/:project/:task` Task (view tabs, `?view=<name>`), `/t/:project/:task/edit/:view` View editor (`new` for a new view), `/r/:runId` Run, `/x/:a/:b` Examples (query `metric`).
 - Design tokens: copied verbatim from `docs/mockups/ui-v4/index.html` into `ui/src/styles/tokens.css` (light + `[data-theme=dark]`).

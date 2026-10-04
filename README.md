@@ -18,9 +18,19 @@ Experiment tracker and control panel for AI researchers and their agents.
 
 ## Install
 
+Hypothex is not on PyPI yet (the `hypothex` name there is a placeholder with no `hx`).
+Install from a checkout. You need [uv](https://docs.astral.sh/uv/) and [Bun](https://bun.sh/)
+to build the web UI:
+
 ```bash
-uv tool install hypothex
+git clone https://github.com/hypothex/hypothex.git
+cd hypothex
+cd ui && bun install && bun run build && cd ..   # writes src/hypothex/ui_dist
+uv tool install .                                # puts `hx` on your PATH
 ```
+
+Do not install from a bare `git+https://...` URL: the UI build is not in git, so that
+install has no web UI.
 
 ## Quickstart
 

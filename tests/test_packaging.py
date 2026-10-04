@@ -82,3 +82,12 @@ def test_wheel_ships_the_license_text(built: tuple[list[str], list[str]]) -> Non
     assert (
         "Apache License\n                           Version 2.0" in (ROOT / "LICENSE").read_text()
     )
+
+
+def test_readme_installs_from_a_checkout_with_the_ui_built() -> None:
+    # PyPI has only a name placeholder with no `hx`; a bare git+ URL installs no UI.
+    readme = (ROOT / "README.md").read_text()
+    install = readme.split("## Install\n", 1)[1].split("\n## ", 1)[0]
+    assert "not on PyPI yet" in install
+    assert "uv tool install hypothex" not in install
+    assert install.index("bun run build") < install.index("uv tool install .")

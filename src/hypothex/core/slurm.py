@@ -38,7 +38,6 @@ from pydantic import BaseModel
 from hypothex.core.context import Context
 from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, HypothexError, RunError, RunNotFoundError
-from hypothex.core.evaluation import evaluate_run
 from hypothex.core.events import EventLog
 from hypothex.core.execution import (
     STOP_MARKER,
@@ -46,6 +45,7 @@ from hypothex.core.execution import (
     process_alive,
     process_create_time,
     release_worktree,
+    score_finished_run,
 )
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.ids import utcnow
@@ -1605,10 +1605,7 @@ def _sync_node_run(ctx: Context, current: RunRecord) -> RunRecord | None:
         ctx.index.replace_metric_points(current.run_id, points)
     scored = bool(ctx.store.read_scores(current.project, current.run_id))
     if changed and current.status == RunStatus.FINISHED and current.task and not scored:
-        try:
-            evaluate_run(ctx, current.run_id)  # the node never scores (auto_evaluate=False)
-        except HypothexError as exc:
-            ctx.emit("run.eval_skipped", current, {"reason": str(exc)[:500]})
+        score_finished_run(ctx, current)  # the node never scores (auto_evaluate=False)
     if current.status in TERMINAL_STATUSES:
         release_worktree(ctx, current)  # after scoring, which reads the checkout
     if changed or current.status in TERMINAL_STATUSES:

@@ -12,7 +12,7 @@ from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
 from hypothex.core.records import RunStatus, UsageTotals
-from tests.factories import write_toy_project
+from tests.factories import git, write_toy_project
 
 PY = sys.executable
 WRITE_PREDS = (
@@ -358,7 +358,7 @@ def test_pump_reads_a_pipe_on_a_file_descriptor_above_1024(tmp_path: Path) -> No
         os.close(r)
         src = os.fdopen(high, "rb", buffering=0)
         log = tmp_path / "out.log"
-        thread = execution._pump(src, log, None, threading.Event())
+        thread = execution._pump(src, log, None, threading.Event(), [])
         os.write(w, b"hello\n")
         os.close(w)
         w = -1
@@ -392,3 +392,153 @@ def test_stop_marker_written_while_the_child_runs_kills_it(ctx: Context, toy_rep
     done = result[0]
     assert done.status == RunStatus.KILLED
     assert not execution.process_alive(done.executor.child_pid, None)
+
+
+class _FullDisk:
+    """A log file on a full disk: every write fails with ENOSPC."""
+
+    def write(self, data: bytes) -> int:
+        raise OSError(28, "No space left on device")
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_full_disk_does_not_block_a_chatty_command(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DF-69: the log thread died on ENOSPC; nobody read the pipe, so the child
+    # blocked on write and the run never ended
+    real_open = Path.open
+
+    def open_full(self: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+        if self.name == "stdout.log" and mode == "ab":
+            return _FullDisk()
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_full)
+    chatty = cmd("import sys; sys.stdout.write('x' * 4_000_000)")
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=chatty))
+    result: list = []
+    worker = threading.Thread(target=lambda: result.append(execute_run(ctx, rec.run_id)))
+    worker.start()
+    worker.join(timeout=60)
+    if worker.is_alive():  # the old bug: unblock the child so the test run can end
+        execution.terminate_group(ctx.find_record(rec.run_id).executor.child_pid or 0, grace=1)
+        worker.join(timeout=30)
+        pytest.fail("the run hung on a full disk")
+    assert result[0].status == RunStatus.FINISHED
+    warnings = [e.payload["message"] for e in _warning_events(ctx, rec.run_id)]
+    assert len(warnings) == 1 and "log write failed" in warnings[0]
+    assert "stdout.log" in warnings[0] and "No space left" in warnings[0]
+
+
+def test_pump_drains_a_pipe_whose_log_cannot_be_opened(tmp_path: Path) -> None:
+    r, w = os.pipe()
+    src = os.fdopen(r, "rb", buffering=0)
+    failures: list[str] = []
+    thread = execution._pump(src, tmp_path / "no" / "dir.log", None, threading.Event(), failures)
+    writer = threading.Thread(target=lambda: (os.write(w, b"x" * 1_000_000), os.close(w)))
+    writer.start()
+    writer.join(timeout=10)
+    thread.join(timeout=10)
+    src.close()
+    assert not writer.is_alive() and not thread.is_alive()
+    assert len(failures) == 1 and failures[0].startswith("dir.log: ")
+
+
+def _ignore_data_and_pin_old_commit(repo: Path) -> str:
+    """Make ``data/`` git-ignored, commit twice, and return the older commit."""
+    git(repo, "rm", "-rq", "--cached", "data")
+    (repo / ".gitignore").write_text("data/\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-qm", "ignore data")
+    old = git(repo, "rev-parse", "HEAD")
+    (repo / "infer.py").write_text("print('new')\n")
+    git(repo, "commit", "-qam", "move on")
+    return old
+
+
+def test_a_pinned_run_reads_git_ignored_data_from_the_repo(ctx: Context, toy_repo: Path) -> None:
+    # DF-18: the dataset path was resolved in the worktree, where ignored data is missing
+    old = _ignore_data_and_pin_old_commit(toy_repo)
+    read = cmd("import sys; print(len(open(sys.argv[1]).readlines()))", "{dataset.path}")
+    req = RunRequest(repo=toy_repo, command=read, task="toy-acc", commit=old)
+    done = run_fg(ctx, req)
+    data = str(toy_repo.resolve() / "data" / "test.jsonl")
+    assert done.status == RunStatus.FINISHED
+    assert done.command[-1] == data
+    assert done.datasets[0].path == data and done.datasets[0].hash_mode != "missing"
+    assert (ctx.run_dir(done) / "logs" / "stdout.log").read_text().strip() == "4"
+
+
+def test_a_pinned_run_reads_tracked_data_from_its_checkout(ctx: Context, toy_repo: Path) -> None:
+    old = git(toy_repo, "rev-parse", "HEAD")
+    (toy_repo / "data" / "test.jsonl").write_text('{"id": "ex-0", "reference": 1}\n')
+    git(toy_repo, "commit", "-qam", "new data")
+    read = cmd("import sys; print(len(open(sys.argv[1]).readlines()))", "{dataset.path}")
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=read, task="toy-acc", commit=old))
+    assert done.command[-1].startswith(str(ctx.layout.worktrees_dir("toy")))
+    assert done.datasets[0].path == done.command[-1]
+    assert (ctx.run_dir(done) / "logs" / "stdout.log").read_text().strip() == "4"
+
+
+def _old_commit(repo: Path) -> str:
+    """Commit once more so the current HEAD is an older commit; return it."""
+    old = git(repo, "rev-parse", "HEAD")
+    (repo / "infer.py").write_text("print('new')\n")
+    git(repo, "commit", "-qam", "move on")
+    return old
+
+
+@pytest.mark.parametrize(
+    ("venv", "removed"), [(".venv", True), ("sub/.venv", False)], ids=["top", "nested"]
+)
+def test_release_worktree_ignores_the_top_level_venv(
+    ctx: Context, toy_repo: Path, venv: str, removed: bool
+) -> None:
+    # DF-19: `uv run --project <worktree>` (env capture, scoring) makes .venv/,
+    # and the worktree was then kept forever
+    make = (
+        "import os, sys; d = sys.argv[1]; os.makedirs(d + '/bin'); "
+        "open(d + '/bin/python', 'w').write('x'); open(d + '/.gitignore', 'w').write('*')"
+    )
+    req = RunRequest(repo=toy_repo, command=cmd(make, venv), commit=_old_commit(toy_repo))
+    done = run_fg(ctx, req)
+    assert done.status == RunStatus.FINISHED
+    tree = ctx.layout.worktrees_dir("toy") / done.run_id
+    assert tree.exists() is not removed
+
+
+def test_auto_eval_warnings_become_run_warnings(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DF-6, DF-17: auto-eval dropped the warnings evaluate_run returned
+    drift = "metric 'accuracy' code changed but version v1 was not bumped"
+    monkeypatch.setattr(execution, "evaluate_run", lambda ctx, run_id: ([], [drift]))
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(WRITE_PREDS), task="toy-acc"))
+    assert done.status == RunStatus.FINISHED
+    assert [e.payload["message"] for e in _warning_events(ctx, done.run_id)] == [drift]
+
+
+def test_an_unknown_stage_is_refused_also_with_a_command(ctx: Context, toy_repo: Path) -> None:
+    # DF-58: with a command, --stage was not checked and a misspelled stage was saved
+    req = RunRequest(repo=toy_repo, stage="infre", command=cmd("print(1)"))
+    with pytest.raises(RunError, match="no stage 'infre'"):
+        prepare_run(ctx, req)
+    assert ctx.store.list_run_ids() == {}
+    ok = prepare_run(ctx, RunRequest(repo=toy_repo, stage="infer", command=cmd("print(1)")))
+    assert ok.stage == "infer" and ok.command == cmd("print(1)")
+
+
+def test_refusing_a_provided_var_names_how_to_set_it(ctx: Context, toy_repo: Path) -> None:
+    # DF-12: the refusal said "--var seed ...", a CLI flag name, and gave no way out
+    req = RunRequest(repo=toy_repo, command=cmd("print(1)"), vars={"seed": "3"})
+    with pytest.raises(RunError) as err:
+        prepare_run(ctx, req)
+    message = str(err.value)
+    assert message.startswith("template var seed is set by Hypothex")
+    assert "--seed" in message and "MCP seed" in message

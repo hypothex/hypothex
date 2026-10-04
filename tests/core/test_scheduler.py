@@ -1118,7 +1118,7 @@ def test_a_clean_worktree_is_removed_when_its_run_ends(ctx: Context, toy_repo: P
     git(toy_repo, "checkout", "--", "marker.txt")
     code = "import sys; sys.dont_write_bytecode = False; print(open('marker.txt').read())"
     rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(code), commit=head, diff=diff))
-    assert Path(rec.cwd).is_dir()
+    assert not Path(rec.cwd).exists()  # made when the run starts (DF-50)
     assert execute_run(ctx, rec.run_id).status == RunStatus.FINISHED
     assert stdout_of(ctx, rec.run_id) == "patched"
     assert worktrees(ctx) == []

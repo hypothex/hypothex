@@ -1281,10 +1281,22 @@ class Hub:
             await asyncio.wait(list(sup.pending))
 
     async def _shielded(self, sup: _Supervisor, fn: Callable[..., T], *args: object) -> T:
-        """Run ``fn`` in a worker thread that a cancel cannot split; ``_halt`` waits for it."""
+        """
+        Run ``fn`` in a worker thread that a cancel cannot split; ``_halt`` waits for it.
+
+        When the caller was cancelled, nobody awaits the thread's result: its
+        exception is read on completion (``_settle``), so asyncio never logs
+        "exception was never retrieved" for it.
+        """
         future: asyncio.Future[T] = asyncio.ensure_future(asyncio.to_thread(fn, *args))
         sup.pending.add(future)
-        future.add_done_callback(sup.pending.discard)
+
+        def _settle(done: asyncio.Future[T]) -> None:
+            sup.pending.discard(done)
+            if not done.cancelled():
+                done.exception()  # marks it retrieved; a caller still waiting gets it too
+
+        future.add_done_callback(_settle)
         return await asyncio.shield(future)
 
     async def _supervise(self, sup: _Supervisor) -> None:

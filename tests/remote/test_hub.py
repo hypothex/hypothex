@@ -7,6 +7,8 @@ random loopback port, in a thread) or a fake; nothing connects to a real host.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import gc
 import json
 import logging
 import os
@@ -1936,6 +1938,37 @@ def test_a_draining_session_is_not_shown_as_connected(
             await hub.stop()
 
     asyncio.run(main())
+
+
+def test_a_shielded_failure_after_its_caller_left_is_not_logged_as_unretrieved(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    hub = Hub(
+        Context.open(tmp_path / "hub"),
+        EnvironmentsFile(environments={"gpu1": HostSpec(route="url", url="http://127.0.0.1:9")}),
+    )
+    sup = hub._sups["gpu1"]
+    started, release = threading.Event(), threading.Event()
+
+    def fail() -> None:
+        started.set()
+        release.wait(10)
+        raise RuntimeError("mirror failed after the session ended")
+
+    async def main() -> None:
+        caller = asyncio.create_task(hub._shielded(sup, fail))
+        await until(started.is_set)
+        caller.cancel()  # the session ends; the thread goes on
+        with contextlib.suppress(asyncio.CancelledError):
+            await caller
+        release.set()
+        await hub._drain(sup)
+        assert not sup.pending
+
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        asyncio.run(main())
+        gc.collect()  # an unretrieved exception is logged when its task is collected
+    assert not [r for r in caplog.records if "never retrieved" in r.getMessage()]
 
 
 def live_session_counter(monkeypatch: pytest.MonkeyPatch) -> set[object]:

@@ -166,6 +166,15 @@ def test_run_filter_accepts_one_status_and_rejects_unknown() -> None:
         RunFilter.model_validate({"status": ["finished", "done"]})
 
 
+def test_curve_point_limit_is_optional_and_bounded() -> None:
+    assert PanelData().max_points is None
+    for limit in (None, 2, 17, 500):
+        assert PanelData.model_validate({"max_points": limit}).max_points == limit
+    for limit in (0, 1, 501, 2.5):
+        with pytest.raises(ValidationError):
+            PanelData.model_validate({"max_points": limit})
+
+
 def test_resolve_view_replaces_same_title_and_appends_new() -> None:
     view = ViewSpec(
         title="mine",

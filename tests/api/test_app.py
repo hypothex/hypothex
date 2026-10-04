@@ -15,6 +15,7 @@ import hypothex.api.app as app_mod
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
 from hypothex.core.evaluation import evaluate_run
+from hypothex.core.records import MetricPoint
 from hypothex.core.views import get_view, load_preset
 from hypothex.sdk import Run
 from tests.factories import PREDS_075, make_record, seed_finished_run
@@ -424,6 +425,29 @@ def test_query_views(client: TestClient, ctx: Context, toy_repo: Path) -> None:
     assert client.post(f"{VIEWS}/query", json={"name": "nope"}).status_code == 404
     bad_panel = client.post(f"{VIEWS}/query", json={"panel": {"type": "pie"}})
     assert bad_panel.status_code == 422
+
+
+def test_query_curve_visible_metrics_with_a_point_cap(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    _scored(ctx, toy_repo)
+    ctx.index.replace_metric_points(
+        "r1",
+        [
+            MetricPoint(name=name, step=step, value=float(step))
+            for name in ("loss", "hidden")
+            for step in range(600)
+        ],
+    )
+    panel = {"type": "curves", "data": {"metrics": ["loss"], "max_points": 17}}
+    response = client.post(f"{VIEWS}/query", json={"panel": panel})
+    assert response.status_code == 200
+    rows = response.json()["panels"][0]["rows"]
+    assert len(rows) == 17
+    assert {row["name"] for row in rows} == {"loss"}
+    assert [rows[0]["step"], rows[-1]["step"]] == [0, 599]
+    panel["data"]["max_points"] = 501
+    assert client.post(f"{VIEWS}/query", json={"panel": panel}).status_code == 422
 
 
 def test_view_anchors_and_huge_specs_are_issues_never_500(

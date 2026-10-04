@@ -146,6 +146,8 @@ class PanelData(BaseModel):
     run_id: str | None = None
     example_id: str | None = None
     step_metric: str | None = None
+    max_points: int | None = Field(None, ge=2, le=500)
+    """Curves only: points per run and metric; None retains the 500-point default."""
 
 
 def _default_noise() -> list[Noise]:

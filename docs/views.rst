@@ -79,8 +79,9 @@ Type           Shows
 stat_strip     A row of headline numbers.
 leaderboard    Seed groups ranked by the primary metric, with seed and test-set noise.
 curves         Metric history by step; seeds faint, mean bold, checkpoints and spikes.
-               Rows follow ``data.metrics`` order; each run's series is thinned to 500
-               points that keep its shape (LTTB). A loss spike is one event per episode,
+               Rows follow ``data.metrics`` order; each run's series is thinned to at
+               most ``data.max_points`` (2–500; omitted or null means 500), retaining
+               its shape with LTTB. A loss spike is one event per episode,
                labelled with its step (``spike 9k``); so is a kill (``killed 14k``).
                A ``NaN`` or infinite value the run logged is marked too (``NaN 9k``).
                ``group_by: run`` draws one column per run, named ``baseline r1``.
@@ -99,6 +100,12 @@ vega_lite      A Vega-Lite ``spec`` drawn over rows from a ``source``. Rows arri
                only: ``url``, ``href``, ``embedOptions`` (at any depth) and ``image``
                marks are rejected.
 ============== ==========================================================================
+
+For curves, request just the visible metric names with ``data.metrics``; an empty
+list draws no series. For example, ``data: {metrics: [train/loss], max_points: 100}``
+returns at most 100 points per run for that metric. ``max_points`` affects only
+curve rows. Events, checkpoints, and a separate ``step_metric`` axis still use
+the available history before this final thinning; other panel types ignore it.
 
 Sources for ``table`` and ``vega_lite``: ``runs``, ``scores``, ``metrics``,
 ``predictions``, ``samples``, ``usage``, ``traces``, and ``groups``. Every row of the

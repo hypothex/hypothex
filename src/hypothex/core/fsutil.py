@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import tempfile
@@ -14,6 +15,11 @@ from typing import Any, BinaryIO
 import yaml
 
 from hypothex.core.ids import utcnow
+
+# libyaml's C loader and dumper parse about 7x faster than the pure-Python ones
+# and give the same data; fall back to the pure ones when PyYAML has no libyaml.
+_YAML_LOADER: type[yaml.SafeLoader] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+_YAML_DUMPER: type[yaml.SafeDumper] = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -32,7 +38,18 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     """
-    Write bytes so readers never see a partial file.
+    Write bytes so readers never see a partial file, and keep them after a crash.
+
+    The data goes to a temp file in the same folder, which is flushed
+    (``os.fsync``) and renamed over ``path``; then the folder is flushed
+    (``fsync_dir``) so the rename itself survives a crash.
+
+    On macOS, ``os.fsync`` hands the data to the drive but does not flush
+    the drive's own cache (``F_FULLFSYNC`` does). That is not used here: it
+    makes each write about 40x slower (0.2 ms to 9.4 ms; one per trace
+    example, mirrored file, or ``run.yaml`` change), and the SQLite index and
+    event log already run without it, so it would not make the stores agree
+    after a power cut either.
 
     Parameters
     ----------
@@ -60,16 +77,44 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+    fsync_dir(path.parent)
+
+
+def fsync_dir(path: Path) -> None:
+    """
+    Make the entries of a folder (a create, rename, or delete in it) durable.
+
+    Parameters
+    ----------
+    path : Path
+        Folder to flush. File systems that cannot fsync a folder are skipped.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> fsync_dir(Path(tempfile.mkdtemp()))
+    """
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EBADF):
+            raise
+    finally:
+        os.close(fd)
 
 
 def write_yaml(path: Path, data: dict[str, Any]) -> None:
-    """Atomically write a mapping as YAML, keeping key order."""
-    atomic_write_text(path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+    """Atomically write a mapping as YAML, keeping key order (libyaml when present)."""
+    text = yaml.dump(data, Dumper=_YAML_DUMPER, sort_keys=False, allow_unicode=True)
+    atomic_write_text(path, text)
 
 
 def read_yaml(path: Path) -> dict[str, Any]:
     """
     Read a YAML file whose top level is a mapping.
+
+    Uses libyaml's safe loader when PyYAML has it (same data, about 7x faster).
 
     Returns
     -------
@@ -81,7 +126,7 @@ def read_yaml(path: Path) -> dict[str, Any]:
     ValueError
         If the top level is not a mapping.
     """
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data = yaml.load(path.read_text(encoding="utf-8"), Loader=_YAML_LOADER)
     if data is None:
         return {}
     if not isinstance(data, dict):

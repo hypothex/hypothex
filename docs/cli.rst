@@ -206,6 +206,8 @@ Maintenance
    hx reindex --json
 
 Rebuild the SQLite index from run folders on disk (the index is always disposable).
+The rebuild is atomic: other commands and ``hx serve`` keep reading the old index
+until the new one replaces it in one transaction.
 
 .. code-block:: bash
 

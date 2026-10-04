@@ -20,6 +20,33 @@ re-evaluation only appends.
 disposable, Hypothex stores a schema version and rebuilds it automatically when
 that version changes.
 
+A rebuild is atomic. It writes every run into ``index.db.tmp`` first; then one
+write transaction on ``index.db`` re-reads the runs that changed meanwhile and
+replaces every table. Other processes (``hx serve``, the GPU scheduler, CLI
+commands) read the old index until that commit and the new one after it, never
+a part of it, and writes made during the rebuild are kept. One rebuild runs at a
+time. A rebuild does not read ``metrics.jsonl``: a run's downsampled points are
+indexed the first time they are asked for. 20,000 runs rebuild in about 15 s.
+
+Every write of indexed data adds 1 to the index *generation* (a ``meta`` row
+written in the same transaction). ``hypothex.core.index.index_generation(ctx)``
+reads it, so a cache of anything built from the index (a leaderboard, a view)
+can use the generation as its key:
+
+.. code-block:: python
+
+   from hypothex.core import queries
+   from hypothex.core.index import index_generation
+
+   key = (task, index_generation(ctx))
+   if key not in cache:
+       cache[key] = queries.get_leaderboard(ctx, task)
+   board = cache[key]
+
+A score append is marked in the index before the file write and cleared by the
+index write, so a crash between them is repaired the next time a Hypothex
+process opens the home.
+
 Event log and replay
 ---------------------
 

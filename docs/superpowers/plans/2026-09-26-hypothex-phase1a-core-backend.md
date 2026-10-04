@@ -335,7 +335,7 @@ def test_layout_paths(tmp_path: Path) -> None:
 def test_new_run_id_format_and_uniqueness() -> None:
     when = datetime(2026, 9, 26, 14, 32, 5, tzinfo=UTC)
     rid = new_run_id("USPTO 50k Top-K!", now=when)
-    assert re.fullmatch(r"20260926-143205-uspto-50k-top-k-[0-9a-f]{4}", rid)
+    assert re.fullmatch(r"20260926-143205-uspto-50k-top-k-[0-9a-f]{8}", rid)
     assert new_run_id(None, now=when).split("-")[2] == "explore"
     assert len({new_run_id("t", now=when) for _ in range(50)}) > 40
     assert re.fullmatch(r"[0-9a-f]{16}", new_command_id())
@@ -464,7 +464,7 @@ def new_run_id(task: str | None, now: datetime | None = None) -> str:
     Returns
     -------
     str
-        ``YYYYMMDD-HHMMSS-<slug>-<4 hex>``.
+        ``YYYYMMDD-HHMMSS-<slug>-<8 hex>`` (32 random bits; INT-F7).
 
     Examples
     --------
@@ -473,7 +473,7 @@ def new_run_id(task: str | None, now: datetime | None = None) -> str:
     """
     stamp = (now or utcnow()).strftime("%Y%m%d-%H%M%S")
     slug = _SLUG.sub("-", (task or "explore").lower()).strip("-")[:16].strip("-") or "run"
-    return f"{stamp}-{slug}-{secrets.token_hex(2)}"
+    return f"{stamp}-{slug}-{secrets.token_hex(4)}"
 
 
 def new_command_id() -> str:
@@ -1952,8 +1952,8 @@ git commit -m "feat: event log with idempotent command receipts and environment 
 - Consumes: Task 3 (`RunRecord`, `RunStatus`, `ScoreRecord`, `MetricPoint`, `ProjectEntry`, `RunStore`), `tests/factories.make_record`.
 - Produces (`hypothex.core.index`):
   - `SCHEMA_VERSION = 1`, `MAX_POINTS_PER_METRIC = 1000`, `downsample(points, limit=MAX_POINTS_PER_METRIC) -> list[MetricPoint]`.
-  - `Index(path: Path)` with attribute `rebuilt_schema: bool` and methods `clear()`, `upsert_project(entry)`, `list_projects() -> list[ProjectEntry]`, `get_project(name) -> ProjectEntry | None`, `upsert_run(record)`, `get_run(run_id) -> RunRecord | None`, `list_runs(*, project=None, task=None, status=None, tag=None, include_archived=False, limit: int | None = 500) -> list[RunRecord]` (newest first), `run_ids() -> set[str]`, `add_score(run_id, score)`, `replace_scores(run_id, scores)`, `scores_for(run_ids) -> dict[str, list[ScoreRecord]]` (oldest first per run), `replace_metric_points(run_id, points)`, `metric_points(run_id) -> list[MetricPoint]`.
-  - `index_run(index, store, record) -> None`, `rebuild_index(index, store) -> int`, `repair_index_gaps(index, store) -> list[str]`.
+  - `Index(path: Path, store: RunStore | None = None)` (audit 2026-10-04: `store` lets `metric_points` read a run's points that a rebuild skipped; `rebuilt_schema` now means "new file or old schema: rebuild before use", and an old index is left intact until `rebuild_index` replaces it; extra methods `schema_version() -> str | None`, `generation() -> int`, `child_run_ids(run_id) -> list[str]`, `count_runs(...) -> int`, `list_runs(..., before=(created_at, run_id))`, `metric_points_for(run_ids, names=None) -> dict[str, list[MetricPoint]]`, `mark_scores_stale(run_id)`, `stale_score_runs() -> list[str]`) with attribute `rebuilt_schema: bool` and methods `clear()`, `upsert_project(entry)`, `list_projects() -> list[ProjectEntry]`, `get_project(name) -> ProjectEntry | None`, `upsert_run(record)`, `get_run(run_id) -> RunRecord | None`, `list_runs(*, project=None, task=None, status=None, tag=None, include_archived=False, limit: int | None = 500) -> list[RunRecord]` (newest first), `run_ids() -> set[str]`, `add_score(run_id, score)`, `replace_scores(run_id, scores)`, `scores_for(run_ids) -> dict[str, list[ScoreRecord]]` (oldest first per run), `replace_metric_points(run_id, points)`, `metric_points(run_id) -> list[MetricPoint]`.
+  - `index_run(index, store, record) -> None`, `rebuild_index(index, store) -> int`, `repair_index_gaps(index, store) -> list[str]`. Audit 2026-10-04: `rebuild_index` is atomic (it fills `<index>.tmp`, then one write transaction catches up the runs written meanwhile and replaces every table; mirror cursors are kept; metric points are read lazily); `rebuild_index_if_stale(index, store) -> int | None` (used by `Context.open`; one rebuild across processes); `index_generation(ctx) -> int` (grows on every write of indexed data, in the same transaction); `repair_stale_scores(index, store) -> list[str]` (used by `Context.open`: re-indexes the scores of runs whose `Context.add_score` was cut short).
 
 - [ ] **Step 1: Write the failing tests**
 

@@ -25,9 +25,9 @@ def test_layout_paths(tmp_path: Path) -> None:
 def test_new_run_id_format_and_uniqueness() -> None:
     when = datetime(2026, 9, 26, 14, 32, 5, tzinfo=UTC)
     rid = new_run_id("USPTO 50k Top-K!", now=when)
-    assert re.fullmatch(r"20260926-143205-uspto-50k-top-k-[0-9a-f]{4}", rid)
+    assert re.fullmatch(r"20260926-143205-uspto-50k-top-k-[0-9a-f]{8}", rid)
     assert new_run_id(None, now=when).split("-")[2] == "explore"
-    assert len({new_run_id("t", now=when) for _ in range(50)}) > 40
+    assert len({new_run_id("t", now=when) for _ in range(2000)}) == 2000  # 32 random bits
     assert re.fullmatch(r"[0-9a-f]{16}", new_command_id())
 
 

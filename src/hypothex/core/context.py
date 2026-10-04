@@ -10,7 +10,12 @@ from typing import Any
 from hypothex.core.config import load_project_config
 from hypothex.core.environment import EnvironmentDescriptor, load_descriptor
 from hypothex.core.events import EventLog
-from hypothex.core.index import Index, rebuild_index, repair_index_if_changed
+from hypothex.core.index import (
+    Index,
+    rebuild_index_if_stale,
+    repair_index_if_changed,
+    repair_stale_scores,
+)
 from hypothex.core.layout import Layout, default_home
 from hypothex.core.records import RunRecord, ScoreRecord
 from hypothex.core.store import ProjectEntry, RunStore, run_lock
@@ -39,8 +44,11 @@ class Context:
         A run folder with no index row (a crash between the file write and the
         index write) is indexed here. The store is listed only when a run or
         project folder changed since the last listing
-        (``index.repair_index_if_changed``); an index with a new schema is
-        rebuilt from files.
+        (``index.repair_index_if_changed``); a new index, or one with an old
+        schema, is rebuilt from files (``index.rebuild_index_if_stale``): other
+        processes read the old index until the rebuilt one replaces it. A
+        score whose add was cut short after its file append is indexed here
+        too (``index.repair_stale_scores``).
 
         Parameters
         ----------
@@ -54,7 +62,7 @@ class Context:
         layout = Layout((home or default_home()).expanduser().resolve())
         layout.ensure()
         store = RunStore(layout)
-        index = Index(layout.index_db)
+        index = Index(layout.index_db, store=store)
         ctx = cls(
             layout=layout,
             store=store,
@@ -63,9 +71,10 @@ class Context:
             descriptor=load_descriptor(layout),
         )
         if index.rebuilt_schema:
-            rebuild_index(index, store)
+            rebuild_index_if_stale(index, store)  # atomic; a concurrent open waits for it
         else:
             repair_index_if_changed(index, store)
+        repair_stale_scores(index, store)
         return ctx
 
     def find_record(self, run_id: str) -> RunRecord:
@@ -194,6 +203,11 @@ class Context:
         """
         Append a score to the file, emit ``run.score_added``, and index it.
 
+        The run is marked first (``Index.mark_scores_stale``) and its scores
+        are then re-indexed from the file, which clears the mark: a crash
+        after the append is repaired by the next ``Context.open``, and an add
+        that races an index rebuild is never indexed twice.
+
         Parameters
         ----------
         record : RunRecord
@@ -202,6 +216,7 @@ class Context:
             Score to append.
         """
         with run_lock(self.run_dir(record)):
+            self.index.mark_scores_stale(record.run_id)
             self.store.append_score(record.project, record.run_id, score)
             self.events.append(
                 "run.score_added",
@@ -209,7 +224,8 @@ class Context:
                 run_id=record.run_id,
                 payload=score.model_dump(mode="json"),
             )
-            self.index.add_score(record.run_id, score)
+            scores = self.store.read_scores(record.project, record.run_id)
+            self.index.replace_scores(record.run_id, scores)
 
     def emit(
         self, event_type: str, record: RunRecord, payload: dict[str, Any] | None = None

@@ -161,6 +161,42 @@ def test_ws_replays_then_signals_ready(client: TestClient, ctx: Context) -> None
         assert ws.receive_json()["event"]["sequence"] == last
 
 
+def test_ws_subscribe_latest_skips_the_replay(client: TestClient, ctx: Context) -> None:
+    for i in range(5):
+        ctx.events.append(f"test.old{i}")
+    last = ctx.events.last_sequence()
+    with client.websocket_connect(WS_URL) as ws:
+        ws.send_json({"type": "subscribe", "after_sequence": "latest"})
+        assert ws.receive_json() == {"type": "ready", "last_sequence": last}
+        ctx.events.append("test.live")
+        live = ws.receive_json()
+        assert live["event"]["type"] == "test.live" and live["event"]["sequence"] == last + 1
+
+
+def test_ws_max_replay_sends_reset_instead_of_a_long_replay(
+    client: TestClient, ctx: Context
+) -> None:
+    for i in range(10):
+        ctx.events.append(f"test.old{i}")
+    last = ctx.events.last_sequence()
+    with client.websocket_connect(WS_URL) as ws:  # too far behind: reset, then live
+        ws.send_json({"type": "subscribe", "after_sequence": 0, "max_replay": 4})
+        assert ws.receive_json() == {"type": "reset", "last_sequence": last}
+        assert ws.receive_json() == {"type": "ready", "last_sequence": last}
+        ctx.events.append("test.live")
+        assert ws.receive_json()["event"]["sequence"] == last + 1
+    with client.websocket_connect(WS_URL) as ws:  # within the cap: a normal replay
+        ws.send_json({"type": "subscribe", "after_sequence": last - 3, "max_replay": 4})
+        replay = [ws.receive_json() for _ in range(4)]
+        assert [m["event"]["sequence"] for m in replay] == list(range(last - 2, last + 2))
+        assert ws.receive_json() == {"type": "ready", "last_sequence": last + 1}
+    with client.websocket_connect(WS_URL) as ws:  # no cap (the hub's mirror): everything
+        ws.send_json({"type": "subscribe", "after_sequence": 0})
+        seen = [ws.receive_json()["type"] for _ in range(last + 1)]
+        assert seen == ["event"] * (last + 1)
+        assert ws.receive_json()["type"] == "ready"
+
+
 def test_foreign_host_is_rejected(client: TestClient) -> None:
     evil = {"Host": "attacker.example:7777", "Origin": "http://attacker.example:7777"}
     assert client.get("/api/v1/runs", headers={"Host": "attacker.example:7777"}).status_code == 400
@@ -539,6 +575,8 @@ def test_api_refuses_an_agent_launch_without_a_hypothesis(
         {"type": "subscribe", "after_sequence": "abc"},
         {"type": "subscribe", "after_sequence": None},
         {"type": "subscribe", "after_sequence": -1},
+        {"type": "subscribe", "after_sequence": "newest"},
+        {"type": "subscribe", "after_sequence": 0, "max_replay": 0},
         ["subscribe"],
         "not json",
     ],

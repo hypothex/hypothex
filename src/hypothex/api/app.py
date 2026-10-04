@@ -246,10 +246,20 @@ class PullBody(ActionBody):
 
 
 class SubscribeMessage(BaseModel):
-    """The first WebSocket message: ``{type: subscribe, after_sequence: N}``."""
+    """
+    The first WebSocket message: ``{type: subscribe, after_sequence, max_replay?}``.
+
+    ``after_sequence`` is the last sequence the client has (``0`` replays the whole
+    log) or ``"latest"``: no replay, live events from now on (a page that has just
+    loaded its data). ``max_replay`` caps the replay: when more than that many
+    events are missing, the server sends ``{type: reset, last_sequence}`` instead
+    of them, and the client reloads its data. Without it every missing event is
+    replayed, which the hub's mirror needs.
+    """
 
     type: Literal["subscribe"]
-    after_sequence: int = Field(default=0, ge=0)
+    after_sequence: Annotated[int, Field(ge=0)] | Literal["latest"] = 0
+    max_replay: int | None = Field(default=None, ge=1)
 
 
 class ReinferBody(ActionBody):
@@ -2378,12 +2388,20 @@ def create_app(
                     {
                         "type": "error",
                         "error": "first message must be {type: subscribe, after_sequence: N}"
-                        " with N an integer >= 0",
+                        ' with N an integer >= 0 or "latest" (and an optional max_replay >= 1)',
                     }
                 )
                 await ws.close()
                 return
-            last = sub.after_sequence
+            head = await asyncio.to_thread(ctx.events.last_sequence)
+            if sub.after_sequence == "latest":
+                last = head
+            elif sub.max_replay is not None and head - sub.after_sequence > sub.max_replay:
+                # too far behind to replay cheaply: the client reloads, then goes on live
+                await ws.send_json({"type": "reset", "last_sequence": head})
+                last = head
+            else:
+                last = sub.after_sequence
             ready = False
             while True:
                 batch = await asyncio.to_thread(ctx.events.since, last, WS_BATCH)

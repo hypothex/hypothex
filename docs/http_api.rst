@@ -198,6 +198,19 @@ Event stream
 
 ``/api/v1/ws`` is a WebSocket. Send ``{"type": "subscribe", "after_sequence": N}``
 first. The server sends every event after ``N`` as ``{"type": "event", "event":
-{...}}``, then ``{"type": "ready", "last_sequence": M}``, then live events. On the
+{...}}``, then ``{"type": "ready", "last_sequence": M}``, then live events.
+
+- ``"after_sequence": "latest"`` skips the replay: ``ready`` comes at once, then live
+  events. Use it on a page that has just loaded its data.
+- ``"max_replay": K`` (optional, ``K >= 1``) caps the replay. When more than ``K``
+  events are missing, the server sends ``{"type": "reset", "last_sequence": M}``
+  instead of them, then ``ready`` and live events; reload your data on ``reset``.
+  Without ``max_replay`` every missing event is replayed (the hub's mirror needs them).
+
+.. code-block:: json
+
+   {"type": "subscribe", "after_sequence": 41, "max_replay": 5000}
+
+On the
 hub, a change to a remote run arrives as ``mirror.run_updated`` with
 ``{host, environment_id, original_type, remote_sequence, status, reason?}``.

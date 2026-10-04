@@ -64,7 +64,9 @@ replace this later without changing the file layout or the event schema.
 Clients subscribe with ``after_sequence=<last seen>``: the server replays missed
 events, then streams live ones, and the client drops anything it has already
 seen by sequence. This makes reconnecting after a dropped connection safe and
-lossless.
+lossless. A page that has just loaded its data subscribes with ``"latest"`` (no
+replay), and a client may cap the replay with ``max_replay``: past the cap it gets one
+``reset`` message and reloads instead of reading the whole log.
 
 Idempotent commands
 --------------------

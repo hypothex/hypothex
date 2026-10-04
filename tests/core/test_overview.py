@@ -374,3 +374,112 @@ def test_headline_counts_queued_runs_as_waiting(ctx: Context, toy_repo: Path) ->
     assert [r.run_id for r in summary.running] == ["r1", "q2", "q1"]
     assert (summary.counts["running"], summary.counts["queued"]) == (1, 2)
     assert summary.headline == "1 running, 2 waiting. No scored runs yet"
+
+
+def test_overview_reads_per_example_scores_only_for_tasks_with_ideas(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PERF-F2: a task without runs in the window needs only its best and unit, which
+    # do not depend on the per-example files; reading them for every task cost 24 s.
+    now = utcnow()
+    _run(ctx, toy_repo, "a1", ago=timedelta(minutes=5), now=now, correct=[True, False])
+    _run(
+        ctx,
+        toy_repo,
+        "b1",
+        ago=timedelta(days=3),
+        now=now,
+        task="toy-broken",
+        config_hash="sha256:bbbb",
+        correct=[True, True],
+    )
+    read: list[str] = []
+    real = q.primary_examples
+
+    def spy(*args: object, **kwargs: object) -> object:
+        read.append(str(args[2]))
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(q, "primary_examples", spy)
+    summary = build_overview(ctx)
+    assert read == ["toy-acc"]
+    assert [(p.task, p.runs, p.best) for p in summary.projects] == [
+        ("toy-acc", 1, 0.5),
+        ("toy-broken", 1, 1.0),
+    ]
+    assert summary.ideas[0].test_interval is not None  # toy-acc's board has its examples
+
+
+def test_overview_does_not_parse_runs_outside_the_window(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PERF-F2: every run record was parsed only to be dropped by the window in Python
+    now = utcnow()
+    _run(ctx, toy_repo, "old", ago=timedelta(days=3), now=now, task=None)
+    _run(ctx, toy_repo, "new", ago=timedelta(minutes=5), now=now, task=None)
+    parsed: list[str] = []
+    real = RunRecord.model_validate_json
+
+    def spy(data: str | bytes, **kwargs: object) -> RunRecord:
+        record = real(data, **kwargs)  # type: ignore[arg-type]
+        parsed.append(record.run_id)
+        return record
+
+    monkeypatch.setattr(RunRecord, "model_validate_json", spy)
+    summary = build_overview(ctx)
+    assert [t.run_id for t in summary.timeline] == ["new"]
+    assert "old" not in parsed
+
+
+def test_overview_today_cost_counts_an_old_run_that_ended_today(
+    ctx: Context, toy_repo: Path
+) -> None:
+    now = utcnow()
+    _run(
+        ctx,
+        toy_repo,
+        "long",
+        ago=timedelta(days=3),
+        now=now,
+        ended_at=now,
+        cost=CostTotals(total_usd=2.0),
+    )
+    _run(ctx, toy_repo, "q1", ago=timedelta(days=5), now=now, status=RunStatus.QUEUED)
+    _run(
+        ctx,
+        toy_repo,
+        "q2",
+        ago=timedelta(days=4),
+        now=now,
+        status=RunStatus.QUEUED,
+        archived=True,
+    )
+    summary = build_overview(ctx)
+    assert summary.timeline == [] and summary.cost_usd == 0.0
+    assert summary.cost_today_usd == 2.0  # created before the window, ended today
+    assert [r.run_id for r in summary.running] == ["q1"]  # active runs ignore the window
+
+
+def test_projects_table_counts_a_project_without_tasks(ctx: Context, tmp_path: Path) -> None:
+    repo = tmp_path / "bare"
+    repo.mkdir()
+    (repo / "hypothex.yaml").write_text("project: bare\n")
+    ctx.register_project(repo)
+    now = utcnow()
+    for run_id, status, archived in [
+        ("b1", RunStatus.FINISHED, False),
+        ("b2", RunStatus.FINISHED, False),
+        ("b3", RunStatus.FINISHED, True),
+        ("b4", RunStatus.FAILED, False),
+    ]:
+        record = make_record(
+            run_id,
+            project="bare",
+            task=None,
+            status=status,
+            archived=archived,
+            created_at=now - timedelta(days=2),
+        )
+        ctx.create_run(record)
+    rows = [(p.project, p.task, p.runs, p.kind) for p in build_overview(ctx).projects]
+    assert rows == [("bare", None, 2, "generic")]

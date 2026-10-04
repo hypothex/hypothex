@@ -1090,6 +1090,33 @@ def _example_values(scope: _Scope, run: RunRecord, name: str, version: str) -> l
     return [float(row[field]) for row in rows if row.get(field) is not None]
 
 
+def _primary_rows(scope: _Scope, run: RunRecord) -> tuple[str, list[dict[str, Any]]] | None:
+    """
+    The primary metric's name and a run's per-example rows of it (without ``id``).
+
+    ``None`` when the primary is not a configured metric; no rows when the run
+    has no per-example file.
+    """
+    name = scope.board().primary.partition("/")[0]
+    spec = scope.entry.config.metrics.get(name)
+    if spec is None:
+        return None
+    path = scope.ctx.run_dir(run) / "predictions" / f"scores.{name}@{spec.version}.jsonl"
+    return name, [{k: v for k, v in row.items() if k != "id"} for row in read_jsonl(path)]
+
+
+def _attempts(scope: _Scope, run: RunRecord) -> int | None:
+    """
+    Count the examples a run attempted: its per-example rows of the primary metric.
+
+    The same count as the stat strip's ``$ / attempt``; ``None`` without rows.
+    """
+    primary = _primary_rows(scope, run)
+    if primary is None or not primary[1]:
+        return None
+    return len(primary[1])
+
+
 def _solved(scope: _Scope, run: RunRecord) -> int | None:
     """
     Count the examples a run solved on the task's primary metric.
@@ -1097,12 +1124,10 @@ def _solved(scope: _Scope, run: RunRecord) -> int | None:
     ``None`` when the run has no per-example file or its field (chosen by
     ``pick_field``, as for test-set noise) is not binary.
     """
-    name = scope.board().primary.partition("/")[0]
-    spec = scope.entry.config.metrics.get(name)
-    if spec is None:
+    primary = _primary_rows(scope, run)
+    if primary is None:
         return None
-    path = scope.ctx.run_dir(run) / "predictions" / f"scores.{name}@{spec.version}.jsonl"
-    rows = [{k: v for k, v in row.items() if k != "id"} for row in read_jsonl(path)]
+    name, rows = primary
     picked = pick_field(rows, name)
     if picked is None or not picked[1]:
         return None
@@ -1129,12 +1154,14 @@ def _run_value(scope: _Scope, run: RunRecord, ref: str) -> float | None:
     """
     Resolve a reference to one finite number for one run.
 
-    Order: ``usage.<field>`` (run totals) or ``usage.<field>/solved`` (the total
-    per example solved on the primary metric), ``params.<p>``/``vars.<p>`` (cast to
-    float), a configured metric ``name[@version][/key]`` (newest good score;
-    when no score has that key and the key is an aggregate such as ``median``,
-    the aggregate of the metric's per-example values), samples ``name[/agg]``,
-    then the last logged value of a history metric named exactly ``ref``.
+    Order: ``usage.<field>`` (run totals), ``usage.<field>/solved`` (the total
+    per example solved on the primary metric) or ``usage.<field>/attempt`` (the
+    total per example attempted: per-example rows of the primary),
+    ``params.<p>``/``vars.<p>`` (cast to float), a configured metric
+    ``name[@version][/key]`` (newest good score; when no score has that key and
+    the key is an aggregate such as ``median``, the aggregate of the metric's
+    per-example values), samples ``name[/agg]``, then the last logged value of
+    a history metric named exactly ``ref``.
     NaN and ±inf count as no value (``None``): they would become null points
     in JSON and make every Pareto comparison false.
     """
@@ -1146,15 +1173,17 @@ def _resolve_value(scope: _Scope, run: RunRecord, ref: str) -> float | None:
     """The raw value behind ``_run_value``; may be NaN or ±inf."""
     if ref.startswith("usage."):
         field, _, per = ref.removeprefix("usage.").partition("/")
-        if per not in ("", "solved"):
-            raise ConfigError("usage references are usage.<field> or usage.<field>/solved")
+        if per not in ("", "solved", "attempt"):
+            raise ConfigError(
+                "usage references are usage.<field>, usage.<field>/solved or usage.<field>/attempt"
+            )
         value = getattr(run.usage, field, None) if run.usage is not None else None
         if not isinstance(value, int | float):
             return None
         if not per:
             return float(value)
-        solved = _solved(scope, run)
-        return float(value) / solved if solved else None
+        count = _solved(scope, run) if per == "solved" else _attempts(scope, run)
+        return float(value) / count if count else None
     if ref.startswith(("params.", "vars.")):
         raw = _param_raw(run, ref)
         return None if raw is None else _as_float(raw)

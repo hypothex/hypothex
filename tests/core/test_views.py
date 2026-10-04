@@ -67,9 +67,19 @@ def test_every_kind_has_a_preset_with_the_spec_panels() -> None:
 
 def test_preset_details_match_spec() -> None:
     agent = {p.title: p for p in load_preset("agent_eval").panels}
-    assert agent["Cost vs solved"].data.x == "usage.usd"
-    assert agent["Cost vs solved"].pareto == {"x": "min", "y": "max"}
-    assert agent["Failures"].data.source == "predictions"
+    cost = agent["Cost vs solved"]
+    # one cost unit on the page: $ per attempt, as in the stat strip, on a log axis
+    assert (cost.data.x, cost.scale) == ("usage.usd/attempt", "log")
+    assert cost.pareto == {"x": "min", "y": "max"}
+    failures = agent["Failures"]
+    assert failures.data.source == "predictions"
+    assert failures.spec is not None
+    encoding = failures.spec["encoding"]
+    assert encoding["y"]["sort"] == "x"  # fewest failures first, as on the leaderboard
+    # mockup legend: timeout first (blue) ... "gave up" last in neutral grey
+    assert encoding["color"]["sort"][0] == "timeout"
+    assert encoding["color"]["sort"][4] == "gave up"
+    assert encoding["color"]["scale"]["range"][4] == "#8b929c"
     bench = {p.title: p for p in load_preset("system_bench").panels}
     assert bench["Latency"].scale == "log"
     assert bench["Latency"].data.source == "samples"

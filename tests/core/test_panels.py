@@ -960,9 +960,24 @@ def test_usage_per_solved_divides_by_solved_examples(ctx: Context, toy_repo: Pat
     rows = query_panel(ctx, "toy", "toy-acc", panel).rows
     # s1: $3.00 over 3 solved examples = 1.0; s2 solved nothing, so it has no value (dropped)
     assert [(r["group_id"], r["x"], r["y"]) for r in rows] == [("s1", 3.0, 1.0)]
-    bad = _panel("scatter", data={"x": "usage.usd/attempt"})
-    with pytest.raises(ConfigError, match=r"usage\.<field>/solved"):
+    bad = _panel("scatter", data={"x": "usage.usd/run"})
+    with pytest.raises(ConfigError, match=r"usage\.<field>/solved or usage\.<field>/attempt"):
         query_panel(ctx, "toy", "toy-acc", bad)
+
+
+def test_usage_per_attempt_divides_by_attempted_examples(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "s1", usage=UsageTotals(usd=3.0))
+    _score(ctx, rec, 0.25)
+    _jsonl(
+        ctx.run_dir(rec) / "predictions" / "scores.accuracy@v1.jsonl",
+        [{"id": f"ex-{i}", "correct": ok} for i, ok in enumerate([True, False, False, False])],
+    )
+    _score(ctx, _run(ctx, toy_repo, "s2", "bbbb", minute=1, usage=UsageTotals(usd=2.0)), 0.5)
+    panel = _panel("scatter", data={"x": "usage.usd/attempt", "group_by": "run"}, scale="log")
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    # s1: $3.00 over 4 attempted examples; s2 has no per-example rows, so no value (dropped)
+    assert [(r["group_id"], r["x"]) for r in result.rows] == [("s1", 0.75)]
+    assert (result.meta["x_unit"], result.meta["scale"]) == ("$", "log")
 
 
 def test_metric_aggregate_keys_read_per_example_scores(ctx: Context, toy_repo: Path) -> None:

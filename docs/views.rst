@@ -61,7 +61,9 @@ Metric references use ``name@version/key`` (version and key are optional). The
 aggregates ``/mean``, ``/median``, and ``/p95`` apply to samples and per-example values.
 Run usage totals are ``usage.usd``, ``usage.seconds``, ``usage.tokens_in``,
 ``usage.tokens_out``, and ``usage.calls``; ``usage.usd/solved`` divides a run's total by the
-examples it solved on the task's primary metric (cost per success). A logged history
+examples it solved on the task's primary metric (cost per success), and
+``usage.usd/attempt`` by the examples it attempted (its per-example rows of the primary
+metric; the ``agent_eval`` preset plots this on a log axis, like the "$ / attempt" stat). A logged history
 metric is named in full (``val/top1``). ``version`` is the task's version ordering key: the
 run param ``version_param`` names (``version`` by default), or the creation time of the
 group's first run when that param is missing; it works as a scatter ``x``, as a

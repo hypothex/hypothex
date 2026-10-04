@@ -7,7 +7,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useRef, useState } from "react";
-import { api } from "../api/client";
+import { ApiError, api } from "../api/client";
 import type { EvalReport, RunRecord } from "../api/models";
 import {
   RUN_EVENT_INVALIDATES,
@@ -192,6 +192,11 @@ function SweepsLine({ project }: { project: string }) {
   );
 }
 
+/** The first 404 among the task's own reads: the project or the task does not exist. */
+function notFound(...errors: (Error | null)[]): Error | null {
+  return errors.find((e) => e instanceof ApiError && e.status === 404) ?? null;
+}
+
 export function TaskPage({ project, task, view }: TaskPageProps) {
   const active = view ? String(view) : "overview";
   const board = useLeaderboard(project, task);
@@ -215,16 +220,34 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
   // drawn with the new view's specs, so wait for the active view's own data.
   const ready = panels.data !== undefined && !panels.isPlaceholderData && !detail.isPending;
   const templateRunId = board.data?.rows[0]?.latest_run_id ?? null;
+  const crumb = (
+    <>
+      <AppLink href={hrefs.overview()}>All projects</AppLink>
+      <span className="sep">/</span>
+      {project}
+      <span className="sep">/</span>
+      {task}
+    </>
+  );
+
+  // one not-found state: no tabs or actions for a task that does not exist
+  const gone = notFound(board.error, views.error);
+  if (gone) {
+    return (
+      <div className="page">
+        <PageStyles />
+        <p className="crumb">{crumb}</p>
+        <h1 className="headline">Not found</h1>
+        <ErrorBox error={gone} />
+      </div>
+    );
+  }
 
   return (
     <div className="page">
       <PageStyles />
       <p className="crumb">
-        <AppLink href={hrefs.overview()}>All projects</AppLink>
-        <span className="sep">/</span>
-        {project}
-        <span className="sep">/</span>
-        {task}
+        {crumb}
         {board.data ? (
           <span className="tag" title="task kind">
             {board.data.kind}

@@ -410,4 +410,34 @@ describe("TaskPage", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("no view 'nope' for toy-test");
     expect(screen.queryByRole("region")).toBeNull();
   });
+
+  test("an unknown project shows one not-found state with no actions", async () => {
+    const gone = new HttpReply(404, { error: "unknown project 'nope'", type: "StoreError" });
+    const NOPE = "/api/v1/tasks/nope/nope";
+    mockApi({
+      [`GET ${NOPE}/leaderboard`]: gone,
+      [`GET ${NOPE}/views`]: gone,
+      [`GET ${NOPE}/views/overview`]: gone,
+      [`POST ${NOPE}/views/query`]: gone,
+    });
+    renderWithClient(<TaskPage project="nope" task="nope" />, { registry });
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Not found"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.getAllByRole("alert").map((a) => a.textContent)).toEqual(["unknown project 'nope'"]);
+    expect(screen.queryByRole("navigation", { name: "Views" })).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.queryByRole("link", { name: "+ view" })).toBeNull();
+    expect(screen.getByRole("link", { name: "All projects" }).getAttribute("href")).toBe("/");
+  });
+
+  test("a server error on the board is not a not-found state", async () => {
+    mockApi({
+      ...routes("overview"),
+      [`GET ${BASE}/leaderboard`]: new HttpReply(500, { error: "index locked", type: "StoreError" }),
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    expect((await screen.findByRole("alert")).textContent).toBe("index locked");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("toy-test");
+    expect(screen.getByRole("button", { name: "Re-evaluate all" })).toBeTruthy();
+  });
 });

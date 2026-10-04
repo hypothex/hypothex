@@ -537,7 +537,8 @@ def hub_call(
     path : str
         API path, e.g. ``/api/v1/hosts``.
     body : dict, optional
-        JSON body for ``POST``.
+        JSON body for ``POST``; default ``{}`` (the hub refuses a POST that is not
+        JSON with 415).
     url : str, optional
         Hub base URL; defaults to ``hub_url()``.
     timeout : float
@@ -568,6 +569,8 @@ def hub_call(
     auth = token or resolve_hub_token(base)
     headers = {"Authorization": f"Bearer {auth}"} if auth else {}
     try:
+        if body is None and method.upper() != "GET":
+            body = {}
         resp = httpx.request(method, base + path, json=body, timeout=timeout, headers=headers)
     except httpx.TransportError as exc:
         raise HubUnavailableError(

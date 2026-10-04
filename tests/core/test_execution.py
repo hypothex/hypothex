@@ -511,3 +511,14 @@ def test_release_worktree_ignores_the_top_level_venv(
     assert done.status == RunStatus.FINISHED
     tree = ctx.layout.worktrees_dir("toy") / done.run_id
     assert tree.exists() is not removed
+
+
+def test_auto_eval_warnings_become_run_warnings(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DF-6, DF-17: auto-eval dropped the warnings evaluate_run returned
+    drift = "metric 'accuracy' code changed but version v1 was not bumped"
+    monkeypatch.setattr(execution, "evaluate_run", lambda ctx, run_id: ([], [drift]))
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(WRITE_PREDS), task="toy-acc"))
+    assert done.status == RunStatus.FINISHED
+    assert [e.payload["message"] for e in _warning_events(ctx, done.run_id)] == [drift]

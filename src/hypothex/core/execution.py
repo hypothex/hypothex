@@ -1249,14 +1249,40 @@ def _execute(
 
     final = ctx.update_run(run_id, f"run.{status.value}", finish, {"exit_code": exit_code})
     if auto_evaluate and status == RunStatus.FINISHED and final.task:
-        try:
-            evaluate_run(ctx, run_id)
-        except HypothexError as exc:  # the run itself finished; scoring can be retried
-            ctx.emit("run.eval_skipped", final, {"reason": str(exc)[:500]})
-        except Exception as exc:  # noqa: BLE001 - e.g. a malformed worker result
-            reason = f"{type(exc).__name__}: {exc}"
-            ctx.emit("run.eval_skipped", final, {"reason": reason[:500]})
+        score_finished_run(ctx, final)
     return ctx.find_record(run_id)
+
+
+def score_finished_run(ctx: Context, record: RunRecord) -> None:
+    """
+    Score a finished task run once, right after it ended (auto-evaluation).
+
+    The run itself finished, so scoring never fails it: an error becomes a
+    ``run.eval_skipped`` event (scoring can be retried with ``hx reeval``),
+    and each warning of the scoring (e.g. metric code changed without a
+    version bump) becomes a ``run.warning`` event.
+
+    Parameters
+    ----------
+    ctx : Context
+    record : RunRecord
+        A ``finished`` run with a task.
+
+    Examples
+    --------
+    >>> score_finished_run(ctx, ctx.find_record(run_id))  # doctest: +SKIP
+    """
+    try:
+        _, warnings = evaluate_run(ctx, record.run_id)
+    except HypothexError as exc:
+        ctx.emit("run.eval_skipped", record, {"reason": str(exc)[:500]})
+        return
+    except Exception as exc:  # noqa: BLE001 - e.g. a malformed worker result
+        reason = f"{type(exc).__name__}: {exc}"
+        ctx.emit("run.eval_skipped", record, {"reason": reason[:500]})
+        return
+    for warning in warnings:
+        ctx.emit("run.warning", record, {"message": warning[:500]})
 
 
 def _wait_unless_stopped(proc: subprocess.Popen[bytes], marker: Path) -> int:

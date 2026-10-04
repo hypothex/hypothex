@@ -515,7 +515,11 @@ class HubManager:
         async with self._lock:
             if self.hub is None:
                 self._read_file()  # fresh: `hx demo` rewrites URLs before the server starts
-                self.hub = Hub(self.ctx, EnvironmentsFile(environments=self._enabled()))
+                self.hub = Hub(
+                    self.ctx,
+                    EnvironmentsFile(environments=self._enabled()),
+                    configured_hosts=self.names,
+                )
                 await self.hub.start()
 
     async def stop(self) -> None:
@@ -749,14 +753,11 @@ class HubManager:
 
     def _cursor_host(self, environment_id: str) -> str | None:
         try:
-            with self.ctx.index.engine.connect() as conn:
-                row = conn.execute(
-                    text("SELECT host FROM host_cursors WHERE environment_id = :e LIMIT 1"),
-                    {"e": environment_id},
-                ).first()
+            hosts = self.ctx.index.cursor_hosts(environment_id)
         except OperationalError:
             return None
-        return None if row is None else str(row[0])
+        configured = self.names()
+        return next((name for name in hosts if name in configured), None)
 
 
 def environment_runs(ctx: Context, environment_id: str) -> list[RunRecord]:

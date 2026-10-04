@@ -136,7 +136,7 @@ class MetricPointRow(Base):
 
 
 class HostCursorRow(Base):
-    """Last remote event sequence the hub mirrored, per host and environment."""
+    """Known host identity and last mirrored event sequence; zero reserves an unused identity."""
 
     __tablename__ = "host_cursors"
     host: Mapped[str] = mapped_column(String, primary_key=True)
@@ -884,6 +884,34 @@ class Index:
             self.replace_metric_points(run_id, self.store.read_metric_points(project, run_id))
 
     # host cursors -------------------------------------------------------------
+    def cursor_hosts(self, environment_id: str) -> list[str]:
+        """
+        Return the hosts known to have served an environment, including sequence zero.
+
+        Parameters
+        ----------
+        environment_id : str
+            Environment identity reported by a host.
+
+        Returns
+        -------
+        list of str
+            Host names in sorted order. Removed aliases remain in the cursor table;
+            the caller checks which names are still configured.
+
+        Examples
+        --------
+        >>> idx.cursor_hosts("env-a")  # doctest: +SKIP
+        ['gpu1']
+        """
+        stmt = (
+            select(HostCursorRow.host)
+            .where(HostCursorRow.environment_id == environment_id)
+            .order_by(HostCursorRow.host)
+        )
+        with Session(self.engine) as session:
+            return list(session.scalars(stmt))
+
     def get_cursor(self, host: str, environment_id: str) -> int:
         """
         Return the last mirrored event sequence of one host environment.
@@ -942,11 +970,13 @@ class Index:
 
     def reset_cursor(self, host: str, environment_id: str) -> None:
         """
-        Forget the mirror cursor of one host environment.
+        Reset the mirror sequence of one host environment, keeping its identity reservation.
 
         ``set_cursor`` only moves forward, so a host whose event log restarted
         (its last sequence is below the cursor) needs this to be replayed from
-        the start. Like ``set_cursor`` it does not change ``generation``.
+        the start. The row remains at zero, so another configured host cannot
+        take the identity after a hub restart. Like ``set_cursor`` it does not
+        change ``generation``.
 
         Parameters
         ----------
@@ -964,8 +994,11 @@ class Index:
         >>> idx.get_cursor("gpu1", "env-a")
         0
         """
-        stmt = delete(HostCursorRow).where(
-            HostCursorRow.host == host, HostCursorRow.environment_id == environment_id
+        stmt = sqlite_insert(HostCursorRow).values(
+            host=host, environment_id=environment_id, last_sequence=0
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["host", "environment_id"], set_={"last_sequence": 0}
         )
         with Session(self.engine) as session, session.begin():
             session.execute(stmt)

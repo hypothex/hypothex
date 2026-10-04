@@ -77,7 +77,7 @@ class HostState(BaseModel):
     environment_id: str | None = None; hx_version: str | None = None; last_sequence: int = 0
     local_port: int | None = None
 class Hub:
-    def __init__(self, ctx: Context, hosts: EnvironmentsFile) -> None: ...
+    def __init__(self, ctx: Context, hosts: EnvironmentsFile, *, configured_hosts: Callable[[], Iterable[str]] | None = None) -> None: ...  # live names, including disabled hosts; defaults to hosts
     async def start(self) -> None: ...       # one supervisor task per host
     async def stop(self) -> None: ...
     def state(self, name: str) -> HostState: ...
@@ -92,6 +92,8 @@ MIRROR_DIRS = ("predictions", "traces", "samples", "env", "logs")
 MIRROR_MAX_BYTES = 200 * 1024 * 1024
 ```
 Backoff 3/4/8/16 s, reset after 30 s connected. Cursor persisted in the hub index table `host_cursors(host, environment_id, last_sequence)`. Mirror writes go through `RunStore` and `index_run`: each changed file is fetched whole into a per-run staging folder, and only when every fetch succeeded is the run id claimed hub-wide (`<store>/.claims/<run_id>.json`) and are the files installed in one pass under the run lock (no appends, no byte offsets). A listed file the host does not serve is listed again once: still missing, its local copy is deleted; too big (or refused twice), its local copy is deleted and its entry (`{reason, size, max_bytes}`) is written to `<run_dir>/.hx/mirror-skips.json`, never next to the file. `.hx/` in a run folder is reserved for Hypothex's own state: the env files route refuses any path whose first component is `.hx` (404) and the mirror never fetches one, so a host file such as `predictions/x.skipped` is mirrored like any other. `.mirror-index-pending` is written before the first change to a run folder and removed last; a replay that finds it re-indexes, and the hub re-indexes such runs when it starts. Mirror events are re-emitted as `mirror.run_updated` with payload `{host, environment_id, original_type, remote_sequence, status, reason?}`: `original_type` is the host's event type, and `reason` is copied from the host's event when it has one (`run.lost`, `run.killed`, `run.failed`, e.g. a SLURM `NODE_FAIL`). Hub marks a host `stale` after 60 s without a successful ping; runs on stale hosts are shown stale (derived, never written as status).
+
+Identity ownership is reserved before the first awaited cursor read: under the shared `.claims` lock, check the environment's cursor rows and legacy run claims against all configured names (including disabled hosts), then upsert a cursor at sequence zero without reducing an existing sequence. Cursor resets retain the row at zero; rebuilds retain cursor rows. Other configured owners cause a terminal connection error. Ownership survives connection-setting changes and is released only after removal and draining that host's pending mirrors. A newly accepted alias for an environment whose old names were removed updates matching run-claim `host` fields before mirroring. Run claims also reject direct writes from a different host until this explicit transfer. Historical cursor rows remain, but forwarding ignores names no longer configured.
 
 ### 1.6 Env-server additions (`hypothex.core` on the host)
 

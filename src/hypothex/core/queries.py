@@ -133,8 +133,10 @@ def refresh_project(ctx: Context, project: str) -> ProjectEntry:
     Returns
     -------
     ProjectEntry
-        The refreshed entry, or the stored snapshot if the repo is gone or
-        the file is invalid.
+        The refreshed entry, or the stored snapshot if the repo is gone, the
+        file is invalid, or the entry is a copy from a host
+        (``remote_host``): its repo path is on that host, so it is never read
+        here.
 
     Notes
     -----
@@ -145,6 +147,8 @@ def refresh_project(ctx: Context, project: str) -> ProjectEntry:
     scan every run folder.
     """
     entry = ctx.store.load_project(project)
+    if entry.remote_host is not None:
+        return entry
     repo = Path(entry.repo)
     try:
         config = load_project_config(repo)
@@ -643,7 +647,10 @@ def _references(ctx: Context, record: RunRecord) -> dict[str, Any]:
     if record.task is None:
         return {}
     try:
-        repo = Path(ctx.store.load_project(record.project).repo)
+        entry = ctx.store.load_project(record.project)
+        if entry.remote_host is not None:
+            return {}  # the repo path is on that host: never read a dataset from it here
+        repo = Path(entry.repo)
         config = load_project_config(repo)
         spec = config.tasks[record.task]
     except (StoreError, ConfigError, KeyError):
@@ -1009,9 +1016,15 @@ def dataset_overlap(
     Raises
     ------
     ConfigError
-        If the project has no such dataset.
+        If the project has no such dataset, or is a copy from a host
+        (``remote_host``), whose dataset files are on that host.
     """
     entry = refresh_project(ctx, project)
+    if entry.remote_host is not None:
+        raise ConfigError(
+            f"project {project!r} was copied from host {entry.remote_host} and its data is "
+            f"on that host; check overlap there, or `hx register` a checkout here"
+        )
     if dataset not in entry.config.datasets:
         raise ConfigError(f"project {project!r} has no dataset {dataset!r}")
     return overlap(dataset, entry.config.datasets[dataset], Path(entry.repo), key_field)

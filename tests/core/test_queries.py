@@ -13,6 +13,7 @@ from hypothex.core.errors import ConfigError, RunError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.index import store_fingerprint
 from hypothex.core.records import DatasetRef, MetricPoint, RunRecord, RunStatus
+from hypothex.core.store import ProjectEntry
 from hypothex.core.sweeps import SweepSpec, save_sweep
 from hypothex.core.sweeps import list_sweeps as list_project_sweeps
 from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
@@ -361,3 +362,25 @@ def test_list_sweeps_spans_projects_newest_first(
     assert only == [{"project": "toy", **s} for s in list_project_sweeps(ctx, "toy")]
     assert [r["id"] for r in only] == ["s-0002", "s-0001"]
     assert q.list_sweeps(ctx, "nothing-here") == []
+
+
+def _as_host_copy(ctx: Context, host: str = "gpu1") -> ProjectEntry:
+    entry = ctx.store.load_project("toy").model_copy(update={"remote_host": host})
+    ctx.store.save_project(entry)
+    ctx.index.upsert_project(entry)
+    return entry
+
+
+def test_a_host_copy_is_never_read_from_its_repo_path(ctx: Context, toy_repo: Path) -> None:
+    # I-2: a remote_host entry's repo is a path on the host; the hub must not
+    # load hypothex.yaml or dataset files from that path, even if it exists here
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    assert q.get_predictions(ctx, "r1").rows[1].reference == 1
+    copy = _as_host_copy(ctx)
+    write_toy_project(toy_repo, accuracy_version="v9")
+    entry = q.refresh_project(ctx, "toy")
+    assert entry == copy and ctx.store.load_project("toy") == copy
+    assert q.list_projects(ctx) == [copy]
+    assert q.get_predictions(ctx, "r1").rows[1].reference is None
+    with pytest.raises(ConfigError, match="copied from host gpu1"):
+        q.dataset_overlap(ctx, "toy", "toyset")

@@ -12,7 +12,7 @@ import re
 import stat
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -330,6 +330,45 @@ async def client_left(ws: WebSocket, seconds: float) -> bool:
     except TimeoutError:
         return False
     return message["type"] == "websocket.disconnect"
+
+
+def validation_detail(problems: Sequence[Any]) -> list[dict[str, Any]]:
+    """
+    Turn FastAPI's validation problems into JSON-safe dicts for a ``422`` body.
+
+    ``input`` is left out: for a body that is not JSON it is the raw bytes, and
+    it echoes whatever the client sent. ``ctx`` values that are not plain JSON
+    scalars (such as the ``ValueError`` a model validator raised) become text.
+
+    Parameters
+    ----------
+    problems : sequence of dict
+        ``RequestValidationError.errors()``.
+
+    Returns
+    -------
+    list of dict
+        Each problem's ``type``, ``loc``, ``msg`` and ``ctx`` (and any other key
+        but ``input``).
+
+    Examples
+    --------
+    >>> validation_detail([{"type": "dict_type", "loc": ("body",), "msg": "bad", "input": b"{}"}])
+    [{'type': 'dict_type', 'loc': ['body'], 'msg': 'bad'}]
+    >>> validation_detail([{"type": "value_error", "loc": ("body", "grid"), "msg": "bad",
+    ...                     "ctx": {"error": ValueError("bad")}}])[0]["ctx"]
+    {'error': 'bad'}
+    """
+    out: list[dict[str, Any]] = []
+    for problem in problems:
+        item = {k: v for k, v in problem.items() if k != "input"}
+        if isinstance(item.get("ctx"), dict):
+            item["ctx"] = {
+                k: v if v is None or isinstance(v, str | int | float | bool) else str(v)
+                for k, v in item["ctx"].items()
+            }
+        out.append(to_jsonable(item))
+    return out
 
 
 async def _repair_loop(ctx: Context) -> None:
@@ -1731,7 +1770,7 @@ def create_app(
             content={
                 "error": f"{where}: {message}" if where else message,
                 "type": "RequestValidationError",
-                "detail": to_jsonable(problems),
+                "detail": validation_detail(problems),
             },
         )
 

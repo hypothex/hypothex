@@ -571,6 +571,24 @@ def test_api_errors_keep_the_error_and_type_shape(client: TestClient) -> None:
     assert wrong_method.status_code == 405 and wrong_method.json()["type"] == "HTTPError"
 
 
+def test_a_body_that_is_not_json_or_fails_a_validator_is_422_not_500(home: Path) -> None:
+    app = create_app(home, background_repair=False)
+    with TestClient(app, base_url="http://127.0.0.1:7777", raise_server_exceptions=False) as c:
+        # FastAPI hands the raw bytes to validation as `input`; they are not JSON
+        raw = c.post(
+            "/api/v1/runs/x/stop",
+            content=b"{}",
+            headers={"Content-Type": "text/plain", "X-Hypothex-Client": "test"},
+        )
+        assert raw.status_code == 422 and raw.json()["type"] == "RequestValidationError"
+        assert all("input" not in problem for problem in raw.json()["detail"])
+        # a model validator's ValueError sits in `ctx`
+        sweep = {"project": "toy", "grid": [{"name": "x"}], "seeds": [1], "command": ["a"]}
+        bad = c.post("/api/v1/sweeps", json={**sweep, "hypothesis": "h"})
+        assert bad.status_code == 422
+        assert all(isinstance(v, str) for p in bad.json()["detail"] for v in p["ctx"].values())
+
+
 def test_leaderboard_metric_pin_needs_a_version(
     client: TestClient, ctx: Context, toy_repo: Path
 ) -> None:

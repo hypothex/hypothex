@@ -209,6 +209,23 @@ describe("launchSeeds", () => {
     // the server may have started seed 4 before the answer was lost
     expect(out.failed?.unknown).toBe(true);
   });
+
+  test("a seed whose first try got no answer stays unknown when a retry is then refused", async () => {
+    // try 1 starts seed 4 and its answer is lost; the hub then drops its connection to gpu1
+    let tries = 0;
+    mockApi({
+      "POST /api/v1/hosts/gpu1/runs": () => {
+        tries += 1;
+        if (tries === 1) throw new Error("socket closed");
+        return new HttpReply(503, { error: "gpu1 is not connected", type: "HostUnavailableError" });
+      },
+    });
+    const out = await launchSeeds(SPEC, [4, 5], "base", { delayMs: 0 });
+    expect(tries).toBe(2);
+    expect(out.failed?.seed).toBe(4);
+    expect(out.failed?.error.message).toBe("gpu1 is not connected");
+    expect(out.failed?.unknown).toBe(true);
+  });
 });
 
 test("outcomeUnknown: only an answer that says the run was not started is a refusal", () => {

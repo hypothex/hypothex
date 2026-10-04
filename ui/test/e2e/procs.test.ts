@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { killableGroups, ownedBy, parsePs, type Proc } from "../../e2e/procs";
+import { demoOwner, killableGroups, ownedBy, parsePs, type Proc } from "../../e2e/procs";
 
 const RUN = "/repo/ui/e2e/.runs/run-AbC123";
 
@@ -64,5 +64,32 @@ describe("killableGroups", () => {
   test("only groups whose every live member is owned, never the caller's own group", () => {
     const owned = ownedBy(TABLE, { marker: RUN, roots: [60], groups: [60], exclude: [50] });
     expect(killableGroups(TABLE, owned, [50]).sort((a, b) => a - b)).toEqual([60, 70, 80, 81, 90]);
+  });
+});
+
+describe("demoOwner", () => {
+  const pids = (procs: Proc[]) => procs.map((p) => p.pid).sort((a, b) => a - b);
+  // the other demo server of the same run: its hub, and a fake host of it
+  const SIBLING: Proc[] = [
+    { pid: 400, ppid: 1, pgid: 400, command: "bun e2e/serve-demo.ts" },
+    { pid: 410, ppid: 400, pgid: 410, command: `/venv/bin/hx --home ${RUN}/home serve --port 4000` },
+    { pid: 420, ppid: 410, pgid: 420, command: `python -m hypothex.cli.main --home ${RUN}/home/demo-hosts/x serve` },
+  ];
+  const ALL = [...TABLE, ...SIBLING];
+
+  test("owns its own hub and what runs under its own home, never the other server's in the same run", () => {
+    const hosts = pids(ownedBy(ALL, demoOwner(`${RUN}/home-hosts`, 60, 50)));
+    expect(hosts).toEqual([60, 61, 62, 70, 80, 81, 90]);
+    const demo = pids(ownedBy(ALL, demoOwner(`${RUN}/home`, 410, 400)));
+    expect(demo).toEqual([301, 410, 420]);
+  });
+
+  test("a hub that never spawned owns nothing outright", () => {
+    expect(demoOwner(`${RUN}/home`, undefined, 400)).toEqual({
+      marker: `${RUN}/home/`,
+      roots: [],
+      groups: [],
+      exclude: [400],
+    });
   });
 });

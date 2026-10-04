@@ -2,6 +2,12 @@
  * Sweep actions (contract section 4): Copy as CLI (the same `hx sweep` command), Cancel
  * queued (`POST .../cancel_queued`), Add seeds (`POST .../extend`: every cell × the next
  * seeds). Each POST carries one `command_id` per click, so a retry is not a second action.
+ *
+ * The hub saves an extend's seeds in the sweep before it issues their runs, so after a
+ * failed extend the refreshed summary may list them already. Until an extend goes through,
+ * the seeds sent in failed tries are not counted as taken: the retry proposes (and sends)
+ * them again, and the hub issues only their missing runs, instead of growing the sweep by
+ * the seeds after them.
  */
 import { type ReactElement, useEffect, useState } from "react";
 import { api } from "../../api/client";
@@ -41,6 +47,8 @@ export function SweepActions({
   const [copy, setCopy] = useState<CopyState>("idle");
   const [open, setOpen] = useState(false);
   const [count, setCount] = useState(String(Math.max(1, spec.seeds.length)));
+  // seeds sent by an extend that has not gone through yet (see above)
+  const [tried, setTried] = useState<readonly number[]>([]);
   useEffect(() => {
     if (copy === "idle") return;
     const timer = setTimeout(() => setCopy("idle"), 1500);
@@ -53,11 +61,14 @@ export function SweepActions({
   const extend = useAction({
     send: (seeds: number[], opts) => api.extendSweep(project, sweepId, seeds, opts),
     invalidate: REMOTE_RUN_INVALIDATES,
-    onSuccess: () => setOpen(false),
+    onSuccess: () => {
+      setTried([]);
+      setOpen(false);
+    },
   });
   const cli = sweepCli(spec, runs);
   const n = parseSeedCount(count);
-  const seeds = n === null ? [] : nextSeeds(spec.seeds, n);
+  const seeds = n === null ? [] : nextSeeds(spec.seeds.filter((s) => !tried.includes(s)), n);
   const doCopy = async (): Promise<void> => {
     try {
       await navigator.clipboard.writeText(cli);
@@ -107,7 +118,9 @@ export function SweepActions({
           aria-label="Add seeds"
           onSubmit={(e) => {
             e.preventDefault();
-            if (seeds.length > 0) extend.run(seeds);
+            if (seeds.length === 0) return;
+            setTried((t) => [...t, ...seeds.filter((s) => !t.includes(s))]);
+            extend.run(seeds);
           }}
         >
           <label>

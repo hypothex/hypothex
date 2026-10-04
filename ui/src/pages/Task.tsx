@@ -70,14 +70,15 @@ interface Opened {
 }
 
 /**
- * Loads the repo path, the template run and every run of the task (not only the newest
- * page: an older run may hold a seed), then shows the dialog. What it opened with is kept
- * until the dialog closes: a refetch (each launch invalidates runs) or a failed refetch
- * must not swap the dialog for a spinner or an error and lose the session in it.
+ * Loads the repo path, the template run and every run of the task, archived included (not
+ * only the newest page: an older or archived run may hold a seed), then shows the dialog.
+ * What it opened with is kept until the dialog closes: a refetch (each launch invalidates
+ * runs) or a failed refetch must not swap the dialog for a spinner or an error and lose
+ * the session in it.
  */
 function NewRun({ project, task, templateRunId, onClose, onLaunched }: NewRunProps) {
   const detail = useTask(project, task);
-  const runs = useAllRuns({ project, task });
+  const runs = useAllRuns({ project, task, archived: true });
   const template = useQuery({
     queryKey: queryKeys.run(templateRunId ?? ""),
     queryFn: ({ signal }) => api.run(templateRunId ?? "", signal),

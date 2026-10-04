@@ -43,15 +43,22 @@ Screens
   ``hx launch`` lines. ``Launch N`` starts one run per seed; a double click still starts
   each seed once, and after a refused seed ``Launch`` sends only the seeds that did not
   start (and needs free GPUs only for those); the preview and ``Copy as CLI`` then show
-  only those seeds too, so pasted lines never start a seed twice. A launch on a host names the project; the
-  hub pins the code (its checkout's commit and uncommitted diff), and ``Rerun sweep`` pins
-  the template run's commit when that run had no uncommitted changes.
+  only those seeds too, so pasted lines never start a seed twice. A seed that got no answer
+  may have started: the form locks, and ``Resend seed N`` sends that seed alone under the
+  same id (also when its GPU now looks taken, maybe by that seed), until the hub answers
+  with its run; then the form unlocks for the seeds after it. A launch on a host names the
+  project; the hub pins the code (its checkout's commit and uncommitted diff), and
+  ``Rerun sweep`` pins the template run's commit when that run had no uncommitted changes.
+  ``New run`` proposes seeds after every seed of the template's config, archived runs
+  included.
 - **Sweep** (``/s/<project>/<sweep_id>``): the best cell and its score as the headline,
   progress, cost and ETA, a params × metric heat table (a sortable table for one param,
   more than two, or sampled ranges), seed dots with 95% intervals (dots only from the
-  cell's own runs), and the sweep's runs on their hosts. Actions: ``Copy as CLI`` (the same ``hx sweep``), ``Cancel queued``,
-  ``Add seeds`` (new seeds for every cell), and ``Rerun sweep`` (the best cell again, in
-  the Launch dialog).
+  cell's own runs), and the sweep's runs on their hosts. Actions: ``Copy as CLI`` (the
+  same ``hx sweep``), ``Cancel queued``, ``Add seeds`` (new seeds for every cell; after a
+  failed try it proposes the same seeds again, not the ones after them, and the hub starts
+  only their missing runs), and ``Rerun sweep`` (the best cell again, in the Launch
+  dialog).
 - **Run** (``/r/<run_id>``): the hypothesis as title, status, stat strip, the task kind's
   run panels, where everything is (code, data, run folder, logs, predictions,
   checkpoints), scores by metric version, notes, and actions. ``?log=stderr`` opens a log
@@ -109,17 +116,24 @@ Test
    bunx playwright install chromium    # once
    bunx playwright test            # smoke tests, light and dark
 
-``bunx playwright test`` seeds a fresh demo home in ``ui/e2e/.home`` with ``hx demo``
-and serves it with ``hx serve`` on a free port the OS picks for that run (never a fixed
-port, so it can never meet an ``hx serve`` you left running), so it never touches your own
-``~/.hypothex``. The runner hands the port to its workers and demo servers in
-``HX_E2E_PORT`` (``HX_E2E_HOSTS_PORT`` for the hosts demo).
+Each ``bunx playwright test`` gets its own directory, ``ui/e2e/.runs/run-XXXXXX``
+(``HX_E2E_RUN_DIR``), so two suites in one checkout never wipe each other's homes. It
+seeds a fresh demo home in ``home`` there with ``hx demo`` and serves it with ``hx serve``
+on a free port the OS picks for that run (never a fixed port, so it can never meet an
+``hx serve`` you left running), so it never touches your own ``~/.hypothex``. The runner
+hands the port to its workers and demo servers in ``HX_E2E_PORT`` (``HX_E2E_HOSTS_PORT``
+for the hosts demo).
 
-The ``hosts-*`` projects run against a second demo hub, seeded in ``ui/e2e/.home-hosts``
-with ``hx demo --with-hosts`` (fake hosts that run on this machine), on its own free port.
+The ``hosts-*`` projects run against a second demo hub, seeded in ``home-hosts`` in the
+same directory with ``hx demo --with-hosts`` (fake hosts that run on this machine), on its
+own free port.
 Both demo servers run with ``HYPOTHEX_SSH=false`` and ``HYPOTHEX_SCP=false``, so no test
 can reach a real host. Playwright never reuses a server that already answers, stops at once
 when a demo server cannot start, and every test first checks that the hub answers with the
 identity written into its fresh home (``environment.json``), so no host route, note or
-launch can reach another server. ``bun e2e/shutdown-check.ts`` stops the hosts demo with
-SIGTERM, as Playwright does, and fails if a demo run or fake host is left running.
+launch can reach another server. When a demo server stops, it waits for its hub's own
+shutdown, then kills every process left under its own home (a hub that crashed or hung
+leaves its fake hosts and runs behind), never the other demo server's.
+``bun e2e/shutdown-check.ts`` stops the hosts demo three ways (SIGTERM, as Playwright
+does; the hub killed; the hub stuck past the shutdown wait) and fails if a demo run or
+fake host is left running.

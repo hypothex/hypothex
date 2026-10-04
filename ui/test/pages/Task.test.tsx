@@ -125,7 +125,7 @@ describe("TaskPage", () => {
     expect(body.created_by).toBe("human");
   });
 
-  const RUNS_URL = "GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=1000";
+  const RUNS_URL = "GET /api/v1/runs?project=toy-classifier&task=toy-test&archived=true&limit=1000";
 
   /** Routes behind the New run dialog: task detail, template run, task runs, hosts. */
   function newRunRoutes(): Record<string, unknown> {
@@ -277,8 +277,19 @@ describe("TaskPage", () => {
     mockApi({
       ...newRunRoutes(),
       [RUNS_URL]: newest,
-      "GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=4000": [...newest, older],
+      "GET /api/v1/runs?project=toy-classifier&task=toy-test&archived=true&limit=4000": [...newest, older],
     });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("5, 6, 7");
+  });
+
+  test("New run counts the seeds of archived runs: an archived seed of the template's config is never proposed", async () => {
+    const base = newRunRoutes();
+    const archived = makeRecord({ run_id: "20260927-000000-toy-test-arch4", seed: 4, archived: true });
+    mockApi({ ...base, [RUNS_URL]: [...(base[RUNS_URL] as RunRecord[]), archived] });
     renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
     await screen.findByRole("region", { name: "a Best" });
     fireEvent.click(screen.getByRole("button", { name: "New run" }));

@@ -14,6 +14,9 @@ Conventions
   file, ``409`` for an interrupted command, ``413`` for a file larger than
   ``max_bytes``, ``422`` for a body that does not match the schema, and ``503`` when a
   host is not connected (or no configured host serves the run).
+- Answers of 2 KiB or more are gzipped when the client sends
+  ``Accept-Encoding: gzip`` (browsers, ``httpx`` and ``curl --compressed`` do). Run
+  files (``application/octet-stream``) are sent as they are.
 - Every ``POST`` body takes an optional ``command_id``. A repeated ``command_id``
   returns the first result and does the work only once. ``created_by`` names the
   author (``agent:<name>`` for agents; such launches need a ``hypothesis``).

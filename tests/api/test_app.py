@@ -17,7 +17,7 @@ from hypothex.core.context import Context
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.views import get_view, load_preset
 from hypothex.sdk import Run
-from tests.factories import PREDS_075, seed_finished_run
+from tests.factories import PREDS_075, make_record, seed_finished_run
 
 WS_URL = "ws://127.0.0.1:7777/api/v1/ws"  # TestClient defaults to Host "testserver"
 
@@ -195,6 +195,27 @@ def test_ws_max_replay_sends_reset_instead_of_a_long_replay(
         seen = [ws.receive_json()["type"] for _ in range(last + 1)]
         assert seen == ["event"] * (last + 1)
         assert ws.receive_json()["type"] == "ready"
+
+
+def test_big_json_answers_are_gzipped_but_run_files_are_not(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    for i in range(30):
+        ctx.index.upsert_run(make_record(f"r{i:02d}"))
+    gzip = {"Accept-Encoding": "gzip"}
+    big = client.get("/api/v1/runs", headers=gzip)
+    assert big.headers["content-encoding"] == "gzip" and len(big.json()) == 30
+    assert int(big.headers["content-length"]) < len(big.content) / 4  # sent vs decoded
+    plain = client.get("/api/v1/runs", headers={"Accept-Encoding": "identity"})
+    assert "content-encoding" not in plain.headers and plain.json() == big.json()
+    small = client.get("/.well-known/hypothex/environment", headers=gzip)
+    assert "content-encoding" not in small.headers  # under GZIP_MIN_BYTES
+    run = seed_finished_run(ctx, toy_repo, "f1")
+    text = "step=1 loss=0.5\n" * 1000
+    (ctx.run_dir(run) / "logs" / "stdout.log").write_text(text)
+    raw = client.get("/api/v1/runs/f1/files/logs/stdout.log", headers=gzip)
+    assert "content-encoding" not in raw.headers and raw.text == text
+    assert raw.headers["content-length"] == str(len(text))
 
 
 def test_foreign_host_is_rejected(client: TestClient) -> None:

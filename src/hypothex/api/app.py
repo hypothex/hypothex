@@ -32,6 +32,7 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 from starlette.types import Scope
@@ -121,6 +122,11 @@ NO_UI_FALLBACK = frozenset({"api", "mcp", ".well-known", "assets"})
 FILE_MAX_BYTES = 200 * 1024 * 1024
 FILE_CHUNK_BYTES = 64 * 1024
 GPU_CACHE_SECONDS = 10.0
+GZIP_MIN_BYTES = 2048
+"""Responses at least this big are gzipped for clients that accept it (JSON compresses ~8x)."""
+GZIP_LEVEL = 6
+GZIP_SKIP_TYPES = (*DEFAULT_EXCLUDED_CONTENT_TYPES, "application/octet-stream")
+"""Run files (``application/octet-stream``, up to ``FILE_MAX_BYTES``) are sent as they are."""
 _OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
@@ -1790,6 +1796,13 @@ def create_app(
     app.state.hub = manager
     app.state.mcp = mcp_server
     hosts = allowed_hosts(host)
+    # innermost: the guards answer first, and the hub's tunnels carry compressed JSON
+    app.add_middleware(
+        GZipMiddleware,
+        minimum_size=GZIP_MIN_BYTES,
+        compresslevel=GZIP_LEVEL,
+        exclude_content_types=GZIP_SKIP_TYPES,
+    )
     app.add_middleware(OriginGuard, hosts=hosts)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
     if auth_token:

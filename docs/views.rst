@@ -84,8 +84,9 @@ curves         Metric history by step; seeds faint, mean bold, checkpoints and s
                Like the index for an ended run, a live run keeps at most 1,000 points
                per name before that: its ``metrics.jsonl`` is read one line at a time
                into a bounded copy (the first, last, lowest and highest point, the rest
-               by LTTB), so a file that grows without limit never fills the hub's
-               memory. A loss spike is one event per episode,
+               by LTTB; at most the first 256 distinct metric names in the file), bounding
+               memory per run independently of file size. A loss spike is
+               one event per episode,
                labelled with its step (``spike 9k``); so is a kill (``killed 14k``).
                A ``NaN`` or infinite value the run logged is marked too (``NaN 9k``).
                ``group_by: run`` draws one column per run, named ``baseline r1``.

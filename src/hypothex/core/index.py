@@ -6,6 +6,7 @@ import contextlib
 import errno
 import fcntl
 import json
+import logging
 import math
 import sqlite3
 import time
@@ -50,6 +51,7 @@ from hypothex.core.thin import MAX_POINTS_PER_METRIC
 if TYPE_CHECKING:
     from hypothex.core.context import Context
 
+log = logging.getLogger(__name__)
 SCHEMA_VERSION = 3
 _IN_CHUNK = 450
 """Most values bound in one ``IN (...)`` list of an index query."""
@@ -1026,6 +1028,35 @@ def points_to_index(
     if RunStatus(status) in INDEXED_POINT_STATUSES:
         return store.read_metric_points(project, run_id)
     return store.read_metric_points_bounded(project, run_id)
+
+
+def index_run_points(index: Index, store: RunStore, record: RunRecord) -> None:
+    """
+    Re-index a run's metric points from its file after a status change, never failing.
+
+    Every end path calls this (or ``index_run``): a run that ends is indexed
+    from its whole file (``points_to_index``), replacing the bounded copy held
+    while it ran. A read or index error is logged, so nothing the run logged
+    keeps it from ending.
+
+    Parameters
+    ----------
+    index : Index
+        Target index.
+    store : RunStore
+        File store to read from.
+    record : RunRecord
+        The run as just written.
+
+    Examples
+    --------
+    >>> index_run_points(ctx.index, ctx.store, killed)  # doctest: +SKIP
+    """
+    try:
+        points = points_to_index(store, record.project, record.run_id, record.status)
+        index.replace_metric_points(record.run_id, points)
+    except Exception as exc:  # noqa: BLE001 - the run has ended either way
+        log.warning("run %s: could not index its metric points: %s", record.run_id, exc)
 
 
 def index_run(index: Index, store: RunStore, record: RunRecord) -> None:

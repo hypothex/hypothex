@@ -8,10 +8,12 @@ import json
 import logging
 import math
 import re
+from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any, TypeVar
 
 import yaml
@@ -46,6 +48,8 @@ _M = TypeVar("_M", bound=BaseModel)
 RUN_SUBDIRS = ("logs", "predictions", "env")
 MAX_METRIC_LINE_BYTES = 64 * 1024
 """Longest ``metrics.jsonl`` line a bounded read parses; a longer line is skipped unread."""
+MAX_NAME_WARNINGS = 1024
+"""Most recent runs whose metric-name warning each store remembers."""
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
 _HASH_TAIL = re.compile(r"-[0-9a-f]{8}\Z")
 
@@ -276,6 +280,8 @@ class RunStore:
 
     def __init__(self, layout: Layout) -> None:
         self.layout = layout
+        self._name_cap_warned: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._name_warning_lock = Lock()
 
     # projects -----------------------------------------------------------
     def _project_file(self, project: str) -> Path:
@@ -586,10 +592,13 @@ class RunStore:
         Read a bounded copy of a run's metric history, one line at a time.
 
         For a live run, whose file may still grow without limit: memory stays
-        bounded by ``2 * limit`` points per name whatever the file size
-        (``thin.HistoryThinner``), and lines over ``MAX_METRIC_LINE_BYTES``
-        are skipped unread. A history of at most ``limit`` points per name is
-        read whole, as ``read_metric_points`` reads it.
+        bounded by ``2 * limit`` points per name and ``thin.MAX_METRIC_NAMES``
+        names (the first distinct names in the file; rows of others are skipped, with one
+        warning per run remembered for ``MAX_NAME_WARNINGS`` recent runs per
+        store) whatever the file size (``thin.HistoryThinner``), and
+        lines over ``MAX_METRIC_LINE_BYTES`` or not UTF-8 are skipped unread.
+        A history of at most ``limit`` points per name is read whole, as
+        ``read_metric_points`` reads it.
 
         Parameters
         ----------
@@ -616,6 +625,23 @@ class RunStore:
         thinner = HistoryThinner(limit)
         for point in _iter_rows(MetricPoint, path, MAX_METRIC_LINE_BYTES):
             thinner.add(point)
+        key = (project, run_id)
+        warn = False
+        if thinner.dropped_rows:
+            with self._name_warning_lock:
+                warn = key not in self._name_cap_warned
+                self._name_cap_warned[key] = None
+                self._name_cap_warned.move_to_end(key)
+                if len(self._name_cap_warned) > MAX_NAME_WARNINGS:
+                    self._name_cap_warned.popitem(last=False)
+        if warn:
+            log.warning(
+                "run %s: metrics.jsonl holds more than %d metric names; %d rows of further "
+                "names were skipped by a bounded read",
+                run_id,
+                thinner.max_names,
+                thinner.dropped_rows,
+            )
         return thinner.points()
 
     def read_nonfinite_points(self, project: str, run_id: str) -> list[NonFiniteMetric]:

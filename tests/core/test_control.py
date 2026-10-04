@@ -527,3 +527,24 @@ def test_stop_run_signals_a_child_its_first_read_missed(
         if child.poll() is None:
             os.killpg(child.pid, signal.SIGKILL)
             child.wait()
+
+
+def test_stop_of_a_run_without_a_supervisor_indexes_its_whole_history(ctx: Context) -> None:
+    from hypothex.core.index import downsample
+
+    _active(ctx, "dead", RunStatus.RUNNING, dead_pid())
+    path = ctx.layout.run_dir("toy", "dead") / "metrics.jsonl"
+    with path.open("w") as fh:
+        for s in range(3000):
+            fh.write(json.dumps({"name": "loss", "step": s, "value": 1.0 / (s + 1)}) + "\n")
+    # while it ran, the index held a bounded copy of a file that might still grow
+    ctx.index.replace_metric_points("dead", ctx.store.read_metric_points_bounded("toy", "dead"))
+    assert ctx.index.metric_points("dead") != downsample(
+        ctx.store.read_metric_points("toy", "dead")
+    )
+    killed = stop_run(ctx, "dead")
+    assert killed.status == RunStatus.KILLED
+    # the end re-indexes from the whole file, like every other end path
+    assert ctx.index.metric_points("dead") == downsample(
+        ctx.store.read_metric_points("toy", "dead")
+    )

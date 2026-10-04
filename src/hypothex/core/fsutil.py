@@ -190,9 +190,14 @@ def iter_jsonl(path: Path, max_line_bytes: int | None = None) -> Iterator[dict[s
     """
     Yield the objects of a JSONL file one line at a time, skipping bad lines.
 
-    Only ``\\n`` ends a line. Blank lines, lines that are not a JSON object
-    (malformed, partial, or not UTF-8), and lines longer than
-    ``max_line_bytes`` are skipped; a long line is read in pieces, never held.
+    Exact reads accept universal newlines (LF, CRLF, and CR); bounded reads
+    split on LF. Blank lines and lines that are not a JSON object
+    (malformed or partial) are skipped. A *bounded* read (``max_line_bytes``
+    given) also skips lines longer than that, read in pieces and never held,
+    and lines that are not UTF-8: it serves live files a view must survive. An
+    exact read (``None``) holds each line whole and raises on bytes that are
+    not UTF-8, as reading the file as text would: a row it skips is malformed
+    JSON, never a row the caller could not see.
 
     Parameters
     ----------
@@ -206,6 +211,11 @@ def iter_jsonl(path: Path, max_line_bytes: int | None = None) -> Iterator[dict[s
     dict
         The parsed objects, in file order.
 
+    Raises
+    ------
+    UnicodeDecodeError
+        If ``max_line_bytes`` is ``None`` and a line is not UTF-8.
+
     Examples
     --------
     >>> list(iter_jsonl(Path("missing.jsonl")))
@@ -213,7 +223,17 @@ def iter_jsonl(path: Path, max_line_bytes: int | None = None) -> Iterator[dict[s
     """
     if not path.is_file():
         return
-    cap = -1 if max_line_bytes is None else max_line_bytes + 1
+    if max_line_bytes is None:
+        with path.open(encoding="utf-8") as text_file:
+            for text_line in text_file:
+                try:
+                    obj = json.loads(text_line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    yield obj
+        return
+    cap = max_line_bytes + 1
     with path.open("rb") as fh:
         while line := fh.readline(cap):
             if cap > 0 and len(line) == cap and not line.endswith(b"\n"):
@@ -223,8 +243,12 @@ def iter_jsonl(path: Path, max_line_bytes: int | None = None) -> Iterator[dict[s
             if not line.strip():
                 continue
             try:
-                obj = json.loads(line)
-            except ValueError:  # JSONDecodeError, or bytes that are not UTF-8
+                text = line.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            try:
+                obj = json.loads(text)
+            except json.JSONDecodeError:
                 continue
             if isinstance(obj, dict):
                 yield obj

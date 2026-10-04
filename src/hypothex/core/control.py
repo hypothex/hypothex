@@ -32,6 +32,7 @@ from hypothex.core.execution import (
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gpus import free_gpus, gpu_status
 from hypothex.core.ids import utcnow
+from hypothex.core.index import index_run_points
 from hypothex.core.records import (
     ACTIVE_STATUSES,
     TERMINAL_STATUSES,
@@ -398,7 +399,9 @@ def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) ->
         if not _supervisor_alive(run_dir, current):
             break
         time.sleep(0.1)
-    return ctx.update_run(run_id, "run.killed", _mark(RunStatus.KILLED), {"reason": "stopped"})
+    killed = ctx.update_run(run_id, "run.killed", _mark(RunStatus.KILLED), {"reason": "stopped"})
+    index_run_points(ctx.index, ctx.store, killed)  # no supervisor is left to index the end
+    return killed
 
 
 def _relative_cwd(cwd: Path, repo: Path, previous_repos: list[Path]) -> Path:

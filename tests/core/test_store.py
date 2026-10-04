@@ -1,8 +1,13 @@
 import fcntl
 import json
+import logging
 import math
 import tracemalloc
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
+from threading import Event
 
 import pytest
 from pydantic import ValidationError
@@ -291,3 +296,118 @@ def test_read_metric_points_bounded_streams_a_huge_live_file(store: RunStore) ->
     assert len(loss) == MAX_POINTS_PER_METRIC
     assert len(kept) == 2 * MAX_POINTS_PER_METRIC
     assert {0, 13_337, n - 1} <= {p.step for p in loss}
+
+
+def test_read_metric_points_bounded_keeps_the_first_max_metric_names(
+    store: RunStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    store.create_run(make_record())
+    path = store.layout.run_dir("toy", "r1") / "metrics.jsonl"
+    good = [
+        json.dumps({"name": f"m{i:05d}", "step": 0, "value": 1.0}).encode() + b"\n"
+        for i in range(MAX_METRIC_NAMES + 3)
+    ]
+    good.append(b'{"name": "m00000", "step": 2, "value": 3.0}\n')
+    bad = b'{"name": "m00000", "step": 1, "value": "\xff"}\n'  # not UTF-8
+    path.write_bytes(b"".join([*good[:-1], bad, good[-1]]))
+    with caplog.at_level(logging.WARNING, logger="hypothex.core.store"):
+        kept = store.read_metric_points_bounded("toy", "r1")
+        store.read_metric_points_bounded("toy", "r1")
+    assert {p.name for p in kept} == {f"m{i:05d}" for i in range(MAX_METRIC_NAMES)}
+    assert [p.step for p in kept if p.name == "m00000"] == [0, 2]  # the bad row is skipped
+    warned = [r for r in caplog.records if "metric names" in r.getMessage()]
+    assert len(warned) == 1 and "r1" in warned[0].getMessage() and "3" in warned[0].getMessage()
+    # the exact read keeps its contract: not UTF-8 is an error, and no name is dropped
+    with pytest.raises(UnicodeDecodeError):
+        store.read_metric_points("toy", "r1")
+    path.write_bytes(b"".join(good))
+    assert len({p.name for p in store.read_metric_points("toy", "r1")}) == MAX_METRIC_NAMES + 3
+
+
+def test_metric_name_warnings_are_isolated_between_stores(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    for directory in ("first", "second"):
+        isolated = RunStore(Layout(tmp_path / directory))
+        isolated.create_run(make_record("same-id"))
+        path = isolated.layout.run_dir("toy", "same-id") / "metrics.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps({"name": f"m{i}", "step": 0, "value": 1.0}) + "\n"
+                for i in range(MAX_METRIC_NAMES + 1)
+            )
+        )
+        with caplog.at_level(logging.WARNING, logger="hypothex.core.store"):
+            isolated.read_metric_points_bounded("toy", "same-id")
+            isolated.read_metric_points_bounded("toy", "same-id")
+    warned = [r for r in caplog.records if "metric names" in r.getMessage()]
+    assert len(warned) == 2
+
+
+def test_metric_name_warning_memory_evicts_old_runs(
+    store: RunStore, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import store as store_module
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    monkeypatch.setattr(store_module, "MAX_NAME_WARNINGS", 2, raising=False)
+    for run_id in ("warning-a", "warning-b", "warning-c"):
+        store.create_run(make_record(run_id))
+        path = store.layout.run_dir("toy", run_id) / "metrics.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps({"name": f"m{i}", "step": 0, "value": 1.0}) + "\n"
+                for i in range(MAX_METRIC_NAMES + 1)
+            )
+        )
+    with caplog.at_level(logging.WARNING, logger="hypothex.core.store"):
+        for run_id in ("warning-a", "warning-b", "warning-c", "warning-a"):
+            store.read_metric_points_bounded("toy", run_id)
+    warned = [r for r in caplog.records if "metric names" in r.getMessage()]
+    assert len(warned) == 4  # the evicted run warns again instead of growing a permanent set
+
+
+def test_concurrent_metric_reads_cannot_evict_a_warning_during_refresh(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import store as store_module
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    monkeypatch.setattr(store_module, "MAX_NAME_WARNINGS", 2)
+    checked, resume = Event(), Event()
+
+    class PausingWarnings(OrderedDict[tuple[str, str], None]):
+        def __contains__(self, key: object) -> bool:
+            present = super().__contains__(key)
+            if key == ("toy", "oldest") and not checked.is_set():
+                checked.set()
+                assert resume.wait(5)
+            return present
+
+    store._name_cap_warned = PausingWarnings([(("toy", "oldest"), None), (("toy", "middle"), None)])
+    for run_id in ("oldest", "newest"):
+        store.create_run(make_record(run_id))
+        path = store.layout.run_dir("toy", run_id) / "metrics.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps({"name": f"m{i}", "step": 0, "value": 1.0}) + "\n"
+                for i in range(MAX_METRIC_NAMES + 1)
+            )
+        )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        oldest = pool.submit(store.read_metric_points_bounded, "toy", "oldest")
+        try:
+            assert checked.wait(5)
+            newest = pool.submit(store.read_metric_points_bounded, "toy", "newest")
+            # A synchronized cache blocks eviction until refresh finishes.
+            with suppress(TimeoutError):
+                newest.result(timeout=0.2)
+        finally:
+            resume.set()
+        assert len(oldest.result(timeout=5)) == MAX_METRIC_NAMES
+        assert len(newest.result(timeout=5)) == MAX_METRIC_NAMES
+    assert len(store._name_cap_warned) <= 2

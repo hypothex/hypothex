@@ -31,7 +31,13 @@ An ended run's points are indexed from its whole file (at most 1,000 evenly spac
 points per name, the last one kept). A queued, running or lost run may still be
 writing its file, so the index (and every view) reads it one line at a time into a
 bounded copy: at most 1,000 points per name, the first, last, lowest and highest
-kept, the rest by LTTB.
+kept, the rest by LTTB; at most the first 256 distinct names in the file (rows of further
+names are skipped, with warnings remembered for the most recent 1,024 runs per
+store); lines over 64 KiB or containing invalid UTF-8 are skipped. Exact reads of
+state files have no byte or name cap and reject invalid UTF-8. Every end path
+(the local supervisor, a SLURM end, ``hx stop`` of a
+run whose supervisor is gone, the hub's mirror of a host's end) indexes the run again
+from its whole file.
 
 Every write of indexed data adds 1 to the index *generation* (a ``meta`` row
 written in the same transaction). ``hypothex.core.index.index_generation(ctx)``

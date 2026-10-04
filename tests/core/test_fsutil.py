@@ -89,12 +89,33 @@ def test_read_jsonl_missing_file_is_empty(tmp_path: Path) -> None:
     assert read_jsonl(tmp_path / "nope.jsonl") == []
 
 
-def test_iter_jsonl_splits_on_newlines_only_and_skips_bad_bytes(tmp_path: Path) -> None:
+def test_iter_jsonl_splits_on_newlines_only(tmp_path: Path) -> None:
     path = tmp_path / "m.jsonl"
-    # a raw U+2028 inside a string is valid JSON; str.splitlines() used to cut that row in two
-    path.write_bytes('{"a": "x\u2028y"}\r\n'.encode() + b'{"a": "\xff"}\n[1]\n{"a": 2}')
+    # a raw U+2028 inside a string is valid JSON; str.splitlines() used to cut that row in two;
+    # CRLF, a BOM-free final line without a newline, and a non-object row are all fine
+    path.write_bytes('{"a": "x\u2028y"}\r\n'.encode() + b'\n[1]\n{"a": 2}')
     assert list(iter_jsonl(path)) == [{"a": "x\u2028y"}, {"a": 2}]
     assert read_jsonl(path) == [{"a": "x\u2028y"}, {"a": 2}]
+
+
+def test_exact_jsonl_reads_preserve_universal_newlines(tmp_path: Path) -> None:
+    path = tmp_path / "scores.jsonl"
+    path.write_bytes(b'{"a": 1}\r{"a": 2}\r\n{"a": 3}\n{"a": 4}')
+    expected = [{"a": value} for value in range(1, 5)]
+    assert read_jsonl(path) == expected
+    assert list(iter_jsonl(path)) == expected
+
+
+def test_only_a_bounded_jsonl_read_skips_bytes_that_are_not_utf8(tmp_path: Path) -> None:
+    path = tmp_path / "m.jsonl"
+    path.write_bytes(b'{"a": 1}\n{"a": "\xff"}\n{"a": 3}\n')
+    # an exact read keeps the old contract: the file is UTF-8 or the caller hears about it
+    with pytest.raises(UnicodeDecodeError):
+        read_jsonl(path)
+    with pytest.raises(UnicodeDecodeError):
+        list(iter_jsonl(path))
+    # a bounded read (a live run's metrics) drops the row: one bad row never fails a view
+    assert list(iter_jsonl(path, max_line_bytes=100)) == [{"a": 1}, {"a": 3}]
 
 
 def test_iter_jsonl_skips_lines_over_the_byte_limit_without_holding_them(tmp_path: Path) -> None:

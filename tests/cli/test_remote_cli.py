@@ -13,7 +13,7 @@ from hypothex.core.context import Context
 from hypothex.core.errors import HypothexError, RunError, StoreError
 from hypothex.core.execution import RunRequest
 from hypothex.core.leaderboard import group_id_for
-from hypothex.core.records import RunRecord
+from hypothex.core.records import RunRecord, RunStatus
 from hypothex.core.sweeps import SweepError
 from hypothex.mcp.server import HubUnavailableError
 from tests.api.envserver import remote_hub, wait_until
@@ -314,3 +314,26 @@ def test_hub_read_is_quiet_without_a_hub_and_warns_on_a_hub_error(
     assert "warning: the hub did not answer /api/v1/runs: hub answered 401" in (
         capsys.readouterr().err
     )
+
+
+def test_show_and_runs_mark_a_run_whose_host_is_not_connected(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CONF-4b: like GET /api/v1/runs/{id}, `hx show` and `hx runs` carry host_state, so
+    # a run on a stale or disabled host is not read as known to be running
+    with remote_hub(tmp_path, threaded=True, hub_home=home) as r:
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
+        env_id = r.env.descriptor.environment_id
+        r.env.create_run(make_record("e1", environment_id=env_id, status=RunStatus.RUNNING))
+        seed_finished_run(r.hub, r.hub_repo, "h1")
+        wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
+        assert hx("show", "e1")["host_state"] == "connected"
+        assert hx("show", "h1")["host_state"] is None
+        r.client.post("/api/v1/hosts/gpu1/disconnect", json={})
+        assert hx("show", "e1")["host_state"] == "disabled"
+        assert "[running (host disabled)]" in runner.invoke(app, ["show", "e1"]).stdout
+        rows = {row["run_id"]: row["host_state"] for row in hx("runs")}
+        assert rows == {"e1": "disabled", "h1": None}
+        text = runner.invoke(app, ["runs"]).stdout
+        assert "running (host disabled)" in text
+        assert "finished (host" not in text

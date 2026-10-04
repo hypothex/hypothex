@@ -454,20 +454,35 @@ def _hub_read(path: str) -> Any | None:
         return None
 
 
-def _run_detail(c: Context, run_id: str) -> q.RunDetail:
+def _run_detail(c: Context, run_id: str) -> tuple[q.RunDetail, str | None]:
     """
-    A run's detail from the hub for a run of another environment, else from this store.
+    A run's detail and ``host_state``: from the hub for a run of another environment.
 
-    The hub has a run this store lacks (a CLI on a laptop), and the live copy of
-    a mirrored run; without a hub, this store's copy (or its "no run" error) stands.
+    The hub has a run this store lacks (a CLI on a laptop), and the connection
+    state of a mirrored run's host (CONF-4b: a run on a ``stale`` host is not
+    known to be running). Without a hub, this store's copy (or its "no run"
+    error) stands, with ``host_state`` None.
     """
     from hypothex.mcp.server import acts_through_hub
 
     if acts_through_hub(c, run_id):
         out = _hub_read(f"/api/v1/runs/{run_id}")
         if out is not None:
-            return q.RunDetail.model_validate(out)
-    return q.show_run(c, run_id)
+            return q.RunDetail.model_validate(out), out.get("host_state")
+    return q.show_run(c, run_id), None
+
+
+def _status_text(record: RunRecord, host_state: str | None) -> str:
+    """
+    A run's status, marked when its host is not connected and the run has not ended.
+
+    A running run on a ``stale`` host shows as ``running (host stale)``: it is
+    not lost, but nothing says it is still going (spec 5.6).
+    """
+    status = record.status.value
+    if host_state in (None, "connected") or record.status in TERMINAL_STATUSES:
+        return status
+    return f"{status} (host {host_state})"
 
 
 def _log_reader(
@@ -955,14 +970,17 @@ def list_runs_cmd(
         "limit": limit,
     }
     hub = _hub_read(_query("/api/v1/runs", filters)) or []
+    states: dict[str, str | None] = {}  # run id -> host_state, from the hub (CONF-4b)
     if hub:
         # a CLI on another machine than the hub (spec 5.2): its own runs and the hub's
         merged = {r.run_id: r for r in records}
-        merged.update((row["run_id"], RunRecord.model_validate(row)) for row in hub)
+        for row in hub:
+            states[row["run_id"]] = row.get("host_state")
+            merged[row["run_id"]] = RunRecord.model_validate(row)
         records = sorted(merged.values(), key=lambda r: (r.created_at, r.run_id), reverse=True)
         records = records[:limit]
     if as_json:
-        _print_json(records)
+        _print_json([{**to_jsonable(r), "host_state": states.get(r.run_id)} for r in records])
         return
     _table(
         ["run", "task", "status", "created", "hypothesis"],
@@ -970,7 +988,7 @@ def list_runs_cmd(
             [
                 r.run_id,
                 r.task,
-                r.status.value,
+                _status_text(r, states.get(r.run_id)),
                 r.created_at.strftime("%Y-%m-%d %H:%M"),
                 r.hypothesis[:50],
             ]
@@ -982,12 +1000,13 @@ def list_runs_cmd(
 @app.command()
 def show(run_id: str, as_json: JsonFlag = False) -> None:
     """Show everything about a run, including where every file lives."""
-    detail = _run_detail(_ctx(), run_id)
+    detail, host_state = _run_detail(_ctx(), run_id)
     if as_json:
-        _print_json(detail)
+        _print_json({**to_jsonable(detail), "host_state": host_state})
         return
     r = detail.record
-    typer.secho(f"{r.run_id}  [{r.status.value}]  {r.project}/{r.task or 'exploratory'}", bold=True)
+    status = _status_text(r, host_state)
+    typer.secho(f"{r.run_id}  [{status}]  {r.project}/{r.task or 'exploratory'}", bold=True)
     typer.echo(f"hypothesis: {r.hypothesis or '—'}")
     typer.echo(f"command:    {r.command_display}")
     typer.echo(f"git:        {r.git.commit or '—'}  {git_state_label(r.git)}")

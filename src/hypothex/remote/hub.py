@@ -815,8 +815,8 @@ class _UpgradeRequiredError(Exception):
     """The host speaks another protocol version; retrying cannot help."""
 
 
-class _OwnEnvironmentError(Exception):
-    """The host reports the hub's own environment id; retrying cannot help."""
+class _EnvironmentTakenError(Exception):
+    """The host reports the hub's own or another host's environment id; retrying cannot help."""
 
 
 AUTH_FAILURE_STATUSES = frozenset({401, 403})
@@ -1218,7 +1218,7 @@ class Hub:
             except _UpgradeRequiredError as exc:
                 self._set(sup, "upgrade", str(exc))
                 return
-            except _OwnEnvironmentError as exc:
+            except _EnvironmentTakenError as exc:
                 self._set(sup, "error", str(exc))
                 return
             except EnvRequestError as exc:
@@ -1301,10 +1301,17 @@ class Hub:
             env_id = desc.environment_id
             if env_id == self.ctx.descriptor.environment_id:
                 # its runs would pass as the hub's own (mirror_run skips them anyway)
-                raise _OwnEnvironmentError(
+                raise _EnvironmentTakenError(
                     f"{sup.name} reports this hub's own environment id {env_id}; "
                     "a host must be another hx home (remove it: hx hosts rm "
                     f"{sup.name})"
+                )
+            holder = self._holder(env_id, sup.name)
+            if holder is not None:
+                # its runs would pass as that host's: same claims, same forwarded actions
+                raise _EnvironmentTakenError(
+                    f"{sup.name} reports the environment id {env_id} of host {holder}; "
+                    f"every host must be its own hx home (remove one: hx hosts rm {sup.name})"
                 )
             cursor = await asyncio.to_thread(self._read_cursor, sup, env_id)
             if cursor:
@@ -1349,6 +1356,13 @@ class Hub:
             self._close_route(sup)
             if cancel is not None:
                 raise cancel
+
+    def _holder(self, env_id: str, name: str) -> str | None:
+        """The other configured host last seen with ``env_id``, or None (it stays known offline)."""
+        for other_name, other in self._sups.items():
+            if other_name != name and other.state.environment_id == env_id:
+                return other_name
+        return None
 
     def _read_cursor(self, sup: _Supervisor, env_id: str) -> int:
         with sup.lock:

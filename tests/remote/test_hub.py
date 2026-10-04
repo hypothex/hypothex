@@ -2247,3 +2247,41 @@ def test_a_host_that_reports_the_hubs_own_environment_is_refused(
 
     asyncio.run(main())
     assert not [e for e in hub_ctx.events.since(0) if e.type == "mirror.run_updated"]
+
+
+def test_a_host_that_reports_another_hosts_environment_is_refused(tmp_path: Path) -> None:
+    # b's home carries a's identity (a cloned home, or a host lying about who it is): its
+    # runs would pass as a's, overwrite a's mirrored runs, and take a's forwarded actions
+    a = EnvServer(tmp_path / "host-a")
+    a.start()
+    b_layout = Context.open(tmp_path / "host-b").layout
+    identity = json.loads(a.ctx.layout.environment_json.read_text(encoding="utf-8"))
+    identity["label"] = "b"
+    b_layout.environment_json.write_text(json.dumps(identity), encoding="utf-8")
+    b = EnvServer(tmp_path / "host-b")
+    b.start()
+    assert b.ctx.descriptor.environment_id == a.ctx.descriptor.environment_id
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(
+            Hub(hub_ctx, EnvironmentsFile(environments={"a": HostSpec(route="url", url=a.url)}))
+        )
+        await hub.start()
+        try:
+            await until(lambda: hub.state("a").state == "connected")
+            await hub.add_host("b", HostSpec(route="url", url=b.url))
+            await until(lambda: hub.state("b").state == "error")
+            assert "host a" in hub.state("b").message
+            seed_run(b.ctx, "b-1")
+            await asyncio.sleep(0.5)
+            assert hub_ctx.index.get_run("b-1") is None
+            assert hub.state("a").state == "connected"
+        finally:
+            await hub.stop()
+
+    try:
+        asyncio.run(main())
+    finally:
+        a.stop()
+        b.stop()

@@ -1,6 +1,11 @@
 # Preset view for task kind "agent_eval" (spec 8.4, mockup docs/mockups/kinds/agent_eval).
+# Cost is per attempt everywhere, as in the stat strip's "$ / attempt": the scatter's x is
+# usage.usd/attempt (a run's cost over the examples it attempted) on a log axis.
 # Failure categories come from the per-example prediction field meta.category. Bars are named
-# by `label`, the seed group's short name (as on the leaderboard).
+# by `label`, the seed group's short name (as on the leaderboard), fewest failures first.
+# Colours go to the categories present in the `sort` order, then to any others: with the five
+# categories `hx demo` writes this is the mockup's legend (timeout blue ... "gave up" neutral
+# grey). Rename the list to match your task's categories.
 title: overview
 panels:
   - type: stat_strip
@@ -12,7 +17,8 @@ panels:
     layout: {span: 12, row: 2}
   - type: scatter
     title: Cost vs solved
-    data: {x: usage.usd, group_by: group}
+    data: {x: usage.usd/attempt, group_by: group}
+    scale: log
     pareto: {x: min, y: max}
     layout: {span: 7, row: 3}
   - type: vega_lite
@@ -26,9 +32,15 @@ panels:
       mark: bar
       height: {step: 30}
       encoding:
-        y: {field: label, type: nominal, title: null}
+        y: {field: label, type: nominal, title: null, sort: x}
         x: {aggregate: count, type: quantitative, title: failed attempts}
-        color: {field: meta\.category, type: nominal, title: null, legend: {orient: bottom, columns: 3}}
+        color:
+          field: meta\.category
+          type: nominal
+          title: null
+          sort: [timeout, loop, invalid SMILES, tool error, gave up]
+          scale: {range: ["#3580de", "#e09a00", "#dd6b9a", "#6a5cc9", "#8b929c", "#e0602e", "#2f9e8f", "#b8447e"]}
+          legend: {orient: bottom, columns: 3}
     layout: {span: 5, row: 3}
   - type: grid
     title: Per target

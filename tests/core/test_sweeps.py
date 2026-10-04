@@ -17,6 +17,7 @@ import hypothex.core.sweeps as sweeps_module
 from hypothex.core.context import Context
 from hypothex.core.control import wait_for_run
 from hypothex.core.errors import RunError, StoreError
+from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import RunRequest
 from hypothex.core.ids import utcnow
 from hypothex.core.records import (
@@ -204,6 +205,8 @@ def test_bad_params_are_rejected(param: dict[str, object], message: str) -> None
         ({"project": "Toy Project"}, "pattern"),
         ({"command_template": []}, "at least 1"),
         ({"gpus": 2}, "Extra inputs"),
+        ({"diff": "diff --git a/x b/x\n"}, "a diff needs the commit"),
+        ({"commit": "HEAD; rm -rf /"}, "pattern"),
     ],
 )
 def test_bad_specs_are_rejected(overrides: dict[str, object], message: str) -> None:
@@ -250,6 +253,19 @@ def test_save_and_load_round_trip(ctx: Context) -> None:
     assert "run_ids" not in path.read_text()  # the definition only: members are tagged runs
     with pytest.raises(ValidationError):
         spec_of(run_ids=["r1"])
+
+
+def test_pinned_code_round_trips_and_old_files_pin_nothing(ctx: Context) -> None:
+    pinned = spec_of(commit="3b8e06d" * 5 + "abcde", diff="diff --git a/t.py b/t.py\n")
+    save_sweep(ctx.layout, pinned)
+    assert load_sweep(ctx.layout, "toy", "s-0001") == pinned
+    # a file written before sweeps stored their code: no keys, nothing pinned
+    path = sweep_path(ctx.layout, "toy", "s-0001")
+    old = yaml.safe_load(path.read_text())
+    del old["commit"], old["diff"]
+    path.write_text(yaml.safe_dump(old))
+    loaded = load_sweep(ctx.layout, "toy", "s-0001")
+    assert (loaded.commit, loaded.diff) == (None, None)
 
 
 def test_load_missing_sweep_is_a_store_error(ctx: Context) -> None:
@@ -384,6 +400,26 @@ def test_summary_counts_cells_best_and_cost(ctx: Context, toy_sweep: SweepSpec) 
     assert summary.best == high
     assert summary.headline == "lr 3e-4: 0.820 accuracy, +0.100 over lr 1e-4, p = 0.07"
     assert summary.total_usd == pytest.approx(1.25 + 1.25 + 0.5 + 1.0 + 1.0)
+
+
+def test_summary_reuses_its_boards_until_the_index_changes(
+    ctx: Context, toy_sweep: SweepSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PERF-F1 handoff: the sweep board and the headline's pair board are cached
+    builds: list[int] = []
+    real = sweeps_module.build_leaderboard
+
+    def spy(*args: Any, **kw: Any) -> Any:
+        builds.append(len(args[3]))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(sweeps_module, "build_leaderboard", spy)
+    first = summarize_sweep(ctx, "toy", "s-0001")
+    assert builds == [6, 4]  # the sweep's runs, then the headline's two cells
+    assert summarize_sweep(ctx, "toy", "s-0001") == first and builds == [6, 4]
+    add_run(ctx, "b3", "3e-4", 3, RunStatus.FINISHED, 0.86)
+    assert summarize_sweep(ctx, "toy", "s-0001").run_ids != first.run_ids
+    assert builds == [6, 4, 7, 5]
 
 
 def test_headline_p_compares_the_two_cells_it_names(ctx: Context, toy_sweep: SweepSpec) -> None:
@@ -966,6 +1002,118 @@ def test_each_sweep_run_has_one_command_id_on_every_launch(ctx: Context, toy_rep
     assert run_command_id(env, "toy", sid, {"lr": "1e-4"}, 2) not in fake.command_ids
 
 
+def with_receipts(ctx: Context, fake: FakeLauncher) -> Any:
+    """A host whose launch route keeps real command receipts, as ``run_once`` does."""
+
+    def launch(req: RunRequest, command_id: str) -> RunRecord:
+        start = lambda: fake(req, command_id).model_dump(mode="json")  # noqa: E731
+        return RunRecord.model_validate(ctx.events.run_once(command_id, start))
+
+    return launch
+
+
+def interrupt(ctx: Context, command_id: str) -> None:
+    """Leave the receipt a server leaves when it dies while it runs ``command_id``."""
+    with ctx.events._conn() as conn:
+        conn.execute(
+            "INSERT INTO receipts(command_id, result, created_at) VALUES (?,?,?)",
+            (command_id, "__interrupted__:2026-10-04T00:00:00", "2026-10-04T00:00:00"),
+        )
+
+
+def test_an_interrupted_run_receipt_never_blocks_the_sweep_resume(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # INT-F3x: the host died while it launched run 2 (nothing was made); its receipt is
+    # interrupted. A resume must still fill the gap, and only that gap, every time.
+    ctx.register_project(toy_repo)
+    fake = FakeLauncher(ctx, fail_at=1)
+    args: dict[str, Any] = {
+        "project": "toy",
+        "grid": [LR],
+        "seeds": [1],
+        "command": CMD[:4],
+        "launch": with_receipts(ctx, fake),
+        "command_id": "cmd-1",
+    }
+    with pytest.raises(RunError):
+        launch_sweep(ctx, **args)
+    [listed] = list_sweeps(ctx, "toy")
+    sid, env = listed["id"], ctx.descriptor.environment_id
+    first_id = run_command_id(env, "toy", sid, {"lr": "3e-4"}, 1)
+    interrupt(ctx, first_id)
+    fake.fail_at = None
+    summary = launch_sweep(ctx, **args)
+    assert summary.spec.id == sid and summary.run_ids == ["r01", "r02"]
+    assert fake.command_ids[1] == run_command_id(env, "toy", sid, {"lr": "3e-4"}, 1, attempt=1)
+    again = launch_sweep(ctx, **args)  # complete: nothing starts, no id is tried
+    assert again.run_ids == ["r01", "r02"] and len(fake.requests) == 2
+    extend_sweep(ctx, "toy", sid, [2], launch=with_receipts(ctx, fake))
+    assert len(fake.requests) == 4
+
+
+def test_an_interrupted_launch_that_made_its_run_is_never_run_twice(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # the run of the interrupted command shows up (mirrored) after the issue began
+    ctx.register_project(toy_repo)
+    fake = FakeLauncher(ctx)
+    made: list[RunRecord] = []
+
+    def launch(req: RunRequest, command_id: str) -> RunRecord:
+        if req.params == {"lr": "3e-4"} and not made:
+            made.append(fake(req, command_id))  # the launch took effect...
+            raise CommandInterruptedError("interrupted")  # ...then the server died
+        return fake(req, command_id)
+
+    summary = launch_sweep(ctx, project="toy", grid=[LR], seeds=[1], command=CMD[:4], launch=launch)
+    assert summary.run_ids == ["r01", "r02"] and len(fake.requests) == 2
+
+
+def test_a_host_answer_of_interrupted_moves_on_to_the_next_id(ctx: Context, toy_repo: Path) -> None:
+    from hypothex.remote.client import EnvRequestError
+
+    ctx.register_project(toy_repo)
+    fake = FakeLauncher(ctx)
+    tried: list[str] = []
+
+    def host(req: RunRequest, command_id: str) -> RunRecord:
+        tried.append(command_id)
+        if len(tried) == 1:
+            raise EnvRequestError(
+                "POST /api/v1/runs -> 409", status_code=409, error_type="CommandInterruptedError"
+            )
+        return fake(req, command_id)
+
+    summary = launch_sweep(ctx, project="toy", grid=[LR], seeds=[1], command=CMD[:4], launch=host)
+    env, sid = ctx.descriptor.environment_id, summary.spec.id
+    assert tried[:2] == [
+        run_command_id(env, "toy", sid, {"lr": "1e-4"}, 1),
+        run_command_id(env, "toy", sid, {"lr": "1e-4"}, 1, attempt=1),
+    ]
+    assert summary.run_ids == ["r01", "r02"]
+
+
+def test_interrupted_retries_are_bounded_and_other_errors_are_not_retried(
+    ctx: Context, toy_repo: Path
+) -> None:
+    ctx.register_project(toy_repo)
+    tried: list[str] = []
+
+    def crashing(req: RunRequest, command_id: str) -> RunRecord:
+        tried.append(command_id)
+        raise CommandInterruptedError("interrupted")
+
+    args: dict[str, Any] = {"project": "toy", "grid": [LR], "seeds": [1], "command": CMD[:4]}
+    with pytest.raises(CommandInterruptedError):
+        launch_sweep(ctx, **args, launch=crashing)
+    assert len(tried) == len(set(tried)) == sweeps_module.MAX_RUN_ATTEMPTS
+    fake = FakeLauncher(ctx, fail_at=0)
+    with pytest.raises(RunError, match="host refused"):
+        launch_sweep(ctx, **args, launch=fake)
+    assert fake.command_ids == []
+
+
 # --------------------------------------------------------------------------- Task 41 cancel/extend
 def test_cancel_queued_stops_only_queued_runs(ctx: Context, toy_sweep: SweepSpec) -> None:
     stopped: list[str] = []
@@ -1046,6 +1194,32 @@ def test_extend_adds_every_cell_for_each_new_seed(ctx: Context, toy_repo: Path) 
     assert all((r.gpus, r.queue, r.hypothesis) == (2, True, "lr matters") for r in new)
     assert all(r.tags == [sweep_tag(ctx.descriptor.environment_id, sid)] for r in new)
     assert load_sweep(ctx.layout, "toy", sid).seeds == [1, 2, 3]
+
+
+def test_extend_pins_the_code_the_sweep_was_launched_with(ctx: Context, toy_repo: Path) -> None:
+    # CONF-1: new seeds must run the sweep's code, or they land in another seed group
+    fake = FakeLauncher(ctx)
+    commit, diff = "a" * 40, "diff --git a/train.py b/train.py\n"
+    sid = launched(ctx, toy_repo, fake, commit=commit, diff=diff)
+    spec = load_sweep(ctx.layout, "toy", sid)
+    assert (spec.commit, spec.diff) == (commit, diff)
+    extend_sweep(ctx, "toy", sid, [2], launch=fake)
+    assert len(fake.requests) == 4
+    assert all((r.commit, r.diff) == (commit, diff) for r in fake.requests)
+
+
+def test_a_sweep_without_pinned_code_pins_nothing(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    extend_sweep(ctx, "toy", sid, [2], launch=fake)
+    assert all((r.commit, r.diff) == (None, None) for r in fake.requests)
+
+
+def test_launch_refuses_a_diff_without_its_commit(ctx: Context, toy_repo: Path) -> None:
+    fake = FakeLauncher(ctx)
+    with pytest.raises(SweepError, match="a diff needs the commit"):
+        launched(ctx, toy_repo, fake, diff="diff --git a/x b/x\n")
+    assert fake.requests == [] and list_sweeps(ctx, "toy") == []
 
 
 def test_extend_explicit_gpus_and_queue_win(ctx: Context, toy_repo: Path) -> None:

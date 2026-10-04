@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -129,6 +130,8 @@ class EventLog:
     Append-only event log with monotonically increasing sequence numbers.
 
     Safe to use from several processes at once (SQLite WAL + busy timeout).
+    Each thread keeps one open connection (a new one after a fork), so an
+    append costs one insert, not a connect.
 
     Parameters
     ----------
@@ -138,20 +141,27 @@ class EventLog:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._local = threading.local()
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")  # stored in the file: once is enough
             conn.executescript(_SCHEMA)
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=10, isolation_level=None)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
+        """Yield this thread's connection (autocommit); roll back a transaction left open."""
+        local = self._local
+        conn: sqlite3.Connection | None = getattr(local, "conn", None)
+        if conn is None or local.pid != os.getpid():
+            conn = sqlite3.connect(self.path, timeout=10, isolation_level=None)
             conn.execute("PRAGMA busy_timeout=10000")
             conn.row_factory = sqlite3.Row
+            local.conn, local.pid = conn, os.getpid()
+        try:
             yield conn
         finally:
-            conn.close()
+            if conn.in_transaction:
+                conn.rollback()
 
     def append(
         self,

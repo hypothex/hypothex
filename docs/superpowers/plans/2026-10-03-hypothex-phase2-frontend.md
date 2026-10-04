@@ -125,7 +125,7 @@ Gives the UI typed access to every phase 2 hub route and keeps hosts, runs, over
   - `interface HostLaunchRequest extends RunFields { project: string }` (`POST /api/v1/hosts/{host}/runs`: the project by name, never a path on this machine; the hub finds its own checkout and the host's mapped one)
   - Additive contract fields: `LeaderboardRow.cost?: CostTotals | null`, `OverviewSummary.cost_usd?: number`, `OverviewSummary.cost_today_usd?: number`, `RunsQuery.environment_id?: string` (the queue panel's filter, Task 27).
   - `interface SweepParam { name: string; values: string[] | null; low: number | null; high: number | null; log: boolean }`
-  - `interface SweepSpec { id; project; task: string | null; host: string | null; grid: SweepParam[]; random: number | null; seeds: number[]; command_template: string[]; created_by: string; created_at: string }` (the definition only: no `run_ids`, controller ruling S8)
+  - `interface SweepSpec { id; project; task: string | null; host: string | null; grid: SweepParam[]; random: number | null; seeds: number[]; command_template: string[]; created_by: string; created_at: string; commit?: string | null; diff?: string | null }` (the definition only: no `run_ids`, controller ruling S8; `commit` / `diff` are the code the sweep was launched with, which every extend runs again, `null` when nothing was pinned; `diff` can be up to 5 MB and comes in every `SweepSummary`, never in the `list_sweeps` rows)
   - `interface SweepCell { params: Record<string, string>; group_id: string; n: number; mean: number | null; lo: number | null; hi: number | null; run_ids: string[] }`
   - `interface SweepSummary { spec: SweepSpec; run_ids: string[]; tag: string; counts: Record<string, number>; cells: SweepCell[]; best: SweepCell | null; headline: string; total_usd: number }` (`run_ids`: the sweep's membership, derived by the backend from the runs tagged `tag`, oldest first; ruling S8; `tag` is `sweep:<owner8>:<id>`, the filter for `GET /api/v1/runs?tag=`)
   - `interface SweepListItem { id: string; created_at: string; n_runs: number; best: SweepCell | null }`
@@ -687,6 +687,10 @@ export interface SweepSpec {
   command_template: string[];
   created_by: string;
   created_at: string;
+  /** The commit the sweep was launched with; every extend runs it again. */
+  commit?: string | null;
+  /** The uncommitted diff on top of `commit` (up to 5 MB); null when none. */
+  diff?: string | null;
 }
 
 /** One parameter combination of a sweep: primary-metric mean and 95% CI over its seeds. */

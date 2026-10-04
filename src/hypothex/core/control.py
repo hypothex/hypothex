@@ -377,18 +377,24 @@ def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) ->
         # marker is written by stop_slurm_run, only once scancel worked.
         return slurm.stop_slurm_run(ctx, record, grace=grace)
     atomic_write_text(run_dir / STOP_MARKER, utcnow().isoformat())
-    child = record.executor.child_pid
     # a pid recorded by another environment (a mirrored run) names a process on
     # another machine: never signal it from here
     mine = record.environment_id == ctx.descriptor.environment_id
-    running = record.status == RunStatus.RUNNING
-    if mine and running and child is not None and process_alive(child, None):
-        terminate_group(child, grace)
+    # Signal from records read after the marker write, not from ``record``: a
+    # supervisor that passed its last marker check before the write had already
+    # recorded its child, so only a fresh read names it.
+    signalled: int | None = None
     deadline = time.monotonic() + grace + 5
     while time.monotonic() < deadline:
         current = ctx.find_record(run_id)
         if current.status in TERMINAL_STATUSES:
             return current
+        child = current.executor.child_pid
+        running = current.status == RunStatus.RUNNING
+        if mine and running and child not in (None, signalled) and process_alive(child, None):
+            terminate_group(child, grace)
+            signalled = child
+            deadline = time.monotonic() + grace + 5
         if not _supervisor_alive(run_dir, current):
             break
         time.sleep(0.1)

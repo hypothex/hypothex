@@ -19,13 +19,13 @@ FAST = settings(max_examples=300, deadline=None, suppress_health_check=[HealthCh
 
 # What sbatch itself owns, written out independently of hypothex.remote.config.
 OWNED_LONG = ("job-name", "comment", "output", "error", "chdir", "wrap")
-REQUEUE_LONG = ("requeue", "no-requeue")
+RENDER_ONLY_LONG = ("requeue", "no-requeue", "array")
 OWNED_SHORT = {"J": "job-name", "o": "output", "e": "error", "D": "chdir"}
 NO_ARG_SHORT = set("hHIkOQsuvVW")  # sbatch short options without a required argument
 VALUE_CHARS = set(string.ascii_letters + string.digits + "_.:+@/,=-")
 
 nasty = "-=Jjoe DdwW#;&|$`'\"\\\t\n\r\x00*?~!(){}[]<>%^é　 "
-prefixes = st.sampled_from(OWNED_LONG + REQUEUE_LONG).flatmap(
+prefixes = st.sampled_from(OWNED_LONG + RENDER_ONLY_LONG).flatmap(
     lambda name: st.integers(1, len(name)).map(lambda n: name[:n])
 )
 items = st.one_of(
@@ -54,13 +54,13 @@ def sbatch_sees(item: str) -> list[str]:
     """
     if item.startswith("--"):
         name = item[2:].split("=", 1)[0]
-        known = (*OWNED_LONG, *REQUEUE_LONG, "qos", "exclusive", "mem", "partition")
+        known = (*OWNED_LONG, *RENDER_ONLY_LONG, "qos", "exclusive", "mem", "partition")
         return [k for k in known if name and k.startswith(name)] or [f"?{name}"]
     seen = []
     rest = item[1:]
     while rest:
         letter, rest = rest[0], rest[1:]
-        seen.append(OWNED_SHORT.get(letter, f"-{letter}"))
+        seen.append("array" if letter == "a" else OWNED_SHORT.get(letter, f"-{letter}"))
         if letter not in NO_ARG_SHORT:
             break  # the rest is this option's argument
     return seen
@@ -93,8 +93,8 @@ def test_every_owned_option_and_abbreviation_is_refused(prefix: str, value: str)
     item = f"--{prefix}{value}"
     owned_hit = any(name.startswith(prefix) for name in OWNED_LONG)
     assert (sbatch_option_problem(item) is not None) == owned_hit
-    if not owned_hit:  # a requeue option: the model allows it, render_sbatch refuses it
-        with pytest.raises(SlurmError, match="requeue"):
+    if not owned_hit:  # model allows these options; render_sbatch refuses them
+        with pytest.raises(SlurmError, match="requeue|array"):
             validate_defaults(SlurmDefaults(extra=[item]))
 
 
@@ -133,6 +133,7 @@ run_ids = st.from_regex(r"[a-z0-9][a-z0-9_.-]{0,20}", fullmatch=True)
     st.integers(0, 8),
     run_ids,
 )
+@example(["--array=1-3"], None, None, "01:00:00", 0, "r1")
 def test_rendered_script_owns_job_identity_exactly_once(
     extra: list[str],
     partition: str | None,
@@ -149,7 +150,7 @@ def test_rendered_script_owns_job_identity_exactly_once(
     try:
         script = render_sbatch(record, defaults, Path("/h"))
     except SlurmError as exc:
-        assert "requeue" in str(exc) or "characters" in str(exc)
+        assert any(reason in str(exc) for reason in ("requeue", "array", "characters"))
         return
     lines = script.split("\n")
     directives = [line.removeprefix("#SBATCH ") for line in lines if line.startswith("#SBATCH")]
@@ -164,7 +165,7 @@ def test_rendered_script_owns_job_identity_exactly_once(
     seen = [name for d in directives for name in sbatch_sees(d)]
     for owned in ("job-name", "output", "no-requeue"):
         assert seen.count(owned) == 1
-    for owned in ("comment", "error", "chdir", "wrap", "requeue"):
+    for owned in ("comment", "error", "chdir", "wrap", "requeue", "array"):
         assert owned not in seen
     for value in (partition, account, time):
         if value is not None:

@@ -32,7 +32,7 @@ from hypothex.core.context import Context
 from hypothex.core.cost import compute_cost
 from hypothex.core.datasets import FingerprintCache, dataset_ref, resolve_dataset_path
 from hypothex.core.envcapture import capture_env
-from hypothex.core.errors import GitError, HypothexError, RunError, TemplateError
+from hypothex.core.errors import GitError, HypothexError, RunError, StoreError, TemplateError
 from hypothex.core.evalrunner import default_python_cmd
 from hypothex.core.evaluation import evaluate_run, run_checkout
 from hypothex.core.fsutil import atomic_write_bytes, atomic_write_text, read_yaml, write_yaml
@@ -54,6 +54,8 @@ from hypothex.remote.config import SlurmDefaults
 
 STOP_MARKER = "stop_requested"
 TERM_GRACE_SECONDS = 10.0
+STOP_POLL_SECONDS = 0.5
+"""How often a supervisor checks the stop marker while its child runs."""
 SUPERVISOR_PID_FILE = "supervisor.pid"
 QUEUE_FILE = "queue.json"
 GIT_FETCH_TIMEOUT_SECONDS = 120.0
@@ -70,6 +72,12 @@ A process the command left running in the background (``cmd &``, a daemon) keeps
 the output pipes open; past this the run is recorded anyway (``run.warning``)."""
 PROVIDED_TEMPLATE_VARS = BUILTIN_TEMPLATE_VARS - {"checkpoint"}
 """Template values Hypothex fills in itself; ``--var`` cannot set them."""
+RUN_ID_ATTEMPTS = 8
+"""How many fresh run ids ``prepare_run`` draws before it gives up (ids clash very rarely)."""
+
+
+class _RunIdTakenError(Exception):
+    """Another launcher owns the new id's run folder or reserved worktree."""
 
 
 @dataclass
@@ -290,6 +298,11 @@ def _checkout(repo: Path, commit: str | None, diff: str | bytes | None, dest: Pa
     patch = (diff if isinstance(diff, bytes) else diff.encode("utf-8")) if diff else None
     if head == resolved and capture_diff(repo).diff == patch:
         return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.mkdir()  # exclusive reservation: cleanup below owns only this directory
+    except FileExistsError as exc:
+        raise _RunIdTakenError(dest.name) from exc
     try:
         return create_worktree(repo, resolved, dest, patch)
     except GitError as exc:
@@ -395,6 +408,10 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     that checkout: ``hypothex.yaml`` (tasks, stages, datasets), ``{repo}`` and
     ``{dataset.path}``, the working directory, git info, and the environment.
 
+    The run id is drawn again when its run folder or worktree already exists,
+    also when another launcher creates the same id while this one prepares
+    (``RUN_ID_ATTEMPTS`` tries).
+
     Parameters
     ----------
     ctx : Context
@@ -411,8 +428,8 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         Unknown task/stage, missing template value, a ``--var`` that sets a
         value Hypothex provides (``run_dir``, ``repo``, ...), a working
         directory that does not exist, command not found, an agent run
-        without a hypothesis, more GPUs than this host has, or a pinned
-        commit/diff that cannot be checked out (spec 8A.4).
+        without a hypothesis, more GPUs than this host has, a pinned
+        commit/diff that cannot be checked out (spec 8A.4), or no free run id.
     """
     repo = req.repo.resolve()
     host_config = load_project_config(repo)  # the host checkout names the project
@@ -432,17 +449,25 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         total = len(query_gpus())
         if req.gpus > total:
             raise RunError(f"asked for {req.gpus} GPUs; this host has {total}")
-    run_id = new_run_id(req.task)
-    worktree = _checkout(
-        repo, req.commit, req.diff, ctx.layout.worktrees_dir(host_config.project) / run_id
-    )
-    try:
-        return _prepare_in(ctx, req, repo, host_config, worktree, run_id)
-    except BaseException:
-        # any failure after the worktree exists removes it (spec 8A.4)
+    for _ in range(RUN_ID_ATTEMPTS):
+        run_id = new_run_id(req.task)
+        dest = ctx.layout.worktrees_dir(host_config.project) / run_id
+        if ctx.layout.run_dir(host_config.project, run_id).exists() or dest.exists():
+            continue  # taken already: draw another id before any work
+        worktree = None
+        try:
+            worktree = _checkout(repo, req.commit, req.diff, dest)
+            return _prepare_in(ctx, req, repo, host_config, worktree, run_id)
+        except _RunIdTakenError:
+            pass  # another launcher claimed this id meanwhile: retry with a new one
+        except BaseException:
+            # any failure after the worktree exists removes it (spec 8A.4)
+            if worktree is not None:
+                _discard_worktree(repo, worktree)
+            raise
         if worktree is not None:
             _discard_worktree(repo, worktree)
-        raise
+    raise RunError(f"could not pick a free run id in {RUN_ID_ATTEMPTS} tries")
 
 
 def _prepare_in(
@@ -567,7 +592,12 @@ def _prepare_in(
         created_by=req.created_by,
         gpus_requested=req.gpus,
     )
-    ctx.create_run(record)
+    try:
+        ctx.create_run(record)
+    except StoreError as exc:
+        if isinstance(exc.__cause__, FileExistsError):  # the run folder exists: id clash
+            raise _RunIdTakenError(run_id) from exc
+        raise
     if user_config is not None:
         write_yaml(run_dir / "config.yaml", user_config)
     diff = capture_diff(cwd)
@@ -877,12 +907,8 @@ def _execute(
             _pump(proc.stderr, run_dir / "logs" / "stderr.log", stderr_sink, stop_pumps),
         ]
         interrupted = False
-        # stop_run may have written the marker after the pre-start check but
-        # before the child pid was recorded, so it could not signal the child.
-        if (run_dir / STOP_MARKER).exists():
-            terminate_group(proc.pid)
         try:
-            exit_code = proc.wait()
+            exit_code = _wait_unless_stopped(proc, run_dir / STOP_MARKER)
         except KeyboardInterrupt:
             interrupted = True
             terminate_group(proc.pid)
@@ -942,6 +968,36 @@ def _execute(
             reason = f"{type(exc).__name__}: {exc}"
             ctx.emit("run.eval_skipped", final, {"reason": reason[:500]})
     return ctx.find_record(run_id)
+
+
+def _wait_unless_stopped(proc: subprocess.Popen[bytes], marker: Path) -> int:
+    """
+    Wait for ``proc``; terminate its group once ``marker`` appears.
+
+    ``stop_run`` signals the child itself, but only if a record it read names
+    the child. A stop whose reads all missed it (or a stop that died before it
+    signalled) still ends the run here.
+
+    Parameters
+    ----------
+    proc : subprocess.Popen
+        The run's child, the leader of its own process group.
+    marker : Path
+        The run's stop marker.
+
+    Returns
+    -------
+    int
+        The child's exit code.
+    """
+    while True:
+        if marker.exists():
+            terminate_group(proc.pid)
+            return proc.wait()
+        try:
+            return proc.wait(timeout=STOP_POLL_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _drain(

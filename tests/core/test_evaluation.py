@@ -7,7 +7,7 @@ import yaml
 from hypothex.core import evaluation
 from hypothex.core.context import Context
 from hypothex.core.errors import EvalError
-from hypothex.core.evaluation import evaluate_run, reeval, validate_project
+from hypothex.core.evaluation import EvalReport, evaluate_run, reeval, validate_project
 from tests.factories import PREDS_075, seed_finished_run, write_toy_project
 
 
@@ -94,6 +94,15 @@ def test_reeval_skips_already_scored_unless_forced(ctx: Context, toy_repo: Path)
     assert reeval(ctx, run_id="r1", force=True).evaluated == ["r1"]
 
 
+def test_task_reeval_scores_only_the_given_run_ids(ctx: Context, toy_repo: Path) -> None:
+    for rid in ("r1", "r2", "r3"):
+        seed_finished_run(ctx, toy_repo, rid, predictions=PREDS_075)
+    report = reeval(ctx, project="toy", task="toy-acc", run_ids=["r3", "r1", "zz"])
+    assert sorted(report.evaluated) == ["r1", "r3"] and report.skipped == {}
+    assert ctx.store.read_scores("toy", "r2") == []
+    assert reeval(ctx, project="toy", task="toy-acc", run_ids=[]) == EvalReport()
+
+
 def test_version_bump_rescores_and_keeps_old(ctx: Context, toy_repo: Path) -> None:
     seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
     evaluate_run(ctx, "r1")
@@ -131,6 +140,22 @@ def test_evaluate_removed_task_is_clear_error(ctx: Context, toy_repo: Path) -> N
     cfg_path.write_text(yaml.safe_dump(cfg))
     with pytest.raises(EvalError, match="no longer exists"):
         evaluate_run(ctx, "r1")
+
+
+def test_a_project_copied_from_a_host_is_never_evaluated_from_its_repo_path(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # the host reported a repo path that also exists here: its hypothex.yaml and
+    # metric code must not run on the hub (SEC-5)
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    with pytest.raises(EvalError, match="copied from host gpu1"):
+        evaluate_run(ctx, "r1")
+    with pytest.raises(EvalError, match="copied from host gpu1"):
+        reeval(ctx, project="toy", task="toy-acc")
+    assert ctx.store.read_scores("toy", "r1") == []
+    assert ctx.index.scores_for(["r1"]) == {}
 
 
 def test_validate_project(ctx: Context, toy_repo: Path) -> None:

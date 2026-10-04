@@ -1,8 +1,13 @@
+import errno
+import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 
+from hypothex.core import fsutil
 from hypothex.core.fsutil import (
     append_jsonl,
     append_note_file,
@@ -21,6 +26,36 @@ def test_atomic_write_replaces_and_leaves_no_temp(tmp_path: Path) -> None:
     atomic_write_text(target, "two")
     assert target.read_text() == "two"
     assert [p.name for p in target.parent.iterdir()] == ["file.txt"]
+
+
+def test_atomic_write_flushes_file_then_renames_then_flushes_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    real_sync, real_replace = os.fsync, os.replace
+
+    def sync(fd: int) -> None:
+        calls.append("sync-dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "sync-file")
+        real_sync(fd)
+
+    def replace(src: str, dst: Path) -> None:
+        calls.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(fsutil.os, "fsync", sync)
+    monkeypatch.setattr(fsutil.os, "replace", replace)
+    atomic_write_bytes(tmp_path / "run.yaml", b"a: 1\n")
+    assert calls == ["sync-file", "replace", "sync-dir"]
+
+
+def test_fsync_dir_skips_a_file_system_that_cannot_flush_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(fd: int) -> None:
+        raise OSError(errno.EINVAL, "cannot fsync a folder here")
+
+    monkeypatch.setattr(fsutil.os, "fsync", refuse)
+    fsutil.fsync_dir(tmp_path)  # no error
 
 
 def test_read_jsonl_skips_partial_last_line(tmp_path: Path) -> None:
@@ -61,6 +96,30 @@ def test_yaml_roundtrip_and_errors(tmp_path: Path) -> None:
     assert read_yaml(path) == {}
     path.write_text("- 1\n- 2\n")
     with pytest.raises(ValueError, match="mapping"):
+        read_yaml(path)
+
+
+@pytest.mark.skipif(not yaml.__with_libyaml__, reason="PyYAML built without libyaml")
+def test_yaml_uses_libyaml_when_present() -> None:
+    assert fsutil._YAML_LOADER is yaml.CSafeLoader
+    assert fsutil._YAML_DUMPER is yaml.CSafeDumper
+
+
+def test_yaml_c_and_pure_paths_agree_and_stay_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = {"name": "café 日本", "n": None, "ok": True, "f": 1.5e-7, "list": [1, "a\tb"]}
+    path = tmp_path / "x.yaml"
+    write_yaml(path, data)
+    fast = read_yaml(path)
+    monkeypatch.setattr(fsutil, "_YAML_LOADER", yaml.SafeLoader)
+    monkeypatch.setattr(fsutil, "_YAML_DUMPER", yaml.SafeDumper)
+    assert read_yaml(path) == fast == data
+    write_yaml(path, data)
+    assert read_yaml(path) == data
+    monkeypatch.undo()
+    path.write_text("x: !!python/object/apply:os.getcwd []\n")
+    with pytest.raises(yaml.YAMLError):
         read_yaml(path)
 
 

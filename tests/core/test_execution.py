@@ -12,7 +12,7 @@ from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
 from hypothex.core.records import RunStatus, UsageTotals
-from tests.factories import write_toy_project
+from tests.factories import git, write_toy_project
 
 PY = sys.executable
 WRITE_PREDS = (
@@ -63,6 +63,85 @@ def test_seed_warning_message_when_seed_dropped() -> None:
     assert "{seed}" in msg
     assert "HYPOTHEX_SEED" in msg
     assert "hx.seed()" in msg
+
+
+def _ids(monkeypatch: pytest.MonkeyPatch, *ids: str) -> None:
+    supply = iter(ids)
+    monkeypatch.setattr(execution, "new_run_id", lambda task: next(supply))
+
+
+def test_prepare_run_skips_an_id_whose_folder_exists(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    _ids(monkeypatch, first.run_id, "20260101-000000-explore-0000000b")
+    again = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    assert again.run_id == "20260101-000000-explore-0000000b"
+    assert ctx.find_record(first.run_id).command == first.command  # untouched
+
+
+def test_prepare_run_retries_when_another_launcher_takes_the_id(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clash, fresh = "20260101-000000-explore-0000000a", "20260101-000000-explore-0000000b"
+    _ids(monkeypatch, clash, fresh)
+    real_git_info = execution.git_info
+    taken: list[str] = []
+
+    def git_info_racing(cwd: Path):  # runs after the id check, before create_run
+        if not taken:
+            other = ctx.layout.run_dir("toy", clash)
+            other.mkdir(parents=True)
+            taken.append(str(other))
+        return real_git_info(cwd)
+
+    monkeypatch.setattr(execution, "git_info", git_info_racing)
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    assert rec.run_id == fresh and taken
+    assert ctx.index.get_run(clash) is None
+    assert not any(e.run_id == clash for e in ctx.events.since(0))
+    assert list(ctx.layout.run_dir("toy", clash).iterdir()) == []  # the other run's folder
+
+
+def test_prepare_run_retries_without_removing_a_racing_launchers_worktree(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The destination check must not grant cleanup rights to another launcher's tree."""
+    clash, fresh = "20260101-000000-explore-0000000a", "20260101-000000-explore-0000000b"
+    _ids(monkeypatch, clash, fresh)
+    commit = git(toy_repo, "rev-parse", "HEAD")
+    # A clean pinned commit needs a worktree when the working checkout is dirty.
+    with (toy_repo / "toymetrics.py").open("a") as fh:
+        fh.write("# local change\n")
+    competitor = ctx.layout.worktrees_dir("toy") / clash
+    real_resolve = execution._resolve_commit
+    raced = False
+
+    def resolve_racing(repo: Path, wanted: str) -> str | None:
+        nonlocal raced
+        if not raced:
+            raced = True
+            execution.create_worktree(repo, commit, competitor, None)
+            (competitor / "owned.txt").write_text("other launcher")
+        return real_resolve(repo, wanted)
+
+    monkeypatch.setattr(execution, "_resolve_commit", resolve_racing)
+    try:
+        rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=commit))
+    finally:
+        assert (competitor / "owned.txt").is_file(), "another launcher's worktree was removed"
+    assert rec.run_id == fresh
+    assert (competitor / "owned.txt").read_text() == "other launcher"
+    assert str(competitor) in git(toy_repo, "worktree", "list", "--porcelain")
+
+
+def test_prepare_run_gives_up_after_run_id_attempts(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    monkeypatch.setattr(execution, "new_run_id", lambda task: first.run_id)
+    with pytest.raises(RunError, match="free run id"):
+        prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
 
 
 def test_prepare_run_emits_seed_warning_when_not_templated(ctx: Context, toy_repo: Path) -> None:
@@ -323,3 +402,25 @@ def test_pump_reads_a_pipe_on_a_file_descriptor_above_1024(tmp_path: Path) -> No
         if w >= 0:
             os.close(w)
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_stop_marker_written_while_the_child_runs_kills_it(ctx: Context, toy_repo: Path) -> None:
+    # INT-F1: the supervisor watches the stop marker while it waits on the child,
+    # so a stop that could not signal the child still ends the run.
+    sleeper = cmd("import time; time.sleep(30)")
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=sleeper))
+    result: list = []
+    worker = threading.Thread(target=lambda: result.append(execute_run(ctx, rec.run_id)))
+    worker.start()
+    deadline = time.monotonic() + 20
+    while ctx.find_record(rec.run_id).status != RunStatus.RUNNING:
+        assert time.monotonic() < deadline, "the run never started"
+        time.sleep(0.05)
+    start = time.monotonic()
+    (ctx.run_dir(rec) / execution.STOP_MARKER).write_text("now")
+    worker.join(timeout=15)
+    assert not worker.is_alive(), "the supervisor never noticed the stop marker"
+    assert time.monotonic() - start < 15
+    done = result[0]
+    assert done.status == RunStatus.KILLED
+    assert not execution.process_alive(done.executor.child_pid, None)

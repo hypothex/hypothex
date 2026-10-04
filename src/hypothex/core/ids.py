@@ -28,7 +28,8 @@ def new_run_id(task: str | None, now: datetime | None = None) -> str:
     Returns
     -------
     str
-        ``YYYYMMDD-HHMMSS-<slug>-<4 hex>``.
+        ``YYYYMMDD-HHMMSS-<slug>-<8 hex>``. The 32 random bits keep ids
+        unique across launchers and hosts that start runs in the same second.
 
     Examples
     --------
@@ -37,7 +38,7 @@ def new_run_id(task: str | None, now: datetime | None = None) -> str:
     """
     stamp = (now or utcnow()).strftime("%Y%m%d-%H%M%S")
     slug = _SLUG.sub("-", (task or "explore").lower()).strip("-")[:16].strip("-") or "run"
-    return f"{stamp}-{slug}-{secrets.token_hex(2)}"
+    return f"{stamp}-{slug}-{secrets.token_hex(4)}"
 
 
 def new_command_id() -> str:

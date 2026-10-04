@@ -4,13 +4,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from mcp import Client
 from mcp.types import TextContent
 
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
-from hypothex.core.errors import RunError
+from hypothex.core.errors import ConfigError, RunError, StoreError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.mcp.server import MCPServer, build_server, require_agent_hypothesis
 from tests.factories import PREDS_075, seed_finished_run
@@ -36,6 +37,8 @@ EXPECTED_TOOLS = {
     "add_view",
     "query_view",
     "list_hosts",
+    "connect_host",
+    "list_sweeps",
     "launch_sweep",
     "get_sweep",
     "cancel_sweep",
@@ -197,3 +200,42 @@ def test_view_tools(home: Path, ctx: Context, toy_repo: Path) -> None:
         home, "add_view", {"task": "toy-acc", "name": "overview", "yaml_text": GOOD_VIEW}
     )
     assert err and "preset view" in message
+
+
+def test_views_of_a_host_copy_never_use_a_folder_at_its_repo_path(
+    ctx: Context, toy_repo: Path
+) -> None:
+    from hypothex.mcp.server import (
+        list_task_views,
+        put_view,
+        query_task_view,
+        remove_view,
+        view_document,
+    )
+
+    entry = ctx.register_project(toy_repo)
+    views = toy_repo / ".hypothex" / "views" / "toy-acc"
+    views.mkdir(parents=True)
+    (views / "mine.yaml").write_text(GOOD_VIEW)
+    assert [v.name for v in list_task_views(ctx, "toy-acc")] == ["overview", "mine"]
+    # a copy from gpu1: its repo names gpu1's folder, which here is also a local folder.
+    # Its config has an inline view of the same name as the file here.
+    task = entry.config.tasks["toy-acc"]
+    inline = {"mine": {**yaml.safe_load(GOOD_VIEW), "title": "inline one"}}
+    tasks = {**entry.config.tasks, "toy-acc": task.model_copy(update={"views": inline})}
+    config = entry.config.model_copy(update={"tasks": tasks})
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1", "config": config}))
+    listed = list_task_views(ctx, "toy-acc")
+    assert [(v.name, v.origin) for v in listed] == [("overview", "preset"), ("mine", "inline")]
+    doc = view_document(ctx, "toy-acc", "mine")
+    assert doc["info"]["origin"] == "inline" and doc["view"]["title"] == "inline one"
+    with pytest.raises(StoreError, match="unknown view 'nope'"):
+        view_document(ctx, "toy-acc", "nope")
+    assert view_document(ctx, "toy-acc", "overview")["info"]["origin"] == "preset"
+    assert query_task_view(ctx, "toy-acc", name="mine")["panels"][0]["title"] == "board"
+    assert query_task_view(ctx, "toy-acc")["panels"]  # the preset still draws
+    with pytest.raises(ConfigError, match="copied from host gpu1"):
+        put_view(ctx, "toy-acc", "other", GOOD_VIEW)
+    with pytest.raises(ConfigError, match="copied from host gpu1"):
+        remove_view(ctx, "toy-acc", "mine")
+    assert sorted(p.name for p in views.iterdir()) == ["mine.yaml"]  # nothing written here

@@ -6,7 +6,8 @@ import pytest
 
 from hypothex.core.context import Context
 from hypothex.core.errors import RunNotFoundError
-from hypothex.core.records import RunStatus
+from hypothex.core.ids import utcnow
+from hypothex.core.records import RunStatus, ScoreRecord
 from tests.factories import make_record
 
 
@@ -82,3 +83,43 @@ def test_open_skips_the_store_scan_when_nothing_changed(
     ctx.store.create_run(make_record("orphan"))  # file written, index not
     assert Context.open(home).index.get_run("orphan") is not None
     assert scans == [1]
+
+
+def _score(value: float) -> ScoreRecord:
+    return ScoreRecord(metric="acc", version="1", key="value", value=value, created_at=utcnow())
+
+
+def test_add_score_writes_file_event_and_index(ctx: Context) -> None:
+    rec = ctx.create_run(make_record("r1", status=RunStatus.FINISHED))
+    ctx.add_score(rec, _score(0.5))
+    ctx.add_score(rec, _score(0.7))
+    assert [s.value for s in ctx.index.scores_for(["r1"])["r1"]] == [0.5, 0.7]
+    assert [s.value for s in ctx.store.read_scores("toy", "r1")] == [0.5, 0.7]
+    assert ctx.index.stale_score_runs() == []
+
+
+def test_open_indexes_a_score_whose_add_was_cut_short(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = Context.open(home)
+    rec = ctx.create_run(make_record("r1", status=RunStatus.FINISHED))
+    ctx.add_score(rec, _score(0.5))
+
+    def killed(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt  # the process dies after the file append
+
+    monkeypatch.setattr(ctx.events, "append", killed)
+    with pytest.raises(KeyboardInterrupt):
+        ctx.add_score(rec, _score(0.9))
+    assert [s.value for s in ctx.index.scores_for(["r1"])["r1"]] == [0.5]
+    again = Context.open(home)  # the next start (INT-F8)
+    assert [s.value for s in again.index.scores_for(["r1"])["r1"]] == [0.5, 0.9]
+    assert again.index.stale_score_runs() == []
+
+
+def test_a_stale_mark_of_a_deleted_run_is_dropped(home: Path) -> None:
+    ctx = Context.open(home)
+    ctx.index.mark_scores_stale("gone")
+    Context.open(home)
+    assert ctx.index.stale_score_runs() == []
+    assert not ctx.layout.run_dir("toy", "gone").exists()

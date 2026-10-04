@@ -5,10 +5,16 @@ from __future__ import annotations
 import math
 import random
 from bisect import bisect_right
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
+from functools import lru_cache
+from operator import itemgetter
 
 Z95 = 1.959963984540054
 _EXACT_BINOM_MAX_N = 1000
+RESAMPLE_CACHE_MAX = 1_000_000
+"""Largest ``n * resamples`` whose bootstrap positions are kept between calls (8 bytes each)."""
+
+_Draw = Callable[[Sequence[float]], tuple[float, ...]]
 
 
 def _clean(values: Sequence[float]) -> list[float]:
@@ -188,6 +194,50 @@ def quantile(values: Sequence[float], q: float) -> float:
     return a * (1.0 - frac) + b * frac  # the gap overflowed, or one side is infinite
 
 
+@lru_cache(maxsize=4)
+def _draws(n: int, resamples: int, seed: int) -> tuple[_Draw, ...]:
+    """
+    One draw per bootstrap resample of a sample of size ``n``, kept for 4 sizes.
+
+    A draw picks the positions ``rng.choices(xs, k=n)`` picks (``floor(u * n)``
+    for each ``u`` of ``random.Random(seed).random()``), so applying the draws in
+    order equals a ``choices`` loop bit for bit. The positions depend only on
+    ``(n, resamples, seed)``, never on the values: a leaderboard bootstraps every
+    seed group over the same examples, so they are drawn once per sample size
+    and not once per row. Draws are ``itemgetter`` objects, so applying one runs
+    in C.
+    """
+    rng = random.Random(seed)
+    u = rng.random
+    size = float(n)
+    positions = list(range(n))  # shared int objects keep the kept draws small
+    draws: list[_Draw] = []
+    for _ in range(resamples):
+        picked = [positions[math.floor(u() * size)] for _ in range(n)]
+        if n == 1:
+            draws.append(lambda xs, i=picked[0]: (xs[i],))
+        else:
+            draws.append(itemgetter(*picked))
+    return tuple(draws)
+
+
+def _resample_sums(xs: list[float], resamples: int, seed: int) -> Iterator[float]:
+    """
+    Sum of each bootstrap resample of ``xs`` (``sum(rng.choices(xs, k=len(xs)))``).
+
+    Samples up to ``RESAMPLE_CACHE_MAX`` total draws reuse ``_draws``; larger ones
+    draw from ``random.Random(seed)`` directly. Both give the same sums.
+    """
+    n = len(xs)
+    if n * resamples <= RESAMPLE_CACHE_MAX:
+        for draw in _draws(n, resamples, seed):
+            yield sum(draw(xs))
+        return
+    rng = random.Random(seed)
+    for _ in range(resamples):
+        yield sum(rng.choices(xs, k=n))
+
+
 def bootstrap_mean_interval(
     values: Sequence[float], resamples: int = 1000, seed: int = 0
 ) -> tuple[float, float]:
@@ -233,8 +283,7 @@ def bootstrap_mean_interval(
     if resamples < 1:
         raise ValueError(f"resamples must be >= 1, got {resamples}")
     n = len(xs)
-    rng = random.Random(seed)
-    means = [sum(rng.choices(xs, k=n)) / n for _ in range(resamples)]
+    means = [total / n for total in _resample_sums(xs, resamples, seed)]
     if any(math.isnan(m) for m in means):
         return (math.nan, math.nan)
     return (quantile(means, 0.025), quantile(means, 0.975))
@@ -287,11 +336,10 @@ def paired_bootstrap_p(
     if not diffs:
         return 1.0
     n = len(diffs)
-    rng = random.Random(seed)
     at_or_below = 0
     at_or_above = 0
-    for _ in range(resamples):
-        m = sum(rng.choices(diffs, k=n)) / n
+    for total in _resample_sums(diffs, resamples, seed):
+        m = total / n
         at_or_below += m <= 0.0
         at_or_above += m >= 0.0
     return min(1.0, 2.0 * (min(at_or_below, at_or_above) + 1) / (resamples + 1))
@@ -418,6 +466,69 @@ def ecdf_points(values: Sequence[float], max_points: int = 200) -> list[tuple[fl
             continue
         points.append((x, bisect_right(xs, x) / n))
     return points
+
+
+def lttb(xs: Sequence[float], ys: Sequence[float], limit: int) -> list[int]:
+    """
+    Indices of at most ``limit`` points that keep a line's shape (LTTB).
+
+    Largest-Triangle-Three-Buckets: the first and last points are always kept.
+    The points between them are cut into ``limit - 2`` buckets of near-equal
+    size (exact integer bounds); from each bucket the point that makes the
+    largest triangle with the point kept before it and the mean of the next
+    bucket is kept (the first on a tie), so peaks such as a loss spike survive
+    the thinning, unlike every-n-th sampling.
+
+    Parameters
+    ----------
+    xs : sequence of float
+        x of each point, in drawing order.
+    ys : sequence of float
+        y of each point.
+    limit : int
+        Most points to keep, at least 2; a series that is not longer is kept whole.
+
+    Returns
+    -------
+    list of int
+        Increasing indices into ``xs`` / ``ys``.
+
+    Raises
+    ------
+    ValueError
+        If ``limit`` is less than 2.
+
+    Examples
+    --------
+    >>> lttb([0, 1, 2, 3, 4], [0, 0, 9, 0, 0], 3)
+    [0, 2, 4]
+    >>> lttb([0, 1], [5, 6], 3)
+    [0, 1]
+    """
+    if limit < 2:
+        raise ValueError(f"lttb keeps at least 2 points, not {limit}")
+    n = len(xs)
+    if n <= limit:
+        return list(range(n))
+    inner = limit - 2
+    out = [0]
+    kept = 0
+    for b in range(inner):
+        # bucket b is [start, stop); the next bucket (the last point after the
+        # last bucket) gives the mean the triangle is drawn to
+        start = b * (n - 2) // inner + 1
+        stop = (b + 1) * (n - 2) // inner + 1
+        after = range(stop, min((b + 2) * (n - 2) // inner + 1, n)) or range(n - 1, n)
+        mean_x = math.fsum(xs[j] for j in after) / len(after)
+        mean_y = math.fsum(ys[j] for j in after) / len(after)
+        x0, y0 = xs[kept], ys[kept]
+        kept = max(
+            range(start, stop),
+            key=lambda j: abs((x0 - mean_x) * (ys[j] - y0) - (x0 - xs[j]) * (mean_y - y0)),
+        )
+        out.append(kept)
+    out.append(n - 1)
+    return out
 
 
 _BETACF_MAX_ITER = 300

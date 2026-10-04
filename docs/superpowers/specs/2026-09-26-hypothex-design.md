@@ -635,9 +635,10 @@ CLI: `hx hosts add <name> --ssh <alias> [--slurm --partition P ...]`, `hx hosts 
 1. Probe: `uname`, Python ≥ 3.11 or `uv` available, `nvidia-smi -L`, `sbatch --version`.
 2. Install: the hub builds its own wheel (`uv build --wheel`, cached by version) and copies
    it with `scp` to `<home>/runtime/wheels/`. The host installs it with
-   `uv tool install --force` into `<home>/runtime/` (if `uv` is missing, it is installed
-   with the official installer into `~/.local/bin`; no network → clear error naming the
-   missing piece). Under a lock dir, so two hubs never race.
+   `uv tool install --force` into `<home>/runtime/` (if `uv` is missing, the install fails
+   before the upload with an error that asks for `uv`, unless the user allowed the official
+   installer (`install_uv`), which then puts it into `~/.local/bin`; no network → clear error
+   naming the missing piece). Under a lock dir, so two hubs never race.
 3. Start: reuse a healthy server recorded in `<home>/serve/server.json` (pid, port,
    managed|external, hx_version); else `nohup hx serve --host 127.0.0.1 --port 0`, wait for
    the descriptor, on failure return the last 80 log lines.

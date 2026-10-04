@@ -72,13 +72,27 @@ def run_fingerprint(
     Returns
     -------
     dict
-        Canonical description of what the run does.
+        Canonical description of what the run does. A param equal to the var of
+        the same name is left out, so a sweep run (which stores each grid value
+        in both) and a manual run with the same ``--var`` hash alike.
+
+    Examples
+    --------
+    >>> swept = run_fingerprint(
+    ...     command_template=["t"], stage=None, user_config=None,
+    ...     params={"C": "1"}, vars={"C": "1"},
+    ... )
+    >>> manual = run_fingerprint(
+    ...     command_template=["t"], stage=None, user_config=None, params={}, vars={"C": "1"}
+    ... )
+    >>> swept == manual
+    True
     """
     return {
         "command": list(command_template),
         "stage": stage,
         "config": {k: v for k, v in (user_config or {}).items() if k != "seed"},
-        "params": {k: v for k, v in params.items() if k != "seed"},
+        "params": {k: v for k, v in params.items() if k != "seed" and vars.get(k) != v},
         "vars": dict(vars),
     }
 
@@ -155,6 +169,36 @@ def summarize(values: list[float]) -> Stats:
     std = statistics.stdev(values)
     half = t_critical(n - 1) * std / math.sqrt(n)
     return Stats(mean=mean, std=std, n=n, ci_low=mean - half, ci_high=mean + half)
+
+
+def clamp(stats: Stats, lo: float, hi: float) -> Stats:
+    """
+    Clip a t-interval to the range the metric can take.
+
+    Parameters
+    ----------
+    stats : Stats
+        A group's statistics.
+    lo, hi : float
+        The lowest and highest possible value.
+
+    Returns
+    -------
+    Stats
+        A copy with ``ci_low >= lo`` and ``ci_high <= hi``; ``stats`` itself when
+        it has no interval.
+
+    Examples
+    --------
+    >>> s = clamp(summarize([0.98, 1.0, 1.0]), 0.0, 1.0)
+    >>> s.ci_high
+    1.0
+    """
+    if stats.ci_low is None or stats.ci_high is None:
+        return stats
+    return stats.model_copy(
+        update={"ci_low": max(lo, stats.ci_low), "ci_high": min(hi, stats.ci_high)}
+    )
 
 
 def intervals_overlap(a: Stats, b: Stats) -> bool | None:

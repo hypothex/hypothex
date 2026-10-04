@@ -15,22 +15,37 @@
 **Mockups:** `docs/mockups/phase3/` (`index.html`, `data.js`, `shot-pair-{ready,done,invalid}-*`, `shot-settings-*`, `shot-settings-collab-*`, `shot-storage-*`, `shot-storage-confirm-*`, `shot-storage-result-*`, `shot-notebook-*`, `shot-notebook-conflict-*`, `shot-task-export-*`, `shot-run-*`, `shot-gate-*`).
 
 **Depends on:**
-- The phase 2 frontend plan (`docs/superpowers/plans/2026-10-03-hypothex-phase2-frontend.md`) merged to `main` in full: the Sweep page (`/s/$project/$id`), the Launch dialog, and Tasks 23–29 (`remote.ts`, the phase 2 `StatusLine.tsx`, `RunActions.tsx` and `Run.tsx`, the `hosts-*` Playwright projects, random e2e ports, `expectIsolatedHub`). Every "as left by phase 2 Task N" anchor below is that plan's final text. Merged: `main` at `8df4760` ("Merge pull request #12 from hypothex/phase-2") holds the whole phase 2 frontend, Tasks 26 and 28 included (`RunActions.tsx` with `Cancel`, the `hosts-*` projects, random ports, `expectIsolatedHub`, and the per-run `RUN_DIR` of `9341413`); every anchor below was re-copied from it at review round 3. Before starting, run the pre-flight check below; it must print `anchors ok`:
+- The phase 2 frontend and audit/UI improvements are merged. The integration snippets below were refreshed against pinned main `5c020378b75bcb2afeba427e85b2f075e8e70804`. The token and DF-48 interfaces remain pending their final merge. Before implementation, run this check on the intended source checkout. The 12 historical snippet anchors alone are insufficient: whole-file Header replacement and procedural event-stream edits must also match the reviewed source blobs.
 
 ```bash
 uv run python - <<'PY'
 import pathlib
 import re
+import subprocess
 
 plan = pathlib.Path("docs/superpowers/plans/2026-10-04-hypothex-phase3-frontend.md").read_text()
 anchor = re.compile(r"`(ui/[^`]+)` \(as left by phase 2 Task \d+\), replace\n\n```[a-z]*\n(.*?)\n```", re.S)
 found = anchor.findall(plan)
 bad = [f for f, block in found if not pathlib.Path(f).is_file() or block not in pathlib.Path(f).read_text()]
-print(f"{len(found)} anchors", "anchors ok" if not bad else f"MISSING in {bad}")
+reviewed = {
+    'ui/src/api/events.ts': '57960da4027eb647cf8db83782aa6beffca770f2',
+    'ui/src/api/queries.ts': '6ca8e0266502e4b99079b2499dcaab2e0f58ef97',
+    'ui/src/api/client.ts': '84c3d0f14e3282590ba4cf1f41be46951205d4b9',
+    'ui/src/shell/Header.tsx': 'b61fbb21380110a250fb21190ce17d81b289a1d8',
+    'ui/src/pages/components/OverviewLists.tsx': '215ed36b1c0907ad248a4f4cdbcc1f0eab6064a5',
+    'ui/src/pages/Task.tsx': '5ad6afa9ea59d49b1aee576e86166a50a6bfbae3',
+    'ui/e2e/serve-demo.ts': 'e3befa39a67bc01c458dc05a089e17147500c54f',
+    'ui/playwright.config.ts': '54ee4b06e868d3c92a74b6a291417928c96947ca',
+}
+changed = [f for f, blob in reviewed.items()
+           if subprocess.check_output(["git", "hash-object", f], text=True).strip() != blob]
+print(f"{len(found)} snippet anchors", "ok" if not bad else f"MISSING in {bad}")
+print("reviewed replacement sources", "ok" if not changed else f"REFRESH REQUIRED for {changed}")
+assert not bad and not changed, "Re-read changed sources and refresh affected replacements before implementation"
 PY
 ```
 
-Run from the repo root. Expected: `12 anchors anchors ok` (true on `8df4760`). A `MISSING` file means `main` changed that file after `8df4760`: re-read it and update the matching "replace" block here before running the task. Task 25 puts the team home and demo file under the run's own `RUN_DIR` like the other two hubs (`join(RUN_DIR, "home-team")`, `join(RUN_DIR, "demo-team.json")`; `e2e/.gitignore` already ignores `.runs/`), and its whole-file `ui/playwright.config.ts` is `main`'s file plus the `team-*` server and projects.
+Expected on the pinned baseline: `12 snippet anchors ok` and `reviewed replacement sources ok`. A later merge deliberately fails the blob check: re-read changed files and update the snippets, tests and baseline hashes together; do not merely copy new hashes. In particular preserve confirmed recents, WebSocket head/cancellation/single-batch invalidation, grouped failure retries, Task loading/launch behavior, and per-run e2e homes. Task 25's whole-file `ui/playwright.config.ts` must remain the final baseline plus its team server/projects.
 - The phase 3 backend plan (`docs/superpowers/plans/2026-10-04-hypothex-phase3-backend.md`) merged: the contract section 3 routes in `/api/openapi.json`, `RunRecord.owner`, `RunDetail.cleaned`, `Leaderboard.baselines`, the section 2 events, the `4401` close code, `hx serve --auth`, and `hx demo --with-team` (contract 11: owner `sv` admin and `alice` launch, two projects with notebook days and one weekly summary, baselines on `toy-classifier/toy-test`, 6 archived runs with artifacts, outbox entries in every state, one connected fake host, the local session token in `<home>/serve/server.json`).
 - The mockups in `docs/mockups/phase3/` approved.
 
@@ -2208,6 +2223,47 @@ describe("tickets and 4401", () => {
     stream.stop();
   });
 
+  test("head completes before ticket acquisition and subscribe retains the head", async () => {
+    const order: string[] = [];
+    const sockets: Socket[] = [];
+    let finishHead!: (value: number) => void;
+    const stream = new EventStream({
+      head: () => new Promise<number>((resolve) => { finishHead = resolve; }),
+      onHead: () => order.push("head"),
+      resolveUrl: async () => { order.push("ticket"); return "ws://local/ws?ticket=one"; },
+      createSocket: (url) => { const socket = new Socket(url); sockets.push(socket); return socket; },
+      onEvents: () => {},
+    });
+    stream.start();
+    expect(order).toEqual([]);
+    finishHead(42);
+    await flush();
+    expect(order).toEqual(["head", "ticket"]);
+    sockets[0]?.open();
+    expect(sockets[0]?.sent).toEqual([JSON.stringify({ type: "subscribe", after_sequence: 42 })]);
+    stream.stop();
+  });
+
+  test("a ticket from before stop and restart cannot open a socket", async () => {
+    const pending: ((url: string) => void)[] = [];
+    const sockets: Socket[] = [];
+    const stream = new EventStream({
+      resolveUrl: () => new Promise<string>((resolve) => pending.push(resolve)),
+      createSocket: (url) => { const socket = new Socket(url); sockets.push(socket); return socket; },
+      onEvents: () => {},
+    });
+    stream.start();
+    stream.stop();
+    stream.start();
+    pending[0]?.("ws://local/ws?ticket=old");
+    await flush();
+    expect(sockets).toHaveLength(0);
+    pending[1]?.("ws://local/ws?ticket=new");
+    await flush();
+    expect(sockets.map((socket) => socket.url)).toEqual(["ws://local/ws?ticket=new"]);
+    stream.stop();
+  });
+
   test("close code 4401 locks and never reconnects", async () => {
     const clock = new Clock0();
     const statuses: string[] = [];
@@ -2372,7 +2428,12 @@ In `ui/src/api/events.ts`, replace
 import { wsUrl } from "./client";
 import type { HxEvent, WsMessage } from "./models";
 import { noteLostReasons } from "./lostReasons";
-import { HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "./queries";
+import {
+  fetchLastSequence,
+  HOST_EVENT_INVALIDATES,
+  REMOTE_RUN_INVALIDATES,
+  RUN_EVENT_INVALIDATES,
+} from "./queries";
 ```
 
 with
@@ -2385,7 +2446,9 @@ import { noteLostReasons } from "./lostReasons";
 import { noteNotebookEditors } from "./notebookEditors";
 import {
   AUTH_EVENT_INVALIDATES,
+  fetchLastSequence,
   HOST_EVENT_INVALIDATES,
+  NOTEBOOK_INVALIDATES,
   NOTIFY_INVALIDATES,
   REMOTE_RUN_INVALIDATES,
   RUN_EVENT_INVALIDATES,
@@ -2497,53 +2560,40 @@ export function keysForEvent(event: HxEvent): QueryKey[] {
 }
 ```
 
-In `EventStream`, replace the first lines of `connect`
+In `EventStream`, retain main's `connect`, `lookupHead`, `needHead`, `headTimer`, `headToken`, `restartFromZero`, and head cancellation in `stop`. Rename its existing socket-opening `private open(): void` to `private openSocket(url: string): void`, and replace only `this.createSocket(this.options.url)` in that method with `this.createSocket(url)`. Add `private urlToken = 0` alongside `headToken`; increment `urlToken` in `stop()` so a pending result from a stopped generation cannot open a socket after restart. Add this new `open` method; both existing calls from `connect` and `lookupHead.finish` continue calling `this.open()`:
 
 ```ts
-  private connect(): void {
-    this.ready = false;
-    this.setStatus("connecting");
-    let socket: SocketLike;
-    try {
-      socket = this.createSocket(this.options.url);
-    } catch {
-```
-
-with
-
-```ts
-  private connect(): void {
-    this.ready = false;
-    this.setStatus("connecting");
+  /** Resolve a ticket only after the initial head decision; each reconnect gets its own. */
+  private open(): void {
+    if (!this.running) return;
+    const token = ++this.urlToken;
+    const current = () => this.running && token === this.urlToken && this.socket === null;
+    const failed = (): void => {
+      if (!current()) return;
+      if (authState() === "locked") {
+        this.stop();
+        this.setStatus("offline");
+        return;
+      }
+      this.setStatus("offline");
+      this.scheduleReconnect();
+    };
     const resolve = this.options.resolveUrl;
-    if (resolve) {
-      resolve().then(
-        (url) => {
-          if (this.running && this.socket === null) this.open(url);
-        },
-        () => {
-          if (!this.running) return;
-          if (authState() === "locked") {
-            // 401: the session is gone; asking again would only repeat the 401
-            this.stop();
-            this.setStatus("offline");
-            return;
-          }
-          this.setStatus("offline");
-          this.scheduleReconnect();
-        },
-      );
+    if (!resolve) {
+      this.openSocket(this.options.url ?? "");
       return;
     }
-    this.open(this.options.url ?? "");
-  }
-
-  private open(url: string): void {
-    let socket: SocketLike;
     try {
-      socket = this.createSocket(url);
+      resolve().then((url) => {
+        if (current()) this.openSocket(url);
+      }, failed);
     } catch {
+      failed();
+    }
+  }
 ```
+
+Retain the single predicate-based `invalidateForEvents` implementation and its `partialMatchKey` import: one event batch issues one invalidation, including when run and project keys overlap.
 
 Replace
 
@@ -2575,6 +2625,7 @@ In `useEventStream`, replace
   useEffect(() => {
     const { url, createSocket, clock } = initial.current;
     const storage = initial.current.storage === undefined ? defaultStorage() : initial.current.storage;
+    const head = initial.current.head === undefined ? () => fetchLastSequence(client) : initial.current.head;
     const stream = new EventStream({
       url: url ?? wsUrl(),
       onEvents: (events) => {
@@ -2590,6 +2641,7 @@ with
     const { url, createSocket, clock, enabled = true } = initial.current;
     if (!enabled) return;
     const storage = initial.current.storage === undefined ? defaultStorage() : initial.current.storage;
+    const head = initial.current.head === undefined ? () => fetchLastSequence(client) : initial.current.head;
     const stream = new EventStream({
       url,
       resolveUrl: url === undefined ? () => eventsUrl() : undefined,
@@ -2599,6 +2651,8 @@ with
         invalidateForEvents(client, events);
       },
 ```
+
+Keep `head: head ?? undefined`, the existing `onHead` callback, and its `cancelQueries(filters).then(() => invalidateQueries(filters))` ordering. Extend only the callback's key union to include `NOTEBOOK_INVALIDATES`, `STORAGE_EVENT_INVALIDATES`, `NOTIFY_INVALIDATES`, and `AUTH_EVENT_INVALIDATES` alongside the existing run and host lists: their events before the accepted head are also skipped. Do not invalidate the view-editor source or `/auth/me`. The hook's `head?: ... | null` test override remains.
 
 Replace
 
@@ -2639,7 +2693,7 @@ export function LiveUpdates({ children, options, enabled = true }: LiveUpdatesPr
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `bun test test/api && bun run typecheck`
-Expected: `phase3-events.test.ts` 8 pass, `notebookEditors.test.ts` 2 pass; `events.test.ts` (phase 1b/2) passes unchanged (its streams pass `url`, so they connect synchronously as before, and its sockets close without a code); `0 fail`; `tsc --noEmit` prints nothing.
+Expected: all phase-3 event cases pass, including head-before-ticket and stopped-generation rejection; `notebookEditors.test.ts` 2 pass; `events.test.ts` (phase 1b/2) passes unchanged (its streams pass `url`, so they connect synchronously as before, and its sockets close without a code); `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 6: Commit (repo root)**
 
@@ -3404,7 +3458,7 @@ Create `ui/test/shell/headerPhase3.test.tsx`:
 import { afterEach, describe, expect, test } from "bun:test";
 import { screen, waitFor } from "@testing-library/react";
 import { covers, SCOPE_GLYPH, scopesUpTo } from "../../src/pages/components/scopes";
-import { RECENT_KEY, parseRecent, projectOf, screenOf, updateRecent } from "../../src/shell/Header";
+import { RECENT_KEY, confirmKeys, parseRecent, projectOf, screenOf, updateRecent } from "../../src/shell/Header";
 import { ME_ADMIN, ME_ALICE, ME_OFF } from "../api/phase3-fixtures";
 import { mockApi, restoreFetch } from "../pages/helpers";
 import { renderApp } from "../render-app";
@@ -3437,6 +3491,12 @@ describe("paths", () => {
     expect(parseRecent({ project: { name: "deepretro" } })).toEqual({ project: { name: "deepretro" } });
     expect(parseRecent({ project: { name: "" } })).toEqual({});
   });
+});
+
+test("new project recents require the page's successful read", () => {
+  expect(confirmKeys("/s/toy/s-0001")).toEqual([["sweeps", "toy", "detail", "s-0001"]]);
+  expect(confirmKeys("/n/toy")).toEqual([["notebook", "toy", "day", "today"]]);
+  expect(confirmKeys("/n/toy/2026-10-04")).toEqual([["notebook", "toy", "day", "2026-10-04"]]);
 });
 
 test("scopes: order, glyphs, what a scope covers", () => {
@@ -3636,6 +3696,8 @@ export function isAppPath(pathname: string): boolean {
 }
 ```
 
+Keep all merged `Header.test.tsx` not-found and pending-read regressions. Extend those cases to a failed/pending notebook day and sweep read: the previous project recent must remain until the requested page query succeeds; a 404 must never replace it. The helper reads only cache state and must not launch duplicate queries. Keep `OverviewLists` grouped failure/retry tests while adding an owner to both a retry-ok and retry-failed row.
+
 - [ ] **Step 4: Replace `Header.tsx`**
 
 Replace the whole of `ui/src/shell/Header.tsx` with:
@@ -3650,12 +3712,14 @@ Replace the whole of `ui/src/shell/Header.tsx` with:
  * pair the user opened (kept in localStorage) and are hidden until there is one. While the
  * app is locked (the hub said 401), only the brand and the theme toggle stay.
  */
+import { type QueryKey, useQueryClient } from "@tanstack/react-query";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { createElement, useEffect, useState } from "react";
+import { createElement, useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 import { authOn, isAdmin, usePrincipal } from "../api/auth";
 import { useStreamStatus } from "../api/events";
 import type { Principal } from "../api/models";
+import { queryKeys } from "../api/queries";
 import { AppLink, hrefs } from "../pages/components/links";
 import { SCOPE_GLYPH } from "../pages/components/scopes";
 import { ThemeToggle } from "./ThemeToggle";
@@ -3748,9 +3812,40 @@ function loadRecent(): RecentTargets {
   }
 }
 
+/**
+ * The reads whose success shows the target in `pathname` exists: the ones its page makes
+ * (Task and the view editor read the leaderboard; Run and Examples read their runs).
+ */
+export function confirmKeys(pathname: string): QueryKey[] {
+  const { task, run, examples } = updateRecent({}, pathname, {});
+  if (task) return [queryKeys.leaderboard(task.project, task.task)];
+  if (run) return [queryKeys.run(run.runId)];
+  if (examples) return [queryKeys.run(examples.a), queryKeys.run(examples.b)];
+  const parts = pathname.split("/").filter(Boolean).map(seg);
+  if (parts[0] === "s" && parts[1] && parts[2]) return [queryKeys.sweep(parts[1], parts[2])];
+  if (parts[0] === "n" && parts[1]) {
+    return [queryKeys.notebookDay(parts[1], parts[2] ?? "today")];
+  }
+  return [];
+}
+
+/**
+ * True once every read in `keys` has succeeded. It only watches the cache (an observer
+ * here would fetch, or pass its options on to the page's query).
+ */
+function useReadsOk(keys: QueryKey[]): boolean {
+  const client = useQueryClient();
+  const cache = client.getQueryCache();
+  const subscribe = useCallback((onChange: () => void) => cache.subscribe(onChange), [cache]);
+  const ok = () => keys.every((key) => client.getQueryState(key)?.status === "success");
+  return useSyncExternalStore(subscribe, ok, ok);
+}
+
 function useRecentTargets(pathname: string, search: Record<string, unknown>): RecentTargets {
-  const [recent, setRecent] = useState<RecentTargets>(() => updateRecent(loadRecent(), pathname, search));
+  const [recent, setRecent] = useState<RecentTargets>(loadRecent);
+  const confirmed = useReadsOk(confirmKeys(pathname));
   useEffect(() => {
+    if (!confirmed) return;
     setRecent((prev) => {
       const next = updateRecent(prev, pathname, search);
       try {
@@ -3760,7 +3855,7 @@ function useRecentTargets(pathname: string, search: Record<string, unknown>): Re
       }
       return next;
     });
-  }, [pathname, search]);
+  }, [confirmed, pathname, search]);
   return recent;
 }
 
@@ -4263,13 +4358,13 @@ with
 and replace
 
 ```tsx
-          <span className="small">{`${fmtTime(f.created_at)}${f.retried_ok ? ", retry ok" : ""}`}</span>
+          <span className="small">{`${fmtTime(f.created_at)}${retry}`}</span>
 ```
 
 with
 
 ```tsx
-          <span className="small">{`${fmtTime(f.created_at)}${f.retried_ok ? ", retry ok" : ""}${
+          <span className="small">{`${fmtTime(f.created_at)}${retry}${
             f.owner ? `, @${f.owner}` : ""
           }`}</span>
 ```

@@ -54,7 +54,7 @@ src/hypothex/
     records.py                 RunRecord.owner (4)
     sweeps.py                  SweepSpec.owner, launch_sweep(owner=) (4)
     control.py                 rerun/reinfer(owner=) (4)
-    index.py                   SCHEMA_VERSION 3, RunRow.owner, list_runs(owner=) (4); dialects,
+    index.py                   SCHEMA_VERSION 4, RunRow.owner, list_runs(owner=) (4); dialects,
                                upsert, json_text, open_index, IndexUnavailableError,
                                IndexSchemaError, HEAD_REVISION, Index.pending, repair_pending (34)
     migrations/          NEW   Alembic env + 0001_phase3; alembic_config, upgrade, current (35)
@@ -1496,20 +1496,20 @@ git commit -m "feat(settings): resolve secrets from env or a 0600 secrets.env an
 
 Contract 1.2, 1.3, 1.10 (store, scopes, pairing). Nothing here touches HTTP; Part 7 wires it in.
 
-### Task 4: `owner` on runs, sweeps, and launch requests; index schema 3
+### Task 4: `owner` on runs, sweeps, and launch requests; index schema 4
 
 **Files:**
 - Modify: `src/hypothex/core/records.py` (`RunRecord.owner`)
 - Modify: `src/hypothex/core/execution.py` (`RunRequest.owner`, copied in `_prepare_in`)
 - Modify: `src/hypothex/core/control.py` (`rerun`, `reinfer` take `owner`)
 - Modify: `src/hypothex/core/sweeps.py` (`SweepSpec.owner`, `launch_sweep(owner=)`, `_requests` copies it)
-- Modify: `src/hypothex/core/index.py` (`SCHEMA_VERSION = 3`, `RunRow.owner`, `list_runs(owner=)`)
+- Modify: `src/hypothex/core/index.py` (`SCHEMA_VERSION = 4`, `RunRow.owner`, `list_runs(owner=)`)
 - Test: `tests/core/test_records_phase3.py`
 
 **Interfaces:**
-- Produces (contract 1.2, exact): `RunRecord.owner: str | None = None`; `SweepSpec.owner: str | None = None`; `RunRequest.owner: str | None = None` (copied to `RunRecord.owner`); `SCHEMA_VERSION = 3`; `Index.list_runs(..., owner: str | None = None)`.
+- Produces (contract 1.2, exact): `RunRecord.owner: str | None = None`; `SweepSpec.owner: str | None = None`; `RunRequest.owner: str | None = None` (copied to `RunRecord.owner`); `SCHEMA_VERSION = 4`; `Index.list_runs(..., owner: str | None = None)`.
 - Produces (additive keywords): `control.rerun(..., owner: str | None = None)`, `control.reinfer(..., owner: str | None = None)` (the child run is owned by the caller); `launch_sweep(..., owner: str | None = None)` (stored on the spec; every run of the sweep, and of later `extend_sweep` calls, gets `spec.owner`).
-- An index with `schema_version` 2 is rebuilt from files on the next `Context.open` (phase 1 rule).
+- An index with `schema_version` 3 is rebuilt from files on the next `Context.open` (phase 1 rule).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1600,20 +1600,20 @@ def test_list_runs_filters_by_owner(ctx: Context) -> None:
     assert {r.run_id for r in ctx.index.list_runs()} == {"a", "b", "c"}
 
 
-def test_schema_2_index_is_rebuilt(tmp_path: Path) -> None:
+def test_schema_3_index_is_rebuilt(tmp_path: Path) -> None:
     from sqlalchemy.orm import Session
 
     index = Index(tmp_path / "index.db")
     with Session(index.engine) as session, session.begin():
-        session.merge(MetaRow(key="schema_version", value="2"))
-    assert SCHEMA_VERSION == 3
+        session.merge(MetaRow(key="schema_version", value="3"))
+    assert SCHEMA_VERSION == 4
     assert Index(tmp_path / "index.db").rebuilt_schema is True
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/core/test_records_phase3.py -v`
-Expected: FAIL; `test_owner_round_trips` with `AttributeError: 'RunRecord' object has no attribute 'owner'`, `test_request_owner_reaches_the_record` with `TypeError: RunRequest.__init__() got an unexpected keyword argument 'owner'`, `test_schema_2_index_is_rebuilt` with `assert 2 == 3`.
+Expected: FAIL; `test_owner_round_trips` with `AttributeError: 'RunRecord' object has no attribute 'owner'`, `test_request_owner_reaches_the_record` with `TypeError: RunRequest.__init__() got an unexpected keyword argument 'owner'`, `test_schema_3_index_is_rebuilt` with `assert 3 == 4`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -1640,20 +1640,22 @@ In `src/hypothex/core/sweeps.py`:
 - in `_requests`, in the `RunRequest(...)` call, after `created_by=spec.created_by,` add `owner=spec.owner,`.
 
 In `src/hypothex/core/index.py`:
-- `SCHEMA_VERSION = 3`;
+- `SCHEMA_VERSION = 4`;
 - in `RunRow`, after `starred` add `owner: Mapped[str | None] = mapped_column(String, nullable=True, index=True)`;
-- in `upsert_run`, in `RunRow(...)`, after `starred=record.starred,` add `owner=record.owner,`;
-- in `list_runs`, add `owner: str | None = None,` after `environment_id: str | None = None,`, document it ("owner : str, optional — only runs created by this user name."), and add after the `environment_id` filter:
+- in the shared `_run_values(record)` dictionary, after `"starred": record.starred,` add `"owner": record.owner,`; retain `"parent": record.parent`. Both `upsert_run` and staged `_add_run` use this helper, so live writes and rebuilds retain owner and parent;
+- add `owner: str | None = None,` to `list_runs` and `count_runs`, document it alongside their existing filters, and add an `owner: str | None = None` keyword to `_filter_runs`. Pass `owner=owner` at both calls to `_filter_runs`, retaining all existing filters and keyset pagination. In `_filter_runs`, before its return, add:
 
 ```python
-        if owner is not None:
-            stmt = stmt.where(RunRow.owner == owner)
+    if owner is not None:
+        stmt = stmt.where(RunRow.owner == owner)
 ```
+
+The existing parent index, `_touch` generation/change markers, and all staging/recovery helpers stay. Extend `test_list_runs_filters_by_owner` to assert `count_runs(owner="alice") == 1` and owner-filtered keyset pagination. Add a file-backed child with `owner="alice", parent="a"`, rebuild through `rebuild_index`, then assert both the returned record and SQL `RunRow.owner`/`RunRow.parent` retain those values. Reopen a home whose schema marker was set to 3 and assert `Context.open` rebuilds it to 4 while retaining that child and its scores. Keep the original schema-marker probe as a narrow constructor test, not evidence of a completed rebuild.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_records_phase3.py -v`
-Expected: `8 passed`.
+Expected: all record/schema/owner regression cases pass.
 
 Run: `uv run pytest -q && uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: every test passes; lint, format, and types clean.
@@ -1662,7 +1664,7 @@ Expected: every test passes; lint, format, and types clean.
 
 ```bash
 git add src/hypothex/core/records.py src/hypothex/core/execution.py src/hypothex/core/control.py src/hypothex/core/sweeps.py src/hypothex/core/index.py tests/core/test_records_phase3.py
-git commit -m "feat(records): run and sweep owner, owner filter, index schema 3"
+git commit -m "feat(records): run and sweep owner, owner filter, index schema 4"
 ```
 
 ---
@@ -11269,17 +11271,26 @@ and the body of `archive_run` (after its docstring) with:
 In `src/hypothex/core/execution.py`, add `from hypothex.core.storage import cleanup_lock, input_paths` to the imports and in `_prepare_in` replace
 
 ```python
-    ctx.create_run(record)
+    try:
+        ctx.create_run(record)
+    except StoreError as exc:
+        if isinstance(exc.__cause__, FileExistsError):  # the run folder exists: id clash
+            raise _RunIdTakenError(run_id) from exc
+        raise
     if user_config is not None:
 ```
 
 with
 
 ```python
-    # a run that reads another run's file (reinfer's checkpoint) is created under the cleanup
-    # lock: an apply in progress has either deleted the file already or sees this run
-    with cleanup_lock(ctx.layout) if input_paths(record) else contextlib.nullcontext():
-        ctx.create_run(record)
+    try:
+        # An input reader and cleanup serialize, while id collisions still retry.
+        with cleanup_lock(ctx.layout) if input_paths(record) else contextlib.nullcontext():
+            ctx.create_run(record)
+    except StoreError as exc:
+        if isinstance(exc.__cause__, FileExistsError):  # preserve exclusive folder ownership
+            raise _RunIdTakenError(run_id) from exc
+        raise
     if user_config is not None:
 ```
 
@@ -11918,7 +11929,7 @@ from hypothex.auth.store import HOST_PRINCIPAL
 and in `TokenGuard.__call__`, replace
 
 ```python
-        if hmac.compare_digest(given, self._expected):
+        if bearer_matches(Headers(scope=scope).get("authorization"), self._token):
             await self.app(scope, receive, send)
             return
 ```
@@ -11926,12 +11937,14 @@ and in `TokenGuard.__call__`, replace
 with
 
 ```python
-        if hmac.compare_digest(given, self._expected):
+        if bearer_matches(Headers(scope=scope).get("authorization"), self._token):
             scope["hx.principal"] = HOST_PRINCIPAL  # api.auth.PRINCIPAL_KEY: a hub forwarding
-            scope["hx.credential"] = given.decode().removeprefix("Bearer ")
+            scope["hx.credential"] = self._token  # the exact token authenticated above
             await self.app(scope, receive, send)
             return
 ```
+
+Keep the current `bearer_matches` helper, minimal unauthenticated descriptor, `same_origin` check and JSON-or-client-header POST requirement. Add principal/credential state only after successful authentication; do not restore the old loopback-host-only origin rule. Run the existing `tests/api/test_security.py` with these auth tests.
 
 In `src/hypothex/api/app.py`:
 
@@ -12423,7 +12436,7 @@ def test_the_pairing_limit_counts_people_behind_a_proxy() -> None:
 def test_logout_revokes_and_clears_the_cookie(app: FastAPI, client: TestClient) -> None:
     token = token_for(app.state.auth, "alice", "read")
     before = app.state.ctx.events.last_sequence()
-    resp = client.post("/api/v1/auth/logout", headers=bearer(token))
+    resp = client.post("/api/v1/auth/logout", headers=bearer(token), json={})
     assert resp.json() == {"ok": True} and 'hx_session=""' in resp.headers["set-cookie"]
     assert client.get("/api/v1/auth/me", headers=bearer(token)).status_code == 401
     (event,) = [e for e in app.state.ctx.events.since(before) if e.type == "auth.session_revoked"]
@@ -12456,7 +12469,7 @@ def test_users_are_admin_only_and_disable_locks_out(app: FastAPI, client: TestCl
 
 
 def test_ws_ticket(app: FastAPI, client: TestClient) -> None:
-    resp = client.post("/api/v1/auth/ws-ticket", headers=bearer(owner_token(app)))
+    resp = client.post("/api/v1/auth/ws-ticket", headers=bearer(owner_token(app)), json={})
     assert resp.json()["expires_in"] == 30 and len(resp.json()["ticket"]) > 20
 
 
@@ -12857,7 +12870,7 @@ def test_a_ticket_opens_the_socket_once(home: Path) -> None:
     app = auth_app(home)
     token = token_for(app.state.auth, "alice", "read", client="browser")
     with TestClient(app, base_url=BASE) as client:
-        ticket = client.post("/api/v1/auth/ws-ticket", headers=bearer(token)).json()["ticket"]
+        ticket = client.post("/api/v1/auth/ws-ticket", headers=bearer(token), json={}).json()["ticket"]
         with client.websocket_connect(f"{WS_URL}?ticket={ticket}") as ws:
             ws.send_json({"type": "subscribe", "after_sequence": 0})
             drain(ws)
@@ -14759,7 +14772,7 @@ Contract 1.10 (`scoped`), 5 (tools and scopes), 7. Over `/mcp` with auth on, the
 **Interfaces:**
 - Produces (contract 1.10, exact): `scoped(scope) -> Callable[[F], F]` (tool decorator), `tool_scopes(server) -> dict[str, Scope]`.
 - Produces (public helpers): `acting_as(principal)` (context manager: the principal of in-process tool calls, e.g. tests and stdio); `caller() -> Principal` (inside a tool); `caller_token() -> str | None` (the exact credential selected by the guard in private ASGI state, so the tool's own hub calls act as the caller); `tool_hub_token(fallback) -> str | None` (over HTTP `caller_token()` and never the fallback; in-process/stdio `fallback()`); `TOOL_SCOPE_ATTR = "__hx_scope__"`.
-- Rules: the wrapper finds the principal in `ctx.request_context.request.scope["hx.principal"]` (an HTTP call through `AuthGuard`/`TokenGuard`), else the `acting_as` principal, else `LOCAL_OWNER`; a tool whose scope the caller does not hold raises a tool error `403 · <scope> scope needed; you hold <scope>`. List/get tools are `read`; `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact` are `launch`. A session principal launches as `agent:<agent>@<user>` with `owner=<user>`; `LOCAL_OWNER` keeps `agent:<agent>` and no owner. Over HTTP a tool's hub calls carry only the caller's credential: a cookie caller forwards its cookie's session token, and a caller without one gets no token, never `hub_token` or the local admin token (that fallback would let any caller act with the server's own rights). Tools apply the same ownership rules as HTTP (contract 1.3): `stop_run` on a local run calls `require_act(caller(), record.owner, "stop")` and `cancel_sweep` on a local sweep `require_act(caller(), spec.owner, "cancel_queued")` before acting, and `launch_run`, `rerun`, `reinfer`, `launch_sweep`, `extend_sweep` call `require_local_exec(caller())` before a run that executes on this machine (a `launch` caller launches on hosts only); forwarded calls are checked by the hub, which sees the caller's own token. Tool errors reach the client as `Error executing tool <name>: <message>` (the SDK's prefix), so tests match the message's end.
+- Rules: the wrapper finds the principal in `ctx.request_context.request.scope["hx.principal"]` (an HTTP call through `AuthGuard`/`TokenGuard`), else the `acting_as` principal, else `LOCAL_OWNER`; a tool whose scope the caller does not hold raises a tool error `403 · <scope> scope needed; you hold <scope>`. List/get tools are `read`; `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`, `connect_host` are `launch`; `list_sweeps` is `read`. A session principal launches as `agent:<agent>@<user>` with `owner=<user>`; `LOCAL_OWNER` keeps `agent:<agent>` and no owner. Over HTTP a tool's hub calls carry only the caller's credential: a cookie caller forwards its cookie's session token, and a caller without one gets no token, never `hub_token` or the local admin token (that fallback would let any caller act with the server's own rights). Tools apply the same ownership rules as HTTP (contract 1.3): `stop_run` on a local run calls `require_act(caller(), record.owner, "stop")` and `cancel_sweep` on a local sweep `require_act(caller(), spec.owner, "cancel_queued")` before acting, and `launch_run`, `rerun`, `reinfer`, `launch_sweep`, `extend_sweep` call `require_local_exec(caller())` before a run that executes on this machine (a `launch` caller launches on hosts only); forwarded calls are checked by the hub, which sees the caller's own token. Tool errors reach the client as `Error executing tool <name>: <message>` (the SDK's prefix), so tests match the message's end.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -14773,8 +14786,9 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-
 from hypothex.auth.store import Principal
+from tests.api.authkit import BASE, auth_app
+
 from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep
@@ -14787,7 +14801,6 @@ from hypothex.mcp.server import (
     tool_hub_token,
     tool_scopes,
 )
-from tests.api.authkit import BASE, auth_app
 from tests.factories import make_record
 from tests.mcp.test_server import call
 
@@ -14797,7 +14810,7 @@ ALICE = Principal(user="alice", scope="launch", session_id="s_00000000000a", cli
 CAROL = Principal(user="carol", scope="admin", session_id="s_00000000000c", client="cli")
 LAUNCH_TOOLS = {
     "launch_run", "rerun", "reinfer", "reevaluate", "stop_run", "add_note", "tag_run",
-    "add_view", "launch_sweep", "cancel_sweep", "extend_sweep", "pull_artifact",
+    "add_view", "launch_sweep", "cancel_sweep", "extend_sweep", "pull_artifact", "connect_host",
 }  # fmt: skip
 
 
@@ -14878,12 +14891,11 @@ def test_registered_http_tool_forwards_only_authenticated_cookie(
     home: Path, monkeypatch: pytest.MonkeyPatch, authorization: bytes | None, tool_name: str
 ) -> None:
     import httpx
+    from hypothex.api.auth import AuthGuard
     from starlette.applications import Starlette
     from starlette.requests import Request
     from starlette.responses import JSONResponse
     from starlette.routing import Route
-
-    from hypothex.api.auth import AuthGuard
     from tests.api.authkit import token_for
 
     app = auth_app(home)
@@ -14934,12 +14946,55 @@ def test_registered_http_tool_forwards_only_authenticated_cookie(
         headers = [(b"cookie", f"hx_session={token}".encode())]
         if authorization is not None:
             headers.append((b"authorization", authorization))
-        assert client.post("/mcp/", headers=headers).status_code == 200
+        assert client.post("/mcp/", headers=headers, json={}).status_code == 200
     assert sent and all(headers["Authorization"] == f"Bearer {token}" for headers in sent)
     # Even a principal-only HTTP context cannot activate either discovery layer.
     sent.clear()
     tool.fn(**args, hx_mcp_ctx=fake_http(None))
     assert sent and all("Authorization" not in headers for headers in sent)
+
+
+@pytest.mark.parametrize("tool_name", ["list_runs", "get_run"])
+@pytest.mark.parametrize("credential", ["hxs_selected", None])
+def test_host_state_reads_never_discover_a_server_token_over_http(
+    home: Path,
+    toy_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    credential: str | None,
+) -> None:
+    import httpx
+
+    ctx = Context.open(home)
+    ctx.register_project(toy_repo)
+    ctx.create_run(make_record("remote-read", environment_id="env-remote"))
+    sent: list[dict[str, str]] = []
+
+    def request(method: str, url: str, **kwargs: object) -> httpx.Response:
+        assert method == "GET" and "/api/v1/runs?" in url
+        sent.append(dict(kwargs["headers"]))
+        return httpx.Response(200, json=[{"host_state": "connected"}])
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("HTTP host-state reads cannot discover a server credential")
+
+    monkeypatch.setattr("hypothex.mcp.server.httpx.request", request)
+    monkeypatch.setattr("hypothex.mcp.server.resolve_hub_token", forbidden)
+    server = build_server(home, hub_url=BASE, hub_token="SERVER-ADMIN")
+    tool = next(t for t in server._tool_manager.list_tools() if t.name == tool_name)
+    args = {"run_id": "remote-read"} if tool_name == "get_run" else {}
+    tool.fn(**args, hx_mcp_ctx=fake_http(credential))
+    assert len(sent) == 1
+    if credential is None:
+        assert "Authorization" not in sent[0]
+    else:
+        assert sent[0]["Authorization"] == f"Bearer {credential}"
+
+
+def test_read_principal_cannot_reconnect_a_host(home: Path) -> None:
+    with acting_as(READER):
+        err, message = call(home, "connect_host", {"name": "gpu1"})
+    assert err and message.endswith("403 · launch scope needed; you hold read")
 
 
 def test_tools_keep_the_ownership_rules(home: Path, toy_repo: Path) -> None:
@@ -15217,7 +15272,15 @@ In `locate_sweep`, pass `discover_token=discover_token` to `sweep_summary`. In t
         return f"agent:{agent}@{principal.user}", principal.user
 ```
 
-3. Put `@scoped("read")` or `@scoped("launch")` between `@mcp.tool()` and `@_expose_errors` on every tool: `read` on `list_projects`, `list_tasks`, `get_task`, `get_leaderboard`, `list_runs`, `get_run`, `compare_runs`, `get_predictions`, `list_views`, `get_view`, `query_view`, `list_hosts`, `get_sweep`; `launch` on `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`. For example:
+The merged `host_states(ctx, environment_ids, *, url=None, token=None)` is another forwarding path used by `list_runs` and `get_run`. Add keyword-only `discover_token: bool = True`, documenting the same rule as `hub_call`. Replace its credential selection with:
+
+```python
+        auth = (auth or token or resolve_hub_token(url, ctx.layout.home)) if discover_token else token
+```
+
+Pass `discover_token=discover_token` to its real `hub_call`, retaining `timeout=HOST_STATE_SECONDS`. In both `list_runs` and `get_run`, pass `discover_token=not _OVER_HTTP.get()` at their `host_states` calls alongside `token=auth()`. Keep the merged host-state and untrusted-source metadata on these responses, and the task-wide remote reeval and pinned local sweep behavior.
+
+3. Put `@scoped("read")` or `@scoped("launch")` between `@mcp.tool()` and `@_expose_errors` on every tool: `read` on `list_projects`, `list_tasks`, `get_task`, `get_leaderboard`, `list_runs`, `get_run`, `compare_runs`, `get_predictions`, `list_views`, `get_view`, `query_view`, `list_hosts`, `list_sweeps`, `get_sweep`; `launch` on `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`, `connect_host`. For example:
 
 ```python
     @mcp.tool()
@@ -15404,7 +15467,7 @@ In `tests/mcp/test_scoped_tools.py` (Task 32), `add_notebook_entry` is a new `la
 LAUNCH_TOOLS = {
     "launch_run", "rerun", "reinfer", "reevaluate", "stop_run", "add_note", "tag_run",
     "add_view", "launch_sweep", "cancel_sweep", "extend_sweep", "pull_artifact",
-    "add_notebook_entry",
+    "add_notebook_entry", "connect_host",
 }  # fmt: skip
 ```
 
@@ -15569,14 +15632,15 @@ Contract 1.11, 8 (failure mode 13), 9 (Docker test). The index is the only thing
 ### Task 34: Index dialects, `upsert`, `open_index`, and a 503 when the index is down
 
 **Files:**
-- Modify: `src/hypothex/core/index.py` (`Index(target, *, password=)`, `dialect`, `upsert`, `upsert_statement`, `json_text`, `open_index`, `IndexUnavailableError`, `IndexSchemaError`, `HEAD_REVISION`; every `session.merge` and `sqlite_insert` goes through `upsert`; `Index.pending`, `INDEX_PENDING_FILE`, `repair_pending`)
+- Modify: `src/hypothex/core/index.py` (`Index(target, store=None, *, password=)`, `dialect`, `upsert`, `upsert_statement`, `json_text`, `open_index`, `IndexUnavailableError`, `IndexSchemaError`, `HEAD_REVISION`; every `session.merge` and `sqlite_insert` goes through `upsert`; `Index.pending`, `INDEX_PENDING_FILE`, `repair_pending`)
 - Modify: `src/hypothex/core/context.py` (`Context.open` uses `open_index`, then `repair_pending`)
 - Modify: `src/hypothex/api/app.py` (`environment_runs` uses `json_text`; 503 for `IndexUnavailableError` and SQLAlchemy `OperationalError`; `_repair_loop` runs `repair_pending`)
 - Test: `tests/core/test_index_dialects.py`
 
 **Interfaces:**
-- Produces (contract 1.11, exact): `Index.__init__(target: Path | str, *, password: SecretStr | None = None)`, `Index.dialect`, `upsert(session, model, values, keys)`, `open_index(layout, settings)`, `IndexUnavailableError` (API 503), `IndexSchemaError` (a `ConfigError`: "run hx db upgrade").
+- Produces (contract 1.11, exact): `Index.__init__(target: Path | str, store: RunStore | None = None, *, password: SecretStr | None = None)`, `Index.dialect`, `upsert(session, model, values, keys)`, `open_index(layout, settings)`, `IndexUnavailableError` (API 503), `IndexSchemaError` (a `ConfigError`: "run hx db upgrade").
 - Produces (additive): `upsert(..., *, keep_max: str | None = None)` (keeps the larger value of one column, for `set_cursor`); `upsert_statement(dialect, model, values, keys, *, keep_max=None)`; `Index.json_text(column, key)` (`json_extract` on SQLite, `json_extract_path_text` on Postgres); `HEAD_REVISION = "0001_phase3"`; `INDEX_PENDING_FILE = "index-pending.txt"`; `Index.pending: Path | None` (set by `open_index` to `<home>/index-pending.txt`); `repair_pending(index, store) -> list[str]`.
+- Rebuild/recovery: preserve main `5c020378b75bcb2afeba427e85b2f075e8e70804` generation/change markers, schema-3 parent/deferred-point/stale-score state and atomic concurrent SQLite rebuild. `Index.store` is retained on both dialects; PostgreSQL gets the explicit staged transaction below and never accesses a SQLite path. PostgreSQL mutation transactions take one exclusive advisory guard before any live DML; final swap takes the same guard, while staging and ordinary reads remain available.
 - Rules: a `Path` target is SQLite exactly as before; a `postgresql+psycopg://` URL opens a pooled engine (`pool_pre_ping=True`) with the password from `server.index_password_env`, never from the URL, and checks that the Alembic revision is `HEAD_REVISION` (`IndexSchemaError` otherwise). A server that does not answer raises `IndexUnavailableError` naming the URL with `***` for any password. A Postgres URL without `psycopg` installed raises `ConfigError` "a Postgres index needs psycopg: uv tool install 'hypothex[server]'" (never a bare `ModuleNotFoundError` from SQLAlchemy). Mid-request index failures answer 503 `{error, type: "IndexUnavailableError"}`. Run files are written before the index, so a failed write leaves the index row missing (a new run: `repair_index_gaps` adds it) or stale (an archive, star, status change, or score append on an indexed run, which `repair_index_gaps` never looks at): every run write of `Index` (`upsert_run`, `add_score`, `replace_scores`, `replace_metric_points`, `delete_run`) that fails with `OperationalError`/`InterfaceError` appends its run id to `Index.pending` (under the file's `flock`, re-opening when a repair moved the file) before re-raising, and `repair_pending` re-indexes those runs from their files (drops the ones whose folder is gone) on the next `Context.open` and every 30 s in the server's repair loop, so the index catches up once Postgres answers. The claim is recoverable: the journal is moved to `index-pending.txt.<8 hex>.claim`, every claim file (a crashed process's too) is read, and each is removed only after all its runs are indexed. Each run is re-read and indexed under its `run_lock` (the lock `Context.update_run` holds), so a repair racing an archive never writes the old value back.
 
 - [ ] **Step 1: Write the failing test**
@@ -15622,6 +15686,8 @@ DEAD_PG = "postgresql+psycopg://hx@127.0.0.1:1/hypothex"
 def test_sqlite_index_is_unchanged(tmp_path: Path) -> None:
     index = Index(tmp_path / "index.db")
     assert index.dialect == "sqlite" and index.rebuilt_schema is True
+    assert Index(tmp_path / "index.db").rebuilt_schema is True  # no rebuild finished yet
+    index.set_meta("schema_version", str(index_module.SCHEMA_VERSION))
     assert Index(tmp_path / "index.db").rebuilt_schema is False
 
 
@@ -15763,52 +15829,26 @@ Expected: FAIL at collection with `ImportError: cannot import name 'IndexUnavail
 
 In `src/hypothex/core/index.py`:
 
-1. Replace the import block with:
+1. Keep the merged-main imports (including `errno`, `sqlite3`, `datetime`, `TemporaryDirectory`, `TYPE_CHECKING`, `Select`, `insert`, `tuple_`, `SqlIndex`, `RunNotFoundError`, and `lttb`). Merge these additions into their existing groups:
 
 ```python
-from __future__ import annotations
-
-import contextlib
-import fcntl
-import json
-import math
 import os
 import secrets
-import time
-from collections import defaultdict
-from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Any, Literal
+from typing import Literal, Protocol
 
 from pydantic import SecretStr
-from sqlalchemy import (
-    JSON,
-    Boolean,
-    Float,
-    Integer,
-    String,
-    Text,
-    cast,
-    create_engine,
-    delete,
-    event,
-    func,
-    select,
-    text,
-)
+from sqlalchemy import JSON, BigInteger, MetaData, Table, cast
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.engine import make_url
-from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import InterfaceError, ProgrammingError
 
 from hypothex.core.errors import ConfigError, HypothexError
 from hypothex.core.layout import Layout
-from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.settings import ServerSettings, redact_url, resolve_secret
-from hypothex.core.store import ProjectEntry, RunStore, run_lock
 ```
+
+`sqlite_insert`, `OperationalError`, `Session`, `RunStore` and the other existing imports stay. Do not replace this module's import block with a pre-audit version.
 
 2. After `MAX_POINTS_PER_METRIC = 1000` add:
 
@@ -15895,6 +15935,7 @@ def upsert(
     keep_max : str, optional
         A column that keeps the larger value.
     """
+    _index_write_guard(session)
     dialect = session.get_bind().dialect.name
     session.execute(upsert_statement(dialect, model, values, keys, keep_max=keep_max))
 ```
@@ -15902,9 +15943,13 @@ def upsert(
 4. Replace `Index.__init__` with:
 
 ```python
-    def __init__(self, target: Path | str, *, password: SecretStr | None = None) -> None:
+    def __init__(
+        self, target: Path | str, store: RunStore | None = None, *, password: SecretStr | None = None
+    ) -> None:
+        self.store = store
         self.dialect: Literal["sqlite", "postgresql"]
         if isinstance(target, Path):
+            self.path = target  # SQLite staging/rebuild owns a local database path
             target.parent.mkdir(parents=True, exist_ok=True)
             self.engine = create_engine(
                 f"sqlite:///{target}", connect_args={"check_same_thread": False, "timeout": 10}
@@ -15917,7 +15962,7 @@ def upsert(
         if password is not None:
             url = url.set(password=password.get_secret_value())
         try:
-            self.engine = create_engine(url, pool_pre_ping=True)  # imports the driver
+            self.engine = create_engine(url, pool_pre_ping=True, isolation_level="READ COMMITTED")
         except ImportError:
             raise ConfigError(
                 "a Postgres index needs psycopg: uv tool install 'hypothex[server]'"
@@ -15932,6 +15977,8 @@ def upsert(
 ```
     target : Path or str
         A SQLite file, or a ``postgresql+psycopg://user@host:port/db`` URL.
+    store : RunStore, optional
+        Store used to fill deferred metric points after a rebuild (both dialects).
     password : SecretStr, optional
         The Postgres password (``server.index_password_env``).
 ```
@@ -15987,29 +16034,13 @@ def upsert(
             )
 ```
 
-   the `session.merge(RunRow(...))` call in `upsert_run` with:
+   the current `session.merge(RunRow(**_run_values(record)))` call in `upsert_run` with:
 
 ```python
-            upsert(
-                session,
-                RunRow,
-                {
-                    "run_id": record.run_id,
-                    "project": record.project,
-                    "task": record.task,
-                    "status": record.status.value,
-                    "created_at": record.created_at.isoformat(),
-                    "config_hash": record.config_hash,
-                    "commit": record.git.commit,
-                    "environment_id": record.environment_id,
-                    "archived": record.archived,
-                    "starred": record.starred,
-                    "owner": record.owner,
-                    "record_json": record.model_dump_json(),
-                },
-                ["run_id"],
-            )
+            upsert(session, RunRow, _run_values(record), ["run_id"])
 ```
+
+   Keep `_touch(session, record.run_id)` before it. Task 4 adds owner to `_run_values`; the shared dictionary also retains parent and is used by staging rebuilds.
 
    the body of `set_meta` with:
 
@@ -16030,7 +16061,7 @@ def upsert(
    and the first line of the body of `upsert_run`, `add_score`, `replace_scores`, `replace_metric_points`, and `delete_run` (`with Session(self.engine) as session, session.begin():`) with
 
 ```python
-        with self._journal(run_id), Session(self.engine) as session, session.begin():
+        with self._journal(run_id), _index_write_session(self.engine) as session:
 ```
 
    (`record.run_id` instead of `run_id` in `upsert_run`), and add to `Index`, after `json_text`:
@@ -16051,7 +16082,174 @@ def upsert(
             raise
 ```
 
-7. Add at the end of the module:
+7. Preserve the merged generation, change-marker and recovery code, and add a dialect-specific staged rebuild.
+
+Every data mutation keeps its existing `_touch` at the same logical point in the transaction. After applying the explicit snippets, replace **every mutation transaction inside `Index`** from `with Session(self.engine) as session, session.begin():` to `with _index_write_session(self.engine) as session:`. For the five journalled run writes use `with self._journal(run_id), _index_write_session(self.engine) as session:` (`record.run_id` for `upsert_run`). This includes `clear`, project/run upserts, run deletion, metadata/cursor writes and reset, score marking/replacement, and metric-point replacement. Read-only sessions stay unchanged. Add `_index_write_guard(session)` as the first statement of `_touch`, before its SQL; `upsert` also invokes it above for direct callers. Reacquisition within the same transaction is allowed and never increments generation by itself. Do not wrap `_rebuild_postgres` in `_index_write_session`: its staging must remain outside the mutation guard. Convert `mark_scores_stale` to:
+
+```python
+        with _index_write_session(self.engine) as session:
+            upsert(session, ScoresStaleRow, {"run_id": run_id}, ["run_id"])
+```
+
+This mark still does not bump generation. `replace_scores` still atomically deletes the stale mark and replaces scores; `Context.add_score` keeps mark → file append → full score replacement under its run lock. Keep `_DATA_TABLES`, `_CARRIED_TABLES`, `_run_values`, `_score_values`, `RunChangeRow`, `PointsPendingRow`, `ScoresStaleRow`, `_fill_pending_points`, and their current call paths. Do not replace metric-point methods with older implementations. Final-baseline checkpoint for the guarded hydration change at `ba4459d`: route `_replace_metric_points` through `_journal(run_id)` and `_index_write_session` **before** its pending-marker DELETE/EXISTS claim. Keep its captured `RunRow.status`, `rowcount` check, outside-transaction reread/retry, and `_touch` only after a successful claim. A lost claim commits no data or generation change; preserve `idx.generation() == published_generation`. The exclusive mutation guard also prevents pending-row/generation-row inversion against `delete_run` or a normal point replacement; a shared guard alone would not. Confirm the final merged method/signature before inserting this transaction wrapper, without restoring an older whole method.
+
+PostgreSQL details follow the official [transaction advisory-lock documentation](https://www.postgresql.org/docs/16/explicit-locking.html#ADVISORY-LOCKS) and [temporary-table/LIKE semantics](https://www.postgresql.org/docs/16/sql-createtable.html). Those references establish primitives; the Docker regressions below must establish the assembled implementation.
+
+Use `BigInteger` for `MetricPointRow.step`, `HostCursorRow.last_sequence`, and `RunChangeRow.generation`, and the corresponding three migration columns. These are signed-int64 values already accepted by SQLite/records/event sequences; PostgreSQL `Integer` is int32. Preserve the same 64-bit capacity for `ScoreRow.id` and `MetricPointRow.id` with `BigInteger().with_variant(Integer(), "sqlite")`, retaining `primary_key=True, autoincrement=True`. Use the equivalent `sa.BigInteger().with_variant(sa.Integer(), "sqlite")` in Alembic: PostgreSQL gets BIGSERIAL while SQLite still gets the exact INTEGER primary-key type required for rowid autoincrement. Qualify the generation target and use BIGINT casts in both constants (plain `value` in PostgreSQL's conflict-update expression is ambiguous with `excluded.value`):
+
+```python
+_BUMP_GENERATION = text(
+    "INSERT INTO meta(key, value) VALUES (:key, '1') ON CONFLICT(key) "
+    "DO UPDATE SET value = CAST(CAST(meta.value AS BIGINT) + 1 AS TEXT)"
+).bindparams(key=GENERATION_KEY)
+_MARK_RUN = text(
+    "INSERT INTO run_changes(run_id, generation) "
+    "SELECT :run_id, CAST(meta.value AS BIGINT) FROM meta WHERE key = :key "
+    "ON CONFLICT(run_id) DO UPDATE SET generation = excluded.generation"
+).bindparams(key=GENERATION_KEY)
+```
+
+Add the following helpers. The two advisory keys are fixed application-wide constants, scoped by the PostgreSQL database: one serializes rebuilds; one serializes ordinary index mutation transactions with each other and with final catch-up/swap. The latter matches SQLite's single-writer behavior; generation updates already contend on one metadata row. Readers take neither lock. Acquire the writer guard **before any live-table DML or row lock**; never acquire the rebuild-serialization key from an ordinary write transaction. Rebuild staging does not call `upsert` or `_touch` until it already holds the exclusive lock. The default engine isolation is explicitly READ COMMITTED, so the final catch-up sees every preceding writer commit.
+
+```python
+PG_REBUILD_LOCK = 0x48595801
+PG_WRITE_LOCK = 0x48595802
+
+
+def _index_write_guard(session: Session) -> None:
+    """Serialize PostgreSQL index mutations and the final swap; SQLite is unchanged."""
+    if session.get_bind().dialect.name == "postgresql":
+        session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": PG_WRITE_LOCK})
+
+
+@contextlib.contextmanager
+def _index_write_session(engine: Engine) -> Iterator[Session]:
+    """Acquire the PostgreSQL write guard before any live-table DML or row lock."""
+    with Session(engine) as session, session.begin():
+        _index_write_guard(session)
+        yield session
+
+
+class _Rows(Protocol):
+    """The two staging backends share the existing row-building functions."""
+
+    def add(self, table: str, row: dict[str, Any]) -> None: ...
+    def flush(self) -> None: ...
+
+
+class _PgBatch:
+    """Batch writes into this transaction's temporary PostgreSQL tables."""
+
+    def __init__(self, session: Session, tables: dict[str, Table]) -> None:
+        self.session = session
+        self.tables = tables
+        self.rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self.size = 0
+
+    def add(self, table: str, row: dict[str, Any]) -> None:
+        self.rows[table].append(row)
+        self.size += 1
+        if self.size >= REBUILD_BATCH:
+            self.flush()
+
+    def flush(self) -> None:
+        for name, rows in self.rows.items():
+            if rows:
+                self.session.execute(insert(self.tables[name]), rows)
+        self.rows.clear()
+        self.size = 0
+
+
+def _rebuild_postgres(index: Index, store: RunStore) -> int:
+    """
+    Stage a rebuild, then catch up changed runs and replace live data in one transaction.
+
+    Parameters
+    ----------
+    index : Index
+        An upgraded PostgreSQL index.
+    store : RunStore
+        Authoritative file store.
+
+    Returns
+    -------
+    int
+        Number of run rows published.
+
+    Notes
+    -----
+    Concurrent readers keep seeing committed live data. Writers proceed during
+    staging, then wait only for the final swap; their later commits land on the
+    rebuilt index. Rebuild never takes run locks while excluding index writes:
+    an ordinary writer can already hold one while waiting to index its file.
+    """
+    with Session(index.engine) as session, session.begin():
+        session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": PG_REBUILD_LOCK})
+        since = int(session.scalar(select(MetaRow.value).where(MetaRow.key == GENERATION_KEY)) or 0)
+        tables: dict[str, Table] = {}
+        metadata = MetaData()
+        for model in _DATA_TABLES:
+            original = Base.metadata.tables[model.__tablename__]
+            name = f"hx_rebuild_{original.name}"
+            # Names come only from our metadata. LIKE retains serial defaults,
+            # so stage score/point ids use the live sequences (gaps are harmless).
+            session.execute(
+                text(
+                    f'CREATE TEMPORARY TABLE "{name}" (LIKE "{original.name}" INCLUDING DEFAULTS) '
+                    "ON COMMIT DROP"
+                )
+            )
+            tables[original.name] = original.to_metadata(metadata, name=name)
+        batch = _PgBatch(session, tables)
+        for record in store.iter_records():
+            _add_run(batch, store, record)
+        batch.flush()
+        session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": PG_WRITE_LOCK})
+        changed = list(
+            session.execute(
+                select(RunChangeRow.run_id, RunRow.project)
+                .outerjoin(RunRow, RunRow.run_id == RunChangeRow.run_id)
+                .where(RunChangeRow.generation > since)
+            )
+        )
+        for run_id, project in changed:
+            for name in ("runs", "run_tags", "scores", "metric_points_pending"):
+                table = tables[name]
+                session.execute(delete(table).where(table.c.run_id == run_id))
+            try:
+                record = store.read_record(project or store.find_project_of(run_id), run_id)
+            except RunNotFoundError:
+                continue
+            except Exception:  # noqa: BLE001 - matches SQLite's unreadable-run policy
+                continue
+            _add_run(batch, store, record)
+        for entry in store.list_projects():
+            _add_project(batch, entry)
+        batch.flush()
+        count = int(session.scalar(select(func.count()).select_from(tables["runs"])) or 0)
+        for model in _DATA_TABLES:
+            live = Base.metadata.tables[model.__tablename__]
+            staged = tables[live.name]
+            session.execute(delete(live))
+            session.execute(insert(live).from_select(list(live.columns.keys()), select(staged)))
+        # Bookkeeping tables are not rebuilt: cursors, stale-score marks and
+        # run-change generations survive, including writes made during staging.
+        _touch(session)
+        upsert(session, MetaRow, {"key": "schema_version", "value": str(SCHEMA_VERSION)}, ["key"])
+        session.execute(delete(MetaRow).where(MetaRow.key == STORE_SCAN_KEY))
+        return count  # transaction commits before return; any exception rolls it all back
+```
+
+Change only the type annotation of `batch` in `_add_run` and `_add_project` from `_Batch` to `_Rows`; both implementations share the complete current row builders. Add at the top of `rebuild_index`'s body, after its docstring:
+
+```python
+    if index.dialect == "postgresql":
+        return _rebuild_postgres(index, store)
+```
+
+The existing SQLite `_rebuild_lock`/`_rebuild_locked`/`_build_fresh`/`_catch_up`/`_swap_in` sequence remains verbatim. Do not route PostgreSQL through those SQLite file helpers or through `clear()` followed by a series of separately committed inserts. `rebuild_index_if_stale` is SQLite-only; its entry must reject a PostgreSQL index with `IndexSchemaError("Postgres schemas require hx db upgrade")`, avoiding any `index.path` access. Document both dialects' atomic publication and retained concurrent writes; PostgreSQL failure rolls back live changes and transaction-created staging tables, and transaction locks release on disconnect.
+
+8. Add at the end of the module:
 
 ```python
 def _append_pending(path: Path, run_id: str) -> None:
@@ -16134,7 +16332,7 @@ def repair_pending(index: Index, store: RunStore) -> list[str]:
     return ids
 
 
-def open_index(layout: Layout, settings: ServerSettings) -> Index:
+def open_index(layout: Layout, settings: ServerSettings, store: RunStore | None = None) -> Index:
     """
     Open the index ``config.yaml`` asks for.
 
@@ -16143,6 +16341,8 @@ def open_index(layout: Layout, settings: ServerSettings) -> Index:
     layout : Layout
     settings : ServerSettings
         ``index_url`` (None = SQLite ``<home>/index.db``) and ``index_password_env``.
+    store : RunStore, optional
+        Existing store; defaults to a store over ``layout``.
 
     Returns
     -------
@@ -16155,41 +16355,35 @@ def open_index(layout: Layout, settings: ServerSettings) -> Index:
     IndexSchemaError
         Postgres is not at ``HEAD_REVISION``.
     """
+    source = store if store is not None else RunStore(layout)
     if settings.index_url is None:
-        index = Index(layout.index_db)
+        index = Index(layout.index_db, store=source)
     else:
         password = resolve_secret(layout, settings.index_password_env)
-        index = Index(settings.index_url, password=password)
+        index = Index(settings.index_url, store=source, password=password)
     index.pending = layout.home / INDEX_PENDING_FILE
     return index
 ```
 
-In `src/hypothex/core/context.py`, replace `from hypothex.core.index import Index, rebuild_index, repair_index_if_changed` with `from hypothex.core.index import Index, open_index, rebuild_index, repair_index_if_changed, repair_pending`, add `from hypothex.core.settings import load_settings`, and in `Context.open` replace `index = Index(layout.index_db)` with:
+In `src/hypothex/core/context.py`, keep `Index`, `rebuild_index_if_stale`, `repair_index_if_changed`, and `repair_stale_scores` in the current grouped import; add `open_index` and `repair_pending`, plus `from hypothex.core.settings import load_settings`. Replace `index = Index(layout.index_db, store=store)` with:
 
 ```python
-        index = open_index(layout, load_settings(layout).server)
+        index = open_index(layout, load_settings(layout).server, store=store)
 ```
 
-and replace
-
-```python
-        if index.rebuilt_schema:
-            rebuild_index(index, store)
-        else:
-            repair_index_if_changed(index, store)
-        return ctx
-```
-
-with
+Retain the current end of `Context.open`, adding only the pending-journal repair after stale-score repair:
 
 ```python
         if index.rebuilt_schema:
-            rebuild_index(index, store)
+            rebuild_index_if_stale(index, store)  # SQLite: concurrent opens rebuild once
         else:
             repair_index_if_changed(index, store)
-        repair_pending(index, store)  # rows a failed index write left stale
+        repair_stale_scores(index, store)
+        repair_pending(index, store)
         return ctx
 ```
+
+Postgres never enters the automatic schema rebuild branch: an old Alembic revision is a clear `IndexSchemaError`. Explicit `rebuild_index` uses the dialect dispatch below.
 
 and add to its docstring: "The index is SQLite unless ``server.index_url`` in ``<home>/config.yaml`` names Postgres (``IndexUnavailableError`` when it does not answer, ``IndexSchemaError`` before ``hx db upgrade``). ``config.yaml`` is read on every open, so an invalid file (``ConfigError`` naming the line) stops every ``hx`` command on this home, not only ``hx serve``: on purpose, so a typo never silently falls back to the SQLite index or to auth off."
 
@@ -16242,7 +16436,7 @@ git commit -m "feat(index): postgres dialect with portable upserts, open_index, 
 - Test: `tests/core/test_migrations.py`, `tests/cli/test_db_cli.py`
 
 **Interfaces:**
-- Produces (contract 1.11, exact): `alembic_config(index_url, password) -> alembic.config.Config`, `upgrade(layout, settings) -> str`, `current(layout, settings) -> str | None`; revision `0001_phase3` creates exactly `Base.metadata` at `SCHEMA_VERSION = 3` (and its `meta` row); `hx db upgrade` / `hx db current` (`ConfigError` on SQLite: "the SQLite index needs no migrations").
+- Produces (contract 1.11, exact): `alembic_config(index_url, password) -> alembic.config.Config`, `upgrade(layout, settings) -> str`, `current(layout, settings) -> str | None`; revision `0001_phase3` creates exactly `Base.metadata` at `SCHEMA_VERSION = 4` (and its `meta` row); `hx db upgrade` / `hx db current` (`ConfigError` on SQLite: "the SQLite index needs no migrations").
 - Rules: the URL (with the password) is handed to `env.py` as `config.attributes["url"]`, never written into an Alembic option (no `%` interpolation, no password in text). The Alembic files ship in the wheel (they are inside `src/hypothex`). `hx db` never calls `Context.open` (that would refuse an index that is not upgraded yet).
 
 - [ ] **Step 1: Write the failing tests**
@@ -16517,7 +16711,7 @@ def downgrade() -> None:
 Create `src/hypothex/core/migrations/versions/0001_phase3.py`:
 
 ```python
-"""phase 3: the whole index at SCHEMA_VERSION 3
+"""phase 3: the whole index at SCHEMA_VERSION 4
 
 Revision ID: 0001_phase3
 Revises:
@@ -16582,12 +16776,13 @@ def upgrade() -> None:
         sa.Column("config_hash", sa.String(), nullable=False),
         sa.Column("commit", sa.String(), nullable=True),
         sa.Column("environment_id", sa.String(), nullable=False),
+        sa.Column("parent", sa.String(), nullable=True),
         sa.Column("archived", sa.Boolean(), nullable=False),
         sa.Column("starred", sa.Boolean(), nullable=False),
         sa.Column("owner", sa.String(), nullable=True),
         sa.Column("record_json", sa.Text(), nullable=False),
     )
-    for column in ("project", "task", "status", "created_at", "owner"):
+    for column in ("project", "task", "status", "created_at", "parent", "owner"):
         op.create_index(f"ix_runs_{column}", "runs", [column])
     op.create_table(
         "run_tags",
@@ -16597,7 +16792,12 @@ def upgrade() -> None:
     op.create_index("ix_run_tags_tag", "run_tags", ["tag"])
     op.create_table(
         "scores",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column(
+            "id",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            primary_key=True,
+            autoincrement=True,
+        ),
         sa.Column("run_id", sa.String(), nullable=False),
         sa.Column("record_json", sa.Text(), nullable=False),
         sa.Column("created_at", sa.String(), nullable=False),
@@ -16605,27 +16805,40 @@ def upgrade() -> None:
     op.create_index("ix_scores_run_id", "scores", ["run_id"])
     op.create_table(
         "metric_points",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column(
+            "id",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            primary_key=True,
+            autoincrement=True,
+        ),
         sa.Column("run_id", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
-        sa.Column("step", sa.Integer(), nullable=False),
+        sa.Column("step", sa.BigInteger(), nullable=False),
         sa.Column("value", sa.Float(), nullable=False),
         sa.Column("t", sa.Float(), nullable=True),
     )
-    op.create_index("ix_metric_points_run_id", "metric_points", ["run_id"])
+    op.create_index("ix_metric_points_run_name_step", "metric_points", ["run_id", "name", "step"])
     op.create_table(
         "host_cursors",
         sa.Column("host", sa.String(), primary_key=True),
         sa.Column("environment_id", sa.String(), primary_key=True),
-        sa.Column("last_sequence", sa.Integer(), nullable=False),
+        sa.Column("last_sequence", sa.BigInteger(), nullable=False),
     )
-    op.bulk_insert(meta, [{"key": "schema_version", "value": "3"}])
+    op.create_table(
+        "run_changes",
+        sa.Column("run_id", sa.String(), primary_key=True),
+        sa.Column("generation", sa.BigInteger(), nullable=False),
+    )
+    for name in ("metric_points_pending", "scores_stale"):
+        op.create_table(name, sa.Column("run_id", sa.String(), primary_key=True))
+    op.bulk_insert(meta, [{"key": "schema_version", "value": "4"}])
 
 
 def downgrade() -> None:
     """Drop every index table."""
     for table in (
-        "host_cursors", "metric_points", "scores", "run_tags", "runs", "tasks", "metrics",
+        "scores_stale", "metric_points_pending", "run_changes", "host_cursors",
+        "metric_points", "scores", "run_tags", "runs", "tasks", "metrics",
         "datasets", "projects", "meta",
     ):  # fmt: skip
         op.drop_table(table)
@@ -16698,19 +16911,24 @@ Create `tests/docker/test_postgres_index.py`:
 ```python
 import secrets
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+from hypothex.core.settings import ServerSettings, Settings, save_settings
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
+import hypothex.core.index as index_module
 from hypothex.cli.main import app
 from hypothex.core.context import Context
+from hypothex.core.fsutil import append_jsonl
 from hypothex.core.ids import utcnow
 from hypothex.core.index import Index, IndexSchemaError, rebuild_index
 from hypothex.core.layout import Layout
-from hypothex.core.records import RunStatus, ScoreRecord
-from hypothex.core.settings import ServerSettings, Settings, save_settings
+from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.store import RunStore
 from tests.docker.conftest import free_port, run_cmd, wait_until
 from tests.factories import make_record, write_toy_project
 
@@ -16802,7 +17020,7 @@ def test_upgrade_then_live_index_equals_rebuilt_and_sqlite(pg_home: Path, tmp_pa
     live = snapshot(ctx.index)
     rebuild_index(ctx.index, ctx.store)
     assert snapshot(ctx.index) == live
-    lite = Index(tmp_path / "sqlite.db")
+    lite = Index(tmp_path / "sqlite.db", store=ctx.store)
     rebuild_index(lite, ctx.store)
     assert snapshot(lite) == live
 
@@ -16829,12 +17047,271 @@ def test_concurrent_upserts_never_fail(pg_home: Path) -> None:
     assert errors == []
     assert ctx.index.get_cursor("gpu1", "env-a") == 7 * 100 + 19
     assert [r.run_id for r in ctx.index.list_runs(include_archived=True)] == ["same"]
+
+
+class PausedStore(RunStore):
+    """Pause once after the first staged row; no lock is held by the hook."""
+
+    def __init__(self, layout: Layout, hook: Callable[[], None]) -> None:
+        super().__init__(layout)
+        self.hook = hook
+        self.points_read = 0
+
+    def iter_records(self, project: str | None = None) -> Iterator[RunRecord]:
+        for i, record in enumerate(super().iter_records(project)):
+            yield record
+            if i == 0:
+                self.hook()
+
+    def read_metric_points(self, project: str, run_id: str) -> list[MetricPoint]:
+        self.points_read += 1
+        return super().read_metric_points(project, run_id)
+
+
+def ready_context(pg_home: Path) -> Context:
+    result = CliRunner().invoke(app, ["db", "upgrade"], catch_exceptions=False)
+    assert result.exit_code == 0
+    ctx = Context.open(pg_home)
+    for rid in ("r0", "r1", "r2"):
+        ctx.create_run(make_record(rid, status=RunStatus.FINISHED, owner="alice"))
+        append_jsonl(
+            ctx.layout.run_dir("toy", rid) / "metrics.jsonl",
+            {"name": "loss", "step": 0, "value": 1.0},
+        )
+    return ctx
+
+
+def test_int64_steps_cursors_and_generation_round_trip(pg_home: Path) -> None:
+    ctx = ready_context(pg_home)
+    step = 2**63 - 1
+    ctx.index.replace_metric_points("r0", [MetricPoint(name="loss", step=step, value=0.5)])
+    assert ctx.index.metric_points("r0")[0].step == step
+    append_jsonl(
+        ctx.layout.run_dir("toy", "r0") / "metrics.jsonl",
+        {"name": "loss", "step": step, "value": 0.5},
+    )
+    ctx.index.set_cursor("gpu1", "env-a", step)
+    assert ctx.index.get_cursor("gpu1", "env-a") == step
+    ctx.index.set_meta(index_module.GENERATION_KEY, str(2**31 - 1))
+    ctx.index.upsert_run(ctx.find_record("r0"))  # exercises existing-key conflict RHS
+    assert ctx.index.generation() == 2**31
+    with Session(ctx.index.engine) as session:
+        assert (
+            session.scalar(
+                select(index_module.RunChangeRow.generation).where(
+                    index_module.RunChangeRow.run_id == "r0"
+                )
+            )
+            == 2**31
+        )
+    rebuild_index(ctx.index, ctx.store)
+    assert ctx.index.get_cursor("gpu1", "env-a") == step
+    assert max(p.step for p in ctx.index.metric_points("r0")) == step  # lazy hydration too
+
+    # The index's generated row ids also retain SQLite's int64 capacity.
+    with Session(ctx.index.engine) as session, session.begin():
+        for table in ("scores", "metric_points"):
+            session.execute(
+                index_module.text(
+                    "SELECT setval(pg_get_serial_sequence(:table, 'id')::regclass, :value, true)"
+                ),
+                {"table": table, "value": 2**31},
+            )
+    score = ScoreRecord(metric="acc", version="v1", key="value", value=0.7, created_at=utcnow())
+    ctx.add_score(ctx.find_record("r0"), score)
+    ctx.index.replace_metric_points("r0", [MetricPoint(name="loss", step=step, value=0.5)])
+    with Session(ctx.index.engine) as session:
+        assert (
+            session.scalar(
+                select(index_module.ScoreRow.id).where(index_module.ScoreRow.run_id == "r0")
+            )
+            > 2**31
+        )
+        assert (
+            session.scalar(
+                select(index_module.MetricPointRow.id).where(
+                    index_module.MetricPointRow.run_id == "r0"
+                )
+            )
+            > 2**31
+        )
+
+
+def test_rebuild_keeps_readers_writes_markers_and_deferred_points(pg_home: Path) -> None:
+    ctx = ready_context(pg_home)
+    before = snapshot(ctx.index)
+    generation = ctx.index.generation()
+    ctx.index.set_cursor("gpu1", "env-a", 9)
+    score = ScoreRecord(metric="acc", version="v1", key="value", value=0.8, created_at=utcnow())
+    writer_errors: list[BaseException] = []
+
+    def changed_during_scan() -> None:
+        # A separate session sees the complete old index, not staging rows.
+        assert snapshot(ctx.index) == before
+
+        def write() -> None:
+            try:
+                ctx.update_run(
+                    "r0",
+                    "run.tagged",
+                    lambda r: r.model_copy(
+                        update={"tags": ["late"], "parent": "r2", "owner": "sv"}
+                    ),
+                )
+                ctx.add_score(ctx.find_record("r0"), score)
+                ctx.create_run(make_record("late", owner="alice", parent="r0"))
+                ctx.index.set_cursor("gpu1", "env-a", 12)
+                ctx.index.mark_scores_stale("r2")
+                ctx.store.append_score("toy", "r2", score)  # simulate a cut-short add
+            except BaseException as exc:  # noqa: BLE001 - asserted in test thread
+                writer_errors.append(exc)
+
+        worker = threading.Thread(target=write, daemon=True)
+        worker.start()
+        worker.join(10)
+        assert not worker.is_alive(), "staging must not exclude ordinary writers"
+        assert writer_errors == []
+
+    staged = PausedStore(ctx.layout, changed_during_scan)
+    ctx.index.store = staged
+    assert rebuild_index(ctx.index, staged) == 4
+    assert staged.points_read == 0  # neither dialect reads metric files while rebuilding
+    assert ctx.index.get_cursor("gpu1", "env-a") == 12
+    assert ctx.index.generation() > generation
+    assert ctx.index.stale_score_runs() == ["r2"]
+    with Session(ctx.index.engine) as session:
+        assert session.execute(
+            select(index_module.RunRow.owner, index_module.RunRow.parent).where(
+                index_module.RunRow.run_id == "r0"
+            )
+        ).one() == ("sv", "r2")
+        assert (
+            session.scalar(
+                select(index_module.RunChangeRow.generation).where(
+                    index_module.RunChangeRow.run_id == "r0"
+                )
+            )
+            is not None
+        )
+    current = ctx.index.get_run("r0")
+    assert current is not None and current.tags == ["late"]
+    assert ctx.index.scores_for(["r0"])["r0"] == [score]
+    assert [(p.name, p.step) for p in ctx.index.metric_points("r0")] == [("loss", 0)]
+    assert staged.points_read == 1
+    ctx.index.metric_points("r0")
+    assert staged.points_read == 1
+    reopened = Context.open(pg_home)
+    assert reopened.index.store is reopened.store
+    assert reopened.index.stale_score_runs() == []
+    assert reopened.index.scores_for(["r2"])["r2"] == [score]  # repaired exactly once
+
+
+def test_failure_after_live_replacement_rolls_back_everything(
+    pg_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = ready_context(pg_home)
+    before = snapshot(ctx.index)
+    generation = ctx.index.generation()
+    real = index_module._touch
+
+    def fail_publish(session: Session, *run_ids: str) -> None:
+        if not run_ids:
+            # Rebuild invokes _touch after DELETE/INSERT, before commit. Other
+            # sessions still see the old index even at this final boundary.
+            assert snapshot(ctx.index) == before
+            raise RuntimeError("publication interrupted")
+        real(session, *run_ids)
+
+    monkeypatch.setattr(index_module, "_touch", fail_publish)
+    with pytest.raises(RuntimeError, match="publication interrupted"):
+        rebuild_index(ctx.index, ctx.store)
+    assert snapshot(ctx.index) == before and ctx.index.generation() == generation
+    monkeypatch.setattr(index_module, "_touch", real)
+    assert rebuild_index(ctx.index, ctx.store) == 3  # locks/staging released after failure
+
+
+def test_a_writer_waits_for_final_swap_then_commits_after_it(pg_home: Path) -> None:
+    ctx = ready_context(pg_home)
+    entered = threading.Event()
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        entered.set()
+        try:
+            ctx.update_run("r0", "run.tagged", lambda r: r.model_copy(update={"tags": ["after"]}))
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+        finally:
+            done.set()
+
+    with Session(ctx.index.engine) as session, session.begin():
+        session.execute(
+            index_module.text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": index_module.PG_WRITE_LOCK},
+        )
+        worker = threading.Thread(target=writer, daemon=True)
+        worker.start()
+        assert entered.wait(5)
+        wait_until(
+            lambda: ctx.store.read_record("toy", "r0").tags == ["after"],
+            timeout=5,
+            what="writer to reach its index update",
+        )
+        assert not done.is_set()
+        # Ordinary reads do not acquire the write guard.
+        assert ctx.index.count_runs(include_archived=True) == 3
+    worker.join(10)
+    assert done.is_set() and not worker.is_alive() and errors == []
+    current = ctx.index.get_run("r0")
+    assert current is not None and current.tags == ["after"]
+
+
+def test_concurrent_rebuilds_keep_writes_and_use_separate_staging(pg_home: Path) -> None:
+    ctx = ready_context(pg_home)
+    first_paused, release, second_scanned = threading.Event(), threading.Event(), threading.Event()
+    errors: list[BaseException] = []
+
+    def pause() -> None:
+        first_paused.set()
+        assert release.wait(10)
+
+    def rebuild(store: RunStore) -> None:
+        try:
+            rebuild_index(ctx.index, store)
+        except BaseException as exc:  # noqa: BLE001 - asserted after both joins
+            errors.append(exc)
+
+    first = threading.Thread(target=rebuild, args=(PausedStore(ctx.layout, pause),), daemon=True)
+    second = threading.Thread(
+        target=rebuild, args=(PausedStore(ctx.layout, second_scanned.set),), daemon=True
+    )
+    first.start()
+    try:
+        assert first_paused.wait(5)
+        second.start()
+        assert not second_scanned.wait(0.1)  # waits on rebuild lock, not the write guard
+        ctx.update_run("r0", "run.tagged", lambda r: r.model_copy(update={"tags": ["kept"]}))
+    finally:
+        release.set()
+        first.join(10)
+        if second.ident is not None:
+            second.join(10)
+    assert not first.is_alive() and not second.is_alive() and errors == []
+    assert second_scanned.is_set()
+    current = ctx.index.get_run("r0")
+    assert current is not None and current.tags == ["kept"]
 ```
 
 - [ ] **Step 2: Run the test**
 
+Final-baseline guarded-hydration regressions must additionally run against real PostgreSQL: pause a deferred read after it captures pending/status, publish a newer terminal point set or remove the run, then resume it; assert no stale points, no deadlock, and no generation bump when the claim loses. Use barriers around the claim and final rebuild publication to exercise hydration versus both `delete_run` and final swap, with bounded joins and propagated worker errors. The transaction guard must be acquired before either contender takes a live row lock. Include a failed deferred hydration in the pending-journal repair regression. These cases must be concrete in the final refreshed plan before round 5; the supplied `5c02037` baseline lacks that later CAS implementation.
+
+Retain and run the existing SQLite `tests/core/test_index_rebuild.py` and `tests/core/test_index_rebuild_overlap.py` regressions as part of Task 34. The Docker cases below are required in addition; SQL compilation or an extracted fake-session probe cannot establish PostgreSQL lock, sequence or MVCC behavior.
+
 Run: `uv run pytest -m docker tests/docker/test_postgres_index.py -v`
-Expected: `2 passed` with Docker running (both tests are skipped without Docker, and an error with `HYPOTHEX_REQUIRE_DOCKER=1`). The network guard allows the test: Postgres listens on `127.0.0.1`.
+Expected: all PostgreSQL upgrade/rebuild/concurrency tests pass with Docker running (the tests are skipped without Docker, and an error with `HYPOTHEX_REQUIRE_DOCKER=1`). The network guard allows the test: Postgres listens on `127.0.0.1`.
 
 Run: `uv run pytest -q` (without `-m docker`)
 Expected: the Docker tests are deselected; everything else passes.
@@ -18364,7 +18841,10 @@ with
 4. In `build_server`, let every tool's hub call carry the tool's agent. Replace `hub` and `via_hub` with:
 
 ```python
-    def hub(method: str, path: str, body: dict[str, Any] | None = None, agent: str = "mcp") -> Any:
+    def hub(
+        method: str, path: str, body: dict[str, Any] | None = None,
+        agent: str = "mcp", timeout: float = 120.0,
+    ) -> Any:
         # a tool always acts for an agent: the hub stamps agent:<agent>@<user> from the header
         return hub_call(
             method,
@@ -18373,6 +18853,7 @@ with
             url=hub_url,
             token=auth(),
             agent=agent,
+            timeout=timeout,
             discover_token=not _OVER_HTTP.get(),
         )
 

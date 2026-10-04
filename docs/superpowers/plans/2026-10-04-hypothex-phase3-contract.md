@@ -76,8 +76,9 @@ class RunRecord(...):   # add
 class SweepSpec(...):   # add
     owner: str | None = None
 # hypothex.core.index
-SCHEMA_VERSION = 3                  # RunRow.owner column (indexed)
+SCHEMA_VERSION = 4                  # RunRow.owner column (indexed)
 def Index.list_runs(..., owner: str | None = None) -> list[RunRecord]: ...   # additive keyword
+def Index.count_runs(..., owner: str | None = None) -> int: ...              # same filter without a limit
 # hypothex.core.execution
 class RunRequest(...):  # add
     owner: str | None = None        # copied to RunRecord.owner
@@ -326,10 +327,10 @@ Auth is on when `server.auth: on` (or `hx serve --auth`). Then every HTTP route 
 
 ```python
 class Index:
-    def __init__(self, target: Path | str, *, password: SecretStr | None = None) -> None: ...   # Path -> SQLite (unchanged); "postgresql+psycopg://..." -> Postgres engine (pool_pre_ping)
+    def __init__(self, target: Path | str, store: RunStore | None = None, *, password: SecretStr | None = None) -> None: ...   # Path -> SQLite (unchanged); "postgresql+psycopg://..." -> Postgres engine (pool_pre_ping)
     dialect: Literal["sqlite", "postgresql"]
 def upsert(session: Session, model: type[Base], values: dict[str, Any], keys: list[str]) -> None: ...   # dialect insert ... on conflict; replaces every sqlite_insert call
-def open_index(layout: Layout, settings: ServerSettings) -> Index: ...   # Context.open uses it; IndexUnavailableError when Postgres does not answer (URL printed without password)
+def open_index(layout: Layout, settings: ServerSettings, store: RunStore | None = None) -> Index: ...   # Context.open uses it; IndexUnavailableError when Postgres does not answer (URL printed without password)
 class IndexUnavailableError(HypothexError): ...   # API 503
 class IndexSchemaError(ConfigError): ...          # Postgres revision != head: "run hx db upgrade"
 def repair_pending(index: Index, store: RunStore) -> list[str]: ...   # re-index, from files, the runs whose index write failed after their files were written (Index.pending, <home>/index-pending.txt); Context.open and the server's 30 s repair loop call it. Claim: the journal moves to index-pending.txt.<8 hex>.claim; every claim file (a crashed process's too) is read and removed only after its runs are indexed; each run is re-read and indexed under its run_lock (the one Context.update_run holds)
@@ -338,7 +339,7 @@ def alembic_config(index_url: str, password: SecretStr | None) -> alembic.config
 def upgrade(layout: Layout, settings: ServerSettings) -> str: ...   # returns the new head revision
 def current(layout: Layout, settings: ServerSettings) -> str | None: ...
 ```
-SQLite keeps the disposable schema-version rebuild (no migrations needed). Postgres uses Alembic: revision `0001_phase3` creates exactly `Base.metadata` at `SCHEMA_VERSION = 3`, and a unit test asserts autogenerate finds no diff between the head and `Base.metadata`. Only the index moves: the event log, command receipts, `auth.db`, and all files stay under the server's home. Dependencies: `alembic` (main), optional extra `server = ["psycopg[binary]>=3.2"]`; `Context.open` reads `config.yaml` for `index_url`, so an invalid `config.yaml` stops every `hx` command on that home (fail closed: never a silent fallback to SQLite or to auth off; `docs/team.rst` says so).
+SQLite keeps the disposable schema-version rebuild (no migrations needed). Postgres uses Alembic: revision `0001_phase3` creates exactly `Base.metadata` at `SCHEMA_VERSION = 4`, and a unit test asserts autogenerate finds no diff between the head and `Base.metadata`. The metadata includes `runs.parent`, `run_changes`, `metric_points_pending`, `scores_stale`, and the `(run_id, name, step)` metric-point index, plus phase 3 owner. Steps, host cursor sequences and run-change generations use signed-int64 SQL columns; generation SQL qualifies `meta.value` and casts through BIGINT. Score/point IDs use BigInteger with an SQLite Integer variant, preserving 64-bit PostgreSQL sequences and SQLite rowid autoincrement. Both dialects preserve generation invalidation, stale-score recovery and store-backed deferred metric points. SQLite retains staged atomic rebuild/catch-up. PostgreSQL stages into transaction-local temporary tables while writers proceed, then takes the same exclusive database advisory guard acquired before all ordinary index mutation transactions, catches up changed runs, and publishes data in one transaction; readers see committed old or new data. Mirror cursors, stale-score marks and change markers survive; failed publication rolls back. `Context.open` keeps `rebuild_index_if_stale`, `repair_index_if_changed`, and `repair_stale_scores`, then adds `repair_pending`. Only the index moves: the event log, command receipts, `auth.db`, and all files stay under the server's home. Dependencies: `alembic` (main), optional extra `server = ["psycopg[binary]>=3.2"]`; `Context.open` reads `config.yaml` for `index_url`, so an invalid `config.yaml` stops every `hx` command on that home (fail closed: never a silent fallback to SQLite or to auth off; `docs/team.rst` says so).
 
 ### 1.12 Collaborators: what a collaborator sees
 
@@ -389,7 +390,7 @@ class NoopRun: # add the same no-op
 | `<run_dir>/.hx/cleaned.json` | env server, hub | list of `CleanedArtifact` | 0644 | reserved `.hx/` (never mirrored) |
 | `hypothex.yaml` `tasks.<t>.baselines` | project repo | list of `BaselineSpec` | | validated by `hx validate` |
 | `run.yaml` | | adds `owner` | | additive; old files load (`owner: null`) |
-| index | | `runs.owner` column, `SCHEMA_VERSION = 3` | | SQLite rebuilds; Postgres via Alembic |
+| index | | `runs.owner` column, `SCHEMA_VERSION = 4` | | SQLite rebuilds; Postgres via Alembic |
 
 New event types: `notebook.updated`, `run.artifacts_cleaned`, `storage.plan_created` `{plan_id, total_bytes, n_items}`, `storage.cleaned` `{plan_id, freed_bytes, n_deleted, n_skipped}`, `notify.sent`, `notify.failed`, `digest.sent`, `auth.session_created` / `auth.session_revoked` `{session_id, user, client}` (never a token or secret). The WebSocket sends `auth.*` and `notify.*` events only to `admin` principals.
 
@@ -641,4 +642,4 @@ Codex (11 findings above P3, 1 lint) and Fable (2 Important, 6 Minor) reviewed t
 - **Mixed-unit task exports.** Tasks 10 and 12 pass per-column formats through group and baseline cells and scale only fractions; regressions swap the primary column and exercise the configured-unit call path.
 - **Partial sweep notifications.** Task 16 persists deferred triggers before cursor advancement and retries after restart without another terminal event; the regression releases the issuance lock after a failed later launch and expects exactly one partial notice.
 
-These are document-level resolutions. Final assembly still requires the planned suites. The queued baseline refresh must account for main's audit-fix schema bump: phase 3 must advance `SCHEMA_VERSION` to 4 when rebased onto that schema-3 baseline. The step-9 default-token design is still pending; reconcile its final interfaces and tests after that work lands, without assuming its implementation here.
+These are document-level resolutions. Final assembly still requires the planned suites. The pinned-main refresh uses schema 4 over main's schema-3 audit baseline; Task 34 preserves the merged generation and recovery machinery. The step-9 default-token design is still pending; reconcile its final interfaces and tests after that work lands, without assuming its implementation here.

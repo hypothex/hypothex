@@ -15,7 +15,7 @@
 **Mockups:** `docs/mockups/phase3/` (`index.html`, `data.js`, `shot-pair-{ready,done,invalid}-*`, `shot-settings-*`, `shot-settings-collab-*`, `shot-storage-*`, `shot-storage-confirm-*`, `shot-storage-result-*`, `shot-notebook-*`, `shot-notebook-conflict-*`, `shot-task-export-*`, `shot-run-*`, `shot-gate-*`).
 
 **Depends on:**
-- The phase 2 frontend plan (`docs/superpowers/plans/2026-10-03-hypothex-phase2-frontend.md`) merged to `main` in full: the Sweep page (`/s/$project/$id`), the Launch dialog, and Tasks 23–29 (`remote.ts`, the phase 2 `StatusLine.tsx`, `RunActions.tsx` and `Run.tsx`, the `hosts-*` Playwright projects, random e2e ports, `expectIsolatedHub`). Every "as left by phase 2 Task N" anchor below is that plan's final text. State when this plan was reviewed (round 1): `main` at `e27a3a2` holds the phase 2 frontend through `083bb1a` (Sweep page, Launch dialog, `remote.ts`, `remoteStats.ts`; the `StatusLine.tsx`, `RunActions.tsx`, `Leaderboard.tsx` and `Task.tsx` anchors below already match it), while phase 2 Task 28 (the `hosts-*` Playwright projects, `HOSTS_PORT`, random e2e ports, `expectIsolatedHub` in `ui/e2e/serve-demo.ts`, `ui/e2e/fixtures.ts`, `ui/e2e/paths.ts`) is still on branch `phase-2` and not merged. Do not start until it is. Then record the merge commit (`git log --oneline -1 main`) here and run the pre-flight check below; it must print `anchors ok`:
+- The phase 2 frontend plan (`docs/superpowers/plans/2026-10-03-hypothex-phase2-frontend.md`) merged to `main` in full: the Sweep page (`/s/$project/$id`), the Launch dialog, and Tasks 23–29 (`remote.ts`, the phase 2 `StatusLine.tsx`, `RunActions.tsx` and `Run.tsx`, the `hosts-*` Playwright projects, random e2e ports, `expectIsolatedHub`). Every "as left by phase 2 Task N" anchor below is that plan's final text. State when this plan was reviewed (round 2): `main` at `e27a3a2` holds the phase 2 frontend through `083bb1a` (Sweep page, Launch dialog, `remote.ts`, `remoteStats.ts`; the `StatusLine.tsx`, `Leaderboard.tsx` and `Task.tsx` anchors below already match it), while phase 2 Task 26 (`RunActions.tsx`: the `Cancel` button and the indented `Stop` block; `main` still has phase 1b's `a2887e5` version) and Task 28 (the `hosts-*` Playwright projects, `HOSTS_PORT`, random e2e ports, `expectIsolatedHub` in `ui/e2e/serve-demo.ts`, `ui/e2e/fixtures.ts`, `ui/e2e/paths.ts`) are still on branch `phase-2` and not merged. Do not start until it is. Then record the merge commit (`git log --oneline -1 main`) here and run the pre-flight check below; it must print `anchors ok`:
 
 ```bash
 uv run python - <<'PY'
@@ -30,7 +30,7 @@ print(f"{len(found)} anchors", "anchors ok" if not bad else f"MISSING in {bad}")
 PY
 ```
 
-Run from the repo root. Expected: `6 anchors anchors ok`. A `MISSING` file means its phase 2 task changed the text after this plan was written: re-read that file on `main` and update the matching "replace" block here before running the task.
+Run from the repo root. Expected: `12 anchors anchors ok`. A `MISSING` file means its phase 2 task changed the text after this plan was written: re-read that file on `main` and update the matching "replace" block here before running the task. Known drift at review round 2: phase 2 commit `9341413` moved the e2e homes and demo files under a per-run `RUN_DIR` (`e2e/.runs/run-XXXXXX`, `procs.ts`) after Task 25 was written, and `phase-2` still has uncommitted e2e edits, so Task 25's `serve-demo.ts`/`fixtures.ts` anchors and its whole-file `ui/playwright.config.ts` are re-synced to the merged files at this check: the team home and demo file go under `RUN_DIR` like the others (`join(RUN_DIR, "home-team")`, `join(RUN_DIR, "demo-team.json")`, no `.gitignore` lines), and `playwright.config.ts` keeps everything phase 2 added, plus the `team-*` server and projects.
 - The phase 3 backend plan (`docs/superpowers/plans/2026-10-04-hypothex-phase3-backend.md`) merged: the contract section 3 routes in `/api/openapi.json`, `RunRecord.owner`, `RunDetail.cleaned`, `Leaderboard.baselines`, the section 2 events, the `4401` close code, `hx serve --auth`, and `hx demo --with-team` (contract 11: owner `sv` admin and `alice` launch, two projects with notebook days and one weekly summary, baselines on `toy-classifier/toy-test`, 6 archived runs with artifacts, outbox entries in every state, one connected fake host, the local session token in `<home>/serve/server.json`).
 - The mockups in `docs/mockups/phase3/` approved.
 
@@ -45,7 +45,7 @@ Run from the repo root. Expected: `6 anchors anchors ok`. A `MISSING` file means
 - Scopes in the UI are hints, never the gate: the server decides (403 shows as an error line). Admin-only reads (`/auth/users`, `/notify`, `/storage`) are never requested for a non-admin principal, so a collaborator's console stays free of 403s; the header hides `storage` for them.
 - Actions: every new write sends only `{command_id, ...its fields}`; `created_by`, `owner` and `author` are set by the server from the principal (contract 1.2, 7). Phase 1–2 actions keep `action()` (`command_id`, `created_by: "human"`). Writes go through `useAction` (`ui/src/pages/components/useAction.ts`) so a retry after a dropped connection reuses the same `command_id`.
 - One data layer: every request goes through `api.*` in `ui/src/api/client.ts`; no module builds its own `fetch` or route table. Downloads use `api.exportTaskUrl(...)` as a plain same-origin `<a download>` (the cookie goes with it).
-- Live data: `notebook.updated` invalidates `["notebook", project]`; `run.artifacts_cleaned` invalidates the run families (narrowed) plus `["storage"]`; `storage.*` invalidates `STORAGE_EVENT_INVALIDATES` (`["storage"]`, `["runs"]`, `["run"]`); `notify.*` and `digest.sent` invalidate `["notify"]` (and `digest.sent` the project's notebook, where the summary is saved); `auth.*` invalidates `AUTH_EVENT_INVALIDATES` (`["auth", "sessions"]`, `["auth", "users"]`). Run events never invalidate `["storage"]` (a storage report walks every host; it refreshes on cleanup events and on demand).
+- Live data: `notebook.updated` invalidates `["notebook", project]`; `run.artifacts_cleaned` invalidates the run families (narrowed) plus `["storage"]`; `storage.*` invalidates `STORAGE_EVENT_INVALIDATES` (`["storage"]`, `["runs"]`, `["run"]`); `notify.*` and `digest.sent` invalidate `["notify"]` (and `digest.sent` the project's notebook, where the summary is saved); `auth.*` invalidates `AUTH_EVENT_INVALIDATES` (`["auth", "sessions"]`, `["auth", "users"]`). Run events never invalidate `["storage"]` (a storage report walks every host; it refreshes on cleanup events and on demand). Export texts are keyed under `["leaderboard", project, task, "export", opts]`, so the run and mirror events that refresh a leaderboard refresh an open export menu with it (Copy never copies older numbers than the table shows).
 - Copy (spec 8.1, terse UI): numbers and glyphs, labels of one or two words; explanations only in `title` tooltips; every state has its own glyph, never colour alone; monospace only for commands, paths, ids and tokens; times in UTC; a missing value is `—`; a not-yet-known cell is `·`. Glyphs: notify events `✓` finished, `✗` failed, `?` lost, `⊘` killed; outbox `✓` sent, `✗` failed, `…` pending/sending, `○` skipped; channel `●` set, `○` unset, `·` not configured; scope `r`/`l`/`a`; refused clean rows `⊘`; cleaned artifact `✕ <date> <bytes>`; baseline `◆`; digest counts `▲` started.
 - CSS: each new component injects its own `<style data-hx="…">`; every selector is scoped (`.page …`, `.bar …`, `.pair …`); colours only through the theme tokens (`var(--ink)`, `var(--fail)`, …), so light and dark both work. `ui/src/pages/components/styles.ts` is not edited.
 - HARD RULE, never touch real services or hosts: no test or step connects to a real Slack workspace, SMTP server, Tailscale tailnet, SSH or SLURM host, and nothing reads `~/.hypothex` or `~/.ssh`. Unit tests stub `fetch` (`mockApi`, `mockFetch`). Every `hx` a step starts uses a fresh temp home given on its own command line (`uv run hx --home "$H" ...`) and runs with `HYPOTHEX_SSH=false HYPOTHEX_SCP=false` set inline on that same command line, never by an earlier `export` (agent shells do not keep variables between calls). Waits are bounded (`for i in $(seq 60)`). Every port a step or check serves a hub on is asked from the OS for that run (`freePort()` in `ui/e2e/paths.ts`, or `uv run python -c` binding port 0), and the caller checks the hub's `GET /.well-known/hypothex/environment` identity before any other route. Playwright never reuses a server it did not start (`reuseExistingServer: false`); the team hub's local session token is read only from the fresh e2e home `serve-demo.ts` wrote.
@@ -1768,7 +1768,7 @@ git commit -m "feat(ui): api client for auth, notebook, export, notify and stora
 **Interfaces:**
 - Consumes: Task 2 `api.*`.
 - Produces (in `ui/src/api/queries.ts`):
-  - `queryKeys.me() = ["auth", "me"]`, `sessions() = ["auth", "sessions"]`, `users() = ["auth", "users"]`, `notify() = ["notify"]`, `notebookDays(project) = ["notebook", project, "days"]`, `notebookDay(project, day) = ["notebook", project, "day", day]`, `storage(project?, remote = true) = ["storage", project ?? null, remote]`, `exportText(project, task, opts) = ["export", project, task, opts]`.
+  - `queryKeys.me() = ["auth", "me"]`, `sessions() = ["auth", "sessions"]`, `users() = ["auth", "users"]`, `notify() = ["notify"]`, `notebookDays(project) = ["notebook", project, "days"]`, `notebookDay(project, day) = ["notebook", project, "day", day]`, `storage(project?, remote = true) = ["storage", project ?? null, remote]`, `exportText(project, task, opts) = ["leaderboard", project, task, "export", opts]` (inside the leaderboard family, so every run or mirror event that refreshes the project's leaderboard refreshes an open export menu too, and Copy never copies numbers older than the table beside it).
   - `NOTEBOOK_INVALIDATES = [["notebook"]]`, `STORAGE_EVENT_INVALIDATES = [["storage"], ["runs"], ["run"]]`, `NOTIFY_INVALIDATES = [["notify"]]`, `AUTH_EVENT_INVALIDATES = [["auth", "sessions"], ["auth", "users"]]`. `RUN_EVENT_INVALIDATES` is unchanged: run events refresh neither the storage report nor an export preview (the preview is read only while the menu is open, and reopening it after the 5 s stale time reads it again).
   - `useMe(enabled = true)` (60 s stale time; no retry, so a 401 or 404 answers at once), `useSessions(enabled = true)`, `useUsers(enabled = true)`, `useNotify(enabled = true)`, `useNotebookDays(project)`, `useNotebookDay(project, day)`, `useStorage(project?, remote = true, enabled = true)` (stale for 60 s: a report walks every host), `useExportText(project, task, opts, enabled)` (keeps the last text while the next format loads).
 
@@ -1824,11 +1824,11 @@ describe("keys and lists", () => {
       ["notebook", "deepretro", "day", "2026-10-04"],
       ["storage", null, true],
       ["storage", "deepretro", false],
-      ["export", "p", "t", { format: "csv" }],
+      ["leaderboard", "p", "t", "export", { format: "csv" }],
     ]);
   });
 
-  test("invalidation lists; run events never refresh storage or exports", () => {
+  test("invalidation lists; run events never refresh storage, but do refresh exports", () => {
     expect(NOTEBOOK_INVALIDATES).toEqual([["notebook"]]);
     expect(STORAGE_EVENT_INVALIDATES).toEqual([["storage"], ["runs"], ["run"]]);
     expect(NOTIFY_INVALIDATES).toEqual([["notify"]]);
@@ -1836,8 +1836,11 @@ describe("keys and lists", () => {
       ["auth", "sessions"],
       ["auth", "users"],
     ]);
-    expect(RUN_EVENT_INVALIDATES).not.toContainEqual(["export"]);
     expect(RUN_EVENT_INVALIDATES).not.toContainEqual(["storage"]);
+    // an export key sits under ["leaderboard", project], which run events invalidate
+    const key = queryKeys.exportText("p", "t", { format: "csv" });
+    expect(RUN_EVENT_INVALIDATES).toContainEqual(["leaderboard"]);
+    expect(key.slice(0, 2)).toEqual(["leaderboard", "p"]);
   });
 });
 
@@ -1929,7 +1932,9 @@ with
   notebookDays: (project: string) => ["notebook", project, "days"] as const,
   notebookDay: (project: string, day: string) => ["notebook", project, "day", day] as const,
   storage: (project?: string, remote = true) => ["storage", project ?? null, remote] as const,
-  exportText: (project: string, task: string, opts: M.ExportOptions) => ["export", project, task, opts] as const,
+  /** Under the leaderboard family: run and mirror events refresh an open export menu with the board. */
+  exportText: (project: string, task: string, opts: M.ExportOptions) =>
+    ["leaderboard", project, task, "export", opts] as const,
 };
 ```
 
@@ -4199,7 +4204,7 @@ with
   const permit = mayStop(usePrincipal(), record.owner);
 ```
 
-Replace
+In `ui/src/pages/components/RunActions.tsx` (as left by phase 2 Task 26), replace
 
 ```tsx
             disabled={stop.pending}
@@ -4225,7 +4230,7 @@ with
             }
 ```
 
-Replace
+In `ui/src/pages/components/RunActions.tsx` (as left by phase 2 Task 26), replace
 
 ```tsx
               disabled={!active || stop.pending}
@@ -7453,7 +7458,7 @@ git commit -m "feat(ui): notebook model for entries, run chips, digest blocks an
 
 **Interfaces:**
 - Consumes: Task 18; Task 4 `useNotebookEditor`; `api.appendNotebook`, `api.saveNotebook`, `NOTEBOOK_INVALIDATES`; `renderMarkdown`, `renderInline`; `AppLink`, `hrefs`; `useAction`, `ErrorBox`; `ageText` (Task 9).
-- Produces: `NOTEBOOK_CSS`, `NotebookStyles()`; `DayView({ project, day, data, now })`. View: a header (`<day>`, `N entries · M runs`, `edit`), the entries (`.ent`, `.ent.dg` for the weekly summary) with `stamp` and author, Markdown with chips (known: a link to the run; unknown: a dashed `? 01J7…`), then `+ entry` (`aria-label="New entry"`). Edit: a textarea (`aria-label="Day text"`), `save`, `discard`; `save` sends the hash the edit started from (a live refresh during the edit does not move it). 409: `role="alert"` `409 · changed by @sv 1m` (or `changed 1m` without a seen editor), theirs and mine side by side, `use theirs` (drops my edit and reloads the day), `keep mine` (PUT my text on their hash).
+- Produces: `NOTEBOOK_CSS`, `NotebookStyles()`; `DayView({ project, day, data, now })`. View: a header (`<day>`, `N entries · M runs`, `edit`), the entries (`.ent`, `.ent.dg` for the weekly summary) with `stamp` and author, Markdown with chips (known: a link to the run; unknown: a dashed `? 01J7…`), then `+ entry` (`aria-label="New entry"`, read-only while the entry is sent, so text typed then is never cleared away). Edit: a textarea (`aria-label="Day text"`, read-only while the save is in flight), `save`, `discard`; `save` sends the hash the edit started from (a live refresh during the edit does not move it). 409: `role="alert"` `409 · changed by @sv 1m` (or `changed 1m` without a seen editor), theirs and mine side by side, `use theirs` (drops my edit and reloads the day), `keep mine` (PUT my text on their hash).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -7516,6 +7521,29 @@ describe("view", () => {
     await waitFor(() => expect(box.value).toBe(""));
     expect(calls[0]?.body).toMatchObject({ text: "beam 10 holds on seed 4 [[run:01J8Z3K7-clf-a1b2]]" });
     expect(Object.keys(calls[0]?.body as object).sort()).toEqual(["command_id", "text"]);
+  });
+
+  test("the box is read-only while the entry is sent, so nothing typed then is lost", async () => {
+    let release = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    mockApi({
+      [`POST ${DAY_URL}`]: async () => {
+        await held;
+        return NOTEBOOK_DAY;
+      },
+    });
+    renderWithClient(view());
+    const box = screen.getByLabelText("New entry") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "A" } });
+    fireEvent.click(screen.getByRole("button", { name: "+ entry" }));
+    await waitFor(() => expect(box.readOnly).toBe(true));
+    fireEvent.change(box, { target: { value: "AB" } });
+    expect(box.value).toBe("A");
+    act(() => release());
+    await waitFor(() => expect(box.value).toBe(""));
+    expect(box.readOnly).toBe(false);
   });
 });
 
@@ -7822,7 +7850,12 @@ export function DayView({ project, day, data, now }: DayViewProps) {
         <textarea
           aria-label="Day text"
           value={editing.text}
-          onChange={(e) => setEditing({ ...editing, text: e.target.value })}
+          readOnly={save.pending}
+          onChange={(e) => {
+            // read-only while the save is in flight: success closes the editor, so text
+            // typed meanwhile would be lost
+            if (!save.pending) setEditing({ ...editing, text: e.target.value });
+          }}
         />
         <div className="row">
           {conflict ? null : (
@@ -7884,7 +7917,11 @@ export function DayView({ project, day, data, now }: DayViewProps) {
           aria-label="New entry"
           value={entry}
           placeholder="[[run:<id>]] links a run"
-          onChange={(ev) => setEntry(ev.target.value)}
+          readOnly={append.pending}
+          onChange={(ev) => {
+            // read-only while the entry is sent: success clears the box
+            if (!append.pending) setEntry(ev.target.value);
+          }}
         />
         <button type="submit" className="btn primary" disabled={append.pending || entry.trim() === ""}>
           + entry
@@ -7899,7 +7936,7 @@ export function DayView({ project, day, data, now }: DayViewProps) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/notebook && bun run typecheck`
-Expected: `dayView.test.tsx` 6 pass, `model.test.ts` 6 pass; `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `dayView.test.tsx` 7 pass, `model.test.ts` 6 pass; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Commit (repo root)**
 
@@ -8501,7 +8538,7 @@ git commit -m "feat(ui): export menu with LaTeX, Markdown and CSV preview, copy 
 
 **Interfaces:**
 - Consumes: Task 1 `BaselineRow`; the leaderboard panel `meta` (`primary`, `metric_versions`; `baselines` is added by the Task page, Task 23).
-- Produces: `BaselineMark({ cx, cy, r? })` (a hollow dashed diamond, class `bdia`); key glyph `baseline`; in `Leaderboard.tsx`: `baselineRows(meta): BaselineRow[]`, `baselineValue(b, key): number | null` (the value for a metric ref, else `primary` for the primary key), `versionBadge(b, key, meta): string | null` (`≠v1` when `version_match[<metric>]` is not true). The panel draws baseline rows (`.frow.bl`, `data-baseline=<name>`, the first with class `first` for the dashed rule) after the groups: `◆ <name>`, the badge, `↗ <source>` linking `source_url` in a new tab, the value (`fmt.num`) with `paper` or `± std`, the mark on the shared x scale (baseline values widen the domain), the second metric, and `fmt.delta(value, best)` in the verdict column. A baseline is never the best row, never draws a band, and never gets a verdict glyph.
+- Produces: `BaselineMark({ cx, cy, r? })` (a hollow dashed diamond, class `bdia`); key glyph `baseline`; in `Leaderboard.tsx`: `baselineRows(meta): BaselineRow[]`, `baselineValue(b, key): number | null` (the value for a metric ref, else `primary` for the primary key), `baselineKey(baselines, meta): string | null` (the primary key from the papers' values when no run is scored; the panel then draws the baselines instead of `No scored runs yet`), `versionBadge(b, key, meta): string | null` (`≠v1` when `version_match[<metric>]` is not true). The panel draws baseline rows (`.frow.bl`, `data-baseline=<name>`, the first with class `first` for the dashed rule) after the groups: `◆ <name>`, the badge, `↗ <source>` linking `source_url` in a new tab, the value (`fmt.num`) with `paper` or `± std`, the mark on the shared x scale (baseline values widen the domain), the second metric, and `fmt.delta(value, best)` in the verdict column. A baseline is never the best row, never draws a band, and never gets a verdict glyph.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -8514,6 +8551,7 @@ import { MINUS } from "../../src/charts/Scale";
 import type { PanelResult } from "../../src/panels/index";
 import {
   Leaderboard,
+  baselineKey,
   baselineRows,
   baselineValue,
   versionBadge,
@@ -8574,6 +8612,7 @@ describe("helpers", () => {
     ]);
     expect([versionBadge(svc, "accuracy/value", META), versionBadge(pfn, "accuracy/value", META)]).toEqual([null, "≠v1"]);
     expect(versionBadge(pfn, "accuracy/value", {})).toBe("≠");
+    expect([baselineKey(BASELINES, META), baselineKey([], META)]).toEqual(["accuracy/value", null]);
   });
 });
 
@@ -8622,6 +8661,18 @@ describe("panel", () => {
     const { container } = render(<Leaderboard result={board(META)} />);
     expect(container.querySelectorAll(".frow.bl")).toHaveLength(0);
     expect(container.querySelector('[data-glyph="baseline"]')).toBeNull();
+  });
+
+  test("papers but no scored run yet: the baselines still show", () => {
+    const { container } = render(<Leaderboard result={{ ...board({ ...META, baselines: BASELINES }), rows: [] }} />);
+    expect(container.querySelector(".panel-empty")).toBeNull();
+    const rows = [...container.querySelectorAll<HTMLElement>(".frow.bl")];
+    expect(rows.map((r) => r.dataset.baseline)).toEqual(["sklearn SVC", "TabPFN"]);
+    expect(rows.map((r) => r.querySelector(".big")?.textContent?.slice(0, 4))).toEqual(["0.91", "0.93"]);
+    expect(rows.map((r) => r.querySelector(".vd")?.textContent)).toEqual(["—", "—"]);
+    cleanup();
+    const none = render(<Leaderboard result={{ ...board(META), rows: [] }} />);
+    expect(none.container.querySelector(".panel-empty")?.textContent).toBe("No scored runs yet");
   });
 });
 ```
@@ -8738,6 +8789,17 @@ export function baselineValue(b: BaselineRow, key: string): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
+/** With no scored run yet, the primary score key from the papers' values (`meta.primary` first). */
+export function baselineKey(baselines: readonly BaselineRow[], meta: Record<string, unknown> | undefined): string | null {
+  const keys = new Set(baselines.flatMap((b) => Object.keys(b.values)));
+  const hinted = meta?.primary;
+  if (typeof hinted === "string") {
+    if (keys.has(hinted)) return hinted;
+    if (keys.has(`${hinted}/value`)) return `${hinted}/value`;
+  }
+  return [...keys].sort()[0] ?? null;
+}
+
 /**
  * `≠v1` when the paper's metric version is not ours for this key's metric (or unknown);
  * null when it matches. The board's version comes from `meta.metric_versions`.
@@ -8776,7 +8838,60 @@ function BaselinePlot({
 
 ```
 
-In `Leaderboard`, replace
+In `Leaderboard`, let a task with paper results and no scored run show the papers (they are the targets): replace
+
+```tsx
+  if (rows.length === 0) return <p className="panel-empty">No scored runs yet</p>;
+
+  const meta = result.meta;
+```
+
+with
+
+```tsx
+  const meta = result.meta;
+  const baselines = baselineRows(meta);
+  // paper results are the targets: with baselines and no scored run yet, still draw them
+  if (rows.length === 0 && baselines.length === 0) {
+    return <p className="panel-empty">No scored runs yet</p>;
+  }
+```
+
+replace
+
+```tsx
+  const pkey = primaryKey(rows, meta) ?? "";
+  const secondKey = [...new Set(rows.flatMap((r) => Object.keys(r.scores)))]
+```
+
+with
+
+```tsx
+  const pkey = primaryKey(rows, meta) ?? baselineKey(baselines, meta) ?? "";
+  // no scored run yet: the keys the papers report stand in for the score columns
+  const scoreKeys =
+    rows.length > 0 ? rows.flatMap((r) => Object.keys(r.scores)) : baselines.flatMap((b) => Object.keys(b.values));
+  const secondKey = [...new Set(scoreKeys)]
+```
+
+replace
+
+```tsx
+  const fmt = valueFormatter(meta, rows.flatMap((r) => (r.primary ? [r.primary.mean] : [])), pkey);
+```
+
+with
+
+```tsx
+  const primaries = rows.flatMap((r) => (r.primary ? [r.primary.mean] : []));
+  const fmt = valueFormatter(
+    meta,
+    primaries.length > 0 ? primaries : baselines.flatMap((b) => baselineValue(b, pkey) ?? []),
+    pkey,
+  );
+```
+
+replace
 
 ```tsx
   if (band) values.push(band.lo, band.hi);
@@ -8787,7 +8902,6 @@ with
 
 ```tsx
   if (band) values.push(band.lo, band.hi);
-  const baselines = baselineRows(meta);
   for (const b of baselines) {
     const v = baselineValue(b, pkey);
     if (v !== null) values.push(v);
@@ -8885,7 +8999,7 @@ Append to `ui/src/panels/panels.css`:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `bun test test/panels test/charts && bun run typecheck`
-Expected: `leaderboardBaselines.test.tsx` 5 pass; `Leaderboard.test.tsx` and `Glyphs.test.tsx` pass unchanged (no `meta.baselines`, so no baseline rows or key entry); `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `leaderboardBaselines.test.tsx` 6 pass; `Leaderboard.test.tsx` and `Glyphs.test.tsx` pass unchanged (no `meta.baselines`, so no baseline rows or key entry); `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 6: Commit (repo root)**
 
@@ -9440,7 +9554,7 @@ with
  * `TEAM_PORT`. Auth is on: the identity route stays public, everything else needs a session.
 ```
 
-Replace
+In `ui/e2e/serve-demo.ts` (as left by phase 2 Task 28), replace
 
 ```ts
   HOSTS_PORT,
@@ -9481,7 +9595,7 @@ const port = withTeam ? TEAM_PORT : withHosts ? HOSTS_PORT : PORT;
 const label = withTeam ? TEAM_DEMO_LABEL : withHosts ? HOSTS_DEMO_LABEL : DEMO_LABEL;
 ```
 
-Replace
+In `ui/e2e/serve-demo.ts` (as left by phase 2 Task 28), replace
 
 ```ts
 const demoArgs = withHosts ? ["demo", "--with-hosts", "--json"] : ["demo", "--json"];
@@ -9497,7 +9611,7 @@ const demoArgs = withTeam
     : ["demo", "--json"];
 ```
 
-Replace
+In `ui/e2e/serve-demo.ts` (as left by phase 2 Task 28), replace
 
 ```ts
 const server: ChildProcess = spawn(hx, ["--home", home, "serve", "--port", String(port)], {
@@ -9529,7 +9643,7 @@ with
 } from "./paths";
 ```
 
-and replace
+In `ui/e2e/fixtures.ts` (as left by phase 2 Task 28), replace
 
 ```ts
   [`http://127.0.0.1:${HOSTS_PORT}`]: { home: HOSTS_HOME_DIR, label: HOSTS_DEMO_LABEL },
@@ -10101,12 +10215,12 @@ All automated:
 ## Assembly notes
 
 1. **What `/pair` shows before redeeming.** The link carries only `<offer_id>.<secret>` (contract 1.10 `pairing_url`) and no route reads an offer, so the ready state shows the hub and the offer id; user and scope appear after `pair` (`✓ alice · launch`). Contract 10.1 was amended to say so in review round 1 (a public read of an offer would tell anyone with a leaked offer id whom it pairs). The mockup `shot-pair-ready-*` follows this.
-2. **Contract gap: the baseline version badge.** `BaselineRow` has `version_match` but not the paper's version, so the badge reads `≠v1` (our version) instead of the mockup requirement's `v1≠v2`. Adding `metric_version_equivalent` to `BaselineRow` would allow the full badge (backend follow-up). The mockup shows `≠v2`.
-3. **Paths, not files.** `CleanItem` has no file count, so the confirm dialog reads `412.3 GB · 3 paths · 3 hosts`; contract 10.1 says `paths` since review round 1, and so does the mockup.
+2. **The baseline version badge.** The badge is `≠<our version>` (`≠v1` in the tests, `≠v2` in the mockup), and the tooltip says the paper used another version. Contract 10 and 10.1 say `≠v2` since review round 2, so contract, mockup and UI agree; the paper's own version is not on `BaselineRow` and is not needed at a glance.
+3. **Paths, not files.** `CleanItem` has no file count, so the confirm dialog counts paths: `412.3 GB · 3 paths · 3 hosts` with this plan's 3-item fixture, `37 paths` in the mockup (6 listed + 31 more; contract 10.1 since review round 2).
 4. **Baselines reach the panel through the Task page.** The view query's leaderboard panel `meta` has no `baselines`; the Task page copies `GET .../leaderboard`'s into every leaderboard result (`withBaselines`, Task 23). A leaderboard panel drawn elsewhere shows none. Moving `baselines` into the panel `meta` on the backend would make this step unnecessary.
 5. **`@owner` on the Overview.** Running rows carry `owner` (`RunRecord`); backend Task 27 adds `owner` to `TimelineItem`, `IdeaRow` and `FailureRow`, so recent ideas and failures end with `@owner` too (contract 1.12, review round 1). `mine` swaps the Running panel to `GET /api/v1/runs?owner=me&status=running`.
 6. **Encodings the backend must accept.** Export `metrics` and `groups` go as comma lists (`metrics=accuracy/value,macro_f1/value`), like the CLI's `--metrics a,b`; the contract names the parameters but not their encoding. The weekly summary is found by its first line naming the ISO week; `render_digest_markdown` (backend Task 18) starts `**2026-W40** · <headline>` and lists task changes as `- <task> before→after ▲ · N runs` (no Markdown table: the UI's renderer has none), and `NOTEBOOK_TEXT` is that exact shape. Any other format still renders, only without the summary block style.
 7. **Event-stream URL.** `eventsUrl()` calls `/auth/me` before each connect (reconnects are rare: 3/4/8/16 s backoff) so a hub that switches auth on between connects is handled; a phase 2 hub answers 404 and gets the plain URL. A ticket request that answers 401 locks the app and stops the stream, so a revoked session never loops.
-8. **Scopes are hints.** The UI hides `storage`, disables Stop/Cancel for non-owners and limits pairing scopes, but every decision is the server's; a 403 shows as an error line. Admin-only reads are never requested for a non-admin, so the browser console stays clean (Playwright's console guard enforces it).
+8. **Scopes are hints.** The UI hides `storage`, disables Stop/Cancel for non-owners and limits pairing scopes, but every decision is the server's; a 403 shows as an error line. Since review round 2 a run on the hub's own machine needs admin (contract 1.3): a `launch` collaborator who picks `local` in the phase 2 Launch dialog gets the hub's 403 (`runs on this machine need admin; launch on a host`) as an error line, and a host placement works as before. Admin-only reads are never requested for a non-admin, so the browser console stays clean (Playwright's console guard enforces it).
 9. **Kept out of scope.** No client function for `POST /api/v1/auth/logout` (no screen has a logout button yet; revoking the session in Settings does it), `GET /api/v1/compare/export` (no compare screen exports yet), or the digest routes (the digest shows up as a notebook entry). Their routes are checked in `types.test.ts`.
-10. **Dry run of this plan.** Every task's code was applied, in order, to a copy of the `phase-2` branch as of `1b5de39` (phase 2 Tasks 1–22), with phase 2's final `RunActions.tsx` and Task 28 e2e files taken from the phase 2 plan, and with the phase 3 paths added to a copy of `types.ts` (Task 2 Step 3 needs the backend). Result: `bun test` 858 of 859 pass (the one failure, `tokens.css`, only needs `docs/mockups/ui-v4/` next to the copy), `tsc --noEmit` and `tsc -p e2e` print nothing, and `playwright test --list` shows the 20 team tests (19 run, 1 skipped) and no team spec in the other projects. The dry run found and fixed three plan bugs before this version: `exportMenu.ts` next to `ExportMenu.tsx` clashed on macOS's case-insensitive file system (now `exportFormats.ts`); adding `["export"]` to `RUN_EVENT_INVALIDATES` broke the phase 2 event tests (dropped); and testing-library joins a chip's spans with spaces in its accessible name (`01J8…a1b2 ✓ 0.913`).
+10. **Dry run of this plan.** Every task's code was applied, in order, to a copy of the `phase-2` branch as of `1b5de39` (phase 2 Tasks 1–22), with phase 2's final `RunActions.tsx` and Task 28 e2e files taken from the phase 2 plan, and with the phase 3 paths added to a copy of `types.ts` (Task 2 Step 3 needs the backend). Result: `bun test` 858 of 859 pass (the one failure, `tokens.css`, only needs `docs/mockups/ui-v4/` next to the copy), `tsc --noEmit` and `tsc -p e2e` print nothing, and `playwright test --list` shows the 20 team tests (19 run, 1 skipped) and no team spec in the other projects. The dry run found and fixed three plan bugs before this version: `exportMenu.ts` next to `ExportMenu.tsx` clashed on macOS's case-insensitive file system (now `exportFormats.ts`); adding `["export"]` to `RUN_EVENT_INVALIDATES` broke the phase 2 event tests (dropped; since review round 2 the export key lives under `["leaderboard", project]` instead, so run events refresh it with no list change); and testing-library joins a chip's spans with spaces in its accessible name (`01J8…a1b2 ✓ 0.913`).

@@ -88,7 +88,7 @@
     plan: {
       plan_id: "cp-8e41c0d2",
       total: 412.3 * GB,
-      files: 37,
+      paths: 37, // 6 items listed + more.n (31): a CleanItem is a path, never a file count
       hosts: ["gpu1", "mccleary", "local"],
       expires: "15:32",
       items: [

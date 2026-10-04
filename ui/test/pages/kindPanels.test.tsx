@@ -8,6 +8,7 @@ import {
   runViewPanels,
   scopeToRun,
   sentenceCase,
+  withoutSweeps,
 } from "../../src/pages/components/KindPanels";
 import { LogView } from "../../src/pages/components/LogView";
 import type { PanelSpec } from "../../src/pages/components/types";
@@ -135,6 +136,35 @@ test("KindPanels scopes the table to the run but not the grid", async () => {
   };
   expect(body.view.panels[0]).toEqual({ type: "grid", title: "same item across configs" });
   expect(body.view.panels[1]?.data).toEqual({ source: "traces", filter: { run_id: "R" } });
+});
+
+describe("sweep metrics stay out of the run's over-time curves (UI-F10b)", () => {
+  const point = (name: string, step: number) => ({ run_id: "R", group_id: "g", seed: 1, name, step, value: 1 });
+  const rows = [point("cpu_pct", 0), point("cpu_pct", 33), point("sweep/rps", 1), point("sweep/rps", 128)];
+  const overTime: PanelSpec = { type: "curves", title: "over time" };
+
+  test("withoutSweeps drops sweep/* rows of a curves panel without a metric list", () => {
+    const result = { type: "curves" as const, title: "over time", rows, meta: { metrics: ["cpu_pct", "sweep/rps"] } };
+    const out = withoutSweeps(result, overTime);
+    expect(out.rows.map((r) => r.name)).toEqual(["cpu_pct", "cpu_pct"]);
+    expect(out.meta.metrics).toEqual(["cpu_pct"]);
+    // a panel that names the sweep metric keeps it; other panel types are left alone
+    const listed: PanelSpec = { type: "curves", data: { metrics: ["sweep/rps"] } };
+    expect(withoutSweeps(result, listed)).toBe(result);
+    const table = { type: "table" as const, title: "t", rows, meta: {} };
+    expect(withoutSweeps(table, { type: "table" })).toBe(table);
+  });
+
+  test("KindPanels draws the over-time panel without the sweep", async () => {
+    mockApi({
+      "POST /api/v1/tasks/p/t/views/query": { panels: [{ type: "curves", title: "over time", rows, meta: {} }] },
+    });
+    renderWithClient(<KindPanels project="p" task="t" runId="R" specs={[overTime]} startIndex={0} />, {
+      registry: fakeRegistry(["curves"]),
+    });
+    const panel = await screen.findByRole("region", { name: "a over time" });
+    expect(within(panel).getByTestId("panel-curves").textContent).toBe("over time:2");
+  });
 });
 
 test("an explicit ?example= wins over the failed one", async () => {

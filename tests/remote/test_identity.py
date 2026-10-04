@@ -16,7 +16,7 @@ from hypothex.core.context import Context
 from hypothex.core.environment import EnvironmentDescriptor
 from hypothex.core.index import rebuild_index
 from hypothex.remote.config import EnvironmentsFile, HostSpec, save_hosts
-from hypothex.remote.hub import Hub, _Supervisor, mirror_run, mirror_source
+from hypothex.remote.hub import CLAIMS_DIR, Hub, _Supervisor, mirror_run, mirror_source
 from tests.remote.test_hub import FakeClient, seed_run, until
 
 ENVIRONMENT = "shared-environment"
@@ -263,3 +263,103 @@ def test_disabled_configured_host_keeps_ownership_across_manager_reload(
             await manager.stop()
 
     asyncio.run(main())
+
+
+def legacy_claim(ctx: Context, run_id: str = "r1") -> Path:
+    """Write the claim shape used before host provenance was recorded."""
+    path = ctx.layout.store / CLAIMS_DIR / f"{run_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"project": "toy", "environment_id": ENVIRONMENT}))
+    return path
+
+
+def test_upgrade_migrates_hostless_claims_only_for_the_saved_cursor_owner(
+    identity_context: Context, tmp_path: Path
+) -> None:
+    ctx, remote = identity_context, Context.open(tmp_path / "remote")
+    seed_run(remote, "r1")
+    claim = legacy_claim(ctx)
+    ctx.index.set_cursor("a", ENVIRONMENT, 7)
+    hub = Hub(ctx, hosts("a", "b"))
+    with pytest.raises(hub_module._EnvironmentTakenError, match="host a"):
+        hub._reserve_environment(ENVIRONMENT, "b")
+    assert "host" not in json.loads(claim.read_text())
+    hub._reserve_environment(ENVIRONMENT, "a")
+    assert json.loads(claim.read_text())["host"] == "a"
+    assert ctx.index.get_cursor("a", ENVIRONMENT) == 7
+    assert mirror_run(ctx, FakeClient(remote), "a", ENVIRONMENT, "toy", "r1")  # type: ignore[arg-type]
+    assert mirror_source(ctx, ctx.find_record("r1")) == "host:a"
+    assert mirror_run(ctx, FakeClient(remote), "b", ENVIRONMENT, "toy", "r1") is None  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("cursor_names", [(), ("a", "b")])
+def test_upgrade_refuses_hostless_claims_without_an_unambiguous_cursor_owner(
+    identity_context: Context, cursor_names: tuple[str, ...]
+) -> None:
+    ctx = identity_context
+    claim = legacy_claim(ctx)
+    before = claim.read_bytes()
+    for name in cursor_names:
+        ctx.index.set_cursor(name, ENVIRONMENT, 7)
+    hub = Hub(ctx, hosts("a", "b"))
+    with pytest.raises(hub_module._EnvironmentTakenError, match="legacy.*owner"):
+        hub._reserve_environment(ENVIRONMENT, "a")
+    assert claim.read_bytes() == before
+    assert ctx.index.cursor_hosts(ENVIRONMENT) == list(cursor_names)
+
+
+def test_upgrade_can_transfer_a_verified_legacy_owner_after_removal(
+    identity_context: Context,
+) -> None:
+    ctx = identity_context
+    claim = legacy_claim(ctx)
+    ctx.index.set_cursor("old", ENVIRONMENT, 7)
+    hub = Hub(ctx, hosts("new"))
+    hub._reserve_environment(ENVIRONMENT, "new")
+    assert json.loads(claim.read_text())["host"] == "new"
+    assert ctx.index.cursor_hosts(ENVIRONMENT) == ["new", "old"]
+
+
+def test_direct_legacy_mirror_reports_the_needed_owner_migration(
+    identity_context: Context, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx, remote = identity_context, Context.open(tmp_path / "remote")
+    seed_run(remote, "r1")
+    legacy_claim(ctx)
+    assert mirror_run(ctx, FakeClient(remote), "a", ENVIRONMENT, "toy", "r1") is None  # type: ignore[arg-type]
+    assert "legacy claim" in caplog.text and "reconnect" in caplog.text
+
+
+@pytest.mark.parametrize("crash_after", ["normalize", "cursor", "claim"])
+def test_upgrade_alias_transfer_resumes_after_an_interrupted_write(
+    identity_context: Context, monkeypatch: pytest.MonkeyPatch, crash_after: str
+) -> None:
+    ctx = identity_context
+    claims = [legacy_claim(ctx, run_id) for run_id in ("r1", "r2")]
+    ctx.index.set_cursor("old", ENVIRONMENT, 7)
+    hub = Hub(ctx, hosts("new"))
+    set_cursor, write_claim = ctx.index.set_cursor, hub_module.atomic_write_text
+
+    def interrupt_cursor(host: str, environment_id: str, sequence: int) -> None:
+        set_cursor(host, environment_id, sequence)
+        raise OSError("interrupted after durable cursor write")
+
+    def interrupt_claim(path: Path, data: str) -> None:
+        write_claim(path, data)
+        target = "old" if crash_after == "normalize" else "new"
+        if json.loads(data).get("host") == target:
+            raise OSError("interrupted after durable claim write")
+
+    with monkeypatch.context() as failing:
+        if crash_after == "cursor":
+            failing.setattr(ctx.index, "set_cursor", interrupt_cursor)
+        else:
+            failing.setattr(hub_module, "atomic_write_text", interrupt_claim)
+        with pytest.raises(OSError, match="interrupted"):
+            hub._reserve_environment(ENVIRONMENT, "new")
+
+    restarted = Hub(Context.open(ctx.layout.home), hosts("new"))
+    restarted._reserve_environment(ENVIRONMENT, "new")
+    assert all(json.loads(path.read_text())["host"] == "new" for path in claims)
+    assert restarted.ctx.index.get_cursor("old", ENVIRONMENT) == 7
+    assert restarted.ctx.index.cursor_hosts(ENVIRONMENT) == ["new", "old"]

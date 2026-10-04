@@ -95,6 +95,9 @@ Backoff 3/4/8/16 s, reset after 30 s connected. Cursor persisted in the hub inde
 
 Identity ownership is reserved before the first awaited cursor read: under the shared `.claims` lock, check the environment's cursor rows and legacy run claims against all configured names (including disabled hosts), then upsert a cursor at sequence zero without reducing an existing sequence. Cursor resets retain the row at zero; rebuilds retain cursor rows. Other configured owners cause a terminal connection error. Ownership survives connection-setting changes and is released only after removal and draining that host's pending mirrors. A newly accepted alias for an environment whose old names were removed updates matching run-claim `host` fields before mirroring. Run claims also reject direct writes from a different host until this explicit transfer. Historical cursor rows remain, but forwarding ignores names no longer configured.
 
+Pre-upgrade claims containing only `{project, environment_id}` gain a `host` label only after the existing cursor rows establish exactly one original owner. This validation precedes any new cursor reservation or claim change and remains under the shared claim lock. Missing or ambiguous cursor ownership refuses the connection with instructions to restore verified host labels or original cursor metadata; the connecting descriptor does not establish legacy ownership.
+When moving such an environment to a new alias, normalize every hostless claim to the verified original owner before adding the new alias cursor. Then transfer labelled claims to the new alias. Interrupted normalization retains one saved owner; interrupted transfer has no remaining hostless claims, so either stage can resume after restart.
+
 ### 1.6 Env-server additions (`hypothex.core` on the host)
 
 ```python

@@ -7,11 +7,15 @@ Use fake clients and temporary stores only. No network hosts or SSH configuratio
 
 - Reuse `host_cursors`; sequence zero is a durable reservation. No new registry or schema.
 - Serialize lookup and reservation under the existing `.claims` lock before any session await.
-- Include disabled configured names and legacy claim-only owners. Retain past identities while
+- Include disabled configured names and labelled claim-only owners. Retain past identities while
   their host remains configured, including after connection-setting changes.
 - An explicit removal releases ownership only after pending mirrors drain. A new alias updates
   the old environment's claim source labels before accepting data; other direct host writes fail.
 - Cursor resets preserve reservations; forwarding ignores historical aliases no longer configured.
+- Upgrade claims without a `host` label migrate only from exactly one preexisting cursor owner.
+  Missing or ambiguous owners fail closed with documented recovery, before any new reservation.
+- Normalize all hostless claims to that original owner before writing a new alias cursor;
+  then transfer the labelled claims. Every intermediate durable state is restartable.
 
 ## Acceptance and evidence
 
@@ -27,6 +31,14 @@ Use fake clients and temporary stores only. No network hosts or SSH configuratio
   (`gate-ruff.log`, `gate-format.log`, `gate-ty.log`, `gate-docs.log`).
 - [x] Review the final diff: reservation precedes awaits, disabled and draining owners remain
   protected, cursor maintenance preserves identity, and alias transfer updates provenance.
+- [x] Cover origin/main's older hostless claim shape: five failures before the migration fix
+  (`gate-upgrade-red.log`).
+- [x] Verify alias-transfer migration can resume after interrupted normalization, cursor,
+  and claim writes: three failures before the ordering fix (`gate-upgrade-crash-red.log`),
+  then all 20 identity tests pass (`gate-upgrade-green.log`).
+
+Upgrade review rule: use the prior release's actual persisted record shapes, and inject
+failures between durable writes as well as checking the completed transition.
 
 Commit locally with these changes; push and main integration remain with the parent task.
 

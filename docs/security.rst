@@ -88,7 +88,23 @@ other configured host. The hub reserves the identity before reading the event
 cursor or starting a mirror. The reservation uses the existing ``host_cursors``
 row, including sequence zero, and survives disconnects, restarts, event-log
 resets, and index rebuilds. Disabled hosts remain owners while they are configured.
-Legacy run claims also preserve ownership when no cursor was saved.
+Run claims with a host label also preserve ownership when no cursor was saved.
+
+On upgrade, older run claims may contain only ``project`` and ``environment_id``.
+The hub adds their ``host`` label only when existing cursor metadata identifies
+exactly one original owner. It checks that ownership under the claim lock before
+writing either a label or a new reservation. The first host to reconnect is never
+assumed to be the owner.
+All hostless claims are first labelled with that original owner before adding a
+new alias cursor. A shutdown during normalization or alias transfer can therefore
+resume without turning a known owner into an ambiguous one.
+
+If those older claims have no saved cursor owner, or have several, the connection
+is refused with a recovery message. Stop the hub and restore the original cursor
+metadata from a trusted backup, or verify the source environment and add the
+correct ``host`` label to its affected ``<store>/.claims/<run_id>.json`` files,
+preserving their project and environment fields. Then reconnect. Removing claims
+or accepting the first connecting host would discard the ownership evidence.
 
 Changing a host's connection settings does not release its current or previously
 seen identities. To move an environment to another host name, remove the old

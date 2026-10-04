@@ -264,11 +264,13 @@ def _claim_owner(ctx: Context, run_id: str) -> dict[str, str] | None:
         data = None
     if not isinstance(data, dict):  # unreadable: never taken over
         return {"project": "?", "environment_id": "?"}
-    return {
+    owner = {
         "project": str(data.get("project")),
         "environment_id": str(data.get("environment_id")),
-        "host": str(data.get("host")),
     }
+    if isinstance(data.get("host"), str) and data["host"]:
+        owner["host"] = data["host"]
+    return owner
 
 
 def _conflict(
@@ -287,7 +289,12 @@ def _conflict(
                 f"run {run_id} is claimed by environment {owner['environment_id']} "
                 f"in project {owner['project']!r}"
             )
-        if owner.get("host") != host:
+        if "host" not in owner:
+            return (
+                f"run {run_id} has a legacy claim without a verified host; "
+                "reconnect its saved cursor owner to migrate the claim"
+            )
+        if owner["host"] != host:
             return f"run {run_id} is claimed by host {owner.get('host')}"
         return None
     store = ctx.layout.store
@@ -1376,10 +1383,12 @@ class Hub:
 
         The existing claim lock serializes the ownership check and the cursor-zero
         write, including across hub processes. Cursors survive restarts and index
-        rebuilds; legacy run claims protect owners whose first cursor was never
-        written. Only removing the old name from the configured hosts releases its
-        identity. Reusing it under another name then transfers the claim labels
-        before that host can supply new run data.
+        rebuilds; labelled run claims protect owners whose first cursor was never
+        written. Older claims without host labels migrate only when the saved
+        cursors identify one owner, never from the newly connecting descriptor.
+        Only removing the old name from the configured hosts releases its identity.
+        Reusing it under another name then transfers the claim labels before that
+        host can supply new run data.
 
         Parameters
         ----------
@@ -1391,7 +1400,8 @@ class Hub:
         Raises
         ------
         _EnvironmentTakenError
-            If another configured host owns this identity.
+            If another configured host owns this identity, or an older claim's
+            owner cannot be established from the saved cursors.
         """
         # A removed supervisor stays an owner until its in-flight mirror writes
         # have drained, even if the manager already loaded the new host file.
@@ -1399,18 +1409,27 @@ class Hub:
         claims_dir = self.ctx.layout.store / CLAIMS_DIR
         with dir_lock(claims_dir):
             claims: list[tuple[Path, dict[str, Any]]] = []
-            owners = set(self.ctx.index.cursor_hosts(env_id))
+            unlabelled: list[tuple[Path, dict[str, Any]]] = []
+            cursor_owners = set(self.ctx.index.cursor_hosts(env_id))
+            owners = set(cursor_owners)
             for path in sorted(claims_dir.glob("*.json")):
                 try:
                     claim = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue  # _conflict refuses an unreadable run claim
-                if (
-                    isinstance(claim, dict)
-                    and claim.get("environment_id") == env_id
-                    and isinstance(claim.get("host"), str)
-                ):
-                    owners.add(claim["host"])
+                if isinstance(claim, dict) and claim.get("environment_id") == env_id:
+                    host = claim.get("host")
+                    if isinstance(host, str) and host:
+                        owners.add(host)
+                    else:
+                        if len(cursor_owners) != 1:
+                            raise _EnvironmentTakenError(
+                                f"{name}: legacy claims for environment {env_id} lack a verified "
+                                "host owner; saved cursor ownership is absent or ambiguous. "
+                                "Restore verified claim host labels or original cursor metadata "
+                                "before reconnecting."
+                            )
+                        unlabelled.append((path, claim))
                     claims.append((path, claim))
             holders = sorted((owners & configured) - {name})
             if holders:
@@ -1418,9 +1437,17 @@ class Hub:
                     f"{name} reports the environment id {env_id} of host {holders[0]}; "
                     f"every host must be its own hx home (remove one: hx hosts rm {name})"
                 )
+            if unlabelled:
+                # Finish normalization before adding a second alias cursor. A
+                # crash partway through leaves one unambiguous saved owner;
+                # after this, an interrupted alias transfer has no hostless rows.
+                [original_owner] = cursor_owners
+                for path, claim in unlabelled:
+                    claim["host"] = original_owner
+                    atomic_write_text(path, json.dumps(claim))
             self.ctx.index.set_cursor(name, env_id, 0)
             for path, claim in claims:
-                if claim["host"] != name:
+                if claim.get("host") != name:
                     claim["host"] = name
                     atomic_write_text(path, json.dumps(claim))
 

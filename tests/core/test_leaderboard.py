@@ -638,3 +638,22 @@ def test_within_noise_follows_the_paired_test_not_seed_intervals() -> None:
     board = build_leaderboard("toy", "t", KINDS, runs, {"x": acc(0.9), "y": acc(0.1)})
     assert board.rows[1].vs_best is not None and board.rows[1].vs_best.p is None
     assert board.rows[1].within_noise_of_best is None
+
+
+def test_rerun_and_reinfer_prefixes_do_not_rename_the_group() -> None:
+    rid = "20261004-124748-uspto-forward-to-5663"
+    assert group_label(f"Rerun of {rid}: svm, rbf kernel", [], "g") == "svm"
+    assert group_label(f"Re-infer of {rid}: svm should win", [], "g") == "svm"
+    chained = f"Rerun of r2: Re-infer of {rid}: Rerun of r0: svm (rbf)"
+    assert group_label(chained, [], "g") == "svm"
+    assert group_label(f"Rerun of {rid}:", ["base"], "g") == "base"  # parent had none
+    # a rerun of the best run keeps the best group's name and the headline
+    runs = [
+        krun("a0", "a", seed=1, hypothesis="svm wins"),
+        krun("a1", "a", seed=2, minute=1, hypothesis="Rerun of a0: svm wins"),
+        krun("b0", "b", hypothesis="rf"),
+    ]
+    scores = {"a0": acc(0.9), "a1": acc(0.9), "b0": acc(0.7)}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    assert board.rows[0].label == "svm wins"
+    assert board.headline.startswith("svm wins ")

@@ -48,6 +48,10 @@ _CLAUSE = re.compile(
 )
 
 
+_DERIVED_PREFIX = re.compile(r"^(?:(?:Rerun|Re-infer) of \S+:\s*)+")
+"""``Rerun of <id>:`` / ``Re-infer of <id>:`` (also chained) that ``control`` prepends."""
+
+
 class NoiseInterval(BaseModel):
     """A 95% interval from test-set noise."""
 
@@ -136,7 +140,9 @@ def group_label(hypothesis: str, tags: Iterable[str], group_id: str) -> str:
     str
         The hypothesis's first clause (cut at ``, ; : ( )``, a dash, a full stop,
         or words like "because"/"should"), at most 32 characters; else the first
-        tag in sorted order; else ``"group <id>"``.
+        tag in sorted order; else ``"group <id>"``. Leading ``Rerun of <id>:`` and
+        ``Re-infer of <id>:`` prefixes are dropped first, so a rerun keeps the
+        parent's label.
 
     Examples
     --------
@@ -144,8 +150,11 @@ def group_label(hypothesis: str, tags: Iterable[str], group_id: str) -> str:
     'RBF-kernel SVM'
     >>> group_label("", ["svm"], "g")
     'svm'
+    >>> group_label("Rerun of 20261004-1-x: svm, rbf", [], "g")
+    'svm'
     """
-    parts = [p.strip() for p in _CLAUSE.split(hypothesis.strip())]
+    text = _DERIVED_PREFIX.sub("", hypothesis.strip())
+    parts = [p.strip() for p in _CLAUSE.split(text)]
     clause = next((p for p in parts if p), "")
     if clause:
         if len(clause) <= LABEL_MAX:

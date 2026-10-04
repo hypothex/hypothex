@@ -602,3 +602,22 @@ def test_a_lost_queued_pinned_run_releases_its_staging_checkout(
     _write_supervisor_pid(ctx, rec.run_id, dead_pid())
     assert [r.run_id for r in repair_runs(ctx)] == [rec.run_id]
     assert _staging(ctx) == [] and _git_worktrees(toy_repo) == 1
+
+
+def test_cancel_many_repositions_the_queue_once_and_goes_past_errors(
+    ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DF-49: a sweep cancel repositioned the whole queue once per run (n^2 events)
+    fake_gpus = tmp_path / "gpus.json"
+    fake_gpus.write_text('[{"index": 0, "external": true}]')  # busy: nothing can start
+    monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(fake_gpus))
+    req = RunRequest(repo=toy_repo, command=cmd("pass"), gpus=1, queue=True)
+    ids = [launch_run(ctx, req).run_id for _ in range(5)]
+    mark = ctx.events.since(0, limit=10_000)[-1].sequence
+    batch = control.cancel_many_if_queued(ctx, [*ids[:3], "no-such-run"])
+    assert [r.run_id for r in batch.records] == ids[:3]
+    assert all(r.status == RunStatus.KILLED for r in batch.records)
+    assert list(batch.errors) == ["no-such-run"]
+    moved = [e for e in ctx.events.since(mark, limit=10_000) if e.type == "run.queue_moved"]
+    assert sorted(e.run_id for e in moved) == sorted(ids[3:])  # once each, not once per cancel
+    assert [ctx.find_record(i).executor.queue_position for i in ids[3:]] == [1, 2]

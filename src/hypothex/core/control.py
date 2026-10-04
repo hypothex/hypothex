@@ -14,7 +14,7 @@ from typing import BinaryIO
 from hypothex.core import slurm
 from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
-from hypothex.core.errors import RunError, RunNotFoundError
+from hypothex.core.errors import HypothexError, RunError, RunNotFoundError
 from hypothex.core.execution import (
     EXECUTION_CLAIM,
     QUEUE_FILE,
@@ -292,13 +292,36 @@ _unqueue = end_unstarted(RunStatus.KILLED)
 
 def _remove_from_queue(ctx: Context, run_id: str, run_dir: Path) -> RunRecord | None:
     """Kill a run still waiting in the GPU queue; None if the scheduler started it."""
+    return _remove_many_from_queue(ctx, {run_id: run_dir}).get(run_id)
+
+
+def _remove_many_from_queue(ctx: Context, waiting: dict[str, Path]) -> dict[str, RunRecord]:
+    """
+    Kill runs still waiting in the GPU queue: one lock, one reposition.
+
+    Parameters
+    ----------
+    ctx : Context
+    waiting : dict of str to Path
+        Run id to run folder of runs that were waiting a moment ago.
+
+    Returns
+    -------
+    dict of str to RunRecord
+        The runs killed; a run the scheduler started meanwhile is left out.
+    """
+    killed: dict[str, RunRecord] = {}
     with scheduler_lock(ctx):
-        if not _scheduler_held(run_dir):
-            return None
-        (run_dir / QUEUE_FILE).unlink()
-        killed = ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "removed from queue"})
-    Scheduler(ctx).refresh_positions()
-    release_worktree(ctx, killed)  # it never ran: execute_run will not clean up after it
+        for run_id, run_dir in waiting.items():
+            if _scheduler_held(run_dir):
+                (run_dir / QUEUE_FILE).unlink()
+                killed[run_id] = ctx.update_run(
+                    run_id, "run.killed", _unqueue, {"reason": "removed from queue"}
+                )
+    if killed:
+        Scheduler(ctx).refresh_positions()
+    for record in killed.values():
+        release_worktree(ctx, record)  # it never ran: execute_run will not clean up after it
     return killed
 
 
@@ -356,6 +379,73 @@ def cancel_if_queued(ctx: Context, run_id: str) -> RunRecord:
     killed = ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "cancelled while queued"})
     release_worktree(ctx, killed)  # a supervisor that arrives now refuses the run, so no cleanup
     return killed
+
+
+@dataclasses.dataclass(frozen=True)
+class CancelBatch:
+    """
+    What ``cancel_many_if_queued`` did.
+
+    ``records`` holds each run after the step (``killed`` when it was
+    cancelled, else as it was); ``errors`` maps a run that was not touched
+    (unknown, another environment, a failed ``scancel``) to the reason.
+    """
+
+    records: list[RunRecord]
+    errors: dict[str, str]
+
+
+def cancel_many_if_queued(ctx: Context, run_ids: list[str]) -> CancelBatch:
+    """
+    Stop many runs, each only if it has not started (``cancel_if_queued``).
+
+    Runs waiting in the GPU queue are removed under one scheduler lock with
+    one reposition of the runs behind them, not one per run, so cancelling a
+    big sweep costs O(n). An error on one run never stops the others.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    run_ids : list of str
+        Run ids, e.g. the queued runs of a sweep.
+
+    Returns
+    -------
+    CancelBatch
+        Each run after the step, and the runs that could not be handled.
+
+    Examples
+    --------
+    >>> batch = cancel_many_if_queued(ctx, ["20261004-101500-toy-acc-1a2b"])  # doctest: +SKIP
+    >>> [r.status.value for r in batch.records], batch.errors  # doctest: +SKIP
+    (['killed'], {})
+    """
+    errors: dict[str, str] = {}
+    waiting: dict[str, Path] = {}
+    for run_id in run_ids:
+        try:
+            record = ctx.find_record(run_id)
+            _require_own(ctx, record, "stop")
+        except HypothexError as exc:
+            errors[run_id] = str(exc)
+            continue
+        run_dir = ctx.run_dir(record)
+        if record.status == RunStatus.QUEUED and _scheduler_held(run_dir):
+            waiting[run_id] = run_dir
+    killed = _remove_many_from_queue(ctx, waiting)
+    records: list[RunRecord] = []
+    for run_id in run_ids:
+        if run_id in errors:
+            continue
+        if run_id in killed:
+            records.append(killed[run_id])
+            continue
+        try:  # not in the GPU queue (or started meanwhile): the one-run path decides
+            records.append(cancel_if_queued(ctx, run_id))
+        except HypothexError as exc:
+            errors[run_id] = str(exc)
+    return CancelBatch(records=records, errors=errors)
 
 
 def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) -> RunRecord:

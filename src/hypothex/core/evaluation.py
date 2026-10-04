@@ -172,7 +172,8 @@ def evaluate_run(
     NoPredictionsError
         If the run has no predictions file.
     EvalError
-        For any other evaluation failure.
+        If no prediction id is in the task's dataset (every reference would be
+        None), or for any other evaluation failure. Some ids missing is a warning.
     """
     record = ctx.find_record(run_id)
     repo, config, task = _task_setup(ctx, record, from_checkout=from_checkout)
@@ -210,6 +211,19 @@ def evaluate_run(
     result = run_worker("evaluate", request, default_python_cmd(repo, config), cwd=repo)
     now = utcnow()
     warnings: list[str] = []
+    # an older worker in the project's environment does not count them
+    n_examples, unmatched = result.get("n_examples", 0), result.get("n_unmatched", 0)
+    where = f"dataset {task.dataset!r}" + (f" split {task.split!r}" if task.split else "")
+    if unmatched and unmatched == n_examples:
+        raise EvalError(
+            f"none of the {n_examples} prediction ids is in {where}; "
+            "nothing to score against (do the ids match the dataset's id field?)"
+        )
+    if unmatched:
+        warnings.append(
+            f"{unmatched} of {n_examples} prediction ids are not in {where}; "
+            "they are scored with no reference"
+        )
     with ctx.store.project_lock(record.project):  # concurrent evaluations share this file
         known = ctx.store.metric_hashes(record.project)
         for r in result["results"]:

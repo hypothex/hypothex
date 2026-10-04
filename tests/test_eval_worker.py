@@ -130,3 +130,24 @@ def test_missing_python_is_eval_error(tmp_path: Path) -> None:
             ["/nonexistent/python"],
             cwd=tmp_path,
         )
+
+
+def test_evaluate_counts_prediction_ids_missing_from_the_dataset(tmp_path: Path) -> None:
+    repo = write_toy_project(tmp_path / "repo", use_git=False)
+    rows = [
+        {"id": "ex-0", "prediction": 0},
+        {"id": "x-1", "prediction": 1},
+        {"id": "x-2", "prediction": 1, "reference": 1},  # inline: not joined
+    ]
+    run_dir = _run_dir(tmp_path, rows)
+    out = run_worker("evaluate", _request(repo, run_dir, ["accuracy"]), [sys.executable], cwd=repo)
+    assert (out["n_examples"], out["n_unmatched"]) == (3, 1)
+    assert out["results"][0]["values"] == {"value": 2 / 3}
+
+
+def test_evaluate_runs_no_metric_when_no_id_is_in_the_dataset(tmp_path: Path) -> None:
+    repo = write_toy_project(tmp_path / "repo", use_git=False)
+    run_dir = _run_dir(tmp_path, [{"id": f"x-{i}", "prediction": 0} for i in range(3)])
+    out = run_worker("evaluate", _request(repo, run_dir, ["accuracy"]), [sys.executable], cwd=repo)
+    assert out == {"n_examples": 3, "n_unmatched": 3, "results": []}
+    assert not (run_dir / "predictions" / "scores.accuracy@v1.jsonl").exists()

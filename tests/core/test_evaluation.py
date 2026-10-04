@@ -160,6 +160,31 @@ def test_reeval_warns_about_metric_drift_without_force(ctx: Context, toy_repo: P
     assert report.warnings == ["metric accuracy code changed without a version bump (still v1)"]
 
 
+def test_no_prediction_id_in_the_dataset_is_an_eval_error(ctx: Context, toy_repo: Path) -> None:
+    # every reference would be None: a perfect model would rank with 0.0
+    preds = [{"id": f"x{p['id']}", "prediction": p["prediction"]} for p in PREDS_075]
+    seed_finished_run(ctx, toy_repo, "r1", predictions=preds)
+    with pytest.raises(EvalError, match="none of the 4 prediction ids is in dataset 'toyset'"):
+        evaluate_run(ctx, "r1")
+    assert ctx.store.read_scores("toy", "r1") == []
+    report = reeval(ctx, run_id="r1")
+    assert report.evaluated == [] and "none of the 4 prediction ids" in report.skipped["r1"]
+
+
+def test_some_prediction_ids_missing_from_the_dataset_warn(ctx: Context, toy_repo: Path) -> None:
+    preds = [*PREDS_075[:3], {"id": "x3", "prediction": 0}]
+    seed_finished_run(ctx, toy_repo, "r1", predictions=preds)
+    scores, warnings = evaluate_run(ctx, "r1")
+    assert [s.value for s in scores] == [0.75]  # x3 has no reference, so it counts wrong
+    expected = (
+        "1 of 4 prediction ids are not in dataset 'toyset' split 'test'; "
+        "they are scored with no reference"
+    )
+    assert warnings == [expected]
+    messages = [e.payload["message"] for e in ctx.events.since(0) if e.type == "run.warning"]
+    assert messages == [expected]
+
+
 def test_evaluate_removed_task_is_clear_error(ctx: Context, toy_repo: Path) -> None:
     seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
     cfg_path = toy_repo / "hypothex.yaml"

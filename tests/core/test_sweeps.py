@@ -1126,6 +1126,59 @@ def test_cancel_queued_skips_runs_that_already_ended(ctx: Context, toy_sweep: Sw
     assert summary.counts["queued"] == 1
 
 
+def test_cancel_queued_goes_on_past_a_failed_stop_and_counts_it(
+    ctx: Context, toy_sweep: SweepSpec
+) -> None:
+    # DF-49: only RunError was caught, so one host error left every later run queued
+    add_run(ctx, "c3", "1e-3", 3, RunStatus.QUEUED)
+    add_run(ctx, "c4", "1e-3", 4, RunStatus.QUEUED)
+    real = sweeps_module.stop_if_queued
+
+    def stop(run_id: str) -> object:
+        if run_id == "c2":
+            raise StoreError("host 'gpu1' did not answer")
+        return real(ctx, run_id)
+
+    summary = cancel_queued(ctx, "toy", "s-0001", stop=stop)
+    assert summary.counts["killed"] == 2 and summary.counts["queued"] == 1
+    assert summary.cancel is not None
+    assert (summary.cancel.asked, summary.cancel.failed) == (3, 1)
+    assert summary.cancel.errors == ["host 'gpu1' did not answer"]
+
+
+def test_cancel_queued_sends_batches_and_goes_on_past_a_failed_batch(
+    ctx: Context, toy_sweep: SweepSpec
+) -> None:
+    for seed in range(3, 3 + sweeps_module.CANCEL_BATCH * 2):
+        add_run(ctx, f"q{seed}", "1e-3", seed, RunStatus.QUEUED)
+    sizes: list[int] = []
+
+    def stop_batch(run_ids: list[str]) -> sweeps_module.CancelResult:
+        sizes.append(len(run_ids))
+        if len(sizes) == 2:
+            raise StoreError("host 'gpu1' is not connected")
+        return sweeps_module.stop_queued_runs(ctx, run_ids)
+
+    summary = cancel_queued(ctx, "toy", "s-0001", stop_batch=stop_batch)
+    n = 1 + sweeps_module.CANCEL_BATCH * 2
+    assert sizes == [sweeps_module.CANCEL_BATCH, sweeps_module.CANCEL_BATCH, 1]
+    assert summary.cancel is not None
+    assert (summary.cancel.asked, summary.cancel.failed) == (n, sweeps_module.CANCEL_BATCH)
+    assert summary.cancel.errors == ["host 'gpu1' is not connected"]
+    assert summary.counts["queued"] == sweeps_module.CANCEL_BATCH
+    assert summary.counts["killed"] == n - sweeps_module.CANCEL_BATCH
+
+
+def test_stop_queued_runs_counts_the_runs_it_could_not_stop(
+    ctx: Context, toy_sweep: SweepSpec
+) -> None:
+    result = sweeps_module.stop_queued_runs(ctx, ["c2", "c1", "nope"])
+    assert ctx.find_record("c2").status == RunStatus.KILLED
+    assert ctx.find_record("c1").status == RunStatus.RUNNING  # started: left alone
+    assert (result.asked, result.failed) == (3, 1)
+    assert len(result.errors) == 1 and "nope" in result.errors[0]
+
+
 def test_cancel_unknown_sweep(ctx: Context) -> None:
     with pytest.raises(StoreError, match="unknown sweep"):
         cancel_queued(ctx, "toy", "s-dead")

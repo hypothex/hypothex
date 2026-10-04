@@ -30,7 +30,7 @@ from hypothex.core.config import (
 )
 from hypothex.core.context import Context
 from hypothex.core.control import cancel_if_queued, launch_run
-from hypothex.core.errors import HypothexError, RunError, StoreError
+from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import COMMIT_PATTERN, RunRequest
 from hypothex.core.fsutil import atomic_write_text, read_yaml, write_yaml
@@ -509,6 +509,56 @@ def new_sweep_id(layout: Layout, project: str) -> str:
 
 # summary ------------------------------------------------------------------------------
 STATUS_KEYS = tuple(s.value for s in RunStatus)
+MAX_CANCEL_ERRORS = 5
+
+
+class CancelResult(BaseModel):
+    """
+    The outcome of stopping a sweep's queued runs (``cancel_queued``, ``stop_queued_runs``).
+
+    Examples
+    --------
+    >>> CancelResult(asked=3, failed=1, errors=["host 'gpu1' is not connected"]).failed
+    1
+    """
+
+    asked: int = 0
+    """Queued runs asked to stop."""
+    failed: int = 0
+    """Runs whose stop raised; they may still be queued."""
+    errors: list[str] = Field(default_factory=list)
+    """Distinct error messages, at most ``MAX_CANCEL_ERRORS``."""
+
+    def add_failure(self, count: int, exc: Exception) -> None:
+        """
+        Count ``count`` runs as failed with the error ``exc``.
+
+        Parameters
+        ----------
+        count : int
+            Runs the error covers (one, or a whole batch).
+        exc : Exception
+            The error; its first line is kept once.
+        """
+        self.failed += count
+        message = _brief(exc)
+        if message not in self.errors and len(self.errors) < MAX_CANCEL_ERRORS:
+            self.errors.append(message)
+
+    def merge(self, other: CancelResult) -> None:
+        """
+        Add another result's counts and errors to this one.
+
+        Parameters
+        ----------
+        other : CancelResult
+            E.g. a host's answer for one batch.
+        """
+        self.asked += other.asked
+        self.failed += other.failed
+        for message in other.errors:
+            if message not in self.errors and len(self.errors) < MAX_CANCEL_ERRORS:
+                self.errors.append(message)
 
 
 class SweepSummary(BaseModel):
@@ -532,6 +582,8 @@ class SweepSummary(BaseModel):
     """The sweep's members (runs tagged ``tag``), in launch order; derived."""
     tag: str = ""
     """The sweep's member tag ``sweep:<owner8>:<id>`` (ask ``GET /api/v1/runs?tag=``)."""
+    cancel: CancelResult | None = None
+    """What ``cancel_queued`` asked and what failed; None for any other summary."""
 
 
 def sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]:
@@ -1337,15 +1389,60 @@ def stop_if_queued(ctx: Context, run_id: str) -> RunRecord:
     return cancel_if_queued(ctx, run_id)  # one conditional step: never a check, then a stop
 
 
+CANCEL_BATCH = 50
+"""Runs per ``stop_batch`` call of ``cancel_queued``: one host request stops this many."""
+
+
+def stop_queued_runs(ctx: Context, run_ids: Iterable[str]) -> CancelResult:
+    """
+    Stop each run that is still queued; a failed stop never ends the loop.
+
+    The host side of a batched cancel: one request stops many runs, and each
+    stop is one conditional step (``stop_if_queued``), so a run that started a
+    moment ago keeps running.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    run_ids : iterable of str
+        Runs of this environment.
+
+    Returns
+    -------
+    CancelResult
+        ``asked`` is the number of ids; ``failed`` counts the stops that raised.
+
+    Examples
+    --------
+    >>> stop_queued_runs(ctx, ["20261004-101500-t1-00ab12cd"]).failed  # doctest: +SKIP
+    0
+    """
+    result = CancelResult()
+    for run_id in run_ids:
+        result.asked += 1
+        try:
+            stop_if_queued(ctx, run_id)
+        except HypothexError as exc:
+            log.warning("could not stop queued run %s: %s", run_id, exc)
+            result.add_failure(1, exc)
+    return result
+
+
 def cancel_queued(
     ctx: Context,
     project: str,
     sweep_id: str,
     *,
     stop: Callable[[str], object] | None = None,
+    stop_batch: Callable[[list[str]], CancelResult] | None = None,
 ) -> SweepSummary:
     """
     Stop every queued run of a sweep; running and finished runs are left alone.
+
+    A stop that fails (a host error, a run of another environment) is counted
+    and the rest are still stopped: one bad run or host error never leaves the
+    others queued.
 
     Parameters
     ----------
@@ -1356,13 +1453,16 @@ def cancel_queued(
     sweep_id : str
         Sweep id.
     stop : callable, optional
-        ``run_id -> Any``; default ``stop_if_queued`` here (queued runs end
-        ``killed``). The hub passes a forwarder for runs on remote hosts.
+        ``run_id -> Any``, one call per run; default ``stop_if_queued`` here
+        (queued runs end ``killed``).
+    stop_batch : callable, optional
+        ``run_ids -> CancelResult``, one call per ``CANCEL_BATCH`` runs; the hub
+        passes a forwarder to the host's ``stop_queued_runs``. Wins over ``stop``.
 
     Returns
     -------
     SweepSummary
-        The sweep after the stops.
+        The sweep after the stops; ``cancel`` holds the counts and errors.
 
     Raises
     ------
@@ -1370,15 +1470,31 @@ def cancel_queued(
         If the sweep does not exist.
     """
     spec = load_sweep(ctx.layout, project, sweep_id)
-    do_stop = stop or (lambda run_id: stop_if_queued(ctx, run_id))
-    for record in sweep_runs(ctx, spec):
-        if record.status != RunStatus.QUEUED:
-            continue
-        try:
-            do_stop(record.run_id)
-        except RunError as exc:  # ended or started between the read and the stop
-            log.info("not stopping %s: %s", record.run_id, exc)
-    return summarize_sweep(ctx, project, sweep_id)
+    queued = [r.run_id for r in sweep_runs(ctx, spec) if r.status == RunStatus.QUEUED]
+    result = CancelResult()
+    if stop_batch is not None:
+        for i in range(0, len(queued), CANCEL_BATCH):
+            batch = queued[i : i + CANCEL_BATCH]
+            try:
+                result.merge(stop_batch(batch))
+            except HypothexError as exc:
+                log.warning(
+                    "could not stop %d queued runs of sweep %s: %s", len(batch), sweep_id, exc
+                )
+                result.asked += len(batch)
+                result.add_failure(len(batch), exc)
+    elif stop is None:
+        result = stop_queued_runs(ctx, queued)
+    else:
+        for run_id in queued:
+            result.asked += 1
+            try:
+                stop(run_id)
+            except HypothexError as exc:
+                log.warning("could not stop queued run %s: %s", run_id, exc)
+                result.add_failure(1, exc)
+    summary = summarize_sweep(ctx, project, sweep_id)
+    return summary.model_copy(update={"cancel": result})
 
 
 def extend_sweep(

@@ -27,7 +27,8 @@ def test_serve_writes_server_json_and_reports_kind(tmp_path: Path) -> None:
         info = wait_until(lambda: json.loads(info_path.read_text()), timeout=30)
         assert info["pid"] == proc.pid and info["managed"] is False and info["port"] > 0
         url = f"http://127.0.0.1:{info['port']}/.well-known/hypothex/environment"
-        descriptor = wait_until(lambda: httpx.get(url, timeout=2).json(), timeout=30)
+        good = {"Authorization": f"Bearer {info['token']}"}
+        descriptor = wait_until(lambda: httpx.get(url, headers=good, timeout=2).json(), timeout=30)
         assert descriptor["kind"] == "ssh"
     finally:
         proc.terminate()

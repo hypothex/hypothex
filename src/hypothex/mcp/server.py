@@ -6,10 +6,10 @@ import contextlib
 import functools
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 import yaml
@@ -385,6 +385,8 @@ def require_agent_hypothesis(created_by: str, hypothesis: str) -> None:
 DEFAULT_HUB_URL = "http://127.0.0.1:7777"
 TASK_REEVAL_SECONDS = 3600.0
 """Wait for a task reeval through the hub: it scores every run, some on their hosts."""
+HOST_STATE_SECONDS = 10.0
+"""Wait for the hub's answer on a host's state (a read must not hang on a slow hub)."""
 LOCAL_HOST = "local"
 
 
@@ -750,6 +752,69 @@ def acts_through_hub(ctx: Context, run_id: str) -> bool:
     return record.environment_id != ctx.descriptor.environment_id
 
 
+def host_states(
+    ctx: Context,
+    environment_ids: Iterable[str],
+    *,
+    url: str | None = None,
+    token: str | None = None,
+) -> dict[str, str | None]:
+    """
+    The ``host_state`` of runs of each environment: its host's connection state.
+
+    Only the hub knows it (its process holds the connections), so each other
+    environment costs one ``GET /api/v1/runs?environment_id=...&limit=1``,
+    whose rows carry the state, as ``GET /api/v1/runs/{id}`` does (spec 5.6).
+
+    Parameters
+    ----------
+    ctx : Context
+    environment_ids : iterable of str
+        Environments of the runs to show.
+    url : str, optional
+        Hub URL (default ``hub_url()``).
+    token : str, optional
+        Hub bearer token (default ``resolve_hub_token`` for this home).
+
+    Returns
+    -------
+    dict
+        ``environment_id -> ConnState or None``. None is a run of this store's own
+        environment (a hub run) or of an environment no configured host serves.
+        When the hub does not answer, a run of another environment is
+        ``"stale"``: nothing refreshes its copy here, and it keeps going on its
+        host (do not rerun it).
+
+    Examples
+    --------
+    >>> host_states(ctx, ["env-gpu1"])  # doctest: +SKIP
+    {'env-gpu1': 'connected'}
+    """
+    own = ctx.descriptor.environment_id
+    out: dict[str, str | None] = {}
+    auth: str | None = None
+    hub_down = False
+    for env in sorted(set(environment_ids)):
+        if env == own:
+            out[env] = None
+            continue
+        if hub_down:
+            out[env] = "stale"
+            continue
+        auth = auth or token or resolve_hub_token(url, ctx.layout.home)
+        query = urlencode({"environment_id": env, "archived": "true", "limit": 1})
+        try:
+            rows = hub_call(
+                "GET", f"/api/v1/runs?{query}", url=url, token=auth, timeout=HOST_STATE_SECONDS
+            )
+        except HypothexError:
+            hub_down = True
+            out[env] = "stale"
+            continue
+        out[env] = rows[0].get("host_state") if isinstance(rows, list) and rows else None
+    return out
+
+
 def task_acts_through_hub(ctx: Context, project: str, task: str) -> bool:
     """
     Tell whether a task reeval must go through the hub.
@@ -1075,7 +1140,11 @@ def build_server(
         tag: str | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """List runs, newest first. status: queued|running|finished|failed|killed|lost."""
+        """
+        List runs, newest first. status: queued|running|finished|failed|killed|lost.
+        host_state is the run's host connection (null: a hub run); a running run on a
+        stale host keeps going there.
+        """
         records = ctx().index.list_runs(
             project=project,
             task=task,
@@ -1083,13 +1152,20 @@ def build_server(
             tag=tag,
             limit=limit,
         )
-        return {"runs": [dump(r) for r in records]}
+        states = host_states(ctx(), {r.environment_id for r in records}, url=hub_url, token=auth())
+        return {"runs": [{**dump(r), "host_state": states[r.environment_id]} for r in records]}
 
     @mcp.tool()
     @_expose_errors
     def get_run(run_id: str) -> dict[str, Any]:
-        """Everything about a run: record, scores, notes, children, and all file paths."""
-        return dump(q.show_run(ctx(), run_id))
+        """
+        Everything about a run: record, scores, notes, children, all file paths, and
+        host_state (its host's connection; null: a hub run).
+        """
+        detail = q.show_run(ctx(), run_id)
+        env = detail.record.environment_id
+        state = host_states(ctx(), [env], url=hub_url, token=auth())[env]
+        return {**dump(detail), "host_state": state}
 
     @mcp.tool()
     @_expose_errors

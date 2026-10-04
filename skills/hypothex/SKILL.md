@@ -90,7 +90,8 @@ SLURM jobs, cost today).
   `hx sweep cancel <id> --json`. List sweeps: `hx sweeps --json`.
 - Checkpoints stay on the host. Copy one when needed:
   `hx pull <run_id> --artifact checkpoint --json` (prints `local_path`).
-- A host that the hub cannot reach shows `stale` or `error` in `hx hosts status`.
+- A host that the hub cannot reach shows `stale` or `error` in `hx hosts status`
+  (MCP `get_run` and `list_runs` show it as `host_state`; `null` is a hub run).
   Its runs keep going there and are not lost: do not rerun them. Wait, or run
   `hx hosts connect <host>` (MCP: `connect_host`).
 - MCP: `list_hosts`, `launch_run(host=..., gpus=..., queue=True)` (SLURM hosts also

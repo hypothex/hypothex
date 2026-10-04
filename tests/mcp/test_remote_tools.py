@@ -360,3 +360,59 @@ def test_task_reevaluate_with_host_runs_needs_the_hub(
     err, message = call(home, "reevaluate", {"task": "toy-acc", "project": "toy"})
     assert err and "hx serve" in message  # never scored into the hub's copy of m1
     assert _score_rows(ctx, "m1") == 0 and _score_rows(ctx, "h1") == 0
+
+
+def test_run_tools_show_the_host_state_from_the_hub(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with remote_hub(tmp_path, threaded=True, hub_home=home) as r:
+        monkeypatch.setenv("HYPOTHEX_HUB_URL", r.hub_url)
+        seed_finished_run(r.env, r.env_repo, "e1")
+        seed_finished_run(r.hub, r.hub_repo, "h1")
+        wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
+        err, detail = call(home, "get_run", {"run_id": "e1"})
+        assert not err and detail["host_state"] == "connected"
+        err, detail = call(home, "get_run", {"run_id": "h1"})
+        assert not err and detail["host_state"] is None  # a hub run
+        r.client.post("/api/v1/hosts/gpu1/disconnect", json={})
+        err, listed = call(home, "list_runs", {"task": "toy-acc"})
+        assert not err
+        assert {row["run_id"]: row["host_state"] for row in listed["runs"]} == {
+            "e1": "disabled",
+            "h1": None,
+        }
+
+
+def test_run_tools_call_a_host_run_stale_without_the_hub(
+    home: Path, ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hypothex.mcp.server as server_mod
+
+    seed_finished_run(ctx, toy_repo, "h1")
+    err, detail = call(home, "get_run", {"run_id": "h1"})
+    assert not err and detail["host_state"] is None
+    calls: list[str] = []
+    real = server_mod.hub_call
+
+    def counted(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+        calls.append(path)
+        return real(method, path, *args, **kwargs)
+
+    monkeypatch.setattr(server_mod, "hub_call", counted)
+    err, listed = call(home, "list_runs")
+    assert not err and listed["runs"][0]["host_state"] is None and calls == []  # no hub needed
+    for rid, env in (("m1", "env-gpu1"), ("m2", "env-gpu2")):
+        ctx.create_run(
+            make_record(rid, task="toy-acc", environment_id=env, status=RunStatus.RUNNING)
+        )
+    err, detail = call(home, "get_run", {"run_id": "m1"})
+    assert not err and detail["host_state"] == "stale"  # the hub is down: nothing refreshes it
+    calls.clear()
+    err, listed = call(home, "list_runs")
+    assert not err
+    assert {row["run_id"]: row["host_state"] for row in listed["runs"]} == {
+        "h1": None,
+        "m1": "stale",
+        "m2": "stale",
+    }
+    assert len(calls) == 1  # one failed hub call is enough

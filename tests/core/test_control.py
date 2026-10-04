@@ -13,7 +13,7 @@ import pytest
 from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
-from hypothex.core.errors import RunError
+from hypothex.core.errors import RemoteProjectError, RunError
 from hypothex.core.execution import (
     STOP_MARKER,
     RunRequest,
@@ -527,3 +527,50 @@ def test_stop_run_signals_a_child_its_first_read_missed(
         if child.poll() is None:
             os.killpg(child.pid, signal.SIGKILL)
             child.wait()
+
+
+def _copy_from_host(ctx: Context, repo: str | None = None) -> None:
+    """Turn the hub's toy registration into a host's copy (repo path as the host reported)."""
+    entry = ctx.store.load_project("toy")
+    update: dict[str, object] = {"remote_host": "gpu1"}
+    if repo is not None:
+        update["repo"] = repo
+    ctx.store.save_project(entry.model_copy(update=update))
+
+
+def test_rerun_and_reinfer_never_run_from_a_host_copys_repo_path(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # the hub's own run, but the project entry is now a host's copy: its repo path
+    # (here also a folder on the hub) must never supply commands or a checkout
+    code = (
+        "import json, os; d = os.environ['HYPOTHEX_RUN_DIR']; "
+        "open(d + '/artifacts.jsonl', 'a').write(json.dumps("
+        "{'kind': 'checkpoint', 'path': '/tmp/model.pt'}) + '\\n')"
+    )
+    parent = execute_run(
+        ctx, prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(code), task="toy-acc")).run_id
+    )
+    _copy_from_host(ctx)
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        rerun(ctx, parent.run_id, background=False)
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        reinfer(ctx, parent.run_id, background=False)
+    assert [r.run_id for r in ctx.index.list_runs(limit=None)] == [parent.run_id]
+    assert ctx.store.load_project("toy").remote_host == "gpu1"
+
+
+def test_a_worktree_is_never_released_through_a_host_copys_repo_path(
+    ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    _commit_train(toy_repo, "train v1")
+    head = git(toy_repo, "rev-parse", "HEAD")
+    _commit_train(toy_repo, "train v2")
+    record = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=head))
+    tree = ctx.layout.worktrees_dir("toy") / record.run_id
+    assert tree.is_dir()
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    _copy_from_host(ctx, repo=str(decoy))
+    assert control.release_worktree(ctx, record) is False  # no git runs in the host's path
+    assert tree.is_dir()

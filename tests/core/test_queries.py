@@ -6,7 +6,7 @@ import yaml
 from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.datasets import FingerprintCache
-from hypothex.core.errors import ConfigError
+from hypothex.core.errors import ConfigError, RemoteProjectError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.records import DatasetRef
 from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
@@ -169,3 +169,36 @@ def test_leaderboard_examples_follow_version_override(ctx: Context, toy_repo: Pa
     assert q.get_leaderboard(ctx, "toy-acc").rows[0].test_interval is None
     old = q.get_leaderboard(ctx, "toy-acc", versions={"accuracy": "v1"})
     assert old.rows[0].test_interval is not None and old.rows[0].test_interval.n == 4
+
+
+def _copy_from_host(ctx: Context, project: str = "toy") -> None:
+    """Turn a hub registration into a host's copy whose reported repo path exists here."""
+    entry = ctx.store.load_project(project).model_copy(update={"remote_host": "gpu1"})
+    ctx.store.save_project(entry)
+    ctx.index.upsert_project(entry)  # as the hub's mirror does (_ensure_project)
+
+
+def test_refreshing_a_host_copy_never_registers_its_repo_path(ctx: Context, toy_repo: Path) -> None:
+    # listing projects re-reads hypothex.yaml; for a host's copy that would register the
+    # host-reported path here and drop remote_host, so evaluation would run its metric code
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    _copy_from_host(ctx)
+    assert [e.remote_host for e in q.list_projects(ctx)] == ["gpu1"]
+    assert q.refresh_project(ctx, "toy").remote_host == "gpu1"
+    entry, task = q.resolve_task(ctx, "toy-acc")
+    assert (entry.remote_host, task) == ("gpu1", "toy-acc")
+    assert ctx.store.load_project("toy").remote_host == "gpu1"
+    assert ctx.index.get_project("toy").remote_host == "gpu1"  # type: ignore[union-attr]
+    with pytest.raises(RemoteProjectError):
+        evaluate_run(ctx, "r1")
+
+
+def test_a_host_copy_never_reads_dataset_files_from_its_repo_path(
+    ctx: Context, toy_repo: Path
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    _copy_from_host(ctx)
+    page = q.get_predictions(ctx, "r1")
+    assert page.total == 4 and [r.reference for r in page.rows] == [None] * 4
+    with pytest.raises(RemoteProjectError):
+        q.dataset_overlap(ctx, "toy", "toyset")

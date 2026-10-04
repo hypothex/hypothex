@@ -901,12 +901,10 @@ def _project_of(body: HostLaunchBody) -> str:
 def _registered_checkout(ctx: Context, project: str) -> str | None:
     """The registered repo of ``project`` when it is a folder on the hub, else None."""
     try:
-        entry = ctx.store.load_project(project)
-    except StoreError:
+        repo = ctx.local_repo(project)
+    except (StoreError, ConfigError):  # a host's copy (RemoteProjectError): its repo is there
         return None
-    if entry.remote_host is not None or not Path(entry.repo).is_dir():
-        return None  # a project copied from a host: its repo path is on that host
-    return entry.repo
+    return str(repo) if repo.is_dir() else None
 
 
 def remote_checkout(ctx: Context, host: str, project: str) -> tuple[HostSpec, str]:
@@ -1041,7 +1039,8 @@ def launch_on_host(
     Raises
     ------
     ConfigError
-        Unknown host.
+        Unknown host, or (``local``) a project copied from a host
+        (``RemoteProjectError``: its repo path is on that host).
     RunError
         No project, no checkout on the host, an agent launch without a
         hypothesis, SLURM fields for a non-SLURM host, or an unusable diff.
@@ -1053,7 +1052,7 @@ def launch_on_host(
     >>> launch_on_host(ctx, manager, "gpu1", HostLaunchBody(project="toy"))  # doctest: +SKIP
     """
     if not is_remote(host):
-        repo = _hub_checkout(body) or ctx.store.load_project(_project_of(body)).repo
+        repo = _hub_checkout(body) or str(ctx.local_repo(_project_of(body)))
         return to_jsonable(launch_here(ctx, body, repo))
     project = _project_of(body)
     spec, checkout = remote_checkout(ctx, host, project)
@@ -1785,7 +1784,8 @@ def create_app(
         def launch(req: RunRequest, run_command_id: str) -> RunRecord:
             parsed = [p for p in map(parse_sweep_tag, req.tags) if p is not None]
             sweep_id = parsed[0][1] if parsed else None
-            local = req.repo.is_dir()  # False for a project copied from a host
+            # never a host's copy, whose repo path may also name a folder here
+            local = _registered_checkout(ctx, project) is not None and req.repo.is_dir()
             if "commit" not in pinned:
                 # spec 8A.4: one commit for every run of this call; the host fetches it
                 head = head_commit(req.repo) if local else None

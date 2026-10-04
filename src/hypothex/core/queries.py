@@ -129,13 +129,14 @@ def refresh_project(ctx: Context, project: str) -> ProjectEntry:
     Returns
     -------
     ProjectEntry
-        The refreshed entry, or the stored snapshot if the repo is gone or
-        the file is invalid.
+        The refreshed entry, or the stored snapshot if the repo is gone, the
+        file is invalid, or the project is a copy from a host (its repo path
+        is on that host: it is never read, nor registered here).
     """
     entry = ctx.store.load_project(project)
     try:
-        return ctx.register_project(Path(entry.repo))
-    except ConfigError:
+        return ctx.register_project(ctx.local_repo(project))
+    except ConfigError:  # includes RemoteProjectError
         return entry
 
 
@@ -491,10 +492,10 @@ def _references(ctx: Context, record: RunRecord) -> dict[str, Any]:
     if record.task is None:
         return {}
     try:
-        repo = Path(ctx.store.load_project(record.project).repo)
+        repo = ctx.local_repo(record.project)
         config = load_project_config(repo)
         spec = config.tasks[record.task]
-    except (StoreError, ConfigError, KeyError):
+    except (StoreError, ConfigError, KeyError):  # ConfigError includes a host's copy
         return {}
     ds = config.datasets[spec.dataset]
     path = resolve_dataset_path(repo, ds.path_for(spec.split))
@@ -823,8 +824,10 @@ def dataset_overlap(
     ------
     ConfigError
         If the project has no such dataset.
+    RemoteProjectError
+        If the project is a copy from a host (its datasets are on that host).
     """
     entry = refresh_project(ctx, project)
     if dataset not in entry.config.datasets:
         raise ConfigError(f"project {project!r} has no dataset {dataset!r}")
-    return overlap(dataset, entry.config.datasets[dataset], Path(entry.repo), key_field)
+    return overlap(dataset, entry.config.datasets[dataset], ctx.local_repo(project), key_field)

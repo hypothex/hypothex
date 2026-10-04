@@ -293,3 +293,15 @@ def test_rows_carry_group_labels_and_accept_overrides(ctx: Context, toy_repo: Pa
     assert [(r["group_id"], r["label"]) for r in rows] == [("aaaa@c1", "svm"), ("bbbb@c1", "rf")]
     rows = list(iter_rows(ctx, [a, b], "runs", fields=[], labels={"bbbb@c1": "forest"}))
     assert [r["label"] for r in rows] == ["svm", "forest"]
+
+
+def test_predictions_of_a_host_copy_never_read_its_repo_path(ctx: Context, toy_repo: Path) -> None:
+    # the repo path of a project copied from a host is the host's: no references from it
+    rec = _run(ctx, toy_repo, "r1")
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    _jsonl(
+        ctx.run_dir(rec) / "predictions" / "predictions.jsonl", [{"id": "ex-1", "prediction": 0}]
+    )
+    [row] = list(iter_rows(ctx, [rec], "predictions"))
+    assert row["reference"] is None

@@ -30,7 +30,7 @@ from hypothex.core.config import (
 )
 from hypothex.core.context import Context
 from hypothex.core.control import cancel_if_queued, launch_run
-from hypothex.core.errors import HypothexError, RunError, StoreError
+from hypothex.core.errors import HypothexError, RemoteProjectError, RunError, StoreError
 from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import COMMIT_PATTERN, RunRequest
 from hypothex.core.fsutil import atomic_write_text, read_yaml, write_yaml
@@ -903,15 +903,19 @@ def _resolve_repo(
     """
     The project's repo, checked to hold ``project`` and ``task``.
 
-    For a host sweep (``remote``) the hub needs no checkout of its own: when the
-    stored repo path is not a folder here (a project copied from a host,
-    ``ProjectEntry.remote_host``, or a hub used from another laptop), the
-    entry's ``hypothex.yaml`` snapshot is checked instead.
+    For a host sweep (``remote``) the hub needs no checkout of its own: for a
+    project copied from a host (``ProjectEntry.remote_host``, whose repo path
+    is never read here even when it names a folder, ``Context.local_repo``)
+    or a stored repo path that is not a folder here (a hub used from another
+    laptop), the entry's ``hypothex.yaml`` snapshot is checked instead.
     """
     if repo is None:
         entry = ctx.store.load_project(project)
-        path = Path(entry.repo)
-        if not path.is_dir():
+        try:
+            path = ctx.local_repo(project)
+        except RemoteProjectError:
+            path = None
+        if path is None or not path.is_dir():
             if not remote:
                 where = entry.remote_host or "another machine"
                 raise SweepError(
@@ -921,7 +925,7 @@ def _resolve_repo(
             known = sorted(entry.config.tasks)
             if task is not None and task not in known:
                 raise SweepError(f"unknown task {task!r}; known tasks: {known}")
-            return path
+            return Path(entry.repo)
     else:
         path = repo
     config = load_project_config(path)

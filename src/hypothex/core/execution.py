@@ -746,7 +746,9 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
 
     The worktree is kept when it holds anything the run may have made: an
     untracked or ignored file (other than Python bytecode caches), or tracked
-    changes other than the diff the run started with (``git.diff``).
+    changes other than the diff the run started with (``git.diff``), and when
+    the project is now a copy from a host (``Context.local_repo``): git never
+    runs in the repo path a host reported.
 
     Parameters
     ----------
@@ -772,6 +774,7 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
         return False
     saved = run_dir / "git.diff"
     try:
+        repo = ctx.local_repo(record.project)  # never a host's copy: keep the tree then
         if capture_diff(tree).diff != (saved.read_bytes() if saved.is_file() else None):
             return False
         status = subprocess.run(
@@ -787,7 +790,7 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
                 return False  # a staged rename: the run changed the tree
             if code in (b"??", b"!!") and not _bytecode(path):
                 return False
-        _discard_worktree(Path(ctx.store.load_project(record.project).repo), tree)
+        _discard_worktree(repo, tree)
     except (OSError, HypothexError):
         return False
     return True

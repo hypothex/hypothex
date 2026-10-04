@@ -10,9 +10,15 @@ from mcp.types import TextContent
 
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
-from hypothex.core.errors import RunError
+from hypothex.core.errors import RemoteProjectError, RunError
 from hypothex.core.evaluation import evaluate_run
-from hypothex.mcp.server import MCPServer, build_server, require_agent_hypothesis
+from hypothex.mcp.server import (
+    MCPServer,
+    build_server,
+    put_view,
+    remove_view,
+    require_agent_hypothesis,
+)
 from tests.factories import PREDS_075, seed_finished_run
 
 EXPECTED_TOOLS = {
@@ -197,3 +203,20 @@ def test_view_tools(home: Path, ctx: Context, toy_repo: Path) -> None:
         home, "add_view", {"task": "toy-acc", "name": "overview", "yaml_text": GOOD_VIEW}
     )
     assert err and "preset view" in message
+
+
+def test_views_are_never_written_under_a_host_copys_repo_path(ctx: Context, toy_repo: Path) -> None:
+    # the repo path of a project copied from a host is the host's, even when it is a
+    # folder here: a view is never saved into it or deleted from it
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    put_view(ctx, "toy-acc", "kept", GOOD_VIEW)
+    kept = toy_repo.resolve() / ".hypothex" / "views" / "toy-acc" / "kept.yaml"
+    entry = ctx.store.load_project("toy").model_copy(update={"remote_host": "gpu1"})
+    ctx.store.save_project(entry)
+    ctx.index.upsert_project(entry)
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        put_view(ctx, "toy-acc", "acc", GOOD_VIEW)
+    assert not kept.with_name("acc.yaml").exists()
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        remove_view(ctx, "toy-acc", "kept")
+    assert kept.read_text() == GOOD_VIEW

@@ -250,7 +250,8 @@ def put_view(
     Raises
     ------
     ConfigError
-        Bad or reserved name.
+        Bad or reserved name, or the project is a copy from a host
+        (``RemoteProjectError``: its repo path is on that host).
     ViewValidationError
         The YAML is invalid; nothing was written.
     """
@@ -260,7 +261,7 @@ def put_view(
     if view is None or issues:
         first = issues[0].message if issues else "not a view"
         raise ViewValidationError(f"invalid view {name!r}: {first}", issues)
-    core_views.save_view(Path(entry.repo), task_name, name, text)
+    core_views.save_view(ctx.local_repo(entry.project), task_name, name, text)
     entry, task_name, info = _find_view(ctx, task_name, name, entry.project)
     resolved = core_views.get_view(Path(entry.repo), entry.config, task_name, name)
     return {"info": to_jsonable(info), "view": dump_view(resolved)}
@@ -289,7 +290,8 @@ def remove_view(ctx: Context, task: str, name: str, project: str | None = None) 
     Raises
     ------
     ConfigError
-        ``overview`` or an inline view (edit ``hypothex.yaml`` instead).
+        ``overview`` or an inline view (edit ``hypothex.yaml`` instead), or
+        the project is a copy from a host (``RemoteProjectError``).
     StoreError
         No such view.
     """
@@ -298,7 +300,7 @@ def remove_view(ctx: Context, task: str, name: str, project: str | None = None) 
     entry, task_name, info = _find_view(ctx, task, name, project)
     if info.origin != "file":
         raise ConfigError(f"view {name!r} is declared in hypothex.yaml; remove it there")
-    core_views.delete_view(Path(entry.repo), task_name, name)
+    core_views.delete_view(ctx.local_repo(entry.project), task_name, name)
     return {"ok": True}
 
 
@@ -810,12 +812,11 @@ def sweep_checkout(ctx: Context, project: str, repo: str | None) -> dict[str, st
         root = Path(repo)
     else:
         try:
-            entry = ctx.store.load_project(project)
-        except StoreError:
+            root = ctx.local_repo(project)
+        except (StoreError, ConfigError):  # a host's copy (RemoteProjectError): its repo is there
             return {}
-        root = Path(entry.repo)
-        if entry.remote_host is not None or not root.is_dir():
-            return {}  # a project copied from a host: its repo path is on that host
+        if not root.is_dir():
+            return {}
     fields, _ = client_checkout(root)
     if fields["project"] != project:
         raise ConfigError(f"{root} holds project {fields['project']!r}, not {project!r}")

@@ -6,7 +6,7 @@ import yaml
 
 from hypothex.core import evaluation
 from hypothex.core.context import Context
-from hypothex.core.errors import EvalError
+from hypothex.core.errors import EvalError, RemoteProjectError
 from hypothex.core.evaluation import evaluate_run, reeval, validate_project
 from tests.factories import PREDS_075, seed_finished_run, write_toy_project
 
@@ -141,9 +141,9 @@ def test_a_project_copied_from_a_host_is_never_evaluated_from_its_repo_path(
     seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
     entry = ctx.store.load_project("toy")
     ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
-    with pytest.raises(EvalError, match="copied from host gpu1"):
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
         evaluate_run(ctx, "r1")
-    with pytest.raises(EvalError, match="copied from host gpu1"):
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
         reeval(ctx, project="toy", task="toy-acc")
     assert ctx.store.read_scores("toy", "r1") == []
     assert ctx.index.scores_for(["r1"]) == {}

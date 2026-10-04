@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { act, render, renderHook, screen } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { queryKeys } from "../../src/api/queries";
@@ -316,6 +316,29 @@ describe("keysForEvent", () => {
     expect(hit.map(invalidated)).toEqual(hit.map(() => true));
     expect(miss.map(invalidated)).toEqual(miss.map(() => false));
   });
+
+  test("a batch refetches each query once, even when several of its keys match it (UI-F13)", async () => {
+    const client = new QueryClient();
+    let fetches = 0;
+    let aborted = 0;
+    const observer = new QueryObserver(client, {
+      queryKey: queryKeys.run("r1"),
+      queryFn: async ({ signal }) => {
+        fetches += 1;
+        signal.addEventListener("abort", () => (aborted += 1));
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return { run_id: "r1" };
+      },
+    });
+    const unsubscribe = observer.subscribe(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetches).toBe(1);
+    // `["run", "r1"]` (the run event) and `["run"]` (the host event) both match the run page
+    invalidateForEvents(client, [ev(1, "run.finished", "toy", "r1"), ev(2, "host.state", null, null)]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect([fetches, aborted]).toEqual([2, 0]);
+    unsubscribe();
+  });
 });
 
 describe("stored sequence", () => {
@@ -594,16 +617,18 @@ describe("useEventStream", () => {
       socket.receive({ type: "event", event: ev(9, "run.finished", "toy", "r1") });
       clock.advance(FLUSH_MS);
     });
-    expect(spy.mock.calls.map((call) => call[0])).toEqual([
-      { queryKey: ["overview"] },
-      { queryKey: ["tasks"] },
-      { queryKey: ["task", "toy"] },
-      { queryKey: ["runs"] },
-      { queryKey: ["run", "r1"] },
-      { queryKey: ["leaderboard", "toy"] },
-      { queryKey: ["views", "query", "toy"] },
-      { queryKey: ["compareExamples"] },
-      { queryKey: ["sweeps", "toy"] },
+    // one call for the batch; it matches the run's keys and nothing else
+    expect(spy).toHaveBeenCalledTimes(1);
+    const predicate = spy.mock.calls[0]?.[0]?.predicate;
+    const matches = (queryKey: readonly unknown[]) => predicate?.({ queryKey } as never) ?? false;
+    const hit = [["overview"], ["tasks"], ["task", "toy", "acc"], ["runs", {}], ["run", "r1", "logs"]];
+    const hit2 = [["leaderboard", "toy"], ["views", "query", "toy"], ["compareExamples"], ["sweeps", "toy"]];
+    expect([...hit, ...hit2].map(matches)).toEqual([...hit, ...hit2].map(() => true));
+    expect([["run", "r2"], ["task", "other"], ["hosts"], ["views", "list"]].map(matches)).toEqual([
+      false,
+      false,
+      false,
+      false,
     ]);
 
     unmount();

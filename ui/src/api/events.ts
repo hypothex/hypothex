@@ -7,7 +7,13 @@
  * delivered sequence is kept in `sessionStorage`, so a page load resumes there instead of
  * replaying the whole event log.
  */
-import { focusManager, type QueryClient, type QueryKey, useQueryClient } from "@tanstack/react-query";
+import {
+  focusManager,
+  partialMatchKey,
+  type QueryClient,
+  type QueryKey,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { createContext, createElement, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 
 import { wsUrl } from "./client";
@@ -178,9 +184,17 @@ export function keysForEvents(events: readonly HxEvent[]): QueryKey[] {
   return keys;
 }
 
-/** Invalidate every query a batch of events may have changed (active ones refetch). */
+/**
+ * Invalidate every query a batch of events may have changed (active ones refetch).
+ *
+ * One `invalidateQueries` call for the whole batch: a query that two keys match (e.g. a
+ * run page under `["run", id]` and `["run"]`) refetches once, not once per key with the
+ * second call aborting the first.
+ */
 export function invalidateForEvents(client: QueryClient, events: readonly HxEvent[]): void {
-  for (const queryKey of keysForEvents(events)) void client.invalidateQueries({ queryKey });
+  const keys = keysForEvents(events);
+  if (keys.length === 0) return;
+  void client.invalidateQueries({ predicate: (query) => keys.some((key) => partialMatchKey(query.queryKey, key)) });
 }
 
 /** Connection supervisor for `/api/v1/ws` (one per app). */

@@ -275,7 +275,8 @@ def copy_from(
         Path on the host; relative paths and ``~/`` are relative to the
         remote home.
     local : Path
-        Destination path. Parent directories are created.
+        Destination path. Parent directories are created once the copy
+        succeeded, so a failed pull leaves no empty folder.
     work : Path
         Folder for pull state (``stage/``, ``txn/``, ``backup/``); must be on
         the same filesystem as ``local``.
@@ -296,7 +297,6 @@ def copy_from(
     """
     _check_remote_path(remote_path, source=True)
     txn_dir, _, stage_dir = _pull_dirs(work)
-    local.parent.mkdir(parents=True, exist_ok=True)
     with _install_lock(txn_dir):
         _recover_swaps(work)  # a recorded swap was cut short: finish or undo it
     # A unique staging folder per call: two pulls of one file never share it.
@@ -382,6 +382,7 @@ def _install(part: Path, local: Path, work: Path) -> None:
     txn_dir, backup_dir, _ = _pull_dirs(work)
     with _install_lock(txn_dir):
         _recover_swaps(work)
+        local.parent.mkdir(parents=True, exist_ok=True)  # only now: a failed pull makes none
         if not part.is_dir() and local.is_dir() and not local.is_symlink():
             raise SshError(f"{local} is a folder; a pulled file never replaces a folder")
         if part.is_dir() and local.is_dir() and not local.is_symlink():

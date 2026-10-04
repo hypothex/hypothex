@@ -305,10 +305,10 @@ def test_copy_from_missing_remote_leaves_nothing(
     fake_remote: FakeRemote, tmp_path: Path, work: Path
 ) -> None:
     fake_remote.add_host("gpu1")
-    out_dir = tmp_path / "out"
+    out_dir = tmp_path / "pulled" / "out"
     with pytest.raises(SshError, match="No such file or directory"):
         copy_from(fake_remote.target("gpu1"), "~/nope.pt", out_dir / "nope.pt", work=work)
-    assert list(out_dir.iterdir()) == []
+    assert not (tmp_path / "pulled").exists()  # no empty folder is left behind
     assert list((work / "stage").iterdir()) == []
 
 

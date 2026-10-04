@@ -726,6 +726,8 @@ export interface SweepSummary {
   best: SweepCell | null;
   headline: string;
   total_usd: number;
+  /** Only on a cancel_queued answer: queued runs asked to stop, stops that failed, their errors. */
+  cancel?: { asked: number; failed: number; errors: string[] } | null;
 }
 
 /** One row of `GET /api/v1/projects/{project}/sweeps`. */

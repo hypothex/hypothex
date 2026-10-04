@@ -123,7 +123,10 @@ Validation: `hx validate` checks schema, that every `fn` imports, and that every
 dataset/metric exists. Built-in template variables are `run_id, run_dir, repo, task, seed,
 config, checkpoint, dataset.name, dataset.version, dataset.path`; any other `{name}` must be
 passed with `--var name=value` (validate warns; launch fails before creating a run if a
-value is missing).
+value is missing). `seed`, `config`, `task`/`dataset.*` and `checkpoint` have a value only
+when the run sets them (`--seed`, `--config`, `--task`, `hx reinfer` or
+`--var checkpoint=...`); the error for a missing variable names the option, and the API
+(`vars`) or MCP (`template_vars`) field, that sets it.
 
 ### 3.2 Run folder
 

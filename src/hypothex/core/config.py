@@ -56,6 +56,44 @@ def template_fields(template: str) -> set[str]:
     return set(_FIELD.findall(template))
 
 
+def template_var_hint(name: str) -> str:
+    """
+    Say how a caller gives a value for the template variable ``name``.
+
+    Built-in variables name the option that sets them (``--seed``,
+    ``--config``, ``--task``), with the API and MCP field where there is one;
+    any other variable names ``--var`` and the ``vars`` (API) or
+    ``template_vars`` (MCP) field.
+
+    Parameters
+    ----------
+    name : str
+        Template variable name, e.g. ``seed`` or ``beam``.
+
+    Returns
+    -------
+    str
+        Short hint, without the name.
+
+    Examples
+    --------
+    >>> template_var_hint("seed")
+    '--seed N; API/MCP: seed'
+    >>> template_var_hint("beam")
+    '--var beam=VALUE; API: vars, MCP: template_vars'
+    """
+    custom = f"--var {name}=VALUE; API: vars, MCP: template_vars"
+    if name == "seed":
+        return "--seed N; API/MCP: seed"
+    if name == "config":
+        return "--config PATH"
+    if name == "checkpoint":
+        return f"set by hx reinfer, or {custom}"
+    if name == "task" or name.startswith("dataset."):
+        return "--task NAME; API/MCP: task"
+    return custom
+
+
 def render_template(template: str, values: dict[str, str]) -> str:
     """
     Fill ``{name}`` fields in a template.
@@ -75,14 +113,13 @@ def render_template(template: str, values: dict[str, str]) -> str:
     Raises
     ------
     TemplateError
-        If a field has no value.
+        If a field has no value; the message says how to set each one
+        (``template_var_hint``).
     """
     missing = sorted(name for name in template_fields(template) if name not in values)
     if missing:
-        raise TemplateError(
-            f"template variables without a value: {', '.join(missing)} "
-            "(pass them with --var name=value)"
-        )
+        hints = ", ".join(f"{name} ({template_var_hint(name)})" for name in missing)
+        raise TemplateError(f"template variables without a value: {hints}")
     return _FIELD.sub(lambda m: values[m.group(1)], template)
 
 

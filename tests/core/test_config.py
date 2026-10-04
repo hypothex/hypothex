@@ -13,6 +13,7 @@ from hypothex.core.config import (
     render_template,
     starter_config,
     template_fields,
+    template_var_hint,
 )
 from hypothex.core.errors import ConfigError, TemplateError
 
@@ -86,6 +87,23 @@ def test_templates() -> None:
     assert out == "python x.py --out /r/p --data /d --beam 5"
     with pytest.raises(TemplateError, match="beam"):
         render_template(tpl, {"run_dir": "/r", "dataset.path": "/d"})
+
+
+@pytest.mark.parametrize(
+    ("name", "hint"),
+    [
+        ("seed", "seed (--seed N; API/MCP: seed)"),
+        ("config", "config (--config PATH)"),
+        ("checkpoint", "checkpoint (set by hx reinfer, or --var checkpoint=VALUE;"),
+        ("dataset.path", "dataset.path (--task NAME; API/MCP: task)"),
+        ("beam", "beam (--var beam=VALUE; API: vars, MCP: template_vars)"),
+    ],
+)
+def test_a_missing_template_variable_names_the_way_to_set_it(name: str, hint: str) -> None:
+    with pytest.raises(TemplateError) as caught:
+        render_template(f"run {{{name}}}", {})
+    assert hint in str(caught.value)
+    assert template_var_hint(name) in str(caught.value)
 
 
 def test_metric_ref_parsing() -> None:

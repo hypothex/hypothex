@@ -38,7 +38,7 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 from hypothex._version import __version__
-from hypothex.api.security import OriginGuard, TokenGuard, allowed_hosts
+from hypothex.api.security import OriginGuard, TokenGuard, allowed_hosts, bearer_matches
 from hypothex.core import control
 from hypothex.core import queries as q
 from hypothex.core.config import load_project_config, parse_metric_version
@@ -122,6 +122,8 @@ NO_UI_FALLBACK = frozenset({"api", "mcp", ".well-known", "assets"})
 FILE_MAX_BYTES = 200 * 1024 * 1024
 FILE_CHUNK_BYTES = 64 * 1024
 GPU_CACHE_SECONDS = 10.0
+PUBLIC_DESCRIPTOR_FIELDS = ("environment_id", "protocol_version", "hx_version")
+"""What the descriptor tells a client without the bearer token (``start.sh`` needs the id)."""
 GZIP_MIN_BYTES = 2048
 """Responses at least this big are gzipped for clients that accept it (JSON compresses ~8x)."""
 GZIP_LEVEL = 6
@@ -1971,8 +1973,12 @@ def create_app(
 
     # environment -----------------------------------------------------------------
     @app.get("/.well-known/hypothex/environment")
-    def environment() -> dict[str, Any]:
-        return ctx.descriptor.model_dump(mode="json")
+    def environment(request: Request) -> dict[str, Any]:
+        full = ctx.descriptor.model_dump(mode="json")
+        if auth_token and not bearer_matches(request.headers.get("authorization"), auth_token):
+            # open so start.sh can find its server; host facts only for the token holder
+            return {k: full[k] for k in PUBLIC_DESCRIPTOR_FIELDS}
+        return full
 
     # hosts (hub) ---------------------------------------------------------------------
     @app.get("/api/v1/hosts")

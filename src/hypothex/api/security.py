@@ -289,11 +289,35 @@ class OriginGuard:
         await self.app(scope, receive, send)
 
 
+def bearer_matches(authorization: str | None, token: str) -> bool:
+    """
+    Tell whether an ``Authorization`` header carries ``Bearer <token>`` (constant time).
+
+    Parameters
+    ----------
+    authorization : str or None
+        The request's ``Authorization`` header.
+    token : str
+        The server's token.
+
+    Returns
+    -------
+    bool
+
+    Examples
+    --------
+    >>> bearer_matches("Bearer s3cret", "s3cret"), bearer_matches(None, "s3cret")
+    (True, False)
+    """
+    return hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode())
+
+
 class TokenGuard:
     """
     Require ``Authorization: Bearer <token>`` on every HTTP and WebSocket request.
 
-    Only paths under ``PUBLIC_PREFIX`` (the environment descriptor) stay open.
+    Only paths under ``PUBLIC_PREFIX`` (the environment descriptor) stay open;
+    without the token the descriptor names only the environment and versions.
     A missing or wrong token gets ``401`` with ``{error, type: "AuthError"}``;
     a WebSocket handshake is closed with code ``1008``.
 
@@ -307,7 +331,7 @@ class TokenGuard:
 
     def __init__(self, app: ASGIApp, token: str) -> None:
         self.app = app
-        self._expected = f"Bearer {token}".encode()
+        self._token = token
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """
@@ -322,8 +346,7 @@ class TokenGuard:
         if scope["type"] not in ("http", "websocket") or scope["path"].startswith(PUBLIC_PREFIX):
             await self.app(scope, receive, send)
             return
-        given = Headers(scope=scope).get("authorization", "").encode()
-        if hmac.compare_digest(given, self._expected):
+        if bearer_matches(Headers(scope=scope).get("authorization"), self._token):
             await self.app(scope, receive, send)
             return
         if scope["type"] == "websocket":

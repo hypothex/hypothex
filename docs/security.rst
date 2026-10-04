@@ -38,7 +38,9 @@ Bearer token
 With a token, every request except the descriptor
 ``/.well-known/hypothex/environment`` needs ``Authorization: Bearer <token>``. A
 missing or wrong token gets ``401`` (``{"type": "AuthError"}``); a WebSocket is closed
-with code ``1008``.
+with code ``1008``. Without the token the descriptor names only ``environment_id``,
+``protocol_version`` and ``hx_version`` (``start.sh`` needs the id); the host name, OS,
+GPUs and the rest are for the token holder.
 
 **Env servers** (``hx serve --kind ssh|slurm``) always have a token, because on a
 shared GPU box or a SLURM login node other users can reach ``127.0.0.1`` too.

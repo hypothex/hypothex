@@ -15,6 +15,7 @@ from hypothex.api.security import (
 )
 
 TOKEN = "a1" * 24
+BASE = "http://127.0.0.1:7777"
 
 
 @pytest.mark.parametrize(
@@ -128,6 +129,21 @@ def test_token_guard_refuses_requests_without_the_token(guarded: TestClient) -> 
 def test_token_guard_leaves_the_descriptor_open(guarded: TestClient) -> None:
     body = guarded.get("/.well-known/hypothex/environment").json()
     assert body["protocol_version"] == 1
+
+
+def test_the_descriptor_names_host_facts_only_to_the_token_holder(guarded: TestClient) -> None:
+    url = "/.well-known/hypothex/environment"
+    for headers in ({}, {"Authorization": "Bearer nope"}):
+        bare = guarded.get(url, headers=headers).json()
+        assert sorted(bare) == ["environment_id", "hx_version", "protocol_version"]
+    full = guarded.get(url, headers={"Authorization": f"Bearer {TOKEN}"}).json()
+    assert {"hostname", "gpus", "os", "kind", "label"} <= set(full)
+    assert full["environment_id"] == bare["environment_id"]
+
+
+def test_without_a_token_the_descriptor_is_whole(home: Path) -> None:
+    with TestClient(create_app(home, background_repair=False), base_url=BASE) as c:
+        assert "hostname" in c.get("/.well-known/hypothex/environment").json()
 
 
 def test_token_guard_closes_a_websocket_without_the_token(guarded: TestClient) -> None:

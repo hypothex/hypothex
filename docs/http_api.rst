@@ -169,7 +169,8 @@ bearer token.
    * - ``GET /.well-known/hypothex/environment``
      - The descriptor: ``environment_id``, ``label``, ``kind``, ``os``, ``arch``,
        ``hostname``, ``hx_version``, ``protocol_version``, ``gpus``, ``capabilities``.
-       Open without a token.
+       Open without a token, but then (on a server that has one) it names only
+       ``environment_id``, ``protocol_version`` and ``hx_version``.
    * - ``GET /api/v1/gpus``
      - ``[{index, name, util, mem_used_mb, mem_total_mb, external, run_id}]``.
    * - ``GET /api/v1/queue``

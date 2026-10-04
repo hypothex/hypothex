@@ -30,7 +30,7 @@ def built(tmp_path_factory: pytest.TempPathFactory) -> tuple[list[str], list[str
         pytest.skip("uv is not on PATH")
     src = tmp_path_factory.mktemp("pkg") / "hypothex"
     src.mkdir()
-    for name in ("pyproject.toml", "README.md", ".gitignore"):
+    for name in ("pyproject.toml", "README.md", "LICENSE", ".gitignore"):
         shutil.copy2(ROOT / name, src / name)
     shutil.copytree(
         ROOT / "src",
@@ -73,3 +73,12 @@ def test_sdist_leaves_out_internal_docs(built: tuple[list[str], list[str]]) -> N
 def test_wheel_ships_the_skill_file(built: tuple[list[str], list[str]]) -> None:
     _, wheel = built
     assert "hypothex/skills/hypothex/SKILL.md" in wheel
+
+
+def test_wheel_ships_the_license_text(built: tuple[list[str], list[str]]) -> None:
+    _, wheel = built
+    licenses = [n for n in wheel if n.endswith(".dist-info/licenses/LICENSE")]
+    assert licenses
+    assert (
+        "Apache License\n                           Version 2.0" in (ROOT / "LICENSE").read_text()
+    )

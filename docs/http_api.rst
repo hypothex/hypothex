@@ -12,8 +12,10 @@ Conventions
 - Errors are JSON: ``{"error": "...", "type": "..."}``. ``400`` for a bad request,
   ``401`` for a missing or wrong bearer token, ``404`` for an unknown run, project, or
   file, ``409`` for an interrupted command, ``413`` for a file larger than
-  ``max_bytes``, ``415`` for a ``POST`` without JSON, ``422`` for a body that does not match the schema, and ``503`` when a
-  host is not connected (or no configured host serves the run).
+  ``max_bytes``, ``415`` for a ``POST`` without JSON, ``422`` for a body that does
+  not match the schema, and ``503`` when a host is not connected (or no configured
+  host serves the run). A ``422`` also has FastAPI's ``detail`` list, without the
+  ``input`` values, so the answer never echoes the body back.
 - Answers of 2 KiB or more are gzipped when the client sends
   ``Accept-Encoding: gzip`` (browsers, ``httpx`` and ``curl --compressed`` do). Run
   files (``application/octet-stream``) are sent as they are.
@@ -197,9 +199,9 @@ Other routes
   ``POST /api/v1/tasks/{project}/{task}/reeval``, ``GET .../kind``, and the views
   routes under ``/api/v1/tasks/{project}/{task}/views``.
 - The task ``reeval`` scores the hub's own runs on the hub and sends each mirrored
-  run's re-evaluation to its host (command id ``<command_id>:<run_id>``). A run whose
-  host is not connected or no longer configured is listed in ``skipped`` with the
-  reason.
+  run's re-evaluation to its host (command id ``<command_id>:<run_id>``), waiting up
+  to 600 s for each answer. A run whose host is not connected or no longer
+  configured is listed in ``skipped`` with the reason.
 - ``GET /api/v1/compare?ids=a,b``, ``GET /api/v1/compare/examples?a=&b=&metric=``,
   ``GET /api/v1/datasets/check``.
 - ``/mcp/``: the MCP server over streamable HTTP (see :doc:`mcp`).

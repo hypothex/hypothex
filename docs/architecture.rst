@@ -28,20 +28,33 @@ a part of it, and writes made during the rebuild are kept. One rebuild runs at a
 time. A rebuild does not read ``metrics.jsonl``: a run's downsampled points are
 indexed the first time they are asked for. 20,000 runs rebuild in about 15 s.
 
+A run's metric curve is indexed as at most 500 points per metric, thinned with
+LTTB (largest triangle three buckets), which keeps the peaks: a one-step spike in
+the loss stays on the curve. Points indexed by an older Hypothex keep their old
+thinning until the run is indexed again (``hx reindex``).
+
 Every write of indexed data adds 1 to the index *generation* (a ``meta`` row
-written in the same transaction). ``hypothex.core.index.index_generation(ctx)``
-reads it, so a cache of anything built from the index (a leaderboard, a view)
-can use the generation as its key:
+written in the same transaction). Setting a mirror cursor or marking scores stale
+does not count. ``hypothex.core.index.index_generation(ctx)`` reads it, so a cache
+of anything built from the index can use the generation as its key. Leaderboards
+do this: ``hypothex.core.leaderboard.cached_leaderboard`` keeps up to
+``BOARD_CACHE_SIZE`` boards, keyed by the generation, the project, the task, the
+config, the metric versions, and a ``variant`` for anything else the board depends
+on. ``get_leaderboard``, ``list_tasks``, the overview, view panels, and sweep tables
+all use it.
 
 .. code-block:: python
 
-   from hypothex.core import queries
-   from hypothex.core.index import index_generation
+   from hypothex.core.leaderboard import build_leaderboard, cached_leaderboard
 
-   key = (task, index_generation(ctx))
-   if key not in cache:
-       cache[key] = queries.get_leaderboard(ctx, task)
-   board = cache[key]
+   board = cached_leaderboard(
+       ctx, "toy", "toy-acc", config,
+       lambda: build_leaderboard("toy", "toy-acc", config, runs, scores),
+       variant=("examples", False),
+   )
+
+A write to any task (a live metric too) starts a new generation, so every cached
+board is built again on its next read.
 
 A score append is marked in the index before the file write and cleared by the
 index write, so a crash between them is repaired the next time a Hypothex
@@ -82,6 +95,12 @@ effect (a launched run outlives the server). It is never run again under that
 id: a retry gets ``409`` with ``CommandInterruptedError``. Check the runs, then
 send the command again with a new ``command_id``.
 
+``POST /api/v1/sweeps`` is the exception: it keeps no receipt. A retry with the same
+``command_id`` finds the sweep that id made and starts only its missing runs, also
+after the hub stopped in the middle of the launch. Each sweep run has its own
+command id on the host; when the host answers that this id was interrupted, the
+hub tries the run's next id, with at most 4 ids per run (``MAX_RUN_ATTEMPTS``).
+
 Supervisors and repair
 ------------------------
 
@@ -95,6 +114,11 @@ repeats it every 30 seconds, and ``hx launch --wait`` checks its own run every
 (``supervisor.pid``), not by the process that launched it, so a supervisor that
 dies before starting the command is marked ``lost`` after a 60 second grace
 period even while the launching server is still up.
+
+``hx stop`` writes a ``stop_requested`` marker into the run folder, then sends
+``SIGTERM`` to the command's process group and ``SIGKILL`` 10 s later. The
+supervisor also checks for the marker every 0.5 s (``STOP_POLL_SECONDS``) while the
+command runs, so a command that started just after the stop is stopped too.
 
 Local-only API
 --------------

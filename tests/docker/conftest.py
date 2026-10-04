@@ -30,13 +30,17 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+import yaml
+from fastapi.testclient import TestClient
 
+from hypothex.api.app import create_app
 from hypothex.core.context import Context
 from hypothex.core.records import RunRecord
 from hypothex.remote.client import EnvClient
 from hypothex.remote.config import EnvironmentsFile, HostSpec, load_hosts, save_hosts
 from hypothex.remote.hub import HostState, Hub
 from hypothex.remote.ssh import SshTarget
+from tests.factories import init_git_repo, write_toy_project
 
 T = TypeVar("T")
 
@@ -46,12 +50,20 @@ SLURM_COMPOSE = DOCKER_DIR / "slurm" / "docker-compose.yml"
 REMOTE_HOME = "~/.hypothex"
 REMOTE_PROJECT = "/home/hx/dock"
 REMOTE_STORE = "/home/hx/.hypothex/store"
+REMOTE_TOY = "/home/hx/toy"
+"""Where ``put_toy_project`` puts the scored toy project on a host."""
+REMOTE_HX_PYTHON = "/home/hx/.hypothex/runtime/tools/hypothex/bin/python"
+"""The Python of the hx that ``hx hosts add`` installs (it has ``hypothex``)."""
 BOOTSTRAP_TIMEOUT = 600.0  # first install downloads hypothex's dependencies from PyPI
 DESCRIPTOR_PY = (
     "import sys, urllib.request; "
     "url = 'http://127.0.0.1:' + sys.argv[1] + '/.well-known/hypothex/environment'; "
-    "print(urllib.request.urlopen(url, timeout=10).read().decode())"
+    "auth = {'Authorization': 'Bearer ' + sys.argv[2]} if len(sys.argv) > 2 else {}; "
+    "req = urllib.request.Request(url, headers=auth); "
+    "print(urllib.request.urlopen(req, timeout=10).read().decode())"
 )
+"""``python3 -c`` code: print the descriptor at port ``argv[1]``. Without the
+server's token (``argv[2]``) it holds only the public fields."""
 SSH_CONFIG = """\
 Host {alias}
   HostName 127.0.0.1
@@ -380,6 +392,21 @@ class SshBox:
         """
         return self.exec("sh", "-c", script, user=user)
 
+    def put(self, local: Path, remote: str) -> None:
+        """
+        Copy a local folder into the container (not over ssh), owned by ``hx``.
+
+        Parameters
+        ----------
+        local : Path
+            Folder on this machine.
+        remote : str
+            Absolute path in the container; must not exist yet.
+        """
+        self.exec("rm", "-rf", remote, user="root")  # a rerun in the same module
+        run_cmd(["docker", "cp", str(local), f"{self.container}:{remote}"], timeout=120)
+        self.exec("chown", "-R", "hx:hx", remote, user="root")
+
     def restart(self) -> None:
         """Restart the container (kills the env server) and wait for sshd."""
         run_cmd(["docker", "restart", "-t", "1", self.container], timeout=120)
@@ -654,6 +681,130 @@ def host_cursor(ctx: Context, host: str) -> int:
     return int(row[0] or 0)
 
 
+# hub app and a scored project ------------------------------------------------------------
+WRITE_PREDS_075 = (
+    "import json, os, pathlib; d = pathlib.Path(os.environ['HYPOTHEX_RUN_DIR']) / 'predictions'; "
+    "d.mkdir(exist_ok=True); f = open(d / 'predictions.jsonl', 'w'); "
+    "[f.write(json.dumps(dict(id='ex-' + str(i), prediction=i % 2)) + chr(10)) for i in range(4)]"
+)
+"""``python3 -c`` code: toy predictions 0 1 0 1 (accuracy 0.75); no braces, as a
+command's ``{name}`` is a template variable."""
+
+
+def write_scored_toy_project(repo: Path) -> Path:
+    """
+    Write the toy project (task ``toy-acc``) for a host and commit it.
+
+    It is ``tests.factories.write_toy_project`` with the evaluation Python set
+    to the hx that ``hx hosts add`` installs on the host (``REMOTE_HX_PYTHON``),
+    so the host scores a run without ``uv run`` in the project.
+
+    Parameters
+    ----------
+    repo : Path
+        New folder on this machine.
+
+    Returns
+    -------
+    Path
+        ``repo``; copy it to the host with ``put`` so both sides share the commit.
+    """
+    write_toy_project(repo, use_git=False)
+    path = repo / "hypothex.yaml"
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    config["env"] = {"python": [REMOTE_HX_PYTHON]}
+    config.pop("stages", None)  # its infer stage names this machine's Python
+    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    init_git_repo(repo)
+    return repo
+
+
+def add_host(home: Path, name: str, alias: str, *options: str, projects: dict[str, str]) -> None:
+    """
+    Add a host as a user does: ``hx hosts add --ssh`` (installs hx), then ``hx hosts map``.
+
+    Parameters
+    ----------
+    home : Path
+        The hub's home.
+    name : str
+        Host name.
+    alias : str
+        The ssh alias (the box's isolated wrappers must be in ``HYPOTHEX_SSH``/``SCP``).
+    *options : str
+        More ``hx hosts add`` options, e.g. ``--slurm``, ``--usd-per-gpu-hour 2``.
+    projects : dict of str to str
+        Project -> checkout path on the host, for ``hx hosts map``.
+    """
+    from typer.testing import CliRunner
+
+    from hypothex.cli.main import app
+
+    runner = CliRunner()
+    base = ["--home", str(home), "hosts"]
+    added = runner.invoke(app, [*base, "add", name, "--ssh", alias, *options, "--json"])
+    assert added.exit_code == 0, added.output
+    for project, path in projects.items():
+        mapped = runner.invoke(app, [*base, "map", project, name, path])
+        assert mapped.exit_code == 0, mapped.output
+
+
+@contextlib.contextmanager
+def hub_app(ctx: Context, host: str, *, timeout: float) -> Iterator[TestClient]:
+    """
+    Run the hub's HTTP app (``hx serve`` on the hub) and wait until ``host`` is connected.
+
+    Unlike ``HubThread``, requests go through the hub's routes, as the UI,
+    CLI, and MCP send them (``POST /api/v1/hosts/{host}/runs``).
+
+    Parameters
+    ----------
+    ctx : Context
+        Hub context; hosts come from its ``environments.yaml``.
+    host : str
+        Host to wait for.
+    timeout : float
+        Seconds to wait for the connection (a first bootstrap installs hx).
+
+    Yields
+    ------
+    TestClient
+        Client of the hub's app.
+    """
+
+    def connected() -> bool:
+        rows = client.get("/api/v1/hosts").json()
+        state = next(r["state"] for r in rows if r["name"] == host)
+        if state["state"] != "connected":
+            raise AssertionError(repr(state))  # kept as "last" for the timeout message
+        return True
+
+    app = create_app(ctx.layout.home, background_repair=False)
+    with TestClient(app, base_url="http://127.0.0.1:7777") as client:
+        wait_until(connected, timeout=timeout, what=f"host {host} connected", interval=0.5)
+        yield client
+
+
+def board_row(client: TestClient, project: str, task: str, run_id: str) -> dict[str, Any] | None:
+    """
+    Return the hub leaderboard row that holds ``run_id`` (None while it has none).
+
+    Parameters
+    ----------
+    client : TestClient
+        Client of the hub's app.
+    project : str
+    task : str
+    run_id : str
+
+    Returns
+    -------
+    dict or None
+    """
+    board = client.get(f"/api/v1/tasks/{project}/{task}/leaderboard").json()
+    return next((row for row in board["rows"] if run_id in row["run_ids"]), None)
+
+
 # SLURM cluster ----------------------------------------------------------------------------
 @dataclass
 class SlurmCluster:
@@ -715,6 +866,21 @@ class SlurmCluster:
         str
         """
         return self.exec("sh", "-c", script)
+
+    def put(self, local: Path, remote: str) -> None:
+        """
+        Copy a local folder to the shared ``/home`` (login and compute node), owned by ``hx``.
+
+        Parameters
+        ----------
+        local : Path
+            Folder on this machine.
+        remote : str
+            Absolute path under ``/home/hx``; must not exist yet.
+        """
+        self.exec("rm", "-rf", remote, user="root")  # a rerun in the same module
+        self.compose("cp", str(local), f"slurmctld:{remote}", timeout=120)
+        self.exec("chown", "-R", "hx:hx", remote, user="root")
 
     def node_state(self) -> str:
         """

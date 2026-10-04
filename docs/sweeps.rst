@@ -56,6 +56,9 @@ Rules:
   fills the whole table early.
 - With ``--host``, the CLI sends your commit and uncommitted diff, as for
   ``hx launch --host`` (see :doc:`remote`).
+- The sweep stores the commit and the uncommitted diff it starts with (``commit`` and
+  ``diff`` in its spec). Every run of the sweep uses that code: ``extend`` and a retry
+  too, also after you commit more changes.
 
 Random search
 -------------

@@ -126,7 +126,7 @@ Gives the UI typed access to every phase 2 hub route and keeps hosts, runs, over
   - Additive contract fields: `LeaderboardRow.cost?: CostTotals | null`, `OverviewSummary.cost_usd?: number`, `OverviewSummary.cost_today_usd?: number`, `RunsQuery.environment_id?: string` (the queue panel's filter, Task 27).
   - `interface SweepParam { name: string; values: string[] | null; low: number | null; high: number | null; log: boolean }`
   - `interface SweepSpec { id; project; task: string | null; host: string | null; grid: SweepParam[]; random: number | null; seeds: number[]; command_template: string[]; created_by: string; created_at: string; commit?: string | null; diff?: string | null }` (the definition only: no `run_ids`, controller ruling S8; `commit` / `diff` are the code the sweep was launched with, which every extend runs again, `null` when nothing was pinned; `diff` can be up to 5 MB and comes in every `SweepSummary`, never in the `list_sweeps` rows)
-  - `interface SweepCell { params: Record<string, string>; group_id: string; n: number; mean: number | null; lo: number | null; hi: number | null; run_ids: string[] }`
+  - `interface SweepCell { params: Record<string, string>; group_id: string; n: number; mean: number | null; lo: number | null; hi: number | null; uncounted?: number; run_ids: string[] }` (`uncounted`: the cell's scored runs in another seed group, e.g. another commit, not in `n` or `mean`; shown as `n=3 +2`, DF-9)
   - `interface SweepSummary { spec: SweepSpec; run_ids: string[]; tag: string; counts: Record<string, number>; cells: SweepCell[]; best: SweepCell | null; headline: string; total_usd: number; cancel?: { asked: number; failed: number; errors: string[] } | null }` (`cancel` is set only on a cancel_queued answer, DF-49; `run_ids`: the sweep's membership, derived by the backend from the runs tagged `tag`, oldest first; ruling S8; `tag` is `sweep:<owner8>:<id>`, the filter for `GET /api/v1/runs?tag=`)
   - `interface SweepListItem { id: string; created_at: string; n_runs: number; best: SweepCell | null }`
   - `interface PullResult { local_path: string }`
@@ -703,6 +703,8 @@ export interface SweepCell {
   mean: number | null;
   lo: number | null;
   hi: number | null;
+  /** Scored runs of the cell in another seed group (another commit): not in `n`; `n=3 +2`. */
+  uncounted?: number;
   run_ids: string[];
 }
 

@@ -560,6 +560,14 @@ def test_cell_split_across_commits_uses_the_larger_seed_group(ctx: Context, toy_
     assert cell["n"] == 2
     assert cell["mean"] == pytest.approx(0.72)
     assert cell["group_id"].endswith("@c1")
+    assert cell["uncounted"] == 1  # DF-9: a3 is scored, but not in n or the mean
+
+
+def test_a_cell_with_one_seed_group_has_no_uncounted_runs(
+    ctx: Context, toy_sweep: SweepSpec
+) -> None:
+    cells = summarize_sweep(ctx, "toy", "s-0001").cells
+    assert [c["uncounted"] for c in cells] == [0, 0, 0]
 
 
 def test_list_sweeps_newest_first(ctx: Context, toy_sweep: SweepSpec) -> None:

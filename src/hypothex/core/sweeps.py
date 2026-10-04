@@ -569,9 +569,11 @@ class SweepSummary(BaseModel):
 
     ``cells`` holds one dict per param combination: ``params``, ``group_id``,
     ``n`` (scored seeds), ``mean``, ``lo``/``hi`` (95% interval: test-set when
-    per-example scores exist, else over seeds), ``std``, ``run_ids``, and
-    ``runs`` (``run_id``, ``status``, ``seed`` of each run). ``best`` is the
-    best scored cell.
+    per-example scores exist, else over seeds), ``std``, ``uncounted`` (the
+    cell's scored runs in another seed group, e.g. another commit: not in
+    ``n`` or ``mean``; shown as ``n=3 +2``), ``run_ids``, and ``runs``
+    (``run_id``, ``status``, ``seed`` of each run). ``best`` is the best
+    scored cell.
     """
 
     spec: SweepSpec
@@ -672,8 +674,15 @@ def _board(
 def _cell(
     params: dict[str, str], members: list[RunRecord], rows: list[LeaderboardRow]
 ) -> dict[str, Any]:
-    """One heat-table cell from its runs and the leaderboard rows they fall in."""
+    """
+    One heat-table cell from its runs and the scored leaderboard rows they fall in.
+
+    The stats come from ``rows[0]``; the cell's runs scored in the other rows
+    (another commit or config: another seed group) are ``uncounted``.
+    """
     row = rows[0] if rows else None
+    ids = {m.run_id for m in members}
+    uncounted = len(ids & {rid for other in rows[1:] for rid in other.run_ids})
     primary = row.primary if row is not None else None
     lo = hi = None
     if row is not None and row.test_interval is not None:
@@ -688,6 +697,7 @@ def _cell(
         "lo": lo,
         "hi": hi,
         "std": primary.std if primary is not None and primary.n > 1 else None,
+        "uncounted": uncounted,
         "run_ids": [m.run_id for m in members],
         "runs": [{"run_id": m.run_id, "status": m.status.value, "seed": m.seed} for m in members],
     }

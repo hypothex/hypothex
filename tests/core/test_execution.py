@@ -370,3 +370,25 @@ def test_pump_reads_a_pipe_on_a_file_descriptor_above_1024(tmp_path: Path) -> No
         if w >= 0:
             os.close(w)
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_stop_marker_written_while_the_child_runs_kills_it(ctx: Context, toy_repo: Path) -> None:
+    # INT-F1: the supervisor watches the stop marker while it waits on the child,
+    # so a stop that could not signal the child still ends the run.
+    sleeper = cmd("import time; time.sleep(30)")
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=sleeper))
+    result: list = []
+    worker = threading.Thread(target=lambda: result.append(execute_run(ctx, rec.run_id)))
+    worker.start()
+    deadline = time.monotonic() + 20
+    while ctx.find_record(rec.run_id).status != RunStatus.RUNNING:
+        assert time.monotonic() < deadline, "the run never started"
+        time.sleep(0.05)
+    start = time.monotonic()
+    (ctx.run_dir(rec) / execution.STOP_MARKER).write_text("now")
+    worker.join(timeout=15)
+    assert not worker.is_alive(), "the supervisor never noticed the stop marker"
+    assert time.monotonic() - start < 15
+    done = result[0]
+    assert done.status == RunStatus.KILLED
+    assert not execution.process_alive(done.executor.child_pid, None)

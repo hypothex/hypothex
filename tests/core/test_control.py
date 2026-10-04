@@ -487,3 +487,43 @@ def test_removing_a_pinned_run_from_the_gpu_queue_releases_its_worktree(
     assert tree.is_dir()
     assert control.cancel_if_queued(ctx, rec.run_id).status == RunStatus.KILLED
     assert not tree.exists()
+
+
+def test_stop_run_signals_a_child_its_first_read_missed(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # INT-F1: stop_run read the run while queued; the supervisor then passed its
+    # last marker check and recorded run.started before the marker was written.
+    # stop_run must signal the child it finds after writing the marker. The
+    # "supervisor" here is this test process, which never watches the marker.
+    queued = prepare_run(ctx, RunRequest(repo=toy_repo, command=SLEEPER))
+    child = subprocess.Popen(SLEEPER, start_new_session=True)
+    try:
+        started = queued.executor.model_copy(
+            update={
+                "pid": os.getpid(),
+                "pid_create_time": process_create_time(os.getpid()),
+                "child_pid": child.pid,
+            }
+        )
+        ctx.update_run(
+            queued.run_id,
+            "run.started",
+            lambda r: r.model_copy(
+                update={"status": RunStatus.RUNNING, "started_at": utcnow(), "executor": started}
+            ),
+        )
+        real = ctx.find_record
+        reads: list[str] = []
+
+        def first_read_is_the_queued_snapshot(run_id: str):  # noqa: ANN202
+            reads.append(run_id)
+            return queued if len(reads) == 1 else real(run_id)
+
+        monkeypatch.setattr(ctx, "find_record", first_read_is_the_queued_snapshot)
+        assert stop_run(ctx, queued.run_id, grace=0.5).status == RunStatus.KILLED
+        assert child.wait(timeout=5) is not None
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()

@@ -464,6 +464,36 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     raise RunError(f"could not pick a free run id in {RUN_ID_ATTEMPTS} tries")
 
 
+def dataset_base(checkout: Path, repo: Path, raw: str) -> Path:
+    """
+    Pick the folder a run's relative dataset path resolves in.
+
+    A pinned run's checkout (a git worktree, spec 8A.4) holds only tracked
+    files. Data that git ignores lives only in the project repo, so the
+    checkout is used only when the dataset is there.
+
+    Parameters
+    ----------
+    checkout : Path
+        Where the run's code is checked out (the repo itself or a worktree).
+    repo : Path
+        The project repo on this host.
+    raw : str
+        The dataset path from ``hypothex.yaml`` (relative or absolute).
+
+    Returns
+    -------
+    Path
+        ``checkout`` when the dataset exists there, else ``repo``.
+
+    Examples
+    --------
+    >>> dataset_base(Path("/no/such/worktree"), Path("/repo"), "data/test.jsonl")
+    PosixPath('/repo')
+    """
+    return checkout if resolve_dataset_path(checkout, raw).exists() else repo
+
+
 def _prepare_in(
     ctx: Context,
     req: RunRequest,
@@ -478,7 +508,8 @@ def _prepare_in(
     ``repo`` is the host checkout and ``host_config`` its ``hypothex.yaml``:
     they name the project and are what is registered for it, so a run pinned
     to an older commit never changes the project's stored tasks. Config,
-    commands, datasets, and captures of the run use the checkout.
+    commands, and captures of the run use the checkout; a relative dataset
+    path uses it only when the dataset is there (``dataset_base``).
     """
     src = worktree or repo
     config = load_project_config(worktree) if worktree is not None else host_config
@@ -517,13 +548,15 @@ def _prepare_in(
     if req.config_path is not None:
         values["config"] = str(run_dir / "config.yaml")
     task_spec = config.tasks.get(req.task) if req.task else None
+    ds_base = src
     if task_spec is not None:
         ds = config.datasets[task_spec.dataset]
+        ds_base = dataset_base(src, repo, ds.path_for(task_spec.split))
         values.update(
             {
                 "dataset.name": task_spec.dataset,
                 "dataset.version": ds.version,
-                "dataset.path": str(resolve_dataset_path(src, ds.path_for(task_spec.split))),
+                "dataset.path": str(resolve_dataset_path(ds_base, ds.path_for(task_spec.split))),
             }
         )
     values.update(req.vars)
@@ -544,7 +577,7 @@ def _prepare_in(
                 task_spec.dataset,
                 config.datasets[task_spec.dataset],
                 task_spec.split,
-                src,
+                ds_base,
                 cache,
                 ctx.descriptor.label,
             )

@@ -12,7 +12,7 @@ from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
 from hypothex.core.records import RunStatus, UsageTotals
-from tests.factories import write_toy_project
+from tests.factories import git, write_toy_project
 
 PY = sys.executable
 WRITE_PREDS = (
@@ -448,3 +448,39 @@ def test_pump_drains_a_pipe_whose_log_cannot_be_opened(tmp_path: Path) -> None:
     src.close()
     assert not writer.is_alive() and not thread.is_alive()
     assert len(failures) == 1 and failures[0].startswith("dir.log: ")
+
+
+def _ignore_data_and_pin_old_commit(repo: Path) -> str:
+    """Make ``data/`` git-ignored, commit twice, and return the older commit."""
+    git(repo, "rm", "-rq", "--cached", "data")
+    (repo / ".gitignore").write_text("data/\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-qm", "ignore data")
+    old = git(repo, "rev-parse", "HEAD")
+    (repo / "infer.py").write_text("print('new')\n")
+    git(repo, "commit", "-qam", "move on")
+    return old
+
+
+def test_a_pinned_run_reads_git_ignored_data_from_the_repo(ctx: Context, toy_repo: Path) -> None:
+    # DF-18: the dataset path was resolved in the worktree, where ignored data is missing
+    old = _ignore_data_and_pin_old_commit(toy_repo)
+    read = cmd("import sys; print(len(open(sys.argv[1]).readlines()))", "{dataset.path}")
+    req = RunRequest(repo=toy_repo, command=read, task="toy-acc", commit=old)
+    done = run_fg(ctx, req)
+    data = str(toy_repo.resolve() / "data" / "test.jsonl")
+    assert done.status == RunStatus.FINISHED
+    assert done.command[-1] == data
+    assert done.datasets[0].path == data and done.datasets[0].hash_mode != "missing"
+    assert (ctx.run_dir(done) / "logs" / "stdout.log").read_text().strip() == "4"
+
+
+def test_a_pinned_run_reads_tracked_data_from_its_checkout(ctx: Context, toy_repo: Path) -> None:
+    old = git(toy_repo, "rev-parse", "HEAD")
+    (toy_repo / "data" / "test.jsonl").write_text('{"id": "ex-0", "reference": 1}\n')
+    git(toy_repo, "commit", "-qam", "new data")
+    read = cmd("import sys; print(len(open(sys.argv[1]).readlines()))", "{dataset.path}")
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=read, task="toy-acc", commit=old))
+    assert done.command[-1].startswith(str(ctx.layout.worktrees_dir("toy")))
+    assert done.datasets[0].path == done.command[-1]
+    assert (ctx.run_dir(done) / "logs" / "stdout.log").read_text().strip() == "4"

@@ -339,18 +339,59 @@ export interface AllRuns {
 }
 
 /**
+ * Keyset cursor of `GET /api/v1/runs`: only runs after `(created_at, run_id)` in the
+ * newest-first order, i.e. the runs below the last run of the previous page.
+ */
+export interface RunsCursor {
+  before_created_at: string;
+  before_run_id: string;
+}
+
+/** The cursor after `run`, or null when the run has no `created_at` to page from. */
+function cursorAfter(run: M.RunRecord | undefined): RunsCursor | null {
+  const created = run?.created_at as unknown;
+  return run && typeof created === "string" && created !== ""
+    ? { before_created_at: created, before_run_id: run.run_id }
+    : null;
+}
+
+/**
  * Every run that matches `query`, not only the newest page.
  *
- * `GET /api/v1/runs` has a `limit` and no offset, so the next page is a bigger limit: start
- * at `ALL_RUNS_FIRST` and ask for 4× more while a page comes back full. A host queue or a
- * 1,000-run sweep then never loses its oldest runs (the queue head) to the page size.
+ * Pages by keyset: the next request asks for the runs after the last run so far
+ * (`before_created_at`, `before_run_id`), 4× more each time (1,000, 4,000, ...), so no run
+ * is read twice. A server that ignores the cursor sends the newest runs again; then the
+ * runs overlap the ones so far, and the request is read as the older paging by a growing
+ * `limit` (the same requests as before). A host queue or a 1,000-run sweep never loses
+ * its oldest runs (the queue head) to the page size either way.
+ *
+ * Examples
+ * --------
+ * >>> const { runs, complete } = await fetchAllRuns({ tag: "sweep:ab12cd34:s-7f3a" });
  */
 export async function fetchAllRuns(query: Omit<M.RunsQuery, "limit">, signal?: AbortSignal): Promise<AllRuns> {
-  for (let limit = ALL_RUNS_FIRST; ; limit *= 4) {
-    const runs = await api.runs({ ...query, limit }, signal);
-    if (runs.length < limit) return { runs, complete: true };
-    if (limit >= ALL_RUNS_MAX) return { runs, complete: false };
+  let limit = ALL_RUNS_FIRST;
+  let runs = await api.runs({ ...query, limit }, signal);
+  let full = runs.length >= limit;
+  let keyset = true; // until the server shows it ignores the cursor
+  while (full) {
+    if (keyset ? runs.length >= ALL_RUNS_MAX : limit >= ALL_RUNS_MAX) return { runs, complete: false };
+    limit *= 4;
+    const cursor = keyset ? cursorAfter(runs.at(-1)) : null;
+    // the first keyset page asks for 4,000 like the growing limit, so either reading holds
+    const size = cursor ? Math.min(limit, ALL_RUNS_MAX - runs.length) : limit;
+    const params: M.RunsQuery & Partial<RunsCursor> = { ...query, limit: size, ...cursor };
+    const page = await api.runs(params, signal);
+    const seen = new Set(runs.map((r) => r.run_id));
+    if (cursor && !page.some((r) => seen.has(r.run_id))) {
+      runs = runs.concat(page);
+    } else {
+      keyset = false; // `page` is the newest `size` runs
+      runs = page;
+    }
+    full = page.length >= size;
   }
+  return { runs, complete: true };
 }
 
 /** `fetchAllRuns` as a query under `["runs"]`, so every run event refreshes it. */

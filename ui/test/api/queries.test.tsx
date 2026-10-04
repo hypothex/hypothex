@@ -302,6 +302,54 @@ describe("hooks", () => {
     expect(calls).toHaveLength(4);
   });
 
+  /** `n` runs, newest first, `from` runs below the newest (created one second apart). */
+  const dated = (n: number, from = 0): RunRecord[] =>
+    Array.from({ length: n }, (_, k) => {
+      const i = from + k;
+      return {
+        run_id: `r${String(100_000 - i).padStart(6, "0")}`,
+        created_at: new Date(Date.UTC(2026, 9, 3) - i * 1000).toISOString(),
+      } as unknown as RunRecord;
+    });
+
+  test("fetchAllRuns pages by keyset (before_created_at, before_run_id) when the server honours it (PERF-F13c)", async () => {
+    const q = "/api/v1/runs?project=toy&limit=";
+    const first = dated(1000);
+    const last = first.at(-1) as RunRecord;
+    const cursor = `before_created_at=${encodeURIComponent(last.created_at)}&before_run_id=${last.run_id}`;
+    const calls = mockRoutes({ [`${q}1000`]: first, [`${q}4000&${cursor}`]: dated(500, 1000) });
+    const out = await fetchAllRuns({ project: "toy" });
+    expect(calls.map((c) => c.url)).toEqual([`${q}1000`, `${q}4000&${cursor}`]);
+    expect([out.runs.length, out.complete]).toEqual([1500, true]);
+    expect(new Set(out.runs.map((r) => r.run_id)).size).toBe(1500);
+  });
+
+  test("fetchAllRuns keyset pages stop at ALL_RUNS_MAX runs in all", async () => {
+    let served = 0;
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://x");
+      calls.push(url.search);
+      const limit = Number(url.searchParams.get("limit"));
+      const page = dated(limit, served);
+      served += limit;
+      return new Response(JSON.stringify(page), { status: 200 });
+    }) as typeof fetch;
+    const out = await fetchAllRuns({ project: "toy" });
+    expect(calls.map((c) => new URLSearchParams(c).get("limit"))).toEqual(["1000", "4000", "16000", "43000"]);
+    expect([out.runs.length, out.complete]).toEqual([ALL_RUNS_MAX, false]);
+  });
+
+  test("fetchAllRuns falls back to a growing limit when the server ignores the cursor", async () => {
+    const q = "/api/v1/runs?project=toy&limit=";
+    // the current server: no cursor, so each page is the newest `limit` runs again
+    const calls = mockRoutes({ [`${q}1000`]: dated(1000), [`${q}4000`]: dated(2500), [`${q}16000`]: dated(9) });
+    const out = await fetchAllRuns({ project: "toy" });
+    expect([out.runs.length, out.complete]).toEqual([2500, true]);
+    expect(calls.map((c) => c.url.split("&before")[0])).toEqual([`${q}1000`, `${q}4000`]);
+    expect(new Set(out.runs.map((r) => r.run_id)).size).toBe(2500);
+  });
+
   test("useView stays idle while name is null", async () => {
     const calls = mockRoutes({});
     const { wrapper } = setup();

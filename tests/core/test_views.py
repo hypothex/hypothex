@@ -42,7 +42,7 @@ PRESET_TYPES = {
         "stat_strip",
         "leaderboard",
         "distribution",
-        "curves",
+        "vega_lite",
         "distribution",
         "vega_lite",
         "curves",
@@ -84,7 +84,14 @@ def test_preset_details_match_spec() -> None:
     assert bench["Latency"].scale == "log"
     assert bench["Latency"].data.source == "samples"
     assert bench["Latency"].data.metrics == ["latency_ms"]
-    assert bench["Throughput vs concurrency"].data.metrics == ["sweep/rps"]
+    throughput = bench["Throughput vs concurrency"]
+    assert (throughput.type, throughput.data.source) == ("vega_lite", "metrics")
+    assert throughput.data.filter == {"name": "sweep/rps"}
+    assert throughput.spec is not None
+    x = throughput.spec["encoding"]["x"]
+    # one chart for all configs, concurrency on a log2 axis with its name
+    assert (x["title"], x["scale"]) == ("concurrency", {"type": "log", "base": 2})
+    assert "column" not in throughput.spec["encoding"] and "row" not in throughput.spec["encoding"]
     assert bench["Utilisation"].data.metrics == ["gpu_pct", "cpu_pct"]
     assert bench["Utilisation"].data.group_by == "group"  # one small multiple per config
     training = {p.title: p for p in load_preset("training").panels}

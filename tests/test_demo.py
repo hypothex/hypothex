@@ -420,6 +420,15 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
             assert all(lo is not None and lo <= hi for d in deltas for _, lo, hi in d.values())
             # async: repeat p95s 163-169 ms vs baseline 231-235 ms, about -29%
             assert min(d["p95"][0] for d in deltas) < -0.25
+            # throughput: one chart of sweep/rps rows, named by config, over concurrency
+            throughput = results["Throughput vs concurrency"]
+            assert {row["name"] for row in throughput.rows} == {"sweep/rps"}
+            assert {row["label"] for row in throughput.rows} == {
+                "baseline",
+                "cache-enabled",
+                "async-worker",
+            }
+            assert min(row["step"] for row in throughput.rows) >= 1  # log2 axis
             # utilisation small multiples: one per config, its 3 repeats inside it
             util = results["Utilisation"]
             assert [g["label"] for g in util.meta["groups"]] == [

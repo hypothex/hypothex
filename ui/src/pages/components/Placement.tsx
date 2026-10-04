@@ -3,8 +3,8 @@
  * GPUs as `CUDA_VISIBLE_DEVICES`, pid, queue place, and cost. Copy buttons copy the value.
  */
 import { CopyButton } from "./CopyButton";
-import { fmtClock, fmtUsd } from "./format";
-import { costNote, gpuLabel, hostLabel, type RunPhase, visibleDevices } from "./remote";
+import { fmtClock } from "./format";
+import { costShown, gpuLabel, hostLabel, type RunPhase, visibleDevices } from "./remote";
 import type { HostRow, RunRecord } from "./types";
 
 export interface PlaceRow {
@@ -51,7 +51,8 @@ export function placementRows(record: RunRecord, phase: RunPhase, host: HostRow 
     if (phase === "stale" && host) row.note = `as of ${fmtClock(host.state.since)}`;
     rows.push(row);
   }
-  if (record.cost) rows.push({ key: "Cost", value: fmtUsd(record.cost.total_usd), note: costNote(record.cost) });
+  const cost = costShown(record.cost, host);
+  if (cost) rows.push({ key: "Cost", value: cost.value, note: cost.note });
   return rows;
 }
 

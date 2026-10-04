@@ -76,6 +76,18 @@ describe("placementRows", () => {
     ]);
   });
 
+  test("cost: unpriced GPU hours show `—` as the stat strip does; an all-zero cost shows no row", () => {
+    const unpriced = { gpu_hours: 1.5, gpu_usd: 0, api_usd: 0, total_usd: 0 };
+    const noRate = { ...MCCLEARY, usd_per_gpu_hour: null };
+    expect(placementRows(lostRecord({ cost: unpriced }), "lost", noRate).at(-1)).toEqual({
+      key: "Cost",
+      value: "—",
+      note: "1.50 GPU h, API $0.000, no GPU rate for this host",
+    });
+    const zero = { gpu_hours: 0, gpu_usd: 0, api_usd: 0, total_usd: 0 };
+    expect(placementRows(lostRecord({ cost: zero }), "lost", MCCLEARY).map((r) => r.key)).not.toContain("Cost");
+  });
+
   test("Placement draws the rows and copies a value", async () => {
     const written = mockClipboard();
     render(<Placement rows={placementRows(lostRecord(), "lost", MCCLEARY)} />);

@@ -60,7 +60,10 @@ Screens
   the host queue while it waits, ``stale`` with the time since the hub last heard from the
   host (never ``lost``: only the host decides that), why it was lost (the reason
   from its ``run.lost`` event when the page saw that event, else what the record says: job,
-  node, end time, exit code), and its cost. The Queue panel lists the host's whole queue.
+  node, end time, exit code), and its cost (``—`` when the host has no
+  ``usd_per_gpu_hour``, so its GPU hours have no price). Times since a moment (waiting,
+  wall, unreachable) move on every 10 s while the run is not over, also when the host
+  sends nothing new. The Queue panel lists the host's whole queue.
 - **Examples** (``/x/<a>/<b>?metric=<name>``): what run B fixes and breaks against run A,
   with the paired sign test.
 - **View editor** (``/t/<project>/<task>/edit/<view>``, ``new`` for a new view): YAML on

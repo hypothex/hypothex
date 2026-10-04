@@ -1,7 +1,7 @@
 /** The run page's stat strip: the few numbers that matter, tooltips for the rest. */
 import { valueFormatter } from "../../charts/valueFormat";
 import { fmtCount, fmtDuration, fmtInterval, fmtScore, fmtUsd, runSeconds } from "./format";
-import { costNote } from "./remote";
+import { costShown } from "./remote";
 import { type PrimaryRef, scoreFor } from "./ScoresList";
 import type { StatItem } from "./StatStrip";
 import type { HostRow, LeaderboardRow, RunDetail } from "./types";
@@ -58,24 +58,14 @@ export function runStats(
   if (seconds !== null) out.push({ label: "wall", value: fmtDuration(seconds) });
   const usage = record.usage;
   // an all-zero cost (a hub or CPU run with no usage) is no cost: no stat, as before 8A.7
-  const c = record.cost ?? null;
-  const cost = c && (c.total_usd > 0 || c.gpu_hours > 0) ? c : null;
+  const cost = costShown(record.cost, host);
   if (usage) {
     out.push({ label: "tokens in", value: fmtCount(usage.tokens_in) });
     out.push({ label: "tokens out", value: fmtCount(usage.tokens_out) });
     if (!cost) out.push({ label: "cost", value: fmtUsd(usage.usd), tooltip: `${usage.calls} calls` });
   }
   // spec 8A.7: GPU hours × rate + API dollars, set when the run ends
-  // GPU hours unpriced because the host row says it has no rate (`null`): the total is
-  // unknown (`—`). Zero GPU dollars alone prove nothing (free GPUs, a tiny charge rounded)
-  if (cost) {
-    const unpriced = host?.usd_per_gpu_hour === null && cost.gpu_hours > 0 && cost.gpu_usd === 0;
-    out.push({
-      label: "cost",
-      value: unpriced ? "—" : fmtUsd(cost.total_usd),
-      tooltip: unpriced ? `${costNote(cost)}, no GPU rate for this host` : costNote(cost),
-    });
-  }
+  if (cost) out.push({ label: "cost", value: cost.value, tooltip: cost.note });
   if (record.exit_code !== null && record.exit_code !== 0) {
     out.push({ label: "exit", value: String(record.exit_code) });
   }

@@ -121,6 +121,20 @@ test("a run on an unreachable host: stale since, bar, Reconnect", async () => {
   await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.url === "/api/v1/hosts/dgx/connect")).toBe(true));
 });
 
+test("elapsed times tick with the clock even when a refetch returns the same data", async () => {
+  mockApi({
+    [`GET /api/v1/runs/${STALE_ID}`]: remoteDetail(staleRecord(), "stale"),
+    [HOSTS_ROUTE]: HOSTS,
+  });
+  const { client } = renderWithClient(<RunPage runId={STALE_ID} clockMs={20} />, { registry });
+  await waitFor(() => expect(screen.getByRole("status").querySelector("b")?.textContent).toBe("dgx unreachable 5m"));
+  // ten minutes on; the host still does not answer, so every poll returns the same body
+  setSystemTime(new Date(NOW + 10 * 60_000));
+  await client.refetchQueries();
+  await waitFor(() => expect(screen.getByRole("status").querySelector("b")?.textContent).toBe("dgx unreachable 15m"));
+  expect(statValues().at(-1)).toBe("15m");
+});
+
 test("the tunnel dies mid-mirror: the hosts list fails, the page still says stale", async () => {
   let up = true;
   const calls = mockApi({

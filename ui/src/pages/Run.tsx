@@ -17,6 +17,7 @@ import {
   useTaskKind,
 } from "../api/queries";
 import { Figure, panelLetter } from "./components/Figure";
+import { useNow } from "./components/HostsPanel";
 import { firstClause, shortId } from "./components/format";
 import { Unbroken } from "./components/Headline";
 import { KindPanels, kindPanelCount, readsTraces, runViewPanels } from "./components/KindPanels";
@@ -50,11 +51,16 @@ export interface RunPageProps {
   runId: string;
   log?: string;
   example?: string;
+  /** How often the clock of an unfinished run ticks (waits, wall time, unreachable since). */
+  clockMs?: number;
 }
+
+/** Clock tick of an unfinished run: its elapsed times move even when a poll returns the same data. */
+export const RUN_CLOCK_MS = 10_000;
 
 const LONG_TITLE = 60;
 
-export function RunPage({ runId, log, example }: RunPageProps) {
+export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPageProps) {
   const run = useRun(runId);
   const lostWhy = useLostReason(runId);
   const record = run.data?.record;
@@ -82,6 +88,8 @@ export function RunPage({ runId, log, example }: RunPageProps) {
     staleTime: Number.POSITIVE_INFINITY,
   });
   const hubEnvId = hubEnv.data?.environment_id;
+  // queued, running and stale runs show times since a moment; an ended run's times are fixed
+  const now = useNow(clockMs, record !== undefined && record.ended_at === null);
 
   if (run.error) {
     return (
@@ -100,7 +108,6 @@ export function RunPage({ runId, log, example }: RunPageProps) {
     );
   }
 
-  const now = Date.now();
   const detail = run.data;
   // matched by environment_id; null without the hosts list (texts then use the hostname)
   const host = runHostRow(detail, hosts.data);

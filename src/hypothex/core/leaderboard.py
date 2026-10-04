@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import math
 import re
-from collections import defaultdict
-from collections.abc import Iterable
+import threading
+from array import array
+from collections import OrderedDict, defaultdict
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
+import xxhash
 from pydantic import BaseModel
 
 from hypothex.core import stats
@@ -23,8 +26,12 @@ from hypothex.core.headlines import (
     task_stat_strip,
     value_format,
 )
+from hypothex.core.index import index_generation
 from hypothex.core.records import CostTotals, RunRecord, RunStatus, ScoreRecord, UsageTotals
 from hypothex.core.seeds import Stats, intervals_overlap, summarize
+
+if TYPE_CHECKING:
+    from hypothex.core.context import Context
 
 PerExample = dict[str, dict[str, dict[str, Any]]]
 """run_id -> example_id -> per-example fields of the primary metric."""
@@ -276,6 +283,134 @@ def _higher_is_better(config: ProjectConfig, spec: TaskSpec) -> bool:
     return config.metrics[metric].higher_is_better
 
 
+# caches ------------------------------------------------------------------------------
+STATS_CACHE_SIZE = 8192
+"""Bootstrap results kept per kind (row intervals, paired p-values), least recently used out."""
+BOARD_CACHE_SIZE = 128
+"""Leaderboards kept by ``cached_leaderboard``, least recently used out."""
+
+_K = TypeVar("_K", bound=Hashable)
+_V = TypeVar("_V")
+
+
+class _Lru(Generic[_K, _V]):
+    """A thread-safe least-recently-used map of at most ``size`` entries."""
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self._data: OrderedDict[_K, _V] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: _K, compute: Callable[[], _V]) -> _V:
+        """Return the value of ``key``, computing and storing it on a miss."""
+        with self._lock:
+            if key in self._data:
+                self._data.move_to_end(key)
+                return self._data[key]
+        value = compute()  # outside the lock: two threads may both compute a miss
+        with self._lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            while len(self._data) > self.size:
+                self._data.popitem(last=False)
+        return value
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+
+
+_INTERVALS: _Lru[bytes, tuple[float, float]] = _Lru(STATS_CACHE_SIZE)
+_PAIRED_P: _Lru[bytes, float] = _Lru(STATS_CACHE_SIZE)
+_BOARDS: _Lru[tuple[Hashable, ...], Leaderboard] = _Lru(BOARD_CACHE_SIZE)
+
+
+def _digest(values: list[float]) -> bytes:
+    """128-bit digest of ``values`` in order (the exact bits of each float)."""
+    return xxhash.xxh3_128_digest(array("d", values).tobytes())
+
+
+def clear_caches() -> None:
+    """
+    Empty the bootstrap and leaderboard caches of this process.
+
+    Never needed for correct results (every key covers its inputs); tests and
+    benchmarks use it to measure cold builds.
+
+    Examples
+    --------
+    >>> clear_caches()
+    """
+    _INTERVALS.clear()
+    _PAIRED_P.clear()
+    _BOARDS.clear()
+
+
+def cached_leaderboard(
+    ctx: Context,
+    project: str,
+    task: str,
+    config: ProjectConfig,
+    build: Callable[[], Leaderboard],
+    *,
+    versions: Mapping[str, str] | None = None,
+    variant: Hashable = (),
+) -> Leaderboard:
+    """
+    Return ``build()``, memoized until the index changes.
+
+    The key is the index file, ``index.index_generation(ctx)`` (read before
+    ``build`` runs, so a write during the build only wastes the entry), the
+    project, task, a digest of ``config``, ``versions`` and ``variant``.
+    ``build`` must read only index data, files written before their index write
+    (per-example score files are written before ``Context.add_score``), and
+    these arguments. At most ``BOARD_CACHE_SIZE`` boards are kept. Each call
+    returns a deep copy, so callers may change it.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open context whose index ``build`` reads.
+    project : str
+        Project name.
+    task : str
+        Task name.
+    config : ProjectConfig
+        The project config ``build`` uses.
+    build : callable
+        Builds the board on a miss, for example a closure over
+        ``build_leaderboard``.
+    versions : mapping of str to str, optional
+        Metric version overrides ``build`` uses.
+    variant : hashable
+        Anything else that changes the board: ``examples=False``, a run filter.
+
+    Returns
+    -------
+    Leaderboard
+        A copy of the cached or new board.
+
+    Examples
+    --------
+    >>> board = cached_leaderboard(  # doctest: +SKIP
+    ...     ctx, "toy", "t", config, lambda: build_leaderboard("toy", "t", config, runs, scores)
+    ... )
+    """
+    key = (
+        str(ctx.index.path),
+        index_generation(ctx),
+        project,
+        task,
+        xxhash.xxh3_128_digest(config.model_dump_json().encode()),
+        tuple(sorted((versions or {}).items())),
+        variant,
+    )
+    return _BOARDS.get(key, build).model_copy(deep=True)
+
+
 # test-set noise --------------------------------------------------------------------
 def _is_number(v: Any) -> bool:
     return isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
@@ -350,7 +485,7 @@ def _test_interval(pooled: dict[str, float], binary: bool) -> NoiseInterval | No
         successes = math.floor(math.fsum(values) + 0.5)
         lo, hi = stats.wilson_interval(successes, len(values))
         return NoiseInterval(lo=lo, hi=hi, method="wilson", n=len(values))
-    lo, hi = stats.bootstrap_mean_interval(values)
+    lo, hi = _INTERVALS.get(_digest(values), lambda: stats.bootstrap_mean_interval(values))
     return NoiseInterval(lo=lo, hi=hi, method="bootstrap", n=len(values))
 
 
@@ -393,7 +528,8 @@ def _versus_test(
             examples_needed=stats.examples_needed(fixed, broken, len(common)),
         )
     if common and binary is False:
-        p = stats.paired_bootstrap_p([mine[k] for k in common], [theirs[k] for k in common])
+        a, b = [mine[k] for k in common], [theirs[k] for k in common]
+        p = _PAIRED_P.get(_digest(a + b), lambda: stats.paired_bootstrap_p(a, b))
         return VersusBest(
             delta=delta, p=p, fixed=None, broken=None, test="paired_bootstrap", examples_needed=None
         )

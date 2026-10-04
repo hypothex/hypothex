@@ -380,3 +380,25 @@ def test_rows_carry_group_labels_and_accept_overrides(ctx: Context, toy_repo: Pa
     assert [(r["group_id"], r["label"]) for r in rows] == [("aaaa@c1", "svm"), ("bbbb@c1", "rf")]
     rows = list(iter_rows(ctx, [a, b], "runs", fields=[], labels={"bbbb@c1": "forest"}))
     assert [r["label"] for r in rows] == ["svm", "forest"]
+
+
+def test_metrics_rows_hold_one_runs_points_at_a_time(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recs = [_run(ctx, toy_repo, f"r{i}", minute=i) for i in range(3)]
+    for rec in recs:
+        _jsonl(ctx.run_dir(rec) / "metrics.jsonl", [{"name": "loss", "step": 0, "value": 1.0}])
+        _index_metrics(ctx, rec)
+    calls: list[list[str]] = []
+    real = ctx.index.metric_points_for
+
+    def spy(run_ids: Any, names: Any = None) -> Any:
+        calls.append(list(run_ids))
+        return real(run_ids, names)
+
+    monkeypatch.setattr(ctx.index, "metric_points_for", spy)
+    rows = iter_rows(ctx, recs, "metrics")
+    assert next(rows)["run_id"] == "r0"
+    assert calls == [["r0"]]  # a table over many runs never holds every run's history
+    assert [r["run_id"] for r in rows] == ["r1", "r2"]
+    assert calls == [["r0"], ["r1"], ["r2"]]

@@ -1419,3 +1419,96 @@ def test_view_parses_a_live_runs_metrics_file_once_for_all_curves(
     assert [r["name"] for r in (*loss.rows, *lr.rows)] == ["train/loss", "lr"]
     assert [r["name"] for r in gpu.rows] == ["sys/gpu_util"]
     assert reads == ["r1", "r1"]  # once for the curves panels, once for the vega_lite source
+
+
+# denial of service: data or specs that must not fail or blow up a view ----------
+def test_lttb_survives_values_near_the_float_limit() -> None:
+    n = 1000
+    big = [1.7e308] * n
+    kept = panels.lttb(list(range(n)), big, 10)
+    assert len(kept) == 10 and (kept[0], kept[-1]) == (0, n - 1)
+    kept = panels.lttb(big, [1.0] * n, 10)
+    assert len(kept) == 10 and kept == sorted(set(kept))
+
+
+def test_curves_of_values_near_the_float_limit_do_not_fail_the_view(
+    ctx: Context, toy_repo: Path
+) -> None:
+    rec = _run(ctx, toy_repo, "r1")
+    _metrics(ctx, rec, [{"name": "loss", "step": s, "value": 1.7e308} for s in range(600)])
+    view = ViewSpec(title="v", panels=[_panel("curves", data={"metrics": ["loss"]})])
+    (curves,) = query_view(ctx, "toy", "toy-acc", view)
+    assert "error" not in curves.meta
+    assert len(curves.rows) == panels.CURVE_POINTS
+
+
+def test_a_step_the_index_cannot_hold_is_skipped_not_a_failed_view(
+    ctx: Context, toy_repo: Path
+) -> None:
+    from hypothex.core.index import rebuild_index
+
+    done = _run(ctx, toy_repo, "r1")
+    live = _run(ctx, toy_repo, "r2", minute=1, status=RunStatus.RUNNING)
+    for rec in (done, live):
+        _jsonl(
+            ctx.run_dir(rec) / "metrics.jsonl",
+            [
+                {"name": "loss", "step": 0, "value": 1.0},
+                {"name": "loss", "step": 2**63, "value": 1.0},
+                {"name": "loss", "step": 10**400, "value": 1.0},
+            ],
+        )
+    rebuild_index(ctx.index, ctx.store)  # r1's points are indexed by the first read
+    view = ViewSpec(title="v", panels=[_panel("curves", data={"metrics": ["loss"]})])
+    (curves,) = query_view(ctx, "toy", "toy-acc", view)
+    assert sorted((r["run_id"], r["step"]) for r in curves.rows) == [("r1", 0), ("r2", 0)]
+
+
+def test_curves_draw_a_repeated_metric_name_once(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "r1")
+    _metrics(ctx, rec, [{"name": "loss", "step": s, "value": 1.0} for s in range(10)])
+    panel = _panel("curves", data={"metrics": ["loss"] * 1000})
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert len(result.rows) == 10
+    assert result.meta["metrics"] == ["loss"]
+
+
+def test_view_cache_keeps_a_bounded_history_of_each_live_run(ctx: Context, toy_repo: Path) -> None:
+    from hypothex.core.index import MAX_POINTS_PER_METRIC
+
+    rec = _run(ctx, toy_repo, "r1", status=RunStatus.RUNNING)
+    n = 3 * MAX_POINTS_PER_METRIC
+    _jsonl(
+        ctx.run_dir(rec) / "metrics.jsonl",
+        [
+            {"name": name, "step": s, "value": 50.0 if s == 2001 else 1.0}
+            for s in range(n)
+            for name in ("loss", "lr", "sys/gpu_util")
+        ],
+    )
+    cache = panels._ViewCache()
+    got = cache.metric_points(ctx, [rec], ["loss"])["r1"]
+    held = cache.files["r1"]
+    assert len(held) <= 3 * MAX_POINTS_PER_METRIC
+    assert [p.step for p in got if p.value == 50.0] == [2001]  # the peak survives
+    assert (got[0].step, got[-1].step) == (0, n - 1)
+
+
+def test_scatter_of_a_history_metric_reads_the_points_once(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for i in range(30):
+        rec = _run(ctx, toy_repo, f"r{i:02d}", f"g{i:03d}", minute=i)
+        _metrics(ctx, rec, [{"name": "acc", "step": s, "value": float(i)} for s in range(3)])
+    calls: list[int] = []
+    real = panels._ViewCache.metric_points
+
+    def spy(self: Any, ctx_: Context, runs: list[RunRecord], names: Any) -> Any:
+        calls.append(len(runs))
+        return real(self, ctx_, runs, names)
+
+    monkeypatch.setattr(panels._ViewCache, "metric_points", spy)
+    panel = _panel("scatter", data={"x": "acc", "y": "acc", "group_by": "run"})
+    result = query_panel(ctx, "toy", "toy-acc", panel)
+    assert len(result.rows) == 30
+    assert calls == [30]  # one read for x and y of every run, not one scan per run

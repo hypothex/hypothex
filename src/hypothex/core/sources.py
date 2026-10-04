@@ -145,7 +145,7 @@ def iter_rows(
     - ``scores``: ``metric``, ``version``, ``key``, ``value`` (errored scores skipped).
     - ``metrics``: ``name``, ``step``, ``value``, ``t`` (``metric_points``: the
       indexed history of runs that ended, ``metrics.jsonl`` of the others),
-      ordered by name then step.
+      ordered by name then step and read one run at a time.
     - ``predictions``: ``id``, ``prediction``, ``reference`` (joined from the
       task dataset when the row has none), ``meta.*``, and every per-example
       score field as ``<metric>@<version>.<field>``.
@@ -195,14 +195,16 @@ def iter_rows(
         raise ConfigError("groups is a task-level source; read it through a table panel")
     if source not in SOURCES:
         raise ConfigError(f"unknown source {source!r}; use one of {', '.join(SOURCES)}")
-    points = metric_points(ctx, runs, names) if source == "metrics" else {}
     refs: _Refs = {}
     label_of = {**group_labels(runs), **(labels or {})}
     for run in runs:
         gid = group_id_for(run)
         base = {"run_id": run.run_id, "group_id": gid, "label": label_of[gid], "seed": run.seed}
         if source == "metrics":
-            rows: Iterable[dict[str, Any]] = _metric_rows(points.get(run.run_id, []))
+            # one run at a time, like the other sources: a table over thousands
+            # of runs holds one run's history, not all of them
+            points = metric_points(ctx, [run], names).get(run.run_id, [])
+            rows: Iterable[dict[str, Any]] = _metric_rows(points)
         else:
             rows = _READERS[source](ctx, run, refs)
         for row in rows:
@@ -339,7 +341,7 @@ def _traces(ctx: Context, run: RunRecord, _refs: _Refs) -> Iterator[dict[str, An
             yield {"example_id": example_id, **step.model_dump()}
 
 
-# Per-run readers; ``metrics`` is read for all runs at once (``metric_points``).
+# Per-run readers; ``metrics`` reads each run through ``metric_points``.
 _READERS: dict[str, Callable[[Context, RunRecord, _Refs], Iterator[dict[str, Any]]]] = {
     "runs": _runs,
     "scores": _scores,

@@ -77,8 +77,10 @@ Type           Shows
 stat_strip     A row of headline numbers.
 leaderboard    Seed groups ranked by the primary metric, with seed and test-set noise.
 curves         Metric history by step; seeds faint, mean bold, checkpoints and spikes.
-               Rows follow ``data.metrics`` order; each run's series is thinned to 500
-               points that keep its shape (LTTB). A loss spike is one event per episode,
+               Rows follow ``data.metrics`` order (a name listed twice is drawn once);
+               each run's series is thinned to 500 points that keep its shape (LTTB).
+               Like the index for an ended run, a live run keeps at most 1,000 points
+               per name (also LTTB) before that. A loss spike is one event per episode,
                labelled with its step (``spike 9k``); so is a kill (``killed 14k``).
                A ``NaN`` or infinite value the run logged is marked too (``NaN 9k``).
                ``group_by: run`` draws one column per run, named ``baseline r1``.

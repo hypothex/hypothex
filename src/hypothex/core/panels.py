@@ -19,6 +19,7 @@ from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, HypothexError
 from hypothex.core.fsutil import read_jsonl
 from hypothex.core.headlines import MINUS, fmt_metric, metric_unit
+from hypothex.core.index import MAX_POINTS_PER_METRIC
 from hypothex.core.leaderboard import (
     Leaderboard,
     _natural_key,
@@ -134,12 +135,16 @@ class _ViewCache:
         ``sources.metric_points`` of ``runs``; each run and name set is read once.
 
         A live run's ``metrics.jsonl`` is parsed once per view, whatever names
-        the panels ask for.
+        the panels ask for, and only its thinned history (``thin_history``) is
+        kept: like an ended run's indexed history, at most
+        ``MAX_POINTS_PER_METRIC`` points per name, so the cache never holds the
+        full files of all live runs at once.
         """
 
         def read_file(run: RunRecord) -> list[MetricPoint]:
             if run.run_id not in self.files:
-                self.files[run.run_id] = ctx.store.read_metric_points(run.project, run.run_id)
+                full = ctx.store.read_metric_points(run.project, run.run_id)
+                self.files[run.run_id] = thin_history(full)
             return self.files[run.run_id]
 
         wanted = None if names is None else frozenset(names)
@@ -160,6 +165,7 @@ class _Scope:
     task: str
     runs: list[RunRecord]
     cache: _ViewCache
+    _points: dict[frozenset[str] | None, dict[str, list[MetricPoint]]] = field(default_factory=dict)
 
     def board(self) -> Leaderboard:
         """Leaderboard over this scope's runs (built once per view)."""
@@ -170,8 +176,16 @@ class _Scope:
         return self.cache.group_labels(self.ctx, self.entry, self.task, self.runs)
 
     def points(self, names: Iterable[str] | None) -> dict[str, list[MetricPoint]]:
-        """Metric history per run of this scope's runs, of ``names`` only (``None``: all)."""
-        return self.cache.metric_points(self.ctx, self.runs, names)
+        """
+        Metric history per run of this scope's runs, of ``names`` only (``None``: all).
+
+        Kept per name set, so a panel that asks once per run (``_resolve_value``)
+        reads every run once, not once per run.
+        """
+        key = None if names is None else frozenset(names)
+        if key not in self._points:
+            self._points[key] = self.cache.metric_points(self.ctx, self.runs, key)
+        return self._points[key]
 
 
 def _task_labels(entry: ProjectEntry, task: str, runs: list[RunRecord]) -> dict[str, str]:
@@ -855,17 +869,60 @@ def lttb(xs: list[float], ys: list[float], limit: int) -> list[int]:
     kept = 0
     for b in range(limit - 2):
         start, end = int(b * size) + 1, int((b + 1) * size) + 1
-        nxt_end = min(int((b + 2) * size) + 1, n)
-        nxt = range(end, nxt_end) if end < nxt_end else range(n - 1, n)
-        mx = math.fsum(xs[j] for j in nxt) / len(nxt)
-        my = math.fsum(ys[j] for j in nxt) / len(nxt)
+        nxt_start, nxt_end = end, min(int((b + 2) * size) + 1, n)
+        if nxt_start >= nxt_end:
+            nxt_start, nxt_end = n - 1, n
+        # mean of the next bucket: values near the float limit make sum() inf
+        # (a poor pick for absurd data), where math.fsum would raise
+        k = nxt_end - nxt_start
+        mx, my = sum(xs[nxt_start:nxt_end]) / k, sum(ys[nxt_start:nxt_end]) / k
         ax, ay = xs[kept], ys[kept]
-        kept = max(
-            range(start, end),
-            key=lambda j: abs((ax - mx) * (ys[j] - ay) - (ax - xs[j]) * (my - ay)),
-        )
+        dx, dy = ax - mx, my - ay
+        best, kept = -1.0, start
+        for j in range(start, end):
+            area = abs(dx * (ys[j] - ay) - (ax - xs[j]) * dy)
+            if area > best:
+                best, kept = area, j
         out.append(kept)
     out.append(n - 1)
+    return out
+
+
+def thin_history(
+    points: list[MetricPoint], limit: int = MAX_POINTS_PER_METRIC
+) -> list[MetricPoint]:
+    """
+    At most ``limit`` points per metric name, picked by ``lttb`` on each series.
+
+    Bounds what is kept of a live run's history to what the index keeps of an
+    ended run's, while the first, last and peak points survive.
+
+    Parameters
+    ----------
+    points : list of MetricPoint
+        A run's history, in any order.
+    limit : int
+        Most points to keep per name.
+
+    Returns
+    -------
+    list of MetricPoint
+        The kept points, ordered by name then step.
+
+    Examples
+    --------
+    >>> pts = [MetricPoint(name="loss", step=s, value=9.0 if s == 5 else 1.0) for s in range(10)]
+    >>> [p.step for p in thin_history(pts, 3)]
+    [0, 5, 9]
+    """
+    by_name: dict[str, list[MetricPoint]] = defaultdict(list)
+    for p in points:
+        by_name[p.name].append(p)
+    out: list[MetricPoint] = []
+    for name in sorted(by_name):
+        series = sorted(by_name[name], key=lambda p: p.step)
+        kept = lttb([p.step for p in series], [p.value for p in series], limit)
+        out.extend(series[i] for i in kept)
     return out
 
 
@@ -941,7 +998,8 @@ def _checkpoints(scope: _Scope, run: RunRecord) -> list[Artifact]:
 
 
 def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
-    wanted = panel.data.metrics
+    # a name listed twice is drawn once: repeats would multiply the rows
+    wanted = None if panel.data.metrics is None else list(dict.fromkeys(panel.data.metrics))
     x_name = panel.data.step_metric or "step"
     rows: list[dict[str, Any]] = []
     checkpoints: list[dict[str, Any]] = []
@@ -957,7 +1015,7 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
         groups.append(entry)
         for r in members:
             group_of[r.run_id] = key
-    names_seen: list[str] = []
+    names_seen: dict[str, None] = {}  # insertion-ordered set
     needed = None if wanted is None else [*wanted, *([x_name] if x_name != "step" else [])]
     history = scope.points(needed)
     for run in scope.runs:
@@ -973,8 +1031,8 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
         last_x: float | None = None
         for name in names:
             series = sorted(by_name.get(name, []), key=lambda p: p.step)
-            if series and name not in names_seen:
-                names_seen.append(name)
+            if series:
+                names_seen.setdefault(name)
             xy = [
                 (x, p.value)
                 for p in series
@@ -1009,7 +1067,7 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
         rows=rows,
         meta={
             "x": x_name,
-            "metrics": names_seen,
+            "metrics": list(names_seen),
             "checkpoints": checkpoints,
             "events": events,
             "groups": groups,

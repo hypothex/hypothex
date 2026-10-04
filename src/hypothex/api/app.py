@@ -1641,18 +1641,21 @@ def create_app(
             try:
                 yield
             finally:
-                await manager.stop()
-                stop.set()
-                if poller is not None:
-                    # wait for the thread itself: a squeue can block for 60 s, and the
-                    # context must not be released under a poll that is still running
-                    await asyncio.to_thread(poller.stop)
-                if task is not None:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-                for loop in loops:
-                    await asyncio.to_thread(loop.join, 10)
+                try:
+                    await manager.stop()
+                finally:
+                    # the loops stop even when the hub's stop fails
+                    stop.set()
+                    if poller is not None:
+                        # wait for the thread itself: a squeue can block for 60 s, and the
+                        # context must not be released under a poll that is still running
+                        await asyncio.to_thread(poller.stop)
+                    if task is not None:
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                    for loop in loops:
+                        await asyncio.to_thread(loop.join, 10)
 
     @asynccontextmanager
     async def lifespan_with_context(app_: FastAPI) -> AsyncIterator[None]:

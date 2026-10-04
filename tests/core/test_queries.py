@@ -204,3 +204,30 @@ def test_failures_and_examples_need_a_known_field(ctx: Context, toy_repo: Path) 
         q.compare_examples(ctx, "a", "b", "accuracy", field="brier")
     with pytest.raises(ConfigError, match="unknown metric 'nope'"):
         q.compare_examples(ctx, "a", "b", "nope")
+
+
+def test_show_run_lists_every_run_file(ctx: Context, toy_repo: Path) -> None:
+    rec = seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    run_dir = ctx.run_dir(rec)
+    paths = q.show_run(ctx, "r1").paths
+    assert paths["run_yaml"] == str(run_dir / "run.yaml")
+    assert paths["scores"] == str(run_dir / "scores.jsonl")
+    assert not {"metrics", "notes", "diff"} & paths.keys()
+    (run_dir / "metrics.jsonl").write_text("")
+    (run_dir / "git.diff").write_text("diff --git a/x b/x\n")
+    q.add_note(ctx, "r1", "hi")
+    paths = q.show_run(ctx, "r1").paths
+    assert paths["metrics"] == str(run_dir / "metrics.jsonl")
+    assert paths["notes"] == str(run_dir / "notes.md")
+    assert paths["diff"] == str(run_dir / "git.diff")
+
+
+def test_get_task_resolves_local_dataset_paths(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    dataset = q.get_task(ctx, "toy-acc")["dataset"]
+    assert dataset["path"] == "data/test.jsonl"
+    assert dataset["resolved_path"] == str(toy_repo.resolve() / "data" / "test.jsonl")
+    assert dataset["resolved_splits"] == {
+        k: str(toy_repo.resolve() / v) for k, v in dataset["splits"].items()
+    }

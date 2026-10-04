@@ -334,16 +334,23 @@ def get_task(ctx: Context, ref: str, project: str | None = None) -> dict[str, An
     Returns
     -------
     dict
+        ``dataset`` holds the config as written; a dataset on this host also
+        has ``resolved_path`` and ``resolved_splits`` (absolute paths).
     """
     entry, name = resolve_task(ctx, ref, project)
     spec = entry.config.tasks[name]
+    ds = entry.config.datasets[spec.dataset]
+    dataset: dict[str, Any] = {"name": spec.dataset, **ds.model_dump(mode="json")}
+    if ds.host in ("local", ctx.descriptor.label):
+        repo = Path(entry.repo)
+        dataset["resolved_path"] = str(resolve_dataset_path(repo, ds.path))
+        dataset["resolved_splits"] = {
+            k: str(resolve_dataset_path(repo, v)) for k, v in ds.splits.items()
+        }
     return {
         "summary": _summary(ctx, entry, name).model_dump(mode="json"),
         "repo": entry.repo,
-        "dataset": {
-            "name": spec.dataset,
-            **entry.config.datasets[spec.dataset].model_dump(mode="json"),
-        },
+        "dataset": dataset,
         "metrics": {m: entry.config.metrics[m].model_dump(mode="json") for m in spec.metrics},
         "stages": entry.config.stages,
     }
@@ -364,6 +371,8 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
     Returns
     -------
     RunDetail
+        ``paths`` also names ``run_yaml``, ``scores``, ``metrics``, ``notes``,
+        ``config`` and ``diff`` when the run has those files.
     """
     record = ctx.find_record(run_id)
     run_dir = ctx.run_dir(record)
@@ -377,8 +386,17 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
     }
     with contextlib.suppress(StoreError):
         paths["repo"] = ctx.store.load_project(record.project).repo
-    if (run_dir / "config.yaml").is_file():
-        paths["config"] = str(run_dir / "config.yaml")
+    files = {
+        "run_yaml": "run.yaml",
+        "config": "config.yaml",
+        "scores": "scores.jsonl",
+        "metrics": "metrics.jsonl",
+        "notes": "notes.md",
+        "diff": "git.diff",
+    }
+    for key, name in files.items():
+        if (run_dir / name).is_file():
+            paths[key] = str(run_dir / name)
     for ref in record.datasets:
         paths[f"dataset:{ref.name}"] = f"{ref.host}:{ref.path}"
     for i, art in enumerate(record.artifacts):
@@ -393,7 +411,7 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
         scores=ctx.store.read_scores(record.project, run_id),
         paths=paths,
         notes=ctx.store.read_notes(record.project, run_id),
-        has_diff=(run_dir / "git.diff").is_file(),
+        has_diff="diff" in paths,
         metric_names=sorted({p.name for p in ctx.index.metric_points(run_id)}),
         children=sorted(children),
     )

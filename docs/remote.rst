@@ -210,6 +210,10 @@ Launch on a host
   ``HEAD`` and your uncommitted changes (``git diff HEAD``). The host runs
   ``git fetch`` when it does not have that commit, and applies the changes in a clean
   git worktree; its own checkout is not touched.
+- Queued pinned runs share a staging checkout until execution starts. Each execution
+  checkout is reserved exclusively; an existing, unverified destination makes the
+  run fail without running in or deleting that directory. SLURM creates the checkout
+  before submission and records its completion so the compute node can reuse it.
 - A diff that is not UTF-8 text, or is larger than 5 MiB, is refused: commit it first.
 - New files that git does not track are not in ``git diff HEAD``. ``hx launch`` names
   them in a warning; ``git add`` them to send them.

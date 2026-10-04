@@ -495,6 +495,87 @@ def _old_commit(repo: Path) -> str:
     return old
 
 
+def test_delayed_checkout_refuses_an_existing_unowned_worktree(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = prepare_run(
+        ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=_old_commit(toy_repo))
+    )
+    tree = ctx.layout.worktrees_dir("toy") / record.run_id
+    assert not tree.exists()
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    execution.create_worktree(toy_repo, record.git.commit, tree, None)
+    original = (tree / "hypothex.yaml").read_bytes()
+    discarded: list[Path] = []
+    real_discard = execution._discard_worktree
+
+    def discard(repo: Path, path: Path) -> None:
+        discarded.append(path)
+        real_discard(repo, path)
+
+    monkeypatch.setattr(execution, "_discard_worktree", discard)
+    done = execute_run(ctx, record.run_id)
+    assert done.status == RunStatus.FAILED
+    assert done.started_at is None
+    assert "already exists" in (ctx.run_dir(record) / "logs" / "stderr.log").read_text()
+    assert tree not in discarded
+    assert (tree / "hypothex.yaml").read_bytes() == original
+
+
+def test_delayed_checkout_reserves_the_directory_before_git(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = prepare_run(
+        ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=_old_commit(toy_repo))
+    )
+    tree = ctx.layout.worktrees_dir("toy") / record.run_id
+    assert not tree.exists()
+    real_create = execution.create_worktree
+    calls: list[Path] = []
+
+    def create(repo: Path, commit: str, dest: Path, diff: bytes | None) -> Path:
+        calls.append(dest)
+        assert dest.is_dir(), "git must only receive an exclusively reserved directory"
+        assert list(dest.iterdir()) == []
+        return real_create(repo, commit, dest, diff)
+
+    monkeypatch.setattr(execution, "create_worktree", create)
+    assert execution.checkout_run_tree(ctx, record) == tree
+    # SLURM prepares on the login node and reuses the same checkout on its compute node.
+    assert execution.checkout_run_tree(ctx, record) == tree
+    assert calls == [tree]
+
+
+def test_delayed_checkout_collision_at_reservation_preserves_the_winner(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = prepare_run(
+        ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=_old_commit(toy_repo))
+    )
+    tree = ctx.layout.worktrees_dir("toy") / record.run_id
+    sentinel = tree / "winner.txt"
+    real_mkdir = Path.mkdir
+    real_create = execution.create_worktree
+    creates: list[Path] = []
+
+    def mkdir(path: Path, mode: int = 0o777, parents: bool = False, exist_ok: bool = False) -> None:
+        if path == tree and not path.exists():
+            real_mkdir(path, mode=mode, parents=True)
+            sentinel.write_text("another owner\n")
+        real_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    def create(repo: Path, commit: str, dest: Path, diff: bytes | None) -> Path:
+        creates.append(dest)
+        return real_create(repo, commit, dest, diff)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    monkeypatch.setattr(execution, "create_worktree", create)
+    with pytest.raises(RunError, match="already exists"):
+        execution.checkout_run_tree(ctx, record)
+    assert creates == []
+    assert sentinel.read_text() == "another owner\n"
+
+
 @pytest.mark.parametrize(
     ("venv", "removed"), [(".venv", True), ("sub/.venv", False)], ids=["top", "nested"]
 )

@@ -394,7 +394,10 @@ def checkout_run_tree(ctx: Context, record: RunRecord) -> Path | None:
     at ``<store>/<project>/worktrees/<run_id>`` (its recorded ``cwd`` and
     ``{repo}``) is made only now, from ``.hx/checkout.json`` and
     ``.hx/checkout.diff``, so queued runs hold no checkout. Execution trees are
-    never shared. The run then stops using the staging checkout.
+    never shared. The directory is reserved exclusively before git runs;
+    an existing directory is reused only after this run recorded a completed
+    checkout in ``.hx/checkout.json`` (SLURM's compute node reuses it).
+    The run then stops using the staging checkout.
 
     Parameters
     ----------
@@ -410,7 +413,9 @@ def checkout_run_tree(ctx: Context, record: RunRecord) -> Path | None:
     Raises
     ------
     RunError
-        The commit is gone or the diff no longer applies (nothing is left behind).
+        The destination already belongs to another creator, the commit is
+        gone, or the diff no longer applies. Only this call's reserved
+        directory is removed after a failed checkout.
 
     Examples
     --------
@@ -424,14 +429,21 @@ def checkout_run_tree(ctx: Context, record: RunRecord) -> Path | None:
     info = json.loads(info_file.read_text(encoding="utf-8"))
     repo = Path(info["repo"])
     tree = ctx.layout.worktrees_dir(record.project) / record.run_id
-    if not tree.is_dir():
+    if not (info.get("ready") is True and tree.is_dir()):
         diff_file = run_dir / HX_DIR / CHECKOUT_DIFF
         patch = diff_file.read_bytes() if diff_file.is_file() else None
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            tree.mkdir()  # only this reservation owns cleanup if git fails
+        except FileExistsError as exc:
+            raise RunError(f"checkout destination already exists: {tree}") from exc
         try:
             create_worktree(repo, info["commit"], tree, patch)
         except GitError as exc:
             _discard_worktree(repo, tree)
             raise RunError(f"could not check out the run's code: {exc}") from exc
+        info["ready"] = True
+        atomic_write_text(info_file, json.dumps(info))
     _leave_staging(ctx, record.project, repo, info["staging"], record.run_id)
     return tree
 
@@ -1031,6 +1043,11 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
     True
     """
     _leave_staging_of(ctx, record)  # a run that never started still used one
+    info_file = ctx.run_dir(record) / HX_DIR / CHECKOUT_FILE
+    if info_file.is_file():
+        info = json.loads(info_file.read_text(encoding="utf-8"))
+        if info.get("ready") is not True:
+            return False  # checkout failed or collided: this run never owned the destination
     tree = run_checkout(ctx, record)
     if tree is None:
         return False

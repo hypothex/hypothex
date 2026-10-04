@@ -150,3 +150,18 @@ def test_atomic_write_follows_the_umask_like_appended_files(tmp_path: Path) -> N
     assert stat.S_IMODE((tmp_path / "run.yaml").stat().st_mode) == 0o644
     assert stat.S_IMODE((tmp_path / "metrics.jsonl").stat().st_mode) == 0o644
     assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
+@pytest.mark.parametrize("mask", [0o022, 0o027])
+def test_atomic_write_long_unicode_filename_preserves_umask(tmp_path: Path, mask: int) -> None:
+    target = tmp_path / ("é" + "x" * 244 + ".yaml")
+    assert len(os.fsencode(target.name)) <= 255
+    old = os.umask(mask)
+    try:
+        atomic_write_text(target, "first\n")
+        atomic_write_text(target, "replacement\n")
+    finally:
+        os.umask(old)
+    assert target.read_text() == "replacement\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o666 & ~mask
+    assert list(tmp_path.iterdir()) == [target]

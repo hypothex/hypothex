@@ -36,6 +36,36 @@ def atomic_write_text(path: Path, text: str) -> None:
     atomic_write_bytes(path, text.encode("utf-8"))
 
 
+TEMP_NAME_KEEP = 200
+"""Most bytes of a file name kept in its temp file's name."""
+
+
+def temp_prefix(name: str) -> str:
+    """
+    Return a hidden temporary-file prefix bounded by the filesystem name limit.
+
+    Parameters
+    ----------
+    name : str
+        Name of the destination file.
+
+    Returns
+    -------
+    str
+        ``.<name>.``, with the name shortened to at most 200 encoded bytes,
+        leaving room for a random suffix within a 255-byte filename.
+
+    Examples
+    --------
+    >>> temp_prefix("run.yaml")
+    '.run.yaml.'
+    """
+    keep = name[:TEMP_NAME_KEEP]
+    while len(os.fsencode(keep)) > TEMP_NAME_KEEP:
+        keep = keep[:-1]
+    return f".{keep}."
+
+
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     """
     Write bytes so readers never see a partial file, and keep them after a crash.
@@ -71,7 +101,7 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # not mkstemp: its 0600 would make run.yaml and the like unreadable to the
     # other users of a shared store; 0666 minus the umask matches appended files
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    tmp = path.with_name(f"{temp_prefix(path.name)}{secrets.token_hex(8)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, "wb") as fh:

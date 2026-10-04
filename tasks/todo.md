@@ -42,3 +42,17 @@ Integration gate:
 - No main merge, push, or PR yet. Wait for queue steps 2/4/5 to merge.
 - Current branch predates audit wave 3 (merge-base with 52b25e4 is 70c369c), so later integration must retain both sides: audit LTTB/metric_names, reeval run_ids filtering, security local_repo gates and metric bounds, plus these dogfood semantics.
 - Cross-layer step7 remainder is deliberately open; see the external evidence note.
+
+Pre-merge composition checks (parent-authorized, no main merge yet):
+- [x] Reproduce long Unicode atomic filenames plus umask: both permission cases fail
+  with ENAMETOOLONG, then pass with byte-bounded prefixes and existing O_EXCL writes.
+- [x] Reproduce delayed execution checkout ownership: an unowned worktree was reused,
+  git received an unreserved destination, and a racing creator was not protected.
+  Three failing tests now pass with exclusive reservation, recorded completion for
+  SLURM reuse, and cleanup refusal for destinations this run never created.
+- [x] Focused lifecycle suite: 28 passed, 219 deselected, including pinned local/queued
+  and fake-SLURM execution/cleanup. Ruff check/format, scoped ty, Sphinx with warnings
+  as errors, and diff whitespace checks passed. Red/green logs remain in the external
+  evidence folder; commit only this worker's seven explicit files.
+- Gate/staging cleanup and verified host-alias/path-cache composition still wait for
+  the authorized main merge after security dependencies land.

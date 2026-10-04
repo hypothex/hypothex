@@ -16,6 +16,9 @@ Every ``run.yaml`` write is atomic (write to a temp file, then ``os.replace``) a
 happens under a per-run lock. Old scores are never overwritten or deleted;
 re-evaluation only appends.
 
+Atomic writes use a byte-bounded temporary filename, including for long Unicode
+destination names, and new files follow the process umask like appended files.
+
 ``hx reindex`` rebuilds the index from run folders on disk. Because the index is
 disposable, Hypothex stores a schema version and rebuilds it automatically when
 that version changes.
@@ -139,7 +142,9 @@ cannot overwrite each other's paired-test data. Legacy dirty runs without a
 hash retain the ``+dirty`` suffix.
 
 Repeated runs of one seed are averaged before computing seed statistics and
-paired-test pools. Runs without a seed remain separate samples. Costs and run
+paired-test pools. Per-seed and per-example averaging keeps finite means
+representable when their intermediate sums exceed floating-point range.
+Runs without a seed remain separate samples. Costs and run
 membership still include every run. ``metric_drift`` lists selected metric versions
 whose stored scores contain differing source hashes; reading a leaderboard does
 not execute repository code. ``within_noise_of_best`` is determined by

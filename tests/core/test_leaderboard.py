@@ -538,12 +538,19 @@ class DiffGit(GitInfo):
     diff_hash: str | None = None
 
 
-def drun(rid: str, git: GitInfo, *, minute: int = 0, **extra: Any) -> RunRecord:
+def drun(
+    rid: str,
+    git: GitInfo,
+    *,
+    minute: int = 0,
+    config_hash: str = "sha256:aaaaaaaabbbb",
+    **extra: Any,
+) -> RunRecord:
     return make_record(
         rid,
         task="t",
         status=RunStatus.FINISHED,
-        config_hash="sha256:aaaaaaaabbbb",
+        config_hash=config_hash,
         git=git,
         created_at=T0 + timedelta(minutes=minute),
         **extra,
@@ -572,3 +579,33 @@ def test_uncommitted_changes_make_their_own_seed_group() -> None:
     clean_row = next(r for r in board.rows if r.group_id == "aaaaaaaa@c1")
     assert clean_row.label == "baseline" and clean_row.n == 2
     assert group_labels(runs).keys() == by_id.keys()  # one id rule for board and sources
+
+
+def test_reruns_of_a_seed_are_one_sample() -> None:
+    # seed 1 run three times (two reruns), seed 2 once; n counts seeds, not runs
+    runs = [drun(f"s1r{i}", GitInfo(commit="c1"), seed=1, minute=i) for i in range(3)]
+    runs += [drun("s2", GitInfo(commit="c1"), seed=2, minute=3)]
+    runs += [drun(f"x{i}", GitInfo(commit="c1"), seed=7, config_hash="sha256:x") for i in (0, 1)]
+    scores = {"s1r0": acc(0.8), "s1r1": acc(0.9), "s1r2": acc(0.7), "s2": acc(0.6)}
+    scores |= {"x0": acc(0.5), "x1": acc(0.5)}
+    per_example = {
+        "s1r0": binary(4, {0, 1}),
+        "s1r1": binary(4, {0, 1}),
+        "s1r2": binary(4, {0, 1}),
+        "s2": binary(4, set()),
+        "x0": binary(4, {0}),
+        "x1": binary(4, {0}),
+    }
+    board = build_leaderboard("toy", "t", CFG, runs, scores, per_example=per_example)
+    row, single = board.rows
+    assert row.run_ids == ["s1r0", "s1r1", "s1r2", "s2"]  # every run stays a member
+    assert row.n == 2 and not row.single_seed
+    assert row.seed_values == {"acc/value": [pytest.approx(0.8), 0.6]}
+    assert row.primary is not None and row.primary.n == 2
+    assert row.primary.mean == pytest.approx(0.7)
+    # pooled per seed first: e0, e1 = 1/2, so 1 of 4 (pooling runs gives 3/4 each, 2 of 4)
+    assert row.test_interval is not None
+    assert (row.test_interval.lo, row.test_interval.hi) == stats.wilson_interval(1, 4)
+    # the same seed twice is one seed: single-seed badge, no t-interval
+    assert single.n == 1 and single.single_seed and single.run_ids == ["x0", "x1"]
+    assert single.primary is not None and single.primary.ci_low is None

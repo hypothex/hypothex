@@ -78,6 +78,7 @@ class LeaderboardRow(BaseModel):
     commit: str | None
     config_hash: str
     n: int
+    """Distinct seeds; reruns of a seed are one sample, runs without a seed one each."""
     scores: dict[str, Stats]
     primary: Stats | None
     single_seed: bool
@@ -375,13 +376,22 @@ def pick_field(rows: Iterable[dict[str, Any]], key: str = "value") -> tuple[str,
     return None
 
 
-def _pool(run_ids: list[str], per_example: PerExample, field: str) -> dict[str, float]:
+def _pool_runs(run_ids: list[str], per_example: PerExample, field: str) -> dict[str, float]:
     seen: dict[str, list[float]] = defaultdict(list)
     for rid in run_ids:
         for ex, fields in per_example.get(rid, {}).items():
             v = fields.get(field)
             if isinstance(v, bool | int | float) and math.isfinite(v):
                 seen[ex].append(float(v))
+    return {ex: math.fsum(vs) / len(vs) for ex, vs in seen.items()}
+
+
+def _pool(seeds: list[list[str]], per_example: PerExample, field: str) -> dict[str, float]:
+    """Mean per example over seeds, after averaging the runs of each seed."""
+    seen: dict[str, list[float]] = defaultdict(list)
+    for run_ids in seeds:
+        for ex, v in _pool_runs(run_ids, per_example, field).items():
+            seen[ex].append(v)
     return {ex: math.fsum(vs) / len(vs) for ex, vs in seen.items()}
 
 
@@ -465,6 +475,49 @@ def _sum_usage(members: list[RunRecord]) -> UsageTotals | None:
     )
 
 
+def seed_buckets(members: list[RunRecord]) -> list[list[RunRecord]]:
+    """
+    Split a seed group's runs by seed: reruns of one seed are one sample, not several.
+
+    Parameters
+    ----------
+    members : list of RunRecord
+        The group's runs, oldest first.
+
+    Returns
+    -------
+    list of list of RunRecord
+        One list per distinct seed, in order of first appearance. Runs without a
+        seed are a list of their own each.
+
+    Examples
+    --------
+    >>> runs = [make_record("a", seed=1), make_record("b", seed=1)]  # doctest: +SKIP
+    >>> [[r.run_id for r in b] for b in seed_buckets(runs)]  # doctest: +SKIP
+    [['a', 'b']]
+    """
+    buckets: dict[tuple[str, int | str], list[RunRecord]] = {}
+    for m in members:
+        key = ("seed", m.seed) if m.seed is not None else ("run", m.run_id)
+        buckets.setdefault(key, []).append(m)
+    return list(buckets.values())
+
+
+def _seed_values(
+    buckets: list[list[RunRecord]], per_run: dict[str, dict[str, float]]
+) -> dict[str, list[float]]:
+    """One value per seed and score key: the mean over that seed's runs."""
+    keys = sorted({k for b in buckets for m in b for k in per_run[m.run_id]})
+    out: dict[str, list[float]] = {}
+    for k in keys:
+        out[k] = []
+        for bucket in buckets:
+            values = [per_run[m.run_id][k] for m in bucket if k in per_run[m.run_id]]
+            if values:
+                out[k].append(math.fsum(values) / len(values))
+    return out
+
+
 def _make_row(
     members: list[RunRecord],
     per_run: dict[str, dict[str, float]],
@@ -475,10 +528,9 @@ def _make_row(
     latest = members[-1]
     chash, commit = latest.config_hash, latest.git.commit
     group_id = group_id_for(latest)
-    keys = sorted({k for m in members for k in per_run[m.run_id]})
-    seed_values = {
-        k: [per_run[m.run_id][k] for m in members if k in per_run[m.run_id]] for k in keys
-    }
+    buckets = seed_buckets(members)
+    n_seeds = len(buckets)
+    seed_values = _seed_values(buckets, per_run)
     summary = {k: summarize(v) for k, v in seed_values.items()}
     prim = seed_values.get(primary, [])
     param = spec.version_param if spec.kind == "agent_iteration" else None
@@ -490,10 +542,10 @@ def _make_row(
         hypothesis=latest.hypothesis,
         commit=commit,
         config_hash=chash,
-        n=len(members),
+        n=n_seeds,
         scores=summary,
         primary=summary.get(primary),
-        single_seed=len(members) == 1,
+        single_seed=n_seeds == 1,
         label=label,
         seed_values=seed_values,
         identical_seeds=len(prim) > 1 and all(v == prim[0] for v in prim),
@@ -590,7 +642,8 @@ def build_leaderboard(
     for members in groups.values():
         row = _make_row(members, per_run, spec, primary)
         if picked is not None:
-            pooled[row.group_id] = _pool(row.run_ids, examples, picked[0])
+            seeds = [[m.run_id for m in b] for b in seed_buckets(members)]
+            pooled[row.group_id] = _pool(seeds, examples, picked[0])
             row.test_interval = _test_interval(pooled[row.group_id], picked[1])
         rows.append(row)
 

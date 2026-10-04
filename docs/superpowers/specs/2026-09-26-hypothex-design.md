@@ -394,7 +394,9 @@ def topk_accuracy(examples: list[Example], *, k: list[int]) -> MetricResult:
 - `config_hash` excludes `seed`. Runs in one task with the same `config_hash`, git
   commit and uncommitted diff (`git.diff_hash`) form a seed group. A dirty run's group
   id ends in `+<diff hash[:4]>`; clean ids do not change.
-- Leaderboard rows are seed groups: `mean ± std (n=3)`. Single runs show `n=1`.
+- Leaderboard rows are seed groups: `mean ± std (n=3)`. Single runs show `n=1`. `n` counts
+  distinct seeds: reruns of one seed are averaged into one sample (runs without a seed
+  count one each), so a rerun never narrows the error bar.
 - When two rows' 95% intervals overlap (t-interval; n ≥ 2 each), the UI marks the
   difference "within noise". n=1 rows get a "single seed" badge.
 
@@ -541,7 +543,7 @@ selector in the task spec).
 - **Test-set interval** per seed group: if the metric's per-example field is binary
   (`correct`/`solved`/any bool), the Wilson 95% interval with `n` = examples scored;
   otherwise a percentile bootstrap over examples (1,000 resamples, fixed seed 0). Seeds are
-  pooled by averaging per example first.
+  pooled by averaging per example first (the runs of one seed are averaged first).
 - **Paired comparison vs best**: binary → exact two-sided sign test on discordant examples
   (fixed vs broken); continuous → paired bootstrap of the mean difference. Reported as `p`.
 - **Examples needed**: the smallest `n` at which the observed discordant rate would give

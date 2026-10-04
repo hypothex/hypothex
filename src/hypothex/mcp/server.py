@@ -942,11 +942,14 @@ def task_acts_through_hub(ctx: Context, project: str, task: str) -> bool:
     >>> task_acts_through_hub(ctx, "toy", "toy-acc")  # doctest: +SKIP
     False
     """
-    own = ctx.descriptor.environment_id
-    runs = ctx.index.list_runs(
-        project=project, task=task, status=RunStatus.FINISHED, include_archived=True, limit=None
-    )
-    return any(r.environment_id != own for r in runs)
+    scope: dict[str, Any] = {
+        "project": project,
+        "task": task,
+        "status": RunStatus.FINISHED,
+        "include_archived": True,
+    }
+    own = ctx.index.count_runs(**scope, environment_id=ctx.descriptor.environment_id)
+    return ctx.index.count_runs(**scope) != own
 
 
 def client_checkout(root: Path) -> tuple[dict[str, str | None], list[str]]:
@@ -1283,11 +1286,16 @@ def build_server(
         """
         c = ctx()
         board = q.get_leaderboard(c, task, project)
-        runs = c.index.list_runs(
-            project=board.project, task=board.task, include_archived=True, limit=None
-        )
-        sources = untrusted_sources(c, runs)
         out = dump(board)
+        scope: dict[str, Any] = {
+            "project": board.project,
+            "task": board.task,
+            "include_archived": True,
+        }
+        own = c.index.count_runs(**scope, environment_id=c.descriptor.environment_id)
+        if c.index.count_runs(**scope) == own:
+            return out  # every run is this hub's own: nothing to mark
+        sources = untrusted_sources(c, c.index.list_runs(**scope, limit=None))
         for row in out["rows"]:
             found = [sources[rid] for rid in row["run_ids"] if rid in sources]
             if found:

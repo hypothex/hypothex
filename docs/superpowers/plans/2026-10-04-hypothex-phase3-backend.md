@@ -11670,6 +11670,69 @@ def test_scope_check_raises_scope_error() -> None:
     assert check(request_as(None, on=False)) == LOCAL_OWNER
 ```
 
+Append to the same test module:
+
+```python
+def test_scoped_handler_preserves_sweep_status_and_recovery_fields(home: Path) -> None:
+    import asyncio
+    import json
+    from datetime import UTC, datetime
+
+    from hypothex.core.errors import HypothexError
+    from hypothex.core.sweep_issuance import (
+        SweepIssuanceActiveError,
+        SweepLegacyResumeRequiredError,
+    )
+    from hypothex.core.sweeps import SweepIncompleteError, SweepSpec
+
+    app = auth_app(home)
+    spec = SweepSpec(
+        id="s-1",
+        project="toy",
+        task=None,
+        host="gpu1",
+        grid=[],
+        seeds=[1, 2],
+        command_template=["true"],
+        created_by="human:sv",
+        created_at=datetime.now(UTC),
+    )
+    incomplete = SweepIncompleteError(spec, 1, 2, RuntimeError("offline"))
+    cases = [
+        (SweepIssuanceActiveError("active"), 409),
+        (SweepLegacyResumeRequiredError("legacy"), 409),
+        (incomplete, 503),
+    ]
+    handler = app.exception_handlers[HypothexError]
+    for error, status in cases:
+        response = asyncio.run(handler(Request({"type": "http"}), error))
+        assert response.status_code == status
+        payload = json.loads(response.body)
+        assert payload["type"] == type(error).__name__ and payload["error"] == str(error)
+        if error is incomplete:
+            assert {
+                key: payload[key]
+                for key in (
+                    "sweep_id",
+                    "project",
+                    "host",
+                    "launched",
+                    "total",
+                    "hint",
+                )
+            } == {
+                key: getattr(error, key)
+                for key in (
+                    "sweep_id",
+                    "project",
+                    "host",
+                    "launched",
+                    "total",
+                    "hint",
+                )
+            }
+```
+
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/api/test_auth_guard.py -v`
@@ -12171,13 +12234,15 @@ Replace only the `environment` route's current auth condition with:
 
 Keep its full descriptor construction and final `return full`. Thus anonymous scoped discovery sees exactly three identity fields, and a valid session sees the full descriptor even though it is not the root bearer.
 
-5. Replace the body of `hypothex_error` with:
+5. Preserve the merged sweep/error imports and replace `hypothex_error` with the existing handler plus auth mappings. Keep active/legacy sweep conflicts at 409, incomplete sweeps at 503 with their recovery fields, interrupted commands at 409 and view issues unchanged:
 
 ```python
     @app.exception_handler(HypothexError)
     async def hypothex_error(_: Request, exc: HypothexError) -> JSONResponse:
         headers: dict[str, str] = {}
-        if isinstance(exc, StoreError):
+        if isinstance(exc, (SweepIssuanceActiveError, SweepLegacyResumeRequiredError)):
+            status = 409
+        elif isinstance(exc, StoreError):
             status = 404
         elif isinstance(exc, HostUnavailableError):
             status = 503
@@ -12189,7 +12254,16 @@ Keep its full descriptor construction and final `return full`. Thus anonymous sc
             status = 400
         if isinstance(exc, CommandInterruptedError):
             status = 409  # the command's outcome is unknown: never replayed
+        if isinstance(exc, SweepIncompleteError):
+            status = 503
         content: dict[str, Any] = {"error": str(exc), "type": type(exc).__name__}
+        if isinstance(exc, SweepIncompleteError):
+            content.update(
+                {
+                    key: getattr(exc, key)
+                    for key in ("sweep_id", "project", "host", "launched", "total", "hint")
+                }
+            )
         if isinstance(exc, ViewValidationError):
             content["issues"] = to_jsonable(exc.issues)
         return JSONResponse(status_code=status, content=content, headers=headers)
@@ -15492,6 +15566,57 @@ def test_mcp_over_http_needs_a_session(home: Path) -> None:
     assert resp.status_code == 401 and resp.json()["type"] == "AuthError"
 ```
 
+Append to the same test module:
+
+```python
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("session", [False, True])
+@pytest.mark.parametrize("override", [None, "chosen"])
+def test_note_attribution_keeps_selected_agent_and_unscoped_author(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remote: bool,
+    session: bool,
+    override: str | None,
+) -> None:
+    from typing import Any
+
+    import httpx
+
+    from hypothex.auth.store import LOCAL_OWNER
+
+    sent: list[tuple[dict[str, str], dict[str, Any]]] = []
+    saved: list[str] = []
+
+    def request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        assert method == "POST" and url == BASE + "/api/v1/runs/r/notes"
+        sent.append((dict(kwargs["headers"]), dict(kwargs["json"])))
+        return httpx.Response(200, json={"ok": True})
+
+    def save_note(ctx: Context, run_id: str, text: str, author: str) -> None:
+        assert run_id == "r" and text == "note"
+        saved.append(author)
+
+    monkeypatch.setattr("hypothex.mcp.server.acts_through_hub", lambda *args: remote)
+    monkeypatch.setattr("hypothex.mcp.server._hub_request", request)
+    monkeypatch.setattr("hypothex.mcp.server.q.add_note", save_note)
+    server = build_server(home, hub_url=BASE, hub_token="test-token", agent="configured")
+    tool = next(t for t in server._tool_manager.list_tools() if t.name == "add_note")
+    args: dict[str, Any] = {"run_id": "r", "text": "note", "author": "custom-author"}
+    if override is not None:
+        args["agent"] = override
+    with acting_as(ALICE if session else LOCAL_OWNER):
+        assert tool.fn(**args) == {"ok": True}
+    acting = "configured" if override is None else override
+    writer = f"agent:{acting}@alice" if session else "custom-author"
+    if remote:
+        assert saved == [] and len(sent) == 1
+        headers, body = sent[0]
+        assert headers["X-Hypothex-Agent"] == acting and body["author"] == writer
+    else:
+        assert sent == [] and saved == [writer]
+```
+
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/mcp/test_scoped_tools.py -v`
@@ -15738,8 +15863,8 @@ The existing `host_states`, `sweep_summary`, `locate_sweep`, `hub_call`, and `bu
 7. In `add_note`, replace its body with:
 
 ```python
-        writer = agent_identity(author)[0] if caller().session_id else author
-        if via_hub(run_id, "notes", {"text": text, "author": writer}) is None:
+        writer = agent_identity(agent)[0] if caller().session_id else author
+        if via_hub(run_id, "notes", {"text": text, "author": writer}, agent=agent) is None:
             q.add_note(ctx(), run_id, text, writer)
         return {"ok": True}
 ```
@@ -15747,7 +15872,7 @@ The existing `host_states`, `sweep_summary`, `locate_sweep`, `hub_call`, and `bu
 8. In `stop_run`, check ownership before stopping a local run (a forwarded stop is checked by the hub, which sees the caller's token):
 
 ```python
-        out = via_hub(run_id, "stop", {})
+        out = via_hub(run_id, "stop", {}, agent=agent)
         if out is not None:
             return {"run": out}
         c = ctx()
@@ -19027,7 +19152,9 @@ Keep the baseline `_Server.capture_signals`. Replace only the `demo_hosts` lifes
                 )
                 shown = _url(host, bound) + (f" · {public}" if public else "")
                 typer.secho(f"hx serve on {shown}" + (" · auth on" if auth_on else ""), err=True)
-                config = uvicorn.Config(application, host=host, port=bound, log_level="info")
+                config = uvicorn.Config(
+                    application, host=host, port=bound, log_level="info", access_log=False
+                )
                 _Server(config).run(sockets=[sock])
             finally:
                 release()
@@ -19347,7 +19474,7 @@ def test_hub_calls_carry_the_callers_agent(hub: tuple[str, AuthStore]) -> None:
 Append to `tests/mcp/test_scoped_tools.py` (Task 32; add `from typing import Any` if absent). These registered-tool tests retain the guard-selected credential and exercise both `via_hub` and a launching call with no environment agent override:
 
 ```python
-@pytest.mark.parametrize("tool_name", ["rerun", "launch_run"])
+@pytest.mark.parametrize("tool_name", ["rerun", "launch_run", "stop_run"])
 @pytest.mark.parametrize("override", [None, "chosen"])
 def test_registered_tools_forward_the_configured_agent_or_explicit_override(
     home: Path,
@@ -19376,7 +19503,7 @@ def test_registered_tools_forward_the_configured_agent_or_explicit_override(
     tool = next(t for t in server._tool_manager.list_tools() if t.name == tool_name)
     args: dict[str, Any] = (
         {"run_id": "remote"}
-        if tool_name == "rerun"
+        if tool_name != "launch_run"
         else {
             "repo": str(toy_repo),
             "host": "gpu1",
@@ -21859,8 +21986,8 @@ Baselines are listed under the groups, never bold. ``‡`` marks a baseline whos
 Create `docs/storage.rst`:
 
 ```rst
-Storage
-=======
+Storage cleanup
+===============
 
 .. code-block:: bash
 

@@ -450,3 +450,8 @@ Final wheel bytes match all current UI assets and the auth/issuer/transport sour
 the sdist excludes internal plans/mockups. Evidence under `token-final-*` supersedes
 earlier candidate-only UI counts. Publication still follows the ordered Step 7/8
 merges and requires current-head green CI; Phase 3 remains documentation only.
+
+## Post-handover backlog
+
+Prepared [backlog plan](backlog.md) and complete initial triage while ordered PRs run
+CI. Implementation remains pending; no Phase 3 runtime work.

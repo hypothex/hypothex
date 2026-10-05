@@ -115,7 +115,7 @@ export function ExamplesPage({ a, b, metric }: ExamplesPageProps) {
   const changed = diff ? diff.fixed.length + diff.broken.length : 0;
 
   return (
-    <div className="page">
+    <div className="page examples-page">
       <PageStyles />
       <p className="crumb">
         {project || "…"}

@@ -116,6 +116,11 @@ available space.
 Recorded task details
 ---------------------
 
+Examples outcome tables wrap long hypothesis labels within their own panel,
+including labels without spaces. Counts and right/wrong labels remain visible
+beside the sign-test chart at narrow widths. The Examples headline and run
+summaries also wrap oversized tokens without shortening the displayed labels.
+
 The task Metric selector requests a new ranking for the selected recorded
 ``metric/key``. Direction, units, uncertainty and the headline follow that metric.
 Seeds (Repeats for system benchmarks) toggles the leaderboard seed or repeat

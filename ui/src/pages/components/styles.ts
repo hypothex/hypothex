@@ -108,20 +108,22 @@ export const PAGES_CSS = `
 .page .trace-pick a { color: var(--ink-3); text-decoration: none; }
 .page .trace-pick a.failed { color: var(--fail); }
 .page .trace-pick a[aria-current="true"] { color: var(--ink); text-decoration: underline; }
-.page .ab { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; margin-top: 36px; padding: 18px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+.page.examples-page h1.headline .nb { display: inline-block; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.page .ab { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 56px; margin-top: 36px; padding: 18px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
 .page .ab .lbl { font-size: 12.5px; color: var(--ink-3); }
 .page .ab .nm { font-weight: 600; font-size: 16px; margin-top: 2px; }
 .page .ab code { overflow-wrap: anywhere; word-break: break-word; }
 .page .ab .meta { font-size: 13px; color: var(--ink-3); margin-top: 3px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
 .page .ab .row { justify-content: space-between; align-items: end; gap: 20px; }
+.page .ab .row > :first-child { min-width: 0; overflow-wrap: anywhere; }
 .page .ab .acc { font: 300 38px/1 var(--sans); letter-spacing: -.02em; text-align: right; }
 .page .ab .acc small { display: block; font-size: 12.5px; color: var(--ink-3); font-weight: 400; letter-spacing: 0; margin-top: 4px; }
 .page .two-x { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 64px; align-items: start; margin-top: 64px; }
 .page .two-x .fig { margin-top: 0; }
-.page .ot { border-collapse: collapse; width: 100%; }
-.page .ot th { font: 500 13px/1.3 var(--sans); color: var(--ink-3); padding: 0 12px 10px; text-align: center; }
-.page .ot th.rh { text-align: right; padding: 0 16px 0 0; width: 96px; vertical-align: middle; white-space: nowrap; }
-.page .ot td { width: 44%; height: 124px; text-align: center; vertical-align: middle; border: 1px solid var(--rule); }
+.page .ot { border-collapse: collapse; width: 100%; table-layout: fixed; }
+.page .ot th { font: 500 13px/1.3 var(--sans); color: var(--ink-3); padding: 0 12px 10px; text-align: center; overflow-wrap: anywhere; }
+.page .ot th.rh { text-align: right; padding: 0 16px 0 0; vertical-align: middle; }
+.page .ot td { height: 124px; text-align: center; vertical-align: middle; border: 1px solid var(--rule); }
 .page .ot .n { font: 300 50px/1 var(--sans); letter-spacing: -.02em; display: block; }
 .page .ot .w { font-size: 13px; color: var(--ink-2); display: inline-flex; gap: 7px; align-items: center; margin-top: 6px; }
 .page .ot td.fx { background: var(--best-wash); }

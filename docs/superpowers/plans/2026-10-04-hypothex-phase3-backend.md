@@ -12235,7 +12235,7 @@ git commit -m "feat(api): auth guard with cookie, bearer, and ticket principals"
 
 **Interfaces:**
 - Consumes: `PUBLIC`, `READ`, `LAUNCH`, `ADMIN`, `route_scopes` (Task 23).
-- Produces: the scope of every phase 1–2 route (contract 3): `GET` → `read`; the descriptor → `public`; launch, rerun, reinfer, reeval, stop, tags, star, archive, notes, views PUT/DELETE, sweeps POST/cancel/extend, pull, hosts reload/connect/disconnect, `POST /api/v1/hosts/{host}/runs`, task reeval → `launch`; views validate/query (POST but read-only) → `read`; env routes (`files`, `entry`, `gpus`, `queue`, `slurm`) → `read`; `/api/v1/ws` → `read`.
+- Produces: the scope of every phase 1–2 route (contract 3): `GET` → `read`; the descriptor → `public`; launch, rerun, reinfer, reeval, stop (including `POST /api/v1/runs/stop_queued`), tags, star, archive, notes, views PUT/DELETE, sweeps POST/cancel/extend, pull, hosts reload/connect/disconnect, `POST /api/v1/hosts/{host}/runs`, task reeval → `launch`; views validate/query (POST but read-only) → `read`; env routes (`files`, `entry`, `gpus`, `queue`, `slurm`) → `read`; `/api/v1/ws` → `read`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -12253,6 +12253,8 @@ from hypothex.api.auth import route_scopes
 
 PHASE_1_2 = {
     "GET /.well-known/hypothex/environment": "public",
+    "HEAD /.well-known/hypothex/environment": "public",
+    "POST /api/v1/auth/ws-ticket": "read",
     "GET /api/v1/hosts": "read",
     "POST /api/v1/hosts/reload": "launch",
     "POST /api/v1/hosts/{host}/connect": "launch",
@@ -12273,6 +12275,7 @@ PHASE_1_2 = {
     "DELETE /api/v1/tasks/{project}/{task}/views/{name}": "launch",
     "GET /api/v1/runs": "read",
     "POST /api/v1/runs": "launch",
+    "POST /api/v1/runs/stop_queued": "launch",
     "GET /api/v1/runs/{run_id}": "read",
     "GET /api/v1/runs/{run_id}/metrics": "read",
     "GET /api/v1/runs/{run_id}/traces": "read",
@@ -12352,7 +12355,7 @@ def test_openapi_shows_each_scope(home: Path) -> None:
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/api/test_route_scopes.py -v`
-Expected: FAIL: `test_every_route_and_the_websocket_declare_a_scope` lists all 51 routes, `test_phase_1_2_routes_have_the_contract_scopes` shows every value `None`, `test_openapi_shows_each_scope` with `KeyError: 'x-hx-scope'`.
+Expected: FAIL: `test_every_route_and_the_websocket_declare_a_scope` lists the existing undeclared methods/routes, `test_phase_1_2_routes_have_the_contract_scopes` shows every value `None`, `test_openapi_shows_each_scope` with `KeyError: 'x-hx-scope'`.
 
 - [ ] **Step 3: Declare the scopes**
 
@@ -12372,6 +12375,8 @@ In `create_app`, in file order:
 
 ```python
     @app.get("/.well-known/hypothex/environment", dependencies=PUBLIC)
+    @app.head("/.well-known/hypothex/environment", include_in_schema=False, dependencies=PUBLIC)
+    @app.post("/api/v1/auth/ws-ticket", response_model=WebSocketTicket, dependencies=READ)
     @app.get("/api/v1/hosts", dependencies=READ)
     @app.post("/api/v1/hosts/reload", dependencies=LAUNCH)
     @app.post("/api/v1/hosts/{host}/connect", dependencies=LAUNCH)
@@ -12392,6 +12397,7 @@ In `create_app`, in file order:
     @app.delete("/api/v1/tasks/{project}/{task}/views/{name}", dependencies=LAUNCH)
     @app.get("/api/v1/runs", dependencies=READ)
     @app.post("/api/v1/runs", dependencies=LAUNCH)
+    @app.post("/api/v1/runs/stop_queued", dependencies=LAUNCH)
     @app.get("/api/v1/runs/{run_id}", dependencies=READ)
     @app.get("/api/v1/runs/{run_id}/metrics", dependencies=READ)
     @app.get("/api/v1/runs/{run_id}/traces", dependencies=READ)
@@ -13206,6 +13212,8 @@ Create `tests/api/test_ownership_api.py`:
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -13214,7 +13222,7 @@ from fastapi.testclient import TestClient
 from hypothex.api.app import create_app
 from hypothex.core import control
 from hypothex.core.context import Context
-from hypothex.core.records import RunStatus
+from hypothex.core.records import ExecutorInfo, RunRecord, RunStatus
 from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep
 from tests.api.authkit import BASE, auth_app, bearer, token_for
 from tests.factories import make_record
@@ -13443,18 +13451,230 @@ def test_rerun_belongs_to_the_caller(
         parent["run_id"],
     )
     control.wait_for_run(ctx, str(child["run_id"]), timeout=30)
+
+def test_batch_cancel_checks_every_owner_before_stopping_and_keeps_receipts(
+    hub: tuple[FastAPI, TestClient, Context],
+) -> None:
+    app, client, ctx = hub
+    alice = bearer(token_for(app.state.auth, "alice", "launch"))
+    admin = bearer(token_for(app.state.auth, "sv", "admin"))
+    reader = bearer(token_for(app.state.auth, "reader", "read"))
+    for rid, owner in (("own", "alice"), ("other", "sv"), ("later", "alice")):
+        queued(ctx, rid, owner)
+    ctx.create_run(
+        make_record(
+            "started",
+            owner="alice",
+            status=RunStatus.RUNNING,
+            environment_id=ctx.descriptor.environment_id,
+        )
+    )
+    url = "/api/v1/runs/stop_queued"
+    assert client.post(url, json={"run_ids": ["own"]}, headers=reader).status_code == 403
+    denied = client.post(url, json={"run_ids": ["own", "other"]}, headers=alice)
+    assert denied.status_code == 403
+    assert ctx.find_record("own").status == RunStatus.QUEUED  # no partial unauthorized batch
+    first = client.post(
+        url, json={"run_ids": ["own", "started"], "command_id": "batch"}, headers=alice
+    )
+    assert first.status_code == 200 and first.json()["asked"] == 2
+    assert ctx.find_record("own").status == RunStatus.KILLED
+    assert ctx.find_record("started").status == RunStatus.RUNNING
+    retry = client.post(url, json={"run_ids": ["later"], "command_id": "batch"}, headers=alice)
+    assert retry.json() == first.json() and ctx.find_record("later").status == RunStatus.QUEUED
+    assert (
+        client.post(
+            url, json={"run_ids": ["other"], "command_id": "batch"}, headers=admin
+        ).status_code
+        == 200
+    )
+    assert ctx.find_record("other").status == RunStatus.KILLED
+    missing = client.post(url, json={"run_ids": ["later", "missing"]}, headers=alice)
+    assert missing.status_code == 200 and missing.json()["failed"] == 1
+    assert ctx.find_record("later").status == RunStatus.KILLED
+
+
+def test_owner_paging_retains_queue_ranks_host_state_and_cursor_validation(
+    hub: tuple[FastAPI, TestClient, Context],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, ctx = hub
+    reader = bearer(token_for(app.state.auth, "alice", "read"))
+    when = make_record().created_at
+    for rid, owner, ticket in (("a", "alice", 10), ("b", "sv", 20), ("c", "alice", 30)):
+        ctx.create_run(
+            make_record(
+                rid,
+                owner=owner,
+                created_at=when,
+                environment_id="env-remote",
+                executor=ExecutorInfo(queue_position=ticket),
+            )
+        )
+    monkeypatch.setattr(app.state.hub, "host_for_environment", lambda env: "gpu1")
+    monkeypatch.setattr(app.state.hub, "state", lambda host: SimpleNamespace(state="connected"))
+    first = client.get("/api/v1/runs", params={"owner": "me", "limit": 1}, headers=reader).json()
+    assert [r["run_id"] for r in first] == ["c"]
+    second = client.get(
+        "/api/v1/runs",
+        params={
+            "owner": "me",
+            "limit": 1,
+            "before_created_at": first[0]["created_at"],
+            "before_run_id": first[0]["run_id"],
+        },
+        headers=reader,
+    ).json()
+    assert [r["run_id"] for r in second] == ["a"]
+    assert [r["executor"]["queue_position"] for r in first + second] == [3, 1]
+    assert {r["host_state"] for r in first + second} == {"connected"}
+    half = client.get("/api/v1/runs", params={"before_run_id": "c"}, headers=reader)
+    assert half.status_code == 400 and "together" in half.json()["error"]
+
+
+@pytest.mark.parametrize(
+    ("action", "body"),
+    [
+        ("tags", {"add": ["seen"]}),
+        ("star", {"on": True}),
+        ("archive", {"on": True}),
+        ("notes", {"text": "seen"}),
+    ],
+)
+def test_unserved_mirror_edits_are_refused_but_imported_run_edits_remain_local(
+    hub: tuple[FastAPI, TestClient, Context],
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    body: dict[str, object],
+) -> None:
+    app, client, ctx = hub
+    admin = bearer(token_for(app.state.auth, "sv", "admin"))
+    ctx.create_run(make_record("foreign", owner="sv", environment_id="env-remote"))
+    monkeypatch.setattr(app.state.hub, "host_for_environment", lambda env: None)
+    monkeypatch.setattr(app.state.hub, "mirrored_from", lambda env: "removed-host")
+    refused = client.post(f"/api/v1/runs/foreign/{action}", json=body, headers=admin)
+    assert (
+        refused.status_code == 503 and "mirrored from host removed-host" in refused.json()["error"]
+    )
+    monkeypatch.setattr(app.state.hub, "mirrored_from", lambda env: None)
+    assert (
+        client.post(f"/api/v1/runs/foreign/{action}", json=body, headers=admin).status_code == 200
+    )
+
+
+def test_task_reeval_keeps_host_partition_timeout_failure_aggregation_and_caller_receipts(
+    hub: tuple[FastAPI, TestClient, Context],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hypothex.api import app as api_module
+    from hypothex.core.evaluation import EvalReport
+    from hypothex.remote.hub import HostUnavailableError
+
+    app, client, ctx = hub
+    for rid, env in (
+        ("here", ctx.descriptor.environment_id),
+        ("remote", "env-gpu"),
+        ("down1", "env-down"),
+        ("down2", "env-down"),
+    ):
+        ctx.create_run(
+            make_record(
+                rid, task="toy-acc", status=RunStatus.FINISHED, owner="alice", environment_id=env
+            )
+        )
+    local_calls: list[list[str] | None] = []
+    sent: list[tuple[str, str, dict[str, Any], float | None]] = []
+
+    def local_reeval(context: Context, **kwargs: Any) -> EvalReport:
+        local_calls.append(kwargs.get("run_ids"))
+        return EvalReport(evaluated=kwargs.get("run_ids") or [])
+
+    class HostClient:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def post_json(
+            self, path: str, body: dict[str, Any], *, timeout: float | None = None
+        ) -> dict[str, Any]:
+            sent.append((self.name, path, body, timeout))
+            if self.name == "down":
+                raise HostUnavailableError("offline")
+            return EvalReport(evaluated=["remote"]).model_dump(mode="json")
+
+    monkeypatch.setattr(api_module, "reeval", local_reeval)
+    monkeypatch.setattr(
+        app.state.hub,
+        "host_for_environment",
+        lambda env: {"env-gpu": "gpu", "env-down": "down"}.get(env),
+    )
+    monkeypatch.setattr(app.state.hub, "mirrored_from", lambda env: None)
+    monkeypatch.setattr(app.state.hub, "names", lambda: ["gpu", "down"])
+    monkeypatch.setattr(app.state.hub, "client", HostClient)
+    url = "/api/v1/tasks/toy/toy-acc/reeval"
+    body = {"force": True, "command_id": "same"}
+    alice = bearer(token_for(app.state.auth, "alice", "launch"))
+    first = client.post(url, json=body, headers=alice)
+    assert first.status_code == 200 and set(first.json()["evaluated"]) == {"here", "remote"}
+    assert set(first.json()["skipped"]) == {"down1", "down2"}
+    assert local_calls == [["here"]] and len(sent) == 2  # one request to a down host
+    assert all(timeout == api_module.REEVAL_FORWARD_SECONDS for _, _, _, timeout in sent)
+    remote_body = next(payload for host, _, payload, _ in sent if host == "gpu")
+    assert remote_body["command_id"] == f"alice|launch|POST {url}|same:remote"
+    assert client.post(url, json=body, headers=alice).json() == first.json() and len(sent) == 2
+    admin = bearer(token_for(app.state.auth, "sv", "admin"))
+    assert client.post(url, json=body, headers=admin).status_code == 200 and len(sent) == 4
+    assert any(
+        payload["command_id"] == f"sv|admin|POST {url}|same:remote" for _, _, payload, _ in sent
+    )
+    single = client.post("/api/v1/runs/remote/reeval", json={"command_id": "one"}, headers=alice)
+    assert single.status_code == 200
+    assert sent[-1][3] == api_module.REEVAL_FORWARD_SECONDS
+    assert sent[-1][2]["command_id"] == "alice|launch|POST /api/v1/runs/remote/reeval|one"
+
+
+def test_local_reinfer_keeps_template_overrides_with_new_owner(
+    hub: tuple[FastAPI, TestClient, Context],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, ctx = hub
+    queued(ctx, "parent", "sv")
+    seen: list[dict[str, Any]] = []
+
+    def reinfer(context: Context, run_id: str, **kwargs: Any) -> RunRecord:
+        seen.append(kwargs)
+        return context.find_record(run_id)
+
+    monkeypatch.setattr(control, "reinfer", reinfer)
+    carol = bearer(token_for(app.state.auth, "carol", "admin"))
+    response = client.post(
+        "/api/v1/runs/parent/reinfer",
+        json={
+            "checkpoint": "/tmp/model.pt",
+            "vars": {"temperature": "0.2"},
+        },
+        headers=carol,
+    )
+    assert response.status_code == 200
+    assert seen == [
+        {
+            "checkpoint": "/tmp/model.pt",
+            "vars": {"temperature": "0.2"},
+            "created_by": "human:carol",
+            "owner": "carol",
+        }
+    ]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run pytest tests/api/test_ownership_api.py -v`
+Run: `uv run pytest tests/api/test_ownership_api.py tests/api/test_forwarding.py tests/api/test_hosts.py tests/api/test_env_launch.py tests/api/test_sweeps_pull.py -v`
 Expected: FAIL: `test_body_identity_is_ignored_with_auth_on` with `('human:sv', None) != ('human:carol', 'carol')`, `test_launch_scope_never_runs_code_on_the_hub` and the stop/archive/cancel tests with `200 != 403`, and `test_owner_me_filters_runs` returning every run.
 
 - [ ] **Step 3: Write the implementation**
 
 In `src/hypothex/api/app.py`:
 
-1. Add `from typing import TypeVar` (merge into the `typing` import), `from starlette.requests import HTTPConnection`, `auth_on`, `command_key` and `identity` to the `hypothex.api.auth` import, and `from hypothex.auth.ownership import require_act, require_local_exec`.
+1. Add `from typing import TypeVar` (merge into the `typing` import), `from starlette.requests import HTTPConnection`, `auth_on`, `command_key` and `identity` to the `hypothex.api.auth` import, and `from hypothex.auth.ownership import require_act, require_local_exec`. Add `RunNotFoundError` to the `hypothex.core.errors` import; keep the existing `CancelResult`, `StopQueuedBody`, `stop_queued_runs`, `UTC`, `datetime` and forwarding timeout imports.
 
 2. Replace `ActionBody` with:
 
@@ -13506,7 +13726,7 @@ def stamp(conn: HTTPConnection, body: _Body) -> _Body:
 
 ```python
     def once(conn: HTTPConnection, body: ActionBody, fn: Callable[[], Any]) -> dict[str, Any]:
-        # keyed by caller and route: another caller's id, or this id on another route, is new
+        # A receipt belongs to this caller and route, including retries with edited bodies.
         return ctx.events.run_once(command_key(conn, body.command_id), lambda: to_jsonable(fn()))
 
     def forward(
@@ -13518,29 +13738,33 @@ def stamp(conn: HTTPConnection, body: _Body) -> _Body:
         *,
         remote_only: bool = False,
     ) -> dict[str, Any]:
-        # A run mirrored from a host is acted on by that host; same body, and the hub's
-        # receipt key as its command_id, so the host's receipt is per hub caller too.
-        # The run is looked up inside the receipt, so a replayed command_id gets its
-        # receipt first (as in phase 1); an error releases the claim, so a retry runs again.
-        key = command_key(conn, body.command_id)
-
+        # A run mirrored from a host is acted on there, with the caller-bound command key.
+        # The run is looked up inside `once`, so a replayed command_id gets its receipt
+        # first (as in phase 1); an error releases the claim, so a retry runs again.
         def act() -> Any:
             record = ctx.find_record(run_id)
             host = manager.host_for_environment(record.environment_id)
             if host is None:
+                source = manager.mirrored_from(record.environment_id)
                 foreign = record.environment_id != ctx.descriptor.environment_id
-                if remote_only and foreign:
-                    # its pids and paths belong to another machine: never act on them here
+                # remote_only: its pids and paths belong to another machine. A mirrored run:
+                # the host's copy replaces the hub's on its next mirror, so an edit made
+                # here (tags, star, archive, notes) would be lost without a word
+                if foreign and (remote_only or source is not None):
+                    mirrored = f" (mirrored from host {source})" if source else ""
                     raise HostUnavailableError(
-                        f"run {run_id} belongs to environment {record.environment_id}, which "
-                        f"no configured host serves; {action} must run on that host "
+                        f"run {run_id} belongs to environment {record.environment_id}{mirrored}, "
+                        f"which no configured host serves; {action} must run on that host "
                         "(`hx hosts add` / `hx hosts connect`)"
                     )
                 return local()
-            payload = {**body.model_dump(mode="json"), "command_id": key}
-            return manager.client(host).post_json(f"/api/v1/runs/{run_id}/{action}", payload)
+            payload = {**body.model_dump(mode="json"), "command_id": command_key(conn, body.command_id)}
+            timeout = REEVAL_FORWARD_SECONDS if action == "reeval" else None
+            return manager.client(host).post_json(
+                f"/api/v1/runs/{run_id}/{action}", payload, timeout=timeout
+            )
 
-        return ctx.events.run_once(key, lambda: to_jsonable(act()))
+        return once(conn, body, act)
 ```
 
 and replace these routes, which item 7 does not replace, so that they pass the request:
@@ -13548,11 +13772,53 @@ and replace these routes, which item 7 does not replace, so that they pass the r
 ```python
     @app.post("/api/v1/tasks/{project}/{task}/reeval", dependencies=LAUNCH)
     def task_reeval(project: str, task: str, body: ReevalBody, request: Request) -> dict[str, Any]:
-        return once(
-            request,
-            body,
-            lambda: reeval(ctx, project=project, task=task, metric=body.metric, force=body.force),
-        )
+        forwarded = body.model_copy(update={"command_id": command_key(request, body.command_id)})
+        # spec 8A.3: a mirrored run is re-scored on its host (the mirror replaces the hub's
+        # scores.jsonl with the host's whole file); only the hub's own runs, and runs no
+        # host ever mirrored here (demo, imported), are scored here
+        def act() -> EvalReport:
+            runs = ctx.index.list_runs(
+                project=project,
+                task=task,
+                status=RunStatus.FINISHED,
+                include_archived=True,
+                limit=None,
+            )
+            hosts = {e: _mirror_host(e) for e in {r.environment_id for r in runs}}
+            if not any(hosts.values()):
+                return reeval(ctx, project=project, task=task, metric=body.metric, force=body.force)
+            # the hub's own runs in one core call, then each mirrored run on its host
+            here = [r.run_id for r in runs if hosts[r.environment_id] is None]
+            report = reeval(
+                ctx,
+                project=project,
+                task=task,
+                metric=body.metric,
+                force=body.force,
+                run_ids=here,
+            )
+            down: dict[str, str] = {}  # host -> why nothing more is sent to it
+            for record in reversed(runs):  # oldest first, as core reeval
+                host = hosts[record.environment_id]
+                if host is None:
+                    continue
+                if host in down:
+                    report.skipped[record.run_id] = down[host]
+                    continue
+                try:
+                    part = EvalReport.model_validate(_reeval_on(host, record.run_id, forwarded))
+                except (HostUnavailableError, EnvUnreachableError) as exc:
+                    down[host] = report.skipped[record.run_id] = f"host {host}: {exc}"[:500]
+                    continue
+                except EnvRequestError as exc:
+                    report.skipped[record.run_id] = f"host {host}: {exc}"[:500]
+                    continue
+                report.evaluated += part.evaluated
+                report.skipped.update(part.skipped)
+                report.warnings += [w for w in part.warnings if w not in report.warnings]
+            return report
+
+        return once(request, body, act)
 ```
 
 ```python
@@ -13598,6 +13864,8 @@ and replace these routes, which item 7 does not replace, so that they pass the r
         return once(request, body, act)
 ```
 
+The complete `forward`, `task_reeval`, and `runs` bodies below retain actual merged-main behavior; the only changes are request/scope/receipt/owner plumbing. Keep `_mirror_host` and `_reeval_on` unchanged, including the per-host failure aggregation, per-run receipt suffix and `REEVAL_FORWARD_SECONDS`. Preserve the refusal for unserved mirrors and its imported-run exception.
+
 7. Replace these route functions (decorators from Task 24 unchanged):
 
 ```python
@@ -13623,30 +13891,67 @@ and replace these routes, which item 7 does not replace, so that they pass the r
         owner: str | None = None,
         archived: bool = False,
         limit: Annotated[int, Query(ge=1)] = 200,
+        before_created_at: datetime | None = None,
+        before_run_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        # no cap below `limit`: the UI pages through a host's queue or a sweep with a
-        # growing limit, starting at 1000
-        who = owner
-        if owner == "me":  # with auth off runs have no owner: every run is the caller's
-            who = principal_of(request).user if auth_on(request) else None
-        return to_jsonable(
-            ctx.index.list_runs(
-                project=project,
-                task=task,
-                status=status,
-                tag=tag,
-                environment_id=environment_id,
-                owner=who,
-                include_archived=archived,
-                limit=limit,
-            )
+        who = principal_of(request).user if owner == "me" and auth_on(request) else owner
+        if owner == "me" and not auth_on(request):
+            who = None
+        # no cap below `limit`. Keyset paging: the next page starts after the last row of
+        # this one (`before_created_at`, `before_run_id`), so a page costs `limit` rows
+        if (before_created_at is None) != (before_run_id is None):
+            raise RunError("give before_created_at and before_run_id together")
+        before = None
+        if before_created_at is not None and before_run_id is not None:
+            if before_created_at.tzinfo is None:
+                before_created_at = before_created_at.replace(tzinfo=UTC)
+            before = (before_created_at.astimezone(UTC), before_run_id)
+        records = ctx.index.list_runs(
+            project=project,
+            task=task,
+            status=status,
+            tag=tag,
+            environment_id=environment_id,
+            owner=who,
+            include_archived=archived,
+            limit=limit,
+            before=before,
         )
+        rows = to_jsonable(q.with_queue_positions(ctx, records))
+        # like the run detail: the CLI and MCP list runs through the hub and see a stale host
+        states: dict[str, str | None] = {}
+        for row in rows:
+            env = row["environment_id"]
+            if env not in states:
+                states[env] = host_state_of(env)
+            row["host_state"] = states[env]
+        return rows
 
     @app.post("/api/v1/runs", dependencies=LAUNCH)
     def launch(body: LaunchBody, request: Request) -> dict[str, Any]:
         require_local_exec(principal_of(request))  # the command runs as this server's user
         body = stamp(request, body)
         return once(request, body, lambda: launch_here(ctx, body, body.repo))
+```
+
+Retain the existing bounded `StopQueuedBody` and route order (the static batch path precedes `/{run_id}`). Add the request/receipt and ownership adapter:
+
+```python
+    @app.post("/api/v1/runs/stop_queued", dependencies=LAUNCH)
+    def runs_stop_queued(body: StopQueuedBody, request: Request) -> dict[str, Any]:
+        def act() -> CancelResult:
+            principal = principal_of(request)
+            # Check every existing member before cancelling any; missing IDs retain the
+            # baseline batch helper's failure accounting instead of stopping the loop.
+            for run_id in dict.fromkeys(body.run_ids):
+                try:
+                    record = ctx.find_record(run_id)
+                except RunNotFoundError:
+                    continue
+                require_act(principal, record.owner, "cancel_queued")
+            return stop_queued_runs(ctx, body.run_ids)
+
+        return once(request, body, act)
 ```
 
 ```python
@@ -13672,6 +13977,7 @@ and replace these routes, which item 7 does not replace, so that they pass the r
                 ctx,
                 run_id,
                 checkpoint=body.checkpoint,
+                vars=body.vars,
                 created_by=body.created_by,
                 owner=body.owner,
             )
@@ -15090,7 +15396,7 @@ def test_registered_http_tool_forwards_only_authenticated_cookie(
     def forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("HTTP caller must never discover the server credential")
 
-    monkeypatch.setattr("hypothex.mcp.server.httpx.request", request)
+    monkeypatch.setattr("hypothex.mcp.server._hub_request", request)
     monkeypatch.setattr("hypothex.mcp.server.resolve_hub_token", forbidden)
 
     async def invoke(request: Request) -> JSONResponse:
@@ -15134,7 +15440,7 @@ def test_host_state_reads_never_discover_a_server_token_over_http(
     def forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("HTTP host-state reads cannot discover a server credential")
 
-    monkeypatch.setattr("hypothex.mcp.server.httpx.request", request)
+    monkeypatch.setattr("hypothex.mcp.server._hub_request", request)
     monkeypatch.setattr("hypothex.mcp.server.resolve_hub_token", forbidden)
     server = build_server(home, hub_url=BASE, hub_token="SERVER-ADMIN")
     tool = next(t for t in server._tool_manager.list_tools() if t.name == tool_name)
@@ -15414,7 +15720,7 @@ The existing `host_states`, `sweep_summary`, `locate_sweep`, `hub_call`, and `bu
         return f"agent:{agent}@{principal.user}", principal.user
 ```
 
-3. Put `@scoped("read")` or `@scoped("launch")` between `@mcp.tool()` and `@_expose_errors` on every tool: `read` on `list_projects`, `list_tasks`, `get_task`, `get_leaderboard`, `list_runs`, `get_run`, `compare_runs`, `get_predictions`, `list_views`, `get_view`, `query_view`, `list_hosts`, `list_sweeps`, `get_sweep`; `launch` on `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`, `connect_host`. For example:
+3. Put `@scoped("read")` or `@scoped("launch")` between `@mcp.tool()` and `@_expose_errors` on every tool: `read` on `list_projects`, `list_tasks`, `get_task`, `get_leaderboard`, `list_runs`, `get_run`, `get_logs`, `compare_examples`, `compare_runs`, `get_predictions`, `list_views`, `get_view`, `query_view`, `list_hosts`, `list_sweeps`, `get_sweep`; `launch` on `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`, `connect_host`. For example:
 
 ```python
     @mcp.tool()
@@ -16237,7 +16543,7 @@ Every data mutation keeps its existing `_touch` at the same logical point in the
 
 This mark still does not bump generation. `replace_scores` still atomically deletes the stale mark and replaces scores; `Context.add_score` keeps mark → file append → full score replacement under its run lock. Keep `_DATA_TABLES`, `_CARRIED_TABLES`, `_run_values`, `_score_values`, `RunChangeRow`, `PointsPendingRow`, `ScoresStaleRow`, `_fill_pending_points`, and their current call paths.
 
-Pending backlog compatibility (not part of this prerequisite pin): optional `ScoreRecord.per_example_hash`, `evaluation_examples`, and `evaluation_ids_hash` are additive evaluation provenance. If that backlog lands, preserve them through `score.model_dump(mode="json")` in `RunStore.append_score`, `score.model_dump_json()` in `_score_values`, normal `ScoreRecord` parsing, and the shared `_add_run` staging path. They require no Phase 3-specific score file name, envelope, hand-built payload, or SQL column/Alembic revision: `scores.jsonl` and `scores.record_json` already carry the complete model. Never reconstruct a reduced score dict or synthesize a binding for old/unbound evaluations. The source hash and exact artifact/population bindings remain distinct. Existing complete-model snapshot comparisons must include populated optional bindings when that baseline is adopted; do not implement or backport the unmerged backlog here.
+Pending backlog compatibility (not part of this prerequisite pin): optional `ScoreRecord.per_example_hash`, `evaluation_examples`, and `evaluation_ids_hash` are additive evaluation provenance. If that backlog lands, preserve them through `score.model_dump(mode="json")` in `RunStore.append_score`, `score.model_dump_json()` in `_score_values`, normal `ScoreRecord` parsing, and the shared `_add_run` staging path. They require no Phase 3-specific score file name, envelope, hand-built payload, or SQL column/Alembic revision: `scores.jsonl` and `scores.record_json` already carry the complete model. Never reconstruct a reduced score dict or synthesize a binding for old/unbound evaluations. The source hash and exact artifact/population bindings remain distinct. Existing complete-model snapshot comparisons must include populated optional bindings when that baseline is adopted; do not implement or backport the unmerged backlog here. Its later `compare_examples(..., require_bound=False)` and optional HTTP `require_bound` query flag also remain additive: preserve the default historical comparison behavior and opt-in strict artifact/population validation used by TaskInsights, including exact read/source bindings. Do not remove the flag in any future route/helper adapter. This backlog is not part of review baseline `54259b0`; preflight the then-current main before a future Phase 3 build.
 
 The merged metric mutator is `_replace_metric_points(self, run_id, points, *, pending_status) -> bool`; public `replace_metric_points` only delegates with `pending_status=None`. Journal and guard the private transaction, before its pending-marker DELETE/EXISTS claim. Preserve its captured `RunRow.status`, `rowcount` check and `_touch` only after a successful claim. `_fill_pending_points` retries by re-reading pending/status outside the transaction through `points_to_index`. A lost claim changes neither data nor generation; a later successful retry is a separate write. The exclusive guard prevents pending-row/generation-row inversion against `delete_run` and final publication. Never replace either method with a pre-CAS body.
 
@@ -19038,9 +19344,60 @@ def test_hub_calls_carry_the_callers_agent(hub: tuple[str, AuthStore]) -> None:
     assert "— human:alice" in plain["text"]
 ```
 
+Append to `tests/mcp/test_scoped_tools.py` (Task 32; add `from typing import Any` if absent). These registered-tool tests retain the guard-selected credential and exercise both `via_hub` and a launching call with no environment agent override:
+
+```python
+@pytest.mark.parametrize("tool_name", ["rerun", "launch_run"])
+@pytest.mark.parametrize("override", [None, "chosen"])
+def test_registered_tools_forward_the_configured_agent_or_explicit_override(
+    home: Path,
+    toy_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    override: str | None,
+) -> None:
+    import httpx
+
+    monkeypatch.delenv("HYPOTHEX_AGENT", raising=False)
+    monkeypatch.setattr("hypothex.mcp.server.acts_through_hub", lambda *args: True)
+    sent: list[tuple[dict[str, str], dict[str, Any]]] = []
+
+    def request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        assert method == "POST" and url.startswith(BASE + "/api/v1/")
+        sent.append((dict(kwargs["headers"]), dict(kwargs["json"])))
+        return httpx.Response(200, json={"run_id": "child"})
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("an HTTP tool cannot discover the privileged server token")
+
+    monkeypatch.setattr("hypothex.mcp.server._hub_request", request)
+    monkeypatch.setattr("hypothex.mcp.server.resolve_hub_token", forbidden)
+    server = build_server(home, hub_url=BASE, hub_token="SERVER-ADMIN", agent="configured")
+    tool = next(t for t in server._tool_manager.list_tools() if t.name == tool_name)
+    args: dict[str, Any] = (
+        {"run_id": "remote"}
+        if tool_name == "rerun"
+        else {
+            "repo": str(toy_repo),
+            "host": "gpu1",
+            "hypothesis": "agent attribution",
+            "command": ["true"],
+        }
+    )
+    if override is not None:
+        args["agent"] = override
+    result = tool.fn(**args, hx_mcp_ctx=fake_http("hxs_selected"))
+    assert result["run"]["run_id"] == "child"
+    headers, body = sent[0]
+    acting = "configured" if override is None else override
+    assert headers["X-Hypothex-Agent"] == acting
+    assert headers["Authorization"] == "Bearer hxs_selected"
+    assert body["created_by"].startswith(f"agent:{acting}") and "None" not in body["created_by"]
+```
+
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run pytest tests/cli/test_auth_cli.py -v`
+Run: `uv run pytest tests/cli/test_auth_cli.py tests/mcp/test_scoped_tools.py -v`
 Expected: FAIL: `No such command 'pair'` (exit code 2) in the five CLI tests, and `test_hub_calls_carry_the_callers_agent` with `TypeError: hub_call() got an unexpected keyword argument 'agent'`.
 
 - [ ] **Step 3: Teach the hub client about logins and agents**
@@ -19107,31 +19464,35 @@ with
         return resp.text if text else resp.json()
 ```
 
-4. In `build_server`, let every tool's hub call carry the tool's agent. Replace `hub` and `via_hub` with:
+4. In `build_server`, retain `default_agent = agent`, `actor(override)` and Task 32's optional-agent signatures/identity helper. Let every hub call normalize `None` through that configured default (not the environment variable), while explicit per-call overrides win. Preserve the merged missing-run/unavailable-hub error mapping. Replace only `hub` and `via_hub` with:
 
 ```python
     def hub(
         method: str, path: str, body: dict[str, Any] | None = None,
-        agent: str = "mcp", timeout: float = 120.0,
+        agent: str | None = None, timeout: float = 120.0,
     ) -> Any:
-        # a tool always acts for an agent: the hub stamps agent:<agent>@<user> from the header
+        # Each MCP call identifies the configured default or its explicit override.
+        acting = default_agent if agent is None else agent
         return hub_call(
             method,
             path,
             body,
             url=hub_url,
             token=auth(),
-            agent=agent,
+            agent=acting,
             timeout=timeout,
         )
 
-
-    def via_hub(run_id: str, action: str, body: dict[str, Any], agent: str = "mcp") -> Any:
-        # a mirrored run is acted on by its host: the hub forwards it (Task 45)
+    def via_hub(
+        run_id: str, action: str, body: dict[str, Any], agent: str | None = None
+    ) -> Any:
         if not acts_through_hub(ctx(), run_id):
             return None
-        full = {**body, "command_id": new_command_id(), "created_by": f"agent:{agent}"}
-        return hub("POST", f"/api/v1/runs/{run_id}/{action}", full, agent=agent)
+        full = {**body, "command_id": new_command_id(), "created_by": actor(agent)}
+        try:
+            return hub("POST", f"/api/v1/runs/{run_id}/{action}", full, agent=agent)
+        except HubUnavailableError as exc:
+            raise missing_run_or_hub_error(ctx(), run_id, exc) from exc
 ```
 
    and pass the tool's agent in the three launching calls: in `launch_run`, `hub("POST", f"/api/v1/hosts/{host}/runs", body, agent=agent)`; in `launch_sweep`, `hub("POST", "/api/v1/sweeps", body, agent=agent)`; in `extend_sweep`, `hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/extend", body, agent=agent)`.
@@ -19416,7 +19777,7 @@ def test_hosts_pair_and_add_with_a_token_env(tmp_path: Path) -> None:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run pytest tests/cli/test_auth_cli.py -v`
+Run: `uv run pytest tests/cli/test_auth_cli.py tests/mcp/test_scoped_tools.py -v`
 Expected: FAIL: `test_a_logged_in_cli_reads_the_hub` lists no projects (the laptop's home is empty), `test_owner_me_needs_a_hub` with `No such option: --owner`, and `test_hosts_pair_and_add_with_a_token_env` with `No such command 'pair'`.
 
 - [ ] **Step 3: Write the implementation**

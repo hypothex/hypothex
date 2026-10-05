@@ -7922,7 +7922,7 @@ git commit -m "feat(ui): notebook page at /n/:project and /n/:project/:day"
 
 ## Group 6: Task export, paper baselines, cleaned artifacts (Tasks 21–24)
 
-The Task page gets `export ▾` in the leaderboard panel's title (mockup `shot-task-export-*`): LaTeX, Markdown or CSV, digits and noise, a six-line preview, Copy, and a `↓` download link, all from `GET /api/v1/tasks/{project}/{task}/export`. The leaderboard draws the board's paper baselines after a dashed rule (`◆ name`, value, `↗` source link, `≠v1` when the paper used another metric version, a hollow dashed diamond on the plot), never in the best band and never as best. The Run page strikes through cleaned artifacts (`✕ 2026-10-04 4.2 GB`, mockup `shot-run-*`).
+The Task page gets `export ▾` in the leaderboard panel's title (mockup `shot-task-export-*`): LaTeX, Markdown or CSV, digits and noise, a six-line preview, Copy, and a `↓` Blob-download button, all from `GET /api/v1/tasks/{project}/{task}/export`. The leaderboard draws the board's paper baselines after a dashed rule (`◆ name`, value, `↗` source link, `≠v1` when the paper used another metric version, a hollow dashed diamond on the plot), never in the best band and never as best. The Run page strikes through cleaned artifacts (`✕ 2026-10-04 4.2 GB`, mockup `shot-run-*`).
 
 ### Task 21: The export menu
 
@@ -9675,6 +9675,7 @@ export function allowStatus(errors: string[], ...statuses: number[]): void {
 Create `ui/e2e/team.spec.ts`:
 
 ```ts
+import { readFile } from "node:fs/promises";
 import { expect, expectTheme, test } from "./fixtures";
 import { allowStatus, ownerGet, ownerHeaders, pairBrowser } from "./team-fixtures";
 
@@ -9731,7 +9732,15 @@ test("task: baseline rows, and the export menu as LaTeX and CSV", async ({ page,
   await expect(menu.getByLabel("Preview")).toContainText("% requires \\usepackage{booktabs}");
   await menu.getByRole("button", { name: "CSV" }).click();
   await expect(menu.getByLabel("Preview")).toContainText("kind,label,key,n,metric,mean,std");
-  await expect(menu.getByRole("link", { name: "↓ .csv" })).toHaveAttribute("download", "toy-test.csv");
+  const expected = await page.request.get("/api/v1/tasks/toy-classifier/toy-test/export?format=csv&digits=3&noise=both");
+  expect(expected.status()).toBe(200);
+  const pendingDownload = page.waitForEvent("download");
+  await menu.getByRole("button", { name: "↓ .csv" }).click();
+  const download = await pendingDownload;
+  expect(download.suggestedFilename()).toBe("toy-test.csv");
+  const saved = await download.path();
+  expect(saved).not.toBeNull();
+  expect(await readFile(saved!, "utf8")).toBe(await expected.text());
 });
 
 test("run: the status line names the owner", async ({ page, request }) => {

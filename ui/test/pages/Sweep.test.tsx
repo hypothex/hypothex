@@ -45,6 +45,31 @@ function renderPage(sweepId = SWEEP_ID) {
 }
 
 describe("SweepPage", () => {
+  test("a failed initial run read leaves an error in its panel, not an endless loading state", async () => {
+    mockApi(routes(makeSummary(), new HttpReply(400, { error: "runs unavailable", type: "IndexError" })));
+    renderPage();
+    await screen.findByText("runs unavailable");
+    const panel = screen.getByRole("region", { name: "c Runs on hosts" });
+    expect(within(panel).getByRole("alert").textContent).toBe("runs unavailable");
+    expect(within(panel).queryByText("loading…") === null).toBe(true);
+    expect(statValue("cost, — GPU-h")).toBe("$12.50");
+  });
+  test("run-dependent panels and GPU hours stay loading until the runs arrive", async () => {
+    let release: (runs: typeof RUNS) => void = () => {};
+    const pending = new Promise<typeof RUNS>((resolve) => { release = resolve; });
+    mockApi(routes(makeSummary(), () => pending));
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: HEADLINE });
+    const panel = screen.getByRole("region", { name: "c Runs on hosts" });
+    expect(within(panel).queryByText("No runs indexed yet") === null).toBe(true);
+    expect(within(panel).getByText("loading…")).toBeTruthy();
+    expect(screen.queryByText("cost, 0.0 GPU-h") === null).toBe(true);
+    expect(statValue("cost, · GPU-h")).toBe("$12.50");
+    expect(document.querySelector('.metaline [title="Hosts"]')?.textContent).toBe("loading hosts…");
+    await act(async () => { release(RUNS); await pending; });
+    await waitFor(() => expect(statValue("cost, 11 GPU-h")).toBe("$12.50"));
+    expect(within(panel).queryByText("loading…") === null).toBe(true);
+  });
   test("sweepRunsQuery asks for every run with the sweep's member tag, archived included", () => {
     // no limit: useAllRuns pages through 1000, 4000, ... until a page is not full
     expect(sweepRunsQuery("rxn", SWEEP_TAG)).toEqual({
@@ -193,7 +218,13 @@ describe("SweepPage", () => {
     mockApi(r);
     const { client } = renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Rerun sweep" }));
-    const dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    // The cached host response still schedules the launch dialog's initial-host effect.
+    for (let tick = 0; tick < 50; tick++) {
+      await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
+      if (screen.queryByLabelText("Command") && (screen.queryByRole("radio", { name: "local" }) as HTMLInputElement | null)?.checked) break;
+    }
+    expect((screen.getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true);
+    const dialog = screen.getByRole("dialog", { name: "Rerun sweep" });
     fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: "D holds" } });
 
     r[`GET ${SWEEP}`] = new HttpReply(503, { error: "hub index locked", type: "IndexError" });

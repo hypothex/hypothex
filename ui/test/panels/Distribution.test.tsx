@@ -255,3 +255,15 @@ test("the ECDF 'share' title sits above the top tick label, not on it", () => {
   const oneTop = Number(one?.getAttribute("y")) - 11;
   expect(shareBase + 3).toBeLessThanOrEqual(oneTop);
 });
+
+test("an explicit baseline uses orange and the first alternative blue regardless of row position", () => {
+  const { container, rerender } = render(<DistributionPanel result={dist({ baseline: "g1" })} />);
+  const colors = () => [...container.querySelectorAll('[data-testid="ecdf"]')].map((p) => (p as SVGElement).style.stroke);
+  expect(colors()).toEqual(["var(--cat-2)", "var(--cat-1)"]);
+  rerender(<DistributionPanel result={dist({ baseline: "g1" }, [...ROWS].reverse())} />);
+  expect(colors()).toEqual(["var(--cat-1)", "var(--cat-2)"]);
+  rerender(<DistributionPanel result={dist({})} />);
+  expect(colors()).toEqual(["var(--cat-1)", "var(--cat-2)"]);
+  rerender(<DistributionPanel result={dist({ baseline: "missing" })} />);
+  expect(colors()).toEqual(["var(--cat-1)", "var(--cat-2)"]);
+});

@@ -456,3 +456,12 @@ Parent final Step 8 verification: full Python **2,290 passed, 3 skipped**, with
 56 pass, along with the 247 affected backend tests, three shutdown cases, types,
 build, Ruff/format/ty and Sphinx. Final source was unchanged during these checks.
 Current-head CI and ordered publication after PR #19 remain the only merge gates.
+
+## Post-handover backlog
+
+The [backlog plan](backlog.md) tracks implemented work and final evidence. Full
+candidate Python/UI/browser/Docker/static/package checks are recorded there.
+Comparison provenance and the final audits are closed. Final checks pass
+2,475 Python tests (3 skips), 1,088 UI tests and 80 browser tests, with a further
+two-theme screenshot capture check. Current-head CI and merged-main dogfood
+remain the final gates. No Phase 3 runtime work.

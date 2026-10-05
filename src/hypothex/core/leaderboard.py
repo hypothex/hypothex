@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 import statistics
@@ -18,6 +20,7 @@ from pydantic import BaseModel, Field
 from hypothex.core import stats
 from hypothex.core.config import ProjectConfig, TaskKind, TaskSpec, parse_metric_key
 from hypothex.core.cost import add_costs
+from hypothex.core.errors import ConfigError
 from hypothex.core.headlines import (
     ValueFormat,
     metric_unit,
@@ -82,6 +85,37 @@ class VersusBest(BaseModel):
     """``delta`` over the best group's mean (``None`` when that mean is 0)."""
 
 
+class EvaluationPopulation(BaseModel):
+    """Auditable population for a cost comparison over the selected success metric.
+
+    Fingerprints encode actual example IDs and recorded dataset identity rather
+    than relying on equal counts. Attempts and solved count every member run,
+    including repeats of a seed whose resource usage remains in group costs.
+    """
+
+    metric: str
+    version: str
+    source_hash: str
+    field: str
+    dataset_fingerprint: str
+    example_ids_hash: str
+    examples: int
+    attempts: int
+    solved: int
+
+
+class RepeatObservation(BaseModel):
+    """One recorded repeat score with its exact evaluator and dataset identity."""
+
+    run_id: str
+    value: float
+    metric: str
+    version: str
+    key: str
+    source_hash: str
+    dataset_fingerprint: str
+
+
 class LeaderboardRow(BaseModel):
     """One seed group: runs with the same config hash, commit and uncommitted diff."""
 
@@ -107,6 +141,12 @@ class LeaderboardRow(BaseModel):
     usage: UsageTotals | None
     cost: CostTotals | None = None
     """Sum of the member runs' ``cost`` (spec 8A.7); None when no run has one yet."""
+    cost_complete: bool = False
+    """Every member has a cost record with explicitly complete GPU pricing."""
+    repeat_observations: list[RepeatObservation] = Field(default_factory=list)
+    """Complete, homogeneous recorded p95 repeats for system benchmark time metrics."""
+    evaluation_population: EvaluationPopulation | None = None
+    """Actual comparable scored attempts; absent when their evidence is incomplete."""
 
 
 class Leaderboard(BaseModel):
@@ -429,8 +469,8 @@ def _select_group(
     return None
 
 
-def _higher_is_better(config: ProjectConfig, spec: TaskSpec) -> bool:
-    metric, key = parse_metric_key(spec.primary)
+def _higher_is_better(config: ProjectConfig, spec: TaskSpec, primary: str | None = None) -> bool:
+    metric, key = parse_metric_key(primary or spec.primary)
     if spec.kind == "system_bench" and percentile_of(f"{metric}/{key}"):
         return False
     return config.metrics[metric].higher_is_better
@@ -836,7 +876,187 @@ def _make_row(
         created_by=sorted({m.created_by for m in members}),
         usage=_sum_usage(members),
         cost=add_costs(m.cost for m in members),
+        cost_complete=all(
+            m.cost is not None and m.cost.gpu_pricing_complete is True for m in members
+        ),
     )
+
+
+def _selected_primary(
+    config: ProjectConfig,
+    task: str,
+    primary: str | None,
+    scores: dict[str, list[ScoreRecord]],
+    versions: dict[str, str],
+) -> str:
+    """Validate a task metric and a configured or observed selected-version key."""
+    spec = config.tasks[task]
+    ref = spec.primary if primary is None else primary
+    name, key = parse_metric_key(ref)
+    if name not in spec.metrics or not key or "/" in key or "@" in ref:
+        raise ConfigError(f"unknown leaderboard primary {ref!r} for task {task!r}")
+    normalized = f"{name}/{key}"
+    configured = "/".join(parse_metric_key(spec.primary))
+    if primary is not None and normalized != configured:
+        keys = {
+            s.key
+            for rows in scores.values()
+            for s in rows
+            if s.metric == name and s.version == versions[name]
+        }
+        if key not in keys and not (key == "value" and not keys):
+            raise ConfigError(
+                f"unknown leaderboard key {ref!r} at {name}@{versions[name]}; "
+                f"recorded keys: {', '.join(sorted(keys)) or 'none'}"
+            )
+    return normalized
+
+
+def _evidenced_score(
+    records: list[ScoreRecord],
+    metric: str,
+    key: str,
+    version: str,
+) -> ScoreRecord | None:
+    """Require the latest exact or whole-metric result to be a sourced success."""
+    matching = [
+        s for s in records if s.metric == metric and s.version == version and s.key in {key, "*"}
+    ]
+    if not matching:
+        return None
+    latest = max(matching, key=lambda s: s.created_at)
+    if (
+        latest.key != key
+        or latest.error is not None
+        or latest.value is None
+        or not math.isfinite(latest.value)
+        or not latest.source_hash
+    ):
+        return None
+    return latest
+
+
+def _population(
+    members: list[RunRecord],
+    examples: PerExample,
+    scores: dict[str, list[ScoreRecord]],
+    spec: TaskSpec,
+    primary: str,
+    version: str,
+    picked: tuple[str, bool] | None,
+    hashes: dict[str, str],
+) -> EvaluationPopulation | None:
+    """Account only for complete, homogeneous binary evaluation populations."""
+    if picked is None or not picked[1]:
+        return None
+    metric, key = parse_metric_key(primary)
+    field = picked[0]
+    cohort: set[str] | None = None
+    dataset: tuple[str, str, str | None, str, str | None] | None = None
+    source: str | None = None
+    attempts = solved = 0
+    for run in members:
+        values = examples.get(run.run_id)
+        if not values:
+            return None
+        ids = set(values)
+        if cohort is not None and ids != cohort:
+            return None
+        cohort = ids
+        refs = [r for r in run.datasets if r.name == spec.dataset and r.split == spec.split]
+        if len(refs) != 1 or not refs[0].hash:
+            return None
+        ref = refs[0]
+        assert ref.hash is not None
+        identity = (ref.name, ref.version, ref.split, ref.hash, ref.hash_mode)
+        if dataset is not None and identity != dataset:
+            return None
+        dataset = identity
+        latest = _evidenced_score(scores.get(run.run_id, []), metric, key, version)
+        if latest is None:
+            return None
+        if (
+            latest.per_example_hash is None
+            or latest.per_example_hash != hashes.get(run.run_id)
+            or latest.evaluation_examples != len(values)
+            or latest.evaluation_ids_hash
+            != "sha256:" + hashlib.sha256(json.dumps(sorted(ids)).encode()).hexdigest()
+        ):
+            return None
+        if not latest.source_hash or source is not None and latest.source_hash != source:
+            return None
+        source = latest.source_hash
+        binary = [row.get(field) for row in values.values()]
+        if any(type(v) not in (bool, int) or v not in (0, 1) for v in binary):
+            return None
+        successes = sum(v for v in binary if isinstance(v, int))
+        assert latest.value is not None
+        if not math.isclose(float(latest.value), successes / len(binary), abs_tol=1e-12):
+            return None
+        solved += successes
+        attempts += len(binary)
+    if cohort is None or dataset is None or source is None:
+        return None
+    return EvaluationPopulation(
+        metric=primary,
+        version=version,
+        source_hash=source,
+        field=field,
+        dataset_fingerprint="sha256:" + hashlib.sha256(json.dumps(dataset).encode()).hexdigest(),
+        example_ids_hash="sha256:"
+        + hashlib.sha256(json.dumps(sorted(cohort)).encode()).hexdigest(),
+        examples=len(cohort),
+        attempts=attempts,
+        solved=solved,
+    )
+
+
+def _repeat_observations(
+    members: list[RunRecord],
+    scores: dict[str, list[ScoreRecord]],
+    spec: TaskSpec,
+    primary: str,
+    version: str,
+    unit: str | None,
+    higher: bool,
+) -> list[RepeatObservation]:
+    """Expose only complete comparable recorded latency repeats, without sampling."""
+    metric, key = parse_metric_key(primary)
+    if spec.kind != "system_bench" or key != "p95" or unit not in {"ms", "s"} or higher:
+        return []
+    if len(members) > 128:
+        return []
+    result: list[RepeatObservation] = []
+    context: tuple[str, str] | None = None
+    for run in members:
+        score = _evidenced_score(scores.get(run.run_id, []), metric, key, version)
+        refs = [r for r in run.datasets if r.name == spec.dataset and r.split == spec.split]
+        if score is None or len(refs) != 1 or not refs[0].hash:
+            return []
+        assert score.source_hash is not None and score.value is not None
+        ref = refs[0]
+        fingerprint = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps((ref.name, ref.version, ref.split, ref.hash, ref.hash_mode)).encode()
+            ).hexdigest()
+        )
+        identity = (score.source_hash, fingerprint)
+        if context is not None and context != identity:
+            return []
+        context = identity
+        result.append(
+            RepeatObservation(
+                run_id=run.run_id,
+                value=score.value,
+                metric=metric,
+                version=version,
+                key=key,
+                source_hash=score.source_hash,
+                dataset_fingerprint=fingerprint,
+            )
+        )
+    return result
 
 
 def build_leaderboard(
@@ -848,6 +1068,8 @@ def build_leaderboard(
     versions: dict[str, str] | None = None,
     *,
     per_example: PerExample | None = None,
+    per_example_hashes: dict[str, str] | None = None,
+    primary: str | None = None,
 ) -> Leaderboard:
     """
     Build a leaderboard for one task.
@@ -873,6 +1095,13 @@ def build_leaderboard(
         run_id -> example_id -> per-example fields of the primary metric at
         the selected version. Enables test-set intervals and paired tests;
         without it rows are compared with a Welch t-test over seed values.
+    per_example_hashes : dict of str to str, optional
+        SHA256 of exact parsed per-example bytes per run. Required only for
+        cost-population attribution; must match the selected score record.
+    primary : str, optional
+        Select a configured task metric or observed metric/key for ranking.
+        Direction, units and evidence follow this metric; the default is the
+        task's configured primary. Versions remain independently selectable.
 
     Returns
     -------
@@ -881,9 +1110,14 @@ def build_leaderboard(
     """
     spec = config.tasks[task]
     chosen = {m: (versions or {}).get(m, config.metrics[m].version) for m in spec.metrics}
-    primary_metric, primary_key = parse_metric_key(spec.primary)
-    primary = f"{primary_metric}/{primary_key}"
-    higher = _higher_is_better(config, spec)
+    requested_primary = primary
+    primary = _selected_primary(config, task, primary, scores, chosen)
+    primary_metric, primary_key = parse_metric_key(primary)
+    higher = (
+        config.metrics[primary_metric].higher_is_better
+        if requested_primary is not None and primary != "/".join(parse_metric_key(spec.primary))
+        else _higher_is_better(config, spec)
+    )
     eligible = [
         r for r in runs if r.task == task and r.status == RunStatus.FINISHED and not r.archived
     ]
@@ -916,16 +1150,56 @@ def build_leaderboard(
             unscored.append(r.run_id)
 
     groups: dict[tuple[str, str | None, str | None], list[RunRecord]] = defaultdict(list)
+    eligible_groups: dict[tuple[str, str | None, str | None], set[str]] = defaultdict(set)
+    for r in runs:
+        if r.task == task and not r.archived:
+            eligible_groups[(r.config_hash, r.git.commit, diff_key(r.git))].add(r.run_id)
     for r in eligible:
         if r.run_id in per_run:
             groups[(r.config_hash, r.git.commit, diff_key(r.git))].append(r)
 
     examples = {rid: ex for rid, ex in (per_example or {}).items() if rid in per_run}
     picked = pick_field((f for ex in examples.values() for f in ex.values()), primary_key)
+    if requested_primary is not None and (
+        primary_key != "value"
+        or any(primary_key in row for ex in examples.values() for row in ex.values())
+    ):
+        # An explicitly selected output key must not borrow another binary or
+        # numeric field from the metric's per-example payload.
+        fields = [row.get(primary_key) for ex in examples.values() for row in ex.values()]
+        if fields and all(isinstance(v, (bool, int, float)) and math.isfinite(v) for v in fields):
+            picked = (primary_key, all(type(v) in (bool, int) and v in (0, 1) for v in fields))
+        else:
+            picked = None
     rows: list[LeaderboardRow] = []
     pooled: dict[str, dict[str, float]] = {}
-    for members in groups.values():
+    for identity, members in groups.items():
         row = _make_row(members, per_run, config, spec, primary)
+        row.repeat_observations = _repeat_observations(
+            members,
+            scores,
+            spec,
+            primary,
+            chosen[primary_metric],
+            config.metrics[primary_metric].unit,
+            higher,
+        )
+        row.evaluation_population = _population(
+            members,
+            examples,
+            scores,
+            spec,
+            primary,
+            chosen[primary_metric],
+            picked,
+            per_example_hashes or {},
+        )
+        if set(row.run_ids) != eligible_groups[identity]:
+            # Existing rankings include scored members only. Missing scored
+            # attempts make cost/population and repeat claims incomplete.
+            row.cost_complete = False
+            row.evaluation_population = None
+            row.repeat_observations = []
         if picked is not None:
             seeds = [[m.run_id for m in b] for b in seed_buckets(members)]
             pooled[row.group_id] = _pool(seeds, examples, picked[0])

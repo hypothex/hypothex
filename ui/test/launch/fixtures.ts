@@ -6,9 +6,11 @@ export const PROJECT = "rxn-forward";
 export const TASK = "uspto-forward-top1";
 export const REPO_PATH = "/Users/sv/code/rxn-forward";
 export const CMD = "python train.py --lr 3e-4 --seed {seed}";
+/** Shared deterministic reference, matching the pure launch-plan test clock. */
+export const FIXTURE_NOW = Date.parse("2026-10-03T14:32:00Z");
 
 export function minutesAgo(minutes: number): string {
-  return new Date(Date.now() - minutes * 60_000).toISOString();
+  return new Date(FIXTURE_NOW - minutes * 60_000).toISOString();
 }
 
 export function gpu(index: number, over: Partial<GpuInfo> = {}): GpuInfo {

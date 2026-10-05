@@ -483,18 +483,19 @@ function sortValue(cell: SweepCellRow, key: string): number | string | null {
   if (key === SORT_N) return cell.n;
   const v = cell.params[key];
   if (v === undefined) return null;
-  return NUMERIC.test(v.trim()) ? Number(v) : v;
+  return NUMERIC.test(v.trim()) && Number.isFinite(Number(v)) ? Number(v) : v;
 }
 
-/** Cells sorted by `sort`; numbers (also `1e-4`-style params) compare as numbers, gaps last. */
+/** Numeric values precede text ascending (reversed descending); gaps always stay last. */
 export function sortCells(cells: readonly SweepCellRow[], sort: SortState): SweepCellRow[] {
   const sign = sort.dir === "asc" ? 1 : -1;
   return cells
     .map((cell, i) => ({ cell, i, v: sortValue(cell, sort.key) }))
     .sort((a, b) => {
       if (a.v === null || b.v === null) return a.v === b.v ? a.i - b.i : a.v === null ? 1 : -1;
-      const d =
-        typeof a.v === "number" && typeof b.v === "number" ? a.v - b.v : String(a.v).localeCompare(String(b.v));
+      const d = typeof a.v === "number"
+        ? typeof b.v === "number" ? a.v - b.v : -1
+        : typeof b.v === "number" ? 1 : a.v.localeCompare(b.v);
       return d !== 0 ? sign * d : a.i - b.i;
     })
     .map((x) => x.cell);
@@ -511,6 +512,8 @@ export interface SweepStatsInput {
   unit: string;
   /** The sweep's runs, in launch order. */
   runs: readonly RunRecord[];
+  /** Absent once member records are available; summary counts/cost remain authoritative. */
+  runsState?: "loading" | "error";
   /** `GET /api/v1/hosts`, to name each run's host (undefined while it loads or fails). */
   hosts: readonly HostRow[] | undefined;
   now: number;
@@ -548,20 +551,22 @@ export function sweepStats(input: SweepStatsInput): StatItem[] {
     {
       label: "failed",
       value: String(c("failed") + c("lost")),
-      tooltip: failed.length > 0 ? failed.map(failLine).join("\n") : "No failed runs",
+      tooltip: failed.length !== c("failed") + c("lost")
+        ? `${c("failed") + c("lost")} failed or lost runs; run details are incomplete`
+        : failed.length > 0 ? failed.map(failLine).join("\n") : "No failed runs",
     },
     {
-      label: `cost, ${fmtGpuHours(total)} GPU-h`,
+      label: `cost, ${input.runsState === "loading" ? "·" : input.runsState === "error" ? DASH : fmtGpuHours(total)} GPU-h`,
       value: input.totalUsd > 0 ? fmtUsd(input.totalUsd) : "$0",
       tooltip:
-        hours.size > 0
+        input.runsState === "loading" ? "Loading GPU time" : input.runsState === "error" ? "GPU time unavailable" : hours.size > 0
           ? [...hours].map(([host, h]) => `${host} ${fmtGpuHours(h)} GPU-h`).join("\n")
           : "No GPU time yet",
     },
     {
       label: "ETA",
-      value: eta === null ? DASH : fmtDuration(eta),
-      tooltip: "Median finished run time × runs left ÷ runs running",
+      value: input.runsState === "loading" ? "·" : input.runsState === "error" || eta === null ? DASH : fmtDuration(eta),
+      tooltip: input.runsState === "loading" ? "Loading run times" : input.runsState === "error" ? "Run times unavailable" : "Median finished run time × runs left ÷ runs running",
     },
   ];
 }

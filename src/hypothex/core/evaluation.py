@@ -260,6 +260,9 @@ def evaluate_run(
                 key=k,
                 value=v,
                 source_hash=digest,
+                per_example_hash=r.get("per_example_hash"),
+                evaluation_examples=r.get("evaluation_examples"),
+                evaluation_ids_hash=r.get("evaluation_ids_hash"),
                 created_at=now,
             )
             for k, v in values.items()

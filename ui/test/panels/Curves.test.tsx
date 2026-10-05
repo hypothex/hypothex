@@ -12,6 +12,7 @@ import {
   isSystem,
   meanSeries,
   ownAxisNames,
+  parameterSubtitle,
   valueAt,
   type CheckpointJson,
   type CurvePoint,
@@ -440,4 +441,67 @@ test("rows follow meta.metrics; system metrics go below the model's, lr last", (
   expect(buildCurves(rows, {}).names).toEqual(["train/loss", "val/loss", "val/top1", "sys/gpu_mem_gb", "sys/gpu_util", "lr"]);
   const listed = buildCurves(rows, { metrics: ["val/top1", "train/loss", "val/loss", "lr"] }).names;
   expect(listed.slice(0, 3)).toEqual(["val/top1", "train/loss", "val/loss"]);
+});
+
+describe("run lifecycle and contributing-run legends", () => {
+  test("terminal runs describe absent history without promising future data", () => {
+    const { rerender } = render(<Curves result={result([])} runStatus="finished" />);
+    expect(screen.getByText("No metric history recorded")).toBeTruthy();
+    for (const status of ["failed", "killed", "lost"] as const) {
+      rerender(<Curves result={result([])} runStatus={status} />);
+      expect(screen.getByText("No metric history recorded")).toBeTruthy();
+    }
+    rerender(<Curves result={result([])} runStatus="running" />);
+    expect(screen.getByText("No metric history yet")).toBeTruthy();
+  });
+
+  test("one contributing run excludes empty metadata groups from the seed/mean legend", () => {
+    const { container } = render(<Curves result={result(points().filter((p) => p.run_id === "b1"))} />);
+    const key = container.querySelector('[aria-label="Key"]');
+    expect(key?.textContent).toContain("run");
+    expect(key?.textContent).not.toContain("seed");
+    expect(key?.textContent).not.toContain("mean");
+  });
+
+  test("a board-selected best group is accented and recorded params appear in its subtitle", () => {
+    const { container } = render(<Curves result={result(points(), {
+      ...META, best_group_id: "aug", groups: [META.groups[0], { ...META.groups[1], params: { lr: 0.0003, batch: 128 } }],
+    })} />);
+    const best = container.querySelector('[data-group="aug"]');
+    expect(best?.getAttribute("data-best")).toBe("true");
+    expect((best?.querySelector(".ml") as SVGElement)?.style.stroke).toBe("var(--best)");
+    expect(best?.querySelector(".curve-params")?.lastChild?.textContent).toBe("batch=128 · lr=0.0003");
+    expect(container.querySelector('[data-group="base"]')?.getAttribute("data-best")).toBeNull();
+  });
+
+  test("no metadata best ID means no inferred best config", () => {
+    const { container } = render(<Curves result={result()} />);
+    expect(container.querySelector('[data-best="true"]')).toBeNull();
+  });
+});
+
+
+test("parameter subtitles use only recorded values with stable ordering", () => {
+  expect(parameterSubtitle(undefined)).toBe("");
+  expect(parameterSubtitle({})).toBe("");
+  expect(parameterSubtitle({ optimizer: "adam", decay: null, layers: [2, 4] })).toBe('decay=null · layers=[2,4] · optimizer=adam');
+});
+
+test("sparse metrics with one contributor per cell do not claim a seed mean", () => {
+  const rows = points().filter((p) => (p.run_id === "b1" && p.name === "train_loss") || (p.run_id === "b2" && p.name === "val_top1"));
+  const { container } = render(<Curves result={result(rows)} />);
+  const key = container.querySelector('[aria-label="Key"]');
+  expect(key?.textContent).toContain("run");
+  expect(key?.textContent).not.toContain("mean");
+});
+
+
+test("long recorded subtitles are bounded while retaining full text and chart clearance", () => {
+  const params = { model: "a-very-long-model-name-".repeat(20) };
+  const { container } = render(<Curves result={result(points(), { ...META, groups: META.groups.map((g) => ({ ...g, params })) })} />);
+  const text = container.querySelector(".curve-params");
+  expect(text?.querySelector("title")?.textContent).toBe(parameterSubtitle(params));
+  expect(text?.lastChild?.textContent?.endsWith("…")).toBe(true);
+  const plotTop = Number(container.querySelector(".curve-cell clipPath rect")?.getAttribute("y"));
+  expect(plotTop).toBeGreaterThan(Number(text?.getAttribute("y")) + 12);
 });

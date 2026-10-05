@@ -301,3 +301,14 @@ Hypothex's own state lives only in reserved locations that remote and artifact p
   inherited from `hx mcp`'s `HYPOTHEX_AGENT` unless a tool call overrides it.
 
 See `docs/http_api.rst`, `docs/mcp.rst` and `docs/sweeps.rst` for examples.
+
+
+## 2026-10-05 cost completeness addition
+
+`CostTotals.gpu_pricing_complete: bool | None = None` distinguishes legacy unknown
+pricing from explicitly complete pricing. CPU-only use and an explicit rate
+(including zero) are complete; billed GPUs with no rate are incomplete. Known
+charges are retained. Leaderboard `cost_complete` also requires all relevant
+members to carry complete cost evidence; a partial recorded subtotal is not the
+group's total price. See the Phase 1b backlog additions for population-bound cost
+comparisons and repeat metadata.

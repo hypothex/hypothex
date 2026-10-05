@@ -142,6 +142,12 @@ class CostTotals(BaseModel):
     gpu_usd: float = 0.0
     api_usd: float = 0.0
     total_usd: float = 0.0
+    gpu_pricing_complete: bool | None = None
+    """Whether every billed GPU has a known rate; None for legacy cost records.
+
+    An explicit zero rate is known pricing. Numeric dollar fields remain the
+    recorded known subtotal even when this flag is False or unknown.
+    """
 
 
 class RunRecord(BaseModel):
@@ -204,6 +210,12 @@ class ScoreRecord(BaseModel):
     value: float | None = None
     error: str | None = None
     source_hash: str | None = None
+    per_example_hash: str | None = None
+    """Exact per-example file bytes emitted by this successful evaluation."""
+    evaluation_examples: int | None = None
+    """Number of unique evaluated predictions, only with full per-example coverage."""
+    evaluation_ids_hash: str | None = None
+    """Hash of sorted evaluated prediction IDs bound to the per-example artifact."""
     created_at: datetime
 
 

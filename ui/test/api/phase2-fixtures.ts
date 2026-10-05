@@ -205,7 +205,7 @@ export const SWEEP: SweepSummary = {
   },
   run_ids: ["r-7e3f", "r-f0a1", "r-66cd", "r-71f2", "r-1d77", "r-c2b9"],
   tag: "sweep:0a1b2c3d:s-7f3a",
-  counts: { finished: 4, running: 1, queued: 1 },
+  counts: { finished: 4, running: 1, queued: 1, failed: 0, killed: 0, lost: 0, total: 6 },
   cells: [
     BEST_CELL,
     {

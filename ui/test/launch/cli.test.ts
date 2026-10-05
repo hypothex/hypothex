@@ -21,6 +21,13 @@ const SPEC: LaunchSpec = {
 };
 const TAIL = "-H 'beam 10 at lr 3e-4 holds' -- python train.py --lr 3e-4 --seed '{seed}'";
 
+test("quotes leading equals so zsh cannot expand the copied argument", () => {
+  expect(cliQuote("=ls")).toBe("'=ls'");
+  expect(cliQuote("=unknown-command")).toBe("'=unknown-command'");
+  expect(cliQuote("--name=x")).toBe("--name=x");
+  expect(launchCliLine({ ...SPEC, argv: ["python", "=ls"] }, 4)).toEndWith("-- python '=ls'");
+});
+
 test("cliQuote leaves plain words alone and quotes braces, spaces, quotes and $", () => {
   expect(cliQuote("train.py")).toBe("train.py");
   expect(cliQuote("3e-4")).toBe("3e-4");

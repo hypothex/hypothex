@@ -343,8 +343,8 @@ def test_stat_strip_training_and_agent_eval() -> None:
     ti = NoiseInterval(lo=0.5, hi=0.7, method="wilson", n=10)
     best = row("opus", [0.6, 0.6, 0.6], ti=ti, usage=UsageTotals(usd=6.0, calls=30))
     strip = task_stat_strip(board("agent_eval", [best]))
-    assert labels(strip) == ["opus 95% CI", "seed σ", "$ / attempt"]
-    assert strip[2]["value"] == "$0.20"  # $6.00 over 3 seeds x 10 examples
+    assert labels(strip) == ["opus 95% CI", "seed σ"]
+    # A seed count and CI sample size do not establish the billed attempt count.
 
 
 def test_stat_strip_agent_iteration() -> None:

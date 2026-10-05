@@ -38,7 +38,7 @@ export function runStats(
         out.push({ label, value: fmtScore(value), tooltip: "this run's primary score" });
       }
     }
-    if (primary.interval) {
+    if (value !== null && primary.interval) {
       const iv = primary.interval;
       out.push({
         label: "95% CI",

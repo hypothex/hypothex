@@ -129,7 +129,13 @@ def test_leaderboard_and_stat_strip_match_task_leaderboard(ctx: Context, toy_rep
 
     strip = query_panel(ctx, "toy", "toy-acc", _panel("stat_strip"))
     assert strip.rows == board.stat_strip
-    assert strip.meta == {"headline": board.headline, "unit": "", "value_format": "fraction"}
+    assert strip.meta == {
+        "headline": board.headline,
+        "unit": "",
+        "value_format": "fraction",
+        "primary": "accuracy/value",
+        "higher_is_better": True,
+    }
     assert (lb.meta["unit"], lb.meta["value_format"]) == ("", "fraction")
 
 
@@ -572,7 +578,9 @@ def test_curves_rows_spikes_kills_and_checkpoints(ctx: Context, toy_repo: Path) 
         {"run_id": "c1", "step": 10, "value": 0.5, "best": False},
         {"run_id": "c1", "step": 20, "value": 0.7, "best": True},
     ]
-    assert result.meta["groups"] == [{"group_id": "aaaa@c1", "label": "baseline"}]
+    assert result.meta["groups"] == [
+        {"group_id": "aaaa@c1", "label": "baseline", "params": {}, "run_ids": ["c1", "c2"]}
+    ]
     assert result.meta["metrics"] == ["train/loss", "val/acc"]
     assert result.meta["x"] == "step"
 
@@ -650,9 +658,30 @@ def test_group_by_run_labels_each_repeat_of_its_config(ctx: Context, toy_repo: P
     curves = _panel("curves", data={"metrics": ["gpu_pct"], "group_by": "run"})
     result = query_panel(ctx, "toy", "toy-acc", curves)
     assert result.meta["groups"] == [
-        {"group_id": "b1", "label": "ha r1", "seed_group": "aaaa@c1", "repeat": 1},
-        {"group_id": "c1", "label": "hb r1", "seed_group": "bbbb@c1", "repeat": 1},
-        {"group_id": "b2", "label": "ha r2", "seed_group": "aaaa@c1", "repeat": 2},
+        {
+            "group_id": "b1",
+            "params": {},
+            "run_ids": ["b1"],
+            "label": "ha r1",
+            "seed_group": "aaaa@c1",
+            "repeat": 1,
+        },
+        {
+            "group_id": "c1",
+            "params": {},
+            "run_ids": ["c1"],
+            "label": "hb r1",
+            "seed_group": "bbbb@c1",
+            "repeat": 1,
+        },
+        {
+            "group_id": "b2",
+            "params": {},
+            "run_ids": ["b2"],
+            "label": "ha r2",
+            "seed_group": "aaaa@c1",
+            "repeat": 2,
+        },
     ]
     # other panels grouped by run get the same labels
     scatter = _panel("scatter", data={"x": "gpu_pct", "group_by": "run"})
@@ -1034,7 +1063,7 @@ def test_stat_strip_with_metrics_summarises_selected_runs(ctx: Context, toy_repo
             "tooltip": "No value in the 2 selected runs",
         },
     ]
-    assert set(result.meta) == {"headline", "unit", "value_format"}
+    assert set(result.meta) == {"headline", "unit", "value_format", "primary", "higher_is_better"}
 
 
 def test_stat_strip_metrics_use_units(ctx: Context, toy_repo: Path) -> None:
@@ -1271,8 +1300,8 @@ def test_grid_fraction_solved_and_difficulty_order(ctx: Context, toy_repo: Path)
     assert result.meta["items"] == ["ex-2", "ex-1", "ex-0"]
     # group means: beta 2/3 > alpha 1/2
     assert result.meta["groups"] == [
-        {"group_id": "bbbb@c1", "label": "beta"},
-        {"group_id": "aaaa@c1", "label": "alpha"},
+        {"group_id": "bbbb@c1", "label": "beta", "run_ids": ["b1"]},
+        {"group_id": "aaaa@c1", "label": "alpha", "run_ids": ["a1", "a2"]},
     ]
     assert result.meta["field"] == "accuracy@v1.correct"
     assert result.rows == [
@@ -1307,9 +1336,9 @@ def test_query_view_builds_one_board_and_lists_runs_once(
     boards: list[int] = []
     real_board = panels._build_board
 
-    def board_spy(*args: Any) -> Any:
+    def board_spy(*args: Any, **kwargs: Any) -> Any:
         boards.append(1)
-        return real_board(*args)
+        return real_board(*args, **kwargs)
 
     lists: list[int] = []
     real_list = ctx.index.list_runs

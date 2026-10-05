@@ -10,7 +10,7 @@ import { useAllRuns, useProjects } from "../../api/queries";
 import { type Carry, type LaunchDraft, launchDefaults, pinnedCommit } from "../../launch/draft";
 import { LaunchDialog } from "../../launch/LaunchDialog";
 import { parseTime } from "./format";
-import { ErrorBox, Loading } from "./QueryState";
+import { OpeningDialog } from "./OpeningDialog";
 import type { SweepCellRow } from "./SweepModel";
 
 export interface RerunDefaults {
@@ -37,6 +37,8 @@ export function rerunHistoryQuery(project: string, task: string | null): Omit<Ru
  * The best cell's latest run (else the sweep's latest run) and the dialog defaults it gives.
  * `history` is every other run that may hold a seed of that config (`rerunHistoryQuery`);
  * `complete` is false when that list is cut (`AllRuns.complete`): then no seed is proposed.
+ * Throws when a selected best cell has no available run template; callers must refresh
+ * or dismiss instead of silently starting a different configuration.
  */
 export function rerunDefaults(
   spec: SweepSpec,
@@ -46,6 +48,9 @@ export function rerunDefaults(
   complete = true,
 ): RerunDefaults {
   const pool = best ? runs.filter((r) => best.run_ids.includes(r.run_id)) : [...runs];
+  if (best && pool.length === 0) {
+    throw new Error("The best cell's runs are not available yet. Retry after the runs refresh.");
+  }
   const template = [...pool].sort((a, b) => parseTime(b.created_at) - parseTime(a.created_at))[0] ?? null;
   const defaults = launchDefaults(template, [...runs, ...history], complete);
   // a CPU template (0 GPUs) stays a CPU run; a run with no field (phase 1) takes the default
@@ -65,6 +70,9 @@ export interface SweepRerunProps {
   best: SweepCellRow | null;
   /** The sweep's runs, in launch order; undefined while they load. */
   runs: readonly RunRecord[] | undefined;
+  runsError?: Error | null;
+  /** Refresh the sweep summary/member queries when their snapshots disagree. */
+  onRefresh?: () => void;
   onClose: () => void;
   onLaunched: (records: RunRecord[], host: string) => void;
 }
@@ -84,22 +92,28 @@ interface Opened {
  * params, vars or commit that Launch sends (the dialog reads `initial` once, so the seeds
  * shown would no longer match them); a failed refetch must not swap the dialog out either.
  */
-export function SweepRerun({ project, spec, best, runs, onClose, onLaunched }: SweepRerunProps): ReactElement {
+export function SweepRerun({ project, spec, best, runs, runsError, onRefresh, onClose, onLaunched }: SweepRerunProps): ReactElement {
   const projects = useProjects();
   const history = useAllRuns(rerunHistoryQuery(project, spec.task));
   const opened = useRef<Opened | null>(null);
+  const retry = (): void => {
+    void projects.refetch();
+    void history.refetch();
+    onRefresh?.();
+  };
+  const opening = (error?: Error): ReactElement => <OpeningDialog title="Rerun sweep" onClose={onClose} error={error} onRetry={retry} />;
   if (opened.current === null) {
-    const error = projects.error ?? history.error;
-    if (error) return <ErrorBox error={error} />;
-    if (projects.data === undefined || history.data === undefined || history.isFetching || runs === undefined) {
-      return <Loading />;
-    }
+    if (projects.isFetching || history.isFetching) return opening();
+    const error = projects.error ?? history.error ?? runsError;
+    if (error) return opening(error);
+    if (projects.data === undefined || history.data === undefined || runs === undefined) return opening();
     const repo = projects.data.find((p) => p.project === project)?.repo;
-    if (repo === undefined) return <ErrorBox error={new Error(`no repo for ${project} on the hub`)} />;
-    opened.current = {
-      repo,
-      defaults: rerunDefaults(spec, best, runs, history.data.runs, history.data.complete),
-    };
+    if (repo === undefined) return opening(new Error(`no repo for ${project} on the hub`));
+    try {
+      opened.current = { repo, defaults: rerunDefaults(spec, best, runs, history.data.runs, history.data.complete) };
+    } catch (error) {
+      return opening(error instanceof Error ? error : new Error(String(error)));
+    }
   }
   const { repo, defaults: d } = opened.current;
   return (

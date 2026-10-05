@@ -48,6 +48,18 @@ describe("splitCommand", () => {
     expect(splitCommand("python a.py '&&' x > out.txt").operators).toEqual([">"]);
   });
 
+  test("warns about attached shell syntax without changing argv", () => {
+    const result = splitCommand("python a.py; python b.py >log.txt a|b 2>&1");
+    expect(result.argv).toEqual(["python", "a.py;", "python", "b.py", ">log.txt", "a|b", "2>&1"]);
+    expect(result.operators).toEqual([";", ">", "|", "2>&1"]);
+    expect(splitCommand("echo 'a|b' \"x>y\" a\\;b").operators).toEqual([]);
+    expect(splitCommand("echo 'quoted'|cat").operators).toEqual(["|"]);
+  });
+
+  test("removes quoted backslash-newline but preserves other literal backslashes", () => {
+    expect(splitCommand('python "a\\\nb" "a\\qb"').argv).toEqual(["python", "ab", "a\\qb"]);
+  });
+
   test("round-trips shellJoin", () => {
     const argv = ["python", "it's", "", "a b", "--seed={seed}", 'say "x"'];
     expect(splitCommand(shellJoin(argv)).argv).toEqual(argv);

@@ -32,6 +32,7 @@ import { useTooltip, type Tooltip } from "../charts/Tooltip";
 import { fmtDuration, valueFormatter, type ValueFormatter } from "../charts/valueFormat";
 import type { CostTotals, LeaderboardRow, NoiseInterval, Stats, UsageTotals, VersusBest } from "../api/models";
 import type { PanelProps } from "./index";
+import { repeatFlags, type RepeatFlagResult } from "../pages/components/TaskInsights";
 
 /** `hypothex.core.seeds.Stats` as JSON. */
 export type StatsJson = Stats;
@@ -117,21 +118,52 @@ function fmtGpuHours(hours: number): string {
 
 /**
  * A group's cost in its meta line (spec 8A.7): `$6.51 · 11 GPU-h · 4m 10s`. Dollars always;
- * GPU hours and agent time only when there are any.
+ * GPU hours and agent time only when there are any. Incomplete GPU pricing keeps
+ * the total unknown and labels any recorded charges as a subtotal.
  */
-export function costText(cost: CostTotals, usage: UsageTotals | null): string {
-  const parts = [`$${cost.total_usd.toFixed(2)}`];
+export function costText(cost: CostTotals, usage: UsageTotals | null, complete = true): string {
+  const parts = complete ? [`$${cost.total_usd.toFixed(2)}`] : ["Cost unknown"];
+  if (!complete && cost.total_usd > 0) parts.push(`$${cost.total_usd.toFixed(2)} recorded`);
   if (cost.gpu_hours > 0) parts.push(`${fmtGpuHours(cost.gpu_hours)} GPU-h`);
   if (usage && usage.seconds > 0) parts.push(fmtDuration(usage.seconds));
   return parts.join(" · ");
 }
 
 /** What the cost is made of, then the usage calls and tokens. */
-export function costTitle(cost: CostTotals, usage: UsageTotals | null): string {
-  const head =
-    `GPU $${cost.gpu_usd.toFixed(2)} + API $${cost.api_usd.toFixed(2)} over the group's runs, ` +
-    `${cost.gpu_hours.toFixed(2)} GPU h`;
+export function costTitle(cost: CostTotals, usage: UsageTotals | null, complete = true): string {
+  const charges = `GPU $${cost.gpu_usd.toFixed(2)} + API $${cost.api_usd.toFixed(2)}`;
+  const head = complete
+    ? `${charges} over the group's runs, ${cost.gpu_hours.toFixed(2)} GPU h`
+    : `Total cost unknown: GPU rate or run cost information is incomplete. Recorded subtotal $${cost.total_usd.toFixed(2)} (${charges}); ${cost.gpu_hours.toFixed(2)} GPU h`;
   return usage ? `${head}\n${usage.calls} calls, ${usage.tokens_in} tokens in, ${usage.tokens_out} out` : head;
+}
+
+/** Benchmark p95 checks use exact per-run observations, never positional seed values. */
+function repeatCheck(row: LeaderboardRowJson, pkey: string, meta: Record<string, unknown> | undefined): RepeatFlagResult | null {
+  const [metric, key] = pkey.split("/");
+  if (meta?.kind !== "system_bench" || meta.higher_is_better !== false || key !== "p95" || !["ms", "s"].includes(String(meta.unit))) return null;
+  const versions = meta.metric_versions;
+  const version = versions && typeof versions === "object" ? (versions as Record<string, unknown>)[metric ?? ""] : undefined;
+  const observations = (row.repeat_observations ?? []).map((r) => {
+    const provenance = [r.metric, r.version, r.key, r.source_hash, r.dataset_fingerprint];
+    const matches = r.metric === metric && r.key === key && typeof version === "string" && r.version === version;
+    const complete = provenance.every((v) => typeof v === "string" && v.trim().length > 0);
+    return { run_id: r.run_id, value: r.value, fingerprint: matches && complete ? JSON.stringify(provenance) : null };
+  });
+  return repeatFlags(observations, row.run_ids);
+}
+
+function RepeatCheck({ check }: { check: RepeatFlagResult | null }): ReactElement | null {
+  if (!check) return null;
+  if (!check.complete) return <span title={check.reason ?? "Comparable repeat observations are unavailable."}>Repeat check unavailable</span>;
+  if (!check.flags.length) return <span title="All recorded repeats have comparable p95 observations; none exceeds the group median by more than 10%.">No repeats &gt;10% above median</span>;
+  return <>{check.flags.map((flag) => (
+    <a key={flag.runId} href={`/r/${encodeURIComponent(flag.runId)}`}
+      style={{ color: "var(--fail)", overflowWrap: "anywhere" }}
+      title={`Recorded p95 is ${Number((flag.relativeDelta * 100).toPrecision(6))}% above the median of this group's comparable repeats; flagged only when more than 10% above it.`}>
+      {`Flagged repeat ${flag.runId} · +${Number((flag.relativeDelta * 100).toPrecision(3))}% p95 vs median`}
+    </a>
+  ))}</>;
 }
 
 /** The best group's band: its test-set interval, else its seed t-interval. */
@@ -422,15 +454,16 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
                   <span>
                     <a href={`/r/${encodeURIComponent(row.latest_run_id)}`}>{row.group_id}</a>
                   </span>
-                  {c && (c.total_usd > 0 || c.gpu_hours > 0) ? (
-                    <span className="cost" title={costTitle(c, u)}>
-                      {costText(c, u)}
+                  {row.cost_complete === false || (c && (c.total_usd > 0 || c.gpu_hours > 0)) ? (
+                    <span className="cost" title={c ? costTitle(c, u, row.cost_complete !== false) : "Total cost is unavailable."}>
+                      {c ? costText(c, u, row.cost_complete !== false) : "Cost unknown"}
                     </span>
                   ) : u && (u.usd > 0 || u.seconds > 0) ? (
                     <span title={`${u.calls} calls, ${u.tokens_in} tokens in, ${u.tokens_out} out`}>
                       ${u.usd.toFixed(2)} · {fmtDuration(u.seconds)}
                     </span>
                   ) : null}
+                  <RepeatCheck check={repeatCheck(row, pkey, meta)} />
                 </div>
               </div>
               <div className="acc">

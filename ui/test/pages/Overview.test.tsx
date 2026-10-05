@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { cleanup, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import { queryKeys } from "../../src/api/queries";
 import { OverviewPage } from "../../src/pages/Overview";
 import { makeOverview } from "./fixtures";
@@ -16,7 +16,7 @@ afterEach(() => {
 
 test("only the hub's own row: backend headline and counts, panels a-f", async () => {
   // the backend's host_rows always sends the hub itself; with no other host nothing changes
-  mockApi({ "GET /api/v1/overview": makeOverview(), "GET /api/v1/hosts": [localRow()], [ENV]: { hx_version: "0.5.0" } });
+  mockApi({ "GET /api/v1/overview": { ...makeOverview(), cost_today_usd: 0 }, "GET /api/v1/hosts": [localRow()], [ENV]: { hx_version: "0.5.0" } });
   renderWithClient(<OverviewPage />);
   const h1 = await screen.findByRole("heading", { level: 1 });
   const hostsPanel = screen.getByRole("region", { name: "a Hosts" });
@@ -24,11 +24,31 @@ test("only the hub's own row: backend headline and counts, panels a-f", async ()
   expect(hub.querySelector(".kind")?.textContent).toBe("hub");
   expect(h1.textContent).toBe("Idle. SVM leads toy-test by 0.037, p = 0.15");
   for (const text of ["19 runs today", "3 failed", "1 task"]) expect(screen.getByText(text)).toBeTruthy();
+  expect([...document.querySelectorAll(".metaline span")].map(span => span.textContent)).toEqual(["19 runs today", "3 failed", "1 task"]);
+  expect(hostsPanel.querySelector(".aside")).toBeNull();
   expect(document.querySelector(".hosts-banner")).toBeNull();
   const names = screen.getAllByRole("region").map((r) => r.getAttribute("aria-label"));
   expect(names).toEqual(["a Hosts", "b Runs by launcher", "c Ideas", "d Running", "e Failures", "f Projects"]);
   expect(within(screen.getByRole("region", { name: "d Running" })).getByText("none")).toBeTruthy();
   expect(within(screen.getByRole("region", { name: "f Projects" })).getByText("0.9222")).toBeTruthy();
+});
+
+test("backend headline and counts remain visible while hosts are pending", async () => {
+  let finishHosts!: (rows: ReturnType<typeof localRow>[]) => void;
+  const pending = new Promise<ReturnType<typeof localRow>[]>(resolve => { finishHosts = resolve; });
+  mockApi({
+    "GET /api/v1/overview": { ...makeOverview(), cost_today_usd: 0 },
+    "GET /api/v1/hosts": () => pending,
+    [ENV]: { hx_version: "0.5.0" },
+  });
+  renderWithClient(<OverviewPage />);
+  expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Idle. SVM leads toy-test by 0.037, p = 0.15");
+  const hostsPanel = screen.getByRole("region", { name: "a Hosts" });
+  expect(within(hostsPanel).getByText("loading…").getAttribute("aria-busy")).toBe("true");
+  expect(within(hostsPanel).queryByRole("group", { name: "local" })).toBeNull();
+  expect([...document.querySelectorAll(".metaline span")].map(span => span.textContent)).toEqual(["19 runs today", "3 failed", "1 task"]);
+  await act(async () => { finishHosts([localRow()]); });
+  expect(await within(hostsPanel).findByRole("group", { name: "local" })).toBeTruthy();
 });
 
 test("with hosts: running/waiting from the backend, stale from hosts; metaline and cells", async () => {
@@ -53,6 +73,7 @@ test("with hosts: running/waiting from the backend, stale from hosts; metaline a
     "dgx",
     "mccleary",
     "gpu2",
+    "Key",
   ]);
   const gpu1 = within(panel).getByRole("group", { name: "gpu1" });
   expect(within(gpu1).getAllByRole("link")[0]?.getAttribute("href")).toBe(`/r/${RUN_AGENT}`);
@@ -78,6 +99,9 @@ test("a host stale for more than 24 h gets a banner; it is still stale, not lost
     "No answer for more than 24 h. Its runs stay stale, not lost: only the host marks a run lost.",
   );
   expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("1 running. dgx stale 1d");
+  const staleHost = screen.getByRole("group", { name: "dgx" });
+  expect(staleHost.querySelector('svg[data-state="stale"]')).toBeTruthy();
+  expect(staleHost.querySelector('svg[data-state="lost"]')).toBeNull();
 });
 
 test("the banner threshold is the hub's stale_banner_hours", async () => {

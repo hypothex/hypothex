@@ -72,7 +72,9 @@ def compute_cost(record: RunRecord, usd_per_gpu_hour: float | None) -> CostTotal
     ``gpu_usd = gpu_hours × usd_per_gpu_hour`` (0 when the host has no rate);
     ``api_usd = usage.usd``; ``total_usd = gpu_usd + api_usd``. Each value is
     rounded to 6 decimals after the sums, so float noise never shows up in
-    ``run.yaml``.
+    ``run.yaml``. ``gpu_pricing_complete`` is true for CPU runs and explicitly
+    priced GPU runs (including a zero rate), false when a billed GPU has no rate.
+    Legacy cost records without this metadata retain an unknown value.
 
     Parameters
     ----------
@@ -98,8 +100,9 @@ def compute_cost(record: RunRecord, usd_per_gpu_hour: float | None) -> CostTotal
     ...     usage=UsageTotals(usd=0.375),
     ...     gpus_requested=2,
     ... )
-    >>> compute_cost(rec, 2.10)
-    CostTotals(gpu_hours=3.0, gpu_usd=6.3, api_usd=0.375, total_usd=6.675)
+    >>> cost = compute_cost(rec, 2.10)
+    >>> (cost.gpu_hours, cost.gpu_usd, cost.api_usd, cost.total_usd, cost.gpu_pricing_complete)
+    (3.0, 6.3, 0.375, 6.675, True)
     """
     gpu_hours = wall_hours(record) * billed_gpus(record)
     gpu_usd = gpu_hours * (usd_per_gpu_hour or 0.0)
@@ -109,6 +112,7 @@ def compute_cost(record: RunRecord, usd_per_gpu_hour: float | None) -> CostTotal
         gpu_usd=round(gpu_usd, COST_DECIMALS),
         api_usd=round(api_usd, COST_DECIMALS),
         total_usd=round(gpu_usd + api_usd, COST_DECIMALS),
+        gpu_pricing_complete=billed_gpus(record) == 0 or usd_per_gpu_hour is not None,
     )
 
 
@@ -169,6 +173,13 @@ def add_costs(costs: Iterable[CostTotals | None]) -> CostTotals | None:
         gpu_usd=round(sum(c.gpu_usd for c in present), 6),
         api_usd=round(sum(c.api_usd for c in present), 6),
         total_usd=round(sum(c.total_usd for c in present), 6),
+        gpu_pricing_complete=(
+            False
+            if any(c.gpu_pricing_complete is False for c in present)
+            else None
+            if any(c.gpu_pricing_complete is None for c in present)
+            else True
+        ),
     )
 
 

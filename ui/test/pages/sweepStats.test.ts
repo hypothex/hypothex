@@ -176,6 +176,15 @@ const TABLE = parseCells([
 const lrs = (cs: SweepCellRow[]): (string | undefined)[] => cs.map((c) => c.params.lr);
 
 describe("table sort", () => {
+  test("mixed numeric and text params have the same total order for every permutation", () => {
+    const values = ["2", "10", "1a"];
+    const permutations = values.flatMap((a) => values.filter((b) => b !== a).map((b) => [a, b, values.find((c) => c !== a && c !== b) as string]));
+    for (const values of permutations) {
+      const cells = parseCells(values.map((lr, i) => raw(String(i), lr, "5", "0", 1, 0.5)));
+      expect(lrs(sortCells(cells, { key: "lr", dir: "asc" }))).toEqual(["2", "10", "1a"]);
+      expect(lrs(sortCells(cells, { key: "lr", dir: "desc" }))).toEqual(["1a", "10", "2"]);
+    }
+  });
   test("by mean (best first, unscored last), by a numeric param, by n", () => {
     expect(lrs(sortCells(TABLE, defaultSort(true)))).toEqual(["3e-4", "3e-5", "1e-4", "1e-3"]);
     expect(lrs(sortCells(TABLE, defaultSort(false)))).toEqual(["1e-4", "3e-5", "3e-4", "1e-3"]);
@@ -224,6 +233,14 @@ describe("table sort", () => {
 });
 
 describe("sweepStats", () => {
+  test("summary failure counts never claim there are no failures while detail rows lag", () => {
+    const input = { counts: { failed: 2, lost: 1 }, totalUsd: 0, best: null, names: [], metric: "score", unit: "", hosts: HOSTS, now: NOW };
+    for (const runs of [[], [run("c2")]]) {
+      expect(sweepStats({ ...input, runs }).find((s) => s.label === "failed")).toMatchObject({
+        value: "3", tooltip: "3 failed or lost runs; run details are incomplete",
+      });
+    }
+  });
   test("best, interval, counts, cost with GPU-hours, ETA", () => {
     const items = sweepStats({
       counts: COUNTS,

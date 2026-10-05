@@ -2170,7 +2170,10 @@ def create_app(
 
     @app.get("/api/v1/tasks/{project}/{task}/leaderboard")
     def leaderboard(
-        project: str, task: str, metric: Annotated[list[str] | None, Query()] = None
+        project: str,
+        task: str,
+        metric: Annotated[list[str] | None, Query()] = None,
+        primary: str | None = None,
     ) -> dict[str, Any]:
         versions = {}
         for item in metric or []:
@@ -2178,7 +2181,7 @@ def create_app(
             if version is None:
                 raise RunError(f"metric needs name@version, got {item!r}")
             versions[name] = version
-        return to_jsonable(q.get_leaderboard(ctx, task, project, versions or None))
+        return to_jsonable(q.get_leaderboard(ctx, task, project, versions or None, primary=primary))
 
     @app.post("/api/v1/tasks/{project}/{task}/reeval")
     def task_reeval(project: str, task: str, body: ReevalBody) -> dict[str, Any]:
@@ -2542,8 +2545,16 @@ def create_app(
         return to_jsonable(q.compare_runs(ctx, [i for i in ids.split(",") if i]))
 
     @app.get("/api/v1/compare/examples")
-    def compare_examples(a: str, b: str, metric: str, field: str = "correct") -> dict[str, Any]:
-        return to_jsonable(q.compare_examples(ctx, a, b, metric, field))
+    def compare_examples(
+        a: str,
+        b: str,
+        metric: str,
+        field: str = "correct",
+        require_bound: bool = False,
+    ) -> dict[str, Any]:
+        return to_jsonable(
+            q.compare_examples(ctx, a, b, metric, field, require_bound=require_bound)
+        )
 
     @app.get("/api/v1/datasets/check")
     def datasets_check(project: str | None = None) -> list[dict[str, Any]]:

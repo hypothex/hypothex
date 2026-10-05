@@ -38,6 +38,7 @@ import { ScoresList, primaryRef } from "./components/ScoresList";
 import { StateBanner } from "./components/StateBanner";
 import { StatStrip } from "./components/StatStrip";
 import { StatusLine } from "./components/StatusLine";
+import { CheckpointTable } from "./components/TrainingDetails";
 import { PageStyles } from "./components/styles";
 import { WhereList } from "./components/WhereList";
 
@@ -137,6 +138,7 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
   const kindStart = next;
   if (showKind) next += kindPanelCount(specs);
   const whereLetter = panelLetter(next++);
+  const checkpointLetter = kind.data?.kind === "training" ? panelLetter(next++) : "";
   const placeLetter = remote ? panelLetter(next++) : "";
   const scoresLetter = panelLetter(next++);
   const notesLetter = panelLetter(next++);
@@ -227,6 +229,8 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
           specs={specs}
           example={example}
           startIndex={kindStart}
+          currentGroupId={row?.group_id}
+          runStatus={record.status}
         />
       ) : null}
       <div className="run-grid">
@@ -234,6 +238,11 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
           <Figure letter={whereLetter} title="Where" aside={<span title="host the run executed on">{record.host}</span>}>
             <WhereList detail={detail} />
           </Figure>
+          {kind.data?.kind === "training" ? (
+            <Figure letter={checkpointLetter} title="Checkpoints">
+              <CheckpointTable artifacts={record.artifacts} />
+            </Figure>
+          ) : null}
         </div>
         <div className="side">
           {remote ? (

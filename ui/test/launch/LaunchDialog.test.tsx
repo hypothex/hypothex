@@ -1,13 +1,15 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, mock, setSystemTime, test } from "bun:test";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 
+import { auth } from "../../src/api/auth";
 import type { RunRecord } from "../../src/api/models";
 import { SEED_HINT } from "../../src/launch/command";
 import { CONFIG_ERROR, SEED_HISTORY_CUT } from "../../src/launch/draft";
 import { LaunchDialog, type LaunchDialogProps } from "../../src/launch/LaunchDialog";
+import { LAUNCH_HOSTS_KEY } from "../../src/launch/launchApi";
 import { makeRecord } from "../pages/fixtures";
 import { type Call, HttpReply, mockApi, mockClipboard, renderWithClient, restoreFetch } from "../pages/helpers";
-import { CMD, DGX, GPU1, GPU2, MCCLEARY, PROJECT, REPO_PATH, TASK, gpu, hostRow } from "./fixtures";
+import { CMD, DGX, FIXTURE_NOW, GPU1, GPU2, MCCLEARY, PROJECT, REPO_PATH, TASK, gpu, hostRow } from "./fixtures";
 
 afterEach(restoreFetch);
 
@@ -56,32 +58,60 @@ async function ready(host = "gpu1"): Promise<void> {
 }
 
 describe("host picker", () => {
+  test("keeps the selected host visible when its background refresh fails", async () => {
+    let failed = false;
+    mockApi({
+      ...HOSTS,
+      "GET /api/v1/hosts": () => failed
+        ? new HttpReply(500, { error: "host refresh failed", type: "IndexError" })
+        : HOSTS["GET /api/v1/hosts"],
+    });
+    const { client } = renderWithClient(<LaunchDialog
+      project={PROJECT} task={TASK} repo={REPO_PATH}
+      initial={{ host: "gpu1", command: CMD, seeds: "4", gpus: 1 }}
+      onClose={() => {}} onLaunched={() => {}}
+    />);
+    await ready();
+    typeHypothesis("same selected host");
+    failed = true;
+    await act(() => client.refetchQueries({ queryKey: LAUNCH_HOSTS_KEY, exact: true }));
+    expect((await screen.findByRole("alert")).textContent).toBe("host refresh failed");
+    expect(radio("gpu1").checked).toBe(true);
+    expect(screen.getByLabelText("GPUs per run").textContent).toBe("1");
+    expect(launchButton(1).disabled).toBe(false);
+  });
+
   test("lists the hub and every host and picks the one with the most free GPUs", async () => {
-    mockApi(HOSTS);
-    renderDialog();
-    await ready("gpu1");
-    expect(screen.getByRole("dialog", { name: "New run" })).toBeTruthy();
-    expect(screen.getByText(`${PROJECT} / ${TASK}`)).toBeTruthy();
-    const group = screen.getByRole("radiogroup", { name: "Host" });
-    expect(within(group).getAllByRole("radio").map((r) => r.getAttribute("aria-label"))).toEqual([
-      "local",
-      "gpu1",
-      "dgx",
-      "mccleary",
-      "gpu2",
-    ]);
-    expect(rowOf("gpu1").textContent).toContain("1 free");
-    expect(rowOf("gpu1").textContent).toContain("q 3");
-    expect(rowOf("gpu1").title).toBe("gpu1: 8 GPU (A100 80GB), 1 free, 3 queued");
-    expect(rowOf("gpu1").querySelectorAll(".mini i.free")).toHaveLength(1);
-    expect(rowOf("gpu1").querySelectorAll(".mini i.other")).toHaveLength(2);
-    expect(rowOf("local").textContent).toContain("no GPU");
-    expect(rowOf("mccleary").textContent).toContain("4 run, 6 pend");
-    expect(radio("dgx").disabled).toBe(true);
-    expect(rowOf("dgx").textContent).toContain("stale 4m");
-    expect(rowOf("dgx").title).toBe("dgx stale 4m: no heartbeat");
-    expect(radio("gpu2").disabled).toBe(true);
-    expect(rowOf("gpu2").title).toBe("installing hx on gpu2");
+    setSystemTime(new Date(FIXTURE_NOW));
+    try {
+      mockApi(HOSTS);
+      renderDialog();
+      await ready("gpu1");
+      expect(screen.getByRole("dialog", { name: "New run" })).toBeTruthy();
+      expect(screen.getByText(`${PROJECT} / ${TASK}`)).toBeTruthy();
+      const group = screen.getByRole("radiogroup", { name: "Host" });
+      expect(within(group).getAllByRole("radio").map((r) => r.getAttribute("aria-label"))).toEqual([
+        "local",
+        "gpu1",
+        "dgx",
+        "mccleary",
+        "gpu2",
+      ]);
+      expect(rowOf("gpu1").textContent).toContain("1 free");
+      expect(rowOf("gpu1").textContent).toContain("q 3");
+      expect(rowOf("gpu1").title).toBe("gpu1: 8 GPU (A100 80GB), 1 free, 3 queued");
+      expect(rowOf("gpu1").querySelectorAll(".mini i.free")).toHaveLength(1);
+      expect(rowOf("gpu1").querySelectorAll(".mini i.other")).toHaveLength(2);
+      expect(rowOf("local").textContent).toContain("no GPU");
+      expect(rowOf("mccleary").textContent).toContain("4 run, 6 pend");
+      expect(radio("dgx").disabled).toBe(true);
+      expect(rowOf("dgx").textContent).toContain("stale 4m");
+      expect(rowOf("dgx").title).toBe("dgx stale 4m: no heartbeat");
+      expect(radio("gpu2").disabled).toBe(true);
+      expect(rowOf("gpu2").title).toBe("installing hx on gpu2");
+    } finally {
+      setSystemTime();
+    }
   });
 
   test("a host without this project is disabled with the fix", async () => {
@@ -108,6 +138,78 @@ describe("host picker", () => {
     expect(launchButton(3).title).toBe("pick a host");
     expect((screen.getByRole("button", { name: "Copy as CLI" }) as HTMLButtonElement).disabled).toBe(true);
   });
+});
+
+for (const method of ["Escape", "Close", "Cancel", "backdrop"]) {
+  test(`partial launch ${method} reports confirmed records once before closing`, async () => {
+    const calls = mockApi({
+      ...HOSTS,
+      "POST /api/v1/hosts/gpu1/runs": (c: Call) => seedOf(c) === 4
+        ? rec(4)
+        : new HttpReply(400, { error: "refused", type: "RunError" }),
+    });
+    const { onClose, onLaunched } = renderDialog({ initial: { command: CMD, seeds: "4, 5" } });
+    await ready();
+    typeHypothesis("partial batch");
+    fireEvent.click(launchButton(2));
+    await screen.findByRole("alert");
+    if (method === "Escape") fireEvent.keyDown(screen.getByLabelText("Hypothesis"), { key: "Escape" });
+    else if (method === "backdrop") fireEvent.mouseDown(document.querySelector(".hx-launch")!);
+    else fireEvent.click(screen.getByRole("button", { name: method }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onLaunched).toHaveBeenCalledTimes(1);
+    expect(onLaunched.mock.calls[0]).toEqual([[rec(4)], "gpu1"]);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onLaunched).toHaveBeenCalledTimes(1);
+    expect(posts(calls).map(seedOf)).toEqual([4, 5]);
+  });
+}
+
+test("closing after a completed batch does not report its records again", async () => {
+  mockApi({ ...HOSTS, "POST /api/v1/hosts/gpu1/runs": rec(4) });
+  const { onLaunched } = renderDialog({ initial: { command: CMD, seeds: "4" } });
+  await ready();
+  typeHypothesis("one batch");
+  fireEvent.click(launchButton(1));
+  await waitFor(() => expect(onLaunched).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(onLaunched).toHaveBeenCalledTimes(1);
+});
+
+test("partial close reports only confirmed runs while an unanswered seed stays unknown", async () => {
+  const calls = mockApi({
+    ...HOSTS,
+    "POST /api/v1/hosts/gpu1/runs": (c: Call) => seedOf(c) === 4
+      ? rec(4)
+      : new HttpReply(503, { error: "unknown outcome", type: "IndexError" }),
+  });
+  const { onLaunched } = renderDialog({ initial: { command: CMD, seeds: "4, 5" } });
+  await ready();
+  typeHypothesis("partial batch");
+  fireEvent.click(launchButton(2));
+  await screen.findByRole("alert");
+  expect(resendButton(5)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(onLaunched.mock.calls).toEqual([[[rec(4)], "gpu1"]]);
+  expect(posts(calls).map(seedOf)).toEqual([4, 5]);
+});
+
+test("partial-close feedback cannot cross a credential generation", async () => {
+  mockApi({
+    ...HOSTS,
+    "POST /api/v1/hosts/gpu1/runs": (c: Call) => seedOf(c) === 4
+      ? rec(4)
+      : new HttpReply(503, { error: "unknown outcome", type: "IndexError" }),
+  });
+  const { onClose, onLaunched } = renderDialog({ initial: { command: CMD, seeds: "4, 5" } });
+  await ready();
+  typeHypothesis("partial batch");
+  fireEvent.click(launchButton(2));
+  await screen.findByRole("alert");
+  act(() => auth.select(null));
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(onClose).toHaveBeenCalledTimes(1);
+  expect(onLaunched).not.toHaveBeenCalled();
 });
 
 describe("GPUs and queue", () => {
@@ -193,9 +295,9 @@ describe("GPUs and queue", () => {
     expect(screen.getByText("3 jobs × 2 GPU, ≤ 08:00:00")).toBeTruthy();
     expect(screen.getByLabelText("Preview").textContent).toBe("mccleary: python train.py --lr 3e-4 --seed 4");
     fireEvent.change(screen.getByLabelText("time"), { target: { value: "8h" } });
-    expect(screen.getByText("time: use h:mm:ss or d-hh:mm:ss")).toBeTruthy();
+    expect(screen.getByText("time: e.g. 30, 1:30:00 or 2-01:30:00")).toBeTruthy();
     typeHypothesis("x");
-    expect(launchButton(3).title).toBe("time: use h:mm:ss or d-hh:mm:ss");
+    expect(launchButton(3).title).toBe("time: e.g. 30, 1:30:00 or 2-01:30:00");
   });
 
   test("the hub: no queue, GPUs from its own nvidia-smi, launches through /api/v1/runs", async () => {

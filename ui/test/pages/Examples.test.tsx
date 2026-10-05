@@ -177,3 +177,23 @@ test("comparison distinguishes two dirty patches at the same commit", async () =
   expect(screen.getByText(/dirty · patch abcdef34/)).toBeTruthy();
   expect(screen.getByText("gpu2:/runs/b/git.diff")).toBeTruthy();
 });
+
+test("example comparison summary does not present a prior score after failed reevaluation", async () => {
+  const detail = makeDetail();
+  detail.scores.push({ metric: "accuracy", version: "v1", key: "*", value: null, error: "latest evaluation failed", source_hash: null, created_at: "2026-09-27T00:00:00Z" });
+  mockApi(routes({ [`GET /api/v1/runs/${RUN_SVM}`]: detail }));
+  renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
+  await screen.findByRole("heading", { level: 1, name: /fixes 9/ });
+  expect(screen.getByText("0.8889")).toBeTruthy();
+  expect(screen.queryByText("0.9222") === null).toBe(true);
+});
+
+test("bare metric request uses the API-resolved version in comparison summaries", async () => {
+  const detail = makeDetail();
+  detail.scores.push({ metric: "accuracy", version: "v2", key: "value", value: 0.98, error: null, source_hash: null, created_at: "2026-09-27T00:00:00Z" });
+  mockApi(routes({ [`GET /api/v1/runs/${RUN_SVM}`]: detail }));
+  renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
+  await screen.findByRole("heading", { level: 1, name: /fixes 9/ });
+  expect(screen.getByText("0.9222")).toBeTruthy();
+  expect(screen.queryByText("0.9800") === null).toBe(true);
+});

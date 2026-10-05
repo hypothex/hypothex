@@ -300,7 +300,7 @@ export function hostTitle(host: LaunchHost): string {
   return `${host.name}: ${host.gpus.length} GPU${kinds}, ${freeGpus(host).length} free, ${host.queue} queued`;
 }
 
-/** Every `sbatch --time` form: `m`, `m:s`, `h:m:s`, `d-h`, `d-h:m`, `d-h:m:s`. */
+/** Supported finite `sbatch --time` forms: `m`, `m:s`, `h:m:s`, `d-h`, `d-h:m`, `d-h:m:s`. */
 export const SLURM_TIME = /^(\d+|\d+:\d{2}|\d+:\d{2}:\d{2}|\d+-\d+|\d+-\d+:\d{2}|\d+-\d+:\d{2}:\d{2})$/;
 
 export function validSlurmTime(time: string): boolean {

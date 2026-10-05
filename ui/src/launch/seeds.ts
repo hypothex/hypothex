@@ -2,11 +2,11 @@
 
 /** Most seeds one launch may start. */
 export const MAX_SEEDS = 64;
-const MAX_SEED = 2 ** 31 - 1;
+export const MAX_SEED = 2 ** 31 - 1;
 
 export interface SeedParse {
   seeds: number[];
-  /** `null` when the text is valid; else a short reason naming the first bad token. */
+  /** `null` when valid; else an empty-list/count error or the first bad token. */
   error: string | null;
 }
 
@@ -38,9 +38,10 @@ export function parseSeeds(text: string): SeedParse {
   return { seeds: out, error: null };
 }
 
-/** `n` seeds after the largest one used (`null` seeds ignored); `1..n` when none was used. */
+/** Up to `n` higher valid seeds; empty at MAX_SEED, never wrapping to an earlier seed. */
 export function nextSeeds(used: readonly (number | null)[], n = 3): number[] {
-  const nums = used.filter((s): s is number => typeof s === "number");
-  const start = nums.length > 0 ? Math.max(...nums) + 1 : 1;
-  return Array.from({ length: n }, (_, i) => start + i);
+  let largest = 0;
+  for (const seed of used) if (seed !== null && seed > largest) largest = seed;
+  const start = largest + 1;
+  return Array.from({ length: Math.max(0, Math.min(n, MAX_SEED - largest)) }, (_, i) => start + i);
 }

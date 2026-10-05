@@ -10,17 +10,21 @@ import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-quer
 import { ApiError, api } from "../api/client";
 import { auth } from "../api/auth";
 import type {
-  GpuInfo,
   HostLaunchRequest,
   HostRow,
   LaunchRequest,
-  QueueEntry,
   RunFields,
   RunRecord,
 } from "../api/models";
 import { HOSTS_REFETCH_MS, fetchHosts, queryKeys } from "../api/queries";
 import { ACTION_RETRY_DELAY_MS, shouldRetry } from "../pages/components/useAction";
 import { type LaunchHost, type LaunchSpec, slurmBody, toLaunchHosts } from "./plan";
+
+/** Older hubs may lack env routes; other failures are not empty resource snapshots. */
+function emptyIfMissing(error: unknown): [] {
+  if (error instanceof ApiError && error.status === 404) return [];
+  throw error;
+}
 
 /**
  * Hosts for the picker: the hub (with its GPUs and queue) first, then `GET /api/v1/hosts`.
@@ -39,8 +43,8 @@ export async function fetchLaunchHosts(signal?: AbortSignal, qc?: QueryClient): 
     : api.hosts(signal);
   const [hostRows, gpus, queue] = await Promise.all([
     rows,
-    api.gpus(signal).catch((): GpuInfo[] => []),
-    api.queue(signal).catch((): QueueEntry[] => []),
+    api.gpus(signal).catch(emptyIfMissing),
+    api.queue(signal).catch(emptyIfMissing),
   ]);
   return toLaunchHosts(hostRows, { gpus, queue: queue.length });
 }

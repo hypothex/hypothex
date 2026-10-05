@@ -423,3 +423,106 @@ test("paired-bootstrap and sign verdicts link while Welch and missing comparison
     unmount();
   }
 });
+
+describe("incomplete GPU pricing", () => {
+  const partial = { gpu_hours: 2, gpu_usd: 0, api_usd: 1.26, total_usd: 1.26 };
+  test("cost helpers distinguish recorded subtotal from unknown total", () => {
+    expect(costText(partial, null, false)).toBe("Cost unknown · $1.26 recorded · 2.0 GPU-h");
+    expect(costText({ ...partial, api_usd: 0, total_usd: 0 }, null, false)).toBe("Cost unknown · 2.0 GPU-h");
+    expect(costTitle(partial, null, false)).toContain("Total cost unknown");
+    expect(costTitle(partial, null, false)).toContain("GPU rate");
+    expect(costTitle(partial, null, false)).toContain("Recorded subtotal $1.26");
+  });
+
+  test("a group with unknown pricing never presents a zero or partial charge as total", () => {
+    const unknown = row({ group_id: "unknown", cost_complete: false, cost: { ...partial, api_usd: 0, total_usd: 0 } });
+    const known = row({ group_id: "free", cost_complete: true, cost: { ...partial, api_usd: 0, total_usd: 0 } });
+    const { container, rerender } = render(<Leaderboard result={board({}, [unknown, known])} />);
+    const costs = [...container.querySelectorAll(".cost")];
+    expect(costs[0]?.textContent).toBe("Cost unknown · 2.0 GPU-h");
+    expect(costs[0]?.textContent).not.toContain("$0.00");
+    expect(costs[1]?.textContent).toBe("$0.00 · 2.0 GPU-h");
+    rerender(<Leaderboard result={board({}, [row({ group_id: "missing", cost_complete: false, cost: null })])} />);
+    expect(container.querySelector(".cost")?.textContent).toBe("Cost unknown");
+  });
+});
+
+describe("recorded benchmark repeat flags", () => {
+  const meta = { kind: "system_bench", primary: "latency/p95", unit: "ms", higher_is_better: false, metric_versions: { latency: "v1" } };
+  const observation = (run_id: string, value: number, source_hash = "source-a") => ({
+    run_id, value, metric: "latency", version: "v1", key: "p95", source_hash, dataset_fingerprint: "dataset-a",
+  });
+  const repeatRow = (observations: ReturnType<typeof observation>[]) => row({
+    group_id: "bench", run_ids: ["r1", "r2", "r3"],
+    scores: { "latency/p95": stat(107, 10) }, primary: stat(107, 10),
+    seed_values: { "latency/p95": [100, 100, 121] }, repeat_observations: observations,
+  });
+
+  test("flags measured per-run p95 and links the exact run, without positional seed pairing", () => {
+    render(<Leaderboard result={board(meta, [repeatRow([
+      observation("r3", 121), observation("r1", 100), observation("r2", 100),
+    ])])} />);
+    const flag = screen.getByRole("link", { name: "Flagged repeat r3 · +21% p95 vs median" });
+    expect(flag.getAttribute("href")).toBe("/r/r3");
+    expect(flag.getAttribute("title")).toContain("more than 10%");
+    expect(screen.queryByText("Repeat check unavailable")).toBeNull();
+  });
+
+  test("partial or incompatible observations are unknown, never healthy or flagged", () => {
+    const { rerender } = render(<Leaderboard result={board(meta, [repeatRow([
+      observation("r1", 100), observation("r3", 121),
+    ])])} />);
+    expect(screen.getByText("Repeat check unavailable").getAttribute("title")).toContain("coverage");
+    expect(screen.queryByRole("link", { name: /Flagged repeat/ })).toBeNull();
+    rerender(<Leaderboard result={board(meta, [repeatRow([
+      observation("r1", 100), observation("r2", 100, "other-source"), observation("r3", 121),
+    ])])} />);
+    expect(screen.getByText("Repeat check unavailable").getAttribute("title")).toContain("fingerprints differ");
+    expect(screen.queryByText("No repeats >10% above median")).toBeNull();
+  });
+
+  test("a complete group at the exact threshold is unflagged; unrelated boards show no repeat check", () => {
+    const { rerender } = render(<Leaderboard result={board(meta, [repeatRow([
+      observation("r1", 100), observation("r2", 100), observation("r3", 110),
+    ])])} />);
+    expect(screen.getByText("No repeats >10% above median")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /Flagged repeat/ })).toBeNull();
+    rerender(<Leaderboard result={board({ ...meta, kind: "generic" }, [repeatRow([])])} />);
+    expect(screen.queryByText(/Repeat check|No repeats|Flagged repeat/)).toBeNull();
+    rerender(<Leaderboard result={board()} />);
+    expect(screen.queryByText(/Repeat check|No repeats|Flagged repeat/)).toBeNull();
+  });
+});
+
+
+test("repeat flags never apply to throughput, another percentile, or unknown unit/version", () => {
+  const observations = [100, 100, 121].map((value, i) => ({ run_id: `r${i + 1}`, value, metric: "latency", version: "v1", key: "p95", source_hash: "source", dataset_fingerprint: "data" }));
+  const sample = row({ group_id: "benchmark", repeat_observations: observations,
+    scores: { "latency/p95": stat(107), "latency/p50": stat(50), "throughput/rps": stat(1000) }, primary: stat(107) });
+  const meta = { kind: "system_bench", higher_is_better: false };
+  const { rerender } = render(<Leaderboard result={board({ ...meta, primary: "throughput/rps", unit: "req/s" }, [sample])} />);
+  expect(screen.queryByRole("link", { name: /Flagged repeat/ })).toBeNull();
+  rerender(<Leaderboard result={board({ ...meta, primary: "latency/p50", unit: "ms" }, [sample])} />);
+  expect(screen.queryByText(/Repeat check|No repeats|Flagged repeat/)).toBeNull();
+  rerender(<Leaderboard result={board({ ...meta, primary: "latency/p95" }, [sample])} />);
+  expect(screen.queryByText(/Repeat check|No repeats|Flagged repeat/)).toBeNull();
+  rerender(<Leaderboard result={board({ ...meta, primary: "latency/p95", unit: "ms" }, [sample])} />);
+  expect(screen.getByText("Repeat check unavailable")).toBeTruthy();
+  expect(screen.queryByRole("link", { name: /Flagged repeat/ })).toBeNull();
+});
+
+test("repeat provenance must match the selected metric version and complete dataset/source identity", () => {
+  const meta = { kind: "system_bench", primary: "latency/p95", unit: "s", higher_is_better: false, metric_versions: { latency: "v1" } };
+  const observations = [100, 100, 121].map((value, i) => ({ run_id: `r${i + 1}`, value, metric: "latency", version: "v1", key: "p95", source_hash: "source", dataset_fingerprint: "data" }));
+  const sample = (values: typeof observations) => row({ group_id: "benchmark", repeat_observations: values,
+    scores: { "latency/p95": stat(107) }, primary: stat(107) });
+  const { rerender } = render(<Leaderboard result={board(meta, [sample(observations)])} />);
+  expect(screen.getByRole("link", { name: /Flagged repeat r3/ })).toBeTruthy();
+  for (const changed of [{ version: "v2" }, { key: "p50" }, { metric: "other" }, { source_hash: "" }, { dataset_fingerprint: "" }, { dataset_fingerprint: "different" }]) {
+    rerender(<Leaderboard result={board(meta, [sample(observations.map((r, i) => i === 0 ? { ...r, ...changed } : r))])} />);
+    expect(screen.getByText("Repeat check unavailable")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /Flagged repeat/ })).toBeNull();
+  }
+  rerender(<Leaderboard result={board({ ...meta, higher_is_better: true }, [sample(observations)])} />);
+  expect(screen.queryByText(/Repeat check|No repeats|Flagged repeat/)).toBeNull();
+});

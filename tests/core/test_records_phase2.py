@@ -40,6 +40,7 @@ def test_cost_totals_defaults() -> None:
         "gpu_usd": 0.0,
         "api_usd": 0.0,
         "total_usd": 0.0,
+        "gpu_pricing_complete": None,
     }
 
 
@@ -58,7 +59,13 @@ def test_phase_2_fields_round_trip_through_run_yaml(tmp_path: Path) -> None:
     store.create_run(record)
     raw = read_yaml(layout.run_dir("toy", "r1") / "run.yaml")
     assert raw["executor"]["gpus"] == [0, 3] and raw["executor"]["slurm_job_id"] == "81234"
-    assert raw["cost"] == {"gpu_hours": 3.0, "gpu_usd": 6.3, "api_usd": 0.375, "total_usd": 6.675}
+    assert raw["cost"] == {
+        "gpu_hours": 3.0,
+        "gpu_usd": 6.3,
+        "api_usd": 0.375,
+        "total_usd": 6.675,
+        "gpu_pricing_complete": None,
+    }
     loaded = store.read_record("toy", "r1")
     assert loaded.executor == record.executor
     assert loaded.cost == record.cost

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import itertools
 import json
+import math
 import shlex
 import weakref
 from collections import defaultdict
@@ -222,6 +224,9 @@ def primary_examples(
     task: str,
     runs: list[RunRecord],
     versions: dict[str, str] | None,
+    *,
+    primary: str | None = None,
+    hashes: dict[str, str] | None = None,
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """
     Load the per-example scores of a task's primary metric for its leaderboard runs.
@@ -238,6 +243,10 @@ def primary_examples(
         Candidate runs; only finished, unarchived runs of ``task`` are read.
     versions : dict of str to str or None
         Metric version overrides; default is each metric's current version.
+    primary : str, optional
+        Selected task metric/key; default the configured task primary.
+    hashes : dict of str to str, optional
+        Populated with SHA256 of the exact bytes parsed for each run.
 
     Returns
     -------
@@ -246,7 +255,9 @@ def primary_examples(
         ``predictions/scores.<metric>@<version>.jsonl``. Runs without that file
         are left out.
     """
-    metric, _ = parse_metric_key(config.tasks[task].primary)
+    metric, _ = parse_metric_key(primary or config.tasks[task].primary)
+    if metric not in config.tasks[task].metrics:
+        raise ConfigError(f"unknown leaderboard primary {primary!r} for task {task!r}")
     version = (versions or {}).get(metric, config.metrics[metric].version)
     name = f"scores.{metric}@{version}.jsonl"
     out: dict[str, dict[str, dict[str, Any]]] = {}
@@ -255,11 +266,20 @@ def primary_examples(
             continue
         path = ctx.run_dir(r) / "predictions" / name
         if path.is_file():
+            raw = path.read_bytes()
+            rows: list[dict[str, Any]] = []
+            for line in raw.decode("utf-8").splitlines():
+                try:
+                    value = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict) and "id" in value:
+                    rows.append(value)
             out[r.run_id] = {
-                str(row["id"]): {k: v for k, v in row.items() if k != "id"}
-                for row in read_jsonl(path)
-                if "id" in row
+                str(row["id"]): {k: v for k, v in row.items() if k != "id"} for row in rows
             }
+            if hashes is not None:
+                hashes[r.run_id] = "sha256:" + hashlib.sha256(raw).hexdigest()
     return out
 
 
@@ -270,6 +290,7 @@ def get_leaderboard(
     versions: dict[str, str] | None = None,
     *,
     examples: bool = True,
+    primary: str | None = None,
 ) -> Leaderboard:
     """
     Build the leaderboard of a task from indexed runs, scores, and per-example scores.
@@ -288,13 +309,16 @@ def get_leaderboard(
         Read each run's per-example scores of the primary metric
         (``predictions/scores.<metric>@<version>.jsonl``) for test-set
         intervals and paired tests. ``False`` skips the file reads.
+    primary : str, optional
+        Selected task metric/key, independently of version pins. Recomputes
+        ranking and evidence without changing the project configuration.
 
     Returns
     -------
     Leaderboard
     """
     entry, task = resolve_task(ctx, ref, project)
-    return _board(ctx, entry, task, versions, examples=examples)
+    return _board(ctx, entry, task, versions, examples=examples, primary=primary)
 
 
 def _board(
@@ -304,17 +328,31 @@ def _board(
     versions: dict[str, str] | None,
     *,
     examples: bool,
+    primary: str | None = None,
 ) -> Leaderboard:
     def build() -> Leaderboard:
         runs = ctx.index.list_runs(
             project=entry.project, task=task, include_archived=True, limit=None
         )
         scores = ctx.index.scores_for(r.run_id for r in runs)
+        hashes: dict[str, str] = {}
         per_example = (
-            primary_examples(ctx, entry.config, task, runs, versions) if examples else None
+            primary_examples(
+                ctx, entry.config, task, runs, versions, primary=primary, hashes=hashes
+            )
+            if examples
+            else None
         )
         return build_leaderboard(
-            entry.project, task, entry.config, runs, scores, versions, per_example=per_example
+            entry.project,
+            task,
+            entry.config,
+            runs,
+            scores,
+            versions,
+            per_example=per_example,
+            per_example_hashes=hashes,
+            primary=primary,
         )
 
     return cached_leaderboard(
@@ -324,7 +362,7 @@ def _board(
         entry.config,
         build,
         versions=versions,
-        variant=("examples", examples),
+        variant=("examples", examples, "primary", primary),
     )
 
 
@@ -924,8 +962,132 @@ def get_predictions(
     )
 
 
+def _bound_example_pair(
+    ctx: Context,
+    a: str,
+    b: str,
+    name: str,
+    version: str,
+    field: str,
+) -> list[dict[str, bool]]:
+    """Read a coherent pair of current evaluator-bound binary outcome snapshots."""
+    ref = f"{name}@{version}"
+    records = [ctx.find_record(rid) for rid in (a, b)]
+    initial_scores = ctx.index.scores_for((a, b))
+    files: list[tuple[Path, bytes]] = []
+    populations: list[tuple[object, ...]] = []
+    passed: list[dict[str, bool]] = []
+    for record in records:
+        rid = record.run_id
+        if record.status != RunStatus.FINISHED or record.archived or record.task is None:
+            raise EvalError(f"run {rid} is not a finished current comparison member")
+        candidates = [
+            s for s in initial_scores.get(rid, []) if s.metric == name and s.version == version
+        ]
+        if not candidates:
+            raise EvalError(f"run {rid} has no bound evaluation for {ref}")
+        latest_at = max(s.created_at for s in candidates)
+        batch = [s for s in candidates if s.created_at == latest_at]
+        if any(
+            s.error is not None
+            or s.key == "*"
+            or s.value is None
+            or not math.isfinite(s.value)
+            or not s.source_hash
+            or not s.per_example_hash
+            or s.evaluation_examples is None
+            or not s.evaluation_ids_hash
+            for s in batch
+        ):
+            raise EvalError(f"run {rid} has no healthy bound current evaluation for {ref}")
+        evidence = {
+            (s.source_hash, s.per_example_hash, s.evaluation_examples, s.evaluation_ids_hash)
+            for s in batch
+        }
+        if len(evidence) != 1:
+            raise EvalError(f"run {rid} has inconsistent evaluation bindings for {ref}")
+        source, digest, count, ids_digest = next(iter(evidence))
+        path = ctx.run_dir(record) / "predictions" / f"scores.{ref}.jsonl"
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise EvalError(f"run {rid} has no bound per-example artifact for {ref}") from exc
+        if "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+            raise EvalError(f"run {rid} per-example artifact does not match its bound evaluation")
+        try:
+            rows = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise EvalError(f"run {rid} has malformed bound per-example data") from exc
+        if any(not isinstance(row, dict) or "id" not in row for row in rows):
+            raise EvalError(f"run {rid} has malformed bound per-example rows")
+        ids = [str(row["id"]) for row in rows]
+        if (
+            not ids
+            or len(ids) != len(set(ids))
+            or len(ids) != count
+            or "sha256:" + hashlib.sha256(json.dumps(sorted(ids)).encode()).hexdigest()
+            != ids_digest
+        ):
+            raise EvalError(f"run {rid} per-example population does not match its bound evaluation")
+        if any(
+            type(row.get(field)) not in (bool, int, float) or row[field] not in (0, 1)
+            for row in rows
+        ):
+            raise EvalError(
+                f"run {rid} has no complete binary {field!r} field in its bound evaluation"
+            )
+        config = refresh_project(ctx, record.project).config
+        spec = config.tasks.get(record.task)
+        refs = [
+            r
+            for r in record.datasets
+            if spec is not None and r.name == spec.dataset and r.split == spec.split
+        ]
+        if len(refs) != 1 or not refs[0].hash:
+            raise EvalError(f"run {rid} has no known comparison dataset identity")
+        dataset = refs[0]
+        populations.append(
+            (
+                record.project,
+                record.task,
+                source,
+                dataset.name,
+                dataset.version,
+                dataset.split,
+                dataset.hash,
+                dataset.hash_mode,
+            )
+        )
+        passed.append({str(row["id"]): bool(row[field]) for row in rows})
+        files.append((path, raw))
+    if populations[0] != populations[1]:
+        raise EvalError(
+            "comparison runs do not share project/task, evaluator source and dataset identity"
+        )
+    # Atomic evaluator file replacement and appended score records can race a
+    # query. Use only the bytes validated above, then reject observed changes.
+    for path, raw in files:
+        try:
+            current = path.read_bytes()
+        except OSError as exc:
+            raise EvalError("bound comparison artifact changed during the query; retry") from exc
+        if current != raw:
+            raise EvalError("bound comparison artifact changed during the query; retry")
+    if ctx.index.scores_for((a, b)) != initial_scores:
+        raise EvalError("bound comparison evaluation changed during the query; retry")
+    if any(ctx.find_record(record.run_id) != record for record in records):
+        raise EvalError("bound comparison run identity changed during the query; retry")
+    return passed
+
+
 def compare_examples(
-    ctx: Context, a: str, b: str, metric: str, field: str = "correct"
+    ctx: Context,
+    a: str,
+    b: str,
+    metric: str,
+    field: str = "correct",
+    *,
+    require_bound: bool = False,
 ) -> ExampleDiff:
     """
     List examples fixed (fail in ``a``, pass in ``b``) and broken (the reverse).
@@ -942,6 +1104,10 @@ def compare_examples(
         ``name`` (current version) or ``name@version``.
     field : str
         Per-example field that marks success.
+    require_bound : bool
+        Require current successful evaluator-issued artifact/population bindings,
+        complete binary outcomes and matching dataset/source identity. False
+        preserves the existing Examples behavior for legacy score files.
 
     Returns
     -------
@@ -953,19 +1119,33 @@ def compare_examples(
         Unknown metric name, or a bare name no longer in ``hypothex.yaml``.
     EvalError
         A run without per-example scores for the metric, or without ``field``.
+        Strict comparisons also reject absent, stale, partial, incompatible or
+        concurrently changed evaluation evidence.
     """
     rec_a = ctx.find_record(a)
-    name, version = _resolve_metric(ctx, rec_a, _per_example(ctx.run_dir(rec_a)), metric)
+    if require_bound:
+        # Only metric names are needed for resolution. Strict comparison reads
+        # the selected artifact itself once for hash and outcome verification.
+        known = {
+            path.name[len("scores.") : -len(".jsonl")]: {}
+            for path in (ctx.run_dir(rec_a) / "predictions").glob("scores.*.jsonl")
+        }
+    else:
+        known = _per_example(ctx.run_dir(rec_a))
+    name, version = _resolve_metric(ctx, rec_a, known, metric)
     if version is None:
         raise ConfigError(f"metric {name!r} is not in hypothex.yaml; pass {name}@<version>")
     ref = f"{name}@{version}"
-    passed: list[dict[str, bool]] = []
-    for rid in (a, b):
-        per = _per_example(ctx.run_dir(ctx.find_record(rid))).get(ref)
-        if per is None:
-            raise EvalError(f"run {rid} has no per-example scores for {ref}")
-        _require_field({ref: per}, field)
-        passed.append({i: not _is_failure(v.get(field)) for i, v in per.items() if field in v})
+    if require_bound:
+        passed = _bound_example_pair(ctx, a, b, name, version, field)
+    else:
+        passed: list[dict[str, bool]] = []
+        for rid in (a, b):
+            per = _per_example(ctx.run_dir(ctx.find_record(rid))).get(ref)
+            if per is None:
+                raise EvalError(f"run {rid} has no per-example scores for {ref}")
+            _require_field({ref: per}, field)
+            passed.append({i: not _is_failure(v.get(field)) for i, v in per.items() if field in v})
     pa, pb = passed
     ids = sorted(pa.keys() & pb.keys())
     return ExampleDiff(

@@ -121,3 +121,54 @@ test("StatusLine lists status, time, launcher, host, tags, and parent", () => {
   }
   expect(screen.getByRole("link", { name: "parent ef4f" }).getAttribute("href")).toBe(`/r/${RUN_RF}`);
 });
+
+for (const failedAt of ["2026-09-26T21:00:00Z", "2026-09-26T22:00:00Z"]) {
+  test(`scoreFor rejects an equal/newer backend wildcard error at ${failedAt}`, () => {
+    const records = [score({ value: 0.8 }), score({ key: "top5", value: 0.9 }), score({ key: "*", value: null, error: "reevaluation failed", created_at: failedAt })];
+    expect(scoreFor(records, "accuracy@v1")).toBeNull();
+    expect(scoreFor(records, "accuracy@v1/top5")).toBeNull();
+    expect(scoreFor(records, "accuracy")).toBeNull();
+  });
+}
+
+test("scoreFor rejects mixed value/error attempts and recovers after a later successful retry", () => {
+  const records = [
+    score({ key: "*", value: null, error: "partially failed evaluator", created_at: "2026-09-26T22:00:00Z" }),
+    score({ value: 0.8, created_at: "2026-09-26T22:00:00Z" }),
+  ];
+  expect(scoreFor(records, "accuracy@v1/value")).toBeNull();
+  records.push(score({ value: 0.85, created_at: "2026-09-26T23:00:00Z" }));
+  expect(scoreFor(records, "accuracy@v1/value")).toBe(0.85);
+  records.push(score({ version: "v0", key: "*", value: null, error: "another version", created_at: "2026-09-27T00:00:00Z" }));
+  records.push(score({ metric: "other", key: "*", value: null, error: "another metric", created_at: "2026-09-27T00:00:00Z" }));
+  expect(scoreFor(records, "accuracy@v1/value")).toBe(0.85);
+});
+
+test("scoreFor never replaces a failed preferred value with another field", () => {
+  const records = [score({ key: "top5", value: 0.95 }), score({ value: null, error: "value failed", created_at: "2026-09-26T22:00:00Z" })];
+  expect(scoreFor(records, "accuracy@v1")).toBeNull();
+  expect(scoreFor(records, "accuracy@v1/top5")).toBe(0.95);
+});
+
+test("score summaries hide failed reevaluation while ScoresList retains timestamped records", () => {
+  const detail = makeDetail({}, { scores: [score({ value: 0.8 }), score({ key: "*", value: null, error: "reevaluation failed", created_at: "2026-09-26T22:00:00Z" })] });
+  const primary = { metric: "accuracy", version: "v1", key: "value", interval: null };
+  expect(runStats(detail, primary, null).some(item => item.label === "accuracy v1")).toBe(false);
+  render(<ScoresList scores={detail.scores} metricNames={[]} primary={primary} />);
+  expect(screen.getByText("0.8000")).toBeTruthy();
+  expect(screen.getByText("error").getAttribute("title")).toBe("reevaluation failed");
+  expect(screen.getByText("21:00")).toBeTruthy();
+  expect(screen.getByText("22:00")).toBeTruthy();
+});
+
+test("runStats suppresses a cached primary interval after that run's reevaluation fails", () => {
+  const board = makeBoard();
+  const row = board.rows[0]!;
+  const detail = makeDetail();
+  detail.scores.push(score({ key: "*", value: null, error: "reevaluation failed", created_at: "2026-09-27T00:00:00Z" }));
+  const primary = primaryRef(board, row);
+  expect(primary?.interval).not.toBeNull();
+  const labels = runStats(detail, primary, row).map(item => item.label);
+  expect(labels.includes("accuracy v1")).toBe(false);
+  expect(labels.includes("95% CI")).toBe(false);
+});

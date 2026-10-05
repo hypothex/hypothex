@@ -70,6 +70,7 @@ export interface LaunchDialogProps {
   /** A note next to the seeds, e.g. why none is proposed (`LaunchDefaults.seedsNote`). */
   seedsNote?: string;
   onClose: () => void;
+  /** Confirmed runs, once on completion or partial close; never an unanswered seed. */
   onLaunched: (records: RunRecord[], host: string) => void;
 }
 
@@ -429,6 +430,8 @@ export function LaunchDialog({
   const [copy, setCopy] = useState<CopyState>("idle");
   const inFlight = useRef(false);
   const picked = useRef(false);
+  const reported = useRef(false);
+  const launchedGeneration = useRef<number | null>(null);
 
   useEffect(() => {
     if (picked.current || hosts.data === undefined) return;
@@ -493,6 +496,19 @@ export function LaunchDialog({
     setFailure(null);
   };
 
+  const reportLaunched = (done: Launched): void => {
+    if (reported.current || done.host === null || done.records.length === 0) return;
+    if (launchedGeneration.current === null || !auth.current(launchedGeneration.current)) return;
+    reported.current = true;
+    onLaunched(done.records, done.host);
+  };
+
+  const close = (): void => {
+    if (inFlight.current) return;
+    reportLaunched(launched);
+    onClose();
+  };
+
   const copyCli = async (): Promise<void> => {
     try {
       await navigator.clipboard.writeText(cli);
@@ -516,6 +532,7 @@ export function LaunchDialog({
       },
     });
     if (!auth.current(generation)) return;
+    launchedGeneration.current = generation;
     inFlight.current = false;
     setProgress(null);
     for (const queryKey of REMOTE_RUN_INVALIDATES) void client.invalidateQueries({ queryKey });
@@ -539,17 +556,17 @@ export function LaunchDialog({
       });
       return;
     }
-    if (left === 0) onLaunched(done.records, spec.host.name);
+    if (left === 0) reportLaunched(done);
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
     if (e.key === "Escape" && !busy) {
       e.stopPropagation();
-      onClose();
+      close();
     }
   };
   const onBackdrop = (e: ReactMouseEvent<HTMLDivElement>): void => {
-    if (e.target === e.currentTarget && !busy) onClose();
+    if (e.target === e.currentTarget && !busy) close();
   };
 
   return (
@@ -559,27 +576,26 @@ export function LaunchDialog({
         <div className="dlg-h">
           <h2 id="hx-launch-h">{title}</h2>
           <span className="small">{task ? `${project} / ${task}` : project}</span>
-          <button type="button" className="x" aria-label="Close" disabled={busy} onClick={onClose}>
+          <button type="button" className="x" aria-label="Close" disabled={busy} onClick={close}>
             ×
           </button>
         </div>
         <fieldset className="dlg-b" disabled={locked}>
           <div className="fr">
             <span className="lb">Host</span>
-            {hosts.error ? (
-              <ErrorBox error={hosts.error} />
-            ) : hosts.data === undefined ? (
-              <Loading />
-            ) : (
-              <HostPicker
-                hosts={hosts.data}
-                selected={draft.host}
-                project={project}
-                now={now}
-                lockedTo={launched.host}
-                onPick={(h) => update({ host: h.name, gpus: h.slurm?.defaults?.gpus ?? gpusForHost(draft.gpus, h, host) })}
-              />
-            )}
+            <div>
+              {hosts.error ? <ErrorBox error={hosts.error} /> : null}
+              {hosts.data !== undefined ? (
+                <HostPicker
+                  hosts={hosts.data}
+                  selected={draft.host}
+                  project={project}
+                  now={now}
+                  lockedTo={launched.host}
+                  onPick={(h) => update({ host: h.name, gpus: h.slurm?.defaults?.gpus ?? gpusForHost(draft.gpus, h, host) })}
+                />
+              ) : hosts.error ? null : <Loading />}
+            </div>
           </div>
           {templateEnvironment && draft.host === null && hosts.data ? (
             <p className="small warn">
@@ -650,7 +666,7 @@ export function LaunchDialog({
           <span className="sum small">
             {host !== null && pending.length > 0 ? launchSummary(host, draft.gpus, pending.length, draft.time) : ""}
           </span>
-          <button type="button" className="btn" disabled={busy} onClick={onClose}>
+          <button type="button" className="btn" disabled={busy} onClick={close}>
             Cancel
           </button>
           <button

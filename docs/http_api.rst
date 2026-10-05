@@ -231,15 +231,37 @@ Other routes
 - ``GET /api/v1/overview`` (``since``): the Overview, with ``cost_usd`` and
   ``cost_today_usd``.
 - ``GET /api/v1/projects``, ``GET /api/v1/tasks``, ``GET /api/v1/tasks/{project}/{task}``,
-  ``GET /api/v1/tasks/{project}/{task}/leaderboard`` (rows have ``cost``),
+  ``GET /api/v1/tasks/{project}/{task}/leaderboard`` (optional ``primary=metric/key``),
   ``POST /api/v1/tasks/{project}/{task}/reeval``, ``GET .../kind``, and the views
   routes under ``/api/v1/tasks/{project}/{task}/views``.
+- Leaderboard ``primary`` recomputes ranking, direction, units, intervals and
+  headline from a configured task metric and recorded output key. Version pins
+  remain independent; omitting ``primary`` preserves the configured selection.
+  View panels accept the same selector as ``data.primary`` for primary-dependent
+  ranking and metadata. Explicit authored axes retain their requested metrics.
+- Leaderboard rows retain known ``cost`` charges and expose ``cost_complete``.
+  ``cost.gpu_pricing_complete`` is ``null`` for legacy unknown evidence, ``false``
+  for unpriced billed GPU use, and ``true`` for explicitly priced or CPU-only use.
+  ``evaluation_population`` records the metric/source/dataset/example-ID identity
+  and measured attempt/solved counts when cost comparisons are supported.
+  Score records optionally bind the exact per-example artifact and full unique
+  prediction-ID population via ``per_example_hash``, ``evaluation_examples`` and
+  ``evaluation_ids_hash``. Legacy unbound or partial evaluations do not establish
+  cost population comparisons; successful re-evaluation records fresh binding.
+  Applicable system benchmark rows also expose exact ``repeat_observations``;
+  missing provenance or incomplete coverage does not establish a repeat outlier.
 - The task ``reeval`` scores the hub's own runs on the hub and sends each mirrored
   run's re-evaluation to its host (command id ``<command_id>:<run_id>``), waiting up
   to 600 s for each answer. A run whose host is not connected or no longer
   configured is listed in ``skipped`` with the reason.
 - ``GET /api/v1/compare?ids=a,b``, ``GET /api/v1/compare/examples?a=&b=&metric=``,
   ``GET /api/v1/datasets/check``.
+  Example comparison accepts optional ``require_bound=true`` to require finished,
+  nonarchived runs in the same project/task, matching dataset/scorer identity,
+  and current evaluator-issued artifact-byte and complete population bindings.
+  Each run's outcomes must be binary. Independently complete cohorts may differ;
+  counts describe only their shared IDs. Missing, stale or changed evidence returns
+  ``EvalError`` without outcomes. Omission preserves legacy comparison behavior.
 - ``/mcp`` and ``/mcp/``: the MCP server over streamable HTTP (see :doc:`mcp`).
 
 Event stream

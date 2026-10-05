@@ -25,7 +25,7 @@ import {
   type LinearScale,
 } from "../charts/Scale";
 import { useTooltip } from "../charts/Tooltip";
-import type { CurvesRow } from "../api/models";
+import type { CurvesRow, RunStatus } from "../api/models";
 import type { PanelProps } from "./index";
 
 /** One `curves` row as sent by the server (contract 1.6). */
@@ -57,6 +57,8 @@ export interface GroupJson {
   label: string;
   seed_group?: string;
   repeat?: number;
+  /** Parameters common to every recorded run in this group. */
+  params?: Record<string, unknown>;
 }
 
 /**
@@ -124,6 +126,8 @@ export interface PlacedCheckpoint extends CheckpointJson {
 export interface CurvesModel {
   /** Groups with any points, curves or values. */
   groups: GroupJson[];
+  /** Authoritative best group supplied by the board; absent means unknown. */
+  bestGroupId: string | null;
   /** Metrics drawn as curves, one row each. */
   names: string[];
   /** Metrics with fewer than 2 points (steps) in every group: shown as values, not rows. */
@@ -390,6 +394,7 @@ export function buildCurves(rows: CurvePoint[], meta: Record<string, unknown> | 
   const drawn = groups.filter((g) => [...names, ...values].some((n) => cells.has(cellKey(g.group_id, n))));
   return {
     groups: columnTitles(drawn, (id) => seedsByGroup.get(id) ?? []),
+    bestGroupId: typeof meta?.best_group_id === "string" ? meta.best_group_id : null,
     names,
     values,
     cells,
@@ -417,8 +422,8 @@ interface RowGeom {
   axis: boolean;
 }
 
-function rowGeometry(names: string[], ownAxis: string[] = []): { rows: RowGeom[]; bottom: number } {
-  let y = TITLE_H;
+function rowGeometry(names: string[], ownAxis: string[] = [], titleHeight = TITLE_H): { rows: RowGeom[]; bottom: number } {
+  let y = titleHeight;
   const lastShared = names.filter((n) => !ownAxis.includes(n)).at(-1);
   const rows = names.map((name, i) => {
     const h = isLr(name) ? LR_ROW_H : ROW_H;
@@ -453,13 +458,22 @@ interface StackProps {
   onHover: (text: string | null, x: number, y: number) => void;
 }
 
+/** Recorded parameters in stable key order, never inferred from a label. */
+export function parameterSubtitle(params: Record<string, unknown> | undefined): string {
+  if (!params || typeof params !== "object" || Array.isArray(params)) return "";
+  return Object.entries(params).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) =>
+    `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`,
+  ).join(" · ");
+}
+
 function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactElement {
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   // the hovered column and the mouse's x in svg pixels; each row maps it to its own step
   const [hover, setHover] = useState<{ col: number; px: number } | null>(null);
   const gutter = labelGutter(model);
   const colW = Math.max(40, (width - gutter - COL_GAP * (cols - 1)) / cols);
-  const { rows, bottom } = rowGeometry(model.names, model.ownAxis);
+  const titleHeight = TITLE_H + (groups.some((g) => parameterSubtitle(g.params)) ? 18 : 0);
+  const { rows, bottom } = rowGeometry(model.names, model.ownAxis, titleHeight);
   const H = bottom + 30;
   const xTicks = linear([0, model.maxStep || 1], 0, 1, 4).ticks;
   const own = (name: string): boolean => model.ownAxis.includes(name);
@@ -525,7 +539,7 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
       const step = col.stepAt(model.names[0] ?? "", px);
       if (step == null) return [];
       const xs = col.x.at(step);
-      return [<line key="xh" className="xh" x1={xs} x2={xs} y1={TITLE_H - 4} y2={bottom} />];
+      return [<line key="xh" className="xh" x1={xs} x2={xs} y1={titleHeight - 4} y2={bottom} />];
     }
     return rows.flatMap((r) => {
       const step = col.stepAt(r.name, px);
@@ -549,12 +563,22 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
         </text>
       ))}
       {columns.map((col) => (
-        <g key={col.g.group_id} className="curve-col" data-group={col.g.group_id}>
+        <g key={col.g.group_id} className="curve-col" data-group={col.g.group_id} data-best={col.g.group_id === model.bestGroupId ? "true" : undefined}>
           <g>
-            <title>{col.g.group_id}</title>
-            <text className="ttl" x={col.x0} y={15}>
+            <title>{`${col.g.group_id}${col.g.group_id === model.bestGroupId ? " · best config" : ""}`}</title>
+            <text className="ttl" x={col.x0} y={15} style={col.g.group_id === model.bestGroupId ? { fill: "var(--best)" } : undefined}>
               {col.g.label}
             </text>
+            {parameterSubtitle(col.g.params) ? (
+              <text className="lbl-s curve-params" x={col.x0} y={31}>
+                <title>{parameterSubtitle(col.g.params)}</title>
+                {(() => {
+                  const text = parameterSubtitle(col.g.params);
+                  const limit = Math.max(1, Math.floor(colW / 7.2));
+                  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+                })()}
+              </text>
+            ) : null}
           </g>
           {rows.map((r, ri) => {
             const scale = model.scales[r.name] ?? { kind: "linear", domain: [0, 1] };
@@ -603,10 +627,11 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
                       {cell?.runs.map((rs) => (
                         <path key={rs.run_id} className="sl" data-run={rs.run_id} d={path(rs.points) ?? ""} />
                       ))}
-                      {cell ? <path className="ml" d={path(cell.mean) ?? ""} /> : null}
+                      {cell ? <path className="ml" style={col.g.group_id === model.bestGroupId ? { stroke: "var(--best)" } : undefined} d={path(cell.mean) ?? ""} /> : null}
                       {cell && dot(cell.mean) ? (
                         <circle
                           className="md"
+                          style={col.g.group_id === model.bestGroupId ? { fill: "var(--best)" } : undefined}
                           data-dot=""
                           cx={xr.at(dot(cell.mean)?.[0] ?? 0)}
                           cy={y.at(dot(cell.mean)?.[1] ?? 0)}
@@ -701,9 +726,9 @@ function CurveStack({ model, groups, width, cols, onHover }: StackProps): ReactE
             className="hit"
             data-hit={col.g.group_id}
             x={col.x0}
-            y={TITLE_H - 4}
+            y={titleHeight - 4}
             width={colW}
-            height={bottom - TITLE_H + 4}
+            height={bottom - titleHeight + 4}
             style={{ cursor: "crosshair" }}
             onMouseMove={(e) => move(col, e)}
             onMouseLeave={() => {
@@ -757,7 +782,7 @@ export function valueStats(model: CurvesModel): ValueStat[] {
 }
 
 /** Draw a `curves` panel result. */
-export function Curves({ result }: PanelProps): ReactElement {
+export function Curves({ result, runStatus }: PanelProps & { runStatus?: RunStatus }): ReactElement {
   const [ref, width] = useElementWidth<HTMLDivElement>(960);
   const tip = useTooltip();
   const model = useMemo(
@@ -767,7 +792,7 @@ export function Curves({ result }: PanelProps): ReactElement {
   if (model.names.length === 0 && model.values.length === 0) {
     return (
       <div ref={ref}>
-        <p className="panel-empty">No metric history yet</p>
+        <p className="panel-empty">{runStatus && !["queued", "running"].includes(runStatus) ? "No metric history recorded" : "No metric history yet"}</p>
       </div>
     );
   }
@@ -799,10 +824,13 @@ export function Curves({ result }: PanelProps): ReactElement {
     if (text) tip.show(text, x, y);
     else tip.hide();
   };
-  const keyItems: KeyItem[] = [
+  const hasMean = curveGroups.some((g) => model.names.some((name) =>
+    !isLr(name) && (model.cells.get(cellKey(g.group_id, name))?.runs.length ?? 0) > 1,
+  ));
+  const keyItems: KeyItem[] = hasMean ? [
     { glyph: "seedLine", label: "seed" },
     { glyph: "meanLine", label: "mean" },
-  ];
+  ] : [{ glyph: "meanLine", label: "run" }];
   if (model.checkpoints.length) keyItems.push({ glyph: "bestCkpt", label: "best ckpt" });
   if (model.events.some((e) => e.kind === "spike")) {
     keyItems.push({ glyph: "spike", label: "spike", title: "Loss above 5× the median of the previous 20 points" });

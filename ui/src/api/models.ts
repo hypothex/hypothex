@@ -124,6 +124,10 @@ export interface RunRecord {
 }
 
 export interface ScoreRecord {
+  /** Exact per-example artifact and full prediction population bound to this evaluation. */
+  per_example_hash?: string | null;
+  evaluation_examples?: number | null;
+  evaluation_ids_hash?: string | null;
   metric: string;
   version: string;
   key: string;
@@ -269,7 +273,33 @@ export interface StatItem {
   tooltip?: string | null;
 }
 
+export interface EvaluationPopulation {
+  metric: string;
+  version: string;
+  source_hash: string;
+  field: string;
+  dataset_fingerprint: string;
+  example_ids_hash: string;
+  examples: number;
+  attempts: number;
+  solved: number;
+}
+
+export interface RepeatObservation {
+  run_id: string;
+  value: number;
+  metric: string;
+  version: string;
+  key: string;
+  source_hash: string;
+  dataset_fingerprint: string;
+}
+
 export interface LeaderboardRow {
+  /** Exact selected per-run p95 observations for comparable system benchmarks. */
+  repeat_observations?: RepeatObservation[];
+  cost_complete?: boolean;
+  evaluation_population?: EvaluationPopulation | null;
   group_id: string;
   run_ids: string[];
   latest_run_id: string;
@@ -387,6 +417,8 @@ export interface PanelLayout {
 }
 
 export interface PanelData {
+  /** Recompute ranking and statistics using an actually recorded metric/key. */
+  primary?: string | null;
   metrics?: string[] | null;
   /** Curves: final points per run/metric (2..500); absent/null keeps the server's 500. */
   max_points?: number | null;
@@ -608,6 +640,8 @@ export type ConnState =
 
 /** `RunRecord.cost`: `gpu_hours = wall x len(executor.gpus)`, `total_usd = gpu_usd + api_usd`. */
 export interface CostTotals {
+  /** Unknown legacy records remain distinct from fully priced GPU usage. */
+  gpu_pricing_complete?: boolean | null;
   gpu_hours: number;
   gpu_usd: number;
   api_usd: number;
@@ -618,7 +652,7 @@ export interface CostTotals {
 export interface SlurmDefaults {
   partition: string | null;
   account: string | null;
-  /** `HH:MM:SS`. */
+  /** Slurm duration: minutes, minutes:seconds, hours:minutes:seconds, or days-hours[:minutes[:seconds]]. */
   time: string;
   gpus: number;
   extra: string[];

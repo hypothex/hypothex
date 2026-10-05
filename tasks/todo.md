@@ -453,5 +453,9 @@ merges and requires current-head green CI; Phase 3 remains documentation only.
 
 ## Post-handover backlog
 
-Prepared [backlog plan](backlog.md) and complete initial triage while ordered PRs run
-CI. Implementation remains pending; no Phase 3 runtime work.
+The [backlog plan](backlog.md) tracks implemented work and final evidence. Full
+candidate Python/UI/browser/Docker/static/package checks are recorded there;
+Comparison provenance and the final audits are closed. Final checks pass
+2,475 Python tests (3 skips), 1,088 UI tests and 80 browser tests, with a further
+two-theme screenshot capture check. Current-head CI and merged-main dogfood
+remain the final gates. No Phase 3 runtime work.

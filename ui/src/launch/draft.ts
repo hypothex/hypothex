@@ -6,7 +6,7 @@ import type { RunRecord } from "../api/models";
 import { shellJoin } from "../pages/components/format";
 import { hasSeedSlot, splitCommand } from "./command";
 import { type LaunchHost, type LaunchPlan, availability, freeGpus, gpuLimit, planLaunch, validSlurmTime } from "./plan";
-import { nextSeeds, parseSeeds } from "./seeds";
+import { MAX_SEED, nextSeeds, parseSeeds } from "./seeds";
 
 export interface LaunchDraft {
   host: string | null;
@@ -57,12 +57,12 @@ export interface LaunchDefaults {
   draft: Partial<LaunchDraft>;
   carry: Carry;
   templateEnvironment?: string;
-  /** Why no seeds are proposed (`SEED_HISTORY_CUT`); absent when they are. */
+  /** Why no seeds are proposed (incomplete history or exhausted higher seeds). */
   seedsNote?: string;
 }
 
 export const NO_SEED_WARNING = "no {seed} in the command: every seed runs the same command";
-export const TIME_ERROR = "time: use h:mm:ss or d-hh:mm:ss";
+export const TIME_ERROR = "time: e.g. 30, 1:30:00 or 2-01:30:00";
 export const SEED_HISTORY_CUT = "run history cut short: pick seeds no run of this config used";
 
 /** The slot `hx run --config FILE` fills with the run's copy of FILE. */
@@ -107,10 +107,12 @@ export function launchDefaults(
   }
   const used = runs.filter((r) => r.config_hash === template.config_hash).map((r) => r.seed);
   used.push(template.seed);
+  const seeds = nextSeeds(used);
   return {
-    draft: { command: shellJoin(argv), seeds: nextSeeds(used).join(", "), ...request },
+    draft: { command: shellJoin(argv), seeds: seeds.join(", "), ...request },
     carry,
     templateEnvironment,
+    ...(seeds.length === 0 ? { seedsNote: `no higher seeds available: choose unused seeds up to ${MAX_SEED}` } : {}),
   };
 }
 

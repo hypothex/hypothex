@@ -227,3 +227,45 @@ Additive changes found in QA. Nothing above is renamed or removed.
 - **Overview headline** (1.8). When the focus task is `system_bench`, `overview_headline` leads with that task's headline (`"1 running. async-worker p95 −29% vs baseline [−32, −26]"`), not an absolute gap (`"leads … by 45.0"`).
 - **Units and value formats** (1.3, 1.6, 1.7, 1.8). `MetricSpec.unit: str = ""` (max 8 chars, display only). `headlines` adds `ValueFormat = Literal["fraction","number","percent_delta"]`, `metric_unit(ref, configured="")` (configured wins; else `usd`/`cost` → `$`, `token` → `tokens`, `latency` or an `ms` word → `ms`, `seconds`/`sec`/`_s` → `s`, else `""`), `value_format(unit, values, higher_is_better)` (`percent_delta` for a lower-is-better `ms`/`s`; `number` for any other unit or a value outside [0,1]; else `fraction`), `fmt_sig3`, `fmt_metric(x, unit, fmt, suffix=True)` (`fraction`: 3 decimals; else 3 significant figures + unit: `166 ms`, `$332`; dollars 0.01–100 keep cents: `$0.55`), `fmt_metric_delta(delta, base, unit, fmt)` (`percent_delta`: `+27%` of `base`; `number`: `−45 ms`; `fraction`: `+0.017`). `Leaderboard` gains `unit: str = ""` and `value_format: ValueFormat = "fraction"` (primary metric; values = group means); `VersusBest` gains `delta_rel: float | None` (`delta / |best mean|`, null when that mean is 0). Headlines and stat strips use them: `"fast p95 310 ms"`, stat `{value: "166 vs 233", unit: "ms"}`, `{value: "$0.55", unit: ""}` (`$` is a prefix in `value`; other units go in `unit`; relative % values have no unit). Overview (1.8): `IdeaRow` and `ProjectRow` gain `unit: str = ""` (the task's `Leaderboard.unit`; `""` for runs without a task); the UI shows the Best column and idea scores with it (`166 ms`, `$0.55`). Panel meta: `leaderboard` and `stat_strip` add `unit`, `value_format`; `scatter` adds `x_unit`, `y_unit`; `distribution` adds `unit`. `stat_strip` rows from `data.metrics` use `fmt_metric` and the ref's unit.
 - **Per-run labels** (1.6). With `data.group_by: run`, every panel labels a run `<group label> r<n>` (`baseline r1`), `n` = the run's 1-based position in its seed group among the selected runs, oldest first. `curves` `meta.groups` entries then also carry `seed_group` (the run's `group_id`) and `repeat` (`n`).
+
+
+## 2026-10-05 backlog interface additions
+
+- Task leaderboard `GET` accepts optional `primary=metric/key` independently of
+  metric version pins. The configured task metric and an observed selected-version
+  result key determine ranking, direction, units, uncertainty, comparisons and
+  headline. Omission preserves the configured primary. `queries.get_leaderboard`
+  and `build_leaderboard` expose the same optional keyword; cached variants include
+  the selection. Invalid task metrics/keys are domain errors.
+- `PanelData.primary: str | None = None` carries that selection into supported
+  primary-dependent panels and best-group metadata. Explicit authored axis metrics
+  remain explicit. Panel cache variants include the selector.
+- Curves group metadata includes the exact member `run_ids` and common recorded
+  `params`; `meta.best_group_id` identifies a displayed group only when its members
+  match the authoritative best scored configuration. Grid groups include member
+  IDs. The run UI matches selected example IDs, never positional indices.
+- Leaderboard rows add `cost_complete: bool`, optional `evaluation_population`
+  (metric/version/source/dataset/example-ID identity and measured attempts/solved),
+  and bounded `repeat_observations` (exact run/metric/version/key/value/source/dataset
+  provenance). Only applicable lower-is-better p95 time-valued system benchmarks
+  produce repeat observations. Incomplete or incompatible coverage suppresses
+  population comparisons and repeat outlier claims.
+- These are Phase 1/2 additive interfaces. CSV/export and collaborative workspace
+  behavior remain deferred to Phase 3.
+
+- `ScoreRecord` adds optional `per_example_hash`, `evaluation_examples`, and
+  `evaluation_ids_hash`. The evaluator emits these only for the current call's
+  complete unique prediction-ID population and exact per-example file bytes.
+  Population cost comparisons require that binding to match the file being read
+  and the latest sourced, successful metric attempt. Re-evaluation refreshes the
+  binding; aggregate-only, partial, failed and legacy unbound evaluations cannot
+  inherit the prior file's provenance. JSON indexing/mirroring retains the fields.
+
+- Example comparison adds optional `require_bound=true`; the query equivalent is
+  keyword-only `require_bound=False`. Strict mode requires finished nonarchived
+  members in the same project/task, matching dataset/scorer identity, healthy
+  latest metric/version batches, exact immutable artifact-byte snapshots, complete
+  unique population bindings and binary outcomes. Changed snapshots are rejected.
+  Cohorts may differ; the unchanged response reports their shared ID intersection.
+  Missing/stale evidence raises `EvalError`, never a legacy fallback. The default
+  keeps existing comparison semantics for legacy score files.

@@ -5,7 +5,8 @@
  */
 import { type ReactElement, useState } from "react";
 import type { HostRow, RunRecord } from "../../api/models";
-import { DASH, fmtUsd } from "./format";
+import { billedGpus } from "./billedGpus";
+import { DASH, fmtUsd, runSeconds } from "./format";
 import { SweepRunLink } from "./SweepGlyphs";
 import { type RunGlyphState, gpuHours, hostOf, runState, runUsd, stateText } from "./SweepModel";
 
@@ -71,6 +72,9 @@ export function SweepRuns({ runs, names, stale, hosts, now }: SweepRunsProps): R
           {shown.map(({ record, state }) => {
             const hours = gpuHours(record, now);
             const usd = runUsd(record);
+            const terminal = record.status !== "running" && record.status !== "queued";
+            const timed = runSeconds(record, now) !== null && (!terminal || record.ended_at !== null);
+            const knownHours = record.cost != null || (record.status !== "queued" && (billedGpus(record) === 0 || timed));
             return (
               <tr key={record.run_id}>
                 <td>
@@ -82,8 +86,8 @@ export function SweepRuns({ runs, names, stale, hosts, now }: SweepRunsProps): R
                 <td className="r">{record.seed ?? DASH}</td>
                 <td>{stateText(record, state, stale, now)}</td>
                 <td>{hostOf(record, hosts)}</td>
-                <td className="r">{hours > 0 ? hours.toFixed(1) : "·"}</td>
-                <td className="r">{usd !== null ? fmtUsd(usd) : "·"}</td>
+                <td className="r">{knownHours ? hours.toFixed(1) : terminal ? DASH : "·"}</td>
+                <td className="r">{usd !== null ? fmtUsd(usd) : terminal ? DASH : "·"}</td>
               </tr>
             );
           })}

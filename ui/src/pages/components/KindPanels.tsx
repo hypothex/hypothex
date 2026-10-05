@@ -4,6 +4,7 @@
  */
 import { useMemo } from "react";
 
+import type { RunStatus } from "../../api/models";
 import { useRunTrace, useRunTraces, useViewQuery } from "../../api/queries";
 import { Figure, panelLetter } from "./Figure";
 import { AppLink, hrefs } from "./links";
@@ -165,11 +166,23 @@ export interface KindPanelsProps {
   specs: PanelSpec[];
   example?: string;
   startIndex: number;
+  currentGroupId?: string;
+  runStatus?: RunStatus;
 }
 
-export function KindPanels({ project, task, runId, specs, example, startIndex }: KindPanelsProps) {
+export function KindPanels({ project, task, runId, specs, example, startIndex, currentGroupId, runStatus }: KindPanelsProps) {
   // `specs` is memoized by the caller, so `regular` and `results` keep their identity across renders
   const { regular, trace } = useMemo(() => splitRunView(specs), [specs]);
+  const traceList = useRunTraces(runId, trace !== null);
+  const chosen = example ? String(example) : pickExample(traceList.data ?? []);
+  const traceFirst = specs[0]?.type === "trace";
+  // A current-target grid must never briefly render every target while selection loads.
+  const waitingForTarget = trace !== null && regular.some((p) => p.type === "grid") && chosen === null;
+  const trajectory = trace ? (
+    <TraceSection runId={runId} example={chosen ?? undefined}
+      letter={panelLetter(startIndex + (traceFirst ? 0 : regular.length))}
+      title={trace.title || "Trajectory"} />
+  ) : null;
   const panels = useViewQuery(
     project,
     task,
@@ -182,20 +195,17 @@ export function KindPanels({ project, task, runId, specs, example, startIndex }:
   if (specs.length === 0) return null;
   return (
     <>
+      {traceFirst ? trajectory : null}
       {panels.error ? <ErrorBox error={panels.error} /> : null}
-      {regular.length > 0 && results ? (
-        <PanelGrid results={results} specs={regular} startIndex={startIndex} />
-      ) : regular.length > 0 && !panels.error ? (
+      {regular.length > 0 && results && !waitingForTarget ? (
+        <PanelGrid results={results} specs={regular} startIndex={startIndex + (traceFirst ? 1 : 0)}
+          selectedItemId={chosen ?? undefined} currentGroupId={currentGroupId} runStatus={runStatus} />
+      ) : waitingForTarget && traceList.data ? (
+        <p className="small">No traced example available for comparison</p>
+      ) : regular.length > 0 && !panels.error && !traceList.error ? (
         <Loading />
       ) : null}
-      {trace ? (
-        <TraceSection
-          runId={runId}
-          example={example}
-          letter={panelLetter(startIndex + regular.length)}
-          title={trace.title || "Trajectory"}
-        />
-      ) : null}
+      {traceFirst ? null : trajectory}
     </>
   );
 }

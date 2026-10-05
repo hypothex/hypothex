@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, screen } from "@testing-library/react";
 import type { RunRecord } from "../../src/api/models";
-import { SweepRuns } from "../../src/pages/components/SweepRuns";
+import { SweepRuns, runsForHosts } from "../../src/pages/components/SweepRuns";
 import { renderWithClient } from "./helpers";
 import { HOSTS, NOW, RUNS, STALE, rid, run } from "./sweepFixtures";
 
@@ -13,6 +13,23 @@ const bodyRows = (): HTMLElement[] => screen.getAllByRole("row").slice(1);
 const firstCells = (): (string | null | undefined)[] => bodyRows().map((r) => r.querySelector("td")?.textContent);
 
 describe("SweepRuns", () => {
+  test("a terminal GPU run without timing data shows missing GPU time, not a known zero", () => {
+    const missing = { ...run("c2"), started_at: null, cost: null, usage: null };
+    renderWithClient(<SweepRuns runs={[missing]} names={NAMES} stale={new Map()} hosts={HOSTS} now={NOW} />);
+    expect(cellsOf(bodyRows()[0] as HTMLElement).slice(-2)).toEqual(["—", "—"]);
+  });
+  test("terminal zero GPU time is known and unavailable terminal cost is missing", () => {
+    const finished = { ...run("a1"), executor: { ...run("a1").executor, gpus: [] }, gpus_requested: 0, cost: null, usage: null };
+    const killed = { ...finished, run_id: rid("killed"), status: "killed" as const };
+    const lost = { ...finished, run_id: rid("lost"), status: "lost" as const };
+    renderWithClient(<SweepRuns runs={[finished, killed, lost, run("a2")]} names={NAMES} stale={new Map()} hosts={HOSTS} now={NOW} />);
+    fireEvent.click(screen.getByRole("button", { name: "+ 1 finished" }));
+    for (const id of ["a1", "killed", "lost"]) {
+      expect(cellsOf(screen.getByRole("link", { name: id }).closest("tr") as Element).slice(-2)).toEqual(["0.0", "—"]);
+    }
+    expect(cellsOf(screen.getByRole("link", { name: "a2" }).closest("tr") as Element).slice(-2)).toEqual(["·", "·"]);
+    expect(runsForHosts([finished, killed, lost, run("c2")], new Map()).map(({ record }) => record.status)).toEqual(["lost", "failed", "killed", "finished"]);
+  });
   test("lists unfinished runs: running and stale first, then queued, then failed", () => {
     renderWithClient(<SweepRuns runs={RUNS} names={NAMES} stale={STALE} hosts={HOSTS} now={NOW} />);
     expect(screen.getAllByRole("columnheader").map((th) => th.textContent)).toEqual([

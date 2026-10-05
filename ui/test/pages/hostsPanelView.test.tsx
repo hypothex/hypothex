@@ -15,6 +15,7 @@ test("one row per host, in API order, under a header with GPU indices 0-7", () =
     "dgx",
     "mccleary",
     "gpu2",
+    "Key",
   ]);
   const idx = [...container.querySelectorAll(".hrow.head .gidx span")].map((s) => s.textContent);
   expect(idx).toEqual(["0", "1", "2", "3", "4", "5", "6", "7"]);
@@ -114,9 +115,21 @@ test("a connected host with no GPUs says so; an empty list says none", () => {
 
 test("the key names every cell kind and mark", () => {
   renderPanel();
-  const key = screen.getByLabelText("Key");
+  const key = screen.getByRole("group", { name: "Key" });
   expect(key.textContent).toBe("agent runhuman runfreenot hxstalehx≠version mismatch");
 });
+
+for (const state of ["error", "upgrade", "disabled", "connecting"] as const) {
+  test(`${state} without GPUs keeps its explanation in the state tooltip`, () => {
+    const base = makeHosts()[0]!;
+    const message = `${state}: detailed transport diagnostic with a long host-specific explanation`;
+    renderPanel([{ ...base, gpus: [], state: { ...base.state, state, message } }]);
+    const group = screen.getByRole("group", { name: base.name });
+    expect(within(group).getByTitle(message)).toBeTruthy();
+    expect(group.textContent).not.toContain(message);
+    expect(group.querySelector(".msg")?.textContent).toBe("·");
+  });
+}
 
 test("StateGlyph: every ConnState has its own SVG shape", () => {
   const states: ConnState[] = ["connecting", "bootstrapping", "connected", "stale", "upgrade", "error", "disabled"];

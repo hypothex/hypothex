@@ -264,6 +264,16 @@ export function DistributionPanel({ result }: { result: PanelResult }) {
     const baseline = typeof meta.baseline === "string" ? meta.baseline : null;
     return <PercentileTable rows={rows} unit={unit} baseline={baseline} />;
   }
+  // Explicit configured baseline semantics: orange reference, blue first alternative.
+  // Generic distributions retain their ordinal palette, even if a label says "baseline".
+  const baseline = typeof meta.baseline === "string" && rows.some((r) => r.group_id === meta.baseline) ? meta.baseline : null;
+  const alternatives = rows.filter((r) => r.group_id !== baseline);
+  const color = (row: DistRow, index: number): string => {
+    if (!baseline) return seriesColor(index);
+    if (row.group_id === baseline) return seriesColor(1);
+    const slot = alternatives.findIndex((r) => r.group_id === row.group_id);
+    return seriesColor(slot === 0 ? 0 : slot + 1);
+  };
   const kind: Scale = meta.scale === "linear" ? "linear" : "log";
   const name = typeof meta.name === "string" ? meta.name : "";
   const xLabel =
@@ -323,7 +333,7 @@ export function DistributionPanel({ result }: { result: PanelResult }) {
             d={d}
             style={{
               fill: "none",
-              stroke: seriesColor(i),
+              stroke: color(r, i),
               strokeWidth: 2,
               strokeLinejoin: "round",
             }}
@@ -346,7 +356,7 @@ export function DistributionPanel({ result }: { result: PanelResult }) {
               x2={14}
               y1={cy}
               y2={cy}
-              style={{ stroke: seriesColor(i), strokeWidth: 2.5 }}
+              style={{ stroke: color(r, i), strokeWidth: 2.5 }}
             />
             <text x={20} y={cy + 4} style={T.lblB}>
               {r.label}

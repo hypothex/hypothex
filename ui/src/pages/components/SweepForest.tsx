@@ -33,6 +33,19 @@ function identical(seeds: readonly number[]): boolean {
   return seeds.length > 1 && seeds.every((v) => v === seeds[0]);
 }
 
+/** Keep labels inside the chart; hover retains the full text, including long sampled params. */
+function ForestLabel({ text, y, kind }: { text: string; y: number; kind: "lbl" | "lbl-b" | "lbl-s" }): ReactElement {
+  return (
+    <foreignObject className="forest-label" x={0} y={y} width={LW - 12} height={ROW}>
+      <div className={kind} title={text} style={{
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right",
+        fontFamily: "var(--sans)", color: kind === "lbl-b" ? "var(--ink)" : kind === "lbl-s" ? "var(--ink-3)" : "var(--ink-2)",
+        lineHeight: `${ROW}px`,
+      }}>{text}</div>
+    </foreignObject>
+  );
+}
+
 export function SweepForest({
   cells,
   best,
@@ -61,9 +74,7 @@ export function SweepForest({
         role="img"
         aria-label={`Cells sorted by mean ${metric}, with seed dots and 95% intervals`}
       >
-        <text className="lbl-s" x={LW - 12} y={10} textAnchor="end">
-          {names.join(", ")}
-        </text>
+        <ForestLabel text={names.join(", ")} y={-12} kind="lbl-s" />
         <GridX x={x.at} ticks={x.ticks} y0={TOP} y1={yAx} />
         {best !== null && best.lo !== null && best.hi !== null ? (
           <BestBand x1={x.at(best.lo)} x2={x.at(best.hi)} y0={TOP} y1={yAx} />
@@ -75,9 +86,7 @@ export function SweepForest({
           const label = cellLabel(c.params, names);
           return (
             <g key={label} className="frow" data-label={label}>
-              <text className={b ? "lbl-b" : "lbl"} x={LW - 12} y={y + 4} textAnchor="end">
-                {label}
-              </text>
+              <ForestLabel text={label} y={y - ROW / 2} kind={b ? "lbl-b" : "lbl"} />
               {c.lo !== null && c.hi !== null ? <Whisker x1={x.at(c.lo)} x2={x.at(c.hi)} y={y} best={b} /> : null}
               {identical(seeds) ? (
                 <IdenticalSeeds cx={x.at(seeds[0] ?? 0)} cy={y - 9} n={seeds.length} r={3.5} best={b} />

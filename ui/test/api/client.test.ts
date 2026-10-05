@@ -150,6 +150,33 @@ describe("errors", () => {
 });
 
 describe("phase 2 api", () => {
+  test("the sweep fixture includes every backend status count and its total", () => {
+    expect(SWEEP.counts).toEqual({ finished: 4, running: 1, queued: 1, failed: 0, killed: 0, lost: 0, total: 6 });
+    expect(SWEEP.counts.total).toBe(SWEEP.run_ids.length);
+    expect(SWEEP_LIST[0]?.n_runs).toBe(SWEEP.counts.total);
+  });
+
+  test("every phase 2 write without options gets a fresh command id and human attribution", async () => {
+    const calls = mockFetch({});
+    const writes = [
+      () => api.connectHost("gpu1"),
+      () => api.launch({ repo: "/tmp/toy", command: ["echo", "ok"] }),
+      () => api.launchOnHost("gpu1", { project: "toy", command: ["echo", "ok"] }),
+      () => api.cancelQueued("toy", "s-7f3a"),
+      () => api.extendSweep("toy", "s-7f3a", [4]),
+      () => api.pull("r-9", "checkpoint"),
+    ];
+    for (const write of writes) { await write(); await write(); }
+    const bodies = calls.map((call) => call.body as { command_id: string; created_by: string });
+    expect(calls).toHaveLength(12);
+    for (const body of bodies) {
+      expect(body.command_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+      expect(body.created_by).toBe("human");
+    }
+    expect(new Set(bodies.map((body) => body.command_id)).size).toBe(calls.length);
+    expect(calls[8]?.body).toMatchObject({ seeds: [4] });
+    expect(calls[10]?.body).toMatchObject({ artifact: "checkpoint" });
+  });
   test("hosts GETs the hub's own row and every host with its state, GPUs and queue", async () => {
     const calls = mockFetch(HOSTS);
     const rows = await api.hosts();
@@ -297,4 +324,16 @@ describe("phase 2 api", () => {
 
 test("wsUrl points at the event stream on the page origin", () => {
   expect(wsUrl()).toBe("ws://127.0.0.1:7777/api/v1/ws");
+});
+
+test("leaderboard primary selection is sent without changing secondary metric requests", async () => {
+  const calls = mockFetch({ rows: [] });
+  await api.leaderboard("toy", "acc", ["accuracy@v2"], undefined, "latency/p95");
+  expect(calls[0]?.url).toBe("/api/v1/tasks/toy/acc/leaderboard?metric=accuracy%40v2&primary=latency%2Fp95");
+});
+
+test("bound example comparison opts in without altering legacy requests", async () => {
+  const calls = mockFetch({ fixed: [], broken: [] });
+  await api.compareExamples("r1", "r2", "accuracy@v1", "correct", undefined, true);
+  expect(calls[0]?.url).toBe("/api/v1/compare/examples?a=r1&b=r2&metric=accuracy%40v1&field=correct&require_bound=true");
 });

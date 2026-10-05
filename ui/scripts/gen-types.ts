@@ -1,5 +1,5 @@
 import { rename, rm } from "node:fs/promises";
-import openapiTS, { astToString, type OpenAPI3 } from "openapi-typescript";
+import openapiTS, { COMMENT_HEADER, astToString, type OpenAPI3 } from "openapi-typescript";
 
 type FetchSchema = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -26,7 +26,7 @@ export async function generateTypes(base: string, token: string | undefined, fet
   }
   try {
     const schema = await response.json() as OpenAPI3;
-    return astToString(await openapiTS(schema, { silent: true }));
+    return COMMENT_HEADER + astToString(await openapiTS(schema, { silent: true }));
   } catch { throw new Error("Invalid OpenAPI schema"); }
 }
 

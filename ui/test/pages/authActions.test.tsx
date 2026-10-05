@@ -24,6 +24,19 @@ function Probe({ onDone }: { onDone: (value: { run_id: string }) => void }) {
   return <button onClick={() => action.run()}>Rerun probe</button>;
 }
 
+async function readyLaunch(): Promise<HTMLButtonElement> {
+  // Credential replacement remounts the dialog; settle query notifications and host selection.
+  for (let tick = 0; tick < 50; tick++) {
+    await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
+    const button = screen.queryByRole("button", { name: "Launch 1" }) as HTMLButtonElement | null;
+    if (button && !button.disabled && (screen.queryByRole("radio", { name: "gpu1" }) as HTMLInputElement | null)?.checked) break;
+  }
+  const button = screen.getByRole("button", { name: "Launch 1" }) as HTMLButtonElement;
+  expect(button.disabled).toBe(false);
+  expect((screen.getByRole("radio", { name: "gpu1" }) as HTMLInputElement).checked).toBe(true);
+  return button;
+}
+
 test("an action interrupted by a credential change never retries with the next credential", async () => {
   auth.select("old-synthetic");
   let resolveFirst!: (response: Response) => void;
@@ -92,15 +105,14 @@ test("a superseded launch dialog never invalidates the replacement session", asy
     initial={{ host: "gpu1", command: CMD, seeds: "1", gpus: 0, hypothesis: "credential test" }}
     onClose={() => {}} onLaunched={onLaunched}
   /></AuthGate></QueryClientProvider>);
-  const button = await screen.findByRole("button", { name: "Launch 1" });
-  await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
+  const button = await readyLaunch();
   fireEvent.click(button);
   await waitFor(() => expect(calls.filter((call) => call.method === "POST")).toHaveLength(1));
   const invalidate = spyOn(client, "invalidateQueries");
   await act(async () => { auth.lock(auth.snapshot().generation); });
   await screen.findByLabelText("Token");
   await act(async () => { auth.accept(auth.select("new-synthetic")); });
-  await screen.findByRole("button", { name: "Launch 1" });
+  await readyLaunch();
   await act(async () => {
     resolveFirst(makeRecord({ seed: 1 }));
     await new Promise((resolve) => setTimeout(resolve, 100));

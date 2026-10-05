@@ -27,8 +27,8 @@ export const queryKeys = {
   projects: () => ["projects"] as const,
   tasks: (project?: string) => ["tasks", project ?? null] as const,
   task: (project: string, task: string) => ["task", project, task] as const,
-  leaderboard: (project: string, task: string, metrics: readonly string[] = []) =>
-    ["leaderboard", project, task, [...metrics]] as const,
+  leaderboard: (project: string, task: string, metrics: readonly string[] = [], primary?: string) =>
+    primary ? ["leaderboard", project, task, [...metrics], primary] as const : ["leaderboard", project, task, [...metrics]] as const,
   taskKind: (project: string, task: string) => ["taskKind", project, task] as const,
   runs: (query: M.RunsQuery = {}) => ["runs", query] as const,
   run: (runId: string) => ["run", runId] as const,
@@ -37,8 +37,10 @@ export const queryKeys = {
     ["run", runId, "predictions", query] as const,
   runTraces: (runId: string) => ["run", runId, "traces"] as const,
   runTrace: (runId: string, exampleId: string) => ["run", runId, "traces", exampleId] as const,
-  compareExamples: (a: string, b: string, metric: string, field?: string) =>
-    ["compareExamples", a, b, metric, field ?? null] as const,
+  compareExamples: (a: string, b: string, metric: string, field?: string, requireBound = false) =>
+    requireBound
+      ? ["compareExamples", a, b, metric, field ?? null, { require_bound: true }] as const
+      : ["compareExamples", a, b, metric, field ?? null] as const,
   views: (project: string, task: string) => ["views", "list", project, task] as const,
   view: (project: string, task: string, name: string) => ["views", "doc", project, task, name] as const,
   viewQuery: (project: string, task: string, body: M.ViewQueryBody) =>
@@ -237,11 +239,11 @@ export const useLeaderboard = (
   project: string,
   task: string,
   metrics: readonly string[] = [],
-  opts: ReadOptions = {},
+  opts: ReadOptions & { primary?: string } = {},
 ) =>
   useQuery({
-    queryKey: queryKeys.leaderboard(project, task, metrics),
-    queryFn: ({ signal }) => api.leaderboard(project, task, metrics, signal),
+    queryKey: queryKeys.leaderboard(project, task, metrics, opts.primary),
+    queryFn: ({ signal }) => api.leaderboard(project, task, metrics, signal, opts.primary),
     ...readOptions(opts),
   });
 
@@ -291,11 +293,11 @@ export const useCompareExamples = (
   b: string,
   metric: string,
   field?: string,
-  opts: ReadOptions = {},
+  opts: ReadOptions & { requireBound?: boolean } = {},
 ) =>
   useQuery({
-    queryKey: queryKeys.compareExamples(a, b, metric, field),
-    queryFn: ({ signal }) => api.compareExamples(a, b, metric, field, signal),
+    queryKey: queryKeys.compareExamples(a, b, metric, field, opts.requireBound),
+    queryFn: ({ signal }) => api.compareExamples(a, b, metric, field, signal, opts.requireBound),
     ...readOptions(opts),
   });
 

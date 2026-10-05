@@ -125,6 +125,10 @@ def evaluate(request: dict[str, Any]) -> dict[str, Any]:
         ``{"n_examples": int, "n_unmatched": int, "results":
         [{"name","version","values","error","source_hash"}]}``. ``results`` is
         empty when no prediction id is in the dataset: no metric runs then.
+        Successful full per-example outputs also carry ``per_example_hash``
+        (SHA256 of exact written bytes), ``evaluation_examples`` and
+        ``evaluation_ids_hash`` (SHA256 of sorted JSON prediction IDs).
+        Duplicate IDs, partial details and aggregate-only results are unbound.
     """
     sys.path.insert(0, request["repo"])
     run_dir = Path(request["run_dir"])
@@ -148,13 +152,23 @@ def evaluate(request: dict[str, Any]) -> dict[str, Any]:
             entry["values"] = result.values
             if result.per_example:
                 out = run_dir / "predictions" / f"scores.{m['name']}@{m['version']}.jsonl"
-                atomic_write_text(
-                    out,
-                    "".join(
-                        json.dumps({"id": k, **v}, default=str) + "\n"
-                        for k, v in result.per_example.items()
-                    ),
+                body = "".join(
+                    json.dumps({"id": k, **v}, default=str) + "\n"
+                    for k, v in result.per_example.items()
                 )
+                atomic_write_text(out, body)
+                ids = [e.id for e in examples]
+                detail_ids = [str(k) for k in result.per_example]
+                if len(ids) == len(set(ids)) == len(detail_ids) == len(set(detail_ids)) and set(
+                    ids
+                ) == set(detail_ids):
+                    entry["per_example_hash"] = (
+                        "sha256:" + hashlib.sha256(body.encode()).hexdigest()
+                    )
+                    entry["evaluation_examples"] = len(ids)
+                    entry["evaluation_ids_hash"] = (
+                        "sha256:" + hashlib.sha256(json.dumps(sorted(ids)).encode()).hexdigest()
+                    )
         except Exception:
             entry["error"] = traceback.format_exc(limit=5)
         results.append(entry)

@@ -9,7 +9,7 @@ const CLI_SAFE = /^[A-Za-z0-9_\-+=/.,:@%]+$/;
 /** Quote one argument for a POSIX shell; plain words stay bare. */
 export function cliQuote(arg: string): string {
   if (arg === "") return "''";
-  return CLI_SAFE.test(arg) ? arg : `'${arg.replace(/'/g, `'"'"'`)}'`;
+  return CLI_SAFE.test(arg) && !arg.startsWith("=") ? arg : `'${arg.replace(/'/g, `'"'"'`)}'`;
 }
 
 /** One `hx launch` command for one seed. */

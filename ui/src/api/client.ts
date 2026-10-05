@@ -201,8 +201,8 @@ export const api = {
     get<M.TaskSummary[]>(ROUTES.tasks, { query: { project }, signal }),
   task: (project: string, task: string, signal?: AbortSignal) =>
     get<M.TaskDetail>(ROUTES.task, { params: { project, task }, signal }),
-  leaderboard: (project: string, task: string, metrics?: readonly string[], signal?: AbortSignal) =>
-    get<M.Leaderboard>(ROUTES.leaderboard, { params: { project, task }, query: { metric: metrics }, signal }),
+  leaderboard: (project: string, task: string, metrics?: readonly string[], signal?: AbortSignal, primary?: string) =>
+    get<M.Leaderboard>(ROUTES.leaderboard, { params: { project, task }, query: { metric: metrics, primary }, signal }),
   taskKind: (project: string, task: string, signal?: AbortSignal) =>
     get<M.TaskKindInfo>(ROUTES.taskKind, { params: { project, task }, signal }),
   views: (project: string, task: string, signal?: AbortSignal) =>
@@ -230,8 +230,8 @@ export const api = {
     get<M.TraceSummary[]>(ROUTES.runTraces, { params: { run_id: runId }, signal }),
   runTrace: (runId: string, exampleId: string, signal?: AbortSignal) =>
     get<M.PanelResult>(ROUTES.runTrace, { params: { run_id: runId, example_id: exampleId }, signal }),
-  compareExamples: (a: string, b: string, metric: string, field?: string, signal?: AbortSignal) =>
-    get<M.ExampleDiff>(ROUTES.compareExamples, { query: { a, b, metric, field }, signal }),
+  compareExamples: (a: string, b: string, metric: string, field?: string, signal?: AbortSignal, requireBound = false) =>
+    get<M.ExampleDiff>(ROUTES.compareExamples, { query: { a, b, metric, field, require_bound: requireBound ? true : undefined }, signal }),
   rerun: (runId: string, opts?: M.ActionOptions) =>
     post<M.RunRecord>(ROUTES.runRerun, { params: { run_id: runId }, body: action(opts) }),
   reinfer: (runId: string, checkpoint?: string, opts?: M.ActionOptions) =>

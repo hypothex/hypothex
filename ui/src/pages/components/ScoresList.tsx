@@ -23,19 +23,25 @@ export function scoreLabel(s: ScoreRecord): string {
   return `${s.metric} ${s.version}${s.key === "value" ? "" : `/${s.key}`}`;
 }
 
-/** The newest valid score for `name`, `name@version`, or `name@version/key`. */
+/**
+ * A current score for `name`, `name@version`, or `name@version/key`.
+ * Select the requested/preferred key before validating it: a failed value must not
+ * fall back to a different field. A same-version wildcard error invalidates values
+ * recorded at or before that attempt, including partial values from that attempt.
+ * Timestamped history remains available through `latestScores` and `ScoresList`.
+ */
 export function scoreFor(scores: ScoreRecord[], ref: string): number | null {
   const [head = "", key] = ref.split("/");
   const [name = "", version] = head.split("@");
   const candidates = latestScores(scores).filter(
-    (s) =>
-      s.metric === name &&
-      (version === undefined || s.version === version) &&
-      s.error === null &&
-      s.value !== null,
+    (s) => s.metric === name && (version === undefined || s.version === version),
   );
-  const pick = candidates.find((s) => s.key === (key ?? "value")) ?? (key ? undefined : candidates[0]);
-  return pick?.value ?? null;
+  const pick = candidates.find((s) => s.key === (key ?? "value"))
+    ?? (key ? undefined : candidates.find((s) => s.key !== "*"));
+  if (!pick || pick.error !== null || pick.value === null || !Number.isFinite(pick.value)) return null;
+  const failed = candidates.some((s) => s.version === pick.version && s.key === "*"
+    && s.error !== null && s.created_at >= pick.created_at);
+  return failed ? null : pick.value;
 }
 
 export interface PrimaryRef {

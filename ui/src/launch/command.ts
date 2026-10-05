@@ -16,18 +16,18 @@ export function fillVars(argv: readonly string[], vars: Readonly<Record<string, 
 /** Tooltip on the command field and on each `{seed}` mark. */
 export const SEED_HINT = "{seed} is filled with each seed. In a shell, quote it: '{seed}'";
 
-/** Words a shell would treat as syntax; as argv they reach the program as plain text. */
-const OPERATORS = new Set(["|", "||", "&", "&&", ";", ">", ">>", "<", "2>", "2>&1"]);
+/** Unquoted shell syntax, including attached redirects; kept as literal argv text. */
+const SHELL_OPERATOR = /^(?:(?:>>?|<<?)(?:&(?:\d+|-))?|\|\||&&|[|&;])/;
 
 export interface SplitResult {
   argv: string[];
   /** `null` when the text splits cleanly. */
   error: string | null;
-  /** Unquoted words that are shell operators, in order. */
+  /** Unquoted shell operators, including ones attached to words, in order. */
   operators: string[];
 }
 
-/** Split a command line into argv like POSIX `sh` (no expansion of `$`, globs or `~`). */
+/** Read shell quotes/backslashes into argv; operators stay literal and nothing expands. */
 export function splitCommand(text: string): SplitResult {
   const argv: string[] = [];
   const operators: string[] = [];
@@ -36,7 +36,6 @@ export function splitCommand(text: string): SplitResult {
   let quoted = false;
   const endWord = (): void => {
     if (!inWord) return;
-    if (!quoted && OPERATORS.has(word)) operators.push(word);
     argv.push(word);
     word = "";
     inWord = false;
@@ -58,8 +57,8 @@ export function splitCommand(text: string): SplitResult {
         if (j >= text.length) return { argv: [], error: 'unclosed " quote', operators: [] };
         const d = text.charAt(j);
         if (d === '"') break;
-        if (d === "\\" && j + 1 < text.length && '"\\$`'.includes(text.charAt(j + 1))) {
-          word += text.charAt(j + 1);
+        if (d === "\\" && j + 1 < text.length && '"\\$`\n'.includes(text.charAt(j + 1))) {
+          if (text.charAt(j + 1) !== "\n") word += text.charAt(j + 1);
           j += 2;
         } else {
           word += d;
@@ -82,9 +81,14 @@ export function splitCommand(text: string): SplitResult {
       endWord();
       i += 1;
     } else {
-      word += c;
+      const operator = SHELL_OPERATOR.exec(text.slice(i))?.[0];
+      if (operator) {
+        const fd = /^[<>]/.test(operator) && !quoted && /^\d+$/.test(word) ? word : "";
+        operators.push(fd + operator);
+      }
+      word += operator ?? c;
       inWord = true;
-      i += 1;
+      i += operator?.length ?? 1;
     }
   }
   endWord();

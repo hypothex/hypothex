@@ -104,3 +104,25 @@ describe("GridPanel", () => {
     expect(screen.getByText("No items")).toBeTruthy();
   });
 });
+
+test("a selected target uses its exact ID across configs and highlights the current config", () => {
+  const { container } = render(<GridPanel result={grid(META)} selectedItemId="t2" currentGroupId="gA" />);
+  expect([...container.querySelectorAll("rect[data-item]")].map((r) => r.getAttribute("data-item"))).toEqual(["t2", "t2"]);
+  expect(container.querySelector('[data-group="gA"]')?.getAttribute("data-current")).toBe("true");
+  expect(screen.getByText("mcts (current)")).toBeTruthy();
+  expect(screen.getByText("0.667")).toBeTruthy();
+  expect(screen.queryByText("hard")).toBeNull();
+  expect(screen.getByText("t2")).toBeTruthy();
+});
+
+test("a missing selected target never falls back to a positional item", () => {
+  const { container } = render(<GridPanel result={grid(META)} selectedItemId="T-002" currentGroupId="gA" />);
+  expect(container.querySelectorAll("rect[data-item]")).toHaveLength(0);
+  expect(screen.getByText("No outcomes for example T-002")).toBeTruthy();
+});
+
+test("a selected target missing from one config stays unknown, not zero", () => {
+  const { container } = render(<GridPanel result={grid(META, ROWS.filter((r) => !(r.group_id === "gB" && r.item_id === "t2")))} selectedItemId="t2" />);
+  expect(container.querySelector('[data-group="gB"]')?.textContent).toContain("—");
+  expect(container.querySelectorAll("rect[data-item]")).toHaveLength(1);
+});

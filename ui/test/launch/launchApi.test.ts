@@ -53,6 +53,28 @@ test("a launch network retry cannot continue with a replacement credential", asy
 });
 
 describe("fetchLaunchHosts", () => {
+  for (const path of ["gpus", "queue"]) {
+    test(`${path} server failures stay errors instead of empty resource snapshots`, async () => {
+      mockApi({
+        "GET /api/v1/hosts": [GPU1],
+        "GET /api/v1/gpus": [],
+        "GET /api/v1/queue": [],
+        [`GET /api/v1/${path}`]: new HttpReply(500, { error: "resource unavailable", type: "IndexError" }),
+      });
+      await expect(fetchLaunchHosts()).rejects.toThrow("resource unavailable");
+    });
+
+    test(`${path} transport failures stay errors instead of empty resource snapshots`, async () => {
+      mockApi({
+        "GET /api/v1/hosts": [GPU1],
+        "GET /api/v1/gpus": [],
+        "GET /api/v1/queue": [],
+        [`GET /api/v1/${path}`]: () => { throw new TypeError("connection reset"); },
+      });
+      await expect(fetchLaunchHosts()).rejects.toThrow("Cannot reach hx serve");
+    });
+  }
+
   test("puts the hub first with its own GPUs and queue", async () => {
     mockApi({
       "GET /api/v1/hosts": [GPU1],

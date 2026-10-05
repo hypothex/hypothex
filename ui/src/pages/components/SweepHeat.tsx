@@ -94,7 +94,8 @@ export function SweepHeat({
     const mean = cell?.mean ?? null;
     return mean !== null && lo !== null && hi !== null ? heatLevel(mean, lo, hi, higherIsBetter) : 0;
   };
-  const anyStale = cells.some((x) => x.runs.some((r) => stateOf(r.run_id, r.status) === "stale"));
+  const usedStates = new Set(cells.flatMap((x) => x.runs.map((r) => stateOf(r.run_id, r.status))));
+  const extraStates = (["lost", "killed", "stale"] as const).filter((s) => usedStates.has(s));
   return (
     <>
       <table className="heat" aria-label={`Mean ${metric} by ${axes.row} and ${axes.col}`}>
@@ -151,7 +152,7 @@ export function SweepHeat({
           </tr>
         </tbody>
       </table>
-      <div className="key" aria-label="Key">
+      <div className="key" role="group" aria-label="Key">
         {lo !== null && hi !== null ? (
           <span title="Darker is better">
             <span className="ramp">
@@ -174,12 +175,12 @@ export function SweepHeat({
             {s}
           </span>
         ))}
-        {anyStale ? (
-          <span className="st-k" title="Host not reachable; the run may still be going">
-            <RunGlyph state="stale" />
-            stale
+        {extraStates.map((s) => (
+          <span key={s} className="st-k" title={s === "stale" ? "Host not reachable; the run may still be going" : undefined}>
+            <RunGlyph state={s} />
+            {s}
           </span>
-        ) : null}
+        ))}
       </div>
     </>
   );

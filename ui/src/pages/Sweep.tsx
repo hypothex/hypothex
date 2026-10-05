@@ -2,7 +2,7 @@
  * Sweep screen (spec 8A.6, contract section 4, mockup shot-sweep-*): one-line headline
  * with the best cell, meta line, stat strip and progress strip; (a) params heat table
  * for two listed params, a sortable table otherwise; (b) seeds forest; (c) runs on hosts.
- * Actions: Copy as CLI, Cancel queued, Add seeds.
+ * Actions: Rerun sweep, Copy as CLI, Cancel queued, Add seeds.
  */
 import { useQuery } from "@tanstack/react-query";
 import { type ReactElement, useState } from "react";
@@ -90,6 +90,8 @@ export function SweepPage({ project, sweepId, now }: SweepPageProps): ReactEleme
           sweepId={sweepId}
           summary={summary.data}
           runs={runs.data?.runs}
+          runsError={runs.error}
+          onRefresh={() => { void runs.refetch(); void summary.refetch(); }}
           hosts={hosts.data}
           board={board.data}
           now={now ?? tick}
@@ -98,7 +100,7 @@ export function SweepPage({ project, sweepId, now }: SweepPageProps): ReactEleme
         <Loading />
       )}
       {summary.error ? <ErrorBox error={summary.error} /> : null}
-      {runs.error && !summary.error ? <ErrorBox error={runs.error} /> : null}
+      {runs.error && runs.data !== undefined && !summary.error ? <ErrorBox error={runs.error} /> : null}
     </div>
   );
 }
@@ -109,12 +111,14 @@ interface SweepBodyProps {
   summary: SweepSummary;
   /** The sweep's runs; undefined while they load. */
   runs: readonly RunRecord[] | undefined;
+  runsError: Error | null;
+  onRefresh: () => void;
   hosts: readonly HostRow[] | undefined;
   board: Leaderboard | undefined;
   now: number;
 }
 
-function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: SweepBodyProps): ReactElement {
+function SweepBody({ project, sweepId, summary, runs, runsError, onRefresh, hosts, board, now }: SweepBodyProps): ReactElement {
   const { spec, counts } = summary;
   const names = spec.grid.map((p) => p.name);
   const cells = parseCells(summary.cells);
@@ -150,7 +154,7 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
               {` = ${counts.total ?? 0}`}
             </span>
             {gpus > 0 ? <span>{`${gpus} GPU / run`}</span> : null}
-            {hostList.length > 0 ? <span title="Hosts">{hostList.join(", ")}</span> : null}
+            {runs === undefined ? <span title="Hosts">{runsError ? "hosts unavailable" : "loading hosts…"}</span> : hostList.length > 0 ? <span title="Hosts">{hostList.join(", ")}</span> : null}
             <span className={`who ${isAgent(spec.created_by) ? "agent" : "human"}`}>
               <i />
               {spec.created_by}
@@ -193,6 +197,7 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
             metric,
             unit: board?.unit ?? "",
             runs: ordered,
+            runsState: runs !== undefined ? undefined : runsError ? "error" : "loading",
             hosts,
             now,
           })}
@@ -241,8 +246,8 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
           />
         </Figure>
       </div>
-      <Figure letter="c" title="Runs on hosts" aside={`${running} running, ${queued} queued`}>
-        <SweepRuns runs={ordered} names={names} stale={stale} hosts={hosts} now={now} />
+      <Figure letter="c" title="Runs on hosts" aside={runs === undefined ? "" : `${running} running, ${queued} queued`}>
+        {runs === undefined ? runsError ? <ErrorBox error={runsError} /> : <Loading /> : <SweepRuns runs={ordered} names={names} stale={stale} hosts={hosts} now={now} />}
       </Figure>
       {rerun ? (
         <SweepRerun
@@ -250,6 +255,8 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
           spec={spec}
           best={best}
           runs={runs === undefined ? undefined : ordered}
+          runsError={runsError}
+          onRefresh={onRefresh}
           onClose={() => setRerun(false)}
           onLaunched={(records, host) => {
             setRerun(false);

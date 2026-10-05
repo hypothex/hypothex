@@ -1,6 +1,6 @@
 # Phase 3 pinned-baseline refresh
 
-Status: document-only checkpoint. Reviewed source baseline: main `5c020378b75bcb2afeba427e85b2f075e8e70804`; starting plan commit: `f776156729949645b3da19547ab85b684553a914`. This is the authorized repair of compatibility checklist items 1–7. Pending token/DF-48 interfaces are not treated as implemented, and no formal round 5 has run.
+Status: document-only checkpoint. Current reviewed source baseline: main `1b769f4ce9210096640a7054f5d757f09f4bb4df`; preceding document checkpoint: `5fd089e959ed0c83a8e282919651879dd3f84ccc`. The original checkpoint below reviewed main `5c020378b75bcb2afeba427e85b2f075e8e70804` from starting plan commit `f776156729949645b3da19547ab85b684553a914`. This is the authorized repair of compatibility checklist items 1–7. Pending token/DF-48 interfaces are not treated as implemented, and no formal round 5 has run.
 
 The original eight-item checklist, with its original line references, is preserved at `/tmp/hx-handoff-evidence/phase3-baseline-refresh/compatibility-checklist.md`.
 
@@ -29,7 +29,24 @@ No real PostgreSQL, Docker, full pytest, full UI typecheck/build or application 
 
 ## Final-main work still required
 
-- [ ] Merge the final guarded hydration interface identified at `ba4459d`: journal and guard `_replace_metric_points` before its DELETE/EXISTS claim; preserve status capture, rowcount, outside-transaction retry and unchanged generation when the claim loses. Final refreshed code/test snippets must concretely cover hydration versus deletion and final swap, bounded joins, and failed-hydration journal repair. Do not replace the new method with an older body.
+- [x] Reconcile merged guarded hydration from `1b769f4`: journal and guard the private `_replace_metric_points` before its DELETE/EXISTS claim; preserve status capture, rowcount, outside-transaction retry and unchanged generation when the claim loses. Task 36 now supplies concrete hydration/deletion, final-swap/status-retry, bounded-join and failed-hydration repair regressions. This checks the plan; PostgreSQL execution remains implementation acceptance.
 - [ ] Reconcile final DF-48 durable queued/issuing/settling state, command receipts, attribution, state-change events and notifier deferral/restart/settlement semantics.
 - [ ] Reconcile final default-token guard, static shell, credential gate, subprotocol ticket transport, private SSH sockets, identity verification and nullable local port, preserving caller-only forwarding and current timeout/error handling.
 - [ ] Re-read every source changed after the pinned baseline, refresh exact replacement snippets/tests and frontend blob checks, then run actual formal rounds 5–6. Preserve round-4 evidence and distinguish document/probe validation from implementation suites.
+
+
+## Merged security and bounded-metrics refresh
+
+Source pin: `1b769f4ce9210096640a7054f5d757f09f4bb4df`. Changes remain confined to phase 3 documents; previous PostgreSQL, owner/schema, MCP and frontend fixes are retained.
+
+- Correct Task 34's journal target to `_replace_metric_points`, because the merged public method now delegates. Preserve the marker/status CAS, outside-transaction retry and zero generation change on a lost claim.
+- Preserve terminal-before-metrics publication across execution, fallback stop, SLURM settlement and mirror/index repair. Keep bounded live histories, full terminal histories, two-dimensional SQL chunking and exact non-metric state parsing.
+- Add portable `reset_cursor` upsert-to-zero and preserve `cursor_hosts` and all rebuild-carried reservations, including identities with no runs. Retain claims-lock reservation before awaits, disabled/draining owners, old hostless-claim normalization before new alias writes, and removal/drain ordering. Storage routing uses verified ownership; uncertain input ownership continues to block all possible hosts.
+- Retain the centralized local-repository gate and current remote snapshot behavior. The frontend's twelve snippets and eight source blob IDs still match the new source pin; no frontend implementation changed between these two pins.
+- Add four concrete Task 36 regressions: cursor reservation/reset/rebuild/reopen; hydration versus deletion; hydration blocked by final swap then rejecting stale status and retrying terminal points; failed hydration journal repair. No formal round 5 has run.
+
+Evidence: `/tmp/hx-handoff-evidence/phase3-merged-baseline/`. `contracts-before.txt` records four missing plan requirements before repair. `probe.py` composes the pinned index with the actual plan snippets in memory. It passes metadata/migration and int64 checks, PostgreSQL SQL compilation/order checks, frontend pin checks, both merged terminal/CAS cases, and the three portable new tests on SQLite. It verifies that the actual private mutation transaction enters the journal and writer guard before claim DML. The final-swap test is AST/Ruff checked only; its PostgreSQL concurrency behavior requires the planned container run. Full phase 3 assembly, Docker/PostgreSQL execution, UI build and acceptance suites were not run. Reuse the preceding frontend runtime evidence: only its baseline-reference text changed, and its source blobs are identical.
+
+A bounded independent read-only review of Task 34's reset/private-mutator snippets and guard/rebuild ordering, plus the four new Task 36 tests, found no actionable P0–P2 issues. It checked the actual `1b769f4` mutator body, the lost-claim `_touch` bypass, and generation observation after the real writer guard. This is supplemental review, not formal round 5 or PostgreSQL runtime evidence.
+
+Step 6 was inspected for future impact only. Its current working integration is not this merged baseline: SQLite corruption recovery (`_open_schema`/`_move_aside`) and gone-run repair may change constructor/recovery anchors; host alias transfer may also repair project ownership before claim labels; metric-name readers/cache file identity may change bounded-read call paths. Re-read final merged versions before adapting these plans. Preserve corruption-vs-operational-error distinctions and metadata/identity retention if that work lands; do not copy speculative bodies or assert it merged. Likewise retain the later overlapping-rebuild regression if present in final main.

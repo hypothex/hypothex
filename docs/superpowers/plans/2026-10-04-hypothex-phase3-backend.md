@@ -15640,8 +15640,8 @@ Contract 1.11, 8 (failure mode 13), 9 (Docker test). The index is the only thing
 **Interfaces:**
 - Produces (contract 1.11, exact): `Index.__init__(target: Path | str, store: RunStore | None = None, *, password: SecretStr | None = None)`, `Index.dialect`, `upsert(session, model, values, keys)`, `open_index(layout, settings)`, `IndexUnavailableError` (API 503), `IndexSchemaError` (a `ConfigError`: "run hx db upgrade").
 - Produces (additive): `upsert(..., *, keep_max: str | None = None)` (keeps the larger value of one column, for `set_cursor`); `upsert_statement(dialect, model, values, keys, *, keep_max=None)`; `Index.json_text(column, key)` (`json_extract` on SQLite, `json_extract_path_text` on Postgres); `HEAD_REVISION = "0001_phase3"`; `INDEX_PENDING_FILE = "index-pending.txt"`; `Index.pending: Path | None` (set by `open_index` to `<home>/index-pending.txt`); `repair_pending(index, store) -> list[str]`.
-- Rebuild/recovery: preserve main `5c020378b75bcb2afeba427e85b2f075e8e70804` generation/change markers, schema-3 parent/deferred-point/stale-score state and atomic concurrent SQLite rebuild. `Index.store` is retained on both dialects; PostgreSQL gets the explicit staged transaction below and never accesses a SQLite path. PostgreSQL mutation transactions take one exclusive advisory guard before any live DML; final swap takes the same guard, while staging and ordinary reads remain available.
-- Rules: a `Path` target is SQLite exactly as before; a `postgresql+psycopg://` URL opens a pooled engine (`pool_pre_ping=True`) with the password from `server.index_password_env`, never from the URL, and checks that the Alembic revision is `HEAD_REVISION` (`IndexSchemaError` otherwise). A server that does not answer raises `IndexUnavailableError` naming the URL with `***` for any password. A Postgres URL without `psycopg` installed raises `ConfigError` "a Postgres index needs psycopg: uv tool install 'hypothex[server]'" (never a bare `ModuleNotFoundError` from SQLAlchemy). Mid-request index failures answer 503 `{error, type: "IndexUnavailableError"}`. Run files are written before the index, so a failed write leaves the index row missing (a new run: `repair_index_gaps` adds it) or stale (an archive, star, status change, or score append on an indexed run, which `repair_index_gaps` never looks at): every run write of `Index` (`upsert_run`, `add_score`, `replace_scores`, `replace_metric_points`, `delete_run`) that fails with `OperationalError`/`InterfaceError` appends its run id to `Index.pending` (under the file's `flock`, re-opening when a repair moved the file) before re-raising, and `repair_pending` re-indexes those runs from their files (drops the ones whose folder is gone) on the next `Context.open` and every 30 s in the server's repair loop, so the index catches up once Postgres answers. The claim is recoverable: the journal is moved to `index-pending.txt.<8 hex>.claim`, every claim file (a crashed process's too) is read, and each is removed only after all its runs are indexed. Each run is re-read and indexed under its `run_lock` (the lock `Context.update_run` holds), so a repair racing an archive never writes the old value back.
+- Rebuild/recovery: preserve main `1b769f4ce9210096640a7054f5d757f09f4bb4df` generation/change markers, schema-3 parent/deferred-point/stale-score state and atomic concurrent SQLite rebuild. `Index.store` is retained on both dialects; PostgreSQL gets the explicit staged transaction below and never accesses a SQLite path. PostgreSQL mutation transactions take one exclusive advisory guard before any live DML; final swap takes the same guard, while staging and ordinary reads remain available.
+- Rules: a `Path` target is SQLite exactly as before; a `postgresql+psycopg://` URL opens a pooled engine (`pool_pre_ping=True`) with the password from `server.index_password_env`, never from the URL, and checks that the Alembic revision is `HEAD_REVISION` (`IndexSchemaError` otherwise). A server that does not answer raises `IndexUnavailableError` naming the URL with `***` for any password. A Postgres URL without `psycopg` installed raises `ConfigError` "a Postgres index needs psycopg: uv tool install 'hypothex[server]'" (never a bare `ModuleNotFoundError` from SQLAlchemy). Mid-request index failures answer 503 `{error, type: "IndexUnavailableError"}`. Run files are written before the index, so a failed write leaves the index row missing (a new run: `repair_index_gaps` adds it) or stale (an archive, star, status change, or score append on an indexed run, which `repair_index_gaps` never looks at): every run write of `Index` (`upsert_run`, `add_score`, `replace_scores`, `_replace_metric_points` (public replacement and deferred hydration), `delete_run`) that fails with `OperationalError`/`InterfaceError` appends its run id to `Index.pending` (under the file's `flock`, re-opening when a repair moved the file) before re-raising, and `repair_pending` re-indexes those runs from their files (drops the ones whose folder is gone) on the next `Context.open` and every 30 s in the server's repair loop, so the index catches up once Postgres answers. The claim is recoverable: the journal is moved to `index-pending.txt.<8 hex>.claim`, every claim file (a crashed process's too) is read, and each is removed only after all its runs are indexed. Each run is re-read and indexed under its `run_lock` (the lock `Context.update_run` holds), so a repair racing an archive never writes the old value back.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -16058,7 +16058,17 @@ def upsert(
             upsert(session, HostCursorRow, values, keys, keep_max="last_sequence")
 ```
 
-   and the first line of the body of `upsert_run`, `add_score`, `replace_scores`, `replace_metric_points`, and `delete_run` (`with Session(self.engine) as session, session.begin():`) with
+   the body of `reset_cursor` (after its docstring) with:
+
+```python
+        values = {"host": host, "environment_id": environment_id, "last_sequence": 0}
+        with _index_write_session(self.engine) as session:
+            upsert(session, HostCursorRow, values, ["host", "environment_id"])
+```
+
+   This deliberately omits `keep_max`: a restarted event log resets its sequence to zero while retaining the identity reservation. Keep `cursor_hosts` unchanged, including zero-sequence and historical aliases. Neither cursor setter nor reset bumps generation. `_CARRIED_TABLES` retains every cursor through both rebuilds, including a reservation with no run yet.
+
+   and the transaction line in `upsert_run`, `add_score`, `replace_scores`, `_replace_metric_points`, and `delete_run` (`with Session(self.engine) as session, session.begin():`) with
 
 ```python
         with self._journal(run_id), _index_write_session(self.engine) as session:
@@ -16091,7 +16101,13 @@ Every data mutation keeps its existing `_touch` at the same logical point in the
             upsert(session, ScoresStaleRow, {"run_id": run_id}, ["run_id"])
 ```
 
-This mark still does not bump generation. `replace_scores` still atomically deletes the stale mark and replaces scores; `Context.add_score` keeps mark → file append → full score replacement under its run lock. Keep `_DATA_TABLES`, `_CARRIED_TABLES`, `_run_values`, `_score_values`, `RunChangeRow`, `PointsPendingRow`, `ScoresStaleRow`, `_fill_pending_points`, and their current call paths. Do not replace metric-point methods with older implementations. Final-baseline checkpoint for the guarded hydration change at `ba4459d`: route `_replace_metric_points` through `_journal(run_id)` and `_index_write_session` **before** its pending-marker DELETE/EXISTS claim. Keep its captured `RunRow.status`, `rowcount` check, outside-transaction reread/retry, and `_touch` only after a successful claim. A lost claim commits no data or generation change; preserve `idx.generation() == published_generation`. The exclusive mutation guard also prevents pending-row/generation-row inversion against `delete_run` or a normal point replacement; a shared guard alone would not. Confirm the final merged method/signature before inserting this transaction wrapper, without restoring an older whole method.
+This mark still does not bump generation. `replace_scores` still atomically deletes the stale mark and replaces scores; `Context.add_score` keeps mark → file append → full score replacement under its run lock. Keep `_DATA_TABLES`, `_CARRIED_TABLES`, `_run_values`, `_score_values`, `RunChangeRow`, `PointsPendingRow`, `ScoresStaleRow`, `_fill_pending_points`, and their current call paths.
+
+The merged metric mutator is `_replace_metric_points(self, run_id, points, *, pending_status) -> bool`; public `replace_metric_points` only delegates with `pending_status=None`. Journal and guard the private transaction, before its pending-marker DELETE/EXISTS claim. Preserve its captured `RunRow.status`, `rowcount` check and `_touch` only after a successful claim. `_fill_pending_points` retries by re-reading pending/status outside the transaction through `points_to_index`. A lost claim changes neither data nor generation; a later successful retry is a separate write. The exclusive guard prevents pending-row/generation-row inversion against `delete_run` and final publication. Never replace either method with a pre-CAS body.
+
+Keep `points_to_index`, `INDEXED_POINT_STATUSES`, `index_run_points`, the imported `MAX_POINTS_PER_METRIC`, and two-dimensional `_IN_CHUNK` query chunking. Live histories use bounded store reads; indexed terminal histories use full reads then downsampling. Local `_execute` publishes its terminal record before replacing metrics, retains warnings if indexing fails, and continues terminal/evaluation cleanup. `stop_run`, SLURM end/settlement, mirror installation and pending repair retain their current status-first, `points_to_index`/`index_run` paths. Rebuild staging continues to defer metrics; hydration chooses live/full from the captured indexed status and rechecks that status atomically. Keep bounded parsing specific to metrics: exact events, receipts, claims, scores and other state reads must not silently skip oversized or invalid UTF-8 records.
+
+Host identity is also a storage invariant: retain `Hub._reserve_environment` under the claims-directory lock before any session await, cursor-zero reservation, configured/disabled/draining ownership checks, and normalization of legacy hostless claims from exactly one preexisting cursor owner before alias reservation and relabelling. Do not infer ownership from a newly connecting descriptor. Removal releases an alias only after outstanding mirrors drain. Existing claim labels and configured aliases determine routing; resetting/rebuilding the index must never let another configured host acquire the same identity. Storage Tasks 20–22 and forwarding Tasks 27–32 use the preserved `host_for_environment`/claim routing; unknown input-reader ownership remains a wildcard blocker, never a guess from project paths. Preserve `Context.local_repo` and the merged repository gate in all edited call paths; host-reported checkout paths are not local repositories.
 
 PostgreSQL details follow the official [transaction advisory-lock documentation](https://www.postgresql.org/docs/16/explicit-locking.html#ADVISORY-LOCKS) and [temporary-table/LIKE semantics](https://www.postgresql.org/docs/16/sql-createtable.html). Those references establish primitives; the Docker regressions below must establish the assembled implementation.
 
@@ -16917,6 +16933,7 @@ from pathlib import Path
 import pytest
 from hypothex.core.settings import ServerSettings, Settings, save_settings
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
@@ -17302,13 +17319,199 @@ def test_concurrent_rebuilds_keep_writes_and_use_separate_staging(pg_home: Path)
     assert second_scanned.is_set()
     current = ctx.index.get_run("r0")
     assert current is not None and current.tags == ["kept"]
+
+
+def test_cursor_reset_keeps_empty_identity_across_rebuild(pg_home: Path) -> None:
+    ctx = ready_context(pg_home)
+    generation = ctx.index.generation()
+    ctx.index.set_cursor("reserved-only", "env-empty", 0)
+    ctx.index.set_cursor("gpu1", "env-a", 9)
+    ctx.index.reset_cursor("gpu1", "env-a")
+    assert ctx.index.get_cursor("gpu1", "env-a") == 0
+    assert ctx.index.cursor_hosts("env-a") == ["gpu1"]
+    assert ctx.index.generation() == generation
+    rebuild_index(ctx.index, ctx.store)
+    reopened = Context.open(pg_home)
+    assert reopened.index.cursor_hosts("env-empty") == ["reserved-only"]
+    assert reopened.index.cursor_hosts("env-a") == ["gpu1"]
+    assert reopened.index.get_cursor("gpu1", "env-a") == 0
+
+
+def test_pending_hydration_cannot_resurrect_deleted_run(
+    pg_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = ready_context(pg_home)
+    rebuild_index(ctx.index, ctx.store)
+    captured, resume = threading.Event(), threading.Event()
+    errors: list[BaseException] = []
+    result: list[list[MetricPoint]] = []
+    real_read = index_module.points_to_index
+
+    def paused_read(
+        store: RunStore, project: str, run_id: str, status: RunStatus | str
+    ) -> list[MetricPoint]:
+        points = real_read(store, project, run_id, status)
+        captured.set()
+        assert resume.wait(10)
+        return points
+
+    def hydrate() -> None:
+        try:
+            result.append(ctx.index.metric_points("r0"))
+        except BaseException as exc:  # noqa: BLE001 - asserted after join
+            errors.append(exc)
+
+    monkeypatch.setattr(index_module, "points_to_index", paused_read)
+    worker = threading.Thread(target=hydrate, daemon=True)
+    worker.start()
+    try:
+        assert captured.wait(5)
+        ctx.index.delete_run("r0")
+        published_generation = ctx.index.generation()
+    finally:
+        resume.set()
+        worker.join(10)
+    assert not worker.is_alive() and errors == []
+    assert result == [[]] and ctx.index.get_run("r0") is None
+    assert ctx.index.generation() == published_generation
+    with Session(ctx.index.engine) as session:
+        assert (
+            session.scalar(
+                select(index_module.PointsPendingRow.run_id).where(
+                    index_module.PointsPendingRow.run_id == "r0"
+                )
+            )
+            is None
+        )
+
+
+def test_pending_hydration_waits_for_swap_and_retries_terminal_status(
+    pg_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = ready_context(pg_home)
+    ctx.update_run(
+        "r0", "run.running", lambda r: r.model_copy(update={"status": RunStatus.RUNNING})
+    )
+    rebuild_index(ctx.index, ctx.store)
+    captured, resume_read = threading.Event(), threading.Event()
+    swap_holds_guard, release_swap = threading.Event(), threading.Event()
+    hydration_at_guard, hydrated = threading.Event(), threading.Event()
+    errors: list[BaseException] = []
+    claims: list[tuple[bool, int, int]] = []
+    claim_before: list[int] = []
+    result: list[list[MetricPoint]] = []
+    real_read, real_touch = index_module.points_to_index, index_module._touch
+    real_guard, real_replace = index_module._index_write_guard, ctx.index._replace_metric_points
+    expected = [
+        MetricPoint(name="loss", step=0, value=1.0),
+        MetricPoint(name="loss", step=1, value=0.25),
+    ]
+
+    def paused_read(
+        store: RunStore, project: str, run_id: str, status: RunStatus | str
+    ) -> list[MetricPoint]:
+        points = real_read(store, project, run_id, status)
+        if threading.current_thread().name == "hydration" and not captured.is_set():
+            captured.set()
+            assert resume_read.wait(10)
+        return points
+
+    def guarded(session: Session) -> None:
+        if threading.current_thread().name == "hydration":
+            hydration_at_guard.set()
+        real_guard(session)
+        if threading.current_thread().name == "hydration" and not claim_before:
+            claim_before.append(ctx.index.generation())
+
+    def publish(session: Session, *run_ids: str) -> None:
+        if threading.current_thread().name == "publication" and not run_ids:
+            swap_holds_guard.set()  # DELETE/INSERT already ran under PG_WRITE_LOCK
+            assert release_swap.wait(10)
+        real_touch(session, *run_ids)
+
+    def replace(run_id: str, points: list[MetricPoint], *, pending_status: str | None) -> bool:
+        if threading.current_thread().name == "hydration":
+            claim_before.clear()
+            accepted = real_replace(run_id, points, pending_status=pending_status)
+            # captured by the actual transaction guard, after publication commits
+            assert len(claim_before) == 1
+            claims.append((accepted, claim_before[0], ctx.index.generation()))
+            return accepted
+        return real_replace(run_id, points, pending_status=pending_status)
+
+    def hydrate() -> None:
+        try:
+            result.append(ctx.index.metric_points("r0"))
+        except BaseException as exc:  # noqa: BLE001 - asserted after join
+            errors.append(exc)
+        finally:
+            hydrated.set()
+
+    def rebuild() -> None:
+        try:
+            rebuild_index(ctx.index, ctx.store)
+        except BaseException as exc:  # noqa: BLE001 - asserted after join
+            errors.append(exc)
+
+    monkeypatch.setattr(index_module, "points_to_index", paused_read)
+    monkeypatch.setattr(index_module, "_index_write_guard", guarded)
+    monkeypatch.setattr(index_module, "_touch", publish)
+    monkeypatch.setattr(ctx.index, "_replace_metric_points", replace)
+    worker = threading.Thread(target=hydrate, name="hydration", daemon=True)
+    publisher = threading.Thread(target=rebuild, name="publication", daemon=True)
+    worker.start()
+    try:
+        assert captured.wait(5)
+        append_jsonl(ctx.layout.run_dir("toy", "r0") / "metrics.jsonl", expected[-1].model_dump())
+        ctx.update_run(
+            "r0", "run.finished", lambda r: r.model_copy(update={"status": RunStatus.FINISHED})
+        )
+        ctx.index.replace_metric_points("r0", expected)
+        publisher.start()
+        assert swap_holds_guard.wait(5)
+        resume_read.set()
+        assert hydration_at_guard.wait(5)
+        assert not hydrated.is_set()
+    finally:
+        release_swap.set()
+        resume_read.set()
+        worker.join(10)
+        if publisher.ident is not None:
+            publisher.join(10)
+    assert not worker.is_alive() and not publisher.is_alive() and errors == []
+    assert result == [expected]
+    assert len(claims) == 2 and [accepted for accepted, _, _ in claims] == [False, True]
+    assert claims[0][1] == claims[0][2]  # failed status CAS did not bump generation
+    assert claims[1][2] == claims[1][1] + 1
+
+
+def test_failed_deferred_hydration_is_journalled_and_repaired(
+    pg_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = ready_context(pg_home)
+    rebuild_index(ctx.index, ctx.store)
+    real_guard = index_module._index_write_guard
+
+    def unavailable(session: Session) -> None:
+        raise OperationalError("SELECT pg_advisory_xact_lock", {}, RuntimeError("offline"))
+
+    monkeypatch.setattr(index_module, "_index_write_guard", unavailable)
+    with pytest.raises(OperationalError):
+        ctx.index.metric_points("r0")
+    assert ctx.index.pending is not None
+    assert ctx.index.pending.read_text().splitlines() == ["r0"]
+    monkeypatch.setattr(index_module, "_index_write_guard", real_guard)
+    assert index_module.repair_pending(ctx.index, ctx.store) == ["r0"]
+    assert ctx.index.metric_points("r0") == [MetricPoint(name="loss", step=0, value=1.0)]
+    assert not ctx.index.pending.exists()
+    assert list(ctx.layout.home.glob("index-pending.txt.*.claim")) == []
 ```
 
 - [ ] **Step 2: Run the test**
 
-Final-baseline guarded-hydration regressions must additionally run against real PostgreSQL: pause a deferred read after it captures pending/status, publish a newer terminal point set or remove the run, then resume it; assert no stale points, no deadlock, and no generation bump when the claim loses. Use barriers around the claim and final rebuild publication to exercise hydration versus both `delete_run` and final swap, with bounded joins and propagated worker errors. The transaction guard must be acquired before either contender takes a live row lock. Include a failed deferred hydration in the pending-journal repair regression. These cases must be concrete in the final refreshed plan before round 5; the supplied `5c02037` baseline lacks that later CAS implementation.
+The concrete hydration tests above require real PostgreSQL: a pending reader cannot resurrect a deleted row, waits before live DML while final publication holds the writer guard, rejects a recreated pending marker when its captured status is old, retries terminal history, and journals failed hydration for repair. All worker joins are bounded and errors propagated. A lost claim cannot bump generation; a successful retry increments it once. The cursor test covers zero reservations without any run, explicit reset and rebuild/reopen preservation.
 
-Retain and run the existing SQLite `tests/core/test_index_rebuild.py` and `tests/core/test_index_rebuild_overlap.py` regressions as part of Task 34. The Docker cases below are required in addition; SQL compilation or an extracted fake-session probe cannot establish PostgreSQL lock, sequence or MVCC behavior.
+Retain and run the existing SQLite `tests/core/test_index_rebuild.py` regressions and `tests/core/test_index.py::test_pending_live_metric_read_keeps_a_newer_terminal_index` as part of Task 34. Keep the terminal-ordering and failure-warning tests in `tests/core/test_execution.py`, fallback-stop tests in `tests/core/test_control.py`, and SLURM terminal-metric tests. Retain `tests/remote/test_identity.py` and cursor/rebuild tests to verify concurrent reservations, disabled and draining owners, crash-restart alias normalization, and hostless-claim failures. `tests/core/test_index_rebuild_overlap.py` is currently a step-6 integration artifact, not part of this pinned merged baseline; add it to required checks if that final merge retains it. The Docker cases below are required in addition; SQL compilation or an extracted fake-session probe cannot establish PostgreSQL lock, sequence or MVCC behavior.
 
 Run: `uv run pytest -m docker tests/docker/test_postgres_index.py -v`
 Expected: all PostgreSQL upgrade/rebuild/concurrency tests pass with Docker running (the tests are skipped without Docker, and an error with `HYPOTHEX_REQUIRE_DOCKER=1`). The network guard allows the test: Postgres listens on `127.0.0.1`.

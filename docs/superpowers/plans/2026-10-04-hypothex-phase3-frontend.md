@@ -15,7 +15,7 @@
 **Mockups:** `docs/mockups/phase3/` (`index.html`, `data.js`, `shot-pair-{ready,done,invalid}-*`, `shot-settings-*`, `shot-settings-collab-*`, `shot-storage-*`, `shot-storage-confirm-*`, `shot-storage-result-*`, `shot-notebook-*`, `shot-notebook-conflict-*`, `shot-task-export-*`, `shot-run-*`, `shot-gate-*`).
 
 **Depends on:**
-- The phase 2 frontend and audit/UI improvements are merged. The integration snippets below were refreshed against pinned main `5c020378b75bcb2afeba427e85b2f075e8e70804`. The token and DF-48 interfaces remain pending their final merge. Before implementation, run this check on the intended source checkout. The 12 historical snippet anchors alone are insufficient: whole-file Header replacement and procedural event-stream edits must also match the reviewed source blobs.
+- The phase 2 frontend and audit/UI improvements are merged. The integration snippets below were refreshed against pinned main `1b769f4ce9210096640a7054f5d757f09f4bb4df`. The token and DF-48 interfaces remain pending their final merge. Before implementation, run this check on the intended source checkout. The 12 historical snippet anchors alone are insufficient: whole-file Header replacement and procedural event-stream edits must also match the reviewed source blobs.
 
 ```bash
 uv run python - <<'PY'

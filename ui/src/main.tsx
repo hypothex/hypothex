@@ -7,6 +7,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
+import { AuthGate } from "./api/AuthGate";
 import { LiveUpdates } from "./api/events";
 import { createQueryClient } from "./api/queries";
 import { createAppRouter } from "./router";
@@ -20,9 +21,11 @@ if (!root) throw new Error("index.html has no #root element");
 createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <LiveUpdates>
-        <RouterProvider router={router} />
-      </LiveUpdates>
+      <AuthGate>
+        <LiveUpdates>
+          <RouterProvider router={router} />
+        </LiveUpdates>
+      </AuthGate>
     </QueryClientProvider>
   </StrictMode>,
 );

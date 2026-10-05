@@ -391,18 +391,19 @@ def test_serve_refuses_a_non_loopback_host_without_a_token(
     home: Path, fake_uvicorn: _FakeUvicorn, host: str
 ) -> None:
     with pytest.raises(ConfigError) as exc:
-        runner.invoke(app, ["serve", "--host", host], catch_exceptions=False)
+        runner.invoke(app, ["serve", "--host", host, "--no-auth"], catch_exceptions=False)
     message = str(exc.value)
     assert host in message and "HYPOTHEX_SERVE_TOKEN" in message
     assert "arbitrary commands" in message and "ssh -L" in message
     assert fake_uvicorn.calls == []
 
 
-def test_serve_on_loopback_needs_no_token(home: Path, fake_uvicorn: _FakeUvicorn) -> None:
+def test_serve_on_loopback_generates_a_token(home: Path, fake_uvicorn: _FakeUvicorn) -> None:
     result = runner.invoke(app, ["serve"], catch_exceptions=False)
     assert result.exit_code == 0
     [call] = fake_uvicorn.calls
     assert call["host"] == "127.0.0.1" and call["port"] == 7777
+    assert len(call["token"]) == 48
 
 
 def test_serve_with_a_token_binds_anywhere_and_enforces_it(

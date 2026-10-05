@@ -31,7 +31,7 @@ def test_hub_timeout_distinguishes_accepted_work_from_unavailable(
         calls.append(kwargs)
         raise kind("synthetic transport failure")
 
-    monkeypatch.setattr(server.httpx, "request", request)
+    monkeypatch.setattr(server, "_hub_request", request)
     with pytest.raises(HypothexError) as caught:
         server.hub_call("POST", "/api/v1/sweeps", {"command_id": "cmd-fixed"}, token="selected")
     if kind in (httpx.ReadTimeout, httpx.WriteTimeout):
@@ -89,7 +89,7 @@ def test_known_mirrored_mutation_preserves_hub_error_and_missing_auth_is_not_rew
     )
     message = "host gpu1 unavailable" if status == 503 else f"original {status} diagnostic"
     monkeypatch.setattr(
-        server.httpx, "request", lambda *a, **kw: httpx.Response(status, json={"error": message})
+        server, "_hub_request", lambda *a, **kw: httpx.Response(status, json={"error": message})
     )
     with pytest.raises(HypothexError) as caught:
         runner.invoke(cli.app, ["tag", "remote", "--add", "x"], catch_exceptions=False)
@@ -113,7 +113,7 @@ def test_timeout_on_missing_mutation_is_not_rewritten_or_retried(
         bodies.append(kwargs["json"])
         raise httpx.ReadTimeout("after accepting")
 
-    monkeypatch.setattr(server.httpx, "request", request)
+    monkeypatch.setattr(server, "_hub_request", request)
     with pytest.raises(HypothexError) as caught:
         runner.invoke(cli.app, ["tag", "missing", "--add", "x"], catch_exceptions=False)
     assert type(caught.value).__name__ == "HubTimeoutError" and "no run" not in str(caught.value)
@@ -130,7 +130,7 @@ def test_local_existing_mutations_do_not_need_hub(
     def forbidden(*args: Any, **kwargs: Any) -> Any:
         pytest.fail("local mutation used the hub")
 
-    monkeypatch.setattr(server.httpx, "request", forbidden)
+    monkeypatch.setattr(server, "_hub_request", forbidden)
     assert (
         runner.invoke(cli.app, ["tag", "local", "--add", "cli"], catch_exceptions=False).exit_code
         == 0

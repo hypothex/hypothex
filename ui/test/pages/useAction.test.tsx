@@ -29,6 +29,7 @@ test("shouldRetry retries unanswered requests twice and never HTTP errors", () =
   expect(shouldRetry(1, offline)).toBe(true);
   expect(shouldRetry(2, offline)).toBe(false);
   expect(shouldRetry(0, new ApiError(400, "bad", "RunError", [], null))).toBe(false);
+  expect(shouldRetry(0, new DOMException("Request superseded", "AbortError"))).toBe(false);
 });
 
 test("retries a network failure with the same command_id", async () => {

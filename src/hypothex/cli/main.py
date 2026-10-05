@@ -5,11 +5,13 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import math
 import os
 import re
 import secrets
 import socket
 import sqlite3
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -19,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast, get_args
 from urllib.parse import urlencode
 
+import psutil
 import typer
 import yaml
 from pydantic import ValidationError
@@ -41,7 +44,14 @@ from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_
 from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, HypothexError, RunError, RunNotFoundError, StoreError
 from hypothex.core.evaluation import EvalReport, reeval, validate_project
-from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
+from hypothex.core.execution import (
+    RunRequest,
+    execute_run,
+    prepare_run,
+    process_alive,
+    process_create_time,
+    seed_warning,
+)
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gitinfo import git_state_label
 from hypothex.core.headlines import fmt_p
@@ -53,6 +63,7 @@ from hypothex.core.leaderboard import Leaderboard
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
 from hypothex.core.seeds import Stats
 from hypothex.core.store import RunStore
+from hypothex.core.tokens import validate_bearer_token
 from hypothex.remote.config import (
     HOST_NAME,
     EnvironmentsFile,
@@ -234,6 +245,9 @@ def _server_file(home: Path, info: ServerInfo) -> Iterator[None]:
     record = {
         **info.model_dump(mode="json"),
         "hostname": socket.gethostname(),
+        "home": str(home.resolve()),
+        "pid_create_time": process_create_time(info.pid),
+        "environment_id": load_descriptor(Layout(home)).environment_id,
         "token": info.token,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2005,7 +2019,7 @@ def resolve_serve_kind(home: Path, kind: str | None) -> str:
     kind : str or None
         ``--kind``; None reuses the kind saved in ``environment.json``.
         ``local`` saves ``local`` again (a home served with ``--kind ssh`` once
-        is the hub again, without a required token).
+        is the hub again, still requiring a token).
 
     Returns
     -------
@@ -2047,10 +2061,10 @@ def _serve_token(host: str, kind: str | None, no_auth: bool) -> str | None:
 
     The token comes from ``HYPOTHEX_SERVE_TOKEN`` and is removed from the
     environment at once, so runs started by this server never inherit it. An env
-    server (``kind`` ``ssh`` or ``slurm``) always has one, a fresh
+    server of every kind always has one, a fresh
     ``secrets.token_hex(24)`` when none is given, unless ``no_auth``: any local
-    user on a shared host can reach its loopback port. The hub's own server keeps
-    phase 1's rule: a token only when one is given.
+    user on a shared host can reach its loopback port. Explicit overrides must
+    satisfy the bounded ASCII bearer-token contract.
 
     Parameters
     ----------
@@ -2075,18 +2089,16 @@ def _serve_token(host: str, kind: str | None, no_auth: bool) -> str | None:
 
     Examples
     --------
-    >>> _serve_token("127.0.0.1", "local", False) is None
-    True
+    >>> len(_serve_token("127.0.0.1", "local", False))  # doctest: +SKIP
+    48
     """
     from hypothex.api.security import is_loopback_bind
 
-    given = os.environ.pop("HYPOTHEX_SERVE_TOKEN", None) or None
+    given = os.environ.pop("HYPOTHEX_SERVE_TOKEN", None)
     if no_auth:
         token = None
-    elif kind in SERVE_KINDS:
-        token = given or secrets.token_hex(24)
     else:
-        token = given
+        token = secrets.token_hex(24) if given is None else validate_bearer_token(given)
     if token is None and not is_loopback_bind(host):
         raise ConfigError(
             f"refusing to serve on {host!r} without authentication: anyone who can reach "
@@ -2096,6 +2108,104 @@ def _serve_token(host: str, kind: str | None, no_auth: bool) -> str | None:
             "(ssh -L 7777:127.0.0.1:7777 HOST)"
         )
     return token
+
+
+def local_server_token(home: Path) -> str:
+    """
+    Read the selected home's credential after verifying its current local owner.
+
+    No HTTP request or SSH command is performed. Process birth must match exactly;
+    unverifiable legacy records require restarting the server.
+
+    Parameters
+    ----------
+    home : Path
+        Selected Hypothex home.
+
+    Returns
+    -------
+    str
+        The validated credential, for explicit owner-requested output only.
+
+    Raises
+    ------
+    ConfigError
+        Missing, malformed, foreign, stale, no-auth or unverifiable owner record.
+
+    Examples
+    --------
+    >>> token = local_server_token(Path("/tmp/my-hypothex"))  # doctest: +SKIP
+    """
+    failure = "no verifiable authenticated local server; restart hx serve for this home"
+    try:
+        record = json.loads((home / "serve" / "server.json").read_text())
+        identity = json.loads((home / "environment.json").read_text())
+    except (OSError, ValueError):
+        raise ConfigError(failure) from None
+    if not isinstance(record, dict) or not isinstance(identity, dict):
+        raise ConfigError(failure)
+    pid, birth = record.get("pid"), record.get("pid_create_time")
+    if (
+        record.get("hostname") != socket.gethostname()
+        or record.get("home") != str(home.resolve())
+        or not isinstance(identity.get("environment_id"), str)
+        or not identity["environment_id"]
+        or record.get("environment_id") != identity["environment_id"]
+        or type(pid) is not int
+        or not 0 < pid < 2**31
+    ):
+        raise ConfigError(failure)
+    try:
+        if birth is not None:
+            verified = (
+                type(birth) in (float, int)
+                and math.isfinite(birth)
+                and birth > 0
+                and process_create_time(pid) == birth
+                and process_alive(pid, birth)
+            )
+        else:
+            legacy = record.get("pid_start")
+            verified = False
+            if isinstance(legacy, str) and legacy and process_alive(pid, None):
+                if legacy.isascii() and legacy.isdecimal() and sys.platform.startswith("linux"):
+                    raw = Path(f"/proc/{pid}/stat").read_text()
+                    actual = raw.rsplit(") ", 1)[1].split()[19]
+                    verified = actual == legacy
+                elif re.fullmatch(
+                    r"[A-Za-z]{3} [A-Za-z]{3} +[0-9]{1,2} [0-9:]{8} [0-9]{4}", legacy
+                ):
+                    result = subprocess.run(
+                        ["ps", "-p", str(pid), "-o", "lstart="],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=2,
+                    )
+                    verified = result.returncode == 0 and " ".join(
+                        result.stdout.split()
+                    ) == " ".join(legacy.split())
+        if not verified:
+            raise ConfigError(failure)
+    except (
+        OSError,
+        ValueError,
+        OverflowError,
+        IndexError,
+        psutil.Error,
+        subprocess.SubprocessError,
+    ):
+        raise ConfigError(failure) from None
+    value = record.get("token")
+    if value is None:
+        raise ConfigError(failure)
+    return validate_bearer_token(value)
+
+
+@app.command("token")
+def token_command() -> None:
+    """Print the current local server token for this home; paste it into the UI."""
+    typer.echo(local_server_token(_home_path()))
 
 
 @app.command()
@@ -2115,18 +2225,17 @@ def serve(
     no_auth: Annotated[
         bool,
         typer.Option(
-            "--no-auth", help="Env server without a bearer token (demo and test hosts only)."
+            "--no-auth", help="Disable token authentication on loopback (demo/test only)."
         ),
     ] = False,
 ) -> None:
     """
     Serve the HTTP/WebSocket API, the UI when built, and (on the hub) the hosts.
 
-    An env server (``--kind ssh|slurm``) requires ``Authorization: Bearer <token>``
-    on every request except the environment descriptor; the token is
-    ``HYPOTHEX_SERVE_TOKEN`` or a fresh one, and is kept in ``<home>/serve/server.json``
-    (mode 0600). The hub's server needs a token only when ``HYPOTHEX_SERVE_TOKEN``
-    is set. A non-loopback --host is refused without a token.
+    Every server requires a bearer token for API requests. A fresh token is saved
+    in the private ``<home>/serve/server.json`` on each start; an explicit
+    ``HYPOTHEX_SERVE_TOKEN`` overrides it. Use ``hx token`` to unlock the browser.
+    ``--no-auth`` explicitly disables authentication on loopback only.
     """
     import uvicorn
 
@@ -2147,6 +2256,7 @@ def serve(
         hx_version=__version__,
         protocol_version=PROTOCOL_VERSION,
         token=token,
+        environment_id=load_descriptor(Layout(home)).environment_id,
     )
 
     class _Server(uvicorn.Server):

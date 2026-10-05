@@ -58,6 +58,7 @@ describe("lost reasons", () => {
           clock,
           storage: null,
           head: null,
+          ticket: null, // fake socket: no live issuer, as with the fake head lookup
           createSocket: () => {
             const socket = new StubSocket();
             sockets.push(socket);

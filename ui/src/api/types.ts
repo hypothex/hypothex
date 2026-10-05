@@ -21,6 +21,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/ws-ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ws Ticket */
+        post: operations["ws_ticket_api_v1_auth_ws_ticket_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/hosts": {
         parameters: {
             query?: never;
@@ -1407,6 +1424,16 @@ export interface components {
             /** Text */
             text: string;
         };
+        /**
+         * WebSocketTicket
+         * @description One-use WebSocket credential returned by the authenticated ticket issuer.
+         */
+        WebSocketTicket: {
+            /** Ticket */
+            ticket: string | null;
+            /** Expires In */
+            expires_in: number;
+        };
     };
     responses: never;
     parameters: never;
@@ -1434,6 +1461,26 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    ws_ticket_api_v1_auth_ws_ticket_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebSocketTicket"];
                 };
             };
         };

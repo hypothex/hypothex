@@ -126,6 +126,7 @@ function harness(afterSequence?: number, resumeSequence?: number, head?: () => P
   const statuses: StreamStatus[] = [];
   const saved: number[] = [];
   const stream = new EventStream({
+    ticket: null,
     url: "ws://127.0.0.1:7777/api/v1/ws",
     clock,
     afterSequence,
@@ -699,6 +700,7 @@ describe("useEventStream", () => {
     const { result, unmount } = renderHook(
       () =>
         useEventStream({
+          ticket: null,
           url: "ws://127.0.0.1:7777/api/v1/ws",
           clock,
           storage: null,
@@ -755,6 +757,7 @@ describe("useEventStream", () => {
     const { unmount } = renderHook(
       () =>
         useEventStream({
+          ticket: null,
           url: "ws://127.0.0.1:7777/api/v1/ws",
           clock: new FakeClock(),
           storage: null,
@@ -800,6 +803,7 @@ describe("useEventStream", () => {
     const { unmount } = renderHook(
       () =>
         useEventStream({
+          ticket: null,
           url: "ws://127.0.0.1:7777/api/v1/ws",
           clock,
           storage,
@@ -857,6 +861,7 @@ describe("useEventStream head", () => {
       createElement(QueryClientProvider, { client }, children);
     const { unmount } = renderHook(
       () => useEventStream({
+          ticket: null,
         storage: null,
         head: d.head,
         createSocket: (url) => {
@@ -898,6 +903,7 @@ describe("useEventStream head", () => {
       const { unmount } = renderHook(
         () =>
           useEventStream({
+          ticket: null,
             url: "ws://127.0.0.1:7777/api/v1/ws",
             clock: new FakeClock(),
             storage: null,
@@ -936,6 +942,7 @@ describe("LiveUpdates", () => {
           LiveUpdates,
           {
             options: {
+              ticket: null,
               url: "ws://127.0.0.1:7777/api/v1/ws",
               clock,
               storage: null,

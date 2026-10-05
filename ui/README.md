@@ -71,6 +71,9 @@ configured disconnected host can reconnect; an unmapped environment cannot run a
 Stop arms an inline confirmation for three seconds and disarms on blur, Escape, navigation,
 or a run-state change. Queued Cancel remains a direct action and sends an atomic
 queue-only precondition, so a run that starts before cancellation is not stopped.
+Changing or rejecting the session credential stops pending action and launch retries.
+An action started under the previous credential cannot continue with the new one or
+apply its late success callback.
 
 A template launch retains its environment identity and GPU request, including zero. If no
 configured host matches, the dialog asks for an explicit host choice. SLURM GPU defaults

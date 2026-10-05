@@ -55,7 +55,10 @@ const home = withHosts ? HOSTS_HOME_DIR : HOME_DIR;
 const demoFile = withHosts ? HOSTS_DEMO_FILE : DEMO_FILE;
 const port = withHosts ? HOSTS_PORT : PORT;
 const label = withHosts ? HOSTS_DEMO_LABEL : DEMO_LABEL;
-const env = { ...process.env, HYPOTHEX_SSH: "false", HYPOTHEX_SCP: "false" };
+const env: NodeJS.ProcessEnv = { ...process.env, HYPOTHEX_HOME: home, HYPOTHEX_SSH: "false", HYPOTHEX_SCP: "false" };
+// The suite exercises newly generated credentials, never an inherited user token.
+delete env.HYPOTHEX_SERVE_TOKEN;
+delete env.HYPOTHEX_HUB_TOKEN;
 
 if (!existsSync(UI_DIST_INDEX)) {
   console.error(`missing ${UI_DIST_INDEX}: run "bun run build" in ui/ first`);

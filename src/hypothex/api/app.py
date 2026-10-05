@@ -40,7 +40,8 @@ from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from hypothex._version import __version__
-from hypothex.api.security import OriginGuard, TokenGuard, allowed_hosts, bearer_matches
+from hypothex.api.security import OriginGuard, TokenGuard, allowed_hosts
+from hypothex.api.tickets import TICKET_SECONDS, TicketStore
 from hypothex.core import control
 from hypothex.core import queries as q
 from hypothex.core import sweeps as sweeps_core
@@ -85,6 +86,7 @@ from hypothex.core.sweeps import (
     stop_queued_runs,
     summarize_sweep,
 )
+from hypothex.core.tokens import validate_bearer_token
 from hypothex.core.views import PanelData, PanelSpec, ViewSpec
 from hypothex.mcp.server import (
     LOCAL_HOST,
@@ -180,6 +182,13 @@ class SpaStaticFiles(StaticFiles):
             if exc.status_code != 404 or (parts and parts[0] in NO_UI_FALLBACK):
                 raise
             return await super().get_response("index.html", scope)
+
+
+class WebSocketTicket(BaseModel):
+    """One-use WebSocket credential returned by the authenticated ticket issuer."""
+
+    ticket: str | None
+    expires_in: int
 
 
 class ActionBody(BaseModel):
@@ -1775,6 +1784,8 @@ def create_app(
     ValueError
         For an unknown ``kind``.
     """
+    if auth_token is not None:
+        auth_token = validate_bearer_token(auth_token)
     if kind is not None and kind not in ENV_KINDS:
         raise ValueError(f"kind must be one of {', '.join(ENV_KINDS)}, got {kind!r}")
     ctx = Context.open(home)
@@ -1863,6 +1874,29 @@ def create_app(
     app.state.hub = manager
     app.state.sweep_issuer = issuer
     app.state.mcp = mcp_server
+    tickets = TicketStore()
+    app.state.ws_tickets = tickets
+    ui = ui_dir or UI_DIST
+    ui_installed = (ui / "index.html").is_file()
+
+    def public_static(path: str) -> bool:
+        if not ui_installed:
+            return False
+        parts = PurePosixPath(path).parts
+        if any(part in ("..", ".") for part in parts) or "\\" in path:
+            return False
+        first = path.lstrip("/").partition("/")[0]
+        if first in {"api", "mcp", ".well-known", "redoc", "files", "docs", "openapi.json"}:
+            return False
+        candidate = (ui / path.lstrip("/")).resolve()
+        if candidate.is_relative_to(ui.resolve()) and candidate.is_file():
+            return True
+        return (
+            path == "/"
+            or re.fullmatch(r"/(?:r/[^/]+|[xs]/[^/]+/[^/]+|t/[^/]+/[^/]+(?:/edit/[^/]+)?)/?", path)
+            is not None
+        )
+
     hosts = allowed_hosts(host)
     # innermost: the guards answer first, and the hub's tunnels carry compressed JSON
     app.add_middleware(
@@ -1871,10 +1905,10 @@ def create_app(
         compresslevel=GZIP_LEVEL,
         exclude_content_types=GZIP_SKIP_TYPES,
     )
+    app.add_middleware(TokenGuard, token=auth_token, tickets=tickets, public_static=public_static)
+    # Host and Origin reject before a one-use ticket can be consumed.
     app.add_middleware(OriginGuard, hosts=hosts)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
-    if auth_token:
-        app.add_middleware(TokenGuard, token=auth_token)  # outermost: checked first
 
     @app.exception_handler(HypothexError)
     async def hypothex_error(_: Request, exc: HypothexError) -> JSONResponse:
@@ -2059,12 +2093,28 @@ def create_app(
 
     # environment -----------------------------------------------------------------
     @app.get("/.well-known/hypothex/environment")
+    @app.head("/.well-known/hypothex/environment", include_in_schema=False)
     def environment(request: Request) -> dict[str, Any]:
         full = ctx.descriptor.model_dump(mode="json")
-        if auth_token and not bearer_matches(request.headers.get("authorization"), auth_token):
+        if auth_token and request.scope.get("hypothex.auth_token") != auth_token:
             # open so start.sh can find its server; host facts only for the token holder
             return {k: full[k] for k in PUBLIC_DESCRIPTOR_FIELDS}
         return full
+
+    @app.post("/api/v1/auth/ws-ticket", response_model=WebSocketTicket)
+    def ws_ticket() -> JSONResponse:
+        if auth_token is None:
+            payload: dict[str, Any] = {"ticket": None, "expires_in": 0}
+        else:
+            ticket = tickets.issue()
+            if ticket is None:
+                return JSONResponse(
+                    {"error": "too many outstanding WebSocket tickets", "type": "RateLimitError"},
+                    status_code=429,
+                    headers={"Cache-Control": "no-store"},
+                )
+            payload = {"ticket": ticket, "expires_in": TICKET_SECONDS}
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     # hosts (hub) ---------------------------------------------------------------------
     @app.get("/api/v1/hosts")
@@ -2502,7 +2552,7 @@ def create_app(
     # live events -------------------------------------------------------------------------
     @app.websocket("/api/v1/ws")
     async def events_ws(ws: WebSocket) -> None:
-        await ws.accept()
+        await ws.accept(subprotocol=ws.scope.get("hypothex.ws_protocol"))
         try:
             first = await ws.receive()
             if first["type"] == "websocket.disconnect":

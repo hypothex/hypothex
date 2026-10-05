@@ -36,17 +36,25 @@ def run_remote(target: SshTarget, script: str, *, timeout: float = 120, input_by
 def copy_to(target: SshTarget, local: Path, remote_path: str, *, timeout: float = 300) -> None: ...
 def copy_from(target: SshTarget, remote_path: str, local: Path, *, work: Path, timeout: float = 600) -> None: ...   # work: <hub home>/pulls (staging + transaction records), see round 4
 class Tunnel:                          # one `ssh -N -L` subprocess
-    def __init__(self, target: SshTarget, remote_port: int, local_port: int | None = None) -> None: ...
-    local_port: int
+    def __init__(self, target: SshTarget, remote_port: int, local_port: int | None = None, *, registry: Path | None = None, private: bool = False) -> None: ...
+    local_port: int | None
+    unix_socket: Path | None
     def start(self) -> None: ...; def alive(self) -> bool: ...; def stop(self) -> None: ...
 ```
 `ssh_bin`/`scp_bin` come from env `HYPOTHEX_SSH` / `HYPOTHEX_SCP` (default `ssh`/`scp`) so tests substitute fakes. Options always include `-o BatchMode=yes`, `-o ExitOnForwardFailure=yes` (tunnels), `-o ServerAliveInterval=15 -o ServerAliveCountMax=3`.
+
+Hub SSH routes always use `private=True`: a fresh Unix socket inside a 0700
+directory, `StreamLocalBindMask=0177`, `StreamLocalBindUnlink=no`, no local TCP
+listener. An explicit TCP port with private mode is invalid. Unsupported private
+forwarding fails closed. Standalone `Tunnel` keeps its explicit TCP compatibility
+mode. Socket cleanup follows process termination and removes only the owned
+directory; birth-verified process cleanup and pending-operation draining still apply.
 
 ### 1.3 `hypothex.remote.bootstrap`
 
 ```python
 class ProbeResult(BaseModel): os: str; arch: str; python: str | None; uv: str | None; gpus: int; slurm: str | None; home: str
-class ServerInfo(BaseModel): pid: int; port: int; managed: bool; hx_version: str; protocol_version: int; token: str | None = None  # bearer token of the env server (from server.json, 0600); excluded from dumps
+class ServerInfo(BaseModel): pid: int; port: int; managed: bool; hx_version: str; protocol_version: int; token: str | None = None; environment_id: str | None = None  # token excluded from repr/dumps; identity optional only for legacy parsing
 def probe(target: SshTarget, home: str) -> ProbeResult: ...
 def build_wheel(cache_dir: Path) -> Path: ...                  # `uv build --wheel` of the running package, cached by version; reuse if present
 def install(target: SshTarget, home: str, wheel: Path) -> None: ...   # scp + `uv tool install --force` under <home>/runtime with a lock dir; installs uv into ~/.local/bin if missing
@@ -55,11 +63,20 @@ class BootstrapError(HypothexError): ...
 BOOTSTRAP_SCRIPTS: dict[str, str]   # POSIX sh templates: "probe", "install", "start", "stop", "logs"
 ```
 
+`ensure_server` returns a nonempty expected environment ID read from the remote
+home's `environment.json` through SSH on both start and reuse. It never derives
+that trusted ID from tunneled HTTP. A healthy older record without an identity
+field is enriched in memory without rewriting its metadata. Conflicting or
+malformed identity fails. A missing token field requires explicit upgrade/restart;
+present `token: null` denotes intentional no-auth. Token format is validated
+before model/client construction without including values in errors.
+
 ### 1.4 `hypothex.remote.client` — HTTP/WS client to an env server
 
 ```python
 class EnvClient:
-    def __init__(self, base_url: str, *, timeout: float = 10, token: str | None = None) -> None: ...  # token -> Authorization: Bearer (HTTP and WS)
+    def __init__(self, base_url: str, *, timeout: float = 10, token: str | None = None, unix_socket: Path | None = None) -> None: ...  # token -> Authorization: Bearer (HTTP and WS); private routes disable proxy environment
+    def identity(self) -> EnvironmentIdentity: ...  # always unauthenticated, no redirects
     def descriptor(self) -> EnvironmentDescriptor: ...
     def get_json(self, path: str, **params: Any) -> Any: ...
     def post_json(self, path: str, body: dict[str, Any]) -> Any: ...
@@ -67,6 +84,14 @@ class EnvClient:
     async def events(self, after_sequence: int) -> AsyncIterator[Event]: ...   # WS subscribe, yields events, ends on disconnect
 ```
 Uses `httpx` and `websockets` (or `httpx-ws`; plan picks one, adds it with `uv add`).
+
+`EnvironmentIdentity` contains only `environment_id`, `protocol_version` and
+`hx_version`, ignoring extra fields from older/no-auth servers. `descriptor()`
+retains the full authenticated descriptor contract. The hub verifies `identity()`
+against the SSH-sourced expected ID before constructing bearer clients; liveness
+pings also use identity without Authorization. Private-route `base_url` supplies
+logical HTTP Host/path semantics, not a public local dial address. SSH host status
+reports `local_port: null` and never exposes the private socket path.
 
 ### 1.5 `hypothex.remote.hub` — supervisors and mirror
 
@@ -173,7 +198,26 @@ Run actions on remote runs (stop, rerun, reinfer, reeval, tags, star, archive, n
 
 Additive fields (spec 8A.7): leaderboard rows add `cost: CostTotals | null` (sum of the group's runs); the Overview adds `cost_usd` (runs in the window) and `cost_today_usd`.
 
-Env servers (`hx serve --kind ssh|slurm`) require `Authorization: Bearer <token>` on every route except `/.well-known/hypothex/environment`; the token is in the host's `<home>/serve/server.json` (0600) and reaches the hub as `ServerInfo.token`. The hub's own server (the UI) needs no token.
+All servers (`hx serve --kind local|ssh|slurm`) require a bearer token by default.
+Each actual start generates a fresh token unless `HYPOTHEX_SERVE_TOKEN` explicitly
+supplies one; healthy server reuse preserves it. Only GET/HEAD of the exact
+`/.well-known/hypothex/environment` and installed static UI/navigation are public.
+The token stays in `<home>/serve/server.json` (0600); the UI obtains it through
+explicit local `hx token`, then sends Authorization headers. The helper validates
+home, hostname, environment ID and exact process birth without network access.
+`--no-auth` is restricted to loopback; `--kind local` persists the switch back
+without changing identity. Explicit bearer format is 1–4096 ASCII letters/digits
+or `-._~+/`, with optional trailing `=`; invalid values fail without echoing them.
+
+`POST /api/v1/auth/ws-ticket` returns `{ticket, expires_in: 30}` with no-store under
+bearer authentication; explicit no-auth returns `{ticket: null, expires_in: 0}`.
+Tickets are monotonic-expiring, atomic single-use, process-local, with a 256-ticket
+cap (`429` when full after expiry pruning). Browsers offer `hypothex.v1` and
+`hx-ticket.<ticket>` on `/api/v1/ws`; only the fixed protocol is selected. No secret
+enters the URL. Host/Origin validation precedes consumption; malformed/duplicate
+credentials fail, and invalid supplied bearer cannot fall back to a ticket.
+Existing bearer-header WebSockets remain supported. Phase 3 scoped AuthGuard
+will replace this default guard when enabled, not stack behind root-only auth.
 
 ## 3. CLI and MCP additions
 

@@ -26,6 +26,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   answersAs,
+  localToken,
   freePort,
   HOSTS_DEMO_LABEL,
   HOSTS_HOME_DIR,
@@ -90,7 +91,7 @@ async function runCase(which: Case): Promise<string | null> {
   const getJson = async <T>(path: string): Promise<T | null> => {
     if (verified === null) throw new Error(`refusing GET ${path}: the hub on ${port} is not verified yet`);
     try {
-      const response = await fetch(`${base}${path}`);
+      const response = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${localToken(HOME)}` } });
       return response.ok ? ((await response.json()) as T) : null;
     } catch {
       return null;

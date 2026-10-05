@@ -969,3 +969,110 @@ def test_tunnel_registration_failure_stops_spawned_process(
     assert child.gone
     assert child.signals == [signal.SIGTERM]
     assert not tunnel.alive()
+
+
+def test_private_tunnel_forwards_without_tcp_and_cleans_up(
+    fake_remote: FakeRemote, echo_port: int
+) -> None:
+    fake_remote.add_host("gpu1")
+    tunnel = Tunnel(fake_remote.target("gpu1"), echo_port, private=True)
+    assert tunnel.local_port is None
+    with tunnel:
+        path = tunnel.unix_socket
+        assert path is not None and path.is_socket()
+        assert path.parent.stat().st_mode & 0o777 == 0o700
+        assert path.stat().st_mode & 0o777 == 0o600
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(str(path))
+            client.sendall(b"private")
+            assert client.recv(7) == b"private"
+        assert "StreamLocalBindMask=0177" in tunnel.argv()
+        assert "StreamLocalBindUnlink=no" in tunnel.argv()
+    assert not path.parent.exists()
+
+
+def test_private_tunnel_rejects_tcp_port(fake_remote: FakeRemote) -> None:
+    with pytest.raises(ValueError, match="private"):
+        Tunnel(fake_remote.target("gpu1"), 7777, local_port=7778, private=True)
+
+
+@pytest.mark.parametrize("stage", ["marker", "partial-marker", "stderr", "popen"])
+def test_private_tunnel_constructor_failures_cleanup_owned_directory(
+    fake_remote: FakeRemote, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    allocated: list[Path] = []
+    original = ssh_module.tempfile.mkdtemp
+
+    def allocate(*args: object, **kwargs: object) -> str:
+        path = original(*args, **kwargs)
+        allocated.append(Path(path))
+        return path
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise PermissionError("injected construction failure")
+
+    monkeypatch.setattr(ssh_module.tempfile, "mkdtemp", allocate)
+    if stage == "partial-marker":
+        original_write = Path.write_text
+
+        def partial_write(path: Path, text: str, **kwargs: object) -> None:
+            original_write(path, text[:2])
+            raise PermissionError("injected partial marker failure")
+
+        monkeypatch.setattr(Path, "write_text", partial_write)
+    elif stage == "marker":
+        monkeypatch.setattr(Path, "write_text", fail)
+    elif stage == "stderr":
+        monkeypatch.setattr(ssh_module.tempfile, "TemporaryFile", fail)
+    else:
+        monkeypatch.setattr(ssh_module.subprocess, "Popen", fail)
+    tunnel = Tunnel(fake_remote.target("gpu1"), 7777, private=True)
+    with pytest.raises(PermissionError):
+        tunnel.start()
+    assert allocated and not allocated[0].exists()
+    assert tunnel.unix_socket is None and tunnel._stderr is None
+
+
+def test_private_tunnel_cleanup_keeps_replaced_socket(
+    fake_remote: FakeRemote, echo_port: int
+) -> None:
+    fake_remote.add_host("gpu1")
+    tunnel = Tunnel(fake_remote.target("gpu1"), echo_port, private=True)
+    tunnel.start()
+    path = tunnel.unix_socket
+    assert path is not None
+    path.unlink()
+    path.write_text("replacement evidence")
+    try:
+        tunnel.stop()
+        assert path.read_text() == "replacement evidence"
+    finally:
+        path.unlink()
+        (path.parent / ".owner").unlink()
+        path.parent.rmdir()
+
+
+@pytest.mark.parametrize("owner_matches", [True, False])
+def test_stale_private_directory_cleanup_requires_owner_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_matches: bool
+) -> None:
+    import tempfile
+
+    folder = Path(tempfile.mkdtemp(prefix="hx-tun-", dir="/tmp"))
+    owner = uuid.uuid4().hex
+    marker = folder / ".owner"
+    marker.write_text(owner if owner_matches else "another-owner")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(folder / "s"))
+    sock.close()
+    record = _tunnel_record(tmp_path / "registry", socket_dir=folder.name, socket_owner=owner)
+    _mock_reaper_processes(monkeypatch, {})
+    try:
+        assert reap_stale_tunnels(record.parent) == []
+        assert folder.exists() is not owner_matches
+        assert not record.exists()
+    finally:
+        if folder.exists():
+            (folder / "s").unlink(missing_ok=True)
+            marker.unlink(missing_ok=True)
+            folder.rmdir()

@@ -33,21 +33,22 @@ def test_sdk_logging_does_not_enable_http_debug_noise(
 ) -> None:
     import mcp.server.mcpserver as sdk
 
-    actual = sdk.MCPServer
+    actual_init = sdk.MCPServer.__init__
+    constructed: list[sdk.MCPServer] = []
     loggers = [logging.getLogger("httpx"), logging.getLogger("httpcore")]
     levels = [log.level for log in loggers]
 
-    def noisy(*args: Any, **kwargs: Any) -> Any:
-        result = actual(*args, **kwargs)
+    def noisy_init(instance: sdk.MCPServer, *args: Any, **kwargs: Any) -> None:
+        actual_init(instance, *args, **kwargs)
+        constructed.append(instance)
         for log in loggers:
             log.setLevel(logging.INFO)
-        return result
 
-    monkeypatch.setattr(sdk, "MCPServer", noisy)
-    if hasattr(server, "MCPServer"):
-        monkeypatch.setattr(server, "MCPServer", noisy)
+    # Preserve the SDK class so the lazy caller-aware implementation can subclass it.
+    monkeypatch.setattr(sdk.MCPServer, "__init__", noisy_init)
     try:
-        server.build_server(home)
+        built = server.build_server(home)
+        assert constructed == [built]
         assert all(log.level == logging.WARNING for log in loggers)
         with caplog.at_level(logging.WARNING, logger="hypothex.test"):
             logging.getLogger("hypothex.test").warning("application warning remains")

@@ -17,8 +17,14 @@ Start it
 The host tools (``list_hosts``, launches with ``host``, sweeps on a host,
 ``pull_artifact``) call the hub at ``HYPOTHEX_HUB_URL`` (default
 ``http://127.0.0.1:7777``), so ``hx serve`` must run on the hub. They send
-``HYPOTHEX_HUB_TOKEN`` when it is set. The MCP server inside ``hx serve`` uses that
-server's own token.
+``HYPOTHEX_HUB_TOKEN`` when it is set; otherwise local stdio clients may discover
+the matching loopback server's credential from its private record. The MCP server
+inside ``hx serve`` forwards the caller's validated credential. Missing or invalid
+caller credentials never fall back to the server's root token.
+Hub calls do not follow redirects or inherit proxy/TLS environment settings.
+
+Both ``/mcp`` and ``/mcp/`` remain authenticated. For a default local server, use
+``hx token`` with the same Hypothex home to retrieve the bearer credential.
 
 An expected error (a bad argument, an unknown run, a host that is not connected) comes
 back as a tool error with a readable message.

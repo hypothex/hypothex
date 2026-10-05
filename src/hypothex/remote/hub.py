@@ -40,6 +40,7 @@ from hypothex.core.index import index_run
 from hypothex.core.layout import HX_DIR, reserved_run_path
 from hypothex.core.records import Artifact, DatasetRef, RunRecord, RunStatus
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
+from hypothex.core.tokens import redact_bearer_token
 from hypothex.remote.bootstrap import BootstrapError, ensure_server
 from hypothex.remote.client import EnvClient, EnvRequestError, RemoteFile
 from hypothex.remote.config import EnvironmentsFile, HostKind, HostSpec
@@ -1011,6 +1012,7 @@ class _Supervisor:
     failed_bootstrap: bool = False
     pending: set[asyncio.Future[Any]] = field(default_factory=set)
     token: str | None = None
+    expected_environment_id: str | None = None
 
 
 class Hub:
@@ -1406,6 +1408,7 @@ class Hub:
                 sup.failure, sup.failed_bootstrap = _brief(exc), True
             except Exception as exc:  # noqa: BLE001 - every failure means "retry later"
                 sup.failure, sup.failed_bootstrap = _brief(exc), False
+            sup.failure = redact_bearer_token(sup.failure, sup.token)
             log.info("host %s: %s", sup.name, sup.failure)
             delay = sup.backoff.next_delay(time.monotonic())
             message = f"retry in {delay:g}s: {sup.failure}"
@@ -1434,12 +1437,15 @@ class Hub:
                 f"upgrade hx on {sup.name}: protocol {info.protocol_version}, "
                 f"hub speaks {PROTOCOL_VERSION}"
             )
-        tunnel = Tunnel(target, info.port, registry=self._tunnels)
+        if not info.environment_id:
+            raise BootstrapError("remote bootstrap returned no trusted environment identity")
+        sup.expected_environment_id = info.environment_id
+        tunnel = Tunnel(target, info.port, registry=self._tunnels, private=True)
         sup.tunnel = tunnel
         sup.token = info.token  # the env server's bearer token, read from server.json over ssh
         # tracked: a disconnect waits for start() before the session's cleanup stops it
         await self._shielded(sup, tunnel.start)
-        return f"http://127.0.0.1:{tunnel.local_port}"
+        return "http://localhost"
 
     def _close_route(self, sup: _Supervisor) -> None:
         tunnel, sup.tunnel = sup.tunnel, None
@@ -1451,11 +1457,19 @@ class Hub:
         client: EnvClient | None = None
         pinger: EnvClient | None = None
         try:
+            sup.expected_environment_id = None
             sup.token = None  # route url: no token; route ssh: _open_route sets it
             base_url = await self._open_route(sup)
-            client = EnvClient(base_url, token=sup.token)
-            pinger = EnvClient(base_url, timeout=PING_TIMEOUT_SECONDS, token=sup.token)
-            desc = await asyncio.to_thread(client.descriptor)
+            socket_path = sup.tunnel.unix_socket if sup.tunnel is not None else None
+            pinger = EnvClient(base_url, timeout=PING_TIMEOUT_SECONDS, unix_socket=socket_path)
+            desc = await self._shielded(sup, pinger.identity)
+            if (
+                sup.expected_environment_id is not None
+                and desc.environment_id != sup.expected_environment_id
+            ):
+                raise _EnvironmentTakenError(
+                    "remote public identity does not match the trusted SSH environment identity"
+                )
             if desc.protocol_version != PROTOCOL_VERSION:
                 raise _UpgradeRequiredError(
                     f"upgrade hx on {sup.name}: protocol {desc.protocol_version}, "
@@ -1470,9 +1484,10 @@ class Hub:
                     f"{sup.name})"
                 )
             self._reserve_environment(env_id, sup.name)
-            cursor = await asyncio.to_thread(self._read_cursor, sup, env_id)
+            client = EnvClient(base_url, token=sup.token, unix_socket=socket_path)
+            cursor = await self._shielded(sup, self._read_cursor, sup, env_id)
             if cursor:
-                cursor = await asyncio.to_thread(self._check_cursor, sup, client, env_id, cursor)
+                cursor = await self._shielded(sup, self._check_cursor, sup, client, env_id, cursor)
             sup.client = client
             sup.failed_bootstrap = False
             self._mark_ok(sup)
@@ -1744,13 +1759,15 @@ class Hub:
             if sup.tunnel is not None and not sup.tunnel.alive():
                 raise ConnectionError("ssh tunnel exited")
             try:
-                await asyncio.to_thread(pinger.descriptor)
+                identity = await self._shielded(sup, pinger.identity)
             except Exception as exc:  # noqa: BLE001 - a failed ping only counts toward stale
                 if self._is_stale(sup):
                     raise ConnectionError(
                         f"no answer for {self.stale_after:g}s: {_brief(exc)}"
                     ) from exc
                 continue
+            if identity.environment_id != env_id or identity.protocol_version != PROTOCOL_VERSION:
+                raise _EnvironmentTakenError("remote public identity changed during the session")
             self._mark_ok(sup)
             await self._shielded(sup, self._refresh_active, sup, client, env_id)
 

@@ -9,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
-import httpx
 import pytest
 from typer.testing import CliRunner
 
@@ -181,13 +180,15 @@ def test_hub_tunnels_launches_and_mirrors(sshd_box: SshBox, hub_ctx: Context) ->
         state = hub.wait_connected("box", timeout=BOOTSTRAP_TIMEOUT)
         assert state.kind == "ssh"
         assert state.hx_version == __version__
-        assert state.local_port is not None
-        url = f"http://127.0.0.1:{state.local_port}/.well-known/hypothex/environment"
-        token = server_json(sshd_box)["token"]
-        auth = {"Authorization": f"Bearer {token}"}
-        descriptor = httpx.get(url, headers=auth, timeout=10).json()  # through ssh -L
-        assert descriptor["environment_id"] == state.environment_id
-        assert descriptor["hostname"] == sshd_box.exec("hostname").strip()
+        assert state.local_port is None
+        client = hub.client("box")
+        assert client.unix_socket is not None and client.unix_socket.is_socket()
+        assert client.unix_socket.parent.stat().st_mode & 0o777 == 0o700
+        assert client.unix_socket.stat().st_mode & 0o777 == 0o600
+        assert client.identity().environment_id == state.environment_id
+        descriptor = client.descriptor()
+        assert descriptor.environment_id == state.environment_id
+        assert descriptor.hostname == sshd_box.exec("hostname").strip()
 
         run_id = launch(hub.client("box"), ["sh", "-c", "echo hello-from-docker"])["run_id"]
         mirrored = wait_mirrored(hub_ctx, run_id, "finished", timeout=120)
@@ -270,10 +271,13 @@ def test_hub_restart_replays_events_missed_while_down(sshd_box: SshBox, hub_ctx:
     # hub is down: a run happens on the host through a private tunnel
     target = sshd_box.access.target()
     info = ensure_server(target, REMOTE_HOME)
-    tunnel = Tunnel(target, info.port)
+    tunnel = Tunnel(target, info.port, private=True)
     tunnel.start()
+    client: EnvClient | None = None
     try:
-        client = EnvClient(f"http://127.0.0.1:{tunnel.local_port}", token=info.token)
+        with EnvClient("http://localhost", unix_socket=tunnel.unix_socket) as preflight:
+            assert preflight.identity().environment_id == info.environment_id
+        client = EnvClient("http://localhost", token=info.token, unix_socket=tunnel.unix_socket)
         missed = launch(client, ["sh", "-c", "echo missed"])["run_id"]
         wait_until(
             lambda: client.get_json(f"/api/v1/runs/{missed}")["record"]["status"] == "finished",
@@ -281,6 +285,8 @@ def test_hub_restart_replays_events_missed_while_down(sshd_box: SshBox, hub_ctx:
             what="missed run finished on the host",
         )
     finally:
+        if client is not None:
+            client.close()
         tunnel.stop()
     with pytest.raises(RunNotFoundError):
         hub_ctx.store.read_record("dock", missed)  # nobody mirrored it yet

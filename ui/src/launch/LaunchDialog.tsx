@@ -26,6 +26,7 @@ import {
 } from "react";
 
 import { newCommandId } from "../api/client";
+import { auth } from "../api/auth";
 import type { RunRecord } from "../api/models";
 import { REMOTE_RUN_INVALIDATES } from "../api/queries";
 import { ErrorBox, Loading } from "../pages/components/QueryState";
@@ -504,13 +505,17 @@ export function LaunchDialog({
   const launch = async (): Promise<void> => {
     if (inFlight.current || spec === null) return;
     if (resend === null && (blocked || pending.length === 0)) return;
+    const generation = auth.snapshot().generation;
     const toSend = resend === null ? pending : [resend];
     inFlight.current = true;
     setFailure(null);
     setProgress({ done: 0, total: toSend.length });
     const out = await launchSeeds(spec, toSend, attempt, {
-      onProgress: (n) => setProgress({ done: n, total: toSend.length }),
+      onProgress: (n) => {
+        if (auth.current(generation)) setProgress({ done: n, total: toSend.length });
+      },
     });
+    if (!auth.current(generation)) return;
     inFlight.current = false;
     setProgress(null);
     for (const queryKey of REMOTE_RUN_INVALIDATES) void client.invalidateQueries({ queryKey });

@@ -15,6 +15,8 @@ How it fits together
   laptop sleeps or the network drops.
 - The hub reaches an env server through an **SSH tunnel** (``ssh -N -L``) made with
   your own ``ssh`` and ``~/.ssh/config``. The env server listens on ``127.0.0.1`` only.
+  The local end is an owner-only Unix socket in a private directory, not a TCP port.
+  Host status therefore reports ``local_port: null`` for SSH connections.
 - The hub subscribes to each host's event stream and **mirrors** the runs: it copies
   the small files of each run to the hub as they change. Big files stay on the host.
   The hub keeps its place in each host's stream (a *cursor*), so after a reconnect it
@@ -23,7 +25,9 @@ How it fits together
   the host is behind the cursor and reads the whole log again; nothing is copied
   twice.
 
-The env server asks for a bearer token on every request. See :doc:`security`.
+The hub and env servers require bearer tokens for API, file and MCP requests.
+The UI shell and exact public identity descriptor can be read without a token.
+See :doc:`security`.
 
 Before you start
 ----------------
@@ -107,6 +111,15 @@ What ``hx hosts add --ssh`` does
 3. **Start**: it starts ``hx serve --host 127.0.0.1 --port 0`` on the host, or reuses
    a healthy env server for that home. The port and the token go into
    ``~/.hypothex/serve/server.json`` on the host (mode 0600).
+
+Bootstrap also reads the expected environment identity over SSH. Before sending
+the token, the hub checks the unauthenticated identity through its private socket
+against that trusted value. It repeats this check after reconnecting; it never
+learns the expected identity from the tunneled HTTP endpoint. A reused legacy
+record with a token but no identity field remains supported through this SSH
+check. A record missing the token field requires an explicit upgrade/restart;
+an explicit ``token: null`` remains an intentional no-auth server. Conflicting
+or malformed identity metadata is refused.
 
 Then it writes the host to ``environments.yaml`` and, when the hub runs, the hub
 connects at once. Without a running hub, the next ``hx serve`` connects it.
@@ -324,8 +337,12 @@ Run an env server by hand
    hx serve --kind ssh --port 0         # on the host
 
 The port it picks and its token go into ``~/.hypothex/serve/server.json``. The kind is
-saved, so a later ``hx serve`` on that home uses it again. ``--no-auth`` drops the
-token; use it only for test hosts that the hub reaches with ``hx hosts add --url``.
+saved, so a later ``hx serve`` on that home uses it again. ``--kind local`` switches
+back without changing the environment ID. A fresh token is generated on each
+actual start unless explicitly supplied; reusing a live server keeps its token.
+``--no-auth`` drops the token on loopback binds only; use it for explicit test
+hosts. For the local hub UI, retrieve its credential with ``hx token`` using the
+same home.
 
 Sweeps on a host
 ----------------

@@ -1,43 +1,26 @@
-"""Local-only request guards: DNS-rebinding and cross-origin protection.
+"""Bearer authentication, DNS-rebinding and cross-origin request protection.
 
-Phase 1a has no auth, so the API must only answer requests that really come
-from this machine. A web page in the user's browser can reach
-``127.0.0.1:7777`` in two ways, and both are blocked here:
-
-* **DNS rebinding** - the page's own host name resolves to ``127.0.0.1``. The
-  browser then sends ``Host: attacker.example``; the ``Host`` allow-list
-  (Starlette's ``TrustedHostMiddleware``) rejects it with ``400``.
-* **Cross-origin writes** - the page posts to ``http://127.0.0.1:7777``
-  directly. The browser sends ``Origin: https://attacker.example`` (or
-  ``http://localhost:8888`` for another local server, such as Jupyter);
-  :class:`OriginGuard` rejects state-changing requests and WebSocket
-  handshakes whose ``Origin`` is not the server's own (the ``Host`` the
-  request was sent to) with ``403``.
-
-A ``POST`` must also send a JSON body (``Content-Type: application/json``)
-or the ``X-Hypothex-Client`` header. A browser sends neither across origins
-without asking the server first (a CORS preflight, which this server never
-grants), so a page cannot reach the API with a "simple" form or ``fetch``
-post, even from a browser that leaves out ``Origin``.
-
-Non-browser clients (CLI, MCP clients, ``curl``) send no ``Origin`` header
-and are unaffected by the origin check.
-
-Neither check is authentication: any client that is not a browser can send
-``Host: localhost``. So ``hx serve`` binds a non-loopback address only with a
-bearer token (``HYPOTHEX_SERVE_TOKEN``), which :class:`TokenGuard` enforces on
-every request except the public descriptor.
+Host and exact-Origin guards run before authentication, including before consuming
+one-use WebSocket tickets. Non-browser clients need no Origin header. Every data
+route requires a bearer by default; only the exact public identity descriptor and
+installed static UI shell are public GET/HEAD resources. Explicit no-auth remains
+available to in-process callers and loopback-only ``hx serve --no-auth``.
 """
 
 from __future__ import annotations
 
 import hmac
 import ipaddress
+import re
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
+
+from hypothex.api.tickets import TicketStore
+from hypothex.core.tokens import validate_bearer_token
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 WILDCARD_BINDS = frozenset({"", "0.0.0.0", "::", "[::]", "*"})
@@ -45,7 +28,10 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 CLIENT_HEADER = "x-hypothex-client"
 """A ``POST`` with this header (any value) may send a body that is not JSON."""
 DEFAULT_PORTS = {"http": 80, "https": 443}
-PUBLIC_PREFIX = "/.well-known/hypothex/"
+PUBLIC_DESCRIPTOR = "/.well-known/hypothex/environment"
+WS_PATH = "/api/v1/ws"
+WS_PROTOCOL = "hypothex.v1"
+TICKET_PREFIX = "hx-ticket."
 """The descriptor stays open: ``start.sh`` and the hub read it to find the server."""
 
 
@@ -314,28 +300,60 @@ def bearer_matches(authorization: str | None, token: str) -> bool:
 
 class TokenGuard:
     """
-    Require ``Authorization: Bearer <token>`` on every HTTP and WebSocket request.
-
-    Only paths under ``PUBLIC_PREFIX`` (the environment descriptor) stay open;
-    without the token the descriptor names only the environment and versions.
-    A missing or wrong token gets ``401`` with ``{error, type: "AuthError"}``;
-    a WebSocket handshake is closed with code ``1008``.
+    Require a bearer for data routes and bearer or one-use ticket for events.
 
     Parameters
     ----------
     app : ASGIApp
-        The wrapped application.
-    token : str
-        The server's token (``HYPOTHEX_SERVE_TOKEN``).
+        Wrapped application.
+    token : str or None
+        Root credential; None explicitly disables authentication.
+    tickets : TicketStore
+        Process-local ticket issuer shared with the HTTP route.
+    public_static : callable
+        Whether a GET/HEAD path is an actual installed static resource or SPA route.
     """
 
-    def __init__(self, app: ASGIApp, token: str) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        token: str | None,
+        tickets: TicketStore,
+        public_static: Callable[[str], bool],
+    ) -> None:
         self.app = app
-        self._token = token
+        self._token = None if token is None else validate_bearer_token(token)
+        self._tickets = tickets
+        self._public_static = public_static
+
+    def _websocket(self, scope: Scope, headers: Headers) -> bool:
+        protocols = scope.get("subprotocols", [])
+        offered = [p for p in protocols if p.startswith(TICKET_PREFIX)]
+        # Only the existing event endpoint accepts ticket credentials.
+        if offered and (scope["path"] != WS_PATH or len(offered) != 1):
+            return False
+        if offered and (
+            protocols.count(WS_PROTOCOL) != 1
+            or not re.fullmatch(r"hx-ticket\.[A-Za-z0-9_-]{32}", offered[0])
+        ):
+            return False
+        auth = headers.getlist("authorization")
+        if len(auth) > 1:
+            return False
+        if self._token is None:
+            valid = not offered
+        elif auth:
+            # An explicitly offered invalid bearer never falls back to a ticket.
+            valid = bearer_matches(auth[0], self._token)
+        else:
+            valid = bool(offered) and self._tickets.consume(offered[0][len(TICKET_PREFIX) :])
+        if valid and scope["path"] == WS_PATH and protocols.count(WS_PROTOCOL) == 1:
+            scope["hypothex.ws_protocol"] = WS_PROTOCOL
+        return valid
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """
-        Pass requests that carry the token (or ask for the descriptor).
+        Validate credentials, without exposing offered secrets in an error.
 
         Parameters
         ----------
@@ -343,14 +361,37 @@ class TokenGuard:
         receive : Receive
         send : Send
         """
-        if scope["type"] not in ("http", "websocket") or scope["path"].startswith(PUBLIC_PREFIX):
+        kind = scope["type"]
+        if kind not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
-        if bearer_matches(Headers(scope=scope).get("authorization"), self._token):
+        headers = Headers(scope=scope)
+        if kind == "websocket":
+            valid = self._websocket(scope, headers)
+        else:
+            public = scope["method"] in ("GET", "HEAD") and (
+                scope["path"] == PUBLIC_DESCRIPTOR or self._public_static(scope["path"])
+            )
+            auth = headers.getlist("authorization")
+            valid = (
+                self._token is None
+                or public
+                or (len(auth) == 1 and bearer_matches(auth[0], self._token))
+            )
+        if valid:
+            # MCP reads this per-message request scope, never an inherited root fallback.
+            if kind == "http":
+                scope["hypothex.auth_token"] = (
+                    self._token
+                    if self._token is not None
+                    and len(auth) == 1
+                    and bearer_matches(auth[0], self._token)
+                    else None
+                )
             await self.app(scope, receive, send)
             return
-        if scope["type"] == "websocket":
-            await receive()  # websocket.connect
+        if kind == "websocket":
+            await receive()
             await send({"type": "websocket.close", "code": 1008})
             return
         response = JSONResponse(

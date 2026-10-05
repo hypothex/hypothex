@@ -32,6 +32,14 @@ CAPABILITIES: tuple[str, ...] = (
 )
 
 
+class EnvironmentIdentity(BaseModel):
+    """Public identity returned before a client sends any credential."""
+
+    environment_id: str
+    protocol_version: int
+    hx_version: str
+
+
 class EnvironmentDescriptor(BaseModel):
     """What ``GET /.well-known/hypothex/environment`` returns."""
 

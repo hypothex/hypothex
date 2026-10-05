@@ -273,7 +273,10 @@ processes it owns. Execution always happens inside an environment, never in a cl
   (under a lock dir), reuses an already-healthy env server if its pid/port file in
   `~/.hypothex/serve/` says so, else starts `nohup hx serve --host 127.0.0.1 --port 0`,
   probes readiness, and on failure returns the last 80 log lines. The hub then opens
-  `ssh -N -L <local>:127.0.0.1:<remote> -o ExitOnForwardFailure=yes -o ServerAliveInterval=15`.
+  `ssh -N -L <private Unix socket>:127.0.0.1:<remote> -o ExitOnForwardFailure=yes -o ServerAliveInterval=15`.
+  The socket lives in a fresh owner-only directory. Bootstrap returns the expected
+  environment ID over SSH; the hub checks the public identity through the socket
+  before sending any bearer credential. There is no TCP fallback.
   The hub only stops env servers it started (`managed` vs `external`).
 - **Long-lived env servers:** `hx service install` writes a systemd user unit (Linux) or
   launchd agent (macOS) so an env server survives reboots/logouts.
@@ -471,8 +474,17 @@ predictions (paged), datasets, environments, queue, sweeps, notes. Actions: `POS
 `command_id` for idempotency (5.3). Live updates (run events, logs, metrics) go over the
 WebSocket with `after_sequence` replay (5.3), not SSE. The same API is served by the hub
 and by env servers; the hub proxies env-specific calls to the owning environment.
-Phase 1–2: bound to `127.0.0.1` (remote envs reached through SSH tunnels), no auth.
-Phase 3: auth (section 9).
+Phase 1–2: bound to `127.0.0.1` by default, with a fresh bearer token for every
+actual server start unless explicitly supplied. `hx token` reads the local private
+server record for browser entry; API, file and MCP routes require authentication.
+Only GET/HEAD of the exact public identity descriptor and installed UI shell/assets
+are public. Explicit `--no-auth` is restricted to loopback. Browser WebSockets use
+30-second, single-use tickets from authenticated `POST /api/v1/auth/ws-ticket`,
+offered as `hx-ticket.<ticket>` alongside `hypothex.v1`; only the fixed protocol is
+selected. Neither token nor ticket enters a URL. SSH envs use private local Unix
+sockets and an SSH-sourced identity check before bearer transmission.
+Phase 3 adds collaborator sessions, pairing and scopes (section 9), replacing the
+single-token guard when enabled rather than requiring both guards.
 
 ### 7.4 MCP server
 
@@ -664,13 +676,19 @@ CLI: `hx hosts add <name> --ssh <alias> [--slurm --partition P ...]`, `hx hosts 
 3. Start: reuse a healthy server recorded in `<home>/serve/server.json` (pid, port,
    managed|external, hx_version); else `nohup hx serve --host 127.0.0.1 --port 0`, wait for
    the descriptor, on failure return the last 80 log lines.
-4. Tunnel: `ssh -N -L 127.0.0.1:<free local port>:127.0.0.1:<remote port>
+4. Tunnel: `ssh -N -L <private Unix socket>:127.0.0.1:<remote port>
    -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3`. One
    supervisor per host restarts the tunnel with backoff 3/4/8/16 s (reset after 30 s).
-5. Version check: incompatible `protocol_version` → host shown as "upgrade" and
-   `hx hosts upgrade` reinstalls.
+5. Identity/version check: read the public descriptor without Authorization and
+   compare its ID with the expected ID returned through SSH before constructing
+   authenticated clients. Incompatible `protocol_version` → host shown as
+   "upgrade" and `hx hosts upgrade` reinstalls. Reconnects repeat verification.
 
-Env servers bind to 127.0.0.1 only. No new network exposure; auth stays in phase 3.
+Env servers bind to 127.0.0.1 by default and require a bearer token. The local
+socket parent is 0700 and its socket is owner-only; unsupported private forwarding
+fails closed. The remote endpoint remains loopback TCP. This protects against a
+different local user taking a public local port, not replacement of the remote
+serving process or access by the same Unix user/root.
 
 ### 8A.3 Hub mirror
 

@@ -2,7 +2,7 @@ Security model
 ==============
 
 The Hypothex API starts arbitrary commands and reads run files. So every server is
-reachable only from its own machine by default, servers on shared hosts need a token,
+reachable only from its own machine by default, every server requires a token,
 and secrets stay out of run files.
 
 Localhost bind
@@ -35,33 +35,60 @@ These checks are not authentication: any program that is not a browser can send
 Bearer token
 ------------
 
-With a token, every request except the descriptor
-``/.well-known/hypothex/environment`` needs ``Authorization: Bearer <token>``. A
+Every API, file and MCP request needs ``Authorization: Bearer <token>``. Only
+``GET``/``HEAD`` of the exact descriptor ``/.well-known/hypothex/environment`` and
+the installed UI's static resources/navigation are public. A
 missing or wrong token gets ``401`` (``{"type": "AuthError"}``); a WebSocket is closed
 with code ``1008``. Without the token the descriptor names only ``environment_id``,
 ``protocol_version`` and ``hx_version`` (``start.sh`` needs the id); the host name, OS,
-GPUs and the rest are for the token holder.
+GPUs and the rest are for the token holder. The public UI opens a Token gate;
+ordinary page queries and the event stream start only after authentication.
 
-**Env servers** (``hx serve --kind ssh|slurm``) always have a token, because on a
-shared GPU box or a SLURM login node other users can reach ``127.0.0.1`` too.
+**All servers**, including the local hub, have a token by default. Other local
+users can reach ``127.0.0.1`` too.
 
 - The token is ``HYPOTHEX_SERVE_TOKEN`` when set, else a new random one for each
   start.
 - It is kept in ``<home>/serve/server.json`` on the host: mode 0600, in a 0700
   folder.
-- The hub reads it over ``ssh`` during the bootstrap and sends it through the tunnel.
+- The hub reads it over ``ssh`` during bootstrap and sends it through a private
+  Unix-socket tunnel only after checking the endpoint's identity against the ID
+  returned over SSH.
   It is never written to ``environments.yaml`` or to error messages.
 - ``hx serve`` removes ``HYPOTHEX_SERVE_TOKEN`` from its environment at start, so the
   runs it starts never inherit it.
-- ``--no-auth`` drops the token. Use it only for test hosts.
+- ``--no-auth`` drops the token and is allowed only on a loopback bind. Use it
+  only for explicit local test setups.
 
-**The hub's own server** (the UI on your machine) needs a token only when
-``HYPOTHEX_SERVE_TOKEN`` is set. ``hx serve`` refuses a non-loopback ``--host`` (such
-as ``0.0.0.0``) without one:
+An explicit token must be 1–4096 ASCII characters: letters, digits,
+``-._~+/``, with optional trailing ``=`` padding. Invalid values fail before a
+listener or client is created, without echoing the value. A supplied token stays
+the same across restarts; randomly generated tokens rotate on each actual start.
+Reusing a live server preserves its token.
+
+For the browser, run this locally using the same Hypothex home and paste its
+output into the Token field:
 
 .. code-block:: bash
 
-   HYPOTHEX_SERVE_TOKEN=$(openssl rand -hex 24) hx serve --host 0.0.0.0
+   hx token
+
+This explicit command prints the token from the private server record after
+checking its home, host, environment identity and process birth. It makes no
+network request and does not read ``HYPOTHEX_HUB_TOKEN``. Stale or unverifiable
+records require a server restart. The browser keeps the credential in memory
+and, when available, session storage. A ``401`` clears cached data and locks the
+UI again; ``403`` and ``404`` do not.
+Changing the selected credential also invalidates pending browser actions. Their
+network retries, later seed launches and success callbacks cannot continue under
+the replacement credential. Work already accepted by the server is unaffected.
+
+Browser WebSockets use a fresh single-use ticket from
+``POST /api/v1/auth/ws-ticket``. Tickets expire after 30 seconds and travel in
+the offered ``hx-ticket.<ticket>`` subprotocol alongside ``hypothex.v1``; the
+server selects only ``hypothex.v1``. Neither the bearer nor ticket appears in a
+URL. At most 256 outstanding tickets are kept; issuance returns ``429`` when
+full. Existing nonbrowser WebSocket clients can use the Authorization header.
 
 Clients find the token like this:
 
@@ -69,7 +96,13 @@ Clients find the token like this:
 - Else, for a hub on a loopback address, they read the token from that hub's
   ``<home>/serve/server.json`` (only when its port matches). A token is never read from
   that file for a hub on another machine.
-- The MCP server mounted in ``hx serve`` uses the server's own token.
+- HTTP MCP forwards the caller's validated credential; it does not replace a
+  missing or invalid credential with the server's root token.
+
+Python hub and environment clients use explicit transports: they do not follow
+redirects or inherit HTTP proxy and TLS configuration from environment variables.
+Their HTTP diagnostics redact a configured bearer even when a peer reflects it
+in response headers or status text.
 
 .. code-block:: bash
 
@@ -83,10 +116,21 @@ SSH
 - ``ssh`` runs with ``-o BatchMode=yes``: it never asks for a password. Tunnels add
   ``-o ExitOnForwardFailure=yes``, and every call uses
   ``ServerAliveInterval=15`` and ``ServerAliveCountMax=3``.
-- Tunnels forward ``127.0.0.1`` on the hub to ``127.0.0.1`` on the host.
+- Hub tunnels forward a Unix socket in a fresh 0700 local directory to
+  ``127.0.0.1`` on the host. The socket is owner-only; there is no local TCP
+  listener or fallback to one. Unsupported private forwarding fails closed.
+- Bootstrap obtains the expected environment ID through SSH. The hub reads the
+  tunneled public identity without a bearer, checks that ID and protocol, and
+  only then constructs authenticated clients. Reconnects repeat this check.
+  Private routes ignore HTTP proxy environment variables.
 - Host names, SSH aliases, remote paths, and SLURM values are checked against strict
   patterns before they reach a shell. ``hx pull`` runs ``scp -s`` (SFTP mode), so the
   host's shell never reads a path.
+
+The local private socket protects against another Unix user taking a public
+local port. Same-user and root processes remain trusted because they can read
+the private files. The remote end still uses loopback TCP; this does not protect
+against replacement of the remote serving process or port by an attacker.
 
 Project checkout paths
 ----------------------
@@ -151,7 +195,9 @@ No secrets in run files
   ``TRANSFORMERS_OFFLINE``). API keys and tokens in your environment are never
   recorded.
 - The recorded git ``origin`` URL has any user name, password, or token removed.
-- Tokens are not in ``run.yaml``, ``environments.yaml``, or the API's answers.
+- Root bearer tokens are not in ``run.yaml``, ``environments.yaml``, or API
+  answers. The authenticated ticket endpoint returns only its short-lived
+  single-use WebSocket credential.
 - The run's command line *is* recorded, in ``run.yaml``. Do not pass secrets as
   command-line arguments; read them from environment variables or files in your code.
 - Hypothex's own state in a run folder lives in ``.hx/``. The env server never serves

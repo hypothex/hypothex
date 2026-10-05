@@ -1,5 +1,7 @@
 # Phase 3 local prerequisite integration
 
+Superseded locally by `2026-10-05-hypothex-phase3-final-candidate.md`, which includes the final credential-intent guards. The evidence below remains the `a66540f` checkpoint.
+
 This is a local merge checkpoint, not formal review round 5. The Phase 3 plan branch at `bbae18c86f0a60773eed9aee067327689748e447` merges `a66540f5d93a9b69c9644a06f323b12af43db231` without rebasing. The incoming history contains frozen DF2 `48f8bef12909a7b40f6037b2331aa1f0300dcffe`, token implementation `826223e4534439f863420bbf97e6a9a93feb078e`, and the lazy MCP factory. The merge had no conflicts. Runtime, UI, tests, dependencies and task files are inherited exactly from the incoming commit; all additional edits are Phase 3 plan documents.
 
 The final merged `origin/main` checkpoint is still required after the prerequisite PRs and documentation work land. The pending credential-generation repair for mutation intents (`useAction` and `launchSeeds`) is not in this pin. Preserve its final implementation and regressions before the next formal review. No Phase 3 runtime implementation, formal round 5, push or PR is part of this checkpoint.

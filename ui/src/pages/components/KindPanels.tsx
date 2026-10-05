@@ -72,10 +72,32 @@ export function sentenceCase(title: string): string {
  * The run-view panels to draw for one run: titles in sentence case (as the page's own
  * sections), and, when the run has no traces (`traceCount === 0`), no trace panels, which
  * would only say "no traces". `traceCount` undefined (not known yet) keeps them.
+ * Curves explicitly name the series the page draws, with the server's per-series cap.
+ * A long terminal history is split at the API's 100-reference limit, never truncated.
  */
-export function runViewPanels(specs: PanelSpec[], traceCount?: number): PanelSpec[] {
+export function runViewPanels(
+  specs: PanelSpec[],
+  traceCount?: number,
+  metricNames: readonly string[] = [],
+): PanelSpec[] {
   const kept = traceCount === 0 ? specs.filter((p) => !readsTraces(p)) : specs;
-  return kept.map((p) => (p.title ? { ...p, title: sentenceCase(p.title) } : p));
+  return kept.flatMap((original): PanelSpec[] => {
+    const panel = original.title ? { ...original, title: sentenceCase(original.title) } : original;
+    if (panel.type !== "curves") return [panel];
+    const data = panel.data ?? {};
+    const names = data.metrics ?? metricNames.filter(
+      (name) => !name.startsWith(SWEEP_PREFIX) && name !== (data.step_metric ?? "step"),
+    );
+    const chunks: string[][] = [];
+    for (let i = 0; i < names.length; i += 100) chunks.push(names.slice(i, i + 100));
+    // [] means no displayed history: omitting the list would read every hidden series.
+    if (chunks.length === 0) chunks.push([]);
+    return chunks.map((metrics, i) => ({
+      ...panel,
+      ...(chunks.length > 1 ? { title: `${panel.title || "Metrics"} · ${i * 100 + 1}–${i * 100 + metrics.length}` } : {}),
+      data: { ...data, metrics, max_points: data.max_points ?? 500 },
+    }));
+  });
 }
 
 /** How many lettered panels `KindPanels` draws for these specs. */

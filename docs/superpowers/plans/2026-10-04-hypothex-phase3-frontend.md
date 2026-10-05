@@ -15,7 +15,7 @@
 **Mockups:** `docs/mockups/phase3/` (`index.html`, `data.js`, `shot-pair-{ready,done,invalid}-*`, `shot-settings-*`, `shot-settings-collab-*`, `shot-storage-*`, `shot-storage-confirm-*`, `shot-storage-result-*`, `shot-notebook-*`, `shot-notebook-conflict-*`, `shot-task-export-*`, `shot-run-*`, `shot-gate-*`).
 
 **Depends on:**
-- The phase 2 frontend and audit/UI improvements are merged. The integration snippets below were refreshed against local prerequisite baseline `a66540f5d93a9b69c9644a06f323b12af43db231`, including the frozen DF-48 and token interfaces. This is a local integration checkpoint; the final merged-main refresh and formal rounds 5–6 remain pending. Before implementation, run this check on the intended source checkout. The 12 historical snippet anchors alone are insufficient: whole-file Header replacement and procedural event-stream edits must also match the reviewed source blobs.
+- The phase 2 frontend and audit/UI improvements are merged. The integration snippets below were refreshed against local prerequisite baseline `138166274d46b0a285c28b1106059c6fab715f3f`, including the frozen DF-48 and token interfaces. This is a local integration checkpoint; the final merged-main refresh and formal rounds 5–6 remain pending. Before implementation, run this check on the intended source checkout. The 12 historical snippet anchors alone are insufficient: whole-file Header replacement and procedural event-stream edits must also match the reviewed source blobs.
 
 ```bash
 uv run python - <<'PY'
@@ -29,14 +29,24 @@ found = anchor.findall(plan)
 bad = [f for f, block in found if not pathlib.Path(f).is_file() or block not in pathlib.Path(f).read_text()]
 reviewed = {
     'ui/src/api/events.ts': '7256185bf8aea3b9950f480611bb4bc527de9d1a',
-    'ui/src/api/queries.ts': 'e63b75fa9b8e1fe42a66636a4312cd86263dea12',
+    'ui/src/api/queries.ts': 'c05040ef695e234e7165056c87a3360fef1a435a',
     'ui/src/api/client.ts': 'a7c990fbbe099a016ff28045d2a271231798702c',
     'ui/src/shell/Header.tsx': 'b61fbb21380110a250fb21190ce17d81b289a1d8',
-    'ui/src/pages/components/OverviewLists.tsx': '215ed36b1c0907ad248a4f4cdbcc1f0eab6064a5',
-    'ui/src/pages/Task.tsx': 'aaec83516cbd524c3cfb971d4a3fae9f07f2f94c',
+    'ui/src/pages/components/OverviewLists.tsx': 'b332763d7670b1192bc4d05e7d0ef2bbd56198a6',
+    'ui/src/pages/Task.tsx': 'a9f4134b06601564edc191ed1162bca270f2da20',
     'ui/e2e/serve-demo.ts': 'a5148484442f9e2656c3757c98140c9b037a36d4',
-    'ui/src/pages/components/RunActions.tsx': 'd66bcfb254c6825694a0ccbf7fa181bc53476bd8',
+    'ui/src/pages/components/RunActions.tsx': '0edaee2caf463d139749f539a1ce797a36193710',
     'ui/playwright.config.ts': '221aaa10fc64bd01c486a48ce0ab00f677277ab1',
+    'ui/src/pages/Overview.tsx': 'f9fae51a56733ebc95ab3851aeb7e3a37f7bdb96',
+    'ui/src/pages/Run.tsx': 'dc58c5266a557f0a2258c9fd196d95f62de2169d',
+    'ui/src/shell/CommandPalette.tsx': 'd6f33215ed15652b23d9f50d3656e598d00088bd',
+    'ui/src/pages/components/WhereList.tsx': '2f8b41b3d5289e13aac5763b18381d13f053fa3a',
+    'ui/src/panels/Leaderboard.tsx': '50d1a4ffb5d5e06f02db3fe506908c230ea31bcb',
+    'ui/src/pages/components/useAction.ts': 'cce82cbf60c2e148bbd60faabc217d4088ef64e8',
+    'ui/src/launch/launchApi.ts': '7eb67cab7d6b6442cc74e1ac13becd850465e47d',
+    'ui/src/launch/LaunchDialog.tsx': '6a5f6efb4f96330e78980b06ce4c65a7567dfcbc',
+    'ui/src/pages/components/KindPanels.tsx': '9923dd29c2fa1ded68c95fbedaadd624bfd7d413',
+    'ui/src/api/models.ts': '97e0f932194bfa945510fd3c4804c976b50f1fcf',
 }
 changed = [f for f, blob in reviewed.items()
            if subprocess.check_output(["git", "hash-object", f], text=True).strip() != blob]
@@ -49,7 +59,7 @@ PY
 Expected on the pinned baseline: `12 snippet anchors ok` and `reviewed replacement sources ok`. A later merge deliberately fails the blob check: re-read changed files and update the snippets, tests and baseline hashes together; do not merely copy new hashes. In particular preserve confirmed recents, WebSocket head/cancellation/single-batch invalidation, `sweep.issuance` events and `issuancePoll`, credential resets including side caches, grouped failure retries, Task unscored counts/metric-drift indicator/templateEnvironment and loading/launch behavior, and per-run e2e homes. Task 25's whole-file `ui/playwright.config.ts` must remain the final baseline plus its team server/projects.
 - The phase 3 backend plan (`docs/superpowers/plans/2026-10-04-hypothex-phase3-backend.md`) merged: the contract section 3 routes in `/api/openapi.json`, `RunRecord.owner`, `RunDetail.cleaned`, `Leaderboard.baselines`, the section 2 events, the `4401` close code, `hx serve --auth`, and `hx demo --with-team` (contract 11: owner `sv` admin and `alice` launch, two projects with notebook days and one weekly summary, baselines on `toy-classifier/toy-test`, 6 archived runs with artifacts, outbox entries in every state, one connected fake host, the local session token in `<home>/serve/server.json`).
 - The mockups in `docs/mockups/phase3/` approved.
-- Final-baseline requirement: retain the incoming credential-generation fix for `useAction` and `launchSeeds`: capture the generation once per user intent, reject it before every request/retry and success side effect after credentials change, and treat `AbortError` as non-retryable. A failed old mutation cannot be retried as the newly selected principal. This fix is still under review and is not included in local pin `a66540f`; inspect its final APIs and regressions before formal Round 5.
+- The local pin includes the final credential-intent guards. Keep `Vars.generation` captured by `useAction.run`, checks before/after `send` and in `onSuccess`, and `shouldRetry` rejecting `AbortError`. Keep `launchSeeds`' captured generation around every `postLaunch` and `LaunchDialog`'s generation checks before progress and after awaiting the outcome, before invalidation/navigation/callbacks. Reusing an idempotency key never authorizes an old intent under a replacement principal. Preserve `ui/test/pages/authActions.test.tsx` and the replacement-credential regression in `ui/test/launch/launchApi.test.ts`. These interfaces need no Phase 3 replacement.
 
 ## Global Constraints
 
@@ -60,7 +70,7 @@ Expected on the pinned baseline: `12 snippet anchors ok` and `reviewed replaceme
 - Routes (exact): UI routes `/pair`, `/settings`, `/storage`, `/n/$project`, `/n/$project/$day` (contract `/n/:project`, `/n/:project/:day`). API the UI calls: `GET /api/v1/auth/me`, `POST /api/v1/auth/ws-ticket`, `POST /api/v1/auth/pair`, `POST /api/v1/auth/pairings`, `GET /api/v1/auth/sessions`, `POST /api/v1/auth/sessions/{session_id}/revoke`, `GET /api/v1/auth/users`, `POST /api/v1/auth/users/{name}/disable`, `GET|POST|PUT /api/v1/projects/{project}/notebook[/{day}]`, `GET /api/v1/tasks/{project}/{task}/export`, `GET /api/v1/notify`, `POST /api/v1/notify/test`, `GET /api/v1/storage`, `POST /api/v1/storage/plan`, `POST /api/v1/storage/plans/{plan_id}/apply`, and `GET /api/v1/runs?owner=me`. `POST /api/v1/auth/logout`, `GET /api/v1/compare/export`, `GET /api/v1/projects/{project}/digest` and `POST .../digest/send` exist on the hub (Task 2's `types.ts` test checks them) but no screen uses them, so the client has no function for them.
 - Auth (contract 1.10): every request sends `credentials: "same-origin"` (the `hx_session` cookie is `HttpOnly; SameSite=Strict`, so script never reads it). A current-generation `401` locks the credential provider and clears session queries/cursor; stale responses cannot affect a replacement credential. The root token-entry gate remains available, with pairing guidance in scoped mode. The event stream uses `websocketTicket` before every connect and sends its one-use result through `hx-ticket.<ticket>` alongside `hypothex.v1`; no credential appears in a URL. Current-generation `4401` locks and stops reconnecting. `/pair` renders without the header and never calls `/auth/me` or opens the event stream; it strips the `#<offer>.<secret>` fragment from the address bar (`history.replaceState`) before it sends anything, and sends the secret only in the `POST /api/v1/auth/pair` body.
 - Scopes in the UI are hints, never the gate: the server decides (403 shows as an error line). Admin-only reads (`/auth/users`, `/notify`, `/storage`) are never requested for a non-admin principal, so a collaborator's console stays free of 403s; the header hides `storage` for them.
-- Actions: every new write sends only `{command_id, ...its fields}`; `created_by`, `owner` and `author` are set by the server from the principal (contract 1.2, 7). Phase 1–2 actions keep `action()` (`command_id`, `created_by: "human"`). Writes go through `useAction` (`ui/src/pages/components/useAction.ts`) so a retry after a dropped connection reuses the same `command_id`.
+- Actions: every new write sends only `{command_id, ...its fields}`; `created_by`, `owner` and `author` are set by the server from the principal (contract 1.2, 7). Phase 1–2 actions keep `action()` (`command_id`, `created_by: "human"`). Writes go through the inherited `useAction` (`ui/src/pages/components/useAction.ts`) so retries reuse both the original `command_id` and credential-generation guard. Do not replace the hook, bypass it for retries, or strip its post-response/onSuccess checks. A new click after a credential change is a new user intent.
 - One data layer: every request goes through `api.*` in `ui/src/api/client.ts`; no module builds its own `fetch` or route table. Downloads use a Blob made from authenticated `api.exportTask(...)` text; a remote anchor cannot carry the root bearer header.
 - Live data: `notebook.updated` invalidates `["notebook", project]`; `run.artifacts_cleaned` invalidates the run families (narrowed) plus `["storage"]`; `storage.*` invalidates `STORAGE_EVENT_INVALIDATES` (`["storage"]`, `["runs"]`, `["run"]`); `notify.*` and `digest.sent` invalidate `["notify"]` (and `digest.sent` the project's notebook, where the summary is saved); `auth.*` invalidates `AUTH_EVENT_INVALIDATES` (`["auth", "sessions"]`, `["auth", "users"]`). Run events never invalidate `["storage"]` (a storage report walks every host; it refreshes on cleanup events and on demand). Export texts are keyed under `["leaderboard", project, task, "export", opts]`, so the run and mirror events that refresh a leaderboard refresh an open export menu with it (Copy never copies older numbers than the table shows).
 - Copy (spec 8.1, terse UI): numbers and glyphs, labels of one or two words; explanations only in `title` tooltips; every state has its own glyph, never colour alone; monospace only for commands, paths, ids and tokens; times in UTC; a missing value is `—`; a not-yet-known cell is `·`. Glyphs: notify events `✓` finished, `✗` failed, `?` lost, `⊘` killed; outbox `✓` sent, `✗` failed, `…` pending/sending, `○` skipped; channel `●` set, `○` unset, `·` not configured; scope `r`/`l`/`a`; refused clean rows `⊘`; cleaned artifact `✕ <date> <bytes>`; baseline `◆`; digest counts `▲` started.
@@ -147,6 +157,8 @@ Each file has one job: `api/` talks to the server, `settings/`, `storage/` and `
 Gives the UI typed access to every phase 3 hub route the screens use and keeps them live. `models.ts` gets the contract shapes (the new routes return plain dicts or pydantic models; `types.ts` knows only their paths). `api/auth.ts` retains the token baseline credential state and adds principal context. `client.ts` retains bearer/cookie selection and credential-generation guards, and adds authenticated export text. Event tickets use the baseline WebSocket subprotocol flow. `queries.ts` adds keys, read hooks and four invalidation lists; `events.ts` maps the new events and handles `4401`. The backend plan must be merged before Task 2 Step 3 (the phase 3 routes must be in `/api/openapi.json`).
 
 ### Task 1: Phase 3 models and typed fixtures
+
+All models are additive to the prerequisite. Retain `PanelData.max_points?: number | null` (curves, 2–500, absent/null default 500), `RunDetail.metric_names`, and the generated OpenAPI constraint; regenerating types must not remove them. The Run page keeps `runViewPanels(kindSpecs, traceCount, metricNames)`: explicit displayed metric lists exclude reserved sweep/step series, chunk at 100 references, send `metrics: []` when empty, and preserve each panel's `max_points ?? 500`. Terminal histories spanning more than 100 metrics are split rather than truncated. No Phase 3 task replaces that path.
 
 **Files:**
 - Modify: `ui/src/api/models.ts` (end of `RunRecord` after `gpus_requested`; end of `RunDetail` after `host_state`; end of `Leaderboard` after `value_format`; end of `RunsQuery` after `environment_id`; append at end of file)
@@ -1857,6 +1869,8 @@ Run: `bun test test/api/phase3-queries.test.tsx`
 Expected: FAIL. `SyntaxError: Export named 'AUTH_EVENT_INVALIDATES' not found in module '.../src/api/queries.ts'` (bun names one of the missing exports).
 
 - [ ] **Step 3: Add the keys, lists and hooks**
+
+Keep `queryKeys.environment()` and `useHubEnvironment(opts)` unchanged. Overview, Run's owner-qualified sweep links, and the command palette share this query; Run retains `enabled: Boolean(record?.sweep_id)`. Do not restore page-local descriptor queries. Keep `clearSessionQueries` so the descriptor and side caches are cleared with credentials even though the descriptor's `staleTime` is infinite.
 
 In `ui/src/api/queries.ts`, replace
 
@@ -3940,7 +3954,7 @@ with
               title={!served ? unavailable : !permit.ok ? (permit.why ?? "") : active ? (armed ? "Click again to stop this run" : "Stop this run") : "The run is not active"}
 ```
 
-Preserve `served`, `hostsLoaded`, routing-unavailable tooltips, `stop.run(true)` for queued cancellation, and the armed running-stop confirmation with its three-second timeout, blur/Escape reset and status/identity reset. Add `permit.ok` to the reset effect's dependencies so a permission change disarms it. Phase 3 ownership is an additional condition; it never enables an unserved run. Extend the existing action tests with unserved owner/admin, conditional queued cancellation, and two-click running stop cases under `PrincipalContext`.
+Preserve the current `inferStage` gate (only a successfully loaded infer stage enables Re-infer), run-ID-qualified re-evaluation reports through `ReevalSummary`, `served`, `hostsLoaded`, routing-unavailable tooltips, `stop.run(true)` for queued cancellation, and the armed running-stop confirmation with its three-second timeout, blur/Escape reset and status/identity reset. Add `permit.ok` to the reset effect's dependencies so a permission change disarms it. Phase 3 ownership is an additional condition; it never enables an unserved run. Extend the existing action tests with unserved owner/admin, conditional queued cancellation, and two-click running stop cases under `PrincipalContext`.
 
 In `ui/src/pages/components/OverviewLists.tsx`, replace
 
@@ -4043,10 +4057,8 @@ with
 In `ui/src/pages/Overview.tsx`, replace
 
 ```tsx
-import { useQuery } from "@tanstack/react-query";
 import { Fragment } from "react";
-import { api } from "../api/client";
-import { useHosts, useOverview } from "../api/queries";
+import { useHosts, useHubEnvironment, useOverview } from "../api/queries";
 ```
 
 with
@@ -4057,7 +4069,7 @@ import { Fragment, useState } from "react";
 import { authOn, usePrincipal } from "../api/auth";
 import { api } from "../api/client";
 import type { RunsQuery } from "../api/models";
-import { queryKeys, useHosts, useOverview } from "../api/queries";
+import { queryKeys, useHosts, useHubEnvironment, useOverview } from "../api/queries";
 ```
 
 and add, directly above `function OverviewBody`,
@@ -8659,7 +8671,9 @@ replace
 
 ```tsx
   if (band) values.push(band.lo, band.hi);
-  const x = linear(niceDomain(values), PAD, width - PAD);
+  // This is the plot column's measured width, not the full leaderboard card.
+  const tickCount = Math.max(2, Math.floor((width - 2 * PAD) / 70));
+  const x = linear(niceDomain(values), PAD, width - PAD, tickCount);
 ```
 
 with
@@ -8670,7 +8684,9 @@ with
     const v = baselineValue(b, pkey);
     if (v !== null) values.push(v);
   }
-  const x = linear(niceDomain(values), PAD, width - PAD);
+  // This is the plot column's measured width, not the full leaderboard card.
+  const tickCount = Math.max(2, Math.floor((width - 2 * PAD) / 70));
+  const x = linear(niceDomain(values), PAD, width - PAD, tickCount);
 ```
 
 Replace
@@ -8746,6 +8762,8 @@ with
         })}
         <div className="frow axisrow">
 ```
+
+Keep the baseline measured-width tick density and endpoint text-anchor rules. Paper baseline values extend the domain without reverting chart layout fixes or CSS.
 
 Append to `ui/src/panels/panels.css`:
 
@@ -9065,10 +9083,13 @@ Expected: FAIL: `SyntaxError: Export named 'cleanedText' not found in module '..
 
 - [ ] **Step 3: Mark cleaned rows**
 
+Preserve the shared `SlashPath` component for roots and child paths, its slash-only wrapping, and linked paths' accessible labels. Cleaned paths retain that renderer while dropping the link and copy action; do not reintroduce plain unbroken path text.
+
 In `ui/src/pages/components/WhereList.tsx`, replace
 
 ```tsx
 import { CopyButton } from "./CopyButton";
+import { SlashPath } from "./SlashPath";
 import { displayPath, fmtBytes, isNum, relativeTo, shellJoin, splitHostPath, tailPath } from "./format";
 import { AppLink, hrefs } from "./links";
 import type { GitInfo, RunDetail } from "./types";
@@ -9079,6 +9100,7 @@ with
 ```tsx
 import { createElement } from "react";
 import { CopyButton } from "./CopyButton";
+import { SlashPath } from "./SlashPath";
 import { displayPath, fmtBytes, fmtDate, isNum, relativeTo, shellJoin, splitHostPath, tailPath } from "./format";
 import { AppLink, hrefs } from "./links";
 import type { CleanedArtifact, GitInfo, RunDetail } from "./types";
@@ -9183,11 +9205,11 @@ and replace
                     <span className="br">{row.indent ? (i === kids.length - 1 ? "└" : "├") : "·"}</span>
                     <span className="p" title={row.title}>
                       {row.href ? (
-                        <AppLink href={row.href} title="Open">
-                          {row.display}
+                        <AppLink href={row.href} title="Open" aria-label={row.display}>
+                          <SlashPath path={row.display} />
                         </AppLink>
                       ) : (
-                        row.display
+                        <SlashPath path={row.display} />
                       )}
                     </span>
                     <span className="what">{row.note ?? ""}</span>
@@ -9204,11 +9226,11 @@ with
                     <span className="br">{row.indent ? (i === kids.length - 1 ? "└" : "├") : "·"}</span>
                     <span className="p" title={row.title}>
                       {row.href && !row.cleaned ? (
-                        <AppLink href={row.href} title="Open">
-                          {row.display}
+                        <AppLink href={row.href} title="Open" aria-label={row.display}>
+                          <SlashPath path={row.display} />
                         </AppLink>
                       ) : (
-                        row.display
+                        <SlashPath path={row.display} />
                       )}
                     </span>
                     {row.cleaned ? (

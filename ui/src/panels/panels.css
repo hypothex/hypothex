@@ -27,6 +27,9 @@
 }
 .frow .fplot { align-self: stretch; margin: -16px 0 0; min-width: 0; }
 .frow.axisrow .fplot { margin: 0; }
+/* Keep endpoint tick labels inside the plot without moving means or intervals. */
+.lb .axis-b > g:first-of-type .tk { text-anchor: start; }
+.lb .axis-b > g:last-of-type .tk { text-anchor: end; }
 .frow .nm { font-weight: 600; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .frow .meta { font-size: 12.5px; line-height: 1.4; color: var(--ink-3); margin-top: 5px; display: flex; flex-direction: column; gap: 2px; }
 .frow .acc { text-align: right; }

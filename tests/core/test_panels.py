@@ -1434,6 +1434,56 @@ def test_curves_thin_a_long_series_and_keep_its_spike(ctx: Context, toy_repo: Pa
     ]
 
 
+@pytest.mark.parametrize("limit", [None, 2, 17, 500])
+def test_curves_requested_point_limit_preserves_metadata_and_axis(
+    ctx: Context, toy_repo: Path, limit: int | None
+) -> None:
+    rec = _run(ctx, toy_repo, "r1", status=RunStatus.KILLED)
+    _metrics(
+        ctx,
+        rec,
+        [
+            {"name": name, "step": step, "value": value}
+            for step in range(600)
+            for name, value in (
+                ("train/loss", 50.0 if step == 301 else 1.0),
+                ("val/acc", 0.5),
+                ("epoch", step / 10),
+            )
+        ],
+    )
+    _jsonl(
+        ctx.run_dir(rec) / "artifacts.jsonl",
+        [{"kind": "checkpoint", "path": "/ck/100.pt", "step": 100, "metrics": {"val/acc": 0.5}}],
+    )
+    data = {"metrics": ["train/loss", "val/acc"], "step_metric": "epoch"}
+    original = query_panel(ctx, "toy", "toy-acc", _panel("curves", data=data))
+    result = query_panel(
+        ctx, "toy", "toy-acc", _panel("curves", data={**data, "max_points": limit})
+    )
+
+    assert result.meta == original.meta
+    assert {event["kind"] for event in result.meta["events"]} == {"spike", "killed"}
+    assert len(result.meta["checkpoints"]) == 1
+    assert {row["name"] for row in result.rows} == {"train/loss", "val/acc"}
+    for name in data["metrics"]:
+        rows = [row for row in result.rows if row["name"] == name]
+        assert len(rows) == (500 if limit is None else limit)
+        assert [rows[0]["step"], rows[-1]["step"]] == [0.0, 59.9]
+
+
+def test_curves_empty_metric_selection_does_not_read_all_series(
+    ctx: Context, toy_repo: Path
+) -> None:
+    rec = _run(ctx, toy_repo, "r1")
+    _metrics(ctx, rec, [{"name": "loss", "step": 0, "value": 1.0}])
+    result = query_panel(
+        ctx, "toy", "toy-acc", _panel("curves", data={"metrics": [], "max_points": 2})
+    )
+    assert result.rows == []
+    assert result.meta["metrics"] == []
+
+
 def test_lttb_keeps_ends_peaks_and_short_series() -> None:
     xs = [float(i) for i in range(100)]
     ys = [0.0] * 100

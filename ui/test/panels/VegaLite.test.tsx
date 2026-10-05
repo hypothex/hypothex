@@ -125,6 +125,145 @@ describe("row facet fitting", () => {
   });
 });
 
+describe("responsive horizontal legends", () => {
+  const spec = {
+    mark: "bar",
+    encoding: { color: { field: "category", type: "nominal", legend: { orient: "bottom", columns: 3 } } },
+  };
+  const columnsOf = (value: Obj): number => (((value.encoding as Obj).color as Obj).legend as Obj).columns as number;
+
+  test("an overflowing legend drops columns, while wide and explicit-width charts preserve them", async () => {
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    try {
+      embedMock.mockImplementation(async (el, value) => {
+        const columns = columnsOf(value as Obj);
+        const legend = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        legend.classList.add("role-legend");
+        legend.getBoundingClientRect = () => ({ width: columns * 145 }) as DOMRect;
+        el.replaceChildren(legend);
+        return { finalize, spec: value, view: {} };
+      });
+      for (const [width, input, expected] of [
+        [320, spec, 2], [640, spec, 3], [100, spec, 1],
+        [320, { ...spec, width: 600 }, 3],
+        [320, { ...spec, encoding: { color: { ...spec.encoding.color,
+          legend: { orient: "right", columns: 3 } } } }, 3],
+        [320, { ...spec, encoding: { ...spec.encoding, row: { field: "run_id" } } }, 3],
+      ] as const) {
+        HTMLElement.prototype.getBoundingClientRect = () => ({ width }) as DOMRect;
+        embedMock.mockClear();
+        const { unmount } = render(<VegaLitePanel result={vega({ spec: input })} />);
+        await waitFor(() => expect(columnsOf(lastSpec())).toBe(expected));
+        expect(spec.encoding.color.legend.columns).toBe(3);
+        unmount();
+      }
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = original;
+      embedMock.mockImplementation(async (_el, value) => ({ finalize, spec: value, view: {} }));
+    }
+  });
+
+  test("widening a mounted panel restores requested columns; fitting has bounded retries", async () => {
+    const originalRect = HTMLElement.prototype.getBoundingClientRect;
+    const originalObserver = globalThis.ResizeObserver;
+    const callbacks: ResizeObserverCallback[] = [];
+    let width = 320;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) { callbacks.push(callback); }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    } as typeof ResizeObserver;
+    HTMLElement.prototype.getBoundingClientRect = () => ({ width }) as DOMRect;
+    embedMock.mockImplementation(async (el, value) => {
+      const legend = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      legend.classList.add("role-legend");
+      legend.getBoundingClientRect = () => ({ width: columnsOf(value as Obj) * 145 }) as DOMRect;
+      el.replaceChildren(legend);
+      return { finalize, spec: value, view: {} };
+    });
+    try {
+      const mounted = render(<VegaLitePanel result={vega({ spec })} />);
+      await waitFor(() => expect(columnsOf(lastSpec())).toBe(2));
+      act(() => {
+        width = 640;
+        callbacks.forEach((callback) => callback([], {} as ResizeObserver));
+      });
+      await waitFor(() => expect(columnsOf(lastSpec())).toBe(3));
+      mounted.unmount();
+      embedMock.mockClear();
+      const extreme = { ...spec, encoding: { color: { ...spec.encoding.color,
+        legend: { orient: "bottom", columns: 10000 } } } };
+      render(<VegaLitePanel result={vega({ spec: extreme })} />);
+      await waitFor(() => expect(columnsOf(lastSpec())).toBe(1));
+      // One initial unmeasured embed, then at most four measured draws.
+      expect(embedMock.mock.calls.length).toBeLessThanOrEqual(5);
+    } finally {
+      cleanup();
+      HTMLElement.prototype.getBoundingClientRect = originalRect;
+      globalThis.ResizeObserver = originalObserver;
+      embedMock.mockImplementation(async (_el, value) => ({ finalize, spec: value, view: {} }));
+    }
+  });
+
+  test("legend fitting accounts for offsets inside a panel, not just legend width", async () => {
+    const originalRect = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = () => ({ width: 380, left: 100, right: 480 }) as DOMRect;
+    try {
+      for (const offset of [20, -5]) {
+        embedMock.mockImplementation(async (el, value) => {
+          const columns = columnsOf(value as Obj);
+          const width = columns === 3 ? 365 : 240;
+          const left = 100 + (columns === 3 ? offset : 20);
+          const legend = document.createElementNS("http://www.w3.org/2000/svg", "g");
+          legend.classList.add("role-legend");
+          legend.getBoundingClientRect = () => ({ width, left, right: left + width }) as DOMRect;
+          el.replaceChildren(legend);
+          return { finalize, spec: value, view: {} };
+        });
+        const { unmount } = render(<VegaLitePanel result={vega({ spec })} />);
+        await waitFor(() => expect(columnsOf(lastSpec())).toBe(2));
+        unmount();
+      }
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = originalRect;
+      embedMock.mockImplementation(async (_el, value) => ({ finalize, spec: value, view: {} }));
+    }
+  });
+
+  test("height changes from an embed error do not start another embed", async () => {
+    const originalRect = HTMLElement.prototype.getBoundingClientRect;
+    const originalObserver = globalThis.ResizeObserver;
+    const callbacks: ResizeObserverCallback[] = [];
+    let height = 200;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) { callbacks.push(callback); }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    } as typeof ResizeObserver;
+    HTMLElement.prototype.getBoundingClientRect = () => ({ width: 380, height }) as DOMRect;
+    embedMock.mockImplementation(async () => { throw new Error("bad spec"); });
+    try {
+      render(<VegaLitePanel result={vega({ spec })} />);
+      expect((await screen.findByRole("alert")).textContent).toBe("Vega-Lite: bad spec");
+      const embeds = embedMock.mock.calls.length;
+      await act(async () => {
+        for (height = 240; height < 300; height += 10) {
+          callbacks.forEach((callback) => callback([], {} as ResizeObserver));
+        }
+      });
+      expect(embedMock.mock.calls.length).toBe(embeds);
+      expect(screen.getByRole("alert").textContent).toBe("Vega-Lite: bad spec");
+    } finally {
+      cleanup();
+      HTMLElement.prototype.getBoundingClientRect = originalRect;
+      globalThis.ResizeObserver = originalObserver;
+      embedMock.mockImplementation(async (_el, value) => ({ finalize, spec: value, view: {} }));
+    }
+  });
+});
+
 describe("DENY_LOADER", () => {
   test("refuses every kind of resource", async () => {
     const url = "https://evil.example/x.csv";
@@ -173,6 +312,10 @@ describe("tokens and theme", () => {
     expect([axis.labelFontSize, axis.titleFontSize]).toEqual([11, 12]);
     expect((cfg.bar as Obj).color).toBe("#4a90e8");
     expect((cfg.bar as Obj).color).not.toBe(t.ink);
+    // Geist's browser SVG text bounds are taller than the fontSize used by Vega layout.
+    expect((cfg.legend as Obj).rowPadding).toBe(6);
+    const custom = buildSpec({ ...SPEC, config: { legend: { rowPadding: 12 } } }, ROWS, cfg);
+    expect(((custom.config as Obj).legend as Obj).rowPadding).toBe(12);
   });
 
   test("the palette tokens in palette.css match the fallback arrays", async () => {

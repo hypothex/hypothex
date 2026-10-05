@@ -188,3 +188,52 @@ test("LogView shows the tail, its size, and a close link", async () => {
   expect(region.querySelector(".aside")?.textContent).toBe("1.5 KB");
   expect(within(region).getByRole("link", { name: "close" }).getAttribute("href")).toBe("/r/R");
 });
+
+describe("bounded visible run curve requests (PERF-F9c)", () => {
+  test("implicit curves request only displayed history names with a per-series cap", () => {
+    const prepared = runViewPanels(
+      [{ type: "curves", title: "over time", data: { step_metric: "elapsed" } }],
+      undefined,
+      ["loss", "sweep/rps", "elapsed", "gpu_pct"],
+    );
+    expect(prepared[0]?.data).toEqual({
+      step_metric: "elapsed", metrics: ["loss", "gpu_pct"], max_points: 500,
+    });
+    expect(runViewPanels([{ type: "curves" }], undefined, ["step", "sweep/rps"])[0]?.data).toEqual({
+      metrics: [], max_points: 500,
+    });
+  });
+
+  test("explicit metric choices, including sweep and step names, stay intact", () => {
+    const source: PanelSpec = { type: "curves", data: { metrics: ["sweep/rps", "step"], max_points: 120 } };
+    expect(runViewPanels([source], undefined, ["loss"])[0]?.data).toEqual(source.data);
+    expect(source.data?.metrics).toEqual(["sweep/rps", "step"]);
+    expect(runViewPanels([{ type: "curves", data: { metrics: [] } }], undefined, ["loss"])[0]?.data).toEqual({
+      metrics: [], max_points: 500,
+    });
+  });
+
+  test("more than 100 displayed names split without truncation or an unfiltered request", async () => {
+    const names = Array.from({ length: 205 }, (_, i) => `metric_${i}`);
+    const specs = runViewPanels([{ type: "curves", title: "metrics" }], undefined, names);
+    expect(specs.map((p) => p.data?.metrics?.length)).toEqual([100, 100, 5]);
+    expect(specs.flatMap((p) => p.data?.metrics ?? [])).toEqual(names);
+    expect(specs.map((p) => p.title)).toEqual(["Metrics · 1–100", "Metrics · 101–200", "Metrics · 201–205"]);
+    expect(kindPanelCount(specs)).toBe(3);
+    const calls = mockApi({
+      "POST /api/v1/tasks/p/t/views/query": {
+        panels: specs.map((p) => ({ type: "curves", title: p.title, rows: p.data?.metrics?.map((name) => ({ name })), meta: {} })),
+      },
+    });
+    renderWithClient(<KindPanels project="p" task="t" runId="R" specs={specs} startIndex={0} />, {
+      registry: fakeRegistry(["curves"]),
+    });
+    await screen.findByRole("region", { name: "c Metrics · 201–205" });
+    const body = calls.find((c) => c.method === "POST")?.body as { view: { panels: PanelSpec[] } };
+    expect(body.view.panels.flatMap((p) => p.data?.metrics ?? [])).toEqual(names);
+    expect(body.view.panels.every((p) => p.data?.max_points === 500 && p.data.filter?.run_id === "R")).toBe(true);
+    expect(screen.getAllByTestId("panel-curves").map((p) => p.textContent)).toEqual([
+      "Metrics · 1–100:100", "Metrics · 101–200:100", "Metrics · 201–205:5",
+    ]);
+  });
+});

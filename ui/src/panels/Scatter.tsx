@@ -104,6 +104,35 @@ const PR = 16;
 const PT = 26;
 const PB = 44;
 
+type LabelBox = { x: number; y: number; width: number; text: string; keyed: boolean };
+
+/** Place labels without changing the points; use a numbered key when a name cannot fit. */
+function scatterLabels(points: { x: number; y: number; label: string }[], w: number, h: number): LabelBox[] {
+  const placed: LabelBox[] = [];
+  const overlaps = (a: LabelBox, b: LabelBox): boolean =>
+    a.x < b.x + b.width + 4 && b.x < a.x + a.width + 4 && Math.abs(a.y - b.y) < 18;
+  return points.map((point, i) => {
+    for (const text of [point.label, String(i + 1)]) {
+      // A full em per character is conservative for the chart's proportional font.
+      const width = text.length * FS.label;
+      for (const dy of [-8, 20, -28, 40, -48, 60]) {
+        for (const x of [point.x + 12, point.x - 12 - width]) {
+          const box = { x, y: point.y + dy, width, text, keyed: text !== point.label };
+          if (x < PL || x + width > w - PR || box.y - FS.label < PT || box.y > h - PB - 4) continue;
+          if (placed.some((other) => overlaps(box, other))) continue;
+          if (points.some((p) => p.x + 7 > x && p.x - 7 < x + width &&
+            p.y + 7 > box.y - FS.label && p.y - 7 < box.y + 3)) continue;
+          placed.push(box);
+          return box;
+        }
+      }
+    }
+    // An unusually dense plot can exhaust the label space. Its names remain in the key
+    // and point tooltips; do not cover data or other labels to force another number in.
+    return { x: point.x, y: point.y, width: 0, text: "", keyed: true };
+  });
+}
+
 const T = {
   tk: { fontSize: FS.tick, fill: "var(--ink-3)", fontVariantNumeric: "tabular-nums" },
   lbl: { fontSize: FS.label, fill: "var(--ink-2)" },
@@ -215,6 +244,8 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
   const stairsD = stairs
     .map(([x, y], i) => `${i ? "L" : "M"}${X(x).toFixed(1)} ${Y(y).toFixed(1)}`)
     .join("");
+  const points = rows.map((r, i) => ({ x: ordinal ? bandX(i) : X(Number(r.x)), y: Y(r.y), label: r.label }));
+  const labels = scatterLabels(points, W, H);
 
   return (
     <div ref={ref}>
@@ -280,7 +311,7 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
           const isBest = i === best;
           const dominated = hasFront && !r.pareto;
           const regressed = ordinal && r.regression;
-          const right = x + 12 + r.label.length * 7 <= W - PR;
+          const label = labels[i];
           const xLine = ordinal
             ? `${xLabel} ${r.x}`
             : `${xLabel} ${withUnit(fmtNum(Number(r.x)), xUnit)}${range(r.x_lo, r.x_hi)}`;
@@ -335,14 +366,14 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
                   <title>{REGRESSION_TIP}</title>
                 </g>
               )}
-              <text
-                x={right ? x + 12 : x - 12}
-                y={y - 8}
-                textAnchor={right ? "start" : "end"}
+              {label.text && <text
+                x={label.x}
+                y={label.y}
+                textAnchor="start"
                 style={isBest ? T.lblBest : dominated ? T.lbl : T.lblB}
               >
-                {r.label}
-              </text>
+                {label.text}
+              </text>}
               <rect x={x - 14} y={y - 14} width={28} height={28} style={{ fill: "transparent" }}>
                 <title>
                   {`${r.label}\n${yLabel} ${yVal(r.y)}${yRange(r.y_lo, r.y_hi)}\n` +
@@ -353,6 +384,15 @@ export function ScatterPanel({ result }: { result: PanelResult }) {
           );
         })}
       </svg>
+      {labels.some((label) => label.keyed) && (
+        <div style={T.key} role="group" aria-label="Groups">
+          {labels.map((label, i) => label.keyed && (
+            <span key={rows[i].group_id} style={{ ...T.keyItem, overflowWrap: "anywhere", minWidth: 0 }}>
+              {label.text ? `${label.text} · ` : ""}{rows[i].label}
+            </span>
+          ))}
+        </div>
+      )}
       <div style={T.key} aria-label="Key">
         <span style={T.keyItem}>
           <svg width="12" height="16" aria-hidden="true">

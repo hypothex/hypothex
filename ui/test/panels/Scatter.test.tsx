@@ -13,6 +13,42 @@ import {
 
 afterEach(cleanup);
 
+test("nearby long labels fit narrow plots without overlapping or moving their means", () => {
+  const original = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = () => ({ width: 360 }) as DOMRect;
+  try {
+    const rows = ROWS.map((r, i) => ({
+      ...r, x: 0.3, y: 0.6, label: `expensive-search-agent-${i + 1}`,
+    }));
+    const { container } = render(<ScatterPanel result={scatter(META, rows)} />);
+    const labels = [...container.querySelectorAll<SVGTextElement>("[data-group] > text")];
+    expect(labels).toHaveLength(3);
+    const boxes = labels.map((t) => {
+      const width = (t.textContent?.length ?? 0) * 7;
+      const x = Number(t.getAttribute("x"));
+      const y = Number(t.getAttribute("y"));
+      return { left: t.getAttribute("text-anchor") === "end" ? x - width : x, width, y };
+    });
+    for (const [i, box] of boxes.entries()) {
+      expect(box.left).toBeGreaterThanOrEqual(52);
+      expect(box.left + box.width).toBeLessThanOrEqual(344);
+      for (const other of boxes.slice(i + 1)) {
+        expect(box.left + box.width <= other.left || other.left + other.width <= box.left ||
+          Math.abs(box.y - other.y) >= 14).toBe(true);
+      }
+    }
+    const means = [...container.querySelectorAll('[data-testid="mean"]')];
+    expect(new Set(means.map((m) => `${m.getAttribute("x")},${m.getAttribute("y")}`)).size).toBe(1);
+    const groups = screen.getByRole("group", { name: "Groups" });
+    for (const r of rows) {
+      expect(groups.textContent).toContain(r.label);
+      expect([...container.querySelectorAll("title")].some((t) => t.textContent?.startsWith(r.label))).toBe(true);
+    }
+  } finally {
+    HTMLElement.prototype.getBoundingClientRect = original;
+  }
+});
+
 const ROWS: ScatterRow[] = [
   {
     group_id: "g1",

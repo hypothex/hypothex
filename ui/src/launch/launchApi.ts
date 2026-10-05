@@ -8,6 +8,7 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError, api } from "../api/client";
+import { auth } from "../api/auth";
 import type {
   GpuInfo,
   HostLaunchRequest,
@@ -139,13 +140,17 @@ export async function launchSeeds(
   opts: LaunchSeedsOptions = {},
 ): Promise<LaunchOutcome> {
   const delay = opts.delayMs ?? ACTION_RETRY_DELAY_MS;
+  const generation = auth.snapshot().generation;
   const records: RunRecord[] = [];
   for (const seed of seeds) {
     const commandId = seedCommandId(base, seed);
     let unknown = false;
     for (let attempt = 0; ; attempt += 1) {
       try {
-        records.push(await postLaunch(spec, seed, commandId));
+        if (!auth.current(generation)) throw new DOMException("Launch superseded", "AbortError");
+        const record = await postLaunch(spec, seed, commandId);
+        if (!auth.current(generation)) throw new DOMException("Launch superseded", "AbortError");
+        records.push(record);
         break;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));

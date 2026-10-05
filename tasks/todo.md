@@ -374,3 +374,9 @@ Final Step 8 integration UI evidence: 930 Bun tests pass (84 files, 26.05s), all
 pass. The final API/core run is 247 passing tests. Static/types/build/Sphinx and
 schema byte comparison pass. Parent started final full Python and Docker runs after
 source freeze; those results and publication/current-head CI remain parent gates.
+
+Parent final Step 8 verification: full Python **2,290 passed, 3 skipped**, with
+11 Docker tests deselected; separate Docker **11 passed**. Full UI 930 and browser
+56 pass, along with the 247 affected backend tests, three shutdown cases, types,
+build, Ruff/format/ty and Sphinx. Final source was unchanged during these checks.
+Current-head CI and ordered publication after PR #19 remain the only merge gates.

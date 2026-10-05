@@ -140,6 +140,8 @@ class PanelData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     metrics: list[str] | None = None
+    primary: str | None = None
+    """Leaderboard/stat-strip ranking or curves best metric/key; omitted uses the task primary."""
     x: str | None = None
     y: str | None = None
     group_by: Literal["group", "config", "run", "seed"] | None = None
@@ -568,6 +570,12 @@ def _panel_issues(
     refs: list[tuple[Loc, str]] = [
         ((*at, "data", "metrics", j), ref) for j, ref in enumerate(data.metrics or [])
     ]
+    if data.primary is not None:
+        if panel.type not in {"leaderboard", "stat_strip", "curves"}:
+            out.append(
+                ((*at, "data", "primary"), "primary applies to leaderboard/stat_strip/curves", None)
+            )
+        refs.append(((*at, "data", "primary"), data.primary))
     # a grid's data.y is a per-example field, checked below
     axes = ("x", "step_metric") if panel.type == "grid" else ("x", "y", "step_metric")
     refs += [((*at, "data", k), v) for k in axes if (v := getattr(data, k))]

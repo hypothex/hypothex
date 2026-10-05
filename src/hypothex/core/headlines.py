@@ -557,7 +557,46 @@ def task_headline(
     text = f"{_name(best)} {gain} over {_name(runner)}"
     if runner.vs_best is not None and runner.vs_best.p is not None:
         text += f", {fmt_p(runner.vs_best.p)}"
+    if board.kind == "agent_eval" and board.higher_is_better:
+        cost = _agent_cost_comparison(best, runner)
+        if cost is not None:
+            text += f"; {cost}"
     return text
+
+
+def _agent_cost_comparison(best: LeaderboardRow, other: LeaderboardRow) -> str | None:
+    """Compare dollars per solved outcome only on the same evidenced population."""
+    left, right = best.evaluation_population, other.evaluation_population
+    if (
+        left is None
+        or right is None
+        or not best.cost_complete
+        or not other.cost_complete
+        or best.cost is None
+        or other.cost is None
+        or left.solved <= 0
+        or right.solved <= 0
+    ):
+        return None
+    identity = (
+        "metric",
+        "version",
+        "source_hash",
+        "field",
+        "dataset_fingerprint",
+        "example_ids_hash",
+    )
+    if any(getattr(left, key) != getattr(right, key) for key in identity):
+        return None
+    a, b = best.cost.total_usd / left.solved, other.cost.total_usd / right.solved
+    if not all(math.isfinite(v) and v >= 0 for v in (a, b)):
+        return None
+    values = f"({fmt_metric(a, '$')} vs {fmt_metric(b, '$')})"
+    if b == 0 or math.isclose(a, b, rel_tol=1e-12, abs_tol=1e-12):
+        return f"$/solved {values}"
+    change = abs(a / b - 1) * 100
+    direction = "lower" if a < b else "higher"
+    return f"{change:.3g}% {direction} $/solved {values}"
 
 
 def _bench_headline(board: Leaderboard, best: LeaderboardRow, base: LeaderboardRow | None) -> str:
@@ -668,10 +707,17 @@ def _compare_strip(
             )
         )
     out.append(_seed_sigma(board, best))
-    if board.kind == "agent_eval" and best.usage is not None:
-        attempts = best.n * (best.test_interval.n if best.test_interval else 1)
-        tip = f"{_name(best)}: ${best.usage.usd:.2f} over {attempts} attempts"
-        out.append(_stat("$ / attempt", fmt_metric(best.usage.usd / attempts, "$"), tip))
+    population = best.evaluation_population
+    if (
+        board.kind == "agent_eval"
+        and population is not None
+        and best.cost_complete
+        and best.cost is not None
+        and population.attempts > 0
+    ):
+        attempts = population.attempts
+        tip = f"{_name(best)}: ${best.cost.total_usd:.2f} over {attempts} recorded attempts"
+        out.append(_stat("$ / attempt", fmt_metric(best.cost.total_usd / attempts, "$"), tip))
     if vs is not None and vs.examples_needed is not None:
         tip = "Test examples needed at the same flip rate to reach p < 0.05"
         out.append(_stat("n for p < 0.05", f"≈{vs.examples_needed}", tip))

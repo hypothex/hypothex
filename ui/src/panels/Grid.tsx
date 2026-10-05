@@ -113,13 +113,24 @@ const T = {
 } satisfies Record<string, CSSProperties>;
 
 /** Grid panel. Reads `meta.items` (hardest first) and `meta.groups`. */
-export function GridPanel({ result }: { result: PanelResult }) {
+export function GridPanel({ result, selectedItemId, currentGroupId }: {
+  result: PanelResult;
+  selectedItemId?: string;
+  currentGroupId?: string;
+}) {
   const [ref, W] = useElementWidth<HTMLDivElement>(GRID_FALLBACK_W);
   const rows = result.rows as unknown as GridRow[];
   const meta = (result.meta ?? {}) as Record<string, unknown>;
+  const selected = selectedItemId !== undefined;
+  if (selected && !rows.some((row) => row.item_id === selectedItemId)) {
+    return <p style={T.empty}>No outcomes for example {selectedItemId}</p>;
+  }
   if (rows.length === 0) return <p style={T.empty}>No items</p>;
-  const { items, groups, cells } = gridLayout(rows, meta);
-  const LW = labelGutter(groups);
+  const layout = gridLayout(rows, meta);
+  const { groups, cells } = layout;
+  const items = selected ? [selectedItemId] : layout.items;
+  const label = (g: GridGroup): string => `${g.label}${g.group_id === currentGroupId ? " (current)" : ""}`;
+  const LW = labelGutter(groups.map((g) => ({ ...g, label: label(g) })));
   const cw = (W - LW) / items.length;
   const gap = cw > 4 ? 1 : 0;
   const yb = TOP + groups.length * RH + 14;
@@ -134,7 +145,7 @@ export function GridPanel({ result }: { result: PanelResult }) {
         style={{ display: "block", overflow: "visible", fontFamily: "var(--sans)" }}
       >
         <text x={LW - 12} y={TOP - 10} textAnchor="end" style={T.lblS}>
-          solved
+          {selected ? "solved share" : "solved"}
         </text>
         {groups.map((g, r) => {
           const y = TOP + r * RH;
@@ -143,19 +154,19 @@ export function GridPanel({ result }: { result: PanelResult }) {
             0,
           );
           return (
-            <g key={g.group_id} data-group={g.group_id}>
-              <text x={0} y={y + CH / 2 + 4} style={T.lbl}>
-                {g.label}
+            <g key={g.group_id} data-group={g.group_id} data-current={g.group_id === currentGroupId ? "true" : undefined}>
+              <text x={0} y={y + CH / 2 + 4} style={{ ...T.lbl, ...(g.group_id === currentGroupId ? { fontWeight: 600, fill: "var(--agent)" } : {}) }}>
+                {label(g)}
               </text>
               <text
-                data-solved={Math.round(solved)}
+                data-solved={selected ? undefined : Math.round(solved)}
                 x={LW - 12}
                 y={y + CH / 2 + 4}
                 textAnchor="end"
                 style={T.tk}
               >
-                <title>{`${fmtNum(solved)} items solved on average over seeds`}</title>
-                {Math.round(solved)}
+                <title>{selected ? `${selectedItemId}: share of seeds solved` : `${fmtNum(solved)} items solved on average over seeds`}</title>
+                {selected ? (cells.has(cellKey(g.group_id, selectedItemId)) ? fmtNum(cells.get(cellKey(g.group_id, selectedItemId))!) : "—") : Math.round(solved)}
               </text>
               {items.map((id, j) => {
                 const v = cells.get(cellKey(g.group_id, id));
@@ -168,7 +179,7 @@ export function GridPanel({ result }: { result: PanelResult }) {
                     y={y}
                     width={Math.max(1, cw - gap)}
                     height={CH}
-                    style={{ fill: cellFill(v) }}
+                    style={{ fill: cellFill(v), ...(g.group_id === currentGroupId ? { stroke: "var(--agent)", strokeWidth: 2 } : {}) }}
                   >
                     <title>{`${id}\n${g.label}: ${fmtNum(v)} of seeds solved`}</title>
                   </rect>
@@ -178,11 +189,9 @@ export function GridPanel({ result }: { result: PanelResult }) {
           );
         })}
         <text x={LW} y={yb} style={T.lblS}>
-          hard
+          {selected ? selectedItemId : "hard"}
         </text>
-        <text x={W} y={yb} textAnchor="end" style={T.lblS}>
-          easy
-        </text>
+        {!selected ? <text x={W} y={yb} textAnchor="end" style={T.lblS}>easy</text> : null}
       </svg>
       <div style={T.key} aria-label="Key">
         {[0, 0.5, 1].map((v) => (

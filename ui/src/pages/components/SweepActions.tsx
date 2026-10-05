@@ -49,7 +49,7 @@ export function SweepActions({
 }: SweepActionsProps): ReactElement {
   const [copy, setCopy] = useState<CopyState>("idle");
   const [open, setOpen] = useState(false);
-  const [count, setCount] = useState(String(Math.max(1, spec.seeds.length)));
+  const [count, setCount] = useState(String(Math.min(MAX_NEW_SEEDS, Math.max(1, spec.seeds.length))));
   // seeds sent by an extend that has not gone through yet (see above)
   const [tried, setTried] = useState<readonly number[]>([]);
   useEffect(() => {
@@ -118,7 +118,10 @@ export function SweepActions({
           disabled={active || cancel.pending || extend.pending}
           aria-expanded={open}
           title="Add seeds to every cell"
-          onClick={() => setOpen((v) => !v)}
+          onClick={() => {
+            extend.reset();
+            setOpen((v) => !v);
+          }}
         >
           Add seeds
         </button>
@@ -168,8 +171,8 @@ export function SweepActions({
           </button>
         </form>
       ) : null}
-      {cancel.error ? <ErrorBox error={cancel.error} /> : null}
-      {extend.error ? <ErrorBox error={extend.error} /> : null}
+      {cancel.error ? <div><ErrorBox error={cancel.error} /><button type="button" className="btn link" onClick={cancel.reset}>Dismiss cancel error</button></div> : null}
+      {extend.error ? <div><ErrorBox error={extend.error} /><button type="button" className="btn link" onClick={extend.reset}>Dismiss extend error</button></div> : null}
     </div>
   );
 }

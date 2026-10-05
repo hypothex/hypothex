@@ -479,7 +479,9 @@ function Cells({ row, runs, columns }: { row: HostRow; runs: ReadonlyMap<string,
     );
   }
   if (row.gpus.length === 0) {
-    const text = row.state.state === "connected" ? (row.kind === "slurm" ? "·" : "no GPUs") : row.state.message || "·";
+    const text = row.state.state === "connected"
+      ? (row.kind === "slurm" ? "·" : "no GPUs")
+      : row.state.state === "bootstrapping" ? row.state.message || "·" : "·";
     return <div className="msg">{text}</div>;
   }
   const asOf = row.state.state === "stale" ? fmtClock(row.state.since) : null;
@@ -564,7 +566,7 @@ export function HostsPanel({ hosts, runs, hubVersion, now }: HostsPanelProps) {
           <HostLine key={row.name} row={row} runs={byId} hub={hubVersion} now={now} columns={columns} />
         ))}
       </div>
-      <div className="key hosts-key" aria-label="Key">
+      <div className="key hosts-key" role="group" aria-label="Key">
         <span><span className="gk agent" />agent run</span>
         <span><span className="gk human" />human run</span>
         <span><span className="gk free" />free</span>

@@ -5,6 +5,7 @@ import { PanelRegistryContext } from "../../src/pages/components/PanelGrid";
 import type { QueryResponse, ViewDetail, ViewInfo } from "../../src/pages/components/types";
 import type { RunRecord } from "../../src/api/models";
 import { hostRow } from "../launch/fixtures";
+import { Leaderboard as LeaderboardPanel } from "../../src/panels/Leaderboard";
 import { TaskPage, boardMeta, reevalLine } from "../../src/pages/Task";
 import { REPO, RUN_RF, RUN_SVM, makeBoard, makeDetail, makeRecord } from "./fixtures";
 import { type Call, HttpReply, fakeRegistry, mockApi, renderWithClient, restoreFetch } from "./helpers";
@@ -15,6 +16,19 @@ afterEach(() => {
 });
 
 const BASE = "/api/v1/tasks/toy-classifier/toy-test";
+
+async function readyNewRun(): Promise<HTMLElement> {
+  // Query notifications and initial-host effects both complete inside act.
+  for (let tick = 0; tick < 50; tick++) {
+    await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
+    if (screen.queryByLabelText("Command") && (screen.queryByRole("radio", { name: "local" }) as HTMLInputElement | null)?.checked) break;
+  }
+  const dialog = screen.getByRole("dialog", { name: "New run" });
+  expect(within(dialog).getByLabelText("Command")).toBeTruthy();
+  expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true);
+  return dialog;
+}
+
 
 const VIEWS: ViewInfo[] = [
   { name: "overview", title: "Overview", origin: "preset", path: null, kind: "generic" },
@@ -181,19 +195,23 @@ describe("TaskPage", () => {
     };
   }
 
-  test("New run opens the launch dialog from the best config and links the launched runs", async () => {
+  test.each([0, 2])("New run opens from the best config and links all launched runs with %i queued", async (queued) => {
     const calls = mockApi({
       ...newRunRoutes(),
       "POST /api/v1/runs": (call: Call) => {
         const seed = (call.body as { seed: number }).seed;
-        return makeRecord({ run_id: `20261003-120000-toy-test-s${seed}`, seed, status: "running" });
+        return makeRecord({
+          run_id: `20261003-120000-toy-test-s${seed}`,
+          seed,
+          status: seed >= 7 - queued ? "queued" : "running",
+        });
       },
     });
     renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
     await screen.findByRole("region", { name: "a Best" });
     fireEvent.click(screen.getByRole("button", { name: "New run" }));
 
-    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    const dialog = await readyNewRun();
     expect(within(dialog).getByText("toy-classifier / toy-test")).toBeTruthy();
     expect((within(dialog).getByLabelText("Command") as HTMLTextAreaElement).value).toBe(
       "python train_eval.py --model svm --seed={seed}",
@@ -210,10 +228,12 @@ describe("TaskPage", () => {
       expect(el).not.toBeNull();
       return el as HTMLElement;
     });
-    expect(line.textContent).toBe("Launched 3 on local: s4 s5 s6");
-    expect(within(line).getByRole("link", { name: "s4" }).getAttribute("href")).toBe(
-      "/r/20261003-120000-toy-test-s4",
-    );
+    expect(line.textContent).toBe(`Launched 3 on local${queued ? `, ${queued} queued` : ""}: s4 s5 s6`);
+    for (const seed of [4, 5, 6]) {
+      expect(within(line).getByRole("link", { name: `s${seed}` }).getAttribute("href")).toBe(
+        `/r/20261003-120000-toy-test-s${seed}`,
+      );
+    }
     expect(screen.queryByRole("dialog")).toBeNull();
     const sent = calls.filter((c) => c.method === "POST" && c.url === "/api/v1/runs");
     expect(sent.map((c) => (c.body as { seed: number }).seed)).toEqual([4, 5, 6]);
@@ -245,7 +265,7 @@ describe("TaskPage", () => {
     await screen.findByRole("region", { name: "a Best" });
     const launch = async (hypothesis: string): Promise<string> => {
       fireEvent.click(screen.getByRole("button", { name: "New run" }));
-      const dialog = await screen.findByRole("dialog", { name: "New run" });
+      const dialog = await readyNewRun();
       const seeds = (within(dialog).getByLabelText("Seeds") as HTMLInputElement).value;
       await waitFor(() =>
         expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true),
@@ -268,7 +288,7 @@ describe("TaskPage", () => {
     const { client } = renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
     await screen.findByRole("region", { name: "a Best" });
     fireEvent.click(screen.getByRole("button", { name: "New run" }));
-    let dialog = await screen.findByRole("dialog", { name: "New run" });
+    let dialog = await readyNewRun();
     expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("4, 5, 6");
     fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
     await waitFor(() => expect(document.querySelector('[role="dialog"]') === null).toBe(true));
@@ -276,7 +296,7 @@ describe("TaskPage", () => {
     elsewhere.push(...[4, 5, 6].map((seed) => makeRecord({ run_id: `20261003-130000-toy-test-e${seed}`, seed })));
     await act(() => client.invalidateQueries({ queryKey: ["runs"] }));
     fireEvent.click(screen.getByRole("button", { name: "New run" }));
-    dialog = await screen.findByRole("dialog", { name: "New run" });
+    dialog = await readyNewRun();
     expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("7, 8, 9");
   });
 
@@ -317,7 +337,7 @@ describe("TaskPage", () => {
     renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
     await screen.findByRole("region", { name: "a Best" });
     fireEvent.click(screen.getByRole("button", { name: "New run" }));
-    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    const dialog = await readyNewRun();
     expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("5, 6, 7");
   });
 
@@ -328,7 +348,7 @@ describe("TaskPage", () => {
     renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
     await screen.findByRole("region", { name: "a Best" });
     fireEvent.click(screen.getByRole("button", { name: "New run" }));
-    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    const dialog = await readyNewRun();
     expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("5, 6, 7");
   });
 
@@ -337,15 +357,17 @@ describe("TaskPage", () => {
     const { client } = renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
     await screen.findByRole("region", { name: "a Best" });
     fireEvent.click(screen.getByRole("button", { name: "New run" }));
-    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    const dialog = await readyNewRun();
     fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: "svm holds on new seeds" } });
     // a run event: the best config's latest run is now another run, whose read never ends
     const board = makeBoard();
     const [best] = board.rows;
     if (best === undefined) throw new Error("fixture has no rows");
     board.rows = [{ ...best, latest_run_id: "20261004-000000-toy-test-new1" }, ...board.rows.slice(1)];
-    client.setQueryData(["leaderboard", "toy-classifier", "toy-test", []], board);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await act(async () => {
+      client.setQueryData(["leaderboard", "toy-classifier", "toy-test", []], board);
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+    });
     const still = screen.getByRole("dialog", { name: "New run" });
     expect((within(still).getByLabelText("Hypothesis") as HTMLInputElement).value).toBe("svm holds on new seeds");
     expect((within(still).getByLabelText("Command") as HTMLTextAreaElement).value).toBe(
@@ -362,6 +384,8 @@ describe("TaskPage", () => {
     await screen.findByRole("region", { name: "a Best" });
     fireEvent.click(screen.getByRole("button", { name: "New run" }));
     expect((await screen.findByRole("alert")).textContent).toBe("runs index unreadable");
+    expect(screen.getByRole("dialog", { name: "New run" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
@@ -374,6 +398,9 @@ describe("TaskPage", () => {
     await screen.findByRole("region", { name: "a Best" });
     fireEvent.click(screen.getByRole("button", { name: "New run" }));
     expect((await screen.findByRole("alert")).textContent).toBe(`no run ${RUN_SVM}`);
+    expect(screen.getByRole("dialog", { name: "New run" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
@@ -494,4 +521,201 @@ test("unscored count is separate from stale scores and drift cites stored refs",
   renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
   const warning = await screen.findByRole("img", { name: "Metric source drift" });
   expect(warning.title).toBe("Different stored metric source hashes: accuracy@v1");
+});
+
+function selectableBoard(kind: ReturnType<typeof makeBoard>["kind"] = "agent_eval") {
+  const board = makeBoard(); board.kind = kind;
+  board.rows[0]!.scores = { "accuracy/value": board.rows[0]!.primary!, "macro_f1/value": { ...board.rows[0]!.primary!, mean: 0.8 } };
+  return board;
+}
+function LinkPanel() {
+  return <div><a href={`/r/${RUN_SVM}`}>Choose run</a><a href={`/r/${RUN_SVM}?log=stderr`}>Run stderr</a><a href={`/r/${RUN_SVM}#details`}>Run anchor</a><a href="/x/a/b">Examples route</a></div>;
+}
+test("task metric selection recomputes ranking and panels using actual score keys", async () => {
+  const next = { ...selectableBoard(), primary: "macro_f1/value", headline: "F1 ranking" };
+  const calls = mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: selectableBoard(), [`GET ${BASE}/leaderboard?primary=macro_f1%2Fvalue`]: next });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  const control = await screen.findByRole("combobox", { name: "Metric" });
+  expect(within(control).getAllByRole("option").map(o => (o as HTMLOptionElement).value)).toEqual(["accuracy/value", "macro_f1/value"]);
+  fireEvent.change(control, { target: { value: "macro_f1/value" } });
+  await screen.findByRole("heading", { name: "F1 ranking" });
+  await waitFor(() => expect(calls.some(c => (c.body as {view?: unknown} | undefined)?.view)).toBe(true));
+  const changed = calls.find(c => (c.body as {view?: unknown} | undefined)?.view)?.body as {view: {panels: {data: {primary: string}}[]}};
+  expect(changed.view.panels.every(p => p.data.primary === "macro_f1/value")).toBe(true);
+  expect(within(control).getAllByRole("option")).toHaveLength(2);
+});
+test("Repeats checkbox hides actual leaderboard seed dots and preserves test intervals and chart grouping", async () => {
+  const board = selectableBoard("system_bench");
+  const doc = detail(VIEWS[0]!); doc.view.panels![1]!.noise = ["seed", "test_set"];
+  doc.view.panels!.push({ type: "curves", title: "Loss", data: { group_by: "config", metrics: ["loss"] } });
+  const calls = mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: board, [`GET ${BASE}/views/overview`]: doc,
+    [`POST ${BASE}/views/query`]: (call: Call) => {
+      const body = call.body as {view?: {panels: {type: string; noise?: string[]}[]}; panel?: unknown};
+      if (body.panel) return { panels: [{ type: "table", title: "Raw samples", rows: [], meta: { total: 0 } }] };
+      const noise = body.view?.panels.find(panel => panel.type === "leaderboard")?.noise ?? ["seed", "test_set"];
+      return { panels: [{ type: "leaderboard", title: "Configs", rows: board.rows, meta: { primary: board.primary, noise } }] };
+    },
+  });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry: { leaderboard: LeaderboardPanel } });
+  const toggle = await screen.findByRole("checkbox", { name: "Repeats" });
+  expect((toggle as HTMLInputElement).checked).toBe(true);
+  await waitFor(() => expect(document.querySelectorAll("g.seeds circle.seed").length).toBeGreaterThan(0));
+  expect(calls.find(c => c.url === `${BASE}/views/query`)?.body).toEqual({ name: "overview" });
+  fireEvent.click(toggle);
+  await waitFor(() => {
+    expect(screen.getByRole("region", { name: "a Configs" })).toBeTruthy();
+    expect(document.querySelectorAll("g.seeds circle.seed")).toHaveLength(0);
+  });
+  const changed = calls.find(c => (c.body as {view?: unknown} | undefined)?.view)?.body as {view: {panels: {noise?: string[]; data?: {group_by?: string}}[]}};
+  expect(changed.view.panels[1]!.noise).toEqual(["test_set"]);
+  expect(changed.view.panels[2]!.data?.group_by).toBe("config");
+  expect(document.querySelectorAll(".whisk").length).toBeGreaterThan(0);
+  fireEvent.click(toggle);
+  await waitFor(() => expect(document.querySelectorAll("g.seeds circle.seed").length).toBeGreaterThan(0));
+});
+test("task run selection stays inline while query, hash, and other links navigate normally", async () => {
+  const navigated: string[] = [];
+  mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: selectableBoard(), [`GET /api/v1/runs/${RUN_SVM}`]: makeDetail(), [`GET ${BASE}/kind`]: { kind: "agent_eval", run_view: [] } });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry: { stat_strip: LinkPanel, leaderboard: () => null }, navigate: href => navigated.push(href) });
+  fireEvent.click(await screen.findByRole("link", { name: "Choose run" }));
+  expect(await screen.findByRole("region", { name: "Selected run" })).toBeTruthy(); expect(navigated).toEqual([]);
+  fireEvent.click(screen.getByRole("button", { name: "Close selected run" })); expect(screen.queryByRole("region", { name: "Selected run" })).toBeNull();
+  fireEvent.click(screen.getByRole("link", { name: "Run stderr" })); fireEvent.click(screen.getByRole("link", { name: "Run anchor" })); fireEvent.click(screen.getByRole("link", { name: "Examples route" }));
+  expect(navigated).toEqual([`/r/${RUN_SVM}?log=stderr`, `/r/${RUN_SVM}#details`, "/x/a/b"]);
+  fireEvent.click(screen.getByRole("link", { name: "Choose run" }), { ctrlKey: true });
+  expect(screen.queryByRole("region", { name: "Selected run" })).toBeNull(); expect(navigated).toHaveLength(3);
+});
+test("training task mounts run and checkpoint sections; iteration task mounts flips", async () => {
+  mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: selectableBoard("training"), "GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=21": [], [`GET ${BASE}`]: { summary: { metrics: {} } } });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  expect(await screen.findByRole("heading", { name: "Training runs" })).toBeTruthy(); expect(screen.getByRole("heading", { name: "Checkpoints" })).toBeTruthy();
+  cleanup(); const board = selectableBoard("agent_iteration"); board.rows = [];
+  mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: board });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  expect(await screen.findByRole("region", { name: "Iteration example changes" })).toBeTruthy();
+});
+test("system selected run scopes the mounted raw samples table", async () => {
+  const calls = mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: selectableBoard("system_bench"), [`GET /api/v1/runs/${RUN_SVM}`]: makeDetail(), [`GET ${BASE}/kind`]: { kind: "system_bench", run_view: [] } });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry: { stat_strip: LinkPanel, leaderboard: () => null } });
+  expect(await screen.findByRole("region", { name: "Raw benchmark samples" })).toBeTruthy(); fireEvent.click(await screen.findByRole("link", { name: "Choose run" }));
+  await waitFor(() => expect(calls.some(c => (c.body as {panel?: {data?: {filter?: {run_id?: string}}}} | undefined)?.panel?.data?.filter?.run_id === RUN_SVM)).toBe(true));
+});
+
+test("metric changes hide previous ranking and panels while recomputation is pending", async () => {
+  let finish: ((value: unknown) => void) | undefined;
+  mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: selectableBoard(), [`GET ${BASE}/leaderboard?primary=macro_f1%2Fvalue`]: () => new Promise(resolve => { finish = resolve; }) });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  await screen.findByRole("region", { name: "a Best" });
+  fireEvent.change(screen.getByRole("combobox", { name: "Metric" }), { target: { value: "macro_f1/value" } });
+  expect(screen.queryByRole("region", { name: "a Best" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "SVM +0.037 over rf, p = 0.15" })).toBeNull();
+  finish?.({ ...selectableBoard(), primary: "macro_f1/value", headline: "New metric ranking" });
+  expect(await screen.findByRole("heading", { name: "New metric ranking" })).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "a Best" })).toBeTruthy();
+});
+
+test("task scope changes reset metric, seeds and selected run", async () => {
+  const nextBase = "/api/v1/tasks/toy-classifier/other";
+  const nextBoard = { ...selectableBoard(), task: "other" };
+  const calls = mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: selectableBoard(), [`GET ${BASE}/leaderboard?primary=macro_f1%2Fvalue`]: { ...selectableBoard(), primary: "macro_f1/value" }, [`GET /api/v1/runs/${RUN_SVM}`]: makeDetail(), [`GET ${BASE}/kind`]: { kind: "agent_eval", run_view: [] }, [`GET ${nextBase}/leaderboard`]: nextBoard, [`GET ${nextBase}/views`]: VIEWS, [`GET ${nextBase}/views/overview`]: detail(VIEWS[0]!), [`POST ${nextBase}/views/query`]: PANELS });
+  const custom = { stat_strip: LinkPanel, leaderboard: () => null };
+  const rendered = renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry: custom });
+  fireEvent.click(await screen.findByRole("link", { name: "Choose run" }));
+  await screen.findByRole("region", { name: "Selected run" });
+  fireEvent.change(screen.getByRole("combobox", { name: "Metric" }), { target: { value: "macro_f1/value" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Seeds" }));
+  rendered.rerender(<QueryClientProvider client={rendered.client}><PanelRegistryContext.Provider value={custom}><TaskPage project="toy-classifier" task="other" /></PanelRegistryContext.Provider></QueryClientProvider>);
+  const metric = await screen.findByRole("combobox", { name: "Metric" });
+  expect((metric as HTMLSelectElement).value).toBe("accuracy/value");
+  expect((screen.getByRole("checkbox", { name: "Seeds" }) as HTMLInputElement).checked).toBe(true);
+  expect(screen.queryByRole("region", { name: "Selected run" })).toBeNull();
+  expect(calls.some(c => c.url.startsWith(`${nextBase}/leaderboard?primary=`))).toBe(false);
+});
+
+test("selected metric only overrides supported panels in a mixed custom view", async () => {
+  const doc = detail(VIEWS[0]!);
+  const scatter = { type: "scatter" as const, title: "Explicit axes", data: { x: "usage.usd", y: "accuracy/value", group_by: "group" as const } };
+  doc.view.panels!.push(scatter, { type: "grid", title: "Examples" });
+  const calls = mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: selectableBoard(), [`GET ${BASE}/views/overview`]: doc, [`GET ${BASE}/leaderboard?primary=macro_f1%2Fvalue`]: { ...selectableBoard(), primary: "macro_f1/value" } });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  fireEvent.change(await screen.findByRole("combobox", { name: "Metric" }), { target: { value: "macro_f1/value" } });
+  await waitFor(() => expect(calls.some(c => (c.body as {view?: unknown} | undefined)?.view)).toBe(true));
+  const changed = calls.find(c => (c.body as {view?: unknown} | undefined)?.view)?.body as {view: {panels: unknown[]}};
+  expect(changed.view.panels[2]).toEqual(scatter);
+  expect(changed.view.panels[3]).toEqual({ type: "grid", title: "Examples" });
+});
+
+test("Seeds checkbox respects custom authored noise and adds only seed visibility", async () => {
+  const doc = detail(VIEWS[0]!); doc.view.panels![1]!.noise = [];
+  const calls = mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: selectableBoard(), [`GET ${BASE}/views/overview`]: doc });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  const checkbox = await screen.findByRole("checkbox", { name: "Seeds" });
+  expect((checkbox as HTMLInputElement).checked).toBe(false);
+  expect(calls.find(c => c.url === `${BASE}/views/query`)?.body).toEqual({ name: "overview" });
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(calls.some(c => (c.body as {view?: unknown} | undefined)?.view)).toBe(true));
+  const changed = calls.find(c => (c.body as {view?: unknown} | undefined)?.view)?.body as {view: {panels: {noise?: string[]}[]}};
+  expect(changed.view.panels[1]!.noise).toEqual(["seed"]);
+  expect((checkbox as HTMLInputElement).checked).toBe(true);
+});
+
+test("views without a leaderboard do not expose an inert Seeds control", async () => {
+  const doc = detail(VIEWS[0]!); doc.view.panels = [{ type: "stat_strip", title: "Summary" }];
+  mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: selectableBoard(), [`GET ${BASE}/views/overview`]: doc, [`POST ${BASE}/views/query`]: { panels: [{ type: "stat_strip", title: "Summary", rows: [], meta: {} }] } });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  await screen.findByRole("region", { name: "a Summary" });
+  expect(screen.queryByRole("checkbox", { name: "Seeds" })).toBeNull();
+  expect(screen.getByRole("combobox", { name: "Metric" })).toBeTruthy();
+});
+
+function metricLaunchRoutes(): Record<string, unknown> {
+  return {
+    ...routes("overview"),
+    [`GET ${BASE}/leaderboard`]: selectableBoard(),
+    [`GET ${BASE}`]: { summary: { project: "toy-classifier", name: "toy-test" }, repo: REPO, dataset: { name: "toyset" }, metrics: {}, stages: {} },
+    "GET /api/v1/runs?project=toy-classifier&task=toy-test&archived=true&limit=1000": [],
+    "GET /api/v1/hosts": [hostRow("local", { kind: "local" }, { environment_id: "env-5c1e" })],
+    "GET /api/v1/gpus": [], "GET /api/v1/queue": [],
+    [`GET /api/v1/runs/${RUN_RF}`]: makeDetail({ run_id: RUN_RF, command_template: ["python", "selected_metric.py", "--seed={seed}"] }),
+  };
+}
+
+test("New run waits for selected ranking before capturing its best template", async () => {
+  let finish: ((value: unknown) => void) | undefined;
+  const calls = mockApi({ ...metricLaunchRoutes(), [`GET ${BASE}/leaderboard?primary=macro_f1%2Fvalue`]: () => new Promise(resolve => { finish = resolve; }) });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  fireEvent.change(await screen.findByRole("combobox", { name: "Metric" }), { target: { value: "macro_f1/value" } });
+  const launch = screen.getByRole("button", { name: "New run" }) as HTMLButtonElement;
+  expect(launch.disabled).toBe(true);
+  fireEvent.click(launch); expect(screen.queryByRole("dialog")).toBeNull();
+  const selected = { ...selectableBoard(), primary: "macro_f1/value", headline: "Selected metric ready" };
+  selected.rows[0]!.latest_run_id = RUN_RF;
+  await act(async () => { finish?.(selected); await new Promise<void>(resolve => setTimeout(resolve, 0)); });
+  await screen.findByRole("heading", { name: "Selected metric ready" });
+  expect(launch.disabled).toBe(false); fireEvent.click(launch);
+  const dialog = await readyNewRun();
+  expect((within(dialog).getByLabelText("Command") as HTMLTextAreaElement).value).toBe("python selected_metric.py --seed={seed}");
+  expect(calls.some(call => call.url === `/api/v1/runs/${RUN_RF}`)).toBe(true);
+});
+
+test("New run remains unavailable when selected ranking fails", async () => {
+  mockApi({ ...metricLaunchRoutes(), [`GET ${BASE}/leaderboard?primary=macro_f1%2Fvalue`]: new HttpReply(500, { error: "selected ranking unavailable", type: "StoreError" }) });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  fireEvent.change(await screen.findByRole("combobox", { name: "Metric" }), { target: { value: "macro_f1/value" } });
+  await screen.findByRole("alert");
+  const launch = screen.getByRole("button", { name: "New run" }) as HTMLButtonElement;
+  expect(launch.disabled).toBe(true); fireEvent.click(launch);
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("a successfully loaded empty leaderboard can open an empty New run draft", async () => {
+  const board = selectableBoard(); board.rows = [];
+  const calls = mockApi({ ...metricLaunchRoutes(), [`GET ${BASE}/leaderboard`]: board });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  await screen.findByRole("combobox", { name: "Metric" });
+  const launch = screen.getByRole("button", { name: "New run" }) as HTMLButtonElement;
+  expect(launch.disabled).toBe(false); fireEvent.click(launch);
+  const dialog = await readyNewRun();
+  expect((within(dialog).getByLabelText("Command") as HTMLTextAreaElement).value).toBe("");
+  expect(calls.some(call => /^\/api\/v1\/runs\//.test(call.url))).toBe(false);
 });

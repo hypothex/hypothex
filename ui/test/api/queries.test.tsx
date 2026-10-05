@@ -8,6 +8,7 @@ import type { ConnState, HostRow, HostState, RunRecord } from "../../src/api/mod
 import {
   ALL_RUNS_FIRST,
   ALL_RUNS_MAX,
+  type AllRuns,
   HOST_EVENT_INVALIDATES,
   HOSTS_REFETCH_MS,
   REMOTE_RUN_INVALIDATES,
@@ -19,6 +20,7 @@ import {
   keepLastKnown,
   queryKeys,
   shouldRetry,
+  useAllRuns,
   useCompareExamples,
   useHosts,
   useLeaderboard,
@@ -165,8 +167,56 @@ describe("hooks", () => {
     expect(result.current.data?.headline).toBe("SVM +0.037 over rf, p = 0.15");
   });
 
-  test("useHosts polls every 10 s by default", () => {
-    expect(HOSTS_REFETCH_MS).toBe(10_000);
+  test("useHosts with no arguments schedules and executes its default 10 s poll", async () => {
+    const timers: { callback: () => void; delay: number | undefined }[] = [];
+    const original = globalThis.setInterval;
+    globalThis.setInterval = ((callback: () => void, delay?: number, ...args: unknown[]) => {
+      timers.push({ callback: () => callback(), delay });
+      return original(callback, delay, ...args);
+    }) as typeof setInterval;
+    const calls = mockRoutes({ "/api/v1/hosts": HOSTS });
+    const { qc, wrapper } = setup();
+    const hook = renderHook(() => useHosts(), { wrapper });
+    try {
+      await waitFor(() => expect(hook.result.current.isSuccess).toBe(true));
+      expect(HOSTS_REFETCH_MS).toBe(10_000);
+      const poll = timers.filter((timer) => timer.delay === 10_000).at(-1);
+      expect(poll).toBeDefined();
+      const before = calls.length;
+      await act(async () => { poll?.callback(); });
+      await waitFor(() => expect(calls.length).toBe(before + 1));
+    } finally {
+      hook.unmount(); qc.clear(); globalThis.setInterval = original;
+    }
+  });
+
+  test("disabled hosts and all-runs hooks stay idle even when their query families invalidate", async () => {
+    const calls = mockRoutes({});
+    const { qc, wrapper } = setup();
+    const { result, unmount } = renderHook(() => ({ hosts: useHosts(undefined, false), runs: useAllRuns({ project: "toy" }, false) }), { wrapper });
+    await act(async () => {
+      await Promise.all([qc.invalidateQueries({ queryKey: ["hosts"] }), qc.invalidateQueries({ queryKey: ["runs"] })]);
+    });
+    expect([result.current.hosts.fetchStatus, result.current.runs.fetchStatus]).toEqual(["idle", "idle"]);
+    expect(calls).toHaveLength(0);
+    expect(qc.getQueryState(queryKeys.allRuns({ project: "toy" }))?.fetchStatus).toBe("idle");
+    unmount(); qc.clear();
+  });
+
+  test("useAllRuns stores its complete result at the all-runs key and refetches on run invalidation", async () => {
+    let records = rows(2);
+    const calls = mockApi({ "GET /api/v1/runs?project=toy&task=acc&archived=true&limit=1000": () => records });
+    const { qc, wrapper } = setup();
+    const query = { project: "toy", task: "acc", archived: true };
+    const { result, unmount } = renderHook(() => useAllRuns(query), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ runs: rows(2), complete: true });
+    expect(qc.getQueryData<AllRuns>(queryKeys.allRuns(query))).toBe(result.current.data);
+    records = rows(3);
+    await act(async () => { await qc.invalidateQueries({ queryKey: ["runs"] }); });
+    await waitFor(() => expect(result.current.data?.runs).toHaveLength(3));
+    expect(calls).toHaveLength(2);
+    unmount(); qc.clear();
   });
 
   test("useHosts loads the hosts and keeps polling them", async () => {
@@ -465,4 +515,23 @@ test("active sweep polling catches a terminal failure without any run event", as
   expect(count).toBe(2);
   unmount();
   qc.clear();
+});
+
+test("primary leaderboard variants never reuse the configured ranking cache", async () => {
+  const { qc, wrapper } = setup();
+  const defaultKey = queryKeys.leaderboard("toy", "acc");
+  qc.setQueryData(defaultKey, { primary: "accuracy/value", rows: [] });
+  const calls = mockApi({ "GET /api/v1/tasks/toy/acc/leaderboard?primary=latency%2Fp95": { primary: "latency/p95", rows: [] } });
+  const { result, unmount } = renderHook(() => useLeaderboard("toy", "acc", [], { primary: "latency/p95" }), { wrapper });
+  await waitFor(() => expect(result.current.data?.primary).toBe("latency/p95"));
+  expect(calls.length).toBe(1);
+  expect(qc.getQueryData<{ primary: string; rows: unknown[] }>(defaultKey)).toEqual({ primary: "accuracy/value", rows: [] });
+  unmount(); qc.clear();
+});
+
+test("bound example comparisons cannot reuse unverified legacy cache entries", () => {
+  const legacy = queryKeys.compareExamples("a", "b", "accuracy@v1", "correct");
+  const strict = queryKeys.compareExamples("a", "b", "accuracy@v1", "correct", true);
+  expect(legacy).toEqual(["compareExamples", "a", "b", "accuracy@v1", "correct"]);
+  expect(strict).not.toEqual(legacy);
 });

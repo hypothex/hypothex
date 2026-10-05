@@ -26,6 +26,12 @@ const OK: LaunchDraft = {
 };
 
 describe("launchDefaults", () => {
+  test("explains exhausted higher seeds without wrapping or proposing invalid values", () => {
+    const defaults = launchDefaults(makeRecord({ seed: 2147483647 }), []);
+    expect(defaults.draft.seeds).toBe("");
+    expect(defaults.seedsNote).toBe("no higher seeds available: choose unused seeds up to 2147483647");
+  });
+
   test("no template: seeds 1, 2, 3 and nothing carried", () => {
     expect(launchDefaults(null, [])).toEqual({
       draft: { seeds: "1, 2, 3" },

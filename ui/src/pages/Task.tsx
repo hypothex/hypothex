@@ -8,7 +8,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useRef, useState } from "react";
 import { ApiError, api } from "../api/client";
-import type { EvalReport, RunRecord } from "../api/models";
+import type { EvalReport, RunRecord, ViewSpec } from "../api/models";
 import {
   RUN_EVENT_INVALIDATES,
   queryKeys,
@@ -23,7 +23,7 @@ import {
 import { type LaunchDefaults, launchDefaults } from "../launch/draft";
 import { LaunchDialog } from "../launch/LaunchDialog";
 import { fmtScore, shortId } from "./components/format";
-import { AppLink, hrefs } from "./components/links";
+import { AppLink, hrefs, NavigateContext, useNavigateHref } from "./components/links";
 import { PanelGrid } from "./components/PanelGrid";
 import { ErrorBox, Loading } from "./components/QueryState";
 import { PageStyles } from "./components/styles";
@@ -31,7 +31,11 @@ import { paramsText, sweepHref } from "./components/SweepModel";
 import type { Leaderboard } from "./components/types";
 import { useAction } from "./components/useAction";
 import { Unbroken } from "./components/Headline";
+import { OpeningDialog } from "./components/OpeningDialog";
 import { ReevalSummary } from "./components/ReevalSummary";
+import { AgentIterationFlips, SystemRawSamples } from "./components/TaskInsights";
+import { SelectedRun } from "./components/SelectedRun";
+import { TrainingCheckpoints, TrainingRuns } from "./components/TrainingDetails";
 
 export interface TaskPageProps {
   project: string;
@@ -93,7 +97,7 @@ function NewRun({ project, task, templateRunId, onClose, onLaunched }: NewRunPro
     // A failed runs read would propose seeds that already exist; a failed template read
     // would open a blank dialog without saying so. Both stop here instead.
     const error = detail.error ?? runs.error ?? template.error;
-    if (error) return <ErrorBox error={error} />;
+    if (error) return <OpeningDialog title="New run" error={error} onClose={onClose} onRetry={() => { void detail.refetch(); void runs.refetch(); if (templateRunId !== null) void template.refetch(); }} />;
     // a refetch in flight too: a cached list may predate runs started since (by anyone)
     if (
       detail.data === undefined ||
@@ -101,7 +105,7 @@ function NewRun({ project, task, templateRunId, onClose, onLaunched }: NewRunPro
       runs.isFetching ||
       (templateRunId !== null && template.isPending)
     ) {
-      return <Loading />;
+      return <OpeningDialog title="New run" onClose={onClose} />;
     }
     const all = runs.data;
     opened.current = {
@@ -180,12 +184,47 @@ function notFound(...errors: (Error | null)[]): Error | null {
   return errors.find(isGone) ?? null;
 }
 
-export function TaskPage({ project, task, view }: TaskPageProps) {
+/** Task-local selections reset when project or task changes. */
+export function TaskPage(props: TaskPageProps) {
+  return <TaskPageScope key={JSON.stringify([props.project, props.task])} {...props} />;
+}
+
+function TaskPageScope({ project, task, view }: TaskPageProps) {
   const active = view ? String(view) : "overview";
-  const board = useLeaderboard(project, task);
+  const [selectedPrimary, setSelectedPrimary] = useState<string | undefined>(undefined);
+  const [seedVisibility, setSeedVisibility] = useState<boolean | undefined>(undefined);
+  const [selectedRun, setSelectedRun] = useState<string | null>(null);
+  const navigate = useNavigateHref();
+  const baseline = useLeaderboard(project, task);
+  const alternate = useLeaderboard(project, task, [], { primary: selectedPrimary, enabled: selectedPrimary !== undefined });
+  const board = selectedPrimary === undefined ? baseline : alternate;
+  const kind = baseline.data?.kind;
+  const metricOptions = [...new Set([baseline.data?.primary, ...(baseline.data?.rows.flatMap(row => Object.keys(row.scores)) ?? [])])]
+    .filter((ref): ref is string => !!ref && /^[^/@]+\/[^/@]+$/.test(ref) && ref.split("/")[0]! in (baseline.data?.metric_versions ?? {}));
+  const selectHref = (href: string): void => {
+    const match = /^\/r\/([^/?#]+)$/.exec(href);
+    if (match && kind && ["training", "agent_eval", "agent_iteration", "system_bench"].includes(kind)) {
+      try { setSelectedRun(decodeURIComponent(match[1]!)); return; } catch { /* malformed route keeps ordinary navigation */ }
+    }
+    navigate(href);
+  };
   const views = useViews(project, task);
   const detail = useView(project, task, active);
-  const panels = useViewQuery(project, task, { name: active });
+  const leaderboardSpecs = detail.data?.view.panels?.filter(panel => panel.type === "leaderboard") ?? [];
+  const authoredSeeds = leaderboardSpecs.every(panel => (panel.noise ?? ["seed", "test_set"]).includes("seed"));
+  const showSeeds = seedVisibility ?? authoredSeeds;
+  const customized = selectedPrimary !== undefined || seedVisibility !== undefined;
+  const effectiveView: ViewSpec | undefined = detail.data ? {
+    ...detail.data.view,
+    panels: detail.data.view.panels?.map(panel => {
+      const primary = selectedPrimary && ["leaderboard", "stat_strip", "curves"].includes(panel.type);
+      const noise: ("seed" | "test_set")[] | undefined = panel.type === "leaderboard" && seedVisibility !== undefined
+        ? [...(panel.noise ?? ["seed", "test_set"]).filter(value => value !== "seed"), ...(seedVisibility ? ["seed" as const] : [])]
+        : undefined;
+      return { ...panel, ...(primary ? { data: { ...panel.data, primary: selectedPrimary } } : {}), ...(noise ? { noise } : {}) };
+    }),
+  } : undefined;
+  const panels = useViewQuery(project, task, customized ? effectiveView ? { view: effectiveView } : null : { name: active });
   const [reevalReport, setReevalReport] = useState<EvalReport | null>(null);
   const reeval = useAction({
     send: (_: void, opts) => api.reevalTask(project, task, {}, opts),
@@ -201,7 +240,7 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
   const viewError = detail.error ?? panels.error;
   // `useViewQuery` keeps the last view's panels while the next loads; they must not be
   // drawn with the new view's specs, so wait for the active view's own data.
-  const ready = panels.data !== undefined && !panels.isPlaceholderData && !detail.isPending;
+  const ready = panels.data !== undefined && !panels.isPlaceholderData && !detail.isPending && !board.isPending;
   const templateRunId = board.data?.rows[0]?.latest_run_id ?? null;
   const crumb = (
     <>
@@ -227,6 +266,7 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
   }
 
   return (
+    <NavigateContext.Provider value={selectHref}>
     <div className="page">
       <PageStyles />
       <p className="crumb">
@@ -250,6 +290,15 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
         </p>
       ) : null}
 
+      {baseline.data ? <div className="row" style={{ gap: 16, marginBottom: 12 }}>
+        <label>Metric <select aria-label="Metric" value={selectedPrimary ?? baseline.data.primary} title="Ranking metric and primary summaries; authored plot axes remain unchanged" onChange={event => setSelectedPrimary(event.target.value === baseline.data?.primary ? undefined : event.target.value)}>
+          {metricOptions.map(ref => <option key={ref} value={ref} title={`${ref} @ ${baseline.data?.metric_versions[ref.split("/")[0]!]}`}>{ref}</option>)}
+        </select></label>
+        {leaderboardSpecs.length > 0 ? <label title="Show individual seed or repeat dots on leaderboard plots">
+          <input type="checkbox" aria-label={kind === "system_bench" ? "Repeats" : "Seeds"} checked={showSeeds} onChange={event => setSeedVisibility(event.target.checked === authoredSeeds ? undefined : event.target.checked)} />
+          {kind === "system_bench" ? "Repeats" : "Seeds"}
+        </label> : null}
+      </div> : null}
       <nav className="view-tabs" aria-label="Views">
         {(views.data ?? []).map((v) => (
           <AppLink
@@ -294,6 +343,7 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
           <button
             type="button"
             className="btn primary"
+            disabled={board.isPending || board.isError}
             onClick={() => setLaunching(templateRunId)}
             title="Launch runs of this task on any host"
           >
@@ -312,10 +362,18 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
       {viewError ? (
         <ErrorBox error={viewError} />
       ) : ready && panels.data ? (
-        <PanelGrid results={panels.data.panels} specs={detail.data?.view.panels} />
+        <PanelGrid results={panels.data.panels} specs={customized ? effectiveView?.panels : detail.data?.view.panels} />
       ) : (
         <Loading />
       )}
+
+      {kind === "training" ? <>
+        <section className="fig" aria-label="Training run records"><h2>Training runs</h2><TrainingRuns project={project} task={task} onSelectRun={setSelectedRun} /></section>
+        <section className="fig" aria-label="Training checkpoints"><h2>Checkpoints</h2><TrainingCheckpoints project={project} task={task} onSelectRun={setSelectedRun} /></section>
+      </> : null}
+      {kind === "agent_iteration" && board.data ? <AgentIterationFlips project={project} task={task} board={board.data} /> : null}
+      {kind === "system_bench" ? <SystemRawSamples project={project} task={task} selectedRunId={selectedRun ?? undefined} /> : null}
+      {selectedRun ? <SelectedRun runId={selectedRun} onClose={() => setSelectedRun(null)} /> : null}
 
       {launching !== undefined ? (
         <NewRun
@@ -330,5 +388,6 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
         />
       ) : null}
     </div>
+    </NavigateContext.Provider>
   );
 }

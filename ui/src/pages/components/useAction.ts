@@ -22,6 +22,8 @@ export interface UseActionOptions<T, A> {
 
 export interface Action<A> {
   run: (arg: A) => void;
+  /** Clear a completed action's message without submitting another action. */
+  reset: () => void;
   pending: boolean;
   error: Error | null;
 }
@@ -57,6 +59,7 @@ export function useAction<T = unknown, A = void>({
   });
   return {
     run: (arg: A) => mutation.mutate({ commandId: newCommandId(), arg, generation: auth.snapshot().generation }),
+    reset: mutation.reset,
     pending: mutation.isPending,
     error: mutation.error,
   };

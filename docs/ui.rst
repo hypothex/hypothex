@@ -113,6 +113,49 @@ Leaderboard ticks follow the plot width. Crowded scatter labels use a numbered
 key, and bottom or top legends reduce their columns only when they overflow the
 available space.
 
+Recorded task details
+---------------------
+
+Examples outcome tables wrap long hypothesis labels within their own panel,
+including labels without spaces. Counts and right/wrong labels remain visible
+beside the sign-test chart at narrow widths. The Examples headline and run
+summaries also wrap oversized tokens without shortening the displayed labels.
+
+The task Metric selector requests a new ranking for the selected recorded
+``metric/key``. Direction, units, uncertainty and the headline follow that metric.
+Seeds (Repeats for system benchmarks) toggles the leaderboard seed or repeat
+marks while retaining the authored test-set interval. Selecting a run on training, agent evaluation, agent iteration or system
+benchmark task pages opens its stored details; Open run opens the full route.
+
+Training run and checkpoint tables page through twenty runs at a time. Best
+checkpoint step comes from recorded ``val/top1`` checkpoint metadata. Evaluated
+``top1/value`` and ``top1/final`` use the current configured metric version and are
+separate from checkpoint validation measurements. Missing measurements remain
+blank. GPU and memory columns show the last recorded observations; they do not
+estimate peak use from a thinned history.
+
+Agent run pages put the trajectory before the matching selected-example grid.
+The grid matches actual example IDs and marks the current configuration; absent
+outcomes remain unknown. Iteration comparison uses the latest run of each selected
+group and compatible recorded evaluation provenance. It requests strict server
+validation of the latest evaluation and exact per-example artifact bytes; stale
+or unbound results remain unavailable. Its waffle counts shared scored example
+IDs, without assuming that equal-sized datasets are identical.
+System benchmark raw samples are scoped to the selected run and display at most
+100 rows with the available total or an explicit unknown total.
+
+Cost labels retain known recorded charges while marking incomplete GPU pricing.
+An agent evaluation cost comparison requires complete pricing and matching metric
+source, dataset identity and actual example-ID populations. System repeat warnings
+require complete comparable per-run p95 latency observations; a warning marks a
+repeat more than ten percent above the group's median. Missing coverage does not
+produce an outlier claim.
+
+Launch preparation and rerun preparation remain dismissible on loading or failure,
+with retry available for failed reads. A failed best-template lookup does not
+silently select a different configuration. Partial launches report confirmed runs;
+unknown launch outcomes retain their command identity for reconciliation.
+
 Build before packaging
 ----------------------
 

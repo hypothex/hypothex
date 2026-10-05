@@ -17,6 +17,33 @@ const SPEC = makeSummary().spec;
 const BASE = `/api/v1/sweeps/${PROJECT}/${SWEEP_ID}`;
 const incompleteIssuance = (state: "incomplete" | "interrupted"): SweepIssuance => ({ state, episode: 1, revision: 3, planned: 8, accepted_at: "now", updated_at: "now", cancel_requested: false, reason: "worker_lost", error: null, resume: { seeds: [2, 7], message: "Resume missing cells" } });
 
+test("a sweep with over twenty seeds opens with a valid bounded count", () => {
+  renderWithClient(<SweepActions project={PROJECT} sweepId={SWEEP_ID} spec={{ ...SPEC, seeds: Array.from({ length: 21 }, (_, i) => i + 1) }} queued={0} cellCount={1} runs={[]} />);
+  fireEvent.click(screen.getByRole("button", { name: "Add seeds" }));
+  expect((screen.getByLabelText("New seeds per cell") as HTMLInputElement).value).toBe("20");
+  expect(screen.getByRole("button", { name: "Add 20 runs" }).hasAttribute("disabled")).toBe(false);
+});
+
+test("closing Add seeds clears its old error, and a disabled cancel error can be dismissed", async () => {
+  mockApi({
+    [`POST ${BASE}/extend`]: new HttpReply(400, { error: "cannot extend", type: "SweepError" }),
+    [`POST ${BASE}/cancel_queued`]: new HttpReply(400, { error: "cannot cancel", type: "SweepError" }),
+  });
+  const tree = (queued: number) => <SweepActions project={PROJECT} sweepId={SWEEP_ID} spec={SPEC} queued={queued} cellCount={4} runs={RUNS} />;
+  const { client, rerender } = renderWithClient(tree(1));
+  fireEvent.click(screen.getByRole("button", { name: "Add seeds" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add 8 runs" }));
+  await screen.findByText("cannot extend");
+  fireEvent.click(screen.getByRole("button", { name: "Add seeds" }));
+  await waitFor(() => expect(screen.queryByRole("alert") === null).toBe(true));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel queued" }));
+  await screen.findByText("cannot cancel");
+  rerender(<QueryClientProvider client={client}>{tree(0)}</QueryClientProvider>);
+  expect(screen.getByRole("button", { name: "Cancel queued" }).hasAttribute("disabled")).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss cancel error" }));
+  await waitFor(() => expect(screen.queryByRole("alert") === null).toBe(true));
+});
+
 for (const state of ["incomplete", "interrupted"] as const) {
   test(`${state} with no observed queue allows Cancel and Resume, unless cancellation already requested`, () => {
     mockApi({});

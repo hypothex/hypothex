@@ -1684,7 +1684,9 @@ def test_run_that_ended_while_the_hub_was_off_is_mirrored_and_priced(
     assert (mirrored.status, mirrored.ended_at) == (RunStatus.FINISHED, ended)
     assert mirrored.environment_id == a.ctx.descriptor.environment_id  # not lost, not stale
     # 3 h x 2 GPUs at $2.00 per GPU hour, priced by the hub (the host has no price)
-    assert mirrored.cost == CostTotals(gpu_hours=6.0, gpu_usd=12.0, total_usd=12.0)
+    assert mirrored.cost == CostTotals(
+        gpu_hours=6.0, gpu_usd=12.0, total_usd=12.0, gpu_pricing_complete=True
+    )
     assert mirrored_seqs(hub_ctx, "a") == [1, 2, 3]
 
 

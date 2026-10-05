@@ -3,9 +3,11 @@ import { type ComponentType, createContext, useContext } from "react";
 import { PANELS, PanelBoundary, PanelError } from "../../panels";
 import { Figure, panelLetter } from "./Figure";
 import { useInAppLinks } from "./links";
+import type { RunStatus } from "../../api/models";
 import type { PanelResult, PanelSpec } from "./types";
 
-export type PanelComponent = ComponentType<{ result: PanelResult }>;
+interface PanelContextProps { selectedItemId?: string; currentGroupId?: string; runStatus?: RunStatus; }
+export type PanelComponent = ComponentType<{ result: PanelResult } & PanelContextProps>;
 export type PanelRegistry = Partial<Record<string, PanelComponent>>;
 
 // The registry's props allow a missing `meta`; API results always carry one, so widen
@@ -19,7 +21,7 @@ export const PanelRegistryContext = createContext<PanelRegistry>(PANELS as unkno
  * reason instead of the panel's empty state. Unknown types and panels that throw show
  * the registry's error box, so one bad panel never blanks the page.
  */
-export function PanelBody({ result }: { result: PanelResult }) {
+export function PanelBody({ result, ...context }: { result: PanelResult } & PanelContextProps) {
   const registry = useContext(PanelRegistryContext);
   const onLinks = useInAppLinks();
   const failed = result.meta.error;
@@ -30,7 +32,7 @@ export function PanelBody({ result }: { result: PanelResult }) {
   return (
     <div className="panel-links" style={{ display: "contents" }} onClick={onLinks}>
       <PanelBoundary>
-        <Component result={result} />
+        <Component result={result} {...context} />
       </PanelBoundary>
     </div>
   );
@@ -47,13 +49,13 @@ function warnings(result: PanelResult): string[] {
   return Array.isArray(raw) ? raw.filter((w): w is string => typeof w === "string") : [];
 }
 
-export interface PanelGridProps {
+export interface PanelGridProps extends PanelContextProps {
   results: PanelResult[];
   specs?: PanelSpec[];
   startIndex?: number;
 }
 
-export function PanelGrid({ results, specs, startIndex = 0 }: PanelGridProps) {
+export function PanelGrid({ results, specs, startIndex = 0, ...context }: PanelGridProps) {
   return (
     <div className="panel-grid">
       {results.map((result, i) => {
@@ -71,7 +73,7 @@ export function PanelGrid({ results, specs, startIndex = 0 }: PanelGridProps) {
               gridRow: row ? String(row) : undefined,
             }}
           >
-            <PanelBody result={result} />
+            <PanelBody result={result} {...context} />
           </Figure>
         );
       })}

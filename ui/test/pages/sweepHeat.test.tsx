@@ -82,7 +82,7 @@ describe("SweepHeat", () => {
 
   test("the key shows the value range, the best cell's seeds and the glyphs in use", () => {
     renderHeat();
-    const key = screen.getByLabelText("Key");
+    const key = screen.getByRole("group", { name: "Key" });
     expect(within(key).getByText("0.890–0.912")).toBeTruthy();
     expect(within(key).getByText("best, 2 seeds")).toBeTruthy();
     expect(texts(key.querySelectorAll("span.st-k"))).toEqual(["finished", "running", "queued", "failed", "stale"]);
@@ -109,6 +109,28 @@ describe("SweepHeat", () => {
     expect(cell("3e-4|10").getAttribute("data-heat")).toBe("4");
     expect(cell("1e-4|5").className).toBe("c best");
   });
+});
+
+test("the named key includes lost and killed only when cells use those glyphs", () => {
+  const changed = { ...CELL_A, runs: [
+    { run_id: rid("lost"), status: "lost", seed: 1 },
+    { run_id: rid("killed"), status: "killed", seed: 2 },
+  ] };
+  renderHeat({ cells: parseCells([changed]) });
+  const key = screen.getByRole("group", { name: "Key" });
+  expect(within(key).getByText("lost")).toBeTruthy();
+  expect(within(key).getByText("killed")).toBeTruthy();
+});
+
+test("an existing unscored cell keeps its run links without heat or a best mark", () => {
+  renderHeat({ cells: parseCells([{ ...CELL_A, n: 0, mean: null, lo: null, hi: null }]), best: null });
+  const unscored = cell("1e-4|5");
+  expect(unscored.className).toBe("c empty");
+  expect(unscored.getAttribute("data-heat")).toBeNull();
+  expect(unscored.querySelector(".v")?.textContent).toBe("·");
+  expect(within(unscored).getAllByRole("link").length).toBeGreaterThan(0);
+  expect(unscored.querySelector(".bm")).toBeNull();
+  expect(within(screen.getByRole("group", { name: "Key" })).queryByText("lost")).toBeNull();
 });
 
 test("heat cell separates scored and uncounted members even when all expected seeds are present", () => {

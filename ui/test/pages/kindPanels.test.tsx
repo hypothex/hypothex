@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, screen, within } from "@testing-library/react";
+import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import {
   KindPanels,
   kindPanelCount,
@@ -236,4 +236,53 @@ describe("bounded visible run curve requests (PERF-F9c)", () => {
       "Metrics · 1–100:100", "Metrics · 101–200:100", "Metrics · 201–205:5",
     ]);
   });
+});
+
+test("trace-first run views keep the trajectory first and compare its selected example", async () => {
+  mockApi({ ...traceRoutes("T-014"), "POST /api/v1/tasks/p/t/views/query": { panels: [
+    { type: "grid", title: "Comparison", rows: [], meta: {} },
+  ] } });
+  renderWithClient(<KindPanels project="p" task="t" runId="R" currentGroupId="config-R"
+    specs={[{ type: "trace", title: "Trajectory" }, { type: "grid", title: "Comparison" }]} startIndex={2} />, {
+    registry: { ...fakeRegistry(["trace"]),
+      grid: ({ selectedItemId, currentGroupId }: { selectedItemId?: string; currentGroupId?: string }) =>
+        <p>{`${selectedItemId ?? "none"}/${currentGroupId ?? "none"}`}</p>,
+    },
+  });
+  await screen.findByText("T-014/config-R");
+  expect(screen.getAllByRole("region").map((r) => r.getAttribute("aria-label"))).toEqual([
+    "c Trajectory · T-014", "d Comparison",
+  ]);
+});
+
+
+test("trace selection loading and no traces never fall back to all grid targets", async () => {
+  let release!: (traces: typeof TRACES) => void;
+  const pending = new Promise<typeof TRACES>((resolve) => { release = resolve; });
+  mockApi({
+    "GET /api/v1/runs/R/traces": () => pending,
+    "POST /api/v1/tasks/p/t/views/query": { panels: [{ type: "grid", title: "Comparison", rows: [{ item_id: "other" }], meta: {} }] },
+  });
+  const { client } = renderWithClient(<KindPanels project="p" task="t" runId="R"
+    specs={[{ type: "trace", title: "Trajectory" }, { type: "grid", title: "Comparison" }]} startIndex={0} />,
+    { registry: fakeRegistry(["grid", "trace"]) });
+  await waitFor(() => expect(client.getQueryCache().getAll().some((q) => q.state.status === "success")).toBe(true));
+  expect(screen.queryByTestId("panel-grid")).toBeNull();
+  await act(async () => { release([]); });
+  expect(await screen.findByText("No traced example available for comparison")).toBeTruthy();
+  expect(screen.queryByTestId("panel-grid")).toBeNull();
+});
+
+test("the URL-selected example also controls the current-target comparison", async () => {
+  mockApi({ ...traceRoutes("T-001"), "POST /api/v1/tasks/p/t/views/query": { panels: [
+    { type: "grid", title: "Comparison", rows: [], meta: {} },
+  ] } });
+  renderWithClient(<KindPanels project="p" task="t" runId="R" example="T-001" currentGroupId="g"
+    specs={[{ type: "trace", title: "Trajectory" }, { type: "grid", title: "Comparison" }]} startIndex={0} />, {
+    registry: { ...fakeRegistry(["trace"]),
+      grid: ({ selectedItemId }: { selectedItemId?: string }) => <p>{`compare ${selectedItemId}`}</p>,
+    },
+  });
+  expect(await screen.findByText("compare T-001")).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "a Trajectory · T-001" })).toBeTruthy();
 });

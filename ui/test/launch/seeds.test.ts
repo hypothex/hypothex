@@ -29,6 +29,16 @@ describe("parseSeeds", () => {
 });
 
 describe("nextSeeds", () => {
+  test("never proposes out-of-range or reused seeds at the upper boundary", () => {
+    expect(nextSeeds([2147483645])).toEqual([2147483646, 2147483647]);
+    expect(nextSeeds([2147483647])).toEqual([]);
+    expect(parseSeeds(nextSeeds([2147483646]).join(",")).error).toBeNull();
+  });
+
+  test("handles large histories without spreading them into function arguments", () => {
+    expect(nextSeeds(Array.from({ length: 200_000 }, (_, i) => i))).toEqual([200_000, 200_001, 200_002]);
+  });
+
   test("continues after the largest seed used", () => {
     expect(nextSeeds([1, 2, 3, null])).toEqual([4, 5, 6]);
     expect(nextSeeds([9], 2)).toEqual([10, 11]);

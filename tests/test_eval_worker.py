@@ -80,6 +80,10 @@ def test_evaluate_scores_and_writes_per_example(tmp_path: Path) -> None:
     assert acc["values"] == {"value": 0.5} and acc["error"] is None
     assert acc["source_hash"].startswith("sha256:")
     assert "boom" in broken["error"] and broken["values"] == {}
+    assert acc["per_example_hash"].startswith("sha256:")
+    assert acc["evaluation_examples"] == 2
+    assert acc["evaluation_ids_hash"].startswith("sha256:")
+    assert broken.get("per_example_hash") is None
     per = read_jsonl(run_dir / "predictions" / "scores.accuracy@v1.jsonl")
     assert {r["id"]: r["correct"] for r in per} == {"ex-0": True, "ex-1": False}
 

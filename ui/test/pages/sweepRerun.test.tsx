@@ -8,7 +8,7 @@ import { parseCell, type SweepCellRow } from "../../src/pages/components/SweepMo
 import { rerunDefaults, SweepRerun } from "../../src/pages/components/SweepRerun";
 import { SweepPage } from "../../src/pages/Sweep";
 import { makeRecord } from "./fixtures";
-import { type Call, mockApi, renderWithClient, restoreFetch } from "./helpers";
+import { type Call, HttpReply, mockApi, renderWithClient, restoreFetch } from "./helpers";
 import {
   CELL_B,
   CELL_D,
@@ -45,7 +45,23 @@ const outside = (seed: number): RunRecord => ({
   sweep_id: null,
 });
 
+async function readyDialog(): Promise<HTMLElement> {
+  // TanStack delivers the host query on a scheduled task; its result triggers the
+  // dialog's passive initial-host effect. Flush both inside act, stopping on visible readiness.
+  for (let tick = 0; tick < 50; tick++) {
+    await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 0)); });
+    if (screen.queryByLabelText("Command") && (screen.queryByRole("radio", { name: "local" }) as HTMLInputElement | null)?.checked) break;
+  }
+  const dialog = screen.getByRole("dialog", { name: "Rerun sweep" });
+  expect(within(dialog).getByLabelText("Command")).toBeTruthy();
+  expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true);
+  return dialog;
+}
+
 describe("rerunDefaults", () => {
+  test("a selected best cell without any available template fails explicitly", () => {
+    expect(() => rerunDefaults(makeSummary().spec, parseCell(CELL_D), [run("a1")])).toThrow("The best cell's runs are not available yet. Retry after the runs refresh.");
+  });
   test("the best cell's latest run: its template, params and vars, the next seeds, the sweep's host", () => {
     const spec = { ...makeSummary().spec, host: "gpu1" };
     const d = rerunDefaults(spec, parseCell(CELL_D), RUNS);
@@ -88,6 +104,77 @@ describe("rerunDefaults", () => {
 });
 
 describe("Rerun sweep", () => {
+  test("a loading rerun can be closed and stays closed when its requests finish", async () => {
+    let release: (value: typeof PROJECTS) => void = () => {};
+    const pending = new Promise<typeof PROJECTS>((resolve) => { release = resolve; });
+    mockApi({
+      [`GET ${SWEEP}`]: makeSummary(), [`GET ${RUNS_URL}`]: RUNS,
+      "GET /api/v1/hosts": HOSTS, "GET /api/v1/gpus": [], "GET /api/v1/queue": [],
+      [`GET /api/v1/tasks/${PROJECT}/${TASK}/leaderboard`]: makeSweepBoard(),
+      [`GET ${HISTORY_URL}`]: RUNS, "GET /api/v1/projects": () => pending,
+    });
+    renderWithClient(<SweepPage project={PROJECT} sweepId={SWEEP_ID} now={NOW} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rerun sweep" }));
+    const opening = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    expect(within(opening).getByText("loading…")).toBeTruthy();
+    await act(async () => { fireEvent.click(within(opening).getByRole("button", { name: "Close" })); });
+    expect(screen.queryByRole("dialog") === null).toBe(true);
+    await act(async () => { release(PROJECTS); await pending; });
+    expect(screen.queryByRole("dialog") === null).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Rerun sweep" }));
+    await readyDialog();
+  });
+
+  test("a missing repo offers close and retry before any launch form", async () => {
+    let available = false;
+    mockApi({ "GET /api/v1/projects": () => available ? PROJECTS : [], [`GET ${HISTORY_URL}`]: RUNS,
+      "GET /api/v1/hosts": HOSTS, "GET /api/v1/gpus": [], "GET /api/v1/queue": [], });
+    renderWithClient(<SweepRerun project={PROJECT} spec={makeSummary().spec} best={parseCell(CELL_D)} runs={RUNS} onClose={() => {}} onLaunched={() => {}} />);
+    await screen.findByText(`no repo for ${PROJECT} on the hub`);
+    expect(screen.queryByLabelText("Command") === null).toBe(true);
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+    available = true;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await readyDialog();
+  });
+  test("initial project failure is a closable modal and Retry opens the real template", async () => {
+    let failed = true;
+    const calls = mockApi({
+      "GET /api/v1/projects": () => failed ? new HttpReply(400, { error: "projects unavailable", type: "ConfigError" }) : PROJECTS,
+      [`GET ${HISTORY_URL}`]: RUNS,
+      "GET /api/v1/hosts": HOSTS, "GET /api/v1/gpus": [], "GET /api/v1/queue": [],
+    });
+    let closed = false;
+    renderWithClient(<SweepRerun project={PROJECT} spec={makeSummary().spec} best={parseCell(CELL_D)} runs={RUNS} onClose={() => { closed = true; }} onLaunched={() => {}} />);
+    await screen.findByText("projects unavailable");
+    const opening = screen.getByRole("dialog", { name: "Rerun sweep" });
+    expect(within(opening).getByRole("button", { name: "Close" })).toBeTruthy();
+    failed = false;
+    fireEvent.click(within(opening).getByRole("button", { name: "Retry" }));
+    await readyDialog();
+    expect((screen.getByLabelText("Command") as HTMLTextAreaElement).value).toBe(TEMPLATE.join(" "));
+    expect(calls.filter((c) => c.url === "/api/v1/projects")).toHaveLength(2);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Close" })); });
+    expect(closed).toBe(true);
+  });
+
+  test("missing best template is recoverable without silently using another cell", async () => {
+    mockApi({ "GET /api/v1/projects": PROJECTS, [`GET ${HISTORY_URL}`]: RUNS,
+      "GET /api/v1/hosts": HOSTS, "GET /api/v1/gpus": [], "GET /api/v1/queue": [], });
+    let refreshed = 0;
+    let closed = false;
+    const tree = (runs: readonly RunRecord[]) => <SweepRerun project={PROJECT} spec={makeSummary().spec} best={parseCell(CELL_D)} runs={runs} onRefresh={() => { refreshed++; }} onClose={() => { closed = true; }} onLaunched={() => {}} />;
+    const { client, rerender } = renderWithClient(tree([run("a1")]));
+    await screen.findByText("The best cell's runs are not available yet. Retry after the runs refresh.");
+    expect(screen.queryByLabelText("Command") === null).toBe(true);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });
+    expect(refreshed).toBe(1);
+    rerender(<QueryClientProvider client={client}>{tree(RUNS)}</QueryClientProvider>);
+    await readyDialog();
+    expect((screen.getByLabelText("Command") as HTMLTextAreaElement).value).toBe(TEMPLATE.join(" "));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Close" })); });
+    expect(closed).toBe(true);
+  });
   test("opens the Launch dialog from the best cell and launches its next seeds", async () => {
     const calls = mockApi({
       [`GET ${SWEEP}`]: makeSummary(),
@@ -106,7 +193,7 @@ describe("Rerun sweep", () => {
     renderWithClient(<SweepPage project={PROJECT} sweepId={SWEEP_ID} now={NOW} />);
     fireEvent.click(await screen.findByRole("button", { name: "Rerun sweep" }));
 
-    const dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    const dialog = await readyDialog();
     expect(within(dialog).getByText(`${PROJECT} / ${TASK}`)).toBeTruthy();
     expect((within(dialog).getByLabelText("Command") as HTMLTextAreaElement).value).toBe(TEMPLATE.join(" "));
     expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("3, 4, 5");
@@ -172,7 +259,7 @@ describe("Rerun sweep", () => {
       </QueryClientProvider>
     );
     const { rerender } = render(tree(parseCell(CELL_D)));
-    const dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    const dialog = await readyDialog();
     // a run finishes while the dialog is open and cell B becomes best
     rerender(tree(parseCell(CELL_B)));
     expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("3, 4, 5");
@@ -218,7 +305,7 @@ describe("Rerun sweep", () => {
     renderWithClient(<SweepPage project={PROJECT} sweepId={SWEEP_ID} now={NOW} />);
     const launch = async (hypothesis: string): Promise<string> => {
       fireEvent.click(await screen.findByRole("button", { name: "Rerun sweep" }));
-      const dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+      const dialog = await readyDialog();
       const seeds = (within(dialog).getByLabelText("Seeds") as HTMLInputElement).value;
       await waitFor(() =>
         expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true),
@@ -252,7 +339,7 @@ describe("Rerun sweep", () => {
     });
     const { client } = renderWithClient(<SweepPage project={PROJECT} sweepId={SWEEP_ID} now={NOW} />);
     fireEvent.click(await screen.findByRole("button", { name: "Rerun sweep" }));
-    let dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    let dialog = await readyDialog();
     expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("3, 4, 5");
     fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
     await waitFor(() => expect(document.querySelector('[role="dialog"]') === null).toBe(true));
@@ -260,7 +347,7 @@ describe("Rerun sweep", () => {
     elsewhere.push(outside(3), outside(4), outside(5));
     await act(() => client.invalidateQueries({ queryKey: ["runs"] }));
     fireEvent.click(screen.getByRole("button", { name: "Rerun sweep" }));
-    dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    dialog = await readyDialog();
     expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("6, 7, 8");
   });
 
@@ -281,14 +368,12 @@ describe("Rerun sweep", () => {
     });
     renderWithClient(<SweepPage project={PROJECT} sweepId={SWEEP_ID} now={NOW} />);
     fireEvent.click(await screen.findByRole("button", { name: "Rerun sweep" }));
-    // the projects and the task history load, the sweep's runs do not: no dialog yet
-    try {
-      await new Promise((r) => setTimeout(r, 50));
-      expect(screen.queryByRole("dialog", { name: "Rerun sweep" }) === null).toBe(true);
-    } finally {
-      release(RUNS);
-    }
-    const dialog = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    // Preparation is itself a closable modal, with no editable launch form yet.
+    const opening = await screen.findByRole("dialog", { name: "Rerun sweep" });
+    expect(within(opening).getByRole("button", { name: "Close" })).toBeTruthy();
+    expect(within(opening).queryByLabelText("Command") === null).toBe(true);
+    await act(async () => { release(RUNS); await late; });
+    const dialog = await readyDialog();
     expect((within(dialog).getByLabelText("Command") as HTMLTextAreaElement).value).toBe(TEMPLATE.join(" "));
     expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("3, 4, 5");
   });

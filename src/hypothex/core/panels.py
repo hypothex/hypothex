@@ -126,7 +126,7 @@ class _ViewCache:
 
     entries: dict[str, ProjectEntry] = field(default_factory=dict)
     task_runs: dict[tuple[str, str], list[RunRecord]] = field(default_factory=dict)
-    boards: dict[_BoardKey, Leaderboard] = field(default_factory=dict)
+    boards: dict[tuple[_BoardKey, str | None], Leaderboard] = field(default_factory=dict)
     labels: dict[_BoardKey, dict[str, str]] = field(default_factory=dict)
     points: dict[tuple[str, frozenset[str] | None], list[MetricPoint]] = field(default_factory=dict)
     files: dict[str, list[MetricPoint]] = field(default_factory=dict)
@@ -155,12 +155,17 @@ class _ViewCache:
         return list(self.task_runs[key])
 
     def board(
-        self, ctx: Context, entry: ProjectEntry, task: str, runs: list[RunRecord]
+        self,
+        ctx: Context,
+        entry: ProjectEntry,
+        task: str,
+        runs: list[RunRecord],
+        primary: str | None = None,
     ) -> Leaderboard:
         """Leaderboard over ``runs`` (built once per run set)."""
-        key = (entry.project, task, tuple(r.run_id for r in runs))
+        key = ((entry.project, task, tuple(r.run_id for r in runs)), primary)
         if key not in self.boards:
-            self.boards[key] = _build_board(ctx, entry, task, runs)
+            self.boards[key] = _build_board(ctx, entry, task, runs, primary=primary)
         return self.boards[key]
 
     def group_labels(
@@ -219,9 +224,9 @@ class _Scope:
     cache: _ViewCache
     _points: dict[frozenset[str] | None, dict[str, list[MetricPoint]]] = field(default_factory=dict)
 
-    def board(self) -> Leaderboard:
+    def board(self, primary: str | None = None) -> Leaderboard:
         """Leaderboard over this scope's runs (built once per view)."""
-        return self.cache.board(self.ctx, self.entry, self.task, self.runs)
+        return self.cache.board(self.ctx, self.entry, self.task, self.runs, primary)
 
     def labels(self) -> dict[str, str]:
         """Label per seed-group id of this scope's runs (``_ViewCache.group_labels``)."""
@@ -383,7 +388,7 @@ def _query(
         latest = {group_id_for(r): r.run_id for r in runs}
         runs = [r for r in runs if r.run_id in set(latest.values())]
     elif panel.data.pick == "best":
-        board_rows = cache.board(ctx, entry, task, runs).rows
+        board_rows = cache.board(ctx, entry, task, runs, panel.data.primary).rows
         best = set(board_rows[0].run_ids) if board_rows else set()
         runs = [r for r in runs if r.run_id in best]
     scope = _Scope(ctx=ctx, entry=entry, task=task, runs=runs, cache=cache)
@@ -416,17 +421,32 @@ def _row_matches(row: dict[str, Any], flt: dict[str, Any]) -> bool:
 
 
 def _build_board(
-    ctx: Context, entry: ProjectEntry, task: str, runs: list[RunRecord]
+    ctx: Context,
+    entry: ProjectEntry,
+    task: str,
+    runs: list[RunRecord],
+    *,
+    primary: str | None = None,
 ) -> Leaderboard:
     def build() -> Leaderboard:
-        per_example = primary_examples(ctx, entry.config, task, runs, None)
+        hashes: dict[str, str] = {}
+        per_example = primary_examples(
+            ctx, entry.config, task, runs, None, primary=primary, hashes=hashes
+        )
         scores = ctx.index.scores_for(r.run_id for r in runs)
         return build_leaderboard(
-            entry.project, task, entry.config, runs, scores, per_example=per_example or None
+            entry.project,
+            task,
+            entry.config,
+            runs,
+            scores,
+            per_example=per_example or None,
+            per_example_hashes=hashes,
+            primary=primary,
         )
 
     # a view's runs are a filtered list of the task's runs: they are part of the key
-    ids = ("view", tuple(r.run_id for r in runs))
+    ids = ("view", tuple(r.run_id for r in runs), "primary", primary)
     return cached_leaderboard(ctx, entry.project, task, entry.config, build, variant=ids)
 
 
@@ -443,7 +463,7 @@ def _stat_strip(scope: _Scope, panel: PanelSpec) -> PanelResult:
     Values are read run by run, each reference once, so a run's files are
     parsed once (``_ViewCache.run_files``), however many references there are.
     """
-    board = scope.board()
+    board = scope.board(panel.data.primary)
     rows: list[dict[str, Any]] = []
     if not panel.data.metrics:
         rows = [dict(item) for item in board.stat_strip]
@@ -475,12 +495,18 @@ def _stat_strip(scope: _Scope, panel: PanelSpec) -> PanelResult:
         type="stat_strip",
         title=panel.title,
         rows=rows,
-        meta={"headline": board.headline, "unit": board.unit, "value_format": board.value_format},
+        meta={
+            "headline": board.headline,
+            "unit": board.unit,
+            "value_format": board.value_format,
+            "primary": board.primary,
+            "higher_is_better": board.higher_is_better,
+        },
     )
 
 
 def _leaderboard(scope: _Scope, panel: PanelSpec) -> PanelResult:
-    board = scope.board()
+    board = scope.board(panel.data.primary)
     return PanelResult(
         type="leaderboard",
         title=panel.title,
@@ -492,6 +518,7 @@ def _leaderboard(scope: _Scope, panel: PanelSpec) -> PanelResult:
             "unit": board.unit,
             "value_format": board.value_format,
             "metric_versions": board.metric_versions,
+            "kind": board.kind,
             "noise": list(panel.noise),
             "needs_reeval": board.needs_reeval,
             "unscored": board.unscored,
@@ -976,7 +1003,17 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
     by_run = panel.data.group_by == "run"
     repeat = _repeats(scope.runs) if by_run else {}
     for key, label, members in _groups(scope, panel):
-        entry: dict[str, Any] = {"group_id": key, "label": label}
+        common = {
+            name: value
+            for name, value in members[0].params.items()
+            if all(r.params.get(name) == value for r in members)
+        }
+        entry: dict[str, Any] = {
+            "group_id": key,
+            "label": label,
+            "params": common,
+            "run_ids": [r.run_id for r in members],
+        }
         if by_run:
             entry |= {"seed_group": group_id_for(members[0]), "repeat": repeat[key]}
         groups.append(entry)
@@ -1028,6 +1065,9 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
             run_events.append(_event(run.run_id, last_x, run.status.value))
         events.extend(sorted(run_events, key=lambda e: e["step"]))
         checkpoints.extend(_checkpoint_rows(scope, run, panel, x_of))
+    ranked = scope.board(panel.data.primary).rows
+    best_members = set(ranked[0].run_ids) if ranked and ranked[0].primary is not None else set()
+    displayed_best = [g["group_id"] for g in groups if set(g["run_ids"]) == best_members]
     return PanelResult(
         type="curves",
         title=panel.title,
@@ -1038,6 +1078,7 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
             "checkpoints": checkpoints,
             "events": events,
             "groups": groups,
+            "best_group_id": displayed_best[0] if len(displayed_best) == 1 else None,
         },
     )
 
@@ -1656,7 +1697,16 @@ def _grid(scope: _Scope, panel: PanelSpec) -> PanelResult:
         rows=rows,
         meta={
             "items": items,
-            "groups": [{"group_id": g, "label": labels[g]} for g in gids],
+            "groups": [
+                {
+                    "group_id": g,
+                    "label": labels[g],
+                    "run_ids": [
+                        r.run_id for key, _, members in groups if key == g for r in members
+                    ],
+                }
+                for g in gids
+            ],
             "field": column,
         },
     )

@@ -1023,6 +1023,8 @@ export interface components {
         PanelData: {
             /** Metrics */
             metrics?: string[] | null;
+            /** Primary */
+            primary?: string | null;
             /** X */
             x?: string | null;
             /** Y */
@@ -1779,6 +1781,7 @@ export interface operations {
         parameters: {
             query?: {
                 metric?: string[] | null;
+                primary?: string | null;
             };
             header?: never;
             path: {
@@ -3008,6 +3011,7 @@ export interface operations {
                 b: string;
                 metric: string;
                 field?: string;
+                require_bound?: boolean;
             };
             header?: never;
             path?: never;

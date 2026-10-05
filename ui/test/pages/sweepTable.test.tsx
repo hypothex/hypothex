@@ -50,6 +50,17 @@ const firstColumn = (): (string | null)[] =>
 const header = (name: RegExp): HTMLElement => screen.getByRole("button", { name }).closest("th") as HTMLElement;
 
 describe("SweepTable", () => {
+  test("short n has a tooltip and only a selected best has a mark or class", () => {
+    const { container } = renderTable();
+    const short = screen.getAllByRole("row")[2] as HTMLElement;
+    expect(short.querySelector('td[title="1 of 2 seeds scored"]')).toBeTruthy();
+    expect(short.classList.contains("best")).toBe(false);
+    expect(short.querySelector(".bm") === null).toBe(true);
+    expect(container.querySelectorAll("tr.best")).toHaveLength(1);
+    cleanup();
+    const none = renderTable({ best: null });
+    expect(none.container.querySelectorAll("tr.best, .bm")).toHaveLength(0);
+  });
   test("sorts by mean, best first, and marks the best row", () => {
     renderTable();
     expect(screen.getByRole("table", { name: "Mean top1 by lr, beam, warmup" })).toBeTruthy();

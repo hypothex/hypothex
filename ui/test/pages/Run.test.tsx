@@ -159,3 +159,24 @@ test("a failed task refresh revokes previously cached infer capability", async (
   await waitFor(() => expect(button.hasAttribute("disabled")).toBe(true));
   expect(button.title).toBe("Infer stage not loaded");
 });
+
+test("training run checkpoints keep validation metrics separate from absent evaluated scores", async () => {
+  mockApi(routes({
+    [`GET /api/v1/runs/${RUN_SVM}`]: makeDetail({ status: "killed", artifacts: [{ kind: "checkpoint", step: 42, host: "gpu", path: "/ckpt/42.pt", size: null, metrics: { "val/top1": 0.75, "val/loss": 0.2 } }] }, { scores: [] }),
+    [`GET ${TASK}/kind`]: { kind: "training", run_view: [] },
+  }));
+  renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
+  const checkpoints = await screen.findByRole("table", { name: "Checkpoint metrics" });
+  expect(checkpoints.textContent).toContain("val/top1");
+  expect(checkpoints.textContent).toContain("0.75");
+  expect(screen.getByText("no scores")).toBeTruthy();
+  expect(regionNames()).toEqual(["a Where", "b Checkpoints", "c Scores", "d Notes"]);
+});
+
+test("run kind panels receive status and authoritative leaderboard group membership", async () => {
+  const board = makeBoard();
+  const expected = board.rows.find(row => row.run_ids.includes(RUN_SVM))!.group_id;
+  mockApi(routes({ [`GET ${TASK}/leaderboard`]: board }));
+  renderWithClient(<RunPage runId={RUN_SVM} />, { registry: { curves: ({ currentGroupId, runStatus }) => <p data-testid="run-panel-context">{`${currentGroupId}/${runStatus}`}</p> } });
+  await waitFor(() => expect(screen.getByTestId("run-panel-context").textContent).toBe(`${expected}/finished`));
+});

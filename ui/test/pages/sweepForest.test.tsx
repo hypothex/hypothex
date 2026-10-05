@@ -27,12 +27,42 @@ function renderForest(over: Partial<SweepForestProps> = {}) {
 }
 
 describe("SweepForest", () => {
+  test("long labels stay in a bounded slot with full text available", () => {
+    const label = "a very long parameter name with many wide WWW values";
+    const cell = parseCell({ ...CELL_D, params: { [label]: label } }) as SweepCellRow;
+    const { container } = renderForest({ cells: [cell], best: cell, names: [label] });
+    const slots = [...container.querySelectorAll("foreignObject.forest-label")];
+    expect(slots).toHaveLength(2);
+    for (const slot of slots) {
+      expect(slot.getAttribute("x")).toBe("0");
+      expect(Number(slot.getAttribute("width"))).toBeLessThan(96);
+      const text = slot.querySelector("[title]") as HTMLElement;
+      expect(text.title).toBe(label);
+      expect(text.style.textOverflow).toBe("ellipsis");
+      expect(text.style.overflow).toBe("hidden");
+    }
+  });
+
+  test("lower-is-better orders the chart, band follows its interval, and missing intervals have no band", () => {
+    const cells = parseCells(RAW_CELLS);
+    const best = cells.find((c) => c.mean === 0.89) as SweepCellRow;
+    const { container } = renderForest({ cells, best, higherIsBetter: false });
+    expect([...container.querySelectorAll("g.frow")].map((g) => g.getAttribute("data-label"))).toEqual(["1e-4, 5", "1e-4, 10", "3e-4, 5", "3e-4, 10"]);
+    const band = container.querySelector("g.best-band rect") as SVGElement;
+    expect(Number(band.getAttribute("width"))).toBeGreaterThan(0);
+    const mean = container.querySelector("rect.mean.best") as SVGElement;
+    expect(Number(mean.getAttribute("x"))).toBeGreaterThan(Number(band.getAttribute("x")));
+    expect(Number(mean.getAttribute("x"))).toBeLessThan(Number(band.getAttribute("x")) + Number(band.getAttribute("width")));
+    cleanup();
+    const missing = renderForest({ best: { ...best, lo: null, hi: null } });
+    expect(missing.container.querySelector("g.best-band") === null).toBe(true);
+  });
   test("one row per scored cell, best first, best label bold", () => {
     const { container } = renderForest();
     const rows = [...container.querySelectorAll("g.frow")];
     expect(rows.map((g) => g.getAttribute("data-label"))).toEqual(["3e-4, 10", "3e-4, 5", "1e-4, 10", "1e-4, 5"]);
-    expect(rows[0]?.querySelector("text")?.getAttribute("class")).toBe("lbl-b");
-    expect(rows[1]?.querySelector("text")?.getAttribute("class")).toBe("lbl");
+    expect(rows[0]?.querySelector(".lbl-b")).toBeTruthy();
+    expect(rows[1]?.querySelector(".lbl")).toBeTruthy();
     expect(screen.getByText("lr, beam")).toBeTruthy();
     expect(screen.getByText("top1 v1")).toBeTruthy();
   });

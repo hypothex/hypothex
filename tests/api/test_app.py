@@ -15,6 +15,7 @@ import hypothex.api.app as app_mod
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
 from hypothex.core.evaluation import evaluate_run
+from hypothex.core.records import MetricPoint
 from hypothex.core.views import get_view, load_preset
 from hypothex.sdk import Run
 from tests.factories import PREDS_075, make_record, seed_finished_run
@@ -424,6 +425,70 @@ def test_query_views(client: TestClient, ctx: Context, toy_repo: Path) -> None:
     assert client.post(f"{VIEWS}/query", json={"name": "nope"}).status_code == 404
     bad_panel = client.post(f"{VIEWS}/query", json={"panel": {"type": "pie"}})
     assert bad_panel.status_code == 422
+
+
+def test_query_curve_visible_metrics_with_a_point_cap(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    _scored(ctx, toy_repo)
+    ctx.index.replace_metric_points(
+        "r1",
+        [
+            MetricPoint(name=name, step=step, value=float(step))
+            for name in ("loss", "hidden")
+            for step in range(600)
+        ],
+    )
+    panel = {"type": "curves", "data": {"metrics": ["loss"], "max_points": 17}}
+    response = client.post(f"{VIEWS}/query", json={"panel": panel})
+    assert response.status_code == 200
+    rows = response.json()["panels"][0]["rows"]
+    assert len(rows) == 17
+    assert {row["name"] for row in rows} == {"loss"}
+    assert [rows[0]["step"], rows[-1]["step"]] == [0, 599]
+    panel["data"]["max_points"] = 501
+    assert client.post(f"{VIEWS}/query", json={"panel": panel}).status_code == 422
+
+
+def test_live_run_names_feed_filtered_capped_view_after_unindexed_writes(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    """The Run UI's detail-to-view flow includes newly logged names without indexing."""
+    from hypothex.core.fsutil import append_jsonl
+    from hypothex.core.records import RunStatus
+
+    record = seed_finished_run(ctx, toy_repo, "r1")
+    ctx.update_run(
+        "r1", "run.updated", lambda r: r.model_copy(update={"status": RunStatus.RUNNING})
+    )
+    path = ctx.run_dir(record) / "metrics.jsonl"
+    for step in range(600):
+        for name in ("loss", "sweep/rps", "step"):
+            append_jsonl(path, {"name": name, "step": step, "value": float(step)})
+    assert ctx.index.metric_names("r1") == []
+    detail = client.get("/api/v1/runs/r1").json()
+    assert detail["metric_names"] == ["loss", "step", "sweep/rps"]
+    for step in range(600):
+        append_jsonl(path, {"name": "new/acc", "step": step, "value": step / 600})
+    refreshed = client.get("/api/v1/runs/r1").json()
+    visible = [
+        name
+        for name in refreshed["metric_names"]
+        if not name.startswith("sweep/") and name != "step"
+    ]
+    assert visible == ["loss", "new/acc"]
+    panel = {
+        "type": "curves",
+        "data": {"metrics": visible, "max_points": 17, "filter": {"run_id": "r1"}},
+    }
+    response = client.post(f"{VIEWS}/query", json={"panel": panel})
+    assert response.status_code == 200
+    rows = response.json()["panels"][0]["rows"]
+    assert {row["name"] for row in rows} == set(visible)
+    for name in visible:
+        series = [row for row in rows if row["name"] == name]
+        assert len(series) == 17
+        assert [series[0]["step"], series[-1]["step"]] == [0, 599]
 
 
 def test_view_anchors_and_huge_specs_are_issues_never_500(

@@ -123,6 +123,74 @@ Decisions and evidence
   PR body/title prepared in `/tmp/hx-handoff-evidence/backend-pr-body.md` and
   `backend-pr-title.txt`; parent will inspect, push, open/link, and monitor CI.
 
+# UI leftovers, handover step 8 (2026-10-05)
+
+Scope: only named step-8 UI items; `/tmp/hx-ui-leftovers`, branch `ui-leftovers`,
+base `3b696f1`. Parent coordinates step-7 merge, backend contract, full-check window,
+push/PR/merge. No Phase 3 or all-minors/F17 implementation.
+
+- [x] Read binding handover, Node guide, source-backed step-8/minor triage; verify base.
+- [x] Identify PERF-F9c active views/query contract: metrics exists; max_points requires additive backend field.
+- [x] Run-page actions: infer capability, re-evaluation counts/reasons, useful 404 state.
+- [x] Paths/errors: SlashPath on run paths and readable project/task names; concise ErrorBox.
+- [x] Charts: width-derived leaderboard ticks, responsive Failures legend, nonoverlapping scatter labels.
+- [x] Request only displayed run metric names with bounded max_points; live-name backend dependency integrated.
+- [x] Share billed GPU count and useHubEnvironment.
+- [x] Preserve queue switch nowrap from step 7.
+- [x] Verify already-fixed row growth and e2e home-path docs; avoid duplicate edits.
+- [x] Merge finalized local step-7 branch without rebasing; preserve both behaviors.
+- [x] Scoped frontend checks and independent review in parent-approved window.
+- [x] Conventional local commit.
+- [x] Complete local step-7/step-8 integration and authorized checks; parent owns final publication/main integration.
+
+Ownership: UI parent owns Run/RunActions/query hooks/stats/KindPanels/models/docs;
+chart_layout owns chart panels and their tests; paths_errors owns shared path/ErrorBox
+components and tests. No worker commits; shared worktree. Every actual fix gets a
+failing regression first and focused green evidence in `/tmp/hx-handoff-evidence/ui-leftovers/`.
+
+Contract proposal sent to parent: optional PanelData.max_points, integer 2..500;
+null/default retains 500, curves-only final per-run/name LTTB; explicit empty metrics
+means no series. UI additions wait for frozen approval. Python/contract edits belong to parent.
+
+Step-8 implementation evidence (before final step-7 merge)
+--------------------------------------------------------
+
+- Run action/not-found regression: 13 pass/4 fail before; 38 focused tests pass after.
+  Infer capability comes from successful task-stage read; re-evaluation formatter is
+  shared with Task and previous-run feedback is not displayed after navigation.
+- Shared environment query + billed GPU-hours: 39 pass/2 fail before; 84 affected
+  query/run/overview/sweep tests pass after. No real host access.
+- PERF-F9c request regressions: 18 pass/4 fail before; 32 tests pass after. Run history
+  names are explicit; >100 names split without loss; explicit [] remains empty;
+  explicit sweep/step choices remain untouched. Generated API types refreshed from
+  create_app in an isolated /tmp home without starting a server.
+- Parent committed backend cap `a5f410e`: six tests failed first; 192 API/core tests,
+  Ruff/format/source ty/Sphinx passed. Backend artifacts/logs live under the shared
+  handoff evidence directory. UI TypeScript check passes.
+- Delegated paths/errors: six expected failing regressions, then 46 tests pass.
+  Chart layout: three expected failing regressions, then 64 tests pass; positional
+  legend bounds and accessible fallback-key grouping verified in review.
+- Existing e2e home-path docs and row-growth CSS verified in source, retained.
+- Build/browser window released: production build and 881 UI unit tests pass; e2e
+  TypeScript passes. Added actual chart text geometry coverage at spans 5/7/12
+  in light/dark with resize; all six browser tests pass (13.4 s).
+  The first browser run caught legend row spacing and endpoint tick overflow;
+  fixed both root causes, with the failing artifacts preserved before rerun.
+- Independent review identified late run re-evaluation feedback and cached infer
+  capability after task refresh failure; both regressions failed first, then all
+  21 action/run tests passed after fixes.
+- Live metric-name lag found in indexed run details; parent owns authoritative
+  backend discovery fix. PERF-F9c remains pending that contract and regression.
+- Waiting on step-7 hx-sw+nowrap merge; no pushes/PRs/merges performed.
+  Full combined checks remain required.
+
+- Final scoped verification: 883 UI unit tests, source/test TypeScript, e2e TypeScript,
+  production build, all 50 Playwright tests (35.5 s), and Sphinx with warnings as
+  errors pass. Both isolated Playwright servers shut down. Diff whitespace check passes.
+- Parent moved the live-name backend fix to the preceding dogfood branch; strict
+  metric whitelisting is integration-dependent until that fix lands on main.
+  Parent requested local UI commit and ownership handback without push/PR.
+
 # Bounded view integration (2026-10-05)
 
 Scope: preserve the merged audit behavior while bounding live metric reads and view work.
@@ -330,3 +398,36 @@ cover slashless calls and read/write timeout redaction. The initial composed run
 passed 272 other MCP/client/issuance/API tests. Ruff/format (179 files), source ty,
 source TypeScript and regenerated combined schema pass. Final full integration
 checks still wait for the ordered UI prerequisite; no publication yet.
+
+
+# Step 8 integration with finalized Step 7 (2026-10-05)
+
+Merged local `dogfood-fixes-2` at `48f8bef` into `ui-leftovers` from `90de44f`
+without rebasing. Seven conflicts retain both sets of source, tests, and documentation.
+Run actions require serving ownership and infer capability, retain queue-only Cancel,
+three-second Stop confirmation, and late-response-safe re-evaluation feedback. Live
+metric-name discovery now feeds the explicit, capped views/query requests. Step 7
+issuance/launch/queue/responsive behavior remains intact, including terminal issuance
+cancellation. The new palette uses the shared environment query too.
+
+- [x] Review complete diff against Step 7; source changes remain the named Step 8 scope.
+- [x] Add integration regressions for joint serving/infer gates and the real API flow
+  from unindexed live metric names into filtered/capped curves.
+- [x] Full Bun suite, source/test/e2e types, production build, all Playwright tests.
+- [x] Affected API/core tests, Ruff lint/format, source ty, and warning-as-error Sphinx.
+- [x] All three isolated demo shutdown cases; no processes of the demos remain.
+- [x] Regenerated current OpenAPI types match the merged tracked file exactly.
+- [x] Local conventional merge commit; parent handback after commit.
+
+Evidence is under `/tmp/hx-handoff-evidence/ui-leftovers/integration/`. The affected
+backend run passed 247 tests, including live-name discovery and the bounded reader,
+curve cap/metadata/step-axis, and view limits. Browser checks pass all 56 tests, adding
+both branches' geometry coverage. Full Python/Docker beyond the affected 247 tests
+remain parent-coordinated; Step 7 already has its full-suite evidence and no unrelated
+backend production code was changed by this integration. No push or PR authorized.
+
+Final Step 8 integration UI evidence: 930 Bun tests pass (84 files, 26.05s), all
+56 Playwright tests pass on final source/build (43.8s), and all three shutdown cases
+pass. The final API/core run is 247 passing tests. Static/types/build/Sphinx and
+schema byte comparison pass. Parent started final full Python and Docker runs after
+source freeze; those results and publication/current-head CI remain parent gates.

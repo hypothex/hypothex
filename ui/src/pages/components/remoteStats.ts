@@ -2,6 +2,7 @@
  * Stat strip items for a remote run (spec 8A.5, 8A.7, mockups shot-run-*): queue place and
  * GPU need while it waits, GPU use while it runs, how long its host is gone when stale.
  */
+import { billedGpus } from "./billedGpus";
 import { runSeconds } from "./format";
 import { fmtWait, freeGpus, hostLabel, type RunPhase, secondsSince } from "./remote";
 import type { StatItem } from "./StatStrip";
@@ -66,13 +67,14 @@ export function remoteStats(
       out.push({ label: "mem", value: String(Math.round(mem)), unit: "GB", tooltip: "GPU memory in use" });
     }
   }
-  if ((phase === "running" || phase === "stale") && gpus.length > 0 && !record.cost) {
+  const billed = billedGpus(record);
+  if ((phase === "running" || phase === "stale") && billed > 0 && !record.cost) {
     const wall = runSeconds(record, now);
     if (wall !== null) {
       out.push({
         label: "GPU h",
-        value: ((wall * gpus.length) / 3600).toFixed(2),
-        tooltip: `wall × ${gpus.length} GPU; the cost is set when the run ends`,
+        value: ((wall * billed) / 3600).toFixed(2),
+        tooltip: `wall × ${billed} GPU; the cost is set when the run ends`,
       });
     }
   }

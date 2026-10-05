@@ -85,6 +85,10 @@ Screens
   ``usd_per_gpu_hour``, so its GPU hours have no price). Times since a moment (waiting,
   wall, unreachable) move on every 10 s while the run is not over, also when the host
   sends nothing new. The Queue panel lists the host's whole queue.
+  ``Re-infer`` is enabled only after the task confirms an ``infer`` stage;
+  ``Re-evaluate`` reports how many runs were re-scored or skipped, with reasons.
+  A missing run shows ``Not found`` with a link back to all projects. Live SLURM
+  GPU-hours use the requested GPU count when the job reports no device indices.
 - **Examples** (``/x/<a>/<b>?metric=<name>``): what run B fixes and breaks against run A,
   with the paired sign test.
 - **View editor** (``/t/<project>/<task>/edit/<view>``, ``new`` for a new view): YAML on
@@ -94,6 +98,18 @@ Screens
 
 Press ``⌘K`` (``Ctrl K`` on Linux and Windows) to find a run, task or path. The
 colour-mode button in the header switches light and dark mode.
+
+Paths wrap after slashes, preserving each segment and the exact copied path. Long
+project and task names wrap in the project table. Error messages omit the API
+transport prefix on screen; the complete message remains in the tooltip.
+
+Run charts request only the metric names they display, with at most 500 points per
+run and metric. Implicit over-time charts leave out ``sweep/*`` series and their
+step-axis metric; explicitly named series are preserved. Histories with more than
+100 displayed metrics are divided into labeled panels so no metric is dropped.
+Leaderboard ticks follow the plot width. Crowded scatter labels use a numbered
+key, and bottom or top legends reduce their columns only when they overflow the
+available space.
 
 Build before packaging
 ----------------------

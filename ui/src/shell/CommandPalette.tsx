@@ -3,14 +3,12 @@
  * switch colour mode. Items are filtered by every typed word (case-insensitive) over the
  * group, title, subtitle and hidden keywords (hypothesis, tags, paths).
  */
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../api/client";
 import { sweepCrumb } from "../pages/components/remote";
 import { useNavigate } from "@tanstack/react-router";
 import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ProjectInfo, RunRecord, TaskSummary } from "../api/models";
-import { useProjects, useRuns, useTasks } from "../api/queries";
+import { useHubEnvironment, useProjects, useRuns, useTasks } from "../api/queries";
 import { toggleTheme } from "./ThemeToggle";
 
 export type NavTarget =
@@ -109,7 +107,7 @@ export function filterCommands(items: CommandItem[], query: string): CommandItem
 function PaletteDialog({ onClose, onToast }: { onClose: () => void; onToast: (msg: string) => void }) {
   const navigate = useNavigate();
   const projects = useProjects();
-  const environment = useQuery({ queryKey: ["environment"], queryFn: ({ signal }) => api.environment(signal), staleTime: Number.POSITIVE_INFINITY });
+  const environment = useHubEnvironment();
   const tasks = useTasks();
   const runs = useRuns({ limit: 200 });
   const [query, setQuery] = useState("");

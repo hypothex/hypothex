@@ -10,10 +10,8 @@
  * host stale for longer than the hub's `stale_banner_hours` (default 24) gets a banner (spec
  * 5.6); its runs stay stale, never lost.
  */
-import { useQuery } from "@tanstack/react-query";
 import { Fragment } from "react";
-import { api } from "../api/client";
-import { useHosts, useOverview } from "../api/queries";
+import { useHosts, useHubEnvironment, useOverview } from "../api/queries";
 import { Figure } from "./components/Figure";
 import { Unbroken } from "./components/Headline";
 import {
@@ -36,11 +34,7 @@ import type { OverviewSummary } from "./components/types";
 
 /** The hub's hx version from its environment descriptor; null until known or on error. */
 function useHubVersion(): string | null {
-  const env = useQuery({
-    queryKey: ["environment"],
-    queryFn: ({ signal }) => api.environment(signal),
-    staleTime: Number.POSITIVE_INFINITY,
-  });
+  const env = useHubEnvironment();
   const version = env.data?.hx_version;
   return typeof version === "string" ? version : null;
 }

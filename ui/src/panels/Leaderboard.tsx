@@ -369,7 +369,9 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
     if (ci) values.push(ci.lo, ci.hi);
   }
   if (band) values.push(band.lo, band.hi);
-  const x = linear(niceDomain(values), PAD, width - PAD);
+  // This is the plot column's measured width, not the full leaderboard card.
+  const tickCount = Math.max(2, Math.floor((width - 2 * PAD) / 70));
+  const x = linear(niceDomain(values), PAD, width - PAD, tickCount);
   const plotHead = showSeeds && showTest ? "seeds, 95% CI" : showSeeds ? "seeds" : "95% CI";
   const keyItems: KeyItem[] = [];
   if (showSeeds) {

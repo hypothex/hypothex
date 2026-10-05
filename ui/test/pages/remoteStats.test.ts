@@ -148,3 +148,21 @@ test("runStats shows the total when no host row says the rate is missing", () =>
     cost(runStats(makeDetail({ cost: tiny }), null, null, NOW, { ...GPU1, usd_per_gpu_hour: 0.1 })),
   ).toMatchObject({ value: "$0.000" });
 });
+
+test("live SLURM GPU hours use requested GPUs when the node has no indices", () => {
+  const base = runningRecord({
+    started_at: new Date(NOW - 3_600_000).toISOString(),
+    cost: null,
+    gpus_requested: 2,
+  });
+  const record = { ...base, executor: { ...base.executor, slurm_job_id: "42", gpus: [] } };
+  for (const phase of ["running", "stale"] as const) {
+    const stats = remoteStats(record, phase, MCCLEARY, NOW);
+    expect(stats.find((s) => s.label === "GPU h")).toMatchObject({ value: "2.00" });
+    expect(stats.some((s) => s.label === "GPU" || s.label === "mem")).toBe(false);
+  }
+  const cpu = { ...record, gpus_requested: 0 };
+  expect(remoteStats(cpu, "running", MCCLEARY, NOW).some((s) => s.label === "GPU h")).toBe(false);
+  const local = { ...record, executor: { ...record.executor, slurm_job_id: null } };
+  expect(remoteStats(local, "running", GPU1, NOW).some((s) => s.label === "GPU h")).toBe(false);
+});

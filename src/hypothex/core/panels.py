@@ -967,6 +967,7 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
     # a name listed twice is drawn once: repeats would multiply the rows
     wanted = None if panel.data.metrics is None else list(dict.fromkeys(panel.data.metrics))
     x_name = panel.data.step_metric or "step"
+    limit = panel.data.max_points if panel.data.max_points is not None else CURVE_POINTS
     rows: list[dict[str, Any]] = []
     checkpoints: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
@@ -1006,7 +1007,7 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
             ]
             if xy:
                 last_x = max([x for x, _ in xy] + ([] if last_x is None else [last_x]))
-            for i in lttb([x for x, _ in xy], [v for _, v in xy], CURVE_POINTS):
+            for i in lttb([x for x, _ in xy], [v for _, v in xy], limit):
                 rows.append(
                     {
                         "run_id": run.run_id,

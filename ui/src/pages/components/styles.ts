@@ -58,7 +58,7 @@ export const PAGES_CSS = `
 .page .projects col.c-best { width: 76px; }
 .page .projects th + th, .page .projects td + td { padding-left: 14px; }
 .page .projects td { white-space: nowrap; }
-.page .projects td.nm { overflow: hidden; text-overflow: ellipsis; }
+.page .projects td.nm { white-space: normal; overflow-wrap: anywhere; }
 .page .fail-b { font: 400 15.5px/1.5 var(--serif); color: var(--ink-2); margin: 0 0 16px; }
 .page .fail-b b { color: var(--ink); font-weight: 650; }
 .page .fail-b .x { color: var(--fail); font-family: var(--sans); font-weight: 600; margin-right: 6px; }

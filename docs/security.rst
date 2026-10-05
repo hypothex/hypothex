@@ -79,6 +79,9 @@ network request and does not read ``HYPOTHEX_HUB_TOKEN``. Stale or unverifiable
 records require a server restart. The browser keeps the credential in memory
 and, when available, session storage. A ``401`` clears cached data and locks the
 UI again; ``403`` and ``404`` do not.
+Changing the selected credential also invalidates pending browser actions. Their
+network retries, later seed launches and success callbacks cannot continue under
+the replacement credential. Work already accepted by the server is unaffected.
 
 Browser WebSockets use a fresh single-use ticket from
 ``POST /api/v1/auth/ws-ticket``. Tickets expire after 30 seconds and travel in

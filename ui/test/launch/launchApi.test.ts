@@ -3,13 +3,17 @@ import { QueryClient } from "@tanstack/react-query";
 
 import type { RunRecord } from "../../src/api/models";
 import { ApiError } from "../../src/api/client";
+import { auth } from "../../src/api/auth";
 import { fetchLaunchHosts, launchRequest, launchSeeds, outcomeUnknown, seedCommandId } from "../../src/launch/launchApi";
 import { type LaunchSpec, gpuCells } from "../../src/launch/plan";
 import { makeRecord } from "../pages/fixtures";
 import { type Call, HttpReply, mockApi, restoreFetch } from "../pages/helpers";
 import { GPU1, gpu, hostRow, launchHost } from "./fixtures";
 
-afterEach(restoreFetch);
+afterEach(() => {
+  restoreFetch();
+  auth.select(null);
+});
 
 const SPEC: LaunchSpec = {
   host: launchHost(),
@@ -29,6 +33,24 @@ const rec = (seed: number): RunRecord =>
   makeRecord({ run_id: `20261003-120000-uspto-forward-top1-s${seed}`, seed, status: "queued" });
 const seedOf = (call: Call): number => (call.body as { seed: number }).seed;
 const idOf = (call: Call): string => (call.body as { command_id: string }).command_id;
+
+test("a launch network retry cannot continue with a replacement credential", async () => {
+  auth.select("old-synthetic");
+  let attempts = 0;
+  mockApi({ "POST /api/v1/hosts/gpu1/runs": () => {
+    attempts += 1;
+    if (attempts === 1) throw new TypeError("connection reset");
+    return rec(1);
+  } });
+  const pending = launchSeeds(SPEC, [1, 2], "attempt", { delayMs: 50 });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(attempts).toBe(1);
+  auth.accept(auth.select("new-synthetic"));
+  const result = await pending;
+  expect(attempts).toBe(1);
+  expect(result.records).toEqual([]);
+  expect(result.failed?.error.name).toBe("AbortError");
+});
 
 describe("fetchLaunchHosts", () => {
   test("puts the hub first with its own GPUs and queue", async () => {

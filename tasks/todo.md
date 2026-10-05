@@ -431,3 +431,22 @@ Final Step 8 integration UI evidence: 930 Bun tests pass (84 files, 26.05s), all
 pass. The final API/core run is 247 passing tests. Static/types/build/Sphinx and
 schema byte comparison pass. Parent started final full Python and Docker runs after
 source freeze; those results and publication/current-head CI remain parent gates.
+
+## Final combined authentication checkpoint
+
+Local integration `acaf680` contains Step 7 and Step 8. Full Python **2,409 passed,
+3 skipped**, with 11 Docker tests run separately and all passing. Final combined
+UI **953 passed**. Complete authenticated browser suite **62 passed**; after the
+last caller guard, six affected auth/launch browser scenarios and 94 affected unit
+tests passed. All three shutdown scenarios pass. Types, build, Ruff/format/source
+ty and warning-as-error Sphinx pass.
+
+Independent combined review reproduced old actions retrying under replacement
+credentials, including scheduled launch retries and a late launch-dialog cache
+refresh. Generation checks now bind each intent, request attempt, progress callback
+and completion to its original credential. Failing-before/passing-after tests and
+independent recheck are retained in `/tmp/hx-handoff-evidence/token-final-ui/`.
+Final wheel bytes match all current UI assets and the auth/issuer/transport source;
+the sdist excludes internal plans/mockups. Evidence under `token-final-*` supersedes
+earlier candidate-only UI counts. Publication still follows the ordered Step 7/8
+merges and requires current-head green CI; Phase 3 remains documentation only.

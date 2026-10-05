@@ -20,6 +20,8 @@ in request headers and gets a fresh 30-second, single-use WebSocket ticket for
 each connection. Credentials never appear in URLs. A server restart normally
 rotates the token; a ``401`` clears cached data and returns to the gate. Explicit
 loopback ``--no-auth`` servers open without a token.
+Replacing the credential stops pending action retries and remaining seed launches;
+newly selected credentials apply only to new actions. Already accepted runs continue.
 
 Screens
 -------

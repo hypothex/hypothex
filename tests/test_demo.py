@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import time
 from collections import Counter, defaultdict
 from datetime import timedelta
@@ -12,9 +14,11 @@ from typer.testing import CliRunner
 from hypothex.api.app import _run_view, create_app
 from hypothex.cli.main import app as cli_app
 from hypothex.core import queries as q
+from hypothex.core import slurm
 from hypothex.core.context import Context
 from hypothex.core.control import repair_runs
 from hypothex.core.errors import ConfigError, StoreError
+from hypothex.core.execution import RunRequest, checkout_run_tree, prepare_run, release_worktree
 from hypothex.core.fsutil import read_jsonl
 from hypothex.core.ids import utcnow
 from hypothex.core.overview import build_overview
@@ -38,6 +42,7 @@ from hypothex.demo import (
 )
 from hypothex.remote.config import load_hosts
 from tests.api.envserver import wait_until
+from tests.factories import git
 
 REFS = {
     "generic": "toy-classifier/toy-test",
@@ -381,13 +386,17 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
             assert [row["x"] for row in cost.rows] == [f"v{i}" for i in range(1, 10)]
             # v1 (data.js): $74.28, $79.57, $75.70 for 80 solved targets in each seed
             assert cost.rows[0]["y"] == pytest.approx((74.28 + 79.57 + 75.70) / 240)
-            # regressions (contract 1.6). Solved: no drop is outside the best earlier
-            # version's CI (the largest, v6 0.558 vs v5 0.607, is inside v5's interval).
+            # regressions (contract 1.6): each version against the one just before it.
+            # Solved: no drop is outside the intervals (the largest, v6 0.558 vs v5 0.607,
+            # has y_hi 0.627 above v5's y_lo 0.536).
             assert not any(row["regression"] for row in solved.rows)
             # $ per solved is lower-is-better (usage.*), seed t-intervals over 3 seeds:
-            # v3 is the cheapest (0.918, hi 1.004); v4..v9 all have y_lo above 1.004
-            # (v4 1.127, v9 1.056), so each is flagged
-            assert [row["regression"] for row in cost.rows] == [False] * 3 + [True] * 6
+            # v4 (y_lo 1.127) costs more than v3 (y_hi 1.004) and v5 (1.314) more than v4
+            # (1.142); v6 (1.521) is inside v5's interval (hi 1.565); v7..v9 are cheaper
+            # than the version before them, so they are not flagged
+            assert [row["regression"] for row in cost.rows] == [False] * 3 + [True] * 2 + [
+                False
+            ] * 4
             # Changes: one row per version with only what changed (kinds/agent_iteration)
             changes = results["Changes"].rows
             assert [row["version"] for row in changes] == [f"v{i}" for i in range(1, 10)]
@@ -416,6 +425,15 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
             assert all(lo is not None and lo <= hi for d in deltas for _, lo, hi in d.values())
             # async: repeat p95s 163-169 ms vs baseline 231-235 ms, about -29%
             assert min(d["p95"][0] for d in deltas) < -0.25
+            # throughput: one chart of sweep/rps rows, named by config, over concurrency
+            throughput = results["Throughput vs concurrency"]
+            assert {row["name"] for row in throughput.rows} == {"sweep/rps"}
+            assert {row["label"] for row in throughput.rows} == {
+                "baseline",
+                "cache-enabled",
+                "async-worker",
+            }
+            assert min(row["step"] for row in throughput.rows) >= 1  # log2 axis
             # utilisation small multiples: one per config, its 3 repeats inside it
             util = results["Utilisation"]
             assert [g["label"] for g in util.meta["groups"]] == [
@@ -435,6 +453,14 @@ def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:
                 assert {row["label"] for row in results[title].rows} == names
                 assert results[title].meta["spec"]["encoding"]["y"]["field"] == "label"
         if kind == "agent_eval":
+            # cost per attempt, the stat strip's unit: Opus 5.5 spent $332.25 on 3 x 200
+            cost = {row["label"]: row for row in results["Cost vs solved"].rows}
+            assert cost["Opus 5.5"]["x"] == pytest.approx(
+                (108.2754 + 106.1396 + 117.8305) / 600, abs=1e-6
+            )
+            assert all(row["x"] < 1 for row in cost.values())
+            meta = results["Cost vs solved"].meta
+            assert (meta["x"], meta["x_unit"], meta["scale"]) == ("usage.usd/attempt", "$", "log")
             failures = results["Failures"]
             assert failures.meta["spec"]["encoding"]["y"]["field"] == "label"
             assert {row["label"] for row in failures.rows} == {
@@ -521,6 +547,9 @@ def test_seed_demo_hosts_writes_hosts_runs_and_the_sweep(hosts_home: Path) -> No
     cluster = Context.open(hosts_home / DEMO_HOSTS_DIR / "cluster")
     lost = next(r for r in cluster.index.list_runs(limit=None) if r.status == RunStatus.LOST)
     assert (lost.executor.slurm_job_id, lost.executor.node) == ("48211932", "r208u06n02")
+    assert lost.end_reason == (
+        "SLURM ended job 48211932 with NODE_FAIL on r208u06n02; no exit record"
+    )
     spec = load_sweep(hub.layout, "rxn-forward", DEMO_SWEEP_ID)
     assert spec.host == "gpu1" and spec.seeds == [1, 2, 3]
     tag = f"sweep:{hub.descriptor.environment_id[:8]}:{DEMO_SWEEP_ID}"  # the hub owns it
@@ -531,6 +560,41 @@ def test_seed_demo_hosts_writes_hosts_runs_and_the_sweep(hosts_home: Path) -> No
     assert len(gpus) == 8 and [g["index"] for g in gpus if g["external"]] == [3, 7]
 
 
+def test_demo_host_repositories_are_isolated_from_an_enclosing_git_checkout(tmp_path: Path) -> None:
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.name", "Outer repository")
+    git(tmp_path, "config", "user.email", "outer@example.invalid")
+    (tmp_path / "outside.txt").write_text("must not enter the demo checkout\n")
+    git(tmp_path, "add", "outside.txt")
+    git(tmp_path, "commit", "-qm", "outer repository")
+    outer_head = git(tmp_path, "rev-parse", "HEAD")
+    home = tmp_path / "ignored-demo"
+    seed_demo(home, ["training"])
+    seed_demo_hosts(home)
+    hub = Context.open(home)
+    repo = Path(hub.store.load_project("rxn-forward").repo)
+    assert Path(git(repo, "rev-parse", "--show-toplevel")).resolve() == repo.resolve()
+    commit = git(repo, "rev-parse", "HEAD")
+    assert commit != outer_head
+    for host in ("gpu1", "cluster"):
+        ctx = Context.open(home / DEMO_HOSTS_DIR / host)
+        host_repo = Path(ctx.store.load_project("rxn-forward").repo)
+        assert Path(git(host_repo, "rev-parse", "--show-toplevel")).resolve() == host_repo.resolve()
+        assert git(host_repo, "rev-parse", "HEAD") == commit
+        run = prepare_run(
+            ctx,
+            RunRequest(repo=host_repo, command=["python", "train.py"], commit=commit, queue=True),
+        )
+        tree = checkout_run_tree(ctx, run)
+        assert tree is not None
+        assert (tree / "hypothex.yaml").is_file()
+        assert (tree / "train.py").is_file()
+        assert not (tree / "outside.txt").exists()
+        assert release_worktree(ctx, run)
+    assert git(tmp_path, "rev-parse", "HEAD") == outer_head
+    assert git(tmp_path, "diff", "--name-only") == ""
+
+
 def test_seed_demo_hosts_refuses_twice_and_needs_training(hosts_home: Path, tmp_path: Path) -> None:
     with pytest.raises(StoreError, match="demo hosts already exist"):
         seed_demo_hosts(hosts_home)
@@ -538,6 +602,51 @@ def test_seed_demo_hosts_refuses_twice_and_needs_training(hosts_home: Path, tmp_
     seed_demo(other, ["generic"])
     with pytest.raises(ConfigError, match="--kinds training"):
         seed_demo_hosts(other)
+
+
+def test_seed_demo_hosts_does_not_initialize_an_unrelated_registered_repository(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    seed_demo(home, ["training"])
+    ctx = Context.open(home)
+    entry = ctx.store.load_project("rxn-forward")
+    outside = tmp_path / "user-project"
+    shutil.copytree(entry.repo, outside)
+    ctx.store.save_project(entry.model_copy(update={"repo": str(outside)}))
+    with pytest.raises(ConfigError, match="generated training demo"):
+        seed_demo_hosts(home)
+    assert not (outside / ".git").exists()
+    assert not (outside / "train.py").exists()
+    assert not (home / DEMO_HOSTS_DIR).exists()
+
+
+def test_fake_slurm_keeps_a_submitted_job_pending_until_scancel(
+    hosts_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty fake squeue made every new demo SLURM launch `lost` within a minute.
+    bin_dir = tmp_path / "bin"
+    shutil.copytree(hosts_home / DEMO_HOSTS_DIR / "cluster-bin", bin_dir)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    first = slurm.submit("#!/bin/sh\n", tmp_path, comment="hx-a")
+    second = slurm.submit("#!/bin/sh\n", tmp_path, comment="hx-b")
+    assert int(second) == int(first) + 1
+    jobs = slurm.poll([first, second])
+    assert {j: (s.state, s.node) for j, s in jobs.items()} == {
+        first: ("PENDING", None),
+        second: ("PENDING", None),
+    }
+    assert slurm.comment_accounting(refresh=True)
+    found, known = slurm.find_submitted("hx-b")
+    assert known and found is not None and (found.job_id, found.state) == (second, "PENDING")
+    slurm.cancel(first)
+    after = slurm.poll([first, second])
+    assert after[first].state == "CANCELLED" and slurm.is_finished(after[first])
+    assert after[second].state == "PENDING"
+    gone, known = slurm.find_submitted("hx-a")
+    assert known and gone is not None and gone.state == "CANCELLED"
+    slurm.cancel("48211932")  # a job the fake never queued: scancel says nothing
+    assert slurm.poll(["48211932"]) == {}
 
 
 def test_demo_hosts_running_does_nothing_without_the_marker(tmp_path: Path) -> None:
@@ -585,6 +694,13 @@ def test_demo_hosts_serve_connected_hosts_a_queue_and_a_sweep(tmp_path: Path) ->
                 "pending": 0,
                 "running": 0,
                 "comment_accounting": True,
+                "defaults": {
+                    "account": None,
+                    "extra": [],
+                    "gpus": 2,
+                    "partition": "gpu",
+                    "time": "08:00:00",
+                },
             }
             wait_until(lambda: rows()["gpu1"]["queue"] == 3, timeout=60)
 
@@ -774,3 +890,65 @@ def test_runs_launched_before_a_failed_launch_are_stopped(
         pass
     assert len(launched) == 1
     assert stopped == launched
+
+
+def _gpu_host(tmp_path: Path) -> Any:
+    import hypothex.demo as demo
+
+    return demo._DemoHost(
+        name="gpu1", kind="ssh", home=str(tmp_path / "gpu1"), repo=str(tmp_path), fake_gpus="x"
+    )
+
+
+def test_live_run_launch_fails_loudly_on_an_error_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    import hypothex.demo as demo
+
+    def error_get(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        body = {"error": "store busy", "type": "StoreError"}
+        return httpx.Response(503, json=body, request=httpx.Request("GET", url))
+
+    def no_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        raise AssertionError("no run may be launched")
+
+    monkeypatch.setattr(httpx, "get", error_get)
+    monkeypatch.setattr(httpx, "post", no_post)
+    host = _gpu_host(tmp_path)
+    with pytest.raises(httpx.HTTPStatusError):
+        demo._launch_live_runs(tmp_path / "hub", [host], {"gpu1": "http://gpu1"}, [])
+
+
+def test_live_run_launch_and_stop_send_command_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    import hypothex.demo as demo
+
+    home = tmp_path / "hub"
+    Context.open(home)
+    (home / DEMO_HOSTS_DIR).mkdir()
+    bodies: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    def empty_get(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(200, json=[], request=httpx.Request("GET", url))
+
+    def record_post(url: str, *args: Any, json: dict[str, Any], **kwargs: Any) -> httpx.Response:
+        bodies[url.rsplit("/", 1)[-1]].append(json)
+        answer = {"run_id": f"r{len(bodies['runs'])}"}
+        return httpx.Response(200, json=answer, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "get", empty_get)
+    monkeypatch.setattr(httpx, "post", record_post)
+    run_ids: list[str] = []
+    demo._launch_live_runs(home, [_gpu_host(tmp_path)], {"gpu1": "http://gpu1"}, run_ids)
+    first = [b["command_id"] for b in bodies.pop("runs")]
+    assert len(first) == len(set(first)) == len(run_ids) == 6
+    demo._launch_live_runs(home, [_gpu_host(tmp_path)], {"gpu1": "http://gpu1"}, [])
+    assert not set(first) & {b["command_id"] for b in bodies.pop("runs")}  # a new start
+    demo._stop_runs("http://gpu1", run_ids)
+    stops = [b["command_id"] for b in bodies["stop"]]
+    assert len(stops) == len(set(stops)) == 6

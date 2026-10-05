@@ -36,17 +36,25 @@ def run_remote(target: SshTarget, script: str, *, timeout: float = 120, input_by
 def copy_to(target: SshTarget, local: Path, remote_path: str, *, timeout: float = 300) -> None: ...
 def copy_from(target: SshTarget, remote_path: str, local: Path, *, work: Path, timeout: float = 600) -> None: ...   # work: <hub home>/pulls (staging + transaction records), see round 4
 class Tunnel:                          # one `ssh -N -L` subprocess
-    def __init__(self, target: SshTarget, remote_port: int, local_port: int | None = None) -> None: ...
-    local_port: int
+    def __init__(self, target: SshTarget, remote_port: int, local_port: int | None = None, *, registry: Path | None = None, private: bool = False) -> None: ...
+    local_port: int | None
+    unix_socket: Path | None
     def start(self) -> None: ...; def alive(self) -> bool: ...; def stop(self) -> None: ...
 ```
 `ssh_bin`/`scp_bin` come from env `HYPOTHEX_SSH` / `HYPOTHEX_SCP` (default `ssh`/`scp`) so tests substitute fakes. Options always include `-o BatchMode=yes`, `-o ExitOnForwardFailure=yes` (tunnels), `-o ServerAliveInterval=15 -o ServerAliveCountMax=3`.
+
+Hub SSH routes always use `private=True`: a fresh Unix socket inside a 0700
+directory, `StreamLocalBindMask=0177`, `StreamLocalBindUnlink=no`, no local TCP
+listener. An explicit TCP port with private mode is invalid. Unsupported private
+forwarding fails closed. Standalone `Tunnel` keeps its explicit TCP compatibility
+mode. Socket cleanup follows process termination and removes only the owned
+directory; birth-verified process cleanup and pending-operation draining still apply.
 
 ### 1.3 `hypothex.remote.bootstrap`
 
 ```python
 class ProbeResult(BaseModel): os: str; arch: str; python: str | None; uv: str | None; gpus: int; slurm: str | None; home: str
-class ServerInfo(BaseModel): pid: int; port: int; managed: bool; hx_version: str; protocol_version: int; token: str | None = None  # bearer token of the env server (from server.json, 0600); excluded from dumps
+class ServerInfo(BaseModel): pid: int; port: int; managed: bool; hx_version: str; protocol_version: int; token: str | None = None; environment_id: str | None = None  # token excluded from repr/dumps; identity optional only for legacy parsing
 def probe(target: SshTarget, home: str) -> ProbeResult: ...
 def build_wheel(cache_dir: Path) -> Path: ...                  # `uv build --wheel` of the running package, cached by version; reuse if present
 def install(target: SshTarget, home: str, wheel: Path) -> None: ...   # scp + `uv tool install --force` under <home>/runtime with a lock dir; installs uv into ~/.local/bin if missing
@@ -55,11 +63,20 @@ class BootstrapError(HypothexError): ...
 BOOTSTRAP_SCRIPTS: dict[str, str]   # POSIX sh templates: "probe", "install", "start", "stop", "logs"
 ```
 
+`ensure_server` returns a nonempty expected environment ID read from the remote
+home's `environment.json` through SSH on both start and reuse. It never derives
+that trusted ID from tunneled HTTP. A healthy older record without an identity
+field is enriched in memory without rewriting its metadata. Conflicting or
+malformed identity fails. A missing token field requires explicit upgrade/restart;
+present `token: null` denotes intentional no-auth. Token format is validated
+before model/client construction without including values in errors.
+
 ### 1.4 `hypothex.remote.client` — HTTP/WS client to an env server
 
 ```python
 class EnvClient:
-    def __init__(self, base_url: str, *, timeout: float = 10, token: str | None = None) -> None: ...  # token -> Authorization: Bearer (HTTP and WS)
+    def __init__(self, base_url: str, *, timeout: float = 10, token: str | None = None, unix_socket: Path | None = None) -> None: ...  # token -> Authorization: Bearer (HTTP and WS); private routes disable proxy environment
+    def identity(self) -> EnvironmentIdentity: ...  # always unauthenticated, no redirects
     def descriptor(self) -> EnvironmentDescriptor: ...
     def get_json(self, path: str, **params: Any) -> Any: ...
     def post_json(self, path: str, body: dict[str, Any]) -> Any: ...
@@ -67,6 +84,14 @@ class EnvClient:
     async def events(self, after_sequence: int) -> AsyncIterator[Event]: ...   # WS subscribe, yields events, ends on disconnect
 ```
 Uses `httpx` and `websockets` (or `httpx-ws`; plan picks one, adds it with `uv add`).
+
+`EnvironmentIdentity` contains only `environment_id`, `protocol_version` and
+`hx_version`, ignoring extra fields from older/no-auth servers. `descriptor()`
+retains the full authenticated descriptor contract. The hub verifies `identity()`
+against the SSH-sourced expected ID before constructing bearer clients; liveness
+pings also use identity without Authorization. Private-route `base_url` supplies
+logical HTTP Host/path semantics, not a public local dial address. SSH host status
+reports `local_port: null` and never exposes the private socket path.
 
 ### 1.5 `hypothex.remote.hub` — supervisors and mirror
 
@@ -77,7 +102,7 @@ class HostState(BaseModel):
     environment_id: str | None = None; hx_version: str | None = None; last_sequence: int = 0
     local_port: int | None = None
 class Hub:
-    def __init__(self, ctx: Context, hosts: EnvironmentsFile) -> None: ...
+    def __init__(self, ctx: Context, hosts: EnvironmentsFile, *, configured_hosts: Callable[[], Iterable[str]] | None = None) -> None: ...  # live names, including disabled hosts; defaults to hosts
     async def start(self) -> None: ...       # one supervisor task per host
     async def stop(self) -> None: ...
     def state(self, name: str) -> HostState: ...
@@ -93,6 +118,11 @@ MIRROR_MAX_BYTES = 200 * 1024 * 1024
 ```
 Backoff 3/4/8/16 s, reset after 30 s connected. Cursor persisted in the hub index table `host_cursors(host, environment_id, last_sequence)`. Mirror writes go through `RunStore` and `index_run`: each changed file is fetched whole into a per-run staging folder, and only when every fetch succeeded is the run id claimed hub-wide (`<store>/.claims/<run_id>.json`) and are the files installed in one pass under the run lock (no appends, no byte offsets). A listed file the host does not serve is listed again once: still missing, its local copy is deleted; too big (or refused twice), its local copy is deleted and its entry (`{reason, size, max_bytes}`) is written to `<run_dir>/.hx/mirror-skips.json`, never next to the file. `.hx/` in a run folder is reserved for Hypothex's own state: the env files route refuses any path whose first component is `.hx` (404) and the mirror never fetches one, so a host file such as `predictions/x.skipped` is mirrored like any other. `.mirror-index-pending` is written before the first change to a run folder and removed last; a replay that finds it re-indexes, and the hub re-indexes such runs when it starts. Mirror events are re-emitted as `mirror.run_updated` with payload `{host, environment_id, original_type, remote_sequence, status, reason?}`: `original_type` is the host's event type, and `reason` is copied from the host's event when it has one (`run.lost`, `run.killed`, `run.failed`, e.g. a SLURM `NODE_FAIL`). Hub marks a host `stale` after 60 s without a successful ping; runs on stale hosts are shown stale (derived, never written as status).
 
+Identity ownership is reserved before the first awaited cursor read: under the shared `.claims` lock, check the environment's cursor rows and legacy run claims against all configured names (including disabled hosts), then upsert a cursor at sequence zero without reducing an existing sequence. Cursor resets retain the row at zero; rebuilds retain cursor rows. Other configured owners cause a terminal connection error. Ownership survives connection-setting changes and is released only after removal and draining that host's pending mirrors. A newly accepted alias for an environment whose old names were removed updates matching run-claim `host` fields before mirroring. Run claims also reject direct writes from a different host until this explicit transfer. Historical cursor rows remain, but forwarding ignores names no longer configured and prefers the current alias even after a removed alias was seen in this process. Historical ownership still identifies a removed host's mirrored runs, preventing local-only curation or re-evaluation.
+
+Pre-upgrade claims containing only `{project, environment_id}` gain a `host` label only after the existing cursor rows establish exactly one original owner. This validation precedes any new cursor reservation or claim change and remains under the shared claim lock. Missing or ambiguous cursor ownership refuses the connection with instructions to restore verified host labels or original cursor metadata; the connecting descriptor does not establish legacy ownership.
+When moving such an environment to a new alias, normalize every hostless claim to the verified original owner before adding the new alias cursor. Then transfer labelled claims to the new alias. Interrupted normalization retains one saved owner; interrupted transfer has no remaining hostless claims, so either stage can resume after restart.
+
 ### 1.6 Env-server additions (`hypothex.core` on the host)
 
 ```python
@@ -101,7 +131,7 @@ class ExecutorInfo(...):   # add
     host: str | None = None; gpus: list[int] = []; slurm_job_id: str | None = None; node: str | None = None; queue_position: int | None = None
 class CostTotals(BaseModel): gpu_hours: float = 0; gpu_usd: float = 0; api_usd: float = 0; total_usd: float = 0
 class RunRecord(...):      # add
-    cost: CostTotals | None = None; sweep_id: str | None = None; gpus_requested: int = 0
+    cost: CostTotals | None = None; sweep_id: str | None = None; gpus_requested: int = 0; end_reason: str | None = None
 # hypothex.core.gpus
 class GpuInfo(BaseModel): index: int; name: str; util: float; mem_used_mb: int; mem_total_mb: int; external: bool; run_id: str | None = None
 def query_gpus() -> list[GpuInfo]: ...     # nvidia-smi --query-gpu / --query-compute-apps; [] when absent; HYPOTHEX_FAKE_GPUS=<json path> overrides for tests
@@ -122,7 +152,7 @@ def cancel(job_id: str) -> None: ...
 # hypothex.core.cost
 def compute_cost(record: RunRecord, usd_per_gpu_hour: float | None) -> CostTotals: ...
 ```
-`hx serve --kind slurm|ssh` (default from `environment.json` / probe) enables the scheduler loop (ssh, every 5 s) or the SLURM poll loop (every 30 s). Run-start path: `prepare_run` accepts `gpus: int`, `queue: bool`, `slurm: SlurmDefaults | None`, `commit: str | None` (hex sha, fetched when missing), `diff: str | None` (applied on `commit` in a worktree, 8A.4). The hub always sends `commit` with `diff`.
+`hx serve --kind slurm|ssh` (default from `environment.json` / probe) enables the scheduler loop (ssh, every 5 s) or the SLURM poll loop (every 30 s). Run-start path: `prepare_run` accepts `gpus: int`, `queue: bool`, `slurm: SlurmDefaults | None`, `commit: str | None` (hex sha, fetched when missing), `diff: str | None` (applied on `commit` in a worktree, 8A.4). The hub always sends `commit` with `diff`. Changed (DF-50): a pinned run's own worktree `<store>/<project>/worktrees/<run_id>` (its `cwd` and `{repo}`) is made when the run starts (`execution.checkout_run_tree`, from `<run_dir>/.hx/checkout.json` and `.hx/checkout.diff`; a SLURM run gets it before `sbatch`), never while it waits. `prepare_run` reads config and captures from one staging checkout per (commit, diff) at `<store>/<project>/staging/<sha>-<diff hash>`, shared by the queued runs that pin it and removed when the last of them starts or ends.
 
 ### 1.7 Sweeps (`hypothex.core.sweeps`)
 
@@ -132,10 +162,13 @@ class SweepSpec(BaseModel, extra="forbid"): id: str; project: str; task: str | N
 def expand(spec: SweepSpec, rng_seed: int = 0) -> list[dict[str, str]]: ...   # grid product (+ random samples), each dict = params; seeds applied separately
 def save_sweep(layout: Layout, spec: SweepSpec) -> Path: ...    # <store>/<project>/sweeps/<id>.yaml
 def load_sweep(layout: Layout, project: str, sweep_id: str) -> SweepSpec: ...
-class SweepSummary(BaseModel): spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []; tag: str = ""   # tag = the sweep's member tag sweep:<owner8>:<id>; run_ids derived: indexed runs with that tag, launch order
-def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary: ...   # cells: {params, group_id, n, mean, lo, hi, run_ids}
+class CancelResult(BaseModel): asked: int = 0; failed: int = 0; errors: list[str] = []
+class SweepSummary(BaseModel): spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []; tag: str = ""; cancel: CancelResult | None = None; issuance: SweepIssuance | None = None   # tag = the sweep's member tag sweep:<owner8>:<id>; run_ids derived: indexed runs with that tag, launch order
+def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary: ...   # cells: {params, group_id, n, mean, lo, hi, std, uncounted, run_ids, runs}; uncounted = scored members in other seed groups, excluded from this cell's displayed statistics
 ```
 Sweep membership is derived from the tag `sweep:<owner8>:<id>`, never stored; `owner8` is the first 8 characters of the environment id that holds the definition (the hub), so two hubs' sweeps with the same id on one host never share runs. Clients read `SweepSummary.tag` instead of building the tag. Each (params, seed) has one deterministic command id (`run_command_id`: 16 hex of a SHA-256 over the owning environment, project, sweep id, sorted params, seed); launch, a retried launch, and extend save the definition and issue every missing (params, seed) with it, and command receipts make a repeat the same run.
+
+For a legacy or direct-local sweep without `spec.commit`, extension uses the first run's recorded commit and saved `git.diff`. A dirty first run whose patch is missing or too large to capture is refused before the definition grows or a member is launched; a missing mirror-side marker does not prove that the recorded commit was clean. `SweepIncompleteError.launched` counts known existing member cells plus acknowledged launches, including already mirrored cells later in launch order. A lost remote response may still conceal an accepted member and is reconciled through its deterministic command ID.
 
 ## 2. HTTP API additions
 
@@ -144,7 +177,7 @@ Hub (and env servers where marked *env*):
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
 | GET | `/api/v1/hosts` | | `list[{name, kind: "local" \| HostKind, state: HostState, gpus: list[GpuInfo], queue: int, slurm: {pending, running, comment_accounting: bool\|null}\|null, cost_today_usd: float, usd_per_gpu_hour: float\|null, projects: list[str], stale_banner_hours: float}]` (first row: the hub, `name` and `kind` `"local"`; `stale_banner_hours` is the same on every row; `comment_accounting` false: the cluster's accounting keeps no job comments, so an unknown submission can never be settled; null: not known, the host is not connected) |
-| POST | `/api/v1/hosts/reload` | `{command_id?}` | the host rows after re-reading `environments.yaml` (`hx hosts add\|map\|rm` call it) |
+| POST | `/api/v1/hosts/reload` | `{command_id?}` | the host rows after re-reading `environments.yaml` (`hx hosts map\|rm` call it; `hx hosts add\|upgrade` call `/api/v1/hosts/{host}/connect`, which also re-reads `environments.yaml` and starts the new host) |
 | POST | `/api/v1/hosts/{host}/connect` / `/disconnect` | `{command_id?}` | `HostState` |
 | POST | `/api/v1/hosts/{host}/runs` | launch body + `{gpus, queue, slurm?: SlurmDefaults, project?, commit?, diff?}`; the project by name (a `repo` path is used only when it is a folder on the hub); without `commit` the hub pins its own checkout's HEAD (and sends its uncommitted diff); with `commit` the body's `diff` (none for a clean run) | run record (forwarded) |
 | GET | `/api/v1/runs` | phase 1 filters + `environment_id?`; `limit` is never capped below the request | `list[RunRecord]` |
@@ -157,15 +190,34 @@ Hub (and env servers where marked *env*):
 | GET | `/api/v1/sweeps/{project}/{id}` | | `SweepSummary` |
 | GET | `/api/v1/sweeps/{id}` | | `SweepSummary` (any project; for clients on another machine) |
 | GET | `/api/v1/projects/{project}/sweeps` | | `list[{id, created_at, n_runs, best}]` |
-| POST | `/api/v1/sweeps/{project}/{id}/cancel_queued` | `{command_id?}` | `SweepSummary` (queued runs of the sweep stopped as `killed`) |
-| POST | `/api/v1/sweeps/{project}/{id}/extend` | `{seeds: list[int], command_id?}` | `SweepSummary` (adds runs for every param combination × new seeds) |
+| POST | `/api/v1/sweeps/{project}/{id}/cancel_queued` | `{command_id?}` | `SweepSummary` (queued runs of the sweep stopped as `killed`; `cancel: {asked, failed, errors}` counts the stops that failed, DF-49) |
+| POST | `/api/v1/sweeps/{project}/{id}/extend` | `{seeds: list[int], command_id?}` | `SweepSummary` (adds runs for every param combination × new seeds, pinned to `spec.commit`/`spec.diff`: the client's commit and diff, else the hub checkout's at create time; audit CONF-1a) |
 | POST | `/api/v1/runs/{id}/pull` | `{artifact: kind or path, command_id?}` | `{local_path}`; 400 when the destination name starts with `.hx-` |
 
-Run actions on remote runs (stop, rerun, reinfer, reeval, tags, star, archive, notes) keep their routes; the hub forwards to the owning host by `environment_id`. A run of an environment no configured host serves gets `503` for stop, rerun, reinfer, and reeval. `GET /api/v1/runs/{id}` adds `host_state: ConnState | null` (null = local).
+Run actions on remote runs (stop, rerun, reinfer, reeval, tags, star, archive, notes) keep their routes; the hub forwards to the owning host by `environment_id`. A run of an environment no configured host serves gets `503` for stop, rerun, reinfer, and reeval; also for tags, star, archive, and notes when the hub mirrored it from a host (it has a `host_cursors` row), since the host's copy replaces the hub's on the next mirror (audit INT-F2a). `GET /api/v1/runs/{id}` adds `served: bool` (local ownership or a configured verified host route) and `host_state: ConnState | null` (null means no known host state, not proof of local ownership); so does each row of `GET /api/v1/runs`, so the CLI and MCP can show a stale host when they list runs through the hub (audit CONF-4a).
 
 Additive fields (spec 8A.7): leaderboard rows add `cost: CostTotals | null` (sum of the group's runs); the Overview adds `cost_usd` (runs in the window) and `cost_today_usd`.
 
-Env servers (`hx serve --kind ssh|slurm`) require `Authorization: Bearer <token>` on every route except `/.well-known/hypothex/environment`; the token is in the host's `<home>/serve/server.json` (0600) and reaches the hub as `ServerInfo.token`. The hub's own server (the UI) needs no token.
+All servers (`hx serve --kind local|ssh|slurm`) require a bearer token by default.
+Each actual start generates a fresh token unless `HYPOTHEX_SERVE_TOKEN` explicitly
+supplies one; healthy server reuse preserves it. Only GET/HEAD of the exact
+`/.well-known/hypothex/environment` and installed static UI/navigation are public.
+The token stays in `<home>/serve/server.json` (0600); the UI obtains it through
+explicit local `hx token`, then sends Authorization headers. The helper validates
+home, hostname, environment ID and exact process birth without network access.
+`--no-auth` is restricted to loopback; `--kind local` persists the switch back
+without changing identity. Explicit bearer format is 1–4096 ASCII letters/digits
+or `-._~+/`, with optional trailing `=`; invalid values fail without echoing them.
+
+`POST /api/v1/auth/ws-ticket` returns `{ticket, expires_in: 30}` with no-store under
+bearer authentication; explicit no-auth returns `{ticket: null, expires_in: 0}`.
+Tickets are monotonic-expiring, atomic single-use, process-local, with a 256-ticket
+cap (`429` when full after expiry pruning). Browsers offer `hypothex.v1` and
+`hx-ticket.<ticket>` on `/api/v1/ws`; only the fixed protocol is selected. No secret
+enters the URL. Host/Origin validation precedes consumption; malformed/duplicate
+credentials fail, and invalid supplied bearer cannot fall back to a ticket.
+Existing bearer-header WebSockets remain supported. Phase 3 scoped AuthGuard
+will replace this default guard when enabled, not stack behind root-only auth.
 
 ## 3. CLI and MCP additions
 
@@ -194,7 +246,7 @@ All additive; nothing was renamed. `ServerInfo.token` and `EnvClient(token=)` (e
 
 ## Changes after review round 1 (2026-10-03)
 
-Additive unless noted. `EnvironmentsFile.stale_banner_hours` (default 24) and `stale_banner_hours` on every `GET /api/v1/hosts` row (spec 5.6 banner); `POST /api/v1/hosts/reload`; `GET /api/v1/runs?environment_id=` with no cap below the requested `limit`; `GET /api/v1/sweeps/{id}`; `POST /api/v1/hosts/{host}/runs` takes the project by name and an optional `commit` (no path, no diff needed from the UI). Spec 5.7: `--hosts a,b` (a queue across hosts) is dropped; a run targets one host (a scope change, not an addition). Backend-only additions the frontend does not use: `submit(..., comment=)`, `find_submitted`, `launch_sweep(..., command_id=)`, `EventLog.append_once`, `Index.list_runs(environment_id=)`. A foreground (`--foreground`) rerun or reinfer on a SLURM host is refused ("SLURM runs are always submitted; drop --foreground"); a SLURM host's home must support `flock` (the env server refuses to start without it).
+Additive unless noted. `EnvironmentsFile.stale_banner_hours` (default 24) and `stale_banner_hours` on every `GET /api/v1/hosts` row (spec 5.6 banner); `POST /api/v1/hosts/reload`; `GET /api/v1/runs?environment_id=` with no cap below the requested `limit`; `GET /api/v1/runs?before_created_at=&before_run_id=` keyset pages (the last row of the previous page; both or neither, else `400`; audit PERF-F13b); the WebSocket subscribe takes `after_sequence: "latest"` (no replay) and an optional `max_replay: int >= 1`; past it the server sends `{type: "reset", last_sequence}` instead of the replay, then `ready` (clients without `max_replay`, such as the hub mirror, still get every event; audit PERF-F10b); `GET /api/v1/sweeps/{id}`; `POST /api/v1/hosts/{host}/runs` takes the project by name and an optional `commit` (no path, no diff needed from the UI). Spec 5.7: `--hosts a,b` (a queue across hosts) is dropped; a run targets one host (a scope change, not an addition). Backend-only additions the frontend does not use: `submit(..., comment=)`, `find_submitted`, `launch_sweep(..., command_id=)`, `EventLog.append_once`, `Index.list_runs(environment_id=)`. A foreground (`--foreground`) rerun or reinfer on a SLURM host is refused ("SLURM runs are always submitted; drop --foreground"); a SLURM host's home must support `flock` (the env server refuses to start without it).
 
 ## Changes after review round 2 (2026-10-03)
 
@@ -207,3 +259,45 @@ Additive unless noted. `SweepSummary.tag` (the member tag); changed: sweep runs 
 ## Changes after review round 4 (2026-10-03)
 
 Hypothex's own state lives only in reserved locations that remote and artifact paths can never address. Changed: the mirror's skip notes move from `<file>.skipped` markers next to the file to `<run_dir>/.hx/mirror-skips.json` (`{path: {reason, size, max_bytes}}`); the env files route answers 404 for any path whose first component is `.hx`, and the mirror never fetches one (`HX_DIR`, `reserved_run_path` in `hypothex.core.layout`). Changed (backend-only): `copy_from(..., work=)` keeps its staging, transaction records, and backups in `<hub home>/pulls/` (`stage/`, `txn/<uuid>.json`, `backup/<uuid>`) instead of `.hx-pull-*` names next to the destination; recovery reads only `pulls/txn/`. `POST /api/v1/runs/{id}/pull` refuses a destination whose name starts with `.hx-` (400). UI: the run page links a run's sweep only when its `sweep:<owner8>:<id>` tag names this hub; otherwise the id is plain text.
+
+
+## Dogfood HTTP and client integration (2026-10-05)
+
+- `ReinferBody.vars: dict[str, str] = {}` carries template overrides through HTTP,
+  `hx reinfer --var name=value`, and MCP `reinfer(..., vars=...)`. Recorded params
+  remain metadata rather than command substitutions.
+- `POST /api/v1/runs/stop_queued` takes `run_ids` (1–50) plus ordinary action
+  identity fields. It conditionally stops queued members and returns `CancelResult`;
+  running members remain running. Remote sweep cancellation uses this batch route.
+- Host rows retain their current verified environment identity while offline and
+  expose `slurm.defaults` for launch defaults. Historical identities cannot override
+  a contradicting current identity. `served` is authoritative for run actions.
+- `RunRecord.end_reason` persists terminal causes. It is nullable for historical
+  records; a later legitimate reconciliation clears or replaces obsolete reasons.
+- `SweepSummary.issuance` and sweep-list `issuance` are nullable for legacy/direct
+  core sweeps. The object contains `state`, `episode`, `revision`, `planned`,
+  `accepted_at`, `updated_at`, `cancel_requested`, `reason`, `error`, and `resume`.
+  States are `preparing|queued|issuing|settling|issued|incomplete|interrupted`.
+  `planned` counts cumulative unique cells in the persisted definition; summary
+  counts remain observed members. `issued` concerns launch accounting, not finished
+  experiment runs. Error is `{type,message}`; resume is `{seeds,message}`.
+- HTTP create and durable-sweep extend accept issuance and return immutable original
+  receipts. Extensions of legacy sweeps retain synchronous behavior.
+  Replaying a command ID does not resume it or return current state; GET does.
+  Preparation is recoverable; accepted queued work resumes automatically. Interrupted
+  or incomplete work requires explicit resume using reported seeds. Concurrent active
+  extension gets 409. Direct local/core issuance keeps synchronous semantics.
+- Cancellation records intent even for zero-member accepted issuance, prevents future
+  launches, drains an in-flight call, and conditionally stops its queued result. Running
+  members continue. Repeated cancellation command IDs return original receipts.
+  Incomplete/interrupted episodes retain known member IDs and unresolved admissions
+  across explicit resume. Cancellation also drains this retained accounting, even
+  when no member is mirrored yet; uncertainty is never resolved from timeout alone.
+- `sweep.issuance` carries `project` and `sweep_id` in its payload; state transition,
+  acceptance receipt and event share a transaction in `events.db`. UI invalidates the
+  matching summary/list and polls active issuance every two seconds.
+- MCP adds compact-by-default `list_runs(..., full=False)`, `get_logs`,
+  `compare_examples`, metric pins on `get_leaderboard`, and default agent attribution
+  inherited from `hx mcp`'s `HYPOTHEX_AGENT` unless a tool call overrides it.
+
+See `docs/http_api.rst`, `docs/mcp.rst` and `docs/sweeps.rst` for examples.

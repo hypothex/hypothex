@@ -365,7 +365,10 @@ class _FakeUvicorn:
         for sock in sockets or []:
             sock.close()
         host, port = self._asked
-        self.calls.append({"app": server.config.app, "host": host, "port": port})
+        # server.json exists only while the server runs: keep its token for the test
+        info = Path(os.environ["HYPOTHEX_HOME"]) / "serve" / "server.json"
+        token = json.loads(info.read_text())["token"] if info.is_file() else None
+        self.calls.append({"app": server.config.app, "host": host, "port": port, "token": token})
 
 
 @pytest.fixture
@@ -388,18 +391,19 @@ def test_serve_refuses_a_non_loopback_host_without_a_token(
     home: Path, fake_uvicorn: _FakeUvicorn, host: str
 ) -> None:
     with pytest.raises(ConfigError) as exc:
-        runner.invoke(app, ["serve", "--host", host], catch_exceptions=False)
+        runner.invoke(app, ["serve", "--host", host, "--no-auth"], catch_exceptions=False)
     message = str(exc.value)
     assert host in message and "HYPOTHEX_SERVE_TOKEN" in message
     assert "arbitrary commands" in message and "ssh -L" in message
     assert fake_uvicorn.calls == []
 
 
-def test_serve_on_loopback_needs_no_token(home: Path, fake_uvicorn: _FakeUvicorn) -> None:
+def test_serve_on_loopback_generates_a_token(home: Path, fake_uvicorn: _FakeUvicorn) -> None:
     result = runner.invoke(app, ["serve"], catch_exceptions=False)
     assert result.exit_code == 0
     [call] = fake_uvicorn.calls
     assert call["host"] == "127.0.0.1" and call["port"] == 7777
+    assert len(call["token"]) == 48
 
 
 def test_serve_with_a_token_binds_anywhere_and_enforces_it(
@@ -441,7 +445,10 @@ def test_env_server_makes_a_token_when_none_is_given(
     [call] = fake_uvicorn.calls
     with TestClient(call["app"], base_url="http://127.0.0.1:7777") as c:  # type: ignore[arg-type]
         assert c.get("/api/v1/runs").status_code == 401
-        assert c.get("/.well-known/hypothex/environment").json()["kind"] == "slurm"
+        descriptor = "/.well-known/hypothex/environment"
+        assert "kind" not in c.get(descriptor).json()  # host facts only for the token holder
+        good = {"Authorization": f"Bearer {call['token']}"}
+        assert c.get(descriptor, headers=good).json()["kind"] == "slurm"
 
 
 def test_show_says_untracked_files_only(in_repo: Path) -> None:

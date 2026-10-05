@@ -1,12 +1,15 @@
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 from pathlib import Path
 
 import httpx
+import pytest
 
+from hypothex.cli import main as cli_main
 from tests.api.envserver import wait_until
 
 HX = [sys.executable, "-m", "hypothex.cli.main"]
@@ -24,7 +27,8 @@ def test_serve_writes_server_json_and_reports_kind(tmp_path: Path) -> None:
         info = wait_until(lambda: json.loads(info_path.read_text()), timeout=30)
         assert info["pid"] == proc.pid and info["managed"] is False and info["port"] > 0
         url = f"http://127.0.0.1:{info['port']}/.well-known/hypothex/environment"
-        descriptor = wait_until(lambda: httpx.get(url, timeout=2).json(), timeout=30)
+        good = {"Authorization": f"Bearer {info['token']}"}
+        descriptor = wait_until(lambda: httpx.get(url, headers=good, timeout=2).json(), timeout=30)
         assert descriptor["kind"] == "ssh"
     finally:
         proc.terminate()
@@ -172,3 +176,89 @@ def test_serve_replaces_the_record_of_a_dead_server(tmp_path: Path) -> None:
     finally:
         proc.terminate()
         proc.wait(timeout=30)
+
+
+def test_write_private_ignores_a_stale_tmp_mode(tmp_path: Path) -> None:
+    path = tmp_path / "serve" / "server.json"
+    path.parent.mkdir()
+    stale = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    stale.write_text("old")
+    stale.chmod(0o644)
+    cli_main._write_private(path, '{"token": "t"}')
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert path.read_text() == '{"token": "t"}'
+
+
+def test_write_private_removes_its_tmp_when_the_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "serve" / "server.json"
+
+    def failing_replace(src: object, dst: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli_main.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="disk full"):
+        cli_main._write_private(path, "{}")
+    assert not path.with_name(f".{path.name}.{os.getpid()}.tmp").exists()
+    assert not path.exists()
+
+
+def test_serve_kind_goes_back_to_local_after_a_trial_ssh(tmp_path: Path) -> None:
+    # The local role is persisted independently of default token authentication.
+    home = tmp_path / "h"
+    assert cli_main.resolve_serve_kind(home, "ssh") == "ssh"
+    assert cli_main.resolve_serve_kind(home, None) == "ssh"  # the saved kind sticks
+    cli_main.check_serve_kind("local")
+    assert cli_main.resolve_serve_kind(home, "local") == "local"
+    assert cli_main.resolve_serve_kind(home, None) == "local"
+    assert json.loads((home / "environment.json").read_text())["kind"] == "local"
+    assert cli_main._serve_token("127.0.0.1", "local", False) is not None
+    with pytest.raises(cli_main.ConfigError, match="or local to serve as the hub"):
+        cli_main.check_serve_kind("gpu")
+
+
+def test_local_default_restart_rotates_token_and_owner_helper(tmp_path: Path) -> None:
+    home = tmp_path / "h"
+    previous: str | None = None
+    environment: str | None = None
+    for _ in range(2):
+        proc = _serve(home, "--kind", "local")
+        try:
+            info = wait_until(
+                lambda: json.loads((home / "serve" / "server.json").read_text()), timeout=30
+            )
+            assert info["home"] == str(home.resolve())
+            assert isinstance(info["pid_create_time"], float)
+            assert info["environment_id"]
+            if environment is not None:
+                assert info["environment_id"] == environment
+            environment = info["environment_id"]
+            base = f"http://127.0.0.1:{info['port']}"
+            wait_until(
+                lambda base=base: (
+                    httpx.get(base + "/.well-known/hypothex/environment").status_code == 200
+                )
+            )
+            result = subprocess.run(
+                [*HX, "--home", str(home), "token"], capture_output=True, text=True, timeout=30
+            )
+            assert result.returncode == 0 and result.stdout.strip() == info["token"]
+            assert result.stderr == ""
+            assert httpx.get(base + "/api/v1/projects").status_code == 401
+            if previous is not None:
+                assert info["token"] != previous
+                assert (
+                    httpx.get(
+                        base + "/api/v1/projects", headers={"Authorization": "Bearer " + previous}
+                    ).status_code
+                    == 401
+                )
+            good = {"Authorization": "Bearer " + info["token"]}
+            assert httpx.get(base + "/api/v1/projects", headers=good).status_code == 200
+            previous = info["token"]
+        finally:
+            proc.terminate()
+            proc.wait(timeout=30)
+    with pytest.raises(cli_main.ConfigError):
+        cli_main.local_server_token(home)

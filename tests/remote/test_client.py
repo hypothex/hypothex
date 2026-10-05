@@ -25,13 +25,13 @@ from tests.factories import seed_finished_run
 
 
 @contextlib.contextmanager
-def live_server(home: Path) -> Iterator[str]:
+def live_server(home: Path, *, auth_token: str | None = None) -> Iterator[str]:
     """Serve ``create_app(home)`` with uvicorn on a free loopback port in a thread."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
-    app = create_app(home, background_repair=False)
+    app = create_app(home, background_repair=False, auth_token=auth_token)
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="on"))
     thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
     thread.start()
@@ -113,10 +113,27 @@ def test_get_json_drops_none_params_and_post_json(
     runs = env.get_json("/api/v1/runs", project="toy", task=None)
     assert [r["run_id"] for r in runs] == ["r1"]
     assert env.get_json("/api/v1/runs", project="other") == []
-    tagged = env.post_json("/api/v1/runs/r1/tags", {"add": ["sweep:s1"], "command_id": "c-1"})
-    assert tagged["tags"] == ["sweep:s1"]
-    again = env.post_json("/api/v1/runs/r1/tags", {"add": ["sweep:s1"], "command_id": "c-1"})
+    tagged = env.post_json("/api/v1/runs/r1/tags", {"add": ["baseline"], "command_id": "c-1"})
+    assert tagged["tags"] == ["baseline"]
+    again = env.post_json("/api/v1/runs/r1/tags", {"add": ["baseline"], "command_id": "c-1"})
     assert again == tagged
+
+
+def test_post_json_can_wait_longer_than_the_client_timeout(
+    env: EnvClient, ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    seen: list[Any] = []
+    real = env._http.request
+
+    def spy(method: str, url: str, **kw: Any) -> httpx.Response:
+        seen.append(kw.get("timeout", "client default"))
+        return real(method, url, **kw)
+
+    monkeypatch.setattr(env._http, "request", spy)
+    env.post_json("/api/v1/runs/r1/star", {"on": True})
+    env.post_json("/api/v1/runs/r1/star", {"on": True}, timeout=600)
+    assert seen == ["client default", 600]
 
 
 def test_server_errors_keep_status_and_type(env: EnvClient) -> None:
@@ -418,3 +435,259 @@ def test_closed_subscription_does_not_hold_the_server(home: Path, ctx: Context) 
         assert [e.type for e in events] == ["test.event"]
         stopping = time.monotonic()
     assert time.monotonic() - stopping < 5  # uvicorn waits for open WebSocket handlers
+
+
+def test_identity_never_sends_authorization() -> None:
+    seen: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200, json={"environment_id": "remote", "protocol_version": 1, "hx_version": "1"}
+        )
+
+    with EnvClient("http://example.test", token="secret") as client:
+        client._http.close()
+        client._http = httpx.Client(
+            transport=httpx.MockTransport(respond),
+            base_url=client.base_url,
+            headers=client.auth_headers(),
+        )
+        assert client.identity().environment_id == "remote"
+        assert "authorization" not in seen[0].headers
+
+
+@pytest.mark.parametrize("token", ["", "secret\n", "non ascii é"])
+def test_invalid_token_before_client_creation(token: str) -> None:
+    from hypothex.core.errors import ConfigError
+
+    with pytest.raises(ConfigError):
+        EnvClient("http://example.test", token=token)
+
+
+def test_remote_errors_redact_known_bearer() -> None:
+    import traceback
+
+    token = "reflected-secret"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": token, "type": token})
+
+    with EnvClient("http://example.test", token=token) as client:
+        client._http.close()
+        client._http = httpx.Client(
+            transport=httpx.MockTransport(respond), base_url=client.base_url
+        )
+        with pytest.raises(EnvRequestError) as error:
+            client.get_json("/api/v1/runs")
+        assert token not in "".join(traceback.format_exception(error.value))
+        assert token not in str(error.value.error_type)
+
+
+def test_transport_errors_do_not_render_secret_context() -> None:
+    import traceback
+
+    token = "reflected-secret"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(token)
+
+    with EnvClient("http://example.test", token=token) as client:
+        client._http.close()
+        client._http = httpx.Client(
+            transport=httpx.MockTransport(respond), base_url=client.base_url
+        )
+        with pytest.raises(EnvUnreachableError) as error:
+            client.get_json("/api/v1/runs")
+        assert token not in "".join(traceback.format_exception(error.value))
+
+
+def test_authenticated_http_files_and_websocket_over_private_ssh(
+    home: Path,
+    ctx: Context,
+    toy_repo: Path,
+    tmp_path: Path,
+    fake_remote: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from hypothex.remote.ssh import Tunnel
+
+    caplog.set_level("DEBUG", logger="websockets.client")
+    run_dir = ctx.run_dir(seed_finished_run(ctx, toy_repo, "r1"))
+    fake_remote.add_host("gpu1")
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(key, "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    with live_server(home, auth_token="private-secret") as url:
+        port = int(url.rsplit(":", 1)[1])
+        with (
+            Tunnel(fake_remote.target("gpu1"), port, private=True) as tunnel,
+            EnvClient(
+                "http://localhost", token="private-secret", unix_socket=tunnel.unix_socket
+            ) as client,
+        ):
+            identity = client.identity()
+            assert identity.environment_id == ctx.descriptor.environment_id
+            assert client.descriptor().environment_id == identity.environment_id
+            assert [run["run_id"] for run in client.get_json("/api/v1/runs")] == ["r1"]
+            dest = tmp_path / "fetched.yaml"
+            assert client.fetch_file("r1", "run.yaml", dest, max_bytes=100_000)
+            assert dest.read_bytes() == (run_dir / "run.yaml").read_bytes()
+            sequence = ctx.events.append("test.private", payload={"ok": True}).sequence
+            events = asyncio.run(_take(client.events(sequence - 1), 1))
+            assert events[0].sequence == sequence
+    assert "private-secret" not in caplog.text
+
+
+def test_identity_rejects_redirect_and_never_replays_bearer() -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            302,
+            headers={"Location": "http://trap.test/"},
+            json={"environment_id": "e", "protocol_version": 1, "hx_version": "1"},
+        )
+
+    with EnvClient("http://example.test", token="secret") as client:
+        client._http.close()
+        client._http = httpx.Client(
+            base_url=client.base_url,
+            headers=client.auth_headers(),
+            transport=httpx.MockTransport(respond),
+        )
+        with pytest.raises(EnvRequestError, match="redirect"):
+            client.identity()
+    assert len(requests) == 1 and "authorization" not in requests[0].headers
+
+
+def test_websocket_rejects_redirect_without_replaying_credentials() -> None:
+    received: list[str] = []
+
+    async def handler(ws: ServerConnection) -> None:
+        await ws.close()
+
+    def redirect(ws: ServerConnection, request: Request) -> Response:
+        received.append(request.path)
+        response = ws.respond(HTTPStatus.TEMPORARY_REDIRECT, "redirect")
+        response.headers["Location"] = "/trap"
+        return response
+
+    async def scenario() -> None:
+        async with fake_ws(handler, process_request=redirect) as url:
+            with EnvClient(url, token="secret") as client:
+                async for _ in client.events(0):
+                    pass
+
+    with pytest.raises(EnvRequestError, match="HTTP 307"):
+        asyncio.run(scenario())
+    assert received == ["/api/v1/ws"]
+
+
+@pytest.mark.parametrize("reflection", ["header", "reason"])
+def test_http_transport_diagnostics_never_log_reflected_bearer(
+    caplog: pytest.LogCaptureFixture, reflection: str
+) -> None:
+    token = "SYNTHETIC_HTTP_DIAGNOSTIC_SECRET"
+
+    class Stream:
+        def __init__(self) -> None:
+            reason = token if reflection == "reason" else "OK"
+            status = f"HTTP/1.1 200 {reason}\r\nContent-Length: 2\r\n"
+            self.body = (status + f"X-Diagnostic: {token}\r\n\r\n{{}}").encode()
+
+        def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+            body, self.body = self.body, b""
+            return body
+
+        def write(self, buffer: bytes, timeout: float | None = None) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def get_extra_info(self, info: str) -> None:
+            return None
+
+    class Backend:
+        def connect_unix_socket(self, *args: object, **kwargs: object) -> Stream:
+            return Stream()
+
+        def connect_tcp(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("TCP forbidden")
+
+    caplog.set_level("DEBUG")
+    with EnvClient(
+        "http://localhost", token=token, unix_socket=Path("/tmp/not-a-real-socket")
+    ) as client:
+        client._http._transport._pool._network_backend = Backend()
+        response = client._http.get("/api/v1/projects")
+        assert response.json() == {}
+        assert response.headers["X-Diagnostic"] == token  # transport data is preserved
+    assert token not in caplog.text
+
+
+@pytest.mark.parametrize("failure", [404, 413, "large", "nested"])
+def test_complete_folder_fetch_reports_any_skipped_child(
+    tmp_path: Path, failure: int | str
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        rel = request.url.path.split("/files/", 1)[1]
+        if rel == "predictions":
+            return httpx.Response(
+                200,
+                json=[
+                    {"path": "predictions/good", "size": 2},
+                    {"path": "predictions/bad", "size": 99 if failure == "large" else 1},
+                ],
+                headers={"X-Hypothex-Dir": "1"},
+            )
+        if rel == "predictions/good":
+            return httpx.Response(200, content=b"ok")
+        if failure == "nested" and rel == "predictions/bad":
+            return httpx.Response(
+                200,
+                json=[{"path": "predictions/bad/missing", "size": 1}],
+                headers={"X-Hypothex-Dir": "1"},
+            )
+        return httpx.Response(failure if isinstance(failure, int) else 404)
+
+    client = _mock_client(handler)
+    assert (
+        client.fetch_file(
+            "r1", "predictions", tmp_path / "strict", max_bytes=10, require_complete=True
+        )
+        is False
+    )
+    # Mirroring intentionally retains its longstanding best-effort behavior.
+    assert client.fetch_file("r1", "predictions", tmp_path / "mirror", max_bytes=10) is True
+
+
+def test_complete_empty_folder_is_materialized(tmp_path: Path) -> None:
+    client = _mock_client(lambda _: httpx.Response(200, json=[], headers={"X-Hypothex-Dir": "1"}))
+    dest = tmp_path / "empty"
+    assert client.fetch_file("r1", "predictions", dest, max_bytes=10, require_complete=True)
+    assert dest.is_dir() and list(dest.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "error,may_have_been_sent",
+    [
+        (httpx.ConnectError, False),
+        (httpx.ConnectTimeout, False),
+        (httpx.PoolTimeout, False),
+        (httpx.ReadTimeout, True),
+        (httpx.WriteTimeout, True),
+        (httpx.ReadError, True),
+    ],
+)
+def test_transport_outcome_uses_typed_pre_send_evidence(
+    error: type[httpx.TransportError], may_have_been_sent: bool
+) -> None:
+    client = _mock_client(lambda _: (_ for _ in ()).throw(error("fake transport")))
+    with pytest.raises(EnvUnreachableError) as caught:
+        client.post_json("/api/v1/runs", {"command_id": "fake"})
+    assert caught.value.may_have_been_sent is may_have_been_sent

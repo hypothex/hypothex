@@ -41,12 +41,20 @@ export function shortGpuName(name: string): string {
   return parts.length > 0 ? parts.join(" ") : name;
 }
 
-/** `5×A100 80GB` when every GPU is the same model and size, `3 GPUs` otherwise, `""` for none. */
-export function gpuSpec(gpus: GpuInfo[]): string {
-  if (gpus.length === 0) return "";
+/**
+ * `count` GPUs named after `gpus`: `2×A100 80GB` when every one of `gpus` is the same model
+ * and size, else `1 GPU`, `2 GPUs`. The one GPU text of the hosts grid and the run page.
+ */
+export function gpuCountLabel(count: number, gpus: readonly GpuInfo[]): string {
   const kinds = new Set(gpus.map((g) => `${shortGpuName(g.name)} ${Math.round(g.mem_total_mb / 1024)}GB`));
   const [only] = [...kinds];
-  return kinds.size === 1 && only ? `${gpus.length}×${only}` : `${gpus.length} GPUs`;
+  if (kinds.size === 1 && only) return `${count}×${only}`;
+  return `${count} ${count === 1 ? "GPU" : "GPUs"}`;
+}
+
+/** `5×A100 80GB` when every GPU is the same model and size, `3 GPUs` otherwise, `""` for none. */
+export function gpuSpec(gpus: GpuInfo[]): string {
+  return gpus.length === 0 ? "" : gpuCountLabel(gpus.length, gpus);
 }
 
 // GPU cells ----------------------------------------------------------------------------------
@@ -266,13 +274,18 @@ export function hostsMetaline(totals: HostTotals, hubVersion: string | null, nHo
   ];
 }
 
-/** The current time, refreshed every `intervalMs` (stale ages tick without a refetch). */
-export function useNow(intervalMs = 30_000): number {
+/**
+ * The current time, refreshed every `intervalMs` (stale ages tick without a refetch). With
+ * `enabled` false the clock stands still; turned on, it reads the time at once.
+ */
+export function useNow(intervalMs = 30_000, enabled = true): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (!enabled) return;
+    setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), intervalMs);
     return () => clearInterval(id);
-  }, [intervalMs]);
+  }, [intervalMs, enabled]);
   return now;
 }
 
@@ -280,7 +293,7 @@ export function useNow(intervalMs = 30_000): number {
 
 /** Panel CSS, scoped under `.page .hosts`, `.page .hosts-key` and `.page .hosts-banner` (values from the mockup). */
 export const HOSTS_CSS = `
-.page .hosts { font-variant-numeric: tabular-nums; }
+.page .hosts { container-type: inline-size; font-variant-numeric: tabular-nums; }
 .page .hosts .hrow { display: grid; grid-template-columns: 168px 132px minmax(0, 1fr) 52px 70px 70px; gap: 0 18px; align-items: center; padding: 14px 0; border-top: 1px solid var(--rule-2); }
 .page .hosts .hrow.head { padding: 0 0 8px; border-top: 0; border-bottom: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); align-items: end; }
 .page .hosts .hrow.head + .hrow { border-top: 0; }
@@ -327,6 +340,14 @@ export const HOSTS_CSS = `
 .page .hosts-key .ne { color: var(--fail); font-weight: 650; }
 .page .hosts-banner { margin: 12px 0 0; padding: 10px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-size: 14px; color: var(--ink-2); }
 .page .hosts-banner b { color: var(--ink); font-weight: 600; }
+@container (max-width: 1050px) {
+  .page .hosts .hrow { grid-template-columns: minmax(140px, 1fr) minmax(100px, 1fr) 52px 70px 70px; gap: 12px 18px; }
+  .page .hosts .hrow > :nth-child(3) { grid-column: 1 / -1; grid-row: 2; }
+  .page .hosts .hrow.head .gidx { display: none; }
+  .page .hosts .cells { display: flex; flex-wrap: wrap; }
+  .page .hosts .gc { flex: 1 1 80px; min-width: 0; }
+  .page .hosts .msg { overflow-wrap: anywhere; }
+}
 `;
 
 /**

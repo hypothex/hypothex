@@ -57,6 +57,8 @@ describe("lost reasons", () => {
           url: "ws://127.0.0.1:1/api/v1/ws",
           clock,
           storage: null,
+          head: null,
+          ticket: null, // fake socket: no live issuer, as with the fake head lookup
           createSocket: () => {
             const socket = new StubSocket();
             sockets.push(socket);

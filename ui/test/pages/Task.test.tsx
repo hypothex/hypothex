@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { PanelRegistryContext } from "../../src/pages/components/PanelGrid";
 import type { QueryResponse, ViewDetail, ViewInfo } from "../../src/pages/components/types";
-import { TaskPage, boardMeta } from "../../src/pages/Task";
-import { makeBoard } from "./fixtures";
+import type { RunRecord } from "../../src/api/models";
+import { hostRow } from "../launch/fixtures";
+import { TaskPage, boardMeta, reevalLine } from "../../src/pages/Task";
+import { REPO, RUN_RF, RUN_SVM, makeBoard, makeDetail, makeRecord } from "./fixtures";
 import { type Call, HttpReply, fakeRegistry, mockApi, renderWithClient, restoreFetch } from "./helpers";
 
 afterEach(() => {
@@ -53,7 +55,8 @@ function routes(view: string): Record<string, unknown> {
     [`GET ${BASE}/views`]: VIEWS,
     [`GET ${BASE}/views/${view}`]: detail(info),
     [`POST ${BASE}/views/query`]: PANELS,
-    [`POST ${BASE}/reeval`]: { evaluated: 12 },
+    [`POST ${BASE}/reeval`]: { evaluated: ["r1", "r2"], skipped: {}, warnings: [] },
+    "GET /api/v1/projects/toy-classifier/sweeps": [],
   };
 }
 
@@ -62,6 +65,22 @@ const registry = fakeRegistry(["stat_strip", "leaderboard"]);
 test("boardMeta counts configs and runs and lists metric versions", () => {
   expect(boardMeta(makeBoard())).toEqual(["2 configs, 6 runs", "accuracy v1", "macro_f1 v1"]);
   expect(boardMeta({ ...makeBoard(), needs_reeval: ["r1"] }).at(-1)).toBe("1 need re-eval");
+});
+
+test("reevalLine counts re-scored and skipped runs, with each skip reason", () => {
+  expect(reevalLine({ evaluated: ["a", "b"], skipped: {}, warnings: [] })).toBe("2 re-scored");
+  expect(reevalLine({ evaluated: [], skipped: { a: "no predictions" }, warnings: [] })).toBe(
+    "0 re-scored · 1 skipped: no predictions",
+  );
+  expect(
+    reevalLine({
+      evaluated: ["a"],
+      skipped: { b: "no predictions", c: "no predictions", d: "metric failed" },
+      warnings: ["w1", "w2"],
+    }),
+  ).toBe("1 re-scored · 3 skipped: no predictions ×2, metric failed ×1 · 2 warnings");
+  // a partial answer must not break the line
+  expect(reevalLine({} as never)).toBe("0 re-scored");
 });
 
 describe("TaskPage", () => {
@@ -121,6 +140,241 @@ describe("TaskPage", () => {
     const body = calls.find((c) => c.url === `${BASE}/reeval`)?.body as Record<string, unknown>;
     expect(typeof body.command_id).toBe("string");
     expect(body.created_by).toBe("human");
+    expect((await screen.findByRole("status", { name: "Re-evaluate" })).textContent).toBe("2 re-scored");
+  });
+
+  test("Re-evaluate all says when it re-scored nothing, and why", async () => {
+    mockApi({
+      ...routes("overview"),
+      [`POST ${BASE}/reeval`]: { evaluated: [], skipped: { r9: "no predictions" }, warnings: [] },
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "Re-evaluate all" }));
+    const status = await screen.findByRole("status", { name: "Re-evaluate" });
+    expect(status.textContent).toBe("0 re-scored · 1 skipped: no predictions");
+    expect(status.getAttribute("title")).toBe("r9: no predictions");
+  });
+
+  const RUNS_URL = "GET /api/v1/runs?project=toy-classifier&task=toy-test&archived=true&limit=1000";
+
+  /** Routes behind the New run dialog: task detail, template run, task runs, hosts. */
+  function newRunRoutes(): Record<string, unknown> {
+    return {
+      ...routes("overview"),
+      [`GET ${BASE}`]: {
+        summary: { project: "toy-classifier", name: "toy-test" },
+        repo: REPO,
+        dataset: { name: "toyset" },
+        metrics: {},
+        stages: {},
+      },
+      [`GET /api/v1/runs/${RUN_SVM}`]: makeDetail(),
+      [RUNS_URL]: [
+        makeRecord({ run_id: "20260926-200000-toy-test-aa01", seed: 1 }),
+        makeRecord({ run_id: "20260926-200100-toy-test-aa02", seed: 2 }),
+        makeRecord({ run_id: RUN_RF, seed: 9, config_hash: "sha256:5a810ddb4e0c2f19" }),
+      ],
+      "GET /api/v1/hosts": [hostRow("local", { kind: "local" }, { environment_id: "env-5c1e" })],
+      "GET /api/v1/gpus": [],
+      "GET /api/v1/queue": [],
+    };
+  }
+
+  test("New run opens the launch dialog from the best config and links the launched runs", async () => {
+    const calls = mockApi({
+      ...newRunRoutes(),
+      "POST /api/v1/runs": (call: Call) => {
+        const seed = (call.body as { seed: number }).seed;
+        return makeRecord({ run_id: `20261003-120000-toy-test-s${seed}`, seed, status: "running" });
+      },
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    expect(within(dialog).getByText("toy-classifier / toy-test")).toBeTruthy();
+    expect((within(dialog).getByLabelText("Command") as HTMLTextAreaElement).value).toBe(
+      "python train_eval.py --model svm --seed={seed}",
+    );
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("4, 5, 6");
+    await waitFor(() =>
+      expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true),
+    );
+    fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: "svm holds on new seeds" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Launch 3" }));
+
+    const line = await waitFor(() => {
+      const el = document.querySelector("p.launched");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(line.textContent).toBe("Launched 3 on local: s4 s5 s6");
+    expect(within(line).getByRole("link", { name: "s4" }).getAttribute("href")).toBe(
+      "/r/20261003-120000-toy-test-s4",
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    const sent = calls.filter((c) => c.method === "POST" && c.url === "/api/v1/runs");
+    expect(sent.map((c) => (c.body as { seed: number }).seed)).toEqual([4, 5, 6]);
+    expect(sent[0]?.body).toMatchObject({
+      repo: REPO,
+      task: "toy-test",
+      command: ["python", "train_eval.py", "--model", "svm", "--seed={seed}"],
+      hypothesis: "svm holds on new seeds",
+      gpus: 0,
+      queue: false,
+    });
+  });
+
+  test("New run opened again after a launch proposes the seeds after the ones it started", async () => {
+    const started: RunRecord[] = [];
+    const base = newRunRoutes();
+    const calls = mockApi({
+      ...base,
+      // each launch invalidates runs; the reopened dialog must read the new runs, not the cache
+      [RUNS_URL]: () => [...(base[RUNS_URL] as RunRecord[]), ...started],
+      "POST /api/v1/runs": (call: Call) => {
+        const seed = (call.body as { seed: number }).seed;
+        const rec = makeRecord({ run_id: `20261003-120000-toy-test-s${seed}`, seed, status: "running" });
+        started.push(rec);
+        return rec;
+      },
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    const launch = async (hypothesis: string): Promise<string> => {
+      fireEvent.click(screen.getByRole("button", { name: "New run" }));
+      const dialog = await screen.findByRole("dialog", { name: "New run" });
+      const seeds = (within(dialog).getByLabelText("Seeds") as HTMLInputElement).value;
+      await waitFor(() =>
+        expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true),
+      );
+      fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: hypothesis } });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Launch 3" }));
+      await waitFor(() => expect(document.querySelector('[role="dialog"]') === null).toBe(true));
+      return seeds;
+    };
+    expect(await launch("first")).toBe("4, 5, 6");
+    expect(await launch("second")).toBe("7, 8, 9");
+    const sent = calls.filter((c) => c.method === "POST" && c.url === "/api/v1/runs");
+    expect(sent.map((c) => (c.body as { seed: number }).seed)).toEqual([4, 5, 6, 7, 8, 9]);
+  });
+
+  test("New run reopened after runs started elsewhere reads the runs again instead of its cache", async () => {
+    const elsewhere: RunRecord[] = [];
+    const base = newRunRoutes();
+    mockApi({ ...base, [RUNS_URL]: () => [...(base[RUNS_URL] as RunRecord[]), ...elsewhere] });
+    const { client } = renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    let dialog = await screen.findByRole("dialog", { name: "New run" });
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("4, 5, 6");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(document.querySelector('[role="dialog"]') === null).toBe(true));
+    // an agent launches seeds 4-6 of the config while the dialog is closed; its run event marks runs stale
+    elsewhere.push(...[4, 5, 6].map((seed) => makeRecord({ run_id: `20261003-130000-toy-test-e${seed}`, seed })));
+    await act(() => client.invalidateQueries({ queryKey: ["runs"] }));
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    dialog = await screen.findByRole("dialog", { name: "New run" });
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("7, 8, 9");
+  });
+
+  test("lists the project's sweeps with their best config, each linking its sweep page", async () => {
+    mockApi({
+      ...routes("overview"),
+      "GET /api/v1/projects/toy-classifier/sweeps": [
+        {
+          id: "s-7f3a",
+          created_at: "2026-10-03T09:12:00Z",
+          n_runs: 6,
+          best: { params: { lr: "3e-4", beam: "10" }, group_id: "g-7e3f", n: 3, mean: 0.9121, lo: 0.9109, hi: 0.9133, run_ids: [] },
+        },
+        { id: "s-1b2c", created_at: "2026-10-02T09:00:00Z", n_runs: 4, best: null },
+      ],
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    const line = await screen.findByLabelText("Sweeps");
+    expect(line.textContent).toBe("sweeps: s-7f3a ×6 lr 3e-4, beam 10 0.9121 · s-1b2c ×4");
+    expect(within(line).getByRole("link", { name: "s-7f3a" }).getAttribute("href")).toBe("/s/toy-classifier/s-7f3a");
+  });
+
+  test("New run reads past the first 1,000 runs: an older seed of the template's config is never proposed", async () => {
+    // the newest 1,000 runs belong to other configs; the template's seed 4 is older
+    const newest = Array.from({ length: 1000 }, (_, i) =>
+      makeRecord({ run_id: `20261001-000000-toy-test-n${i}`, seed: 1, config_hash: "sha256:other" }),
+    );
+    const older = makeRecord({ run_id: "20260901-000000-toy-test-old4", seed: 4 });
+    const last = newest.at(-1);
+    const cursor = `before_created_at=${encodeURIComponent(last?.created_at ?? "")}&before_run_id=${last?.run_id}`;
+    mockApi({
+      ...newRunRoutes(),
+      [RUNS_URL]: newest,
+      // the next page after the newest 1,000 (keyset); a server without keyset paging
+      // answers the newest 4,000 instead, which fetchAllRuns also reads
+      [`GET /api/v1/runs?project=toy-classifier&task=toy-test&archived=true&limit=4000&${cursor}`]: [older],
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("5, 6, 7");
+  });
+
+  test("New run counts the seeds of archived runs: an archived seed of the template's config is never proposed", async () => {
+    const base = newRunRoutes();
+    const archived = makeRecord({ run_id: "20260927-000000-toy-test-arch4", seed: 4, archived: true });
+    mockApi({ ...base, [RUNS_URL]: [...(base[RUNS_URL] as RunRecord[]), archived] });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    expect((within(dialog).getByLabelText("Seeds") as HTMLInputElement).value).toBe("5, 6, 7");
+  });
+
+  test("a leaderboard update while the dialog is open keeps the dialog and what was typed", async () => {
+    mockApi(newRunRoutes());
+    const { client } = renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    const dialog = await screen.findByRole("dialog", { name: "New run" });
+    fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: "svm holds on new seeds" } });
+    // a run event: the best config's latest run is now another run, whose read never ends
+    const board = makeBoard();
+    const [best] = board.rows;
+    if (best === undefined) throw new Error("fixture has no rows");
+    board.rows = [{ ...best, latest_run_id: "20261004-000000-toy-test-new1" }, ...board.rows.slice(1)];
+    client.setQueryData(["leaderboard", "toy-classifier", "toy-test", []], board);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const still = screen.getByRole("dialog", { name: "New run" });
+    expect((within(still).getByLabelText("Hypothesis") as HTMLInputElement).value).toBe("svm holds on new seeds");
+    expect((within(still).getByLabelText("Command") as HTMLTextAreaElement).value).toBe(
+      "python train_eval.py --model svm --seed={seed}",
+    );
+  });
+
+  test("New run shows the runs read error instead of a dialog with possibly used seeds", async () => {
+    mockApi({
+      ...newRunRoutes(),
+      [RUNS_URL]: new HttpReply(500, { error: "runs index unreadable", type: "StoreError" }),
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("runs index unreadable");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("New run shows the template run read error instead of a blank dialog", async () => {
+    mockApi({
+      ...newRunRoutes(),
+      [`GET /api/v1/runs/${RUN_SVM}`]: new HttpReply(404, { error: `no run ${RUN_SVM}`, type: "StoreError" }),
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    await screen.findByRole("region", { name: "a Best" });
+    fireEvent.click(screen.getByRole("button", { name: "New run" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(`no run ${RUN_SVM}`);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   test("a tab switch does not draw the previous view's panels under the new view", async () => {
@@ -172,4 +426,72 @@ describe("TaskPage", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("no view 'nope' for toy-test");
     expect(screen.queryByRole("region")).toBeNull();
   });
+
+  test("an unknown project shows one not-found state with no actions", async () => {
+    const gone = new HttpReply(404, { error: "unknown project 'nope'", type: "StoreError" });
+    const NOPE = "/api/v1/tasks/nope/nope";
+    mockApi({
+      [`GET ${NOPE}/leaderboard`]: gone,
+      [`GET ${NOPE}/views`]: gone,
+      [`GET ${NOPE}/views/overview`]: gone,
+      [`POST ${NOPE}/views/query`]: gone,
+    });
+    renderWithClient(<TaskPage project="nope" task="nope" />, { registry });
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Not found"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.getAllByRole("alert").map((a) => a.textContent)).toEqual(["unknown project 'nope'"]);
+    expect(screen.queryByRole("navigation", { name: "Views" })).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.queryByRole("link", { name: "+ view" })).toBeNull();
+    expect(screen.getByRole("link", { name: "All projects" }).getAttribute("href")).toBe("/");
+  });
+
+  test("an unknown task in a known project (400 ConfigError) shows the same not-found state", async () => {
+    const gone = new HttpReply(400, { error: "unknown task 'nope' in project 'toy-classifier'", type: "ConfigError" });
+    const NOPE = "/api/v1/tasks/toy-classifier/nope";
+    mockApi({
+      [`GET ${NOPE}/leaderboard`]: gone,
+      [`GET ${NOPE}/views`]: gone,
+      [`GET ${NOPE}/views/overview`]: gone,
+      [`POST ${NOPE}/views/query`]: gone,
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="nope" />, { registry });
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Not found"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.getAllByRole("alert").map((a) => a.textContent)).toEqual([
+      "unknown task 'nope' in project 'toy-classifier'",
+    ]);
+    expect(screen.queryByRole("navigation", { name: "Views" })).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  test("another 400 ConfigError is not a not-found state", async () => {
+    mockApi({
+      ...routes("overview"),
+      [`GET ${BASE}/leaderboard`]: new HttpReply(400, { error: "bad metric 'x'", type: "ConfigError" }),
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    expect((await screen.findByRole("alert")).textContent).toBe("bad metric 'x'");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).not.toBe("Not found");
+  });
+
+  test("a server error on the board is not a not-found state", async () => {
+    mockApi({
+      ...routes("overview"),
+      [`GET ${BASE}/leaderboard`]: new HttpReply(500, { error: "index locked", type: "StoreError" }),
+    });
+    renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+    expect((await screen.findByRole("alert")).textContent).toBe("index locked");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("toy-test");
+    expect(screen.getByRole("button", { name: "Re-evaluate all" })).toBeTruthy();
+  });
+});
+
+test("unscored count is separate from stale scores and drift cites stored refs", async () => {
+  const board = { ...makeBoard(), unscored: ["u1", "u2"], needs_reeval: ["old"], metric_drift: ["accuracy@v1"] };
+  expect(boardMeta(board)).toEqual(["2 configs, 6 runs", "accuracy v1", "macro_f1 v1", "1 need re-eval", "2 unscored"]);
+  mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: board });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  const warning = await screen.findByRole("img", { name: "Metric source drift" });
+  expect(warning.title).toBe("Different stored metric source hashes: accuracy@v1");
 });

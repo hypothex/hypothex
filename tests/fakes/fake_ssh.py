@@ -119,16 +119,19 @@ def bridge(client: socket.socket, host: str, port: int) -> None:
 def serve_forward(spec: str, exit_on_failure: bool, home: Path, alias: str) -> None:
     """Listen on the local side of ``-L spec`` and relay until killed or host down."""
     parts = spec.split(":")
+    private = spec.startswith("/")
     if len(parts) == 3:
-        parts = ["127.0.0.1", *parts]
+        parts = ["unix" if private else "127.0.0.1", *parts]
     if len(parts) != 4:
         fail(f"Bad local forwarding specification '{spec}'")
     bind, lport, host, rport = parts
     host = "127.0.0.1" if host == "localhost" else host
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server = socket.socket(socket.AF_UNIX if private else socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        server.bind((bind or "127.0.0.1", int(lport)))
+        server.bind(lport if private else (bind or "127.0.0.1", int(lport)))
+        if private:
+            os.chmod(lport, 0o600)
     except OSError:
         sys.stderr.write(f"bind [{bind}]:{lport}: Address already in use\n")
         if exit_on_failure:

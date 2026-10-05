@@ -253,3 +253,15 @@ describe("CommandPalette", () => {
     expect(screen.getByText("Nothing matches")).toBeTruthy();
   });
 });
+
+test("run params are searchable and owned sweeps are unique per project", () => {
+  const h = handlers();
+  const run = makeRun({ run_id: "p1", params: { lr: "0.1" }, sweep_id: "s-one", tags: ["sweep:abcdefgh:s-one"] });
+  const data = { projects: [], tasks: [], hubEnvironmentId: "abcdefgh-rest", runs: [run, { ...run, run_id: "p2" }, { ...run, run_id: "p3", project: "other" }, { ...run, run_id: "foreign", tags: ["sweep:zzzzzzzz:s-one"] }] };
+  const items = buildCommands(data, h);
+  expect(filterCommands(items, "lr=0.1").filter((i) => i.group === "Runs")).toHaveLength(4);
+  expect(items.filter((i) => i.group === "Sweeps")).toHaveLength(2);
+  items.find((i) => i.group === "Sweeps")?.run();
+  expect(h.calls[0]).toEqual(["go", { to: "/s/$project/$id", params: { project: "toy", id: "s-one" } }]);
+  expect(buildCommands({ ...data, hubEnvironmentId: null }, h).some((i) => i.group === "Sweeps")).toBe(false);
+});

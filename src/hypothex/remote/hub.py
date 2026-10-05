@@ -20,7 +20,7 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -38,12 +38,13 @@ from hypothex.core.fsutil import atomic_write_text, read_yaml
 from hypothex.core.ids import utcnow
 from hypothex.core.index import index_run
 from hypothex.core.layout import HX_DIR, reserved_run_path
-from hypothex.core.records import ACTIVE_STATUSES, Artifact, RunRecord
+from hypothex.core.records import Artifact, DatasetRef, RunRecord, RunStatus
 from hypothex.core.store import ProjectEntry, dir_lock, run_lock
+from hypothex.core.tokens import redact_bearer_token
 from hypothex.remote.bootstrap import BootstrapError, ensure_server
 from hypothex.remote.client import EnvClient, EnvRequestError, RemoteFile
 from hypothex.remote.config import EnvironmentsFile, HostKind, HostSpec
-from hypothex.remote.ssh import SshTarget, Tunnel
+from hypothex.remote.ssh import SshTarget, Tunnel, reap_stale_tunnels
 
 log = logging.getLogger(__name__)
 
@@ -62,27 +63,39 @@ MIRROR_FILES = (
     "git.diff",
     "git.stat",
 )
+"""Copied from each host as written there: text such as ``notes.md`` is untrusted on the hub
+(``mirror_source`` names where it came from)."""
 MIRROR_DIRS = ("predictions", "traces", "samples", "env", "logs")
 MIRROR_MAX_BYTES = 200 * 1024 * 1024
 LOG_TAIL_BYTES = 8 * 1024 * 1024
 """Logs are mirrored as tails (spec 5.3, 8A.3): at most the last 8 MiB of each, fetched whole."""
 CLAIMS_DIR = ".claims"
-"""``<store>/.claims/<run_id>.json``: the project and environment that own a mirrored run id."""
+"""``<store>/.claims/<run_id>.json``: the project, environment, and host that own a mirrored
+run id."""
 INDEX_PENDING = ".mirror-index-pending"
 """Written (durably) before a mirror first changes a run folder and removed after its index
 and manifest; seen again (a replay, or the next hub start), the index is redone."""
 SKIPS_FILE = f"{HX_DIR}/mirror-skips.json"
 """``<run_dir>/.hx/mirror-skips.json``: ``{path: {reason, size, max_bytes}}`` for every listed file
 the hub does not hold. ``.hx/`` is reserved (``reserved_run_path``): no host path can address it."""
+HOST_PATHS_FILE = f"{HX_DIR}/host-paths.json"
+"""``<run_dir>/.hx/host-paths.json``: ``{host, run_dir, repo}``, where a mirrored run lives on its
+host (the ``paths`` of the host's ``GET /api/v1/runs/{id}``); fetched once per verified owner."""
+HOST_PATH_KEYS = ("run_dir", "repo")
 
 BACKOFF_SECONDS: tuple[float, ...] = (3.0, 4.0, 8.0, 16.0)
 STABLE_AFTER_SECONDS = 30.0
 STALE_AFTER_SECONDS = 60.0
 PING_INTERVAL_SECONDS = 10.0
 PING_TIMEOUT_SECONDS = 5.0
+STALE_CHECK_SECONDS = 1.0
+TUNNELS_DIR = "hub/tunnels"
+"""``<home>/hub/tunnels/<pid>.json``: one record per running ``ssh -L`` tunnel of the hub, so the
+next hub start stops the tunnels of a hub that was killed (``reap_stale_tunnels``)."""
 REMOTE_FILE_KIND = "remote_file"
 MANIFEST_NAME = ".mirror.json"
-_SAFE_NAME = re.compile(r"[A-Za-z0-9_.-]{1,200}")
+# No leading dot: dot folders are skipped by the cross-project scan, and "." / ".." escape
+_SAFE_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,199}")
 _MESSAGE_LIMIT = 2000
 
 
@@ -216,7 +229,7 @@ def wanted_path(rel: str) -> bool:
 
 
 def _safe_name(name: str | None) -> bool:
-    return name is not None and name not in (".", "..") and _SAFE_NAME.fullmatch(name) is not None
+    return name is not None and _SAFE_NAME.fullmatch(name) is not None
 
 
 def _read_manifest(run_dir: Path) -> dict[str, list[int]]:
@@ -251,7 +264,7 @@ def _claim_path(ctx: Context, run_id: str) -> Path:
 
 
 def _claim_owner(ctx: Context, run_id: str) -> dict[str, str] | None:
-    """The ``{project, environment_id}`` that claimed ``run_id``, or None."""
+    """The project, environment, and host that claimed ``run_id``, or None."""
     try:
         data = json.loads(_claim_path(ctx, run_id).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -260,10 +273,18 @@ def _claim_owner(ctx: Context, run_id: str) -> dict[str, str] | None:
         data = None
     if not isinstance(data, dict):  # unreadable: never taken over
         return {"project": "?", "environment_id": "?"}
-    return {"project": str(data.get("project")), "environment_id": str(data.get("environment_id"))}
+    owner = {
+        "project": str(data.get("project")),
+        "environment_id": str(data.get("environment_id")),
+    }
+    if isinstance(data.get("host"), str) and data["host"]:
+        owner["host"] = data["host"]
+    return owner
 
 
-def _conflict(ctx: Context, environment_id: str, project: str, run_id: str) -> str | None:
+def _conflict(
+    ctx: Context, environment_id: str, project: str, run_id: str, host: str
+) -> str | None:
     """
     Return why a remote run must not be written here, or None.
 
@@ -272,11 +293,18 @@ def _conflict(ctx: Context, environment_id: str, project: str, run_id: str) -> s
     """
     owner = _claim_owner(ctx, run_id)
     if owner is not None:
-        if owner != {"project": project, "environment_id": environment_id}:
+        if owner.get("project") != project or owner.get("environment_id") != environment_id:
             return (
                 f"run {run_id} is claimed by environment {owner['environment_id']} "
                 f"in project {owner['project']!r}"
             )
+        if "host" not in owner:
+            return (
+                f"run {run_id} has a legacy claim without a verified host; "
+                "reconnect its saved cursor owner to migrate the claim"
+            )
+        if owner["host"] != host:
+            return f"run {run_id} is claimed by host {owner.get('host')}"
         return None
     store = ctx.layout.store
     for folder in sorted(store.iterdir()) if store.is_dir() else []:
@@ -292,12 +320,13 @@ def _conflict(ctx: Context, environment_id: str, project: str, run_id: str) -> s
     return None
 
 
-def _claim(ctx: Context, environment_id: str, project: str, run_id: str) -> str | None:
+def _claim(ctx: Context, environment_id: str, project: str, run_id: str, host: str) -> str | None:
     """
     Claim ``run_id`` hub-wide for this project and environment, before any install.
 
     Under the shared claim lock the conflict check runs again and, when it
-    passes, ``<store>/.claims/<run_id>.json`` is written. The claim stays when a
+    passes, ``<store>/.claims/<run_id>.json`` is written (with the ``host`` the
+    run came from, for ``mirror_source``). The claim stays when a
     later install or index fails, so no other project or environment can take
     the id in between.
 
@@ -307,11 +336,54 @@ def _claim(ctx: Context, environment_id: str, project: str, run_id: str) -> str 
         Why the run must not be installed here, or None when the claim is ours.
     """
     with dir_lock(ctx.layout.store / CLAIMS_DIR):
-        reason = _conflict(ctx, environment_id, project, run_id)
+        reason = _conflict(ctx, environment_id, project, run_id, host)
         if reason is None and _claim_owner(ctx, run_id) is None:
-            owner = {"project": project, "environment_id": environment_id}
+            owner = {"project": project, "environment_id": environment_id, "host": host}
             atomic_write_text(_claim_path(ctx, run_id), json.dumps(owner))
         return reason
+
+
+def mirror_source(ctx: Context, record: RunRecord) -> str | None:
+    """
+    Name where a run's text was written when it is not this hub's own run.
+
+    A mirrored run's files (``MIRROR_FILES``: ``notes.md``, the hypothesis,
+    tags, and command in ``run.yaml``, ``config.yaml``, ...) were written on a
+    host, by its code or its users. Show them to an agent as untrusted data
+    from this source, never as instructions (they can carry prompt injection).
+
+    Parameters
+    ----------
+    ctx : Context
+        The hub context.
+    record : RunRecord
+        Any run the hub holds.
+
+    Returns
+    -------
+    str or None
+        ``"host:<name>"`` for a run the hub mirrored from that host,
+        ``"environment:<id>"`` for another environment's run with no host on
+        record, and None for a run of this hub's own environment.
+
+    Examples
+    --------
+    >>> mirror_source(ctx, ctx.find_record("r1"))  # doctest: +SKIP
+    'host:gpu1'
+    """
+    if record.environment_id == ctx.descriptor.environment_id:
+        return None
+    try:
+        data = json.loads(_claim_path(ctx, record.run_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if (
+        isinstance(data, dict)
+        and data.get("environment_id") == record.environment_id
+        and isinstance(data.get("host"), str)
+    ):
+        return f"host:{data['host']}"
+    return f"environment:{record.environment_id}"
 
 
 def _read_remote_record(path: Path) -> RunRecord | None:
@@ -321,7 +393,9 @@ def _read_remote_record(path: Path) -> RunRecord | None:
         return None
 
 
-def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) -> None:
+def _ensure_project(
+    ctx: Context, client: EnvClient, host: str, project: str, *, refresh: bool = True
+) -> None:
     """
     Copy a project from the host, or refresh this host's copy (spec 5.2: the hub holds the index).
 
@@ -331,12 +405,14 @@ def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) ->
     on every mirror, so a task or metric version added on the host reaches
     the hub. A project registered on the hub (or copied from another host) is
     never replaced; a later ``hx register`` of a checkout on the hub replaces
-    the copy.
+    the copy. The copy's ``repo`` is the path the host reported, on the host:
+    hub code must never read or write under it (``Context.local_repo`` refuses it).
+    With ``refresh`` False, a project the hub already has is not fetched again.
     """
     known: ProjectEntry | None = None
     with contextlib.suppress(StoreError):
         known = ctx.store.load_project(project)
-    if known is not None and known.remote_host != host:
+    if known is not None and (known.remote_host != host or not refresh):
         return
     try:
         data = client.get_json(f"/api/v1/projects/{project}/entry")
@@ -350,9 +426,85 @@ def _ensure_project(ctx: Context, client: EnvClient, host: str, project: str) ->
     ctx.index.upsert_project(entry)
 
 
-def _hosted(artifacts: list[Artifact], host: str) -> list[Artifact]:
-    """Mark the host's own artifacts (``host: local`` there) with the host's name."""
-    return [a.model_copy(update={"host": host}) if a.host == "local" else a for a in artifacts]
+_HostedT = TypeVar("_HostedT", Artifact, DatasetRef)
+
+
+def _hosted(items: list[_HostedT], host: str) -> list[_HostedT]:
+    """Mark the host's own artifacts and datasets (``host: local`` there) with the host's name."""
+    return [i.model_copy(update={"host": host}) if i.host == "local" else i for i in items]
+
+
+def _fetch_host_paths(client: EnvClient, host: str, run_id: str) -> dict[str, str] | None:
+    """
+    Ask the host where a run lives there: ``{host, run_dir, repo}`` (``repo`` when known).
+
+    Returns None when the host does not answer with a ``run_dir``; the next mirror asks again.
+    """
+    try:
+        paths = client.get_json(f"/api/v1/runs/{run_id}")["paths"]
+    except (HypothexError, ValueError, TypeError, KeyError) as exc:
+        log.info("host %s: paths of %s not known yet: %s", host, run_id, exc)
+        return None
+    found = {k: paths[k] for k in HOST_PATH_KEYS if isinstance(paths.get(k), str)}
+    return {"host": host, **found} if "run_dir" in found else None
+
+
+def _cached_host_paths(run_dir: Path, host: str) -> dict[str, str] | None:
+    """Read cached paths only when their label matches the verified run owner."""
+    try:
+        data = json.loads((run_dir / HOST_PATHS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(data, dict)
+        or data.get("host") != host
+        or not isinstance(data.get("run_dir"), str)
+    ):
+        return None
+    return {"host": host, **{k: data[k] for k in HOST_PATH_KEYS if isinstance(data.get(k), str)}}
+
+
+def host_paths(ctx: Context, record: RunRecord) -> dict[str, str]:
+    """
+    Return where a mirrored run lives on its host, as ``<host>:<path>``.
+
+    The hub's copy of a mirrored run is not where the run ran: its run folder,
+    project checkout, and working folder are on the host (spec 8.1, 8A.8).
+    Use these paths in place of the hub's own when showing the run. The
+    verified claim supplies the host label; cached paths from a previous
+    alias stay hidden until the new owner supplies its current paths.
+
+    Parameters
+    ----------
+    ctx : Context
+        The hub context.
+    record : RunRecord
+        Any run the hub holds.
+
+    Returns
+    -------
+    dict of str to str
+        ``run_dir`` and ``repo`` (each when the host reported it) and ``cwd``
+        (when the record has one), each prefixed with the host's name; ``{}``
+        for a run of this hub's own environment or one whose host is unknown.
+
+    Examples
+    --------
+    >>> host_paths(ctx, ctx.find_record("r1"))  # doctest: +SKIP
+    {'run_dir': 'gpu1:/home/me/.hypothex/store/toy/runs/r1', 'repo': 'gpu1:/home/me/toy',
+     'cwd': 'gpu1:/home/me/toy'}
+    """
+    if record.environment_id == ctx.descriptor.environment_id:
+        return {}
+    source = mirror_source(ctx, record) or ""
+    if not source.startswith("host:"):
+        return {}
+    host = source.removeprefix("host:")
+    data = _cached_host_paths(ctx.run_dir(record), host) or {}
+    out = {k: f"{host}:{data[k]}" for k in HOST_PATH_KEYS if isinstance(data.get(k), str)}
+    if record.cwd:
+        out["cwd"] = f"{host}:{record.cwd}"
+    return out
 
 
 def mirror_run(
@@ -364,6 +516,7 @@ def mirror_run(
     run_id: str,
     *,
     usd_per_gpu_hour: float | None = None,
+    refresh_project: bool = True,
 ) -> tuple[RunRecord, bool] | None:
     """
     Copy one remote run's small files into the hub store and index it.
@@ -379,9 +532,11 @@ def mirror_run(
     fetch succeeded is the run id claimed hub-wide (``_claim``) and are the
     files installed, in one pass under the run lock (``_install``); nothing is
     ever appended. Artifacts the host recorded as ``local`` get the host's
-    name, and an ended run gets its ``cost`` at the host's price
-    (``price_record``). A project the hub does not know is copied from the
-    host first, and a copy from this host is refreshed (``_ensure_project``).
+    name, and so do datasets; an ended run gets its ``cost`` at the host's
+    price (``price_record``). A project the hub does not know is copied from
+    the host first, and a copy from this host is refreshed
+    (``_ensure_project``). Where the run lives on the host (``host_paths``) is
+    asked once per verified owner, on the first mirror that gets an answer.
 
     Parameters
     ----------
@@ -399,17 +554,25 @@ def mirror_run(
         Run id.
     usd_per_gpu_hour : float, optional
         The host's price per GPU hour from ``environments.yaml``.
+    refresh_project : bool
+        Fetch this host's copy of the project again even when the hub has it
+        (False for the periodic refresh of running runs: one GET less per run).
 
     Returns
     -------
     tuple of (RunRecord, bool) or None
         The mirrored record and whether any file changed; None when the run was
-        skipped (unsafe name, owned by another environment, or gone).
+        skipped (unsafe name, owned by another environment, reported under the
+        hub's own environment id, or gone).
     """
     if not (_safe_name(project) and _safe_name(run_id)):
         log.warning("host %s: skipping run with unsafe name %r/%r", host, project, run_id)
         return None
-    reason = _conflict(ctx, environment_id, project, run_id)
+    if environment_id == ctx.descriptor.environment_id:
+        # it would pass as the hub's own run: rerun/reinfer would run its command here
+        log.warning("host %s reports this hub's own environment id; run %s skipped", host, run_id)
+        return None
+    reason = _conflict(ctx, environment_id, project, run_id, host)
     if reason is not None:
         log.warning("host %s: not mirroring: %s", host, reason)
         return None
@@ -425,8 +588,10 @@ def mirror_run(
         if record is None or record.run_id != run_id or record.project != project:
             log.warning("host %s: run.yaml of %s is unreadable or mismatched", host, run_id)
             return None
-        _ensure_project(ctx, client, host, project)
+        _ensure_project(ctx, client, host, project, refresh=refresh_project)
         manifest = _read_manifest(run_dir)
+        asked = _cached_host_paths(run_dir, host) is not None
+        where = None if asked else _fetch_host_paths(client, host, run_id)
         staged: list[tuple[RemoteFile, Path]] = []
         remote_only: list[Artifact] = []
         skipped: dict[str, dict[str, object]] = {}
@@ -473,17 +638,18 @@ def mirror_run(
                 update={
                     "environment_id": environment_id,
                     "artifacts": [*_hosted(record.artifacts, host), *remote_only],
+                    "datasets": _hosted(record.datasets, host),
                 }
             ),
             usd_per_gpu_hour,
         )
         # every file is here: claim the id hub-wide, then install everything at once
-        reason = _claim(ctx, environment_id, project, run_id)
+        reason = _claim(ctx, environment_id, project, run_id, host)
         if reason is not None:
             log.warning("host %s: not mirroring: %s", host, reason)
             return None
         with run_lock(run_dir):
-            changed = _install(ctx, run_dir, staged, manifest, record, gone, skipped)
+            changed = _install(ctx, run_dir, staged, manifest, record, gone, skipped, where)
     return record, changed
 
 
@@ -555,6 +721,7 @@ def _install(
     record: RunRecord,
     gone: list[str],
     skipped: dict[str, dict[str, object]],
+    where: dict[str, str] | None = None,
 ) -> bool:
     """
     Install fully fetched files, then ``run.yaml``, then re-index; caller holds the run lock.
@@ -567,7 +734,8 @@ def _install(
     (``gone``) before any install, with the folders that leaves empty, so a
     path that changed between file and folder on the host installs; skipped
     files are deleted too and listed in ``.hx/mirror-skips.json``
-    (``skipped``), never marked next to the file.
+    (``skipped``), never marked next to the file. ``where`` (the run's paths
+    on its host, when just fetched) is written to ``.hx/host-paths.json``.
 
     Returns
     -------
@@ -589,6 +757,10 @@ def _install(
             changed = True
         manifest[entry.path] = [entry.size, entry.mtime_ns]
     changed |= _write_skips(run_dir, skipped)
+    if where is not None:
+        (run_dir / HX_DIR).mkdir(parents=True, exist_ok=True)
+        atomic_write_text(run_dir / HOST_PATHS_FILE, json.dumps(where, sort_keys=True))
+        changed = True
     if _read_local(ctx, record.project, record.run_id) != record:
         ctx.store.write_record(record)  # after the files: never terminal next to stale files
         changed = True
@@ -671,6 +843,7 @@ def _emit_mirror(
     original_type: str,
     remote_sequence: int | None,
     *,
+    remote_created_at: datetime | None = None,
     reason: str | None = None,
 ) -> None:
     payload: dict[str, object] = {
@@ -688,9 +861,11 @@ def _emit_mirror(
         )
         return
     # events.db and the cursor (index.db) are two databases: a crash between this event
-    # and the cursor write replays the remote event, and the key drops the repeat
+    # and the cursor write replays the remote event, and the key drops the repeat. The
+    # event's time is part of its identity: a host whose log restarted reuses sequences
+    stamp = f":{remote_created_at.isoformat()}" if remote_created_at is not None else ""
     ctx.events.append_once(
-        f"mirror:{host}:{environment_id}:{remote_sequence}",
+        f"mirror:{host}:{environment_id}:{remote_sequence}{stamp}",
         "mirror.run_updated",
         project=record.project,
         run_id=record.run_id,
@@ -743,12 +918,23 @@ def mirror_event(
     if mirrored is None:
         return
     _emit_mirror(
-        ctx, host, environment_id, mirrored[0], event.type, event.sequence, reason=_reason(event)
+        ctx,
+        host,
+        environment_id,
+        mirrored[0],
+        event.type,
+        event.sequence,
+        remote_created_at=event.created_at,
+        reason=_reason(event),
     )
 
 
 class _UpgradeRequiredError(Exception):
     """The host speaks another protocol version; retrying cannot help."""
+
+
+class _EnvironmentTakenError(Exception):
+    """The host reports the hub's own or another host's environment id; retrying cannot help."""
 
 
 AUTH_FAILURE_STATUSES = frozenset({401, 403})
@@ -777,6 +963,32 @@ def _brief(exc: BaseException) -> str:
     return text[-_MESSAGE_LIMIT:]
 
 
+def _host_sequence(client: EnvClient) -> int | None:
+    """
+    Return the last sequence of the host's own event log, or None when unknown.
+
+    Read from the host's own (``kind: local``) row of its ``GET /api/v1/hosts``.
+
+    Parameters
+    ----------
+    client : EnvClient
+        Client of the host's env server.
+
+    Returns
+    -------
+    int or None
+        The host's ``events.last_sequence()``; None when the host does not
+        answer or sends no such row.
+    """
+    try:
+        rows = client.get_json("/api/v1/hosts")
+        [own] = [r for r in rows if r.get("kind") == "local"]
+        value = own["state"]["last_sequence"]
+    except (HypothexError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 # supervisors -------------------------------------------------------------------------
 REPLAY_BATCH_EVENTS = 500
 """Most events one ``_apply`` call mirrors; each run in a batch is mirrored once."""
@@ -800,6 +1012,7 @@ class _Supervisor:
     failed_bootstrap: bool = False
     pending: set[asyncio.Future[Any]] = field(default_factory=set)
     token: str | None = None
+    expected_environment_id: str | None = None
 
 
 class Hub:
@@ -818,16 +1031,28 @@ class Hub:
         ``mirror.run_updated`` events go here.
     hosts : EnvironmentsFile
         Parsed ``environments.yaml``.
+    configured_hosts : callable, optional
+        Names still configured, including disabled hosts with no supervisor. The
+        manager supplies a live lookup so reloads preserve identity reservations.
+        Defaults to the names in ``hosts``.
     """
 
-    def __init__(self, ctx: Context, hosts: EnvironmentsFile) -> None:
+    def __init__(
+        self,
+        ctx: Context,
+        hosts: EnvironmentsFile,
+        *,
+        configured_hosts: Callable[[], Iterable[str]] | None = None,
+    ) -> None:
         self.ctx = ctx
         self.hosts = hosts
+        self._configured_hosts = configured_hosts or (lambda: self.hosts.environments)
         self.backoff_delays: tuple[float, ...] = BACKOFF_SECONDS
         self.stable_after = STABLE_AFTER_SECONDS
         self.stale_after = STALE_AFTER_SECONDS
         self.ping_interval = PING_INTERVAL_SECONDS
         self._started = False
+        self._tunnels = ctx.layout.home / TUNNELS_DIR
         self._sups: dict[str, _Supervisor] = {}
         for name, spec in sorted(hosts.environments.items()):
             self._sups[name] = self._new_supervisor(name, spec)
@@ -853,12 +1078,20 @@ class Hub:
         """
         Start one supervisor task per remote host (no-op when already started).
 
-        First re-indexes mirrored runs a cut-short mirror left with
-        ``.mirror-index-pending`` (``reindex_pending``).
+        First stops the ``ssh -L`` tunnels a killed hub left running
+        (``reap_stale_tunnels``), and re-indexes mirrored runs a cut-short
+        mirror left with ``.mirror-index-pending`` (``reindex_pending``).
         """
         if self._started:
             return
         self._started = True
+        try:
+            reaped = await asyncio.to_thread(reap_stale_tunnels, self._tunnels)
+        except Exception:  # noqa: BLE001 - an orphan tunnel only holds a port
+            log.exception("stopping the tunnels of a previous hub failed")
+        else:
+            if reaped:
+                log.info("stopped ssh tunnels a previous hub left: %s", reaped)
         try:
             repaired = reindex_pending(self.ctx)
         except Exception:  # noqa: BLE001 - each run's next mirror redoes it anyway
@@ -919,10 +1152,10 @@ class Hub:
             Host name; unknown names are ignored.
         """
         async with self._owned(name) as sup:
-            self._sups.pop(name, None)
-            self.hosts.environments.pop(name, None)
             if sup is not None:
                 await self._halt(sup)
+            self._sups.pop(name, None)
+            self.hosts.environments.pop(name, None)
 
     async def connect(self, name: str) -> HostState:
         """
@@ -1092,9 +1325,15 @@ class Hub:
     async def _halt(self, sup: _Supervisor) -> None:
         task, sup.task = sup.task, None
         if task is not None:
+            current = asyncio.current_task()
+            # a caller already unwinding a cancel (``stop`` in a ``finally``) must still halt
+            before = current.cancelling() if current is not None else 0
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                if current is not None and current.cancelling() > before:
+                    raise  # a new cancel was aimed at our caller, not only at the task
         await self._drain(sup)
 
     async def _drain(self, sup: _Supervisor) -> None:
@@ -1104,19 +1343,55 @@ class Hub:
             await asyncio.wait(list(sup.pending))
 
     async def _shielded(self, sup: _Supervisor, fn: Callable[..., T], *args: object) -> T:
-        """Run ``fn`` in a worker thread that a cancel cannot split; ``_halt`` waits for it."""
+        """
+        Run ``fn`` in a worker thread that a cancel cannot split; ``_halt`` waits for it.
+
+        When the caller was cancelled, nobody awaits the thread's result: its
+        exception is read on completion (``_settle``), so asyncio never logs
+        "exception was never retrieved" for it.
+        """
         future: asyncio.Future[T] = asyncio.ensure_future(asyncio.to_thread(fn, *args))
         sup.pending.add(future)
-        future.add_done_callback(sup.pending.discard)
+
+        def _settle(done: asyncio.Future[T]) -> None:
+            sup.pending.discard(done)
+            if not done.cancelled():
+                done.exception()  # marks it retrieved; a caller still waiting gets it too
+
+        future.add_done_callback(_settle)
         return await asyncio.shield(future)
 
     async def _supervise(self, sup: _Supervisor) -> None:
+        ticker = asyncio.create_task(self._mark_stale(sup))
+        try:
+            await self._reconnect(sup)
+        finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+
+    async def _mark_stale(self, sup: _Supervisor) -> None:
+        """
+        Mark the host ``stale`` once its last contact is ``stale_after`` old.
+
+        Runs for the whole supervisor, so a slow attempt (an unreachable host
+        holds ``ssh`` until its timeout) cannot delay ``stale``. A ``connected``
+        session decides itself: its pings end it once stale.
+        """
+        while True:
+            await asyncio.sleep(STALE_CHECK_SECONDS)
+            if sup.state.state not in ("stale", "connected") and self._is_stale(sup):
+                self._set(sup, "stale", sup.state.message, since=sup.last_ok_at)
+
+    async def _reconnect(self, sup: _Supervisor) -> None:
         while True:
             try:
                 await self._session(sup)
                 sup.failure, sup.failed_bootstrap = "connection closed", False
             except _UpgradeRequiredError as exc:
                 self._set(sup, "upgrade", str(exc))
+                return
+            except _EnvironmentTakenError as exc:
+                self._set(sup, "error", str(exc))
                 return
             except EnvRequestError as exc:
                 status = _auth_failure(exc)
@@ -1133,6 +1408,7 @@ class Hub:
                 sup.failure, sup.failed_bootstrap = _brief(exc), True
             except Exception as exc:  # noqa: BLE001 - every failure means "retry later"
                 sup.failure, sup.failed_bootstrap = _brief(exc), False
+            sup.failure = redact_bearer_token(sup.failure, sup.token)
             log.info("host %s: %s", sup.name, sup.failure)
             delay = sup.backoff.next_delay(time.monotonic())
             message = f"retry in {delay:g}s: {sup.failure}"
@@ -1142,14 +1418,7 @@ class Hub:
                 self._set(sup, "error", message)
             else:
                 self._set(sup, "connecting", message)
-            await self._wait(sup, delay)
-
-    async def _wait(self, sup: _Supervisor, delay: float) -> None:
-        end = time.monotonic() + delay
-        while (left := end - time.monotonic()) > 0:
-            await asyncio.sleep(min(left, 1.0))
-            if sup.state.state != "stale" and self._is_stale(sup):
-                self._set(sup, "stale", sup.state.message, since=sup.last_ok_at)
+            await asyncio.sleep(delay)  # _mark_stale goes on meanwhile
 
     async def _open_route(self, sup: _Supervisor) -> str:
         spec = sup.spec
@@ -1160,7 +1429,7 @@ class Hub:
         if not spec.ssh_alias:
             raise BootstrapError(f"host {sup.name!r} has route ssh but no ssh_alias")
         target = SshTarget(alias=spec.ssh_alias)  # ssh/scp from $HYPOTHEX_SSH/$HYPOTHEX_SCP
-        if sup.state.state != "stale":
+        if sup.last_ok is None:  # a reconnect is not a bootstrap: it stays connecting (or stale)
             self._set(sup, "bootstrapping")
         info = await self._shielded(sup, lambda: ensure_server(target, spec.home, kind=spec.kind))
         if info.protocol_version != PROTOCOL_VERSION:
@@ -1168,12 +1437,15 @@ class Hub:
                 f"upgrade hx on {sup.name}: protocol {info.protocol_version}, "
                 f"hub speaks {PROTOCOL_VERSION}"
             )
-        tunnel = Tunnel(target, info.port)
+        if not info.environment_id:
+            raise BootstrapError("remote bootstrap returned no trusted environment identity")
+        sup.expected_environment_id = info.environment_id
+        tunnel = Tunnel(target, info.port, registry=self._tunnels, private=True)
         sup.tunnel = tunnel
         sup.token = info.token  # the env server's bearer token, read from server.json over ssh
         # tracked: a disconnect waits for start() before the session's cleanup stops it
         await self._shielded(sup, tunnel.start)
-        return f"http://127.0.0.1:{tunnel.local_port}"
+        return "http://localhost"
 
     def _close_route(self, sup: _Supervisor) -> None:
         tunnel, sup.tunnel = sup.tunnel, None
@@ -1185,18 +1457,37 @@ class Hub:
         client: EnvClient | None = None
         pinger: EnvClient | None = None
         try:
+            sup.expected_environment_id = None
             sup.token = None  # route url: no token; route ssh: _open_route sets it
             base_url = await self._open_route(sup)
-            client = EnvClient(base_url, token=sup.token)
-            pinger = EnvClient(base_url, timeout=PING_TIMEOUT_SECONDS, token=sup.token)
-            desc = await asyncio.to_thread(client.descriptor)
+            socket_path = sup.tunnel.unix_socket if sup.tunnel is not None else None
+            pinger = EnvClient(base_url, timeout=PING_TIMEOUT_SECONDS, unix_socket=socket_path)
+            desc = await self._shielded(sup, pinger.identity)
+            if (
+                sup.expected_environment_id is not None
+                and desc.environment_id != sup.expected_environment_id
+            ):
+                raise _EnvironmentTakenError(
+                    "remote public identity does not match the trusted SSH environment identity"
+                )
             if desc.protocol_version != PROTOCOL_VERSION:
                 raise _UpgradeRequiredError(
                     f"upgrade hx on {sup.name}: protocol {desc.protocol_version}, "
                     f"hub speaks {PROTOCOL_VERSION}"
                 )
             env_id = desc.environment_id
-            cursor = await asyncio.to_thread(self._read_cursor, sup, env_id)
+            if env_id == self.ctx.descriptor.environment_id:
+                # its runs would pass as the hub's own (mirror_run skips them anyway)
+                raise _EnvironmentTakenError(
+                    f"{sup.name} reports this hub's own environment id {env_id}; "
+                    "a host must be another hx home (remove it: hx hosts rm "
+                    f"{sup.name})"
+                )
+            self._reserve_environment(env_id, sup.name)
+            client = EnvClient(base_url, token=sup.token, unix_socket=socket_path)
+            cursor = await self._shielded(sup, self._read_cursor, sup, env_id)
+            if cursor:
+                cursor = await self._shielded(sup, self._check_cursor, sup, client, env_id, cursor)
             sup.client = client
             sup.failed_bootstrap = False
             self._mark_ok(sup)
@@ -1221,6 +1512,8 @@ class Hub:
                 task.result()
         finally:
             sup.client = None
+            if sup.state.state == "connected":  # no client while the session drains
+                self._set(sup, "connecting", "session ended")
             # the shielded apply/refresh threads still use `client`: wait for them, even
             # through a cancel (_halt lands here when the session ended on its own), then
             # close both clients and the route, then let the cancel go on
@@ -1238,9 +1531,140 @@ class Hub:
             if cancel is not None:
                 raise cancel
 
+    def _reserve_environment(self, env_id: str, name: str) -> None:
+        """
+        Reserve an identity durably before the session yields or mirrors anything.
+
+        The existing claim lock serializes the ownership check and the cursor-zero
+        write, including across hub processes. Cursors survive restarts and index
+        rebuilds; labelled run claims protect owners whose first cursor was never
+        written. Older claims without host labels migrate only when the saved
+        cursors identify one owner, never from the newly connecting descriptor.
+        Only removing the old name from the configured hosts releases its identity.
+        Reusing it under another name transfers exclusively proven remote project
+        aliases and claim labels before that host can supply new run data. Project
+        snapshots then refresh normally on the next mirror; local projects and
+        projects without unambiguous claim and cursor provenance stay untouched.
+
+        Parameters
+        ----------
+        env_id : str
+            Environment identity from the checked descriptor.
+        name : str
+            Host whose session is connecting.
+
+        Raises
+        ------
+        _EnvironmentTakenError
+            If another configured host owns this identity, or an older claim's
+            owner cannot be established from the saved cursors.
+        """
+        # A removed supervisor stays an owner until its in-flight mirror writes
+        # have drained, even if the manager already loaded the new host file.
+        configured = set(self._configured_hosts()) | self._sups.keys()
+        claims_dir = self.ctx.layout.store / CLAIMS_DIR
+        with dir_lock(claims_dir):
+            claims: list[tuple[Path, dict[str, Any]]] = []
+            unlabelled: list[tuple[Path, dict[str, Any]]] = []
+            project_environments: dict[str, set[str]] = {}
+            projects_verified = True
+            cursor_owners = set(self.ctx.index.cursor_hosts(env_id))
+            owners = set(cursor_owners)
+            for path in sorted(claims_dir.glob("*.json")):
+                try:
+                    claim = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    projects_verified = False
+                    continue  # _conflict refuses an unreadable run claim
+                project = claim.get("project") if isinstance(claim, dict) else None
+                environment = claim.get("environment_id") if isinstance(claim, dict) else None
+                if (
+                    isinstance(project, str)
+                    and _safe_name(project)
+                    and isinstance(environment, str)
+                    and environment
+                ):
+                    project_environments.setdefault(project, set()).add(environment)
+                else:
+                    projects_verified = False
+                if isinstance(claim, dict) and claim.get("environment_id") == env_id:
+                    host = claim.get("host")
+                    if isinstance(host, str) and host:
+                        owners.add(host)
+                    else:
+                        if len(cursor_owners) != 1:
+                            raise _EnvironmentTakenError(
+                                f"{name}: legacy claims for environment {env_id} lack a verified "
+                                "host owner; saved cursor ownership is absent or ambiguous. "
+                                "Restore verified claim host labels or original cursor metadata "
+                                "before reconnecting."
+                            )
+                        unlabelled.append((path, claim))
+                    claims.append((path, claim))
+            holders = sorted((owners & configured) - {name})
+            if holders:
+                raise _EnvironmentTakenError(
+                    f"{name} reports the environment id {env_id} of host {holders[0]}; "
+                    f"every host must be its own hx home (remove one: hx hosts rm {name})"
+                )
+            if unlabelled:
+                # Finish normalization before adding a second alias cursor. A
+                # crash partway through leaves one unambiguous saved owner;
+                # after this, an interrupted alias transfer has no hostless rows.
+                [original_owner] = cursor_owners
+                for path, claim in unlabelled:
+                    claim["host"] = original_owner
+                    atomic_write_text(path, json.dumps(claim))
+            self.ctx.index.set_cursor(name, env_id, 0)
+            if projects_verified:
+                for project, environments in project_environments.items():
+                    if environments != {env_id}:
+                        continue
+                    try:
+                        entry = self.ctx.store.load_project(project)
+                    except StoreError:
+                        continue
+                    old_host = entry.remote_host
+                    if old_host != name:
+                        if old_host not in cursor_owners or old_host in configured:
+                            continue
+                        entry = entry.model_copy(update={"remote_host": name})
+                        self.ctx.store.save_project(entry)
+                    # A crash after saving the entry can leave its index behind.
+                    # Repair it before changing claim labels, including on restart.
+                    if self.ctx.index.get_project(project) != entry:
+                        self.ctx.index.upsert_project(entry)
+            for path, claim in claims:
+                if claim.get("host") != name:
+                    claim["host"] = name
+                    atomic_write_text(path, json.dumps(claim))
+
     def _read_cursor(self, sup: _Supervisor, env_id: str) -> int:
         with sup.lock:
             return self.ctx.index.get_cursor(sup.name, env_id)
+
+    def _check_cursor(self, sup: _Supervisor, client: EnvClient, env_id: str, cursor: int) -> int:
+        """
+        Return the cursor to subscribe after, reset to 0 when the host's event log restarted.
+
+        Host sequences only grow, so a host whose last sequence is below the
+        cursor lost its ``events.db`` (deleted, or the home restored from a
+        backup) but kept its environment id. Its new events reuse sequences the
+        hub has already seen, so the cursor is dropped and the whole log is
+        replayed; mirroring is idempotent.
+        """
+        latest = _host_sequence(client)
+        if latest is None or latest >= cursor:
+            return cursor
+        log.warning(
+            "host %s: event log restarted (host at sequence %d, hub cursor %d); replaying it",
+            sup.name,
+            latest,
+            cursor,
+        )
+        with sup.lock:
+            self.ctx.index.reset_cursor(sup.name, env_id)
+        return 0
 
     def _apply(
         self, sup: _Supervisor, client: EnvClient, env_id: str, events: list[Event]
@@ -1282,6 +1706,7 @@ class Hub:
                         record,
                         event.type,
                         event.sequence,
+                        remote_created_at=event.created_at,
                         reason=_reason(event),
                     )
             last = fresh[-1].sequence
@@ -1334,33 +1759,40 @@ class Hub:
             if sup.tunnel is not None and not sup.tunnel.alive():
                 raise ConnectionError("ssh tunnel exited")
             try:
-                await asyncio.to_thread(pinger.descriptor)
+                identity = await self._shielded(sup, pinger.identity)
             except Exception as exc:  # noqa: BLE001 - a failed ping only counts toward stale
                 if self._is_stale(sup):
                     raise ConnectionError(
                         f"no answer for {self.stale_after:g}s: {_brief(exc)}"
                     ) from exc
                 continue
+            if identity.environment_id != env_id or identity.protocol_version != PROTOCOL_VERSION:
+                raise _EnvironmentTakenError("remote public identity changed during the session")
             self._mark_ok(sup)
             await self._shielded(sup, self._refresh_active, sup, client, env_id)
 
     def _refresh_active(self, sup: _Supervisor, client: EnvClient, env_id: str) -> None:
-        """Re-mirror this host's queued/running runs; SDK metric writes emit no event."""
-        with sup.lock:
-            for status in sorted(ACTIVE_STATUSES):
-                for record in self.ctx.index.list_runs(
-                    status=status, include_archived=True, limit=None
-                ):
-                    if record.environment_id != env_id:
-                        continue
-                    mirrored = mirror_run(
-                        self.ctx,
-                        client,
-                        sup.name,
-                        env_id,
-                        record.project,
-                        record.run_id,
-                        usd_per_gpu_hour=sup.spec.usd_per_gpu_hour,
-                    )
-                    if mirrored is not None and mirrored[1]:
-                        _emit_mirror(self.ctx, sup.name, env_id, mirrored[0], "refresh", None)
+        """
+        Re-mirror this host's running runs: SDK metric and log writes emit no event.
+
+        Queued runs are left out (every change of theirs is an event), the
+        project is not fetched again, and ``sup.lock`` is taken per run, so
+        events wait for at most one run, not for the whole pass.
+        """
+        running = self.ctx.index.list_runs(
+            status=RunStatus.RUNNING, environment_id=env_id, include_archived=True, limit=None
+        )
+        for record in running:
+            with sup.lock:
+                mirrored = mirror_run(
+                    self.ctx,
+                    client,
+                    sup.name,
+                    env_id,
+                    record.project,
+                    record.run_id,
+                    usd_per_gpu_hour=sup.spec.usd_per_gpu_hour,
+                    refresh_project=False,
+                )
+                if mirrored is not None and mirrored[1]:
+                    _emit_mirror(self.ctx, sup.name, env_id, mirrored[0], "refresh", None)

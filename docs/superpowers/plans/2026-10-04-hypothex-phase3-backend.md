@@ -12,7 +12,7 @@
 
 **Contract:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-contract.md`, sections 1–9 and 11. Every name, field, route, and file listed there is exact. This plan adds private helpers, a few public helpers (each task's Interfaces lists them), and optional keyword arguments (`AuthStore(session_days=)`, `leaderboard_table(directions=, value_formats=)`, `send_slack(transport=)`, `send_email(ssl_context=)`, `Notifier(ssl_context=)`, `send_digest(since=)`, `upsert(keep_max=)`, `hub_call(text=, agent=)`, `create_app(auth=, public_url=, notifier=)`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the contract was ambiguous or silent and how this plan reads it.
 
-**Prerequisite:** `main` at `e27a3a2` (phases 1a, 1b, 2, plus `p2-backend-minors`, `p2-docs-ci` (`6ace21d`), `p2-property-tests`, and the phase 2 frontend so far). Every "replace X with Y" anchor below was re-checked against `e27a3a2`; the drift from the first base `738c711` that touches this plan: `cli/main.py::_write_private` is hardened (Task 2 moves that version into `core.settings`), `launch --gpus` is `LaunchGpusOpt` (no task edits `launch`'s signature), `mcp/server.py` `launch_sweep` sends `sweep_checkout(...)` in its remote body (Task 32 Step 4.6 adds `created_by`/`owner` next to it), `api/app.py`'s lifespan `finally` nests the joins in a second `try/finally` (Task 30 adds the notifier thread before the loop that *starts* the threads), `remote/hub.py` `_SAFE_NAME`/`_halt` changed (no task edits them), and `docs/index.rst`'s User guide toctree ends `remote, gpus, slurm, sweeps, cost` (Task 46). Review round 3: `main` is now `8df4760` (the phase 2 frontend merge, PR #12), and `git diff e27a3a2 8df4760 -- src docs/index.rst` is empty, so every anchor still holds. If `main` has moved on when this plan starts, re-run `git diff 8df4760 main -- src docs/index.rst` and re-check each anchor the diff touches. No frontend code is touched. **Frontend:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-frontend.md` (contract section 10) starts after this plan is merged and uses `hx demo --with-team` for fixtures.
+**Prerequisite:** `main` at `e27a3a2` (phases 1a, 1b, 2, plus `p2-backend-minors`, `p2-docs-ci` (`6ace21d`), `p2-property-tests`, and the phase 2 frontend so far). Every "replace X with Y" anchor below was re-checked against `e27a3a2`; the drift from the first base `738c711` that touches this plan: `cli/main.py::_write_private` is hardened (Task 2 moves that version into `core.settings`), `launch --gpus` is `LaunchGpusOpt` (no task edits `launch`'s signature), `mcp/server.py` `launch_sweep` sends `sweep_checkout(...)` in its remote body (Task 32 Step 4.6 adds `created_by`/`owner` next to it), `api/app.py`'s lifespan `finally` nests the joins in a second `try/finally` (Task 30 adds the notifier thread before the loop that *starts* the threads), `remote/hub.py` `_SAFE_NAME`/`_halt` changed (no task edits them), and `docs/index.rst`'s User guide toctree ends `remote, gpus, slurm, sweeps, cost` (Task 46). Review round 3: `main` is now `8df4760` (the phase 2 frontend merge, PR #12), and `git diff e27a3a2 8df4760 -- src docs/index.rst` is empty, so every anchor still holds. If `main` has moved on when this plan starts, re-run `git diff 8df4760 main -- src docs/index.rst` and re-check each anchor the diff touches. This paragraph records the historical review baseline. The local prerequisite integration is now `a66540f5d93a9b69c9644a06f323b12af43db231` (DF2 `48f8bef`, token `826223e`, lazy MCP `a66540f`); the final merged-main refresh and formal rounds 5–6 remain pending. See `2026-10-05-hypothex-phase3-local-baseline.md` for the checked adapters and limits. No runtime source is changed by this plan merge. **Frontend:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-frontend.md` (contract section 10) starts after this plan is merged and uses `hx demo --with-team` for fixtures.
 
 ## Global Constraints
 
@@ -21,10 +21,10 @@
 - Lint and format with **ruff** (line length 100, rules `E F I B UP SIM`), types with **ty** (`uv run ty check src`), tests with **pytest** in `tests/` mirroring `src/`. Every task ends with its tests green and `ruff check`, `ruff format --check`, `ty check src` clean.
 - Every public function has type annotations and a numpydoc docstring (summary, Parameters, Returns, Raises where any, Examples where they help).
 - **Secrets** (Slack webhook URL, SMTP password, Postgres password, session tokens, pairing secrets, host tokens) never appear in `config.yaml`, run folders, `env/` captures, the event log, the index, API responses, CLI `--json` output, log lines, exception messages, notices, or the outbox. They are `SecretStr` from the moment they are read; `.get_secret_value()` is called only at the socket (`send_slack`, `send_email`, the Postgres URL, the `Authorization` header). Every error string that leaves `hypothex.notify` goes through `redact()`. Pydantic errors about settings are printed without input values (`errors(include_input=False)`), and exceptions that could carry a secret are raised `from None`.
-- Auth is opt-in: with `server.auth: off` (the default) every request runs as `LOCAL_OWNER` (`admin`), `created_by` keeps phase 1–2 values (`human`, `agent:<name>`), `owner` stays `None`, and phase 1–2 tests pass unchanged. With auth on, the server sets `created_by` (`human:<user>`, `agent:<agent>@<user>`) and `owner` from the principal; body values are ignored except from the host principal (a hub forwarding).
+- Scoped collaboration auth is opt-in: with `server.auth: off` (the default), authenticated local-root requests run as `LOCAL_OWNER` (`admin`); the token prerequisite still protects transport by default. Explicit environment/host credentials use `HOST_PRINCIPAL`. With scoped auth off, `created_by` keeps phase 1–2 values (`human`, `agent:<name>`), `owner` stays `None`, and the prerequisite's authenticated test fixtures remain in use. With auth on, the server sets `created_by` (`human:<user>`, `agent:<agent>@<user>`) and `owner` from the principal; body values are ignored except from the host principal (a hub forwarding).
 - Scopes are ordered `read ⊂ launch ⊂ admin`. Every `APIRoute` and the WebSocket declare a scope with `requires(...)`; every MCP tool carries `@scoped(...)`. Storage, notification settings, users, and other users' sessions need `admin`. No MCP tool applies a cleanup, sends a notification, or manages users or sessions.
 - Destructive actions: storage deletion is admin-only, plan-then-apply with `confirm_bytes == plan.total_bytes`, re-validated per item where the file lives, never follows a symlink, never touches a protected path, never rewrites `run.yaml`, and is never reachable through MCP.
-- Every mutating HTTP call accepts a `command_id`; `once()` (phase 1) makes it idempotent. Every `hx` command supports `--json`.
+- Every mutating HTTP call accepts a `command_id`; ordinary mutations use `once()` (phase 1), while durable sweep create/extend keep `SweepIssuer`'s atomic acceptance receipts. Phase 3 binds both receipt keys through `command_key`. Every `hx` command supports `--json`.
 - Copy is terse (spec section 8): numbers, glyphs, short labels; CLI text output is one line or a table, never paragraphs. Notice titles start with a status glyph (`✓ ✗ ? ⊘`).
 - Commits: one conventional message per task, exactly as given in the task. No `Co-Authored-By` lines and no AI or Claude mentions in commits or PR text.
 
@@ -1636,7 +1636,7 @@ In `src/hypothex/core/control.py`, add `owner: str | None = None,` after `create
 
 In `src/hypothex/core/sweeps.py`:
 - in `SweepSpec`, after `created_at: datetime` add `owner: str | None = None`;
-- in `launch_sweep`, add `owner: str | None = None,` after `created_by: str = "human",`, document it ("owner : str, optional — user name stored on the sweep and given to each of its runs."), and add `owner=owner,` after `created_at=utcnow(),` in the `SweepSpec(...)` draft;
+- in `launch_sweep`, add `owner: str | None = None,` after `created_by: str = "human",` and document it ("owner : str, optional — user name stored on the sweep and given to each of its runs."). The baseline now constructs the spec in `_draft`, not inline: immediately after `draft = _draft(project, task, host, grid, random, seeds, command, created_by, commit, diff)`, add `draft = draft.model_copy(update={"owner": owner})`. Keep `_draft`'s existing signature so the durable HTTP path can stamp its own validated owner (Task 27);
 - in `_requests`, in the `RunRequest(...)` call, after `created_by=spec.created_by,` add `owner=spec.owner,`.
 
 In `src/hypothex/core/index.py`:
@@ -7307,7 +7307,7 @@ git commit -m "feat(notify): slack and smtp delivery with retryable and permanen
 - Produces (contract 1.7, exact): `NOTIFY_DIR`, `RETRY_DELAYS`, `TERMINAL_EVENTS`, `OutboxEntry`, `Notifier(ctx, settings, *, now=utcnow, transport=None)` with `scan()`.
 - Produces (additive): `Notifier(..., ssl_context=None)`; `Notifier.enqueue(notice, channels) -> list[OutboxEntry]` (redacts the notice itself, so no caller can skip it; idempotent per `(notice.id, channel)`; only configured channels; used by the digest, Task 19); `hypothex.core.sweeps.sweep_issuing(layout, project, sweep_id) -> bool` (True while `launch_sweep` or `extend_sweep` holds the sweep's lock to issue runs); `Notifier.secret_values() -> list[SecretStr]`; `SENDING_RETRY_SECONDS = 60.0`.
 - Files (contract 2): `<home>/notify/pending-sweeps.json` (sweep key → terminal `Event`, persisted before cursor advancement; retried each scan and after restart until settled or excluded by current notification policy), `<home>/notify/cursor.json` `{last_sequence}`, `outbox/<id>.<channel>.json` (one `OutboxEntry`, rewritten atomically), `sent.jsonl` (final entries) — all 0600.
-- Rules: the first scan sets the cursor to the log's last sequence and enqueues nothing (no backlog flood). A run notifies on `run.finished|failed|killed|lost`, or on `mirror.run_updated` whose `original_type` is one of them. Its project's rule is `notify.projects[project]`, else `notify.default`, else nothing. A run that ended more than `max_age_hours` before now gets nothing. With `fold_sweeps` and a `sweep_id` whose sweep file is on this hub and whose run carries this hub's member tag `sweep:<owner8>:<id>` (a mirrored run of another hub's sweep with the same id is not a member and is notified as a run), nothing is sent while the sweep has a queued or running run, nor while it has fewer members than `len(sweep_combos(spec)) * len(spec.seeds)` and `sweep_issuing` says its launch is still issuing runs (a short first run ending before the last launch must not read `1/1`); when none of that holds, one sweep notice (the same id for every final event, so one entry) if at least one of its runs ended with a status in `rule.events` (a failure-only rule hears only about sweeps with a failure; `events: []` hears nothing); the sweep's summary is read once per event batch, after the batch is fetched, never kept across batches (a sweep whose last run ends between two batches still notifies). Otherwise the run's status must be in `rule.events`, and a finished run shorter than `min_seconds` is skipped. Notices are redacted (every configured secret value) by `enqueue` before they are written, whatever enqueues them (run, sweep, digest).
+- Rules: the first scan sets the cursor to the log's last sequence and enqueues nothing (no backlog flood). A run notifies on `run.finished|failed|killed|lost`, or on `mirror.run_updated` whose `original_type` is one of them. Its project's rule is `notify.projects[project]`, else `notify.default`, else nothing. A run that ended more than `max_age_hours` before now gets nothing. With `fold_sweeps` and a `sweep_id` whose sweep file is on this hub and whose run carries this hub's member tag `sweep:<owner8>:<id>` (a mirrored run of another hub's sweep with the same id is not a member and is notified as a run), nothing is sent while the sweep has a queued or running run or durable `issuance.state` is `preparing|queued|issuing|settling`. With `issuance=None` only, the legacy lock fallback also defers while it has fewer members than `len(sweep_combos(spec)) * len(spec.seeds)` and `sweep_issuing` says its launch is still issuing runs (a short first run ending before the last launch must not read `1/1`); when none of that holds, one sweep notice (the same id for every final event, so one entry) if at least one of its runs ended with a status in `rule.events` (a failure-only rule hears only about sweeps with a failure; `events: []` hears nothing); the sweep's summary is read once per event batch, after the batch is fetched, never kept across batches (a sweep whose last run ends between two batches still notifies). Otherwise the run's status must be in `rule.events`, and a finished run shorter than `min_seconds` is skipped. Notices are redacted (every configured secret value) by `enqueue` before they are written, whatever enqueues them (run, sweep, digest).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -7740,6 +7740,43 @@ def test_partial_sweep_notifies_after_issuance_failure_without_new_events(
     (entry,) = notifier.scan()
     assert entry.notice.title == "✗ toy sweep s-0008 1/1"
     assert json.loads(pending.read_text()) == {}
+    assert notifier.scan() == []
+    assert Notifier(toy, settings, now=clock).scan() == []
+
+
+@pytest.mark.parametrize("state", ["preparing", "queued", "issuing", "settling"])
+@pytest.mark.parametrize("terminal", ["issued", "incomplete", "interrupted"])
+def test_durable_issuance_defers_without_lock_and_retries_after_restart(
+    toy: Context, hook: FakeWebhook, clock: Clock, monkeypatch: pytest.MonkeyPatch,
+    state: str, terminal: str,
+) -> None:
+    from hypothex.core.sweeps import SweepIssuance, SweepSummary, summarize_sweep
+
+    tag = small_sweep(toy, "s-0009", 1)
+    settings = settings_for()
+    notifier = primed(toy, settings, clock)
+    end_run(toy, "durable0", "failed", tags=[tag], sweep_id="s-0009")
+    summary = summarize_sweep(toy, "toy", "s-0009")
+    current = [state]
+
+    def fresh(_self: Notifier, _record: RunRecord) -> SweepSummary:
+        issuance = SweepIssuance.model_validate({
+            "state": current[0], "episode": 1, "revision": 2, "planned": 1,
+            "accepted_at": T0, "updated_at": T0,
+        })
+        return summary.model_copy(update={"issuance": issuance})
+
+    monkeypatch.setattr(Notifier, "_sweep", fresh)
+    assert not sweep_issuing(toy.layout, "toy", "s-0009")
+    assert summary.counts["total"] == 1  # full observed count still cannot finish issuance
+    assert notifier.scan() == []
+    cursor = toy.events.last_sequence()
+    notifier = Notifier(toy, settings, now=clock)
+    assert notifier.scan() == []
+    current[0] = terminal
+    assert toy.events.last_sequence() == cursor  # no new event needed for durable retry
+    (entry,) = notifier.scan()
+    assert entry.notice.title == "✗ toy sweep s-0009 1/1"
     assert notifier.scan() == []
     assert Notifier(toy, settings, now=clock).scan() == []
 
@@ -8190,11 +8227,16 @@ class Notifier:
             if counts.get("queued", 0) + counts.get("running", 0) > 0:
                 return [], True
             spec = summary.spec
-            planned = len(sweep_combos(spec)) * len(spec.seeds)
-            if counts.get("total", 0) < planned and sweep_issuing(
-                self.ctx.layout, spec.project, spec.id
-            ):
-                return [], True  # durable retry after issuance ends, even without another event
+            if summary.issuance is not None:
+                if summary.issuance.state in {"preparing", "queued", "issuing", "settling"}:
+                    return [], True  # durable worker may add or settle members with no run event
+            else:
+                # Legacy/direct-core sweeps still use the synchronous launch lock.
+                planned = len(sweep_combos(spec)) * len(spec.seeds)
+                if counts.get("total", 0) < planned and sweep_issuing(
+                    self.ctx.layout, spec.project, spec.id
+                ):
+                    return [], True
             if not any(counts.get(wanted, 0) for wanted in rule.events):
                 return [], False  # the sweep's outcome holds no status this rule asks for
             notice = sweep_notice(self.ctx, summary, base_url=base)
@@ -13670,17 +13712,25 @@ and replace these routes, which item 7 does not replace, so that they pass the r
         return forward(request, run_id, "notes", body, act)
 ```
 
-In `sweep_create`, change the signature to `def sweep_create(body: SweepBody, request: Request) -> dict[str, Any]:`, add as its first lines
+Preserve `SweepIssuer`, its app-owned lifecycle, `app.state.sweep_issuer`, its immutable acceptance receipts and the existing legacy fallback. Add caller scope and ownership around the final baseline; do not replace durable create/extend with synchronous `launch_sweep` or wrap `issuer.accept`/`issuer.extend` in `once` (the issuer owns those receipts).
+
+In `sweep_create`, add `dependencies=LAUNCH` to the decorator, change the signature to `def sweep_create(body: SweepBody, request: Request) -> dict[str, Any]:`, and add these first lines before the existing `prepare` closure:
 
 ```python
         if not is_remote(body.host):
-            require_local_exec(principal_of(request))  # its runs execute on this machine
+            require_local_exec(principal_of(request))
         body = stamp(request, body)
 ```
 
-in the `launch_sweep(...)` call add `owner=body.owner,` after `created_by=body.created_by,` and replace `command_id=body.command_id,  # a retry resumes this sweep (Task 40)` with `command_id=command_key(request, body.command_id),  # a retry by this caller resumes it`, and replace its last line `return once(body, act)` with `return once(request, body, act)`.
+Keep the entire baseline `prepare` closure: original hypothesis, remote checkout validation, commit/diff pin, `_draft`, repository and launch options. Immediately after `_draft(...)` completes and before `_resolve_repo`, add `spec = spec.model_copy(update={"owner": body.owner})`. Replace only the final call with:
 
-Replace `sweep_extend` with:
+```python
+        return issuer.accept(command_key(request, body.command_id), prepare)
+```
+
+The serialized spec carries trusted `created_by` and `owner` through restart and extension; Task 4's `_requests` copies both to each worker launch. Keep `launcher_for`'s existing per-cell command IDs, pin and request fields; add `owner=req.owner` to `HostLaunchBody` beside `created_by=req.created_by`. The background worker must never read request-local principal state after acceptance.
+
+Replace `sweep_extend` with the baseline durable branch plus scope checks and the preserved legacy branch:
 
 ```python
     @app.post("/api/v1/sweeps/{project}/{sweep_id}/extend", dependencies=LAUNCH)
@@ -13688,11 +13738,15 @@ Replace `sweep_extend` with:
         project: str, sweep_id: str, body: SeedsBody, request: Request
     ) -> dict[str, Any]:
         principal = principal_of(request)
+        spec = find_sweep(ctx, sweep_id, project)
+        if not is_remote(spec.host):
+            require_local_exec(principal)
+        if ctx.events.sweep_operation(spec.project, spec.id) is not None:
+            return issuer.extend(
+                command_key(request, body.command_id), spec.project, spec.id, body.seeds
+            )
 
         def act() -> SweepSummary:
-            spec = find_sweep(ctx, sweep_id, project)
-            if not is_remote(spec.host):
-                require_local_exec(principal)  # the new seeds run on this machine
             launched: list[str] = []
             launch = launcher_for(spec.host, launched, project=spec.project)
             more = extend_sweep(ctx, spec.project, spec.id, body.seeds, launch=launch)
@@ -13714,11 +13768,14 @@ Replace `sweep_cancel` with:
         def act() -> SweepSummary:
             spec = find_sweep(ctx, sweep_id, project)
             require_act(principal, spec.owner, "cancel_queued")
+            issuer.request_cancel(spec.project, spec.id)
             stop = stopper_for(spec.host, command_key(request, action.command_id))
-            return cancel_queued(ctx, spec.project, spec.id, stop=stop)
+            return cancel_queued(ctx, spec.project, spec.id, stop_batch=stop)
 
         return once(request, action, act)
 ```
+
+Keep the frozen DF-48 API and crash tests. Add scoped integration tests to `test_ownership_api.py`: two callers reusing the same command ID obtain separate receipts; the same caller's retry returns the original queued receipt with no second launch; a queued owner-stamped spec survives reopen and issues owner-stamped runs; a launch-only caller cannot create/extend a local durable episode; a non-owner cancellation fails before setting `cancel_requested`; an authorized cancellation sets it before queued-member stops; an active extension retains the baseline 409. Exercise `SweepIssuer` with its worker paused and fake launchers, never real hosts.
 
 In `src/hypothex/core/overview.py`, add this field as the last field of `TimelineItem` (after `label: str`), of `IdeaRow` (after its `unit` docstring), and of `FailureRow` (after `retried_ok: bool`):
 
@@ -15145,8 +15202,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TypeVar, cast
 
-from mcp.server.mcpserver import Context as McpContext
-
 from hypothex.auth.ownership import require_act, require_local_exec
 from hypothex.auth.scopes import Scope, covers
 from hypothex.auth.store import LOCAL_OWNER, Principal
@@ -15273,6 +15328,10 @@ def scoped(scope: Scope) -> Callable[[F], F]:
     """
 
     def wrap(fn: F) -> F:
+        # Tool registration is already inside build_server; CLI hub helpers stay SDK-free.
+        from mcp.server.mcpserver.context import Context as McpContext
+        from mcp.server.mcpserver.exceptions import ToolError
+
         signature = inspect.signature(fn, eval_str=True)
 
         @functools.wraps(fn)
@@ -15337,15 +15396,18 @@ def tool_scopes(server: MCPServer) -> dict[str, Scope]:
 
 In `build_server`:
 
-1. Keep the token prerequisite's `_CallerMCPServer`, `NO_AUTH_TOKEN`, `TokenChoice`, `_caller_token`, `hub_call` sentinel handling and existing inner `auth() -> TokenChoice` unchanged. The scoped decorator above sets that same context for direct registered-tool tests; real HTTP tool calls are also bound by `_CallerMCPServer.call_tool` from each SDK message's request scope, not the connection's initial context. The private credential key is exactly `hypothex.auth_token` in both guards. `caller_token()` exposes only the selected string or None; `tool_hub_token` internally preserves `NO_AUTH_TOKEN` so an HTTP caller with no selected credential never activates filesystem discovery.
+1. Keep the token prerequisite's lazy `_caller_server()` factory and its nested `_CallerMCPServer`, `NO_AUTH_TOKEN`, `TokenChoice`, `_caller_token`, `hub_call` sentinel handling and existing inner `auth() -> TokenChoice` unchanged. The scoped decorator above sets that same context for direct registered-tool tests; real HTTP tool calls are also bound by `_CallerMCPServer.call_tool` from each SDK message's request scope, not the connection's initial context. The private credential key is exactly `hypothex.auth_token` in both guards. `caller_token()` exposes only the selected string or None; `tool_hub_token` internally preserves `NO_AUTH_TOKEN` so an HTTP caller with no selected credential never activates filesystem discovery.
+
+Retain `tests/mcp/test_lazy_client_imports.py`: importing CLI hub helpers must not load the SDK, building the server must preserve warning-level HTTP logging, and `uvicorn` access logging stays disabled. The decorator imports its SDK Context and ToolError lazily during registration, while `MCPServer` remains a TYPE_CHECKING import.
 
 The existing `host_states`, `sweep_summary`, `locate_sweep`, `hub_call`, and `build_server` already accept `TokenChoice` and distinguish None from `NO_AUTH_TOKEN`. Preserve their real sentinel propagation, timeout and host-state metadata; do not add the obsolete `discover_token` flag or replace `None` tests with truthiness. Keep `token=auth()` at every tool forwarding call. Add a regression where separate HTTP messages on the same MCP session use different selected credentials, a principal-only HTTP call forwards no Authorization and never invokes discovery, and a stdio call with no message request still discovers the selected home's credential.
 
 2. Add after `def dump(...)`:
 
 ```python
-    def agent_identity(agent: str) -> tuple[str, str | None]:
-        # a session acts as agent:<agent>@<user>; the local owner keeps phase 2 values
+    def agent_identity(agent: str | None) -> tuple[str, str | None]:
+        # Keep the selected stdio default and optional per-call override.
+        agent = default_agent if agent is None else agent
         principal = caller()
         if principal.session_id is None:
             return f"agent:{agent}", None
@@ -15361,11 +15423,11 @@ The existing `host_states`, `sweep_summary`, `locate_sweep`, `hub_call`, and `bu
     def list_projects() -> dict[str, Any]:
 ```
 
-4. In `launch_run`, replace `created_by = f"agent:{agent}"` with `created_by, owner = agent_identity(agent)`, add `"owner": owner,` to the remote `body` after `"created_by": created_by,`, add `require_local_exec(caller())  # the run executes on this machine` as the first line after the remote branch (before `record = control.launch_run(`), and add `owner=owner,` after `created_by=created_by,` in the local `RunRequest(...)`.
+4. In `launch_run`, replace `created_by = actor(agent)` with `created_by, owner = agent_identity(agent)`, add `"owner": owner,` to the remote `body` after `"created_by": created_by,`, add `require_local_exec(caller())  # the run executes on this machine` as the first line after the remote branch (before `record = control.launch_run(`), and add `owner=owner,` after `created_by=created_by,` in the local `RunRequest(...)`.
 
-5. In `rerun` and `reinfer`, compute `created_by, owner = agent_identity(agent)` at the top, add `require_local_exec(caller())` after the `if out is not None: return {"run": out}` early return (a local run's child executes here), and pass `created_by=created_by, owner=owner` to `control.rerun(...)` / `control.reinfer(...)` instead of `created_by=f"agent:{agent}"`.
+5. In `rerun` and `reinfer`, compute `created_by, owner = agent_identity(agent)` at the top, add `require_local_exec(caller())` after the `if out is not None: return {"run": out}` early return (a local run's child executes here), and pass `created_by=created_by, owner=owner` to `control.rerun(...)` / `control.reinfer(...)` instead of `created_by=actor(agent)`. Preserve `reinfer`'s `vars=vars` forwarding and optional agent signatures.
 
-6. In `launch_sweep`, compute `created_by, owner = agent_identity(agent)` at the top, use `created_by` in `require_agent_hypothesis` and in the remote body (`"created_by": created_by,` plus `"owner": owner,`), add `require_local_exec(caller())` just before `summary = core_sweeps.launch_sweep(`, and pass `created_by=created_by, owner=owner` to `core_sweeps.launch_sweep(...)`. In `extend_sweep`, add `require_local_exec(caller())` just before its last line (`return dump(core_sweeps.extend_sweep(c, spec.project, spec.id, seeds))`).
+6. In `launch_sweep`, compute `created_by, owner = agent_identity(agent)` at the top, replace its `actor(agent)` uses with `created_by` in `require_agent_hypothesis` and in the remote body (`"created_by": created_by,` plus `"owner": owner,`), add `require_local_exec(caller())` just before `summary = core_sweeps.launch_sweep(`, and pass `created_by=created_by, owner=owner` to `core_sweeps.launch_sweep(...)`. Preserve `sweep_acts_through_hub(c, spec, here)` for durable local as well as remote sweeps in both `cancel_sweep` and `extend_sweep`; retain their issuance-aware docstrings and the `INSTRUCTIONS` receipt guidance. In `extend_sweep`, add `require_local_exec(caller())` just before its last line (`return dump(core_sweeps.extend_sweep(c, spec.project, spec.id, seeds))`).
 
 7. In `add_note`, replace its body with:
 

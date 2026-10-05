@@ -38,7 +38,6 @@ from pydantic import BaseModel
 from hypothex.core.context import Context
 from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, HypothexError, RunError, RunNotFoundError
-from hypothex.core.evaluation import evaluate_run
 from hypothex.core.events import EventLog
 from hypothex.core.execution import (
     STOP_MARKER,
@@ -46,10 +45,11 @@ from hypothex.core.execution import (
     process_alive,
     process_create_time,
     release_worktree,
+    score_finished_run,
 )
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.ids import utcnow
-from hypothex.core.index import Index
+from hypothex.core.index import Index, index_run_points, points_to_index
 from hypothex.core.layout import Layout
 from hypothex.core.records import (
     ACTIVE_STATUSES,
@@ -103,6 +103,9 @@ SUBMIT_SETTLE_SECONDS = 300.0
 """An unknown submission counts as absent only this long after its intent."""
 PENDING_STALE_SECONDS = SLURM_COMMAND_TIMEOUT + SUBMIT_SETTLE_SECONDS
 """A ``pending`` intent this old is ``unknown`` even while its submitter lives: sbatch is over."""
+LOST_RECHECK_SECONDS = 3600.0
+"""A run marked ``lost`` keeps its outbox entry this long: a node end that a shared
+filesystem shows late (``run.yaml`` or ``exit.json``) still replaces ``lost``."""
 FLOCK_PROBE = ".flock-probe"
 
 
@@ -175,7 +178,8 @@ def validate_defaults(defaults: SlurmDefaults) -> None:
         (``sbatch_option_problem``: ``--job-name``, ``--comment``,
         ``--output``, ``--error``, ``--chdir``, ``--wrap``, in any form; and
         here also ``--requeue`` / ``--no-requeue`` or an abbreviation of them,
-        see ``REQUEUE_OPTIONS``).
+        see ``REQUEUE_OPTIONS``, and ``--array`` / ``-a`` in any form, see
+        ``ARRAY_OPTION``).
 
     Examples
     --------
@@ -187,7 +191,7 @@ def validate_defaults(defaults: SlurmDefaults) -> None:
     if defaults.account is not None:
         _safe("account", defaults.account)
     for item in defaults.extra:
-        problem = sbatch_option_problem(item) or _requeue_problem(item)
+        problem = sbatch_option_problem(item) or _requeue_problem(item) or _array_problem(item)
         if problem is not None:
             raise SlurmError(f"slurm extra option {problem}")
 
@@ -212,6 +216,31 @@ def _requeue_problem(item: str) -> str | None:
     return (
         f"{item!r} sets --{taken}, which Hypothex sets itself "
         "(every job is --no-requeue: a second attempt cannot run the same run)"
+    )
+
+
+ARRAY_OPTION = "array"
+"""The sbatch option (short ``-a``) that makes a job array; ``extra`` may not set it.
+
+Every task of an array runs the batch script, so each task after the first
+would run ``hx run --child`` for the same run, find it already claimed, and
+fail: one run is one job.
+"""
+ARRAY_SHORT = "a"
+
+
+def _array_problem(item: str) -> str | None:
+    """Why ``item`` makes a job array (``--array=1-3``, ``--arr=0-9``, ``-a1-3``), or None."""
+    if item.startswith("--"):
+        name = item[2:].split("=", 1)[0]
+        taken = bool(name) and ARRAY_OPTION.startswith(name)
+    else:
+        taken = item.startswith(f"-{ARRAY_SHORT}")
+    if not taken:
+        return None
+    return (
+        f"{item!r} sets --{ARRAY_OPTION}, which Hypothex cannot run "
+        "(each array task would run the same run again)"
     )
 
 
@@ -958,7 +987,7 @@ def run_child(
     SQLite file is opened on the compute node. Scoring is left to the login
     node, so the git worktree of a pinned run is kept here; the login node
     removes it once it published the end (``sync_node_run``). At the end the
-    exit record ``exit.json`` (``status``, ``exit_code``, ``ended_at``) is
+    exit record ``exit.json`` (``status``, ``exit_code``, ``ended_at``, ``end_reason``) is
     written next to ``run.yaml``.
 
     Parameters
@@ -994,6 +1023,7 @@ def run_child(
         "run_id": final.run_id,
         "status": final.status.value,
         "exit_code": final.exit_code,
+        "end_reason": final.end_reason,
         "ended_at": (final.ended_at or utcnow()).isoformat(),
     }
     atomic_write_text(ctx.run_dir(final) / EXIT_FILE, json.dumps(exit_record))
@@ -1018,7 +1048,11 @@ def _outbox_lock(layout: Layout) -> contextlib.AbstractContextManager[None]:
 
 
 def _done(entry: dict[str, Any]) -> bool:
-    """An entry can go: terminal status published, job known, no cancel or node end pending."""
+    """
+    An entry can go: terminal status published, job known, no cancel or node end pending.
+
+    A ``lost`` run's entry stays while it holds ``lost_at`` (``LOST_RECHECK_SECONDS``).
+    """
     try:
         published = RunStatus(entry["published"])
     except (KeyError, ValueError):
@@ -1028,6 +1062,7 @@ def _done(entry: dict[str, Any]) -> bool:
         and entry.get("state") == "submitted"
         and not entry.get("cancel_requested")
         and not entry.get("node_end_pending")
+        and not entry.get("lost_at")
     )
 
 
@@ -1166,22 +1201,31 @@ def _end_if_active(
     event_type: str,
     mutate: Callable[[RunRecord], RunRecord],
     payload: dict[str, Any],
+    *,
+    replaces: frozenset[RunStatus] = frozenset(),
 ) -> RunRecord | None:
     """
     End an active SLURM run and emit ``event_type``; None when it had already ended.
 
+    ``replaces`` names end statuses this end may still overwrite (``lost``,
+    the login node's guess, which the node's own exit record corrects).
+
     ``Context.update_run`` emits its event even when ``mutate`` keeps a record
     that the compute node ended first (a ``run.lost`` carrying ``finished``).
-    Here the check, the write, the event, and the index update happen under
-    the run lock, and nothing is written or emitted for a run that ended: the
-    caller then publishes the node's own end (``sync_node_run``, Task 29).
+    Here the check, the write, the event, and the index update (the record,
+    then its metric points from the whole file, ``index_run_points``) happen
+    under the run lock, and nothing is written or emitted for a run that
+    ended: the caller then publishes the node's own end (``sync_node_run``,
+    Task 29).
     """
     project = ctx.find_record(run_id).project
     with run_lock(ctx.layout.run_dir(project, run_id)):
         current = ctx.store.read_record(project, run_id)
-        if current.status in TERMINAL_STATUSES:
+        if current.status in TERMINAL_STATUSES and current.status not in replaces:
             return None
         ended = mutate(current)
+        if "reason" in payload:
+            ended = ended.model_copy(update={"end_reason": payload["reason"]})
         ctx.store.write_record(ended)
         ctx.events.append(
             event_type,
@@ -1190,6 +1234,7 @@ def _end_if_active(
             payload={"status": ended.status.value, **payload},
         )
         ctx.index.upsert_run(ended)
+        index_run_points(ctx.index, ctx.store, ended)
     return ended
 
 
@@ -1417,6 +1462,9 @@ def _exit_fields(data: object) -> dict[str, Any] | str:
     exit_code = data.get("exit_code")
     if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int)):
         return f"exit_code {exit_code!r} is not an integer"
+    end_reason = data.get("end_reason")
+    if end_reason is not None and not isinstance(end_reason, str):
+        return "end_reason is not a string or null"
     raw = data.get("ended_at")
     ended_at: datetime | None = None
     if raw is not None:
@@ -1428,12 +1476,17 @@ def _exit_fields(data: object) -> dict[str, Any] | str:
             return f"ended_at {raw!r} is not an ISO 8601 time"
         if ended_at.tzinfo is None:
             ended_at = ended_at.replace(tzinfo=UTC)
-    return {"status": status, "exit_code": exit_code, "ended_at": ended_at}
+    return {
+        "status": status,
+        "exit_code": exit_code,
+        "ended_at": ended_at,
+        "end_reason": end_reason,
+    }
 
 
 def _read_exit(run_dir: Path) -> dict[str, Any] | None:
     """
-    The node's exit record, checked: ``status`` (an end status), ``exit_code``, ``ended_at``.
+    The node's exit record, checked, including its nullable terminal cause.
 
     None when there is none, and (with a warning) when it cannot be used: a
     bad record must never stop the poll at this run (or at the runs after it).
@@ -1454,14 +1507,17 @@ def _read_exit(run_dir: Path) -> dict[str, Any] | None:
 
 
 def _apply_exit(exit_record: dict[str, Any]) -> Callable[[RunRecord], RunRecord]:
+    """Apply the node's exit record to an active run, or over a login-node ``lost``."""
+
     def mutate(r: RunRecord) -> RunRecord:
-        if r.status in TERMINAL_STATUSES:
+        if r.status in TERMINAL_STATUSES and r.status != RunStatus.LOST:
             return r
         return r.model_copy(
             update={
                 "status": exit_record["status"],
                 "exit_code": exit_record["exit_code"],
                 "ended_at": exit_record["ended_at"] or utcnow(),
+                "end_reason": exit_record.get("end_reason"),
             }
         )
 
@@ -1531,10 +1587,11 @@ def _sync_node_run(ctx: Context, current: RunRecord) -> RunRecord | None:
     """``sync_node_run``'s body; the caller holds the publication lock."""
     seen = _published(ctx.layout, current)
     changed = False
-    if current.status in ACTIVE_STATUSES:
+    if current.status in ACTIVE_STATUSES or current.status == RunStatus.LOST:
         exit_record = _read_exit(ctx.run_dir(current))
-        if exit_record is not None:
-            # run.yaml lost the node's last write; the exit record wins
+        if exit_record is not None and exit_record["status"] != current.status:
+            # run.yaml lost the node's last write (or the login node wrote lost over it
+            # while a shared filesystem hid it); the exit record wins
             status = exit_record["status"].value
             applied = _end_if_active(
                 ctx,
@@ -1542,6 +1599,7 @@ def _sync_node_run(ctx: Context, current: RunRecord) -> RunRecord | None:
                 f"run.{status}",
                 _apply_exit(exit_record),
                 {"exit_code": exit_record["exit_code"], "source": "exit.json"},
+                replaces=frozenset({RunStatus.LOST}),
             )
             if applied is not None:
                 current, seen, changed = applied, applied.status, True
@@ -1558,14 +1616,11 @@ def _sync_node_run(ctx: Context, current: RunRecord) -> RunRecord | None:
         ctx.index.upsert_run(current)
         changed = True
     if changed or current.status == RunStatus.RUNNING:
-        points = ctx.store.read_metric_points(current.project, current.run_id)
+        points = points_to_index(ctx.store, current.project, current.run_id, current.status)
         ctx.index.replace_metric_points(current.run_id, points)
     scored = bool(ctx.store.read_scores(current.project, current.run_id))
     if changed and current.status == RunStatus.FINISHED and current.task and not scored:
-        try:
-            evaluate_run(ctx, current.run_id)  # the node never scores (auto_evaluate=False)
-        except HypothexError as exc:
-            ctx.emit("run.eval_skipped", current, {"reason": str(exc)[:500]})
+        score_finished_run(ctx, current)  # the node never scores (auto_evaluate=False)
     if current.status in TERMINAL_STATUSES:
         release_worktree(ctx, current)  # after scoring, which reads the checkout
     if changed or current.status in TERMINAL_STATUSES:
@@ -1592,9 +1647,10 @@ UNRESOLVED_SUBMISSION = "submission outcome unknown; check squeue/sacct"
 """Shown on a run whose submission no lookup can settle (no comment accounting)."""
 
 
-def _intent_age(entry: dict[str, Any]) -> float:
+def _intent_age(entry: dict[str, Any], key: str = "intent_at") -> float:
+    """Seconds since the outbox entry's ``key`` time; infinite when it is missing or bad."""
     try:
-        return (utcnow() - datetime.fromisoformat(entry["intent_at"])).total_seconds()
+        return (utcnow() - datetime.fromisoformat(entry[key])).total_seconds()
     except (KeyError, TypeError, ValueError):
         return float("inf")
 
@@ -1714,6 +1770,11 @@ def _track_entry(
     if published is not None:
         changed.append(published)
         current = published
+    if entry.get("lost_at"):  # marked lost: the sync above publishes a late node end
+        late = current.status != RunStatus.LOST
+        if late or _intent_age(entry, "lost_at") >= LOST_RECHECK_SECONDS:
+            _update_intent(ctx.layout, run_id, lost_at=None)  # done: the entry goes
+        return None
     job_id = entry.get("job_id") or current.executor.slurm_job_id
     if job_id is None:
         resolved = _resolve_intent(ctx, entry, current)
@@ -1722,6 +1783,12 @@ def _track_entry(
         return None  # tracked from the next poll on
     if entry.get("state") != "submitted":  # the node's run.yaml names the job
         entry = _update_intent(ctx.layout, run_id, state="submitted", job_id=job_id) or entry
+    if current.executor.slurm_job_id is None:
+        # the submitter died between the outbox write and run.yaml (``_record_job``)
+        current = _record_job(ctx, run_id, job_id, recovered=True)
+        changed.append(current)
+        if entry.get("cancel_requested"):
+            return None  # ``_record_job`` carried out the stop (or the next poll retries it)
     if entry.get("cancel_requested"):
         _cancel_requested(ctx, run_id, job_id)
         return None
@@ -1767,7 +1834,7 @@ def _settle_node_end(
         changed = published is not None
         if ctx.index.get_run(run_id) != current:
             ctx.index.upsert_run(current)
-            points = ctx.store.read_metric_points(project, run_id)
+            points = points_to_index(ctx.store, project, run_id, current.status)
             ctx.index.replace_metric_points(run_id, points)
             ctx.events.append(
                 "run.slurm_state",
@@ -1806,10 +1873,15 @@ def reconcile(
       only ``run.yaml`` and ``exit.json``, so the events and the index updates
       of SLURM runs come from here. A run whose job id was never recorded (its
       submitter crashed after ``sbatch``) is matched to its job by name and
-      comment, or failed when its submitter is dead and SLURM has no job.
+      comment, or failed when its submitter is dead and SLURM has no job. A
+      job id that only the outbox holds (the submitter died before writing
+      ``run.yaml``) is recorded in ``run.yaml`` with ``run.submitted``.
     - Job queued or running: keep; record its node when SLURM assigned one.
     - Run already has an exit record (``run.yaml`` is terminal): keep.
     - Job ended (``sacct``) or vanished, and no exit record: mark ``lost``.
+      The outbox entry stays for ``LOST_RECHECK_SECONDS``: a node end that a
+      shared filesystem shows later (``run.yaml`` or ``exit.json``) is then
+      published over ``lost``, and a finished task run is scored.
 
     Parameters
     ----------
@@ -1892,6 +1964,8 @@ def _reconcile_job(
     if job is None and confirm_gone is not None:
         job = confirm_gone.get(job_id)  # sacct had the end state at the first poll
     with _publish_lock(ctx.run_dir(current)):
+        if _read_exit(ctx.run_dir(current)) is not None:  # the node's end showed up meanwhile
+            return _publish_node_end(ctx, current.run_id)
         lost = _end_if_active(
             ctx,
             current.run_id,
@@ -1906,7 +1980,11 @@ def _reconcile_job(
         if lost is None:  # the node's end arrived first: publish it, never "lost"
             return _publish_node_end(ctx, current.run_id)
         release_worktree(ctx, lost)
-        mark_published(ctx.layout, lost)  # acknowledged after the event of this end
+        # acknowledged after the event of this end; the entry stays for LOST_RECHECK_SECONDS
+        # so a node end that a shared filesystem shows late still replaces lost
+        _update_intent(
+            ctx.layout, lost.run_id, published=lost.status.value, lost_at=utcnow().isoformat()
+        )
     return lost
 
 

@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -284,3 +285,56 @@ def test_log_records_non_finite_values_as_divergence_markers(run_env: Path) -> N
     ]
     assert all(isinstance(r["t"], float) for r in rows)
     assert len(_lines(run_env / "metrics.jsonl")) == 1  # only acc
+
+
+def test_log_opens_each_metrics_file_once_per_call(
+    run_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[str] = []
+    real = sdk.open_jsonl_append
+
+    def counting(path: Path) -> Any:
+        opened.append(path.name)
+        return real(path)
+
+    monkeypatch.setattr(sdk, "open_jsonl_append", counting)
+    monkeypatch.setattr(sdk, "append_jsonl", lambda *a, **k: pytest.fail("per-row append"))
+    run = hx.current()
+    values = {f"m/{i:03d}": i / 10 for i in range(50)}
+    values["bad"] = float("nan")
+    values["worse"] = float("inf")
+    with pytest.warns(RuntimeWarning):
+        run.log(values)
+    assert sorted(opened) == ["metrics.jsonl", "metrics_nonfinite.jsonl"]
+    rows = _lines(run_env / "metrics.jsonl")
+    assert [(r["name"], r["step"], r["value"]) for r in rows] == [
+        (f"m/{i:03d}", 0, i / 10) for i in range(50)
+    ]
+    assert len({r["t"] for r in rows}) == 1
+    bad = _lines(run_env / "metrics_nonfinite.jsonl")
+    assert [(r["name"], r["value"]) for r in bad] == [("bad", "nan"), ("worse", "inf")]
+    opened.clear()
+    run.log({"loss": 0.5})
+    assert opened == ["metrics.jsonl"]
+
+
+def test_log_with_a_non_number_writes_nothing_and_keeps_steps(run_env: Path) -> None:
+    run = hx.current()
+    with pytest.raises(ValueError):
+        run.log({"loss": 0.5, "acc": "high"})  # type: ignore[dict-item]
+    assert not (run_env / "metrics.jsonl").exists()
+    run.log({"loss": 0.25})
+    rows = _lines(run_env / "metrics.jsonl")
+    assert [(r["name"], r["step"]) for r in rows] == [("loss", 0)]
+
+
+@pytest.mark.parametrize("name", ["", "x" * 257, 3])
+def test_log_rejects_a_bad_metric_name_and_writes_nothing(run_env: Path, name: object) -> None:
+    # An empty or 2M-character name made the run page millions of pixels wide.
+    run = hx.current()
+    with pytest.raises(ValueError, match="metric name"):
+        run.log({"loss": 0.5, name: 1.0})  # type: ignore[dict-item]
+    assert not (run_env / "metrics.jsonl").exists()
+    run.log({"loss": 0.25, "x" * 256: 1.0})
+    rows = _lines(run_env / "metrics.jsonl")
+    assert [(r["name"][:4], r["step"]) for r in rows] == [("loss", 0), ("xxxx", 0)]

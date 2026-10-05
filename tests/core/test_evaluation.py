@@ -5,10 +5,17 @@ import pytest
 import yaml
 
 from hypothex.core import evaluation
+from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
-from hypothex.core.errors import EvalError
-from hypothex.core.evaluation import evaluate_run, reeval, validate_project
-from tests.factories import PREDS_075, seed_finished_run, write_toy_project
+from hypothex.core.errors import EvalError, RemoteProjectError
+from hypothex.core.evaluation import (
+    EvalReport,
+    evaluate_run,
+    metric_drift,
+    reeval,
+    validate_project,
+)
+from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
 
 
 def test_evaluate_run_scores_file_and_index(ctx: Context, toy_repo: Path) -> None:
@@ -94,6 +101,15 @@ def test_reeval_skips_already_scored_unless_forced(ctx: Context, toy_repo: Path)
     assert reeval(ctx, run_id="r1", force=True).evaluated == ["r1"]
 
 
+def test_task_reeval_scores_only_the_given_run_ids(ctx: Context, toy_repo: Path) -> None:
+    for rid in ("r1", "r2", "r3"):
+        seed_finished_run(ctx, toy_repo, rid, predictions=PREDS_075)
+    report = reeval(ctx, project="toy", task="toy-acc", run_ids=["r3", "r1", "zz"])
+    assert sorted(report.evaluated) == ["r1", "r3"] and report.skipped == {}
+    assert ctx.store.read_scores("toy", "r2") == []
+    assert reeval(ctx, project="toy", task="toy-acc", run_ids=[]) == EvalReport()
+
+
 def test_version_bump_rescores_and_keeps_old(ctx: Context, toy_repo: Path) -> None:
     seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
     evaluate_run(ctx, "r1")
@@ -104,23 +120,111 @@ def test_version_bump_rescores_and_keeps_old(ctx: Context, toy_repo: Path) -> No
     assert versions == ["v1", "v2"]
 
 
+def _scored(ctx: Context, run_id: str) -> list[tuple[str, str]]:
+    return [(s.metric, s.version) for s in ctx.store.read_scores("toy", run_id)]
+
+
+def test_reeval_scores_only_the_stale_metrics(ctx: Context, toy_repo: Path) -> None:
+    cfg_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["metrics"]["acc2"] = {"version": "v1", "fn": "toymetrics:accuracy"}
+    cfg["tasks"]["toy-acc"]["metrics"] = ["accuracy", "acc2"]
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    cfg["metrics"]["accuracy"]["version"] = "v2"
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    assert reeval(ctx, run_id="r1").evaluated == ["r1"]
+    assert _scored(ctx, "r1") == [("accuracy", "v1"), ("acc2", "v1"), ("accuracy", "v2")]
+    assert reeval(ctx, run_id="r1", force=True).evaluated == ["r1"]
+    assert _scored(ctx, "r1")[3:] == [("accuracy", "v2"), ("acc2", "v1")]
+
+
+def test_reeval_retries_only_the_failing_metric(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", task="toy-broken", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    assert reeval(ctx, run_id="r1").evaluated == ["r1"]
+    assert _scored(ctx, "r1") == [("accuracy", "v1"), ("broken", "v1"), ("broken", "v1")]
+
+
 def test_reeval_rejects_non_current_version(ctx: Context, toy_repo: Path) -> None:
     seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
     with pytest.raises(EvalError, match="only the current version"):
         reeval(ctx, run_id="r1", metric="accuracy@v9")
 
 
-def test_metric_code_change_without_bump_warns(ctx: Context, toy_repo: Path) -> None:
-    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
-    evaluate_run(ctx, "r1")
-    path = toy_repo / "toymetrics.py"
+def _tweak_accuracy(repo: Path) -> None:
+    """Change the accuracy metric's code without bumping its version."""
+    path = repo / "toymetrics.py"
     path.write_text(
         path.read_text().replace(
             "def accuracy(examples):\n", "def accuracy(examples):\n    # tweak\n"
         )
     )
+
+
+def test_metric_code_change_without_bump_warns(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    _tweak_accuracy(toy_repo)
     _, warnings = evaluate_run(ctx, "r1")
     assert any("without a version bump" in w for w in warnings)
+
+
+def test_metric_drift_warning_is_a_run_warning_event(ctx: Context, toy_repo: Path) -> None:
+    # auto-eval (execution, slurm) keeps no report: the warning must reach the run's events
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    _tweak_accuracy(toy_repo)
+    evaluate_run(ctx, "r1")
+    messages = [e.payload["message"] for e in ctx.events.since(0) if e.type == "run.warning"]
+    assert messages == ["metric accuracy code changed without a version bump (still v1)"]
+
+
+def test_metric_drift_names_changed_metrics(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", task="toy-broken", predictions=PREDS_075)
+    config = load_project_config(toy_repo)
+    assert metric_drift(ctx, toy_repo, config) == []  # nothing recorded yet
+    evaluate_run(ctx, "r1")
+    assert metric_drift(ctx, toy_repo, config) == []
+    _tweak_accuracy(toy_repo)
+    assert metric_drift(ctx, toy_repo, config) == ["accuracy@v1"]
+    assert metric_drift(ctx, toy_repo, config, ["broken"]) == []
+    assert any("without a version bump" in w for w in validate_project(ctx, toy_repo).warnings)
+
+
+def test_reeval_warns_about_metric_drift_without_force(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    _tweak_accuracy(toy_repo)
+    report = reeval(ctx, project="toy", task="toy-acc")
+    assert report.skipped == {"r1": "already scored at the current version"}
+    assert report.warnings == ["metric accuracy code changed without a version bump (still v1)"]
+
+
+def test_no_prediction_id_in_the_dataset_is_an_eval_error(ctx: Context, toy_repo: Path) -> None:
+    # every reference would be None: a perfect model would rank with 0.0
+    preds = [{"id": f"x{p['id']}", "prediction": p["prediction"]} for p in PREDS_075]
+    seed_finished_run(ctx, toy_repo, "r1", predictions=preds)
+    with pytest.raises(EvalError, match="none of the 4 prediction ids is in dataset 'toyset'"):
+        evaluate_run(ctx, "r1")
+    assert ctx.store.read_scores("toy", "r1") == []
+    report = reeval(ctx, run_id="r1")
+    assert report.evaluated == [] and "none of the 4 prediction ids" in report.skipped["r1"]
+
+
+def test_some_prediction_ids_missing_from_the_dataset_warn(ctx: Context, toy_repo: Path) -> None:
+    preds = [*PREDS_075[:3], {"id": "x3", "prediction": 0}]
+    seed_finished_run(ctx, toy_repo, "r1", predictions=preds)
+    scores, warnings = evaluate_run(ctx, "r1")
+    assert [s.value for s in scores] == [0.75]  # x3 has no reference, so it counts wrong
+    expected = (
+        "1 of 4 prediction ids are not in dataset 'toyset' split 'test'; "
+        "they are scored with no reference"
+    )
+    assert warnings == [expected]
+    messages = [e.payload["message"] for e in ctx.events.since(0) if e.type == "run.warning"]
+    assert messages == [expected]
 
 
 def test_evaluate_removed_task_is_clear_error(ctx: Context, toy_repo: Path) -> None:
@@ -131,6 +235,22 @@ def test_evaluate_removed_task_is_clear_error(ctx: Context, toy_repo: Path) -> N
     cfg_path.write_text(yaml.safe_dump(cfg))
     with pytest.raises(EvalError, match="no longer exists"):
         evaluate_run(ctx, "r1")
+
+
+def test_a_project_copied_from_a_host_is_never_evaluated_from_its_repo_path(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # the host reported a repo path that also exists here: its hypothex.yaml and
+    # metric code must not run on the hub (SEC-5)
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        evaluate_run(ctx, "r1")
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        reeval(ctx, project="toy", task="toy-acc")
+    assert ctx.store.read_scores("toy", "r1") == []
+    assert ctx.index.scores_for(["r1"]) == {}
 
 
 def test_validate_project(ctx: Context, toy_repo: Path) -> None:
@@ -181,3 +301,23 @@ def test_metric_hashes_update_holds_project_lock(
     assert seen == [("read", True), ("save", True)]
     assert not _project_lock_is_held(ctx)
     assert list(real_read("toy")) == ["accuracy@v1"]
+
+
+def test_run_checkout_never_names_a_tree_outside_the_worktrees_folder(
+    ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    # a run's cwd is text (a host may have written it): `..` and a symlink that leave
+    # <store>/toy/worktrees/ must not pass as a worktree, even when a hypothex.yaml is there
+    root = ctx.layout.worktrees_dir("toy")
+    root.mkdir(parents=True)
+    (root.parent / "hypothex.yaml").write_text("project: toy\n")
+    outside = write_toy_project(tmp_path / "outside", use_git=False)
+    (root / "link").symlink_to(outside)
+    (root / "t1").mkdir()
+    (root / "t1" / "hypothex.yaml").write_text("project: toy\n")
+    dotted = make_record("r1", cwd=str(root / ".." / "x"))
+    linked = make_record("r2", cwd=str(root / "link" / "sub"))
+    real = make_record("r3", cwd=str(root / "t1" / "pkg"))
+    assert evaluation.run_checkout(ctx, dotted) is None
+    assert evaluation.run_checkout(ctx, linked) is None
+    assert evaluation.run_checkout(ctx, real) == root / "t1"

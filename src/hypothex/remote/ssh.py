@@ -16,18 +16,21 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import tempfile
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+import psutil
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from hypothex.core.errors import HypothexError
+from hypothex.core.fsutil import atomic_write_text
 
 SSH_FAILURE_CODE = 255
 _STDERR_TAIL = 2000
@@ -275,7 +278,8 @@ def copy_from(
         Path on the host; relative paths and ``~/`` are relative to the
         remote home.
     local : Path
-        Destination path. Parent directories are created.
+        Destination path. Parent directories are created once the copy
+        succeeded, so a failed pull leaves no empty folder.
     work : Path
         Folder for pull state (``stage/``, ``txn/``, ``backup/``); must be on
         the same filesystem as ``local``.
@@ -295,22 +299,58 @@ def copy_from(
     >>> copy_from(SshTarget(alias="gpu1"), "~/ckpt/best.pt", dest, work=work)  # doctest: +SKIP
     """
     _check_remote_path(remote_path, source=True)
-    txn_dir, _, stage_dir = _pull_dirs(work)
-    local.parent.mkdir(parents=True, exist_ok=True)
-    with _install_lock(txn_dir):
-        _recover_swaps(work)  # a recorded swap was cut short: finish or undo it
-    # A unique staging folder per call: two pulls of one file never share it.
-    stage = Path(tempfile.mkdtemp(prefix="pull-", dir=stage_dir))
-    part = stage / local.name
-    argv = [target.scp_bin, *_base_options(target), "-s", "-q", "-r"]
-    argv += [f"{target.alias}:{remote_path}", str(part)]
-    try:
+    with staged_pull(local, work=work) as part:
+        argv = [target.scp_bin, *_base_options(target), "-s", "-q", "-r"]
+        argv += [f"{target.alias}:{remote_path}", str(part)]
         res = _run(argv, stdin=None, timeout=timeout, what=f"scp from {target.alias}")
         if res.returncode != 0 or not part.exists():
             raise SshError(
                 f"scp {target.alias}:{remote_path} -> {local} failed "
                 f"(exit {res.returncode}): {_tail(res.stderr)}"
             )
+
+
+@contextmanager
+def staged_pull(local: Path, *, work: Path) -> Iterator[Path]:
+    """
+    Stage a complete download and install it with the trusted pull transaction.
+
+    Both HTTP and SFTP downloads use this boundary. No final destination parent
+    is created until the download succeeds; exceptions discard the staged copy.
+    Existing destinations retain the same serialized swap/recovery semantics as
+    :func:`copy_from`.
+
+    Parameters
+    ----------
+    local : Path
+        Final destination, on the same filesystem as ``work``.
+    work : Path
+        Trusted pull state directory, separate from destination content.
+
+    Yields
+    ------
+    Path
+        Unique staged path to write before exiting successfully.
+
+    Raises
+    ------
+    SshError
+        No completed download exists, or a file would replace a directory.
+
+    Examples
+    --------
+    >>> with staged_pull(dest, work=home / "pulls") as part:  # doctest: +SKIP
+    ...     part.write_bytes(downloaded)
+    """
+    txn_dir, _, stage_dir = _pull_dirs(work)
+    with _install_lock(txn_dir):
+        _recover_swaps(work)
+    stage = Path(tempfile.mkdtemp(prefix="pull-", dir=stage_dir))
+    part = stage / local.name
+    try:
+        yield part
+        if not part.exists():
+            raise SshError(f"download for {local} did not produce a file or folder")
         _install(part, local, work)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
@@ -382,6 +422,7 @@ def _install(part: Path, local: Path, work: Path) -> None:
     txn_dir, backup_dir, _ = _pull_dirs(work)
     with _install_lock(txn_dir):
         _recover_swaps(work)
+        local.parent.mkdir(parents=True, exist_ok=True)  # only now: a failed pull makes none
         if not part.is_dir() and local.is_dir() and not local.is_symlink():
             raise SshError(f"{local} is a folder; a pulled file never replaces a folder")
         if part.is_dir() and local.is_dir() and not local.is_symlink():
@@ -436,6 +477,15 @@ class Tunnel:
         Port on the host (the env server binds to 127.0.0.1 there).
     local_port : int, optional
         Local port; a free one is picked when omitted.
+    private : bool
+        Use an owner-only Unix socket in a fresh 0700 directory under ``/tmp``.
+        The hub always uses this mode; ``local_port`` is then None, with no TCP
+        fallback. The socket is allocated by :meth:`start`.
+    registry : Path, optional
+        Folder for ``<pid>.json`` (pid, owner, argv and both process birth
+        times) while the ``ssh`` process runs, so a later process can stop it with
+        :func:`reap_stale_tunnels` after this one died without :meth:`stop`
+        (the hub passes ``<home>/hub/tunnels``).
 
     Examples
     --------
@@ -446,12 +496,31 @@ class Tunnel:
     >>> tunnel.stop()  # doctest: +SKIP
     """
 
-    def __init__(self, target: SshTarget, remote_port: int, local_port: int | None = None) -> None:
+    def __init__(
+        self,
+        target: SshTarget,
+        remote_port: int,
+        local_port: int | None = None,
+        *,
+        registry: Path | None = None,
+        private: bool = False,
+    ) -> None:
+        if private and local_port is not None:
+            raise ValueError("private tunnels cannot expose a local TCP port")
+        self.private = private
+        self.unix_socket: Path | None = None
+        self._socket_owner: str | None = None
+        self._socket_dir_identity: tuple[int, int] | None = None
+        self._socket_marker_identity: tuple[int, int] | None = None
         self.target = target
         self.remote_port = remote_port
-        self.local_port: int = local_port if local_port is not None else _free_port()
+        self.local_port: int | None = (
+            None if private else (local_port if local_port is not None else _free_port())
+        )
+        self.registry = registry
         self._proc: subprocess.Popen[bytes] | None = None
         self._stderr: IO[bytes] | None = None
+        self._record: Path | None = None
 
     def argv(self) -> list[str]:
         """
@@ -463,12 +532,19 @@ class Tunnel:
             ``ssh -N -o ExitOnForwardFailure=yes ... -L 127.0.0.1:L:127.0.0.1:R alias``.
         """
         forward = f"127.0.0.1:{self.local_port}:127.0.0.1:{self.remote_port}"
+        private_options: list[str] = []
+        if self.private:
+            if self.unix_socket is None:
+                raise SshError("private tunnel socket is allocated by start()")
+            forward = f"{self.unix_socket}:127.0.0.1:{self.remote_port}"
+            private_options = ["-o", "StreamLocalBindMask=0177", "-o", "StreamLocalBindUnlink=no"]
         return [
             self.target.ssh_bin,
             "-N",
             *_base_options(self.target),
             "-o",
             "ExitOnForwardFailure=yes",
+            *private_options,
             "-L",
             forward,
             self.target.alias,
@@ -490,34 +566,70 @@ class Tunnel:
         if self.alive():
             return
         self._close()
-        if _port_open(self.local_port):
+        if self.local_port is not None and _port_open(self.local_port):
             raise SshError(f"local port {self.local_port} is already in use")
-        # Held open for the tunnel's lifetime (a pipe could fill and block ssh).
-        self._stderr = tempfile.TemporaryFile()  # noqa: SIM115
         try:
-            self._proc = subprocess.Popen(
-                self.argv(),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=self._stderr,
-            )
-        except FileNotFoundError as exc:
-            self._close()
-            raise SshError(f"{self.target.ssh_bin} not found; is OpenSSH installed?") from exc
-        deadline = time.monotonic() + self.target.connect_timeout + 5
-        while time.monotonic() < deadline:
-            code = self._proc.poll()
-            if code is not None:
-                message = self.stderr_tail()
-                self._close()
-                raise SshError(
-                    f"tunnel to {self.target.alias} exited {code} before it was ready: {message}"
+            if self.private:
+                folder = Path(tempfile.mkdtemp(prefix="hx-tun-", dir="/tmp"))
+                self.unix_socket = folder / "s"
+                info = folder.lstat()
+                self._socket_dir_identity = (info.st_dev, info.st_ino)
+                self._socket_owner = uuid.uuid4().hex
+                marker = folder / ".owner"
+                marker.touch(mode=0o600, exist_ok=False)
+                marker_info = marker.lstat()
+                self._socket_marker_identity = (marker_info.st_dev, marker_info.st_ino)
+                marker.write_text(self._socket_owner, encoding="ascii")
+            # Held open for the lifetime: a pipe could fill and block ssh.
+            self._stderr = tempfile.TemporaryFile()  # noqa: SIM115
+            try:
+                self._proc = subprocess.Popen(
+                    self.argv(),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=self._stderr,
                 )
-            if _port_open(self.local_port) and self._proc.poll() is None:
-                return
-            time.sleep(0.05)
-        self.stop()
-        raise SshError(f"tunnel to {self.target.alias} did not open port {self.local_port} in time")
+            except FileNotFoundError:
+                raise SshError(f"{self.target.ssh_bin} not found; is OpenSSH installed?") from None
+            if self.registry is not None:
+                self._record = _register_tunnel(
+                    self.registry,
+                    self._proc.pid,
+                    self.argv(),
+                    socket_dir=self.unix_socket.parent.name if self.unix_socket else None,
+                    socket_owner=self._socket_owner,
+                )
+            deadline = time.monotonic() + self.target.connect_timeout + 5
+            while time.monotonic() < deadline:
+                code = self._proc.poll()
+                if code is not None:
+                    message = self.stderr_tail()
+                    raise SshError(
+                        f"tunnel to {self.target.alias} exited {code} "
+                        f"before it was ready: {message}"
+                    )
+                if self._ready() and self._proc.poll() is None:
+                    return
+                time.sleep(0.05)
+            raise SshError(
+                f"tunnel to {self.target.alias} did not open port {self.local_port} in time"
+            )
+        except BaseException:
+            # __exit__ is not called when __enter__/start fails. In particular,
+            # an unwritable registry must not leave the new ssh process alive.
+            self.stop()
+            raise
+
+    def _ready(self) -> bool:
+        if self.unix_socket is None:
+            return self.local_port is not None and _port_open(self.local_port)
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.2)
+                sock.connect(str(self.unix_socket))
+            return True
+        except OSError:
+            return False
 
     def alive(self) -> bool:
         """
@@ -553,14 +665,33 @@ class Tunnel:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # Keep the process handle and its recovery record: a later
+                    # stop/reaper must still be able to account for it.
+                    raise SshError(f"tunnel to {self.target.alias} did not stop") from None
         self._close()
 
     def _close(self) -> None:
         if self._stderr is not None:
             self._stderr.close()
             self._stderr = None
+        if self._record is not None:
+            _drop_tunnel_record(self._record)
+            self._record = None
         self._proc = None
+        if self.unix_socket is not None:
+            _cleanup_private_socket(
+                self.unix_socket.parent.name,
+                self._socket_owner,
+                self._socket_dir_identity,
+                self._socket_marker_identity,
+            )
+            self.unix_socket = None
+            self._socket_owner = None
+            self._socket_dir_identity = None
+            self._socket_marker_identity = None
 
     def __enter__(self) -> Tunnel:
         self.start()
@@ -568,3 +699,203 @@ class Tunnel:
 
     def __exit__(self, *exc: Any) -> None:
         self.stop()
+
+
+class _TunnelRecord(BaseModel):
+    """Strict process identity; absent birth times identify a legacy record."""
+
+    pid: int = Field(strict=True, ge=1, le=2**31 - 1)
+    owner: int = Field(strict=True, ge=1, le=2**31 - 1)
+    argv: list[str] = Field(min_length=2)
+    pid_create_time: float | None = Field(default=None, strict=True, gt=0, allow_inf_nan=False)
+    owner_create_time: float | None = Field(default=None, strict=True, gt=0, allow_inf_nan=False)
+    socket_dir: str | None = None
+    socket_owner: str | None = None
+
+
+def _cleanup_private_socket(
+    name: str | None,
+    owner: str | None,
+    directory_identity: tuple[int, int] | None = None,
+    marker_identity: tuple[int, int] | None = None,
+) -> None:
+    """Remove only an owned fixed-name socket and marker in a private temp directory."""
+    if (
+        name is None
+        or owner is None
+        or re.fullmatch(r"hx-tun-[A-Za-z0-9_-]+", name) is None
+        or re.fullmatch(r"[0-9a-f]{32}", owner) is None
+    ):
+        return
+    folder = Path("/tmp") / name
+    try:
+        info = folder.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            return
+        if directory_identity is not None and (info.st_dev, info.st_ino) != directory_identity:
+            return
+        marker = folder / ".owner"
+        if not marker.exists() and not marker.is_symlink() and directory_identity is not None:
+            folder.rmdir()  # a marker-construction failure: only the same empty directory
+            return
+        with marker.open("r", encoding="ascii") as handle:
+            info = os.fstat(handle.fileno())
+            if (
+                marker.is_symlink()
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or (handle.read(33) != owner and (info.st_dev, info.st_ino) != marker_identity)
+            ):
+                return
+        sock = folder / "s"
+        if sock.exists() or sock.is_symlink():
+            if not stat.S_ISSOCK(sock.lstat().st_mode):
+                return
+            sock.unlink()
+        marker.unlink()
+        folder.rmdir()
+    except (OSError, UnicodeError):
+        return
+
+
+def _register_tunnel(
+    registry: Path,
+    pid: int,
+    argv: list[str],
+    *,
+    socket_dir: str | None = None,
+    socket_owner: str | None = None,
+) -> Path:
+    """Atomically record the tunnel and owner's exact process birth times."""
+    data = _TunnelRecord(
+        pid=pid,
+        owner=os.getpid(),
+        argv=argv,
+        pid_create_time=psutil.Process(pid).create_time(),
+        owner_create_time=psutil.Process().create_time(),
+        socket_dir=socket_dir,
+        socket_owner=socket_owner,
+    )
+    record = registry / f"{pid}.json"
+    atomic_write_text(record, data.model_dump_json())
+    return record
+
+
+def _drop_tunnel_record(record: Path) -> None:
+    """Drop a finished or malformed record; an I/O failure can be retried later."""
+    with suppress(OSError):
+        record.unlink(missing_ok=True)
+
+
+def _registered_process(
+    pid: int, birth: float | None
+) -> tuple[Literal["same", "gone", "unknown"], psutil.Process | None]:
+    """Compare process birth without treating inspection failures as absence."""
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return "gone", None
+        if birth is None:
+            return "unknown", None
+        if proc.create_time() != birth:
+            return "gone", None  # the recorded process ended; this pid was reused
+        return "same", proc
+    except psutil.NoSuchProcess:
+        return "gone", None
+    except (psutil.Error, OSError):
+        return "unknown", None
+
+
+def _matches_argv(proc: psutil.Process, argv: list[str]) -> bool:
+    """Compare argument boundaries, allowing an executable wrapper prefix."""
+    actual = proc.cmdline()
+    tail = argv[1:]
+    return bool(tail) and len(actual) >= len(tail) and actual[-len(tail) :] == tail
+
+
+def _stop_registered_tunnel(proc: psutil.Process, data: _TunnelRecord) -> bool:
+    """Stop a verified process with bounded waits; retain unresolved evidence."""
+    try:
+        # psutil's signal methods also reject pid reuse between this identity
+        # check and the signal; raw os.kill would not provide that protection.
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except psutil.TimeoutExpired:
+            state, current = _registered_process(data.pid, data.pid_create_time)
+            if state == "gone":
+                return True
+            if current is None or not _matches_argv(current, data.argv):
+                return False
+            current.kill()
+            current.wait(timeout=5)
+        return True
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError):
+        return False
+
+
+def reap_stale_tunnels(registry: Path) -> list[int]:
+    """
+    Stop the ``ssh -L`` tunnels a dead process left behind.
+
+    A hub killed with ``kill -9`` never stops its tunnels: the ``ssh``
+    processes keep running and keep their ports. Each tunnel started with a
+    ``registry`` left ``<registry>/<pid>.json``. A record whose owner process
+    is gone is checked against both the child's birth time and exact arguments
+    before signalling. SIGTERM is followed by a bounded wait and, if necessary,
+    SIGKILL after another identity check. Records of live owners or uncertain
+    processes remain; legacy records without birth times never authorize a signal.
+
+    Parameters
+    ----------
+    registry : Path
+        The folder passed to :class:`Tunnel` as ``registry``.
+
+    Returns
+    -------
+    list of int
+        The tunnel pids confirmed stopped after a verified cleanup attempt.
+
+    Examples
+    --------
+    >>> reap_stale_tunnels(Path("~/.hypothex/hub/tunnels").expanduser())  # doctest: +SKIP
+    [48213]
+    """
+    reaped: list[int] = []
+    for record in sorted(registry.glob("*.json")) if registry.is_dir() else []:
+        try:
+            data = _TunnelRecord.model_validate_json(record.read_text(encoding="utf-8"))
+        except OSError:
+            continue  # unreadable now is not proof the recorded process is gone
+        except (ValueError, ValidationError):
+            _drop_tunnel_record(record)
+            continue
+        if record.stem != str(data.pid):
+            _drop_tunnel_record(record)
+            continue
+        owner_state, _ = _registered_process(data.owner, data.owner_create_time)
+        if owner_state != "gone":
+            continue
+        state, proc = _registered_process(data.pid, data.pid_create_time)
+        if state == "gone":
+            _cleanup_private_socket(data.socket_dir, data.socket_owner)
+            _drop_tunnel_record(record)
+        elif proc is not None:
+            try:
+                matches = _matches_argv(proc, data.argv)
+            except psutil.NoSuchProcess:
+                _drop_tunnel_record(record)
+                continue
+            except (psutil.Error, OSError):
+                continue
+            if matches and _stop_registered_tunnel(proc, data):
+                reaped.append(data.pid)
+                _cleanup_private_socket(data.socket_dir, data.socket_owner)
+                _drop_tunnel_record(record)
+    return reaped

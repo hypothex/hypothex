@@ -1,0 +1,179 @@
+Sweeps
+======
+
+A sweep runs every combination of a parameter grid once per seed, as one group.
+``hx sweep show`` gives a table of the parameters against the task's primary metric,
+the best cell, progress, and cost.
+
+Start a sweep
+-------------
+
+.. code-block:: bash
+
+   hx sweep -t TASK -H "lr x beam" --grid lr=1e-4,3e-4,1e-3 --grid beam=5,10 \
+       --seeds 3 --host gpu-box --gpus 1 --queue -- \
+       python train.py --lr '{lr}' --beam '{beam}' --seed '{seed}'
+
+This starts 3 x 2 x 3 = 18 runs. ``hx sweep ...`` with options is short for
+``hx sweep create ...``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Option
+     - Meaning
+   * - ``-t``, ``--task``
+     - The task that scores the runs (optional).
+   * - ``-H``, ``--hypothesis``
+     - Why the sweep exists; copied onto each run. Agents must give one.
+   * - ``--grid name=v1,v2``
+     - One grid parameter (repeatable).
+   * - ``--random N``
+     - Random search: ``N`` samples (see below).
+   * - ``--param name=low:high[:log]``
+     - A range that ``--random`` samples from (repeatable).
+   * - ``--seeds``
+     - A count (``3`` means seeds 1, 2, 3) or a list (``1,2,5``). Default ``3``.
+   * - ``--host``
+     - Run on this host. Without it, the sweep runs on this machine.
+   * - ``--gpus N``
+     - GPUs for each run.
+   * - ``--queue``
+     - Wait in the host's queue for GPUs.
+   * - ``--repo``
+     - The project repo (default: the current folder).
+   * - ``--json``
+     - Print the sweep summary as JSON.
+
+Rules:
+
+- The command must use every swept name as ``{name}``. A name that the command does
+  not use, or a ``{field}`` that no parameter or built-in fills, is refused.
+- Each run gets its seed as ``{seed}`` and as ``$HYPOTHEX_SEED``.
+- A sweep has at most 1000 runs.
+- Seed 1 of every combination starts first, then seed 2, and so on. A queue then
+  fills the whole table early.
+- With ``--host``, the CLI sends your commit and uncommitted diff, as for
+  ``hx launch --host`` (see :doc:`remote`).
+- The sweep stores the commit and the uncommitted diff it starts with (``commit`` and
+  ``diff`` in its spec). Every run of the sweep uses that code: ``extend`` and a retry
+  too, also after you commit more changes.
+
+Random search
+-------------
+
+.. code-block:: bash
+
+   hx sweep -t TASK -H "lr search" --random 20 --param lr=1e-5:1e-3:log \
+       --grid beam=5,10 --seeds 2 -- python train.py --lr '{lr}' --beam '{beam}' --seed '{seed}'
+
+With ``--param`` ranges, ``--random N`` draws ``N`` samples once and crosses them
+with every grid combination, so each grid cell sees the same samples. ``:log`` samples
+on a log scale (``low`` must be above 0). Without ranges, ``--random N`` keeps ``N``
+grid combinations chosen at random. The samples come from the sweep id, so a sweep
+keeps the same samples for its whole life (``extend`` too).
+
+Follow a sweep
+--------------
+
+.. code-block:: bash
+
+   hx sweeps                            # newest first, with the best cell
+   hx sweeps -p toy-classifier --json
+   hx sweep show s-7f3a                 # progress, params x primary metric, best, cost
+   hx sweep show s-7f3a --json
+
+``hx sweep show`` prints one row per combination: the parameters, ``n`` (scored
+seeds), the mean, the 95% interval, and a ``best`` mark. The interval is over the test
+set when the runs log per-example scores, else over seeds.
+
+The JSON summary has ``spec`` (the definition), ``counts`` (runs by status),
+``cells`` (one per combination: ``params``, ``group_id``, ``n``, ``mean``, ``lo``,
+``hi``, ``std``, ``uncounted``, ``run_ids``, ``runs``), ``best``, ``headline``,
+``total_usd``, ``run_ids`` (launch order), ``tag``, and optional ``issuance``.
+``uncounted`` identifies scored members from other seed groups that are excluded
+from a cell's displayed statistics. ``counts.total`` counts observed members.
+
+HTTP sweep creation and extension of a durable sweep return an accepted receipt
+while a worker issues the members. Legacy sweep extensions remain synchronous.
+Read the current summary with ``hx sweep show`` or
+``GET /api/v1/sweeps/{project}/{id}``; replaying the original command ID returns
+the original receipt, not current progress. Direct local core/CLI sweeps retain
+synchronous issuance.
+
+``issuance.state`` distinguishes ``preparing`` (not yet accepted), ``queued``,
+``issuing``, ``settling`` (reconciling accepted members), ``issued``,
+``incomplete`` and ``interrupted``. ``issued`` means launches are accounted for;
+the experiments themselves may still be running. ``issuance.planned`` counts
+the cumulative unique parameter/seed cells in the current definition, including
+earlier episodes. It is separate from observed members and their run statuses.
+
+Queued accepted work resumes after restart. Interrupted or incomplete issuance
+requires the explicit resume seeds returned in ``issuance.resume``. An active
+issuance rejects a competing extension with ``409``. A ``sweep.issuance`` event
+signals progress even before the first member exists; the UI also polls active
+issuance every two seconds.
+
+Change a sweep
+--------------
+
+.. code-block:: bash
+
+   hx sweep extend s-7f3a --seeds 4,5   # add runs for every combination x seeds 4, 5
+   hx sweep cancel s-7f3a               # stop queued runs; running runs keep going
+
+After issuance stops, ``extend`` with existing seeds starts only missing runs.
+If a host drops during a launch, the sweep retains members already accepted;
+use the reported resume seeds once the episode is incomplete or interrupted.
+``--seeds`` is required for ``extend``. ``--seeds 4`` adds seed 4 (here a single number
+is a seed, not a count).
+
+An incomplete launch reports the known launched members, including ones already
+mirrored later in launch order. A lost response can still hide a remotely accepted
+run; resuming uses the same member command IDs to reconcile it.
+
+An extension uses the sweep's pinned code, or the first run's recorded commit and
+saved patch when the original sweep had no pin. If that run was dirty and its
+``git.diff`` is missing or was too large to capture, the extension refuses before
+adding seeds. Restore the recorded patch first; it cannot reproduce that run from
+the clean commit alone.
+
+``cancel`` stops the runs that wait in the queue; they end as ``killed``. For a
+durable active issuance it also records cancellation intent before the first
+member exists, prevents further launches, and drains any launch already in
+flight. A newly accepted queued member is cancelled conditionally; one that has
+started remains running. Read current issuance until cancellation settles before
+resuming. Replaying a cancellation command returns its original receipt.
+Incomplete or interrupted issuance can still have accepted members that are not
+yet mirrored. Cancelling it also drains those retained members, even when the
+current summary shows zero queued runs. An uncertain remote outcome remains
+pending until it can be resolved; elapsed time alone never proves it was rejected.
+
+``show``, ``extend``, and ``cancel`` take ``-p PROJECT`` when two projects have a
+sweep with the same id.
+
+Where sweeps live
+-----------------
+
+- The definition is saved at ``<store>/<project>/sweeps/<id>.yaml`` on the machine
+  that launched it (normally the hub). Sweep ids look like ``s-7f3a``.
+- Membership is a tag, never a stored list: each run gets the tag
+  ``sweep:<hub>:<id>``. ``<hub>`` is the first 8 characters of the hub's environment
+  id, so two hubs that use one host never mix their sweeps. Read the tag from the
+  summary's ``tag`` field; do not build it yourself.
+
+.. code-block:: bash
+
+   hx runs --tag "$(hx sweep show s-7f3a --json | jq -r .tag)"
+
+HTTP and MCP
+------------
+
+Routes: ``POST /api/v1/sweeps``, ``GET /api/v1/sweeps/{id}``,
+``GET /api/v1/sweeps/{project}/{id}``, ``GET /api/v1/projects/{project}/sweeps``,
+``POST /api/v1/sweeps/{project}/{id}/cancel_queued``, and
+``POST /api/v1/sweeps/{project}/{id}/extend``. See :doc:`http_api`.
+
+MCP tools: ``launch_sweep``, ``get_sweep``, ``cancel_sweep``, ``extend_sweep``. See
+:doc:`mcp`.

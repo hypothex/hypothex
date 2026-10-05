@@ -14,6 +14,7 @@ is ignored.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -22,12 +23,14 @@ import subprocess
 import uuid
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
 import hypothex
 from hypothex._version import __version__
-from hypothex.core.errors import HypothexError
+from hypothex.core.errors import ConfigError, HypothexError
+from hypothex.core.tokens import validate_bearer_token
 from hypothex.remote.ssh import SshTarget, copy_to, run_remote
 
 _PREFIX = "HX:"
@@ -102,6 +105,7 @@ class ServerInfo(BaseModel):
     hx_version: str
     protocol_version: int
     token: str | None = Field(default=None, repr=False, exclude=True)
+    environment_id: str | None = None
 
 
 def _load_scripts() -> dict[str, str]:
@@ -141,7 +145,7 @@ def _render(name: str, **params: str) -> str:
     """
     lines = []
     for key, value in params.items():
-        if not _PARAM.match(key):
+        if not _PARAM.fullmatch(key):
             raise ValueError(f"bad script parameter name {key!r}")
         lines.append(f"{key}={shlex.quote(value)}")
     return "\n".join(lines) + "\n" + BOOTSTRAP_SCRIPTS[name]
@@ -425,7 +429,7 @@ def build_wheel(cache_dir: Path) -> Path:
             shutil.rmtree(staging, ignore_errors=True)
 
 
-def install(target: SshTarget, home: str, wheel: Path) -> None:
+def install(target: SshTarget, home: str, wheel: Path, *, install_uv: bool = False) -> None:
     """
     Install ``wheel`` on a host with ``uv tool install --force``.
 
@@ -433,7 +437,9 @@ def install(target: SshTarget, home: str, wheel: Path) -> None:
     name, then, under the lock dir ``<home>/runtime/.lock``, installs it into
     ``<home>/runtime/tools`` with the ``hx`` entry point in ``<home>/runtime/bin``.
     If the host has no ``uv`` (``PATH``, ``~/.local/bin``, ``~/.cargo/bin``), the
-    official installer puts one into ``~/.local/bin`` first.
+    install fails before the wheel is copied, unless ``install_uv`` allows the
+    official installer (``https://astral.sh/uv/install.sh``) to put one into
+    ``~/.local/bin`` first.
 
     Parameters
     ----------
@@ -443,20 +449,26 @@ def install(target: SshTarget, home: str, wheel: Path) -> None:
         Hypothex home on the host; ``~`` is expanded there.
     wheel : Path
         Local wheel from :func:`build_wheel`.
+    install_uv : bool
+        Allow downloading and running the official uv installer on a host
+        without ``uv``. Off by default: the user must agree to it.
 
     Raises
     ------
     BootstrapError
-        Wheel missing, lock held too long, uv missing and not installable, the
-        install failed, or the installed ``hx --version`` differs from the wheel.
+        Wheel missing, lock held too long, uv missing (and ``install_uv`` off,
+        or the installer failed), the install failed, or the installed
+        ``hx --version`` differs from the wheel.
 
     Examples
     --------
     >>> install(SshTarget(alias="gpu1"), "~/.hypothex", build_wheel(cache))  # doctest: +SKIP
+    >>> install(target, "~/.hypothex", wheel, install_uv=True)  # host without uv  # doctest: +SKIP
     """
     if not wheel.is_file():
         raise BootstrapError(f"wheel not found: {wheel}")
-    values, _ = _run_script(target, "install", HX_HOME=home, HX_STEP="prepare")
+    allow = "1" if install_uv else "0"
+    values, _ = _run_script(target, "install", HX_HOME=home, HX_STEP="prepare", HX_INSTALL_UV=allow)
     remote_home = values.get("home")
     if not remote_home:
         raise BootstrapError(f"{target.alias}: install prepare step reported no home")
@@ -468,6 +480,7 @@ def install(target: SshTarget, home: str, wheel: Path) -> None:
         timeout=900,
         HX_HOME=home,
         HX_STEP="install",
+        HX_INSTALL_UV=allow,
         HX_WHEEL=wheel.name,
         HX_UPLOAD=upload,
     )
@@ -477,6 +490,38 @@ def install(target: SshTarget, home: str, wheel: Path) -> None:
         raise BootstrapError(
             f"{target.alias}: installed hx reports version {installed!r}, expected {expected!r}"
         )
+
+
+def _trusted_environment_id(values: dict[str, str]) -> str:
+    """Strictly parse the unchanged environment-file bytes received over SSH."""
+
+    def unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate environment field")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError("non-JSON constant")
+
+    try:
+        data = json.loads(
+            bytes.fromhex(values.get("environment_json_hex", "")),
+            object_pairs_hook=unique_fields,
+            parse_constant=reject_constant,
+        )
+        expected = data.get("environment_id") if isinstance(data, dict) else None
+        if (
+            not isinstance(expected, str)
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", expected) is None
+            or values.get("environment_id") != expected
+        ):
+            raise ValueError("invalid environment id")
+    except ValueError:
+        raise BootstrapError("missing or invalid trusted environment identity") from None
+    return expected
 
 
 def ensure_server(target: SshTarget, home: str, *, kind: str | None = None) -> ServerInfo:
@@ -533,11 +578,33 @@ def ensure_server(target: SshTarget, home: str, *, kind: str | None = None) -> S
     if not raw:
         raise BootstrapError(f"{target.alias}: start script reported no server")
     try:
-        return ServerInfo.model_validate_json(raw)
+        record = json.loads(raw)
+    except ValueError:
+        raise BootstrapError(f"{target.alias}: bad server.json (record)") from None
+    if not isinstance(record, dict):
+        raise BootstrapError(f"{target.alias}: bad server.json (record)")
+    if "token" not in record:
+        raise BootstrapError(
+            f"{target.alias}: legacy server record has no token policy; "
+            "upgrade or restart the remote server"
+        )
+    if record["token"] is not None:
+        try:
+            validate_bearer_token(record["token"])
+        except ConfigError:
+            raise BootstrapError(f"{target.alias}: invalid bearer token in server record") from None
+    try:
+        info = ServerInfo.model_validate(record)
     except ValidationError as exc:
         # Never echo the raw record or pydantic's input values: they hold the token.
         fields = sorted({".".join(map(str, err["loc"])) or "record" for err in exc.errors()})
         raise BootstrapError(f"{target.alias}: bad server.json ({', '.join(fields)})") from None
+    expected = _trusted_environment_id(values)
+    if info.environment_id is not None and info.environment_id != expected:
+        raise BootstrapError(
+            f"{target.alias}: server record conflicts with trusted environment identity"
+        )
+    return info.model_copy(update={"environment_id": expected})
 
 
 def stop_server(target: SshTarget, home: str) -> bool:

@@ -1,3 +1,4 @@
+import { clearLostReasons } from "./lostReasons";
 /**
  * TanStack Query keys, hooks and mutations over the API client.
  *
@@ -18,6 +19,7 @@ import {
 
 import { ApiError, api } from "./client";
 import type * as M from "./models";
+import { issuancePoll } from "./sweepIssuance";
 
 export const queryKeys = {
   overview: (since?: string) => ["overview", since ?? null] as const,
@@ -115,6 +117,14 @@ export function keepLastKnown(prev: readonly M.HostRow[] | undefined, next: M.Ho
  */
 const lastKnownRows = new WeakMap<QueryClient, Map<string, M.HostRow>>();
 
+/** Drop all prior-session data, including the stale-host side cache. */
+export function clearSessionQueries(qc: QueryClient): void {
+  void qc.cancelQueries();
+  qc.clear();
+  lastKnownRows.delete(qc);
+  clearLostReasons();
+}
+
 /** Store every row of `rows` that has data (connected, or GPUs carried) in `known`. */
 function rememberRows(known: Map<string, M.HostRow>, rows: readonly M.HostRow[]): Map<string, M.HostRow> {
   for (const row of rows) {
@@ -135,6 +145,36 @@ export async function fetchHosts(qc: QueryClient, signal?: AbortSignal): Promise
   const out = keepLastKnown([...known.values()], rows);
   lastKnownRows.set(qc, rememberRows(known, out));
   return out;
+}
+
+/**
+ * The newest event sequence of the server's log: the hub's own row of `GET /api/v1/hosts`
+ * (`kind: "local"`, `state.last_sequence`). A new tab subscribes to live events after it
+ * instead of replaying the whole log (the page fetches every query anyway). The rows are
+ * stored as the hosts query, so a Hosts panel on the same page reuses them.
+ *
+ * Returns null when the request fails or the row has no valid sequence; the caller then
+ * replays from 0.
+ *
+ * Examples
+ * --------
+ * >>> await fetchLastSequence(qc)
+ * 1022
+ */
+export async function fetchLastSequence(qc: QueryClient): Promise<number | null> {
+  try {
+    const rows = await qc.fetchQuery({
+      queryKey: queryKeys.hosts(),
+      queryFn: ({ signal }) => fetchHosts(qc, signal),
+      // always fresh: a cached head from before a store switch could skip new events
+      staleTime: 0,
+      retry: false,
+    });
+    const last = rows.find((row) => row.kind === "local")?.state?.last_sequence;
+    return typeof last === "number" && Number.isSafeInteger(last) && last >= 0 ? last : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Retry transient failures twice; never retry a 4xx (the answer will not change). */
@@ -288,6 +328,7 @@ export const useSweep = (project: string, sweepId: string) =>
   useQuery({
     queryKey: queryKeys.sweep(project, sweepId),
     queryFn: ({ signal }) => api.sweep(project, sweepId, signal),
+    refetchInterval: (query) => issuancePoll(query.state.data?.issuance),
   });
 
 export const useProjectSweeps = (project: string) =>
@@ -309,18 +350,60 @@ export interface AllRuns {
 }
 
 /**
+ * Keyset cursor of `GET /api/v1/runs`: only runs after `(created_at, run_id)` in the
+ * newest-first order, i.e. the runs below the last run of the previous page.
+ */
+export interface RunsCursor {
+  before_created_at: string;
+  before_run_id: string;
+}
+
+/** The cursor after `run`, or null when the run has no `created_at` to page from. */
+function cursorAfter(run: M.RunRecord | undefined): RunsCursor | null {
+  const created = run?.created_at as unknown;
+  return run && typeof created === "string" && created !== ""
+    ? { before_created_at: created, before_run_id: run.run_id }
+    : null;
+}
+
+/**
  * Every run that matches `query`, not only the newest page.
  *
- * `GET /api/v1/runs` has a `limit` and no offset, so the next page is a bigger limit: start
- * at `ALL_RUNS_FIRST` and ask for 4× more while a page comes back full. A host queue or a
- * 1,000-run sweep then never loses its oldest runs (the queue head) to the page size.
+ * Pages by keyset: the next request asks for the runs after the last run so far
+ * (`before_created_at`, `before_run_id`), 4× more each time (1,000, 4,000, ...), so no run
+ * is read twice. A server that ignores the cursor sends the newest runs again; then the
+ * runs overlap the ones so far, and the request is read as the older paging by a growing
+ * `limit` (the same requests as before). A host queue or a 1,000-run sweep never loses
+ * its oldest runs (the queue head) to the page size either way.
+ *
+ * Examples
+ * --------
+ * >>> const { runs, complete } = await fetchAllRuns({ tag: "sweep:ab12cd34:s-7f3a" });
  */
 export async function fetchAllRuns(query: Omit<M.RunsQuery, "limit">, signal?: AbortSignal): Promise<AllRuns> {
-  for (let limit = ALL_RUNS_FIRST; ; limit *= 4) {
-    const runs = await api.runs({ ...query, limit }, signal);
-    if (runs.length < limit) return { runs, complete: true };
-    if (limit >= ALL_RUNS_MAX) return { runs, complete: false };
+  let limit = ALL_RUNS_FIRST;
+  let runs = await api.runs({ ...query, limit }, signal);
+  let full = runs.length >= limit;
+  let keyset = true; // until the server shows it ignores the cursor
+  while (full) {
+    if (keyset ? runs.length >= ALL_RUNS_MAX : limit >= ALL_RUNS_MAX) return { runs, complete: false };
+    limit *= 4;
+    const cursor = keyset ? cursorAfter(runs.at(-1)) : null;
+    // the first keyset page asks for 4,000 like the growing limit, so either reading holds
+    const size = cursor ? Math.min(limit, ALL_RUNS_MAX - runs.length) : limit;
+    const params: M.RunsQuery & Partial<RunsCursor> = { ...query, limit: size, ...cursor };
+    const page = await api.runs(params, signal);
+    // TODO(PERF-F13c): drop the overlap sniffing (and the growing-limit branch) once the server pages by cursor
+    const seen = new Set(runs.map((r) => r.run_id));
+    if (cursor && !page.some((r) => seen.has(r.run_id))) {
+      runs = runs.concat(page);
+    } else {
+      keyset = false; // `page` is the newest `size` runs
+      runs = page;
+    }
+    full = page.length >= size;
   }
+  return { runs, complete: true };
 }
 
 /** `fetchAllRuns` as a query under `["runs"]`, so every run event refreshes it. */

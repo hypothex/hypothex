@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import math
 import re
-from collections import defaultdict
-from collections.abc import Iterable
+import statistics
+import threading
+from array import array
+from collections import Counter, OrderedDict, defaultdict
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel
+import xxhash
+from pydantic import BaseModel, Field
 
 from hypothex.core import stats
 from hypothex.core.config import ProjectConfig, TaskKind, TaskSpec, parse_metric_key
@@ -23,18 +27,37 @@ from hypothex.core.headlines import (
     task_stat_strip,
     value_format,
 )
-from hypothex.core.records import CostTotals, RunRecord, RunStatus, ScoreRecord, UsageTotals
-from hypothex.core.seeds import Stats, intervals_overlap, summarize
+from hypothex.core.index import index_generation
+from hypothex.core.records import (
+    CostTotals,
+    GitInfo,
+    RunRecord,
+    RunStatus,
+    ScoreRecord,
+    UsageTotals,
+)
+from hypothex.core.seeds import Stats, clamp, summarize
+
+if TYPE_CHECKING:
+    from hypothex.core.context import Context
 
 PerExample = dict[str, dict[str, dict[str, Any]]]
 """run_id -> example_id -> per-example fields of the primary metric."""
 
 BINARY_FIELDS = ("correct", "solved")
 LABEL_MAX = 32
+NOISE_ALPHA = 0.05
+"""``within_noise_of_best`` is true when the test against the best gives ``p >= 0.05``."""
+LEGACY_DIRTY = "dirty"
+"""``diff_key`` of a dirty run recorded without a diff hash."""
 _CLAUSE = re.compile(
     r"[,;:()]|\s[-–—]\s|\.(?:\s|$)|\s(?:because|should|so that|since|to see if|in order to)\s",
     re.IGNORECASE,
 )
+
+
+_DERIVED_PREFIX = re.compile(r"^(?:(?:Rerun|Re-infer) of \S+:\s*)+")
+"""``Rerun of <id>:`` / ``Re-infer of <id>:`` (also chained) that ``control`` prepends."""
 
 
 class NoiseInterval(BaseModel):
@@ -60,7 +83,7 @@ class VersusBest(BaseModel):
 
 
 class LeaderboardRow(BaseModel):
-    """One seed group: runs with the same config hash and commit."""
+    """One seed group: runs with the same config hash, commit and uncommitted diff."""
 
     group_id: str
     run_ids: list[str]
@@ -69,10 +92,12 @@ class LeaderboardRow(BaseModel):
     commit: str | None
     config_hash: str
     n: int
+    """Distinct seeds; reruns of a seed are one sample, runs without a seed one each."""
     scores: dict[str, Stats]
     primary: Stats | None
     single_seed: bool
     within_noise_of_best: bool | None = None
+    """``vs_best.p >= 0.05`` (not a real win yet); ``None`` for the best row or without a p."""
     label: str
     seed_values: dict[str, list[float]]
     identical_seeds: bool
@@ -92,6 +117,8 @@ class Leaderboard(BaseModel):
     primary: str
     higher_is_better: bool
     metric_versions: dict[str, str]
+    metric_drift: list[str] = Field(default_factory=list)
+    """Selected metric versions scored with more than one recorded source hash."""
     rows: list[LeaderboardRow]
     needs_reeval: list[str]
     unscored: list[str]
@@ -105,7 +132,9 @@ class Leaderboard(BaseModel):
 
 
 # labels and ordering -------------------------------------------------------------
-def group_label(hypothesis: str, tags: Iterable[str], group_id: str) -> str:
+def group_label(
+    hypothesis: str, tags: Iterable[str], group_id: str, *, limit: int | None = LABEL_MAX
+) -> str:
     """
     Derive a short name for a seed group.
 
@@ -117,13 +146,19 @@ def group_label(hypothesis: str, tags: Iterable[str], group_id: str) -> str:
         Tags of the group's runs.
     group_id : str
         The group id, used when there is nothing else.
+    limit : int or None
+        Longest clause kept whole (default ``LABEL_MAX``, 32); a longer one is cut
+        at a word and ends in "…". ``None`` keeps the whole clause, for prose such
+        as headlines.
 
     Returns
     -------
     str
         The hypothesis's first clause (cut at ``, ; : ( )``, a dash, a full stop,
-        or words like "because"/"should"), at most 32 characters; else the first
-        tag in sorted order; else ``"group <id>"``.
+        or words like "because"/"should"), at most ``limit`` characters; else the
+        first tag in sorted order; else ``"group <id>"``. Leading ``Rerun of <id>:``
+        and ``Re-infer of <id>:`` prefixes are dropped first, so a rerun keeps
+        the parent's label.
 
     Examples
     --------
@@ -131,13 +166,20 @@ def group_label(hypothesis: str, tags: Iterable[str], group_id: str) -> str:
     'RBF-kernel SVM'
     >>> group_label("", ["svm"], "g")
     'svm'
+    >>> group_label("Rerun of 20261004-1-x: svm, rbf", [], "g")
+    'svm'
+    >>> group_label("40k steps with heavier augmentation lifts accuracy", [], "g")
+    '40k steps with heavier…'
+    >>> group_label("40k steps with heavier augmentation lifts accuracy", [], "g", limit=None)
+    '40k steps with heavier augmentation lifts accuracy'
     """
-    parts = [p.strip() for p in _CLAUSE.split(hypothesis.strip())]
+    text = _DERIVED_PREFIX.sub("", hypothesis.strip())
+    parts = [p.strip() for p in _CLAUSE.split(text)]
     clause = next((p for p in parts if p), "")
     if clause:
-        if len(clause) <= LABEL_MAX:
+        if limit is None or len(clause) <= limit:
             return clause
-        cut = clause[:LABEL_MAX].rsplit(" ", 1)[0].rstrip() or clause[:LABEL_MAX]
+        cut = clause[:limit].rsplit(" ", 1)[0].rstrip() or clause[:limit]
         return cut + "…"
     tag_list = sorted({t for t in tags if t})
     return tag_list[0] if tag_list else f"group {group_id}"
@@ -178,6 +220,90 @@ def seed_group_label(
     return group_label(hypothesis, (t for m in members for t in m.tags), group_id)
 
 
+def distinct_labels(
+    labels: Mapping[str, str], members_of: Mapping[str, list[RunRecord]]
+) -> dict[str, str]:
+    """
+    Make the labels of seed groups that share one label different.
+
+    Groups of a sweep often share a hypothesis, so ``seed_group_label`` gives
+    them one name. Each such group gets ``" · "`` and the ``vars`` that differ
+    between those groups (``"lr x beam · lr 1e-3, beam 10"``; a var the group
+    does not have is left out). Groups whose names still match get
+    ``" · <group id>"`` as well. A label no other group has is kept.
+
+    Parameters
+    ----------
+    labels : mapping of str to str
+        Label per group id (``seed_group_label``).
+    members_of : mapping of str to list of RunRecord
+        The runs of each group id, oldest first; the newest run's ``vars`` count.
+
+    Returns
+    -------
+    dict of str to str
+        Label per group id, in the order of ``labels``.
+
+    Examples
+    --------
+    >>> a = [make_record(vars={"lr": "1e-3", "beam": "10"})]  # doctest: +SKIP
+    >>> b = [make_record(vars={"lr": "1e-3", "beam": "5"})]  # doctest: +SKIP
+    >>> same = {"g1": "lr x beam", "g2": "lr x beam"}
+    >>> distinct_labels(same, {"g1": a, "g2": b})  # doctest: +SKIP
+    {'g1': 'lr x beam · beam 10', 'g2': 'lr x beam · beam 5'}
+    """
+    out = dict(labels)
+    shared: dict[str, list[str]] = defaultdict(list)
+    for group_id, label in labels.items():
+        shared[label].append(group_id)
+    for label, group_ids in shared.items():
+        if len(group_ids) < 2:
+            continue
+        vars_of = {g: members_of[g][-1].vars for g in group_ids}
+        keys = list(dict.fromkeys(k for g in sorted(group_ids) for k in vars_of[g]))
+        differ = [k for k in keys if len({vars_of[g].get(k) for g in group_ids}) > 1]
+        for g in group_ids:
+            parts = [f"{k} {vars_of[g][k]}" for k in differ if k in vars_of[g]]
+            out[g] = f"{label} · {', '.join(parts)}" if parts else label
+        counts = Counter(out[g] for g in group_ids)
+        for g in group_ids:
+            if counts[out[g]] > 1:
+                out[g] = f"{out[g]} · {g}"
+    return out
+
+
+def seed_group_labels(
+    members_of: Mapping[str, list[RunRecord]], version_param: str | None = None
+) -> dict[str, str]:
+    """
+    Label every seed group: ``seed_group_label``, then ``distinct_labels``.
+
+    This is the label rule of ``LeaderboardRow.label`` for the groups of one
+    board, and of ``sources.group_labels`` for the groups of a view.
+
+    Parameters
+    ----------
+    members_of : mapping of str to list of RunRecord
+        The runs of each group id, oldest first.
+    version_param : str, optional
+        The task's ``version_param`` (``agent_iteration`` tasks only), else ``None``.
+
+    Returns
+    -------
+    dict of str to str
+        A label per group id; groups that would share one get the vars that
+        differ, else their group id.
+
+    Examples
+    --------
+    >>> runs = [make_record(hypothesis="svm, rbf kernel")]  # doctest: +SKIP
+    >>> seed_group_labels({"g": runs})  # doctest: +SKIP
+    {'g': 'svm'}
+    """
+    labels = {g: seed_group_label(m, g, version_param) for g, m in members_of.items()}
+    return distinct_labels(labels, members_of)
+
+
 def group_id_for(run: RunRecord) -> str:
     """
     Return the seed-group id of a run.
@@ -191,14 +317,48 @@ def group_id_for(run: RunRecord) -> str:
     -------
     str
         ``<first 8 hex of the config hash>@<first 7 chars of the commit>``;
-        ``nogit`` replaces the commit when the run has no git info.
+        ``nogit`` replaces the commit when the run has no git info. A run with
+        uncommitted changes gets ``+<its full recorded diff hash>`` (``+dirty``
+        when the record has no diff hash), so it never joins the clean group.
 
     Examples
     --------
     >>> group_id_for(make_record(config_hash="sha256:0123456789"))  # doctest: +SKIP
     '01234567@nogit'
     """
-    return f"{run.config_hash.removeprefix('sha256:')[:8]}@{(run.git.commit or 'nogit')[:7]}"
+    base = f"{run.config_hash.removeprefix('sha256:')[:8]}@{(run.git.commit or 'nogit')[:7]}"
+    diff = diff_key(run.git)
+    if diff is None:
+        return base
+    return f"{base}+{diff}"
+
+
+def diff_key(git: GitInfo) -> str | None:
+    """
+    Identify the uncommitted code a run started with.
+
+    Parameters
+    ----------
+    git : GitInfo
+        The run's git state.
+
+    Returns
+    -------
+    str or None
+        ``git.diff_hash`` when set; ``"dirty"`` for a dirty record without
+        one (written before diff hashes existed); ``None`` for a clean run.
+
+    Examples
+    --------
+    >>> diff_key(GitInfo(commit="abc")) is None
+    True
+    >>> diff_key(GitInfo(commit="abc", dirty=True))
+    'dirty'
+    """
+    diff_hash: str | None = getattr(git, "diff_hash", None)
+    if diff_hash:
+        return diff_hash
+    return LEGACY_DIRTY if git.dirty else None
 
 
 def _version_of(members: list[RunRecord], param: str) -> str | None:
@@ -276,6 +436,138 @@ def _higher_is_better(config: ProjectConfig, spec: TaskSpec) -> bool:
     return config.metrics[metric].higher_is_better
 
 
+# caches ------------------------------------------------------------------------------
+STATS_CACHE_SIZE = 8192
+"""Bootstrap results kept per kind (row intervals, paired p-values), least recently used out."""
+BOARD_CACHE_SIZE = 128
+"""Leaderboards kept by ``cached_leaderboard``, least recently used out."""
+
+_K = TypeVar("_K", bound=Hashable)
+_V = TypeVar("_V")
+
+
+class _Lru(Generic[_K, _V]):
+    """A thread-safe least-recently-used map of at most ``size`` entries."""
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self._data: OrderedDict[_K, _V] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: _K, compute: Callable[[], _V]) -> _V:
+        """Return the value of ``key``, computing and storing it on a miss."""
+        with self._lock:
+            if key in self._data:
+                self._data.move_to_end(key)
+                return self._data[key]
+        value = compute()  # outside the lock: two threads may both compute a miss
+        with self._lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            while len(self._data) > self.size:
+                self._data.popitem(last=False)
+        return value
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+
+
+_INTERVALS: _Lru[bytes, tuple[float, float]] = _Lru(STATS_CACHE_SIZE)
+_PAIRED_P: _Lru[bytes, float] = _Lru(STATS_CACHE_SIZE)
+_BOARDS: _Lru[tuple[Hashable, ...], Leaderboard] = _Lru(BOARD_CACHE_SIZE)
+
+
+def _digest(values: list[float]) -> bytes:
+    """128-bit digest of ``values`` in order (the exact bits of each float)."""
+    return xxhash.xxh3_128_digest(array("d", values).tobytes())
+
+
+def clear_caches() -> None:
+    """
+    Empty the bootstrap and leaderboard caches of this process.
+
+    Never needed for correct results (every key covers its inputs); tests and
+    benchmarks use it to measure cold builds.
+
+    Examples
+    --------
+    >>> clear_caches()
+    """
+    _INTERVALS.clear()
+    _PAIRED_P.clear()
+    _BOARDS.clear()
+
+
+def cached_leaderboard(
+    ctx: Context,
+    project: str,
+    task: str,
+    config: ProjectConfig,
+    build: Callable[[], Leaderboard],
+    *,
+    versions: Mapping[str, str] | None = None,
+    variant: Hashable = (),
+) -> Leaderboard:
+    """
+    Return ``build()``, memoized until the index changes.
+
+    The key includes the index file's path and device/inode identity (so a
+    replaced database cannot reuse an old generation), ``index.index_generation(ctx)``
+    (read before ``build`` runs, so a write during the build only wastes the entry), the
+    project, task, a digest of ``config``, ``versions`` and ``variant``.
+    ``build`` must read only index data, files written before their index write
+    (per-example score files are written before ``Context.add_score``), and
+    these arguments. At most ``BOARD_CACHE_SIZE`` boards are kept. Each call
+    returns a deep copy, so callers may change it.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open context whose index ``build`` reads.
+    project : str
+        Project name.
+    task : str
+        Task name.
+    config : ProjectConfig
+        The project config ``build`` uses.
+    build : callable
+        Builds the board on a miss, for example a closure over
+        ``build_leaderboard``.
+    versions : mapping of str to str, optional
+        Metric version overrides ``build`` uses.
+    variant : hashable
+        Anything else that changes the board: ``examples=False``, a run filter.
+
+    Returns
+    -------
+    Leaderboard
+        A copy of the cached or new board.
+
+    Examples
+    --------
+    >>> board = cached_leaderboard(  # doctest: +SKIP
+    ...     ctx, "toy", "t", config, lambda: build_leaderboard("toy", "t", config, runs, scores)
+    ... )
+    """
+    identity = ctx.index.path.stat()
+    key = (
+        str(ctx.index.path),
+        identity.st_dev,
+        identity.st_ino,
+        index_generation(ctx),
+        project,
+        task,
+        xxhash.xxh3_128_digest(config.model_dump_json().encode()),
+        tuple(sorted((versions or {}).items())),
+        variant,
+    )
+    return _BOARDS.get(key, build).model_copy(deep=True)
+
+
 # test-set noise --------------------------------------------------------------------
 def _is_number(v: Any) -> bool:
     return isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
@@ -332,14 +624,44 @@ def pick_field(rows: Iterable[dict[str, Any]], key: str = "value") -> tuple[str,
     return None
 
 
-def _pool(run_ids: list[str], per_example: PerExample, field: str) -> dict[str, float]:
+def _mean(values: list[float]) -> float:
+    """
+    Average finite values without overflowing the intermediate sum.
+
+    Parameters
+    ----------
+    values : list of float
+        Nonempty finite values.
+
+    Returns
+    -------
+    float
+        Their mean. Normal values use fsum; overflowing sums use the standard
+        library's exact rational summation before conversion back to float.
+    """
+    try:
+        return math.fsum(values) / len(values)
+    except OverflowError:
+        return statistics.mean(values)
+
+
+def _pool_runs(run_ids: list[str], per_example: PerExample, field: str) -> dict[str, float]:
     seen: dict[str, list[float]] = defaultdict(list)
     for rid in run_ids:
         for ex, fields in per_example.get(rid, {}).items():
             v = fields.get(field)
             if isinstance(v, bool | int | float) and math.isfinite(v):
                 seen[ex].append(float(v))
-    return {ex: math.fsum(vs) / len(vs) for ex, vs in seen.items()}
+    return {ex: _mean(vs) for ex, vs in seen.items()}
+
+
+def _pool(seeds: list[list[str]], per_example: PerExample, field: str) -> dict[str, float]:
+    """Mean per example over seeds, after averaging the runs of each seed."""
+    seen: dict[str, list[float]] = defaultdict(list)
+    for run_ids in seeds:
+        for ex, v in _pool_runs(run_ids, per_example, field).items():
+            seen[ex].append(v)
+    return {ex: _mean(vs) for ex, vs in seen.items()}
 
 
 def _test_interval(pooled: dict[str, float], binary: bool) -> NoiseInterval | None:
@@ -350,7 +672,7 @@ def _test_interval(pooled: dict[str, float], binary: bool) -> NoiseInterval | No
         successes = math.floor(math.fsum(values) + 0.5)
         lo, hi = stats.wilson_interval(successes, len(values))
         return NoiseInterval(lo=lo, hi=hi, method="wilson", n=len(values))
-    lo, hi = stats.bootstrap_mean_interval(values)
+    lo, hi = _INTERVALS.get(_digest(values), lambda: stats.bootstrap_mean_interval(values))
     return NoiseInterval(lo=lo, hi=hi, method="bootstrap", n=len(values))
 
 
@@ -393,7 +715,8 @@ def _versus_test(
             examples_needed=stats.examples_needed(fixed, broken, len(common)),
         )
     if common and binary is False:
-        p = stats.paired_bootstrap_p([mine[k] for k in common], [theirs[k] for k in common])
+        a, b = [mine[k] for k in common], [theirs[k] for k in common]
+        p = _PAIRED_P.get(_digest(a + b), lambda: stats.paired_bootstrap_p(a, b))
         return VersusBest(
             delta=delta, p=p, fixed=None, broken=None, test="paired_bootstrap", examples_needed=None
         )
@@ -422,9 +745,61 @@ def _sum_usage(members: list[RunRecord]) -> UsageTotals | None:
     )
 
 
+def seed_buckets(members: list[RunRecord]) -> list[list[RunRecord]]:
+    """
+    Split a seed group's runs by seed: reruns of one seed are one sample, not several.
+
+    Parameters
+    ----------
+    members : list of RunRecord
+        The group's runs, oldest first.
+
+    Returns
+    -------
+    list of list of RunRecord
+        One list per distinct seed, in order of first appearance. Runs without a
+        seed are a list of their own each.
+
+    Examples
+    --------
+    >>> runs = [make_record("a", seed=1), make_record("b", seed=1)]  # doctest: +SKIP
+    >>> [[r.run_id for r in b] for b in seed_buckets(runs)]  # doctest: +SKIP
+    [['a', 'b']]
+    """
+    buckets: dict[tuple[str, int | str], list[RunRecord]] = {}
+    for m in members:
+        key = ("seed", m.seed) if m.seed is not None else ("run", m.run_id)
+        buckets.setdefault(key, []).append(m)
+    return list(buckets.values())
+
+
+def _seed_values(
+    buckets: list[list[RunRecord]], per_run: dict[str, dict[str, float]]
+) -> dict[str, list[float]]:
+    """One value per seed and score key: the mean over that seed's runs."""
+    keys = sorted({k for b in buckets for m in b for k in per_run[m.run_id]})
+    out: dict[str, list[float]] = {}
+    for k in keys:
+        out[k] = []
+        for bucket in buckets:
+            values = [per_run[m.run_id][k] for m in bucket if k in per_run[m.run_id]]
+            if values:
+                out[k].append(_mean(values))
+    return out
+
+
+def _summarize(values: list[float], unit: str) -> Stats:
+    """``summarize``, with the t-interval kept in [0, 1] for a unitless fraction."""
+    stats = summarize(values)
+    if unit == "" and all(0.0 <= v <= 1.0 for v in values):
+        return clamp(stats, 0.0, 1.0)
+    return stats
+
+
 def _make_row(
     members: list[RunRecord],
     per_run: dict[str, dict[str, float]],
+    config: ProjectConfig,
     spec: TaskSpec,
     primary: str,
 ) -> LeaderboardRow:
@@ -432,11 +807,13 @@ def _make_row(
     latest = members[-1]
     chash, commit = latest.config_hash, latest.git.commit
     group_id = group_id_for(latest)
-    keys = sorted({k for m in members for k in per_run[m.run_id]})
-    seed_values = {
-        k: [per_run[m.run_id][k] for m in members if k in per_run[m.run_id]] for k in keys
+    buckets = seed_buckets(members)
+    n_seeds = len(buckets)
+    seed_values = _seed_values(buckets, per_run)
+    summary = {
+        k: _summarize(v, metric_unit(k, config.metrics[k.split("/", 1)[0]].unit))
+        for k, v in seed_values.items()
     }
-    summary = {k: summarize(v) for k, v in seed_values.items()}
     prim = seed_values.get(primary, [])
     param = spec.version_param if spec.kind == "agent_iteration" else None
     label = seed_group_label(members, group_id, param)
@@ -447,10 +824,10 @@ def _make_row(
         hypothesis=latest.hypothesis,
         commit=commit,
         config_hash=chash,
-        n=len(members),
+        n=n_seeds,
         scores=summary,
         primary=summary.get(primary),
-        single_seed=len(members) == 1,
+        single_seed=n_seeds == 1,
         label=label,
         seed_values=seed_values,
         identical_seeds=len(prim) > 1 and all(v == prim[0] for v in prim),
@@ -511,6 +888,7 @@ def build_leaderboard(
         r for r in runs if r.task == task and r.status == RunStatus.FINISHED and not r.archived
     ]
 
+    source_hashes: dict[str, set[str]] = defaultdict(set)
     per_run: dict[str, dict[str, float]] = {}
     needs_reeval: list[str] = []
     unscored: list[str] = []
@@ -518,6 +896,8 @@ def build_leaderboard(
         run_scores = sorted(scores.get(r.run_id, []), key=lambda s: s.created_at)
         current: dict[tuple[str, str], float] = {}
         for s in run_scores:
+            if s.source_hash and s.metric in chosen and s.version == chosen[s.metric]:
+                source_hashes[f"{s.metric}@{s.version}"].add(s.source_hash)
             if (
                 s.metric in chosen
                 and s.version == chosen[s.metric]
@@ -535,19 +915,20 @@ def build_leaderboard(
         elif not stale:
             unscored.append(r.run_id)
 
-    groups: dict[tuple[str, str | None], list[RunRecord]] = defaultdict(list)
+    groups: dict[tuple[str, str | None, str | None], list[RunRecord]] = defaultdict(list)
     for r in eligible:
         if r.run_id in per_run:
-            groups[(r.config_hash, r.git.commit)].append(r)
+            groups[(r.config_hash, r.git.commit, diff_key(r.git))].append(r)
 
     examples = {rid: ex for rid, ex in (per_example or {}).items() if rid in per_run}
     picked = pick_field((f for ex in examples.values() for f in ex.values()), primary_key)
     rows: list[LeaderboardRow] = []
     pooled: dict[str, dict[str, float]] = {}
     for members in groups.values():
-        row = _make_row(members, per_run, spec, primary)
+        row = _make_row(members, per_run, config, spec, primary)
         if picked is not None:
-            pooled[row.group_id] = _pool(row.run_ids, examples, picked[0])
+            seeds = [[m.run_id for m in b] for b in seed_buckets(members)]
+            pooled[row.group_id] = _pool(seeds, examples, picked[0])
             row.test_interval = _test_interval(pooled[row.group_id], picked[1])
         rows.append(row)
 
@@ -561,12 +942,16 @@ def build_leaderboard(
         best = rows[0]
         for row in rows[1:]:
             if row.primary is not None and best.primary is not None:
-                row.within_noise_of_best = intervals_overlap(row.primary, best.primary)
                 binary = picked[1] if picked is not None else None
                 row.vs_best = _versus(row, best, pooled, binary, primary)
+                p = row.vs_best.p
+                row.within_noise_of_best = None if p is None else p >= NOISE_ALPHA
 
     by_id = {r.run_id: r for r in eligible}
     members_of = {row.group_id: [by_id[i] for i in row.run_ids] for row in rows}
+    labels = distinct_labels({row.group_id: row.label for row in rows}, members_of)
+    for row in rows:
+        row.label = labels[row.group_id]
     reference = None
     gain_interval = None
     if spec.kind == "system_bench":
@@ -584,6 +969,7 @@ def build_leaderboard(
         primary=primary,
         higher_is_better=higher,
         metric_versions=chosen,
+        metric_drift=sorted(ref for ref, hashes in source_hashes.items() if len(hashes) > 1),
         rows=rows,
         needs_reeval=needs_reeval,
         unscored=unscored,

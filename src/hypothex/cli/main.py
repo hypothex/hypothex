@@ -5,26 +5,34 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import math
 import os
 import re
 import secrets
 import socket
+import sqlite3
+import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast, get_args
+from urllib.parse import urlencode
 
+import psutil
 import typer
 import yaml
 from pydantic import ValidationError
+from sqlalchemy.exc import DBAPIError
 from typer.core import TyperGroup
 
 from hypothex._version import __version__
 from hypothex.core import queries as q
 from hypothex.core.config import (
     CONFIG_FILENAME,
+    NAME_PATTERN,
     TaskKind,
     find_repo_root,
     load_project_config,
@@ -34,16 +42,28 @@ from hypothex.core.config import (
 from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
 from hypothex.core.environment import load_descriptor
-from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
-from hypothex.core.evaluation import reeval, validate_project
-from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
+from hypothex.core.errors import ConfigError, HypothexError, RunError, RunNotFoundError, StoreError
+from hypothex.core.evaluation import EvalReport, reeval, validate_project
+from hypothex.core.execution import (
+    RunRequest,
+    execute_run,
+    prepare_run,
+    process_alive,
+    process_create_time,
+    seed_warning,
+)
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gitinfo import git_state_label
+from hypothex.core.headlines import fmt_p
 from hypothex.core.ids import new_command_id
 from hypothex.core.index import rebuild_index
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import Layout, default_home
+from hypothex.core.leaderboard import Leaderboard
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
+from hypothex.core.seeds import Stats
+from hypothex.core.store import RunStore
+from hypothex.core.tokens import validate_bearer_token
 from hypothex.remote.config import (
     HOST_NAME,
     EnvironmentsFile,
@@ -56,6 +76,7 @@ from hypothex.remote.config import (
 
 if TYPE_CHECKING:
     from hypothex.remote.bootstrap import ServerInfo
+    from hypothex.remote.ssh import SshTarget
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -79,7 +100,8 @@ hosts_app = typer.Typer(
 )
 app.add_typer(hosts_app, name="hosts")
 KindOpt = Annotated[
-    str | None, typer.Option("--kind", help="What this machine is to the hub: ssh or slurm.")
+    str | None,
+    typer.Option("--kind", help="What this machine is to the hub: ssh, slurm, or local."),
 ]
 
 JsonFlag = Annotated[bool, typer.Option("--json", help="Print machine-readable JSON.")]
@@ -147,10 +169,15 @@ def _write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    tmp.unlink(missing_ok=True)  # a stale tmp keeps its old mode, which os.replace carries
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _pid_alive(pid: int) -> bool:
@@ -218,6 +245,9 @@ def _server_file(home: Path, info: ServerInfo) -> Iterator[None]:
     record = {
         **info.model_dump(mode="json"),
         "hostname": socket.gethostname(),
+        "home": str(home.resolve()),
+        "pid_create_time": process_create_time(info.pid),
+        "environment_id": load_descriptor(Layout(home)).environment_id,
         "token": info.token,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,9 +299,13 @@ def _created_by() -> str:
     return f"agent:{agent}" if agent else "human"
 
 
-def _stats(s: Any) -> str:
+def _stats(s: Stats | None, identical: bool = False) -> str:
     if s is None:
         return "—"
+    if identical:
+        return f"{s.mean:.4f} ◇×{s.n}"
+    if s.n == 1:
+        return f"{s.mean:.4f} (n=1)"
     return f"{s.mean:.4f} ± {s.std:.4f} (n={s.n})"
 
 
@@ -306,9 +340,14 @@ def _request(
         config_path=config.resolve() if config else None,
         params=_pairs(params, "--param"),
         vars=_pairs(variables, "--var"),
-        cwd=Path.cwd() if repo is None else None,
+        cwd=Path.cwd() if repo is None and argv else None,
         created_by=_created_by(),
     )
+
+
+def _local(dt: datetime | None) -> str:
+    """Format a human timestamp in the machine's local timezone, or a missing marker."""
+    return "—" if dt is None else dt.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
 def _finish(record: RunRecord, as_json: bool) -> None:
@@ -325,8 +364,16 @@ def _finish(record: RunRecord, as_json: bool) -> None:
             fg="green" if record.status == RunStatus.FINISHED else "red",
             err=True,
         )
+    # Read source files, never open an index here: SLURM compute-node --child
+    # also calls _finish and must not open the shared SQLite databases.
+    errors: dict[tuple[str, str], bool] = {}
+    for score in RunStore(Layout(_home_path())).read_scores(record.project, record.run_id):
+        errors[score.metric, score.version] = score.error is not None
+    if count := sum(errors.values()):
+        typer.secho(f"eval: {count} errors", fg="yellow", err=True)
     if record.status in TERMINAL_STATUSES and record.status != RunStatus.FINISHED:
-        raise typer.Exit(record.exit_code or 1)
+        code = record.exit_code or 1
+        raise typer.Exit(128 - code if code < 0 else code)
 
 
 def _warn_seed(record: RunRecord) -> None:
@@ -349,12 +396,24 @@ TagOpt = Annotated[list[str] | None, typer.Option("--tag", help="Tag (repeatable
 ConfigOpt = Annotated[Path | None, typer.Option("--config", help="Config file; use {config}.")]
 ParamOpt = Annotated[list[str] | None, typer.Option("--param", help="name=value (repeatable).")]
 VarOpt = Annotated[list[str] | None, typer.Option("--var", help="Template var name=value.")]
-StageOpt = Annotated[str | None, typer.Option("--stage", help="Run a stage from hypothex.yaml.")]
+StageOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--stage",
+        help="Stage from hypothex.yaml: execute its template, or label an explicit command.",
+    ),
+]
 RepoOpt = Annotated[Path | None, typer.Option("--repo", help="Project repo (default: cwd).")]
 HostOpt = Annotated[
     str | None, typer.Option("--host", help="Run on this host (`hx hosts list`); default here.")
 ]
 GpusOpt = Annotated[int, typer.Option("--gpus", min=0, help="GPUs for each run.")]
+LaunchGpusOpt = Annotated[
+    int | None,
+    typer.Option(
+        "--gpus", min=0, help="GPUs for each run (default 0; on SLURM, the host's default)."
+    ),
+]
 QueueOpt = Annotated[bool, typer.Option("--queue", help="Wait in the host's queue for GPUs.")]
 REMOTE_POLL_SECONDS = 2.0
 
@@ -386,20 +445,169 @@ def _hub_token() -> str | None:
     return resolve_hub_token(home=_home_path())
 
 
-def _hub(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+def _hub(
+    method: str, path: str, body: dict[str, Any] | None = None, *, timeout: float = 120.0
+) -> Any:
     # The hub client lives with the MCP helpers; import lazily to keep `hx` fast.
     from hypothex.mcp.server import hub_call
 
-    return hub_call(method, path, body, token=_hub_token())
+    return hub_call(method, path, body, token=_hub_token(), timeout=timeout)
 
 
-def _hub_try(method: str, path: str, body: dict[str, Any] | None = None) -> Any | None:
+def _hub_try(
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    timeout: float | None = None,
+) -> Any | None:
     from hypothex.mcp.server import HubUnavailableError
 
     try:
+        if timeout is not None:
+            return _hub(method, path, body, timeout=timeout)
         return _hub(method, path, body)
     except HubUnavailableError:
         return None
+
+
+def _query(path: str, params: dict[str, Any]) -> str:
+    """``path`` with the params that are not None as a query string (lists repeat)."""
+    pairs = urlencode({k: v for k, v in params.items() if v is not None}, doseq=True)
+    return f"{path}?{pairs}" if pairs else path
+
+
+def _hub_read(path: str) -> Any | None:
+    """
+    GET ``path`` from the hub for a read command; None when the hub cannot help.
+
+    A CLI on another machine than the hub (spec 5.2) has only its own runs in its
+    store: ``show``, ``logs``, ``runs``, ``leaderboard`` and ``sweeps`` ask the hub
+    for the rest (CONF-5). No hub (or no such item there, 404) gives None; any
+    other hub error is printed as a warning, so this store's answer still prints.
+
+    Parameters
+    ----------
+    path : str
+        API path with its query string.
+
+    Returns
+    -------
+    Any or None
+        The hub's JSON answer.
+    """
+    from hypothex.mcp.server import HubUnavailableError
+
+    try:
+        return _hub("GET", path)
+    except (HubUnavailableError, StoreError):
+        return None
+    except HypothexError as exc:
+        typer.secho(f"warning: the hub did not answer {path}: {exc}", fg="yellow", err=True)
+        return None
+
+
+def _run_detail(c: Context, run_id: str) -> tuple[q.RunDetail, str | None]:
+    """
+    A run's detail and ``host_state``: from the hub for a run of another environment.
+
+    The hub has a run this store lacks (a CLI on a laptop), and the connection
+    state of a mirrored run's host (CONF-4b: a run on a ``stale`` host is not
+    known to be running). Without a hub, this store's copy (or its "no run"
+    error) stands, with ``host_state`` None.
+    """
+    from hypothex.mcp.server import acts_through_hub
+
+    if acts_through_hub(c, run_id):
+        out = _hub_read(f"/api/v1/runs/{run_id}")
+        if out is not None:
+            return q.RunDetail.model_validate(out), out.get("host_state")
+    return q.show_run(c, run_id), None
+
+
+def _status_text(record: RunRecord, host_state: str | None) -> str:
+    """
+    A run's status, marked when its host is not connected and the run has not ended.
+
+    A running run on a ``stale`` host shows as ``running (host stale)``: it is
+    not lost, but nothing says it is still going (spec 5.6).
+    """
+    status = record.status.value
+    if host_state in (None, "connected") or record.status in TERMINAL_STATUSES:
+        return status
+    return f"{status} (host {host_state})"
+
+
+def _log_reader(
+    c: Context, run_id: str, stream: str
+) -> tuple[Callable[[int | None], q.LogChunk], Callable[[], bool]]:
+    """
+    Read a run's log from ``offset``, and tell whether the run ended.
+
+    From this store, else from the hub for a run this store does not have.
+
+    Raises
+    ------
+    StoreError
+        Neither this store nor a hub has the run.
+    """
+    try:
+        c.find_record(run_id)
+    except StoreError:
+        if _hub_read(f"/api/v1/runs/{run_id}") is None:
+            raise
+
+        def hub_read(offset: int | None) -> q.LogChunk:
+            path = _query(f"/api/v1/runs/{run_id}/logs", {"stream": stream, "offset": offset})
+            return q.LogChunk.model_validate(_hub("GET", path))
+
+        def hub_ended() -> bool:
+            record = RunRecord.model_validate(_hub("GET", f"/api/v1/runs/{run_id}")["record"])
+            return record.status in TERMINAL_STATUSES
+
+        return hub_read, hub_ended
+
+    def read(offset: int | None) -> q.LogChunk:
+        return q.read_log(c, run_id, stream, offset)
+
+    def ended() -> bool:
+        return c.find_record(run_id).status in TERMINAL_STATUSES
+
+    return read, ended
+
+
+def _hub_task(ref: str, project: str | None) -> tuple[str, str] | None:
+    """
+    The hub's ``(project, task)`` for ``task`` or ``project/task``; None if unknown there.
+
+    Raises
+    ------
+    ConfigError
+        The task name is in several of the hub's projects.
+    """
+    if project is None and "/" in ref:
+        project, ref = ref.split("/", 1)
+    if project is not None:
+        return project, ref
+    tasks = _hub_read("/api/v1/tasks") or []
+    owners = sorted({t["project"] for t in tasks if t["name"] == ref})
+    if len(owners) > 1:
+        raise ConfigError(f"task {ref!r} exists in several projects ({', '.join(owners)})")
+    return (owners[0], ref) if owners else None
+
+
+def _hub_sweeps(project: str | None) -> list[dict[str, Any]]:
+    """The hub's sweep rows (as ``q.list_sweeps``) of one project or of all; [] without a hub."""
+    if project is not None:
+        projects = [project]
+    else:
+        projects = [e["project"] for e in _hub_read("/api/v1/projects") or []]
+    rows = []
+    for name in projects:
+        for row in _hub_read(f"/api/v1/projects/{name}/sweeps") or []:
+            created = datetime.fromisoformat(row["created_at"])
+            rows.append({"project": name, **row, "created_at": created})
+    return rows
 
 
 def _client_checkout(root: Path) -> dict[str, str | None]:
@@ -428,21 +636,56 @@ def _through_hub(run_id: str, action: str, body: dict[str, Any]) -> Any | None:
     """
     Send a mutation of another environment's run through the hub; None for this machine's.
 
-    The hub forwards it to the run's host with the same command id (Task 45). A run of
-    this machine (or of an environment no host serves, on a hub without that run) acts
-    here as in phase 1.
+    The hub forwards it to the run's host with the same command id (Task 45).
+    Only runs of this environment act locally. Unknown runs are looked up at the hub;
+    when that hub is unavailable the error also identifies the missing local run.
     """
-    from hypothex.mcp.server import acts_through_hub
+    from hypothex.mcp.server import (
+        HubUnavailableError,
+        acts_through_hub,
+        missing_run_or_hub_error,
+    )
 
-    if not acts_through_hub(_ctx(), run_id):
+    c = _ctx()
+    if not acts_through_hub(c, run_id):
         return None
     full = {**body, "command_id": new_command_id(), "created_by": _created_by()}
-    return _hub("POST", f"/api/v1/runs/{run_id}/{action}", full)
+    try:
+        return _hub("POST", f"/api/v1/runs/{run_id}/{action}", full)
+    except HubUnavailableError as exc:
+        raise missing_run_or_hub_error(c, run_id, exc) from exc
 
 
 def _launch_remote(
-    host: str, req: RunRequest, *, gpus: int, queue: bool, slurm: dict[str, str]
+    host: str, req: RunRequest, *, gpus: int | None, queue: bool, slurm: dict[str, Any]
 ) -> RunRecord:
+    """
+    Launch ``req`` on ``host`` through the hub.
+
+    An explicit ``gpus`` (also 0) goes in ``slurm.gpus`` too, so it overrides a SLURM
+    host's default GPU count, as the UI's launch does; ``None`` keeps that default.
+    Hosts that are not SLURM hosts ignore ``slurm.gpus``.
+
+    Parameters
+    ----------
+    host : str
+        Host name (``hx hosts list``).
+    req : RunRequest
+        The launch; ``config_path`` is refused (the file is not sent).
+    gpus : int or None
+        GPUs per run; ``None`` when ``--gpus`` was not given.
+    queue : bool
+        Wait in the host's queue for GPUs.
+    slurm : dict
+        ``partition``, ``time``, ``account`` as given.
+
+    Returns
+    -------
+    RunRecord
+        The run as the host created it.
+    """
+    if gpus is not None:
+        slurm = {**slurm, "gpus": gpus}
     if req.config_path is not None:
         raise RunError("--config is not sent to hosts; commit the file and pass it with --var")
     body = {
@@ -455,7 +698,7 @@ def _launch_remote(
         "tags": req.tags,
         "params": req.params,
         "vars": req.vars,
-        "gpus": gpus,
+        "gpus": gpus or 0,
         "queue": queue,
         "slurm": slurm or None,
         "created_by": req.created_by,
@@ -485,6 +728,32 @@ def _sweep_out(summary: dict[str, Any], as_json: bool) -> None:
         f"on {spec['host'] or 'local'}",
         bold=True,
     )
+    if issuance := summary.get("issuance"):
+        state = issuance["state"]
+        explanations = {
+            "preparing": "not yet accepted",
+            "queued": "accepted; waiting to issue member runs",
+            "issuing": "issuing member runs",
+            "settling": "reconciling launched runs",
+            "issued": "all launches accounted for; experiment runs may still be running",
+            "incomplete": "issuance ended with an error",
+            "interrupted": "issuance stopped before completion",
+        }
+        typer.echo(f"issuance: {state} — {explanations.get(state, state)}")
+        typer.echo(f"episode {issuance['episode']}  planned cells: {issuance['planned']}")
+        if issuance.get("cancel_requested"):
+            typer.echo("cancellation requested; in-flight work must settle before it is final")
+        if reason := issuance.get("reason"):
+            typer.echo(f"reason: {reason}")
+        if error := issuance.get("error"):
+            typer.echo(f"{error['type']}: {error['message']}")
+        if resume := issuance.get("resume"):
+            seeds = ",".join(str(seed) for seed in resume["seeds"])
+            typer.echo(
+                f"resume: hx sweep extend {spec['id']} --project {spec['project']} --seeds {seeds}"
+            )
+            typer.echo(resume["message"])
+        typer.echo(f"current state: hx sweep show {spec['id']} --project {spec['project']}")
     typer.echo(summary["headline"])
     counts = "  ".join(f"{k} {v}" for k, v in summary["counts"].items())
     typer.echo(f"{counts}  cost ${summary['total_usd']:.2f}")
@@ -517,7 +786,55 @@ def _known_host(hosts: EnvironmentsFile, name: str) -> HostSpec:
     return spec
 
 
-def _bootstrap(c: Context, name: str, spec: HostSpec) -> ServerInfo:
+InstallUvOpt = Annotated[
+    bool,
+    typer.Option(
+        "--install-uv",
+        help=(
+            "On a host without uv, allow hx to download and run the official uv "
+            "installer (https://astral.sh/uv/install.sh). Off: hx stops and asks for uv."
+        ),
+    ),
+]
+
+
+def _install(c: Context, target: SshTarget, home: str, *, install_uv: bool) -> None:
+    """
+    Build this hx's wheel and install it on a host (spec 8A.2 step 2).
+
+    uv is installed on a host only with the user's consent (``--install-uv``,
+    SEC-3): a missing uv otherwise stops the install, with a hint to the option.
+
+    Parameters
+    ----------
+    c : Context
+        This machine's context (the wheel cache is under its home).
+    target : SshTarget
+        The host.
+    home : str
+        The hx home on the host.
+    install_uv : bool
+        ``--install-uv``.
+
+    Raises
+    ------
+    BootstrapError
+        The install failed; when uv is missing, the message names ``--install-uv``.
+    """
+    from hypothex.remote import bootstrap
+
+    wheel = bootstrap.build_wheel(c.layout.home / "cache" / "wheels")
+    try:
+        bootstrap.install(target, home, wheel, install_uv=install_uv)
+    except bootstrap.BootstrapError as exc:
+        if install_uv or "uv is missing on the host" not in str(exc):
+            raise
+        raise bootstrap.BootstrapError(
+            f"{exc}; to let hx run that installer, add --install-uv"
+        ) from exc
+
+
+def _bootstrap(c: Context, name: str, spec: HostSpec, *, install_uv: bool) -> ServerInfo:
     # spec 8A.2 steps 1-3 over the user's own ssh: probe, install this hx, start the server
     from hypothex.mcp.server import ssh_target
     from hypothex.remote import bootstrap
@@ -526,8 +843,7 @@ def _bootstrap(c: Context, name: str, spec: HostSpec) -> ServerInfo:
     facts = bootstrap.probe(target, spec.home)
     if spec.kind == "slurm" and facts.slurm is None:
         raise ConfigError(f"{name} has no sbatch on PATH; drop --slurm or use the login node")
-    wheel = bootstrap.build_wheel(c.layout.home / "cache" / "wheels")
-    bootstrap.install(target, facts.home, wheel)
+    _install(c, target, facts.home, install_uv=install_uv)
     return bootstrap.ensure_server(target, facts.home, kind=spec.kind)
 
 
@@ -560,7 +876,18 @@ def init(
     path = Path.cwd() / CONFIG_FILENAME
     if path.exists() and not force:
         raise RunError(f"{path} exists; use --force to overwrite")
-    name = project or re.sub(r"[^a-z0-9_.-]+", "-", Path.cwd().name.lower()).strip("-") or "project"
+    parent_project = next(
+        (p / CONFIG_FILENAME for p in Path.cwd().parents if (p / CONFIG_FILENAME).is_file()), None
+    )
+    if parent_project is not None and not force:
+        raise RunError(f"parent project {parent_project} exists; use --force for a nested project")
+    name = (
+        project
+        if project is not None
+        else re.sub(r"[^a-z0-9_.-]+", "-", Path.cwd().name.lower()).strip("-") or "project"
+    )
+    if re.fullmatch(NAME_PATTERN, name) is None:
+        raise RunError(f"project name {name!r} must match {NAME_PATTERN}")
     path.write_text(starter_config(name), encoding="utf-8")
     if as_json:
         _print_json({"path": str(path), "project": name})
@@ -653,7 +980,7 @@ def leaderboard(
         if version is None:
             raise RunError(f"--metric needs name@version, got {item!r}")
         versions[name] = version
-    board = q.get_leaderboard(_ctx(), ref, project, versions or None)
+    board = _board(ref, project, versions, metric or [])
     if as_json:
         _print_json(board)
         return
@@ -668,13 +995,22 @@ def leaderboard(
             [
                 i,
                 r.group_id,
-                _stats(r.primary),
+                _stats(r.primary, r.identical_seeds),
+                fmt_p(r.vs_best.p) if r.vs_best and r.vs_best.p is not None else None,
+                None
+                if r.test_interval is None
+                else f"[{r.test_interval.lo:.4f}, {r.test_interval.hi:.4f}]",
                 noise[r.within_noise_of_best],
                 r.latest_run_id,
                 r.hypothesis[:50],
             ]
         )
-    _table(["#", "group", board.primary, "note", "latest run", "hypothesis"], rows)
+    _table(["#", "group", board.primary, "p", "test 95%", "note", "latest run", "hypothesis"], rows)
+    if board.metric_drift:
+        typer.secho(
+            f"warning: {', '.join(board.metric_drift)} have different recorded source hashes",
+            fg="yellow",
+        )
     if board.needs_reeval:
         typer.secho(
             f"{len(board.needs_reeval)} runs scored on older metric versions: "
@@ -683,6 +1019,38 @@ def leaderboard(
         )
     if board.unscored:
         typer.secho(f"{len(board.unscored)} finished runs have no scores", fg="yellow")
+
+
+def _board(
+    ref: str, project: str | None, versions: dict[str, str], metric: list[str]
+) -> Leaderboard:
+    """
+    A task's board from this store, else (unknown or without runs here) from the hub.
+
+    Raises
+    ------
+    ConfigError, StoreError
+        This store's error, when the hub has no board either.
+    """
+    try:
+        board = q.get_leaderboard(_ctx(), ref, project, versions or None)
+    except (ConfigError, StoreError):
+        hub = _hub_board(ref, project, metric)
+        if hub is None:
+            raise
+        return hub
+    if board.rows or board.unscored or board.needs_reeval:
+        return board
+    return _hub_board(ref, project, metric) or board
+
+
+def _hub_board(ref: str, project: str | None, metric: list[str]) -> Leaderboard | None:
+    where = _hub_task(ref, project)
+    if where is None:
+        return None
+    path = _query(f"/api/v1/tasks/{where[0]}/{where[1]}/leaderboard", {"metric": metric or None})
+    out = _hub_read(path)
+    return None if out is None else Leaderboard.model_validate(out)
 
 
 # runs ---------------------------------------------------------------------------
@@ -696,12 +1064,30 @@ def list_runs_cmd(
     limit: Annotated[int, typer.Option(help="Maximum rows.")] = 50,
     as_json: JsonFlag = False,
 ) -> None:
-    """List runs, newest first."""
+    """List runs, newest first: this store's, and the hub's when one answers."""
     records = _ctx().index.list_runs(
         project=project, task=task, status=status, tag=tag, include_archived=archived, limit=limit
     )
+    filters = {
+        "project": project,
+        "task": task,
+        "status": None if status is None else status.value,
+        "tag": tag,
+        "archived": "true" if archived else None,
+        "limit": limit,
+    }
+    hub = _hub_read(_query("/api/v1/runs", filters)) or []
+    states: dict[str, str | None] = {}  # run id -> host_state, from the hub (CONF-4b)
+    if hub:
+        # a CLI on another machine than the hub (spec 5.2): its own runs and the hub's
+        merged = {r.run_id: r for r in records}
+        for row in hub:
+            states[row["run_id"]] = row.get("host_state")
+            merged[row["run_id"]] = RunRecord.model_validate(row)
+        records = sorted(merged.values(), key=lambda r: (r.created_at, r.run_id), reverse=True)
+        records = records[:limit]
     if as_json:
-        _print_json(records)
+        _print_json([{**to_jsonable(r), "host_state": states.get(r.run_id)} for r in records])
         return
     _table(
         ["run", "task", "status", "created", "hypothesis"],
@@ -709,8 +1095,8 @@ def list_runs_cmd(
             [
                 r.run_id,
                 r.task,
-                r.status.value,
-                r.created_at.strftime("%Y-%m-%d %H:%M"),
+                _status_text(r, states.get(r.run_id)),
+                _local(r.created_at),
                 r.hypothesis[:50],
             ]
             for r in records
@@ -721,22 +1107,45 @@ def list_runs_cmd(
 @app.command()
 def show(run_id: str, as_json: JsonFlag = False) -> None:
     """Show everything about a run, including where every file lives."""
-    detail = q.show_run(_ctx(), run_id)
+    detail, host_state = _run_detail(_ctx(), run_id)
     if as_json:
-        _print_json(detail)
+        _print_json({**to_jsonable(detail), "host_state": host_state})
         return
     r = detail.record
-    typer.secho(f"{r.run_id}  [{r.status.value}]  {r.project}/{r.task or 'exploratory'}", bold=True)
+    status = _status_text(r, host_state)
+    typer.secho(f"{r.run_id}  [{status}]  {r.project}/{r.task or 'exploratory'}", bold=True)
     typer.echo(f"hypothesis: {r.hypothesis or '—'}")
     typer.echo(f"command:    {r.command_display}")
     typer.echo(f"git:        {r.git.commit or '—'}  {git_state_label(r.git)}")
+    for label, value in (
+        ("tags", ", ".join(r.tags)),
+        ("seed", r.seed),
+        ("params", json.dumps(r.params, ensure_ascii=False)),
+        ("vars", json.dumps(r.vars, ensure_ascii=False)),
+        ("parent", r.parent),
+        ("children", ", ".join(detail.children)),
+        ("starred", "yes" if r.starred else "no"),
+        ("exit code", r.exit_code),
+        ("end reason", r.end_reason),
+        ("created", _local(r.created_at)),
+        ("started", _local(r.started_at)),
+        ("ended", _local(r.ended_at)),
+    ):
+        typer.echo(f"{label}: {value if value is not None and value != '' else '—'}")
+    if detail.notes.strip():
+        typer.secho("notes:", bold=True)
+        typer.echo(detail.notes.rstrip())
     typer.secho("paths:", bold=True)
     for k, v in detail.paths.items():
         typer.echo(f"  {k:<22} {v}")
     if detail.scores:
         typer.secho("scores:", bold=True)
         for s in detail.scores:
-            value = s.value if s.error is None else "ERROR"
+            reason = next(
+                (line.strip() for line in reversed((s.error or "").splitlines()) if line.strip()),
+                "unknown error",
+            )
+            value = s.value if s.error is None else f"ERROR: {reason}"
             typer.echo(f"  {s.metric}@{s.version}/{s.key} = {value}")
 
 
@@ -812,7 +1221,7 @@ def launch(
     stage: StageOpt = None,
     repo: RepoOpt = None,
     host: HostOpt = None,
-    gpus: GpusOpt = 0,
+    gpus: LaunchGpusOpt = None,
     queue: QueueOpt = False,
     partition: Annotated[str | None, typer.Option(help="SLURM partition.")] = None,
     time_limit: Annotated[
@@ -836,7 +1245,7 @@ def launch(
         repo=repo,
         interactive=not as_json,
     )
-    slurm = {
+    slurm: dict[str, Any] = {
         k: v
         for k, v in {"partition": partition, "time": time_limit, "account": account}.items()
         if v is not None
@@ -859,7 +1268,7 @@ def launch(
     if slurm:
         raise RunError("--partition, --time, and --account need --host <slurm host>")
     c = _ctx()
-    record = launch_run(c, dataclasses.replace(req, gpus=gpus, queue=queue))
+    record = launch_run(c, dataclasses.replace(req, gpus=gpus or 0, queue=queue))
     _warn_seed(record)
     if wait:
         record = wait_for_run(c, record.run_id, timeout=WAIT_FOREVER)
@@ -919,27 +1328,109 @@ def rerun_cmd(run_id: str, foreground: ForegroundOpt = False, as_json: JsonFlag 
 def reinfer_cmd(
     run_id: str,
     checkpoint: Annotated[str | None, typer.Option(help="Checkpoint path override.")] = None,
+    var: VarOpt = None,
     foreground: ForegroundOpt = False,
     as_json: JsonFlag = False,
 ) -> None:
-    """Run the `infer` stage again with this run's checkpoint."""
+    """Run the `infer` stage with this run's checkpoint and optional --var overrides."""
     from hypothex.mcp.server import acts_through_hub
 
+    variables = _pairs(var, "--var")
     if acts_through_hub(_ctx(), run_id):
         _not_foreground(run_id, foreground)
-        out = _through_hub(run_id, "reinfer", {"checkpoint": checkpoint})
+        out = _through_hub(run_id, "reinfer", {"checkpoint": checkpoint, "vars": variables})
         _started(RunRecord.model_validate(out), False, as_json)
         return
     record = reinfer(
         _ctx(),
         run_id,
         checkpoint=checkpoint,
+        vars=variables,
         background=not foreground,
         created_by=_created_by(),
         stdout_sink=None if as_json else sys.stdout.buffer,
         stderr_sink=sys.stderr.buffer,
     )
     _started(record, foreground, as_json)
+
+
+HOST_RUN_SKIPPED = (
+    "runs on a host and the hub did not answer; start the hub (`hx serve`) to "
+    "re-evaluate it on its host"
+)
+
+
+def _reeval_task(c: Context, ref: str, project: str | None, body: dict[str, Any]) -> EvalReport:
+    """
+    Re-score a task's finished runs; through the hub when some are another environment's.
+
+    Scores written into a mirrored run's copy here would be replaced by the host's
+    ``scores.jsonl`` at the next mirror (CONF-2), so the hub scores its own runs and
+    sends each mirrored run to its host (spec 8A.3). Without a hub, only this
+    environment's runs are scored; the others are skipped with ``HOST_RUN_SKIPPED``.
+
+    Parameters
+    ----------
+    c : Context
+        This machine's context.
+    ref : str
+        ``task`` or ``project/task``.
+    project : str or None
+        ``--project``.
+    body : dict
+        ``metric``, ``force`` and ``created_by`` of the reeval.
+
+    Returns
+    -------
+    EvalReport
+        This store's report, or the hub's.
+
+    Raises
+    ------
+    ConfigError, StoreError
+        The task (or its project) is unknown here and on the hub.
+    """
+
+    def through_hub(project_name: str, task_name: str) -> EvalReport | None:
+        path = f"/api/v1/tasks/{project_name}/{task_name}/reeval"
+        from hypothex.mcp.server import TASK_REEVAL_SECONDS
+
+        out = _hub_try(
+            "POST", path, {**body, "command_id": new_command_id()}, timeout=TASK_REEVAL_SECONDS
+        )
+        return None if out is None else EvalReport.model_validate(out)
+
+    try:
+        entry, name = q.resolve_task(c, ref, project)
+    except (ConfigError, StoreError) as exc:
+        where = _hub_task(ref, project)  # a CLI on another machine than the hub
+        report = None if where is None else through_hub(*where)
+        if report is None:
+            raise exc
+        return report
+    runs = c.index.list_runs(
+        project=entry.project,
+        task=name,
+        status=RunStatus.FINISHED,
+        include_archived=True,
+        limit=None,
+    )
+    own = c.descriptor.environment_id
+    mirrored = [r.run_id for r in runs if r.environment_id != own]
+    if mirrored:
+        report = through_hub(entry.project, name)
+        if report is not None:
+            return report
+    report = reeval(
+        c,
+        project=entry.project,
+        task=name,
+        metric=body["metric"],
+        force=body["force"],
+        run_ids=[r.run_id for r in runs if r.environment_id == own] if mirrored else None,
+    )
+    report.skipped.update(dict.fromkeys(mirrored, HOST_RUN_SKIPPED))
+    return report
 
 
 @app.command("reeval")
@@ -955,19 +1446,14 @@ def reeval_cmd(
     from hypothex.mcp.server import acts_through_hub
 
     c = _ctx()
+    body = {"metric": metric, "force": force, "created_by": _created_by()}
     if run_id is not None and acts_through_hub(c, run_id):
-        body = {"metric": metric, "force": force, "command_id": new_command_id()}
-        out = _hub("POST", f"/api/v1/runs/{run_id}/reeval", {**body, "created_by": _created_by()})
-        if as_json:
-            _print_json(out)
-        else:
-            typer.echo(f"evaluated {len(out['evaluated'])}, skipped {len(out['skipped'])}")
-        return
-    if run_id is not None:
+        out = _through_hub(run_id, "reeval", body)
+        report = EvalReport.model_validate(out)
+    elif run_id is not None:
         report = reeval(c, run_id=run_id, metric=metric, force=force)
     elif task is not None:
-        entry, name = q.resolve_task(c, task, project)
-        report = reeval(c, project=entry.project, task=name, metric=metric, force=force)
+        report = _reeval_task(c, task, project, body)
     else:
         raise RunError("give a run id or --task")
     if as_json:
@@ -1062,24 +1548,47 @@ def predictions(
 @app.command()
 def logs(
     run_id: str,
-    stream: Annotated[str, typer.Option(help="stdout, stderr, or supervisor.")] = "stdout",
+    stream: Annotated[
+        str | None,
+        typer.Option(
+            help="stdout, stderr, or supervisor (default stdout; failed runs also show stderr)."
+        ),
+    ] = None,
     follow: Annotated[bool, typer.Option(help="Keep printing until the run ends.")] = False,
     as_json: JsonFlag = False,
 ) -> None:
     """Print a run's log (tail), optionally following it."""
     c = _ctx()
-    chunk = q.read_log(c, run_id, stream)
+    read, ended = _log_reader(c, run_id, stream or "stdout")
+    chunk = read(None)
     if as_json:
         _print_json(chunk)
         return
     typer.echo(chunk.text, nl=False)
+    line_ended = not chunk.text or chunk.text.endswith("\n")
     while follow:
-        if c.find_record(run_id).status in TERMINAL_STATUSES:
-            typer.echo(q.read_log(c, run_id, stream, chunk.offset).text, nl=False)
-            return
-        time.sleep(1)
-        chunk = q.read_log(c, run_id, stream, chunk.offset)
+        done = ended()
+        if not done:
+            time.sleep(1)
+        chunk = read(chunk.offset)
         typer.echo(chunk.text, nl=False)
+        if chunk.text:
+            line_ended = chunk.text.endswith("\n")
+        if done:
+            break
+    if stream is None:
+        try:
+            record = c.find_record(run_id)
+        except RunNotFoundError:
+            record = RunRecord.model_validate(_hub("GET", f"/api/v1/runs/{run_id}")["record"])
+        if record.status in {RunStatus.FAILED, RunStatus.KILLED, RunStatus.LOST}:
+            stderr, _ = _log_reader(c, run_id, "stderr")
+            tail = stderr(None).text
+            if tail:
+                if not line_ended:
+                    typer.echo()
+                typer.echo("-- stderr --")
+                typer.echo(tail, nl=False)
 
 
 # curation -------------------------------------------------------------------------
@@ -1188,8 +1697,13 @@ def sweep_create(
         }
         _sweep_out(_hub("POST", "/api/v1/sweeps", body), as_json)
         return
+    from hypothex.api.app import pin_checkout  # lazy: the API is slow to import
+
     c = _ctx()
     c.register_project(root)
+    # spec 8A.4: the sweep stores the checkout's HEAD and diff, so an extend after more
+    # commits (or edits) runs the same code and its seeds join the same groups
+    commit, diff = pin_checkout(str(root))
     summary = launch_sweep(
         c,
         project=project,
@@ -1203,6 +1717,8 @@ def sweep_create(
         queue=queue,
         created_by=_created_by(),
         repo=root,
+        commit=commit,
+        diff=diff,
     )
     _sweep_out(to_jsonable(summary), as_json)
 
@@ -1217,13 +1733,13 @@ def sweep_show(sweep_id: str, project: ProjectOpt = None, as_json: JsonFlag = Fa
 
 @sweep_app.command("cancel")
 def sweep_cancel(sweep_id: str, project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
-    """Stop the sweep's queued runs; running runs keep going."""
+    """Stop queued members and future issuance; running runs keep going."""
     from hypothex.core.sweeps import cancel_queued
-    from hypothex.mcp.server import is_remote, locate_sweep
+    from hypothex.mcp.server import locate_sweep, sweep_acts_through_hub
 
     c = _ctx()
     spec, here = locate_sweep(c, sweep_id, project, token=_hub_token())
-    if is_remote(spec.host) or not here:
+    if sweep_acts_through_hub(c, spec, here):
         body = {"command_id": new_command_id(), "created_by": _created_by()}
         summary = _hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/cancel_queued", body)
     else:
@@ -1238,14 +1754,14 @@ def sweep_extend(
     project: ProjectOpt = None,
     as_json: JsonFlag = False,
 ) -> None:
-    """Add runs for every combination x the new seeds."""
+    """Add seeds, or resume missing cells with existing seeds after interrupted issuance."""
     from hypothex.core.sweeps import extend_sweep
-    from hypothex.mcp.server import is_remote, locate_sweep, parse_seeds
+    from hypothex.mcp.server import locate_sweep, parse_seeds, sweep_acts_through_hub
 
     c = _ctx()
     spec, here = locate_sweep(c, sweep_id, project, token=_hub_token())
     seed_list = parse_seeds(seeds, count_ok=False)
-    if is_remote(spec.host) or not here:
+    if sweep_acts_through_hub(c, spec, here):
         body = {"seeds": seed_list, "command_id": new_command_id(), "created_by": _created_by()}
         summary = _hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/extend", body)
     else:
@@ -1255,24 +1771,23 @@ def sweep_extend(
 
 @app.command("sweeps")
 def sweeps_cmd(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
-    """List sweeps, newest first."""
-    from hypothex.core.sweeps import list_sweeps
-
-    c = _ctx()
-    projects = [project] if project else [e.project for e in c.store.list_projects()]
-    rows: list[dict[str, Any]] = [{"project": p, **s} for p in projects for s in list_sweeps(c, p)]
-    rows.sort(key=lambda s: s["created_at"], reverse=True)
+    """List sweeps, newest first: this store's, and the hub's when one answers."""
+    merged = {(s["project"], s["id"]): s for s in q.list_sweeps(_ctx(), project)}
+    for row in _hub_sweeps(project):
+        merged.setdefault((row["project"], row["id"]), row)
+    rows = sorted(merged.values(), key=lambda s: (s["created_at"], s["id"]), reverse=True)
     if as_json:
         _print_json(rows)
         return
     _table(
-        ["sweep", "project", "created", "runs", "best"],
+        ["sweep", "project", "created", "runs", "issuance", "best"],
         [
             [
                 s["id"],
                 s["project"],
-                s["created_at"].strftime("%Y-%m-%d %H:%M"),
+                _local(s["created_at"]),
                 s["n_runs"],
+                (s.get("issuance") or {}).get("state"),
                 None if s["best"] is None else json.dumps(s["best"].get("params"))[:40],
             ]
             for s in rows
@@ -1462,25 +1977,35 @@ def repair(as_json: JsonFlag = False) -> None:
         typer.echo(f"marked {len(lost)} runs lost")
 
 
-SERVE_KINDS = ("ssh", "slurm")
+SERVE_KINDS = ("ssh", "slurm")  # the env server kinds: a token always, a GPU queue or sbatch
+KINDS = ("local", *SERVE_KINDS)
 
 
 def check_serve_kind(kind: str | None) -> None:
     """
     Check a ``--kind`` option.
 
+    ``local`` is accepted so that a home once served with ``--kind ssh`` (or
+    ``slurm``) can serve as the hub (or a plain machine) again: the kind is saved.
+
     Parameters
     ----------
     kind : str or None
-        ``ssh``, ``slurm``, or None (not given).
+        ``local``, ``ssh``, ``slurm``, or None (not given).
 
     Raises
     ------
     ConfigError
         For any other value.
+
+    Examples
+    --------
+    >>> check_serve_kind("local")  # the hub again, after a trial `--kind ssh`
     """
-    if kind is not None and kind not in SERVE_KINDS:
-        raise ConfigError(f"--kind must be ssh or slurm, got {kind!r}")
+    if kind is not None and kind not in KINDS:
+        raise ConfigError(
+            f"--kind must be ssh or slurm, got {kind!r}; or local to serve as the hub"
+        )
 
 
 def resolve_serve_kind(home: Path, kind: str | None) -> str:
@@ -1493,6 +2018,8 @@ def resolve_serve_kind(home: Path, kind: str | None) -> str:
         The Hypothex home of this env server.
     kind : str or None
         ``--kind``; None reuses the kind saved in ``environment.json``.
+        ``local`` saves ``local`` again (a home served with ``--kind ssh`` once
+        is the hub again, still requiring a token).
 
     Returns
     -------
@@ -1503,13 +2030,18 @@ def resolve_serve_kind(home: Path, kind: str | None) -> str:
     Raises
     ------
     ConfigError
-        If ``kind`` is not ``ssh`` or ``slurm``.
+        If ``kind`` is not ``local``, ``ssh`` or ``slurm``.
 
     Examples
     --------
     >>> import tempfile
-    >>> resolve_serve_kind(Path(tempfile.mkdtemp()), None)
+    >>> home = Path(tempfile.mkdtemp())
+    >>> resolve_serve_kind(home, None)
     'local'
+    >>> resolve_serve_kind(home, "ssh"), resolve_serve_kind(home, None)
+    ('ssh', 'ssh')
+    >>> resolve_serve_kind(home, "local"), resolve_serve_kind(home, None)
+    ('local', 'local')
     """
     check_serve_kind(kind)
     layout = Layout(home.expanduser().resolve())
@@ -1529,10 +2061,10 @@ def _serve_token(host: str, kind: str | None, no_auth: bool) -> str | None:
 
     The token comes from ``HYPOTHEX_SERVE_TOKEN`` and is removed from the
     environment at once, so runs started by this server never inherit it. An env
-    server (``kind`` ``ssh`` or ``slurm``) always has one, a fresh
+    server of every kind always has one, a fresh
     ``secrets.token_hex(24)`` when none is given, unless ``no_auth``: any local
-    user on a shared host can reach its loopback port. The hub's own server keeps
-    phase 1's rule: a token only when one is given.
+    user on a shared host can reach its loopback port. Explicit overrides must
+    satisfy the bounded ASCII bearer-token contract.
 
     Parameters
     ----------
@@ -1557,18 +2089,16 @@ def _serve_token(host: str, kind: str | None, no_auth: bool) -> str | None:
 
     Examples
     --------
-    >>> _serve_token("127.0.0.1", "local", False) is None
-    True
+    >>> len(_serve_token("127.0.0.1", "local", False))  # doctest: +SKIP
+    48
     """
     from hypothex.api.security import is_loopback_bind
 
-    given = os.environ.pop("HYPOTHEX_SERVE_TOKEN", None) or None
+    given = os.environ.pop("HYPOTHEX_SERVE_TOKEN", None)
     if no_auth:
         token = None
-    elif kind in SERVE_KINDS:
-        token = given or secrets.token_hex(24)
     else:
-        token = given
+        token = secrets.token_hex(24) if given is None else validate_bearer_token(given)
     if token is None and not is_loopback_bind(host):
         raise ConfigError(
             f"refusing to serve on {host!r} without authentication: anyone who can reach "
@@ -1580,6 +2110,104 @@ def _serve_token(host: str, kind: str | None, no_auth: bool) -> str | None:
     return token
 
 
+def local_server_token(home: Path) -> str:
+    """
+    Read the selected home's credential after verifying its current local owner.
+
+    No HTTP request or SSH command is performed. Process birth must match exactly;
+    unverifiable legacy records require restarting the server.
+
+    Parameters
+    ----------
+    home : Path
+        Selected Hypothex home.
+
+    Returns
+    -------
+    str
+        The validated credential, for explicit owner-requested output only.
+
+    Raises
+    ------
+    ConfigError
+        Missing, malformed, foreign, stale, no-auth or unverifiable owner record.
+
+    Examples
+    --------
+    >>> token = local_server_token(Path("/tmp/my-hypothex"))  # doctest: +SKIP
+    """
+    failure = "no verifiable authenticated local server; restart hx serve for this home"
+    try:
+        record = json.loads((home / "serve" / "server.json").read_text())
+        identity = json.loads((home / "environment.json").read_text())
+    except (OSError, ValueError):
+        raise ConfigError(failure) from None
+    if not isinstance(record, dict) or not isinstance(identity, dict):
+        raise ConfigError(failure)
+    pid, birth = record.get("pid"), record.get("pid_create_time")
+    if (
+        record.get("hostname") != socket.gethostname()
+        or record.get("home") != str(home.resolve())
+        or not isinstance(identity.get("environment_id"), str)
+        or not identity["environment_id"]
+        or record.get("environment_id") != identity["environment_id"]
+        or type(pid) is not int
+        or not 0 < pid < 2**31
+    ):
+        raise ConfigError(failure)
+    try:
+        if birth is not None:
+            verified = (
+                type(birth) in (float, int)
+                and math.isfinite(birth)
+                and birth > 0
+                and process_create_time(pid) == birth
+                and process_alive(pid, birth)
+            )
+        else:
+            legacy = record.get("pid_start")
+            verified = False
+            if isinstance(legacy, str) and legacy and process_alive(pid, None):
+                if legacy.isascii() and legacy.isdecimal() and sys.platform.startswith("linux"):
+                    raw = Path(f"/proc/{pid}/stat").read_text()
+                    actual = raw.rsplit(") ", 1)[1].split()[19]
+                    verified = actual == legacy
+                elif re.fullmatch(
+                    r"[A-Za-z]{3} [A-Za-z]{3} +[0-9]{1,2} [0-9:]{8} [0-9]{4}", legacy
+                ):
+                    result = subprocess.run(
+                        ["ps", "-p", str(pid), "-o", "lstart="],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=2,
+                    )
+                    verified = result.returncode == 0 and " ".join(
+                        result.stdout.split()
+                    ) == " ".join(legacy.split())
+        if not verified:
+            raise ConfigError(failure)
+    except (
+        OSError,
+        ValueError,
+        OverflowError,
+        IndexError,
+        psutil.Error,
+        subprocess.SubprocessError,
+    ):
+        raise ConfigError(failure) from None
+    value = record.get("token")
+    if value is None:
+        raise ConfigError(failure)
+    return validate_bearer_token(value)
+
+
+@app.command("token")
+def token_command() -> None:
+    """Print the current local server token for this home; paste it into the UI."""
+    typer.echo(local_server_token(_home_path()))
+
+
 @app.command()
 def serve(
     host: Annotated[str, typer.Option(help="Bind address.")] = "127.0.0.1",
@@ -1588,24 +2216,26 @@ def serve(
         str | None,
         typer.Option(
             "--kind",
-            help="Run as a host's env server: ssh (GPU queue) or slurm. Default: the saved kind.",
+            help=(
+                "Run as a host's env server: ssh (GPU queue) or slurm; local serves as the "
+                "hub again. Default: the saved kind."
+            ),
         ),
     ] = None,
     no_auth: Annotated[
         bool,
         typer.Option(
-            "--no-auth", help="Env server without a bearer token (demo and test hosts only)."
+            "--no-auth", help="Disable token authentication on loopback (demo/test only)."
         ),
     ] = False,
 ) -> None:
     """
     Serve the HTTP/WebSocket API, the UI when built, and (on the hub) the hosts.
 
-    An env server (``--kind ssh|slurm``) requires ``Authorization: Bearer <token>``
-    on every request except the environment descriptor; the token is
-    ``HYPOTHEX_SERVE_TOKEN`` or a fresh one, and is kept in ``<home>/serve/server.json``
-    (mode 0600). The hub's server needs a token only when ``HYPOTHEX_SERVE_TOKEN``
-    is set. A non-loopback --host is refused without a token.
+    Every server requires a bearer token for API requests. A fresh token is saved
+    in the private ``<home>/serve/server.json`` on each start; an explicit
+    ``HYPOTHEX_SERVE_TOKEN`` overrides it. Use ``hx token`` to unlock the browser.
+    ``--no-auth`` explicitly disables authentication on loopback only.
     """
     import uvicorn
 
@@ -1626,6 +2256,7 @@ def serve(
         hx_version=__version__,
         protocol_version=PROTOCOL_VERSION,
         token=token,
+        environment_id=load_descriptor(Layout(home)).environment_id,
     )
 
     class _Server(uvicorn.Server):
@@ -1659,7 +2290,9 @@ def serve(
         typer.secho(f"hx serve on {_url(host, bound)}", err=True)
         # the socket is bound already: uvicorn logs no "running on" line for it, so
         # the start script finds the port in server.json (written above, Task 11)
-        config = uvicorn.Config(application, host=host, port=bound, log_level="info")
+        config = uvicorn.Config(
+            application, host=host, port=bound, log_level="info", access_log=False
+        )
         _Server(config).run(sockets=[sock])
 
 
@@ -1711,6 +2344,7 @@ def hosts_add(
     usd: Annotated[
         float | None, typer.Option("--usd-per-gpu-hour", help="Price, for cost.")
     ] = None,
+    install_uv: InstallUvOpt = False,
     as_json: JsonFlag = False,
 ) -> None:
     """Add a host: for --ssh, install hx there and start its env server; the hub connects it."""
@@ -1739,7 +2373,9 @@ def hosts_add(
         )
     except ValidationError as exc:
         raise ConfigError(f"invalid host {name}: {exc.errors()[0]['msg']}") from exc
-    server = _bootstrap(c, name, spec) if spec.route == "ssh" else None
+    if install_uv and spec.route != "ssh":
+        raise ConfigError("--install-uv needs --ssh (hx installs nothing on a --url host)")
+    server = _bootstrap(c, name, spec, install_uv=install_uv) if spec.route == "ssh" else None
     environments = {**hosts.environments, name: spec}
     save_hosts(c.layout, hosts.model_copy(update={"environments": environments}))
     state = _hub_try("POST", f"/api/v1/hosts/{name}/connect", {})
@@ -1833,7 +2469,7 @@ def hosts_rm(name: str, as_json: JsonFlag = False) -> None:
 
 
 @hosts_app.command("upgrade")
-def hosts_upgrade(name: str, as_json: JsonFlag = False) -> None:
+def hosts_upgrade(name: str, install_uv: InstallUvOpt = False, as_json: JsonFlag = False) -> None:
     """Install this hx version on the host and restart its env server if needed."""
     from hypothex.mcp.server import ssh_target
     from hypothex.remote import bootstrap
@@ -1843,8 +2479,7 @@ def hosts_upgrade(name: str, as_json: JsonFlag = False) -> None:
     if spec.route != "ssh":
         raise ConfigError(f"host {name} is reached by {spec.route}; upgrade hx on it by hand")
     target = ssh_target(spec)
-    wheel = bootstrap.build_wheel(c.layout.home / "cache" / "wheels")
-    bootstrap.install(target, spec.home, wheel)
+    _install(c, target, spec.home, install_uv=install_uv)
     bootstrap.stop_server(target, spec.home)  # only a server hx started; an external one stays
     info = bootstrap.ensure_server(target, spec.home, kind=spec.kind)
     if info.hx_version != __version__:
@@ -1879,7 +2514,7 @@ def mcp() -> None:
     """Run the MCP server over stdio (for Claude Code, Codex, ...)."""
     from hypothex.mcp.server import build_server
 
-    build_server(_state.home).run()
+    build_server(_state.home, agent=os.environ.get("HYPOTHEX_AGENT") or "mcp").run()
 
 
 @app.command(hidden=True)
@@ -1938,7 +2573,7 @@ def cli() -> None:
     """Console entry point: expected errors print cleanly (JSON with --json)."""
     try:
         app()
-    except HypothexError as exc:
+    except (HypothexError, OSError, sqlite3.Error, DBAPIError, json.JSONDecodeError) as exc:
         issues = [to_jsonable(i) for i in getattr(exc, "issues", [])]
         if "--json" in sys.argv:
             payload: dict[str, Any] = {"error": str(exc), "type": type(exc).__name__}

@@ -1,12 +1,25 @@
+import random
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from hypothex.core import stats
+from hypothex.core import leaderboard, stats
 from hypothex.core.config import ProjectConfig
+from hypothex.core.context import Context
 from hypothex.core.ids import utcnow
-from hypothex.core.leaderboard import build_leaderboard, group_label, pick_field
+from hypothex.core.leaderboard import (
+    Leaderboard,
+    _pool,
+    build_leaderboard,
+    cached_leaderboard,
+    clear_caches,
+    distinct_labels,
+    group_label,
+    pick_field,
+    seed_group_labels,
+)
 from hypothex.core.records import (
     CostTotals,
     GitInfo,
@@ -529,3 +542,388 @@ def test_rows_sum_the_cost_of_their_runs() -> None:
     best, other = build_leaderboard("toy", "t", CFG, runs, scores).rows
     assert best.cost == CostTotals(gpu_hours=1.5, gpu_usd=3.0, api_usd=0.25, total_usd=3.25)
     assert other.cost is None
+
+
+# dogfood fixes ---------------------------------------------------------------------------
+def drun(
+    rid: str,
+    git: GitInfo,
+    *,
+    minute: int = 0,
+    config_hash: str = "sha256:aaaaaaaabbbb",
+    **extra: Any,
+) -> RunRecord:
+    return make_record(
+        rid,
+        task="t",
+        status=RunStatus.FINISHED,
+        config_hash=config_hash,
+        git=git,
+        created_at=T0 + timedelta(minutes=minute),
+        **extra,
+    )
+
+
+def test_uncommitted_changes_make_their_own_seed_group() -> None:
+    clean = [drun(f"c{i}", GitInfo(commit="c1"), seed=i, hypothesis="baseline") for i in (1, 2)]
+    dirty = [
+        drun(f"d{i}", GitInfo(commit="c1", dirty=True, diff_hash="9f3c2e1a"), seed=i, minute=1)
+        for i in (1, 2)
+    ]
+    other = drun("o1", GitInfo(commit="c1", dirty=True, diff_hash="0badf00d"), seed=1)
+    legacy = drun("l1", GitInfo(commit="c1", dirty=True), seed=1)  # no diff hash recorded
+    runs = [*clean, *dirty, other, legacy]
+    scores = {"c1": acc(0.8), "c2": acc(0.8), "d1": acc(0.9), "d2": acc(0.9)}
+    scores |= {"o1": acc(0.7), "l1": acc(0.6)}
+    board = build_leaderboard("toy", "t", CFG, runs, scores)
+    by_id = {r.group_id: r.run_ids for r in board.rows}
+    assert by_id == {
+        "aaaaaaaa@c1+9f3c2e1a": ["d1", "d2"],
+        "aaaaaaaa@c1": ["c1", "c2"],
+        "aaaaaaaa@c1+0badf00d": ["o1"],
+        "aaaaaaaa@c1+dirty": ["l1"],
+    }
+    clean_row = next(r for r in board.rows if r.group_id == "aaaaaaaa@c1")
+    assert clean_row.label == "baseline" and clean_row.n == 2
+    assert group_labels(runs).keys() == by_id.keys()  # one id rule for board and sources
+
+
+def test_reruns_of_a_seed_are_one_sample() -> None:
+    # seed 1 run three times (two reruns), seed 2 once; n counts seeds, not runs
+    runs = [drun(f"s1r{i}", GitInfo(commit="c1"), seed=1, minute=i) for i in range(3)]
+    runs += [drun("s2", GitInfo(commit="c1"), seed=2, minute=3)]
+    runs += [drun(f"x{i}", GitInfo(commit="c1"), seed=7, config_hash="sha256:x") for i in (0, 1)]
+    scores = {"s1r0": acc(0.8), "s1r1": acc(0.9), "s1r2": acc(0.7), "s2": acc(0.6)}
+    scores |= {"x0": acc(0.5), "x1": acc(0.5)}
+    per_example = {
+        "s1r0": binary(4, {0, 1}),
+        "s1r1": binary(4, {0, 1}),
+        "s1r2": binary(4, {0, 1}),
+        "s2": binary(4, set()),
+        "x0": binary(4, {0}),
+        "x1": binary(4, {0}),
+    }
+    board = build_leaderboard("toy", "t", CFG, runs, scores, per_example=per_example)
+    row, single = board.rows
+    assert row.run_ids == ["s1r0", "s1r1", "s1r2", "s2"]  # every run stays a member
+    assert row.n == 2 and not row.single_seed
+    assert row.seed_values == {"acc/value": [pytest.approx(0.8), 0.6]}
+    assert row.primary is not None and row.primary.n == 2
+    assert row.primary.mean == pytest.approx(0.7)
+    # pooled per seed first: e0, e1 = 1/2, so 1 of 4 (pooling runs gives 3/4 each, 2 of 4)
+    assert row.test_interval is not None
+    assert (row.test_interval.lo, row.test_interval.hi) == stats.wilson_interval(1, 4)
+    # the same seed twice is one seed: single-seed badge, no t-interval
+    assert single.n == 1 and single.single_seed and single.run_ids == ["x0", "x1"]
+    assert single.primary is not None and single.primary.ci_low is None
+
+
+def test_rerun_seed_means_do_not_overflow_when_the_mean_is_finite() -> None:
+    runs = [drun(f"r{i}", GitInfo(commit="c1"), seed=i % 2, minute=i) for i in range(40)]
+    scores = {r.run_id: acc(1e307 if r.seed == 0 else -1e307) for r in runs}
+
+    row = build_leaderboard("toy", "t", CFG, runs, scores).rows[0]
+
+    assert row.n == 2
+    assert row.seed_values == {"acc/value": [1e307, -1e307]}
+    assert row.primary is not None
+    assert row.primary.mean == 0.0
+    assert row.primary.std == pytest.approx(2**0.5 * 1e307)
+    assert row.primary.ci_low == pytest.approx(-12.706 * 1e307)
+    assert row.primary.ci_high == pytest.approx(12.706 * 1e307)
+
+
+@pytest.mark.parametrize(
+    ("values", "repeats", "expected"),
+    [([1e307, -1e307], 20, 0.0), ([1e308, 1e308], 1, 1e308), ([5e-324, 5e-324], 1, 5e-324)],
+)
+def test_example_seed_pool_does_not_overflow_when_the_mean_is_finite(
+    values: list[float], repeats: int, expected: float
+) -> None:
+    seeds = [[f"s{seed}r{i}" for i in range(repeats)] for seed in range(2)]
+    examples = {
+        rid: {"example": {"value": values[seed]}}
+        for seed, run_ids in enumerate(seeds)
+        for rid in run_ids
+    }
+
+    assert _pool(seeds, examples, "value") == {"example": expected}
+
+
+def test_within_noise_follows_the_paired_test_not_seed_intervals() -> None:
+    # wide seed intervals overlap, but the paired test on 40 examples is clear
+    runs = [krun(f"a{i}", "a", minute=i) for i in range(3)]
+    runs += [krun(f"b{i}", "b", minute=i) for i in range(3)]
+    scores = {"a0": acc(0.5), "a1": acc(1.0), "a2": acc(0.9), "b0": acc(0.4)}
+    scores |= {"b1": acc(0.9), "b2": acc(0.5)}
+    per_example = {f"a{i}": binary(40, set(range(30))) for i in range(3)}
+    per_example |= {f"b{i}": binary(40, set(range(10))) for i in range(3)}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    vs = board.rows[1].vs_best
+    assert vs is not None and vs.p is not None and vs.p < 1e-5
+    assert board.rows[1].within_noise_of_best is False
+    # identical seeds (std 0) do not make a real win when the paired p is large
+    runs = [krun(f"k{i}", "k", minute=i) for i in range(2)]
+    runs += [krun(f"l{i}", "l", minute=i) for i in range(2)]
+    scores = {"k0": acc(0.6), "k1": acc(0.6), "l0": acc(0.5), "l1": acc(0.5)}
+    per_example = {f"k{i}": binary(10, set(range(6))) for i in range(2)}
+    per_example |= {f"l{i}": binary(10, set(range(1, 6))) for i in range(2)}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    vs = board.rows[1].vs_best
+    assert vs is not None and vs.p == pytest.approx(1.0)
+    assert board.rows[1].within_noise_of_best is True
+    # no p (single seeds, no examples): unknown
+    runs = [krun("x", "x"), krun("y", "y")]
+    board = build_leaderboard("toy", "t", KINDS, runs, {"x": acc(0.9), "y": acc(0.1)})
+    assert board.rows[1].vs_best is not None and board.rows[1].vs_best.p is None
+    assert board.rows[1].within_noise_of_best is None
+
+
+def test_rerun_and_reinfer_prefixes_do_not_rename_the_group() -> None:
+    rid = "20261004-124748-uspto-forward-to-5663"
+    assert group_label(f"Rerun of {rid}: svm, rbf kernel", [], "g") == "svm"
+    assert group_label(f"Re-infer of {rid}: svm should win", [], "g") == "svm"
+    chained = f"Rerun of r2: Re-infer of {rid}: Rerun of r0: svm (rbf)"
+    assert group_label(chained, [], "g") == "svm"
+    assert group_label(f"Rerun of {rid}:", ["base"], "g") == "base"  # parent had none
+    # a rerun of the best run keeps the best group's name and the headline
+    runs = [
+        krun("a0", "a", seed=1, hypothesis="svm wins"),
+        krun("a1", "a", seed=2, minute=1, hypothesis="Rerun of a0: svm wins"),
+        krun("b0", "b", hypothesis="rf"),
+    ]
+    scores = {"a0": acc(0.9), "a1": acc(0.9), "b0": acc(0.7)}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    assert board.rows[0].label == "svm wins"
+    assert board.headline.startswith("svm wins ")
+
+
+def test_seed_intervals_of_fractions_stay_in_zero_one() -> None:
+    runs = [krun(f"a{i}", "a", minute=i) for i in range(3)]
+    runs += [krun(f"s{i}", g, task="sb", minute=i) for i, g in enumerate("sss")]
+    scores = {"a0": acc(0.98), "a1": acc(1.0), "a2": acc(1.0)}
+    for i, v in enumerate([810.0, 900.0, 900.0]):  # "lat" is unitless but not a fraction
+        scores[f"s{i}"] = [
+            ScoreRecord(metric="lat", version="v1", key="p95", value=v, created_at=T0)
+        ]
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    p = board.rows[0].primary
+    assert p is not None and p.ci_high == 1.0 and p.ci_low is not None and p.ci_low < 0.98
+    bench = build_leaderboard("toy", "sb", KINDS, runs, scores).rows[0].primary
+    assert bench is not None and bench.ci_high is not None and bench.ci_high > 900
+    # a unit means the values are not fractions: no clip even inside [0, 1]
+    timed = KINDS.model_copy(deep=True)
+    timed.metrics["acc"].unit = "s"
+    p = build_leaderboard("toy", "t", timed, runs, scores).rows[0].primary
+    assert p is not None and p.ci_high is not None and p.ci_high > 1.0
+
+
+def test_distinct_dirty_hashes_with_same_prefix_keep_separate_paired_data() -> None:
+    runs = [
+        drun("best", GitInfo(commit="c1", dirty=True, diff_hash="abcd0001"), seed=1),
+        drun("other", GitInfo(commit="c1", dirty=True, diff_hash="abcd0002"), seed=1),
+    ]
+    board = build_leaderboard(
+        "toy",
+        "t",
+        CFG,
+        runs,
+        {"best": acc(1.0), "other": acc(0.0)},
+        per_example={"best": binary(20, set(range(20))), "other": binary(20, set())},
+    )
+    best, other = board.rows
+    assert other.vs_best is not None
+    assert other.vs_best.p == pytest.approx(2 / 2**20)
+    assert (other.vs_best.fixed, other.vs_best.broken) == (20, 0)
+    assert best.group_id != other.group_id
+    assert len(group_labels(runs)) == 2
+
+
+def test_leaderboard_names_mixed_metric_code_at_the_selected_version() -> None:
+    runs = [krun("a", "a"), krun("b", "b")]
+    old = score("acc", 0.8).model_copy(update={"source_hash": "sha256:first"})
+    new = score("acc", 0.9).model_copy(update={"source_hash": "sha256:second"})
+    board = build_leaderboard("toy", "t", CFG, runs, {"a": [old], "b": [new]})
+    assert board.model_dump().get("metric_drift") == ["acc@v2"]
+    # A different version is a different definition; missing hashes provide no evidence.
+    clean = build_leaderboard(
+        "toy",
+        "t",
+        CFG,
+        runs,
+        {"a": [old], "b": [new.model_copy(update={"version": "v1"}), score("acc", 0.9)]},
+    )
+    assert clean.model_dump().get("metric_drift") == []
+
+
+def float_board_inputs(
+    groups: int = 4, examples: int = 30
+) -> tuple[list[RunRecord], dict[str, list[ScoreRecord]], dict[str, dict[str, dict[str, Any]]]]:
+    """``groups`` seed groups of 2 runs with float per-example scores."""
+    rng = random.Random(7)
+    runs: list[RunRecord] = []
+    scores: dict[str, list[ScoreRecord]] = {}
+    per_example: dict[str, dict[str, dict[str, Any]]] = {}
+    for g in range(groups):
+        for s in range(2):
+            rid = f"g{g}s{s}"
+            runs.append(krun(rid, f"grp{g}", minute=2 * g + s))
+            values = [rng.random() * (g + 1) / groups for _ in range(examples)]
+            per_example[rid] = {f"e{i}": {"score": v} for i, v in enumerate(values)}
+            scores[rid] = acc(sum(values) / examples)
+    return runs, scores, per_example
+
+
+def count_bootstraps(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    interval, paired = stats.bootstrap_mean_interval, stats.paired_bootstrap_p
+
+    def counted_interval(*args: Any, **kwargs: Any) -> tuple[float, float]:
+        calls.append("interval")
+        return interval(*args, **kwargs)
+
+    def counted_paired(*args: Any, **kwargs: Any) -> float:
+        calls.append("paired")
+        return paired(*args, **kwargs)
+
+    monkeypatch.setattr(stats, "bootstrap_mean_interval", counted_interval)
+    monkeypatch.setattr(stats, "paired_bootstrap_p", counted_paired)
+    return calls
+
+
+def test_a_rebuilt_board_reuses_bootstraps_and_equals_a_cold_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs, scores, per_example = float_board_inputs()
+    calls = count_bootstraps(monkeypatch)
+    clear_caches()
+    cold = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    assert calls.count("interval") == 4 and calls.count("paired") == 3
+    calls.clear()
+    warm = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    assert calls == []  # every row interval and p-value came from the cache
+    assert warm == cold
+    # one group's examples change: only its interval and its p-value are recomputed
+    per_example["g1s0"] = {k: {"score": v["score"] / 2} for k, v in per_example["g1s0"].items()}
+    changed = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    assert sorted(calls) == ["interval", "paired"]
+    clear_caches()
+    assert build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example) == changed
+
+
+def test_cached_leaderboard_keeps_a_board_until_the_index_changes(ctx: Context) -> None:
+    runs, scores, per_example = float_board_inputs()
+    builds: list[int] = []
+
+    def build() -> Leaderboard:
+        builds.append(1)
+        return build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+
+    direct = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    first = cached_leaderboard(ctx, "toy", "t", KINDS, build)
+    second = cached_leaderboard(ctx, "toy", "t", KINDS, build)
+    assert len(builds) == 1
+    assert first == second == direct
+    first.rows.clear()  # each call returns its own copy
+    assert cached_leaderboard(ctx, "toy", "t", KINDS, build) == direct
+    # other versions, variants and configs are other boards
+    cached_leaderboard(ctx, "toy", "t", KINDS, build, versions={"acc": "v1"})
+    cached_leaderboard(ctx, "toy", "t", KINDS, build, variant="examples=False")
+    other = KINDS.model_copy(deep=True)
+    other.metrics["acc"].version = "v3"
+    cached_leaderboard(ctx, "toy", "t", other, build)
+    assert len(builds) == 4
+    # an index write moves the generation on: the next call builds again
+    ctx.index.upsert_run(krun("late", "grp9"))
+    cached_leaderboard(ctx, "toy", "t", KINDS, build)
+    assert len(builds) == 5
+
+
+def test_cached_leaderboard_does_not_share_boards_between_homes(
+    ctx: Context, tmp_path: Path
+) -> None:
+    runs, scores, _ = float_board_inputs()
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    other_ctx = Context.open(tmp_path / "other-home")
+    assert other_ctx.index.generation() == ctx.index.generation()
+    cached_leaderboard(ctx, "toy", "t", KINDS, lambda: board)
+    empty = board.model_copy(update={"rows": []})
+    assert cached_leaderboard(other_ctx, "toy", "t", KINDS, lambda: empty).rows == []
+
+
+def test_caches_drop_the_least_recently_used_entry() -> None:
+    cache: leaderboard._Lru[str, int] = leaderboard._Lru(2)
+    computed: list[str] = []
+
+    def value(key: str) -> int:
+        return cache.get(key, lambda: computed.append(key) or len(computed))
+
+    assert (value("a"), value("b"), value("a")) == (1, 2, 1)
+    value("c")  # evicts b, the least recently used
+    assert len(cache) == 2
+    value("a")
+    value("b")
+    assert computed == ["a", "b", "c", "b"]
+    assert leaderboard._BOARDS.size == leaderboard.BOARD_CACHE_SIZE
+    assert leaderboard._INTERVALS.size == leaderboard._PAIRED_P.size == leaderboard.STATS_CACHE_SIZE
+
+
+def sweep_runs() -> tuple[list[RunRecord], dict[str, list[ScoreRecord]]]:
+    """Four configs of one sweep hypothesis; two share their vars (other commits)."""
+    grid = [
+        ("a", {"lr": "1e-3", "beam": "10"}, "c1", 0.9),
+        ("b", {"lr": "1e-3", "beam": "5"}, "c1", 0.8),
+        ("c", {"lr": "1e-4", "beam": "5"}, "c1", 0.7),
+        ("d", {"lr": "1e-4", "beam": "5"}, "c2", 0.6),
+    ]
+    runs, scores = [], {}
+    for i, (group, sweep_vars, commit, value) in enumerate(grid):
+        runs.append(
+            make_record(
+                group,
+                task="t",
+                status=RunStatus.FINISHED,
+                config_hash=f"sha256:{group * 8}",
+                git=GitInfo(commit=commit),
+                created_at=T0 + timedelta(minutes=i),
+                hypothesis="lr x beam, a small sweep",
+                vars=sweep_vars,
+            )
+        )
+        scores[group] = acc(value)
+    return runs, scores
+
+
+def test_groups_that_share_a_label_get_the_vars_that_differ() -> None:
+    runs, scores = sweep_runs()
+    runs.append(krun("solo", "solo", minute=9, hypothesis="bigger model", vars={"lr": "1e-3"}))
+    scores["solo"] = acc(0.5)
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    assert [r.label for r in board.rows] == [
+        "lr x beam · lr 1e-3, beam 10",
+        "lr x beam · lr 1e-3, beam 5",
+        "lr x beam · lr 1e-4, beam 5 · cccccccc@c1",  # same vars as d: group id too
+        "lr x beam · lr 1e-4, beam 5 · dddddddd@c2",
+        "bigger model",  # a label no other group has stays as it is
+    ]
+    members = {r.group_id: [m for m in runs if m.run_id in r.run_ids] for r in board.rows}
+    assert seed_group_labels(members) == {r.group_id: r.label for r in board.rows}
+    assert group_labels(runs) == {r.group_id: r.label for r in board.rows}  # views too
+
+
+def test_distinct_labels_leaves_out_vars_a_group_does_not_have() -> None:
+    one = [krun("x", "x", vars={"lr": "1e-3"})]
+    two = [krun("y", "y", vars={"lr": "1e-3", "beam": "5"})]
+    none = [krun("z", "z")]
+    labels = distinct_labels(
+        {"x": "same", "y": "same", "z": "same"}, {"x": one, "y": two, "z": none}
+    )
+    assert labels == {"x": "same · lr 1e-3", "y": "same · lr 1e-3, beam 5", "z": "same"}
+
+
+def test_group_label_keeps_the_whole_clause_without_a_limit() -> None:
+    hypothesis = "40k steps with heavier augmentation lifts top-1, as in the paper"
+    assert group_label(hypothesis, [], "g") == "40k steps with heavier…"
+    assert group_label(hypothesis, [], "g", limit=None) == (
+        "40k steps with heavier augmentation lifts top-1"
+    )

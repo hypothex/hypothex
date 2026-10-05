@@ -90,6 +90,44 @@ def _finite(value: Any, what: str) -> float:
     return number
 
 
+MAX_METRIC_NAME = 256
+"""Longest metric name ``Run.log`` accepts, in characters."""
+
+
+def _metric_name(name: Any) -> str:
+    """
+    Check one metric name: a non-empty string of at most ``MAX_METRIC_NAME`` characters.
+
+    Parameters
+    ----------
+    name : Any
+        The key given to ``Run.log``.
+
+    Returns
+    -------
+    str
+        The name, unchanged.
+
+    Raises
+    ------
+    ValueError
+        If ``name`` is not a string, is empty, or is too long.
+
+    Examples
+    --------
+    >>> _metric_name("val/top1")
+    'val/top1'
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"a metric name must be a non-empty string, got {name!r}")
+    if len(name) > MAX_METRIC_NAME:
+        raise ValueError(
+            f"metric name {name[:40]!r}... has {len(name)} characters; "
+            f"the limit is {MAX_METRIC_NAME}"
+        )
+    return name
+
+
 class Run:
     """
     Handle to the current run's folder.
@@ -123,6 +161,9 @@ class Run:
         with ``value`` one of ``"nan"``, ``"inf"``, ``"-inf"``; the curves panel
         marks it.
 
+        All rows of one call go to each file in a single append, so a call costs
+        one file open per file, not one per value.
+
         Parameters
         ----------
         values : mapping of str to float
@@ -130,30 +171,43 @@ class Run:
         step : int, optional
             Explicit step for all values.
 
+        Raises
+        ------
+        ValueError
+            If a value is not a number, or a name is not a non-empty string of at
+            most ``MAX_METRIC_NAME`` (256) characters; nothing is written and no
+            step is used then.
+
         Examples
         --------
         >>> hx.current().log({"loss": 0.41})  # doctest: +SKIP
         """
+        for name in values:
+            _metric_name(name)
         now = time.time()
+        steps = dict(self._steps)
+        finite: list[str] = []
+        nonfinite: list[str] = []
         for name, value in values.items():
-            s = step if step is not None else self._steps.get(name, -1) + 1
-            self._steps[name] = s
+            s = step if step is not None else steps.get(name, -1) + 1
+            steps[name] = s
             number = float(value)
-            if not math.isfinite(number):
-                warnings.warn(
-                    f"hypothex: metric {name!r} at step {s} is {number}; not logged",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                append_jsonl(
-                    self.run_dir / "metrics_nonfinite.jsonl",
-                    {"name": name, "step": s, "value": str(number), "t": now},
-                )
+            if math.isfinite(number):
+                row = {"name": name, "step": s, "value": number, "t": now}
+                finite.append(json.dumps(row, default=str, separators=(",", ":")) + "\n")
                 continue
-            append_jsonl(
-                self.run_dir / "metrics.jsonl",
-                {"name": name, "step": s, "value": number, "t": now},
+            warnings.warn(
+                f"hypothex: metric {name!r} at step {s} is {number}; not logged",
+                RuntimeWarning,
+                stacklevel=2,
             )
+            row = {"name": name, "step": s, "value": str(number), "t": now}
+            nonfinite.append(json.dumps(row, default=str, separators=(",", ":")) + "\n")
+        self._steps = steps
+        for filename, lines in (("metrics.jsonl", finite), ("metrics_nonfinite.jsonl", nonfinite)):
+            if lines:
+                with open_jsonl_append(self.run_dir / filename) as fh:
+                    fh.write("".join(lines).encode("utf-8"))
 
     def log_predictions(self, rows: Iterable[Mapping[str, Any]]) -> int:
         """

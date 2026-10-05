@@ -1,6 +1,13 @@
 import fcntl
+import json
+import logging
 import math
+import tracemalloc
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
+from threading import Event
 
 import pytest
 from pydantic import ValidationError
@@ -12,6 +19,7 @@ from hypothex.core.ids import utcnow
 from hypothex.core.layout import Layout
 from hypothex.core.records import ScoreRecord, UsageTotals
 from hypothex.core.store import (
+    ProjectEntry,
     RunStore,
     TraceStep,
     UsageRow,
@@ -85,6 +93,7 @@ def test_scores_points_artifacts_notes(store: RunStore) -> None:
     append_jsonl(run_dir / "metrics.jsonl", {"name": "loss", "step": 0, "value": 1.5, "t": 1.0})
     append_jsonl(run_dir / "metrics.jsonl", {"name": "loss", "value": "bad"})
     assert [p.value for p in store.read_metric_points("toy", "r1")] == [1.5]
+    assert store.read_metric_points_bounded("toy", "r1") == store.read_metric_points("toy", "r1")
     append_jsonl(run_dir / "artifacts.jsonl", {"kind": "checkpoint", "path": "/m.pt"})
     assert store.read_artifacts("toy", "r1")[0].kind == "checkpoint"
     store.append_note("toy", "r1", "looks good", "alice")
@@ -263,3 +272,451 @@ def test_read_samples(store: RunStore) -> None:
         "latency_ms": [12.5, 15.0],
         "ttft": [3.0],
     }
+
+
+def test_read_metric_points_bounded_streams_a_huge_live_file(store: RunStore) -> None:
+    from hypothex.core.thin import MAX_POINTS_PER_METRIC
+
+    store.create_run(make_record())
+    n = 20_000
+    with (store.layout.run_dir("toy", "r1") / "metrics.jsonl").open("w") as fh:
+        for s in range(n):
+            value = 9.0 if s == 13_337 else 1.0 / (s + 1)
+            fh.write(json.dumps({"name": "loss", "step": s, "value": value}) + "\n")
+            fh.write(json.dumps({"name": "lr", "step": s, "value": 0.1}) + "\n")
+        fh.write('{"name": "loss", "step": 1, "value": "' + "x" * (2 << 20) + '"}\n')
+    tracemalloc.start()
+    try:
+        kept = store.read_metric_points_bounded("toy", "r1")
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # the full read holds all 40k parsed points (~35 MiB); the bounded one a few thousand
+    assert peak < 6 * 2**20, f"peak {peak / 2**20:.1f} MiB"
+    loss = [p for p in kept if p.name == "loss"]
+    assert len(loss) == MAX_POINTS_PER_METRIC
+    assert len(kept) == 2 * MAX_POINTS_PER_METRIC
+    assert {0, 13_337, n - 1} <= {p.step for p in loss}
+
+
+def test_read_metric_points_bounded_keeps_the_first_max_metric_names(
+    store: RunStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    store.create_run(make_record())
+    path = store.layout.run_dir("toy", "r1") / "metrics.jsonl"
+    good = [
+        json.dumps({"name": f"m{i:05d}", "step": 0, "value": 1.0}).encode() + b"\n"
+        for i in range(MAX_METRIC_NAMES + 3)
+    ]
+    good.append(b'{"name": "m00000", "step": 2, "value": 3.0}\n')
+    bad = b'{"name": "m00000", "step": 1, "value": "\xff"}\n'  # not UTF-8
+    path.write_bytes(b"".join([*good[:-1], bad, good[-1]]))
+    with caplog.at_level(logging.WARNING, logger="hypothex.core.store"):
+        kept = store.read_metric_points_bounded("toy", "r1")
+        store.read_metric_points_bounded("toy", "r1")
+    assert {p.name for p in kept} == {f"m{i:05d}" for i in range(MAX_METRIC_NAMES)}
+    assert [p.step for p in kept if p.name == "m00000"] == [0, 2]  # the bad row is skipped
+    warned = [r for r in caplog.records if "metric names" in r.getMessage()]
+    assert len(warned) == 1 and "r1" in warned[0].getMessage() and "3" in warned[0].getMessage()
+    # the exact read keeps its contract: not UTF-8 is an error, and no name is dropped
+    with pytest.raises(UnicodeDecodeError):
+        store.read_metric_points("toy", "r1")
+    path.write_bytes(b"".join(good))
+    assert len({p.name for p in store.read_metric_points("toy", "r1")}) == MAX_METRIC_NAMES + 3
+
+
+def test_metric_name_warnings_are_isolated_between_stores(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    for directory in ("first", "second"):
+        isolated = RunStore(Layout(tmp_path / directory))
+        isolated.create_run(make_record("same-id"))
+        path = isolated.layout.run_dir("toy", "same-id") / "metrics.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps({"name": f"m{i}", "step": 0, "value": 1.0}) + "\n"
+                for i in range(MAX_METRIC_NAMES + 1)
+            )
+        )
+        with caplog.at_level(logging.WARNING, logger="hypothex.core.store"):
+            isolated.read_metric_points_bounded("toy", "same-id")
+            isolated.read_metric_points_bounded("toy", "same-id")
+    warned = [r for r in caplog.records if "metric names" in r.getMessage()]
+    assert len(warned) == 2
+
+
+def test_metric_name_warning_memory_evicts_old_runs(
+    store: RunStore, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import store as store_module
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    monkeypatch.setattr(store_module, "MAX_NAME_WARNINGS", 2, raising=False)
+    for run_id in ("warning-a", "warning-b", "warning-c"):
+        store.create_run(make_record(run_id))
+        path = store.layout.run_dir("toy", run_id) / "metrics.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps({"name": f"m{i}", "step": 0, "value": 1.0}) + "\n"
+                for i in range(MAX_METRIC_NAMES + 1)
+            )
+        )
+    with caplog.at_level(logging.WARNING, logger="hypothex.core.store"):
+        for run_id in ("warning-a", "warning-b", "warning-c", "warning-a"):
+            store.read_metric_points_bounded("toy", run_id)
+    warned = [r for r in caplog.records if "metric names" in r.getMessage()]
+    assert len(warned) == 4  # the evicted run warns again instead of growing a permanent set
+
+
+def test_concurrent_metric_reads_cannot_evict_a_warning_during_refresh(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import store as store_module
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    monkeypatch.setattr(store_module, "MAX_NAME_WARNINGS", 2)
+    checked, resume = Event(), Event()
+
+    class PausingWarnings(OrderedDict[tuple[str, str], None]):
+        def __contains__(self, key: object) -> bool:
+            present = super().__contains__(key)
+            if key == ("toy", "oldest") and not checked.is_set():
+                checked.set()
+                assert resume.wait(5)
+            return present
+
+    store._name_cap_warned = PausingWarnings([(("toy", "oldest"), None), (("toy", "middle"), None)])
+    for run_id in ("oldest", "newest"):
+        store.create_run(make_record(run_id))
+        path = store.layout.run_dir("toy", run_id) / "metrics.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps({"name": f"m{i}", "step": 0, "value": 1.0}) + "\n"
+                for i in range(MAX_METRIC_NAMES + 1)
+            )
+        )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        oldest = pool.submit(store.read_metric_points_bounded, "toy", "oldest")
+        try:
+            assert checked.wait(5)
+            newest = pool.submit(store.read_metric_points_bounded, "toy", "newest")
+            # A synchronized cache blocks eviction until refresh finishes.
+            with suppress(TimeoutError):
+                newest.result(timeout=0.2)
+        finally:
+            resume.set()
+        assert len(oldest.result(timeout=5)) == MAX_METRIC_NAMES
+        assert len(newest.result(timeout=5)) == MAX_METRIC_NAMES
+    assert len(store._name_cap_warned) <= 2
+
+
+def test_bounded_history_does_not_retain_a_long_name_copy_for_every_point(store: RunStore) -> None:
+    store.create_run(make_record())
+    path = store.layout.run_dir("toy", "r1") / "metrics.jsonl"
+    names = [f"metric-{i}-" + "x" * 32_000 for i in range(4)]
+    with path.open("w") as stream:
+        for step in range(200):
+            for name in names:
+                stream.write(json.dumps({"name": name, "step": step, "value": step % 17}) + "\n")
+    tracemalloc.start()
+    try:
+        kept = store.read_metric_points_bounded("toy", "r1", limit=50)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert {point.name for point in kept} == set(names)
+    assert len(kept) <= 4 * 50
+    # A valid near-cap name is retained once per series, not once per buffered row.
+    assert peak < 2 * 1024 * 1024
+
+
+def test_registering_over_a_hosts_copy_forgets_the_hosts_paths(
+    store: RunStore, tmp_path: Path
+) -> None:
+    # the copy's repo and previous_repos are paths on the host, chosen by it: they are
+    # not this hub's history (rerun maps a run's cwd through previous_repos)
+    cfg = ProjectConfig(project="toy")
+    copy = ProjectEntry(
+        project="toy",
+        repo="/on/the/host",
+        config=cfg,
+        registered_at=utcnow(),
+        previous_repos=["/on/the/host/old"],
+        remote_host="gpu1",
+    )
+    store.save_project(copy)
+    entry = store.register_project(cfg, tmp_path / "a")
+    assert (entry.remote_host, entry.previous_repos) == (None, [])
+    assert store.load_project("toy").previous_repos == []
+
+
+def test_read_metric_names_bounded_uses_the_live_row_policy(store: RunStore) -> None:
+    from hypothex.core.store import MAX_METRIC_LINE_BYTES
+
+    store.create_run(make_record())
+    assert store.read_metric_names_bounded("toy", "r1") == []
+    path = store.layout.run_dir("toy", "r1") / "metrics.jsonl"
+    oversized = json.dumps(
+        {
+            "name": "oversized",
+            "step": 0,
+            "value": 1.0,
+            "padding": "é" * (MAX_METRIC_LINE_BYTES // 2),
+        },
+        ensure_ascii=False,
+    ).encode()
+    assert len(oversized) > MAX_METRIC_LINE_BYTES
+    assert len(oversized.decode()) < MAX_METRIC_LINE_BYTES
+    path.write_bytes(
+        b"not json\n[]\n\xff\n"
+        + oversized
+        + b"\n"
+        + b'{"name":"nonfinite","step":0,"value":NaN}\n'
+        + b'{"name":"bad-step","step":9223372036854775808,"value":1}\n'
+        + b'{"name":"missing-value","step":0}\n'
+    )
+    for name in ("z", "λ/loss", "a", "z"):
+        append_jsonl(path, {"name": name, "step": 0, "value": 1.0})
+    assert store.read_metric_names_bounded("toy", "r1") == ["a", "z", "λ/loss"]
+    assert store.read_metric_names_bounded("toy", "r1") == sorted(
+        {p.name for p in store.read_metric_points_bounded("toy", "r1")}
+    )
+
+
+def test_read_metric_names_bounded_stops_at_first_names_without_history(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from collections.abc import Iterator
+
+    from hypothex.core import store as store_module
+    from hypothex.core.records import MetricPoint
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    store.create_run(make_record())
+    path = store.layout.run_dir("toy", "r1") / "metrics.jsonl"
+    names = [f"m{i:04d}" for i in range(MAX_METRIC_NAMES + 10, 0, -1)]
+    for name in names:
+        for step in (0, 1):
+            append_jsonl(path, {"name": name, "step": step, "value": 1.0})
+    expected = sorted(names[:MAX_METRIC_NAMES])
+    assert sorted({p.name for p in store.read_metric_points_bounded("toy", "r1")}) == expected
+    original = store_module._iter_rows
+    seen: set[str] = set()
+
+    def no_history(*args: object, **kwargs: object) -> list[MetricPoint]:
+        raise AssertionError("name lookup materialized a metric history")
+
+    def stop_after_cap(
+        model: type[MetricPoint], path: Path, max_line_bytes: int | None = None
+    ) -> Iterator[MetricPoint]:
+        for point in original(model, path, max_line_bytes):
+            seen.add(point.name)
+            yield point
+            if len(seen) == MAX_METRIC_NAMES:
+                raise AssertionError("name lookup read past its final allowed name")
+
+    monkeypatch.setattr(store, "read_metric_points", no_history)
+    monkeypatch.setattr(store, "read_metric_points_bounded", no_history)
+    monkeypatch.setattr(store_module, "_iter_rows", stop_after_cap)
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    assert len(seen) == MAX_METRIC_NAMES
+
+
+def _count_metric_name_scans(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    from collections.abc import Iterator
+
+    from hypothex.core import store as store_module
+    from hypothex.core.records import MetricPoint
+
+    original = store_module._iter_rows
+    scanned: list[Path] = []
+
+    def read(
+        model: type[MetricPoint], path: Path, max_line_bytes: int | None = None
+    ) -> Iterator[MetricPoint]:
+        scanned.append(path)
+        yield from original(model, path, max_line_bytes)
+
+    monkeypatch.setattr(store_module, "_iter_rows", read)
+    return scanned
+
+
+def _metric_name_file(store: RunStore, run_id: str, name: str) -> Path:
+    store.create_run(make_record(run_id))
+    path = store.layout.run_dir("toy", run_id) / "metrics.jsonl"
+    append_jsonl(path, {"name": name, "step": 0, "value": 1.0})
+    return path
+
+
+def test_metric_name_cache_reuses_unchanged_files_and_copies_results(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _metric_name_file(store, "r1", "loss")
+    scans = _count_metric_name_scans(monkeypatch)
+    first = store.read_metric_names_bounded("toy", "r1")
+    first.append("caller-only")
+    assert store.read_metric_names_bounded("toy", "r1") == ["loss"]
+    assert scans == [path]
+
+
+@pytest.mark.parametrize("change", ["append", "replace", "truncate", "same-size", "missing"])
+def test_metric_name_cache_invalidates_on_every_file_change(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    import os
+
+    path = _metric_name_file(store, "r1", "old")
+    scans = _count_metric_name_scans(monkeypatch)
+    assert store.read_metric_names_bounded("toy", "r1") == ["old"]
+    assert store.read_metric_names_bounded("toy", "r1") == ["old"]
+    before = path.stat()
+    expected: list[str]
+    if change == "append":
+        append_jsonl(path, {"name": "new", "step": 1, "value": 0.5})
+        expected = ["new", "old"]
+    elif change == "replace":
+        replacement = path.with_name("replacement.jsonl")
+        replacement.write_bytes(path.read_bytes().replace(b"old", b"new"))
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        replacement.replace(path)
+        expected = ["new"]
+    elif change == "truncate":
+        path.write_bytes(b"")
+        expected = []
+    elif change == "same-size":
+        path.write_bytes(path.read_bytes().replace(b"old", b"new"))
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        assert path.stat().st_size == before.st_size
+        assert path.stat().st_mtime_ns == before.st_mtime_ns
+        assert path.stat().st_ctime_ns != before.st_ctime_ns
+        expected = ["new"]
+    else:
+        path.unlink()
+        assert store.read_metric_names_bounded("toy", "r1") == []
+        append_jsonl(path, {"name": "new", "step": 0, "value": 1.0})
+        expected = ["new"]
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    assert scans == [path, path]
+
+
+@pytest.mark.parametrize("max_entries,max_bytes", [(2, 100), (32, 8)])
+def test_metric_name_cache_limits_entries_and_utf8_bytes_with_lru_eviction(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch, max_entries: int, max_bytes: int
+) -> None:
+    from hypothex.core import store as store_module
+
+    monkeypatch.setattr(store_module, "MAX_METRIC_NAME_CACHE_ENTRIES", max_entries, raising=False)
+    monkeypatch.setattr(store_module, "MAX_METRIC_NAME_CACHE_BYTES", max_bytes, raising=False)
+    paths = {rid: _metric_name_file(store, rid, "éé") for rid in ("a", "b", "c")}
+    scans = _count_metric_name_scans(monkeypatch)
+    for rid in ("a", "b", "a", "c", "a"):
+        assert store.read_metric_names_bounded("toy", rid) == ["éé"]
+    assert scans == [paths["a"], paths["b"], paths["c"]]
+    assert store.read_metric_names_bounded("toy", "b") == ["éé"]
+    assert scans[-1] == paths["b"] and len(scans) == 4
+
+
+def test_metric_name_cache_returns_oversized_results_without_retaining_them(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import store as store_module
+
+    monkeypatch.setattr(store_module, "MAX_METRIC_NAME_CACHE_BYTES", 4, raising=False)
+    small = _metric_name_file(store, "small", "ok")
+    large = _metric_name_file(store, "large", "ééé")  # six UTF-8 bytes, three characters
+    scans = _count_metric_name_scans(monkeypatch)
+    for rid in ("small", "large", "large", "small"):
+        assert store.read_metric_names_bounded("toy", rid) == ["ok" if rid == "small" else "ééé"]
+    assert scans == [small, large, large]
+
+
+def test_metric_name_cache_does_not_publish_a_scan_changed_during_read(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from collections.abc import Iterator
+
+    from hypothex.core import store as store_module
+    from hypothex.core.records import MetricPoint
+
+    path = _metric_name_file(store, "r1", "old")
+    original = store_module._iter_rows
+    started, resume = Event(), Event()
+    scans: list[Path] = []
+
+    def paused_old_read(
+        model: type[MetricPoint], file: Path, max_line_bytes: int | None = None
+    ) -> Iterator[MetricPoint]:
+        scans.append(file)
+        for point in original(model, file, max_line_bytes):
+            yield point
+            if point.name == "old":
+                started.set()
+                assert resume.wait(5)
+
+    monkeypatch.setattr(store_module, "_iter_rows", paused_old_read)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        old_read = pool.submit(store.read_metric_names_bounded, "toy", "r1")
+        try:
+            assert started.wait(5)
+            path.write_bytes(path.read_bytes().replace(b"old", b"new"))
+            new_read = pool.submit(store.read_metric_names_bounded, "toy", "r1")
+            assert new_read.result(timeout=5) == ["new"]
+        finally:
+            resume.set()
+        assert old_read.result(timeout=5) == ["old"]
+    assert store.read_metric_names_bounded("toy", "r1") == ["new"]
+    assert scans == [path, path]  # the old scan did not evict the newer cached result
+
+
+def test_metric_name_cache_preserves_the_first_name_cap_after_appends(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    path = _metric_name_file(store, "r1", "z-first")
+    for i in range(MAX_METRIC_NAMES):
+        append_jsonl(path, {"name": f"m{i:04d}", "step": 0, "value": 1.0})
+    scans = _count_metric_name_scans(monkeypatch)
+    expected = sorted(["z-first", *[f"m{i:04d}" for i in range(MAX_METRIC_NAMES - 1)]])
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    append_jsonl(path, {"name": "a-late", "step": 0, "value": 1.0})
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    assert scans == [path, path]
+
+
+def test_concurrent_metric_name_cache_keeps_exact_budget_accounting(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import store as store_module
+
+    monkeypatch.setattr(store_module, "MAX_METRIC_NAME_CACHE_ENTRIES", 3)
+    monkeypatch.setattr(store_module, "MAX_METRIC_NAME_CACHE_BYTES", 8)
+    for i in range(8):
+        _metric_name_file(store, str(i), f"{i}é")
+    ids = [str(i % 8) for i in range(80)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda rid: store.read_metric_names_bounded("toy", rid), ids))
+    assert results == [[f"{rid}é"] for rid in ids]
+    assert len(store._metric_name_cache) <= 3
+    assert store._metric_name_cache_bytes <= 8
+    assert store._metric_name_cache_bytes == sum(
+        len(name.encode("utf-8"))
+        for entry in store._metric_name_cache.values()
+        for name in entry.names
+    )
+
+
+def test_metric_name_cache_preserves_escaped_surrogate_names(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _metric_name_file(store, "r1", "\ud800")
+    scans = _count_metric_name_scans(monkeypatch)
+    assert store.read_metric_names_bounded("toy", "r1") == ["\ud800"]
+    assert store.read_metric_names_bounded("toy", "r1") == ["\ud800"]
+    assert scans == [path]

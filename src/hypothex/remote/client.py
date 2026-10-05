@@ -10,6 +10,7 @@ run files over ``GET /api/v1/runs/{id}/files/{path}``, and the event stream over
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from collections.abc import AsyncGenerator
@@ -23,9 +24,12 @@ from pydantic import BaseModel, ValidationError
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
-from hypothex.core.environment import EnvironmentDescriptor
+from hypothex.core.environment import EnvironmentDescriptor, EnvironmentIdentity
 from hypothex.core.errors import HypothexError
 from hypothex.core.events import Event
+from hypothex.core.fsutil import temp_prefix
+from hypothex.core.tokens import redact_bearer_token, validate_bearer_token
+from hypothex.remote.http import TokenSafeHTTPTransport
 
 DIR_HEADER = "X-Hypothex-Dir"
 SIZE_HEADER = "X-Hypothex-Size"
@@ -57,10 +61,33 @@ class EnvRequestError(HypothexError):
 
 
 class EnvUnreachableError(EnvRequestError):
-    """The env server could not be reached, timed out, or dropped the connection."""
+    """
+    The env server could not be reached, timed out, or dropped the connection.
+
+    Parameters
+    ----------
+    message : str
+        Bounded transport diagnostic.
+    status_code, error_type : optional
+        Existing request-error metadata.
+    may_have_been_sent : bool
+        Conservative outcome flag. False only for a failure known to precede
+        sending the HTTP request; never infer this from error text or elapsed time.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_type: str | None = None,
+        may_have_been_sent: bool = True,
+    ) -> None:
+        super().__init__(message, status_code=status_code, error_type=error_type)
+        self.may_have_been_sent = may_have_been_sent
 
 
-def _error_from(resp: httpx.Response, what: str) -> EnvRequestError:
+def _error_from(resp: httpx.Response, what: str, token: str | None = None) -> EnvRequestError:
     """
     Build an :class:`EnvRequestError` from an error response.
 
@@ -88,9 +115,9 @@ def _error_from(resp: httpx.Response, what: str) -> EnvRequestError:
     else:
         detail = resp.text[:500]
     return EnvRequestError(
-        f"{what} -> {resp.status_code}: {detail}",
+        redact_bearer_token(f"{what} -> {resp.status_code}: {detail}", token),
         status_code=resp.status_code,
-        error_type=error_type,
+        error_type=redact_bearer_token(error_type, token) if error_type else None,
     )
 
 
@@ -159,10 +186,32 @@ def _parse_listing(raw: bytes, url: str, status_code: int) -> list[RemoteFile]:
         if not isinstance(body, list):
             raise ValueError(f"expected a list, got {type(body).__name__}")
         return [RemoteFile.model_validate(item) for item in body]
-    except (ValueError, ValidationError) as exc:
+    except (ValueError, ValidationError):
         raise EnvRequestError(
-            f"GET {url} -> {status_code}: invalid folder listing: {exc}", status_code=status_code
-        ) from exc
+            f"GET {url} -> {status_code}: invalid folder listing", status_code=status_code
+        ) from None
+
+
+class _TokenSafeLogger(logging.LoggerAdapter):
+    """Keep library handshake/frame diagnostics from recording the session token."""
+
+    def __init__(self, token: str | None) -> None:
+        super().__init__(logging.getLogger("websockets.client"), {})
+        self._token = token
+
+    def log(self, level: int, msg: object, *args: object, **kwargs: Any) -> None:
+        if self.isEnabledFor(level):
+            rendered = str(msg) % args if args else str(msg)
+            # Exception tracebacks may include a peer's reflected credential.
+            kwargs.pop("exc_info", None)
+            self.logger.log(level, redact_bearer_token(rendered, self._token), **kwargs)
+
+
+class _NoRedirectConnect(connect):
+    """Reject redirects before a WebSocket handshake can replay credentials."""
+
+    def process_redirect(self, exc: Exception) -> Exception:
+        return exc
 
 
 class EnvClient:
@@ -176,8 +225,11 @@ class EnvClient:
     timeout : float
         Seconds for connect, read, and the WebSocket handshake.
     token : str, optional
-        The env server's bearer token (``ServerInfo.token``); sent as
-        ``Authorization: Bearer <token>`` on every request and the WebSocket.
+        The env server's bearer token (``ServerInfo.token``); sent on protected
+        requests and the WebSocket. :meth:`identity` always omits it.
+    unix_socket : Path, optional
+        Private local SSH Unix socket for both HTTP and WebSocket traffic.
+        Ambient proxy settings and redirects are disabled.
 
     Raises
     ------
@@ -193,7 +245,14 @@ class EnvClient:
     >>> client.close()
     """
 
-    def __init__(self, base_url: str, *, timeout: float = 10, token: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout: float = 10,
+        token: str | None = None,
+        unix_socket: Path | None = None,
+    ) -> None:
         parts = urlsplit(base_url)
         if parts.scheme not in ("http", "https") or not parts.netloc:
             raise ValueError(
@@ -201,9 +260,16 @@ class EnvClient:
             )
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._token = token
+        self._token = validate_bearer_token(token) if token is not None else None
+        self.unix_socket = unix_socket
+        transport = TokenSafeHTTPTransport(self._token, unix_socket=unix_socket)
         self._http = httpx.Client(
-            base_url=self.base_url, timeout=timeout, headers=self.auth_headers()
+            base_url=self.base_url,
+            timeout=timeout,
+            headers=self.auth_headers(),
+            transport=transport,
+            trust_env=False,
+            follow_redirects=False,
         )
 
     def auth_headers(self) -> dict[str, str]:
@@ -238,8 +304,13 @@ class EnvClient:
         self.close()
 
     def _unreachable(self, exc: Exception) -> EnvUnreachableError:
-        reason = str(exc) or type(exc).__name__
-        return EnvUnreachableError(f"cannot reach {self.base_url}: {reason}")
+        reason = type(exc).__name__
+        return EnvUnreachableError(
+            f"cannot reach {self.base_url}: {reason}",
+            may_have_been_sent=not isinstance(
+                exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+            ),
+        )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         """Send one request and return its decoded JSON body."""
@@ -247,18 +318,44 @@ class EnvClient:
         try:
             resp = self._http.request(method, path, **kwargs)
         except httpx.TransportError as exc:
-            raise self._unreachable(exc) from exc
+            raise self._unreachable(exc) from None
         if resp.is_error:
-            raise _error_from(resp, what)
+            raise _error_from(resp, what, self._token)
         try:
             return resp.json()
-        except ValueError as exc:
+        except ValueError:
             raise EnvRequestError(
                 f"{what} -> {resp.status_code}: answer is not JSON", status_code=resp.status_code
-            ) from exc
+            ) from None
 
     def _file_url(self, run_id: str, rel_path: str) -> str:
         return f"/api/v1/runs/{quote(run_id, safe='')}/files/{quote(rel_path, safe='/')}"
+
+    def identity(self) -> EnvironmentIdentity:
+        """
+        Fetch public identity without sending Authorization or following redirects.
+
+        Returns
+        -------
+        EnvironmentIdentity
+            Identity only; fuller legacy descriptors are accepted too.
+        """
+        request = self._http.build_request("GET", "/.well-known/hypothex/environment")
+        request.headers.pop("authorization", None)
+        try:
+            response = self._http.send(request, follow_redirects=False)
+        except httpx.TransportError as exc:
+            raise self._unreachable(exc) from None
+        if response.is_redirect:
+            raise EnvRequestError(
+                "public identity redirects are not accepted", status_code=response.status_code
+            )
+        if response.is_error:
+            raise _error_from(response, "GET public identity", self._token)
+        try:
+            return EnvironmentIdentity.model_validate(response.json())
+        except (ValueError, ValidationError):
+            raise EnvRequestError("env server sent an invalid public identity") from None
 
     def descriptor(self) -> EnvironmentDescriptor:
         """
@@ -278,8 +375,8 @@ class EnvClient:
         body = self._request("GET", "/.well-known/hypothex/environment")
         try:
             return EnvironmentDescriptor.model_validate(body)
-        except ValidationError as exc:
-            raise EnvRequestError(f"{self.base_url} sent an invalid descriptor: {exc}") from exc
+        except ValidationError:
+            raise EnvRequestError("env server sent an invalid descriptor") from None
 
     def get_json(self, path: str, **params: Any) -> Any:
         """
@@ -308,7 +405,7 @@ class EnvClient:
         query = {k: v for k, v in params.items() if v is not None}
         return self._request("GET", path, params=query)
 
-    def post_json(self, path: str, body: dict[str, Any]) -> Any:
+    def post_json(self, path: str, body: dict[str, Any], *, timeout: float | None = None) -> Any:
         """
         ``POST`` a JSON body to an endpoint.
 
@@ -318,6 +415,9 @@ class EnvClient:
             Path on the server, e.g. ``/api/v1/runs/r1/stop``.
         body : dict
             JSON body; keep the caller's ``command_id`` so retries stay idempotent.
+        timeout : float, optional
+            Seconds for this request instead of the client's ``timeout``, for
+            work that takes long on the server, such as a reeval.
 
         Returns
         -------
@@ -331,7 +431,9 @@ class EnvClient:
         EnvRequestError
             The server answered with a 4xx/5xx status.
         """
-        return self._request("POST", path, json=body)
+        if timeout is None:
+            return self._request("POST", path, json=body)
+        return self._request("POST", path, json=body, timeout=timeout)
 
     def list_files(self, run_id: str, rel_dir: str = "") -> list[RemoteFile]:
         """
@@ -361,11 +463,11 @@ class EnvClient:
         try:
             resp = self._http.get(url, params={"max_bytes": 0})
         except httpx.TransportError as exc:
-            raise self._unreachable(exc) from exc
+            raise self._unreachable(exc) from None
         if resp.status_code == 413 or (not resp.is_error and not resp.headers.get(DIR_HEADER)):
             raise EnvRequestError(f"{rel_dir!r} of run {run_id} is a file, not a folder")
         if resp.is_error:
-            raise _error_from(resp, f"GET {url}")
+            raise _error_from(resp, f"GET {url}", self._token)
         return _parse_listing(resp.content, url, resp.status_code)
 
     def fetch_file(
@@ -376,6 +478,7 @@ class EnvClient:
         *,
         max_bytes: int,
         tail: bool = False,
+        require_complete: bool = False,
     ) -> bool:
         """
         Copy one run file (or every file of a run folder) to ``dest``.
@@ -398,12 +501,17 @@ class EnvClient:
         tail : bool
             For a file over ``max_bytes``, copy its last ``max_bytes`` bytes instead
             of skipping it (for log tails).
+        require_complete : bool
+            Require every listed descendant to transfer successfully. False keeps
+            best-effort mirror behavior; True is for explicitly requested artifacts
+            whose caller stages the entire folder before installing it.
 
         Returns
         -------
         bool
             ``False`` when skipped: missing, or over ``max_bytes`` without ``tail``.
             ``True`` when the file, or the folder listing, was fetched.
+            With ``require_complete``, False also means a descendant was skipped.
 
         Raises
         ------
@@ -432,24 +540,42 @@ class EnvClient:
                     return False
                 if resp.is_error:
                     resp.read()
-                    raise _error_from(resp, f"GET {url}")
+                    raise _error_from(resp, f"GET {url}", self._token)
                 if not resp.headers.get(DIR_HEADER):
                     return self._write_stream(resp, dest, max_bytes)
                 listing = _parse_listing(resp.read(), url, resp.status_code)
         except httpx.TransportError as exc:
-            raise self._unreachable(exc) from exc
+            raise self._unreachable(exc) from None
         if dest.exists() and not dest.is_dir():
             raise NotADirectoryError(
                 f"{dest} is a file; cannot fetch folder {rel_path!r} of run {run_id} into it"
             )
         base = PurePosixPath(rel_path)
+        if require_complete:
+            dest.mkdir(parents=True, exist_ok=True)
         for entry in listing:
             parts = _local_parts(entry.path, base)
-            if parts is None or (entry.size > max_bytes and not tail):
+            if parts is None or entry.size < 0:
+                if require_complete:
+                    raise EnvRequestError(
+                        f"invalid folder listing for {rel_path!r}: unsafe path or size",
+                        status_code=502,
+                    )
                 continue
-            self.fetch_file(
-                run_id, entry.path, dest.joinpath(*parts), max_bytes=max_bytes, tail=tail
+            if entry.size > max_bytes and not tail:
+                if require_complete:
+                    return False
+                continue
+            fetched = self.fetch_file(
+                run_id,
+                entry.path,
+                dest.joinpath(*parts),
+                max_bytes=max_bytes,
+                tail=tail,
+                require_complete=require_complete,
             )
+            if require_complete and not fetched:
+                return False
         return True
 
     @staticmethod
@@ -464,7 +590,9 @@ class EnvClient:
         if dest.is_dir() and not dest.is_symlink():
             raise IsADirectoryError(f"{dest} is a folder; cannot fetch a file onto it")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".part", dir=dest.parent)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=temp_prefix(dest.name), suffix=".part", dir=dest.parent
+        )
         done = False
         try:
             with os.fdopen(fd, "wb") as fh:
@@ -509,19 +637,24 @@ class EnvClient:
             frame that is not a valid event message.
         """
         try:
-            ws = await connect(
+            kwargs: dict[str, Any] = {"proxy": None}
+            if self.unix_socket is not None:
+                kwargs.update(unix=True, path=str(self.unix_socket))
+            ws = await _NoRedirectConnect(
                 self.ws_url,
+                **kwargs,
                 open_timeout=self.timeout,
                 max_size=WS_MAX_MESSAGE_BYTES,
                 additional_headers=self.auth_headers(),
+                logger=_TokenSafeLogger(self._token),
             )
         except InvalidStatus as exc:
             status = exc.response.status_code
             raise EnvRequestError(
                 f"{self.ws_url} refused the subscription: HTTP {status}", status_code=status
-            ) from exc
+            ) from None
         except (OSError, TimeoutError, InvalidHandshake) as exc:
-            raise self._unreachable(exc) from exc
+            raise self._unreachable(exc) from None
         last = after_sequence
         async with ws:
             try:
@@ -534,12 +667,12 @@ class EnvClient:
                             error = msg.get("error")
                         elif kind == "event":
                             event = Event.model_validate(msg["event"])
-                    except (ValueError, KeyError, AttributeError, ValidationError) as exc:
-                        raise EnvRequestError(
-                            f"{self.ws_url} sent an invalid message: {exc}"
-                        ) from exc
+                    except (ValueError, KeyError, AttributeError, ValidationError):
+                        raise EnvRequestError("env server sent an invalid message") from None
                     if kind == "error":
-                        raise EnvRequestError(f"{self.ws_url}: {error}")
+                        raise EnvRequestError(
+                            redact_bearer_token(f"{self.ws_url}: {error}", self._token)
+                        )
                     if kind != "event":
                         continue  # "ready" and future message types
                     if event.sequence <= last:

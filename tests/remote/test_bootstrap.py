@@ -347,7 +347,10 @@ def test_every_script_gives_up_on_its_lock_before_ssh_times_out(
         "probe": "HX:os=linux\nHX:arch=x\nHX:home=/h\n",
         "install": "HX:home=/h\nHX:installed=1.0\n",
         "start": 'HX:server={"pid": 1, "port": 2, "managed": true, "hx_version": "1", '
-        '"protocol_version": 1}\n',
+        '"protocol_version": 1, "token": null}\nHX:environment_id=e1\n'
+        + "HX:environment_json_hex="
+        + json.dumps({"environment_id": "e1"}).encode().hex()
+        + "\n",
         "stop": "HX:stopped=1\n",
         "logs": "HX:log=x\n",
     }
@@ -557,15 +560,30 @@ def test_install_bootstraps_missing_uv(host: FakeHost, wheel: Path, uv_env: str)
     host.add_tool(
         "curl", f'case "$*" in *astral.sh/uv/install.sh*) cat {script};; *) exit 7;; esac\n'
     )
-    bs.install(host.target, "~/.hypothex", wheel)
+    bs.install(host.target, "~/.hypothex", wheel, install_uv=True)
     assert (host.remote_home / ".local" / "bin" / "uv").is_file()
     assert _installed_version(host) == __version__
+
+
+def test_install_never_runs_the_uv_installer_unless_allowed(
+    host: FakeHost, wheel: Path, tmp_path: Path
+) -> None:
+    fetched = tmp_path / "curl-called"
+    host.add_tool("curl", f"touch {fetched}\nexit 7\n")
+    with pytest.raises(BootstrapError, match="uv is missing on the host") as info:
+        bs.install(host.target, "~/.hypothex", wheel)
+    message = str(info.value)
+    assert "install uv (https://docs.astral.sh/uv/) on the host" in message
+    assert "allow hx to run the official installer" in message
+    assert not fetched.exists()  # nothing downloaded, nothing run
+    assert [c[0] for c in host.calls()] == ["ssh"]  # failed before the wheel upload
+    assert not (host.hx_home / "runtime" / "bin" / "hx").exists()
 
 
 def test_install_without_uv_or_network(host: FakeHost, wheel: Path) -> None:
     host.add_tool("curl", 'echo "curl: (6) Could not resolve host: astral.sh" >&2\nexit 6\n')
     with pytest.raises(BootstrapError, match="uv is missing on the host") as info:
-        bs.install(host.target, "~/.hypothex", wheel)
+        bs.install(host.target, "~/.hypothex", wheel, install_uv=True)
     message = str(info.value)
     assert "https://astral.sh/uv/install.sh" in message
     assert "Could not resolve host" in message
@@ -845,6 +863,7 @@ record = {"pid": os.getpid(), "port": server.server_address[1], "managed": False
           "hx_version": "9.9.9", "protocol_version": 1,
           "token": os.environ.get("HYPOTHEX_SERVE_TOKEN")}
 serve = Path(os.environ["HYPOTHEX_HOME"]) / "serve"
+(serve.parent / "environment.json").write_text(json.dumps({"environment_id": "e1"}))
 (serve / "server.json.tmp").write_text(json.dumps(record, indent=2))
 os.replace(serve / "server.json.tmp", serve / "server.json")
 print("serving, and no uvicorn line", flush=True)
@@ -1096,3 +1115,197 @@ def test_bootstrap_end_to_end(host: FakeHost, wheel: Path, uv_env: str, servers:
     # uvicorn's "Uvicorn running on" line before Task 47, "hx serve on" after it
     assert f"http://127.0.0.1:{info.port}" in bs.server_logs(host.target, facts.home)
     assert bs.stop_server(host.target, facts.home) is True
+
+
+@pytest.mark.parametrize("token", ["missing", "", "bad\nvalue", "badé", "a" * 4097])
+def test_ensure_server_rejects_unsafe_record_tokens(
+    monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    record = {"pid": 1, "port": 1234, "managed": False, "hx_version": "1", "protocol_version": 1}
+    if token != "missing":
+        record["token"] = token
+    monkeypatch.setattr(
+        bs,
+        "_run_script",
+        lambda *a, **k: (
+            {
+                "server": json.dumps(record),
+                "environment_id": "e1",
+                "environment_json_hex": json.dumps({"environment_id": "e1"}).encode().hex(),
+            },
+            [],
+        ),
+    )
+    with pytest.raises(bs.BootstrapError):
+        bs.ensure_server(SshTarget(alias="fake"), "/h")
+
+
+def test_ensure_server_enriches_trusted_identity_without_rewriting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = {
+        "pid": 1,
+        "port": 1234,
+        "managed": False,
+        "hx_version": "1",
+        "protocol_version": 1,
+        "token": "secret",
+    }
+    monkeypatch.setattr(
+        bs,
+        "_run_script",
+        lambda *a, **k: (
+            {
+                "server": json.dumps(record),
+                "environment_id": "e1",
+                "environment_json_hex": json.dumps({"environment_id": "e1"}).encode().hex(),
+            },
+            [],
+        ),
+    )
+    assert bs.ensure_server(SshTarget(alias="fake"), "/h").environment_id == "e1"
+
+
+def test_ensure_server_rejects_conflicting_trusted_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = {
+        "pid": 1,
+        "port": 1234,
+        "managed": False,
+        "hx_version": "1",
+        "protocol_version": 1,
+        "token": "secret",
+        "environment_id": "wrong",
+    }
+    monkeypatch.setattr(
+        bs,
+        "_run_script",
+        lambda *a, **k: (
+            {
+                "server": json.dumps(record),
+                "environment_id": "e1",
+                "environment_json_hex": json.dumps({"environment_id": "e1"}).encode().hex(),
+            },
+            [],
+        ),
+    )
+    with pytest.raises(bs.BootstrapError, match="identity"):
+        bs.ensure_server(SshTarget(alias="fake"), "/h")
+
+
+def test_healthy_legacy_record_reuse_preserves_process_metadata(
+    host: FakeHost, servers: list[int]
+) -> None:
+    import psutil
+
+    _install_source_hx(host)
+    initial = bs.ensure_server(host.target, "~/.hypothex")
+    record_path = host.hx_home / "serve" / "server.json"
+    record = json.loads(record_path.read_text())
+    assert record["pid_create_time"] == psutil.Process(initial.pid).create_time()
+    assert Path(record["home"]).resolve() == host.hx_home.resolve()
+    assert record["environment_id"] == initial.environment_id
+    # A tokenful legacy record may lack the new field: enrich only the return value.
+    record.pop("environment_id")
+    record_path.write_text(json.dumps(record))
+    original = record_path.read_bytes()
+    assert bs.ensure_server(host.target, "~/.hypothex").environment_id == initial.environment_id
+    assert record_path.read_bytes() == original
+    record.pop("token")
+    record_path.write_text(json.dumps(record))
+    original = record_path.read_bytes()
+    with pytest.raises(BootstrapError, match="legacy server record"):
+        bs.ensure_server(host.target, "~/.hypothex")
+    assert _alive(initial.pid) and record_path.read_bytes() == original
+    # Explicit null is an intentional no-auth record, distinct from a missing key.
+    record["token"] = None
+    record_path.write_text(json.dumps(record))
+    assert bs.ensure_server(host.target, "~/.hypothex").token is None
+
+
+def test_raw_token_is_rejected_before_pydantic(monkeypatch: pytest.MonkeyPatch) -> None:
+    record = {
+        "pid": 1,
+        "port": 1234,
+        "managed": False,
+        "hx_version": "1",
+        "protocol_version": 1,
+        "token": "secret\r\nheader",
+    }
+    monkeypatch.setattr(
+        bs,
+        "_run_script",
+        lambda *a, **k: (
+            {
+                "server": json.dumps(record),
+                "environment_id": "e1",
+                "environment_json_hex": json.dumps({"environment_id": "e1"}).encode().hex(),
+            },
+            [],
+        ),
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("raw invalid token reached Pydantic")
+
+    monkeypatch.setattr(bs.ServerInfo, "model_validate", forbidden)
+    monkeypatch.setattr(bs.ServerInfo, "model_validate_json", forbidden)
+    with pytest.raises(BootstrapError, match="invalid bearer token"):
+        bs.ensure_server(SshTarget(alias="fake"), "/h")
+
+
+def test_failed_managed_record_rewrite_never_replaces_cli_record(
+    host: FakeHost, servers: list[int]
+) -> None:
+    _install_source_hx(host)
+    real_sed = shutil.which("sed")
+    assert real_sed is not None
+    backup = host.remote_home / "before-rewrite.json"
+    host.add_tool(
+        "sed",
+        f"""for arg do
+    case "$arg" in 's/"managed":'*)
+        cat > '{backup}'
+        printf '{{"partial":'
+        exit 9
+        ;;
+    esac
+done
+exec '{real_sed}' "$@"
+""",
+    )
+    try:
+        with pytest.raises(BootstrapError, match="cannot update managed server record"):
+            bs.ensure_server(host.target, "~/.hypothex")
+    finally:
+        if backup.exists():
+            servers.append(json.loads(backup.read_text())["pid"])
+    original = json.loads(backup.read_text())
+    assert not _alive(original["pid"])
+    record_path = host.hx_home / "serve" / "server.json"
+    if record_path.exists():
+        assert record_path.read_bytes() == backup.read_bytes()
+    assert not (host.hx_home / "serve" / "server.json.tmp").exists()
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        '{"environment_id":"ENV"',
+        '{"environment_id":"ENV","label":"bad\nline"}',
+        '{"environment_id":"ENV","environment_id":"ENV"}',
+        '{"environment_id":"ENV","label":NaN}',
+    ],
+)
+def test_reuse_rejects_malformed_trusted_environment_json(
+    host: FakeHost, servers: list[int], template: str
+) -> None:
+    _install_source_hx(host)
+    initial = bs.ensure_server(host.target, "~/.hypothex")
+    record_path = host.hx_home / "serve" / "server.json"
+    original = record_path.read_bytes()
+    (host.hx_home / "environment.json").write_text(template.replace("ENV", initial.environment_id))
+    with pytest.raises(BootstrapError, match="trusted environment identity"):
+        bs.ensure_server(host.target, "~/.hypothex")
+    assert _alive(initial.pid) and record_path.read_bytes() == original

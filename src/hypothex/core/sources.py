@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
-from pathlib import Path
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any
 
 from hypothex.core.config import load_project_config
@@ -11,8 +10,8 @@ from hypothex.core.context import Context
 from hypothex.core.datasets import resolve_dataset_path
 from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.fsutil import read_jsonl
-from hypothex.core.leaderboard import group_id_for, seed_group_label
-from hypothex.core.records import RunRecord
+from hypothex.core.leaderboard import group_id_for, seed_group_labels
+from hypothex.core.records import INDEXED_POINT_STATUSES, MetricPoint, RunRecord
 
 if TYPE_CHECKING:
     from hypothex.core.views import Source
@@ -37,10 +36,12 @@ def group_labels(runs: list[RunRecord], version_param: str | None = None) -> dic
     """
     Short name per seed group of the given runs.
 
-    ``leaderboard.seed_group_label`` per group, the rule of ``LeaderboardRow.label``:
-    the group's ``version_param`` value when ``version_param`` is given and a run has
+    ``leaderboard.seed_group_labels``, the rule of ``LeaderboardRow.label``: the
+    group's ``version_param`` value when ``version_param`` is given and a run has
     it (``agent_iteration`` tasks); else ``group_label`` of the newest non-empty
-    hypothesis and the group's tags.
+    hypothesis and the group's tags. Groups that would share a label get the
+    ``vars`` that differ (then their group id), as on the board; with the same
+    groups the labels equal the board's.
 
     Parameters
     ----------
@@ -62,7 +63,64 @@ def group_labels(runs: list[RunRecord], version_param: str | None = None) -> dic
     members: dict[str, list[RunRecord]] = {}
     for r in sorted(runs, key=lambda r: (r.created_at, r.run_id)):
         members.setdefault(group_id_for(r), []).append(r)
-    return {key: seed_group_label(group, key, version_param) for key, group in members.items()}
+    return seed_group_labels(members, version_param)
+
+
+def metric_points(
+    ctx: Context,
+    runs: Iterable[RunRecord],
+    names: Collection[str] | None = None,
+    read: Callable[[RunRecord], list[MetricPoint]] | None = None,
+) -> dict[str, list[MetricPoint]]:
+    """
+    Metric history of many runs, of some names only, ordered by name then step.
+
+    Runs that ended (``INDEXED_POINT_STATUSES``) read the index in one query
+    that filters the names in SQL: the indexed history keeps at most
+    ``thin.MAX_POINTS_PER_METRIC`` points per name (always the last one).
+    Queued, running and lost runs read their ``metrics.jsonl``, since the index
+    may not have their latest points, but only a bounded copy of it
+    (``RunStore.read_metric_points_bounded``: at most as many points per name,
+    with the first, last, lowest and highest), so a file that grows without
+    limit never fills memory.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    runs : iterable of RunRecord
+        Runs to read.
+    names : collection of str, optional
+        Metric names to keep; ``None`` keeps every name.
+    read : callable, optional
+        Reads one live run's history; default ``RunStore.read_metric_points_bounded``.
+        The panel engine passes a reader that parses each file once per view.
+
+    Returns
+    -------
+    dict of str to list of MetricPoint
+        Points per run id; a run with no matching point may be missing.
+
+    Examples
+    --------
+    >>> metric_points(ctx, runs, names=["train/loss"])  # doctest: +SKIP
+    {'r1': [MetricPoint(name='train/loss', step=0, value=2.3, t=None)]}
+    """
+    runs = list(runs)
+    wanted = None if names is None else set(names)
+    ended = [r.run_id for r in runs if r.status in INDEXED_POINT_STATUSES]
+    out = ctx.index.metric_points_for(ended, wanted) if ended else {}
+    for run in runs:
+        if run.status in INDEXED_POINT_STATUSES:
+            continue
+        if read is not None:
+            history = read(run)
+        else:
+            history = ctx.store.read_metric_points_bounded(run.project, run.run_id)
+        points = [p for p in history if wanted is None or p.name in wanted]
+        if points:
+            out[run.run_id] = sorted(points, key=lambda p: (p.name, p.step))
+    return out
 
 
 def iter_rows(
@@ -71,6 +129,7 @@ def iter_rows(
     source: Source,
     fields: list[str] | None = None,
     labels: Mapping[str, str] | None = None,
+    names: Collection[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """
     Yield flat rows of one data source across runs.
@@ -82,10 +141,13 @@ def iter_rows(
       ``hypothesis``, ``tags``, ``host``, ``exit_code``, ``params.*``,
       ``vars.*``, ``usage.*`` (only when the run has usage totals).
     - ``scores``: ``metric``, ``version``, ``key``, ``value`` (errored scores skipped).
-    - ``metrics``: ``name``, ``step``, ``value``, ``t`` (full history from
-      ``metrics.jsonl``).
+    - ``metrics``: ``name``, ``step``, ``value``, ``t`` (``metric_points``: the
+      indexed history of runs that ended, a bounded read of ``metrics.jsonl``
+      of the others; at most ``thin.MAX_POINTS_PER_METRIC`` points per name),
+      ordered by name then step and read one run at a time.
     - ``predictions``: ``id``, ``prediction``, ``reference`` (joined from the
-      task dataset when the row has none), ``meta.*``, and every per-example
+      task dataset when the row has none, except for a project copied from a
+      host, whose repo is on that host), ``meta.*``, and every per-example
       score field as ``<metric>@<version>.<field>``.
     - ``samples``: ``name``, ``value`` (``RunStore.read_samples``).
     - ``usage``: ``example_id``, ``tokens_in``, ``tokens_out``, ``usd``, ``seconds``
@@ -107,6 +169,10 @@ def iter_rows(
     labels : mapping of str to str, optional
         Label per ``group_id`` (the panel engine passes the leaderboard's);
         groups it lacks get ``group_labels(runs)``.
+    names : collection of str, optional
+        ``metrics`` source only: keep these metric names. They are filtered in
+        the index query, so a chart of one name over many runs reads only that
+        name's points.
 
     Yields
     ------
@@ -129,13 +195,19 @@ def iter_rows(
         raise ConfigError("groups is a task-level source; read it through a table panel")
     if source not in SOURCES:
         raise ConfigError(f"unknown source {source!r}; use one of {', '.join(SOURCES)}")
-    reader = _READERS[source]
     refs: _Refs = {}
-    names = {**group_labels(runs), **(labels or {})}
+    label_of = {**group_labels(runs), **(labels or {})}
     for run in runs:
         gid = group_id_for(run)
-        base = {"run_id": run.run_id, "group_id": gid, "label": names[gid], "seed": run.seed}
-        for row in reader(ctx, run, refs):
+        base = {"run_id": run.run_id, "group_id": gid, "label": label_of[gid], "seed": run.seed}
+        if source == "metrics":
+            # one run at a time, like the other sources: a table over thousands
+            # of runs holds one run's history, not all of them
+            points = metric_points(ctx, [run], names).get(run.run_id, [])
+            rows: Iterable[dict[str, Any]] = _metric_rows(points)
+        else:
+            rows = _READERS[source](ctx, run, refs)
+        for row in rows:
             yield select_fields({**base, **row}, fields)
 
 
@@ -198,21 +270,27 @@ def _scores(ctx: Context, run: RunRecord, _refs: _Refs) -> Iterator[dict[str, An
             yield {"metric": s.metric, "version": s.version, "key": s.key, "value": s.value}
 
 
-def _metrics(ctx: Context, run: RunRecord, _refs: _Refs) -> Iterator[dict[str, Any]]:
-    for p in ctx.store.read_metric_points(run.project, run.run_id):
+def _metric_rows(points: list[MetricPoint]) -> Iterator[dict[str, Any]]:
+    for p in points:
         yield {"name": p.name, "step": p.step, "value": p.value, "t": p.t}
 
 
 def _dataset_references(ctx: Context, project: str, task: str | None) -> dict[str, Any]:
+    """
+    Reference per example id from the task's dataset, or ``{}``.
+
+    A project copied from a host (``ProjectEntry.remote_host``) has its repo
+    path on that host, so it is never read here: its rows keep no reference.
+    """
     if task is None:
         return {}
     try:
-        repo = Path(ctx.store.load_project(project).repo)
+        repo = ctx.local_repo(project)
         config = load_project_config(repo)
         spec = config.tasks[task]
         ds = config.datasets[spec.dataset]
         path = resolve_dataset_path(repo, ds.path_for(spec.split))
-    except (StoreError, ConfigError, KeyError):
+    except (StoreError, ConfigError, KeyError):  # ConfigError includes a host's copy
         return {}
     return {
         str(r[ds.id_field]): r.get(ds.reference_field) for r in read_jsonl(path) if ds.id_field in r
@@ -269,10 +347,10 @@ def _traces(ctx: Context, run: RunRecord, _refs: _Refs) -> Iterator[dict[str, An
             yield {"example_id": example_id, **step.model_dump()}
 
 
+# Per-run readers; ``metrics`` reads each run through ``metric_points``.
 _READERS: dict[str, Callable[[Context, RunRecord, _Refs], Iterator[dict[str, Any]]]] = {
     "runs": _runs,
     "scores": _scores,
-    "metrics": _metrics,
     "predictions": _predictions,
     "samples": _samples,
     "usage": _usage,

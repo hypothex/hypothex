@@ -15,6 +15,7 @@ import {
   createQueryClient,
   fetchAllRuns,
   fetchHosts,
+  fetchLastSequence,
   keepLastKnown,
   queryKeys,
   shouldRetry,
@@ -262,6 +263,21 @@ describe("hooks", () => {
     expect(result.current.data?.map((s) => [s.id, s.n_runs])).toEqual([["s-7f3a", 6]]);
   });
 
+  test("fetchLastSequence reads the hub's last_sequence from its local host row (PERF-F10a)", async () => {
+    mockRoutes({ "/api/v1/hosts": HOSTS });
+    const { qc } = setup();
+    expect(await fetchLastSequence(qc)).toBe(1022);
+    // the rows land in the hosts query, so the Hosts panel does not fetch them again
+    expect(qc.getQueryData<HostRow[]>(queryKeys.hosts())?.length).toBe(HOSTS.length);
+    const local = HOSTS[0] as HostRow;
+    mockRoutes({ "/api/v1/hosts": [{ ...local, state: { ...local.state, last_sequence: -3 } }] });
+    expect(await fetchLastSequence(createQueryClient())).toBeNull();
+    mockRoutes({ "/api/v1/hosts": HOSTS.slice(1) });
+    expect(await fetchLastSequence(createQueryClient())).toBeNull();
+    mockRoutes({});
+    expect(await fetchLastSequence(createQueryClient())).toBeNull();
+  });
+
   test("fetchAllRuns asks for 4x more while a page comes back full, so no run is cut", async () => {
     const q = "/api/v1/runs?status=queued&environment_id=env-gpu1&limit=";
     // 1,500 queued runs on one host: the first page (1,000) is full, the second is not
@@ -284,6 +300,54 @@ describe("hooks", () => {
     const out = await fetchAllRuns({ tag: "sweep:s-1" });
     expect([out.runs.length, out.complete]).toEqual([64000, false]);
     expect(calls).toHaveLength(4);
+  });
+
+  /** `n` runs, newest first, `from` runs below the newest (created one second apart). */
+  const dated = (n: number, from = 0): RunRecord[] =>
+    Array.from({ length: n }, (_, k) => {
+      const i = from + k;
+      return {
+        run_id: `r${String(100_000 - i).padStart(6, "0")}`,
+        created_at: new Date(Date.UTC(2026, 9, 3) - i * 1000).toISOString(),
+      } as unknown as RunRecord;
+    });
+
+  test("fetchAllRuns pages by keyset (before_created_at, before_run_id) when the server honours it (PERF-F13c)", async () => {
+    const q = "/api/v1/runs?project=toy&limit=";
+    const first = dated(1000);
+    const last = first.at(-1) as RunRecord;
+    const cursor = `before_created_at=${encodeURIComponent(last.created_at)}&before_run_id=${last.run_id}`;
+    const calls = mockRoutes({ [`${q}1000`]: first, [`${q}4000&${cursor}`]: dated(500, 1000) });
+    const out = await fetchAllRuns({ project: "toy" });
+    expect(calls.map((c) => c.url)).toEqual([`${q}1000`, `${q}4000&${cursor}`]);
+    expect([out.runs.length, out.complete]).toEqual([1500, true]);
+    expect(new Set(out.runs.map((r) => r.run_id)).size).toBe(1500);
+  });
+
+  test("fetchAllRuns keyset pages stop at ALL_RUNS_MAX runs in all", async () => {
+    let served = 0;
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://x");
+      calls.push(url.search);
+      const limit = Number(url.searchParams.get("limit"));
+      const page = dated(limit, served);
+      served += limit;
+      return new Response(JSON.stringify(page), { status: 200 });
+    }) as typeof fetch;
+    const out = await fetchAllRuns({ project: "toy" });
+    expect(calls.map((c) => new URLSearchParams(c).get("limit"))).toEqual(["1000", "4000", "16000", "43000"]);
+    expect([out.runs.length, out.complete]).toEqual([ALL_RUNS_MAX, false]);
+  });
+
+  test("fetchAllRuns falls back to a growing limit when the server ignores the cursor", async () => {
+    const q = "/api/v1/runs?project=toy&limit=";
+    // the current server: no cursor, so each page is the newest `limit` runs again
+    const calls = mockRoutes({ [`${q}1000`]: dated(1000), [`${q}4000`]: dated(2500), [`${q}16000`]: dated(9) });
+    const out = await fetchAllRuns({ project: "toy" });
+    expect([out.runs.length, out.complete]).toEqual([2500, true]);
+    expect(calls.map((c) => c.url.split("&before")[0])).toEqual([`${q}1000`, `${q}4000`]);
+    expect(new Set(out.runs.map((r) => r.run_id)).size).toBe(2500);
   });
 
   test("useView stays idle while name is null", async () => {
@@ -366,4 +430,20 @@ describe("hooks", () => {
     await waitFor(() => expect(result.current.save.isSuccess).toBe(true));
     expect(result.current.panels.isFetching).toBe(true);
   });
+});
+
+test("active sweep polling catches a terminal failure without any run event", async () => {
+  const { qc, wrapper } = setup();
+  let count = 0;
+  const issuance = { state: "queued", episode: 1, revision: 1, planned: 4, accepted_at: "now", updated_at: "now", cancel_requested: false, reason: null, error: null, resume: null };
+  mockApi({ "GET /api/v1/sweeps/toy/s-async": () => {
+    count += 1;
+    return { ...SWEEP, issuance: count === 1 ? issuance : { ...issuance, state: "incomplete", revision: 2, error: { type: "LaunchError", message: "no host" } } };
+  } });
+  const { result, unmount } = renderHook(() => useSweep("toy", "s-async"), { wrapper });
+  await waitFor(() => expect(result.current.data?.issuance?.state).toBe("queued"));
+  await waitFor(() => expect(result.current.data?.issuance?.state).toBe("incomplete"), { timeout: 4500 });
+  expect(count).toBe(2);
+  unmount();
+  qc.clear();
 });

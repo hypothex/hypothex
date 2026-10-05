@@ -21,6 +21,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/ws-ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ws Ticket */
+        post: operations["ws_ticket_api_v1_auth_ws_ticket_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/hosts": {
         parameters: {
             query?: never;
@@ -307,6 +324,23 @@ export interface paths {
         put?: never;
         /** Launch */
         post: operations["launch_api_v1_runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runs/stop_queued": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Runs Stop Queued */
+        post: operations["runs_stop_queued_api_v1_runs_stop_queued_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1119,6 +1153,10 @@ export interface components {
             created_by: string;
             /** Checkpoint */
             checkpoint?: string | null;
+            /** Vars */
+            vars?: {
+                [key: string]: string;
+            };
         };
         /**
          * RunFilter
@@ -1211,6 +1249,21 @@ export interface components {
              * @default false
              */
             only_queued: boolean;
+        };
+        /**
+         * StopQueuedBody
+         * @description A bounded batch of conditional queued-run stops on this environment.
+         */
+        StopQueuedBody: {
+            /** Command Id */
+            command_id?: string | null;
+            /**
+             * Created By
+             * @default api
+             */
+            created_by: string;
+            /** Run Ids */
+            run_ids: string[];
         };
         /**
          * SweepBody
@@ -1369,6 +1422,16 @@ export interface components {
             /** Text */
             text: string;
         };
+        /**
+         * WebSocketTicket
+         * @description One-use WebSocket credential returned by the authenticated ticket issuer.
+         */
+        WebSocketTicket: {
+            /** Ticket */
+            ticket: string | null;
+            /** Expires In */
+            expires_in: number;
+        };
     };
     responses: never;
     parameters: never;
@@ -1396,6 +1459,26 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    ws_ticket_api_v1_auth_ws_ticket_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebSocketTicket"];
                 };
             };
         };
@@ -2027,6 +2110,8 @@ export interface operations {
                 environment_id?: string | null;
                 archived?: boolean;
                 limit?: number;
+                before_created_at?: string | null;
+                before_run_id?: string | null;
             };
             header?: never;
             path?: never;
@@ -2091,6 +2176,41 @@ export interface operations {
             };
         };
     };
+    runs_stop_queued_api_v1_runs_stop_queued_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StopQueuedBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     run_detail_api_v1_runs__run_id__get: {
         parameters: {
             query?: never;
@@ -2126,7 +2246,10 @@ export interface operations {
     };
     run_metrics_api_v1_runs__run_id__metrics_get: {
         parameters: {
-            query?: never;
+            query?: {
+                names?: string[] | null;
+                max_points?: number | null;
+            };
             header?: never;
             path: {
                 run_id: string;

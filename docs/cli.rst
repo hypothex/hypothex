@@ -1,8 +1,9 @@
 The ``hx`` CLI
 ===============
 
-Every ``hx`` command supports ``--json`` for machine-readable output (a stable
-``pydantic`` ``model_dump(mode="json")``); agents should always pass it.
+Data commands support ``--json`` for machine-readable output; agents should use
+it where offered by ``--help``. Human-readable timestamps use the local timezone;
+JSON timestamps retain their recorded timezone.
 
 Discover
 --------
@@ -31,6 +32,9 @@ Show one task: dataset, metrics, stages, and repo.
    hx runs --json
 
 List runs, newest first, with filters for project, task, status, and tag.
+``runs --json`` rows and ``show --json`` include ``host_state`` from the hub
+(``null`` when unavailable or local), so clients can distinguish a run status from
+its host connection state.
 
 .. code-block:: bash
 
@@ -38,6 +42,9 @@ List runs, newest first, with filters for project, task, status, and tag.
 
 Show everything about a run: hypothesis, command, git commit, scores, and every path
 (code, config, logs, predictions, checkpoint) it touches.
+Human output also includes notes, tags, seed, parameters, template variables,
+parent/children, star state, exit code, persisted end reason, and timestamps.
+An errored score includes the last non-empty line of its error report.
 
 Run
 ---
@@ -47,6 +54,8 @@ Run
    hx init --json
 
 Write a starter ``hypothex.yaml`` in the current directory.
+An existing project in a parent directory requires ``--force`` before creating
+a nested project. ``--project`` must be a valid project name.
 
 .. code-block:: bash
 
@@ -59,12 +68,30 @@ Check ``hypothex.yaml``, metric imports, and dataset paths.
    hx run -t TASK -H WHY --seed 1 --json -- python train.py --seed {seed}
 
 Run a command in the foreground and record it.
+The process exit status remains separate from scoring: metric failures print
+``eval: N errors`` to stderr. A negative signal exit is mapped to the shell's
+``128 + signal`` status; the recorded process exit code stays unchanged.
 
 .. code-block:: bash
 
    hx launch -t TASK -H WHY --stage infer --json -- python infer.py
 
 Start a stage in the background; check progress with ``hx logs`` or ``hx show``.
+``--wait`` blocks until the run ends.
+With ``--stage NAME`` and no explicit command, the stage template runs from the
+repository root even when invoked in a subdirectory. An explicit command after
+``--`` keeps the caller's directory unless ``--repo`` selects the repository;
+``--stage`` then labels and validates that stage rather than replacing the command.
+
+.. code-block:: bash
+
+   hx launch --host gpu-box --gpus 2 --queue -t TASK -H WHY --json -- python train.py
+   hx launch --host cluster --gpus 4 --time 04:00:00 --partition gpu --account my-lab \
+       -t TASK -H WHY --json -- python train.py
+
+Start a run on a remote host. ``--gpus N`` asks for GPUs, ``--queue`` waits for them
+(:doc:`gpus`). ``--partition``, ``--time``, and ``--account`` override the SLURM host's
+defaults (:doc:`slurm`). See :doc:`remote`.
 
 .. code-block:: bash
 
@@ -93,13 +120,16 @@ Evaluate
 
 Run the ``infer`` stage again with this run's checkpoint, recording a new run whose
 ``parent`` is the original.
+Use repeated ``--var name=value`` options to override its template variables,
+for example ``hx reinfer RUN_ID --var batch_size=32 --json``.
 
 .. code-block:: bash
 
    hx reeval --task TASK --json
 
 Re-score saved predictions with the current metric versions; old scores are kept and
-new scores are appended.
+new scores are appended. A task re-evaluation sent through the hub waits up to
+one hour for scoring, matching the MCP task re-evaluation budget.
 
 Compare
 -------
@@ -109,6 +139,8 @@ Compare
    hx leaderboard TASK --json
 
 Rank seed groups of a task (mean +/- std over seeds) by the primary metric.
+Human output marks identical repeats as ``◇×N``, reports ``p`` separately from
+the test-set 95% interval, and warns about differing recorded metric source hashes.
 
 .. code-block:: bash
 
@@ -130,9 +162,11 @@ Page through a run's predictions with per-example scores.
 
 .. code-block:: bash
 
-   hx logs RUN_ID --follow --json
+   hx logs RUN_ID --follow
 
 Print a run's log tail, optionally following it until the run ends.
+Without an explicit ``--stream``, human output also shows stderr for a failed run.
+``--json`` returns one log chunk with its offset; it does not follow.
 
 Curate
 ------
@@ -195,12 +229,76 @@ Maintenance
    hx reindex --json
 
 Rebuild the SQLite index from run folders on disk (the index is always disposable).
+The rebuild is atomic: other commands and ``hx serve`` keep reading the old index
+until the new one replaces it in one transaction.
 
 .. code-block:: bash
 
    hx repair --json
 
 Mark runs whose supervisor process died as ``lost``.
+
+Remote hosts
+------------
+
+.. code-block:: bash
+
+   hx hosts add gpu-box --ssh gpu-box --usd-per-gpu-hour 2.10 --json
+   hx hosts add cluster --ssh cluster-login --slurm --partition gpu --time 08:00:00 --json
+   hx hosts map PROJECT gpu-box /home/me/code/project --json
+
+Add a host (``--ssh ALIAS`` or ``--url URL``; ``--slurm``, ``--partition``,
+``--account``, ``--time``, ``--gpus``, ``--remote-home``, ``--usd-per-gpu-hour``), and
+say where a project's checkout is on it.
+
+.. code-block:: bash
+
+   hx hosts list --json
+   hx hosts status [HOST] --json
+   hx hosts connect HOST --json
+   hx hosts disconnect HOST --json
+   hx hosts upgrade HOST --json
+   hx hosts rm HOST --json
+
+List the hosts in ``environments.yaml``; show live state, GPUs, queue, SLURM jobs, and
+cost today; reconnect or stop watching a host; install this Hypothex version on it;
+remove it. See :doc:`remote`.
+
+.. code-block:: bash
+
+   hx pull RUN_ID --artifact checkpoint --json
+
+Copy a big file of a remote run to the hub (``--artifact``: a kind, an artifact path,
+or a run-folder path; default ``checkpoint``).
+
+.. code-block:: bash
+
+   hx service install --kind ssh --json
+   hx service uninstall --json
+
+On a host: write a systemd user unit or launchd agent for its env server, and print
+how to enable it.
+
+Sweeps
+------
+
+.. code-block:: bash
+
+   hx sweep -t TASK -H WHY --grid lr=1e-4,3e-4 --grid beam=5,10 --seeds 3 \
+       --host gpu-box --gpus 1 --queue --json -- python train.py --lr '{lr}' --beam '{beam}' --seed '{seed}'
+
+Start a sweep: every grid combination x seed (``--random N`` with
+``--param name=low:high[:log]`` for random search).
+
+.. code-block:: bash
+
+   hx sweeps [-p PROJECT] --json
+   hx sweep show SWEEP_ID --json
+   hx sweep extend SWEEP_ID --seeds 4,5 --json
+   hx sweep cancel SWEEP_ID --json
+
+List sweeps; show one (progress, parameters x primary metric, best cell, cost); add
+seeds; stop its queued runs. See :doc:`sweeps`.
 
 Servers
 -------
@@ -213,27 +311,65 @@ Serve the HTTP/WebSocket API on ``127.0.0.1:7777``, and the UI at
 ``http://127.0.0.1:7777/`` when the package contains a UI build
 (``src/hypothex/ui_dist``; ``cd ui && bun run build`` makes one).
 
-``--host`` other than a loopback address (``127.0.0.1``, ``::1``, ``localhost``)
-is refused unless ``HYPOTHEX_SERVE_TOKEN`` is set, because the API starts
-arbitrary commands. With the token set, every request except the environment
-descriptor needs ``Authorization: Bearer <token>``:
+``--port 0`` picks a free port. ``--kind local|ssh|slurm`` selects a local hub,
+SSH GPU queue, or SLURM submission. The kind is saved for the next start;
+``--kind local`` switches back without changing the environment identity.
+
+Every server requires a fresh random bearer token by default. An explicit
+``HYPOTHEX_SERVE_TOKEN`` overrides it and must match the format in :doc:`security`.
+``--no-auth`` is restricted to loopback addresses. The installed UI shell and
+public identity descriptor are readable before authentication; API, file and
+MCP routes require the token. Open the UI and paste the output of:
 
 .. code-block:: bash
 
-   HYPOTHEX_SERVE_TOKEN=$(openssl rand -hex 24) hx serve --host 0.0.0.0
+   hx token
+
+Run ``hx token`` with the same ``--home``/``HYPOTHEX_HOME`` as the server. It
+validates the local server record and process birth without contacting a server,
+then prints only the token. An absent, stale, foreign, no-auth or unverifiable
+record fails without printing a secret. Ordinary startup/status output omits it.
 
 The CLI and ``hx mcp`` reach the hub at ``HYPOTHEX_HUB_URL`` (default
 ``http://127.0.0.1:7777``) and send ``HYPOTHEX_HUB_TOKEN`` when it is set. Without
 it, for a hub on this machine they read the token from the hub's own
-``<home>/serve/server.json`` (owner-only). The MCP server that ``hx serve`` mounts
-uses the server's token:
+``<home>/serve/server.json`` (owner-only). HTTP MCP forwards the authenticated
+caller's credential; the local stdio server retains local token discovery:
 
 .. code-block:: bash
 
-   HYPOTHEX_HUB_URL=http://gpu-box:7777 HYPOTHEX_HUB_TOKEN=... hx hosts status
+   HYPOTHEX_HUB_URL=http://hub.example:7777 HYPOTHEX_HUB_TOKEN=... hx hosts status
 
 .. code-block:: bash
 
    hx mcp
 
 Run the MCP server over stdio, for Claude Code, Codex, and other MCP clients.
+
+Environment variables
+---------------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Variable
+     - Meaning
+   * - ``HYPOTHEX_HOME``
+     - The Hypothex home (same as ``--home``; default ``~/.hypothex``).
+   * - ``HYPOTHEX_AGENT``
+     - Record runs as ``agent:<name>``; a hypothesis is then required.
+   * - ``HYPOTHEX_HUB_URL``
+     - Where the CLI and ``hx mcp`` find the hub (default ``http://127.0.0.1:7777``).
+   * - ``HYPOTHEX_HUB_TOKEN``
+     - The bearer token they send to the hub.
+   * - ``HYPOTHEX_SERVE_TOKEN``
+     - The bearer token ``hx serve`` requires.
+   * - ``HYPOTHEX_SSH``, ``HYPOTHEX_SCP``
+     - The ``ssh`` and ``scp`` programs to use (default ``ssh`` and ``scp``).
+   * - ``HYPOTHEX_FAKE_GPUS``
+     - A JSON file of fake GPUs instead of ``nvidia-smi`` (tests and demos).
+
+A run's command gets ``HYPOTHEX_RUN_DIR``, ``HYPOTHEX_RUN_ID``, ``HYPOTHEX_PROJECT``,
+``HYPOTHEX_SEED`` (when it has a seed), and ``CUDA_VISIBLE_DEVICES`` (when it holds
+GPUs).

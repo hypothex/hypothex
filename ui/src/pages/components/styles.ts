@@ -40,7 +40,7 @@ export const PAGES_CSS = `
 .page .timeline .key span { display: inline-flex; align-items: center; gap: 7px; }
 .page .timeline .key svg { display: block; overflow: visible; }
 .page .ideas { list-style: none; margin: 0; padding: 0; }
-.page .idea { display: grid; grid-template-columns: 56px minmax(0, 1fr) minmax(0, 420px) 84px; gap: 0 20px; align-items: center; padding: 14px 0; border-top: 1px solid var(--rule-2); }
+.page .idea { display: grid; grid-template-columns: 56px minmax(140px, 1fr) minmax(0, 420px) 84px; gap: 0 20px; align-items: center; padding: 14px 0; border-top: 1px solid var(--rule-2); }
 .page .idea:first-child { border-top: 0; }
 .page .idea .mks { display: flex; gap: 4px; align-items: center; }
 .page .idea .nm { font-weight: 550; font-size: 15px; }
@@ -69,7 +69,8 @@ export const PAGES_CSS = `
 .page .view-tabs > a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
 .page .view-tabs .r { margin-left: auto; display: flex; gap: 8px; align-items: center; padding-bottom: 6px; }
 .page .run-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 40px; align-items: start; }
-.page .actions { display: flex; gap: 8px; padding-top: 10px; }
+.page .run-top .err { width: 0; min-width: 100%; overflow-wrap: anywhere; }
+.page .actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 10px; }
 .page .status { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 18px; font-size: 14px; color: var(--ink-2); align-items: center; }
 .page .st { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; color: var(--ink); }
 .page .st i { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); }
@@ -77,6 +78,7 @@ export const PAGES_CSS = `
 .page .st.failed i, .page .st.killed i, .page .st.lost i { background: var(--fail); }
 .page .st.running i { background: var(--agent); }
 .page .run-grid { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 72px; margin-top: 64px; }
+.page .run-grid > div, .page .run-top > div { min-width: 0; }
 .page .run-grid .fig { margin-top: 0; }
 .page .run-grid .side .fig + .fig { margin-top: 56px; }
 .page .tree { font-size: 14px; }
@@ -109,6 +111,7 @@ export const PAGES_CSS = `
 .page .ab { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; margin-top: 36px; padding: 18px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
 .page .ab .lbl { font-size: 12.5px; color: var(--ink-3); }
 .page .ab .nm { font-weight: 600; font-size: 16px; margin-top: 2px; }
+.page .ab code { overflow-wrap: anywhere; word-break: break-word; }
 .page .ab .meta { font-size: 13px; color: var(--ink-3); margin-top: 3px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
 .page .ab .row { justify-content: space-between; align-items: end; gap: 20px; }
 .page .ab .acc { font: 300 38px/1 var(--sans); letter-spacing: -.02em; text-align: right; }
@@ -142,6 +145,12 @@ export const PAGES_CSS = `
 .page .signtest text { font: 400 11px var(--sans); fill: var(--ink-3); }
 .page .signtest .obs { stroke: var(--ink-3); }
 .page .signtest text.obs-l { fill: var(--ink); font-weight: 600; }
+.page .sweep-issuance { overflow-wrap: anywhere; font-size: 14px; color: var(--ink-2); }
+@media (max-width: 1100px) {
+  .page .run-top, .page .run-grid, .page .ov-grid { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+  .page .run-top .actions { padding-top: 0; }
+  .page .idea { grid-template-columns: 56px minmax(140px, 1fr) minmax(80px, 2fr) 84px; }
+}
 `;
 
 /** Inject the page CSS (React dedupes nothing here; one `<style>` per mounted page). */

@@ -46,7 +46,7 @@ def test_disconnect_and_connect(tmp_path: Path) -> None:
         out = r.client.post("/api/v1/hosts/gpu1/disconnect", json={}).json()
         assert (out["name"], out["state"]) == ("gpu1", "disabled")
         assert host_state(r.client, "gpu1") == "disabled"
-        assert r.client.post("/api/v1/hosts/gpu1/connect").json()["name"] == "gpu1"
+        assert r.client.post("/api/v1/hosts/gpu1/connect", json={}).json()["name"] == "gpu1"
         wait_until(lambda: host_state(r.client, "gpu1") == "connected", timeout=30)
         resp = r.client.post("/api/v1/hosts/nope/connect", json={})
         assert resp.status_code == 400 and "hx hosts add nope" in resp.json()["error"]
@@ -96,6 +96,7 @@ def test_slurm_counts_and_cost_today(tmp_path: Path) -> None:
             "pending": 2,
             "running": 1,
             "comment_accounting": False,
+            "defaults": SlurmDefaults(partition="gpu").model_dump(mode="json"),
         }
         assert row["cost_today_usd"] == 3.25
 
@@ -175,12 +176,34 @@ def test_reload_applies_a_removed_host_and_new_project_maps(tmp_path: Path) -> N
 
 
 def test_runs_filter_by_environment_and_honour_large_limits(home: Path, ctx: Context) -> None:
-    for i in range(1005):
-        ctx.index.upsert_run(make_record(f"r{i:04d}", environment_id="env-b" if i % 2 else "env-a"))
+    for i in range(1005):  # real run folders: the startup repair drops index rows without one
+        ctx.create_run(make_record(f"r{i:04d}", environment_id="env-b" if i % 2 else "env-a"))
     with TestClient(create_app(home, background_repair=False, hub=False), base_url=BASE_URL) as c:
         assert len(c.get("/api/v1/runs", params={"limit": 1005}).json()) == 1005
         only_b = c.get("/api/v1/runs", params={"environment_id": "env-b", "limit": 2000}).json()
         assert len(only_b) == 502 and {r["environment_id"] for r in only_b} == {"env-b"}
+
+
+def test_runs_page_by_keyset_without_gaps_or_repeats(home: Path, ctx: Context) -> None:
+    start = utcnow().replace(microsecond=123456)
+    for i in range(11):  # pairs share a created_at: run_id breaks the tie
+        when = start + timedelta(seconds=i // 2)
+        ctx.create_run(make_record(f"r{i:02d}", environment_id="env-a", created_at=when))
+    with TestClient(create_app(home, background_repair=False, hub=False), base_url=BASE_URL) as c:
+        everything = [r["run_id"] for r in c.get("/api/v1/runs").json()]
+        pages: list[list[str]] = []
+        cursor: dict[str, str] = {}
+        for _ in range(len(everything) + 1):  # bounded: a cursor that is ignored never ends
+            page = c.get("/api/v1/runs", params={"limit": 3, **cursor}).json()
+            if not page:
+                break
+            pages.append([r["run_id"] for r in page])
+            last = page[-1]
+            cursor = {"before_created_at": last["created_at"], "before_run_id": last["run_id"]}
+        assert [len(p) for p in pages] == [3, 3, 3, 2]
+        assert [rid for p in pages for rid in p] == everything
+        half = c.get("/api/v1/runs", params={"before_run_id": "r05"})
+        assert half.status_code == 400 and "together" in half.json()["error"]
 
 
 def test_disconnected_hosts_stay_disconnected_after_a_restart(tmp_path: Path) -> None:
@@ -228,3 +251,46 @@ def test_a_disconnected_host_keeps_its_totals(tmp_path: Path, kind: HostKind) ->
         again = create_app(r.hub.layout.home, background_repair=False)
         with TestClient(again, base_url=BASE_URL) as client:
             assert _gpu1_row(client)["cost_today_usd"] == before["cost_today_usd"]
+
+
+def test_queue_positions_are_global_ranks_on_list_and_detail(
+    home: Path, ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    from hypothex.core.control import cancel_many_if_queued, launch_run
+    from hypothex.core.execution import RunRequest
+    from hypothex.core.records import ExecutorInfo
+
+    gpus = write_fake_gpus(tmp_path / "queue-ranks.json", 1, external=(0,))
+    monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(gpus))
+    req = RunRequest(repo=toy_repo, command=[sys.executable, "-c", "pass"], gpus=1, queue=True)
+    ids = [launch_run(ctx, req).run_id for _ in range(3)]
+    cancel_many_if_queued(ctx, [ids[0]])
+    for rid, ticket in (("remote-a", 5), ("remote-b", 8)):
+        ctx.create_run(
+            make_record(
+                rid,
+                environment_id="other-env",
+                status=RunStatus.QUEUED,
+                executor=ExecutorInfo(queue_position=ticket),
+            )
+        )
+    with TestClient(create_app(home, background_repair=False, hub=False), base_url=BASE_URL) as c:
+        rows = c.get("/api/v1/runs", params={"status": "queued"}).json()
+        assert {r["run_id"]: r["executor"]["queue_position"] for r in rows} == {
+            ids[1]: 1,
+            ids[2]: 2,
+            "remote-a": 1,
+            "remote-b": 2,
+        }
+        # A filtered page still uses the global host queue, not just its own rows.
+        ctx.update_run(ids[2], "run.tagged", lambda r: r.model_copy(update={"tags": ["last"]}))
+        only = c.get("/api/v1/runs", params={"tag": "last", "limit": 1}).json()
+        assert only[0]["executor"]["queue_position"] == 2
+        for run_id, expected in ((ids[2], 2), ("remote-b", 2)):
+            detail = c.get(f"/api/v1/runs/{run_id}").json()
+            assert detail["record"]["executor"]["queue_position"] == expected
+    # Read paths never rewrite the stable ticket.
+    assert ctx.find_record(ids[2]).executor.queue_position == 3
+    assert ctx.find_record("remote-b").executor.queue_position == 8

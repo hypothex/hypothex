@@ -4,15 +4,25 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from mcp import Client
+from mcp.server.mcpserver import MCPServer
 from mcp.types import TextContent
 
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
-from hypothex.core.errors import RunError
+from hypothex.core.errors import ConfigError, RemoteProjectError, RunError, StoreError
 from hypothex.core.evaluation import evaluate_run
-from hypothex.mcp.server import MCPServer, build_server, require_agent_hypothesis
+from hypothex.mcp.server import (
+    build_server,
+    list_task_views,
+    put_view,
+    query_task_view,
+    remove_view,
+    require_agent_hypothesis,
+    view_document,
+)
 from tests.factories import PREDS_075, seed_finished_run
 
 EXPECTED_TOOLS = {
@@ -22,6 +32,8 @@ EXPECTED_TOOLS = {
     "get_leaderboard",
     "list_runs",
     "get_run",
+    "get_logs",
+    "compare_examples",
     "compare_runs",
     "launch_run",
     "rerun",
@@ -36,6 +48,8 @@ EXPECTED_TOOLS = {
     "add_view",
     "query_view",
     "list_hosts",
+    "connect_host",
+    "list_sweeps",
     "launch_sweep",
     "get_sweep",
     "cancel_sweep",
@@ -197,3 +211,76 @@ def test_view_tools(home: Path, ctx: Context, toy_repo: Path) -> None:
         home, "add_view", {"task": "toy-acc", "name": "overview", "yaml_text": GOOD_VIEW}
     )
     assert err and "preset view" in message
+
+
+def test_views_are_never_written_under_a_host_copys_repo_path(ctx: Context, toy_repo: Path) -> None:
+    # the repo path of a project copied from a host is the host's, even when it is a
+    # folder here: a view is never saved into it or deleted from it
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    put_view(ctx, "toy-acc", "kept", GOOD_VIEW)
+    kept = toy_repo.resolve() / ".hypothex" / "views" / "toy-acc" / "kept.yaml"
+    entry = ctx.store.load_project("toy").model_copy(update={"remote_host": "gpu1"})
+    ctx.store.save_project(entry)
+    ctx.index.upsert_project(entry)
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        put_view(ctx, "toy-acc", "acc", GOOD_VIEW)
+    assert not kept.with_name("acc.yaml").exists()
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        remove_view(ctx, "toy-acc", "kept")
+    assert kept.read_text() == GOOD_VIEW
+
+
+def test_views_are_never_read_from_a_host_copys_repo_path(ctx: Context, toy_repo: Path) -> None:
+    # the view files and hypothex.yaml under a host copy's repo path are the host's, even
+    # when the path is a folder here: only the snapshot's preset and inline views are served
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    put_view(ctx, "toy-acc", "kept", GOOD_VIEW)
+    entry = ctx.store.load_project("toy").model_copy(update={"remote_host": "gpu1"})
+    ctx.store.save_project(entry)
+    ctx.index.upsert_project(entry)
+    (toy_repo / "hypothex.yaml").write_text("project: [not, valid\n")  # never parsed
+    views = [(v.name, v.origin) for v in list_task_views(ctx, "toy-acc")]
+    assert views == [("overview", "preset")]
+    with pytest.raises(StoreError, match="unknown view 'kept'"):
+        view_document(ctx, "toy-acc", "kept")
+    panels = query_task_view(ctx, "toy-acc")["panels"]
+    assert [p["type"] for p in panels] and all("error" not in p for p in panels)
+
+
+def test_views_of_a_host_copy_never_use_a_folder_at_its_repo_path(
+    ctx: Context, toy_repo: Path
+) -> None:
+    from hypothex.mcp.server import (
+        list_task_views,
+        put_view,
+        query_task_view,
+        remove_view,
+        view_document,
+    )
+
+    entry = ctx.register_project(toy_repo)
+    views = toy_repo / ".hypothex" / "views" / "toy-acc"
+    views.mkdir(parents=True)
+    (views / "mine.yaml").write_text(GOOD_VIEW)
+    assert [v.name for v in list_task_views(ctx, "toy-acc")] == ["overview", "mine"]
+    # a copy from gpu1: its repo names gpu1's folder, which here is also a local folder.
+    # Its config has an inline view of the same name as the file here.
+    task = entry.config.tasks["toy-acc"]
+    inline = {"mine": {**yaml.safe_load(GOOD_VIEW), "title": "inline one"}}
+    tasks = {**entry.config.tasks, "toy-acc": task.model_copy(update={"views": inline})}
+    config = entry.config.model_copy(update={"tasks": tasks})
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1", "config": config}))
+    listed = list_task_views(ctx, "toy-acc")
+    assert [(v.name, v.origin) for v in listed] == [("overview", "preset"), ("mine", "inline")]
+    doc = view_document(ctx, "toy-acc", "mine")
+    assert doc["info"]["origin"] == "inline" and doc["view"]["title"] == "inline one"
+    with pytest.raises(StoreError, match="unknown view 'nope'"):
+        view_document(ctx, "toy-acc", "nope")
+    assert view_document(ctx, "toy-acc", "overview")["info"]["origin"] == "preset"
+    assert query_task_view(ctx, "toy-acc", name="mine")["panels"][0]["title"] == "board"
+    assert query_task_view(ctx, "toy-acc")["panels"]  # the preset still draws
+    with pytest.raises(ConfigError, match="copied from host gpu1"):
+        put_view(ctx, "toy-acc", "other", GOOD_VIEW)
+    with pytest.raises(ConfigError, match="copied from host gpu1"):
+        remove_view(ctx, "toy-acc", "mine")
+    assert sorted(p.name for p in views.iterdir()) == ["mine.yaml"]  # nothing written here

@@ -1,7 +1,7 @@
 /** Pure formatting helpers shared by the pages. Times are shown in UTC. */
 import { format } from "d3-format";
 import { MINUS, fmtP as pDigits } from "../../charts/Scale";
-import { withUnit } from "../../charts/valueFormat";
+import { shortId, withUnit } from "../../charts/valueFormat";
 
 // Shared with the panels: one definition each, in charts/valueFormat.
 export { fmtDuration, fmtSigned, shortId } from "../../charts/valueFormat";
@@ -190,4 +190,11 @@ export function primaryMetricName(primary: string): string {
 /** Launchers named `agent…` are agents; everyone else is a human. */
 export function isAgent(createdBy: string): boolean {
   return createdBy.startsWith("agent");
+}
+
+/** Distinguish queued configurations and repeat seeds without hiding their hypothesis. */
+export function queueLabel(record: RunRecord): string {
+  const params = Object.entries(record.params).map(([key, value]) => `${key}=${value}`).join(", ");
+  return [firstClause(record.hypothesis, `run ${shortId(record.run_id)}`), params,
+    record.seed === null ? "" : `seed ${record.seed}`].filter(Boolean).join(" · ");
 }

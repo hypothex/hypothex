@@ -4,16 +4,29 @@
  * One stream per app: subscribe with `after_sequence`, receive the replay, then live
  * events. Reconnects with 3/4/8/16 s backoff (reset after 30 s stable), drops duplicate
  * sequences, and turns events into TanStack Query invalidations (spec 5.3, 8.2). The last
- * delivered sequence is kept in `sessionStorage`, so a page load resumes there instead of
- * replaying the whole event log.
+ * delivered sequence is kept in `sessionStorage`, so a page load resumes there; a new tab
+ * starts after the server's newest sequence (`fetchLastSequence`). Neither replays the
+ * whole event log.
  */
-import { focusManager, type QueryClient, type QueryKey, useQueryClient } from "@tanstack/react-query";
+import {
+  focusManager,
+  partialMatchKey,
+  type QueryClient,
+  type QueryKey,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { createContext, createElement, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 
-import { wsUrl } from "./client";
+import { auth } from "./auth";
+import { ApiError, websocketTicket, wsUrl } from "./client";
 import type { HxEvent, WsMessage } from "./models";
 import { noteLostReasons } from "./lostReasons";
-import { HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "./queries";
+import {
+  fetchLastSequence,
+  HOST_EVENT_INVALIDATES,
+  REMOTE_RUN_INVALIDATES,
+  RUN_EVENT_INVALIDATES,
+} from "./queries";
 
 /** One entry of the server's event log (`hypothex.core.events.Event`). */
 export type { HxEvent };
@@ -47,7 +60,9 @@ export interface EventStreamOptions {
   /** Called with new events, deduplicated by sequence, in order, batched. */
   onEvents: (events: HxEvent[]) => void;
   onStatus?: (status: StreamStatus) => void;
-  createSocket?: (url: string) => SocketLike;
+  createSocket?: (url: string, protocols: string[]) => SocketLike;
+  /** Fresh one-use ticket for each attempt; null is an explicit noauth test seam. */
+  ticket?: ((signal: AbortSignal) => Promise<string | null>) | null;
   clock?: Clock;
   /** Last sequence already seen and trusted; the first subscribe replays after it. Default 0. */
   afterSequence?: number;
@@ -60,14 +75,27 @@ export interface EventStreamOptions {
   resumeSequence?: number;
   /** Called with the last delivered sequence after `ready` and after each batch. */
   onSequence?: (sequence: number) => void;
+  /**
+   * Looks up the server's newest event sequence. Given, a stream with nothing to resume
+   * (no `afterSequence`, no `resumeSequence`, or a stored sequence the server lacks)
+   * subscribes after it instead of after 0, so it does not replay the whole log. A
+   * failure, an invalid answer, or no answer within `HEAD_TIMEOUT_MS` means 0.
+   */
+  head?: () => Promise<number | null>;
+  /** Refresh reads taken before an accepted head: events up to it will not replay. */
+  onHead?: () => void;
 }
 
 export interface EventStreamHookOptions {
   url?: string;
-  createSocket?: (url: string) => SocketLike;
+  createSocket?: (url: string, protocols: string[]) => SocketLike;
+  /** Fresh one-use ticket for each attempt; null is an explicit noauth test seam. */
+  ticket?: ((signal: AbortSignal) => Promise<string | null>) | null;
   clock?: Clock;
   /** Where the last sequence is kept; default `sessionStorage`, `null` keeps nothing. */
   storage?: Pick<Storage, "getItem" | "setItem"> | null;
+  /** Newest-sequence lookup; default `fetchLastSequence` (`GET /hosts`), `null` none (start at 0). */
+  head?: (() => Promise<number | null>) | null;
 }
 
 /** Reconnect delays in ms: 3, 4, 8, then 16 s for every later attempt. */
@@ -76,6 +104,8 @@ export const BACKOFF_MS: readonly number[] = [3_000, 4_000, 8_000, 16_000];
 export const STABLE_RESET_MS = 30_000;
 /** Live events that arrive within this window are delivered as one batch. */
 export const FLUSH_MS = 250;
+/** A newest-sequence lookup slower than this is dropped; the stream replays from 0. */
+export const HEAD_TIMEOUT_MS = 5_000;
 
 /** `sessionStorage` key for the last delivered event sequence (per tab and origin). */
 export const SEQUENCE_KEY = "hx-ws-sequence";
@@ -137,6 +167,12 @@ export function backoffDelay(attempt: number): number {
  * - anything else: nothing.
  */
 export function keysForEvent(event: HxEvent): QueryKey[] {
+  if (event.type === "sweep.issuance") {
+    const project = event.project ?? event.payload?.project;
+    const id = event.payload?.sweep_id;
+    if (typeof project !== "string" || typeof id !== "string") return [];
+    return [["sweeps", project, "detail", id], ["sweeps", project, "list"]];
+  }
   if (event.type.startsWith("host.")) return HOST_EVENT_INVALIDATES.map((family) => [...family]);
   if (event.type === MIRROR_RUN_UPDATED) return narrow(REMOTE_RUN_INVALIDATES, event);
   if (event.type.startsWith("run.")) return narrow(RUN_EVENT_INVALIDATES, event);
@@ -178,16 +214,27 @@ export function keysForEvents(events: readonly HxEvent[]): QueryKey[] {
   return keys;
 }
 
-/** Invalidate every query a batch of events may have changed (active ones refetch). */
+/**
+ * Invalidate every query a batch of events may have changed (active ones refetch).
+ *
+ * One `invalidateQueries` call for the whole batch: a query that two keys match (e.g. a
+ * run page under `["run", id]` and `["run"]`) refetches once, not once per key with the
+ * second call aborting the first.
+ */
 export function invalidateForEvents(client: QueryClient, events: readonly HxEvent[]): void {
-  for (const queryKey of keysForEvents(events)) void client.invalidateQueries({ queryKey });
+  const keys = keysForEvents(events);
+  if (keys.length === 0) return;
+  void client.invalidateQueries({ predicate: (query) => keys.some((key) => partialMatchKey(query.queryKey, key)) });
 }
 
 /** Connection supervisor for `/api/v1/ws` (one per app). */
 export class EventStream {
   private readonly options: EventStreamOptions;
   private readonly clock: Clock;
-  private readonly createSocket: (url: string) => SocketLike;
+  private readonly createSocket: (url: string, protocols: string[]) => SocketLike;
+  private ticketController: AbortController | null = null;
+  private connectionGeneration = 0;
+  private unsubscribeAuth: (() => void) | null = null;
   private socket: SocketLike | null = null;
   private lastSequence: number;
   /** A stored sequence still to be confirmed by the server (see `resumeSequence`). */
@@ -199,11 +246,16 @@ export class EventStream {
   private reconnectTimer: unknown = null;
   private stableTimer: unknown = null;
   private flushTimer: unknown = null;
+  /** Subscribe after the server's newest sequence (looked up first), not after 0. */
+  private needHead: boolean;
+  private headTimer: unknown = null;
+  /** Bumped by each lookup and by `stop()`: an answer for an older token is ignored. */
+  private headToken = 0;
 
   constructor(options: EventStreamOptions) {
     this.options = options;
     this.clock = options.clock ?? realClock;
-    this.createSocket = options.createSocket ?? ((url) => new WebSocket(url));
+    this.createSocket = options.createSocket ?? ((url, protocols) => new WebSocket(url, protocols));
     const resume = options.resumeSequence ?? 0;
     if (options.afterSequence === undefined && resume > 0) {
       this.lastSequence = resume - 1;
@@ -211,6 +263,7 @@ export class EventStream {
     } else {
       this.lastSequence = options.afterSequence ?? 0;
     }
+    this.needHead = options.head !== undefined && options.afterSequence === undefined && resume <= 0;
   }
 
   /** Highest event sequence seen so far. */
@@ -221,17 +274,26 @@ export class EventStream {
   start(): void {
     if (this.running) return;
     this.running = true;
+    this.unsubscribeAuth = auth.onReset(() => this.stop());
     this.connect();
   }
 
   stop(): void {
     this.running = false;
+    this.connectionGeneration += 1;
+    this.ticketController?.abort();
+    this.ticketController = null;
+    this.unsubscribeAuth?.();
+    this.unsubscribeAuth = null;
     this.cancel(this.reconnectTimer);
     this.cancel(this.stableTimer);
     this.cancel(this.flushTimer);
+    this.cancel(this.headTimer);
     this.reconnectTimer = null;
     this.stableTimer = null;
     this.flushTimer = null;
+    this.headTimer = null;
+    this.headToken += 1;
     this.pending = [];
     const socket = this.socket;
     this.socket = null;
@@ -259,9 +321,68 @@ export class EventStream {
   private connect(): void {
     this.ready = false;
     this.setStatus("connecting");
+    if (this.needHead && this.options.head) {
+      this.lookupHead(this.options.head);
+      return;
+    }
+    this.open();
+  }
+
+  /** Ask for the newest sequence, then open the socket after it (0 on failure or timeout). */
+  private lookupHead(head: () => Promise<number | null>): void {
+    const token = ++this.headToken;
+    const finish = (sequence: number | null): void => {
+      if (token !== this.headToken || !this.running) return;
+      this.headToken += 1;
+      this.cancel(this.headTimer);
+      this.headTimer = null;
+      this.needHead = false;
+      this.lastSequence = sequence ?? 0;
+      if (sequence !== null) this.options.onHead?.();
+      this.open();
+    };
+    this.headTimer = this.clock.setTimeout(() => finish(null), HEAD_TIMEOUT_MS);
+    let answer: Promise<number | null>;
+    try {
+      answer = head();
+    } catch {
+      answer = Promise.resolve(null);
+    }
+    answer.then(
+      (n) => finish(typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : null),
+      () => finish(null),
+    );
+  }
+
+  private open(): void {
+    if (!this.running) return;
+    const generation = ++this.connectionGeneration;
+    const issue = this.options.ticket === undefined ? websocketTicket : this.options.ticket;
+    if (issue === null) { this.openSocket(null); return; }
+    const controller = new AbortController();
+    this.ticketController = controller;
+    const failed = (error: unknown): void => {
+      if (!this.running || generation !== this.connectionGeneration) return;
+      this.ticketController = null;
+      if (error instanceof ApiError && error.status === 401) { this.stop(); return; }
+      this.setStatus("offline");
+      this.scheduleReconnect();
+    };
+    try {
+      issue(controller.signal).then((ticket) => {
+        if (!this.running || generation !== this.connectionGeneration) return;
+        this.ticketController = null;
+        this.openSocket(ticket);
+      }, failed);
+    } catch (error) { failed(error); }
+  }
+
+  private openSocket(ticket: string | null): void {
     let socket: SocketLike;
     try {
-      socket = this.createSocket(this.options.url);
+      const protocols = ticket === null ? ["hypothex.v1"] : ["hypothex.v1", "hx-ticket." + ticket];
+      socket = this.createSocket(this.options.url, protocols);
+      if (!this.running) { socket.close(); return; }
     } catch {
       this.setStatus("offline");
       this.scheduleReconnect();
@@ -298,10 +419,14 @@ export class EventStream {
     this.scheduleReconnect();
   }
 
-  /** The server lacks the stored sequence (another or a reset store): start over from 0. */
+  /**
+   * The server lacks the stored sequence (another or a reset store): start over from its
+   * newest sequence (with a `head` lookup), else from 0.
+   */
   private restartFromZero(): void {
     this.anchor = null;
     this.lastSequence = 0;
+    this.needHead = this.options.head !== undefined;
     this.pending = [];
     this.cancel(this.stableTimer);
     this.stableTimer = null;
@@ -402,8 +527,9 @@ export function useEventStream(options: EventStreamHookOptions = {}): StreamStat
   const [status, setStatus] = useState<StreamStatus>("connecting");
   const initial = useRef(options);
   useEffect(() => {
-    const { url, createSocket, clock } = initial.current;
+    const { url, createSocket, clock, ticket } = initial.current;
     const storage = initial.current.storage === undefined ? defaultStorage() : initial.current.storage;
+    const head = initial.current.head === undefined ? () => fetchLastSequence(client) : initial.current.head;
     const stream = new EventStream({
       url: url ?? wsUrl(),
       onEvents: (events) => {
@@ -413,7 +539,20 @@ export function useEventStream(options: EventStreamHookOptions = {}): StreamStat
       onStatus: setStatus,
       onSequence: (sequence) => writeSequence(storage, sequence),
       resumeSequence: readSequence(storage),
+      head: head ?? undefined,
+      onHead: () => {
+        // A page can finish its first read before /hosts chooses the head. Cancel
+        // even initial reads still in flight, then refresh after that boundary;
+        // otherwise a skipped event can leave the page stale until another event.
+        // As with replayed events, leave the view editor's source alone.
+        const keys = [...RUN_EVENT_INVALIDATES, ...HOST_EVENT_INVALIDATES];
+        const filters = {
+          predicate: (query: { queryKey: QueryKey }) => keys.some((key) => partialMatchKey(query.queryKey, key)),
+        };
+        void client.cancelQueries(filters).then(() => client.invalidateQueries(filters));
+      },
       createSocket,
+      ticket,
       clock,
     });
     stream.start();

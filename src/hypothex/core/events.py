@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -15,7 +16,7 @@ from typing import Any
 import psutil
 from pydantic import BaseModel
 
-from hypothex.core.errors import HypothexError
+from hypothex.core.errors import HypothexError, StoreError
 from hypothex.core.ids import utcnow
 
 _SCHEMA = """
@@ -35,6 +36,16 @@ CREATE TABLE IF NOT EXISTS receipts (
 CREATE TABLE IF NOT EXISTS event_keys (
   key TEXT PRIMARY KEY,
   sequence INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sweep_issuance (
+  operation_key TEXT PRIMARY KEY,
+  project TEXT NOT NULL,
+  sweep_id TEXT,
+  episode INTEGER NOT NULL,
+  revision INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  data TEXT NOT NULL,
+  UNIQUE(project, sweep_id, episode)
 );
 """
 _PENDING = "__pending__"
@@ -129,6 +140,8 @@ class EventLog:
     Append-only event log with monotonically increasing sequence numbers.
 
     Safe to use from several processes at once (SQLite WAL + busy timeout).
+    Each thread keeps one open connection (a new one after a fork), so an
+    append costs one insert, not a connect.
 
     Parameters
     ----------
@@ -138,20 +151,39 @@ class EventLog:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._local = threading.local()
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")  # stored in the file: once is enough
             conn.executescript(_SCHEMA)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(sweep_issuance)")}
+            required = {
+                "operation_key",
+                "project",
+                "sweep_id",
+                "episode",
+                "revision",
+                "state",
+                "data",
+            }
+            if not required <= columns:
+                raise StoreError("unrecognized sweep issuance schema; existing data was preserved")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=10, isolation_level=None)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
+        """Yield this thread's connection (autocommit); roll back a transaction left open."""
+        local = self._local
+        conn: sqlite3.Connection | None = getattr(local, "conn", None)
+        if conn is None or local.pid != os.getpid():
+            conn = sqlite3.connect(self.path, timeout=10, isolation_level=None)
             conn.execute("PRAGMA busy_timeout=10000")
             conn.row_factory = sqlite3.Row
+            local.conn, local.pid = conn, os.getpid()
+        try:
             yield conn
         finally:
-            conn.close()
+            if conn.in_transaction:
+                conn.rollback()
 
     def append(
         self,
@@ -349,6 +381,295 @@ class EventLog:
                 (json.dumps(result, default=str), command_id),
             )
         return json.loads(json.dumps(result, default=str))
+
+    def command_result(self, command_id: str) -> dict[str, Any] | None:
+        """
+        Read an existing command receipt without claiming or replaying its action.
+
+        Parameters
+        ----------
+        command_id : str
+            The same effective key used by ``run_once``.
+
+        Returns
+        -------
+        dict or None
+            Immutable result, or None if there is no receipt. Existing pending
+            and interrupted claims keep ``run_once``'s waiting/error semantics.
+        """
+        with self._conn() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM receipts WHERE command_id = ?", (command_id,)
+            ).fetchone()
+        return self._wait_for_result(command_id) if exists else None
+
+    @staticmethod
+    def _sweep_data(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        """Decode only the supported operational row version; never repair unknown data."""
+        if row is None:
+            return None
+        try:
+            data = json.loads(row["data"])
+        except (ValueError, TypeError) as exc:
+            raise StoreError("invalid sweep issuance data; existing data was preserved") from exc
+        if not isinstance(data, dict) or data.get("schema_version") != 1:
+            raise StoreError(
+                "unsupported sweep issuance schema version; existing data was preserved"
+            )
+        return data
+
+    def sweep_operation_by_key(self, operation_key: str) -> dict[str, Any] | None:
+        """
+        Read one durable sweep operation, including an unfinished preparation.
+
+        Parameters
+        ----------
+        operation_key : str
+            Accepted command key, or a generated key for a no-ID request.
+
+        Returns
+        -------
+        dict or None
+            A detached copy of the operational document.
+        """
+        with self._conn() as conn:
+            return self._sweep_data(
+                conn.execute(
+                    "SELECT data FROM sweep_issuance WHERE operation_key = ?", (operation_key,)
+                ).fetchone()
+            )
+
+    def sweep_operation(self, project: str, sweep_id: str) -> dict[str, Any] | None:
+        """
+        Read the latest issuance episode for a sweep.
+
+        Parameters
+        ----------
+        project, sweep_id : str
+            Local definition identity.
+
+        Returns
+        -------
+        dict or None
+            Current operation, or None for a legacy/direct-core sweep.
+        """
+        with self._conn() as conn:
+            return self._sweep_data(
+                conn.execute(
+                    "SELECT data FROM sweep_issuance WHERE project = ? AND sweep_id = ? "
+                    "ORDER BY episode DESC LIMIT 1",
+                    (project, sweep_id),
+                ).fetchone()
+            )
+
+    def sweep_operations(self, states: set[str]) -> list[dict[str, Any]]:
+        """
+        Discover persisted operations in the requested states after a lost wakeup.
+
+        Parameters
+        ----------
+        states : set of str
+            States the dispatcher can recover or process.
+
+        Returns
+        -------
+        list of dict
+            Operational documents in insertion order.
+        """
+        if not states:
+            return []
+        placeholders = ",".join("?" for _ in states)
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT data FROM sweep_issuance WHERE state IN ({placeholders}) ORDER BY rowid",
+                sorted(states),
+            ).fetchall()
+        return [data for row in rows if (data := self._sweep_data(row)) is not None]
+
+    def prepare_sweep(
+        self,
+        operation_key: str,
+        data: dict[str, Any],
+        *,
+        previous: tuple[str, int] | None = None,
+    ) -> bool:
+        """
+        Atomically reserve a command receipt and persist launch-free preparation.
+
+        Parameters
+        ----------
+        operation_key : str
+            Effective command key in the ordinary shared receipt namespace.
+        data : dict
+            Version-1 operational document in preparing state, with a nonnegative revision.
+        previous : tuple of str and int, optional
+            Previous episode key and revision. An extension claims its receipt only
+            if this is still the latest terminal episode in the same transaction.
+
+        Returns
+        -------
+        bool
+            True for the new claim; False when that command is already owned.
+            No member side effect is permitted before its acceptance transaction.
+        """
+        state = data["issuance"]
+        if (
+            data.get("schema_version") != 1
+            or state["state"] != "preparing"
+            or state["revision"] < 0
+        ):
+            raise ValueError(
+                "a sweep preparation must have version 1 and nonnegative preparing revision"
+            )
+        if data["operation_key"] != operation_key:
+            raise ValueError("sweep preparation key differs from its command receipt")
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM sweep_issuance WHERE operation_key = ?", (operation_key,)
+            ).fetchone():
+                conn.rollback()
+                return False
+            if previous is not None:
+                latest = conn.execute(
+                    "SELECT operation_key,revision,state FROM sweep_issuance "
+                    "WHERE project=? AND sweep_id=? ORDER BY episode DESC LIMIT 1",
+                    (data["project"], data["sweep_id"]),
+                ).fetchone()
+                if (
+                    latest is None
+                    or (latest[0], latest[1]) != previous
+                    or latest[2] not in {"issued", "incomplete", "interrupted"}
+                ):
+                    conn.rollback()
+                    return False
+            claimed = conn.execute(
+                "INSERT OR IGNORE INTO receipts(command_id, result, created_at) VALUES (?,?,?)",
+                (operation_key, _claim_marker(), utcnow().isoformat()),
+            ).rowcount
+            if not claimed:
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO sweep_issuance"
+                "(operation_key,project,sweep_id,episode,revision,state,data) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    operation_key,
+                    data["project"],
+                    data["sweep_id"],
+                    data["episode"],
+                    state["revision"],
+                    "preparing",
+                    json.dumps(data, default=str),
+                ),
+            )
+            conn.commit()
+        return True
+
+    @staticmethod
+    def _append_sweep_event(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
+        """Append only the public invalidation payload inside the caller's transaction."""
+        state = data["issuance"]
+        payload = {
+            "project": data["project"],
+            "sweep_id": data["sweep_id"],
+            "episode": state["episode"],
+            "revision": state["revision"],
+            "state": state["state"],
+            "cancel_requested": state["cancel_requested"],
+            "error_type": state["error"]["type"] if state["error"] else None,
+        }
+        conn.execute(
+            "INSERT INTO events(type,project,run_id,payload,created_at) VALUES (?,?,NULL,?,?)",
+            ("sweep.issuance", data["project"], json.dumps(payload), state["updated_at"]),
+        )
+
+    def update_sweep(
+        self,
+        operation_key: str,
+        expected_revision: int,
+        changes: dict[str, Any],
+        *,
+        receipt: dict[str, Any] | None = None,
+        emit: bool = True,
+        require_current: bool = False,
+    ) -> dict[str, Any] | None:
+        """
+        Compare-and-set sweep state, optionally committing its immutable receipt.
+
+        Parameters
+        ----------
+        operation_key : str
+            Existing operation key.
+        expected_revision : int
+            Revision read by the caller; a concurrent transition invalidates it.
+        changes : dict
+            Top-level document updates; issuance is a complete public-state object.
+        receipt : dict, optional
+            First acceptance snapshot, allowed only from preparing to queued.
+        emit : bool
+            Append ``sweep.issuance`` atomically; False for private preparation/progress.
+        require_current : bool
+            Refuse a transition if a newer episode has already been accepted/prepared.
+
+        Returns
+        -------
+        dict or None
+            Updated detached document, or None if the expected revision is stale.
+        """
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._sweep_data(
+                conn.execute(
+                    "SELECT data FROM sweep_issuance WHERE operation_key = ? AND revision = ?",
+                    (operation_key, expected_revision),
+                ).fetchone()
+            )
+            if current is None:
+                conn.rollback()
+                return None
+            if require_current:
+                latest = conn.execute(
+                    "SELECT operation_key FROM sweep_issuance WHERE project=? AND sweep_id=? "
+                    "ORDER BY episode DESC LIMIT 1",
+                    (current["project"], current["sweep_id"]),
+                ).fetchone()
+                if latest is None or latest[0] != operation_key:
+                    conn.rollback()
+                    return None
+            data = {**current, **changes}
+            data["issuance"] = {**data["issuance"], "revision": expected_revision + 1}
+            state = data["issuance"]
+            if data["operation_key"] != operation_key or data["episode"] != current["episode"]:
+                raise StoreError("a sweep transition cannot change operation identity")
+            if receipt is not None:
+                if current["issuance"]["state"] != "preparing" or state["state"] != "queued":
+                    raise StoreError("sweep acceptance receipt can only be committed once")
+                previous = conn.execute(
+                    "SELECT result FROM receipts WHERE command_id = ?", (operation_key,)
+                ).fetchone()
+                if previous is None or not previous[0].startswith((_PENDING, _INTERRUPTED)):
+                    raise StoreError("sweep preparation no longer owns its pending receipt")
+                conn.execute(
+                    "UPDATE receipts SET result = ? WHERE command_id = ?",
+                    (json.dumps(receipt, default=str), operation_key),
+                )
+            conn.execute(
+                "UPDATE sweep_issuance SET sweep_id=?, revision=?, state=?, data=? "
+                "WHERE operation_key=?",
+                (
+                    data["sweep_id"],
+                    state["revision"],
+                    state["state"],
+                    json.dumps(data, default=str),
+                    operation_key,
+                ),
+            )
+            if emit and data["sweep_id"] is not None:
+                self._append_sweep_event(conn, data)
+            conn.commit()
+        return json.loads(json.dumps(data, default=str))
 
     def _wait_for_result(self, command_id: str, timeout: float = 60.0) -> dict[str, Any]:
         """

@@ -21,11 +21,21 @@ test("a note added through the API appears on the open run page without a reload
   const run = runs[0];
   if (!run) throw new Error("generic demo has no finished run");
 
+  // the newest event before the page opens: a new tab subscribes after the hub's head, not 0
+  const hosts = await getJson<{ kind: string; state?: { last_sequence?: number } | null }[]>(
+    request,
+    "/api/v1/hosts",
+  );
+  const head = hosts.find((h) => h.kind === "local")?.state?.last_sequence;
+  if (typeof head !== "number") throw new Error("hub row has no last_sequence");
+
   await page.goto(`/r/${run.run_id}`);
   await expectTheme(page, theme);
   await expect(page.getByText(run.hypothesis || run.run_id).first()).toBeVisible();
   await expect.poll(() => received.some((m) => m.includes('"type":"ready"'))).toBe(true);
-  expect(sent[0]).toBe('{"type":"subscribe","after_sequence":0}');
+  const subscribe = JSON.parse(sent[0] ?? "{}") as { type?: string; after_sequence?: number };
+  expect(subscribe.type).toBe("subscribe");
+  expect(subscribe.after_sequence).toBeGreaterThanOrEqual(head);
   await page.evaluate(() => {
     (window as unknown as { hxNoReload?: boolean }).hxNoReload = true;
   });

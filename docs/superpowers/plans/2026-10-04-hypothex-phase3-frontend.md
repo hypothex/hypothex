@@ -15,7 +15,7 @@
 **Mockups:** `docs/mockups/phase3/` (`index.html`, `data.js`, `shot-pair-{ready,done,invalid}-*`, `shot-settings-*`, `shot-settings-collab-*`, `shot-storage-*`, `shot-storage-confirm-*`, `shot-storage-result-*`, `shot-notebook-*`, `shot-notebook-conflict-*`, `shot-task-export-*`, `shot-run-*`, `shot-gate-*`).
 
 **Depends on:**
-- The phase 2 frontend and audit/UI improvements are merged. The integration snippets below were refreshed against pinned main `1b769f4ce9210096640a7054f5d757f09f4bb4df`. The token and DF-48 interfaces remain pending their final merge. Before implementation, run this check on the intended source checkout. The 12 historical snippet anchors alone are insufficient: whole-file Header replacement and procedural event-stream edits must also match the reviewed source blobs.
+- The phase 2 frontend and audit/UI improvements are merged. The integration snippets below were refreshed against local prerequisite baseline `a66540f5d93a9b69c9644a06f323b12af43db231`, including the frozen DF-48 and token interfaces. This is a local integration checkpoint; the final merged-main refresh and formal rounds 5–6 remain pending. Before implementation, run this check on the intended source checkout. The 12 historical snippet anchors alone are insufficient: whole-file Header replacement and procedural event-stream edits must also match the reviewed source blobs.
 
 ```bash
 uv run python - <<'PY'
@@ -28,14 +28,15 @@ anchor = re.compile(r"`(ui/[^`]+)` \(as left by phase 2 Task \d+\), replace\n\n`
 found = anchor.findall(plan)
 bad = [f for f, block in found if not pathlib.Path(f).is_file() or block not in pathlib.Path(f).read_text()]
 reviewed = {
-    'ui/src/api/events.ts': '57960da4027eb647cf8db83782aa6beffca770f2',
-    'ui/src/api/queries.ts': '6ca8e0266502e4b99079b2499dcaab2e0f58ef97',
-    'ui/src/api/client.ts': '84c3d0f14e3282590ba4cf1f41be46951205d4b9',
+    'ui/src/api/events.ts': '7256185bf8aea3b9950f480611bb4bc527de9d1a',
+    'ui/src/api/queries.ts': 'e63b75fa9b8e1fe42a66636a4312cd86263dea12',
+    'ui/src/api/client.ts': 'a7c990fbbe099a016ff28045d2a271231798702c',
     'ui/src/shell/Header.tsx': 'b61fbb21380110a250fb21190ce17d81b289a1d8',
     'ui/src/pages/components/OverviewLists.tsx': '215ed36b1c0907ad248a4f4cdbcc1f0eab6064a5',
-    'ui/src/pages/Task.tsx': '5ad6afa9ea59d49b1aee576e86166a50a6bfbae3',
-    'ui/e2e/serve-demo.ts': 'e3befa39a67bc01c458dc05a089e17147500c54f',
-    'ui/playwright.config.ts': '54ee4b06e868d3c92a74b6a291417928c96947ca',
+    'ui/src/pages/Task.tsx': 'aaec83516cbd524c3cfb971d4a3fae9f07f2f94c',
+    'ui/e2e/serve-demo.ts': 'a5148484442f9e2656c3757c98140c9b037a36d4',
+    'ui/src/pages/components/RunActions.tsx': 'd66bcfb254c6825694a0ccbf7fa181bc53476bd8',
+    'ui/playwright.config.ts': '221aaa10fc64bd01c486a48ce0ab00f677277ab1',
 }
 changed = [f for f, blob in reviewed.items()
            if subprocess.check_output(["git", "hash-object", f], text=True).strip() != blob]
@@ -45,9 +46,10 @@ assert not bad and not changed, "Re-read changed sources and refresh affected re
 PY
 ```
 
-Expected on the pinned baseline: `12 snippet anchors ok` and `reviewed replacement sources ok`. A later merge deliberately fails the blob check: re-read changed files and update the snippets, tests and baseline hashes together; do not merely copy new hashes. In particular preserve confirmed recents, WebSocket head/cancellation/single-batch invalidation, grouped failure retries, Task loading/launch behavior, and per-run e2e homes. Task 25's whole-file `ui/playwright.config.ts` must remain the final baseline plus its team server/projects.
+Expected on the pinned baseline: `12 snippet anchors ok` and `reviewed replacement sources ok`. A later merge deliberately fails the blob check: re-read changed files and update the snippets, tests and baseline hashes together; do not merely copy new hashes. In particular preserve confirmed recents, WebSocket head/cancellation/single-batch invalidation, `sweep.issuance` events and `issuancePoll`, credential resets including side caches, grouped failure retries, Task unscored counts/metric-drift indicator/templateEnvironment and loading/launch behavior, and per-run e2e homes. Task 25's whole-file `ui/playwright.config.ts` must remain the final baseline plus its team server/projects.
 - The phase 3 backend plan (`docs/superpowers/plans/2026-10-04-hypothex-phase3-backend.md`) merged: the contract section 3 routes in `/api/openapi.json`, `RunRecord.owner`, `RunDetail.cleaned`, `Leaderboard.baselines`, the section 2 events, the `4401` close code, `hx serve --auth`, and `hx demo --with-team` (contract 11: owner `sv` admin and `alice` launch, two projects with notebook days and one weekly summary, baselines on `toy-classifier/toy-test`, 6 archived runs with artifacts, outbox entries in every state, one connected fake host, the local session token in `<home>/serve/server.json`).
 - The mockups in `docs/mockups/phase3/` approved.
+- Final-baseline requirement: retain the incoming credential-generation fix for `useAction` and `launchSeeds`: capture the generation once per user intent, reject it before every request/retry and success side effect after credentials change, and treat `AbortError` as non-retryable. A failed old mutation cannot be retried as the newly selected principal. This fix is still under review and is not included in local pin `a66540f`; inspect its final APIs and regressions before formal Round 5.
 
 ## Global Constraints
 
@@ -2076,6 +2078,13 @@ describe("phase 3 keys", () => {
     ]);
   });
 
+  test("durable issuance refreshes only its sweep detail and project list", () => {
+    expect(keysForEvent({ ...ev("sweep.issuance"), payload: { sweep_id: "s-1" } })).toEqual([
+      ["sweeps", "deepretro", "detail", "s-1"], ["sweeps", "deepretro", "list"],
+    ]);
+    expect(keysForEvent(ev("sweep.issuance"))).toEqual([]);
+  });
+
   test("a plain run event never refreshes the storage report", () => {
     expect(keysForEvent(ev("run.finished", "deepretro", "r1"))).not.toContainEqual(["storage"]);
   });
@@ -2204,6 +2213,12 @@ Replace the whole `keysForEvent` function and its doc comment (as left by phase 
  * - anything else: nothing.
  */
 export function keysForEvent(event: HxEvent): QueryKey[] {
+  if (event.type === "sweep.issuance") {
+    const project = event.project ?? event.payload?.project;
+    const id = event.payload?.sweep_id;
+    if (typeof project !== "string" || typeof id !== "string") return [];
+    return [["sweeps", project, "detail", id], ["sweeps", project, "list"]];
+  }
   if (event.type.startsWith("host.")) return HOST_EVENT_INVALIDATES.map((family) => [...family]);
   if (event.type === MIRROR_RUN_UPDATED) return narrow(REMOTE_RUN_INVALIDATES, event);
   if (event.type.startsWith("run.")) return narrow(RUN_EVENT_INVALIDATES, event);
@@ -2228,6 +2243,12 @@ with
  * - anything else: nothing.
  */
 export function keysForEvent(event: HxEvent): QueryKey[] {
+  if (event.type === "sweep.issuance") {
+    const project = event.project ?? event.payload?.project;
+    const id = event.payload?.sweep_id;
+    if (typeof project !== "string" || typeof id !== "string") return [];
+    return [["sweeps", project, "detail", id], ["sweeps", project, "list"]];
+  }
   const all = (families: readonly QueryKey[]): QueryKey[] => families.map((family) => [...family]);
   if (event.type.startsWith("host.")) return all(HOST_EVENT_INVALIDATES);
   if (event.type === MIRROR_RUN_UPDATED) return narrow(REMOTE_RUN_INVALIDATES, event);
@@ -3680,23 +3701,23 @@ describe("run page", () => {
 
   test("a collaborator cannot stop the owner's run; the reason is the tooltip", () => {
     mockApi({});
-    renderWithClient(as(ME_ALICE, <RunActions record={makeRecord({ status: "running", owner: "sv" })} />));
+    renderWithClient(as(ME_ALICE, <RunActions served hostsLoaded record={makeRecord({ status: "running", owner: "sv" })} />));
     const stop = screen.getByRole("button", { name: "Stop" }) as HTMLButtonElement;
     expect([stop.disabled, stop.title]).toEqual([true, "owned by @sv; stop needs owner or admin"]);
   });
 
   test("the owner and an admin can stop it", () => {
     mockApi({});
-    const view = renderWithClient(as(ME_ALICE, <RunActions record={makeRecord({ status: "running", owner: "alice" })} />));
+    const view = renderWithClient(as(ME_ALICE, <RunActions served hostsLoaded record={makeRecord({ status: "running", owner: "alice" })} />));
     expect((within(view.container).getByRole("button", { name: "Stop" }) as HTMLButtonElement).disabled).toBe(false);
-    const admin = renderWithClient(as(ME_ADMIN, <RunActions record={makeRecord({ status: "running", owner: "alice" })} />));
+    const admin = renderWithClient(as(ME_ADMIN, <RunActions served hostsLoaded record={makeRecord({ status: "running", owner: "alice" })} />));
     expect((within(admin.container).getByRole("button", { name: "Stop" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   test("a queued run of someone else: Cancel is disabled for a collaborator", () => {
     mockApi({});
     renderWithClient(
-      as(ME_ALICE, <RunActions record={makeRecord({ status: "queued", owner: "sv" })} phase="queued" hostName="gpu1" />),
+      as(ME_ALICE, <RunActions served hostsLoaded record={makeRecord({ status: "queued", owner: "sv" })} phase="queued" hostName="gpu1" />),
     );
     const cancel = screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
     expect([cancel.disabled, cancel.title]).toEqual([true, "owned by @sv; stop needs owner or admin"]);
@@ -3856,10 +3877,10 @@ with
 In `ui/src/pages/components/RunActions.tsx` (as left by phase 2 Task 26), replace
 
 ```tsx
-            disabled={stop.pending}
-            onClick={() => stop.run()}
+            disabled={!served || stop.pending}
+            onClick={() => stop.run(true)}
             title={
-              phase === "pending" && record.executor.slurm_job_id
+              !served ? unavailable : phase === "pending" && record.executor.slurm_job_id
                 ? `Cancel SLURM job ${record.executor.slurm_job_id}`
                 : `Remove from the ${label} queue`
             }
@@ -3868,10 +3889,10 @@ In `ui/src/pages/components/RunActions.tsx` (as left by phase 2 Task 26), replac
 with
 
 ```tsx
-            disabled={stop.pending || !permit.ok}
-            onClick={() => stop.run()}
+            disabled={!served || stop.pending || !permit.ok}
+            onClick={() => stop.run(true)}
             title={
-              !permit.ok
+              !served ? unavailable : !permit.ok
                 ? (permit.why ?? "")
                 : phase === "pending" && record.executor.slurm_job_id
                   ? `Cancel SLURM job ${record.executor.slurm_job_id}`
@@ -3882,18 +3903,44 @@ with
 In `ui/src/pages/components/RunActions.tsx` (as left by phase 2 Task 26), replace
 
 ```tsx
-              disabled={!active || stop.pending}
-              onClick={() => stop.run()}
-              title={active ? "Stop this run" : "The run is not active"}
+              disabled={!served || !active || stop.pending}
+              onClick={() => {
+                if (!served || !active || stop.pending) return;
+                if (armed) {
+                  setArmed(false);
+                  stop.run(false);
+                } else {
+                  setArmed(true);
+                }
+              }}
+              onBlur={() => setArmed(false)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setArmed(false);
+              }}
+              title={!served ? unavailable : active ? (armed ? "Click again to stop this run" : "Stop this run") : "The run is not active"}
 ```
 
 with
 
 ```tsx
-              disabled={!active || stop.pending || !permit.ok}
-              onClick={() => stop.run()}
-              title={!active ? "The run is not active" : permit.ok ? "Stop this run" : (permit.why ?? "")}
+              disabled={!served || !active || stop.pending || !permit.ok}
+              onClick={() => {
+                if (!served || !active || stop.pending || !permit.ok) return;
+                if (armed) {
+                  setArmed(false);
+                  stop.run(false);
+                } else {
+                  setArmed(true);
+                }
+              }}
+              onBlur={() => setArmed(false)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setArmed(false);
+              }}
+              title={!served ? unavailable : !permit.ok ? (permit.why ?? "") : active ? (armed ? "Click again to stop this run" : "Stop this run") : "The run is not active"}
 ```
+
+Preserve `served`, `hostsLoaded`, routing-unavailable tooltips, `stop.run(true)` for queued cancellation, and the armed running-stop confirmation with its three-second timeout, blur/Escape reset and status/identity reset. Add `permit.ok` to the reset effect's dependencies so a permission change disarms it. Phase 3 ownership is an additional condition; it never enables an unserved run. Extend the existing action tests with unserved owner/admin, conditional queued cancellation, and two-click running stop cases under `PrincipalContext`.
 
 In `ui/src/pages/components/OverviewLists.tsx`, replace
 
@@ -9341,6 +9388,8 @@ const serveArgs = ["--home", home, "serve", "--port", String(port), ...(withTeam
 const server: ChildProcess = spawn(hx, serveArgs, {
 ```
 
+Keep the final baseline's `env` construction and deletion of `HYPOTHEX_SERVE_TOKEN`/`HYPOTHEX_HUB_TOKEN`; team mode must mint its own scoped owner session. Preserve process ownership, bounded shutdown, and isolated homes.
+
 - [ ] **Step 3: Check the team hub's identity too**
 
 In `ui/e2e/fixtures.ts` (as left by phase 2 Task 28), replace
@@ -9384,7 +9433,7 @@ import { defineConfig, devices } from "@playwright/test";
 import type { ThemeOptions } from "./e2e/fixtures";
 // Loading paths.ts picks this run's free ports and puts them in process.env, which the
 // workers and every web server inherit (never a fixed port, ruling S1).
-import { HOSTS_PORT, IDENTITY_ROUTE, PORT, TEAM_PORT } from "./e2e/paths";
+import { HOSTS_PORT, IDENTITY_ROUTE, PORT, TEAM_PORT, VITE_PORT } from "./e2e/paths";
 
 const WRITES = /(editor|live)\.spec\.ts$/;
 /** Specs against the `hx demo --with-hosts` hub; `launch` starts runs, so it runs last. */
@@ -9422,10 +9471,15 @@ export default defineConfig<ThemeOptions>({
   expect: { timeout: 10_000 },
   use: {
     baseURL: `http://127.0.0.1:${PORT}`,
-    trace: "retain-on-failure",
-    screenshot: "only-on-failure",
+    trace: "off",
+    screenshot: "off",
   },
   projects: [
+    {
+      name: "vite-auth",
+      testMatch: /auth\.spec\.ts$/,
+      use: desktop("light", `http://127.0.0.1:${VITE_PORT}`),
+    },
     { name: "light", testIgnore: [WRITES, ...OTHER_HUBS], use: desktop("light") },
     { name: "dark", testIgnore: [WRITES, ...OTHER_HUBS], use: desktop("dark") },
     { name: "light-edit", testMatch: WRITES, dependencies: ["light", "dark"], use: desktop("light") },
@@ -9453,22 +9507,22 @@ export default defineConfig<ThemeOptions>({
       dependencies: ["hosts-light", "hosts-dark", "hosts-light-edit"],
       use: desktop("dark", HOSTS_URL),
     },
-    { name: "team-light", testMatch: TEAM_READS, use: desktop("light", TEAM_URL) },
-    { name: "team-dark", testMatch: TEAM_READS, use: desktop("dark", TEAM_URL) },
+    { name: "team-light", testMatch: TEAM_READS, use: { ...desktop("light", TEAM_URL), unlock: false } },
+    { name: "team-dark", testMatch: TEAM_READS, use: { ...desktop("dark", TEAM_URL), unlock: false } },
     {
       // The edits delete artifacts and revoke nothing the read specs need, but they run
       // after them so the reads see the seeded state.
       name: "team-light-edit",
       testMatch: TEAM_WRITES,
       dependencies: ["team-light", "team-dark"],
-      use: desktop("light", TEAM_URL),
+      use: { ...desktop("light", TEAM_URL), unlock: false },
     },
     {
       // After team-light-edit: it applies the cleanup this project checks.
       name: "team-dark-edit",
       testMatch: TEAM_WRITES,
       dependencies: ["team-light", "team-dark", "team-light-edit"],
-      use: desktop("dark", TEAM_URL),
+      use: { ...desktop("dark", TEAM_URL), unlock: false },
     },
   ],
   // Every port is random per run. Never reuse a server that answers on one anyway: an
@@ -9476,6 +9530,15 @@ export default defineConfig<ThemeOptions>({
   // web server whose command exits stops the run at once, and every test checks the hub's
   // identity first (`isolatedHub` in e2e/fixtures.ts).
   webServer: [
+    {
+      command: `bun run dev --host 127.0.0.1 --port ${VITE_PORT}`,
+      env: { HX_API: `http://127.0.0.1:${PORT}` },
+      url: `http://127.0.0.1:${VITE_PORT}/`,
+      reuseExistingServer: false,
+      timeout: 60_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
     {
       command: "bun e2e/serve-demo.ts",
       url: `http://127.0.0.1:${PORT}${IDENTITY_ROUTE}`,
@@ -9506,6 +9569,8 @@ export default defineConfig<ThemeOptions>({
   ],
 });
 ```
+
+The existing fixture now unlocks root-auth browsers by default and sends the isolated home's bearer for API requests. Team projects set `unlock: false` above so their pages reach `/pair` without selecting the owner token; retain the fixture's identity verification and `authToken`/`localToken` safeguards. `pairBrowser` then selects cookie mode through the real Pair page. Keep the Vite proxy authentication project, `VITE_PORT` ownership mapping, and `trace: "off"`/`screenshot: "off"` so credentials are not recorded in artifacts.
 
 - [ ] **Step 5: Write the team helpers**
 

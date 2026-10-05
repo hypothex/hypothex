@@ -56,6 +56,44 @@ def template_fields(template: str) -> set[str]:
     return set(_FIELD.findall(template))
 
 
+def template_var_hint(name: str) -> str:
+    """
+    Say how a caller gives a value for the template variable ``name``.
+
+    Built-in variables name the option that sets them (``--seed``,
+    ``--config``, ``--task``), with the API and MCP field where there is one;
+    any other variable names ``--var`` and the ``vars`` (API) or
+    ``template_vars`` (MCP) field.
+
+    Parameters
+    ----------
+    name : str
+        Template variable name, e.g. ``seed`` or ``beam``.
+
+    Returns
+    -------
+    str
+        Short hint, without the name.
+
+    Examples
+    --------
+    >>> template_var_hint("seed")
+    '--seed N; API/MCP: seed'
+    >>> template_var_hint("beam")
+    '--var beam=VALUE; API: vars, MCP: template_vars'
+    """
+    custom = f"--var {name}=VALUE; API: vars, MCP: template_vars"
+    if name == "seed":
+        return "--seed N; API/MCP: seed"
+    if name == "config":
+        return "--config PATH"
+    if name == "checkpoint":
+        return f"set by hx reinfer, or {custom}"
+    if name == "task" or name.startswith("dataset."):
+        return "--task NAME; API/MCP: task"
+    return custom
+
+
 def render_template(template: str, values: dict[str, str]) -> str:
     """
     Fill ``{name}`` fields in a template.
@@ -75,14 +113,13 @@ def render_template(template: str, values: dict[str, str]) -> str:
     Raises
     ------
     TemplateError
-        If a field has no value.
+        If a field has no value; the message says how to set each one
+        (``template_var_hint``).
     """
     missing = sorted(name for name in template_fields(template) if name not in values)
     if missing:
-        raise TemplateError(
-            f"template variables without a value: {', '.join(missing)} "
-            "(pass them with --var name=value)"
-        )
+        hints = ", ".join(f"{name} ({template_var_hint(name)})" for name in missing)
+        raise TemplateError(f"template variables without a value: {hints}")
     return _FIELD.sub(lambda m: values[m.group(1)], template)
 
 
@@ -211,7 +248,14 @@ class TaskSpec(_Strict):
 
 
 class EnvSpec(_Strict):
-    """How to run code in the project's environment."""
+    """
+    How to run code in the project's environment.
+
+    ``python`` is the command that runs the project's Python, e.g.
+    ``[uv, run, python]``; Hypothex uses it to run the metric functions and to
+    record the environment. ``setup`` (e.g. ``uv sync``) is accepted and
+    stored, but nothing runs it yet.
+    """
 
     setup: str | None = None
     python: list[str] | None = None
@@ -233,7 +277,7 @@ class ProjectConfig(_Strict):
         """Cross-check task references to datasets, metrics, and splits."""
         errors: list[str] = []
         for name, task in self.tasks.items():
-            if not re.match(NAME_PATTERN, name):
+            if not re.fullmatch(NAME_PATTERN, name):
                 errors.append(f"task name {name!r} must match {NAME_PATTERN}")
             dataset = self.datasets.get(task.dataset)
             if dataset is None:
@@ -251,7 +295,7 @@ class ProjectConfig(_Strict):
             if primary_metric not in task.metrics:
                 errors.append(f"task {name!r}: primary {task.primary!r} is not one of its metrics")
             for view in task.views:
-                if not re.match(VIEW_NAME_PATTERN, view):
+                if not re.fullmatch(VIEW_NAME_PATTERN, view):
                     errors.append(
                         f"task {name!r}: view name {view!r} must match {VIEW_NAME_PATTERN}"
                     )
@@ -442,6 +486,41 @@ def has_cycle(data: Any) -> bool:
     return False
 
 
+def validation_summary(exc: ValidationError) -> str:
+    """
+    Say what a pydantic validation error found, one ``loc: msg`` part per problem.
+
+    Unlike ``str(exc)`` it has no input dumps, types, or documentation links.
+    A problem of the whole model (a ``model_validator``) has no location, and
+    its ``ValueError`` text is given as it is.
+
+    Parameters
+    ----------
+    exc : ValidationError
+        The error to summarize.
+
+    Returns
+    -------
+    str
+        The problems, joined by ``"; "``.
+
+    Examples
+    --------
+    >>> try:
+    ...     ProjectConfig.model_validate({"project": "x", "bogus": 1, "env": {"python": 3}})
+    ... except ValidationError as exc:
+    ...     print(validation_summary(exc))
+    env.python: Input should be a valid list; bogus: Extra inputs are not permitted
+    """
+    parts = []
+    for error in exc.errors():
+        cause = error.get("ctx", {}).get("error")
+        msg = str(cause) if error["type"] == "value_error" and cause is not None else error["msg"]
+        where = ".".join(str(p) for p in error["loc"])
+        parts.append(f"{where}: {msg}" if where else msg)
+    return "; ".join(parts)
+
+
 def load_project_config(repo: Path) -> ProjectConfig:
     """
     Load and validate ``<repo>/hypothex.yaml``.
@@ -487,8 +566,8 @@ def load_project_config(repo: Path) -> ProjectConfig:
     else:
         try:
             return ProjectConfig.model_validate(data)
-        except (ValidationError, ValueError) as exc:
-            raise ConfigError(f"{path}: {exc}") from exc
+        except ValidationError as exc:
+            raise ConfigError(f"{path}: {validation_summary(exc)}") from exc
     where = "" if line is None else f" (line {line})"
     raise ConfigError(f"{path}: {message}{where}")
 

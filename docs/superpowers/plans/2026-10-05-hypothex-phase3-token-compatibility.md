@@ -1,5 +1,7 @@
 # Phase 3 prerequisite compatibility checkpoint
 
+Later local integration: see `2026-10-05-hypothex-phase3-local-baseline.md` for the merged frozen token/DF-48 baseline and lazy MCP reconciliation. The evidence below remains the earlier working-file checkpoint.
+
 Status: document-only compatibility repair after plan commit `4bb93aa`. The full-plan audited main pin remains `1b769f4ce9210096640a7054f5d757f09f4bb4df`. Step 6 was inspected at `a5ddaa0dec13ccee534c17a76443ef42f82f77c9` and its merge `55ca922e10d37ab075bb4e99ac7c970c2ba3e2d5` was verified. Token adapters target the inspected working files in `/tmp/hx-token-default`; their SHA-256 identities are recorded with the evidence below. They are prerequisite compatibility, not a claim that the token branch is merged. DF-48 integration and formal rounds 5–6 remain outstanding.
 
 ## Repairs

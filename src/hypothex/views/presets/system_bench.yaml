@@ -21,9 +21,24 @@ panels:
     data: {source: samples, metrics: [latency_ms], group_by: group}
     scale: log
     layout: {span: 7, row: 3}
-  - type: curves
+  # Throughput: one chart, one line per config (the mean of its repeats) over concurrency, on a
+  # log2 axis so 1, 2, 4 ... 128 are evenly spaced (concurrency must be at least 1).
+  - type: vega_lite
     title: Throughput vs concurrency
-    data: {metrics: [sweep/rps], group_by: group}
+    data:
+      source: metrics
+      filter: {name: sweep/rps}
+      fields: [name, step, value]
+    spec:
+      mark: {type: line, point: true}
+      encoding:
+        x: {field: step, type: quantitative, title: concurrency, scale: {type: log, base: 2}, axis: {format: d}}
+        y: {aggregate: mean, field: value, type: quantitative, title: requests / s}
+        color: {field: label, type: nominal, title: null, legend: {orient: bottom}}
+        tooltip:
+          - {field: label, type: nominal, title: config}
+          - {field: step, type: quantitative, title: concurrency}
+          - {aggregate: mean, field: value, type: quantitative, title: mean requests / s, format: ",.0f"}
     layout: {span: 5, row: 3}
   # Percentile table: one row per group, p50/p95/p99 columns, each with Δ and 95% CI vs the
   # baseline group (distribution rows' vs_baseline; the baseline row shows "ref").

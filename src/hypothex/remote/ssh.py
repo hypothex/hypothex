@@ -298,21 +298,58 @@ def copy_from(
     >>> copy_from(SshTarget(alias="gpu1"), "~/ckpt/best.pt", dest, work=work)  # doctest: +SKIP
     """
     _check_remote_path(remote_path, source=True)
-    txn_dir, _, stage_dir = _pull_dirs(work)
-    with _install_lock(txn_dir):
-        _recover_swaps(work)  # a recorded swap was cut short: finish or undo it
-    # A unique staging folder per call: two pulls of one file never share it.
-    stage = Path(tempfile.mkdtemp(prefix="pull-", dir=stage_dir))
-    part = stage / local.name
-    argv = [target.scp_bin, *_base_options(target), "-s", "-q", "-r"]
-    argv += [f"{target.alias}:{remote_path}", str(part)]
-    try:
+    with staged_pull(local, work=work) as part:
+        argv = [target.scp_bin, *_base_options(target), "-s", "-q", "-r"]
+        argv += [f"{target.alias}:{remote_path}", str(part)]
         res = _run(argv, stdin=None, timeout=timeout, what=f"scp from {target.alias}")
         if res.returncode != 0 or not part.exists():
             raise SshError(
                 f"scp {target.alias}:{remote_path} -> {local} failed "
                 f"(exit {res.returncode}): {_tail(res.stderr)}"
             )
+
+
+@contextmanager
+def staged_pull(local: Path, *, work: Path) -> Iterator[Path]:
+    """
+    Stage a complete download and install it with the trusted pull transaction.
+
+    Both HTTP and SFTP downloads use this boundary. No final destination parent
+    is created until the download succeeds; exceptions discard the staged copy.
+    Existing destinations retain the same serialized swap/recovery semantics as
+    :func:`copy_from`.
+
+    Parameters
+    ----------
+    local : Path
+        Final destination, on the same filesystem as ``work``.
+    work : Path
+        Trusted pull state directory, separate from destination content.
+
+    Yields
+    ------
+    Path
+        Unique staged path to write before exiting successfully.
+
+    Raises
+    ------
+    SshError
+        No completed download exists, or a file would replace a directory.
+
+    Examples
+    --------
+    >>> with staged_pull(dest, work=home / "pulls") as part:  # doctest: +SKIP
+    ...     part.write_bytes(downloaded)
+    """
+    txn_dir, _, stage_dir = _pull_dirs(work)
+    with _install_lock(txn_dir):
+        _recover_swaps(work)
+    stage = Path(tempfile.mkdtemp(prefix="pull-", dir=stage_dir))
+    part = stage / local.name
+    try:
+        yield part
+        if not part.exists():
+            raise SshError(f"download for {local} did not produce a file or folder")
         _install(part, local, work)
     finally:
         shutil.rmtree(stage, ignore_errors=True)

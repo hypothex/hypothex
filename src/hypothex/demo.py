@@ -2209,6 +2209,7 @@ def _host_run(
     rate: float,
     sweep_id: str | None = None,
     sweep_owner: str = "",
+    end_reason: str | None = None,
     slurm_job: str | None = None,
     node: str | None = None,
 ) -> RunRecord:
@@ -2251,6 +2252,7 @@ def _host_run(
         created_at=created_at,
         started_at=created_at,
         ended_at=created_at + timedelta(minutes=minutes),
+        end_reason=end_reason,
         exit_code=exit_code,
         tags=[sweep_tag(sweep_owner, sweep_id)] if sweep_id else [],
         created_by=created_by,
@@ -2341,6 +2343,7 @@ def _seed_cluster_runs(ctx: Context, repo: Path, anchor: datetime) -> list[str]:
         minutes=52,
         status=RunStatus.LOST,
         exit_code=None,
+        end_reason="SLURM ended job 48211932 with NODE_FAIL on r208u06n02; no exit record",
         slurm_job="48211932",
         node="r208u06n02",
         **common,

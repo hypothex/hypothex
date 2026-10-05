@@ -237,7 +237,7 @@ describe("Leaderboard panel", () => {
     expect(screen.queryByText("0.874–0.953")).toBeNull();
   });
 
-  test("each scored non-best verdict links to the Examples page against the best run", () => {
+  test("only comparisons with paired examples link to the Examples page", () => {
     const rf = { ...RF, latest_run_id: "20260926-ef4f" };
     const knn = { ...KNN, latest_run_id: "20260926-3f7e" };
     const unscored = row({ group_id: "b2@c2", label: "unscored", vs_best: null });
@@ -252,7 +252,7 @@ describe("Leaderboard panel", () => {
     expect(hrefs({})).toEqual([
       null,
       "/x/20260926-ef4f/20260926-6f71?metric=accuracy",
-      "/x/20260926-3f7e/20260926-6f71?metric=accuracy",
+      null,
       null,
     ]);
     expect(hrefs({ primary: "macro_f1/value" })[1]).toBe("/x/20260926-ef4f/20260926-6f71?metric=macro_f1");
@@ -389,4 +389,15 @@ describe("Leaderboard number formatting", () => {
     const hd = container.querySelector(".frow.head .f1.hd");
     expect(hd?.getAttribute("title")).toBe("errors/rate");
   });
+});
+
+test("paired-bootstrap and sign verdicts link while Welch and missing comparisons retain plain verdicts", () => {
+  for (const method of ["sign", "paired_bootstrap", "welch", null] as const) {
+    const candidate = { ...RF, vs_best: { ...RF.vs_best!, test: method } };
+    const { container, unmount } = render(<Leaderboard result={board({}, [SVM, candidate])} />);
+    const verdict = container.querySelectorAll(".vd")[1];
+    expect(Boolean(verdict?.querySelector("a"))).toBe(method === "sign" || method === "paired_bootstrap");
+    expect(verdict?.textContent).toContain("0.037");
+    unmount();
+  }
 });

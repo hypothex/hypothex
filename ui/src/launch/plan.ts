@@ -14,6 +14,7 @@ export const SLURM_MAX_GPUS = 8;
 
 export interface LaunchHost {
   name: string;
+  environment_id?: string | null;
   kind: LaunchHostKind;
   state: ConnState;
   since: string | null;
@@ -21,7 +22,7 @@ export interface LaunchHost {
   gpus: GpuInfo[];
   /** hx runs waiting for GPUs on this host. */
   queue: number;
-  slurm: { pending: number; running: number } | null;
+  slurm: { pending: number; running: number; defaults?: SlurmDefaults } | null;
   /** Projects with a repo mapped on the host; `null` means every project (the hub). */
   projects: string[] | null;
 }
@@ -81,6 +82,7 @@ export type GpuCell = "busy" | "free" | "other" | "stale" | "none";
 function fromRow(row: HostRow): LaunchHost {
   return {
     name: row.name,
+    environment_id: row.state.environment_id,
     kind: row.kind === "local" ? "hub" : row.kind,
     state: row.state.state,
     since: row.state.since,
@@ -213,6 +215,25 @@ export function gpusForHost(prev: number, host: LaunchHost, from: LaunchHost | n
   if (limit === 0) return 0;
   const forced = prev <= 0 && from !== null && gpuLimit(from) === 0;
   return Math.min(forced ? 1 : Math.max(prev, 0), limit);
+}
+
+/** Initial GPU request: an explicit template request wins, including CPU-only zero. */
+export function initialGpus(host: LaunchHost, requested?: number): number {
+  return requested ?? host.slurm?.defaults?.gpus ?? gpusForHost(1, host);
+}
+
+/** Resolve a template by verified environment identity, retaining unavailable hosts. */
+export function initialHost(
+  hosts: readonly LaunchHost[],
+  project: string,
+  preferred: string | null,
+  environment?: string,
+): string | null {
+  if (environment !== undefined) {
+    const matches = hosts.filter((host) => host.environment_id === environment);
+    return matches.length === 1 ? matches[0]!.name : null;
+  }
+  return preferred ?? pickHost(hosts, project, null);
 }
 
 /** The preferred host when it can take the run, else the available host with most free GPUs. */

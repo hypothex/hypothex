@@ -31,6 +31,13 @@ describe("buildUrl", () => {
 });
 
 describe("api", () => {
+  test("queued cancellation carries the atomic queue precondition; Stop does not", async () => {
+    const calls = mockFetch({ run_id: "r1", status: "killed" });
+    await api.cancelQueuedRun("r1", { command_id: "cancel-1" });
+    await api.stop("r1", { command_id: "stop-1" });
+    expect(calls[0]).toEqual({ url: "/api/v1/runs/r1/stop", method: "POST", body: { command_id: "cancel-1", created_by: "human", only_queued: true } });
+    expect(calls[1]?.body).toEqual({ command_id: "stop-1", created_by: "human" });
+  });
   test("leaderboard GETs the task route with repeated metric params", async () => {
     const calls = mockFetch({ project: "toy", task: "acc", rows: [] });
     const board = await api.leaderboard("toy", "acc", ["accuracy@v2"]);

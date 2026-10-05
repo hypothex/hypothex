@@ -435,3 +435,66 @@ def test_closed_subscription_does_not_hold_the_server(home: Path, ctx: Context) 
         assert [e.type for e in events] == ["test.event"]
         stopping = time.monotonic()
     assert time.monotonic() - stopping < 5  # uvicorn waits for open WebSocket handlers
+
+
+@pytest.mark.parametrize("failure", [404, 413, "large", "nested"])
+def test_complete_folder_fetch_reports_any_skipped_child(
+    tmp_path: Path, failure: int | str
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        rel = request.url.path.split("/files/", 1)[1]
+        if rel == "predictions":
+            return httpx.Response(
+                200,
+                json=[
+                    {"path": "predictions/good", "size": 2},
+                    {"path": "predictions/bad", "size": 99 if failure == "large" else 1},
+                ],
+                headers={"X-Hypothex-Dir": "1"},
+            )
+        if rel == "predictions/good":
+            return httpx.Response(200, content=b"ok")
+        if failure == "nested" and rel == "predictions/bad":
+            return httpx.Response(
+                200,
+                json=[{"path": "predictions/bad/missing", "size": 1}],
+                headers={"X-Hypothex-Dir": "1"},
+            )
+        return httpx.Response(failure if isinstance(failure, int) else 404)
+
+    client = _mock_client(handler)
+    assert (
+        client.fetch_file(
+            "r1", "predictions", tmp_path / "strict", max_bytes=10, require_complete=True
+        )
+        is False
+    )
+    # Mirroring intentionally retains its longstanding best-effort behavior.
+    assert client.fetch_file("r1", "predictions", tmp_path / "mirror", max_bytes=10) is True
+
+
+def test_complete_empty_folder_is_materialized(tmp_path: Path) -> None:
+    client = _mock_client(lambda _: httpx.Response(200, json=[], headers={"X-Hypothex-Dir": "1"}))
+    dest = tmp_path / "empty"
+    assert client.fetch_file("r1", "predictions", dest, max_bytes=10, require_complete=True)
+    assert dest.is_dir() and list(dest.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "error,may_have_been_sent",
+    [
+        (httpx.ConnectError, False),
+        (httpx.ConnectTimeout, False),
+        (httpx.PoolTimeout, False),
+        (httpx.ReadTimeout, True),
+        (httpx.WriteTimeout, True),
+        (httpx.ReadError, True),
+    ],
+)
+def test_transport_outcome_uses_typed_pre_send_evidence(
+    error: type[httpx.TransportError], may_have_been_sent: bool
+) -> None:
+    client = _mock_client(lambda _: (_ for _ in ()).throw(error("fake transport")))
+    with pytest.raises(EnvUnreachableError) as caught:
+        client.post_json("/api/v1/runs", {"command_id": "fake"})
+    assert caught.value.may_have_been_sent is may_have_been_sent

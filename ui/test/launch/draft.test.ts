@@ -49,6 +49,7 @@ describe("launchDefaults", () => {
     ];
     expect(launchDefaults(template, runs)).toEqual({
       draft: { command: "python train.py --lr 3e-4 --seed {seed}", seeds: "4, 5, 6" },
+      templateEnvironment: "env-5c1e",
       carry: { params: { lr: "3e-4" }, vars: { config: "configs/aug.yaml" } },
     });
   });
@@ -172,4 +173,13 @@ describe("checkDraft", () => {
       checkDraft({ ...OK, command: "python a.py --seed {seed} && echo done" }, G1, PROJECT).warnings,
     ).toEqual(["&& is passed to the program as text; use sh -c '…' for shell syntax"]);
   });
+});
+
+test("Queue cannot make a request larger than the host's total GPU capacity runnable", () => {
+  const host = launchHost({ gpus: [gpu(0), gpu(1)] });
+  expect(checkDraft({ ...OK, gpus: 4, queue: true }, host, PROJECT).blockers).toContain("4 GPUs requested; gpu1 has 2");
+  expect(checkDraft({ ...OK, gpus: 2, queue: true }, host, PROJECT).blockers).toEqual([]);
+  expect(checkDraft({ ...OK, gpus: 0 }, host, PROJECT).blockers).toEqual([]);
+  expect(checkDraft({ ...OK, gpus: 4 }, { ...host, kind: "slurm" }, PROJECT).blockers).toEqual([]);
+  expect(checkDraft({ ...OK, gpus: 4 }, { ...host, state: "disabled", gpus: [] }, PROJECT).blockers.some((message) => message.includes("has 0"))).toBe(false);
 });

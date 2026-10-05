@@ -1,7 +1,7 @@
-import sqlite3
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,6 +31,17 @@ def _body(**over: object) -> dict[str, object]:
     }
 
 
+def _issued(client: TestClient, accepted: dict[str, Any]) -> dict[str, Any]:
+    sid = accepted["spec"]["id"]
+
+    def current() -> dict[str, Any] | None:
+        result = client.get(f"/api/v1/sweeps/{sid}").json()
+        assert result["issuance"]["state"] not in {"incomplete", "interrupted"}, result
+        return result if result["issuance"]["state"] == "issued" else None
+
+    return wait_until(current, timeout=30)
+
+
 @pytest.fixture
 def client(home: Path, ctx: Context, toy_repo: Path) -> Iterator[TestClient]:
     ctx.register_project(toy_repo)
@@ -40,6 +51,9 @@ def client(home: Path, ctx: Context, toy_repo: Path) -> Iterator[TestClient]:
 
 def test_local_sweep_routes(client: TestClient, ctx: Context) -> None:
     first = client.post("/api/v1/sweeps", json=_body(command_id="S1")).json()
+    accepted = first
+    assert accepted["issuance"]["state"] == "queued"
+    first = _issued(client, accepted)
     sid = first["spec"]["id"]
     assert len(first["run_ids"]) == 4 and first["spec"]["host"] is None
     assert client.post("/api/v1/sweeps", json=_body(command_id="S1")).json()["spec"]["id"] == sid
@@ -49,9 +63,12 @@ def test_local_sweep_routes(client: TestClient, ctx: Context) -> None:
     assert [(s["id"], s["n_runs"]) for s in listed] == [(sid, 4)]
     assert client.get(f"/api/v1/sweeps/toy/{sid}").json()["spec"]["seeds"] == [1, 2]
     more = client.post(f"/api/v1/sweeps/toy/{sid}/extend", json={"seeds": [3]}).json()
+    assert more["issuance"]["state"] == "queued"
+    more = _issued(client, more)
     assert more["spec"]["seeds"] == [1, 2, 3] and len(more["run_ids"]) == 6
     again = client.post(f"/api/v1/sweeps/toy/{sid}/extend", json={"seeds": [3]})
-    assert again.status_code == 200 and len(again.json()["run_ids"]) == 6  # idempotent
+    assert again.status_code == 200
+    assert len(_issued(client, again.json())["run_ids"]) == 6  # only missing cells
     for rid in more["run_ids"]:
         control.wait_for_run(ctx, rid, timeout=60)
     cancelled = client.post(f"/api/v1/sweeps/toy/{sid}/cancel_queued", json={}).json()
@@ -60,20 +77,17 @@ def test_local_sweep_routes(client: TestClient, ctx: Context) -> None:
     assert client.get("/api/v1/sweeps/toy/s-000000").status_code == 404
 
 
-def test_a_sweep_retried_after_a_hub_crash_resumes(client: TestClient, ctx: Context) -> None:
+def test_create_retry_replays_original_acceptance_after_issuance(
+    client: TestClient, ctx: Context
+) -> None:
     first = client.post("/api/v1/sweeps", json=_body(command_id="S9")).json()
-    for rid in first["run_ids"]:
+    current = _issued(client, first)
+    for rid in current["run_ids"]:
         control.wait_for_run(ctx, rid, timeout=60)
-    # what a hub that died mid-call leaves behind: a receipt claimed by a dead process
-    with sqlite3.connect(ctx.events.path) as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO receipts(command_id, result, created_at) VALUES (?, ?, ?)",
-            ("S9", "__interrupted__:2026-10-04T00:00:00+00:00", "2026-10-04T00:00:00+00:00"),
-        )
-    again = client.post("/api/v1/sweeps", json=_body(command_id="S9"))
-    assert again.status_code == 200
-    assert again.json()["spec"]["id"] == first["spec"]["id"]
-    assert sorted(again.json()["run_ids"]) == sorted(first["run_ids"])  # no second run set
+    again = client.post("/api/v1/sweeps", json=_body(command_id="S9", seeds=[99]))
+    assert again.status_code == 200 and again.json() == first
+    assert first["issuance"]["state"] == "queued" and first["counts"]["total"] == 0
+    assert len(current["run_ids"]) == 4
 
 
 def test_a_sweep_is_found_by_id_alone(client: TestClient, ctx: Context) -> None:
@@ -97,6 +111,7 @@ def test_sweep_input_errors(client: TestClient) -> None:
 def test_remote_sweep_runs_on_the_host(tmp_path: Path) -> None:
     with remote_hub(tmp_path) as r:
         out = r.client.post("/api/v1/sweeps", json=_body(host="gpu1", command_id="RS")).json()
+        out = _issued(r.client, out)
         sid, ids = out["spec"]["id"], out["run_ids"]
         assert len(ids) == 4 and out["spec"]["host"] == "gpu1"
         assert set(ids) <= r.hub.index.run_ids()
@@ -118,6 +133,7 @@ def test_remote_cancel_queued_stops_queued_runs_on_the_host(
     with remote_hub(tmp_path) as r:
         body = _body(host="gpu1", seeds=[1], gpus=1, queue=True)
         out = r.client.post("/api/v1/sweeps", json=body).json()
+        out = _issued(r.client, out)
         sid, ids = out["spec"]["id"], out["run_ids"]
         assert len(ids) == 2
         wait_until(lambda: all(r.hub.find_record(i).status == RunStatus.QUEUED for i in ids))
@@ -288,11 +304,13 @@ def test_extend_runs_the_commit_and_diff_the_sweep_started_with(
         head = git(r.hub_repo, "rev-parse", "HEAD")
         stored = r.client.get(f"/api/v1/sweeps/toy/{out['spec']['id']}").json()["spec"]
         assert stored["commit"] == head and stored["diff"].strip() == diff.strip()
+        out = _issued(r.client, out)
         # the researcher keeps working on the hub checkout: commits, pushes, cleans up
         git(r.hub_repo, "checkout", "--", "infer.py")
         assert _commit_on(r.hub_repo, "NEW.txt") != head
         more = r.client.post(f"/api/v1/sweeps/toy/{out['spec']['id']}/extend", json={"seeds": [2]})
-        new = set(more.json()["run_ids"]) - set(out["run_ids"])
+        assert more.status_code == 200, more.text
+        new = set(_issued(r.client, more.json())["run_ids"]) - set(out["run_ids"])
         assert len(new) == 1
         owner = r.env if host else r.hub
         (added,) = [owner.find_record(rid) for rid in new]

@@ -105,7 +105,9 @@ def test_rerun_same_commit_runs_in_place(ctx: Context, toy_repo: Path) -> None:
             ctx, RunRequest(repo=toy_repo, command=cmd("print('hi')"), hypothesis="h")
         ).run_id,
     )
+    ctx.store.write_record(parent.model_copy(update={"end_reason": "old terminal cause"}))
     child = rerun(ctx, parent.run_id, background=False)
+    assert child.end_reason is None
     assert child.parent == parent.run_id and child.status == RunStatus.FINISHED
     assert child.cwd == parent.cwd and child.config_hash == parent.config_hash
     assert child.hypothesis.startswith(f"Rerun of {parent.run_id}")
@@ -138,7 +140,9 @@ def test_reinfer_uses_checkpoint_artifact(ctx: Context, toy_repo: Path) -> None:
     parent = execute_run(
         ctx, prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(code), task="toy-acc")).run_id
     )
+    ctx.store.write_record(parent.model_copy(update={"end_reason": "old terminal cause"}))
     child = reinfer(ctx, parent.run_id, background=False)
+    assert child.end_reason is None
     assert child.kind == RunKind.INFER and child.vars["checkpoint"] == "/tmp/model.pt"
     assert "inferred with /tmp/model.pt" in (ctx.run_dir(child) / "logs" / "stdout.log").read_text()
     assert [s.value for s in ctx.store.read_scores("toy", child.run_id)] == [0.75]
@@ -170,6 +174,7 @@ def test_repair_marks_dead_running_as_lost(ctx: Context) -> None:
     lost = repair_runs(ctx)
     assert [r.run_id for r in lost] == ["dead"]
     assert ctx.find_record("dead").status == RunStatus.LOST
+    assert ctx.find_record("dead").end_reason == "supervisor exited without recording a result"
     assert ctx.find_record("alive").status == RunStatus.RUNNING
 
 
@@ -389,6 +394,7 @@ def test_sigkill_of_supervisor_then_repair_marks_lost_and_kills_orphan(
     assert not process_alive(child, None)
     reasons = [e.payload.get("reason", "") for e in ctx.events.since(0) if e.type == "run.lost"]
     assert reasons and "orphaned process terminated" in reasons[-1]
+    assert lost.end_reason == reasons[-1]
 
 
 def test_stop_marker_before_start_ends_killed_without_starting(
@@ -401,6 +407,7 @@ def test_stop_marker_before_start_ends_killed_without_starting(
     assert done.started_at is None and done.executor.child_pid is None
     killed = [e for e in ctx.events.since(0) if e.type == "run.killed"]
     assert killed[-1].payload.get("reason") == "stopped before start"
+    assert done.end_reason == "stopped before start"
 
 
 # review fixes: reruns check out through prepare_run, repair skips gone runs, reinfer config
@@ -761,3 +768,41 @@ def test_a_worktree_is_never_released_through_a_host_copys_repo_path(
     _copy_from_host(ctx, repo=str(decoy))
     assert control.release_worktree(ctx, record) is False  # no git runs in the host's path
     assert tree.is_dir()
+
+
+def test_queued_cancel_persists_reason_without_changing_running_run(
+    ctx: Context, toy_repo: Path
+) -> None:
+    from hypothex.core.control import cancel_if_queued
+
+    queued = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    killed = cancel_if_queued(ctx, queued.run_id)
+    assert killed.end_reason == "cancelled while queued"
+    assert ctx.store.read_record(killed.project, killed.run_id).end_reason == killed.end_reason
+    _active(ctx, "still-running", RunStatus.RUNNING, os.getpid())
+    assert cancel_if_queued(ctx, "still-running").end_reason is None
+
+
+def test_checkout_failure_preserves_winning_end_without_false_event(
+    ctx: Context,
+    toy_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+
+    def fail_after_terminal(_ctx: Context, _record: RunRecord) -> None:
+        ctx.update_run(
+            record.run_id,
+            "run.lost",
+            lambda r: r.model_copy(
+                update={"status": RunStatus.LOST, "end_reason": "winning evidence"}
+            ),
+        )
+        raise RunError("checkout refused")
+
+    monkeypatch.setattr(control, "checkout_run_tree", fail_after_terminal)
+    with pytest.raises(RunError, match="checkout refused"):
+        control._checkout_before_submit(ctx, record)
+    done = ctx.find_record(record.run_id)
+    assert done.status == RunStatus.LOST and done.end_reason == "winning evidence"
+    assert [e.type for e in ctx.events.since(0)] == ["run.created", "run.lost"]

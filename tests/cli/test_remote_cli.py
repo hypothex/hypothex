@@ -32,6 +32,18 @@ def hx(*args: str) -> Any:
     return json.loads(result.stdout)
 
 
+def _issued_sweep(sweep_id: str) -> dict[str, Any]:
+    """Read current CLI sweep state until accepted member issuance completes."""
+
+    def current() -> dict[str, Any] | None:
+        summary = hx("sweep", "show", sweep_id)
+        state = summary["issuance"]["state"]
+        assert state not in {"incomplete", "interrupted"}, summary["issuance"]
+        return summary if state == "issued" else None
+
+    return wait_until(current, timeout=30)
+
+
 @pytest.fixture
 def in_repo(toy_repo: Path, home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(toy_repo)
@@ -220,10 +232,15 @@ def test_sweep_follow_ups_from_another_machine(
             "--grid", "x=1,2", "--seeds", "1", "--", *SWEEP_CMD,
         )  # fmt: skip
         sid = made["spec"]["id"]
+        assert made["issuance"]["state"] == "queued" and made["run_ids"] == []
         assert not (home / "store" / "toy" / "sweeps" / f"{sid}.yaml").exists()
         assert hx("sweep", "show", sid)["spec"]["id"] == sid
         assert hx("sweep", "show", sid, "-p", "toy")["spec"]["host"] == "gpu1"
-        more = hx("sweep", "extend", sid, "--seeds", "2")
+        assert len(_issued_sweep(sid)["run_ids"]) == 2
+        accepted = hx("sweep", "extend", sid, "--seeds", "2")
+        assert accepted["issuance"]["state"] == "queued"
+        assert accepted["issuance"]["episode"] == 2
+        more = _issued_sweep(sid)
         assert more["spec"]["seeds"] == [1, 2] and len(more["run_ids"]) == 4
         assert hx("sweep", "cancel", sid)["spec"]["id"] == sid
 
@@ -238,7 +255,10 @@ def test_sweep_on_a_host_and_pull(
             "sweep", "--host", "gpu1", "-t", "toy-acc", "-H", "remote sweep",
             "--grid", "x=1,2", "--seeds", "1", "--", *SWEEP_CMD,
         )  # fmt: skip
-        assert out["spec"]["host"] == "gpu1" and len(out["run_ids"]) == 2
+        assert out["spec"]["host"] == "gpu1"
+        assert out["issuance"]["state"] == "queued" and out["run_ids"] == []
+        out = _issued_sweep(out["spec"]["id"])
+        assert len(out["run_ids"]) == 2
         assert all(r.env.find_record(i).sweep_id == out["spec"]["id"] for i in out["run_ids"])
         record = seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
         wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)

@@ -3,7 +3,7 @@ The project file: ``hypothex.yaml``
 
 Every Hypothex project has one ``hypothex.yaml`` at the repository root. It declares
 the project's datasets, versioned metrics, tasks (a dataset plus the metrics that
-score it), stage command templates, and any setup needed before a stage runs.
+score it), stage command templates, and the Python command used for scoring.
 
 .. code-block:: yaml
 
@@ -39,10 +39,10 @@ score it), stage command templates, and any setup needed before a stage runs.
    stages:                         # command templates; {vars} are filled by hx
      train: python -m deepretro.train --config {config} --out {run_dir}/artifacts
      infer: python -m deepretro.infer --ckpt {checkpoint} --data {dataset.path} --out {run_dir}/predictions
-     eval:  hx eval --run {run_id}   # default: built-in metric runner
 
    env:
-     setup: uv sync                # optional, run before stages on a fresh host
+     python: [uv, run, python]      # runs metric functions and captures the environment
+     setup: uv sync                # accepted metadata; not executed by hx
 
 Sections
 --------
@@ -64,11 +64,16 @@ Sections
    and names the ``primary`` metric/key that the leaderboard sorts by.
 
 ``stages``
-   Named command templates (``train``, ``infer``, ``eval``, ...) that ``hx run``,
-   ``hx launch``, ``hx reinfer``, and ``hx reeval`` fill in and execute.
+   Named command templates (``train``, ``infer``, ...) that ``hx run`` and
+   ``hx launch`` select with ``--stage``. ``hx reinfer`` runs the ``infer``
+   template. Scoring is built in: ``hx reeval`` evaluates saved predictions with
+   the configured metric functions; it does not execute a stage command.
 
 ``env``
-   Optional setup command run before stages on a fresh host.
+   ``python`` is an argument list for the project's Python, used to run metric
+   functions and record the environment. When omitted, it defaults to
+   ``uv run --project <repo> python``. ``setup`` is accepted and stored but is
+   not executed yet; perform required setup yourself before launching runs.
 
 Validation
 ----------

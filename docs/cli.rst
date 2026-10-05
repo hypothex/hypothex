@@ -1,8 +1,9 @@
 The ``hx`` CLI
 ===============
 
-Every ``hx`` command supports ``--json`` for machine-readable output (a stable
-``pydantic`` ``model_dump(mode="json")``); agents should always pass it.
+Data commands support ``--json`` for machine-readable output; agents should use
+it where offered by ``--help``. Human-readable timestamps use the local timezone;
+JSON timestamps retain their recorded timezone.
 
 Discover
 --------
@@ -41,6 +42,9 @@ its host connection state.
 
 Show everything about a run: hypothesis, command, git commit, scores, and every path
 (code, config, logs, predictions, checkpoint) it touches.
+Human output also includes notes, tags, seed, parameters, template variables,
+parent/children, star state, exit code, persisted end reason, and timestamps.
+An errored score includes the last non-empty line of its error report.
 
 Run
 ---
@@ -50,6 +54,8 @@ Run
    hx init --json
 
 Write a starter ``hypothex.yaml`` in the current directory.
+An existing project in a parent directory requires ``--force`` before creating
+a nested project. ``--project`` must be a valid project name.
 
 .. code-block:: bash
 
@@ -62,6 +68,9 @@ Check ``hypothex.yaml``, metric imports, and dataset paths.
    hx run -t TASK -H WHY --seed 1 --json -- python train.py --seed {seed}
 
 Run a command in the foreground and record it.
+The process exit status remains separate from scoring: metric failures print
+``eval: N errors`` to stderr. A negative signal exit is mapped to the shell's
+``128 + signal`` status; the recorded process exit code stays unchanged.
 
 .. code-block:: bash
 
@@ -69,6 +78,10 @@ Run a command in the foreground and record it.
 
 Start a stage in the background; check progress with ``hx logs`` or ``hx show``.
 ``--wait`` blocks until the run ends.
+With ``--stage NAME`` and no explicit command, the stage template runs from the
+repository root even when invoked in a subdirectory. An explicit command after
+``--`` keeps the caller's directory unless ``--repo`` selects the repository;
+``--stage`` then labels and validates that stage rather than replacing the command.
 
 .. code-block:: bash
 
@@ -107,6 +120,8 @@ Evaluate
 
 Run the ``infer`` stage again with this run's checkpoint, recording a new run whose
 ``parent`` is the original.
+Use repeated ``--var name=value`` options to override its template variables,
+for example ``hx reinfer RUN_ID --var batch_size=32 --json``.
 
 .. code-block:: bash
 
@@ -124,6 +139,8 @@ Compare
    hx leaderboard TASK --json
 
 Rank seed groups of a task (mean +/- std over seeds) by the primary metric.
+Human output marks identical repeats as ``◇×N``, reports ``p`` separately from
+the test-set 95% interval, and warns about differing recorded metric source hashes.
 
 .. code-block:: bash
 
@@ -145,9 +162,11 @@ Page through a run's predictions with per-example scores.
 
 .. code-block:: bash
 
-   hx logs RUN_ID --follow --json
+   hx logs RUN_ID --follow
 
 Print a run's log tail, optionally following it until the run ends.
+Without an explicit ``--stream``, human output also shows stderr for a failed run.
+``--json`` returns one log chunk with its offset; it does not follow.
 
 Curate
 ------

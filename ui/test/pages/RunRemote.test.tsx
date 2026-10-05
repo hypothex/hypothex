@@ -54,7 +54,7 @@ test("a queued run: title with its place, the host queue, placement", async () =
   renderWithClient(<RunPage runId={QUEUED_ID} />, { registry });
   // the host is named once the hosts list matches the run's environment (executor.host is sv-a100-01)
   const h1 = await screen.findByRole("heading", { level: 1 });
-  await waitFor(() => expect(h1.textContent).toBe("lr 1e-3 with beam 1: queued 2nd on gpu1"));
+  await waitFor(() => expect(h1.textContent).toBe("lr 1e-3 with beam 1 · seed 3: queued 2nd on gpu1"));
   await waitFor(() => expect(statValues()).toEqual(["2 / 3", "2 GPU", "1 / 3", "12m"]));
   await waitFor(() => expect(document.querySelectorAll(".queue-t tbody tr").length).toBe(2));
   expect(regionNames()).toEqual(["a Queue", "b Where", "c Placement", "d Scores", "e Notes"]);
@@ -222,4 +222,22 @@ test("a lost run shows the reason its mirrored run.lost event carried", async ()
   const bar = screen.getByRole("status");
   expect(bar.querySelector("b")?.textContent).toBe("SLURM job 4471023 lost");
   expect(bar.querySelector("span")?.textContent).toBe(why);
+});
+
+test("an unmapped active environment is never treated as a hub run and cannot reconnect", async () => {
+  const detail = remoteDetail(runningRecord({ environment_id: "env-removed" }), null);
+  const calls = mockApi({ [`GET /api/v1/runs/${RUNNING_ID}`]: { ...detail, served: false }, [HOSTS_ROUTE]: HOSTS });
+  renderWithClient(<RunPage runId={RUNNING_ID} />, { registry });
+  const reconnect = await screen.findByRole("button", { name: "Reconnect" });
+  await waitFor(() => expect(reconnect.title).toContain("No configured host"));
+  expect(reconnect.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(reconnect);
+  expect(calls.filter((call) => call.method === "POST")).toHaveLength(0);
+});
+
+test("persisted lost reason is visible on a fresh run page with no event cache", async () => {
+  mockApi({ [`GET /api/v1/runs/${LOST_ID}`]: remoteDetail(lostRecord({ end_reason: "NODE_FAIL" })), [HOSTS_ROUTE]: HOSTS, [ENV_ROUTE]: HUB_ENV });
+  renderWithClient(<RunPage runId={LOST_ID} />, { registry });
+  expect(await screen.findByText("NODE_FAIL")).toBeTruthy();
+  expect(document.querySelector(".state-bar b")?.getAttribute("title")).toContain("persisted");
 });

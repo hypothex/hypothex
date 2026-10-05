@@ -1,3 +1,4 @@
+import { checkLayout, LAYOUT_WIDTHS } from "./layout-geometry";
 import {
   type BoardLite,
   demoTask,
@@ -121,4 +122,28 @@ test("view editor opens with a YAML editor and preview", async ({ page, theme })
   await expectTheme(page, theme);
   await expect(page.locator(".cm-editor")).toBeVisible();
   await expect(page.getByRole("button", { name: "Save", exact: true })).toBeVisible();
+});
+
+test("step7 overview and run geometry at narrow and breakpoint widths", async ({ page, request, theme }, info) => {
+  const { project, task } = demoTask("generic");
+  const runs = await getJson<RunLite[]>(request, `/api/v1/runs?project=${encodeURIComponent(project)}&task=${encodeURIComponent(task)}&status=finished&limit=1`);
+  const run = runs[0];
+  if (!run) throw new Error("generic demo lacks a finished run");
+  await page.goto("/");
+  await expectTheme(page, theme);
+  await expect(page.locator(".ov-grid")).toBeVisible();
+  for (const width of LAYOUT_WIDTHS) {
+    await checkLayout(page, info, "overview", width, [".ov-grid", ".idea .nm", ".projects"]);
+    const names = await page.locator(".idea .nm").evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().width));
+    for (const size of names) expect.soft(size).toBeGreaterThanOrEqual(140);
+  }
+  await page.goto(`/r/${run.run_id}`);
+  await expect(page.locator(".run-grid")).toBeVisible();
+  for (const width of LAYOUT_WIDTHS) {
+    await checkLayout(page, info, "run", width, [".run-top h1", ".run-top .actions", ".run-top button", ".run-grid > div"]);
+    if (width <= 1100) {
+      const columns = await page.locator(".run-grid").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length);
+      expect.soft(columns).toBe(1);
+    }
+  }
 });

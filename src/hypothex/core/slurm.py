@@ -987,7 +987,7 @@ def run_child(
     SQLite file is opened on the compute node. Scoring is left to the login
     node, so the git worktree of a pinned run is kept here; the login node
     removes it once it published the end (``sync_node_run``). At the end the
-    exit record ``exit.json`` (``status``, ``exit_code``, ``ended_at``) is
+    exit record ``exit.json`` (``status``, ``exit_code``, ``ended_at``, ``end_reason``) is
     written next to ``run.yaml``.
 
     Parameters
@@ -1023,6 +1023,7 @@ def run_child(
         "run_id": final.run_id,
         "status": final.status.value,
         "exit_code": final.exit_code,
+        "end_reason": final.end_reason,
         "ended_at": (final.ended_at or utcnow()).isoformat(),
     }
     atomic_write_text(ctx.run_dir(final) / EXIT_FILE, json.dumps(exit_record))
@@ -1223,6 +1224,8 @@ def _end_if_active(
         if current.status in TERMINAL_STATUSES and current.status not in replaces:
             return None
         ended = mutate(current)
+        if "reason" in payload:
+            ended = ended.model_copy(update={"end_reason": payload["reason"]})
         ctx.store.write_record(ended)
         ctx.events.append(
             event_type,
@@ -1459,6 +1462,9 @@ def _exit_fields(data: object) -> dict[str, Any] | str:
     exit_code = data.get("exit_code")
     if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int)):
         return f"exit_code {exit_code!r} is not an integer"
+    end_reason = data.get("end_reason")
+    if end_reason is not None and not isinstance(end_reason, str):
+        return "end_reason is not a string or null"
     raw = data.get("ended_at")
     ended_at: datetime | None = None
     if raw is not None:
@@ -1470,12 +1476,17 @@ def _exit_fields(data: object) -> dict[str, Any] | str:
             return f"ended_at {raw!r} is not an ISO 8601 time"
         if ended_at.tzinfo is None:
             ended_at = ended_at.replace(tzinfo=UTC)
-    return {"status": status, "exit_code": exit_code, "ended_at": ended_at}
+    return {
+        "status": status,
+        "exit_code": exit_code,
+        "ended_at": ended_at,
+        "end_reason": end_reason,
+    }
 
 
 def _read_exit(run_dir: Path) -> dict[str, Any] | None:
     """
-    The node's exit record, checked: ``status`` (an end status), ``exit_code``, ``ended_at``.
+    The node's exit record, checked, including its nullable terminal cause.
 
     None when there is none, and (with a warning) when it cannot be used: a
     bad record must never stop the poll at this run (or at the runs after it).
@@ -1506,6 +1517,7 @@ def _apply_exit(exit_record: dict[str, Any]) -> Callable[[RunRecord], RunRecord]
                 "status": exit_record["status"],
                 "exit_code": exit_record["exit_code"],
                 "ended_at": exit_record["ended_at"] or utcnow(),
+                "end_reason": exit_record.get("end_reason"),
             }
         )
 

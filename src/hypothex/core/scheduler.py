@@ -28,6 +28,7 @@ from hypothex.core.errors import HypothexError, RunError
 from hypothex.core.execution import (
     QUEUE_FILE,
     SUPERVISOR_PID_FILE,
+    _update_terminal_run,
     spawn_supervisor,
     write_queue_marker,
 )
@@ -90,10 +91,6 @@ def _set_ticket(ticket: int) -> Callable[[RunRecord], RunRecord]:
         return r.model_copy(update={"executor": executor})
 
     return mutate
-
-
-_spawn_failed = end_unstarted(RunStatus.FAILED)
-"""Fail a run whose supervisor never started; it gives back its GPUs and queue place."""
 
 
 @dataclass(frozen=True)
@@ -330,10 +327,13 @@ class Scheduler:
                         continue
                     # never committed: nothing runs, so the GPUs go back
                     marker.unlink(missing_ok=True)
-                    self.ctx.update_run(
+                    _update_terminal_run(
+                        self.ctx,
                         entry.run_id,
                         "run.failed",
-                        _spawn_failed,
+                        end_unstarted(
+                            RunStatus.FAILED, reason=f"could not start the supervisor: {exc}"
+                        ),
                         {"reason": f"could not start the supervisor: {exc}"},
                     )
                     continue

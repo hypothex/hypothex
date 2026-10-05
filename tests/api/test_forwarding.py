@@ -380,6 +380,16 @@ def test_a_launch_here_never_runs_in_a_host_copys_repo_path(
     assert ctx.store.load_project("toy").remote_host == "gpu1"
 
 
+def _issued_sweep(client: TestClient, accepted: dict[str, Any]) -> dict[str, Any]:
+    def current() -> dict[str, Any] | None:
+        response = client.get(f"/api/v1/sweeps/{accepted['spec']['id']}")
+        assert response.status_code == 200, response.text
+        result = response.json()
+        return result if result["issuance"]["state"] == "issued" else None
+
+    return wait_until(current, timeout=30)
+
+
 def test_a_host_sweep_never_sends_the_diff_of_a_host_copys_repo_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -390,7 +400,13 @@ def test_a_host_sweep_never_sends_the_diff_of_a_host_copys_repo_path(
     def fake_launch(c: Context, req: RunRequest) -> RunRecord:
         seen.append(req)
         return c.create_run(
-            make_record(f"fake{len(seen)}", environment_id=c.descriptor.environment_id)
+            make_record(
+                f"fake{len(seen)}",
+                environment_id=c.descriptor.environment_id,
+                tags=req.tags,
+                params=req.params,
+                seed=req.seed,
+            )
         )
 
     monkeypatch.setattr(control, "launch_run", fake_launch)
@@ -408,6 +424,7 @@ def test_a_host_sweep_never_sends_the_diff_of_a_host_copys_repo_path(
         }
         resp = r.client.post("/api/v1/sweeps", json=body)
         assert resp.status_code == 200, resp.text
+        _issued_sweep(r.client, resp.json())
         [req] = seen
         assert (req.commit, req.diff) == (None, None)
 
@@ -474,7 +491,8 @@ def test_a_sweep_on_a_fake_8_gpu_host_queues_and_gives_each_run_its_own_gpus(
             "queue": True,
         }
         out = r.client.post("/api/v1/sweeps", json=body).json()
-        ids = out["run_ids"]
+        assert out["issuance"]["state"] == "queued"
+        ids = _issued_sweep(r.client, out)["run_ids"]
         assert len(ids) == 5
 
         def hub_view() -> dict[str, RunRecord]:

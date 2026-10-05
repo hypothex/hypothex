@@ -1,7 +1,7 @@
 /**
  * Remote run state for the run page (spec 5.6, 8A.5, 8A.8): the phase a run is shown in,
  * the hosts row that serves it, and the short texts each phase needs. Pure functions; the
- * page does the fetching. A run is remote when its detail has a `host_state`; its host is
+ * page does the fetching. Serving availability is separate from connection state; the host is
  * found by `environment_id`, never by `executor.host` (the backend writes the machine's own
  * hostname there, on every run).
  */
@@ -21,15 +21,15 @@ import type { CostTotals, GpuInfo, HostRow, RunDetail, RunRecord } from "./types
 export type RunPhase = "local" | "queued" | "pending" | "running" | "stale" | "lost" | "ended";
 
 /**
- * The phase of a run. `host_state` null (or missing, on a phase 1 server) is a hub run: the
- * backend sets it only for runs of a host's environment. `executor.host` says nothing here,
+ * The phase of a run. A served run with null `host_state` belongs to the hub. An unserved
+ * run with null state is unmapped, so it is never treated as local. `executor.host` says nothing here,
  * since the backend fills it on every run, hub runs too.
  */
 export function runPhase(detail: RunDetail): RunPhase {
   const record = detail.record;
   if (record.status === "lost") return "lost";
   const conn = detail.host_state ?? null;
-  if (conn === null) return "local";
+  if (conn === null && detail.served !== false) return "local";
   const active = record.status === "queued" || record.status === "running";
   if (active && conn !== "connected") return "stale";
   if (record.status === "queued") return record.executor.slurm_job_id ? "pending" : "queued";
@@ -42,7 +42,7 @@ export function runPhase(detail: RunDetail): RunPhase {
  * `environment_id`); null for a hub run, or while the hosts list is not loaded or failed.
  */
 export function runHostRow(detail: RunDetail, hosts: readonly HostRow[] | undefined): HostRow | null {
-  if ((detail.host_state ?? null) === null) return null;
+  if (detail.served === false || (detail.host_state ?? null) === null) return null;
   return hostRowForRun(detail.record, hosts);
 }
 
@@ -112,7 +112,7 @@ const REASON_TIP = "Reason from the run's run.lost event.";
  * What a lost run's record says: the SLURM job, the node, when, and the exit code. The env
  * server's own reason (`SLURM ended job 4471023 with NODE_FAIL on r814u05n01; no exit
  * record`) is in the `run.lost` event, not in the run detail: pass it as `reason` when the
- * tab saw that event (`useLostReason`), and it comes first. Without it the words stay
+ * tab saw that event (`useLostReason`). A persisted end_reason takes precedence. Without either the words stay
  * neutral: a job lost to `NODE_FAIL` is still in `sacct`, and a dead supervisor is only one
  * of the causes, so neither is guessed here.
  */
@@ -123,8 +123,9 @@ export function lostReason(record: RunRecord, reason: string | null = null): Los
   if (record.ended_at) parts.push(fmtTime(record.ended_at));
   parts.push(record.exit_code === null ? "no exit code" : `exit ${record.exit_code}`);
   const title = ex.slurm_job_id ? `SLURM job ${ex.slurm_job_id} lost` : "run lost";
-  const why = reason?.trim() ?? "";
-  return why === "" ? { title, tooltip: LOST_TIP, parts } : { title, tooltip: REASON_TIP, parts: [why, ...parts] };
+  const persisted = record.end_reason?.trim() ?? "";
+  const why = persisted || reason?.trim() || "";
+  return why === "" ? { title, tooltip: LOST_TIP, parts } : { title, tooltip: persisted ? "Reason persisted in the run record." : REASON_TIP, parts: [why, ...parts] };
 }
 
 /**

@@ -3,7 +3,7 @@
  * command_id. A run waiting in a queue can only be cancelled; a run on an unreachable host
  * offers Reconnect; a lost run makes Rerun the main action.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { EvalReport } from "../../api/models";
 import { HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "../../api/queries";
@@ -17,6 +17,9 @@ import { useAction } from "./useAction";
 export interface RunActionsProps {
   record: RunRecord;
   phase?: RunPhase;
+  /** Authoritative routing availability from RunDetail, independent of connection state. */
+  served: boolean;
+  hostsLoaded?: boolean;
   /**
    * The hub's name for the run's host (`runHostRow(...)?.name`); null for a hub run or while
    * the hosts list is not loaded. Never `executor.host`: that is the machine's hostname, and
@@ -27,7 +30,14 @@ export interface RunActionsProps {
   inferStage?: boolean;
 }
 
-export function RunActions({ record, phase = "local", hostName = null, inferStage }: RunActionsProps) {
+export function RunActions({
+  record,
+  phase = "local",
+  hostName = null,
+  served,
+  hostsLoaded = false,
+  inferStage,
+}: RunActionsProps) {
   const navigate = useNavigateHref();
   const id = record.run_id;
   const label = hostName ?? record.host;
@@ -52,12 +62,27 @@ export function RunActions({ record, phase = "local", hostName = null, inferStag
     invalidate: refresh,
     onSuccess: setReport,
   });
-  const stop = useAction({ send: (_: void, opts) => api.stop(id, opts), invalidate: refresh });
+  const stop = useAction({
+    send: (onlyQueued: boolean, opts) => onlyQueued ? api.cancelQueuedRun(id, opts) : api.stop(id, opts),
+    invalidate: refresh,
+  });
   const reconnect = useAction<HostState>({
     send: (_: void, opts) => api.connectHost(hostName ?? "", opts),
     invalidate: HOST_EVENT_INVALIDATES,
   });
   const active = ACTIVE_STATUSES.has(record.status);
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    setArmed(false);
+  }, [id, record.status, served, phase]);
+  useEffect(() => {
+    if (!armed) return;
+    const timer = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(timer);
+  }, [armed]);
+  const unavailable = hostsLoaded
+    ? "No configured host serves this run's environment"
+    : "The hosts list is not loaded; this run's serving host is unknown";
   const error = rerun.error ?? reinfer.error ?? reeval.error ?? stop.error ?? reconnect.error;
   const waiting = phase === "queued" || phase === "pending";
   const lost = phase === "lost";
@@ -68,10 +93,10 @@ export function RunActions({ record, phase = "local", hostName = null, inferStag
           <button
             type="button"
             className="btn primary"
-            disabled={stop.pending}
-            onClick={() => stop.run()}
+            disabled={!served || stop.pending}
+            onClick={() => stop.run(true)}
             title={
-              phase === "pending" && record.executor.slurm_job_id
+              !served ? unavailable : phase === "pending" && record.executor.slurm_job_id
                 ? `Cancel SLURM job ${record.executor.slurm_job_id}`
                 : `Remove from the ${label} queue`
             }
@@ -83,19 +108,19 @@ export function RunActions({ record, phase = "local", hostName = null, inferStag
             <button
               type="button"
               className="btn primary"
-              disabled={reconnect.pending || hostName === null}
+              disabled={!served || reconnect.pending || hostName === null}
               onClick={() => {
                 if (hostName !== null) reconnect.run();
               }}
               title={
-                hostName === null
-                  ? `The hosts list is not loaded, so the hub's name for ${record.host} is unknown`
+                !served ? unavailable : hostName === null
+                  ? hostsLoaded ? unavailable : `The hosts list is not loaded, so the hub's name for ${record.host} is unknown`
                   : `Try ${hostName} again now`
               }
             >
               Reconnect
             </button>
-            <button type="button" className="btn" disabled title={`${label} is unreachable`}>
+            <button type="button" className="btn" disabled title={!served ? unavailable : `${label} is unreachable`}>
               Stop
             </button>
           </>
@@ -104,19 +129,19 @@ export function RunActions({ record, phase = "local", hostName = null, inferStag
             <button
               type="button"
               className={lost ? "btn primary" : "btn"}
-              disabled={rerun.pending}
+              disabled={!served || rerun.pending}
               onClick={() => rerun.run()}
-              title="Run again with the same command, code, and seed"
+              title={!served ? unavailable : "Run again with the same command, code, and seed"}
             >
               Rerun
             </button>
             <button
               type="button"
               className="btn"
-              disabled={reinfer.pending || inferStage !== true}
+              disabled={!served || reinfer.pending || inferStage !== true}
               onClick={() => reinfer.run()}
               title={
-                inferStage === true
+                !served ? unavailable : inferStage === true
                   ? "Run the infer stage again on this run's checkpoint"
                   : inferStage === false ? "Task has no infer stage" : "Infer stage not loaded"
               }
@@ -126,23 +151,35 @@ export function RunActions({ record, phase = "local", hostName = null, inferStag
             <button
               type="button"
               className={lost ? "btn" : "btn primary"}
-              disabled={reeval.pending}
+              disabled={!served || reeval.pending}
               onClick={() => {
                 setReport(null);
                 reeval.run();
               }}
-              title="Re-score saved predictions with the current metric versions"
+              title={!served ? unavailable : "Re-score saved predictions with the current metric versions"}
             >
               Re-evaluate
             </button>
             <button
               type="button"
               className="btn"
-              disabled={!active || stop.pending}
-              onClick={() => stop.run()}
-              title={active ? "Stop this run" : "The run is not active"}
+              disabled={!served || !active || stop.pending}
+              onClick={() => {
+                if (!served || !active || stop.pending) return;
+                if (armed) {
+                  setArmed(false);
+                  stop.run(false);
+                } else {
+                  setArmed(true);
+                }
+              }}
+              onBlur={() => setArmed(false)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setArmed(false);
+              }}
+              title={!served ? unavailable : active ? (armed ? "Click again to stop this run" : "Stop this run") : "The run is not active"}
             >
-              Stop
+              {armed ? "Stop ✓?" : "Stop"}
             </button>
           </>
         )}

@@ -72,6 +72,8 @@ GROUP_FIELDS = (
 )
 """Keys of a ``groups`` source row (one row per seed group, in version order)."""
 FIELD_PREFIXES = ("usage.", "params.", "vars.")
+FILTER_METRIC_COLUMNS = {"scores": "metric", "metrics": "name", "samples": "name"}
+"""The row key of each source that holds a metric name, checked in ``data.filter``."""
 VEGA_ROOT_KEYS = frozenset({"mark", "layer", "concat", "hconcat", "vconcat", "facet", "repeat"})
 
 CONTEXT_RUNS = 20
@@ -80,6 +82,8 @@ VEGA_BLOCKED_KEYS = frozenset({"url", "href", "embedOptions"})
 VERSION_REF = "version"
 VEGA_MAX_DEPTH = 64
 VEGA_MAX_NODES = 10_000
+MAX_PANEL_REFS = 100
+"""Most entries in one panel's ``data.metrics``; each one is a value per run."""
 NO_ANCHORS = "YAML anchors and aliases are not allowed"
 
 Loc = tuple[str | int, ...]
@@ -148,6 +152,14 @@ class PanelData(BaseModel):
     step_metric: str | None = None
     max_points: int | None = Field(None, ge=2, le=500)
     """Curves only: points per run and metric; None retains the 500-point default."""
+
+    @field_validator("metrics")
+    @classmethod
+    def _few_metrics(cls, value: list[str] | None) -> list[str] | None:
+        """Reject more than ``MAX_PANEL_REFS`` metric references."""
+        if value is not None and len(value) > MAX_PANEL_REFS:
+            raise ValueError(f"a panel lists at most {MAX_PANEL_REFS} metrics, not {len(value)}")
+        return value
 
 
 def _default_noise() -> list[Noise]:
@@ -413,6 +425,65 @@ def _example_field_problem(
     return f"unknown per-example field {name}", _closest(name, fields)
 
 
+def _row_fields(source: Source, known_fields: dict[str, set[str]], *, version: bool) -> set[str]:
+    """
+    Return the keys a row of ``source`` may have, or an empty set when none are known.
+
+    Parameters
+    ----------
+    source : Source
+        Data source of the rows.
+    known_fields : dict of str to set of str
+        Row fields per source seen for the task (``view_context``).
+    version : bool
+        Whether ``runs`` rows carry the synthetic ``version`` key (table rows do).
+
+    Returns
+    -------
+    set of str
+        ``GROUP_FIELDS`` for ``groups``; else the seen fields plus ``ROW_KEYS``.
+
+    Examples
+    --------
+    >>> sorted(_row_fields("runs", {"runs": {"status"}}, version=True))
+    ['group_id', 'label', 'run_id', 'seed', 'status', 'version']
+    >>> _row_fields("scores", {}, version=True)
+    set()
+    """
+    if source == "groups":
+        return set(GROUP_FIELDS)
+    known = known_fields.get(source, set())
+    if not known:
+        return set()
+    return known | ROW_KEYS | ({VERSION_REF} if version and source == "runs" else set())
+
+
+def _filter_issues(
+    panel: PanelSpec, at: Loc, known_metrics: set[str], known_fields: dict[str, set[str]]
+) -> list[tuple[Loc, str, str | None]]:
+    """
+    Return ``(loc, message, suggestion)`` for unknown ``data.filter`` keys and metric names.
+
+    A ``table`` or ``vega_lite`` panel filters rows of its source; every other
+    panel filters ``runs`` rows (without ``version``). A key is checked only when
+    the source's fields are known, a metric name only when metrics are known.
+    """
+    flt = panel.data.filter or {}
+    source_rows = panel.type in ("table", "vega_lite")
+    source: Source = (panel.data.source or "runs") if source_rows else "runs"
+    allowed = _row_fields(source, known_fields, version=source_rows)
+    out: list[tuple[Loc, str, str | None]] = []
+    for key, want in flt.items():
+        loc: Loc = (*at, "data", "filter", key)
+        if allowed and key not in allowed:
+            out.append((loc, f"unknown filter key {key} in {source}", _closest(key, allowed)))
+        elif key == FILTER_METRIC_COLUMNS.get(source) and known_metrics:
+            for name in want if isinstance(want, list) else [want]:
+                if isinstance(name, str) and name not in known_metrics:
+                    out.append((loc, f"unknown metric {name}", _closest(name, known_metrics)))
+    return out
+
+
 class _SpecTooBig(Exception):
     """Raised inside ``vega_spec_problems`` when a spec passes a size bound."""
 
@@ -510,12 +581,8 @@ def _panel_issues(
             out.append(((*at, "data", "y"), *problem))
     if panel.type in ("table", "vega_lite") and data.source is None:
         out.append(((*at, "data"), f"{panel.type} needs data.source", None))
-    known = known_fields.get(data.source, set()) if data.source else set()
-    if data.source == "groups":
-        known = set(GROUP_FIELDS)
-    if known:
-        row_keys = set() if data.source == "groups" else ROW_KEYS
-        allowed = known | row_keys | ({VERSION_REF} if data.source == "runs" else set())
+    allowed = _row_fields(data.source, known_fields, version=True) if data.source else set()
+    if allowed:
         for j, name in enumerate(data.fields or []):
             if name not in allowed:
                 out.append(
@@ -525,6 +592,7 @@ def _panel_issues(
                         _closest(name, allowed),
                     )
                 )
+    out += _filter_issues(panel, at, known_metrics, known_fields)
     if panel.type == "scatter" and not data.x:
         out.append(((*at, "data"), "scatter needs data.x", None))
     if panel.type == "markdown" and not panel.text:

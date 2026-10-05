@@ -187,6 +187,29 @@ def test_metrics_source_reads_the_file_of_a_live_or_lost_run(
     ]
 
 
+def test_metrics_source_keeps_a_bounded_history_of_a_live_run(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core.thin import MAX_POINTS_PER_METRIC
+
+    rec = _run(ctx, toy_repo, "r1", status=RunStatus.RUNNING)
+    n = 5 * MAX_POINTS_PER_METRIC
+    _jsonl(
+        ctx.run_dir(rec) / "metrics.jsonl",
+        [{"name": "loss", "step": s, "value": 7.0 if s == 4321 else 1.0} for s in range(n)],
+    )
+
+    def no_full_read(*_: Any) -> None:
+        raise AssertionError("a live run's metrics.jsonl was parsed in full")
+
+    monkeypatch.setattr(ctx.store, "read_metric_points", no_full_read)
+    rows = list(iter_rows(ctx, [rec], "metrics"))
+    steps = [r["step"] for r in rows]
+    assert len(rows) == MAX_POINTS_PER_METRIC
+    assert {0, 4321, n - 1} <= set(steps)
+    assert len(metric_points(ctx, [rec])["r1"]) == MAX_POINTS_PER_METRIC
+
+
 def test_metrics_source_keeps_only_the_given_names(ctx: Context, toy_repo: Path) -> None:
     done = _run(ctx, toy_repo, "r1")
     live = _run(ctx, toy_repo, "r2", minute=1, status=RunStatus.RUNNING)
@@ -218,6 +241,7 @@ def test_metric_points_reads_ended_runs_from_the_index_in_one_query(
         raise AssertionError("an ended run's metrics.jsonl was parsed")
 
     monkeypatch.setattr(ctx.store, "read_metric_points", no_file)
+    monkeypatch.setattr(ctx.store, "read_metric_points_bounded", no_file)
     calls: list[list[str]] = []
     real = ctx.index.metric_points_for
 
@@ -397,6 +421,28 @@ def test_rows_carry_group_labels_and_accept_overrides(ctx: Context, toy_repo: Pa
     assert [(r["group_id"], r["label"]) for r in rows] == [("aaaa@c1", "svm"), ("bbbb@c1", "rf")]
     rows = list(iter_rows(ctx, [a, b], "runs", fields=[], labels={"bbbb@c1": "forest"}))
     assert [r["label"] for r in rows] == ["svm", "forest"]
+
+
+def test_metrics_rows_hold_one_runs_points_at_a_time(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recs = [_run(ctx, toy_repo, f"r{i}", minute=i) for i in range(3)]
+    for rec in recs:
+        _jsonl(ctx.run_dir(rec) / "metrics.jsonl", [{"name": "loss", "step": 0, "value": 1.0}])
+        _index_metrics(ctx, rec)
+    calls: list[list[str]] = []
+    real = ctx.index.metric_points_for
+
+    def spy(run_ids: Any, names: Any = None) -> Any:
+        calls.append(list(run_ids))
+        return real(run_ids, names)
+
+    monkeypatch.setattr(ctx.index, "metric_points_for", spy)
+    rows = iter_rows(ctx, recs, "metrics")
+    assert next(rows)["run_id"] == "r0"
+    assert calls == [["r0"]]  # a table over many runs never holds every run's history
+    assert [r["run_id"] for r in rows] == ["r1", "r2"]
+    assert calls == [["r0"], ["r1"], ["r2"]]
 
 
 def test_predictions_of_a_host_copy_never_read_its_repo_path(ctx: Context, toy_repo: Path) -> None:

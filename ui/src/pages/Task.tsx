@@ -49,6 +49,7 @@ export function boardMeta(board: Leaderboard): string[] {
     ...Object.entries(board.metric_versions).map(([metric, version]) => `${metric} ${version}`),
   ];
   if (board.needs_reeval.length > 0) out.push(`${board.needs_reeval.length} need re-eval`);
+  if (board.unscored.length > 0) out.push(`${board.unscored.length} unscored`);
   return out;
 }
 
@@ -115,6 +116,7 @@ function NewRun({ project, task, templateRunId, onClose, onLaunched }: NewRunPro
       task={task}
       repo={repo}
       initial={defaults.draft}
+      templateEnvironment={defaults.templateEnvironment}
       carry={defaults.carry}
       seedsNote={defaults.seedsNote}
       onClose={onClose}
@@ -241,6 +243,7 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
       {board.error ? <ErrorBox error={board.error} /> : null}
       {board.data ? (
         <p className="metaline">
+          {board.data.metric_drift?.length ? <span role="img" aria-label="Metric source drift" title={`Different stored metric source hashes: ${board.data.metric_drift.join(", ")}`}>⚠</span> : null}
           {boardMeta(board.data).map((text) => (
             <span key={text}>{text}</span>
           ))}

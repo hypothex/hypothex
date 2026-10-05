@@ -67,7 +67,7 @@ function HeatCell({ id, cell, isBest, level, maxSeeds, names, seeds, stateOf }: 
       {isBest ? <span className="bm">◆ best</span> : null}
       <span className="v" title={cellTip(cell, names, seeds)}>
         {scored ? fmtScore(cell.mean) : "·"}
-        {scored && cell.n < maxSeeds ? <small>{`n=${cell.n}`}</small> : null}
+        {(scored && cell.n < maxSeeds) || cell.uncounted ? <small>{`n=${cell.n}${cell.uncounted ? ` +${cell.uncounted}` : ""}`}</small> : null}
       </span>
       <SweepRunList runs={cell.runs} stateOf={stateOf} />
     </td>

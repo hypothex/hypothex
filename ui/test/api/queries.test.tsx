@@ -450,3 +450,19 @@ test("useHubEnvironment shares one descriptor query and keeps disabled consumers
   first.unmount();
   second.unmount();
 });
+
+test("active sweep polling catches a terminal failure without any run event", async () => {
+  const { qc, wrapper } = setup();
+  let count = 0;
+  const issuance = { state: "queued", episode: 1, revision: 1, planned: 4, accepted_at: "now", updated_at: "now", cancel_requested: false, reason: null, error: null, resume: null };
+  mockApi({ "GET /api/v1/sweeps/toy/s-async": () => {
+    count += 1;
+    return { ...SWEEP, issuance: count === 1 ? issuance : { ...issuance, state: "incomplete", revision: 2, error: { type: "LaunchError", message: "no host" } } };
+  } });
+  const { result, unmount } = renderHook(() => useSweep("toy", "s-async"), { wrapper });
+  await waitFor(() => expect(result.current.data?.issuance?.state).toBe("queued"));
+  await waitFor(() => expect(result.current.data?.issuance?.state).toBe("incomplete"), { timeout: 4500 });
+  expect(count).toBe(2);
+  unmount();
+  qc.clear();
+});

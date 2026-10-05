@@ -380,6 +380,16 @@ def test_a_launch_here_never_runs_in_a_host_copys_repo_path(
     assert ctx.store.load_project("toy").remote_host == "gpu1"
 
 
+def _issued_sweep(client: TestClient, accepted: dict[str, Any]) -> dict[str, Any]:
+    def current() -> dict[str, Any] | None:
+        response = client.get(f"/api/v1/sweeps/{accepted['spec']['id']}")
+        assert response.status_code == 200, response.text
+        result = response.json()
+        return result if result["issuance"]["state"] == "issued" else None
+
+    return wait_until(current, timeout=30)
+
+
 def test_a_host_sweep_never_sends_the_diff_of_a_host_copys_repo_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -390,7 +400,13 @@ def test_a_host_sweep_never_sends_the_diff_of_a_host_copys_repo_path(
     def fake_launch(c: Context, req: RunRequest) -> RunRecord:
         seen.append(req)
         return c.create_run(
-            make_record(f"fake{len(seen)}", environment_id=c.descriptor.environment_id)
+            make_record(
+                f"fake{len(seen)}",
+                environment_id=c.descriptor.environment_id,
+                tags=req.tags,
+                params=req.params,
+                seed=req.seed,
+            )
         )
 
     monkeypatch.setattr(control, "launch_run", fake_launch)
@@ -408,6 +424,7 @@ def test_a_host_sweep_never_sends_the_diff_of_a_host_copys_repo_path(
         }
         resp = r.client.post("/api/v1/sweeps", json=body)
         assert resp.status_code == 200, resp.text
+        _issued_sweep(r.client, resp.json())
         [req] = seen
         assert (req.commit, req.diff) == (None, None)
 
@@ -474,11 +491,19 @@ def test_a_sweep_on_a_fake_8_gpu_host_queues_and_gives_each_run_its_own_gpus(
             "queue": True,
         }
         out = r.client.post("/api/v1/sweeps", json=body).json()
-        ids = out["run_ids"]
+        assert out["issuance"]["state"] == "queued"
+        ids = _issued_sweep(r.client, out)["run_ids"]
         assert len(ids) == 5
 
         def hub_view() -> dict[str, RunRecord]:
-            return {rid: r.hub.find_record(rid) for rid in ids}
+            # The API overlays live queue ranks on immutable persisted FIFO tickets.
+            response = r.client.get("/api/v1/runs")
+            assert response.status_code == 200, response.text
+            return {
+                row["run_id"]: RunRecord.model_validate(row)
+                for row in response.json()
+                if row["run_id"] in ids
+            }
 
         def split(view: dict[str, RunRecord]) -> tuple[list[RunRecord], list[RunRecord]]:
             running = [x for x in view.values() if x.status == RunStatus.RUNNING]
@@ -511,6 +536,9 @@ def test_a_sweep_on_a_fake_8_gpu_host_queues_and_gives_each_run_its_own_gpus(
         assert sorted(held) == list(range(8))  # disjoint, and all 8 in use
         [last] = waiting
         assert last.executor.gpus == []
+        assert last.executor.queue_position == 1
+        assert r.hub.find_record(last.run_id).executor.queue_position == 5
+        assert r.env.find_record(last.run_id).executor.queue_position == 5
         # the host's records agree with the hub's mirror
         assert {x.run_id: x.executor.gpus for x in running} == {
             x.run_id: r.env.find_record(x.run_id).executor.gpus for x in running

@@ -468,6 +468,29 @@ def ecdf_points(values: Sequence[float], max_points: int = 200) -> list[tuple[fl
     return points
 
 
+def _lttb_axis(values: Sequence[float]) -> list[float]:
+    """
+    Center and scale a finite axis without losing large integer step differences.
+
+    Parameters
+    ----------
+    values : sequence of float
+        Nonempty coordinates; integer coordinates retain exact subtraction.
+
+    Returns
+    -------
+    list of float
+        Bounded coordinates with the same relative geometry. When subtraction
+        overflows, scale the original values, whose spread is already large.
+    """
+    shifted = [value - values[0] for value in values]
+    scale = max(abs(value) for value in shifted) or 1.0
+    if math.isfinite(scale):
+        return [value / scale for value in shifted]
+    scale = max(abs(value) for value in values) or 1.0
+    return [value / scale for value in values]
+
+
 def lttb(xs: Sequence[float], ys: Sequence[float], limit: int) -> list[int]:
     """
     Indices of at most ``limit`` points that keep a line's shape (LTTB).
@@ -477,7 +500,9 @@ def lttb(xs: Sequence[float], ys: Sequence[float], limit: int) -> list[int]:
     size (exact integer bounds); from each bucket the point that makes the
     largest triangle with the point kept before it and the mean of the next
     bucket is kept (the first on a tie), so peaks such as a loss spike survive
-    the thinning, unlike every-n-th sampling.
+    the thinning, unlike every-n-th sampling. Each axis is centered and rescaled
+    before computing triangle areas, preserving large integer step differences
+    and preventing overflow for finite extreme values.
 
     Parameters
     ----------
@@ -510,6 +535,8 @@ def lttb(xs: Sequence[float], ys: Sequence[float], limit: int) -> list[int]:
     n = len(xs)
     if n <= limit:
         return list(range(n))
+    xs = _lttb_axis(xs)
+    ys = _lttb_axis(ys)
     inner = limit - 2
     out = [0]
     kept = 0

@@ -33,13 +33,13 @@ export const LAUNCH_CSS = `
 .hx-launch .stp button:hover:not(:disabled) { color: var(--ink); }
 .hx-launch .stp button:disabled { color: var(--rule); cursor: not-allowed; }
 .hx-launch .stp output { min-width: 26px; text-align: center; font-variant-numeric: tabular-nums; font-size: 14px; }
-.hx-launch .sw { position: relative; display: inline-flex; align-items: center; gap: 9px; cursor: pointer; font-size: 14px; color: var(--ink-2); }
-.hx-launch .sw input { position: absolute; opacity: 0; }
-.hx-launch .sw .tr { width: 30px; height: 18px; border-radius: 9px; background: var(--rule); position: relative; transition: background .12s; flex: none; }
-.hx-launch .sw .tr::after { content: ""; position: absolute; left: 2px; top: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--paper); transition: transform .12s; }
-.hx-launch .sw input:checked + .tr { background: var(--ink); }
-.hx-launch .sw input:checked + .tr::after { transform: translateX(12px); }
-.hx-launch .sw input:focus-visible + .tr { outline: 2px solid var(--agent); outline-offset: 2px; }
+.hx-launch .hx-sw { position: relative; display: inline-flex; align-items: center; gap: 9px; white-space: nowrap; cursor: pointer; font-size: 14px; color: var(--ink-2); }
+.hx-launch .hx-sw input { position: absolute; opacity: 0; }
+.hx-launch .hx-sw .tr { width: 30px; height: 18px; border-radius: 9px; background: var(--rule); position: relative; transition: background .12s; flex: none; }
+.hx-launch .hx-sw .tr::after { content: ""; position: absolute; left: 2px; top: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--paper); transition: transform .12s; }
+.hx-launch .hx-sw input:checked + .tr { background: var(--ink); }
+.hx-launch .hx-sw input:checked + .tr::after { transform: translateX(12px); }
+.hx-launch .hx-sw input:focus-visible + .tr { outline: 2px solid var(--agent); outline-offset: 2px; }
 .hx-launch .hp { display: grid; border: 1px solid var(--rule); border-radius: 7px; overflow: hidden; }
 .hx-launch .hp label { display: grid; grid-template-columns: 18px 92px 56px minmax(0, 1fr) 84px 52px; gap: 0 12px; align-items: center; padding: 8px 12px; cursor: pointer; font-size: 14px; border-top: 1px solid var(--rule-2); font-variant-numeric: tabular-nums; }
 .hx-launch .hp label:first-child { border-top: 0; }

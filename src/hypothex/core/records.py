@@ -26,6 +26,13 @@ ACTIVE_STATUSES = frozenset({RunStatus.QUEUED, RunStatus.RUNNING})
 TERMINAL_STATUSES = frozenset(
     {RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED, RunStatus.LOST}
 )
+INDEXED_POINT_STATUSES = frozenset({RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED})
+"""Run states whose indexed metric history is final.
+
+A run's points are indexed in full (then downsampled) when it ends
+(``execute_run``, SLURM, the hub's mirror). A queued, running, or lost run may
+log more since; its file is only ever read bounded
+(``RunStore.read_metric_points_bounded``), by the index and the views alike."""
 
 
 class RunKind(StrEnum):
@@ -49,6 +56,8 @@ class GitInfo(BaseModel):
     commit: str | None = None
     branch: str | None = None
     dirty: bool = False
+    diff_hash: str | None = None
+    """First eight SHA-256 hex digits of the captured diff (stat when too large)."""
     untracked_count: int = 0
     untracked: list[str] = Field(default_factory=list)
 
@@ -100,8 +109,8 @@ class ExecutorInfo(BaseModel):
     ``host`` is the run's host name from the hub's ``environments.yaml``
     (None on the hub itself). ``gpus`` holds the GPU indices given to the run
     (its ``CUDA_VISIBLE_DEVICES``). ``slurm_job_id`` and ``node`` are set for
-    SLURM runs. ``queue_position`` is the 1-based place in the host's queue
-    while the run waits, else None.
+    SLURM runs. Stored ``queue_position`` is the stable FIFO ticket while a
+    run waits, else None; API read models expose its live 1-based rank.
     """
 
     type: str = "local"
@@ -136,7 +145,12 @@ class CostTotals(BaseModel):
 
 
 class RunRecord(BaseModel):
-    """All facts about one run; stored as ``run.yaml``."""
+    """All facts about one run; stored as ``run.yaml``.
+
+    ``end_reason`` records a known terminal cause, or None for ordinary
+    completion and legacy records. Warnings and connection errors are not
+    terminal causes. Reruns start with a fresh empty reason.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -163,6 +177,7 @@ class RunRecord(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    end_reason: str | None = None
     exit_code: int | None = None
     artifacts: list[Artifact] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
@@ -192,7 +207,9 @@ class ScoreRecord(BaseModel):
     created_at: datetime
 
 
-def end_unstarted(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
+def end_unstarted(
+    status: RunStatus, *, reason: str | None = None
+) -> Callable[[RunRecord], RunRecord]:
     """
     Build an ``update_run`` mutator that ends a run that never started.
 
@@ -205,6 +222,9 @@ def end_unstarted(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
     status : RunStatus
         The terminal status, e.g. ``failed`` (could not start) or ``killed``
         (removed from the queue).
+    reason : str or None, optional
+        Recorded terminal cause; None when no cause is known. Rejected
+        transitions preserve the existing reason.
 
     Returns
     -------
@@ -221,7 +241,12 @@ def end_unstarted(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
             return r
         executor = r.executor.model_copy(update={"gpus": [], "queue_position": None})
         return r.model_copy(
-            update={"status": status, "ended_at": datetime.now(UTC), "executor": executor}
+            update={
+                "status": status,
+                "ended_at": datetime.now(UTC),
+                "executor": executor,
+                "end_reason": reason,
+            }
         )
 
     return mutate
@@ -232,11 +257,13 @@ class MetricPoint(BaseModel):
     One step of a logged metric history; stored in ``metrics.jsonl``.
 
     ``value`` is finite: a ``NaN`` or infinite row (a diverged loss written by
-    an old SDK) fails validation, so readers skip it.
+    an old SDK) fails validation, so readers skip it. ``step`` fits a 64-bit
+    signed integer, the widest the index can store; a larger step fails
+    validation too, so one bad row never stops a run's points from being indexed.
     """
 
     name: str
-    step: int
+    step: int = Field(ge=-(2**63), le=2**63 - 1)
     value: float = Field(allow_inf_nan=False)
     t: float | None = None
 

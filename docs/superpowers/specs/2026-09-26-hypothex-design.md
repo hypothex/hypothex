@@ -113,17 +113,26 @@ tasks:
 stages:                         # command templates; {vars} are filled by hx
   train: python -m deepretro.train --config {config} --out {run_dir}/artifacts
   infer: python -m deepretro.infer --ckpt {checkpoint} --data {dataset.path} --out {run_dir}/predictions
-  eval:  hx eval --run {run_id}   # default: built-in metric runner
 
 env:
-  setup: uv sync                # optional, run before stages on a fresh host
+  python: [uv, run, python]     # metric functions and environment capture
+  setup: uv sync               # accepted metadata; not executed yet
 ```
+
+Scoring is built in: `hx reeval` scores saved predictions with the configured
+metric functions and never executes a stage. `hx reinfer` uses the `infer`
+template. `env.python` is the project's Python argument list (default
+`uv run --project <repo> python`); `env.setup` is stored but not run. Required
+environment setup remains an explicit user step.
 
 Validation: `hx validate` checks schema, that every `fn` imports, and that every task's
 dataset/metric exists. Built-in template variables are `run_id, run_dir, repo, task, seed,
 config, checkpoint, dataset.name, dataset.version, dataset.path`; any other `{name}` must be
 passed with `--var name=value` (validate warns; launch fails before creating a run if a
-value is missing).
+value is missing). `seed`, `config`, `task`/`dataset.*` and `checkpoint` have a value only
+when the run sets them (`--seed`, `--config`, `--task`, `hx reinfer` or
+`--var checkpoint=...`); the error for a missing variable names the option, and the API
+(`vars`) or MCP (`template_vars`) field, that sets it.
 
 ### 3.2 Run folder
 
@@ -186,7 +195,8 @@ change; `metrics.jsonl` and `scores.jsonl` are append-only.
 
 SQLite (WAL mode) at `~/.hypothex/index.db`. Because the index is disposable, phase 1 stores
 a schema version and rebuilds the index from files when it changes; Alembic arrives with
-Postgres in phase 3.
+Postgres in phase 3. An `index.db` that SQLite cannot read is moved aside
+(`index.db.corrupt-<time>`) and rebuilt the same way.
 Tables: `projects, datasets, metrics, tasks, runs, scores, metric_points, tags, hosts,
 queue, sweeps, notes`. `metric_points` stores downsampled history for fast charts; full
 history stays in `metrics.jsonl`.
@@ -248,7 +258,9 @@ processes it owns. Execution always happens inside an environment, never in a cl
   which submits to SLURM).
 - **Identity is not the route.** Each environment has a stable `environment_id` created once
   and stored in `~/.hypothex/environment.json`. How the hub reaches it (local, SSH tunnel,
-  Tailscale, direct URL) can change without changing identity.
+  Tailscale, direct URL) can change without changing identity. If the file is lost, the id
+  of this host's runs in the store (`host` = hostname) is used again, with a warning; when
+  those runs name two ids, hx stops and asks for the right one.
 - **Descriptor:** `GET /.well-known/hypothex/environment` returns
   `{environment_id, label, os, arch, hostname, hx_version, protocol_version, kind:
   local|ssh|slurm, gpus, capabilities: [...]}`. The hub refuses to talk to an env with an
@@ -272,12 +284,13 @@ processes it owns. Execution always happens inside an environment, never in a cl
 
 ### 5.3 Event log, streaming, and reconnect (adapted from T3 Code)
 
-- **Event log is the truth for run state.** Each env server has an append-only event log
+- **Run folders are the truth; events are the change feed.** Each env server has an append-only event log
   (SQLite, per environment) with a monotonically increasing `sequence`:
-  `run.created, run.started, run.log_chunk, run.metric, run.score_added, run.finished,
-  run.failed, run.killed, run.lost, ...`. Run folders are written by a reactor from these
-  events (file layout in 3.2 is unchanged).
-  Phase 1a simplification: every state change is written synchronously under a per-run
+  `run.created, run.launched, run.started, run.score_added, run.finished,
+  run.failed, run.killed, run.lost, ...`. Queue/GPU, SLURM, annotation and remote-state
+  events are listed in `docs/architecture.rst`. Logs and metric points are read from
+  their HTTP endpoints; `run.log_chunk` and `run.metric` are not emitted.
+  Every state change is written synchronously under a per-run
   file lock in the order run folder → event → index; the event log is the ordered change
   feed that streams and replay use. A reactor model can replace this later without
   changing the file layout or the event schema.
@@ -386,16 +399,25 @@ def topk_accuracy(examples: list[Example], *, k: list[int]) -> MetricResult:
 - Version string comes from `hypothex.yaml`. Hypothex also stores a hash of the function's
   source. If the source hash changes but the version does not, `hx validate` and the UI
   warn: "metric code changed without a version bump".
+- Leaderboards expose `metric_drift: [name@version]` when selected-version scores
+  contain differing stored source hashes. This is a read-only provenance check; it does
+  not import current repository code or claim that unscored edits have been checked.
 - Old scores are never overwritten. Leaderboards default to the current version and show
   a badge with how many runs are on older versions, plus a "re-evaluate N runs" button.
 
 ### 6.3 Seed groups and error bars
 
-- `config_hash` excludes `seed`. Runs in one task with the same `config_hash` and
-  git commit form a seed group.
-- Leaderboard rows are seed groups: `mean ± std (n=3)`. Single runs show `n=1`.
-- When two rows' 95% intervals overlap (t-interval; n ≥ 2 each), the UI marks the
-  difference "within noise". n=1 rows get a "single seed" badge.
+- `config_hash` excludes `seed`. Runs in one task with the same `config_hash`, git
+  commit and uncommitted diff (`git.diff_hash`) form a seed group. A dirty run's group
+  id ends in `+<diff hash>`; clean ids do not change.
+- Leaderboard rows are seed groups: `mean ± std (n=3)`. Single runs show `n=1`. `n` counts
+  distinct seeds: reruns of one seed are averaged into one sample (runs without a seed
+  count one each), so a rerun never narrows the error bar.
+- A row whose test against the best row (8.5: sign test, paired bootstrap, or Welch over
+  seeds) gives `p ≥ 0.05` is marked "within noise" (`within_noise_of_best`); with no `p`
+  (no per-example data and n < 2) it is unknown. Seed t-intervals alone do not decide it:
+  wide seeds can hide a clear paired win, and zero-variance seeds can fake one. n=1 rows
+  get a "single seed" badge.
 
 ## 7. Interfaces
 
@@ -540,7 +562,7 @@ selector in the task spec).
 - **Test-set interval** per seed group: if the metric's per-example field is binary
   (`correct`/`solved`/any bool), the Wilson 95% interval with `n` = examples scored;
   otherwise a percentile bootstrap over examples (1,000 resamples, fixed seed 0). Seeds are
-  pooled by averaging per example first.
+  pooled by averaging per example first (the runs of one seed are averaged first).
 - **Paired comparison vs best**: binary → exact two-sided sign test on discordant examples
   (fixed vs broken); continuous → paired bootstrap of the mean difference. Reported as `p`.
 - **Examples needed**: the smallest `n` at which the observed discordant rate would give

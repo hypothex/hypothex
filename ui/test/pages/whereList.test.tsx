@@ -148,3 +148,14 @@ test("WhereList adds slash breaks to roots, children and linked paths without ch
   expect(container.querySelector(".kids .p a wbr")).not.toBeNull();
   await waitFor(() => expect(written).toEqual(rows.map((row) => row.copy)));
 });
+
+test("recorded patch path keeps its remote host instead of reconstructing a local path", () => {
+  const detail = makeDetail({}, { paths: { run_dir: "/store/run", diff: "gpu2:/patches/abcdef12.diff" }, has_diff: true });
+  const patch = buildWhere(detail).flatMap((group) => group.rows).find((row) => row.note === "tracked diff");
+  expect(patch?.copy).toBe("gpu2:/patches/abcdef12.diff");
+  expect(patch?.indent).toBe(false);
+});
+
+test("dirty git identity includes the entire recorded patch hash", () => {
+  expect(gitLine({ commit: "0123456789", branch: "main", dirty: true, diff_hash: "abcdef12" })?.text).toContain("abcdef12");
+});

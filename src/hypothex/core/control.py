@@ -14,7 +14,7 @@ from typing import BinaryIO
 from hypothex.core import slurm
 from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
-from hypothex.core.errors import RunError, RunNotFoundError
+from hypothex.core.errors import HypothexError, RunError, RunNotFoundError
 from hypothex.core.execution import (
     EXECUTION_CLAIM,
     QUEUE_FILE,
@@ -22,6 +22,8 @@ from hypothex.core.execution import (
     SUPERVISOR_PID_FILE,
     TERM_GRACE_SECONDS,
     RunRequest,
+    _update_terminal_run,
+    checkout_run_tree,
     execute_run,
     prepare_run,
     process_alive,
@@ -32,6 +34,7 @@ from hypothex.core.execution import (
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gpus import free_gpus, gpu_status
 from hypothex.core.ids import utcnow
+from hypothex.core.index import index_run_points
 from hypothex.core.records import (
     ACTIVE_STATUSES,
     TERMINAL_STATUSES,
@@ -88,7 +91,9 @@ def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
             slurm.remember_slurm_defaults(ctx.layout, defaults)
         # no host queue marker: a queue.json would make the GPU scheduler start it here
         submitted = dataclasses.replace(req, slurm=defaults, queue=False)
-        return slurm.submit_run(ctx, prepare_run(ctx, submitted), defaults)
+        record = prepare_run(ctx, submitted)
+        _checkout_before_submit(ctx, record)
+        return slurm.submit_run(ctx, record, defaults)
     if req.queue:
         record = prepare_run(ctx, req)
         try:  # the only place a run joins the queue: marker, FIFO place, position at once
@@ -96,7 +101,13 @@ def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
         except Exception as exc:
             # any failure (also OSError, ConfigError): a queued run without a
             # marker and with a live launcher pid would never be started or repaired
-            ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": str(exc)})
+            _update_terminal_run(
+                ctx,
+                record.run_id,
+                "run.failed",
+                end_unstarted(RunStatus.FAILED, reason=str(exc)),
+                {"reason": str(exc)},
+            )
             raise
         return ctx.find_record(record.run_id)
     if req.gpus > 0:
@@ -107,6 +118,27 @@ def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
     record = prepare_run(ctx, req)
     _start_supervisor(ctx, record)
     return ctx.find_record(record.run_id)
+
+
+def _checkout_before_submit(ctx: Context, record: RunRecord) -> None:
+    """
+    Make a pinned SLURM run's worktree here, before ``sbatch``.
+
+    The job runs on a compute node, which may have no git; ``execute_run``
+    there finds the worktree made. A checkout that fails fails the run.
+    """
+    try:
+        checkout_run_tree(ctx, record)
+    except (HypothexError, OSError) as exc:
+        failed = _update_terminal_run(
+            ctx,
+            record.run_id,
+            "run.failed",
+            end_unstarted(RunStatus.FAILED, reason=str(exc)),
+            {"reason": str(exc)},
+        )
+        release_worktree(ctx, failed)
+        raise RunError(f"could not check out run {record.run_id}: {exc}") from exc
 
 
 def _prepare_on_free_gpus(
@@ -155,7 +187,13 @@ def _prepare_on_free_gpus(
                 f"{req.gpus} GPUs requested; {len(free)} of {len(gpus)} free now "
                 f"(taken while the run was prepared); {hint}"
             )
-            ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": message})
+            _update_terminal_run(
+                ctx,
+                record.run_id,
+                "run.failed",
+                end_unstarted(RunStatus.FAILED, reason=message),
+                {"reason": message},
+            )
             raise RunError(message)
         chosen = free[: req.gpus]
         record = ctx.update_run(
@@ -166,17 +204,19 @@ def _prepare_on_free_gpus(
     return record
 
 
-_fail_unstarted = end_unstarted(RunStatus.FAILED)
-"""Mark a prepared run that never started as failed; it gives back its GPUs."""
-
-
 def _start_supervisor(ctx: Context, record: RunRecord) -> None:
     """Spawn the run's supervisor; a start that never committed fails the run."""
     try:
         spawn_supervisor(ctx, record)
     except OSError as exc:  # nothing will execute it (Task 18), so its GPUs go back
         message = f"could not start the supervisor: {exc}"
-        ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": message})
+        _update_terminal_run(
+            ctx,
+            record.run_id,
+            "run.failed",
+            end_unstarted(RunStatus.FAILED, reason=message),
+            {"reason": message},
+        )
         raise RunError(message) from exc
 
 
@@ -254,11 +294,11 @@ def _supervisor_alive(run_dir: Path, record: RunRecord) -> bool:
     return process_alive(record.executor.pid, record.executor.pid_create_time)
 
 
-def _mark(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
+def _mark(status: RunStatus, reason: str | None = None) -> Callable[[RunRecord], RunRecord]:
     def mutate(r: RunRecord) -> RunRecord:
         if r.status in TERMINAL_STATUSES:
             return r
-        return r.model_copy(update={"status": status, "ended_at": utcnow()})
+        return r.model_copy(update={"status": status, "ended_at": utcnow(), "end_reason": reason})
 
     return mutate
 
@@ -268,18 +308,19 @@ def _scheduler_held(run_dir: Path) -> bool:
     return (run_dir / QUEUE_FILE).is_file() and not (run_dir / SUPERVISOR_PID_FILE).is_file()
 
 
-_unqueue = end_unstarted(RunStatus.KILLED)
-"""Kill a run removed from the GPU queue before it started."""
-
-
 def _remove_from_queue(ctx: Context, run_id: str, run_dir: Path) -> RunRecord | None:
     """Kill a run still waiting in the GPU queue; None if the scheduler started it."""
     with scheduler_lock(ctx):
         if not _scheduler_held(run_dir):
             return None
         (run_dir / QUEUE_FILE).unlink()
-        killed = ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "removed from queue"})
-    Scheduler(ctx).refresh_positions()
+        killed = _update_terminal_run(
+            ctx,
+            run_id,
+            "run.killed",
+            end_unstarted(RunStatus.KILLED, reason="removed from queue"),
+            {"reason": "removed from queue"},
+        )
     release_worktree(ctx, killed)  # it never ran: execute_run will not clean up after it
     return killed
 
@@ -335,9 +376,100 @@ def cancel_if_queued(ctx: Context, run_id: str) -> RunRecord:
         os.close(os.open(run_dir / EXECUTION_CLAIM, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
     except FileExistsError:
         return ctx.find_record(run_id)  # it started: leave it alone
-    killed = ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "cancelled while queued"})
+    killed = _update_terminal_run(
+        ctx,
+        run_id,
+        "run.killed",
+        end_unstarted(RunStatus.KILLED, reason="cancelled while queued"),
+        {"reason": "cancelled while queued"},
+    )
     release_worktree(ctx, killed)  # a supervisor that arrives now refuses the run, so no cleanup
     return killed
+
+
+@dataclasses.dataclass(frozen=True)
+class CancelBatch:
+    """
+    What ``cancel_many_if_queued`` did.
+
+    ``records`` holds each run after the step (``killed`` when it was
+    cancelled, else as it was); ``errors`` maps a run that was not touched
+    (unknown, another environment, a failed ``scancel``) to the reason.
+    """
+
+    records: list[RunRecord]
+    errors: dict[str, str]
+
+
+def cancel_many_if_queued(ctx: Context, run_ids: list[str]) -> CancelBatch:
+    """
+    Stop many runs, each only if it has not started (``cancel_if_queued``).
+
+    Runs waiting in the GPU queue are removed under one scheduler lock with
+    no reposition of the runs behind them, so cancelling a big sweep costs
+    O(n). Queue positions are computed on read. An error on one run never stops the others.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    run_ids : list of str
+        Run ids, e.g. the queued runs of a sweep.
+
+    Returns
+    -------
+    CancelBatch
+        Each run after the step, and the runs that could not be handled.
+
+    Examples
+    --------
+    >>> batch = cancel_many_if_queued(ctx, ["20261004-101500-toy-acc-1a2b"])  # doctest: +SKIP
+    >>> [r.status.value for r in batch.records], batch.errors  # doctest: +SKIP
+    (['killed'], {})
+    """
+    errors: dict[str, str] = {}
+    waiting: dict[str, Path] = {}
+    for run_id in run_ids:
+        try:
+            record = ctx.find_record(run_id)
+            _require_own(ctx, record, "stop")
+        except HypothexError as exc:
+            errors[run_id] = str(exc)
+            continue
+        run_dir = ctx.run_dir(record)
+        if record.status == RunStatus.QUEUED and _scheduler_held(run_dir):
+            waiting[run_id] = run_dir
+    killed: dict[str, RunRecord] = {}
+    if waiting:
+        with scheduler_lock(ctx):
+            for run_id, run_dir in waiting.items():
+                if not _scheduler_held(run_dir):
+                    continue
+                try:
+                    (run_dir / QUEUE_FILE).unlink()
+                    killed[run_id] = _update_terminal_run(
+                        ctx,
+                        run_id,
+                        "run.killed",
+                        end_unstarted(RunStatus.KILLED, reason="removed from queue"),
+                        {"reason": "removed from queue"},
+                    )
+                except HypothexError as exc:
+                    errors[run_id] = str(exc)
+        for record in killed.values():
+            release_worktree(ctx, record)
+    records: list[RunRecord] = []
+    for run_id in run_ids:
+        if run_id in errors:
+            continue
+        if run_id in killed:
+            records.append(killed[run_id])
+            continue
+        try:  # not in the GPU queue (or started meanwhile): the one-run path decides
+            records.append(cancel_if_queued(ctx, run_id))
+        except HypothexError as exc:
+            errors[run_id] = str(exc)
+    return CancelBatch(records=records, errors=errors)
 
 
 def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) -> RunRecord:
@@ -398,7 +530,11 @@ def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) ->
         if not _supervisor_alive(run_dir, current):
             break
         time.sleep(0.1)
-    return ctx.update_run(run_id, "run.killed", _mark(RunStatus.KILLED), {"reason": "stopped"})
+    killed = _update_terminal_run(
+        ctx, run_id, "run.killed", _mark(RunStatus.KILLED, "stopped"), {"reason": "stopped"}
+    )
+    index_run_points(ctx.index, ctx.store, killed)  # no supervisor is left to index the end
+    return killed
 
 
 def _relative_cwd(cwd: Path, repo: Path, previous_repos: list[Path]) -> Path:
@@ -448,6 +584,34 @@ def _start(
     return execute_run(ctx, record.run_id, stdout_sink=stdout_sink, stderr_sink=stderr_sink)
 
 
+def _inherited_tags(tags: list[str]) -> list[str]:
+    """
+    The tags a child run (rerun, re-infer) takes from its parent.
+
+    A sweep tag is left out: a sweep's members are the runs with its tag, so a
+    child that kept it would join the sweep (a seed counted twice, a re-infer
+    as a cell of its own). User tags are kept.
+
+    Parameters
+    ----------
+    tags : list of str
+        The parent's tags.
+
+    Returns
+    -------
+    list of str
+        ``tags`` without ``sweep:*`` tags.
+
+    Examples
+    --------
+    >>> _inherited_tags(["best", "sweep:0a1b2c3d:s-7f3a"])
+    ['best']
+    """
+    from hypothex.core.sweeps import SWEEP_TAG_PREFIX  # sweeps imports this module
+
+    return [t for t in tags if not t.startswith(SWEEP_TAG_PREFIX)]
+
+
 def rerun(
     ctx: Context,
     run_id: str,
@@ -467,7 +631,8 @@ def rerun(
     resolve inside that checkout. If the repo moved since the parent ran (the
     project was re-registered at a new path), the working directory is mapped
     onto the new location; a parent that ran in a worktree keeps its
-    subdirectory.
+    subdirectory. The child keeps the parent's tags except a sweep tag, so it
+    never joins the parent's sweep.
 
     Parameters
     ----------
@@ -521,7 +686,7 @@ def rerun(
         task=parent.task,
         hypothesis=f"Rerun of {parent.run_id}: {parent.hypothesis}".strip(),
         seed=parent.seed,
-        tags=list(parent.tags),
+        tags=_inherited_tags(parent.tags),
         config_path=config_file if config_file.is_file() else None,
         params=dict(parent.params),
         vars=dict(parent.vars),
@@ -543,6 +708,7 @@ def reinfer(
     run_id: str,
     *,
     checkpoint: str | None = None,
+    vars: dict[str, str] | None = None,
     background: bool = True,
     created_by: str = "human",
     stdout_sink: BinaryIO | None = None,
@@ -552,7 +718,8 @@ def reinfer(
     Run the project's ``infer`` stage with a run's checkpoint as a child run.
 
     The parent's ``config.yaml`` (if it had one) is passed on, so ``{config}``
-    works in the ``infer`` stage.
+    works in the ``infer`` stage. The child keeps the parent's tags except a
+    sweep tag, so it never joins the parent's sweep.
 
     Parameters
     ----------
@@ -561,6 +728,10 @@ def reinfer(
         The parent run to re-infer from.
     checkpoint : str, optional
         Checkpoint path; defaults to the parent's most recent checkpoint artifact.
+    vars : dict of str to str, optional
+        Template values for the ``infer`` stage, on top of the parent's
+        (e.g. a ``{temperature}`` the stage gained since); ``checkpoint``
+        always comes from ``checkpoint``.
     background : bool
         Run in a detached supervisor process.
     created_by : str
@@ -576,10 +747,16 @@ def reinfer(
     Raises
     ------
     RunError
-        If there is no ``infer`` stage or no checkpoint, or the parent belongs
-        to another environment.
+        If there is no ``infer`` stage or no checkpoint, a var the stage
+        needs is missing (or one Hypothex sets is given), or the parent
+        belongs to another environment.
     RemoteProjectError
         If the project is a copy from a host (its repo path is on that host).
+
+    Examples
+    --------
+    >>> reinfer(ctx, run_id, vars={"temperature": "2"}).kind.value  # doctest: +SKIP
+    'infer'
     """
     parent = ctx.find_record(run_id)
     _require_own(ctx, parent, "reinfer")
@@ -598,9 +775,9 @@ def reinfer(
         task=parent.task,
         hypothesis=f"Re-infer of {parent.run_id}: {parent.hypothesis}".strip(),
         seed=parent.seed,
-        tags=list(parent.tags),
+        tags=_inherited_tags(parent.tags),
         config_path=config_file if config_file.is_file() else None,
-        vars={**parent.vars, "checkpoint": chosen},
+        vars={**parent.vars, **(vars or {}), "checkpoint": chosen},
         kind=RunKind.INFER,
         parent=parent.run_id,
         created_by=created_by,
@@ -655,7 +832,13 @@ def repair_runs(ctx: Context) -> list[RunRecord]:
 
 
 def _repair_one(ctx: Context, current: RunRecord) -> RunRecord | None:
-    """Mark one active run of this environment lost if its supervisor is gone."""
+    """
+    Mark one active run of this environment lost if its supervisor is gone.
+
+    Its worktree is released like that of any ended run (``release_worktree``):
+    removed when the run left nothing in it, and a queued pinned run stops
+    using its staging checkout.
+    """
     if current.environment_id != ctx.descriptor.environment_id:
         return None
     if current.executor.type == slurm.SLURM_EXECUTOR:
@@ -673,4 +856,8 @@ def _repair_one(ctx: Context, current: RunRecord) -> RunRecord | None:
     if child is not None and process_alive(child, None):
         terminate_group(child)
         reason += "; orphaned process terminated"
-    return ctx.update_run(current.run_id, "run.lost", _mark(RunStatus.LOST), {"reason": reason})
+    lost = _update_terminal_run(
+        ctx, current.run_id, "run.lost", _mark(RunStatus.LOST, reason), {"reason": reason}
+    )
+    release_worktree(ctx, lost)  # nothing executes it any more: also frees a staging checkout
+    return lost

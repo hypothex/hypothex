@@ -313,6 +313,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runs/stop_queued": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Runs Stop Queued */
+        post: operations["runs_stop_queued_api_v1_runs_stop_queued_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runs/{run_id}": {
         parameters: {
             query?: never;
@@ -1121,6 +1138,10 @@ export interface components {
             created_by: string;
             /** Checkpoint */
             checkpoint?: string | null;
+            /** Vars */
+            vars?: {
+                [key: string]: string;
+            };
         };
         /**
          * RunFilter
@@ -1213,6 +1234,21 @@ export interface components {
              * @default false
              */
             only_queued: boolean;
+        };
+        /**
+         * StopQueuedBody
+         * @description A bounded batch of conditional queued-run stops on this environment.
+         */
+        StopQueuedBody: {
+            /** Command Id */
+            command_id?: string | null;
+            /**
+             * Created By
+             * @default api
+             */
+            created_by: string;
+            /** Run Ids */
+            run_ids: string[];
         };
         /**
          * SweepBody
@@ -2070,6 +2106,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["LaunchBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    runs_stop_queued_api_v1_runs_stop_queued_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StopQueuedBody"];
             };
         };
         responses: {

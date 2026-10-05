@@ -62,7 +62,10 @@ Screens
   same ``hx sweep``), ``Cancel queued``, ``Add seeds`` (new seeds for every cell; after a
   failed try it proposes the same seeds again, not the ones after them, and the hub starts
   only their missing runs), and ``Rerun sweep`` (the best cell again, in the Launch
-  dialog).
+  dialog). Durable issuance state is separate from observed run counts. ``Resume``
+  uses the server's reported seeds; ``Cancel queued`` also drains accepted members
+  that are not mirrored yet, even after interrupted or incomplete issuance.
+  Resume/Add seeds remain disabled while cancellation is pending or settling.
 - **Run** (``/r/<run_id>``): the hypothesis as title, status, stat strip, the task kind's
   run panels, where everything is (code, data, run folder, logs, predictions,
   checkpoints), scores by metric version, notes, and actions. ``?log=stderr`` opens a log

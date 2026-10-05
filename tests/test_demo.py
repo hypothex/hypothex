@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import time
 from collections import Counter, defaultdict
 from datetime import timedelta
@@ -12,9 +14,11 @@ from typer.testing import CliRunner
 from hypothex.api.app import _run_view, create_app
 from hypothex.cli.main import app as cli_app
 from hypothex.core import queries as q
+from hypothex.core import slurm
 from hypothex.core.context import Context
 from hypothex.core.control import repair_runs
 from hypothex.core.errors import ConfigError, StoreError
+from hypothex.core.execution import RunRequest, checkout_run_tree, prepare_run, release_worktree
 from hypothex.core.fsutil import read_jsonl
 from hypothex.core.ids import utcnow
 from hypothex.core.overview import build_overview
@@ -38,6 +42,7 @@ from hypothex.demo import (
 )
 from hypothex.remote.config import load_hosts
 from tests.api.envserver import wait_until
+from tests.factories import git
 
 REFS = {
     "generic": "toy-classifier/toy-test",
@@ -542,6 +547,9 @@ def test_seed_demo_hosts_writes_hosts_runs_and_the_sweep(hosts_home: Path) -> No
     cluster = Context.open(hosts_home / DEMO_HOSTS_DIR / "cluster")
     lost = next(r for r in cluster.index.list_runs(limit=None) if r.status == RunStatus.LOST)
     assert (lost.executor.slurm_job_id, lost.executor.node) == ("48211932", "r208u06n02")
+    assert lost.end_reason == (
+        "SLURM ended job 48211932 with NODE_FAIL on r208u06n02; no exit record"
+    )
     spec = load_sweep(hub.layout, "rxn-forward", DEMO_SWEEP_ID)
     assert spec.host == "gpu1" and spec.seeds == [1, 2, 3]
     tag = f"sweep:{hub.descriptor.environment_id[:8]}:{DEMO_SWEEP_ID}"  # the hub owns it
@@ -552,6 +560,41 @@ def test_seed_demo_hosts_writes_hosts_runs_and_the_sweep(hosts_home: Path) -> No
     assert len(gpus) == 8 and [g["index"] for g in gpus if g["external"]] == [3, 7]
 
 
+def test_demo_host_repositories_are_isolated_from_an_enclosing_git_checkout(tmp_path: Path) -> None:
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.name", "Outer repository")
+    git(tmp_path, "config", "user.email", "outer@example.invalid")
+    (tmp_path / "outside.txt").write_text("must not enter the demo checkout\n")
+    git(tmp_path, "add", "outside.txt")
+    git(tmp_path, "commit", "-qm", "outer repository")
+    outer_head = git(tmp_path, "rev-parse", "HEAD")
+    home = tmp_path / "ignored-demo"
+    seed_demo(home, ["training"])
+    seed_demo_hosts(home)
+    hub = Context.open(home)
+    repo = Path(hub.store.load_project("rxn-forward").repo)
+    assert Path(git(repo, "rev-parse", "--show-toplevel")).resolve() == repo.resolve()
+    commit = git(repo, "rev-parse", "HEAD")
+    assert commit != outer_head
+    for host in ("gpu1", "cluster"):
+        ctx = Context.open(home / DEMO_HOSTS_DIR / host)
+        host_repo = Path(ctx.store.load_project("rxn-forward").repo)
+        assert Path(git(host_repo, "rev-parse", "--show-toplevel")).resolve() == host_repo.resolve()
+        assert git(host_repo, "rev-parse", "HEAD") == commit
+        run = prepare_run(
+            ctx,
+            RunRequest(repo=host_repo, command=["python", "train.py"], commit=commit, queue=True),
+        )
+        tree = checkout_run_tree(ctx, run)
+        assert tree is not None
+        assert (tree / "hypothex.yaml").is_file()
+        assert (tree / "train.py").is_file()
+        assert not (tree / "outside.txt").exists()
+        assert release_worktree(ctx, run)
+    assert git(tmp_path, "rev-parse", "HEAD") == outer_head
+    assert git(tmp_path, "diff", "--name-only") == ""
+
+
 def test_seed_demo_hosts_refuses_twice_and_needs_training(hosts_home: Path, tmp_path: Path) -> None:
     with pytest.raises(StoreError, match="demo hosts already exist"):
         seed_demo_hosts(hosts_home)
@@ -559,6 +602,51 @@ def test_seed_demo_hosts_refuses_twice_and_needs_training(hosts_home: Path, tmp_
     seed_demo(other, ["generic"])
     with pytest.raises(ConfigError, match="--kinds training"):
         seed_demo_hosts(other)
+
+
+def test_seed_demo_hosts_does_not_initialize_an_unrelated_registered_repository(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    seed_demo(home, ["training"])
+    ctx = Context.open(home)
+    entry = ctx.store.load_project("rxn-forward")
+    outside = tmp_path / "user-project"
+    shutil.copytree(entry.repo, outside)
+    ctx.store.save_project(entry.model_copy(update={"repo": str(outside)}))
+    with pytest.raises(ConfigError, match="generated training demo"):
+        seed_demo_hosts(home)
+    assert not (outside / ".git").exists()
+    assert not (outside / "train.py").exists()
+    assert not (home / DEMO_HOSTS_DIR).exists()
+
+
+def test_fake_slurm_keeps_a_submitted_job_pending_until_scancel(
+    hosts_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty fake squeue made every new demo SLURM launch `lost` within a minute.
+    bin_dir = tmp_path / "bin"
+    shutil.copytree(hosts_home / DEMO_HOSTS_DIR / "cluster-bin", bin_dir)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    first = slurm.submit("#!/bin/sh\n", tmp_path, comment="hx-a")
+    second = slurm.submit("#!/bin/sh\n", tmp_path, comment="hx-b")
+    assert int(second) == int(first) + 1
+    jobs = slurm.poll([first, second])
+    assert {j: (s.state, s.node) for j, s in jobs.items()} == {
+        first: ("PENDING", None),
+        second: ("PENDING", None),
+    }
+    assert slurm.comment_accounting(refresh=True)
+    found, known = slurm.find_submitted("hx-b")
+    assert known and found is not None and (found.job_id, found.state) == (second, "PENDING")
+    slurm.cancel(first)
+    after = slurm.poll([first, second])
+    assert after[first].state == "CANCELLED" and slurm.is_finished(after[first])
+    assert after[second].state == "PENDING"
+    gone, known = slurm.find_submitted("hx-a")
+    assert known and gone is not None and gone.state == "CANCELLED"
+    slurm.cancel("48211932")  # a job the fake never queued: scancel says nothing
+    assert slurm.poll(["48211932"]) == {}
 
 
 def test_demo_hosts_running_does_nothing_without_the_marker(tmp_path: Path) -> None:
@@ -606,6 +694,13 @@ def test_demo_hosts_serve_connected_hosts_a_queue_and_a_sweep(tmp_path: Path) ->
                 "pending": 0,
                 "running": 0,
                 "comment_accounting": True,
+                "defaults": {
+                    "account": None,
+                    "extra": [],
+                    "gpus": 2,
+                    "partition": "gpu",
+                    "time": "08:00:00",
+                },
             }
             wait_until(lambda: rows()["gpu1"]["queue"] == 3, timeout=60)
 

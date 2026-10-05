@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-libra
 import { PanelRegistryContext } from "../../src/pages/components/PanelGrid";
 import type { QueryResponse, ViewDetail, ViewInfo } from "../../src/pages/components/types";
 import type { RunRecord } from "../../src/api/models";
+import { hostRow } from "../launch/fixtures";
 import { TaskPage, boardMeta, reevalLine } from "../../src/pages/Task";
 import { REPO, RUN_RF, RUN_SVM, makeBoard, makeDetail, makeRecord } from "./fixtures";
 import { type Call, HttpReply, fakeRegistry, mockApi, renderWithClient, restoreFetch } from "./helpers";
@@ -174,7 +175,7 @@ describe("TaskPage", () => {
         makeRecord({ run_id: "20260926-200100-toy-test-aa02", seed: 2 }),
         makeRecord({ run_id: RUN_RF, seed: 9, config_hash: "sha256:5a810ddb4e0c2f19" }),
       ],
-      "GET /api/v1/hosts": [],
+      "GET /api/v1/hosts": [hostRow("local", { kind: "local" }, { environment_id: "env-5c1e" })],
       "GET /api/v1/gpus": [],
       "GET /api/v1/queue": [],
     };
@@ -484,4 +485,13 @@ describe("TaskPage", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("toy-test");
     expect(screen.getByRole("button", { name: "Re-evaluate all" })).toBeTruthy();
   });
+});
+
+test("unscored count is separate from stale scores and drift cites stored refs", async () => {
+  const board = { ...makeBoard(), unscored: ["u1", "u2"], needs_reeval: ["old"], metric_drift: ["accuracy@v1"] };
+  expect(boardMeta(board)).toEqual(["2 configs, 6 runs", "accuracy v1", "macro_f1 v1", "1 need re-eval", "2 unscored"]);
+  mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: board });
+  renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
+  const warning = await screen.findByRole("img", { name: "Metric source drift" });
+  expect(warning.title).toBe("Different stored metric source hashes: accuracy@v1");
 });

@@ -28,10 +28,9 @@ import {
 import { newCommandId } from "../api/client";
 import type { RunRecord } from "../api/models";
 import { REMOTE_RUN_INVALIDATES } from "../api/queries";
-import { shellJoin } from "../pages/components/format";
 import { ErrorBox, Loading } from "../pages/components/QueryState";
 import { launchCli, sbatchLine } from "./cli";
-import { SEED_HINT, templateSegments } from "./command";
+import { SEED_HINT, previewSegments, templateSegments } from "./command";
 import { type Carry, DEFAULT_DRAFT, type DraftCheck, type LaunchDraft, NO_CARRY, checkDraft } from "./draft";
 import { launchSeeds, useLaunchHosts } from "./launchApi";
 import {
@@ -47,7 +46,8 @@ import {
   gpusForHost,
   hostTitle,
   launchSummary,
-  pickHost,
+  initialHost,
+  initialGpus,
   posRange,
   stateLabel,
 } from "./plan";
@@ -62,6 +62,8 @@ export interface LaunchDialogProps {
   commit?: string | null;
   title?: string;
   initial?: Partial<LaunchDraft>;
+  /** Resolve a template's environment without substituting another available host. */
+  templateEnvironment?: string;
   /** Params and vars of the template run, sent with every seed. */
   carry?: Carry;
   /** A note next to the seeds, e.g. why none is proposed (`LaunchDefaults.seedsNote`). */
@@ -245,7 +247,7 @@ function GpuRows({ host, draft, check, update }: RowProps & { host: LaunchHost }
         <div className="fr">
           <span className="lb">Queue</span>
           <div className="row">
-            <label className="sw">
+            <label className="hx-sw">
               <input type="checkbox" checked={draft.queue} onChange={(e) => update({ queue: e.target.checked })} />
               <span className="tr" />
               wait for GPUs
@@ -374,7 +376,7 @@ function CommandRow({ draft, check, update, where }: RowProps & { where: string 
 }
 
 /** The first seed still to launch, as it will run (after a partial launch: the next one not started). */
-function Preview({ host, check }: { host: LaunchHost | null; check: DraftCheck }) {
+function Preview({ host, check, vars }: { host: LaunchHost | null; check: DraftCheck; vars: Carry["vars"] }) {
   const seed = check.pending[0];
   if (host === null || check.argv.length === 0 || seed === undefined) {
     return (
@@ -390,10 +392,10 @@ function Preview({ host, check }: { host: LaunchHost | null; check: DraftCheck }
   return (
     <code className="cmd" aria-label="Preview" title={`Seed ${seed}, as it will run on ${host.name}`}>
       <span className="hostp">{host.name}:</span> {cvd}
-      {templateSegments(shellJoin(check.argv)).map((s, i) =>
+      {previewSegments(check.argv, vars, seed).map((s, i) =>
         s.seed ? (
           <b key={i} className="tok">
-            {seed}
+            {s.text}
           </b>
         ) : (
           <span key={i}>{s.text}</span>
@@ -410,6 +412,7 @@ export function LaunchDialog({
   commit = null,
   title = "New run",
   initial,
+  templateEnvironment,
   carry = NO_CARRY,
   seedsNote,
   onClose,
@@ -429,10 +432,10 @@ export function LaunchDialog({
   useEffect(() => {
     if (picked.current || hosts.data === undefined) return;
     picked.current = true;
-    const name = pickHost(hosts.data, project, draft.host);
+    const name = initialHost(hosts.data, project, draft.host, templateEnvironment);
     const chosen = hosts.data.find((h) => h.name === name);
-    setDraft((d) => ({ ...d, host: name, gpus: chosen ? gpusForHost(d.gpus, chosen) : d.gpus }));
-  }, [hosts.data, project, draft.host]);
+    setDraft((d) => ({ ...d, host: name, gpus: chosen ? initialGpus(chosen, initial?.gpus) : d.gpus }));
+  }, [hosts.data, project, draft.host, templateEnvironment, initial?.gpus]);
 
   useEffect(() => {
     if (copy === "idle") return;
@@ -569,10 +572,15 @@ export function LaunchDialog({
                 project={project}
                 now={now}
                 lockedTo={launched.host}
-                onPick={(h) => update({ host: h.name, gpus: gpusForHost(draft.gpus, h, host) })}
+                onPick={(h) => update({ host: h.name, gpus: h.slurm?.defaults?.gpus ?? gpusForHost(draft.gpus, h, host) })}
               />
             )}
           </div>
+          {templateEnvironment && draft.host === null && hosts.data ? (
+            <p className="small warn">
+              Template environment {templateEnvironment} has no configured host; pick a host explicitly.
+            </p>
+          ) : null}
           {host?.kind === "slurm" ? (
             <SlurmRow draft={draft} check={check} update={update} />
           ) : host !== null ? (
@@ -611,7 +619,7 @@ export function LaunchDialog({
           <div className="fr">
             <span className="lb">Preview</span>
             <div className="prev">
-              <Preview host={host} check={check} />
+              <Preview host={host} check={check} vars={carry.vars} />
               <span className="xn">×{pending.length}</span>
             </div>
           </div>

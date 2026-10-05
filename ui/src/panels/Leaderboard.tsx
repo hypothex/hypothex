@@ -465,7 +465,7 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
               <div className="f1">{second ? fmt2.value(second.mean) : ""}</div>
               <div className="vd" title={v.tip}>
                 {v.kind === "none" ? null : <span className={`vg ${v.kind}`} />}
-                {best && row !== best && s && pkey ? (
+                {best && row !== best && s && pkey && (row.vs_best?.test === "sign" || row.vs_best?.test === "paired_bootstrap") ? (
                   <a className="vx" href={examplesHref(row.latest_run_id, best.latest_run_id, pkey.split("/")[0] ?? pkey)}>
                     {v.text}
                   </a>

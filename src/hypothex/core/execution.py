@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -14,11 +15,11 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, BinaryIO
+from typing import IO, Any, BinaryIO
 
 import psutil
 
@@ -27,6 +28,7 @@ from hypothex.core.config import (
     ProjectConfig,
     load_project_config,
     render_template,
+    template_var_hint,
 )
 from hypothex.core.context import Context
 from hypothex.core.cost import compute_cost
@@ -39,6 +41,7 @@ from hypothex.core.fsutil import atomic_write_bytes, atomic_write_text, read_yam
 from hypothex.core.gitinfo import capture_diff, create_worktree, git_info, head_commit
 from hypothex.core.gpus import query_gpus
 from hypothex.core.ids import new_run_id, utcnow
+from hypothex.core.layout import HX_DIR
 from hypothex.core.records import (
     TERMINAL_STATUSES,
     Artifact,
@@ -47,9 +50,10 @@ from hypothex.core.records import (
     RunRecord,
     RunStatus,
     UsageTotals,
+    end_unstarted,
 )
 from hypothex.core.seeds import config_hash, run_fingerprint
-from hypothex.core.store import sum_usage
+from hypothex.core.store import dir_lock, sum_usage
 from hypothex.remote.config import SlurmDefaults
 
 STOP_MARKER = "stop_requested"
@@ -72,8 +76,15 @@ A process the command left running in the background (``cmd &``, a daemon) keeps
 the output pipes open; past this the run is recorded anyway (``run.warning``)."""
 PROVIDED_TEMPLATE_VARS = BUILTIN_TEMPLATE_VARS - {"checkpoint"}
 """Template values Hypothex fills in itself; ``--var`` cannot set them."""
+CHOSEN_PROVIDED_VARS = frozenset({"seed", "config"})
+"""Provided values a caller may still choose, through their own option (``template_var_hint``)."""
 RUN_ID_ATTEMPTS = 8
 """How many fresh run ids ``prepare_run`` draws before it gives up (ids clash very rarely)."""
+STAGING_DIR = "staging"
+"""Per project: checkouts that queued pinned runs are prepared from (spec 8A.4)."""
+CHECKOUT_FILE = "checkout.json"
+CHECKOUT_DIFF = "checkout.diff"
+"""In a pinned run's ``.hx/``: the repo, commit, and diff of the worktree it starts in."""
 
 
 class _RunIdTakenError(Exception):
@@ -249,9 +260,24 @@ def _discard_worktree(repo: Path, path: Path) -> None:
     subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True)
 
 
-def _checkout(repo: Path, commit: str | None, diff: str | bytes | None, dest: Path) -> Path | None:
+@dataclass(frozen=True)
+class _Pin:
+    """The code a pinned run executes: a resolved commit and the diff applied on top."""
+
+    commit: str
+    patch: bytes | None
+
+    @property
+    def key(self) -> str:
+        """Name of the shared staging checkout of this commit and diff."""
+        return f"{self.commit}-{hashlib.sha256(self.patch or b'').hexdigest()[:16]}"
+
+
+def _pin(
+    repo: Path, commit: str | None, diff: str | bytes | None, *, deferred: bool = False
+) -> _Pin | None:
     """
-    Make the working copy a request pins with ``commit`` and/or ``diff`` (spec 8A.4).
+    Resolve the code a request pins with ``commit`` and/or ``diff`` (spec 8A.4).
 
     Parameters
     ----------
@@ -261,20 +287,20 @@ def _checkout(repo: Path, commit: str | None, diff: str | bytes | None, dest: Pa
         Commit to run (full or abbreviated sha); None means the repo's HEAD.
     diff : str, bytes, or None
         Uncommitted changes to apply on top of ``commit``; empty or None means none.
-    dest : Path
-        Where to create the worktree when one is needed.
+    deferred : bool
+        Whether execution may wait in a queue. A pinned deferred run always
+        uses a checkout, even if the project currently matches the pin.
 
     Returns
     -------
-    Path or None
-        The new worktree, or None when the repo already is at ``commit``
-        with exactly ``diff`` (or nothing was pinned).
+    _Pin or None
+        The full sha and the diff, or None when nothing was pinned or an
+        immediate run already has ``commit`` with exactly ``diff`` in place.
 
     Raises
     ------
     RunError
-        Not a git repo, commit missing even after ``git fetch``, or the diff
-        does not apply (the half-made worktree is removed).
+        Not a git repo, or the commit is missing even after ``git fetch``.
     """
     if commit is None and diff is None:
         return None
@@ -296,18 +322,152 @@ def _checkout(repo: Path, commit: str | None, diff: str | bytes | None, dest: Pa
                 "push it to a remote this host can fetch"
             )
     patch = (diff if isinstance(diff, bytes) else diff.encode("utf-8")) if diff else None
-    if head == resolved and capture_diff(repo).diff == patch:
+    if not deferred and head == resolved and capture_diff(repo).diff == patch:
         return None
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        dest.mkdir()  # exclusive reservation: cleanup below owns only this directory
-    except FileExistsError as exc:
-        raise _RunIdTakenError(dest.name) from exc
-    try:
-        return create_worktree(repo, resolved, dest, patch)
-    except GitError as exc:
-        _discard_worktree(repo, dest)
-        raise RunError(str(exc)) from exc
+    return _Pin(resolved, patch)
+
+
+def _staging_root(ctx: Context, project: str) -> Path:
+    """The folder of a project's staging checkouts (``<store>/<project>/staging``)."""
+    return ctx.layout.project_dir(project) / STAGING_DIR
+
+
+def _join_staging(ctx: Context, project: str, repo: Path, pin: _Pin, run_id: str) -> Path:
+    """
+    Return the shared staging checkout of ``pin``, made once; ``run_id`` now uses it.
+
+    Pinned runs are prepared (config, captures, fingerprints) from this
+    checkout. It stays while a queued run uses it, so a sweep of N queued runs
+    makes one checkout at launch, not N (``_leave_staging``). Each run id is
+    reserved exclusively: a colliding preparation cannot release its owner's
+    marker or shared checkout.
+
+    Raises
+    ------
+    RunError
+        The commit is missing or the diff does not apply (nothing is left behind).
+    _RunIdTakenError
+        Another preparation owns this run id's staging reservation.
+    """
+    root = _staging_root(ctx, project)
+    tree, ready = root / pin.key, root / f"{pin.key}.ready"
+    with dir_lock(root):
+        if not ready.is_file():  # none yet, or a creator died half-way
+            _discard_worktree(repo, tree)
+            try:
+                create_worktree(repo, pin.commit, tree, pin.patch)
+            except GitError as exc:
+                _discard_worktree(repo, tree)
+                raise RunError(str(exc)) from exc
+            ready.touch()
+        users = root / f"{pin.key}.users"
+        users.mkdir(exist_ok=True)
+        try:
+            os.close(os.open(users / run_id, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+        except FileExistsError as exc:
+            raise _RunIdTakenError(run_id) from exc
+    return tree
+
+
+def _leave_staging(ctx: Context, project: str, repo: Path, key: str, run_id: str) -> None:
+    """Stop ``run_id`` using a staging checkout; the last user removes it."""
+    root = _staging_root(ctx, project)
+    users = root / f"{key}.users"
+    if not (users / run_id).exists():
+        return  # left already (no lock: a SLURM compute node gets here too)
+    with dir_lock(root):
+        if not (users / run_id).exists():
+            return  # another release of this run came first
+        (users / run_id).unlink()
+        if any(users.iterdir()):
+            return
+        users.rmdir()
+        (root / f"{key}.ready").unlink(missing_ok=True)
+        _discard_worktree(repo, root / key)
+
+
+def _leave_staging_of(ctx: Context, record: RunRecord) -> None:
+    """Release the staging checkout a pinned run was prepared from, if it still uses one."""
+    info_file = ctx.run_dir(record) / HX_DIR / CHECKOUT_FILE
+    if info_file.is_file():
+        info = json.loads(info_file.read_text(encoding="utf-8"))
+        _leave_staging(ctx, record.project, Path(info["repo"]), info["staging"], record.run_id)
+
+
+def checkout_run_tree(ctx: Context, record: RunRecord) -> Path | None:
+    """
+    Make the git worktree a pinned run executes in, when it starts (spec 8A.4).
+
+    A pinned run is prepared from a shared staging checkout; its own worktree
+    at ``<store>/<project>/worktrees/<run_id>`` (its recorded ``cwd`` and
+    ``{repo}``) is made only now, from ``.hx/checkout.json`` and
+    ``.hx/checkout.diff``, so queued runs hold no checkout. Execution trees are
+    never shared. The directory is reserved exclusively before git runs;
+    an existing directory is reused only after this run recorded a completed
+    checkout in ``.hx/checkout.json`` (SLURM's compute node reuses it).
+    The run then stops using the staging checkout.
+
+    Parameters
+    ----------
+    ctx : Context
+    record : RunRecord
+        A run about to start.
+
+    Returns
+    -------
+    Path or None
+        The run's worktree, or None for a run that is not pinned.
+
+    Raises
+    ------
+    RunError
+        The destination already belongs to another creator, the commit is
+        gone, or the diff no longer applies. Only this call's reserved
+        directory is removed after a failed checkout.
+    RemoteProjectError
+        The project was copied from a remote host; no checkout or staging
+        metadata is changed even if its reported repo also exists locally.
+
+    Examples
+    --------
+    >>> checkout_run_tree(ctx, ctx.find_record(run_id))  # doctest: +SKIP
+    PosixPath('/home/me/.hypothex/store/toy/worktrees/20261003-101500-toy-acc-1a2b')
+    """
+    run_dir = ctx.run_dir(record)
+    info_file = run_dir / HX_DIR / CHECKOUT_FILE
+    if not info_file.is_file():
+        return None
+    ctx.local_repo(record.project)  # authorize before using stored pin paths or cleaning staging
+    info = json.loads(info_file.read_text(encoding="utf-8"))
+    repo = Path(info["repo"])
+    tree = ctx.layout.worktrees_dir(record.project) / record.run_id
+    if not (info.get("ready") is True and tree.is_dir()):
+        diff_file = run_dir / HX_DIR / CHECKOUT_DIFF
+        patch = diff_file.read_bytes() if diff_file.is_file() else None
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            tree.mkdir()  # only this reservation owns cleanup if git fails
+        except FileExistsError as exc:
+            raise RunError(f"checkout destination already exists: {tree}") from exc
+        try:
+            create_worktree(repo, info["commit"], tree, patch)
+        except GitError as exc:
+            _discard_worktree(repo, tree)
+            raise RunError(f"could not check out the run's code: {exc}") from exc
+        info["ready"] = True
+        atomic_write_text(info_file, json.dumps(info))
+    _leave_staging(ctx, record.project, repo, info["staging"], record.run_id)
+    return tree
+
+
+def _write_pin(run_dir: Path, repo: Path, pin: _Pin) -> None:
+    """Record in ``.hx/`` what ``checkout_run_tree`` checks out when the run starts."""
+    hx = run_dir / HX_DIR
+    hx.mkdir(exist_ok=True)
+    if pin.patch:
+        atomic_write_bytes(hx / CHECKOUT_DIFF, pin.patch)
+    info = {"repo": str(repo), "commit": pin.commit, "staging": pin.key}
+    atomic_write_text(hx / CHECKOUT_FILE, json.dumps(info))
 
 
 def write_queue_marker(run_dir: Path) -> None:
@@ -402,11 +562,15 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
     Validate a request, create the run folder, and capture git/env/dataset state.
 
     Nothing is created when the request is invalid. With ``req.commit`` or
-    ``req.diff`` (spec 8A.4) the run's code is checked out first: in place when
-    the repo already is at that commit with that diff, else in a worktree at
-    ``<store>/<project>/worktrees/<run_id>``. Everything else is then read from
-    that checkout: ``hypothex.yaml`` (tasks, stages, datasets), ``{repo}`` and
-    ``{dataset.path}``, the working directory, git info, and the environment.
+    ``req.diff`` (spec 8A.4) the run executes in place when the repo already is
+    at that commit with that diff, else in its own worktree at
+    ``<store>/<project>/worktrees/<run_id>``: its ``cwd``, ``{repo}``, and
+    ``{dataset.path}`` point there. That worktree is made only when the run
+    starts (``checkout_run_tree``); until then the run is prepared from a
+    staging checkout of the same commit and diff, shared by all queued runs
+    that pin them (``<store>/<project>/staging``). ``hypothex.yaml`` (tasks,
+    stages, datasets), the working directory, git info, and the environment
+    are read from that checkout.
 
     The run id is drawn again when its run folder or worktree already exists,
     also when another launcher creates the same id while this one prepares
@@ -437,9 +601,12 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         raise RunError("agents must give a hypothesis (--hypothesis): why does this run exist?")
     provided = sorted(set(req.vars) & PROVIDED_TEMPLATE_VARS)
     if provided:
+        name = provided[0]
+        hint = template_var_hint(name) if name in CHOSEN_PROVIDED_VARS else None
         raise RunError(
-            f"--var {provided[0]} is set by Hypothex and cannot be overridden "
+            f"template var {name} is set by Hypothex and cannot be given as a var "
             f"(Hypothex sets: {', '.join(sorted(PROVIDED_TEMPLATE_VARS))})"
+            + (f"; {hint}" if hint else "")
         )
     if req.config_path is not None and not req.config_path.is_file():
         raise RunError(f"config file not found: {req.config_path}")
@@ -449,25 +616,74 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         total = len(query_gpus())
         if req.gpus > total:
             raise RunError(f"asked for {req.gpus} GPUs; this host has {total}")
+    project = host_config.project
+    pin = _pin(repo, req.commit, req.diff, deferred=req.queue or req.slurm is not None)
     for _ in range(RUN_ID_ATTEMPTS):
         run_id = new_run_id(req.task)
-        dest = ctx.layout.worktrees_dir(host_config.project) / run_id
-        if ctx.layout.run_dir(host_config.project, run_id).exists() or dest.exists():
+        dest = ctx.layout.worktrees_dir(project) / run_id
+        if ctx.layout.run_dir(project, run_id).exists() or dest.exists():
             continue  # taken already: draw another id before any work
-        worktree = None
         try:
-            worktree = _checkout(repo, req.commit, req.diff, dest)
-            return _prepare_in(ctx, req, repo, host_config, worktree, run_id)
+            staging = _join_staging(ctx, project, repo, pin, run_id) if pin is not None else None
+        except _RunIdTakenError:
+            continue  # no staging reservation was acquired: never release the winner's marker
+        try:
+            return _prepare_in(ctx, req, repo, host_config, pin, staging, run_id)
         except _RunIdTakenError:
             pass  # another launcher claimed this id meanwhile: retry with a new one
         except BaseException:
-            # any failure after the worktree exists removes it (spec 8A.4)
-            if worktree is not None:
-                _discard_worktree(repo, worktree)
+            # a failed run leaves the staging checkout: its last user removes it (spec 8A.4)
+            if pin is not None:
+                _leave_staging(ctx, project, repo, pin.key, run_id)
             raise
-        if worktree is not None:
-            _discard_worktree(repo, worktree)
+        if pin is not None:
+            _leave_staging(ctx, project, repo, pin.key, run_id)
     raise RunError(f"could not pick a free run id in {RUN_ID_ATTEMPTS} tries")
+
+
+def _reroot(path: str, old: Path, new: Path) -> str:
+    """
+    Move an absolute path under ``old`` to the same place under ``new``.
+
+    Examples
+    --------
+    >>> _reroot("/wt/run-1/train.py", Path("/wt/run-1"), Path("/staging/abc"))
+    '/staging/abc/train.py'
+    >>> _reroot("python", Path("/wt/run-1"), Path("/staging/abc"))
+    'python'
+    """
+    p = Path(path)
+    return str(new / p.relative_to(old)) if p.is_absolute() and p.is_relative_to(old) else path
+
+
+def dataset_base(checkout: Path, repo: Path, raw: str) -> Path:
+    """
+    Pick the folder a run's relative dataset path resolves in.
+
+    A pinned run's checkout (a git worktree, spec 8A.4) holds only tracked
+    files. Data that git ignores lives only in the project repo, so the
+    checkout is used only when the dataset is there.
+
+    Parameters
+    ----------
+    checkout : Path
+        Where the run's code is checked out (the repo itself or a worktree).
+    repo : Path
+        The project repo on this host.
+    raw : str
+        The dataset path from ``hypothex.yaml`` (relative or absolute).
+
+    Returns
+    -------
+    Path
+        ``checkout`` when the dataset exists there, else ``repo``.
+
+    Examples
+    --------
+    >>> dataset_base(Path("/no/such/worktree"), Path("/repo"), "data/test.jsonl")
+    PosixPath('/repo')
+    """
+    return checkout if resolve_dataset_path(checkout, raw).exists() else repo
 
 
 def _prepare_in(
@@ -475,19 +691,24 @@ def _prepare_in(
     req: RunRequest,
     repo: Path,
     host_config: ProjectConfig,
-    worktree: Path | None,
+    pin: _Pin | None,
+    staging: Path | None,
     run_id: str,
 ) -> RunRecord:
     """
-    Create the run from its checkout: ``worktree`` when there is one, else ``repo``.
+    Create the run from its checkout: ``staging`` when it is pinned, else ``repo``.
 
     ``repo`` is the host checkout and ``host_config`` its ``hypothex.yaml``:
     they name the project and are what is registered for it, so a run pinned
     to an older commit never changes the project's stored tasks. Config,
-    commands, datasets, and captures of the run use the checkout.
+    commands, and captures of the run read the checkout; a relative dataset
+    path uses it only when the dataset is there (``dataset_base``). The paths
+    a pinned run records (``cwd``, ``{repo}``, ``{dataset.path}``) name its own
+    worktree, which ``checkout_run_tree`` makes when it starts.
     """
-    src = worktree or repo
-    config = load_project_config(worktree) if worktree is not None else host_config
+    src = staging or repo  # read now
+    run_root = repo if staging is None else ctx.layout.worktrees_dir(host_config.project) / run_id
+    config = load_project_config(staging) if staging is not None else host_config
     project = host_config.project
     if config.project != project:
         raise RunError(
@@ -495,13 +716,12 @@ def _prepare_in(
         )
     if req.task is not None and req.task not in config.tasks:
         raise RunError(f"unknown task {req.task!r}; known tasks: {sorted(config.tasks)}")
+    if req.stage is not None and req.stage not in config.stages:
+        # also with a command (a rerun sends both): a misspelled stage is never saved
+        raise RunError(f"project has no stage {req.stage!r}; known stages: {sorted(config.stages)}")
     if req.command is None:
         if req.stage is None:
             raise RunError("give a command or a stage")
-        if req.stage not in config.stages:
-            raise RunError(
-                f"project has no stage {req.stage!r}; known stages: {sorted(config.stages)}"
-            )
         template = shlex.split(config.stages[req.stage])
     else:
         template = list(req.command)
@@ -510,26 +730,36 @@ def _prepare_in(
     user_config = read_yaml(req.config_path) if req.config_path is not None else None
 
     cwd = (req.cwd or repo).resolve()
-    if worktree is not None:
-        cwd = worktree / (cwd.relative_to(repo) if cwd.is_relative_to(repo) else Path())
-        if not cwd.is_dir():
+    read_cwd = cwd
+    if staging is not None:
+        relative = cwd.relative_to(repo) if cwd.is_relative_to(repo) else Path()
+        read_cwd, cwd = staging / relative, run_root / relative
+        if not read_cwd.is_dir():
             raise RunError(f"working directory {cwd} does not exist at the pinned commit")
     elif not cwd.is_dir():
         raise RunError(f"working directory {cwd} does not exist")
     run_dir = ctx.layout.run_dir(config.project, run_id)
-    values = {"run_id": run_id, "run_dir": str(run_dir), "repo": str(src), "task": req.task or ""}
+    values = {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "repo": str(run_root),
+        "task": req.task or "",
+    }
     if req.seed is not None:
         values["seed"] = str(req.seed)
     if req.config_path is not None:
         values["config"] = str(run_dir / "config.yaml")
     task_spec = config.tasks.get(req.task) if req.task else None
+    ds_read = ds_base = src
     if task_spec is not None:
         ds = config.datasets[task_spec.dataset]
+        ds_read = dataset_base(src, repo, ds.path_for(task_spec.split))
+        ds_base = run_root if ds_read == src else repo  # the checkout's copy, where it runs
         values.update(
             {
                 "dataset.name": task_spec.dataset,
                 "dataset.version": ds.version,
-                "dataset.path": str(resolve_dataset_path(src, ds.path_for(task_spec.split))),
+                "dataset.path": str(resolve_dataset_path(ds_base, ds.path_for(task_spec.split))),
             }
         )
     values.update(req.vars)
@@ -537,7 +767,7 @@ def _prepare_in(
         argv = [render_template(part, values) for part in template]
     except TemplateError as exc:
         raise RunError(str(exc)) from exc
-    if not _executable_exists(argv[0], cwd):
+    if not _executable_exists(_reroot(argv[0], run_root, src), read_cwd):
         raise RunError(f"command not found: {argv[0]}")
 
     entry = ctx.store.register_project(host_config, repo)
@@ -545,16 +775,17 @@ def _prepare_in(
     datasets = []
     if task_spec is not None:
         cache = FingerprintCache(ctx.layout.dataset_cache)
-        datasets.append(
-            dataset_ref(
-                task_spec.dataset,
-                config.datasets[task_spec.dataset],
-                task_spec.split,
-                src,
-                cache,
-                ctx.descriptor.label,
-            )
+        ref = dataset_ref(
+            task_spec.dataset,
+            config.datasets[task_spec.dataset],
+            task_spec.split,
+            ds_read,
+            cache,
+            ctx.descriptor.label,
         )
+        if ref.hash_mode != "remote-unchecked":  # the same file, where the run will read it
+            ref = ref.model_copy(update={"path": _reroot(ref.path, src, run_root)})
+        datasets.append(ref)
     fingerprint = run_fingerprint(
         command_template=template,
         stage=req.stage,
@@ -562,6 +793,13 @@ def _prepare_in(
         params=req.params,
         vars=req.vars,
     )
+    diff = capture_diff(read_cwd)
+    git = git_info(read_cwd)
+    identity = diff.diff or (diff.stat.encode("utf-8") if diff.too_large else b"")
+    if identity:
+        git = git.model_copy(
+            update={"dirty": True, "diff_hash": hashlib.sha256(identity).hexdigest()[:8]}
+        )
     record = RunRecord(
         run_id=run_id,
         project=config.project,
@@ -582,7 +820,7 @@ def _prepare_in(
             pid_create_time=process_create_time(os.getpid()),
             host=ctx.descriptor.label,
         ),
-        git=git_info(cwd),
+        git=git,
         datasets=datasets,
         seed=req.seed,
         config_hash=config_hash(fingerprint),
@@ -598,9 +836,10 @@ def _prepare_in(
         if isinstance(exc.__cause__, FileExistsError):  # the run folder exists: id clash
             raise _RunIdTakenError(run_id) from exc
         raise
+    if pin is not None:
+        _write_pin(run_dir, repo, pin)
     if user_config is not None:
         write_yaml(run_dir / "config.yaml", user_config)
-    diff = capture_diff(cwd)
     if diff.diff:
         atomic_write_bytes(run_dir / "git.diff", diff.diff)
     if diff.stat:
@@ -615,13 +854,39 @@ def _prepare_in(
 
 
 def _pump(
-    src: IO[bytes] | None, log_path: Path, sink: BinaryIO | None, stop: threading.Event
+    src: IO[bytes] | None,
+    log_path: Path,
+    sink: BinaryIO | None,
+    stop: threading.Event,
+    failures: list[str],
 ) -> threading.Thread:
     """
     Copy a pipe to a log file (and ``sink``) until EOF or until ``stop`` is set.
 
     ``stop`` lets the run end when a process the command left behind still
-    holds the pipe open, so EOF never comes.
+    holds the pipe open, so EOF never comes. The pipe is read to the end even
+    when the log cannot be written (a full disk): the bytes are dropped and the
+    first error is appended to ``failures``, so the command never blocks on a
+    full pipe.
+
+    Parameters
+    ----------
+    src : binary file or None
+        The child's stdout or stderr pipe; None does nothing.
+    log_path : Path
+        The log file, opened for append.
+    sink : binary file or None
+        Where to echo the output as well (a terminal); dropped once it fails.
+    stop : threading.Event
+        Set to stop reading before EOF.
+    failures : list of str
+        Gets ``"<log name>: <error>"`` when the log could not be opened or
+        written; nothing more is written to that log.
+
+    Returns
+    -------
+    threading.Thread
+        The started daemon thread.
     """
 
     def run() -> None:
@@ -629,23 +894,40 @@ def _pump(
             return
         out = sink
         fd = src.fileno()
-        # a selector (poll/epoll/kqueue), not select(): that fails for fds >= 1024
-        with selectors.DefaultSelector() as sel, log_path.open("ab") as fh:
-            sel.register(fd, selectors.EVENT_READ)
-            while not stop.is_set():
-                if not sel.select(0.1):
-                    continue
-                chunk = os.read(fd, 65536)
-                if not chunk:
-                    return
-                fh.write(chunk)
-                fh.flush()
-                if out is not None:
-                    try:
-                        out.write(chunk)
-                        out.flush()
-                    except (OSError, ValueError):
-                        out = None
+        try:
+            fh: BinaryIO | None = log_path.open("ab")
+        except OSError as exc:
+            failures.append(f"{log_path.name}: {exc}")
+            fh = None
+        try:
+            # a selector (poll/epoll/kqueue), not select(): that fails for fds >= 1024
+            with selectors.DefaultSelector() as sel:
+                sel.register(fd, selectors.EVENT_READ)
+                while not stop.is_set():
+                    if not sel.select(0.1):
+                        continue
+                    chunk = os.read(fd, 65536)
+                    if not chunk:
+                        return
+                    if fh is not None:
+                        try:
+                            fh.write(chunk)
+                            fh.flush()
+                        except OSError as exc:  # keep draining: a full pipe blocks the child
+                            failures.append(f"{log_path.name}: {exc}")
+                            with contextlib.suppress(OSError):
+                                fh.close()
+                            fh = None
+                    if out is not None:
+                        try:
+                            out.write(chunk)
+                            out.flush()
+                        except (OSError, ValueError):
+                            out = None
+        finally:
+            if fh is not None:
+                with contextlib.suppress(OSError):
+                    fh.close()
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
@@ -698,6 +980,35 @@ def _forward_termination() -> Iterator[_TermState]:
             signal.signal(sig, old)
 
 
+class _RunUpdateRejected(Exception):
+    """Leave a run untouched when a lifecycle update loses its precondition."""
+
+    def __init__(self, record: RunRecord) -> None:
+        self.record = record
+        super().__init__(record.run_id)
+
+
+def _update_terminal_run(
+    ctx: Context,
+    run_id: str,
+    event_type: str,
+    mutate: Callable[[RunRecord], RunRecord],
+    payload: dict[str, Any] | None = None,
+) -> RunRecord:
+    """Publish an accepted terminal mutation, leaving a rejected update silent."""
+
+    def guarded(current: RunRecord) -> RunRecord:
+        updated = mutate(current)
+        if updated is current:
+            raise _RunUpdateRejected(current)
+        return updated
+
+    try:
+        return ctx.update_run(run_id, event_type, guarded, payload)
+    except _RunUpdateRejected as winner:
+        return winner.record
+
+
 def execute_run(
     ctx: Context,
     run_id: str,
@@ -719,10 +1030,13 @@ def execute_run(
     The run ends when the command exits. Output still flowing from processes
     it left running is captured for ``PUMP_DRAIN_SECONDS`` more, then the run
     is recorded with a ``run.warning``. A failure to read or index what the
-    run logged also becomes a ``run.warning``, never a run stuck ``running``.
+    run logged also becomes a ``run.warning``, never a run stuck ``running``,
+    and so does a log file that cannot be written (a full disk): the output is
+    still read, so the command never blocks, but it is dropped.
 
     After scoring, the git worktree the run executed in (spec 8A.4) is
-    removed when the run left nothing in it (``release_worktree``).
+    removed when the run left nothing in it (``release_worktree``). A pinned
+    checkout refused by the project gate fails before any command starts.
 
     Parameters
     ----------
@@ -740,7 +1054,10 @@ def execute_run(
     RunRecord
         The final record.
     """
-    final = _execute(ctx, run_id, stdout_sink, stderr_sink, auto_evaluate)
+    try:
+        final = _execute(ctx, run_id, stdout_sink, stderr_sink, auto_evaluate)
+    except _RunUpdateRejected as winner:
+        final = winner.record
     if auto_evaluate and final.status in TERMINAL_STATUSES:
         release_worktree(ctx, final)
     return final
@@ -750,11 +1067,13 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
     """
     Remove the git worktree an ended run executed in, if the run left nothing there.
 
-    The worktree is kept when it holds anything the run may have made: an
-    untracked or ignored file (other than Python bytecode caches), or tracked
-    changes other than the diff the run started with (``git.diff``), and when
-    the project is now a copy from a host (``Context.local_repo``): git never
-    runs in the repo path a host reported.
+    A run that never started stops using its staging checkout here
+    (``checkout_run_tree``). The worktree is kept when it holds anything the
+    run may have made: an
+    untracked or ignored file (other than Python bytecode caches and the
+    top-level ``.venv/``, see ``_disposable``), or tracked changes other than
+    the diff the run started with (``git.diff``). A project copied from a
+    host keeps its checkout: ``Context.local_repo`` refuses its remote path.
 
     Parameters
     ----------
@@ -772,6 +1091,16 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
     >>> release_worktree(ctx, ctx.find_record(run_id))  # doctest: +SKIP
     True
     """
+    try:
+        repo = ctx.local_repo(record.project)  # gate staging cleanup as well as the execution tree
+        _leave_staging_of(ctx, record)  # a run that never started still used one
+        info_file = ctx.run_dir(record) / HX_DIR / CHECKOUT_FILE
+        if info_file.is_file():
+            info = json.loads(info_file.read_text(encoding="utf-8"))
+            if info.get("ready") is not True:
+                return False  # checkout failed or collided: this run never owned the destination
+    except (OSError, HypothexError):
+        return False  # cleanup must not obscure the run's recorded terminal outcome
     tree = run_checkout(ctx, record)
     if tree is None:
         return False
@@ -780,7 +1109,6 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
         return False
     saved = run_dir / "git.diff"
     try:
-        repo = ctx.local_repo(record.project)  # never a host's copy: keep the tree then
         if capture_diff(tree).diff != (saved.read_bytes() if saved.is_file() else None):
             return False
         status = subprocess.run(
@@ -794,7 +1122,7 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
             code, path = entry[:2], entry[3:]
             if code[:1] in (b"R", b"C"):
                 return False  # a staged rename: the run changed the tree
-            if code in (b"??", b"!!") and not _bytecode(path):
+            if code in (b"??", b"!!") and not _disposable(path):
                 return False
         _discard_worktree(repo, tree)
     except (OSError, HypothexError):
@@ -802,8 +1130,31 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
     return True
 
 
-def _bytecode(path: bytes) -> bool:
-    """True for a Python bytecode cache file, which a run may always leave behind."""
+def _disposable(path: bytes) -> bool:
+    """
+    True for a file a run may always leave in its worktree: it is rebuilt on demand.
+
+    Python bytecode caches anywhere, and the project's virtual environment at
+    the top of the tree (``.venv/``), which ``uv run --project <worktree>``
+    creates when the environment is captured or the run is scored.
+
+    Parameters
+    ----------
+    path : bytes
+        A path from ``git status --porcelain -z``, relative to the tree root.
+
+    Returns
+    -------
+    bool
+        True when removing the worktree loses nothing the run made.
+
+    Examples
+    --------
+    >>> _disposable(b".venv/bin/python"), _disposable(b"pkg/.venv/x")
+    (True, False)
+    """
+    if path == b".venv" or path.startswith(b".venv/"):
+        return True
     return b"__pycache__/" in path or path.endswith((b".pyc", b"__pycache__"))
 
 
@@ -834,13 +1185,35 @@ def _execute(
         }
     )
     if (run_dir / STOP_MARKER).exists():
-        return ctx.update_run(
+        return _update_terminal_run(
+            ctx,
             run_id,
             "run.killed",
-            lambda r: r.model_copy(
-                update={"status": RunStatus.KILLED, "ended_at": utcnow(), "executor": me}
+            lambda r: (
+                r.model_copy(
+                    update={
+                        "status": RunStatus.KILLED,
+                        "ended_at": utcnow(),
+                        "executor": me,
+                        "end_reason": "stopped before start",
+                    }
+                )
+                if r.status == RunStatus.QUEUED
+                else r
             ),
             {"reason": "stopped before start"},
+        )
+    try:  # a pinned run's own worktree is made now, not while it waited (spec 8A.4)
+        checkout_run_tree(ctx, record)
+    except (HypothexError, OSError) as exc:
+        with contextlib.suppress(OSError):
+            (run_dir / "logs" / "stderr.log").write_text(f"hypothex: {exc}\n")
+        return _update_terminal_run(
+            ctx,
+            run_id,
+            "run.failed",
+            end_unstarted(RunStatus.FAILED, reason=str(exc)[:500]),
+            {"reason": str(exc)[:500]},
         )
     env = {
         **os.environ,
@@ -869,35 +1242,44 @@ def _execute(
                 f"hypothex: could not start command: {exc}\n"
             )
             now = utcnow()
-            return ctx.update_run(
+            reason = str(exc)
+            return _update_terminal_run(
+                ctx,
                 run_id,
                 "run.failed",
-                lambda r: r.model_copy(
-                    update={
-                        "status": RunStatus.FAILED,
-                        "started_at": now,
-                        "ended_at": now,
-                        "exit_code": 127,
-                        "executor": me,
-                    }
+                lambda r: (
+                    r.model_copy(
+                        update={
+                            "status": RunStatus.FAILED,
+                            "started_at": now,
+                            "ended_at": now,
+                            "exit_code": 127,
+                            "end_reason": reason,
+                            "executor": me,
+                        }
+                    )
+                    if r.status == RunStatus.QUEUED
+                    else r
                 ),
                 {"reason": str(exc)},
             )
         term.attach(proc.pid)
 
         started = me.model_copy(update={"child_pid": proc.pid})
-        try:
-            ctx.update_run(
-                run_id,
-                "run.started",
-                lambda r: r.model_copy(
-                    update={
-                        "status": RunStatus.RUNNING,
-                        "started_at": utcnow(),
-                        "executor": started,
-                    }
-                ),
+
+        def start(r: RunRecord) -> RunRecord:
+            if r.status in TERMINAL_STATUSES:
+                raise _RunUpdateRejected(r)
+            return r.model_copy(
+                update={
+                    "status": RunStatus.RUNNING,
+                    "started_at": utcnow(),
+                    "executor": started,
+                }
             )
+
+        try:
+            ctx.update_run(run_id, "run.started", start)
         except BaseException:
             assert proc.stdin is not None
             proc.stdin.close()  # never opened: the gate exits without running the command
@@ -905,9 +1287,14 @@ def _execute(
             raise
         _open_gate(proc)  # child_pid is saved: only now may the command run
         stop_pumps = threading.Event()
+        log_failures: list[str] = []
         pumps = [
-            _pump(proc.stdout, run_dir / "logs" / "stdout.log", stdout_sink, stop_pumps),
-            _pump(proc.stderr, run_dir / "logs" / "stderr.log", stderr_sink, stop_pumps),
+            _pump(
+                proc.stdout, run_dir / "logs" / "stdout.log", stdout_sink, stop_pumps, log_failures
+            ),
+            _pump(
+                proc.stderr, run_dir / "logs" / "stderr.log", stderr_sink, stop_pumps, log_failures
+            ),
         ]
         interrupted = False
         try:
@@ -925,6 +1312,9 @@ def _execute(
                 f"left running?); output after {PUMP_DRAIN_SECONDS:g}s is not captured"
             },
         )
+    if log_failures:
+        message = f"log write failed; later output was not saved ({'; '.join(log_failures)})"
+        ctx.emit("run.warning", record, {"message": message[:500]})
 
     stopped = interrupted or term.signalled or (run_dir / STOP_MARKER).exists()
     if stopped:
@@ -938,19 +1328,26 @@ def _execute(
     try:  # nothing the run logged may keep it from ending
         logged = ctx.store.read_artifacts(record.project, record.run_id)
         usage = sum_usage(ctx.store.read_usage(record.project, record.run_id))
-        ctx.index.replace_metric_points(
-            record.run_id, ctx.store.read_metric_points(record.project, record.run_id)
-        )
     except Exception as exc:  # noqa: BLE001 - the run ends either way; the warning says why
         message = f"could not read or index what the run logged: {type(exc).__name__}: {exc}"
         ctx.emit("run.warning", record, {"message": message[:500]})
 
     def finish(r: RunRecord) -> RunRecord:
+        # Only the node's observed result may correct the login node's provisional LOST.
+        if r.status in TERMINAL_STATUSES and not (
+            (r.executor.type == "slurm" and r.status == RunStatus.LOST)
+            or r.status == status == RunStatus.KILLED
+        ):
+            raise _RunUpdateRejected(r)
+        reason = "stopped" if stopped else None
+        if r.status == status == RunStatus.KILLED:
+            reason = r.end_reason or reason
         # A path logged twice (e.g. an overwritten last.pt) keeps its latest step/metrics.
         merged = {(a.kind, a.path): a for a in [*r.artifacts, *logged]}
         done = r.model_copy(
             update={
                 "status": status,
+                "end_reason": reason,
                 "ended_at": utcnow(),
                 "exit_code": exit_code,
                 "artifacts": list(merged.values()),
@@ -962,15 +1359,47 @@ def _execute(
         return done.model_copy(update={"cost": compute_cost(done, None)})
 
     final = ctx.update_run(run_id, f"run.{status.value}", finish, {"exit_code": exit_code})
-    if auto_evaluate and status == RunStatus.FINISHED and final.task:
-        try:
-            evaluate_run(ctx, run_id)
-        except HypothexError as exc:  # the run itself finished; scoring can be retried
-            ctx.emit("run.eval_skipped", final, {"reason": str(exc)[:500]})
-        except Exception as exc:  # noqa: BLE001 - e.g. a malformed worker result
-            reason = f"{type(exc).__name__}: {exc}"
-            ctx.emit("run.eval_skipped", final, {"reason": reason[:500]})
+    # Publish the terminal status first: a rebuild in this gap must hydrate
+    # exact terminal history, never replace the final points with a live sample.
+    try:
+        ctx.index.replace_metric_points(
+            final.run_id, ctx.store.read_metric_points(final.project, final.run_id)
+        )
+    except Exception as exc:  # noqa: BLE001 - the run ends either way; preserve its warning
+        message = f"could not read or index what the run logged: {type(exc).__name__}: {exc}"
+        ctx.emit("run.warning", final, {"message": message[:500]})
+    if auto_evaluate and final.status == RunStatus.FINISHED and final.task:
+        score_finished_run(ctx, final)
     return ctx.find_record(run_id)
+
+
+def score_finished_run(ctx: Context, record: RunRecord) -> None:
+    """
+    Score a finished task run once, right after it ended (auto-evaluation).
+
+    The run itself finished, so scoring never fails it: an error becomes a
+    ``run.eval_skipped`` event (scoring can be retried with ``hx reeval``),
+    and each warning of the scoring (e.g. metric code changed without a
+    version bump) becomes a ``run.warning`` event (``evaluate_run`` emits it).
+
+    Parameters
+    ----------
+    ctx : Context
+    record : RunRecord
+        A ``finished`` run with a task.
+
+    Examples
+    --------
+    >>> score_finished_run(ctx, ctx.find_record(run_id))  # doctest: +SKIP
+    """
+    try:
+        evaluate_run(ctx, record.run_id)
+    except HypothexError as exc:
+        ctx.emit("run.eval_skipped", record, {"reason": str(exc)[:500]})
+        return
+    except Exception as exc:  # noqa: BLE001 - e.g. a malformed worker result
+        reason = f"{type(exc).__name__}: {exc}"
+        ctx.emit("run.eval_skipped", record, {"reason": reason[:500]})
 
 
 def _wait_unless_stopped(proc: subprocess.Popen[bytes], marker: Path) -> int:

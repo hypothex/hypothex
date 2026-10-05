@@ -94,7 +94,18 @@ Runs
        run record.
    * - ``GET /api/v1/runs/{id}``
      - Everything about a run, plus ``host_state`` (the state name of its host,
-       such as ``"connected"``; ``null`` for a run of the hub).
+       such as ``"connected"``; ``null`` for a run of the hub). ``metric_names``
+       is sorted. For queued, running and lost runs it reflects the current
+       ``metrics.jsonl``, including names not yet indexed: the first 256 distinct
+       names from valid rows, skipping lines over 64 KiB and invalid UTF-8,
+       matching live curve reads. Name lookup retains no histories and stops
+       at the name cap. Unchanged files reuse a thread-safe per-store cache of
+       at most 32 results and 4 MiB of UTF-8 name bytes; oversized results are
+       returned uncached. Device, inode, size, mtime and ctime changes invalidate
+       a result. Appended or edited files are rescanned, so this cache removes
+       repeated unchanged-file work without delaying newly logged names.
+       Finished, failed and killed runs use indexed names,
+       without a name cap or another history scan when already indexed.
    * - ``GET /api/v1/runs/{id}/metrics``, ``/traces``, ``/traces/{example_id}``,
        ``/logs``, ``/predictions``
      - The run's metrics (``names``, repeatable, keeps only those metrics;
@@ -104,8 +115,11 @@ Runs
        ``failures_only``, ``field``).
    * - ``POST /api/v1/runs/{id}/stop``
      - ``{only_queued?}``. Stops the run (``scancel`` on SLURM).
+   * - ``POST /api/v1/runs/stop_queued``
+     - ``{run_ids}``: 1–50 conditional stops. Runs that have already
+       started remain running; the result reports cancellations and failures.
    * - ``POST /api/v1/runs/{id}/rerun``, ``/reinfer``, ``/reeval``
-     - Rerun, re-infer (``{checkpoint?}``), re-evaluate (``{metric?, force?}``).
+     - Rerun, re-infer (``{checkpoint?, vars?}``), re-evaluate (``{metric?, force?}``).
    * - ``POST /api/v1/runs/{id}/tags``, ``/star``, ``/archive``, ``/notes``
      - ``{add, remove}``, ``{on}``, ``{on}``, ``{text, author}``.
    * - ``POST /api/v1/runs/{id}/pull``
@@ -115,6 +129,10 @@ Runs
 
 The run actions keep their routes for remote runs: the hub sends them to the run's
 host with the same ``command_id``.
+Run detail includes ``served``: whether this hub owns the environment or can
+route it to a configured verified host. A null ``host_state`` alone does not
+establish local ownership. Run records include nullable ``end_reason`` so terminal
+causes survive reconnects even when the client missed the event.
 
 Sweeps
 ------
@@ -130,23 +148,26 @@ Sweeps
        queue?, commit?, diff?, command_id?}``. ``grid`` is a list of
        ``{name, values}`` or ``{name, low, high, log}``. The sweep pins its code in
        ``spec.commit`` and ``spec.diff``: the body's ``commit`` (with its ``diff``),
-       else the hub checkout's ``HEAD`` and uncommitted diff. A repeated
-       ``command_id`` resumes the same sweep and issues only its missing runs, also
-       after the hub stopped mid-launch. Answers the sweep summary.
+       else the hub checkout's ``HEAD`` and uncommitted diff. Answers an accepted
+       summary while a durable worker issues members. A repeated ``command_id``
+       returns the immutable original receipt; use GET for current progress.
    * - ``GET /api/v1/sweeps/{id}``
      - The summary of a sweep in any project.
    * - ``GET /api/v1/sweeps/{project}/{id}``
      - The summary.
    * - ``GET /api/v1/projects/{project}/sweeps``
-     - ``[{id, created_at, n_runs, best}]``.
+     - ``[{id, created_at, n_runs, best, issuance}]``.
    * - ``POST /api/v1/sweeps/{project}/{id}/cancel_queued``
-     - ``{command_id?}``. Stops the queued runs (``killed``) and answers the summary.
+     - ``{command_id?}``. Stops queued runs and records cancellation of active
+       issuance, including zero-member sweeps. Running members continue.
    * - ``POST /api/v1/sweeps/{project}/{id}/extend``
      - ``{seeds, command_id?}``. Adds runs for every combination and new seed, at the
        sweep's ``commit`` and ``diff`` (not the checkout as it is now), and answers the
-       summary.
+       accepted summary. An active issuance conflicts with ``409``. Once stopped,
+       use the resume seeds to reconcile and issue missing cells.
+       Legacy sweeps without durable issuance keep synchronous extension.
 
-The summary is ``{spec, counts, cells, best, headline, total_usd, run_ids, tag}``. See
+The summary is ``{spec, counts, cells, best, headline, total_usd, run_ids, tag, issuance}``. See
 :doc:`sweeps`.
 
 .. code-block:: bash
@@ -204,7 +225,7 @@ Other routes
   configured is listed in ``skipped`` with the reason.
 - ``GET /api/v1/compare?ids=a,b``, ``GET /api/v1/compare/examples?a=&b=&metric=``,
   ``GET /api/v1/datasets/check``.
-- ``/mcp/``: the MCP server over streamable HTTP (see :doc:`mcp`).
+- ``/mcp`` and ``/mcp/``: the MCP server over streamable HTTP (see :doc:`mcp`).
 
 Event stream
 ------------

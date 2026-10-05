@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -35,12 +36,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
-from starlette.types import Scope
+from starlette.routing import Route
+from starlette.types import Receive, Scope, Send
 
 from hypothex._version import __version__
 from hypothex.api.security import OriginGuard, TokenGuard, allowed_hosts, bearer_matches
 from hypothex.core import control
 from hypothex.core import queries as q
+from hypothex.core import sweeps as sweeps_core
 from hypothex.core.config import load_project_config, parse_metric_version
 from hypothex.core.context import Context
 from hypothex.core.cost import cost_since, today_start
@@ -60,18 +63,26 @@ from hypothex.core.panels import query_panel
 from hypothex.core.records import Artifact, RunRecord, RunStatus
 from hypothex.core.scheduler import Scheduler, run_scheduler_loop
 from hypothex.core.slurm import SlurmPoller, comment_accounting, require_flock
+from hypothex.core.sweep_issuance import (
+    SweepIssuanceActiveError,
+    SweepIssuer,
+    SweepLegacyResumeRequiredError,
+)
 from hypothex.core.sweeps import (
+    CANCEL_BATCH,
+    CancelResult,
     Launcher,
+    SweepIncompleteError,
     SweepParam,
     SweepSpec,
     SweepSummary,
     cancel_queued,
     extend_sweep,
-    launch_sweep,
     list_sweeps,
     mark_sweep,
     parse_sweep_tag,
     stop_if_queued,
+    stop_queued_runs,
     summarize_sweep,
 )
 from hypothex.core.views import PanelData, PanelSpec, ViewSpec
@@ -99,7 +110,7 @@ from hypothex.remote.client import (
 )
 from hypothex.remote.config import EnvironmentsFile, HostSpec, SlurmDefaults, load_hosts
 from hypothex.remote.hub import HostState, HostUnavailableError, Hub
-from hypothex.remote.ssh import SshError, copy_from
+from hypothex.remote.ssh import SshError, copy_from, staged_pull
 
 log = logging.getLogger(__name__)
 
@@ -209,6 +220,12 @@ class StopBody(ActionBody):
     only_queued: bool = False
 
 
+class StopQueuedBody(ActionBody):
+    """A bounded batch of conditional queued-run stops on this environment."""
+
+    run_ids: list[str] = Field(min_length=1, max_length=CANCEL_BATCH)
+
+
 class HostLaunchBody(RunFields):
     """
     Body of ``POST /api/v1/hosts/{host}/runs``.
@@ -277,6 +294,7 @@ class ReinferBody(ActionBody):
     """Body of ``POST /api/v1/runs/{id}/reinfer``."""
 
     checkpoint: str | None = None
+    vars: dict[str, str] = Field(default_factory=dict)
 
 
 class ReevalBody(ActionBody):
@@ -517,6 +535,7 @@ class HubManager:
         self.disabled: dict[str, datetime] = _load_disabled(ctx)
         self.started_at = utcnow()
         self._seen: dict[str, str] = {}
+        self._latest: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._read_file()
 
@@ -664,11 +683,32 @@ class HubManager:
         """
         async with self._lock:
             self._check_file(name)
+            self.state(name)  # remember the verified identity before removing its supervisor
             self.disabled.setdefault(name, utcnow())
             _save_disabled(self.ctx, self.disabled)
             if self.hub is not None:
                 await self.hub.remove_host(name)
         return self.state(name)
+
+    def _known_environment(self, name: str) -> str | None:
+        """Current verified identity, or one unambiguous persisted offline candidate."""
+        if self.hub is not None:
+            with contextlib.suppress(HostUnavailableError):
+                current = self.hub.state(name).environment_id
+                if current:
+                    self._latest[name] = current
+                    self._seen[current] = name
+        if name in self._latest:
+            return self._latest[name]
+        try:
+            with self.ctx.index.engine.connect() as conn:
+                rows = conn.execute(
+                    text("SELECT environment_id FROM host_cursors WHERE host = :h"), {"h": name}
+                ).all()
+        except OperationalError:
+            return None
+        # Sequence numbers belong to different environments: they cannot order identities.
+        return str(rows[0][0]) if len(rows) == 1 else None
 
     def state(self, name: str) -> HostState:
         """
@@ -683,9 +723,15 @@ class HubManager:
         HostState
         """
         spec = self.spec(name)
+        environment_id = self._known_environment(name)
         if self.error is not None:
             return HostState(
-                name=name, kind=spec.kind, state="error", since=self.started_at, message=self.error
+                name=name,
+                kind=spec.kind,
+                state="error",
+                since=self.started_at,
+                message=self.error,
+                environment_id=environment_id,
             )
         if name in self.disabled:
             return HostState(
@@ -694,6 +740,7 @@ class HubManager:
                 state="disabled",
                 since=self.disabled[name],
                 message="disconnected; `hx hosts connect` reconnects",
+                environment_id=environment_id,
             )
         if self.hub is None:
             return HostState(
@@ -702,6 +749,7 @@ class HubManager:
                 state="disabled",
                 since=self.started_at,
                 message="hub not started",
+                environment_id=environment_id,
             )
         try:
             state = self.hub.state(name)
@@ -712,10 +760,9 @@ class HubManager:
                 state="disabled",
                 since=self.started_at,
                 message=f"not connected; `hx hosts connect {name}`",
+                environment_id=environment_id,
             )
-        if state.environment_id:
-            self._seen[state.environment_id] = name
-        return state
+        return state.model_copy(update={"environment_id": environment_id})
 
     def states(self) -> list[HostState]:
         """
@@ -758,8 +805,9 @@ class HubManager:
         """
         Return the host that serves an environment.
 
-        Looks at the live states, then at environment ids seen earlier in this
-        process, then at the hub's persisted cursors (``host_cursors``).
+        Uses the host's current verified identity, then its latest verified
+        identity in this process, then one unambiguous persisted cursor identity.
+        Historical identities never override a contradicting current identity.
 
         Parameters
         ----------
@@ -769,18 +817,14 @@ class HubManager:
         -------
         str or None
             The host name; None for this hub's own runs and for environments no
-            configured host serves (they are handled locally, as in phase 1).
+            configured host currently serves. Foreign runs cannot execute locally.
         """
         if environment_id == self.ctx.descriptor.environment_id:
             return None
-        if self.hub is not None:
-            for name in self.names():
-                if name not in self.disabled:
-                    self.state(name)
-        configured = self.names()
-        seen = self._seen.get(environment_id)
-        name = seen if seen in configured else self._cursor_host(environment_id)
-        return name if name in configured else None
+        return next(
+            (name for name in self.names() if self._known_environment(name) == environment_id),
+            None,
+        )
 
     def mirrored_from(self, environment_id: str) -> str | None:
         """
@@ -962,6 +1006,7 @@ def host_rows(
                 "pending": sum(1 for r in runs if r.status == RunStatus.QUEUED),
                 "running": sum(1 for r in runs if r.status == RunStatus.RUNNING),
                 "comment_accounting": accounting,
+                "defaults": (spec.slurm or SlurmDefaults()).model_dump(mode="json"),
             }
         rows.append(
             {
@@ -1297,9 +1342,11 @@ def pull_artifact(ctx: Context, manager: HubManager, run_id: str, artifact: str)
         if ".." in rel.parts:
             raise RunError(f"{artifact!r} is outside the run folder")
         dest = pulled / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if not manager.client(host).fetch_file(run_id, str(rel), dest, max_bytes=PULL_MAX_BYTES):
-            raise RunError(f"{artifact} is not in run {run_id} on {host} (or is too large)")
+        with staged_pull(dest, work=ctx.layout.home / PULL_WORK_DIR) as part:
+            if not manager.client(host).fetch_file(
+                run_id, str(rel), part, max_bytes=PULL_MAX_BYTES, require_complete=True
+            ):
+                raise RunError(f"{artifact} is not in run {run_id} on {host} (or is too large)")
         return dest
     name = PurePosixPath(remote_path).name
     if (
@@ -1315,7 +1362,6 @@ def pull_artifact(ctx: Context, manager: HubManager, run_id: str, artifact: str)
             f"host {host} is not reached over ssh; pulling {remote_path} needs route ssh"
         )
     dest = pulled / name
-    dest.parent.mkdir(parents=True, exist_ok=True)
     work = ctx.layout.home / PULL_WORK_DIR  # pull state never lives next to `dest`
     try:
         copy_from(ssh_target(spec), remote_path, dest, work=work)  # scp -s: no remote shell
@@ -1735,6 +1781,7 @@ def create_app(
     if kind is not None:
         ctx.descriptor.kind = kind
     manager = HubManager(ctx)
+    issuer = SweepIssuer(ctx)
     if ctx.descriptor.kind == "slurm":
         require_flock(ctx.layout.home)  # every run-state write takes the run lock
     # one Context (and descriptor) for HTTP and MCP
@@ -1766,11 +1813,18 @@ def create_app(
         if hub:
             await manager.start()
         async with mcp_server.session_manager.run():
+            issuer.start(
+                lambda spec: launcher_for(spec.host, [], project=spec.project),
+                lambda spec, key: stopper_for(spec.host, key),
+            )
             try:
                 yield
             finally:
                 try:
-                    await manager.stop()
+                    try:
+                        await asyncio.to_thread(issuer.stop)
+                    finally:
+                        await manager.stop()
                 finally:
                     # the loops stop even when the hub's stop fails
                     stop.set()
@@ -1807,6 +1861,7 @@ def create_app(
     )
     app.state.ctx = ctx
     app.state.hub = manager
+    app.state.sweep_issuer = issuer
     app.state.mcp = mcp_server
     hosts = allowed_hosts(host)
     # innermost: the guards answer first, and the hub's tunnels carry compressed JSON
@@ -1823,7 +1878,9 @@ def create_app(
 
     @app.exception_handler(HypothexError)
     async def hypothex_error(_: Request, exc: HypothexError) -> JSONResponse:
-        if isinstance(exc, StoreError):
+        if isinstance(exc, (SweepIssuanceActiveError, SweepLegacyResumeRequiredError)):
+            status = 409
+        elif isinstance(exc, StoreError):
             status = 404
         elif isinstance(exc, HostUnavailableError):
             status = 503
@@ -1831,7 +1888,16 @@ def create_app(
             status = 400
         if isinstance(exc, CommandInterruptedError):
             status = 409  # the command's outcome is unknown: never replayed
+        if isinstance(exc, SweepIncompleteError):
+            status = 503
         content: dict[str, Any] = {"error": str(exc), "type": type(exc).__name__}
+        if isinstance(exc, SweepIncompleteError):
+            content.update(
+                {
+                    key: getattr(exc, key)
+                    for key in ("sweep_id", "project", "host", "launched", "total", "hint")
+                }
+            )
         if isinstance(exc, ViewValidationError):
             content["issues"] = to_jsonable(exc.issues)
         return JSONResponse(status_code=status, content=content)
@@ -1839,7 +1905,8 @@ def create_app(
     @app.exception_handler(EnvRequestError)
     async def host_error(_: Request, exc: EnvRequestError) -> JSONResponse:
         # a host's error answer keeps its status; no answer at all is 503
-        status = 503 if isinstance(exc, EnvUnreachableError) else exc.status_code or 502
+        upstream_status = exc.status_code if exc.status_code and exc.status_code >= 400 else 502
+        status = 503 if isinstance(exc, EnvUnreachableError) else upstream_status
         content = {"error": str(exc), "type": exc.error_type or type(exc).__name__}
         return JSONResponse(status_code=status, content=content)
 
@@ -1957,21 +2024,25 @@ def create_app(
 
         return launch
 
-    def stopper_for(host: str | None, command_id: str | None) -> Callable[[str], object] | None:
-        # None: stop_if_queued here; a host name: an only_queued stop on that host
+    def stopper_for(
+        host: str | None, command_id: str | None
+    ) -> Callable[[list[str]], CancelResult] | None:
+        # None: local one-lock cancellation; remote batches retain conditional stop semantics.
         if not is_remote(host):
             return None
         target = str(host)
 
-        def stop(run_id: str) -> None:
-            manager.client(target).post_json(
-                f"/api/v1/runs/{run_id}/stop",
+        def stop(run_ids: list[str]) -> CancelResult:
+            identity = hashlib.sha256(json.dumps(run_ids).encode()).hexdigest()
+            result = manager.client(target).post_json(
+                "/api/v1/runs/stop_queued",
                 {
-                    "command_id": f"{command_id}:{run_id}" if command_id else None,
-                    "only_queued": True,
+                    "command_id": f"{command_id}:batch:{identity}" if command_id else None,
+                    "run_ids": run_ids,
                     "created_by": "hub",
                 },
             )
+            return CancelResult.model_validate(result)
 
         return stop
 
@@ -2180,18 +2251,17 @@ def create_app(
             if before_created_at.tzinfo is None:
                 before_created_at = before_created_at.replace(tzinfo=UTC)
             before = (before_created_at.astimezone(UTC), before_run_id)
-        rows = to_jsonable(
-            ctx.index.list_runs(
-                project=project,
-                task=task,
-                status=status,
-                tag=tag,
-                environment_id=environment_id,
-                include_archived=archived,
-                limit=limit,
-                before=before,
-            )
+        records = ctx.index.list_runs(
+            project=project,
+            task=task,
+            status=status,
+            tag=tag,
+            environment_id=environment_id,
+            include_archived=archived,
+            limit=limit,
+            before=before,
         )
+        rows = to_jsonable(q.with_queue_positions(ctx, records))
         # like the run detail: the CLI and MCP list runs through the hub and see a stale host
         states: dict[str, str | None] = {}
         for row in rows:
@@ -2205,11 +2275,19 @@ def create_app(
     def launch(body: LaunchBody) -> dict[str, Any]:
         return once(body, lambda: launch_here(ctx, body, body.repo))
 
+    @app.post("/api/v1/runs/stop_queued")
+    def runs_stop_queued(body: StopQueuedBody) -> dict[str, Any]:
+        return once(body, lambda: stop_queued_runs(ctx, body.run_ids))
+
     @app.get("/api/v1/runs/{run_id}")
     def run_detail(run_id: str) -> dict[str, Any]:
         detail = q.show_run(ctx, run_id)
         out = to_jsonable(detail)
         out["host_state"] = host_state_of(detail.record.environment_id)
+        out["served"] = (
+            detail.record.environment_id == ctx.descriptor.environment_id
+            or manager.host_for_environment(detail.record.environment_id) is not None
+        )
         return out
 
     @app.get("/api/v1/runs/{run_id}/metrics")
@@ -2282,7 +2360,7 @@ def create_app(
             "reinfer",
             body,
             lambda: control.reinfer(
-                ctx, run_id, checkpoint=body.checkpoint, created_by=body.created_by
+                ctx, run_id, checkpoint=body.checkpoint, vars=body.vars, created_by=body.created_by
             ),
             remote_only=True,
         )
@@ -2329,43 +2407,37 @@ def create_app(
     # sweeps --------------------------------------------------------------------------
     @app.post("/api/v1/sweeps")
     def sweep_create(body: SweepBody) -> dict[str, Any]:
-        require_agent_hypothesis(body.created_by, body.hypothesis)
-
-        def act() -> SweepSummary:
+        def prepare() -> dict[str, Any]:
+            require_agent_hypothesis(body.created_by, body.hypothesis)
             remote = is_remote(body.host)
             if remote:
-                remote_checkout(ctx, str(body.host), body.project)  # unknown host or no map
-            # spec 8A.4: the sweep stores its code, so an extend runs the same commit and
-            # diff: the client's (`hx sweep --host` from a laptop), else the hub checkout's
+                remote_checkout(ctx, str(body.host), body.project)
             if body.commit is not None:
                 commit, diff = body.commit, body.diff
             else:
                 commit, diff = pin_checkout(_registered_checkout(ctx, body.project))
-            launched: list[str] = []
-            summary = launch_sweep(
-                ctx,
-                project=body.project,
-                task=body.task,
-                host=body.host if remote else None,
-                grid=body.grid,
-                random=body.random,
-                seeds=body.seeds,
-                command=body.command,
-                hypothesis=body.hypothesis,
-                gpus=body.gpus,
-                queue=body.queue,
-                created_by=body.created_by,
-                launch=launcher_for(body.host, launched, project=body.project),
-                command_id=body.command_id,  # a retry resumes this sweep (Task 40)
-                commit=commit,
-                diff=diff,
+            spec = sweeps_core._draft(
+                body.project,
+                body.task,
+                body.host if remote else None,
+                body.grid,
+                body.random,
+                body.seeds,
+                body.command,
+                body.created_by,
+                commit,
+                diff,
             )
-            return settled(summary.spec, launched)
+            repo = sweeps_core._resolve_repo(ctx, body.project, body.task, None, remote=remote)
+            return {
+                "spec": spec.model_dump(mode="json"),
+                "repo": str(repo),
+                "hypothesis": body.hypothesis,
+                "gpus": body.gpus,
+                "queue": body.queue,
+            }
 
-        # no command receipt: launch_sweep resumes the sweep a command id made (its claim
-        # file) and issues only the missing runs, even after a hub crash mid-launch, where
-        # a receipt would be `__interrupted__` and refuse the retry
-        return to_jsonable(act())
+        return issuer.accept(body.command_id, prepare)
 
     @app.get("/api/v1/sweeps/{sweep_id}")
     def sweep_get_by_id(sweep_id: str) -> dict[str, Any]:
@@ -2388,13 +2460,17 @@ def create_app(
 
         def act() -> SweepSummary:
             spec = find_sweep(ctx, sweep_id, project)
+            issuer.request_cancel(spec.project, spec.id)
             stop = stopper_for(spec.host, action.command_id)
-            return cancel_queued(ctx, spec.project, spec.id, stop=stop)
+            return cancel_queued(ctx, spec.project, spec.id, stop_batch=stop)
 
         return once(action, act)
 
     @app.post("/api/v1/sweeps/{project}/{sweep_id}/extend")
     def sweep_extend(project: str, sweep_id: str, body: SeedsBody) -> dict[str, Any]:
+        if ctx.events.sweep_operation(project, sweep_id) is not None:
+            return issuer.extend(body.command_id, project, sweep_id, body.seeds)
+
         def act() -> SweepSummary:
             spec = find_sweep(ctx, sweep_id, project)
             launched: list[str] = []
@@ -2470,6 +2546,18 @@ def create_app(
             return
 
     register_env_routes(app, ctx)
+
+    class BareMcp:
+        """Exact ASGI dispatch; a function endpoint would be wrapped as a Request handler."""
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            child = dict(scope)
+            child["path"] = "/"
+            child["raw_path"] = b"/"
+            child["root_path"] = ""
+            await mcp_http(child, receive, send)
+
+    app.router.routes.append(Route("/mcp", endpoint=BareMcp(), methods=["GET", "POST", "DELETE"]))
     app.mount("/mcp", mcp_http)
 
     ui = ui_dir or UI_DIST

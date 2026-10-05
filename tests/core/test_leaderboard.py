@@ -11,6 +11,7 @@ from hypothex.core.context import Context
 from hypothex.core.ids import utcnow
 from hypothex.core.leaderboard import (
     Leaderboard,
+    _pool,
     build_leaderboard,
     cached_leaderboard,
     clear_caches,
@@ -541,6 +542,218 @@ def test_rows_sum_the_cost_of_their_runs() -> None:
     best, other = build_leaderboard("toy", "t", CFG, runs, scores).rows
     assert best.cost == CostTotals(gpu_hours=1.5, gpu_usd=3.0, api_usd=0.25, total_usd=3.25)
     assert other.cost is None
+
+
+# dogfood fixes ---------------------------------------------------------------------------
+def drun(
+    rid: str,
+    git: GitInfo,
+    *,
+    minute: int = 0,
+    config_hash: str = "sha256:aaaaaaaabbbb",
+    **extra: Any,
+) -> RunRecord:
+    return make_record(
+        rid,
+        task="t",
+        status=RunStatus.FINISHED,
+        config_hash=config_hash,
+        git=git,
+        created_at=T0 + timedelta(minutes=minute),
+        **extra,
+    )
+
+
+def test_uncommitted_changes_make_their_own_seed_group() -> None:
+    clean = [drun(f"c{i}", GitInfo(commit="c1"), seed=i, hypothesis="baseline") for i in (1, 2)]
+    dirty = [
+        drun(f"d{i}", GitInfo(commit="c1", dirty=True, diff_hash="9f3c2e1a"), seed=i, minute=1)
+        for i in (1, 2)
+    ]
+    other = drun("o1", GitInfo(commit="c1", dirty=True, diff_hash="0badf00d"), seed=1)
+    legacy = drun("l1", GitInfo(commit="c1", dirty=True), seed=1)  # no diff hash recorded
+    runs = [*clean, *dirty, other, legacy]
+    scores = {"c1": acc(0.8), "c2": acc(0.8), "d1": acc(0.9), "d2": acc(0.9)}
+    scores |= {"o1": acc(0.7), "l1": acc(0.6)}
+    board = build_leaderboard("toy", "t", CFG, runs, scores)
+    by_id = {r.group_id: r.run_ids for r in board.rows}
+    assert by_id == {
+        "aaaaaaaa@c1+9f3c2e1a": ["d1", "d2"],
+        "aaaaaaaa@c1": ["c1", "c2"],
+        "aaaaaaaa@c1+0badf00d": ["o1"],
+        "aaaaaaaa@c1+dirty": ["l1"],
+    }
+    clean_row = next(r for r in board.rows if r.group_id == "aaaaaaaa@c1")
+    assert clean_row.label == "baseline" and clean_row.n == 2
+    assert group_labels(runs).keys() == by_id.keys()  # one id rule for board and sources
+
+
+def test_reruns_of_a_seed_are_one_sample() -> None:
+    # seed 1 run three times (two reruns), seed 2 once; n counts seeds, not runs
+    runs = [drun(f"s1r{i}", GitInfo(commit="c1"), seed=1, minute=i) for i in range(3)]
+    runs += [drun("s2", GitInfo(commit="c1"), seed=2, minute=3)]
+    runs += [drun(f"x{i}", GitInfo(commit="c1"), seed=7, config_hash="sha256:x") for i in (0, 1)]
+    scores = {"s1r0": acc(0.8), "s1r1": acc(0.9), "s1r2": acc(0.7), "s2": acc(0.6)}
+    scores |= {"x0": acc(0.5), "x1": acc(0.5)}
+    per_example = {
+        "s1r0": binary(4, {0, 1}),
+        "s1r1": binary(4, {0, 1}),
+        "s1r2": binary(4, {0, 1}),
+        "s2": binary(4, set()),
+        "x0": binary(4, {0}),
+        "x1": binary(4, {0}),
+    }
+    board = build_leaderboard("toy", "t", CFG, runs, scores, per_example=per_example)
+    row, single = board.rows
+    assert row.run_ids == ["s1r0", "s1r1", "s1r2", "s2"]  # every run stays a member
+    assert row.n == 2 and not row.single_seed
+    assert row.seed_values == {"acc/value": [pytest.approx(0.8), 0.6]}
+    assert row.primary is not None and row.primary.n == 2
+    assert row.primary.mean == pytest.approx(0.7)
+    # pooled per seed first: e0, e1 = 1/2, so 1 of 4 (pooling runs gives 3/4 each, 2 of 4)
+    assert row.test_interval is not None
+    assert (row.test_interval.lo, row.test_interval.hi) == stats.wilson_interval(1, 4)
+    # the same seed twice is one seed: single-seed badge, no t-interval
+    assert single.n == 1 and single.single_seed and single.run_ids == ["x0", "x1"]
+    assert single.primary is not None and single.primary.ci_low is None
+
+
+def test_rerun_seed_means_do_not_overflow_when_the_mean_is_finite() -> None:
+    runs = [drun(f"r{i}", GitInfo(commit="c1"), seed=i % 2, minute=i) for i in range(40)]
+    scores = {r.run_id: acc(1e307 if r.seed == 0 else -1e307) for r in runs}
+
+    row = build_leaderboard("toy", "t", CFG, runs, scores).rows[0]
+
+    assert row.n == 2
+    assert row.seed_values == {"acc/value": [1e307, -1e307]}
+    assert row.primary is not None
+    assert row.primary.mean == 0.0
+    assert row.primary.std == pytest.approx(2**0.5 * 1e307)
+    assert row.primary.ci_low == pytest.approx(-12.706 * 1e307)
+    assert row.primary.ci_high == pytest.approx(12.706 * 1e307)
+
+
+@pytest.mark.parametrize(
+    ("values", "repeats", "expected"),
+    [([1e307, -1e307], 20, 0.0), ([1e308, 1e308], 1, 1e308), ([5e-324, 5e-324], 1, 5e-324)],
+)
+def test_example_seed_pool_does_not_overflow_when_the_mean_is_finite(
+    values: list[float], repeats: int, expected: float
+) -> None:
+    seeds = [[f"s{seed}r{i}" for i in range(repeats)] for seed in range(2)]
+    examples = {
+        rid: {"example": {"value": values[seed]}}
+        for seed, run_ids in enumerate(seeds)
+        for rid in run_ids
+    }
+
+    assert _pool(seeds, examples, "value") == {"example": expected}
+
+
+def test_within_noise_follows_the_paired_test_not_seed_intervals() -> None:
+    # wide seed intervals overlap, but the paired test on 40 examples is clear
+    runs = [krun(f"a{i}", "a", minute=i) for i in range(3)]
+    runs += [krun(f"b{i}", "b", minute=i) for i in range(3)]
+    scores = {"a0": acc(0.5), "a1": acc(1.0), "a2": acc(0.9), "b0": acc(0.4)}
+    scores |= {"b1": acc(0.9), "b2": acc(0.5)}
+    per_example = {f"a{i}": binary(40, set(range(30))) for i in range(3)}
+    per_example |= {f"b{i}": binary(40, set(range(10))) for i in range(3)}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    vs = board.rows[1].vs_best
+    assert vs is not None and vs.p is not None and vs.p < 1e-5
+    assert board.rows[1].within_noise_of_best is False
+    # identical seeds (std 0) do not make a real win when the paired p is large
+    runs = [krun(f"k{i}", "k", minute=i) for i in range(2)]
+    runs += [krun(f"l{i}", "l", minute=i) for i in range(2)]
+    scores = {"k0": acc(0.6), "k1": acc(0.6), "l0": acc(0.5), "l1": acc(0.5)}
+    per_example = {f"k{i}": binary(10, set(range(6))) for i in range(2)}
+    per_example |= {f"l{i}": binary(10, set(range(1, 6))) for i in range(2)}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    vs = board.rows[1].vs_best
+    assert vs is not None and vs.p == pytest.approx(1.0)
+    assert board.rows[1].within_noise_of_best is True
+    # no p (single seeds, no examples): unknown
+    runs = [krun("x", "x"), krun("y", "y")]
+    board = build_leaderboard("toy", "t", KINDS, runs, {"x": acc(0.9), "y": acc(0.1)})
+    assert board.rows[1].vs_best is not None and board.rows[1].vs_best.p is None
+    assert board.rows[1].within_noise_of_best is None
+
+
+def test_rerun_and_reinfer_prefixes_do_not_rename_the_group() -> None:
+    rid = "20261004-124748-uspto-forward-to-5663"
+    assert group_label(f"Rerun of {rid}: svm, rbf kernel", [], "g") == "svm"
+    assert group_label(f"Re-infer of {rid}: svm should win", [], "g") == "svm"
+    chained = f"Rerun of r2: Re-infer of {rid}: Rerun of r0: svm (rbf)"
+    assert group_label(chained, [], "g") == "svm"
+    assert group_label(f"Rerun of {rid}:", ["base"], "g") == "base"  # parent had none
+    # a rerun of the best run keeps the best group's name and the headline
+    runs = [
+        krun("a0", "a", seed=1, hypothesis="svm wins"),
+        krun("a1", "a", seed=2, minute=1, hypothesis="Rerun of a0: svm wins"),
+        krun("b0", "b", hypothesis="rf"),
+    ]
+    scores = {"a0": acc(0.9), "a1": acc(0.9), "b0": acc(0.7)}
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    assert board.rows[0].label == "svm wins"
+    assert board.headline.startswith("svm wins ")
+
+
+def test_seed_intervals_of_fractions_stay_in_zero_one() -> None:
+    runs = [krun(f"a{i}", "a", minute=i) for i in range(3)]
+    runs += [krun(f"s{i}", g, task="sb", minute=i) for i, g in enumerate("sss")]
+    scores = {"a0": acc(0.98), "a1": acc(1.0), "a2": acc(1.0)}
+    for i, v in enumerate([810.0, 900.0, 900.0]):  # "lat" is unitless but not a fraction
+        scores[f"s{i}"] = [
+            ScoreRecord(metric="lat", version="v1", key="p95", value=v, created_at=T0)
+        ]
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    p = board.rows[0].primary
+    assert p is not None and p.ci_high == 1.0 and p.ci_low is not None and p.ci_low < 0.98
+    bench = build_leaderboard("toy", "sb", KINDS, runs, scores).rows[0].primary
+    assert bench is not None and bench.ci_high is not None and bench.ci_high > 900
+    # a unit means the values are not fractions: no clip even inside [0, 1]
+    timed = KINDS.model_copy(deep=True)
+    timed.metrics["acc"].unit = "s"
+    p = build_leaderboard("toy", "t", timed, runs, scores).rows[0].primary
+    assert p is not None and p.ci_high is not None and p.ci_high > 1.0
+
+
+def test_distinct_dirty_hashes_with_same_prefix_keep_separate_paired_data() -> None:
+    runs = [
+        drun("best", GitInfo(commit="c1", dirty=True, diff_hash="abcd0001"), seed=1),
+        drun("other", GitInfo(commit="c1", dirty=True, diff_hash="abcd0002"), seed=1),
+    ]
+    board = build_leaderboard(
+        "toy",
+        "t",
+        CFG,
+        runs,
+        {"best": acc(1.0), "other": acc(0.0)},
+        per_example={"best": binary(20, set(range(20))), "other": binary(20, set())},
+    )
+    best, other = board.rows
+    assert other.vs_best is not None
+    assert other.vs_best.p == pytest.approx(2 / 2**20)
+    assert (other.vs_best.fixed, other.vs_best.broken) == (20, 0)
+    assert best.group_id != other.group_id
+    assert len(group_labels(runs)) == 2
+
+
+def test_leaderboard_names_mixed_metric_code_at_the_selected_version() -> None:
+    runs = [krun("a", "a"), krun("b", "b")]
+    old = score("acc", 0.8).model_copy(update={"source_hash": "sha256:first"})
+    new = score("acc", 0.9).model_copy(update={"source_hash": "sha256:second"})
+    board = build_leaderboard("toy", "t", CFG, runs, {"a": [old], "b": [new]})
+    assert board.model_dump().get("metric_drift") == ["acc@v2"]
+    # A different version is a different definition; missing hashes provide no evidence.
+    clean = build_leaderboard(
+        "toy",
+        "t",
+        CFG,
+        runs,
+        {"a": [old], "b": [new.model_copy(update={"version": "v1"}), score("acc", 0.9)]},
+    )
+    assert clean.model_dump().get("metric_drift") == []
 
 
 def float_board_inputs(

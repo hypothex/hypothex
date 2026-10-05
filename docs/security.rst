@@ -102,6 +102,11 @@ replaces the host copy without retaining its paths in local repo history.
 Host identities
 ---------------
 
+When ``environment.json`` is missing, identity recovery considers only runs with
+this machine's hostname and no mirror claim. A host can report the same hostname
+as the hub, so a matching hostname alone never makes a claimed mirror local.
+Malformed claims and dangling claim symlinks still exclude their runs from recovery.
+
 A host must report an environment identity different from the hub and from every
 other configured host. The hub reserves the identity before reading the event
 cursor or starting a mirror. The reservation uses the existing ``host_cursors``

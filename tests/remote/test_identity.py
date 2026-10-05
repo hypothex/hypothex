@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -15,6 +16,9 @@ from hypothex.api.app import HubManager
 from hypothex.core.context import Context
 from hypothex.core.environment import EnvironmentDescriptor
 from hypothex.core.index import rebuild_index
+from hypothex.core.queries import show_run
+from hypothex.core.records import Artifact, DatasetRef
+from hypothex.remote.client import EnvRequestError
 from hypothex.remote.config import EnvironmentsFile, HostSpec, save_hosts
 from hypothex.remote.hub import CLAIMS_DIR, Hub, _Supervisor, mirror_run, mirror_source
 from tests.remote.test_hub import FakeClient, seed_run, until
@@ -197,6 +201,169 @@ def test_removing_the_old_host_allows_an_explicit_alias_transfer(
             await hub.stop()
 
     asyncio.run(main())
+
+
+@pytest.mark.parametrize("paths_available", [True, False])
+def test_alias_transfer_refreshes_cached_paths_from_the_verified_owner(
+    identity_context: Context, tmp_path: Path, toy_repo: Path, paths_available: bool
+) -> None:
+    ctx, remote = identity_context, Context.open(tmp_path / "remote")
+    remote.register_project(toy_repo)
+    original = seed_run(remote, "r1").model_copy(
+        update={
+            "artifacts": [Artifact(kind="checkpoint", path="/remote/model.pt")],
+            "datasets": [DatasetRef(name="data", version="1", path="/remote/data.jsonl")],
+        }
+    )
+    remote.store.write_record(original)
+    client = FakeClient(remote)
+    assert mirror_run(ctx, client, "old", ENVIRONMENT, "toy", "r1")  # type: ignore[arg-type]
+    cache = ctx.run_dir(ctx.find_record("r1")) / hub_module.HOST_PATHS_FILE
+    assert json.loads(cache.read_text())["host"] == "old"
+    ctx.index.set_cursor("old", ENVIRONMENT, 7)
+    hub = Hub(ctx, hosts("old"))
+
+    class NewOwnerClient(FakeClient):
+        def get_json(self, path: str, **params: Any) -> Any:
+            if path == "/api/v1/runs/r1" and not paths_available:
+                raise EnvRequestError("paths unavailable", status_code=503)
+            return super().get_json(path, **params)
+
+    async def main() -> None:
+        await hub.remove_host("old")
+        await hub.add_host("new", hosts("new").environments["new"])
+        await hub.connect("new")
+        try:
+            await until(lambda: hub.state("new").state in {"connected", "error"}, timeout=3)
+            assert hub.state("new").state == "connected"
+            assert mirror_run(  # type: ignore[arg-type]
+                ctx, NewOwnerClient(remote), "new", ENVIRONMENT, "toy", "r1"
+            )
+            mirrored = ctx.find_record("r1")
+            assert mirror_source(ctx, mirrored) == "host:new"
+            assert mirrored.artifacts[0].host == mirrored.datasets[0].host == "new"
+            paths = hub_module.host_paths(ctx, mirrored)
+            assert paths["cwd"] == f"new:{original.cwd}"
+            if paths_available:
+                assert json.loads(cache.read_text())["host"] == "new"
+                shown = show_run(ctx, "r1").paths
+                assert shown["run_dir"] == f"new:{remote.run_dir(original)}"
+                assert shown["repo"] == f"new:{toy_repo}"
+                assert shown["stdout"].startswith("new:")
+            else:
+                assert paths == {"cwd": f"new:{original.cwd}"}
+                assert mirror_run(ctx, client, "new", ENVIRONMENT, "toy", "r1")  # type: ignore[arg-type]
+                assert json.loads(cache.read_text())["host"] == "new"
+            assert mirror_run(ctx, client, "old", ENVIRONMENT, "toy", "r1") is None  # type: ignore[arg-type]
+            assert mirror_source(ctx, ctx.find_record("r1")) == "host:new"
+            assert ctx.index.get_cursor("old", ENVIRONMENT) == 7
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+
+
+def test_alias_transfer_refreshes_the_proven_projects_snapshot(
+    identity_context: Context, tmp_path: Path, toy_repo: Path
+) -> None:
+    ctx, remote = identity_context, Context.open(tmp_path / "remote")
+    entry = remote.register_project(toy_repo)
+    seed_run(remote, "r1")
+    client = FakeClient(remote)
+    assert mirror_run(ctx, client, "old", ENVIRONMENT, "toy", "r1")  # type: ignore[arg-type]
+    ctx.index.set_cursor("old", ENVIRONMENT, 7)
+    hub = Hub(ctx, hosts("new"))
+    hub._reserve_environment(ENVIRONMENT, "new")
+    assert ctx.store.load_project("toy").remote_host == "new"
+    assert ctx.index.get_project("toy") == ctx.store.load_project("toy")
+    for description in ("new snapshot", "next snapshot"):
+        changed = entry.model_copy(
+            update={
+                "repo": "/remote/moved/toy",
+                "config": entry.config.model_copy(update={"description": description}),
+            }
+        )
+        remote.store.save_project(changed)
+        assert mirror_run(ctx, client, "new", ENVIRONMENT, "toy", "r1")  # type: ignore[arg-type]
+        copied = ctx.store.load_project("toy")
+        assert copied.remote_host == "new"
+        assert copied.repo == "/remote/moved/toy"
+        assert copied.config.description == description
+        assert ctx.index.get_project("toy") == copied
+
+
+@pytest.mark.parametrize(
+    "missing_proof",
+    ["local", "other_environment", "missing_cursor", "missing_claim", "configured", "unreadable"],
+)
+def test_alias_transfer_preserves_projects_without_exclusive_provenance(
+    identity_context: Context, tmp_path: Path, toy_repo: Path, missing_proof: str
+) -> None:
+    ctx, remote = identity_context, Context.open(tmp_path / "remote")
+    remote.register_project(toy_repo)
+    seed_run(remote, "r1")
+    client = FakeClient(remote)
+    assert mirror_run(ctx, client, "old", ENVIRONMENT, "toy", "r1")  # type: ignore[arg-type]
+    if missing_proof != "missing_cursor":
+        ctx.index.set_cursor("old", ENVIRONMENT, 7)
+    if missing_proof == "local":
+        ctx.register_project(toy_repo)
+    elif missing_proof == "other_environment":
+        claim = ctx.layout.store / CLAIMS_DIR / "other.json"
+        claim.write_text(json.dumps({"project": "toy", "environment_id": "another", "host": "old"}))
+        ctx.index.set_cursor("old", "another", 8)
+    elif missing_proof == "missing_claim":
+        (ctx.layout.store / CLAIMS_DIR / "r1.json").unlink()
+    elif missing_proof == "unreadable":
+        (ctx.layout.store / CLAIMS_DIR / "unknown.json").write_text("not readable")
+    before = ctx.store.load_project("toy")
+    configured = hosts("old", "new") if missing_proof == "configured" else hosts("new")
+    hub = Hub(ctx, configured)
+    if missing_proof == "configured":
+        with pytest.raises(hub_module._EnvironmentTakenError, match="host old"):
+            hub._reserve_environment(ENVIRONMENT, "new")
+    else:
+        hub._reserve_environment(ENVIRONMENT, "new")
+        assert mirror_run(ctx, client, "new", ENVIRONMENT, "toy", "r1")  # type: ignore[arg-type]
+    assert ctx.store.load_project("toy") == before
+    assert ctx.index.get_project("toy") == before
+
+
+@pytest.mark.parametrize("crash_after", ["project", "index", "claim"])
+def test_alias_project_transfer_resumes_after_an_interrupted_write(
+    identity_context: Context,
+    tmp_path: Path,
+    toy_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_after: str,
+) -> None:
+    ctx, remote = identity_context, Context.open(tmp_path / "remote")
+    remote.register_project(toy_repo)
+    seed_run(remote, "r1")
+    assert mirror_run(ctx, FakeClient(remote), "old", ENVIRONMENT, "toy", "r1")  # type: ignore[arg-type]
+    ctx.index.set_cursor("old", ENVIRONMENT, 7)
+    hub = Hub(ctx, hosts("new"))
+    target, attribute = {
+        "project": (ctx.store, "save_project"),
+        "index": (ctx.index, "upsert_project"),
+        "claim": (hub_module, "atomic_write_text"),
+    }[crash_after]
+    write = getattr(target, attribute)
+
+    def interrupt(*args: Any, **kwargs: Any) -> None:
+        write(*args, **kwargs)
+        raise OSError("interrupted project transfer")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(target, attribute, interrupt)
+        with pytest.raises(OSError, match="interrupted project transfer"):
+            hub._reserve_environment(ENVIRONMENT, "new")
+    restarted = Hub(Context.open(ctx.layout.home), hosts("new"))
+    restarted._reserve_environment(ENVIRONMENT, "new")
+    copied = restarted.ctx.store.load_project("toy")
+    assert copied.remote_host == "new"
+    assert restarted.ctx.index.get_project("toy") == copied
+    assert mirror_source(ctx, ctx.find_record("r1")) == "host:new"
 
 
 def test_alias_transfer_waits_for_the_old_hosts_pending_mirrors(

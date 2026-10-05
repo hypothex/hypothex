@@ -5,7 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
-import tempfile
+import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -37,33 +37,28 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 
 TEMP_NAME_KEEP = 200
-"""Most bytes of a file name kept in its temp file's name (the rest is cut)."""
+"""Most bytes of a file name kept in its temp file's name."""
 
 
 def temp_prefix(name: str) -> str:
     """
-    Return a ``tempfile.mkstemp`` prefix for a hidden temp file next to ``name``.
-
-    The prefix is ``.<name>.`` with ``name`` cut to ``TEMP_NAME_KEEP`` bytes, so
-    the prefix, mkstemp's 8 random characters and a short suffix stay within
-    the 255-byte name limit even when ``name`` itself uses all of it.
+    Return a hidden temporary-file prefix bounded by the filesystem name limit.
 
     Parameters
     ----------
     name : str
-        Name of the file the temp file will replace.
+        Name of the destination file.
 
     Returns
     -------
     str
-        The prefix, at most ``TEMP_NAME_KEEP + 2`` bytes.
+        ``.<name>.``, with the name shortened to at most 200 encoded bytes,
+        leaving room for a random suffix within a 255-byte filename.
 
     Examples
     --------
-    >>> temp_prefix("a.jsonl")
-    '.a.jsonl.'
-    >>> len(temp_prefix("x" * 255))
-    202
+    >>> temp_prefix("run.yaml")
+    '.run.yaml.'
     """
     keep = name[:TEMP_NAME_KEEP]
     while len(os.fsencode(keep)) > TEMP_NAME_KEEP:
@@ -77,7 +72,9 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
 
     The data goes to a temp file in the same folder, which is flushed
     (``os.fsync``) and renamed over ``path``; then the folder is flushed
-    (``fsync_dir``) so the rename itself survives a crash.
+    (``fsync_dir``) so the rename itself survives a crash. The file mode is
+    ``0666`` minus the umask, as for any new file (``0644`` with the usual
+    umask); write secrets with a mode of their own.
 
     On macOS, ``os.fsync`` hands the data to the drive but does not flush
     the drive's own cache (``F_FULLFSYNC`` does). That is not used here: it
@@ -97,12 +94,15 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     --------
     >>> import tempfile
     >>> target = Path(tempfile.mkdtemp()) / "blob.bin"
-    >>> atomic_write_bytes(target, b"caf\xe9")
+    >>> atomic_write_bytes(target, b"caf\\xe9")
     >>> target.read_bytes()
-    b'caf\xe9'
+    b'caf\\xe9'
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=temp_prefix(path.name), suffix=".tmp")
+    # not mkstemp: its 0600 would make run.yaml and the like unreadable to the
+    # other users of a shared store; 0666 minus the umask matches appended files
+    tmp = path.with_name(f"{temp_prefix(path.name)}{secrets.token_hex(8)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
@@ -221,29 +221,84 @@ def append_jsonl(path: Path, obj: dict[str, Any]) -> None:
         fh.write((line + "\n").encode("utf-8"))
 
 
+def iter_jsonl(path: Path, max_line_bytes: int | None = None) -> Iterator[dict[str, Any]]:
+    """
+    Yield the objects of a JSONL file one line at a time, skipping bad lines.
+
+    Exact reads accept universal newlines (LF, CRLF, and CR); bounded reads
+    split on LF. Blank lines and lines that are not a JSON object
+    (malformed or partial) are skipped. A *bounded* read (``max_line_bytes``
+    given) also skips lines longer than that, read in pieces and never held,
+    and lines that are not UTF-8: it serves live files a view must survive. An
+    exact read (``None``) holds each line whole and raises on bytes that are
+    not UTF-8, as reading the file as text would: a row it skips is malformed
+    JSON, never a row the caller could not see.
+
+    Parameters
+    ----------
+    path : Path
+        JSONL file; a missing file yields nothing.
+    max_line_bytes : int, optional
+        Longest line to parse, in bytes; ``None`` parses every line.
+
+    Yields
+    ------
+    dict
+        The parsed objects, in file order.
+
+    Raises
+    ------
+    UnicodeDecodeError
+        If ``max_line_bytes`` is ``None`` and a line is not UTF-8.
+
+    Examples
+    --------
+    >>> list(iter_jsonl(Path("missing.jsonl")))
+    []
+    """
+    if not path.is_file():
+        return
+    if max_line_bytes is None:
+        with path.open(encoding="utf-8") as text_file:
+            for text_line in text_file:
+                try:
+                    obj = json.loads(text_line.strip())
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    yield obj
+        return
+    cap = max_line_bytes + 1
+    with path.open("rb") as fh:
+        while line := fh.readline(cap):
+            if cap > 0 and len(line) == cap and not line.endswith(b"\n"):
+                while (rest := fh.readline(cap)) and not rest.endswith(b"\n"):
+                    pass
+                continue
+            if not line.strip():
+                continue
+            try:
+                text = line.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            try:
+                obj = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                yield obj
+
+
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     """
-    Read a JSONL file, skipping blank, malformed, and partial lines.
+    Read a JSONL file, skipping blank, malformed, and partial lines (``iter_jsonl``).
 
     Returns
     -------
     list of dict
         Parsed objects; ``[]`` if the file does not exist.
     """
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            obj = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            rows.append(obj)
-    return rows
+    return list(iter_jsonl(path))
 
 
 def append_note_file(path: Path, text: str, author: str, now: datetime | None = None) -> None:

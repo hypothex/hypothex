@@ -4,13 +4,15 @@ The demo mirrors the approved mockups in ``docs/mockups/kinds/*/data.js`` (and
 ``docs/mockups/ui-v4/data.js`` for the generic kind): the same seeded generators,
 ported to Python, produce the same numbers. Every file is written through the
 public store, ``Context``, and SDK APIs, so the demo home has the production
-layout. Nothing is executed: no training, no metric worker, no git.
+layout. ``seed_demo`` executes no training, metric worker, or Git commands.
 
 Used by UI tests, Playwright, and docs screenshots.
 
 ``seed_demo_hosts`` adds two fake hosts (an 8-GPU SSH box and a SLURM cluster) as
 separate homes under ``<home>/demo-hosts/``; ``demo_hosts_running`` (used by
 ``hx serve``) starts them and fills the GPU queue. Nothing reaches a real host.
+The host demo uses an isolated Git repository so queued launches can pin its
+configuration and fake training script without discovering an enclosing checkout.
 
 Examples
 --------
@@ -380,14 +382,14 @@ class _Seeder:
 
     def index_progress(self, record: RunRecord) -> None:
         """
-        Index a still-running run's logged metric history.
+        Index a still-running run's logged metric history (a bounded read).
 
         Parameters
         ----------
         record : RunRecord
             The running run.
         """
-        points = self.ctx.store.read_metric_points(record.project, record.run_id)
+        points = self.ctx.store.read_metric_points_bounded(record.project, record.run_id)
         self.ctx.index.replace_metric_points(record.run_id, points)
 
     def finish(
@@ -2065,19 +2067,57 @@ import time
 
 time.sleep(float(os.environ.get("HX_DEMO_SLEEP", "900")))
 '''
+# demo stand-ins: `.jobs` holds queued jobs as `id|comment` (they stay PENDING, nothing
+# runs); `scancel` moves a job to `.cancelled`, which `sacct` reports as CANCELLED. The
+# lock waits at most 5 s, so a lock left by a killed script never blocks the demo.
+_FAKE_SLURM_LOCK = (
+    'd="$(dirname "$0")"\n'
+    "i=0\n"
+    'while ! mkdir "$d/.lock" 2>/dev/null && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.05; done\n'
+    "trap 'rmdir \"$d/.lock\"' EXIT\n"
+)
 _FAKE_SLURM = {
     "sbatch": (
         "#!/bin/sh\n"
-        "# demo stand-in: accept the job, print an id, run nothing\n"
-        'f="$(dirname "$0")/.jobid"\n'
-        'n=$(cat "$f" 2>/dev/null || echo 48213000)\n'
+        "# demo stand-in: queue the job (it stays PENDING), print its id, run nothing\n"
+        + _FAKE_SLURM_LOCK
+        + 'comment=""\n'
+        'for a in "$@"; do case "$a" in --comment=*) comment="${a#--comment=}";; esac; done\n'
+        'n=$(cat "$d/.jobid" 2>/dev/null || echo 48213000)\n'
         "n=$((n + 1))\n"
-        'echo "$n" > "$f"\n'
+        'echo "$n" > "$d/.jobid"\n'
+        'echo "$n|$comment" >> "$d/.jobs"\n'
         'echo "$n"\n'
     ),
-    "squeue": "#!/bin/sh\n# demo stand-in: the queue is empty\nexit 0\n",
-    "sacct": "#!/bin/sh\n# demo stand-in: no accounting records\nexit 0\n",
-    "scancel": "#!/bin/sh\nexit 0\n",
+    "squeue": (
+        "#!/bin/sh\n"
+        "# demo stand-in: every queued job is PENDING on no node\n"
+        'd="$(dirname "$0")"\n'
+        '[ -f "$d/.jobs" ] || exit 0\n'
+        "while IFS='|' read -r id comment; do\n"
+        '  case "$*" in *%k*) echo "$id|PENDING||$comment";; *) echo "$id|PENDING|";; esac\n'
+        'done < "$d/.jobs"\n'
+    ),
+    "sacct": (
+        "#!/bin/sh\n"
+        "# demo stand-in: only cancelled jobs have accounting records\n"
+        'd="$(dirname "$0")"\n'
+        '[ -f "$d/.cancelled" ] || exit 0\n'
+        'row="CANCELLED by 0|0:0|None assigned"\n'
+        "while IFS='|' read -r id comment; do\n"
+        '  case "$*" in *Comment*) echo "$id|$row|$comment";; *) echo "$id|$row";; esac\n'
+        'done < "$d/.cancelled"\n'
+    ),
+    "scancel": (
+        "#!/bin/sh\n"
+        "# demo stand-in: a queued job leaves the queue as CANCELLED; others are ignored\n"
+        + _FAKE_SLURM_LOCK
+        + 'for a in "$@"; do case "$a" in -*) ;; *) id="$a";; esac; done\n'
+        'job=$(grep "^$id|" "$d/.jobs" 2>/dev/null) || exit 0\n'
+        'grep -v "^$id|" "$d/.jobs" > "$d/.jobs.new"\n'
+        'mv "$d/.jobs.new" "$d/.jobs"\n'
+        'echo "$job" >> "$d/.cancelled"\n'
+    ),
     "scontrol": (
         "#!/bin/sh\n# demo stand-in: accounting keeps job comments\n"
         'echo "AccountingStoreFlags    = job_comment"\n'
@@ -2169,6 +2209,7 @@ def _host_run(
     rate: float,
     sweep_id: str | None = None,
     sweep_owner: str = "",
+    end_reason: str | None = None,
     slurm_job: str | None = None,
     node: str | None = None,
 ) -> RunRecord:
@@ -2211,6 +2252,7 @@ def _host_run(
         created_at=created_at,
         started_at=created_at,
         ended_at=created_at + timedelta(minutes=minutes),
+        end_reason=end_reason,
         exit_code=exit_code,
         tags=[sweep_tag(sweep_owner, sweep_id)] if sweep_id else [],
         created_by=created_by,
@@ -2301,6 +2343,7 @@ def _seed_cluster_runs(ctx: Context, repo: Path, anchor: datetime) -> list[str]:
         minutes=52,
         status=RunStatus.LOST,
         exit_code=None,
+        end_reason="SLURM ended job 48211932 with NODE_FAIL on r208u06n02; no exit record",
         slurm_job="48211932",
         node="r208u06n02",
         **common,
@@ -2320,6 +2363,8 @@ def seed_demo_hosts(home: Path) -> dict[str, str]:
     ``lr x beam`` sweep ``s-7f3a``; ``cluster`` (SLURM kind, $0.50/GPU-hour) holds a
     finished and a lost run. The hub gets ``route: url`` entries for both and the
     sweep spec; ``hx serve`` starts the hosts (``demo_hosts_running``).
+    The generated training repository and both host copies share an initial Git
+    commit containing their configuration and fake training script.
 
     Parameters
     ----------
@@ -2334,7 +2379,8 @@ def seed_demo_hosts(home: Path) -> dict[str, str]:
     Raises
     ------
     ConfigError
-        If the training demo is missing.
+        If the training demo is missing or its registered repository is not the
+        generated demo directory.
     StoreError
         If the fake hosts already exist.
 
@@ -2358,9 +2404,22 @@ def seed_demo_hosts(home: Path) -> dict[str, str]:
     root = home / DEMO_HOSTS_DIR
     if root.exists():
         raise StoreError(f"demo hosts already exist in {root}; seed into an empty HYPOTHEX_HOME")
+    repo = Path(entry.repo)
+    if repo.resolve() != (home / "demo-repos" / project).resolve():
+        raise ConfigError("--with-hosts requires the generated training demo repository")
+    atomic_write_text(repo / "train.py", _TRAIN_PY)
+    # A demo home may be nested in a source checkout (the browser fixture is).
+    # Give it its own history before copying so hub pins exist on both fake hosts.
+    git = [
+        "git", "-C", str(repo), "-c", "core.hooksPath=/dev/null",
+        "-c", "commit.gpgSign=false", "-c", "user.name=Hypothex demo",
+        "-c", "user.email=demo@hypothex.invalid",
+    ]  # fmt: skip
+    for args in (["init", "-q"], ["add", "."], ["commit", "-qm", "Seed fake host demo"]):
+        subprocess.run([*git, *args], check=True, capture_output=True)
     anchor = utcnow().replace(minute=0, second=0, microsecond=0)
-    gpu_ctx, gpu_repo = _demo_host_home(root, "gpu1", Path(entry.repo))
-    slurm_ctx, slurm_repo = _demo_host_home(root, "cluster", Path(entry.repo))
+    gpu_ctx, gpu_repo = _demo_host_home(root, "gpu1", repo)
+    slurm_ctx, slurm_repo = _demo_host_home(root, "cluster", repo)
     fake_gpus = root / "gpu1-gpus.json"
     atomic_write_text(fake_gpus, json.dumps(_fake_gpu_rows(), indent=2))
     bin_dir = root / "cluster-bin"

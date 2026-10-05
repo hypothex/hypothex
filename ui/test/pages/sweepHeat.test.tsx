@@ -110,3 +110,10 @@ describe("SweepHeat", () => {
     expect(cell("1e-4|5").className).toBe("c best");
   });
 });
+
+test("heat cell separates scored and uncounted members even when all expected seeds are present", () => {
+  const row = parseCell({ ...CELL_D, n: 3, uncounted: 2 })!;
+  renderHeat({ cells: [row], best: row, maxSeeds: 3 });
+  expect(screen.getByText("n=3 +2")).toBeTruthy();
+  expect(cell("3e-4|10").querySelector(".v")?.getAttribute("title")).toContain("2 uncounted runs");
+});

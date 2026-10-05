@@ -1,3 +1,4 @@
+import { checkLayout, LAYOUT_WIDTHS } from "./layout-geometry";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { Page } from "@playwright/test";
@@ -90,4 +91,18 @@ test("an invalid view blocks Save and is never written", async ({ page, request,
   await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
   const views = await getJson<ViewInfoLite[]>(request, `/api/v1/tasks/${project}/${task}/views`);
   expect(views.map((v) => v.name)).not.toContain(name);
+});
+
+test("step7 editor geometry with actual leaderboard preview", async ({ page, theme }, info) => {
+  const { project, task } = demoTask("generic");
+  await page.goto(`/t/${project}/${task}/edit/new`);
+  await expectTheme(page, theme);
+  await replaceEditorText(page, "title: Layout preview\npanels:\n  - type: leaderboard\n    title: Large leaderboard\n    layout:\n      span: 12\n");
+  await expect(page.locator(".hx-ed-pp .forest")).toBeVisible();
+  for (const width of LAYOUT_WIDTHS) {
+    await checkLayout(page, info, "editor", width, [".hx-ed-top", ".hx-ed-act", ".hx-ed-split", ".hx-ed-pv", ".hx-ed-pp", ".hx-ed-pv .fplot"]);
+    if (width <= 1100) {
+      expect.soft(await page.locator(".hx-ed-pv").evaluate((element) => getComputedStyle(element).position)).toBe("static");
+    }
+  }
 });

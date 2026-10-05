@@ -38,7 +38,6 @@ from pydantic import BaseModel
 from hypothex.core.context import Context
 from hypothex.core.environment import load_descriptor
 from hypothex.core.errors import ConfigError, HypothexError, RunError, RunNotFoundError
-from hypothex.core.evaluation import evaluate_run
 from hypothex.core.events import EventLog
 from hypothex.core.execution import (
     STOP_MARKER,
@@ -46,10 +45,11 @@ from hypothex.core.execution import (
     process_alive,
     process_create_time,
     release_worktree,
+    score_finished_run,
 )
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.ids import utcnow
-from hypothex.core.index import Index
+from hypothex.core.index import Index, index_run_points, points_to_index
 from hypothex.core.layout import Layout
 from hypothex.core.records import (
     ACTIVE_STATUSES,
@@ -987,7 +987,7 @@ def run_child(
     SQLite file is opened on the compute node. Scoring is left to the login
     node, so the git worktree of a pinned run is kept here; the login node
     removes it once it published the end (``sync_node_run``). At the end the
-    exit record ``exit.json`` (``status``, ``exit_code``, ``ended_at``) is
+    exit record ``exit.json`` (``status``, ``exit_code``, ``ended_at``, ``end_reason``) is
     written next to ``run.yaml``.
 
     Parameters
@@ -1023,6 +1023,7 @@ def run_child(
         "run_id": final.run_id,
         "status": final.status.value,
         "exit_code": final.exit_code,
+        "end_reason": final.end_reason,
         "ended_at": (final.ended_at or utcnow()).isoformat(),
     }
     atomic_write_text(ctx.run_dir(final) / EXIT_FILE, json.dumps(exit_record))
@@ -1211,9 +1212,11 @@ def _end_if_active(
 
     ``Context.update_run`` emits its event even when ``mutate`` keeps a record
     that the compute node ended first (a ``run.lost`` carrying ``finished``).
-    Here the check, the write, the event, and the index update happen under
-    the run lock, and nothing is written or emitted for a run that ended: the
-    caller then publishes the node's own end (``sync_node_run``, Task 29).
+    Here the check, the write, the event, and the index update (the record,
+    then its metric points from the whole file, ``index_run_points``) happen
+    under the run lock, and nothing is written or emitted for a run that
+    ended: the caller then publishes the node's own end (``sync_node_run``,
+    Task 29).
     """
     project = ctx.find_record(run_id).project
     with run_lock(ctx.layout.run_dir(project, run_id)):
@@ -1221,6 +1224,8 @@ def _end_if_active(
         if current.status in TERMINAL_STATUSES and current.status not in replaces:
             return None
         ended = mutate(current)
+        if "reason" in payload:
+            ended = ended.model_copy(update={"end_reason": payload["reason"]})
         ctx.store.write_record(ended)
         ctx.events.append(
             event_type,
@@ -1229,6 +1234,7 @@ def _end_if_active(
             payload={"status": ended.status.value, **payload},
         )
         ctx.index.upsert_run(ended)
+        index_run_points(ctx.index, ctx.store, ended)
     return ended
 
 
@@ -1456,6 +1462,9 @@ def _exit_fields(data: object) -> dict[str, Any] | str:
     exit_code = data.get("exit_code")
     if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int)):
         return f"exit_code {exit_code!r} is not an integer"
+    end_reason = data.get("end_reason")
+    if end_reason is not None and not isinstance(end_reason, str):
+        return "end_reason is not a string or null"
     raw = data.get("ended_at")
     ended_at: datetime | None = None
     if raw is not None:
@@ -1467,12 +1476,17 @@ def _exit_fields(data: object) -> dict[str, Any] | str:
             return f"ended_at {raw!r} is not an ISO 8601 time"
         if ended_at.tzinfo is None:
             ended_at = ended_at.replace(tzinfo=UTC)
-    return {"status": status, "exit_code": exit_code, "ended_at": ended_at}
+    return {
+        "status": status,
+        "exit_code": exit_code,
+        "ended_at": ended_at,
+        "end_reason": end_reason,
+    }
 
 
 def _read_exit(run_dir: Path) -> dict[str, Any] | None:
     """
-    The node's exit record, checked: ``status`` (an end status), ``exit_code``, ``ended_at``.
+    The node's exit record, checked, including its nullable terminal cause.
 
     None when there is none, and (with a warning) when it cannot be used: a
     bad record must never stop the poll at this run (or at the runs after it).
@@ -1503,6 +1517,7 @@ def _apply_exit(exit_record: dict[str, Any]) -> Callable[[RunRecord], RunRecord]
                 "status": exit_record["status"],
                 "exit_code": exit_record["exit_code"],
                 "ended_at": exit_record["ended_at"] or utcnow(),
+                "end_reason": exit_record.get("end_reason"),
             }
         )
 
@@ -1601,14 +1616,11 @@ def _sync_node_run(ctx: Context, current: RunRecord) -> RunRecord | None:
         ctx.index.upsert_run(current)
         changed = True
     if changed or current.status == RunStatus.RUNNING:
-        points = ctx.store.read_metric_points(current.project, current.run_id)
+        points = points_to_index(ctx.store, current.project, current.run_id, current.status)
         ctx.index.replace_metric_points(current.run_id, points)
     scored = bool(ctx.store.read_scores(current.project, current.run_id))
     if changed and current.status == RunStatus.FINISHED and current.task and not scored:
-        try:
-            evaluate_run(ctx, current.run_id)  # the node never scores (auto_evaluate=False)
-        except HypothexError as exc:
-            ctx.emit("run.eval_skipped", current, {"reason": str(exc)[:500]})
+        score_finished_run(ctx, current)  # the node never scores (auto_evaluate=False)
     if current.status in TERMINAL_STATUSES:
         release_worktree(ctx, current)  # after scoring, which reads the checkout
     if changed or current.status in TERMINAL_STATUSES:
@@ -1822,7 +1834,7 @@ def _settle_node_end(
         changed = published is not None
         if ctx.index.get_run(run_id) != current:
             ctx.index.upsert_run(current)
-            points = ctx.store.read_metric_points(project, run_id)
+            points = points_to_index(ctx.store, project, run_id, current.status)
             ctx.index.replace_metric_points(run_id, points)
             ctx.events.append(
                 "run.slurm_state",

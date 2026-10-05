@@ -450,6 +450,47 @@ def test_query_curve_visible_metrics_with_a_point_cap(
     assert client.post(f"{VIEWS}/query", json={"panel": panel}).status_code == 422
 
 
+def test_live_run_names_feed_filtered_capped_view_after_unindexed_writes(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    """The Run UI's detail-to-view flow includes newly logged names without indexing."""
+    from hypothex.core.fsutil import append_jsonl
+    from hypothex.core.records import RunStatus
+
+    record = seed_finished_run(ctx, toy_repo, "r1")
+    ctx.update_run(
+        "r1", "run.updated", lambda r: r.model_copy(update={"status": RunStatus.RUNNING})
+    )
+    path = ctx.run_dir(record) / "metrics.jsonl"
+    for step in range(600):
+        for name in ("loss", "sweep/rps", "step"):
+            append_jsonl(path, {"name": name, "step": step, "value": float(step)})
+    assert ctx.index.metric_names("r1") == []
+    detail = client.get("/api/v1/runs/r1").json()
+    assert detail["metric_names"] == ["loss", "step", "sweep/rps"]
+    for step in range(600):
+        append_jsonl(path, {"name": "new/acc", "step": step, "value": step / 600})
+    refreshed = client.get("/api/v1/runs/r1").json()
+    visible = [
+        name
+        for name in refreshed["metric_names"]
+        if not name.startswith("sweep/") and name != "step"
+    ]
+    assert visible == ["loss", "new/acc"]
+    panel = {
+        "type": "curves",
+        "data": {"metrics": visible, "max_points": 17, "filter": {"run_id": "r1"}},
+    }
+    response = client.post(f"{VIEWS}/query", json={"panel": panel})
+    assert response.status_code == 200
+    rows = response.json()["panels"][0]["rows"]
+    assert {row["name"] for row in rows} == set(visible)
+    for name in visible:
+        series = [row for row in rows if row["name"] == name]
+        assert len(series) == 17
+        assert [series[0]["step"], series[-1]["step"]] == [0, 599]
+
+
 def test_view_anchors_and_huge_specs_are_issues_never_500(
     client: TestClient, ctx: Context, toy_repo: Path
 ) -> None:

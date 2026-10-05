@@ -215,6 +215,8 @@ export const api = {
     post<M.EvalReport>(ROUTES.taskReeval, { params: { project, task }, body: { ...action(opts), ...args } }),
   stop: (runId: string, opts?: M.ActionOptions) =>
     post<M.RunRecord>(ROUTES.runStop, { params: { run_id: runId }, body: action(opts) }),
+  cancelQueuedRun: (runId: string, opts?: M.ActionOptions) =>
+    post<M.RunRecord>(ROUTES.runStop, { params: { run_id: runId }, body: { ...action(opts), only_queued: true } }),
   note: (runId: string, text: string, opts?: M.ActionOptions) =>
     post<{ ok: true }>(ROUTES.runNotes, {
       params: { run_id: runId },

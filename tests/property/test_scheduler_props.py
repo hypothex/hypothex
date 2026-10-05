@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,7 @@ def _fake_spawn(ctx: Context, record: RunRecord) -> int:
     return 1
 
 
-def _set_status(status: RunStatus):  # noqa: ANN202 - small local mutator factory
+def _set_status(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
     def mutate(r: RunRecord) -> RunRecord:
         return r.model_copy(update={"status": status})
 
@@ -56,6 +57,7 @@ class GpuQueueMachine(RuleBasedStateMachine):
         self.total = 0
         self.external: set[int] = set()
         self.queue: list[str] = []  # waiting runs, FIFO
+        self.tickets: dict[str, int] = {}  # stable while waiting; displayed ranks can change
         self.need: dict[str, int] = {}
         self.running: dict[str, list[int]] = {}
         self.count = 0
@@ -85,11 +87,13 @@ class GpuQueueMachine(RuleBasedStateMachine):
             # it never joined the queue; end it so it does not linger as queued
             self.ctx.update_run(run_id, "run.killed", _set_status(RunStatus.KILLED))
             return
+        ticket = max(self.tickets.values(), default=0) + 1
         position = self.scheduler.enqueue(run_id)
         self.queue.append(run_id)
+        self.tickets[run_id] = ticket
         self.need[run_id] = need
         assert position == len(self.queue)
-        assert self.ctx.find_record(run_id).executor.queue_position == position
+        assert self.ctx.find_record(run_id).executor.queue_position == ticket
 
     @rule()
     def tick(self) -> None:
@@ -101,6 +105,7 @@ class GpuQueueMachine(RuleBasedStateMachine):
                 chosen, free = free[: self.need[run_id]], free[self.need[run_id] :]
                 self.running[run_id] = chosen
                 self.queue.remove(run_id)
+                del self.tickets[run_id]
                 expected.append(run_id)
         assert self.scheduler.tick() == expected
         for run_id in expected:
@@ -108,8 +113,8 @@ class GpuQueueMachine(RuleBasedStateMachine):
             assert record.executor.gpus == self.running[run_id]
             assert record.executor.queue_position is None
             assert record.status == RunStatus.RUNNING
-        for i, run_id in enumerate(self.queue, start=1):
-            assert self.ctx.find_record(run_id).executor.queue_position == i
+        for run_id in self.queue:
+            assert self.ctx.find_record(run_id).executor.queue_position == self.tickets[run_id]
 
     @precondition(lambda self: bool(self.running))
     @rule(data=st.data())
@@ -124,6 +129,7 @@ class GpuQueueMachine(RuleBasedStateMachine):
         run_id = data.draw(st.sampled_from(self.queue))
         self.ctx.update_run(run_id, "run.killed", _set_status(RunStatus.KILLED))
         self.queue.remove(run_id)
+        del self.tickets[run_id]
 
     @precondition(lambda self: self.total > 0)
     @rule(data=st.data())

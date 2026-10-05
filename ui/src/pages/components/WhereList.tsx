@@ -52,7 +52,7 @@ function joinNote(parts: (string | null)[]): string {
 
 /** The git fields `gitLine` reads; the untracked fields may be missing on runs recorded before phase 1b. */
 export type GitState = Pick<GitInfo, "commit" | "branch" | "dirty"> &
-  Partial<Pick<GitInfo, "untracked_count" | "untracked">>;
+  Partial<Pick<GitInfo, "untracked_count" | "untracked" | "diff_hash">>;
 
 /** Branch, short commit, and working-copy state; tracked changes and untracked files apart. */
 export function gitLine(git: GitState): GitLine | null {
@@ -62,7 +62,7 @@ export function gitLine(git: GitState): GitLine | null {
   const untracked = git.untracked ?? [];
   if (git.dirty) {
     const text = count > 0 ? `tracked changes, ${count} untracked` : "tracked changes";
-    return { ref, state: "dirty", text, untracked };
+    return { ref, state: "dirty", text: git.diff_hash ? `${text} · patch ${git.diff_hash}` : text, untracked };
   }
   if (count > 0) return { ref, state: "untracked", text: "untracked files only", untracked };
   return { ref, state: "clean", text: "tracked clean", untracked: [] };
@@ -107,8 +107,9 @@ export function buildWhere(detail: RunDetail): WhereGroup[] {
       const p = paths[key];
       if (p) run.rows.push(whereRow(splitHostPath(p), dir));
     }
-    if (detail.has_diff) {
-      run.rows.push(whereRow({ host: dir.host, path: `${dir.path}/git.diff` }, dir, { note: "tracked diff" }));
+    if (paths.diff || detail.has_diff) {
+      const diff = paths.diff ? splitHostPath(paths.diff) : { host: dir.host, path: `${dir.path}/git.diff` };
+      run.rows.push(whereRow(diff, dir, { note: "tracked diff" }));
     }
     for (const art of record.artifacts) {
       const note = joinNote([

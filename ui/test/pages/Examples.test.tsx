@@ -165,3 +165,15 @@ test("sends the solved field to compare and to the errors query", async () => {
   expect(urls).toContain(solvedErrors);
   expect(urls.some((u) => u.startsWith("/api/v1/compare/examples") && !u.includes("field="))).toBe(false);
 });
+
+test("comparison distinguishes two dirty patches at the same commit", async () => {
+  const git = makeDetail().record.git;
+  mockApi(routes({
+    [`GET /api/v1/runs/${RUN_RF}`]: makeDetail({ run_id: RUN_RF, git: { ...git, dirty: true, diff_hash: "abcdef12" } }, { paths: { diff: "gpu1:/runs/a/git.diff" } }),
+    [`GET /api/v1/runs/${RUN_SVM}`]: makeDetail({ git: { ...git, dirty: true, diff_hash: "abcdef34" } }, { paths: { diff: "gpu2:/runs/b/git.diff" } }),
+  }));
+  renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
+  expect(await screen.findByText(/dirty · patch abcdef12/)).toBeTruthy();
+  expect(screen.getByText(/dirty · patch abcdef34/)).toBeTruthy();
+  expect(screen.getByText("gpu2:/runs/b/git.diff")).toBeTruthy();
+});

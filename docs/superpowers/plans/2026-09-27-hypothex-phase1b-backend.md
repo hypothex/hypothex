@@ -33,7 +33,7 @@
 - Views: names match `^[a-z0-9][a-z0-9_-]*$`; `overview` is reserved for the kind preset; files live at `<repo>/.hypothex/views/<task>/<name>.yaml` (atomic write, text stored byte for byte); presets ship at `src/hypothex/views/presets/<kind>.yaml`; an invalid view is never saved.
 - Example-id and sample-name file stems: `[^A-Za-z0-9_.-]` → `_`, plus `-<sha1(name)[:8]>` when that changed the name or when the name already ends in `-` + 8 lowercase hex digits, through the one helper `store.safe_stem`. Files store the original id or name in every row, and writers call `store.check_stem_owner` first: an existing file that stores a different original raises `StoreError("id collision: ...")`.
 - Telemetry floats (usage `usd`/`seconds`, trace `seconds`) must be finite: `inf` is rejected like `nan` by the SDK and skipped by the readers.
-- Seed-group id: `<config hash hex[:8]>@<commit[:7]>` (`nogit` without git), through the one helper `leaderboard.group_id_for`. Group labels come from the one helper `leaderboard.group_label`.
+- Seed-group id: `<config hash hex[:8]>@<commit[:7]>` (`nogit` without git), plus `+<diff hash>` for a run with uncommitted changes (`+dirty` when the record has no `git.diff_hash`), through the one helper `leaderboard.group_id_for`. Group labels come from the one helper `leaderboard.group_label`.
 - Headlines are one line generated from data. Metrics in [0, 1] get 3 decimals; p-values read `p = 0.15` (two decimals), `p = 0.004` (three decimals when 0.001 ≤ p < 0.01, so a value never reads `p = 0.00`), or `p < 0.001` when tiny; negatives use U+2212 `−`.
 - Copy is terse: numbers, glyphs, short labels; explanations live only in tooltips (`stat_strip` rows carry `tooltip`). Identical seeds show `◇×N`, never a fake `± 0`.
 - Overview default window: the last 24 h. Naive datetimes are read as UTC everywhere (API `since`, view `runs.since`, `build_overview`).
@@ -3926,7 +3926,7 @@ git commit -m "feat: headline number formatting and welch intervals"
   - `LeaderboardRow` adds required fields `label: str`, `seed_values: dict[str, list[float]]` (per `metric/key`, one value per seed in run order), `identical_seeds: bool`, `test_interval: NoiseInterval | None`, `vs_best: VersusBest | None`, `created_by: list[str]` (sorted, unique), `usage: UsageTotals | None` (summed; None if no run has usage).
   - `Leaderboard` adds required fields `headline: str`, `kind: TaskKind`, `stat_strip: list[dict[str, Any]]`. Task 12 fills `headline` and `stat_strip`; until then they are `""` and `[]`.
   - `group_label(hypothesis: str, tags: Iterable[str], group_id: str) -> str`. The one label rule: the panel engine (Task 21) and the Overview (Task 24) reuse it.
-  - `group_id_for(run: RunRecord) -> str` = `<config hash hex[:8]>@<commit[:7] or "nogit">`. The one seed-group id helper: `core.sources` (re-export), `core.panels`, and `core.overview` import it.
+  - `group_id_for(run: RunRecord) -> str` = `<config hash hex[:8]>@<commit[:7] or "nogit">`, plus `+<diff hash>` (or `+dirty`) for a dirty run (`leaderboard.diff_key`). The one seed-group id helper: `core.sources` (re-export), `core.panels`, and `core.overview` import it.
   - `system_bench` with a percentile primary → `Leaderboard.higher_is_better is False`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -8308,7 +8308,7 @@ Implements contract sections 1.5 (`hypothex.core.sources`) and 1.6 (`hypothex.co
 
 **Design decisions (apply to every task in this part):**
 - Rows are read from run-folder files (not the downsampled index), so spike detection and quantiles see full data.
-- `group_id` everywhere is the leaderboard seed-group id `<hash8>@<commit7>` (`nogit` without a commit), computed by `leaderboard.group_id_for` (Task 10; `sources` re-exports it).
+- `group_id` everywhere is the leaderboard seed-group id `<hash8>@<commit7>[+<diff4>]` (`nogit` without a commit), computed by `leaderboard.group_id_for` (Task 10; `sources` re-exports it).
 - `sources` imports `views.Source` only under `TYPE_CHECKING`: `views.view_context` imports `sources`, so a runtime import would be circular.
 - Run selection for a panel: the task's unarchived runs, oldest first; then the view's `RunFilter` (`status` any-of, `tags` all-of, `created_by` equal, `since` inclusive, naive datetimes read as UTC); then `data.filter` (equality, or membership when the wanted value is a list) against the flattened `runs` row (for `table`/`vega_lite` it filters each source row instead); then `data.pick` (`latest` = newest run per seed group, `best` = runs of the leaderboard's top group, `all`/unset = everything).
 - `data.group_by`: `group` (default, leaderboard seed group, labelled with the leaderboard label when the group is on the board), `config` (config hash only), `run`, `seed`. Fallback label: `leaderboard.group_label` (Task 10) of the newest non-empty hypothesis and the group's tags.

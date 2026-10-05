@@ -33,6 +33,7 @@ export interface SweepCellRun {
 
 /** One param combination of a sweep (a `summarize_sweep` cell). */
 export interface SweepCellRow {
+  uncounted?: number;
   params: Record<string, string>;
   group_id: string | null;
   /** Scored seeds. */
@@ -81,6 +82,7 @@ export function parseCell(raw: unknown): SweepCellRow | null {
     params,
     group_id: typeof r.group_id === "string" ? r.group_id : null,
     n: isNum(r.n) ? r.n : 0,
+    uncounted: isNum(r.uncounted) ? r.uncounted : 0,
     mean: numOrNull(r.mean),
     lo: numOrNull(r.lo),
     hi: numOrNull(r.hi),
@@ -267,6 +269,7 @@ export function seedValues(cell: SweepCellRow, board: Leaderboard | undefined): 
 /** Hover text of a cell: params, mean over seeds, seed values, 95% interval, seed σ. */
 export function cellTip(cell: SweepCellRow, names: readonly string[], seeds: readonly number[]): string {
   const lines = [paramsText(cell.params, names)];
+  if (cell.uncounted) lines.push(`${cell.uncounted} uncounted runs (excluded from score)`);
   if (cell.mean === null) {
     lines.push("no scored runs yet");
     return lines.join("\n");

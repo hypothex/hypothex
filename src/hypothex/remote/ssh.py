@@ -21,13 +21,15 @@ import tempfile
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+import psutil
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from hypothex.core.errors import HypothexError
+from hypothex.core.fsutil import atomic_write_text
 
 SSH_FAILURE_CODE = 255
 _STDERR_TAIL = 2000
@@ -275,7 +277,8 @@ def copy_from(
         Path on the host; relative paths and ``~/`` are relative to the
         remote home.
     local : Path
-        Destination path. Parent directories are created.
+        Destination path. Parent directories are created once the copy
+        succeeded, so a failed pull leaves no empty folder.
     work : Path
         Folder for pull state (``stage/``, ``txn/``, ``backup/``); must be on
         the same filesystem as ``local``.
@@ -295,22 +298,58 @@ def copy_from(
     >>> copy_from(SshTarget(alias="gpu1"), "~/ckpt/best.pt", dest, work=work)  # doctest: +SKIP
     """
     _check_remote_path(remote_path, source=True)
-    txn_dir, _, stage_dir = _pull_dirs(work)
-    local.parent.mkdir(parents=True, exist_ok=True)
-    with _install_lock(txn_dir):
-        _recover_swaps(work)  # a recorded swap was cut short: finish or undo it
-    # A unique staging folder per call: two pulls of one file never share it.
-    stage = Path(tempfile.mkdtemp(prefix="pull-", dir=stage_dir))
-    part = stage / local.name
-    argv = [target.scp_bin, *_base_options(target), "-s", "-q", "-r"]
-    argv += [f"{target.alias}:{remote_path}", str(part)]
-    try:
+    with staged_pull(local, work=work) as part:
+        argv = [target.scp_bin, *_base_options(target), "-s", "-q", "-r"]
+        argv += [f"{target.alias}:{remote_path}", str(part)]
         res = _run(argv, stdin=None, timeout=timeout, what=f"scp from {target.alias}")
         if res.returncode != 0 or not part.exists():
             raise SshError(
                 f"scp {target.alias}:{remote_path} -> {local} failed "
                 f"(exit {res.returncode}): {_tail(res.stderr)}"
             )
+
+
+@contextmanager
+def staged_pull(local: Path, *, work: Path) -> Iterator[Path]:
+    """
+    Stage a complete download and install it with the trusted pull transaction.
+
+    Both HTTP and SFTP downloads use this boundary. No final destination parent
+    is created until the download succeeds; exceptions discard the staged copy.
+    Existing destinations retain the same serialized swap/recovery semantics as
+    :func:`copy_from`.
+
+    Parameters
+    ----------
+    local : Path
+        Final destination, on the same filesystem as ``work``.
+    work : Path
+        Trusted pull state directory, separate from destination content.
+
+    Yields
+    ------
+    Path
+        Unique staged path to write before exiting successfully.
+
+    Raises
+    ------
+    SshError
+        No completed download exists, or a file would replace a directory.
+
+    Examples
+    --------
+    >>> with staged_pull(dest, work=home / "pulls") as part:  # doctest: +SKIP
+    ...     part.write_bytes(downloaded)
+    """
+    txn_dir, _, stage_dir = _pull_dirs(work)
+    with _install_lock(txn_dir):
+        _recover_swaps(work)
+    stage = Path(tempfile.mkdtemp(prefix="pull-", dir=stage_dir))
+    part = stage / local.name
+    try:
+        yield part
+        if not part.exists():
+            raise SshError(f"download for {local} did not produce a file or folder")
         _install(part, local, work)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
@@ -382,6 +421,7 @@ def _install(part: Path, local: Path, work: Path) -> None:
     txn_dir, backup_dir, _ = _pull_dirs(work)
     with _install_lock(txn_dir):
         _recover_swaps(work)
+        local.parent.mkdir(parents=True, exist_ok=True)  # only now: a failed pull makes none
         if not part.is_dir() and local.is_dir() and not local.is_symlink():
             raise SshError(f"{local} is a folder; a pulled file never replaces a folder")
         if part.is_dir() and local.is_dir() and not local.is_symlink():
@@ -436,6 +476,11 @@ class Tunnel:
         Port on the host (the env server binds to 127.0.0.1 there).
     local_port : int, optional
         Local port; a free one is picked when omitted.
+    registry : Path, optional
+        Folder for ``<pid>.json`` (pid, owner, argv and both process birth
+        times) while the ``ssh`` process runs, so a later process can stop it with
+        :func:`reap_stale_tunnels` after this one died without :meth:`stop`
+        (the hub passes ``<home>/hub/tunnels``).
 
     Examples
     --------
@@ -446,12 +491,21 @@ class Tunnel:
     >>> tunnel.stop()  # doctest: +SKIP
     """
 
-    def __init__(self, target: SshTarget, remote_port: int, local_port: int | None = None) -> None:
+    def __init__(
+        self,
+        target: SshTarget,
+        remote_port: int,
+        local_port: int | None = None,
+        *,
+        registry: Path | None = None,
+    ) -> None:
         self.target = target
         self.remote_port = remote_port
         self.local_port: int = local_port if local_port is not None else _free_port()
+        self.registry = registry
         self._proc: subprocess.Popen[bytes] | None = None
         self._stderr: IO[bytes] | None = None
+        self._record: Path | None = None
 
     def argv(self) -> list[str]:
         """
@@ -504,20 +558,29 @@ class Tunnel:
         except FileNotFoundError as exc:
             self._close()
             raise SshError(f"{self.target.ssh_bin} not found; is OpenSSH installed?") from exc
-        deadline = time.monotonic() + self.target.connect_timeout + 5
-        while time.monotonic() < deadline:
-            code = self._proc.poll()
-            if code is not None:
-                message = self.stderr_tail()
-                self._close()
-                raise SshError(
-                    f"tunnel to {self.target.alias} exited {code} before it was ready: {message}"
-                )
-            if _port_open(self.local_port) and self._proc.poll() is None:
-                return
-            time.sleep(0.05)
-        self.stop()
-        raise SshError(f"tunnel to {self.target.alias} did not open port {self.local_port} in time")
+        try:
+            if self.registry is not None:
+                self._record = _register_tunnel(self.registry, self._proc.pid, self.argv())
+            deadline = time.monotonic() + self.target.connect_timeout + 5
+            while time.monotonic() < deadline:
+                code = self._proc.poll()
+                if code is not None:
+                    message = self.stderr_tail()
+                    raise SshError(
+                        f"tunnel to {self.target.alias} exited {code} "
+                        f"before it was ready: {message}"
+                    )
+                if _port_open(self.local_port) and self._proc.poll() is None:
+                    return
+                time.sleep(0.05)
+            raise SshError(
+                f"tunnel to {self.target.alias} did not open port {self.local_port} in time"
+            )
+        except BaseException:
+            # __exit__ is not called when __enter__/start fails. In particular,
+            # an unwritable registry must not leave the new ssh process alive.
+            self.stop()
+            raise
 
     def alive(self) -> bool:
         """
@@ -553,13 +616,21 @@ class Tunnel:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # Keep the process handle and its recovery record: a later
+                    # stop/reaper must still be able to account for it.
+                    raise SshError(f"tunnel to {self.target.alias} did not stop") from None
         self._close()
 
     def _close(self) -> None:
         if self._stderr is not None:
             self._stderr.close()
             self._stderr = None
+        if self._record is not None:
+            _drop_tunnel_record(self._record)
+            self._record = None
         self._proc = None
 
     def __enter__(self) -> Tunnel:
@@ -568,3 +639,141 @@ class Tunnel:
 
     def __exit__(self, *exc: Any) -> None:
         self.stop()
+
+
+class _TunnelRecord(BaseModel):
+    """Strict process identity; absent birth times identify a legacy record."""
+
+    pid: int = Field(strict=True, ge=1, le=2**31 - 1)
+    owner: int = Field(strict=True, ge=1, le=2**31 - 1)
+    argv: list[str] = Field(min_length=2)
+    pid_create_time: float | None = Field(default=None, strict=True, gt=0, allow_inf_nan=False)
+    owner_create_time: float | None = Field(default=None, strict=True, gt=0, allow_inf_nan=False)
+
+
+def _register_tunnel(registry: Path, pid: int, argv: list[str]) -> Path:
+    """Atomically record the tunnel and owner's exact process birth times."""
+    data = _TunnelRecord(
+        pid=pid,
+        owner=os.getpid(),
+        argv=argv,
+        pid_create_time=psutil.Process(pid).create_time(),
+        owner_create_time=psutil.Process().create_time(),
+    )
+    record = registry / f"{pid}.json"
+    atomic_write_text(record, data.model_dump_json())
+    return record
+
+
+def _drop_tunnel_record(record: Path) -> None:
+    """Drop a finished or malformed record; an I/O failure can be retried later."""
+    with suppress(OSError):
+        record.unlink(missing_ok=True)
+
+
+def _registered_process(
+    pid: int, birth: float | None
+) -> tuple[Literal["same", "gone", "unknown"], psutil.Process | None]:
+    """Compare process birth without treating inspection failures as absence."""
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return "gone", None
+        if birth is None:
+            return "unknown", None
+        if proc.create_time() != birth:
+            return "gone", None  # the recorded process ended; this pid was reused
+        return "same", proc
+    except psutil.NoSuchProcess:
+        return "gone", None
+    except (psutil.Error, OSError):
+        return "unknown", None
+
+
+def _matches_argv(proc: psutil.Process, argv: list[str]) -> bool:
+    """Compare argument boundaries, allowing an executable wrapper prefix."""
+    actual = proc.cmdline()
+    tail = argv[1:]
+    return bool(tail) and len(actual) >= len(tail) and actual[-len(tail) :] == tail
+
+
+def _stop_registered_tunnel(proc: psutil.Process, data: _TunnelRecord) -> bool:
+    """Stop a verified process with bounded waits; retain unresolved evidence."""
+    try:
+        # psutil's signal methods also reject pid reuse between this identity
+        # check and the signal; raw os.kill would not provide that protection.
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except psutil.TimeoutExpired:
+            state, current = _registered_process(data.pid, data.pid_create_time)
+            if state == "gone":
+                return True
+            if current is None or not _matches_argv(current, data.argv):
+                return False
+            current.kill()
+            current.wait(timeout=5)
+        return True
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError):
+        return False
+
+
+def reap_stale_tunnels(registry: Path) -> list[int]:
+    """
+    Stop the ``ssh -L`` tunnels a dead process left behind.
+
+    A hub killed with ``kill -9`` never stops its tunnels: the ``ssh``
+    processes keep running and keep their ports. Each tunnel started with a
+    ``registry`` left ``<registry>/<pid>.json``. A record whose owner process
+    is gone is checked against both the child's birth time and exact arguments
+    before signalling. SIGTERM is followed by a bounded wait and, if necessary,
+    SIGKILL after another identity check. Records of live owners or uncertain
+    processes remain; legacy records without birth times never authorize a signal.
+
+    Parameters
+    ----------
+    registry : Path
+        The folder passed to :class:`Tunnel` as ``registry``.
+
+    Returns
+    -------
+    list of int
+        The tunnel pids confirmed stopped after a verified cleanup attempt.
+
+    Examples
+    --------
+    >>> reap_stale_tunnels(Path("~/.hypothex/hub/tunnels").expanduser())  # doctest: +SKIP
+    [48213]
+    """
+    reaped: list[int] = []
+    for record in sorted(registry.glob("*.json")) if registry.is_dir() else []:
+        try:
+            data = _TunnelRecord.model_validate_json(record.read_text(encoding="utf-8"))
+        except OSError:
+            continue  # unreadable now is not proof the recorded process is gone
+        except (ValueError, ValidationError):
+            _drop_tunnel_record(record)
+            continue
+        if record.stem != str(data.pid):
+            _drop_tunnel_record(record)
+            continue
+        owner_state, _ = _registered_process(data.owner, data.owner_create_time)
+        if owner_state != "gone":
+            continue
+        state, proc = _registered_process(data.pid, data.pid_create_time)
+        if state == "gone":
+            _drop_tunnel_record(record)
+        elif proc is not None:
+            try:
+                matches = _matches_argv(proc, data.argv)
+            except psutil.NoSuchProcess:
+                _drop_tunnel_record(record)
+                continue
+            except (psutil.Error, OSError):
+                continue
+            if matches and _stop_registered_tunnel(proc, data):
+                reaped.append(data.pid)
+                _drop_tunnel_record(record)
+    return reaped

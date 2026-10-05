@@ -13,6 +13,7 @@ from hypothex.core.config import (
     render_template,
     starter_config,
     template_fields,
+    template_var_hint,
 )
 from hypothex.core.errors import ConfigError, TemplateError
 
@@ -70,8 +71,27 @@ def test_invalid_configs_raise(tmp_path: Path, old: str, new: str, message: str)
 
 
 def test_unknown_top_level_key_is_rejected(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="extra"):
+    with pytest.raises(ConfigError, match="bogus: Extra inputs are not permitted"):
         load_project_config(_write(tmp_path, VALID + "\nbogus: 1\n"))
+
+
+def test_validation_errors_are_one_brief_line_per_problem(tmp_path: Path) -> None:
+    text = VALID.replace("project: deepretro", "project: Ünicode") + "\nbogus: 1\n"
+    with pytest.raises(ConfigError) as caught:
+        load_project_config(_write(tmp_path, text))
+    message = str(caught.value)
+    assert message.endswith(
+        "hypothex.yaml: project: String should match pattern '^[a-z0-9][a-z0-9_.-]*$'; "
+        "bogus: Extra inputs are not permitted"
+    )
+    assert "pydantic.dev" not in message and "\n" not in message
+
+
+def test_a_model_check_error_has_no_location_prefix(tmp_path: Path) -> None:
+    text = VALID.replace("dataset: uspto50k", "dataset: missing")
+    with pytest.raises(ConfigError) as caught:
+        load_project_config(_write(tmp_path, text))
+    assert str(caught.value).endswith("hypothex.yaml: task 'uspto-topk': unknown dataset 'missing'")
 
 
 def test_missing_file_mentions_init(tmp_path: Path) -> None:
@@ -86,6 +106,23 @@ def test_templates() -> None:
     assert out == "python x.py --out /r/p --data /d --beam 5"
     with pytest.raises(TemplateError, match="beam"):
         render_template(tpl, {"run_dir": "/r", "dataset.path": "/d"})
+
+
+@pytest.mark.parametrize(
+    ("name", "hint"),
+    [
+        ("seed", "seed (--seed N; API/MCP: seed)"),
+        ("config", "config (--config PATH)"),
+        ("checkpoint", "checkpoint (set by hx reinfer, or --var checkpoint=VALUE;"),
+        ("dataset.path", "dataset.path (--task NAME; API/MCP: task)"),
+        ("beam", "beam (--var beam=VALUE; API: vars, MCP: template_vars)"),
+    ],
+)
+def test_a_missing_template_variable_names_the_way_to_set_it(name: str, hint: str) -> None:
+    with pytest.raises(TemplateError) as caught:
+        render_template(f"run {{{name}}}", {})
+    assert hint in str(caught.value)
+    assert template_var_hint(name) in str(caught.value)
 
 
 def test_metric_ref_parsing() -> None:

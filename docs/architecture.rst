@@ -16,6 +16,9 @@ Every ``run.yaml`` write is atomic (write to a temp file, then ``os.replace``) a
 happens under a per-run lock. Old scores are never overwritten or deleted;
 re-evaluation only appends.
 
+Atomic writes use a byte-bounded temporary filename, including for long Unicode
+destination names, and new files follow the process umask like appended files.
+
 ``hx reindex`` rebuilds the index from run folders on disk. Because the index is
 disposable, Hypothex stores a schema version and rebuilds it automatically when
 that version changes.
@@ -37,15 +40,34 @@ the loss stays on the curve. Points indexed by an older Hypothex keep their old
 thinning until the run is indexed again (``hx reindex``). View curves further
 limit each series to 500 points; the metrics API accepts a separate ``max_points`` limit.
 
+An ended run's points are indexed from its whole file. A queued, running or lost
+run may still be writing its file, so the index (and every view) reads it one line
+at a time into a bounded copy: at most 1,000 points per name, with the first, last,
+lowest and highest kept and the rest chosen by LTTB. At most the first 256 distinct
+names in the file are retained; rows of further names are skipped, with warnings
+remembered for the most recent 1,024 runs per store. Lines over 64 KiB or containing
+invalid UTF-8 are skipped. Repeated points share their metric-name string, so long
+names consume memory once per name rather than once per buffered point.
+Exact reads of state files have no byte or name cap and reject invalid UTF-8.
+Every end path (the local supervisor, a SLURM end, ``hx stop`` of a run whose
+supervisor is gone, the hub's mirror of a host's end) indexes the run again from
+its whole file.
+The local supervisor publishes terminal status before installing that exact
+history, so a concurrent rebuild cannot leave the earlier live copy in place.
+Deferred index hydration installs a read only while its pending marker and run
+status still match. A read started before a run finished cannot overwrite its
+newer terminal history, including when an intervening rebuild recreated the marker.
+
 Every write of indexed data adds 1 to the index *generation* (a ``meta`` row
 written in the same transaction). Setting a mirror cursor or marking scores stale
 does not count. ``hypothex.core.index.index_generation(ctx)`` reads it, so a cache
 of anything built from the index can use the generation as its key. Leaderboards
 do this: ``hypothex.core.leaderboard.cached_leaderboard`` keeps up to
-``BOARD_CACHE_SIZE`` boards, keyed by the generation, the project, the task, the
-config, the metric versions, and a ``variant`` for anything else the board depends
-on. ``get_leaderboard``, ``list_tasks``, the overview, view panels, and sweep tables
-all use it.
+``BOARD_CACHE_SIZE`` boards, keyed by the database device and inode plus generation,
+the project, the task, the config, the metric versions, and a ``variant`` for
+anything else the board depends on. File identity prevents a replaced database
+from reusing a board at the same generation. ``get_leaderboard``, ``list_tasks``,
+the overview, view panels, and sweep tables all use it.
 
 .. code-block:: python
 
@@ -68,15 +90,27 @@ Event log and replay
 ---------------------
 
 Each environment (a host running ``hx serve``) keeps an append-only event log with
-a monotonically increasing ``sequence``: ``run.created``, ``run.started``,
-``run.log_chunk``, ``run.metric``, ``run.score_added``, ``run.finished``,
-``run.failed``, ``run.killed``, ``run.lost``, and so on. Run folders are the
-result of applying these events; the event log is the ordered change feed that
-streaming and replay use.
+a monotonically increasing ``sequence``. Current event types include:
 
-Phase 1a simplification: every state change is written synchronously, under the
-per-run file lock, in the order run folder -> event -> index. A reactor model can
-replace this later without changing the file layout or the event schema.
+- Lifecycle: ``run.created``, ``run.launched``, ``run.started``, ``run.finished``,
+  ``run.failed``, ``run.killed``, ``run.lost``.
+- Queue and GPU allocation: ``run.enqueued``, ``run.queue_moved``,
+  ``run.gpus_assigned``, ``run.gpus_released``.
+- SLURM: ``run.submitting``, ``run.submitted``, ``run.submit_unknown``,
+  ``run.slurm_state``.
+- Scores and annotations: ``run.score_added``, ``run.eval_skipped``,
+  ``run.warning``, ``run.note_added``, ``run.tagged``, ``run.starred``,
+  ``run.archived``.
+- Remote state: ``host.state``, ``mirror.run_updated``.
+- Durable sweep issuance: ``sweep.issuance``, including progress before any member
+  run exists. The issuance state and its accepted receipt commit atomically with
+  the event in ``events.db``; this is separate from run-folder lifecycle writes.
+
+Logs and metric points are read through ``/api/v1/runs/{id}/logs`` and
+``/api/v1/runs/{id}/metrics``; there are no ``run.log_chunk`` or ``run.metric``
+events. Run folders remain the source of truth. State changes are written
+synchronously under the per-run file lock in the order run folder -> event ->
+index; the event log is the ordered change feed used for streaming and replay.
 
 Clients subscribe with ``after_sequence=<last seen>``: the server replays missed
 events, then streams live ones, and the client drops anything it has already
@@ -149,20 +183,67 @@ code ``1008``). To reach a server on another machine without a token, keep it on
 
    curl -H 'Host: attacker.example' http://127.0.0.1:7777/api/v1/runs   # 400
 
-Phase 2
--------
+Remote environments
+-------------------
 
-Phase 1a runs everything on one machine. Phase 2 adds env servers per machine
-(SSH boxes, SLURM login nodes) alongside the hub: each environment owns its own
+Env servers run per machine (SSH boxes, SLURM login nodes) alongside the hub.
+Each environment owns its own
 runs, event log, and supervisors, so a run keeps going and keeps being recorded
 even if the hub machine sleeps or the network drops. The hub reaches an
 environment over SSH tunnels or a direct URL, but the environment's identity
 (``environment_id``) is stable regardless of the route.
+See :doc:`remote` for setup, lifecycle and ownership rules.
+
+Seed identity and repeated runs
+-------------------------------
+
+A seed group includes the configuration hash, commit and the recorded dirty-diff
+hash. Launch captures the first eight SHA-256 hex digits of ``git.diff``; if the
+diff exceeds the capture limit, the captured diff stat is hashed instead. The
+stat fallback identifies a summary, not exact content, and cannot support an
+exact rerun. Dirty group ids include all eight digits so distinct stored hashes
+cannot overwrite each other's paired-test data. Legacy dirty runs without a
+hash retain the ``+dirty`` suffix.
+
+Repeated runs of one seed are averaged before computing seed statistics and
+paired-test pools. Per-seed and per-example averaging keeps finite means
+representable when their intermediate sums exceed floating-point range.
+Runs without a seed remain separate samples. Costs and run
+membership still include every run. ``metric_drift`` lists selected metric versions
+whose stored scores contain differing source hashes; reading a leaderboard does
+not execute repository code. ``within_noise_of_best`` is determined by
+the comparison p-value (``p >= 0.05``), or is unknown when no p-value is available.
+
+Queue tickets and remote paths
+------------------------------
+
+Queued runs retain a stable ticket in ``run.yaml``. Run-list and run-detail
+responses replace the ticket with its current one-based position across the
+entire environment queue, including when a response filters or limits runs.
+Batch cancellation takes one scheduler lock and does not rewrite the tickets
+of later runs.
+
+Pinned queued and SLURM runs use a staging checkout even when the requested
+revision initially matches the project working copy. Moving the working copy
+while the job waits therefore cannot change its recorded code. Each executing
+run still receives its own checkout.
+Both delayed checkout and staging cleanup check that the project is local before
+using recorded repository paths; a mirrored project cannot reuse a coincidentally
+matching local path.
+
+Mirrored run details show host-qualified run, repository, working-directory
+and captured-file paths. The hub's local mirror paths are used internally for
+reads, while displayed paths identify the files on the original host.
+Remote task snapshots retain dataset paths as configured on their host. They do
+not expose locally resolved dataset paths or splits, even when the same repository
+path happens to exist on the hub.
+
 
 Run-id reservations
 -------------------
 
-A pinned launch reserves its worktree directory with an exclusive creation before
-checking out the commit. If another launcher claims the same run id between the
-initial existence check and checkout, Hypothex draws a new id. Cleanup removes only
-the directory this launch reserved, preserving the competing launch's worktree.
+Preparation draws a new run id when the selected run directory or execution
+checkout is already claimed. A pinned run reserves its execution directory
+exclusively when it starts (before submission for SLURM). A later collision fails
+that run without executing in or deleting the competing checkout. Cleanup removes
+only a checkout whose successful creation this run recorded.

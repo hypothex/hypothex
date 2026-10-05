@@ -159,6 +159,25 @@ def test_model_defaults_and_limits() -> None:
         RunFilter.model_validate({"stauts": "finished"})
 
 
+def test_a_panel_lists_at_most_max_panel_refs_metrics() -> None:
+    from hypothex.core.views import MAX_PANEL_REFS
+
+    assert PanelData(metrics=["acc"] * MAX_PANEL_REFS).metrics == ["acc"] * MAX_PANEL_REFS
+    with pytest.raises(ValidationError, match=f"at most {MAX_PANEL_REFS} metrics"):
+        PanelData(metrics=["acc"] * (MAX_PANEL_REFS + 1))
+    refs = ", ".join(["accuracy"] * (MAX_PANEL_REFS + 1))
+    text = f"title: t\npanels:\n  - type: stat_strip\n    data:\n      metrics: [{refs}]\n"
+    view, issues = validate_view_text(text, {"accuracy"}, {})
+    assert view is None
+    assert [(i.line, i.path, i.message) for i in issues] == [
+        (
+            5,
+            "panels[0].data.metrics",
+            f"metrics: a panel lists at most {MAX_PANEL_REFS} metrics, not {MAX_PANEL_REFS + 1}",
+        )
+    ]
+
+
 def test_run_filter_accepts_one_status_and_rejects_unknown() -> None:
     assert RunFilter.model_validate({"status": "finished"}).status == ["finished"]
     assert RunFilter.model_validate({"tags": "baseline"}).tags == ["baseline"]
@@ -416,6 +435,37 @@ panels:
         (6, "panels[1].data.fields[1]", "unknown field seed in groups", None),
         (6, "panels[1].data.fields[2]", "unknown field chnages in groups", "changes"),
     ]
+
+
+def test_filter_keys_and_metric_names_are_checked() -> None:
+    fields = {
+        **KNOWN_FIELDS,
+        "scores": {"metric", "version", "key", "value", "run_id", "group_id", "label", "seed"},
+        "metrics": set(),
+    }
+    text = """\
+title: t
+panels:
+  - type: table
+    data: {source: scores, filter: {metric: solved, key: value}}
+  - type: vega_lite
+    data: {source: scores, filter: {metric: [solved, slovd], kye: value}}
+    spec: {mark: bar}
+  - type: table
+    data: {source: metrics, filter: {name: tokns, anything: 1}}
+  - type: table
+    data: {source: runs, filter: {version: p10, label: a, params.depth: 3}}
+  - type: leaderboard
+    data: {filter: {status: finished, version: p10}}
+"""
+    _, issues = validate_view_text(text, KNOWN_METRICS, fields)
+    assert [(i.line, i.path, i.message, i.suggestion) for i in issues] == [
+        (6, "panels[1].data.filter.metric", "unknown metric slovd", "solved"),
+        (6, "panels[1].data.filter.kye", "unknown filter key kye in scores", "key"),
+        (9, "panels[2].data.filter.name", "unknown metric tokns", "tokens"),
+        (13, "panels[4].data.filter.version", "unknown filter key version in runs", None),
+    ]
+    assert validate_view_text(text, set(), {})[1] == []  # nothing known: skipped
 
 
 def test_duplicate_panel_titles() -> None:

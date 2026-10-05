@@ -11,7 +11,7 @@ from hypothex.core.datasets import resolve_dataset_path
 from hypothex.core.errors import ConfigError, StoreError
 from hypothex.core.fsutil import read_jsonl
 from hypothex.core.leaderboard import group_id_for, seed_group_labels
-from hypothex.core.records import MetricPoint, RunRecord, RunStatus
+from hypothex.core.records import INDEXED_POINT_STATUSES, MetricPoint, RunRecord
 
 if TYPE_CHECKING:
     from hypothex.core.views import Source
@@ -28,13 +28,6 @@ SOURCES: tuple[str, ...] = (
 
 ROW_KEYS: tuple[str, ...] = ("run_id", "group_id", "label", "seed")
 """Keys every per-run source row carries, whatever ``fields`` lists."""
-
-INDEXED_POINT_STATUSES = frozenset({RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED})
-"""Run states whose metric history ``metric_points`` reads from the index.
-
-A run's points are indexed when it ends (``execute_run``, SLURM, the hub's
-mirror); a queued, running, or lost run may have logged more since, so its
-``metrics.jsonl`` is read instead."""
 
 _Refs = dict[tuple[str, str | None], dict[str, Any]]
 
@@ -84,9 +77,12 @@ def metric_points(
 
     Runs that ended (``INDEXED_POINT_STATUSES``) read the index in one query
     that filters the names in SQL: the indexed history keeps at most
-    ``index.MAX_POINTS_PER_METRIC`` points per name (always the last one).
-    Queued, running and lost runs read their ``metrics.jsonl`` in full, since
-    the index may not have their latest points.
+    ``thin.MAX_POINTS_PER_METRIC`` points per name (always the last one).
+    Queued, running and lost runs read their ``metrics.jsonl``, since the index
+    may not have their latest points, but only a bounded copy of it
+    (``RunStore.read_metric_points_bounded``: at most as many points per name,
+    with the first, last, lowest and highest), so a file that grows without
+    limit never fills memory.
 
     Parameters
     ----------
@@ -97,7 +93,7 @@ def metric_points(
     names : collection of str, optional
         Metric names to keep; ``None`` keeps every name.
     read : callable, optional
-        Reads one live run's full history; default ``RunStore.read_metric_points``.
+        Reads one live run's history; default ``RunStore.read_metric_points_bounded``.
         The panel engine passes a reader that parses each file once per view.
 
     Returns
@@ -117,9 +113,10 @@ def metric_points(
     for run in runs:
         if run.status in INDEXED_POINT_STATUSES:
             continue
-        history = (
-            read(run) if read is not None else ctx.store.read_metric_points(run.project, run.run_id)
-        )
+        if read is not None:
+            history = read(run)
+        else:
+            history = ctx.store.read_metric_points_bounded(run.project, run.run_id)
         points = [p for p in history if wanted is None or p.name in wanted]
         if points:
             out[run.run_id] = sorted(points, key=lambda p: (p.name, p.step))
@@ -145,8 +142,9 @@ def iter_rows(
       ``vars.*``, ``usage.*`` (only when the run has usage totals).
     - ``scores``: ``metric``, ``version``, ``key``, ``value`` (errored scores skipped).
     - ``metrics``: ``name``, ``step``, ``value``, ``t`` (``metric_points``: the
-      indexed history of runs that ended, ``metrics.jsonl`` of the others),
-      ordered by name then step.
+      indexed history of runs that ended, a bounded read of ``metrics.jsonl``
+      of the others; at most ``thin.MAX_POINTS_PER_METRIC`` points per name),
+      ordered by name then step and read one run at a time.
     - ``predictions``: ``id``, ``prediction``, ``reference`` (joined from the
       task dataset when the row has none, except for a project copied from a
       host, whose repo is on that host), ``meta.*``, and every per-example
@@ -197,14 +195,16 @@ def iter_rows(
         raise ConfigError("groups is a task-level source; read it through a table panel")
     if source not in SOURCES:
         raise ConfigError(f"unknown source {source!r}; use one of {', '.join(SOURCES)}")
-    points = metric_points(ctx, runs, names) if source == "metrics" else {}
     refs: _Refs = {}
     label_of = {**group_labels(runs), **(labels or {})}
     for run in runs:
         gid = group_id_for(run)
         base = {"run_id": run.run_id, "group_id": gid, "label": label_of[gid], "seed": run.seed}
         if source == "metrics":
-            rows: Iterable[dict[str, Any]] = _metric_rows(points.get(run.run_id, []))
+            # one run at a time, like the other sources: a table over thousands
+            # of runs holds one run's history, not all of them
+            points = metric_points(ctx, [run], names).get(run.run_id, [])
+            rows: Iterable[dict[str, Any]] = _metric_rows(points)
         else:
             rows = _READERS[source](ctx, run, refs)
         for row in rows:
@@ -347,7 +347,7 @@ def _traces(ctx: Context, run: RunRecord, _refs: _Refs) -> Iterator[dict[str, An
             yield {"example_id": example_id, **step.model_dump()}
 
 
-# Per-run readers; ``metrics`` is read for all runs at once (``metric_points``).
+# Per-run readers; ``metrics`` reads each run through ``metric_points``.
 _READERS: dict[str, Callable[[Context, RunRecord, _Refs], Iterator[dict[str, Any]]]] = {
     "runs": _runs,
     "scores": _scores,

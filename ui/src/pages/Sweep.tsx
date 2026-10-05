@@ -166,11 +166,20 @@ function SweepBody({ project, sweepId, summary, runs, hosts, board, now }: Sweep
           sweepId={sweepId}
           spec={spec}
           queued={counts.queued ?? 0}
+          issuance={summary.issuance}
           cellCount={cells.length}
           runs={ordered}
           onRerun={() => setRerun(true)}
         />
       </div>
+      {summary.issuance ? (
+        <div className="sweep-issuance" role="status">
+          <p>{`Issuance ${summary.issuance.state} · ${counts.total ?? 0} observed / ${summary.issuance.planned} planned`}{summary.issuance.cancel_requested ? " · cancellation requested" : ""}</p>
+          {summary.issuance.reason ? <p>{summary.issuance.reason.replaceAll("_", " ")}</p> : null}
+          {summary.issuance.error ? <p role="alert">{summary.issuance.error.type}: {summary.issuance.error.message}</p> : null}
+          {summary.issuance.resume ? <p>{summary.issuance.resume.message}</p> : null}
+        </div>
+      ) : null}
       {launched ? (
         <p className="small launched" role="status">{`Launched ${launched.n} on ${launched.host}`}</p>
       ) : null}

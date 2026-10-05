@@ -20,7 +20,7 @@ import {
 } from "../api/queries";
 import { Figure, panelLetter } from "./components/Figure";
 import { useNow } from "./components/HostsPanel";
-import { firstClause, shortId } from "./components/format";
+import { firstClause, shortId, queueLabel } from "./components/format";
 import { Unbroken } from "./components/Headline";
 import { KindPanels, kindPanelCount, readsTraces, runViewPanels } from "./components/KindPanels";
 import { AppLink, hrefs } from "./components/links";
@@ -79,9 +79,9 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
   const metricNames = run.data?.metric_names;
   const specs = useMemo(() => runViewPanels(kindSpecs, traceCount, metricNames), [kindSpecs, traceCount, metricNames]);
   const phase = run.data ? runPhase(run.data) : "local";
-  // A remote run: the hub reports its host's state. Hub runs have host_state null, even
-  // though the backend sets executor.host (the machine's hostname) on every run.
-  const remote = (run.data?.host_state ?? null) !== null;
+  // An unserved environment needs host lookup even if no connection state is available.
+  // A served hub run has null host_state; executor.host is only a display hostname.
+  const remote = (run.data?.host_state ?? null) !== null || run.data?.served === false;
   // The shared hosts query (keepLastKnown, one query function per key), idle for a hub run.
   const hosts = useHosts(HOSTS_REFETCH_MS, remote);
   // the whole queue of the run's host (every page), never the newest page of all hosts
@@ -123,7 +123,7 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
   const row = board.data?.rows.find((r) => r.run_ids.includes(runId)) ?? null;
   const primary = primaryRef(board.data ?? null, row);
   const stream = asLogStream(log);
-  const label = row?.label ?? firstClause(record.hypothesis, `run ${shortId(runId)}`);
+  const label = waiting ? queueLabel(record) : row?.label ?? firstClause(record.hypothesis, `run ${shortId(runId)}`);
   const title = stateTitle(label, phase, record, host) ?? (record.hypothesis || label);
   const stats = waiting
     ? remoteStats(record, phase, host, now)
@@ -181,6 +181,8 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
           record={record}
           phase={phase}
           hostName={host?.name ?? null}
+          served={detail.served === true}
+          hostsLoaded={hosts.data !== undefined}
           inferStage={!hasTask ? false : taskDetail.isSuccess ? Object.hasOwn(taskDetail.data.stages, "infer") : undefined}
         />
       </div>

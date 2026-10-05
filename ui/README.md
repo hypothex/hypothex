@@ -63,3 +63,27 @@ the run's directory (fake hosts, supervisors and their run commands; they run in
 sessions, so a crashed hub leaves them behind). `bun e2e/shutdown-check.ts` (also run in CI)
 checks three ends, each on its own random port after it has verified the hub's identity: a
 SIGTERM, a killed hub, and a hub that hangs. It fails if any demo process is left.
+
+### Serving, launches, and sweep progress
+
+Run actions use the server's `served` flag, separately from host connection state. A
+configured disconnected host can reconnect; an unmapped environment cannot run actions.
+Stop arms an inline confirmation for three seconds and disarms on blur, Escape, navigation,
+or a run-state change. Queued Cancel remains a direct action and sends an atomic
+queue-only precondition, so a run that starts before cancellation is not stopped.
+
+A template launch retains its environment identity and GPU request, including zero. If no
+configured host matches, the dialog asks for an explicit host choice. SLURM GPU defaults
+initialize a newly selected host; ordinary polling does not overwrite edits. Command
+previews fill original template slots once before displaying shell quoting; slot text
+inside a carried value stays literal. Requests above a connected host's total GPU count
+remain visible but block Launch, even with Queue enabled.
+
+Sweep summaries expose admission/issuance progress independently of observed members.
+The UI polls preparing, queued, issuing, and settling episodes every two seconds and stops
+at terminal states, including cancelled episodes whose `cancel_requested` remains true.
+The `sweep.issuance` event refreshes the summary and project list. Cancel can stop accepted
+issuance before its first member arrives; Resume is explicit and sends the server's exact
+resume seeds. Incomplete/interrupted episodes can also cancel retained remote members
+before they appear locally. Resume and Add seeds are disabled while cancellation is
+pending or settling. Scored `n` and `+M` uncounted members remain separate in tables and heat cells.

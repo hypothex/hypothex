@@ -63,7 +63,7 @@ def source_hash(fn: Any) -> str | None:
     return "sha256:" + hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
 
 
-def load_examples(run_dir: Path, dataset: dict[str, Any] | None) -> list[Example]:
+def load_examples(run_dir: Path, dataset: dict[str, Any] | None) -> tuple[list[Example], int]:
     """
     Load predictions and join references from the dataset when rows lack them.
 
@@ -76,7 +76,10 @@ def load_examples(run_dir: Path, dataset: dict[str, Any] | None) -> list[Example
 
     Returns
     -------
-    list of Example
+    examples : list of Example
+    n_unmatched : int
+        Rows with no inline ``reference`` whose id is not in the dataset; their
+        reference is None. Always 0 when there is no dataset to join.
 
     Raises
     ------
@@ -88,12 +91,14 @@ def load_examples(run_dir: Path, dataset: dict[str, Any] | None) -> list[Example
         raise FileNotFoundError(f"no predictions at {path}")
     rows = [r for r in read_jsonl(path) if "id" in r]
     refs: dict[str, Any] = {}
+    unmatched = 0
     if dataset and any("reference" not in r for r in rows):
         id_field, ref_field = dataset["id_field"], dataset["reference_field"]
         for row in read_jsonl(Path(dataset["path"])):
             if id_field in row:
                 refs[str(row[id_field])] = row.get(ref_field)
-    return [
+        unmatched = sum(1 for r in rows if "reference" not in r and str(r["id"]) not in refs)
+    examples = [
         Example(
             id=str(r["id"]),
             prediction=r.get("prediction"),
@@ -102,6 +107,7 @@ def load_examples(run_dir: Path, dataset: dict[str, Any] | None) -> list[Example
         )
         for r in rows
     ]
+    return examples, unmatched
 
 
 def evaluate(request: dict[str, Any]) -> dict[str, Any]:
@@ -116,11 +122,16 @@ def evaluate(request: dict[str, Any]) -> dict[str, Any]:
     Returns
     -------
     dict
-        ``{"n_examples": int, "results": [{"name","version","values","error","source_hash"}]}``.
+        ``{"n_examples": int, "n_unmatched": int, "results":
+        [{"name","version","values","error","source_hash"}]}``. ``results`` is
+        empty when no prediction id is in the dataset: no metric runs then.
     """
     sys.path.insert(0, request["repo"])
     run_dir = Path(request["run_dir"])
-    examples = load_examples(run_dir, request.get("dataset"))
+    examples, unmatched = load_examples(run_dir, request.get("dataset"))
+    counts = {"n_examples": len(examples), "n_unmatched": unmatched}
+    if examples and unmatched == len(examples):
+        return {**counts, "results": []}  # every reference is None: scores would be wrong
     results: list[dict[str, Any]] = []
     for m in request["metrics"]:
         entry: dict[str, Any] = {
@@ -147,7 +158,7 @@ def evaluate(request: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             entry["error"] = traceback.format_exc(limit=5)
         results.append(entry)
-    return {"n_examples": len(examples), "results": results}
+    return {**counts, "results": results}
 
 
 def describe(request: dict[str, Any]) -> dict[str, Any]:

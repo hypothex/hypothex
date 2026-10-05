@@ -13,6 +13,7 @@ from hypothex.core.fsutil import (
     append_note_file,
     atomic_write_bytes,
     atomic_write_text,
+    iter_jsonl,
     open_jsonl_append,
     read_jsonl,
     read_yaml,
@@ -88,6 +89,49 @@ def test_read_jsonl_missing_file_is_empty(tmp_path: Path) -> None:
     assert read_jsonl(tmp_path / "nope.jsonl") == []
 
 
+def test_iter_jsonl_splits_on_newlines_only(tmp_path: Path) -> None:
+    path = tmp_path / "m.jsonl"
+    # a raw U+2028 inside a string is valid JSON; str.splitlines() used to cut that row in two;
+    # CRLF, a BOM-free final line without a newline, and a non-object row are all fine
+    path.write_bytes('{"a": "x\u2028y"}\r\n'.encode() + b'\n[1]\n{"a": 2}')
+    assert list(iter_jsonl(path)) == [{"a": "x\u2028y"}, {"a": 2}]
+    assert read_jsonl(path) == [{"a": "x\u2028y"}, {"a": 2}]
+
+
+def test_exact_jsonl_reads_preserve_universal_newlines(tmp_path: Path) -> None:
+    path = tmp_path / "scores.jsonl"
+    path.write_bytes(b'{"a": 1}\r{"a": 2}\r\n{"a": 3}\n{"a": 4}')
+    expected = [{"a": value} for value in range(1, 5)]
+    assert read_jsonl(path) == expected
+    assert list(iter_jsonl(path)) == expected
+
+
+def test_exact_jsonl_reads_preserve_outer_unicode_whitespace(tmp_path: Path) -> None:
+    path = tmp_path / "scores.jsonl"
+    path.write_text('\u00a0{"a": 1}\u00a0\n\t{"a": 2}\t\n', encoding="utf-8")
+    assert read_jsonl(path) == [{"a": 1}, {"a": 2}]
+
+
+def test_only_a_bounded_jsonl_read_skips_bytes_that_are_not_utf8(tmp_path: Path) -> None:
+    path = tmp_path / "m.jsonl"
+    path.write_bytes(b'{"a": 1}\n{"a": "\xff"}\n{"a": 3}\n')
+    # an exact read keeps the old contract: the file is UTF-8 or the caller hears about it
+    with pytest.raises(UnicodeDecodeError):
+        read_jsonl(path)
+    with pytest.raises(UnicodeDecodeError):
+        list(iter_jsonl(path))
+    # a bounded read (a live run's metrics) drops the row: one bad row never fails a view
+    assert list(iter_jsonl(path, max_line_bytes=100)) == [{"a": 1}, {"a": 3}]
+
+
+def test_iter_jsonl_skips_lines_over_the_byte_limit_without_holding_them(tmp_path: Path) -> None:
+    path = tmp_path / "m.jsonl"
+    long_row = '{"a": "' + "x" * 5000 + '"}'
+    path.write_text(f'{{"a": 1}}\n{long_row}\n{{"a": 3}}\n{long_row}')
+    assert list(iter_jsonl(path, max_line_bytes=100)) == [{"a": 1}, {"a": 3}]
+    assert len(list(iter_jsonl(path))) == 4
+
+
 def test_yaml_roundtrip_and_errors(tmp_path: Path) -> None:
     path = tmp_path / "x.yaml"
     write_yaml(path, {"b": 1, "a": [1, 2]})
@@ -138,3 +182,30 @@ def test_atomic_write_bytes_keeps_raw_bytes(tmp_path: Path) -> None:
     atomic_write_bytes(target, b"caf\xe9\xff\n")
     assert target.read_bytes() == b"caf\xe9\xff\n"
     assert [p.name for p in target.parent.iterdir()] == ["blob.bin"]
+
+
+def test_atomic_write_follows_the_umask_like_appended_files(tmp_path: Path) -> None:
+    old = os.umask(0o022)
+    try:
+        atomic_write_text(tmp_path / "run.yaml", "a: 1\n")
+        append_jsonl(tmp_path / "metrics.jsonl", {"a": 1})
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((tmp_path / "run.yaml").stat().st_mode) == 0o644
+    assert stat.S_IMODE((tmp_path / "metrics.jsonl").stat().st_mode) == 0o644
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
+@pytest.mark.parametrize("mask", [0o022, 0o027])
+def test_atomic_write_long_unicode_filename_preserves_umask(tmp_path: Path, mask: int) -> None:
+    target = tmp_path / ("é" + "x" * 244 + ".yaml")
+    assert len(os.fsencode(target.name)) <= 255
+    old = os.umask(mask)
+    try:
+        atomic_write_text(target, "first\n")
+        atomic_write_text(target, "replacement\n")
+    finally:
+        os.umask(old)
+    assert target.read_text() == "replacement\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o666 & ~mask
+    assert list(tmp_path.iterdir()) == [target]

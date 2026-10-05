@@ -450,3 +450,9 @@ Final wheel bytes match all current UI assets and the auth/issuer/transport sour
 the sdist excludes internal plans/mockups. Evidence under `token-final-*` supersedes
 earlier candidate-only UI counts. Publication still follows the ordered Step 7/8
 merges and requires current-head green CI; Phase 3 remains documentation only.
+
+Parent final Step 8 verification: full Python **2,290 passed, 3 skipped**, with
+11 Docker tests deselected; separate Docker **11 passed**. Full UI 930 and browser
+56 pass, along with the 247 affected backend tests, three shutdown cases, types,
+build, Ruff/format/ty and Sphinx. Final source was unchanged during these checks.
+Current-head CI and ordered publication after PR #19 remain the only merge gates.

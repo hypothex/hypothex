@@ -2,7 +2,7 @@
 
 Binding for the phase 3 plans (backend, frontend). Spec: `docs/superpowers/specs/2026-09-26-hypothex-design.md` sections **9** (phase 3 design summary), **13** (phase 3 row), 3.4 (Postgres + Alembic), 5.3 (auth failures stop retrying until re-pair), 5.4 (`route: url` lab server), 7.2 (`hx export`, `hx storage`), 7.3 (phase 3 auth), 7.4 (`/mcp` on the server), 12 (`daemon/` notifier). Phases 1a, 1b, and 2 are on `main`; read the real code (`src/hypothex/`, `ui/src/`) before planning. Names below are exact; plans may add private helpers but must not rename or reshape these.
 
-Prerequisite: the phase 2 frontend (Sweep page `/s/:project/:id`, Launch dialog) is merged to `main` before the phase 3 frontend plan starts. The historical backend pin was `738c711`; the local prerequisite checkpoint now includes `138166274d46b0a285c28b1106059c6fab715f3f` (frozen durable issuance, token transport, lazy MCP, step 8 UI and credential-intent guards). See `2026-10-05-hypothex-phase3-local-baseline.md`. The final merged-main refresh and formal rounds 5–6 remain pending.
+Prerequisite: the phase 2 frontend (Sweep page `/s/:project/:id`, Launch dialog) is merged to `main` before the phase 3 frontend plan starts. The historical backend pin was `738c711`; the local prerequisite checkpoint now includes `a2f06e44a767b103b81a03e69dbd3a85d2053856` (frozen durable issuance, token transport, lazy MCP, step 8 UI and credential-intent guards). See `2026-10-05-hypothex-phase3-local-baseline.md`. The final merged-main refresh and formal rounds 5–6 remain pending.
 
 Hard rules: no test or step ever connects to a real Slack workspace, SMTP server, Tailscale tailnet, Postgres server outside Docker, SSH host, or SLURM cluster, and nothing reads or writes `~/.ssh`. Tests use a fake SMTP server, a fake webhook receiver, a fake `tailscale` binary, a fake clock, in-process env servers (`route: url`), and a throwaway Postgres container (marker `docker`). A session-wide network guard refuses every socket connect to a non-loopback address.
 
@@ -401,6 +401,8 @@ class NoopRun: # add the same no-op
 | `hypothex.yaml` `tasks.<t>.baselines` | project repo | list of `BaselineSpec` | | validated by `hx validate` |
 | `run.yaml` | | adds `owner` | | additive; old files load (`owner: null`) |
 | index | | `runs.owner` column, `SCHEMA_VERSION = 4` | | SQLite rebuilds; Postgres via Alembic |
+
+Pending backlog compatibility, not included in the local prerequisite pin: additive optional `ScoreRecord` fields `per_example_hash`, `evaluation_examples`, and `evaluation_ids_hash` bind successful evaluations to their exact per-example artifact and complete prediction population. Phase 3 must preserve them through full model serialization in existing `scores.jsonl` and SQL `scores.record_json`, including rebuild/recovery. No Phase 3-specific file path, envelope, per-field payload adapter, SQL column, or migration is needed. Old/unbound records retain missing/null evidence; Phase 3 must not infer or manufacture a binding. Refresh against the actual merged backlog before implementation if it lands later.
 
 New event types: `notebook.updated`, `run.artifacts_cleaned`, `storage.plan_created` `{plan_id, total_bytes, n_items}`, `storage.cleaned` `{plan_id, freed_bytes, n_deleted, n_skipped}`, `notify.sent`, `notify.failed`, `digest.sent`, `auth.session_created` / `auth.session_revoked` `{session_id, user, client}` (never a token or secret). The WebSocket sends `auth.*` and `notify.*` events only to `admin` principals.
 

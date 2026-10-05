@@ -21,3 +21,11 @@ The frontend preflight passes 12 historical exact anchors and 19 inspected sourc
 The source hashes of the mutation guards, launch dialog, query hooks, run-view metric selector and backend panel cap are recorded. `git diff 1381662 -- src ui tests pyproject.toml uv.lock tasks` is empty; `git diff --check` passes. Evidence logs and hashes are retained with the probe scripts. No runtime source changes were made to obtain these results.
 
 The prerequisite's completed suite evidence belongs to the coordinating run and is not rerun or relabeled here. These local checks are document-adapter verification, not full Phase 3 assembly, UI typechecking, browser acceptance, Docker/PostgreSQL verification or formal round 5. Reconcile any later main-branch delta before consuming that formal round.
+
+## Final PR21 candidate refresh
+
+The next local plan merge takes `token-default` at `a2f06e44a767b103b81a03e69dbd3a85d2053856`, with plan parent `dcfb05f587b4ed467ae666c6736c63143e5637e7`. Relative to the previously reviewed `1381662` candidate, the complete incoming diff is six added verification lines in `tasks/todo.md`. Runtime, UI, tests and dependencies are identical, so the preceding source-adapter evidence remains applicable. The merged task receipt is preserved exactly from the incoming candidate. Evidence for the commit/tree comparison and unchanged 12 anchors/19 source blobs is in `/tmp/hx-handoff-evidence/phase3-pr21-candidate/`.
+
+The three active plan documents now identify the final PR21 candidate. This remains a local candidate: PR20 was reported merged at `7d04fe1`, and PR21 was still open when this refresh was requested. Formal round 5 must run against the real merged main after PR21, not this branch. No push, PR, Phase 3 implementation or formal review round is authorized by this checkpoint.
+
+The pending backlog adds optional score artifact/population bindings, but is not in this candidate. The contract and PostgreSQL adapter now explicitly preserve those fields through the existing full-model score JSON and rebuild paths when that backlog is adopted. No extra score payload format or SQL migration is introduced, and absent historical bindings are not backfilled. This is a compatibility note, not a claim that the backlog has merged.

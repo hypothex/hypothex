@@ -130,3 +130,14 @@ def test_cli_service_install_and_uninstall(
     assert "removed" in text and "systemctl --user stop hypothex.service" in text
     with pytest.raises(ConfigError, match="--kind"):
         runner.invoke(app, ["service", "install", "--kind", "gpu"], catch_exceptions=False)
+
+
+def test_service_kind_local_matches_cli(fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    result = runner.invoke(
+        app,
+        ["--home", str(fake_home / "h"), "service", "install", "--kind", "local", "--json"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert "--kind local" in json.loads(result.stdout)["text"]

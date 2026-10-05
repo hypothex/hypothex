@@ -292,24 +292,30 @@ Serve the HTTP/WebSocket API on ``127.0.0.1:7777``, and the UI at
 ``http://127.0.0.1:7777/`` when the package contains a UI build
 (``src/hypothex/ui_dist``; ``cd ui && bun run build`` makes one).
 
-``--port 0`` picks a free port. ``--kind ssh|slurm`` runs it as a host's env server
-(GPU queue, or SLURM submission); the kind is saved for the next start. An env server
-always requires a bearer token unless ``--no-auth`` (test hosts only).
+``--port 0`` picks a free port. ``--kind local|ssh|slurm`` selects a local hub,
+SSH GPU queue, or SLURM submission. The kind is saved for the next start;
+``--kind local`` switches back without changing the environment identity.
 
-``--host`` other than a loopback address (``127.0.0.1``, ``::1``, ``localhost``)
-is refused unless ``HYPOTHEX_SERVE_TOKEN`` is set, because the API starts
-arbitrary commands. With the token set, every request except the environment
-descriptor needs ``Authorization: Bearer <token>``:
+Every server requires a fresh random bearer token by default. An explicit
+``HYPOTHEX_SERVE_TOKEN`` overrides it and must match the format in :doc:`security`.
+``--no-auth`` is restricted to loopback addresses. The installed UI shell and
+public identity descriptor are readable before authentication; API, file and
+MCP routes require the token. Open the UI and paste the output of:
 
 .. code-block:: bash
 
-   HYPOTHEX_SERVE_TOKEN=$(openssl rand -hex 24) hx serve --host 0.0.0.0
+   hx token
+
+Run ``hx token`` with the same ``--home``/``HYPOTHEX_HOME`` as the server. It
+validates the local server record and process birth without contacting a server,
+then prints only the token. An absent, stale, foreign, no-auth or unverifiable
+record fails without printing a secret. Ordinary startup/status output omits it.
 
 The CLI and ``hx mcp`` reach the hub at ``HYPOTHEX_HUB_URL`` (default
 ``http://127.0.0.1:7777``) and send ``HYPOTHEX_HUB_TOKEN`` when it is set. Without
 it, for a hub on this machine they read the token from the hub's own
-``<home>/serve/server.json`` (owner-only). The MCP server that ``hx serve`` mounts
-uses the server's token:
+``<home>/serve/server.json`` (owner-only). HTTP MCP forwards the authenticated
+caller's credential; the local stdio server retains local token discovery:
 
 .. code-block:: bash
 

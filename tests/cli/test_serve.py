@@ -205,8 +205,7 @@ def test_write_private_removes_its_tmp_when_the_write_fails(
 
 
 def test_serve_kind_goes_back_to_local_after_a_trial_ssh(tmp_path: Path) -> None:
-    # CONF-12b: one `hx serve --kind ssh` must not make every later plain `hx serve` an
-    # env server whose fresh token locks the browser UI out (401 on every call)
+    # The local role is persisted independently of default token authentication.
     home = tmp_path / "h"
     assert cli_main.resolve_serve_kind(home, "ssh") == "ssh"
     assert cli_main.resolve_serve_kind(home, None) == "ssh"  # the saved kind sticks
@@ -214,6 +213,52 @@ def test_serve_kind_goes_back_to_local_after_a_trial_ssh(tmp_path: Path) -> None
     assert cli_main.resolve_serve_kind(home, "local") == "local"
     assert cli_main.resolve_serve_kind(home, None) == "local"
     assert json.loads((home / "environment.json").read_text())["kind"] == "local"
-    assert cli_main._serve_token("127.0.0.1", "local", False) is None
+    assert cli_main._serve_token("127.0.0.1", "local", False) is not None
     with pytest.raises(cli_main.ConfigError, match="or local to serve as the hub"):
         cli_main.check_serve_kind("gpu")
+
+
+def test_local_default_restart_rotates_token_and_owner_helper(tmp_path: Path) -> None:
+    home = tmp_path / "h"
+    previous: str | None = None
+    environment: str | None = None
+    for _ in range(2):
+        proc = _serve(home, "--kind", "local")
+        try:
+            info = wait_until(
+                lambda: json.loads((home / "serve" / "server.json").read_text()), timeout=30
+            )
+            assert info["home"] == str(home.resolve())
+            assert isinstance(info["pid_create_time"], float)
+            assert info["environment_id"]
+            if environment is not None:
+                assert info["environment_id"] == environment
+            environment = info["environment_id"]
+            base = f"http://127.0.0.1:{info['port']}"
+            wait_until(
+                lambda base=base: (
+                    httpx.get(base + "/.well-known/hypothex/environment").status_code == 200
+                )
+            )
+            result = subprocess.run(
+                [*HX, "--home", str(home), "token"], capture_output=True, text=True, timeout=30
+            )
+            assert result.returncode == 0 and result.stdout.strip() == info["token"]
+            assert result.stderr == ""
+            assert httpx.get(base + "/api/v1/projects").status_code == 401
+            if previous is not None:
+                assert info["token"] != previous
+                assert (
+                    httpx.get(
+                        base + "/api/v1/projects", headers={"Authorization": "Bearer " + previous}
+                    ).status_code
+                    == 401
+                )
+            good = {"Authorization": "Bearer " + info["token"]}
+            assert httpx.get(base + "/api/v1/projects", headers=good).status_code == 200
+            previous = info["token"]
+        finally:
+            proc.terminate()
+            proc.wait(timeout=30)
+    with pytest.raises(cli_main.ConfigError):
+        cli_main.local_server_token(home)

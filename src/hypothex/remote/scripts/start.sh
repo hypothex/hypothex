@@ -13,6 +13,17 @@ LOG=$SERVE/server.log
 HX_BIN=$HX_HOME/runtime/bin/hx
 DESCRIPTOR=/.well-known/hypothex/environment
 
+# Preserve the entire file, including newlines, for strict local JSON validation.
+# Shell extraction below is only a health comparison, never the trusted parser.
+hx_emit_environment() {
+    _env_hex=$(od -An -v -tx1 "$HX_HOME/environment.json") ||
+        hx_fail "cannot read trusted environment identity"
+    _env_hex=$(printf '%s' "$_env_hex" | tr -d ' \n') ||
+        hx_fail "cannot encode trusted environment identity"
+    echo "HX:environment_json_hex=$_env_hex"
+    echo "HX:environment_id=$_env_id"
+}
+
 umask 077 # server.json holds the token: owner-only
 mkdir -p "$SERVE" || hx_fail "cannot create $SERVE"
 chmod 700 "$SERVE" 2>/dev/null || true
@@ -40,6 +51,7 @@ if [ -f "$SJ" ]; then
         if [ -n "$_port" ] && [ -n "$_env_id" ] &&
             _d=$(hx_get "http://127.0.0.1:$_port$DESCRIPTOR" 2>/dev/null) &&
             [ "$(hx_json_str "$_d" environment_id)" = "$_env_id" ]; then
+            hx_emit_environment
             echo "HX:reused=1"
             echo "HX:server=$_j"
             exit 0
@@ -115,11 +127,36 @@ if [ -z "$_desc" ]; then
     hx_abort_start "hx serve was not ready after ${_wait}s"
 fi
 
+# Read again after startup: a new home did not have environment.json earlier.
+_env_id=""
+if [ -f "$HX_HOME/environment.json" ]; then
+    _env_id=$(hx_json_str "$(tr -d '\n' <"$HX_HOME/environment.json")" environment_id)
+fi
+[ -n "$_env_id" ] && [ "$(hx_json_str "$_desc" environment_id)" = "$_env_id" ] ||
+    hx_abort_start "server descriptor does not match the trusted environment identity"
+
 _ver=$(hx_json_str "$_desc" hx_version)
 _proto=$(hx_json_num "$_desc" protocol_version)
 _birth=$(hx_pid_start "$_pid") # stop.sh signals only this exact process
-printf '{"pid": %s, "port": %s, "managed": true, "hx_version": "%s", "protocol_version": %s, "hostname": "%s", "pid_start": "%s", "token": "%s"}\n' \
-    "$_pid" "$_port" "$_ver" "${_proto:-0}" "$_me" "$_birth" "$HX_TOKEN" >"$SJ.tmp" && mv -f "$SJ.tmp" "$SJ" ||
-    hx_abort_start "cannot write $SJ" # an unrecorded server could never be stopped
+# Preserve the CLI's exact process birth, home, environment, and token fields.
+# Only managed and the shell process identity are added/changed here.
+if [ -f "$SJ" ]; then
+    _j=$(tr -d '\n' <"$SJ") || hx_abort_start "cannot read managed server record"
+    [ "$(hx_json_num "$_j" pid)" = "$_pid" ] ||
+        hx_abort_start "managed server record changed during startup"
+    _managed=$(printf '%s\n' "$_j" | sed \
+        -e 's/"managed": *false/"managed": true/' \
+        -e "s/}[[:space:]]*$/, \"pid_start\": \"$_birth\"}/") ||
+        hx_abort_start "cannot update managed server record"
+    [ -n "$_managed" ] || hx_abort_start "cannot update managed server record"
+    printf '%s\n' "$_managed" >"$SJ.tmp" || hx_abort_start "cannot write managed server record"
+else
+    printf '{"pid": %s, "port": %s, "managed": true, "hx_version": "%s", "protocol_version": %s, "hostname": "%s", "pid_start": "%s", "token": "%s", "environment_id": "%s"}\n' \
+        "$_pid" "$_port" "$_ver" "${_proto:-0}" "$_me" "$_birth" "$HX_TOKEN" "$_env_id" >"$SJ.tmp" ||
+        hx_abort_start "cannot write managed server record"
+fi
+mv -f "$SJ.tmp" "$SJ" || hx_abort_start "cannot write $SJ"
+_j=$(cat "$SJ") || hx_abort_start "cannot read managed server record"
+hx_emit_environment
 echo "HX:reused=0"
-echo "HX:server=$(cat "$SJ")"
+echo "HX:server=$_j"

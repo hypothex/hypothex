@@ -1,3 +1,4 @@
+import { clearLostReasons } from "./lostReasons";
 /**
  * TanStack Query keys, hooks and mutations over the API client.
  *
@@ -114,6 +115,14 @@ export function keepLastKnown(prev: readonly M.HostRow[] | undefined, next: M.Ho
  * list alone would lose the cells before the host turns stale.
  */
 const lastKnownRows = new WeakMap<QueryClient, Map<string, M.HostRow>>();
+
+/** Drop all prior-session data, including the stale-host side cache. */
+export function clearSessionQueries(qc: QueryClient): void {
+  void qc.cancelQueries();
+  qc.clear();
+  lastKnownRows.delete(qc);
+  clearLostReasons();
+}
 
 /** Store every row of `rows` that has data (connected, or GPUs carried) in `known`. */
 function rememberRows(known: Map<string, M.HostRow>, rows: readonly M.HostRow[]): Map<string, M.HostRow> {

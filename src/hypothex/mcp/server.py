@@ -7,6 +7,8 @@ import functools
 import json
 import os
 from collections.abc import Callable, Iterable
+from contextvars import ContextVar
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -14,7 +16,9 @@ from urllib.parse import urlencode, urlsplit
 import httpx
 import yaml
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.context import Context as MCPContext
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp_types import CallToolResult, InputRequiredResult
 
 from hypothex.api.security import is_loopback_bind
 from hypothex.core import control
@@ -39,10 +43,62 @@ from hypothex.core.layout import default_home
 from hypothex.core.records import RunRecord, RunStatus
 from hypothex.core.store import ProjectEntry
 from hypothex.core.sweeps import SweepParam, SweepSpec, load_sweep, summarize_sweep, sweep_path
+from hypothex.core.tokens import redact_bearer_token, validate_bearer_token
 from hypothex.core.views import PanelSpec, ValidationIssue, ViewInfo, ViewSpec
 from hypothex.remote.config import HostSpec
+from hypothex.remote.http import TokenSafeHTTPTransport
 from hypothex.remote.hub import mirror_source
 from hypothex.remote.ssh import SshTarget
+
+
+class NoAuthToken(Enum):
+    """Explicit absence of credentials; filesystem/environment discovery is forbidden."""
+
+    SELECTED = "no-auth-token"
+
+
+NO_AUTH_TOKEN = NoAuthToken.SELECTED
+TokenChoice = str | NoAuthToken | None
+_caller_token: ContextVar[TokenChoice] = ContextVar("hypothex_mcp_caller_token", default=None)
+
+
+class _CallerMCPServer(MCPServer):
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: MCPContext[Any, Any] | None = None,
+    ) -> CallToolResult | InputRequiredResult:
+        """
+        Bind the guard-selected credential from this message's HTTP request.
+
+        Parameters
+        ----------
+        name : str
+            Registered tool name.
+        arguments : dict
+            Validated by the MCP SDK against the tool's declared inputs.
+        context : MCPContext or None
+            Per-message transport context; a local call may omit it.
+
+        Returns
+        -------
+        CallToolResult or InputRequiredResult
+            The SDK tool result, with this call's credential context restored.
+        """
+        selected: TokenChoice = None
+        if context is not None:
+            with contextlib.suppress(ValueError):
+                request = context.request_context.request
+                if request is not None:
+                    scope = getattr(request, "scope", {})
+                    selected = scope.get("hypothex.auth_token") or NO_AUTH_TOKEN
+        handle = _caller_token.set(selected)
+        try:
+            return await super().call_tool(name, arguments, context)
+        finally:
+            _caller_token.reset(handle)
+
 
 INSTRUCTIONS = """\
 Hypothex tracks ML/AI experiments across projects. Each run belongs to a task
@@ -492,6 +548,42 @@ def resolve_hub_token(url: str | None = None, home: Path | None = None) -> str |
     return token if isinstance(token, str) and token else None
 
 
+def _hub_request(
+    method: str,
+    url: str,
+    *,
+    json: dict[str, Any] | None,
+    timeout: float,
+    headers: dict[str, str],
+    token: str | None,
+) -> httpx.Response:
+    """
+    Send one hub request with credential-safe diagnostics and a fixed route.
+
+    Parameters
+    ----------
+    method : str
+    url : str
+        Destination selected by the caller; redirects are never followed.
+    json : dict or None
+        Request body.
+    timeout : float
+        Request timeout in seconds.
+    headers : dict
+        Already selected request headers, including any validated bearer.
+    token : str or None
+        The same selected bearer, for diagnostic redaction only. No discovery.
+
+    Returns
+    -------
+    httpx.Response
+        Fully read response; the client's connection pool is closed afterwards.
+    """
+    transport = TokenSafeHTTPTransport(token, unix_socket=None)
+    with httpx.Client(transport=transport, trust_env=False, follow_redirects=False) as client:
+        return client.request(method, url, json=json, timeout=timeout, headers=headers)
+
+
 def hub_call(
     method: str,
     path: str,
@@ -499,7 +591,7 @@ def hub_call(
     *,
     url: str | None = None,
     timeout: float = 120.0,
-    token: str | None = None,
+    token: TokenChoice = None,
 ) -> Any:
     """
     Call the hub's HTTP API and return the decoded JSON answer.
@@ -540,16 +632,22 @@ def hub_call(
     [{'name': 'local', 'kind': 'local', ...}]
     """
     base = (url or hub_url()).rstrip("/")
-    auth = token or resolve_hub_token(base)
+    auth = resolve_hub_token(base) if token is None else token
+    if auth is NO_AUTH_TOKEN:
+        auth = None
+    if auth is not None:
+        auth = validate_bearer_token(auth)
     headers = {"Authorization": f"Bearer {auth}"} if auth else {}
     try:
         if body is None and method.upper() != "GET":
             body = {}
-        resp = httpx.request(method, base + path, json=body, timeout=timeout, headers=headers)
+        resp = _hub_request(
+            method, base + path, json=body, timeout=timeout, headers=headers, token=auth
+        )
     except httpx.TransportError as exc:
         raise HubUnavailableError(
-            f"the hub at {base} did not answer ({exc}); start it with `hx serve`"
-        ) from exc
+            f"the hub at {base} did not answer ({type(exc).__name__}); start it with `hx serve`"
+        ) from None
     if resp.status_code < 400:
         return resp.json()
     try:
@@ -557,7 +655,12 @@ def hub_call(
     except ValueError:
         data = {}
     message = data.get("error") if isinstance(data, dict) else None
-    text = message or f"hub answered {resp.status_code} to {method} {path}"
+    text = redact_bearer_token(
+        message
+        if isinstance(message, str)
+        else f"hub answered {resp.status_code} to {method} {path}",
+        auth,
+    )
     if resp.status_code == 404:
         raise StoreError(text)
     if resp.status_code == 503:
@@ -797,7 +900,7 @@ def host_states(
     environment_ids: Iterable[str],
     *,
     url: str | None = None,
-    token: str | None = None,
+    token: TokenChoice = None,
 ) -> dict[str, str | None]:
     """
     The ``host_state`` of runs of each environment: its host's connection state.
@@ -832,7 +935,7 @@ def host_states(
     """
     own = ctx.descriptor.environment_id
     out: dict[str, str | None] = {}
-    auth: str | None = None
+    auth: TokenChoice = token
     hub_down = False
     for env in sorted(set(environment_ids)):
         if env == own:
@@ -841,7 +944,8 @@ def host_states(
         if hub_down:
             out[env] = "stale"
             continue
-        auth = auth or token or resolve_hub_token(url, ctx.layout.home)
+        if auth is None:
+            auth = resolve_hub_token(url, ctx.layout.home)
         query = urlencode({"environment_id": env, "archived": "true", "limit": 1})
         try:
             rows = hub_call(
@@ -1048,7 +1152,7 @@ def sweep_summary(
     project: str | None = None,
     *,
     url: str | None = None,
-    token: str | None = None,
+    token: TokenChoice = None,
 ) -> dict[str, Any]:
     """
     A sweep's summary from this store, else from the hub.
@@ -1074,7 +1178,7 @@ def sweep_summary(
         spec = find_sweep(ctx, sweep_id, project)
     except StoreError:
         path = f"/api/v1/sweeps/{project}/{sweep_id}" if project else f"/api/v1/sweeps/{sweep_id}"
-        auth = token or resolve_hub_token(url, ctx.layout.home)
+        auth = resolve_hub_token(url, ctx.layout.home) if token is None else token
         return hub_call("GET", path, url=url, token=auth)
     return to_jsonable(summarize_sweep(ctx, spec.project, spec.id))
 
@@ -1085,7 +1189,7 @@ def locate_sweep(
     project: str | None = None,
     *,
     url: str | None = None,
-    token: str | None = None,
+    token: TokenChoice = None,
 ) -> tuple[SweepSpec, bool]:
     """
     Find a sweep's spec here, else on the hub.
@@ -1173,7 +1277,7 @@ def build_server(
     hub_url: str | None = None,
     *,
     context: Context | None = None,
-    hub_token: str | None = None,
+    hub_token: TokenChoice = None,
 ) -> MCPServer:
     """
     Build the Hypothex MCP server.
@@ -1190,15 +1294,16 @@ def build_server(
         An open context to use instead, so a server that also serves HTTP
         (``create_app``) answers both from one context and one descriptor.
     hub_token : str, optional
-        Bearer token for the hub (``create_app`` passes its own, so the mounted
-        tools can call their own server); default ``resolve_hub_token`` for this home.
+        Owner credential for local calls; defaults to ``resolve_hub_token`` for
+        this home. HTTP calls always use their guard-selected caller credential
+        and never discover or fall back to this value.
 
     Returns
     -------
     MCPServer
         Run with ``.run()`` for stdio, or mount ``.streamable_http_app()``.
     """
-    mcp = MCPServer("hypothex", instructions=INSTRUCTIONS)
+    mcp = _CallerMCPServer("hypothex", instructions=INSTRUCTIONS)
     holder: dict[str, Context] = {} if context is None else {"ctx": context}
 
     def ctx() -> Context:
@@ -1209,8 +1314,11 @@ def build_server(
     def dump(obj: Any) -> Any:
         return obj.model_dump(mode="json") if hasattr(obj, "model_dump") else obj
 
-    def auth() -> str | None:
-        return hub_token or resolve_hub_token(hub_url, ctx().layout.home)
+    def auth() -> TokenChoice:
+        selected = _caller_token.get()
+        if selected is not None:
+            return selected
+        return hub_token if hub_token is not None else resolve_hub_token(hub_url, ctx().layout.home)
 
     def hub(
         method: str, path: str, body: dict[str, Any] | None = None, timeout: float = 120.0

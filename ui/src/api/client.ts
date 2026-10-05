@@ -5,6 +5,7 @@
  * renamed or removed backend route fails `bun run typecheck` after `bun run gen:types`.
  * Response bodies use the hand-written contract shapes in models.ts.
  */
+import { auth } from "./auth";
 import type * as M from "./models";
 import type { paths } from "./types";
 
@@ -12,6 +13,7 @@ export type * from "./models";
 
 /** Every HTTP route the UI calls. Keys are client names; values must exist in `paths`. */
 export const ROUTES = {
+  wsTicket: "/api/v1/auth/ws-ticket",
   environment: "/.well-known/hypothex/environment",
   overview: "/api/v1/overview",
   projects: "/api/v1/projects",
@@ -121,7 +123,14 @@ export function buildUrl(route: string, params: Record<string, string> = {}, que
 export async function request<T>(method: Method, route: Route, opts: RequestOptions = {}): Promise<T> {
   const url = buildUrl(route, opts.params, opts.query);
   const headers: Record<string, string> = { Accept: "application/json" };
-  const init: RequestInit = { method, headers, signal: opts.signal };
+  const credential = auth.capture();
+  if (credential.token) headers.Authorization = `Bearer ${credential.token}`;
+  const signal = opts.signal ? AbortSignal.any([opts.signal, credential.signal]) : credential.signal;
+  const current = (): void => {
+    if (signal.aborted || !auth.current(credential.generation)) throw new DOMException("Request superseded", "AbortError");
+  };
+  current();
+  const init: RequestInit = { method, headers, signal };
   if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(opts.body);
@@ -130,10 +139,17 @@ export async function request<T>(method: Method, route: Route, opts: RequestOpti
   try {
     res = await fetch(url, init);
   } catch (err) {
+    current();
     if (err instanceof DOMException && err.name === "AbortError") throw err;
     throw new ApiError(0, "Cannot reach hx serve", "NetworkError", [], null);
   }
+  current();
+  if (res.status === 401) {
+    auth.lock(credential.generation);
+    throw new ApiError(401, "Token required", "AuthError", [], null);
+  }
   const text = await res.text();
+  current();
   let data: unknown = null;
   if (text) {
     try {
@@ -144,6 +160,17 @@ export async function request<T>(method: Method, route: Route, opts: RequestOpti
   }
   if (!res.ok) throw ApiError.from(res.status, data);
   return data as T;
+}
+
+/** Ticket route checked against the generated OpenAPI schema. */
+export const WS_TICKET_ROUTE = ROUTES.wsTicket;
+export async function websocketTicket(signal?: AbortSignal): Promise<string | null> {
+  const result = await request<{ ticket: string | null; expires_in: number }>("POST", WS_TICKET_ROUTE, { signal, body: {} });
+  if (result.ticket === null && result.expires_in === 0) return null;
+  if (typeof result.ticket !== "string" || !/^[A-Za-z0-9_-]+$/.test(result.ticket) || result.expires_in !== 30) {
+    throw new ApiError(0, "Invalid live stream response", "ProtocolError", [], null);
+  }
+  return result.ticket;
 }
 
 /** WebSocket URL of the live event stream, on the page's own origin. */

@@ -1,0 +1,61 @@
+import { describe, expect, test } from "bun:test";
+import { generateTypes } from "../../scripts/gen-types";
+
+const schema = {
+  openapi: "3.1.0",
+  info: { title: "test", version: "1" },
+  paths: { "/api/v1/projects": { get: { responses: { "200": { description: "ok" } } } } },
+};
+
+describe("authenticated schema generation", () => {
+  test("sends the credential only in a header and refuses redirects", async () => {
+    let calls = 0;
+    const result = await generateTypes("http://127.0.0.1:7777", "synthetic-token", async (input, init) => {
+      calls++;
+      expect(String(input)).toBe("http://127.0.0.1:7777/api/openapi.json");
+      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer synthetic-token");
+      expect(init?.redirect).toBe("error");
+      return Response.json(schema);
+    });
+    expect(calls).toBe(1);
+    expect(result).toContain('"/api/v1/projects"');
+  });
+
+  test("supports explicit no-auth endpoints without an invented credential", async () => {
+    await generateTypes("http://localhost:7777", undefined, async (_input, init) => {
+      expect(new Headers(init?.headers).has("Authorization")).toBe(false);
+      return Response.json(schema);
+    });
+  });
+
+  test("an unauthorized schema response fails without echoing credentials or body", async () => {
+    await expect(generateTypes("http://localhost:7777", "synthetic-token", async () =>
+      new Response("reflected synthetic-token", { status: 401 }),
+    )).rejects.toThrow("Schema request failed (HTTP 401); set HYPOTHEX_HUB_TOKEN from hx token");
+  });
+
+  test("transport failures never expose raw diagnostic credentials", async () => {
+    try {
+      await generateTypes("http://localhost:7777", "synthetic-token", async () => {
+        throw new Error("Authorization: Bearer synthetic-token");
+      });
+      throw new Error("expected failure");
+    } catch (error) {
+      expect(String(error)).toBe("Error: Cannot fetch the OpenAPI schema");
+      expect((error as Error).cause).toBeUndefined();
+    }
+  });
+
+  test.each(["", "bad token", "line\r\nsecret", "é", "x".repeat(4097)])("rejects invalid explicit token before any request", async (token) => {
+    let calls = 0;
+    await expect(generateTypes("http://localhost:7777", token, async () => {
+      calls++;
+      return Response.json(schema);
+    })).rejects.toThrow("Invalid bearer token format");
+    expect(calls).toBe(0);
+  });
+
+  test("rejects credentials embedded in a URL", async () => {
+    await expect(generateTypes("http://user:password@localhost:7777", undefined)).rejects.toThrow("Invalid hub URL");
+  });
+});

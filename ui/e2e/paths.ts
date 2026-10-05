@@ -43,14 +43,15 @@ export const DEMO_FILE = join(RUN_DIR, "demo.json");
 
 /** Run by `node -e` or `bun -e`: bind port 0 on 127.0.0.1, print the port the OS gave, close. */
 const FREE_PORT_JS =
-  "const s = require('node:net').createServer(); s.listen(0, '127.0.0.1', () => { console.log(s.address().port); s.close(); });";
+  "const s = require('node:net').createServer(); s.listen(0, '127.0.0.1', () => { process.stdout.write(String(s.address().port)); s.close(); });";
 
 /**
  * A TCP port the OS reports free on 127.0.0.1. A child process does the bind, so this
- * stays synchronous (the Playwright config cannot await).
+ * stays synchronous (the Playwright config cannot await). Tests can select the Node
+ * runtime used by Playwright workers while their own runner remains Bun.
  */
-export function freePort(): number {
-  const out = spawnSync(process.execPath, ["-e", FREE_PORT_JS], { encoding: "utf8" });
+export function freePort(runtime: string = process.execPath): number {
+  const out = spawnSync(runtime, ["-e", FREE_PORT_JS], { encoding: "utf8" });
   const port = Number(out.stdout?.trim());
   if (out.status !== 0 || !Number.isInteger(port) || port <= 0) {
     throw new Error(`no free port from the OS: ${out.error?.message ?? out.stderr ?? "no output"}`);
@@ -76,6 +77,8 @@ function runPort(name: string): number {
 export const PORT = runPort("HX_E2E_PORT");
 /** Port of the `hx demo --with-hosts` hub (projects hosts-*). */
 export const HOSTS_PORT = runPort("HX_E2E_HOSTS_PORT");
+/** Vite same-origin proxy used by the authentication acceptance project. */
+export const VITE_PORT = runPort("HX_E2E_VITE_PORT");
 
 export const KINDS = [
   "generic",
@@ -134,8 +137,19 @@ export async function answersAs(base: string, want: Identity): Promise<boolean> 
     const response = await fetch(`${base}${IDENTITY_ROUTE}`, { signal: AbortSignal.timeout(2_000) });
     if (!response.ok) return false;
     const got = (await response.json()) as Partial<Identity>;
-    return got.environment_id === want.environment_id && got.label === want.label;
+    return got.environment_id === want.environment_id;
   } catch {
     return false;
   }
+}
+
+/** Read only this suite's fresh owner-home credential through the local CLI. Never log it. */
+export function localToken(home: string): string {
+  if (home !== HOME_DIR && home !== HOSTS_HOME_DIR) throw new Error("Not an isolated test home");
+  const result = spawnSync("uv", ["run", "--project", REPO_ROOT, "hx", "--home", home, "token"], {
+    cwd: REPO_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  });
+  const token = result.stdout?.trim();
+  if (result.status !== 0 || !token) throw new Error("Cannot read isolated test token");
+  return token;
 }

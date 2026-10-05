@@ -17,7 +17,8 @@ import {
 } from "@tanstack/react-query";
 import { createContext, createElement, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 
-import { wsUrl } from "./client";
+import { auth } from "./auth";
+import { ApiError, websocketTicket, wsUrl } from "./client";
 import type { HxEvent, WsMessage } from "./models";
 import { noteLostReasons } from "./lostReasons";
 import {
@@ -59,7 +60,9 @@ export interface EventStreamOptions {
   /** Called with new events, deduplicated by sequence, in order, batched. */
   onEvents: (events: HxEvent[]) => void;
   onStatus?: (status: StreamStatus) => void;
-  createSocket?: (url: string) => SocketLike;
+  createSocket?: (url: string, protocols: string[]) => SocketLike;
+  /** Fresh one-use ticket for each attempt; null is an explicit noauth test seam. */
+  ticket?: ((signal: AbortSignal) => Promise<string | null>) | null;
   clock?: Clock;
   /** Last sequence already seen and trusted; the first subscribe replays after it. Default 0. */
   afterSequence?: number;
@@ -85,7 +88,9 @@ export interface EventStreamOptions {
 
 export interface EventStreamHookOptions {
   url?: string;
-  createSocket?: (url: string) => SocketLike;
+  createSocket?: (url: string, protocols: string[]) => SocketLike;
+  /** Fresh one-use ticket for each attempt; null is an explicit noauth test seam. */
+  ticket?: ((signal: AbortSignal) => Promise<string | null>) | null;
   clock?: Clock;
   /** Where the last sequence is kept; default `sessionStorage`, `null` keeps nothing. */
   storage?: Pick<Storage, "getItem" | "setItem"> | null;
@@ -220,7 +225,10 @@ export function invalidateForEvents(client: QueryClient, events: readonly HxEven
 export class EventStream {
   private readonly options: EventStreamOptions;
   private readonly clock: Clock;
-  private readonly createSocket: (url: string) => SocketLike;
+  private readonly createSocket: (url: string, protocols: string[]) => SocketLike;
+  private ticketController: AbortController | null = null;
+  private connectionGeneration = 0;
+  private unsubscribeAuth: (() => void) | null = null;
   private socket: SocketLike | null = null;
   private lastSequence: number;
   /** A stored sequence still to be confirmed by the server (see `resumeSequence`). */
@@ -241,7 +249,7 @@ export class EventStream {
   constructor(options: EventStreamOptions) {
     this.options = options;
     this.clock = options.clock ?? realClock;
-    this.createSocket = options.createSocket ?? ((url) => new WebSocket(url));
+    this.createSocket = options.createSocket ?? ((url, protocols) => new WebSocket(url, protocols));
     const resume = options.resumeSequence ?? 0;
     if (options.afterSequence === undefined && resume > 0) {
       this.lastSequence = resume - 1;
@@ -260,11 +268,17 @@ export class EventStream {
   start(): void {
     if (this.running) return;
     this.running = true;
+    this.unsubscribeAuth = auth.onReset(() => this.stop());
     this.connect();
   }
 
   stop(): void {
     this.running = false;
+    this.connectionGeneration += 1;
+    this.ticketController?.abort();
+    this.ticketController = null;
+    this.unsubscribeAuth?.();
+    this.unsubscribeAuth = null;
     this.cancel(this.reconnectTimer);
     this.cancel(this.stableTimer);
     this.cancel(this.flushTimer);
@@ -335,9 +349,34 @@ export class EventStream {
   }
 
   private open(): void {
+    if (!this.running) return;
+    const generation = ++this.connectionGeneration;
+    const issue = this.options.ticket === undefined ? websocketTicket : this.options.ticket;
+    if (issue === null) { this.openSocket(null); return; }
+    const controller = new AbortController();
+    this.ticketController = controller;
+    const failed = (error: unknown): void => {
+      if (!this.running || generation !== this.connectionGeneration) return;
+      this.ticketController = null;
+      if (error instanceof ApiError && error.status === 401) { this.stop(); return; }
+      this.setStatus("offline");
+      this.scheduleReconnect();
+    };
+    try {
+      issue(controller.signal).then((ticket) => {
+        if (!this.running || generation !== this.connectionGeneration) return;
+        this.ticketController = null;
+        this.openSocket(ticket);
+      }, failed);
+    } catch (error) { failed(error); }
+  }
+
+  private openSocket(ticket: string | null): void {
     let socket: SocketLike;
     try {
-      socket = this.createSocket(this.options.url);
+      const protocols = ticket === null ? ["hypothex.v1"] : ["hypothex.v1", "hx-ticket." + ticket];
+      socket = this.createSocket(this.options.url, protocols);
+      if (!this.running) { socket.close(); return; }
     } catch {
       this.setStatus("offline");
       this.scheduleReconnect();
@@ -482,7 +521,7 @@ export function useEventStream(options: EventStreamHookOptions = {}): StreamStat
   const [status, setStatus] = useState<StreamStatus>("connecting");
   const initial = useRef(options);
   useEffect(() => {
-    const { url, createSocket, clock } = initial.current;
+    const { url, createSocket, clock, ticket } = initial.current;
     const storage = initial.current.storage === undefined ? defaultStorage() : initial.current.storage;
     const head = initial.current.head === undefined ? () => fetchLastSequence(client) : initial.current.head;
     const stream = new EventStream({
@@ -507,6 +546,7 @@ export function useEventStream(options: EventStreamHookOptions = {}): StreamStat
         void client.cancelQueries(filters).then(() => client.invalidateQueries(filters));
       },
       createSocket,
+      ticket,
       clock,
     });
     stream.start();

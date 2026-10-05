@@ -6,6 +6,17 @@ server. The OpenAPI docs are at ``http://127.0.0.1:7777/api/docs`` (schema:
 ``/api/openapi.json``). This page lists the routes. See :doc:`security` for the access
 rules.
 
+Every server requires a bearer token by default. Send it in the Authorization
+header; OpenAPI, API data, files and MCP remain protected. Only GET/HEAD of the
+exact public identity descriptor and installed UI resources/navigation are public.
+Run ``hx token`` locally with the server's Hypothex home to retrieve its credential.
+
+``POST /api/v1/auth/ws-ticket`` requires that bearer and returns
+``{"ticket": "...", "expires_in": 30}`` with ``Cache-Control: no-store``. Tickets
+are single-use and server-local; at most 256 unexpired tickets are outstanding,
+after which issuance returns ``429``. Explicit no-auth servers return
+``{"ticket": null, "expires_in": 0}``.
+
 Conventions
 -----------
 
@@ -27,8 +38,10 @@ Conventions
 
 .. code-block:: bash
 
-   curl -s http://127.0.0.1:7777/api/v1/hosts | jq '.[].name'
-   curl -s -X POST http://127.0.0.1:7777/api/v1/hosts/gpu-box/connect \
+   printf 'Authorization: Bearer %s\n' "$(hx token)" | \
+       curl -s -H @- http://127.0.0.1:7777/api/v1/hosts | jq '.[].name'
+   printf 'Authorization: Bearer %s\n' "$(hx token)" | \
+       curl -s -H @- -X POST http://127.0.0.1:7777/api/v1/hosts/gpu-box/connect \
        -H 'content-type: application/json' -d '{}'
 
 Hosts (hub)
@@ -68,7 +81,8 @@ checkout's ``HEAD`` and sends its uncommitted diff. With ``commit``, the body's
 
 .. code-block:: bash
 
-   curl -s -X POST http://127.0.0.1:7777/api/v1/hosts/gpu-box/runs \
+   printf 'Authorization: Bearer %s\n' "$(hx token)" | \
+       curl -s -H @- -X POST http://127.0.0.1:7777/api/v1/hosts/gpu-box/runs \
        -H 'content-type: application/json' -d '{
          "project": "toy-classifier", "task": "toy-test", "hypothesis": "rf on the GPU box",
          "command": ["python", "train_eval.py", "--model", "rf", "--seed", "{seed}"],
@@ -162,7 +176,8 @@ The summary is ``{spec, counts, cells, best, headline, total_usd, run_ids, tag}`
 
 .. code-block:: bash
 
-   curl -s -X POST http://127.0.0.1:7777/api/v1/sweeps \
+   printf 'Authorization: Bearer %s\n' "$(hx token)" | \
+       curl -s -H @- -X POST http://127.0.0.1:7777/api/v1/sweeps \
        -H 'content-type: application/json' -d '{
          "project": "toy-classifier", "task": "toy-test", "host": "gpu-box",
          "grid": [{"name": "model", "values": ["logreg", "rf"]}], "seeds": [1, 2, 3],
@@ -220,7 +235,14 @@ Other routes
 Event stream
 ------------
 
-``/api/v1/ws`` is a WebSocket. Send ``{"type": "subscribe", "after_sequence": N}``
+``/api/v1/ws`` is a WebSocket. Browsers offer protocols ``hypothex.v1`` and
+``hx-ticket.<ticket>`` using a fresh ticket from the endpoint above; the server
+selects only ``hypothex.v1``. No-auth browsers offer only the fixed protocol.
+Nonbrowser clients may still use a bearer Authorization header. Credentials never
+belong in a URL. Host/Origin checks precede ticket consumption, and an invalid
+supplied bearer cannot fall back to a ticket.
+
+Send ``{"type": "subscribe", "after_sequence": N}``
 first. The server sends every event after ``N`` as ``{"type": "event", "event":
 {...}}``, then ``{"type": "ready", "last_sequence": M}``, then live events.
 

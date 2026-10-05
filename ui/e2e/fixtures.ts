@@ -12,6 +12,8 @@ import {
   IDENTITY_ROUTE,
   type Kind,
   PORT,
+  VITE_PORT,
+  localToken,
   readIdentity,
 } from "./paths";
 
@@ -20,6 +22,7 @@ export { expect };
 export type Theme = "light" | "dark";
 export interface ThemeOptions {
   theme: Theme;
+  unlock: boolean;
 }
 
 /** `--paper` from docs/mockups/ui-v4/index.html: #F6F7F3 (light), #12161C (dark). */
@@ -68,13 +71,15 @@ export interface OverviewLite {
 interface Fixtures {
   consoleErrors: string[];
   isolatedHub: void;
+  authToken: string;
 }
 
 /**
  * The hubs this suite starts itself: base URL → the fresh home and the label it wrote.
  * `PORT` and `HOSTS_PORT` are this run's random ports (every worker reads the same ones).
  */
-const OWN_HUBS: Record<string, { home: string; label: string }> = {
+export const OWN_HUBS: Record<string, { home: string; label: string }> = {
+  [`http://127.0.0.1:${VITE_PORT}`]: { home: HOME_DIR, label: DEMO_LABEL },
   [`http://127.0.0.1:${PORT}`]: { home: HOME_DIR, label: DEMO_LABEL },
   [`http://127.0.0.1:${HOSTS_PORT}`]: { home: HOSTS_HOME_DIR, label: HOSTS_DEMO_LABEL },
 };
@@ -101,10 +106,37 @@ export async function expectIsolatedHub(request: APIRequestContext, baseURL: str
 
 export const test = base.extend<ThemeOptions & Fixtures>({
   theme: ["light", { option: true }],
-  page: async ({ page, theme }, use) => {
+  unlock: [true, { option: true }],
+  authToken: async ({ playwright, baseURL }, use) => {
+    const own = baseURL === undefined ? undefined : OWN_HUBS[baseURL];
+    if (!own) throw new Error("Not an isolated test origin");
+    const wanted = readIdentity(own.home);
+    expect(wanted?.label).toBe(own.label);
+    // No credential until the public identity matches the fresh local home.
+    const probe = await playwright.request.newContext({ baseURL });
+    try {
+      const response = await probe.get(IDENTITY_ROUTE);
+      expect(response.status()).toBe(200);
+      const got = await response.json();
+      expect(got.environment_id).toBe(wanted?.environment_id);
+    } finally { await probe.dispose(); }
+    await use(localToken(own.home));
+  },
+  request: async ({ playwright, baseURL, authToken }, use) => {
+    const request = await playwright.request.newContext({ baseURL, extraHTTPHeaders: { Authorization: `Bearer ${authToken}` } });
+    await use(request);
+    await request.dispose();
+  },
+  page: async ({ page, theme, authToken, unlock }, use) => {
     await page.addInitScript((value) => {
       window.localStorage.setItem("hx-theme", value);
     }, theme);
+    if (unlock) {
+      await page.goto("/");
+      await page.getByLabel("Token", { exact: true }).fill(authToken);
+      await page.getByRole("button", { name: "Unlock", exact: true }).click();
+      await expect(page.getByLabel("Token", { exact: true })).toHaveCount(0);
+    }
     await use(page);
   },
   isolatedHub: [
@@ -118,7 +150,8 @@ export const test = base.extend<ThemeOptions & Fixtures>({
     async ({ page }, use) => {
       const errors: string[] = [];
       page.on("console", (message) => {
-        if (message.type() === "error") errors.push(message.text());
+        // A deliberate unauthenticated validation gets the browser's ordinary 401 console entry.
+        if (message.type() === "error" && !/^Failed to load resource: the server responded with a status of 401/.test(message.text())) errors.push(message.text());
       });
       page.on("pageerror", (error) => {
         errors.push(`pageerror: ${error.message}`);

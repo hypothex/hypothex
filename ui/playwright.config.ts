@@ -2,7 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 import type { ThemeOptions } from "./e2e/fixtures";
 // Loading paths.ts picks this run's two free ports and puts them in process.env, which the
 // workers and both web servers inherit (never a fixed port, ruling S1).
-import { HOSTS_PORT, IDENTITY_ROUTE, PORT } from "./e2e/paths";
+import { HOSTS_PORT, IDENTITY_ROUTE, PORT, VITE_PORT } from "./e2e/paths";
 
 const WRITES = /(editor|live)\.spec\.ts$/;
 /** Specs against the `hx demo --with-hosts` hub; `launch` starts runs, so it runs last. */
@@ -29,10 +29,15 @@ export default defineConfig<ThemeOptions>({
   expect: { timeout: 10_000 },
   use: {
     baseURL: `http://127.0.0.1:${PORT}`,
-    trace: "retain-on-failure",
-    screenshot: "only-on-failure",
+    trace: "off",
+    screenshot: "off",
   },
   projects: [
+    {
+      name: "vite-auth",
+      testMatch: /auth\.spec\.ts$/,
+      use: { ...devices["Desktop Chrome"], baseURL: `http://127.0.0.1:${VITE_PORT}`, colorScheme: "light", theme: "light" },
+    },
     {
       name: "light",
       testIgnore: [WRITES, HOSTS_READS, HOSTS_WRITES],
@@ -88,6 +93,15 @@ export default defineConfig<ThemeOptions>({
   // start instead, a web server whose command exits stops the run at once, and every test
   // checks the hub's identity first (`isolatedHub` in e2e/fixtures.ts).
   webServer: [
+    {
+      command: `bun run dev --host 127.0.0.1 --port ${VITE_PORT}`,
+      env: { HX_API: `http://127.0.0.1:${PORT}` },
+      url: `http://127.0.0.1:${VITE_PORT}/`,
+      reuseExistingServer: false,
+      timeout: 60_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
     {
       command: "bun e2e/serve-demo.ts",
       url: `http://127.0.0.1:${PORT}${IDENTITY_ROUTE}`,

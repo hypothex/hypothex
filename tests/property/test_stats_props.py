@@ -283,6 +283,7 @@ def test_paired_bootstrap_detects_a_uniform_shift(a: list[float], shift: float) 
     st.lists(moderate, min_size=2, max_size=15),
 )
 @example([0.0, 0.0], [699050.9501341588] * 3)
+@example([0.0, 0.0], [0.0, 0.0, 2.5597196641276581e-85])
 def test_welch_matches_scipy(a: list[float], b: list[float]) -> None:
     p = welch_p(a, b)
     if len(set(a)) == 1 and len(set(b)) == 1:
@@ -291,10 +292,14 @@ def test_welch_matches_scipy(a: list[float], b: list[float]) -> None:
     # scipy loses everything to cancellation when the spread is ~1e-10 of the values
     spread = max(max(a) - min(a), max(b) - min(b))
     scale = max(map(abs, a + b))
-    # and its variance underflows for spreads near the float minimum
-    assume(spread > 1e-6 * scale and spread > 1e-100)
+    assume(spread > 1e-6 * scale)
     assert p is not None and 0.0 <= p <= 1.0
-    ref = float(sps.ttest_ind(a, b, equal_var=False).pvalue)
+    # Welch is invariant to common scaling. Normalize the SciPy oracle because
+    # its degrees-of-freedom formula squares variance: tiny nonzero variances
+    # can underflow there and silently fall back to df=1 instead of the true df.
+    ref = float(
+        sps.ttest_ind([x / scale for x in a], [x / scale for x in b], equal_var=False).pvalue
+    )
     assert p == pytest.approx(ref, rel=1e-6, abs=1e-12)
 
 

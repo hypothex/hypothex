@@ -50,7 +50,7 @@ from hypothex.core.records import (
 )
 from hypothex.core.store import RunStore
 from hypothex.remote.bootstrap import BootstrapError, ServerInfo
-from hypothex.remote.client import EnvRequestError, EnvUnreachableError, RemoteFile
+from hypothex.remote.client import EnvClient, EnvRequestError, EnvUnreachableError, RemoteFile
 from hypothex.remote.config import EnvironmentsFile, HostSpec
 from hypothex.remote.hub import (
     CLAIMS_DIR,
@@ -2168,28 +2168,40 @@ class FakeTunnel:
         local_port: int | None = None,
         *,
         registry: Path | None = None,
+        private: bool = False,
     ) -> None:
+        from hypothex.remote.ssh import Tunnel
+
+        assert private
+        self._real = Tunnel(target, remote_port, private=True)
+        self.unix_socket: Path | None = None
         self.target = target
-        self.local_port = remote_port
+        self.local_port = None
         self.registry = registry
         self.started = self.stopped = self.dead = False
         FakeTunnel.instances.append(self)
 
     def start(self) -> None:
+        self._real.start()
+        self.unix_socket = self._real.unix_socket
         self.started = True
 
     def alive(self) -> bool:
         return not self.dead
 
     def stop(self) -> None:
+        self._real.stop()
         self.stopped = True
 
 
 @pytest.fixture
-def fake_ssh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tuple[str, str, str]]:
+def fake_ssh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_remote: Any
+) -> list[tuple[str, str, str]]:
     FakeTunnel.instances = []
     monkeypatch.setattr(hub_mod, "Tunnel", FakeTunnel)
-    monkeypatch.setenv("HYPOTHEX_SSH", str(tmp_path / "bin" / "fake-ssh"))
+    fake_remote.add_host("gpu1")
+    monkeypatch.setenv("HYPOTHEX_SSH", fake_remote.ssh_bin)
     return []
 
 
@@ -2212,6 +2224,7 @@ def test_ssh_route_bootstraps_tunnels_and_mirrors(
         return ServerInfo(
             pid=1,
             port=a.port,
+            environment_id=a.ctx.descriptor.environment_id,
             managed=True,
             hx_version=__version__,
             protocol_version=PROTOCOL_VERSION,
@@ -2226,10 +2239,10 @@ def test_ssh_route_bootstraps_tunnels_and_mirrors(
         await hub.start()
         try:
             await until(lambda: hub.state("gpu1").last_sequence == 2)
-            assert hub.state("gpu1").local_port == a.port
+            assert hub.state("gpu1").local_port is None
             # the env server's token (from server.json over ssh) goes on every request
             assert hub.client("gpu1").auth_headers() == {"Authorization": "Bearer t0k"}
-            assert fake_ssh == [("gpu1", "~/.hypothex", str(tmp_path / "bin" / "fake-ssh"))]
+            assert len(fake_ssh) == 1 and fake_ssh[0][:2] == ("gpu1", "~/.hypothex")
             FakeTunnel.instances[0].dead = True  # the ssh -L process died
             await until(lambda: len(fake_ssh) == 2 and hub.state("gpu1").state == "connected")
             assert FakeTunnel.instances[0].stopped
@@ -2261,6 +2274,7 @@ def test_an_ssh_reconnect_is_not_bootstrapping_and_goes_stale_mid_attempt(
         return ServerInfo(
             pid=1,
             port=a.port,
+            environment_id=a.ctx.descriptor.environment_id,
             managed=True,
             hx_version=__version__,
             protocol_version=PROTOCOL_VERSION,
@@ -2303,6 +2317,7 @@ def test_hub_start_reaps_old_tunnels_and_records_its_own(
         return ServerInfo(
             pid=1,
             port=a.port,
+            environment_id=a.ctx.descriptor.environment_id,
             managed=True,
             hx_version=__version__,
             protocol_version=PROTOCOL_VERSION,
@@ -2404,7 +2419,8 @@ def test_disconnect_during_tunnel_start_leaves_no_tunnel(
 
     def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
         return ServerInfo(
-            pid=1, port=a.port, managed=True, hx_version=__version__,
+            pid=1, port=a.port, environment_id=a.ctx.descriptor.environment_id,
+            managed=True, hx_version=__version__,
             protocol_version=PROTOCOL_VERSION,
         )  # fmt: skip
 
@@ -2437,7 +2453,7 @@ def test_the_token_never_reaches_states_events_or_logs(
     def ensure(target: Any, home: str, *, kind: str | None = None) -> ServerInfo:
         fake_ssh.append((target.alias, home, target.ssh_bin))
         return ServerInfo(
-            pid=1, port=1, managed=True, hx_version=__version__,
+            pid=1, port=1, environment_id="e1", managed=True, hx_version=__version__,
             protocol_version=PROTOCOL_VERSION, token=sentinel,
         )  # fmt: skip  # port 1: nothing answers, so the session fails and retries
 
@@ -2569,3 +2585,112 @@ def test_a_host_that_reports_another_hosts_environment_is_refused(tmp_path: Path
     finally:
         a.stop()
         b.stop()
+
+
+def test_ssh_identity_mismatch_never_sends_bearer_or_reserves_cursor(
+    tmp_path: Path, servers: tuple[EnvServer, EnvServer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, _ = servers
+    seen: list[dict[str, str]] = []
+    original = hub_mod.EnvClient.identity if hasattr(hub_mod.EnvClient, "identity") else None
+    assert original is not None
+
+    def identity(client: EnvClient) -> Any:
+        seen.append(client.auth_headers())
+        return original(client)
+
+    async def route(self: Hub, sup: Any) -> str:
+        sup.token = "must-stay-local"
+        sup.expected_environment_id = "wrong-environment"
+        return a.url
+
+    monkeypatch.setattr(Hub, "_open_route", route)
+    monkeypatch.setattr(EnvClient, "identity", identity)
+    hub_ctx = Context.open(tmp_path / "hub")
+
+    async def main() -> None:
+        hub = fast(Hub(hub_ctx, ssh_hosts()))
+        await hub.start()
+        try:
+            await until(lambda: hub.state("gpu1").state == "error")
+            assert "identity" in hub.state("gpu1").message
+        finally:
+            await hub.stop()
+
+    asyncio.run(main())
+    assert seen == [{}]
+    assert hub_ctx.index.get_cursor("gpu1", a.ctx.descriptor.environment_id) == 0
+    assert not list((hub_ctx.layout.home / "hub" / "cursors").glob("*"))
+
+
+def test_cancelled_cursor_preflight_drains_before_clients_route_and_next_cursor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core.environment import EnvironmentIdentity
+
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    created: list[Any] = []
+
+    class Client:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.closed = False
+            created.append(self)
+
+        def identity(self) -> EnvironmentIdentity:
+            return EnvironmentIdentity(
+                environment_id="remote-cursor", protocol_version=1, hx_version="1"
+            )
+
+        def get_json(self, path: str) -> list[dict[str, Any]]:
+            entered.set()
+            assert release.wait(5)
+            finished.set()
+            return [{"kind": "local", "state": {"last_sequence": 0}}]
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Route:
+        unix_socket = None
+        local_port = None
+        stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    route = Route()
+
+    async def open_route(self: Hub, sup: Any) -> str:
+        sup.tunnel = route
+        return "http://unused.invalid"
+
+    monkeypatch.setattr(hub_mod, "EnvClient", Client)
+    monkeypatch.setattr(Hub, "_open_route", open_route)
+    ctx = Context.open(tmp_path / "hub")
+    ctx.index.set_cursor("review", "remote-cursor", 12)
+    hub = Hub(
+        ctx,
+        EnvironmentsFile(
+            environments={"review": HostSpec(route="url", url="http://unused.invalid")}
+        ),
+    )
+
+    async def scenario() -> None:
+        task = asyncio.create_task(hub._session(hub._sups["review"]))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            task.cancel()
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            assert not any(client.closed for client in created)
+            assert not route.stopped
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            assert await asyncio.to_thread(finished.wait, 3)
+        assert all(client.closed for client in created) and route.stopped
+        ctx.index.set_cursor("review", "remote-cursor", 99)
+        await asyncio.sleep(0.05)
+        assert ctx.index.get_cursor("review", "remote-cursor") == 99
+
+    asyncio.run(scenario())

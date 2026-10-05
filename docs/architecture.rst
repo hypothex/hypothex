@@ -160,12 +160,15 @@ through the user's browser. A ``POST`` must also send JSON (or an
 CLI, MCP clients, ``curl -H 'content-type: application/json'``) are not affected.
 
 These checks are not authentication: any client that is not a browser can send
-``Host: localhost``. So ``hx serve`` refuses a non-loopback ``--host`` (such as
-``0.0.0.0``) unless ``HYPOTHEX_SERVE_TOKEN`` is set. With a token, every request
-except ``/.well-known/hypothex/environment`` needs
-``Authorization: Bearer <token>`` (``401`` otherwise; a WebSocket is closed with
-code ``1008``). To reach a server on another machine without a token, keep it on
-``127.0.0.1`` and use an SSH tunnel: ``ssh -L 7777:127.0.0.1:7777 HOST``.
+``Host: localhost``. Every ``hx serve`` therefore requires a bearer token by
+default, including the local hub. Each actual start creates a fresh credential
+unless ``HYPOTHEX_SERVE_TOKEN`` explicitly supplies it; live server reuse keeps it.
+Only the exact public identity descriptor and installed UI shell/resources accept
+unauthenticated GET/HEAD. API, file and MCP requests need Authorization headers.
+The browser's Token gate uses the credential printed by local ``hx token`` and
+obtains a single-use 30-second ticket for each WebSocket handshake. Tickets travel
+in an offered subprotocol, never a URL. Explicit ``--no-auth`` is allowed only on
+loopback. See :doc:`security` for public-route and credential boundaries.
 
 .. code-block:: bash
 

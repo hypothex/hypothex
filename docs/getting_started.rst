@@ -116,8 +116,9 @@ Open the web UI
 
    hx serve                     # http://127.0.0.1:7777/
 
-The UI shows the Overview (with your hosts), tasks, and runs, and updates live. See
-:doc:`ui`.
+In another terminal, run ``hx token`` with the same Hypothex home and paste its
+output into the Token field. The UI then shows the Overview (with your hosts),
+tasks, and runs, and updates live. See :doc:`ui`.
 
 Connect an agent
 ----------------

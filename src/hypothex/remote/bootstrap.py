@@ -14,6 +14,7 @@ is ignored.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -22,12 +23,14 @@ import subprocess
 import uuid
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
 import hypothex
 from hypothex._version import __version__
-from hypothex.core.errors import HypothexError
+from hypothex.core.errors import ConfigError, HypothexError
+from hypothex.core.tokens import validate_bearer_token
 from hypothex.remote.ssh import SshTarget, copy_to, run_remote
 
 _PREFIX = "HX:"
@@ -102,6 +105,7 @@ class ServerInfo(BaseModel):
     hx_version: str
     protocol_version: int
     token: str | None = Field(default=None, repr=False, exclude=True)
+    environment_id: str | None = None
 
 
 def _load_scripts() -> dict[str, str]:
@@ -488,6 +492,38 @@ def install(target: SshTarget, home: str, wheel: Path, *, install_uv: bool = Fal
         )
 
 
+def _trusted_environment_id(values: dict[str, str]) -> str:
+    """Strictly parse the unchanged environment-file bytes received over SSH."""
+
+    def unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate environment field")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError("non-JSON constant")
+
+    try:
+        data = json.loads(
+            bytes.fromhex(values.get("environment_json_hex", "")),
+            object_pairs_hook=unique_fields,
+            parse_constant=reject_constant,
+        )
+        expected = data.get("environment_id") if isinstance(data, dict) else None
+        if (
+            not isinstance(expected, str)
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", expected) is None
+            or values.get("environment_id") != expected
+        ):
+            raise ValueError("invalid environment id")
+    except ValueError:
+        raise BootstrapError("missing or invalid trusted environment identity") from None
+    return expected
+
+
 def ensure_server(target: SshTarget, home: str, *, kind: str | None = None) -> ServerInfo:
     """
     Return a healthy env server on the host, starting one if needed.
@@ -542,11 +578,33 @@ def ensure_server(target: SshTarget, home: str, *, kind: str | None = None) -> S
     if not raw:
         raise BootstrapError(f"{target.alias}: start script reported no server")
     try:
-        return ServerInfo.model_validate_json(raw)
+        record = json.loads(raw)
+    except ValueError:
+        raise BootstrapError(f"{target.alias}: bad server.json (record)") from None
+    if not isinstance(record, dict):
+        raise BootstrapError(f"{target.alias}: bad server.json (record)")
+    if "token" not in record:
+        raise BootstrapError(
+            f"{target.alias}: legacy server record has no token policy; "
+            "upgrade or restart the remote server"
+        )
+    if record["token"] is not None:
+        try:
+            validate_bearer_token(record["token"])
+        except ConfigError:
+            raise BootstrapError(f"{target.alias}: invalid bearer token in server record") from None
+    try:
+        info = ServerInfo.model_validate(record)
     except ValidationError as exc:
         # Never echo the raw record or pydantic's input values: they hold the token.
         fields = sorted({".".join(map(str, err["loc"])) or "record" for err in exc.errors()})
         raise BootstrapError(f"{target.alias}: bad server.json ({', '.join(fields)})") from None
+    expected = _trusted_environment_id(values)
+    if info.environment_id is not None and info.environment_id != expected:
+        raise BootstrapError(
+            f"{target.alias}: server record conflicts with trusted environment identity"
+        )
+    return info.model_copy(update={"environment_id": expected})
 
 
 def stop_server(target: SshTarget, home: str) -> bool:

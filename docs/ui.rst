@@ -14,6 +14,13 @@ replaying the whole event log. Reconnects resume after the last received event.
 
    uv run hx serve
 
+The UI first shows a Token field. In another terminal, run ``uv run hx token``
+with the same Hypothex home and paste its output. The browser sends the bearer
+in request headers and gets a fresh 30-second, single-use WebSocket ticket for
+each connection. Credentials never appear in URLs. A server restart normally
+rotates the token; a ``401`` clears cached data and returns to the gate. Explicit
+loopback ``--no-auth`` servers open without a token.
+
 Screens
 -------
 
@@ -107,7 +114,20 @@ Develop
    cd ui && bun run dev            # http://localhost:5173
 
 The Vite dev server reloads on save and proxies ``/api`` (HTTP and WebSocket) to
-``hx serve``. Set ``HX_API=http://host:port`` to proxy to another server.
+``hx serve``. Use the same Token gate in development. Set
+``HX_API=http://host:port`` to proxy to another server.
+
+Regenerate the typed API paths from the running authenticated server:
+
+.. code-block:: bash
+
+   cd ui
+   HYPOTHEX_HUB_TOKEN="$(uv run hx token)" bun run gen:types
+
+The token helper must use the server's Hypothex home. ``HYPOTHEX_HUB_URL`` changes
+the schema server (default ``http://127.0.0.1:7777``). The generator sends the
+credential only as a header, refuses redirects, and leaves the existing types
+file intact if fetching or parsing fails. Explicit no-auth servers need no token.
 
 Test
 ----

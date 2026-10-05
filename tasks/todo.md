@@ -214,3 +214,47 @@ mirrors, PID-safe tunnel ownership, alias-transfer snapshot refresh, bounded liv
 caching, terminal checkout failures, exclusive shared-staging membership, recorded
 sweep patches/counts, and nested demo Git isolation. The full branch has been reviewed;
 publication and current-head CI remain the final merge gate.
+
+## Default authentication and private SSH transport (step 9)
+
+Independent CI-wait work starts from reviewed `a5ddaa0`; merge the intervening
+ordered queue branches before publication. Accepted detailed design and regression
+matrix: `/tmp/hx-handoff-evidence/token-implementation-plan.md`.
+
+- [x] Transport: private UDS, SSH-sourced expected identity before bearer, safe
+  cancellation/reconnect, strict token validation and diagnostic boundaries.
+- [x] API/CLI: default per-start tokens, local owner token helper, exact public
+  shell/identity surface, bounded one-use WS tickets, caller credential forwarding.
+- [x] UI: credential gate, Authorization headers, ticket reconnect, 401 reset,
+  protected packaged/Vite browser acceptance with explicit no-auth coverage.
+- [x] Reconcile interfaces with docs/security, remote, CLI, HTTP, UI, phase 2
+  contract/spec; keep collaborator auth implementation deferred to Phase 3.
+- [ ] Parent review and focused regressions, full Python/static/docs/UI/browser,
+  Docker fake SSH acceptance, package inspection; PR/link/green CI/merge in order.
+
+Three owners have disjoint transport, API/CLI/MCP and UI files. Parent owns central
+contracts/docs and integration. No tests touch real hosts or SSH configuration.
+Documentation edits are provisional until their signatures and behavior are checked
+against the final implementation and runtime evidence.
+
+Local checkpoint verification is complete. Full Python originally had 2,143 passing
+tests, three skips, eleven Docker deselections and one unrelated property-oracle
+failure. Its exact tiny-variance input is retained; normalizing the SciPy reference
+fixes squared-variance underflow, and all 31 statistics properties pass without a
+production statistics edit. Subsequent final-state checks passed: 242 affected
+transport tests (three skips), 33 identity tests, 115 MCP/client tests after sharing
+safe HTTP diagnostics, and 321 API/CLI tests. Docker SSH and SLURM: 11 passed.
+UI: 867 unit tests, both type checks/build, and 50 actual browser tests.
+
+Independent review fixed reflected bearer diagnostics in both HTTP clients,
+untracked cursor cancellation, and malformed trusted environment JSON. Private
+SSH HTTP/files/WebSockets, redirect/proxy boundaries, token rotation and the local
+helper were exercised with isolated homes and fake hosts. Ruff, formatting, source
+ty, Sphinx and diff checks pass. The actual wheel/sdist contains the compiled UI,
+ticket/shared-token/safe-HTTP modules and trusted bootstrap; internal plans and
+mockups are excluded. Authenticated OpenAPI type extraction was verified against
+an isolated live server. Evidence is under `/tmp/hx-handoff-evidence/token-*`.
+
+Merge the ordered dogfood/UI prerequisite branches and run affected integration
+checks before PR publication. This local checkpoint does not claim merged-main or
+CI completion. Phase 3 remains documentation-only in its separate branch.

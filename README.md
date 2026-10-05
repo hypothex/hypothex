@@ -14,7 +14,7 @@ Experiment tracker and control panel for AI researchers and their agents.
 - **Cost**: GPU hours at each host's price plus API spend, per run, seed group, sweep, host, and day.
 - **Web UI**: Overview with a live Hosts panel, task dashboards, run pages, examples.
 - **Built for agents**: `hx --json` CLI, MCP server, HTTP API, and a skill file.
-- **Safe by default**: servers bind `127.0.0.1`; env servers need a bearer token; no secrets in run files.
+- **Safe by default**: servers bind `127.0.0.1` and require a bearer token; `hx token` unlocks the UI; no secrets in run files.
 
 ## Install
 
@@ -42,6 +42,9 @@ hx leaderboard TASK                                  # rank seed groups by the p
 hx show <run-id>                                     # every path: code, config, logs, predictions, checkpoint
 hx serve                                             # UI and API at http://127.0.0.1:7777/
 ```
+
+In another terminal, run `hx token` with the same Hypothex home and paste its
+output into the UI's Token field.
 
 On a remote GPU box (keep `hx serve` running on your machine):
 

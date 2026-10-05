@@ -14,7 +14,7 @@ from sqlalchemy import text
 import hypothex.remote.hub as hub_module
 from hypothex.api.app import HubManager
 from hypothex.core.context import Context
-from hypothex.core.environment import EnvironmentDescriptor
+from hypothex.core.environment import EnvironmentIdentity
 from hypothex.core.index import rebuild_index
 from hypothex.core.queries import show_run
 from hypothex.core.records import Artifact, DatasetRef
@@ -43,8 +43,8 @@ def identity_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Context
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        def descriptor(self) -> EnvironmentDescriptor:
-            return descriptor
+        def identity(self) -> EnvironmentIdentity:
+            return EnvironmentIdentity.model_validate(descriptor.model_dump())
 
         def close(self) -> None:
             pass

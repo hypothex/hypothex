@@ -27,7 +27,8 @@ def test_serve_writes_server_json_and_reports_kind(tmp_path: Path) -> None:
         info = wait_until(lambda: json.loads(info_path.read_text()), timeout=30)
         assert info["pid"] == proc.pid and info["managed"] is False and info["port"] > 0
         url = f"http://127.0.0.1:{info['port']}/.well-known/hypothex/environment"
-        descriptor = wait_until(lambda: httpx.get(url, timeout=2).json(), timeout=30)
+        good = {"Authorization": f"Bearer {info['token']}"}
+        descriptor = wait_until(lambda: httpx.get(url, headers=good, timeout=2).json(), timeout=30)
         assert descriptor["kind"] == "ssh"
     finally:
         proc.terminate()
@@ -201,3 +202,18 @@ def test_write_private_removes_its_tmp_when_the_write_fails(
         cli_main._write_private(path, "{}")
     assert not path.with_name(f".{path.name}.{os.getpid()}.tmp").exists()
     assert not path.exists()
+
+
+def test_serve_kind_goes_back_to_local_after_a_trial_ssh(tmp_path: Path) -> None:
+    # CONF-12b: one `hx serve --kind ssh` must not make every later plain `hx serve` an
+    # env server whose fresh token locks the browser UI out (401 on every call)
+    home = tmp_path / "h"
+    assert cli_main.resolve_serve_kind(home, "ssh") == "ssh"
+    assert cli_main.resolve_serve_kind(home, None) == "ssh"  # the saved kind sticks
+    cli_main.check_serve_kind("local")
+    assert cli_main.resolve_serve_kind(home, "local") == "local"
+    assert cli_main.resolve_serve_kind(home, None) == "local"
+    assert json.loads((home / "environment.json").read_text())["kind"] == "local"
+    assert cli_main._serve_token("127.0.0.1", "local", False) is None
+    with pytest.raises(cli_main.ConfigError, match="or local to serve as the hub"):
+        cli_main.check_serve_kind("gpu")

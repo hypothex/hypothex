@@ -30,14 +30,19 @@ from hypothex.core.config import (
 )
 from hypothex.core.context import Context
 from hypothex.core.control import cancel_if_queued, cancel_many_if_queued, launch_run
-from hypothex.core.errors import HypothexError, RunError, StoreError
+from hypothex.core.errors import HypothexError, RemoteProjectError, RunError, StoreError
 from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import COMMIT_PATTERN, RunRequest
 from hypothex.core.fsutil import atomic_write_text, read_yaml, write_yaml
 from hypothex.core.headlines import NO_RUNS, fmt_metric, fmt_metric_delta, fmt_p
 from hypothex.core.ids import utcnow
 from hypothex.core.layout import Layout
-from hypothex.core.leaderboard import Leaderboard, LeaderboardRow, build_leaderboard
+from hypothex.core.leaderboard import (
+    Leaderboard,
+    LeaderboardRow,
+    build_leaderboard,
+    cached_leaderboard,
+)
 from hypothex.core.queries import primary_examples
 from hypothex.core.records import RunRecord, RunStatus
 
@@ -706,9 +711,15 @@ def _board(
     """The task leaderboard restricted to ``runs``, or None without a known task."""
     if spec.task is None or config is None:
         return None
-    scores = ctx.index.scores_for(r.run_id for r in runs)
-    per_example = primary_examples(ctx, config, spec.task, runs, None)
-    return build_leaderboard(spec.project, spec.task, config, runs, scores, per_example=per_example)
+    task = spec.task
+
+    def build() -> Leaderboard:
+        scores = ctx.index.scores_for(r.run_id for r in runs)
+        per_example = primary_examples(ctx, config, task, runs, None)
+        return build_leaderboard(spec.project, task, config, runs, scores, per_example=per_example)
+
+    ids = ("sweep", tuple(r.run_id for r in runs))
+    return cached_leaderboard(ctx, spec.project, task, config, build, variant=ids)
 
 
 def _cell(
@@ -1007,15 +1018,19 @@ def _resolve_repo(
     """
     The project's repo, checked to hold ``project`` and ``task``.
 
-    For a host sweep (``remote``) the hub needs no checkout of its own: when the
-    stored repo path is not a folder here (a project copied from a host,
-    ``ProjectEntry.remote_host``, or a hub used from another laptop), the
-    entry's ``hypothex.yaml`` snapshot is checked instead.
+    For a host sweep (``remote``) the hub needs no checkout of its own: for a
+    project copied from a host (``ProjectEntry.remote_host``, whose repo path
+    is never read here even when it names a folder, ``Context.local_repo``)
+    or a stored repo path that is not a folder here (a hub used from another
+    laptop), the entry's ``hypothex.yaml`` snapshot is checked instead.
     """
     if repo is None:
         entry = ctx.store.load_project(project)
-        path = Path(entry.repo)
-        if not path.is_dir():
+        try:
+            path = ctx.local_repo(project)
+        except RemoteProjectError:
+            path = None
+        if path is None or not path.is_dir():
             if not remote:
                 where = entry.remote_host or "another machine"
                 raise SweepError(
@@ -1025,7 +1040,7 @@ def _resolve_repo(
             known = sorted(entry.config.tasks)
             if task is not None and task not in known:
                 raise SweepError(f"unknown task {task!r}; known tasks: {known}")
-            return path
+            return Path(entry.repo)
     else:
         path = repo
     config = load_project_config(path)
@@ -1271,13 +1286,15 @@ def _issue(
         A launch failed: it names how many runs exist and how to start the rest.
     """
     members = {(r.seed, _combo_key(r.params)) for r in sweep_runs(ctx, spec)}
-    for done, (seed, req) in enumerate(requests):
-        if (seed, _combo_key(req.params)) in members:
+    for seed, req in requests:
+        member = (seed, _combo_key(req.params))
+        if member in members:
             continue
         try:
             _launch_run(ctx, spec, launch, seed, req, requested)
         except HypothexError as exc:
-            raise SweepIncompleteError(spec, done, planned_runs(spec), exc) from exc
+            raise SweepIncompleteError(spec, len(members), planned_runs(spec), exc) from exc
+        members.add(member)
 
 
 def launch_sweep(
@@ -1688,7 +1705,8 @@ def _pinned_code(
     Raises
     ------
     SweepError
-        If the first run's diff was too large to save: its code is not known.
+        If the first run's diff was too large to save or its dirty patch is
+        missing: its code is not known.
     """
     if spec.commit is not None or first is None or first.git.commit is None:
         return spec.commit, spec.diff
@@ -1699,6 +1717,11 @@ def _pinned_code(
             "save; its code cannot be pinned for new seeds"
         )
     saved = run_dir / "git.diff"
+    if (first.git.dirty or first.git.diff_hash) and not saved.is_file():
+        raise SweepError(
+            f"the sweep's first run {first.run_id} had uncommitted changes but its "
+            "patch is missing; restore its saved git.diff before adding seeds"
+        )
     return first.git.commit, saved.read_bytes() if saved.is_file() else None
 
 
@@ -1749,7 +1772,7 @@ def extend_sweep(
     ------
     SweepError
         No seeds, the sweep would grow past ``MAX_SWEEP_RUNS``, or the sweep
-        pins no code and its first run's diff was too large to save.
+        pins no code and its first run's dirty patch is missing or too large to save.
     SweepIncompleteError
         A run launch failed; the seeds are saved, so the same extend resumes.
     StoreError

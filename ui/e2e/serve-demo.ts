@@ -1,39 +1,172 @@
 /**
  * Playwright `webServer` command: seed a fresh demo home, then serve it.
  *
- * Wipes `e2e/.home`, runs `hx demo --json` into it, writes the kind → "project/task" map
- * to `e2e/.demo.json`, then runs `hx serve` in the foreground until Playwright stops it.
+ * Every path is inside this run's own directory (`RUN_DIR`, `e2e/.runs/run-XXXXXX`, see
+ * `e2e/paths.ts`), so two suites in one checkout never touch each other's homes.
+ *
+ * Without arguments: wipes `HOME_DIR`, writes its identity (`environment.json`: a new
+ * `environment_id` and the label `DEMO_LABEL`), runs `hx demo --json` into it, writes the
+ * kind → "project/task" map to `DEMO_FILE`, then runs `hx serve` on `PORT`.
+ *
+ * With `--with-hosts`: the same with `hx demo --with-hosts --json` into `HOSTS_HOME_DIR`,
+ * label `HOSTS_DEMO_LABEL`, output in `HOSTS_DEMO_FILE`, served on `HOSTS_PORT`. Its
+ * hosts are fake (env servers on this machine reached by `route: url`). `HYPOTHEX_SSH` and
+ * `HYPOTHEX_SCP` are `false` for both servers, so nothing started here can open a real SSH
+ * connection. `PORT` and `HOSTS_PORT` are the run's random ports.
+ *
+ * A child that cannot start (no `uv`, no venv `hx`, `hx demo` failing, `hx serve` not
+ * spawning or exiting, e.g. on a taken port) ends this script at once with exit code 1 or
+ * the child's code, so Playwright and `shutdown-check.ts` stop waiting immediately.
+ *
+ * Shutdown order: Playwright sends SIGTERM to this script's process group
+ * (`gracefulShutdown`). `hx serve` runs in its own group (`detached`), so it does not get
+ * that signal; this script forwards SIGTERM to the hub process alone and waits for it to
+ * exit. The hub's ASGI lifespan shutdown, which uvicorn runs on that SIGTERM before it
+ * exits (the backend plan, ruling S9), stops the demo runs over the fake gpu1 server's
+ * HTTP API, then the fake hosts. Killing the fake hosts first would orphan the demo runs'
+ * supervisors. Only then, or after `SHUTDOWN_WAIT_MS`, or when the hub dies by itself, does
+ * this script SIGKILL every process its home still owns (`e2e/procs.ts`): the fake hosts and
+ * supervisors run in their own sessions, so a hub that crashed or hung leaves them behind.
+ * Then it removes its home and demo file. `bun e2e/shutdown-check.ts` checks all three ends.
  */
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { DEMO_FILE, HOME_DIR, PORT, REPO_ROOT, UI_DIST_INDEX } from "./paths";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  DEMO_FILE,
+  DEMO_LABEL,
+  HOME_DIR,
+  HOSTS_DEMO_FILE,
+  HOSTS_DEMO_LABEL,
+  HOSTS_HOME_DIR,
+  HOSTS_PORT,
+  IDENTITY_FILE,
+  PORT,
+  REPO_ROOT,
+  RUN_DIR,
+  SHUTDOWN_WAIT_MS,
+  UI_DIST_INDEX,
+} from "./paths";
+import { demoOwner, killOwned, listProcs, type Owner } from "./procs";
+
+const withHosts = process.argv.includes("--with-hosts");
+const home = withHosts ? HOSTS_HOME_DIR : HOME_DIR;
+const demoFile = withHosts ? HOSTS_DEMO_FILE : DEMO_FILE;
+const port = withHosts ? HOSTS_PORT : PORT;
+const label = withHosts ? HOSTS_DEMO_LABEL : DEMO_LABEL;
+const env = { ...process.env, HYPOTHEX_SSH: "false", HYPOTHEX_SCP: "false" };
 
 if (!existsSync(UI_DIST_INDEX)) {
   console.error(`missing ${UI_DIST_INDEX}: run "bun run build" in ui/ first`);
   process.exit(1);
 }
-rmSync(HOME_DIR, { recursive: true, force: true });
-mkdirSync(HOME_DIR, { recursive: true });
 
-const hx = ["run", "--project", REPO_ROOT, "hx", "--home", HOME_DIR];
-const seeded = spawnSync("uv", [...hx, "demo", "--json"], {
+/** The project venv's `hx`, so signals reach `hx serve` itself and not a `uv run` wrapper. */
+function venvHx(): string {
+  const found = spawnSync(
+    "uv",
+    ["run", "--project", REPO_ROOT, "python", "-c", "import os, sys; print(os.path.join(os.path.dirname(sys.executable), 'hx'))"],
+    { cwd: REPO_ROOT, encoding: "utf8", env, stdio: ["ignore", "pipe", "inherit"] },
+  );
+  const path = (found.stdout ?? "").trim();
+  if (found.status !== 0 || !existsSync(path)) {
+    console.error(`cannot find the venv's hx (uv run exited ${found.status}, got "${path}")`);
+    process.exit(1);
+  }
+  return path;
+}
+
+rmSync(home, { recursive: true, force: true });
+mkdirSync(home, { recursive: true });
+// the same two keys `load_descriptor` writes; the specs compare the hub's answer with them
+writeFileSync(
+  join(home, IDENTITY_FILE),
+  JSON.stringify({ environment_id: randomUUID().replace(/-/g, ""), label }, null, 2),
+);
+
+const hx = venvHx();
+const demoArgs = withHosts ? ["demo", "--with-hosts", "--json"] : ["demo", "--json"];
+const seeded = spawnSync(hx, ["--home", home, ...demoArgs], {
   cwd: REPO_ROOT,
   encoding: "utf8",
+  env,
   stdio: ["ignore", "pipe", "inherit"],
 });
 if (seeded.status !== 0) {
-  console.error(`hx demo failed with exit code ${seeded.status}`);
+  const why = seeded.error ? seeded.error.message : `exit code ${seeded.status}`;
+  console.error(`hx ${demoArgs.join(" ")} failed: ${why}`);
   process.exit(1);
 }
-writeFileSync(DEMO_FILE, seeded.stdout);
+writeFileSync(demoFile, seeded.stdout);
 
-const server = spawn("uv", [...hx, "serve", "--port", String(PORT)], {
+const server: ChildProcess = spawn(hx, ["--home", home, "serve", "--port", String(port)], {
   cwd: REPO_ROOT,
+  env,
   stdio: "inherit",
+  detached: true,
 });
-const stop = (): void => {
-  server.kill("SIGTERM");
-};
-process.on("SIGINT", stop);
-process.on("SIGTERM", stop);
-server.on("exit", (code) => process.exit(code ?? 0));
+// the hub could not be spawned at all: stop now, nothing else will ever answer on the port
+server.on("error", (err) => {
+  console.error(`hx serve did not start: ${err.message}`);
+  process.exit(1);
+});
+let exited = server.exitCode !== null;
+server.on("exit", () => {
+  exited = true;
+});
+
+// this server's own home, not RUN_DIR: the other demo server of the run has its hub there too
+const owner: Owner = demoOwner(home, server.pid, process.pid);
+
+/**
+ * SIGKILL every process this invocation owns: the hub, its group, and every fake host,
+ * supervisor and run command started under this server's home (they run in their own
+ * sessions, so a hub that crashed or hung leaves them behind). Then remove this server's
+ * home and demo file, and the run's directory once the other server has removed its own.
+ */
+async function clearOwned(): Promise<void> {
+  // this script's group is the one Playwright signals; never kill it from here
+  let ownGroup = process.pid;
+  const me = listProcs().find((p) => p.pid === process.pid);
+  if (me) ownGroup = me.pgid;
+  const left = await killOwned(owner, [ownGroup]);
+  if (left.length > 0) {
+    console.error(`could not kill:\n${left.map((p) => `${p.pid} ${p.command}`).join("\n")}`);
+    return; // keep the home: something may still write to it
+  }
+  rmSync(home, { recursive: true, force: true });
+  rmSync(demoFile, { force: true });
+  try {
+    rmdirSync(RUN_DIR);
+  } catch {
+    // the other server still has its home here, or it is gone already
+  }
+}
+
+let stopping = false;
+/** SIGTERM the hub alone, wait for its lifespan cleanup and exit, then clear what is left. */
+async function stop(): Promise<void> {
+  if (stopping) return;
+  stopping = true;
+  if (server.pid !== undefined && !exited) {
+    try {
+      process.kill(server.pid, "SIGTERM");
+    } catch {
+      // already gone
+    }
+    const deadline = Date.now() + SHUTDOWN_WAIT_MS;
+    while (!exited && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 200));
+    if (!exited) console.error(`hx serve did not exit within ${SHUTDOWN_WAIT_MS} ms; killing every process of the run`);
+  }
+  await clearOwned();
+  process.exit(0);
+}
+process.on("SIGINT", () => void stop());
+process.on("SIGTERM", () => void stop());
+// the hub ended by itself (failed start, crash or Ctrl-C): clear what it left, keep its exit code
+server.on("exit", (code) => {
+  if (stopping) return;
+  stopping = true;
+  void clearOwned().then(() => process.exit(code ?? 1));
+});

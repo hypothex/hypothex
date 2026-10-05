@@ -5,10 +5,16 @@ from __future__ import annotations
 import math
 import random
 from bisect import bisect_right
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
+from functools import lru_cache
+from operator import itemgetter
 
 Z95 = 1.959963984540054
 _EXACT_BINOM_MAX_N = 1000
+RESAMPLE_CACHE_MAX = 1_000_000
+"""Largest ``n * resamples`` whose bootstrap positions are kept between calls (8 bytes each)."""
+
+_Draw = Callable[[Sequence[float]], tuple[float, ...]]
 
 
 def _clean(values: Sequence[float]) -> list[float]:
@@ -143,7 +149,10 @@ def quantile(values: Sequence[float], q: float) -> float:
     """
     Quantile with linear interpolation (numpy's default ``"linear"`` method).
 
-    NaN values are ignored.
+    NaN values are ignored. The result always lies between the two values it
+    interpolates: equal neighbours give that value (``inf`` for two ``inf``),
+    and a gap too wide for a float (``-1e308`` to ``1e308``) does not overflow.
+    Only a step from ``-inf`` to ``inf`` gives NaN.
 
     Parameters
     ----------
@@ -176,7 +185,57 @@ def quantile(values: Sequence[float], q: float) -> float:
     lo = math.floor(h)
     if lo + 1 >= len(xs):
         return xs[-1]
-    return xs[lo] + (h - lo) * (xs[lo + 1] - xs[lo])
+    a, b, frac = xs[lo], xs[lo + 1], h - lo
+    if frac == 0.0 or a == b:
+        return a  # also inf for two equal infinities, where the step below gives NaN
+    gap = b - a
+    if math.isfinite(gap):
+        return a + frac * gap
+    return a * (1.0 - frac) + b * frac  # the gap overflowed, or one side is infinite
+
+
+@lru_cache(maxsize=4)
+def _draws(n: int, resamples: int, seed: int) -> tuple[_Draw, ...]:
+    """
+    One draw per bootstrap resample of a sample of size ``n``, kept for 4 sizes.
+
+    A draw picks the positions ``rng.choices(xs, k=n)`` picks (``floor(u * n)``
+    for each ``u`` of ``random.Random(seed).random()``), so applying the draws in
+    order equals a ``choices`` loop bit for bit. The positions depend only on
+    ``(n, resamples, seed)``, never on the values: a leaderboard bootstraps every
+    seed group over the same examples, so they are drawn once per sample size
+    and not once per row. Draws are ``itemgetter`` objects, so applying one runs
+    in C.
+    """
+    rng = random.Random(seed)
+    u = rng.random
+    size = float(n)
+    positions = list(range(n))  # shared int objects keep the kept draws small
+    draws: list[_Draw] = []
+    for _ in range(resamples):
+        picked = [positions[math.floor(u() * size)] for _ in range(n)]
+        if n == 1:
+            draws.append(lambda xs, i=picked[0]: (xs[i],))
+        else:
+            draws.append(itemgetter(*picked))
+    return tuple(draws)
+
+
+def _resample_sums(xs: list[float], resamples: int, seed: int) -> Iterator[float]:
+    """
+    Sum of each bootstrap resample of ``xs`` (``sum(rng.choices(xs, k=len(xs)))``).
+
+    Samples up to ``RESAMPLE_CACHE_MAX`` total draws reuse ``_draws``; larger ones
+    draw from ``random.Random(seed)`` directly. Both give the same sums.
+    """
+    n = len(xs)
+    if n * resamples <= RESAMPLE_CACHE_MAX:
+        for draw in _draws(n, resamples, seed):
+            yield sum(draw(xs))
+        return
+    rng = random.Random(seed)
+    for _ in range(resamples):
+        yield sum(rng.choices(xs, k=n))
 
 
 def bootstrap_mean_interval(
@@ -186,7 +245,10 @@ def bootstrap_mean_interval(
     Percentile bootstrap 95% interval for the mean.
 
     NaN values are ignored. Resampling uses ``random.Random(seed)``, so the
-    result is deterministic for a given input.
+    result is deterministic for a given input. If any resample holds both
+    ``inf`` and ``-inf``, its mean is undefined, so the interval is undefined
+    too and ``(nan, nan)`` is returned (dropping those resamples would bias
+    the interval).
 
     Parameters
     ----------
@@ -200,7 +262,8 @@ def bootstrap_mean_interval(
     Returns
     -------
     tuple of (float, float)
-        The 2.5th and 97.5th percentiles of the resampled means.
+        The 2.5th and 97.5th percentiles of the resampled means;
+        ``(nan, nan)`` when a resampled mean is undefined.
 
     Raises
     ------
@@ -211,6 +274,8 @@ def bootstrap_mean_interval(
     --------
     >>> bootstrap_mean_interval([0.5, 0.5, 0.5])
     (0.5, 0.5)
+    >>> bootstrap_mean_interval([math.inf, -math.inf])
+    (nan, nan)
     """
     xs = _clean(values)
     if not xs:
@@ -218,8 +283,9 @@ def bootstrap_mean_interval(
     if resamples < 1:
         raise ValueError(f"resamples must be >= 1, got {resamples}")
     n = len(xs)
-    rng = random.Random(seed)
-    means = [sum(rng.choices(xs, k=n)) / n for _ in range(resamples)]
+    means = [total / n for total in _resample_sums(xs, resamples, seed)]
+    if any(math.isnan(m) for m in means):
+        return (math.nan, math.nan)
     return (quantile(means, 0.025), quantile(means, 0.975))
 
 
@@ -270,11 +336,10 @@ def paired_bootstrap_p(
     if not diffs:
         return 1.0
     n = len(diffs)
-    rng = random.Random(seed)
     at_or_below = 0
     at_or_above = 0
-    for _ in range(resamples):
-        m = sum(rng.choices(diffs, k=n)) / n
+    for total in _resample_sums(diffs, resamples, seed):
+        m = total / n
         at_or_below += m <= 0.0
         at_or_above += m >= 0.0
     return min(1.0, 2.0 * (min(at_or_below, at_or_above) + 1) / (resamples + 1))
@@ -403,6 +468,96 @@ def ecdf_points(values: Sequence[float], max_points: int = 200) -> list[tuple[fl
     return points
 
 
+def _lttb_axis(values: Sequence[float]) -> list[float]:
+    """
+    Center and scale a finite axis without losing large integer step differences.
+
+    Parameters
+    ----------
+    values : sequence of float
+        Nonempty coordinates; integer coordinates retain exact subtraction.
+
+    Returns
+    -------
+    list of float
+        Bounded coordinates with the same relative geometry. When subtraction
+        overflows, scale the original values, whose spread is already large.
+    """
+    shifted = [value - values[0] for value in values]
+    scale = max(abs(value) for value in shifted) or 1.0
+    if math.isfinite(scale):
+        return [value / scale for value in shifted]
+    scale = max(abs(value) for value in values) or 1.0
+    return [value / scale for value in values]
+
+
+def lttb(xs: Sequence[float], ys: Sequence[float], limit: int) -> list[int]:
+    """
+    Indices of at most ``limit`` points that keep a line's shape (LTTB).
+
+    Largest-Triangle-Three-Buckets: the first and last points are always kept.
+    The points between them are cut into ``limit - 2`` buckets of near-equal
+    size (exact integer bounds); from each bucket the point that makes the
+    largest triangle with the point kept before it and the mean of the next
+    bucket is kept (the first on a tie), so peaks such as a loss spike survive
+    the thinning, unlike every-n-th sampling. Each axis is centered and rescaled
+    before computing triangle areas, preserving large integer step differences
+    and preventing overflow for finite extreme values.
+
+    Parameters
+    ----------
+    xs : sequence of float
+        x of each point, in drawing order.
+    ys : sequence of float
+        y of each point.
+    limit : int
+        Most points to keep, at least 2; a series that is not longer is kept whole.
+
+    Returns
+    -------
+    list of int
+        Increasing indices into ``xs`` / ``ys``.
+
+    Raises
+    ------
+    ValueError
+        If ``limit`` is less than 2.
+
+    Examples
+    --------
+    >>> lttb([0, 1, 2, 3, 4], [0, 0, 9, 0, 0], 3)
+    [0, 2, 4]
+    >>> lttb([0, 1], [5, 6], 3)
+    [0, 1]
+    """
+    if limit < 2:
+        raise ValueError(f"lttb keeps at least 2 points, not {limit}")
+    n = len(xs)
+    if n <= limit:
+        return list(range(n))
+    xs = _lttb_axis(xs)
+    ys = _lttb_axis(ys)
+    inner = limit - 2
+    out = [0]
+    kept = 0
+    for b in range(inner):
+        # bucket b is [start, stop); the next bucket (the last point after the
+        # last bucket) gives the mean the triangle is drawn to
+        start = b * (n - 2) // inner + 1
+        stop = (b + 1) * (n - 2) // inner + 1
+        after = range(stop, min((b + 2) * (n - 2) // inner + 1, n)) or range(n - 1, n)
+        mean_x = math.fsum(xs[j] for j in after) / len(after)
+        mean_y = math.fsum(ys[j] for j in after) / len(after)
+        x0, y0 = xs[kept], ys[kept]
+        kept = max(
+            range(start, stop),
+            key=lambda j: abs((x0 - mean_x) * (ys[j] - y0) - (x0 - xs[j]) * (mean_y - y0)),
+        )
+        out.append(kept)
+    out.append(n - 1)
+    return out
+
+
 _BETACF_MAX_ITER = 300
 _BETACF_EPS = 3.0e-16
 _BETACF_FPMIN = 1.0e-300
@@ -501,7 +656,10 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
     """
     Two-sided Welch t-test p-value for a difference in means.
 
-    NaN values are ignored. Degrees of freedom follow Welch-Satterthwaite.
+    NaN values are ignored. Degrees of freedom follow Welch-Satterthwaite. Each
+    sample is scaled by its own power of two (exact), so values near the float
+    limits never overflow and a tiny spread never underflows to zero variance,
+    even next to a sample of a very different size.
 
     Parameters
     ----------
@@ -511,8 +669,8 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
     Returns
     -------
     float or None
-        The p-value, or None when either sample has fewer than 2 values or
-        both samples have zero variance.
+        The p-value, or None when either sample has fewer than 2 values,
+        both samples have zero variance, or a value is infinite.
 
     Examples
     --------
@@ -523,13 +681,48 @@ def welch_p(a: Sequence[float], b: Sequence[float]) -> float | None:
     ys = _clean(b)
     if len(xs) < 2 or len(ys) < 2:
         return None
-    na, nb = len(xs), len(ys)
-    ma, mb = sum(xs) / na, sum(ys) / nb
-    va = sum((x - ma) ** 2 for x in xs) / (na - 1)
-    vb = sum((y - mb) ** 2 for y in ys) / (nb - 1)
+    if not all(math.isfinite(v) for v in (*xs, *ys)):
+        return None  # an infinite mean or variance has no t statistic
+    # Each sample is scaled by its own power of two (exact), so its sum, squares
+    # and deviations neither overflow nor underflow, whatever the other sample's
+    # scale. The variances and the mean difference are then put on one scale.
+    ma, va, ea = _scaled_moments(xs)
+    mb, vb, eb = _scaled_moments(ys)
     if va == 0.0 and vb == 0.0:
-        return None
-    sa, sb = va / na, vb / nb
-    t = (ma - mb) / math.sqrt(sa + sb)
+        return None  # both samples are constant
+    na, nb = len(xs), len(ys)
+    wa, wb = va / na, vb / nb  # var/n of each sample is w * 4**e
+    f = max(math.frexp(w)[1] + 2 * e for w, e in ((wa, ea), (wb, eb)) if w > 0.0)
+    f += f % 2  # even, so the square root of 2**f is exact
+    sa, sb = math.ldexp(wa, 2 * ea - f), math.ldexp(wb, 2 * eb - f)  # larger in [0.25, 1)
+    # a zero mean (an all-zero sample) has no scale: it must not push the
+    # other mean below the smallest float
+    g = max((e for m, e in ((ma, ea), (mb, eb)) if m != 0.0), default=0)
+    diff = math.ldexp(ma, ea - g) - math.ldexp(mb, eb - g)  # (mean_a - mean_b) / 2**g
+    u = diff / math.sqrt(sa + sb)  # t / 2**shift, |u| <= 4
+    shift = g - f // 2
+    if u == 0.0:
+        t = 0.0
+    elif math.frexp(u)[1] + shift > 1024:
+        t = math.copysign(math.inf, u)  # beyond the largest float
+    else:
+        t = math.ldexp(u, shift)
     df = (sa + sb) ** 2 / (sa * sa / (na - 1) + sb * sb / (nb - 1))
     return _t_two_sided_p(t, df)
+
+
+def _scaled_moments(xs: list[float]) -> tuple[float, float, int]:
+    """
+    Mean and sample variance of finite ``xs``, scaled by a power of two.
+
+    Returns ``(m, v, e)`` with mean ``m * 2**e`` and variance ``v * 4**e``,
+    where ``2**e`` is the power of two just above the largest magnitude.
+    """
+    biggest = max(abs(x) for x in xs)
+    e = math.frexp(biggest)[1] if biggest else 0
+    ys = [math.ldexp(x, -e) for x in xs]
+    if all(y == ys[0] for y in ys):
+        return ys[0], 0.0, e  # sum / n can miss a constant by an ulp
+    m = sum(ys) / len(ys)
+    v = sum((y - m) ** 2 for y in ys) / (len(ys) - 1)
+    return m, v, e

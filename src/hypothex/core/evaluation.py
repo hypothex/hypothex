@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -64,10 +65,13 @@ def run_checkout(ctx: Context, record: RunRecord) -> Path | None:
     PosixPath('/home/me/.hypothex/store/toy/worktrees/20261003-101500-toy-acc-1a2b')
     """
     root = ctx.layout.worktrees_dir(record.project)
-    cwd = Path(record.cwd)
-    if not cwd.is_relative_to(root) or cwd == root:
+    # resolve first: ``cwd`` is text (a mirrored run's was written on a host), so ``..``
+    # or a symlink in it must not pass the containment check and name a tree elsewhere
+    real_root = root.resolve()
+    cwd = Path(record.cwd).resolve()
+    if not cwd.is_relative_to(real_root) or cwd == real_root:
         return None
-    tree = root / cwd.relative_to(root).parts[0]
+    tree = root / cwd.relative_to(real_root).parts[0]
     return tree if (tree / CONFIG_FILENAME).is_file() else None
 
 
@@ -92,21 +96,16 @@ def _task_setup(
     Raises
     ------
     EvalError
-        If the run has no task, the task no longer exists, or the project
-        is a copy from a host (``ProjectEntry.remote_host``): its repo path
-        is on that host, so it is never read here.
+        If the run has no task, or the task no longer exists.
+    RemoteProjectError
+        If the project is a copy from a host (``Context.local_repo``): its
+        repo path is on that host, so it is never read here.
     """
     if record.task is None:
         raise EvalError(f"run {record.run_id} has no task; nothing to evaluate against")
-    entry = ctx.store.load_project(record.project)
-    if entry.remote_host is not None:
-        # the host sent this repo path: never load hypothex.yaml (and metric code) from it here
-        raise EvalError(
-            f"project {record.project!r} was copied from host {entry.remote_host} and its repo "
-            f"is on that host; evaluate there, or `hx register` a checkout here"
-        )
+    project_repo = ctx.local_repo(record.project)  # never a host's copy, even with a checkout
     checkout = run_checkout(ctx, record) if from_checkout else None
-    repo = checkout or Path(entry.repo)
+    repo = checkout or project_repo
     config = load_project_config(repo)
     if record.task not in config.tasks:
         raise EvalError(f"task {record.task!r} no longer exists in {repo / CONFIG_FILENAME}")
@@ -171,6 +170,8 @@ def evaluate_run(
     ------
     NoPredictionsError
         If the run has no predictions file.
+    RemoteProjectError
+        If the project is a copy from a host (its repo path is on that host).
     EvalError
         If no prediction id is in the task's dataset (every reference would be
         None), or for any other evaluation failure. Some ids missing is a warning.
@@ -278,6 +279,7 @@ def reeval(
     task: str | None = None,
     metric: str | None = None,
     force: bool = False,
+    run_ids: Collection[str] | None = None,
 ) -> EvalReport:
     """
     Re-score saved predictions without rerunning inference.
@@ -295,6 +297,10 @@ def reeval(
         Re-score every selected metric, also those a run already has a
         score for at the current version. Without it a run is scored only
         with the selected metrics it has no error-free current score for.
+    run_ids : collection of str, optional
+        With ``project`` and ``task``: score only these of the task's finished
+        runs (the hub scores its own runs here and sends mirrored ones to their
+        hosts). ``None`` scores them all.
 
     Returns
     -------
@@ -307,9 +313,10 @@ def reeval(
     Raises
     ------
     EvalError
-        If neither a run id nor a project and task are given, a
-        non-current metric version is requested, or the project is a copy
-        from a host (its repo path is on that host).
+        If neither a run id nor a project and task are given, or a
+        non-current metric version is requested.
+    RemoteProjectError
+        If the project is a copy from a host (its repo path is on that host).
     """
     if run_id is not None:
         targets = [ctx.find_record(run_id)]
@@ -325,6 +332,9 @@ def reeval(
                 )
             )
         )
+        if run_ids is not None:
+            keep = set(run_ids)
+            targets = [t for t in targets if t.run_id in keep]
     else:
         raise EvalError("give a run id, or a project and a task")
     report = EvalReport()

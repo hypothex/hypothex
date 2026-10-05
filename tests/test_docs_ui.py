@@ -27,3 +27,33 @@ def test_ui_page_covers_screens_build_dev_and_e2e() -> None:
         "HX_E2E_PORT",
     ):
         assert command in page, command
+
+
+def test_ui_page_covers_phase2_screens() -> None:
+    page = (DOCS / "ui.rst").read_text()
+    for screen in ("Hosts", "Launch dialog", "Sweep"):
+        assert f"**{screen}**" in page, screen
+    for text in (
+        "/s/<project>/<sweep_id>",
+        "Copy as CLI",
+        "Cancel queued",
+        "Add seeds",
+        "Rerun sweep",
+        "wait for GPUs",
+        "CUDA_VISIBLE_DEVICES",
+        "stale",
+        "stale_banner_hours",
+        "GPU-h",
+        ":doc:`remote`",
+        "hx demo --with-hosts",
+        "free port",
+        "HYPOTHEX_SSH=false",
+        "environment.json",
+        "run.lost",
+        "shutdown-check.ts",
+        "Resend seed N",
+        "archived runs",
+        "ui/e2e/.runs/run-XXXXXX",
+        "HX_E2E_RUN_DIR",
+    ):
+        assert text in page, text

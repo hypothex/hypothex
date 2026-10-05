@@ -89,3 +89,14 @@ def test_metric_point_rejects_non_finite_values(value: float) -> None:
 
     with pytest.raises(ValidationError):
         MetricPoint(name="loss", step=1, value=value)
+
+
+@pytest.mark.parametrize("step", [2**63, -(2**63) - 1, 10**400])
+def test_metric_point_step_must_fit_an_index_integer(step: int) -> None:
+    from pydantic import ValidationError
+
+    from hypothex.core.records import MetricPoint
+
+    with pytest.raises(ValidationError):
+        MetricPoint(name="loss", step=step, value=1.0)
+    assert MetricPoint(name="loss", step=2**63 - 1, value=1.0).step == 2**63 - 1

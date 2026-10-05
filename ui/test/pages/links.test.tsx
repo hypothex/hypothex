@@ -68,7 +68,8 @@ describe("AppLink", () => {
 
 describe("useInAppLinks", () => {
   test("routes plain clicks on app links in-app and leaves the rest to the browser", () => {
-    expect(["/", "/t/p/t", "/r/r1", "/x/a/b", "/api/v1/runs", "/mcp", "/rx"].map(isAppPath)).toEqual([
+    expect(["/", "/t/p/t", "/r/r1", "/x/a/b", "/s/p/s-1", "/api/v1/runs", "/mcp", "/rx"].map(isAppPath)).toEqual([
+      true,
       true,
       true,
       true,

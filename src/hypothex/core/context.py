@@ -9,6 +9,7 @@ from typing import Any
 
 from hypothex.core.config import load_project_config
 from hypothex.core.environment import EnvironmentDescriptor, load_descriptor
+from hypothex.core.errors import RemoteProjectError
 from hypothex.core.events import EventLog
 from hypothex.core.index import (
     Index,
@@ -132,6 +133,48 @@ class Context:
         entry = self.store.register_project(load_project_config(repo), repo)
         self.index.upsert_project(entry)
         return entry
+
+    def local_repo(self, project: str) -> Path:
+        """
+        Return the checkout of ``project`` on this machine, to read or run code from.
+
+        Every hub path that loads ``hypothex.yaml``, metric code, stage
+        commands, or datasets from a project's repo, or runs git in it, gets
+        the repo here. A project the hub copied from a host
+        (``ProjectEntry.remote_host``) keeps the repo path the host reported:
+        that path is on the host, and may also name a folder here, so it is
+        never used.
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+
+        Returns
+        -------
+        Path
+            The registered repo path (it may no longer exist).
+
+        Raises
+        ------
+        StoreError
+            If no such project is registered.
+        RemoteProjectError
+            If the project is a copy from a host; ``hx register`` a checkout
+            here to replace the copy.
+
+        Examples
+        --------
+        >>> ctx.local_repo("toy")  # doctest: +SKIP
+        PosixPath('/home/me/code/toy')
+        """
+        entry = self.store.load_project(project)
+        if entry.remote_host is not None:
+            raise RemoteProjectError(
+                f"project {project!r} was copied from host {entry.remote_host} and its repo "
+                f"is on that host; act on it there, or `hx register` a checkout here"
+            )
+        return Path(entry.repo)
 
     def create_run(self, record: RunRecord) -> RunRecord:
         """

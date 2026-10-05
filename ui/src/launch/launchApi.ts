@@ -128,7 +128,9 @@ export interface LaunchSeedsOptions {
 
 /**
  * Launch every seed in order. An unanswered request (the server may not have seen it) is
- * retried twice with the same `command_id`; any answered failure stops the launch.
+ * retried twice with the same `command_id`; any answered failure stops the launch. A seed
+ * stays `unknown` once any try of it got no answer, even when a later try is refused: the
+ * first try may have started it.
  */
 export async function launchSeeds(
   spec: LaunchSpec,
@@ -140,15 +142,15 @@ export async function launchSeeds(
   const records: RunRecord[] = [];
   for (const seed of seeds) {
     const commandId = seedCommandId(base, seed);
+    let unknown = false;
     for (let attempt = 0; ; attempt += 1) {
       try {
         records.push(await postLaunch(spec, seed, commandId));
         break;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        if (!shouldRetry(attempt, error)) {
-          return { records, failed: { seed, error, unknown: outcomeUnknown(error) } };
-        }
+        unknown ||= outcomeUnknown(error);
+        if (!shouldRetry(attempt, error)) return { records, failed: { seed, error, unknown } };
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }

@@ -56,6 +56,9 @@ Rules:
   fills the whole table early.
 - With ``--host``, the CLI sends your commit and uncommitted diff, as for
   ``hx launch --host`` (see :doc:`remote`).
+- The sweep stores the commit and the uncommitted diff it starts with (``commit`` and
+  ``diff`` in its spec). Every run of the sweep uses that code: ``extend`` and a retry
+  too, also after you commit more changes.
 
 Random search
 -------------
@@ -103,6 +106,16 @@ that are missing. If a host drops during a launch, the sweep keeps the runs that
 started; ``hx sweep extend`` with the same seeds then starts only the missing ones.
 ``--seeds`` is required for ``extend``. ``--seeds 4`` adds seed 4 (here a single number
 is a seed, not a count).
+
+An incomplete launch reports the known launched members, including ones already
+mirrored later in launch order. A lost response can still hide a remotely accepted
+run; resuming uses the same member command IDs to reconcile it.
+
+An extension uses the sweep's pinned code, or the first run's recorded commit and
+saved patch when the original sweep had no pin. If that run was dirty and its
+``git.diff`` is missing or was too large to capture, the extension refuses before
+adding seeds. Restore the recorded patch first; it cannot reproduce that run from
+the clean commit alone.
 
 ``cancel`` stops the runs that wait in the queue; they end as ``killed``.
 

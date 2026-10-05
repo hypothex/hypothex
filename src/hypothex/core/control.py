@@ -33,6 +33,7 @@ from hypothex.core.execution import (
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gpus import free_gpus, gpu_status
 from hypothex.core.ids import utcnow
+from hypothex.core.index import index_run_points
 from hypothex.core.records import (
     ACTIVE_STATUSES,
     TERMINAL_STATUSES,
@@ -121,7 +122,7 @@ def _checkout_before_submit(ctx: Context, record: RunRecord) -> None:
     """
     try:
         checkout_run_tree(ctx, record)
-    except (RunError, OSError) as exc:
+    except (HypothexError, OSError) as exc:
         failed = ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": str(exc)})
         release_worktree(ctx, failed)
         raise RunError(f"could not check out run {record.run_id}: {exc}") from exc
@@ -496,7 +497,9 @@ def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) ->
         if not _supervisor_alive(run_dir, current):
             break
         time.sleep(0.1)
-    return ctx.update_run(run_id, "run.killed", _mark(RunStatus.KILLED), {"reason": "stopped"})
+    killed = ctx.update_run(run_id, "run.killed", _mark(RunStatus.KILLED), {"reason": "stopped"})
+    index_run_points(ctx.index, ctx.store, killed)  # no supervisor is left to index the end
+    return killed
 
 
 def _relative_cwd(cwd: Path, repo: Path, previous_repos: list[Path]) -> Path:
@@ -619,11 +622,13 @@ def rerun(
         If the saved diff was too large to reproduce, the commit cannot be
         checked out, the working directory does not exist in the
         (possibly moved) repo, or the parent belongs to another environment.
+    RemoteProjectError
+        If the project is a copy from a host (its repo path is on that host).
     """
     parent = ctx.find_record(run_id)
     _require_own(ctx, parent, "rerun")
+    repo = ctx.local_repo(parent.project)  # never a host's copy
     entry = ctx.store.load_project(parent.project)
-    repo = Path(entry.repo)
     parent_dir = ctx.run_dir(parent)
     if (parent_dir / "git.diff.too_large").exists():
         raise RunError(
@@ -710,6 +715,8 @@ def reinfer(
         If there is no ``infer`` stage or no checkpoint, a var the stage
         needs is missing (or one Hypothex sets is given), or the parent
         belongs to another environment.
+    RemoteProjectError
+        If the project is a copy from a host (its repo path is on that host).
 
     Examples
     --------
@@ -718,7 +725,7 @@ def reinfer(
     """
     parent = ctx.find_record(run_id)
     _require_own(ctx, parent, "reinfer")
-    repo = Path(ctx.store.load_project(parent.project).repo)
+    repo = ctx.local_repo(parent.project)  # never a host's copy
     config = load_project_config(repo)
     if "infer" not in config.stages:
         raise RunError("project has no `infer` stage in hypothex.yaml; add one to use re-infer")

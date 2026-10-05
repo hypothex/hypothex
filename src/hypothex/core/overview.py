@@ -5,14 +5,16 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session
 
 from hypothex.core import queries as q
 from hypothex.core.config import TaskKind
 from hypothex.core.context import Context
 from hypothex.core.cost import cost_since, today_start
-from hypothex.core.errors import ConfigError
 from hypothex.core.headlines import overview_headline
 from hypothex.core.ids import utcnow
+from hypothex.core.index import RunRow
 from hypothex.core.leaderboard import (
     Leaderboard,
     LeaderboardRow,
@@ -25,6 +27,8 @@ from hypothex.core.seeds import Stats
 
 DEFAULT_WINDOW = timedelta(hours=24)
 FAILED_STATUSES = frozenset({RunStatus.FAILED, RunStatus.LOST})
+_SQL_SLACK = timedelta(days=1)
+"""How far ``_recent_runs`` widens its SQL time bounds; exact filters run in Python."""
 
 
 class TimelineItem(BaseModel):
@@ -135,9 +139,44 @@ def _as_utc(moment: datetime) -> datetime:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
-def _boards(ctx: Context) -> tuple[dict[tuple[str, str], Leaderboard], list[ProjectRow]]:
+def _recent_runs(ctx: Context, start: datetime, today: datetime) -> list[RunRecord]:
     """
-    Build every task's leaderboard and the projects table.
+    Read the runs the overview can show, in one query, newest first.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    start : datetime
+        Aware start of the window.
+    today : datetime
+        Aware start of today (``cost.today_start``).
+
+    Returns
+    -------
+    list of RunRecord
+        Every run created at or after ``start`` (archived too), every queued
+        or running run, and every run that ended at or after ``today``, plus
+        some runs just outside these bounds: the SQL bounds are widened by
+        ``_SQL_SLACK``, so a time zone offset in the stored text never drops a
+        run. Callers filter exactly.
+    """
+    floor = (start - _SQL_SLACK).astimezone(UTC).isoformat()
+    ended_floor = (today - _SQL_SLACK).astimezone(UTC).isoformat()
+    active = [s.value for s in ACTIVE_STATUSES]
+    ended = func.json_extract(RunRow.record_json, "$.ended_at")
+    stmt = (
+        select(RunRow.record_json)
+        .where(or_(RunRow.created_at >= floor, RunRow.status.in_(active), ended >= ended_floor))
+        .order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
+    )
+    with Session(ctx.index.engine) as session:
+        return [RunRecord.model_validate_json(j) for j in session.scalars(stmt)]
+
+
+def _finished_counts(ctx: Context) -> dict[tuple[str, str | None], int]:
+    """
+    Count the finished, unarchived runs of every task with one ``GROUP BY``.
 
     Parameters
     ----------
@@ -146,40 +185,63 @@ def _boards(ctx: Context) -> tuple[dict[tuple[str, str], Leaderboard], list[Proj
 
     Returns
     -------
+    dict
+        Count per ``(project, task)``; ``task`` is ``None`` for runs without
+        one. Pairs without such runs are left out.
+    """
+    stmt = (
+        select(RunRow.project, RunRow.task, func.count())
+        .where(RunRow.status == RunStatus.FINISHED.value, RunRow.archived.is_(False))
+        .group_by(RunRow.project, RunRow.task)
+    )
+    with Session(ctx.index.engine) as session:
+        return {(project, task): int(n) for project, task, n in session.execute(stmt)}
+
+
+def _boards(
+    ctx: Context, examples_for: set[tuple[str, str]]
+) -> tuple[dict[tuple[str, str], Leaderboard], list[ProjectRow]]:
+    """
+    Get every task's leaderboard (cached) and build the projects table.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    examples_for : set of tuple of (str, str)
+        ``(project, task)`` pairs whose boards need the per-example scores
+        (test-set intervals and paired p-values): the tasks of the ideas.
+        Other boards skip those file reads; their ranking, labels, best and
+        unit are the same either way.
+
+    Returns
+    -------
     boards : dict
         Leaderboard keyed by ``(project, task)``.
     projects : list of ProjectRow
         Sorted by project, then task; projects without tasks get one row
-        with ``task=None``.
+        with ``task=None``. ``runs`` counts finished, unarchived runs.
     """
+    finished = _finished_counts(ctx)
     boards: dict[tuple[str, str], Leaderboard] = {}
     rows: list[ProjectRow] = []
     for entry in q.list_projects(ctx):
         if not entry.config.tasks:
-            finished = ctx.index.list_runs(
-                project=entry.project, status=RunStatus.FINISHED, limit=None
-            )
+            runs = sum(n for (project, _), n in finished.items() if project == entry.project)
             rows.append(
-                ProjectRow(
-                    project=entry.project, task=None, runs=len(finished), best=None, kind="generic"
-                )
+                ProjectRow(project=entry.project, task=None, runs=runs, best=None, kind="generic")
             )
             continue
         for task in sorted(entry.config.tasks):
-            try:
-                board = q.get_leaderboard(ctx, task, entry.project)
-            except ConfigError:  # the task vanished between listing and building
-                continue
-            boards[(entry.project, task)] = board
+            key = (entry.project, task)
+            board = q._board(ctx, entry, task, None, examples=key in examples_for)
+            boards[key] = board
             best = board.rows[0].primary if board.rows else None
-            finished = ctx.index.list_runs(
-                project=entry.project, task=task, status=RunStatus.FINISHED, limit=None
-            )
             rows.append(
                 ProjectRow(
                     project=entry.project,
                     task=task,
-                    runs=len(finished),
+                    runs=finished.get(key, 0),
                     best=best.mean if best is not None else None,
                     kind=entry.config.tasks[task].kind,
                     unit=board.unit,
@@ -255,7 +317,13 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
     (0, [])
     """
     start = _as_utc(since) if since is not None else utcnow() - DEFAULT_WINDOW
-    boards, projects = _boards(ctx)
+    today = today_start()
+    recent = _recent_runs(ctx, start, today)
+    window = sorted(
+        (r for r in recent if r.created_at >= start), key=lambda r: (r.created_at, r.run_id)
+    )
+    ideas_in = {(r.project, r.task) for r in window if r.task is not None and not r.archived}
+    boards, projects = _boards(ctx, ideas_in)
     row_of: dict[tuple[str, str, str], LeaderboardRow] = {}
     best_of: dict[tuple[str, str], LeaderboardRow] = {}
     for (project, task), board in boards.items():
@@ -263,11 +331,6 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
             row_of[(project, task, row.group_id)] = row
         if board.rows and board.rows[0].primary is not None:
             best_of[(project, task)] = board.rows[0]
-
-    everything = ctx.index.list_runs(include_archived=True, limit=None)
-    window = sorted(
-        (r for r in everything if r.created_at >= start), key=lambda r: (r.created_at, r.run_id)
-    )
 
     def board_row(run: RunRecord) -> LeaderboardRow | None:
         if run.task is None:
@@ -323,7 +386,7 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
         )
     ideas.sort(key=lambda i: (i.created_at, i.group_id), reverse=True)
 
-    running = [r for r in everything if r.status in ACTIVE_STATUSES and not r.archived]
+    running = [r for r in recent if r.status in ACTIVE_STATUSES and not r.archived]
     failures = [
         FailureRow(
             run_id=run.run_id,
@@ -331,7 +394,7 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
             exit_code=run.exit_code,
             created_at=run.created_at,
             stderr_path=str(ctx.run_dir(run) / "logs" / "stderr.log"),
-            retried_ok=_retried_ok(run, everything),
+            retried_ok=_retried_ok(run, window),
         )
         for run in reversed(window)
         if run.status in FAILED_STATUSES
@@ -356,7 +419,7 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
         failures=failures,
         projects=projects,
         cost_usd=round(cost_usd, 4),
-        cost_today_usd=cost_since(everything, today_start()),
+        cost_today_usd=cost_since(recent, today),
     )
     summary.headline = overview_headline(summary, board=_focus_board(ideas, boards))
     return summary

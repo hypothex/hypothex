@@ -13706,7 +13706,7 @@ export function RunPage({ runId, log, example }: RunPageProps) {
   const title = stateTitle(label, phase, record, host) ?? (record.hypothesis || label);
   const stats = waiting
     ? remoteStats(record, phase, host, now)
-    : [...runStats(detail, primary, row, now), ...remoteStats(record, phase, host, now)];
+    : [...runStats(detail, primary, row, now, host), ...remoteStats(record, phase, host, now)];
   const showKind = hasTask && !waiting;
   const sweep = sweepCrumb(record, typeof hubEnvId === "string" ? hubEnvId : null);
 

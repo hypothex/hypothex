@@ -26,6 +26,13 @@ ACTIVE_STATUSES = frozenset({RunStatus.QUEUED, RunStatus.RUNNING})
 TERMINAL_STATUSES = frozenset(
     {RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED, RunStatus.LOST}
 )
+INDEXED_POINT_STATUSES = frozenset({RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED})
+"""Run states whose indexed metric history is final.
+
+A run's points are indexed in full (then downsampled) when it ends
+(``execute_run``, SLURM, the hub's mirror). A queued, running, or lost run may
+log more since; its file is only ever read bounded
+(``RunStore.read_metric_points_bounded``), by the index and the views alike."""
 
 
 class RunKind(StrEnum):
@@ -234,11 +241,13 @@ class MetricPoint(BaseModel):
     One step of a logged metric history; stored in ``metrics.jsonl``.
 
     ``value`` is finite: a ``NaN`` or infinite row (a diverged loss written by
-    an old SDK) fails validation, so readers skip it.
+    an old SDK) fails validation, so readers skip it. ``step`` fits a 64-bit
+    signed integer, the widest the index can store; a larger step fails
+    validation too, so one bad row never stops a run's points from being indexed.
     """
 
     name: str
-    step: int
+    step: int = Field(ge=-(2**63), le=2**63 - 1)
     value: float = Field(allow_inf_nan=False)
     t: float | None = None
 

@@ -4,15 +4,18 @@ import resource
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from hypothex.core import execution
 from hypothex.core.context import Context
-from hypothex.core.errors import RunError
+from hypothex.core.errors import RemoteProjectError, RunError
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
-from hypothex.core.records import RunStatus, UsageTotals
+from hypothex.core.index import rebuild_index
+from hypothex.core.records import RunRecord, RunStatus, UsageTotals
 from tests.factories import git, write_toy_project
 
 PY = sys.executable
@@ -102,6 +105,109 @@ def test_prepare_run_retries_when_another_launcher_takes_the_id(
     assert ctx.index.get_run(clash) is None
     assert not any(e.run_id == clash for e in ctx.events.since(0))
     assert list(ctx.layout.run_dir("toy", clash).iterdir()) == []  # the other run's folder
+
+
+def test_colliding_preparations_never_release_another_launchers_staging_checkout(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clash, fresh = "20260101-000000-explore-0000000a", "20260101-000000-explore-0000000b"
+    first_joined, second_attempted = threading.Event(), threading.Event()
+    first_created, loser_retried, checked = threading.Event(), threading.Event(), threading.Event()
+    attempts: dict[str, int] = {}
+    records: dict[str, RunRecord] = {}
+    errors: dict[str, BaseException] = {}
+    prepare = execution._prepare_in
+
+    def draw(task: str | None) -> str:
+        name = threading.current_thread().name
+        attempts[name] = attempts.get(name, 0) + 1
+        if attempts[name] == 1:
+            return clash
+        second_attempted.set()  # the exclusive marker can reject before _prepare_in
+        loser_retried.set()
+        assert checked.wait(10)
+        return fresh
+
+    def prepare_in(*args: Any, **kwargs: Any) -> RunRecord:
+        name = threading.current_thread().name
+        if name == "winner":
+            first_joined.set()
+            assert second_attempted.wait(10)
+        elif args[-1] == clash:
+            second_attempted.set()
+            assert first_created.wait(10)
+        return prepare(*args, **kwargs)
+
+    def capture(repo: Path, env_dir: Path, python_cmd: list[str]) -> None:
+        if threading.current_thread().name == "winner":
+            first_created.set()  # its run folder now owns the colliding run id
+            assert loser_retried.wait(10)
+            try:
+                assert (repo / "hypothex.yaml").is_file(), "loser removed winner's staging tree"
+                assert (repo.parent / f"{repo.name}.users" / clash).is_file()
+            finally:
+                checked.set()
+
+    monkeypatch.setattr(execution, "new_run_id", draw)
+    monkeypatch.setattr(execution, "_prepare_in", prepare_in)
+    monkeypatch.setattr(execution, "capture_env", capture)
+    req = RunRequest(
+        repo=toy_repo, command=cmd("pass"), commit=git(toy_repo, "rev-parse", "HEAD"), queue=True
+    )
+
+    def launch() -> None:
+        name = threading.current_thread().name
+        try:
+            records[name] = prepare_run(ctx, req)
+        except BaseException as exc:
+            errors[name] = exc
+
+    winner = threading.Thread(target=launch, name="winner")
+    contender = threading.Thread(target=launch, name="contender")
+    winner.start()
+    assert first_joined.wait(10)
+    contender.start()
+    for thread in (winner, contender):
+        thread.join(15)
+        assert not thread.is_alive()
+    assert errors == {}
+    assert records["winner"].run_id == clash
+    assert records["contender"].run_id == fresh
+    assert ctx.find_record(clash) == records["winner"]
+    users = next((ctx.layout.project_dir("toy") / execution.STAGING_DIR).glob("*.users"))
+    assert {path.name for path in users.iterdir()} == {clash, fresh}
+
+
+def test_prepare_run_retries_without_removing_a_racing_launchers_worktree(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The destination check must not grant cleanup rights to another launcher's tree."""
+    clash, fresh = "20260101-000000-explore-0000000a", "20260101-000000-explore-0000000b"
+    _ids(monkeypatch, clash, fresh)
+    commit = git(toy_repo, "rev-parse", "HEAD")
+    # A clean pinned commit needs a worktree when the working checkout is dirty.
+    with (toy_repo / "toymetrics.py").open("a") as fh:
+        fh.write("# local change\n")
+    competitor = ctx.layout.worktrees_dir("toy") / clash
+    real_resolve = execution._resolve_commit
+    raced = False
+
+    def resolve_racing(repo: Path, wanted: str) -> str | None:
+        nonlocal raced
+        if not raced:
+            raced = True
+            execution.create_worktree(repo, commit, competitor, None)
+            (competitor / "owned.txt").write_text("other launcher")
+        return real_resolve(repo, wanted)
+
+    monkeypatch.setattr(execution, "_resolve_commit", resolve_racing)
+    try:
+        rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=commit))
+    finally:
+        assert (competitor / "owned.txt").is_file(), "another launcher's worktree was removed"
+    assert rec.run_id == fresh
+    assert (competitor / "owned.txt").read_text() == "other launcher"
+    assert str(competitor) in git(toy_repo, "worktree", "list", "--porcelain")
 
 
 def test_prepare_run_gives_up_after_run_id_attempts(
@@ -281,6 +387,38 @@ def test_non_finite_metric_values_do_not_break_the_run_or_the_index(
     reopened = Context.open(ctx.layout.home)
     assert reopened.index.get_run(done.run_id) is not None
     assert [p.value for p in reopened.index.metric_points(done.run_id)] == [0.5]
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_local_end_indexes_exact_history_after_an_intervening_rebuild(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int
+) -> None:
+    code = (
+        "import json,os; p=os.environ['HYPOTHEX_RUN_DIR']+'/metrics.jsonl'; "
+        "open(p,'w').write(''.join(json.dumps(dict(name=f'm{i:03d}',step=0,value=float(i)))"
+        "+chr(10) for i in range(257))); "
+        f"raise SystemExit({exit_code})"
+    )
+    original_update = ctx.update_run
+    seen: list[int] = []
+
+    def rebuild_before_end(
+        run_id: str,
+        event_type: str,
+        mutate: Callable[[RunRecord], RunRecord],
+        payload: dict[str, Any] | None = None,
+    ) -> RunRecord:
+        if event_type in {"run.finished", "run.failed"}:
+            # A concurrent rebuild sees RUNNING and its reader fills bounded points.
+            rebuild_index(ctx.index, ctx.store)
+            seen.append(len(ctx.index.metric_points(run_id)))
+        return original_update(run_id, event_type, mutate, payload)
+
+    monkeypatch.setattr(ctx, "update_run", rebuild_before_end)
+    done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd(code)))
+    assert done.status == (RunStatus.FINISHED if exit_code == 0 else RunStatus.FAILED)
+    assert seen == [256]
+    assert len(ctx.index.metric_points(done.run_id)) == 257
 
 
 def test_index_refresh_failure_still_finishes_the_run(
@@ -574,6 +712,125 @@ def test_delayed_checkout_collision_at_reservation_preserves_the_winner(
         execution.checkout_run_tree(ctx, record)
     assert creates == []
     assert sentinel.read_text() == "another owner\n"
+
+
+@pytest.mark.parametrize("ready", [False, True], ids=["staging", "checked-out"])
+@pytest.mark.parametrize("operation", ["checkout", "release"])
+def test_remote_project_gate_precedes_pinned_checkout_and_staging_cleanup(
+    ctx: Context,
+    toy_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ready: bool,
+    operation: str,
+) -> None:
+    record = prepare_run(
+        ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=_old_commit(toy_repo))
+    )
+    if ready:
+        execution.checkout_run_tree(ctx, record)
+    staging = ctx.layout.project_dir("toy") / execution.STAGING_DIR
+    before = {
+        str(p.relative_to(staging)): p.read_bytes() for p in staging.rglob("*") if p.is_file()
+    }
+    entry = ctx.store.load_project("toy")
+    # The reported remote path deliberately also exists on this machine.
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    calls: list[str] = []
+    local_repo = ctx.local_repo
+
+    def checked_repo(project: str) -> Path:
+        calls.append("gate")
+        return local_repo(project)
+
+    def no_git(*args: object, **kwargs: object) -> Any:
+        calls.append("git")
+        pytest.fail("remote-only project reached checkout or staging git operations")
+
+    monkeypatch.setattr(ctx, "local_repo", checked_repo)
+    monkeypatch.setattr(execution, "create_worktree", no_git)
+    monkeypatch.setattr(execution, "_discard_worktree", no_git)
+    monkeypatch.setattr(execution, "capture_diff", no_git)
+    monkeypatch.setattr(execution.subprocess, "run", no_git)
+    if operation == "checkout":
+        with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+            execution.checkout_run_tree(ctx, record)
+    else:
+        assert execution.release_worktree(ctx, record) is False
+    assert calls == ["gate"]
+    after = {str(p.relative_to(staging)): p.read_bytes() for p in staging.rglob("*") if p.is_file()}
+    assert after == before
+    tree = ctx.layout.worktrees_dir("toy") / record.run_id
+    assert tree.is_dir() is ready
+
+
+@pytest.mark.parametrize("log_writable", [True, False])
+def test_execute_terminalizes_a_pinned_run_refused_by_the_project_gate(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch, log_writable: bool
+) -> None:
+    record = prepare_run(
+        ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=_old_commit(toy_repo))
+    )
+    record = ctx.update_run(
+        record.run_id,
+        "run.test_assignment",
+        lambda r: r.model_copy(
+            update={"executor": r.executor.model_copy(update={"gpus": [0], "queue_position": 1})}
+        ),
+    )
+    staging = ctx.layout.project_dir("toy") / execution.STAGING_DIR
+    before = {
+        str(p.relative_to(staging)): p.read_bytes() for p in staging.rglob("*") if p.is_file()
+    }
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+
+    def forbidden(*args: object, **kwargs: object) -> Any:
+        pytest.fail("a refused project reached checkout, cleanup, or command execution")
+
+    monkeypatch.setattr(execution, "create_worktree", forbidden)
+    monkeypatch.setattr(execution, "_discard_worktree", forbidden)
+    monkeypatch.setattr(execution.subprocess, "Popen", forbidden)
+    write_text = Path.write_text
+
+    def write(path: Path, *args: Any, **kwargs: Any) -> int:
+        if not log_writable and path == ctx.run_dir(record) / "logs" / "stderr.log":
+            raise OSError("log volume full")
+        return write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", write)
+    failed = execute_run(ctx, record.run_id)
+    assert failed.status == RunStatus.FAILED and failed.ended_at is not None
+    assert failed.started_at is None
+    assert failed.executor.gpus == [] and failed.executor.queue_position is None
+    assert (ctx.run_dir(failed) / execution.EXECUTION_CLAIM).is_file()
+    events = [
+        e for e in ctx.events.since(0) if e.run_id == record.run_id and e.type == "run.failed"
+    ]
+    assert len(events) == 1 and "copied from host gpu1" in events[0].payload["reason"]
+    after = {str(p.relative_to(staging)): p.read_bytes() for p in staging.rglob("*") if p.is_file()}
+    assert after == before
+    with pytest.raises(RunError, match="not queued"):
+        execute_run(ctx, record.run_id)
+
+
+def test_failed_checkout_is_not_masked_by_a_staging_cleanup_error(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = prepare_run(
+        ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=_old_commit(toy_repo))
+    )
+
+    def reject(*args: object) -> None:
+        raise RunError("checkout refused")
+
+    def cleanup(*args: object) -> None:
+        raise OSError("staging cleanup unavailable")
+
+    monkeypatch.setattr(execution, "checkout_run_tree", reject)
+    monkeypatch.setattr(execution, "_leave_staging_of", cleanup)
+    failed = execute_run(ctx, record.run_id)
+    assert failed.status == RunStatus.FAILED
+    assert "checkout refused" in (ctx.run_dir(failed) / "logs" / "stderr.log").read_text()
 
 
 @pytest.mark.parametrize(

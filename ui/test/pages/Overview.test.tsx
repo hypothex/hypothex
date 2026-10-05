@@ -43,8 +43,8 @@ test("with hosts: running/waiting from the backend, stale from hosts; metaline a
   await waitFor(() => expect(h1.textContent).toBe("12 running, 11 waiting. dgx stale 4m"));
   expect(await screen.findByText("hub hx 0.5.0")).toBeTruthy();
   const meta = [...document.querySelectorAll(".metaline span")].map((s) => s.textContent);
-  // 4 hosts: the hub's own row is not counted
-  expect(meta).toEqual(["1 GPU free", "$332 today", "hub hx 0.5.0", "4 hosts"]);
+  // 5 hosts: one per row of the Hosts table, the hub's own row too
+  expect(meta).toEqual(["1 GPU free", "$332 today", "hub hx 0.5.0", "5 hosts"]);
   const panel = screen.getByRole("region", { name: "a Hosts" });
   expect(panel.querySelector(".aside")?.textContent).toBe("$332 today");
   expect(within(panel).getAllByRole("group").map((g) => g.getAttribute("aria-label"))).toEqual([
@@ -122,7 +122,7 @@ test("cost today comes from the overview when it sends it; the hub-only metaline
       "1 GPU free",
       "$403 today",
       "hub hx 0.5.0",
-      "4 hosts",
+      "5 hosts",
     ]),
   );
   expect(screen.getByRole("region", { name: "a Hosts" }).querySelector(".aside")?.textContent).toBe("$403 today");

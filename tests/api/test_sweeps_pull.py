@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -57,6 +58,22 @@ def test_local_sweep_routes(client: TestClient, ctx: Context) -> None:
     statuses = {ctx.find_record(rid).status for rid in cancelled["run_ids"]}
     assert statuses == {RunStatus.FINISHED}
     assert client.get("/api/v1/sweeps/toy/s-000000").status_code == 404
+
+
+def test_a_sweep_retried_after_a_hub_crash_resumes(client: TestClient, ctx: Context) -> None:
+    first = client.post("/api/v1/sweeps", json=_body(command_id="S9")).json()
+    for rid in first["run_ids"]:
+        control.wait_for_run(ctx, rid, timeout=60)
+    # what a hub that died mid-call leaves behind: a receipt claimed by a dead process
+    with sqlite3.connect(ctx.events.path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO receipts(command_id, result, created_at) VALUES (?, ?, ?)",
+            ("S9", "__interrupted__:2026-10-04T00:00:00+00:00", "2026-10-04T00:00:00+00:00"),
+        )
+    again = client.post("/api/v1/sweeps", json=_body(command_id="S9"))
+    assert again.status_code == 200
+    assert again.json()["spec"]["id"] == first["spec"]["id"]
+    assert sorted(again.json()["run_ids"]) == sorted(first["run_ids"])  # no second run set
 
 
 def test_a_sweep_is_found_by_id_alone(client: TestClient, ctx: Context) -> None:
@@ -247,3 +264,40 @@ def test_pull_refuses_a_reserved_destination_name(
         bad = client.post("/api/v1/runs/b5/pull", json={"artifact": "checkpoint"})
     assert bad.status_code == 400 and "reserved" in bad.json()["error"]
     assert not (ctx.layout.run_dir("toy", "b5") / "pulled").exists()
+
+
+def _commit_on(repo: Path, name: str) -> str:
+    """Commit a new file on ``repo``, push it, and return the new HEAD."""
+    (repo / name).write_text("later work\n")
+    git(repo, "add", name)
+    git(repo, "commit", "-qm", "later")
+    git(repo, "push", "-q", "origin", "HEAD")
+    return git(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("host", ["gpu1", None])
+def test_extend_runs_the_commit_and_diff_the_sweep_started_with(
+    tmp_path: Path, host: str | None
+) -> None:
+    with remote_hub(tmp_path) as r:
+        with (r.hub_repo / "infer.py").open("a") as fh:
+            fh.write("# uncommitted edit\n")
+        diff = git(r.hub_repo, "diff", "HEAD")
+        sweep = _body(host=host, grid=[{"name": "x", "values": ["1"]}], seeds=[1])
+        out = r.client.post("/api/v1/sweeps", json=sweep).json()
+        head = git(r.hub_repo, "rev-parse", "HEAD")
+        stored = r.client.get(f"/api/v1/sweeps/toy/{out['spec']['id']}").json()["spec"]
+        assert stored["commit"] == head and stored["diff"].strip() == diff.strip()
+        # the researcher keeps working on the hub checkout: commits, pushes, cleans up
+        git(r.hub_repo, "checkout", "--", "infer.py")
+        assert _commit_on(r.hub_repo, "NEW.txt") != head
+        more = r.client.post(f"/api/v1/sweeps/toy/{out['spec']['id']}/extend", json={"seeds": [2]})
+        new = set(more.json()["run_ids"]) - set(out["run_ids"])
+        assert len(new) == 1
+        owner = r.env if host else r.hub
+        (added,) = [owner.find_record(rid) for rid in new]
+        assert added.git.commit == head  # not the hub's new HEAD
+        if host is None:
+            done = control.wait_for_run(r.hub, added.run_id, timeout=60)
+            patch = (r.hub.run_dir(done) / "git.diff").read_text()
+            assert patch.strip() == diff.strip()  # and the sweep's diff, not the clean tree

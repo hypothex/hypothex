@@ -50,6 +50,7 @@ from hypothex.core.records import (
     RunRecord,
     RunStatus,
     UsageTotals,
+    end_unstarted,
 )
 from hypothex.core.seeds import config_hash, run_fingerprint
 from hypothex.core.store import dir_lock, sum_usage
@@ -87,7 +88,7 @@ CHECKOUT_DIFF = "checkout.diff"
 
 
 class _RunIdTakenError(Exception):
-    """``ctx.create_run`` found a run folder with the new id; it wrote nothing."""
+    """Another launcher owns the new id's run folder or reserved worktree."""
 
 
 @dataclass
@@ -337,12 +338,16 @@ def _join_staging(ctx: Context, project: str, repo: Path, pin: _Pin, run_id: str
 
     Pinned runs are prepared (config, captures, fingerprints) from this
     checkout. It stays while a queued run uses it, so a sweep of N queued runs
-    makes one checkout at launch, not N (``_leave_staging``).
+    makes one checkout at launch, not N (``_leave_staging``). Each run id is
+    reserved exclusively: a colliding preparation cannot release its owner's
+    marker or shared checkout.
 
     Raises
     ------
     RunError
         The commit is missing or the diff does not apply (nothing is left behind).
+    _RunIdTakenError
+        Another preparation owns this run id's staging reservation.
     """
     root = _staging_root(ctx, project)
     tree, ready = root / pin.key, root / f"{pin.key}.ready"
@@ -357,7 +362,10 @@ def _join_staging(ctx: Context, project: str, repo: Path, pin: _Pin, run_id: str
             ready.touch()
         users = root / f"{pin.key}.users"
         users.mkdir(exist_ok=True)
-        (users / run_id).touch()
+        try:
+            os.close(os.open(users / run_id, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+        except FileExistsError as exc:
+            raise _RunIdTakenError(run_id) from exc
     return tree
 
 
@@ -416,6 +424,9 @@ def checkout_run_tree(ctx: Context, record: RunRecord) -> Path | None:
         The destination already belongs to another creator, the commit is
         gone, or the diff no longer applies. Only this call's reserved
         directory is removed after a failed checkout.
+    RemoteProjectError
+        The project was copied from a remote host; no checkout or staging
+        metadata is changed even if its reported repo also exists locally.
 
     Examples
     --------
@@ -426,6 +437,7 @@ def checkout_run_tree(ctx: Context, record: RunRecord) -> Path | None:
     info_file = run_dir / HX_DIR / CHECKOUT_FILE
     if not info_file.is_file():
         return None
+    ctx.local_repo(record.project)  # authorize before using stored pin paths or cleaning staging
     info = json.loads(info_file.read_text(encoding="utf-8"))
     repo = Path(info["repo"])
     tree = ctx.layout.worktrees_dir(record.project) / record.run_id
@@ -611,11 +623,14 @@ def prepare_run(ctx: Context, req: RunRequest) -> RunRecord:
         dest = ctx.layout.worktrees_dir(project) / run_id
         if ctx.layout.run_dir(project, run_id).exists() or dest.exists():
             continue  # taken already: draw another id before any work
-        staging = _join_staging(ctx, project, repo, pin, run_id) if pin is not None else None
+        try:
+            staging = _join_staging(ctx, project, repo, pin, run_id) if pin is not None else None
+        except _RunIdTakenError:
+            continue  # no staging reservation was acquired: never release the winner's marker
         try:
             return _prepare_in(ctx, req, repo, host_config, pin, staging, run_id)
         except _RunIdTakenError:
-            pass  # another launcher created the same id meanwhile: retry with a new one
+            pass  # another launcher claimed this id meanwhile: retry with a new one
         except BaseException:
             # a failed run leaves the staging checkout: its last user removes it (spec 8A.4)
             if pin is not None:
@@ -991,7 +1006,8 @@ def execute_run(
     still read, so the command never blocks, but it is dropped.
 
     After scoring, the git worktree the run executed in (spec 8A.4) is
-    removed when the run left nothing in it (``release_worktree``).
+    removed when the run left nothing in it (``release_worktree``). A pinned
+    checkout refused by the project gate fails before any command starts.
 
     Parameters
     ----------
@@ -1024,7 +1040,8 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
     run may have made: an
     untracked or ignored file (other than Python bytecode caches and the
     top-level ``.venv/``, see ``_disposable``), or tracked changes other than
-    the diff the run started with (``git.diff``).
+    the diff the run started with (``git.diff``). A project copied from a
+    host keeps its checkout: ``Context.local_repo`` refuses its remote path.
 
     Parameters
     ----------
@@ -1042,12 +1059,16 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
     >>> release_worktree(ctx, ctx.find_record(run_id))  # doctest: +SKIP
     True
     """
-    _leave_staging_of(ctx, record)  # a run that never started still used one
-    info_file = ctx.run_dir(record) / HX_DIR / CHECKOUT_FILE
-    if info_file.is_file():
-        info = json.loads(info_file.read_text(encoding="utf-8"))
-        if info.get("ready") is not True:
-            return False  # checkout failed or collided: this run never owned the destination
+    try:
+        repo = ctx.local_repo(record.project)  # gate staging cleanup as well as the execution tree
+        _leave_staging_of(ctx, record)  # a run that never started still used one
+        info_file = ctx.run_dir(record) / HX_DIR / CHECKOUT_FILE
+        if info_file.is_file():
+            info = json.loads(info_file.read_text(encoding="utf-8"))
+            if info.get("ready") is not True:
+                return False  # checkout failed or collided: this run never owned the destination
+    except (OSError, HypothexError):
+        return False  # cleanup must not obscure the run's recorded terminal outcome
     tree = run_checkout(ctx, record)
     if tree is None:
         return False
@@ -1071,7 +1092,7 @@ def release_worktree(ctx: Context, record: RunRecord) -> bool:
                 return False  # a staged rename: the run changed the tree
             if code in (b"??", b"!!") and not _disposable(path):
                 return False
-        _discard_worktree(Path(ctx.store.load_project(record.project).repo), tree)
+        _discard_worktree(repo, tree)
     except (OSError, HypothexError):
         return False
     return True
@@ -1142,14 +1163,13 @@ def _execute(
         )
     try:  # a pinned run's own worktree is made now, not while it waited (spec 8A.4)
         checkout_run_tree(ctx, record)
-    except (RunError, OSError) as exc:
-        (run_dir / "logs" / "stderr.log").write_text(f"hypothex: {exc}\n")
+    except (HypothexError, OSError) as exc:
+        with contextlib.suppress(OSError):
+            (run_dir / "logs" / "stderr.log").write_text(f"hypothex: {exc}\n")
         return ctx.update_run(
             run_id,
             "run.failed",
-            lambda r: r.model_copy(
-                update={"status": RunStatus.FAILED, "ended_at": utcnow(), "executor": me}
-            ),
+            end_unstarted(RunStatus.FAILED),
             {"reason": str(exc)[:500]},
         )
     env = {
@@ -1256,9 +1276,6 @@ def _execute(
     try:  # nothing the run logged may keep it from ending
         logged = ctx.store.read_artifacts(record.project, record.run_id)
         usage = sum_usage(ctx.store.read_usage(record.project, record.run_id))
-        ctx.index.replace_metric_points(
-            record.run_id, ctx.store.read_metric_points(record.project, record.run_id)
-        )
     except Exception as exc:  # noqa: BLE001 - the run ends either way; the warning says why
         message = f"could not read or index what the run logged: {type(exc).__name__}: {exc}"
         ctx.emit("run.warning", record, {"message": message[:500]})
@@ -1280,6 +1297,15 @@ def _execute(
         return done.model_copy(update={"cost": compute_cost(done, None)})
 
     final = ctx.update_run(run_id, f"run.{status.value}", finish, {"exit_code": exit_code})
+    # Publish the terminal status first: a rebuild in this gap must hydrate
+    # exact terminal history, never replace the final points with a live sample.
+    try:
+        ctx.index.replace_metric_points(
+            final.run_id, ctx.store.read_metric_points(final.project, final.run_id)
+        )
+    except Exception as exc:  # noqa: BLE001 - the run ends either way; preserve its warning
+        message = f"could not read or index what the run logged: {type(exc).__name__}: {exc}"
+        ctx.emit("run.warning", final, {"message": message[:500]})
     if auto_evaluate and status == RunStatus.FINISHED and final.task:
         score_finished_run(ctx, final)
     return ctx.find_record(run_id)

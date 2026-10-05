@@ -7,9 +7,15 @@ import yaml
 from hypothex.core import evaluation
 from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
-from hypothex.core.errors import EvalError
-from hypothex.core.evaluation import evaluate_run, metric_drift, reeval, validate_project
-from tests.factories import PREDS_075, seed_finished_run, write_toy_project
+from hypothex.core.errors import EvalError, RemoteProjectError
+from hypothex.core.evaluation import (
+    EvalReport,
+    evaluate_run,
+    metric_drift,
+    reeval,
+    validate_project,
+)
+from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
 
 
 def test_evaluate_run_scores_file_and_index(ctx: Context, toy_repo: Path) -> None:
@@ -93,6 +99,15 @@ def test_reeval_skips_already_scored_unless_forced(ctx: Context, toy_repo: Path)
     assert reeval(ctx, run_id="r1").evaluated == ["r1"]
     assert reeval(ctx, run_id="r1").skipped == {"r1": "already scored at the current version"}
     assert reeval(ctx, run_id="r1", force=True).evaluated == ["r1"]
+
+
+def test_task_reeval_scores_only_the_given_run_ids(ctx: Context, toy_repo: Path) -> None:
+    for rid in ("r1", "r2", "r3"):
+        seed_finished_run(ctx, toy_repo, rid, predictions=PREDS_075)
+    report = reeval(ctx, project="toy", task="toy-acc", run_ids=["r3", "r1", "zz"])
+    assert sorted(report.evaluated) == ["r1", "r3"] and report.skipped == {}
+    assert ctx.store.read_scores("toy", "r2") == []
+    assert reeval(ctx, project="toy", task="toy-acc", run_ids=[]) == EvalReport()
 
 
 def test_version_bump_rescores_and_keeps_old(ctx: Context, toy_repo: Path) -> None:
@@ -230,9 +245,9 @@ def test_a_project_copied_from_a_host_is_never_evaluated_from_its_repo_path(
     seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
     entry = ctx.store.load_project("toy")
     ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
-    with pytest.raises(EvalError, match="copied from host gpu1"):
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
         evaluate_run(ctx, "r1")
-    with pytest.raises(EvalError, match="copied from host gpu1"):
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
         reeval(ctx, project="toy", task="toy-acc")
     assert ctx.store.read_scores("toy", "r1") == []
     assert ctx.index.scores_for(["r1"]) == {}
@@ -286,3 +301,23 @@ def test_metric_hashes_update_holds_project_lock(
     assert seen == [("read", True), ("save", True)]
     assert not _project_lock_is_held(ctx)
     assert list(real_read("toy")) == ["accuracy@v1"]
+
+
+def test_run_checkout_never_names_a_tree_outside_the_worktrees_folder(
+    ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    # a run's cwd is text (a host may have written it): `..` and a symlink that leave
+    # <store>/toy/worktrees/ must not pass as a worktree, even when a hypothex.yaml is there
+    root = ctx.layout.worktrees_dir("toy")
+    root.mkdir(parents=True)
+    (root.parent / "hypothex.yaml").write_text("project: toy\n")
+    outside = write_toy_project(tmp_path / "outside", use_git=False)
+    (root / "link").symlink_to(outside)
+    (root / "t1").mkdir()
+    (root / "t1" / "hypothex.yaml").write_text("project: toy\n")
+    dotted = make_record("r1", cwd=str(root / ".." / "x"))
+    linked = make_record("r2", cwd=str(root / "link" / "sub"))
+    real = make_record("r3", cwd=str(root / "t1" / "pkg"))
+    assert evaluation.run_checkout(ctx, dotted) is None
+    assert evaluation.run_checkout(ctx, linked) is None
+    assert evaluation.run_checkout(ctx, real) == root / "t1"

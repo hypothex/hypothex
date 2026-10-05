@@ -1,3 +1,4 @@
+import json
 import logging
 import socket
 from pathlib import Path
@@ -53,6 +54,38 @@ def test_missing_file_with_two_local_ids_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="id-a, id-b"):
         load_descriptor(layout)
     assert not layout.environment_json.exists()
+
+
+@pytest.mark.parametrize("claim_kind", ["valid", "malformed", "dangling"])
+@pytest.mark.parametrize("has_local_run", [False, True])
+def test_recovery_never_adopts_a_claimed_mirror_with_the_local_hostname(
+    tmp_path: Path, claim_kind: str, has_local_run: bool
+) -> None:
+    here = socket.gethostname()
+    runs = {"remote-r": (here, "remote-id")}
+    if has_local_run:
+        runs["local-r"] = (here, "local-id")
+    layout = _home_with_runs(tmp_path, runs)
+    claim = layout.store / ".claims" / "remote-r.json"
+    claim.parent.mkdir()
+    if claim_kind == "valid":
+        claim.write_text(
+            json.dumps({"project": "toy", "environment_id": "remote-id", "host": "gpu1"}),
+            encoding="utf-8",
+        )
+    elif claim_kind == "malformed":
+        claim.write_text("{", encoding="utf-8")
+    else:
+        claim.symlink_to(claim.parent / "missing")
+
+    descriptor = load_descriptor(layout)
+
+    assert descriptor.environment_id != "remote-id"
+    if has_local_run:
+        assert descriptor.environment_id == "local-id"
+    else:
+        assert len(descriptor.environment_id) == 32
+    assert load_descriptor(layout).environment_id == descriptor.environment_id
 
 
 @pytest.mark.parametrize("text", ['{"environment_id": "ab', "[1, 2]", '{"label": "mac"}'])

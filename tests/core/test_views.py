@@ -42,7 +42,7 @@ PRESET_TYPES = {
         "stat_strip",
         "leaderboard",
         "distribution",
-        "curves",
+        "vega_lite",
         "distribution",
         "vega_lite",
         "curves",
@@ -67,14 +67,31 @@ def test_every_kind_has_a_preset_with_the_spec_panels() -> None:
 
 def test_preset_details_match_spec() -> None:
     agent = {p.title: p for p in load_preset("agent_eval").panels}
-    assert agent["Cost vs solved"].data.x == "usage.usd"
-    assert agent["Cost vs solved"].pareto == {"x": "min", "y": "max"}
-    assert agent["Failures"].data.source == "predictions"
+    cost = agent["Cost vs solved"]
+    # one cost unit on the page: $ per attempt, as in the stat strip, on a log axis
+    assert (cost.data.x, cost.scale) == ("usage.usd/attempt", "log")
+    assert cost.pareto == {"x": "min", "y": "max"}
+    failures = agent["Failures"]
+    assert failures.data.source == "predictions"
+    assert failures.spec is not None
+    encoding = failures.spec["encoding"]
+    assert encoding["y"]["sort"] == "x"  # fewest failures first, as on the leaderboard
+    # mockup legend: timeout first (blue) ... "gave up" last in neutral grey
+    assert encoding["color"]["sort"][0] == "timeout"
+    assert encoding["color"]["sort"][4] == "gave up"
+    assert encoding["color"]["scale"]["range"][4] == "#8b929c"
     bench = {p.title: p for p in load_preset("system_bench").panels}
     assert bench["Latency"].scale == "log"
     assert bench["Latency"].data.source == "samples"
     assert bench["Latency"].data.metrics == ["latency_ms"]
-    assert bench["Throughput vs concurrency"].data.metrics == ["sweep/rps"]
+    throughput = bench["Throughput vs concurrency"]
+    assert (throughput.type, throughput.data.source) == ("vega_lite", "metrics")
+    assert throughput.data.filter == {"name": "sweep/rps"}
+    assert throughput.spec is not None
+    x = throughput.spec["encoding"]["x"]
+    # one chart for all configs, concurrency on a log2 axis with its name
+    assert (x["title"], x["scale"]) == ("concurrency", {"type": "log", "base": 2})
+    assert "column" not in throughput.spec["encoding"] and "row" not in throughput.spec["encoding"]
     assert bench["Utilisation"].data.metrics == ["gpu_pct", "cpu_pct"]
     assert bench["Utilisation"].data.group_by == "group"  # one small multiple per config
     training = {p.title: p for p in load_preset("training").panels}
@@ -140,6 +157,25 @@ def test_model_defaults_and_limits() -> None:
         PanelData.model_validate({"metrcs": ["acc"]})
     with pytest.raises(ValidationError):
         RunFilter.model_validate({"stauts": "finished"})
+
+
+def test_a_panel_lists_at_most_max_panel_refs_metrics() -> None:
+    from hypothex.core.views import MAX_PANEL_REFS
+
+    assert PanelData(metrics=["acc"] * MAX_PANEL_REFS).metrics == ["acc"] * MAX_PANEL_REFS
+    with pytest.raises(ValidationError, match=f"at most {MAX_PANEL_REFS} metrics"):
+        PanelData(metrics=["acc"] * (MAX_PANEL_REFS + 1))
+    refs = ", ".join(["accuracy"] * (MAX_PANEL_REFS + 1))
+    text = f"title: t\npanels:\n  - type: stat_strip\n    data:\n      metrics: [{refs}]\n"
+    view, issues = validate_view_text(text, {"accuracy"}, {})
+    assert view is None
+    assert [(i.line, i.path, i.message) for i in issues] == [
+        (
+            5,
+            "panels[0].data.metrics",
+            f"metrics: a panel lists at most {MAX_PANEL_REFS} metrics, not {MAX_PANEL_REFS + 1}",
+        )
+    ]
 
 
 def test_run_filter_accepts_one_status_and_rejects_unknown() -> None:

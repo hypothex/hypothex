@@ -257,14 +257,9 @@ describe("Curves panel", () => {
   });
 
   test("more than three groups wrap into a second band; empty rows show a note", () => {
-    const rows = [1, 2, 3, 4].map((i) => ({
-      run_id: `r${i}`,
-      group_id: `g${i}`,
-      seed: 1,
-      name: "loss",
-      step: 0,
-      value: 1,
-    }));
+    const rows = [1, 2, 3, 4].flatMap((i) =>
+      [0, 1].map((step) => ({ run_id: `r${i}`, group_id: `g${i}`, seed: 1, name: "loss", step, value: 1 })),
+    );
     const { container } = render(<Curves result={result(rows, {})} />);
     expect(container.querySelectorAll("svg[role=img]").length).toBe(2);
     cleanup();
@@ -277,7 +272,9 @@ describe("small multiple titles", () => {
   const perRun = (groups: Record<string, unknown>[]): PanelResult => ({
     type: "curves",
     title: "Utilisation",
-    rows: RUNS.map((r) => ({ run_id: r.run_id, group_id: r.run_id, seed: r.seed, name: "gpu", step: 0, value: 1 })),
+    rows: RUNS.flatMap((r) =>
+      [0, 1].map((step) => ({ run_id: r.run_id, group_id: r.run_id, seed: r.seed, name: "gpu", step, value: 1 })),
+    ),
     meta: { groups },
   });
 
@@ -371,10 +368,65 @@ test("the hover crosshair uses each row's own x scale on own-axis rows", () => {
   expect(lines[3]).toBe("sweep/rps (step 16)  s1 32  mean 32");
 });
 
-test("a series with a single point is drawn as a dot", () => {
-  const rows: CurvePoint[] = [{ run_id: "r", group_id: "g", seed: 1, name: "train_accuracy", step: 0, value: 0.97 }];
-  const { container } = render(<Curves result={result(rows, { groups: [{ group_id: "g", label: "g" }] })} />);
+test("a series with a single point next to a longer one is drawn as a dot", () => {
+  const rows: CurvePoint[] = [
+    { run_id: "a", group_id: "a", seed: 1, name: "train_accuracy", step: 0, value: 0.9 },
+    { run_id: "a", group_id: "a", seed: 1, name: "train_accuracy", step: 10, value: 0.95 },
+    { run_id: "b", group_id: "b", seed: 1, name: "train_accuracy", step: 0, value: 0.97 },
+  ];
+  const { container } = render(<Curves result={result(rows, {})} />);
   expect(container.querySelectorAll("circle[data-dot]").length).toBe(1);
+  expect(container.querySelector("dl.stats")).toBeNull();
+});
+
+describe("a metric with fewer than 2 points is a value, not a curve (UI-F11)", () => {
+  const one = (name: string, value: number, run = "r", group = "g", seed = 1): CurvePoint => ({
+    run_id: run,
+    group_id: group,
+    seed,
+    name,
+    step: 0,
+    value,
+  });
+
+  test("the model lists it under values, out of the rows and their step axes", () => {
+    const rows: CurvePoint[] = [one("train_accuracy", 0.97)];
+    for (let s = 0; s <= 40; s += 10) rows.push({ ...one("loss", 1 / (s + 1)), step: s });
+    const model = buildCurves(rows, {});
+    expect(model.names).toEqual(["loss"]);
+    expect(model.values).toEqual(["train_accuracy"]);
+    expect(model.ownAxis).toEqual([]);
+    expect(model.maxStep).toBe(40);
+  });
+
+  test("a run with one logged value shows the value, with no 0-1 step axis", () => {
+    const { container } = render(<Curves result={result([one("train_accuracy", 0.9222)], {})} />);
+    expect(container.querySelector("svg")).toBeNull();
+    expect(screen.queryByText("No metric history yet")).toBeNull();
+    const stat = container.querySelector("dl.stats > div");
+    expect(stat?.querySelector("dt")?.textContent).toBe("train_accuracy");
+    expect(stat?.querySelector("dd")?.textContent).toBe("0.922");
+  });
+
+  test("seeds give the mean; several groups each get their own value", () => {
+    const rows = [
+      one("acc", 0.8, "a1", "a", 1),
+      one("acc", 0.9, "a2", "a", 2),
+      one("acc", 0.5, "b1", "b", 1),
+    ];
+    const { container } = render(
+      <Curves result={result(rows, { groups: [{ group_id: "a", label: "svm" }, { group_id: "b", label: "rf" }] })} />,
+    );
+    const stats = [...container.querySelectorAll("dl.stats > div")].map((d) => [
+      d.querySelector("dt")?.textContent,
+      d.querySelector("dd")?.textContent,
+      d.getAttribute("title"),
+    ]);
+    expect(stats).toEqual([
+      ["acc svm", "0.85", "s1 0.8  s2 0.9"],
+      ["acc rf", "0.5", "s1 0.5"],
+    ]);
+  });
 });
 
 test("rows follow meta.metrics; system metrics go below the model's, lr last", () => {
@@ -382,7 +434,9 @@ test("rows follow meta.metrics; system metrics go below the model's, lr last", (
   expect(isSystem("system.mem")).toBe(true);
   expect(isSystem("sysadmin_score")).toBe(false);
   const names = ["sys/gpu_mem_gb", "sys/gpu_util", "lr", "train/loss", "val/loss", "val/top1"];
-  const rows: CurvePoint[] = names.map((name) => ({ run_id: "r", group_id: "g", seed: 1, name, step: 0, value: 0.5 }));
+  const rows: CurvePoint[] = names.flatMap((name) =>
+    [0, 1].map((step) => ({ run_id: "r", group_id: "g", seed: 1, name, step, value: 0.5 })),
+  );
   expect(buildCurves(rows, {}).names).toEqual(["train/loss", "val/loss", "val/top1", "sys/gpu_mem_gb", "sys/gpu_util", "lr"]);
   const listed = buildCurves(rows, { metrics: ["val/top1", "train/loss", "val/loss", "lr"] }).names;
   expect(listed.slice(0, 3)).toEqual(["val/top1", "train/loss", "val/loss"]);

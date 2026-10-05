@@ -5,11 +5,18 @@ from typing import Any
 
 import pytest
 
+from hypothex.core import sources
 from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError
 from hypothex.core.ids import utcnow
 from hypothex.core.records import GitInfo, RunRecord, RunStatus, ScoreRecord, UsageTotals
-from hypothex.core.sources import group_id_for, group_labels, iter_rows, select_fields
+from hypothex.core.sources import (
+    group_id_for,
+    group_labels,
+    iter_rows,
+    metric_points,
+    select_fields,
+)
 from tests.factories import make_record
 
 T0 = utcnow()
@@ -108,12 +115,23 @@ def test_scores_source_skips_errors(ctx: Context, toy_repo: Path) -> None:
     ]
 
 
-def test_metrics_source_reads_full_history(ctx: Context, toy_repo: Path) -> None:
+def _index_metrics(ctx: Context, rec: RunRecord) -> None:
+    """Index the run's ``metrics.jsonl``, as the end of the run does."""
+    ctx.index.replace_metric_points(rec.run_id, ctx.store.read_metric_points("toy", rec.run_id))
+
+
+def test_metrics_source_reads_the_indexed_history_of_an_ended_run(
+    ctx: Context, toy_repo: Path
+) -> None:
     rec = _run(ctx, toy_repo, "r1")
+    path = ctx.run_dir(rec) / "metrics.jsonl"
     _jsonl(
-        ctx.run_dir(rec) / "metrics.jsonl",
+        path,
         [{"name": "loss", "step": s, "value": 1.0 / (s + 1), "t": 100.0 + s} for s in range(3)],
     )
+    _index_metrics(ctx, rec)
+    with path.open("a") as fh:  # not indexed: an ended run's history comes from the index
+        fh.write(json.dumps({"name": "loss", "step": 3, "value": 9.0}) + "\n")
     rows = list(iter_rows(ctx, [rec], "metrics", fields=["step", "value"]))
     assert rows == [
         {
@@ -141,6 +159,100 @@ def test_metrics_source_reads_full_history(ctx: Context, toy_repo: Path) -> None
             "value": 1.0 / 3,
         },
     ]
+
+
+@pytest.mark.parametrize("status", [RunStatus.RUNNING, RunStatus.QUEUED, RunStatus.LOST])
+def test_metrics_source_reads_the_file_of_a_live_or_lost_run(
+    ctx: Context, toy_repo: Path, status: RunStatus
+) -> None:
+    rec = _run(ctx, toy_repo, "r1", status=status)
+    path = ctx.run_dir(rec) / "metrics.jsonl"
+    _jsonl(path, [{"name": "loss", "step": 0, "value": 1.0}])
+    _index_metrics(ctx, rec)
+    _jsonl(  # logged after the last index write, in log order (not by name)
+        path,
+        [
+            {"name": "loss", "step": 0, "value": 1.0},
+            {"name": "acc", "step": 1, "value": 0.6},
+            {"name": "loss", "step": 1, "value": 0.5},
+            {"name": "acc", "step": 0, "value": 0.5},
+        ],
+    )
+    rows = list(iter_rows(ctx, [rec], "metrics", fields=["name", "step", "value"]))
+    assert [(r["name"], r["step"], r["value"]) for r in rows] == [
+        ("acc", 0, 0.5),
+        ("acc", 1, 0.6),
+        ("loss", 0, 1.0),
+        ("loss", 1, 0.5),
+    ]
+
+
+def test_metrics_source_keeps_a_bounded_history_of_a_live_run(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core.thin import MAX_POINTS_PER_METRIC
+
+    rec = _run(ctx, toy_repo, "r1", status=RunStatus.RUNNING)
+    n = 5 * MAX_POINTS_PER_METRIC
+    _jsonl(
+        ctx.run_dir(rec) / "metrics.jsonl",
+        [{"name": "loss", "step": s, "value": 7.0 if s == 4321 else 1.0} for s in range(n)],
+    )
+
+    def no_full_read(*_: Any) -> None:
+        raise AssertionError("a live run's metrics.jsonl was parsed in full")
+
+    monkeypatch.setattr(ctx.store, "read_metric_points", no_full_read)
+    rows = list(iter_rows(ctx, [rec], "metrics"))
+    steps = [r["step"] for r in rows]
+    assert len(rows) == MAX_POINTS_PER_METRIC
+    assert {0, 4321, n - 1} <= set(steps)
+    assert len(metric_points(ctx, [rec])["r1"]) == MAX_POINTS_PER_METRIC
+
+
+def test_metrics_source_keeps_only_the_given_names(ctx: Context, toy_repo: Path) -> None:
+    done = _run(ctx, toy_repo, "r1")
+    live = _run(ctx, toy_repo, "r2", minute=1, status=RunStatus.RUNNING)
+    for rec in (done, live):
+        _jsonl(
+            ctx.run_dir(rec) / "metrics.jsonl",
+            [{"name": n, "step": 0, "value": 1.0} for n in ("loss", "acc", "sys/gpu_util")],
+        )
+    _index_metrics(ctx, done)
+    rows = iter_rows(ctx, [done, live], "metrics", names=["sys/gpu_util", "acc"])
+    assert [(r["run_id"], r["name"]) for r in rows] == [
+        ("r1", "acc"),
+        ("r1", "sys/gpu_util"),
+        ("r2", "acc"),
+        ("r2", "sys/gpu_util"),
+    ]
+    assert metric_points(ctx, [done, live], names=["nope"]) == {}
+
+
+def test_metric_points_reads_ended_runs_from_the_index_in_one_query(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recs = [_run(ctx, toy_repo, f"r{i}", minute=i) for i in range(3)]
+    for rec in recs:
+        _jsonl(ctx.run_dir(rec) / "metrics.jsonl", [{"name": "loss", "step": 0, "value": 1.0}])
+        _index_metrics(ctx, rec)
+
+    def no_file(*_: Any) -> None:
+        raise AssertionError("an ended run's metrics.jsonl was parsed")
+
+    monkeypatch.setattr(ctx.store, "read_metric_points", no_file)
+    monkeypatch.setattr(ctx.store, "read_metric_points_bounded", no_file)
+    calls: list[list[str]] = []
+    real = ctx.index.metric_points_for
+
+    def spy(run_ids: Any, names: Any = None) -> Any:
+        calls.append(list(run_ids))
+        return real(run_ids, names)
+
+    monkeypatch.setattr(ctx.index, "metric_points_for", spy)
+    points = metric_points(ctx, recs, ["loss"])
+    assert sorted(points) == ["r0", "r1", "r2"]
+    assert calls == [["r0", "r1", "r2"]]
 
 
 def test_predictions_source_joins_references_meta_and_scores(ctx: Context, toy_repo: Path) -> None:
@@ -179,6 +291,22 @@ def test_predictions_source_joins_references_meta_and_scores(ctx: Context, toy_r
             "reference": 7,
         },
     ]
+
+
+def test_predictions_source_never_reads_the_repo_of_a_project_copied_from_a_host(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec = _run(ctx, toy_repo, "r1")
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    _jsonl(ctx.run_dir(rec) / "predictions" / "predictions.jsonl", [{"id": "ex-0"}])
+
+    def no_read(*_: Any) -> None:
+        raise AssertionError("read hypothex.yaml from a host's repo path")
+
+    monkeypatch.setattr(sources, "load_project_config", no_read)
+    (row,) = iter_rows(ctx, [rec], "predictions", fields=["id", "reference"])
+    assert (row["id"], row["reference"]) == ("ex-0", None)
 
 
 def test_samples_usage_and_traces_sources(ctx: Context, toy_repo: Path) -> None:
@@ -293,3 +421,37 @@ def test_rows_carry_group_labels_and_accept_overrides(ctx: Context, toy_repo: Pa
     assert [(r["group_id"], r["label"]) for r in rows] == [("aaaa@c1", "svm"), ("bbbb@c1", "rf")]
     rows = list(iter_rows(ctx, [a, b], "runs", fields=[], labels={"bbbb@c1": "forest"}))
     assert [r["label"] for r in rows] == ["svm", "forest"]
+
+
+def test_metrics_rows_hold_one_runs_points_at_a_time(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recs = [_run(ctx, toy_repo, f"r{i}", minute=i) for i in range(3)]
+    for rec in recs:
+        _jsonl(ctx.run_dir(rec) / "metrics.jsonl", [{"name": "loss", "step": 0, "value": 1.0}])
+        _index_metrics(ctx, rec)
+    calls: list[list[str]] = []
+    real = ctx.index.metric_points_for
+
+    def spy(run_ids: Any, names: Any = None) -> Any:
+        calls.append(list(run_ids))
+        return real(run_ids, names)
+
+    monkeypatch.setattr(ctx.index, "metric_points_for", spy)
+    rows = iter_rows(ctx, recs, "metrics")
+    assert next(rows)["run_id"] == "r0"
+    assert calls == [["r0"]]  # a table over many runs never holds every run's history
+    assert [r["run_id"] for r in rows] == ["r1", "r2"]
+    assert calls == [["r0"], ["r1"], ["r2"]]
+
+
+def test_predictions_of_a_host_copy_never_read_its_repo_path(ctx: Context, toy_repo: Path) -> None:
+    # the repo path of a project copied from a host is the host's: no references from it
+    rec = _run(ctx, toy_repo, "r1")
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    _jsonl(
+        ctx.run_dir(rec) / "predictions" / "predictions.jsonl", [{"id": "ex-1", "prediction": 0}]
+    )
+    [row] = list(iter_rows(ctx, [rec], "predictions"))
+    assert row["reference"] is None

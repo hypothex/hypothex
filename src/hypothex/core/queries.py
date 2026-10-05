@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import shlex
+import weakref
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic import BaseModel, Field
 
+from hypothex.core import stats
 from hypothex.core.config import (
     ProjectConfig,
     load_project_config,
@@ -29,8 +32,15 @@ from hypothex.core.datasets import (
 )
 from hypothex.core.errors import ConfigError, EvalError, RunError, StoreError
 from hypothex.core.fsutil import read_jsonl, read_yaml
-from hypothex.core.leaderboard import Leaderboard, build_leaderboard
-from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.index import Index
+from hypothex.core.leaderboard import Leaderboard, build_leaderboard, cached_leaderboard
+from hypothex.core.records import (
+    INDEXED_POINT_STATUSES,
+    MetricPoint,
+    RunRecord,
+    RunStatus,
+    ScoreRecord,
+)
 from hypothex.core.store import ProjectEntry
 
 LOG_TAIL_BYTES = 8 * 1024 * 1024
@@ -130,14 +140,28 @@ def refresh_project(ctx: Context, project: str) -> ProjectEntry:
     Returns
     -------
     ProjectEntry
-        The refreshed entry, or the stored snapshot if the repo is gone or
-        the file is invalid.
+        The refreshed entry, or the stored snapshot if the repo is gone, the
+        file is invalid, or the entry is a copy from a host
+        (``remote_host``): its repo path is on that host, so it is never read
+        here.
+
+    Notes
+    -----
+    The project is registered again only when the parsed config or the repo
+    path changed. A read never rewrites an unchanged ``project.json``: that
+    write would change ``registered_at``, bump the index generation, and
+    change the project folder's mtime, which makes the next ``Context.open``
+    scan every run folder.
     """
     entry = ctx.store.load_project(project)
     try:
-        return ctx.register_project(Path(entry.repo))
-    except ConfigError:
+        repo = ctx.local_repo(project)
+        config = load_project_config(repo)
+    except ConfigError:  # includes RemoteProjectError
         return entry
+    if config == entry.config and str(repo.resolve()) == entry.repo:
+        return entry
+    return ctx.register_project(repo)
 
 
 def list_projects(ctx: Context) -> list[ProjectEntry]:
@@ -270,21 +294,87 @@ def get_leaderboard(
     Leaderboard
     """
     entry, task = resolve_task(ctx, ref, project)
-    runs = ctx.index.list_runs(project=entry.project, task=task, include_archived=True, limit=None)
-    scores = ctx.index.scores_for(r.run_id for r in runs)
-    per_example = primary_examples(ctx, entry.config, task, runs, versions) if examples else None
-    return build_leaderboard(
-        entry.project, task, entry.config, runs, scores, versions, per_example=per_example
+    return _board(ctx, entry, task, versions, examples=examples)
+
+
+def _board(
+    ctx: Context,
+    entry: ProjectEntry,
+    task: str,
+    versions: dict[str, str] | None,
+    *,
+    examples: bool,
+) -> Leaderboard:
+    def build() -> Leaderboard:
+        runs = ctx.index.list_runs(
+            project=entry.project, task=task, include_archived=True, limit=None
+        )
+        scores = ctx.index.scores_for(r.run_id for r in runs)
+        per_example = (
+            primary_examples(ctx, entry.config, task, runs, versions) if examples else None
+        )
+        return build_leaderboard(
+            entry.project, task, entry.config, runs, scores, versions, per_example=per_example
+        )
+
+    return cached_leaderboard(
+        ctx,
+        entry.project,
+        task,
+        entry.config,
+        build,
+        versions=versions,
+        variant=("examples", examples),
     )
+
+
+class _Ranked(NamedTuple):
+    """What a task summary takes from the index, and the state it was read at."""
+
+    generation: int
+    config: ProjectConfig
+    primary: str
+    higher_is_better: bool
+    best: float | None
+    n_runs: int
+
+
+_RANKED: weakref.WeakKeyDictionary[Index, dict[tuple[str, str], _Ranked]] = (
+    weakref.WeakKeyDictionary()
+)
+"""Per index, the last ``_Ranked`` of each ``(project, task)``."""
+
+
+def _ranked(ctx: Context, entry: ProjectEntry, name: str) -> _Ranked:
+    """
+    Rank a task's runs, or reuse the last ranking while nothing it reads changed.
+
+    The ranking reads only the index and the project config, so it is reused
+    while the index generation and the config are the same (a task list
+    request then builds no leaderboard).
+    """
+    memo = _RANKED.setdefault(ctx.index, {})
+    generation = ctx.index.generation()  # read first: a write during the build reruns it
+    cached = memo.get((entry.project, name))
+    if cached is not None and cached.generation == generation and cached.config == entry.config:
+        return cached
+    board = _board(ctx, entry, name, None, examples=False)
+    top = board.rows[0].primary if board.rows else None
+    ranked = _Ranked(
+        generation=generation,
+        config=entry.config,
+        primary=board.primary,
+        higher_is_better=board.higher_is_better,
+        best=top.mean if top else None,
+        n_runs=ctx.index.count_runs(project=entry.project, task=name, status=RunStatus.FINISHED),
+    )
+    memo[(entry.project, name)] = ranked
+    return ranked
 
 
 def _summary(ctx: Context, entry: ProjectEntry, name: str) -> TaskSummary:
     spec = entry.config.tasks[name]
-    board = get_leaderboard(ctx, name, entry.project, examples=False)
-    best = board.rows[0].primary.mean if board.rows and board.rows[0].primary else None
-    n_runs = len(
-        ctx.index.list_runs(project=entry.project, task=name, status=RunStatus.FINISHED, limit=None)
-    )
+    ranked = _ranked(ctx, entry, name)
     return TaskSummary(
         project=entry.project,
         name=name,
@@ -293,10 +383,10 @@ def _summary(ctx: Context, entry: ProjectEntry, name: str) -> TaskSummary:
         dataset_version=entry.config.datasets[spec.dataset].version,
         split=spec.split,
         metrics={m: entry.config.metrics[m].version for m in spec.metrics},
-        primary=board.primary,
-        higher_is_better=board.higher_is_better,
-        n_runs=n_runs,
-        best=best,
+        primary=ranked.primary,
+        higher_is_better=ranked.higher_is_better,
+        n_runs=ranked.n_runs,
+        best=ranked.best,
     )
 
 
@@ -335,15 +425,16 @@ def get_task(ctx: Context, ref: str, project: str | None = None) -> dict[str, An
     Returns
     -------
     dict
-        ``dataset`` holds the config as written; a dataset on this host also
-        has ``resolved_path`` and ``resolved_splits`` (absolute paths).
+        ``dataset`` holds the config as written; a dataset of a local project
+        on this host also has ``resolved_path`` and ``resolved_splits`` (absolute
+        paths). A remote project's paths are never resolved on this machine.
     """
     entry, name = resolve_task(ctx, ref, project)
     spec = entry.config.tasks[name]
     ds = entry.config.datasets[spec.dataset]
     dataset: dict[str, Any] = {"name": spec.dataset, **ds.model_dump(mode="json")}
-    if ds.host in ("local", ctx.descriptor.label):
-        repo = Path(entry.repo)
+    if entry.remote_host is None and ds.host in ("local", ctx.descriptor.label):
+        repo = ctx.local_repo(entry.project)
         dataset["resolved_path"] = str(resolve_dataset_path(repo, ds.path))
         dataset["resolved_splits"] = {
             k: str(resolve_dataset_path(repo, v)) for k, v in ds.splits.items()
@@ -379,10 +470,24 @@ def with_queue_positions(ctx: Context, records: list[RunRecord]) -> list[RunReco
     >>> with_queue_positions(ctx, [])  # doctest: +SKIP
     []
     """
-    if not any(r.status == RunStatus.QUEUED for r in records):
+    queued = [r for r in records if r.status == RunStatus.QUEUED]
+    if not queued:
         return records
+    from hypothex.core.execution import QUEUE_FILE
     from hypothex.core.scheduler import Scheduler
 
+    # QUEUED also describes a prepared run that has never joined a GPU queue.
+    # Only real queue members need the global rank lookup. A local marker can
+    # precede its ticket if enqueue is still running or stopped between writes.
+    if not any(
+        r.executor.queue_position is not None
+        or (
+            r.environment_id == ctx.descriptor.environment_id
+            and (ctx.run_dir(r) / QUEUE_FILE).is_file()
+        )
+        for r in queued
+    ):
+        return records
     positions = Scheduler(ctx).positions()
     remote: dict[str, list[RunRecord]] = defaultdict(list)
     for record in ctx.index.list_runs(status=RunStatus.QUEUED, include_archived=True, limit=None):
@@ -421,7 +526,9 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
     -------
     RunDetail
         ``paths`` also names ``run_yaml``, ``scores``, ``metrics``, ``notes``,
-        ``config`` and ``diff`` when the run has those files.
+        ``config`` and ``diff`` when the run has those files. ``metric_names``
+        reads live names from the bounded file policy for queued, running and
+        lost runs; finished, failed and killed runs use exact indexed names.
     """
     record = with_queue_positions(ctx, [ctx.find_record(run_id)])[0]
     run_dir = ctx.run_dir(record)
@@ -460,23 +567,64 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
         paths[f"dataset:{ref.name}"] = f"{ref.host}:{ref.path}"
     for i, art in enumerate(record.artifacts):
         paths[f"artifact:{art.kind}:{i}"] = f"{art.host}:{art.path}"
-    children = [
-        r.run_id
-        for r in ctx.index.list_runs(project=record.project, include_archived=True, limit=None)
-        if r.parent == run_id
-    ]
     return RunDetail(
         record=record,
         scores=ctx.store.read_scores(record.project, run_id),
         paths=paths,
         notes=ctx.store.read_notes(record.project, run_id),
         has_diff="diff" in paths,
-        metric_names=sorted({p.name for p in ctx.index.metric_points(run_id)}),
-        children=sorted(children),
+        metric_names=(
+            ctx.index.metric_names(run_id)
+            if record.status in INDEXED_POINT_STATUSES
+            else ctx.store.read_metric_names_bounded(record.project, run_id)
+        ),
+        children=sorted(ctx.index.child_run_ids(run_id)),
     )
 
 
-def metric_history(ctx: Context, run_id: str) -> list[MetricPoint]:
+def lttb(series: list[MetricPoint], limit: int) -> list[MetricPoint]:
+    """
+    Downsample one series with Largest-Triangle-Three-Buckets (``stats.lttb``).
+
+    The first and last points are always kept, and peaks and dips survive,
+    unlike every-n-th sampling. Kept points are returned as they are (no
+    averaging).
+
+    Parameters
+    ----------
+    series : list of MetricPoint
+        One metric's points, ordered by step.
+    limit : int
+        Maximum points to return; at least 2.
+
+    Returns
+    -------
+    list of MetricPoint
+        ``series`` itself when it has at most ``limit`` points.
+
+    Raises
+    ------
+    RunError
+        If ``limit`` is less than 2.
+
+    Examples
+    --------
+    >>> pts = [MetricPoint(name="loss", step=i, value=v) for i, v in enumerate([0, 1, 9, 1, 0])]
+    >>> [p.value for p in lttb(pts, 3)]
+    [0.0, 9.0, 0.0]
+    """
+    if limit < 2:
+        raise RunError(f"max_points must be at least 2, not {limit}")
+    keep = stats.lttb([p.step for p in series], [p.value for p in series], limit)
+    return series if len(keep) == len(series) else [series[i] for i in keep]
+
+
+def metric_history(
+    ctx: Context,
+    run_id: str,
+    names: Iterable[str] | None = None,
+    max_points: int | None = None,
+) -> list[MetricPoint]:
     """
     Return a run's indexed (downsampled) metric history.
 
@@ -486,13 +634,39 @@ def metric_history(ctx: Context, run_id: str) -> list[MetricPoint]:
         Open Hypothex context.
     run_id : str
         Run id to look up.
+    names : iterable of str, optional
+        Metric names to return; ``None`` returns every name. The filter runs
+        in SQL, so a chart of two names reads only their rows.
+    max_points : int, optional
+        Keep at most this many points per name (at least 2), picked with
+        ``lttb``. ``None`` returns the indexed points (up to
+        ``MAX_POINTS_PER_METRIC`` per name).
 
     Returns
     -------
     list of MetricPoint
+        Ordered by name, then step.
+
+    Raises
+    ------
+    RunError
+        If ``max_points`` is less than 2.
+
+    Examples
+    --------
+    >>> metric_history(ctx, run_id, names=["train/loss"], max_points=500)  # doctest: +SKIP
+    [MetricPoint(name='train/loss', step=0, value=2.3, t=None), ...]
     """
+    if max_points is not None and max_points < 2:
+        raise RunError(f"max_points must be at least 2, not {max_points}")
     ctx.find_record(run_id)
-    return ctx.index.metric_points(run_id)
+    points = ctx.index.metric_points_for([run_id], names).get(run_id, [])
+    if max_points is None:
+        return points
+    out: list[MetricPoint] = []
+    for _, series in itertools.groupby(points, key=lambda p: p.name):
+        out.extend(lttb(list(series), max_points))
+    return out
 
 
 def _flatten(prefix: str, value: Any, out: dict[str, Any]) -> None:
@@ -573,10 +747,10 @@ def _references(ctx: Context, record: RunRecord) -> dict[str, Any]:
     if record.task is None:
         return {}
     try:
-        repo = Path(ctx.store.load_project(record.project).repo)
+        repo = ctx.local_repo(record.project)
         config = load_project_config(repo)
         spec = config.tasks[record.task]
-    except (StoreError, ConfigError, KeyError):
+    except (StoreError, ConfigError, KeyError):  # ConfigError includes a host's copy
         return {}
     ds = config.datasets[spec.dataset]
     path = resolve_dataset_path(repo, ds.path_for(spec.split))
@@ -961,6 +1135,41 @@ def add_note(ctx: Context, run_id: str, text: str, author: str = "human") -> Non
     ctx.emit("run.note_added", record, {"author": author})
 
 
+# sweeps ----------------------------------------------------------------------------
+def list_sweeps(ctx: Context, project: str | None = None) -> list[dict[str, Any]]:
+    """
+    List sweeps of one project or of all projects, newest first.
+
+    The rows are those of ``hx sweeps --json``: ``GET
+    /api/v1/projects/{project}/sweeps`` rows plus the project.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    project : str, optional
+        Restrict to one project; ``None`` lists every registered project.
+
+    Returns
+    -------
+    list of dict
+        ``{project, id, created_at, n_runs, best}`` per sweep; ``best`` is the
+        best cell (``None`` before any run is scored). Unreadable sweep files
+        are skipped.
+
+    Examples
+    --------
+    >>> list_sweeps(ctx, "toy")  # doctest: +SKIP
+    [{'project': 'toy', 'id': 's-0002', 'created_at': datetime(...), 'n_runs': 6, 'best': {...}}]
+    """
+    from hypothex.core.sweeps import list_sweeps as project_sweeps  # sweeps imports this module
+
+    projects = [project] if project else [e.project for e in ctx.store.list_projects()]
+    rows = [{"project": p, **s} for p in projects for s in project_sweeps(ctx, p)]
+    rows.sort(key=lambda s: (s["created_at"], s["id"]), reverse=True)
+    return rows
+
+
 # datasets --------------------------------------------------------------------------
 def check_datasets(ctx: Context, project: str | None = None) -> list[DatasetDrift]:
     """
@@ -1006,8 +1215,11 @@ def dataset_overlap(
     ------
     ConfigError
         If the project has no such dataset.
+    RemoteProjectError
+        If the project is a copy from a host (its datasets are on that host).
     """
     entry = refresh_project(ctx, project)
+    repo = ctx.local_repo(project)
     if dataset not in entry.config.datasets:
         raise ConfigError(f"project {project!r} has no dataset {dataset!r}")
-    return overlap(dataset, entry.config.datasets[dataset], Path(entry.repo), key_field)
+    return overlap(dataset, entry.config.datasets[dataset], repo, key_field)

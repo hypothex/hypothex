@@ -20,8 +20,14 @@ A browser on your machine can still reach ``127.0.0.1``. Two checks block web pa
 - **Host allow-list**: the ``Host`` header must be ``127.0.0.1``, ``localhost``,
   ``[::1]``, or the ``--host`` address (when it is not a wildcard). Anything else gets
   ``400``. This blocks DNS rebinding.
-- **Origin check**: a ``POST`` or WebSocket handshake whose ``Origin`` is not one of
-  those hosts gets ``403``. A web page cannot start runs through your browser.
+- **Origin check**: a ``POST`` or WebSocket handshake whose ``Origin`` is not the
+  server's own (the host and port the request was sent to, one of those hosts) gets
+  ``403``. A page on another local server, such as Jupyter on ``localhost:8888``,
+  is refused too. The Vite dev server forwards the browser's ``Host``, so its pages
+  pass.
+- **JSON posts**: a ``POST`` needs ``Content-Type: application/json`` or an
+  ``X-Hypothex-Client`` header, else ``415``. A browser sends neither to another
+  origin without a CORS preflight, which the server never grants.
 
 These checks are not authentication: any program that is not a browser can send
 ``Host: localhost``.
@@ -32,7 +38,9 @@ Bearer token
 With a token, every request except the descriptor
 ``/.well-known/hypothex/environment`` needs ``Authorization: Bearer <token>``. A
 missing or wrong token gets ``401`` (``{"type": "AuthError"}``); a WebSocket is closed
-with code ``1008``.
+with code ``1008``. Without the token the descriptor names only ``environment_id``,
+``protocol_version`` and ``hx_version`` (``start.sh`` needs the id); the host name, OS,
+GPUs and the rest are for the token holder.
 
 **Env servers** (``hx serve --kind ssh|slurm``) always have a token, because on a
 shared GPU box or a SLURM login node other users can reach ``127.0.0.1`` too.
@@ -79,6 +87,60 @@ SSH
 - Host names, SSH aliases, remote paths, and SLURM values are checked against strict
   patterns before they reach a shell. ``hx pull`` runs ``scp -s`` (SFTP mode), so the
   host's shell never reads a path.
+
+Project checkout paths
+----------------------
+
+``Context.local_repo`` is the shared gate for operations that read a registered
+project's checkout or run code from it. A project copied from a host retains that
+host's repo path for display, but the hub never reads it as a local checkout,
+even when the same path exists here. Evaluation, datasets, view files, local
+launches, reruns, and git pins use the gate. Read-only views can still use the
+copied config's presets and inline definitions. Registering a checkout here
+replaces the host copy without retaining its paths in local repo history.
+
+Host identities
+---------------
+
+When ``environment.json`` is missing, identity recovery considers only runs with
+this machine's hostname and no mirror claim. A host can report the same hostname
+as the hub, so a matching hostname alone never makes a claimed mirror local.
+Malformed claims and dangling claim symlinks still exclude their runs from recovery.
+
+A host must report an environment identity different from the hub and from every
+other configured host. The hub reserves the identity before reading the event
+cursor or starting a mirror. The reservation uses the existing ``host_cursors``
+row, including sequence zero, and survives disconnects, restarts, event-log
+resets, and index rebuilds. Disabled hosts remain owners while they are configured.
+Run claims with a host label also preserve ownership when no cursor was saved.
+
+On upgrade, older run claims may contain only ``project`` and ``environment_id``.
+The hub adds their ``host`` label only when existing cursor metadata identifies
+exactly one original owner. It checks that ownership under the claim lock before
+writing either a label or a new reservation. The first host to reconnect is never
+assumed to be the owner.
+All hostless claims are first labelled with that original owner before adding a
+new alias cursor. A shutdown during normalization or alias transfer can therefore
+resume without turning a known owner into an ambiguous one.
+
+If those older claims have no saved cursor owner, or have several, the connection
+is refused with a recovery message. Stop the hub and restore the original cursor
+metadata from a trusted backup, or verify the source environment and add the
+correct ``host`` label to its affected ``<store>/.claims/<run_id>.json`` files,
+preserving their project and environment fields. Then reconnect. Removing claims
+or accepting the first connecting host would discard the ownership evidence.
+
+Changing a host's connection settings does not release its current or previously
+seen identities. To move an environment to another host name, remove the old
+name with ``hx hosts rm OLD`` and add the new one. The old supervisor's pending
+mirror writes finish before the identity is released. On accepting the new
+name, the hub updates that environment's run-claim source labels before any new
+data is mirrored. A different host cannot overwrite a claim while its old name
+remains configured. Existing conflicting configured owners are refused rather
+than choosing one arbitrarily.
+Forwarding prefers the current configured alias; historical cursor ownership is
+still retained so edits to a removed host's mirrored runs cannot silently become
+local-only changes.
 
 No secrets in run files
 -----------------------

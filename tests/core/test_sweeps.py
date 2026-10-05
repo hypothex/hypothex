@@ -403,6 +403,26 @@ def test_summary_counts_cells_best_and_cost(ctx: Context, toy_sweep: SweepSpec) 
     assert summary.total_usd == pytest.approx(1.25 + 1.25 + 0.5 + 1.0 + 1.0)
 
 
+def test_summary_reuses_its_boards_until_the_index_changes(
+    ctx: Context, toy_sweep: SweepSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PERF-F1 handoff: the sweep board and the headline's pair board are cached
+    builds: list[int] = []
+    real = sweeps_module.build_leaderboard
+
+    def spy(*args: Any, **kw: Any) -> Any:
+        builds.append(len(args[3]))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(sweeps_module, "build_leaderboard", spy)
+    first = summarize_sweep(ctx, "toy", "s-0001")
+    assert builds == [6, 4]  # the sweep's runs, then the headline's two cells
+    assert summarize_sweep(ctx, "toy", "s-0001") == first and builds == [6, 4]
+    add_run(ctx, "b3", "3e-4", 3, RunStatus.FINISHED, 0.86)
+    assert summarize_sweep(ctx, "toy", "s-0001").run_ids != first.run_ids
+    assert builds == [6, 4, 7, 5]
+
+
 def test_headline_p_compares_the_two_cells_it_names(ctx: Context, toy_sweep: SweepSpec) -> None:
     # a third lr 3e-4 run at another commit forms its own group: one run, the board's
     # top row, but not the row the cell shows (the cell keeps its larger group)
@@ -844,6 +864,33 @@ def test_a_failed_extend_names_the_sweep_too(ctx: Context, toy_repo: Path) -> No
         extend_sweep(ctx, "toy", sid, [2], launch=fake)
     assert (raised.value.launched, raised.value.total) == (3, 4)
     assert raised.value.hint == f"hx sweep extend {sid} --seeds 1,2"
+
+
+def test_failed_resume_counts_existing_members_after_the_failed_cell(
+    ctx: Context, toy_repo: Path
+) -> None:
+    ctx.register_project(toy_repo)
+    spec = sweeps_module.create_sweep(
+        ctx,
+        project="toy",
+        grid=[SweepParam(name="lr", values=["1e-4"])],
+        seeds=[1, 2],
+        command=CMD[:4],
+    )
+    # A later member can mirror before an earlier one. It still exists when
+    # resuming the missing first member fails before iteration reaches it.
+    ctx.create_run(
+        make_record(
+            "later",
+            project="toy",
+            seed=2,
+            params={"lr": "1e-4"},
+            tags=[sweep_tag(ctx.descriptor.environment_id, spec.id)],
+        )
+    )
+    with pytest.raises(SweepIncompleteError) as raised:
+        extend_sweep(ctx, "toy", spec.id, [1, 2], launch=FakeLauncher(ctx, fail_at=0))
+    assert (raised.value.launched, raised.value.total) == (1, 2)
 
 
 def test_a_failed_first_launch_keeps_the_definition(ctx: Context, toy_repo: Path) -> None:
@@ -1329,6 +1376,27 @@ def test_extend_refuses_when_the_first_runs_diff_was_too_large(
     assert len(fake.requests) == 2
 
 
+@pytest.mark.parametrize("dirty,diff_hash", [(True, None), (False, "a1b2c3d4")])
+def test_extend_refuses_dirty_first_run_without_its_patch(
+    ctx: Context, toy_repo: Path, dirty: bool, diff_hash: str | None
+) -> None:
+    fake = FakeLauncher(ctx)
+    sid = launched(ctx, toy_repo, fake)
+    record = first_run_code(ctx, sid, "c" * 40, None)
+    ctx.update_run(
+        record.run_id,
+        "run.test_git",
+        lambda r: r.model_copy(
+            update={"git": r.git.model_copy(update={"dirty": dirty, "diff_hash": diff_hash})}
+        ),
+    )
+    # Older mirrors copied the dirty record but not the too-large marker.
+    with pytest.raises(SweepError, match="patch is missing"):
+        extend_sweep(ctx, "toy", sid, [2], launch=fake)
+    assert len(fake.requests) == 2
+    assert load_sweep(ctx.layout, "toy", sid).seeds == [1]
+
+
 def test_local_extend_after_a_new_commit_joins_the_same_seed_groups(
     ctx: Context, toy_repo: Path
 ) -> None:
@@ -1518,3 +1586,29 @@ def test_cancel_takes_the_claim_so_a_supervisor_on_its_way_never_runs(
     psutil.Process(pid).wait(timeout=60)
     assert not out.exists()
     assert ctx.find_record(rec.run_id).status == RunStatus.KILLED
+
+
+def test_a_sweep_never_uses_a_host_copys_repo_path_even_when_it_exists_here(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # the host reported a repo path that is also a folder on the hub: a local sweep
+    # must not run there, and a host sweep must not read hypothex.yaml from it
+    entry = ctx.register_project(toy_repo)
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    with pytest.raises(SweepError, match="no checkout here"):
+        launch_sweep(ctx, project="toy", grid=[LR], seeds=[1], command=CMD[:4])
+    assert ctx.index.list_runs(limit=None) == []
+    (toy_repo / "hypothex.yaml").write_text("project: [not, valid\n")  # never read
+    fake = FakeLauncher(ctx)
+    summary = launch_sweep(
+        ctx,
+        project="toy",
+        task="toy-acc",
+        host="gpu1",
+        grid=[LR],
+        seeds=[1],
+        command=CMD[:4],
+        launch=fake,
+    )
+    assert len(summary.run_ids) == 2
+    assert ctx.store.load_project("toy").remote_host == "gpu1"

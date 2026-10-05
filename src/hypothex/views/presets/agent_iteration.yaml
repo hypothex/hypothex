@@ -4,8 +4,8 @@
 # creation time of the group's first run (spec 8.4). So this view works for any version_param.
 # "$ per solved" is each run's usage.usd divided by the examples it solved on the primary
 # metric (usage.<field>/solved), averaged over seeds. Both scatters have an ordinal x (version
-# text), so each row carries `regression`: worse than the best earlier version by more than
-# that version's 95% CI (spec 8.4 "regressions marked"; the UI draws it in the failure colour).
+# text), so each row carries `regression`: worse than the version just before it by more than
+# their 95% CIs allow (spec 8.4 "regressions marked"; the UI draws it in the failure colour).
 title: overview
 panels:
   - type: stat_strip

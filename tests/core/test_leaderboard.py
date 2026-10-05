@@ -1,12 +1,25 @@
+import random
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from hypothex.core import stats
+from hypothex.core import leaderboard, stats
 from hypothex.core.config import ProjectConfig
+from hypothex.core.context import Context
 from hypothex.core.ids import utcnow
-from hypothex.core.leaderboard import _pool, build_leaderboard, group_label, pick_field
+from hypothex.core.leaderboard import (
+    Leaderboard,
+    _pool,
+    build_leaderboard,
+    cached_leaderboard,
+    clear_caches,
+    distinct_labels,
+    group_label,
+    pick_field,
+    seed_group_labels,
+)
 from hypothex.core.records import (
     CostTotals,
     GitInfo,
@@ -741,3 +754,176 @@ def test_leaderboard_names_mixed_metric_code_at_the_selected_version() -> None:
         {"a": [old], "b": [new.model_copy(update={"version": "v1"}), score("acc", 0.9)]},
     )
     assert clean.model_dump().get("metric_drift") == []
+
+
+def float_board_inputs(
+    groups: int = 4, examples: int = 30
+) -> tuple[list[RunRecord], dict[str, list[ScoreRecord]], dict[str, dict[str, dict[str, Any]]]]:
+    """``groups`` seed groups of 2 runs with float per-example scores."""
+    rng = random.Random(7)
+    runs: list[RunRecord] = []
+    scores: dict[str, list[ScoreRecord]] = {}
+    per_example: dict[str, dict[str, dict[str, Any]]] = {}
+    for g in range(groups):
+        for s in range(2):
+            rid = f"g{g}s{s}"
+            runs.append(krun(rid, f"grp{g}", minute=2 * g + s))
+            values = [rng.random() * (g + 1) / groups for _ in range(examples)]
+            per_example[rid] = {f"e{i}": {"score": v} for i, v in enumerate(values)}
+            scores[rid] = acc(sum(values) / examples)
+    return runs, scores, per_example
+
+
+def count_bootstraps(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    interval, paired = stats.bootstrap_mean_interval, stats.paired_bootstrap_p
+
+    def counted_interval(*args: Any, **kwargs: Any) -> tuple[float, float]:
+        calls.append("interval")
+        return interval(*args, **kwargs)
+
+    def counted_paired(*args: Any, **kwargs: Any) -> float:
+        calls.append("paired")
+        return paired(*args, **kwargs)
+
+    monkeypatch.setattr(stats, "bootstrap_mean_interval", counted_interval)
+    monkeypatch.setattr(stats, "paired_bootstrap_p", counted_paired)
+    return calls
+
+
+def test_a_rebuilt_board_reuses_bootstraps_and_equals_a_cold_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs, scores, per_example = float_board_inputs()
+    calls = count_bootstraps(monkeypatch)
+    clear_caches()
+    cold = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    assert calls.count("interval") == 4 and calls.count("paired") == 3
+    calls.clear()
+    warm = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    assert calls == []  # every row interval and p-value came from the cache
+    assert warm == cold
+    # one group's examples change: only its interval and its p-value are recomputed
+    per_example["g1s0"] = {k: {"score": v["score"] / 2} for k, v in per_example["g1s0"].items()}
+    changed = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    assert sorted(calls) == ["interval", "paired"]
+    clear_caches()
+    assert build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example) == changed
+
+
+def test_cached_leaderboard_keeps_a_board_until_the_index_changes(ctx: Context) -> None:
+    runs, scores, per_example = float_board_inputs()
+    builds: list[int] = []
+
+    def build() -> Leaderboard:
+        builds.append(1)
+        return build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+
+    direct = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
+    first = cached_leaderboard(ctx, "toy", "t", KINDS, build)
+    second = cached_leaderboard(ctx, "toy", "t", KINDS, build)
+    assert len(builds) == 1
+    assert first == second == direct
+    first.rows.clear()  # each call returns its own copy
+    assert cached_leaderboard(ctx, "toy", "t", KINDS, build) == direct
+    # other versions, variants and configs are other boards
+    cached_leaderboard(ctx, "toy", "t", KINDS, build, versions={"acc": "v1"})
+    cached_leaderboard(ctx, "toy", "t", KINDS, build, variant="examples=False")
+    other = KINDS.model_copy(deep=True)
+    other.metrics["acc"].version = "v3"
+    cached_leaderboard(ctx, "toy", "t", other, build)
+    assert len(builds) == 4
+    # an index write moves the generation on: the next call builds again
+    ctx.index.upsert_run(krun("late", "grp9"))
+    cached_leaderboard(ctx, "toy", "t", KINDS, build)
+    assert len(builds) == 5
+
+
+def test_cached_leaderboard_does_not_share_boards_between_homes(
+    ctx: Context, tmp_path: Path
+) -> None:
+    runs, scores, _ = float_board_inputs()
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    other_ctx = Context.open(tmp_path / "other-home")
+    assert other_ctx.index.generation() == ctx.index.generation()
+    cached_leaderboard(ctx, "toy", "t", KINDS, lambda: board)
+    empty = board.model_copy(update={"rows": []})
+    assert cached_leaderboard(other_ctx, "toy", "t", KINDS, lambda: empty).rows == []
+
+
+def test_caches_drop_the_least_recently_used_entry() -> None:
+    cache: leaderboard._Lru[str, int] = leaderboard._Lru(2)
+    computed: list[str] = []
+
+    def value(key: str) -> int:
+        return cache.get(key, lambda: computed.append(key) or len(computed))
+
+    assert (value("a"), value("b"), value("a")) == (1, 2, 1)
+    value("c")  # evicts b, the least recently used
+    assert len(cache) == 2
+    value("a")
+    value("b")
+    assert computed == ["a", "b", "c", "b"]
+    assert leaderboard._BOARDS.size == leaderboard.BOARD_CACHE_SIZE
+    assert leaderboard._INTERVALS.size == leaderboard._PAIRED_P.size == leaderboard.STATS_CACHE_SIZE
+
+
+def sweep_runs() -> tuple[list[RunRecord], dict[str, list[ScoreRecord]]]:
+    """Four configs of one sweep hypothesis; two share their vars (other commits)."""
+    grid = [
+        ("a", {"lr": "1e-3", "beam": "10"}, "c1", 0.9),
+        ("b", {"lr": "1e-3", "beam": "5"}, "c1", 0.8),
+        ("c", {"lr": "1e-4", "beam": "5"}, "c1", 0.7),
+        ("d", {"lr": "1e-4", "beam": "5"}, "c2", 0.6),
+    ]
+    runs, scores = [], {}
+    for i, (group, sweep_vars, commit, value) in enumerate(grid):
+        runs.append(
+            make_record(
+                group,
+                task="t",
+                status=RunStatus.FINISHED,
+                config_hash=f"sha256:{group * 8}",
+                git=GitInfo(commit=commit),
+                created_at=T0 + timedelta(minutes=i),
+                hypothesis="lr x beam, a small sweep",
+                vars=sweep_vars,
+            )
+        )
+        scores[group] = acc(value)
+    return runs, scores
+
+
+def test_groups_that_share_a_label_get_the_vars_that_differ() -> None:
+    runs, scores = sweep_runs()
+    runs.append(krun("solo", "solo", minute=9, hypothesis="bigger model", vars={"lr": "1e-3"}))
+    scores["solo"] = acc(0.5)
+    board = build_leaderboard("toy", "t", KINDS, runs, scores)
+    assert [r.label for r in board.rows] == [
+        "lr x beam · lr 1e-3, beam 10",
+        "lr x beam · lr 1e-3, beam 5",
+        "lr x beam · lr 1e-4, beam 5 · cccccccc@c1",  # same vars as d: group id too
+        "lr x beam · lr 1e-4, beam 5 · dddddddd@c2",
+        "bigger model",  # a label no other group has stays as it is
+    ]
+    members = {r.group_id: [m for m in runs if m.run_id in r.run_ids] for r in board.rows}
+    assert seed_group_labels(members) == {r.group_id: r.label for r in board.rows}
+    assert group_labels(runs) == {r.group_id: r.label for r in board.rows}  # views too
+
+
+def test_distinct_labels_leaves_out_vars_a_group_does_not_have() -> None:
+    one = [krun("x", "x", vars={"lr": "1e-3"})]
+    two = [krun("y", "y", vars={"lr": "1e-3", "beam": "5"})]
+    none = [krun("z", "z")]
+    labels = distinct_labels(
+        {"x": "same", "y": "same", "z": "same"}, {"x": one, "y": two, "z": none}
+    )
+    assert labels == {"x": "same · lr 1e-3", "y": "same · lr 1e-3, beam 5", "z": "same"}
+
+
+def test_group_label_keeps_the_whole_clause_without_a_limit() -> None:
+    hypothesis = "40k steps with heavier augmentation lifts top-1, as in the paper"
+    assert group_label(hypothesis, [], "g") == "40k steps with heavier…"
+    assert group_label(hypothesis, [], "g", limit=None) == (
+        "40k steps with heavier augmentation lifts top-1"
+    )

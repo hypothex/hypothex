@@ -23,11 +23,13 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+import psutil
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from hypothex.core.errors import HypothexError
+from hypothex.core.fsutil import atomic_write_text
 
 SSH_FAILURE_CODE = 255
 _STDERR_TAIL = 2000
@@ -438,8 +440,8 @@ class Tunnel:
     local_port : int, optional
         Local port; a free one is picked when omitted.
     registry : Path, optional
-        Folder for ``<pid>.json`` (``{pid, owner, argv}``) while the ``ssh``
-        process runs, so a later process can stop it with
+        Folder for ``<pid>.json`` (pid, owner, argv and both process birth
+        times) while the ``ssh`` process runs, so a later process can stop it with
         :func:`reap_stale_tunnels` after this one died without :meth:`stop`
         (the hub passes ``<home>/hub/tunnels``).
 
@@ -519,22 +521,29 @@ class Tunnel:
         except FileNotFoundError as exc:
             self._close()
             raise SshError(f"{self.target.ssh_bin} not found; is OpenSSH installed?") from exc
-        if self.registry is not None:
-            self._record = _register_tunnel(self.registry, self._proc.pid, self.argv())
-        deadline = time.monotonic() + self.target.connect_timeout + 5
-        while time.monotonic() < deadline:
-            code = self._proc.poll()
-            if code is not None:
-                message = self.stderr_tail()
-                self._close()
-                raise SshError(
-                    f"tunnel to {self.target.alias} exited {code} before it was ready: {message}"
-                )
-            if _port_open(self.local_port) and self._proc.poll() is None:
-                return
-            time.sleep(0.05)
-        self.stop()
-        raise SshError(f"tunnel to {self.target.alias} did not open port {self.local_port} in time")
+        try:
+            if self.registry is not None:
+                self._record = _register_tunnel(self.registry, self._proc.pid, self.argv())
+            deadline = time.monotonic() + self.target.connect_timeout + 5
+            while time.monotonic() < deadline:
+                code = self._proc.poll()
+                if code is not None:
+                    message = self.stderr_tail()
+                    raise SshError(
+                        f"tunnel to {self.target.alias} exited {code} "
+                        f"before it was ready: {message}"
+                    )
+                if _port_open(self.local_port) and self._proc.poll() is None:
+                    return
+                time.sleep(0.05)
+            raise SshError(
+                f"tunnel to {self.target.alias} did not open port {self.local_port} in time"
+            )
+        except BaseException:
+            # __exit__ is not called when __enter__/start fails. In particular,
+            # an unwritable registry must not leave the new ssh process alive.
+            self.stop()
+            raise
 
     def alive(self) -> bool:
         """
@@ -570,7 +579,12 @@ class Tunnel:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # Keep the process handle and its recovery record: a later
+                    # stop/reaper must still be able to account for it.
+                    raise SshError(f"tunnel to {self.target.alias} did not stop") from None
         self._close()
 
     def _close(self) -> None:
@@ -578,7 +592,7 @@ class Tunnel:
             self._stderr.close()
             self._stderr = None
         if self._record is not None:
-            self._record.unlink(missing_ok=True)
+            _drop_tunnel_record(self._record)
             self._record = None
         self._proc = None
 
@@ -590,46 +604,83 @@ class Tunnel:
         self.stop()
 
 
+class _TunnelRecord(BaseModel):
+    """Strict process identity; absent birth times identify a legacy record."""
+
+    pid: int = Field(strict=True, ge=1, le=2**31 - 1)
+    owner: int = Field(strict=True, ge=1, le=2**31 - 1)
+    argv: list[str] = Field(min_length=2)
+    pid_create_time: float | None = Field(default=None, strict=True, gt=0, allow_inf_nan=False)
+    owner_create_time: float | None = Field(default=None, strict=True, gt=0, allow_inf_nan=False)
+
+
 def _register_tunnel(registry: Path, pid: int, argv: list[str]) -> Path:
-    """Write ``<registry>/<pid>.json`` (``{pid, owner, argv}``) for :func:`reap_stale_tunnels`."""
-    registry.mkdir(parents=True, exist_ok=True)
+    """Atomically record the tunnel and owner's exact process birth times."""
+    data = _TunnelRecord(
+        pid=pid,
+        owner=os.getpid(),
+        argv=argv,
+        pid_create_time=psutil.Process(pid).create_time(),
+        owner_create_time=psutil.Process().create_time(),
+    )
     record = registry / f"{pid}.json"
-    tmp = registry / f".{pid}.json.tmp"
-    tmp.write_text(json.dumps({"pid": pid, "owner": os.getpid(), "argv": argv}), encoding="utf-8")
-    os.replace(tmp, record)
+    atomic_write_text(record, data.model_dump_json())
     return record
 
 
-def _pid_alive(pid: int) -> bool:
+def _drop_tunnel_record(record: Path) -> None:
+    """Drop a finished or malformed record; an I/O failure can be retried later."""
+    with suppress(OSError):
+        record.unlink(missing_ok=True)
+
+
+def _registered_process(
+    pid: int, birth: float | None
+) -> tuple[Literal["same", "gone", "unknown"], psutil.Process | None]:
+    """Compare process birth without treating inspection failures as absence."""
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:  # alive, owned by another user
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return "gone", None
+        if birth is None:
+            return "unknown", None
+        if proc.create_time() != birth:
+            return "gone", None  # the recorded process ended; this pid was reused
+        return "same", proc
+    except psutil.NoSuchProcess:
+        return "gone", None
+    except (psutil.Error, OSError):
+        return "unknown", None
+
+
+def _matches_argv(proc: psutil.Process, argv: list[str]) -> bool:
+    """Compare argument boundaries, allowing an executable wrapper prefix."""
+    actual = proc.cmdline()
+    tail = argv[1:]
+    return bool(tail) and len(actual) >= len(tail) and actual[-len(tail) :] == tail
+
+
+def _stop_registered_tunnel(proc: psutil.Process, data: _TunnelRecord) -> bool:
+    """Stop a verified process with bounded waits; retain unresolved evidence."""
+    try:
+        # psutil's signal methods also reject pid reuse between this identity
+        # check and the signal; raw os.kill would not provide that protection.
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except psutil.TimeoutExpired:
+            state, current = _registered_process(data.pid, data.pid_create_time)
+            if state == "gone":
+                return True
+            if current is None or not _matches_argv(current, data.argv):
+                return False
+            current.kill()
+            current.wait(timeout=5)
         return True
-    return True
-
-
-def _runs_argv(pid: int, argv: list[str]) -> bool:
-    """
-    Tell whether process ``pid`` still runs this tunnel's ``ssh`` command line.
-
-    Its arguments must end with ``argv[1:]`` (which hold the unique ``-L``
-    forward), so an ``ssh`` started through a wrapper (``$HYPOTHEX_SSH``)
-    matches and a pid reused by another program does not.
-    """
-    try:
-        res = subprocess.run(
-            ["ps", "-ww", "-o", "args=", "-p", str(pid)],
-            capture_output=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError):
         return False
-    line = res.stdout.decode("utf-8", "replace").strip()
-    tail = " ".join(argv[1:])
-    return res.returncode == 0 and bool(tail) and (line == tail or line.endswith(f" {tail}"))
 
 
 def reap_stale_tunnels(registry: Path) -> list[int]:
@@ -639,8 +690,10 @@ def reap_stale_tunnels(registry: Path) -> list[int]:
     A hub killed with ``kill -9`` never stops its tunnels: the ``ssh``
     processes keep running and keep their ports. Each tunnel started with a
     ``registry`` left ``<registry>/<pid>.json``. A record whose owner process
-    is gone is removed; its ``ssh`` gets SIGTERM only when that pid still runs
-    the recorded command line. Records of a live owner are left alone.
+    is gone is checked against both the child's birth time and exact arguments
+    before signalling. SIGTERM is followed by a bounded wait and, if necessary,
+    SIGKILL after another identity check. Records of live owners or uncertain
+    processes remain; legacy records without birth times never authorize a signal.
 
     Parameters
     ----------
@@ -650,7 +703,7 @@ def reap_stale_tunnels(registry: Path) -> list[int]:
     Returns
     -------
     list of int
-        The pids that were sent SIGTERM.
+        The tunnel pids confirmed stopped after a verified cleanup attempt.
 
     Examples
     --------
@@ -660,21 +713,30 @@ def reap_stale_tunnels(registry: Path) -> list[int]:
     reaped: list[int] = []
     for record in sorted(registry.glob("*.json")) if registry.is_dir() else []:
         try:
-            data = json.loads(record.read_text(encoding="utf-8"))
-            pid, owner, argv = int(data["pid"]), int(data["owner"]), data["argv"]
-        except (OSError, ValueError, TypeError, KeyError):
-            record.unlink(missing_ok=True)  # unreadable: nothing can be checked against it
+            data = _TunnelRecord.model_validate_json(record.read_text(encoding="utf-8"))
+        except OSError:
+            continue  # unreadable now is not proof the recorded process is gone
+        except (ValueError, ValidationError):
+            _drop_tunnel_record(record)
             continue
-        if owner == os.getpid() or _pid_alive(owner):
-            continue  # a live process still owns (and stops) this tunnel
-        if (
-            record.stem == str(pid)
-            and isinstance(argv, list)
-            and all(isinstance(a, str) for a in argv)
-            and _runs_argv(pid, argv)
-        ):
-            with suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGTERM)
-                reaped.append(pid)
-        record.unlink(missing_ok=True)
+        if record.stem != str(data.pid):
+            _drop_tunnel_record(record)
+            continue
+        owner_state, _ = _registered_process(data.owner, data.owner_create_time)
+        if owner_state != "gone":
+            continue
+        state, proc = _registered_process(data.pid, data.pid_create_time)
+        if state == "gone":
+            _drop_tunnel_record(record)
+        elif proc is not None:
+            try:
+                matches = _matches_argv(proc, data.argv)
+            except psutil.NoSuchProcess:
+                _drop_tunnel_record(record)
+                continue
+            except (psutil.Error, OSError):
+                continue
+            if matches and _stop_registered_tunnel(proc, data):
+                reaped.append(data.pid)
+                _drop_tunnel_record(record)
     return reaped

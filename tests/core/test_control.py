@@ -15,7 +15,7 @@ import pytest
 from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
-from hypothex.core.errors import RunError
+from hypothex.core.errors import RemoteProjectError, RunError
 from hypothex.core.execution import (
     STOP_MARKER,
     RunRequest,
@@ -48,6 +48,43 @@ def test_launch_run_in_background_finishes(ctx: Context, toy_repo: Path) -> None
     run_dir = ctx.run_dir(done)
     assert (run_dir / "logs" / "stdout.log").read_text().strip() == "bg"
     assert (run_dir / "supervisor.pid").is_file()
+
+
+def test_presubmit_terminalizes_a_pinned_run_refused_by_the_project_gate(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import execution
+
+    record = prepare_run(
+        ctx,
+        RunRequest(
+            repo=toy_repo,
+            command=cmd("pass"),
+            commit=git(toy_repo, "rev-parse", "HEAD"),
+            queue=True,
+        ),
+    )
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    staging = ctx.layout.project_dir("toy") / execution.STAGING_DIR
+    before = {
+        str(p.relative_to(staging)): p.read_bytes() for p in staging.rglob("*") if p.is_file()
+    }
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("a refused project reached git or submission")
+
+    monkeypatch.setattr(execution, "create_worktree", forbidden)
+    monkeypatch.setattr(execution, "_discard_worktree", forbidden)
+    monkeypatch.setattr(control.slurm, "submit_run", forbidden)
+    with pytest.raises(RunError, match="copied from host gpu1") as error:
+        control._checkout_before_submit(ctx, record)
+    assert isinstance(error.value.__cause__, RemoteProjectError)
+    failed = ctx.find_record(record.run_id)
+    assert failed.status == RunStatus.FAILED and failed.ended_at is not None
+    assert failed.started_at is None and failed.executor.gpus == []
+    after = {str(p.relative_to(staging)): p.read_bytes() for p in staging.rglob("*") if p.is_file()}
+    assert after == before
 
 
 def test_stop_run_kills_background_run(ctx: Context, toy_repo: Path) -> None:
@@ -655,3 +692,72 @@ def test_batch_cancel_uses_one_lock_and_keeps_queue_tickets(
     }
     assert not any(e.type == "run.queue_moved" for e in ctx.events.since(mark, limit=10_000))
     assert lock_count == 1
+
+
+def test_stop_of_a_run_without_a_supervisor_indexes_its_whole_history(ctx: Context) -> None:
+    from hypothex.core.index import downsample
+
+    _active(ctx, "dead", RunStatus.RUNNING, dead_pid())
+    path = ctx.layout.run_dir("toy", "dead") / "metrics.jsonl"
+    with path.open("w") as fh:
+        for s in range(3000):
+            fh.write(json.dumps({"name": "loss", "step": s, "value": 1.0 / (s + 1)}) + "\n")
+    # while it ran, the index held a bounded copy of a file that might still grow
+    ctx.index.replace_metric_points("dead", ctx.store.read_metric_points_bounded("toy", "dead"))
+    assert ctx.index.metric_points("dead") != downsample(
+        ctx.store.read_metric_points("toy", "dead")
+    )
+    killed = stop_run(ctx, "dead")
+    assert killed.status == RunStatus.KILLED
+    # the end re-indexes from the whole file, like every other end path
+    assert ctx.index.metric_points("dead") == downsample(
+        ctx.store.read_metric_points("toy", "dead")
+    )
+
+
+def _copy_from_host(ctx: Context, repo: str | None = None) -> None:
+    """Turn the hub's toy registration into a host's copy (repo path as the host reported)."""
+    entry = ctx.store.load_project("toy")
+    update: dict[str, object] = {"remote_host": "gpu1"}
+    if repo is not None:
+        update["repo"] = repo
+    ctx.store.save_project(entry.model_copy(update=update))
+
+
+def test_rerun_and_reinfer_never_run_from_a_host_copys_repo_path(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # the hub's own run, but the project entry is now a host's copy: its repo path
+    # (here also a folder on the hub) must never supply commands or a checkout
+    code = (
+        "import json, os; d = os.environ['HYPOTHEX_RUN_DIR']; "
+        "open(d + '/artifacts.jsonl', 'a').write(json.dumps("
+        "{'kind': 'checkpoint', 'path': '/tmp/model.pt'}) + '\\n')"
+    )
+    parent = execute_run(
+        ctx, prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd(code), task="toy-acc")).run_id
+    )
+    _copy_from_host(ctx)
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        rerun(ctx, parent.run_id, background=False)
+    with pytest.raises(RemoteProjectError, match="copied from host gpu1"):
+        reinfer(ctx, parent.run_id, background=False)
+    assert [r.run_id for r in ctx.index.list_runs(limit=None)] == [parent.run_id]
+    assert ctx.store.load_project("toy").remote_host == "gpu1"
+
+
+def test_a_worktree_is_never_released_through_a_host_copys_repo_path(
+    ctx: Context, toy_repo: Path, tmp_path: Path
+) -> None:
+    _commit_train(toy_repo, "train v1")
+    head = git(toy_repo, "rev-parse", "HEAD")
+    _commit_train(toy_repo, "train v2")
+    record = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=head))
+    control.checkout_run_tree(ctx, record)  # deferred checkouts are made when execution starts
+    tree = ctx.layout.worktrees_dir("toy") / record.run_id
+    assert tree.is_dir()
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    _copy_from_host(ctx, repo=str(decoy))
+    assert control.release_worktree(ctx, record) is False  # no git runs in the host's path
+    assert tree.is_dir()

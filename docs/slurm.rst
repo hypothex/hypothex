@@ -80,10 +80,11 @@ Hypothex refuses an item that is not exactly one token
 (``"--qos=normal --mem=8G"`` is two), and an item that sets an option Hypothex owns,
 in any form (long name, abbreviation, or short letter): ``--job-name`` (``-J``),
 ``--comment``, ``--output`` (``-o``), ``--error`` (``-e``), ``--chdir`` (``-D``),
-``--wrap``, ``--requeue``, and ``--no-requeue``. Every job is ``--no-requeue``: a
-second attempt cannot run the same run. Values may use letters, digits, and
-``_ . : + @ / , = -`` only. ``time`` uses SLURM's formats (``MM``, ``HH:MM:SS``,
-``D-HH:MM:SS``).
+``--wrap``, ``--requeue``, ``--no-requeue``, and ``--array`` (``-a``). Every job is
+``--no-requeue``: a second attempt cannot run the same run. A job array is refused for
+the same reason: each array task would run the same run again. Values may use
+letters, digits, and ``_ . : + @ / , = -`` only. ``time`` uses SLURM's formats
+(``MM``, ``HH:MM:SS``, ``D-HH:MM:SS``).
 
 .. note::
 
@@ -129,6 +130,12 @@ GPFS.
 A job that is gone without an exit record, in two polls in a row, makes the run
 ``lost``. The reason names SLURM's end state when ``sacct`` knows it, for example
 ``SLURM ended job 81234 with NODE_FAIL on node017; no exit record``.
+
+A shared filesystem can show the node's files late. So for one hour after a run is
+marked ``lost`` (``LOST_RECHECK_SECONDS``; its outbox entry holds ``lost_at``), each
+poll looks again for the node's ``run.yaml`` or ``exit.json``. When one appears, the
+run gets the end the node wrote in place of ``lost``, and a finished task run is
+scored. After the hour, the outbox entry is removed.
 
 The SLURM job's own output goes to ``logs/slurm-JOBID.out`` in the run folder.
 

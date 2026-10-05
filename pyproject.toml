@@ -36,6 +36,8 @@ dev = [
   "sphinx>=8.0",
   "sphinx-rtd-theme>=3.0",
   "numpydoc>=1.8",
+  "hypothesis>=6.168.3",
+  "scipy>=1.17.1",
 ]
 
 [build-system]

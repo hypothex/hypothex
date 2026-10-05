@@ -2,3 +2,7 @@
 .demo.json
 .results/
 .report/
+.home-hosts/
+.home-shutdown/
+.demo-hosts.json
+.runs/

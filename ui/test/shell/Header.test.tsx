@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 
-import { RECENT_KEY, paletteShortcut, parseRecent, screenOf, updateRecent } from "../../src/shell/Header";
+import { RECENT_KEY, confirmKeys, paletteShortcut, parseRecent, screenOf, updateRecent } from "../../src/shell/Header";
 import { mockRoutes } from "../api/fetch-mock";
+import { makeBoard, makeDetail } from "../pages/fixtures";
 import { renderApp } from "../render-app";
 
 const realFetch = globalThis.fetch;
@@ -42,6 +43,22 @@ describe("updateRecent", () => {
   });
 });
 
+test("confirmKeys names the reads that show a screen's target exists", () => {
+  expect(confirmKeys("/t/my%20proj/acc/edit/new")).toEqual([["leaderboard", "my proj", "acc", []]]);
+  expect(confirmKeys("/r/r-9")).toEqual([["run", "r-9"]]);
+  expect(confirmKeys("/x/r1/r2")).toEqual([
+    ["run", "r1"],
+    ["run", "r2"],
+  ]);
+  expect([confirmKeys("/"), confirmKeys("/nope")]).toEqual([[], []]);
+});
+
+/** Routes that answer the run `id` (its other reads 404). */
+const runRoutes = (id: string) => ({
+  [`/api/v1/runs/${id}`]: makeDetail({ run_id: id }),
+  [`/api/v1/runs/${id}/`]: null,
+});
+
 test("parseRecent keeps only non-empty string fields", () => {
   expect(
     parseRecent({
@@ -77,6 +94,7 @@ describe("Header", () => {
 
   test("a corrupt stored value is ignored", async () => {
     localStorage.setItem(RECENT_KEY, "{not json");
+    mockRoutes(runRoutes("r-1"));
     renderApp("/r/r-1");
     await screen.findByRole("navigation", { name: "Screens" });
     await waitFor(() => expect(tabs().map((a) => a.textContent)).toEqual(["Overview", "Run"]));
@@ -105,6 +123,7 @@ describe("Header", () => {
   });
 
   test("remembers the last task and run as tabs", async () => {
+    mockRoutes({ "/api/v1/tasks/toy/acc/leaderboard": makeBoard(), ...runRoutes("r-7") });
     const { router } = renderApp("/t/toy/acc");
     await waitFor(() => expect(router.state.location.pathname).toBe("/t/toy/acc"));
     await act(() => router.navigate({ to: "/r/$runId", params: { runId: "r-7" } }));
@@ -119,6 +138,27 @@ describe("Header", () => {
       task: { project: "toy", task: "acc" },
       run: { runId: "r-7" },
     });
+  });
+
+  test("a missing run or task is not saved as a tab; the last good one stays", async () => {
+    localStorage.setItem(RECENT_KEY, JSON.stringify({ run: { runId: "r-3" } }));
+    const { queryClient } = renderApp("/r/r-gone");
+    await waitFor(() => expect(queryClient.getQueryState(["run", "r-gone"])?.status).toBe("error"));
+    const pairs = () => tabs().map((a) => [a.textContent, a.getAttribute("href")]);
+    expect(pairs()).toEqual([
+      ["Overview", "/"],
+      ["Run", "/r/r-3"],
+    ]);
+    cleanup();
+    const second = renderApp("/t/nope/nope");
+    await waitFor(() =>
+      expect(second.queryClient.getQueryState(["leaderboard", "nope", "nope", []])?.status).toBe("error"),
+    );
+    expect(pairs()).toEqual([
+      ["Overview", "/"],
+      ["Run", "/r/r-3"],
+    ]);
+    expect(JSON.parse(localStorage.getItem(RECENT_KEY) ?? "{}")).toEqual({ run: { runId: "r-3" } });
   });
 
   test("shows nothing about live updates while the stream is ready", async () => {

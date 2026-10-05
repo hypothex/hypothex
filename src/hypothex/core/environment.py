@@ -95,9 +95,14 @@ def _read_identity(path: Path) -> dict[str, Any]:
 
 
 def _local_environment_ids(layout: Layout, hostname: str) -> set[str]:
-    """The environment ids of the runs in the store that ran on ``hostname``."""
+    """Ids from unclaimed runs on ``hostname``, excluding mirrored runs."""
     found: set[str] = set()
     for path in layout.store.glob("*/runs/*/run.yaml"):
+        # A host reports its own hostname; matching ours does not make a
+        # mirrored run local. Even a damaged claim keeps its run foreign.
+        claim = layout.store / ".claims" / f"{path.parent.name}.json"
+        if claim.exists() or claim.is_symlink():
+            continue
         try:
             data = read_yaml(path)
         except (OSError, ValueError, yaml.YAMLError):  # an unreadable run is skipped
@@ -111,9 +116,10 @@ def _recover_identity(layout: Layout) -> dict[str, str]:
     """
     Make the identity for a missing ``environment.json``.
 
-    The id of this host's runs in the store (``host`` is this hostname) is
-    used again, so a lost file does not make every old local run foreign. With
-    no such run a new id is made.
+    The id of this host's unclaimed runs in the store (``host`` is this
+    hostname) is used again, so a lost file does not make every old local run
+    foreign. Mirror claims exclude remote runs even when their hostname
+    matches this machine. With no such local run a new id is made.
 
     Raises
     ------
@@ -141,9 +147,9 @@ def load_descriptor(layout: Layout) -> EnvironmentDescriptor:
     Load this environment's descriptor, creating a stable id on first use.
 
     When ``environment.json`` is missing and the store has runs of this host
-    (``host`` is this hostname), their id is used again and a warning is
-    logged; with no such run a new id is made. The id is then written to the
-    file.
+    (``host`` is this hostname, with no mirror claim), their id is used again
+    and a warning is logged; with no such run a new id is made. The id is then
+    written to the file.
 
     Parameters
     ----------

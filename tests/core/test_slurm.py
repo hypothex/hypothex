@@ -2067,3 +2067,27 @@ def test_reconcile_emits_the_warnings_of_scoring(
         "1 of 4 prediction ids are not in dataset 'toyset' split 'test'; "
         "they are scored with no reference"
     ]
+
+
+def test_a_slurm_end_indexes_the_whole_history(ctx: Context) -> None:
+    from hypothex.core.index import downsample
+
+    slurm_run(ctx, "r1")
+    path = ctx.layout.run_dir("toy", "r1") / "metrics.jsonl"
+    with path.open("w") as fh:
+        for s in range(3000):
+            fh.write(json.dumps({"name": "loss", "step": s, "value": 1.0 / (s + 1)}) + "\n")
+    exact = downsample(ctx.store.read_metric_points("toy", "r1"))
+    ctx.index.replace_metric_points("r1", ctx.store.read_metric_points_bounded("toy", "r1"))
+    assert ctx.index.metric_points("r1") != exact
+    ended = slurm_module._end_if_active(
+        ctx, "r1", "run.killed", slurm_module._end(RunStatus.KILLED), {"reason": "stopped"}
+    )
+    assert ended is not None and ended.status == RunStatus.KILLED
+    assert ctx.index.metric_points("r1") == exact
+    # a lost run may still be writing: its history stays a bounded read, re-indexed when found
+    slurm_run(ctx, "r2")
+    lost = slurm_module._end_if_active(
+        ctx, "r2", "run.lost", slurm_module._end(RunStatus.LOST), {"reason": "gone"}
+    )
+    assert lost is not None and lost.status == RunStatus.LOST

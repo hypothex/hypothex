@@ -4,7 +4,7 @@
 
 **Goal:** Show phase 3 in the web UI: pairing a device (`/pair`), the 401 gate, the header's notebook, storage, settings and user chip, Settings (sessions, users, add device with QR, notifications), Storage (bytes by project and host, largest items, dry run, then apply with the number typed back), the lab notebook (`/n/:project/:day` with run chips, append, whole-day edit and the 409 conflict view), the Task page's `export ▾` menu and paper baselines, and run ownership (`@owner`, owner-only stop) plus cleaned artifacts on the Run page, all kept live by the phase 3 events.
 
-**Architecture:** The phase 1b/2 API layer stays the only data layer. Tasks 1–4 add the contract shapes to `models.ts`, a tiny auth store (`api/auth.ts`: `open | locked`, set by any 401 or a WebSocket close code `4401`), one `api.*` function per route the screens use, keys, hooks and invalidation lists, and the phase 3 event mapping; the event stream asks for a single-use ticket before each connect when the hub has auth on. Each screen keeps its arithmetic in small pure modules with unit tests on concrete numbers (`pairing.ts`, `owner.ts`, `settings/model.ts`, `storage/model.ts`, `notebook/model.ts`, `exportFormats.ts`) and draws with small prop-driven components that inject their own scoped CSS. One `GET /api/v1/auth/me` per app (in `AppShell`) feeds `PrincipalContext`; components read it with `usePrincipal()` instead of fetching. Playwright gets a third demo hub, `hx demo --with-team` (auth on, owner `sv`, collaborator `alice`), and pairs every browser through the real `/pair` page.
+**Architecture:** The phase 1b/2 API layer stays the only data layer. Tasks 1–4 add the contract shapes to `models.ts`, the merged token credential provider extended with scoped principal context, one `api.*` function per route the screens use, keys, hooks and invalidation lists, and the phase 3 event mapping; the event stream retains the token baseline's fresh-ticket subprotocol flow before every connect. Each screen keeps its arithmetic in small pure modules with unit tests on concrete numbers (`pairing.ts`, `owner.ts`, `settings/model.ts`, `storage/model.ts`, `notebook/model.ts`, `exportFormats.ts`) and draws with small prop-driven components that inject their own scoped CSS. One `GET /api/v1/auth/me` per app (in `AppShell`) feeds `PrincipalContext`; components read it with `usePrincipal()` instead of fetching. Playwright gets a third demo hub, `hx demo --with-team` (auth on, owner `sv`, collaborator `alice`), and pairs every browser through the real `/pair` page.
 
 **Tech Stack:** Bun 1.3, Vite 8, React 19, TypeScript 5.9 (strict), TanStack Router and TanStack Query 5, d3-scale (through the phase 1b `charts/` primitives), happy-dom + Testing Library (`bun test`), Playwright 1.63, openapi-typescript 7; `uv` for every Python command (`uv run hx ...`, `uv run pytest`, `uv run sphinx-build`).
 
@@ -56,10 +56,10 @@ Expected on the pinned baseline: `12 snippet anchors ok` and `reviewed replaceme
 - Generated file: `ui/src/api/types.ts` comes from `bunx openapi-typescript` against a running hub, is checked in, and is never edited by hand. Response bodies are typed by `ui/src/api/models.ts`, the only hand-written copy of the contract shapes.
 - Contract names (exact): `Scope` (`read | launch | admin`), `Principal` (the `/auth/me` body), `SessionRow`, `UserRow`, `PairingOffer` (`{offer_id, url, expires_at, qr}`), `NotifyStatus`, `OutboxEntry`, `ProjectRule`, `Digest`, `TaskChange`, `NotebookDay`, `RunChip`, `BaselineRow`, `StorageReport`, `StorageItem`, `CleanPolicy`, `CleanPlan`, `CleanResult`, `CleanedArtifact`; additive optional fields `RunRecord.owner?`, `RunDetail.cleaned?`, `Leaderboard.baselines?` (an older hub omits them). Event types `notebook.updated`, `run.artifacts_cleaned`, `storage.plan_created`, `storage.cleaned`, `notify.sent`, `notify.failed`, `digest.sent`, `auth.session_created`, `auth.session_revoked`.
 - Routes (exact): UI routes `/pair`, `/settings`, `/storage`, `/n/$project`, `/n/$project/$day` (contract `/n/:project`, `/n/:project/:day`). API the UI calls: `GET /api/v1/auth/me`, `POST /api/v1/auth/ws-ticket`, `POST /api/v1/auth/pair`, `POST /api/v1/auth/pairings`, `GET /api/v1/auth/sessions`, `POST /api/v1/auth/sessions/{session_id}/revoke`, `GET /api/v1/auth/users`, `POST /api/v1/auth/users/{name}/disable`, `GET|POST|PUT /api/v1/projects/{project}/notebook[/{day}]`, `GET /api/v1/tasks/{project}/{task}/export`, `GET /api/v1/notify`, `POST /api/v1/notify/test`, `GET /api/v1/storage`, `POST /api/v1/storage/plan`, `POST /api/v1/storage/plans/{plan_id}/apply`, and `GET /api/v1/runs?owner=me`. `POST /api/v1/auth/logout`, `GET /api/v1/compare/export`, `GET /api/v1/projects/{project}/digest` and `POST .../digest/send` exist on the hub (Task 2's `types.ts` test checks them) but no screen uses them, so the client has no function for them.
-- Auth (contract 1.10): every request sends `credentials: "same-origin"` (the `hx_session` cookie is `HttpOnly; SameSite=Strict`, so script never reads it). Any `401` sets the auth store to `locked`; the shell then shows the 401 gate (`401 · pair this device: hx pair`) until a full page load. The event stream gets `?ticket=<t>` from `POST /api/v1/auth/ws-ticket` before each connect when `/auth/me` says `auth: "on"`; a long-lived token never appears in a URL; close code `4401` locks the app and stops reconnecting. `/pair` renders without the header and never calls `/auth/me` or opens the event stream; it strips the `#<offer>.<secret>` fragment from the address bar (`history.replaceState`) before it sends anything, and sends the secret only in the `POST /api/v1/auth/pair` body.
+- Auth (contract 1.10): every request sends `credentials: "same-origin"` (the `hx_session` cookie is `HttpOnly; SameSite=Strict`, so script never reads it). A current-generation `401` locks the credential provider and clears session queries/cursor; stale responses cannot affect a replacement credential. The root token-entry gate remains available, with pairing guidance in scoped mode. The event stream uses `websocketTicket` before every connect and sends its one-use result through `hx-ticket.<ticket>` alongside `hypothex.v1`; no credential appears in a URL. Current-generation `4401` locks and stops reconnecting. `/pair` renders without the header and never calls `/auth/me` or opens the event stream; it strips the `#<offer>.<secret>` fragment from the address bar (`history.replaceState`) before it sends anything, and sends the secret only in the `POST /api/v1/auth/pair` body.
 - Scopes in the UI are hints, never the gate: the server decides (403 shows as an error line). Admin-only reads (`/auth/users`, `/notify`, `/storage`) are never requested for a non-admin principal, so a collaborator's console stays free of 403s; the header hides `storage` for them.
 - Actions: every new write sends only `{command_id, ...its fields}`; `created_by`, `owner` and `author` are set by the server from the principal (contract 1.2, 7). Phase 1–2 actions keep `action()` (`command_id`, `created_by: "human"`). Writes go through `useAction` (`ui/src/pages/components/useAction.ts`) so a retry after a dropped connection reuses the same `command_id`.
-- One data layer: every request goes through `api.*` in `ui/src/api/client.ts`; no module builds its own `fetch` or route table. Downloads use `api.exportTaskUrl(...)` as a plain same-origin `<a download>` (the cookie goes with it).
+- One data layer: every request goes through `api.*` in `ui/src/api/client.ts`; no module builds its own `fetch` or route table. Downloads use a Blob made from authenticated `api.exportTask(...)` text; a remote anchor cannot carry the root bearer header.
 - Live data: `notebook.updated` invalidates `["notebook", project]`; `run.artifacts_cleaned` invalidates the run families (narrowed) plus `["storage"]`; `storage.*` invalidates `STORAGE_EVENT_INVALIDATES` (`["storage"]`, `["runs"]`, `["run"]`); `notify.*` and `digest.sent` invalidate `["notify"]` (and `digest.sent` the project's notebook, where the summary is saved); `auth.*` invalidates `AUTH_EVENT_INVALIDATES` (`["auth", "sessions"]`, `["auth", "users"]`). Run events never invalidate `["storage"]` (a storage report walks every host; it refreshes on cleanup events and on demand). Export texts are keyed under `["leaderboard", project, task, "export", opts]`, so the run and mirror events that refresh a leaderboard refresh an open export menu with it (Copy never copies older numbers than the table shows).
 - Copy (spec 8.1, terse UI): numbers and glyphs, labels of one or two words; explanations only in `title` tooltips; every state has its own glyph, never colour alone; monospace only for commands, paths, ids and tokens; times in UTC; a missing value is `—`; a not-yet-known cell is `·`. Glyphs: notify events `✓` finished, `✗` failed, `?` lost, `⊘` killed; outbox `✓` sent, `✗` failed, `…` pending/sending, `○` skipped; channel `●` set, `○` unset, `·` not configured; scope `r`/`l`/`a`; refused clean rows `⊘`; cleaned artifact `✕ <date> <bytes>`; baseline `◆`; digest counts `▲` started.
 - CSS: each new component injects its own `<style data-hx="…">`; every selector is scoped (`.page …`, `.bar …`, `.pair …`); colours only through the theme tokens (`var(--ink)`, `var(--fail)`, …), so light and dark both work. `ui/src/pages/components/styles.ts` is not edited.
@@ -77,7 +77,7 @@ Six failure modes the contract implies that no single screen's happy path covers
 3. **Two people edit one notebook day.** The second save gets 409 with the current day (contract 8.16). The page must keep the user's text, show both versions side by side, and `keep mine` must PUT with `base_hash = current.hash` (not the stale one, which would 409 forever). An append never conflicts. Tests: `a 409 keeps my text, shows theirs, and keep mine saves on their hash`, `use theirs drops my edit; without a seen editor the bar says only when` and `save replaces the day on the hash the edit started from, even after a live refresh` (Task 19).
 4. **Apply on a stale or mistyped plan.** The plan expires after `plan_ttl_minutes`; a wrong number must never reach the server as a "close enough" confirm. `apply` stays disabled until a plan exists and is unexpired; the dialog's `delete` stays disabled until the typed text equals the plan's displayed number (`412.3`); the request carries `plan.total_bytes` exactly; a `400 CleanRefusedError` shows its message and the plan is kept for a new dry run. Tests: `delete stays disabled until the typed number matches; apply sends the exact bytes`, `an expired plan disables apply` and `a refused apply shows the error and keeps the plan` (Task 16).
 5. **A collaborator opens Settings.** A `launch` principal must see only their own sessions and an add-device panel limited to `read`/`launch`, and the page must not request `/auth/users` or `/notify` (403s in the console, contract 1.12). Test: `a collaborator sees own sessions and add device only; admin routes are never requested` (Task 13).
-6. **A phase 2 hub (no auth routes).** `/auth/me` answers 404. The app must keep working as before: no user chip, no storage link, no gate, the event stream on the plain URL, owner checks permissive. Tests: `eventsUrl falls back to the plain URL on a hub without /auth/me` (Task 2), `a hub without /auth/me: no chip, no storage, settings link kept` (Task 7).
+6. **A hub without scoped auth routes.** `/auth/me` answers 404: hide the collaboration chip/storage UI and keep scoped owner checks permissive. Retain the root credential gate and ticket transport; 404 does not prove transport auth is off. Test the root gate and fresh-ticket socket path independently of scoped feature discovery, plus `a hub without /auth/me: no chip, no storage, settings link kept` (Task 7).
 
 ---
 
@@ -88,8 +88,8 @@ ui/
   src/
     api/models.ts                 phase 3 shapes: principal, sessions, users, pairing, notify, notebook, baselines, export, storage, digest (Task 1)
     api/types.ts                  GENERATED OpenAPI paths, regenerated with the phase 3 routes   (Task 2)
-    api/auth.ts                   auth store (open | locked), PrincipalContext, usePrincipal, authOn, isAdmin (Task 2)
-    api/client.ts                 credentials, 401 → lock, requestText, eventsUrl, ROUTES + api.* (Task 2)
+    api/auth.ts                   existing credential provider plus PrincipalContext, usePrincipal, authOn, isAdmin (Task 2)
+    api/client.ts                 credential-aware requests, 401 → lock, requestText, ROUTES + api.* (Task 2)
     api/queries.ts                keys, useMe/useSessions/useUsers/useNotify/useNotebook*/useStorage/useExportText, lists (Task 3)
     api/events.ts                 phase 3 events, async ticket URL, 4401, enabled flag             (Task 4)
     api/notebookEditors.ts        last editor of a notebook day, from notebook.updated events      (Task 4)
@@ -142,7 +142,7 @@ Each file has one job: `api/` talks to the server, `settings/`, `storage/` and `
 
 ## Group 1: Models, auth store, client, queries, live events (Tasks 1–4)
 
-Gives the UI typed access to every phase 3 hub route the screens use and keeps them live. `models.ts` gets the contract shapes (the new routes return plain dicts or pydantic models; `types.ts` knows only their paths). `api/auth.ts` holds the one piece of global state phase 3 needs: whether the hub has said 401. `client.ts` sends cookies, locks on 401, fetches export text, and builds the event-stream URL with a ticket. `queries.ts` adds keys, read hooks and four invalidation lists; `events.ts` maps the new events and handles `4401`. The backend plan must be merged before Task 2 Step 3 (the phase 3 routes must be in `/api/openapi.json`).
+Gives the UI typed access to every phase 3 hub route the screens use and keeps them live. `models.ts` gets the contract shapes (the new routes return plain dicts or pydantic models; `types.ts` knows only their paths). `api/auth.ts` retains the token baseline credential state and adds principal context. `client.ts` retains bearer/cookie selection and credential-generation guards, and adds authenticated export text. Event tickets use the baseline WebSocket subprotocol flow. `queries.ts` adds keys, read hooks and four invalidation lists; `events.ts` maps the new events and handles `4401`. The backend plan must be merged before Task 2 Step 3 (the phase 3 routes must be in `/api/openapi.json`).
 
 ### Task 1: Phase 3 models and typed fixtures
 
@@ -1063,7 +1063,7 @@ git commit -m "feat(ui): phase 3 api models for auth, notebook, export, notify a
 ### Task 2: Auth store, client routes, 401 lock and the event-stream ticket
 
 **Files:**
-- Create: `ui/src/api/auth.ts`
+- Modify: the token baseline credential provider (`ui/src/api/auth.ts` or its final merged location)
 - Modify: `ui/src/api/types.ts` (regenerated)
 - Modify: `ui/src/api/client.ts` (imports; `request` and a new `requestText`; after `wsUrl`; `ROUTES`; end of the `api` object)
 - Modify: `ui/test/setup.ts` (reset the auth store after each test)
@@ -1073,10 +1073,9 @@ git commit -m "feat(ui): phase 3 api models for auth, notebook, export, notify a
 **Interfaces:**
 - Consumes: Task 1 models; `ApiError`, `buildUrl`, `get`, `post`, `request`, `newCommandId` in `client.ts`.
 - Produces:
-  - `ui/src/api/auth.ts`: `type AuthState = "open" | "locked"`; `authState(): AuthState`; `lock(): void`; `unlock(): void` (tests; only a page load unlocks the app); `subscribeAuth(fn): () => void`; `useAuthState(): AuthState`; `PrincipalContext` (React context, `Principal | null`); `usePrincipal(): Principal | null`; `authOn(p): boolean` (`p?.auth === "on"`); `isAdmin(p): boolean` (`p?.scope === "admin"`, so the auth-off local owner is admin).
-  - `ui/src/api/client.ts`: every request sends `credentials: "same-origin"`; a `401` answer calls `lock()` before throwing; `requestText(route, opts): Promise<string>` (GET, `Accept: text/plain, text/csv`); `eventsUrl(signal?): Promise<string>` (`wsUrl()` plus `?ticket=` when `/auth/me` says `auth: "on"`; the plain URL on a 404 from a pre-phase-3 hub); `exportQuery(opts: ExportOptions): Record<string, QueryValue>` (lists joined by commas).
-  - `ROUTES.authMe | authWsTicket | authPair | authPairings | authSessions | authSessionRevoke | authUsers | authUserDisable | notebookDays | notebookDay | taskExport | notify | notifyTest | storage | storagePlan | storageApply`.
-  - `api.me(signal?)`, `api.wsTicket(signal?)`, `api.pair(body)`, `api.createPairing(body)`, `api.sessions(signal?)`, `api.revokeSession(id, opts?)`, `api.users(signal?)`, `api.disableUser(name, opts?)`, `api.notebookDays(project, signal?)`, `api.notebookDay(project, day, signal?)`, `api.appendNotebook(project, day, text, opts?)`, `api.saveNotebook(project, day, text, baseHash, opts?)` (PUT), `api.exportTask(project, task, opts, signal?) => Promise<string>`, `api.exportTaskUrl(project, task, opts) => string`, `api.notify(signal?)`, `api.testNotify(channel, opts?)`, `api.storage(query?, signal?)`, `api.planClean(policy, opts?)`, `api.applyClean(planId, confirmBytes, opts?)`. New writes send `{command_id, …fields}` and no `created_by`.
+  - Preserve the merged token provider's credential state, transitions and public helpers; add `PrincipalContext`, `usePrincipal`, `authOn` (scoped feature mode), and `isAdmin`. Do not replace its generation guards with a separate boolean store. Adapt the test-only lock/reset helpers below to the final reviewed exports before Round 5.
+  - Retain bearer selection, same-origin cookies, stale-response rejection, 401 lock/query/cursor cleanup, and 403/404 handling in all JSON and text requests. `requestText` must use that same transport; `exportQuery` joins list options. `/auth/me` 404 hides scoped features only. Reuse the baseline ticket endpoint and socket protocol helpers; do not add a second URL resolver.
+  - `api.me(signal?)`, `api.wsTicket(signal?)`, `api.pair(body)`, `api.createPairing(body)`, `api.sessions(signal?)`, `api.revokeSession(id, opts?)`, `api.users(signal?)`, `api.disableUser(name, opts?)`, `api.notebookDays(project, signal?)`, `api.notebookDay(project, day, signal?)`, `api.appendNotebook(project, day, text, opts?)`, `api.saveNotebook(project, day, text, baseHash, opts?)` (PUT), `api.exportTask(project, task, opts, signal?) => Promise<string>`, `api.exportTaskUrl(project, task, opts) => string (URL construction only, never a remote download anchor)`, `api.notify(signal?)`, `api.testNotify(channel, opts?)`, `api.storage(query?, signal?)`, `api.planClean(policy, opts?)`, `api.applyClean(planId, confirmBytes, opts?)`. New writes send `{command_id, …fields}` and no `created_by`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1154,7 +1153,7 @@ Create `ui/test/api/phase3-client.test.ts`:
 ```ts
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { authState, lock, subscribeAuth, unlock } from "../../src/api/auth";
-import { ApiError, api, eventsUrl, exportQuery } from "../../src/api/client";
+import { ApiError, api, exportQuery } from "../../src/api/client";
 import { mockFetch } from "./fetch-mock";
 import { CLEAN_PLAN, CLEAN_RESULT, ME_ADMIN, ME_OFF, NOTEBOOK_DAY, OFFER } from "./phase3-fixtures";
 
@@ -1247,37 +1246,6 @@ describe("requests", () => {
   });
 });
 
-describe("eventsUrl", () => {
-  test("auth on: a single-use ticket in the query", async () => {
-    const seen = stub({
-      "/api/v1/auth/me": [200, ME_ADMIN],
-      "/api/v1/auth/ws-ticket": [200, { ticket: "t_9f/2+x", expires_in: 30 }],
-    });
-    expect(await eventsUrl()).toBe("ws://127.0.0.1:7777/api/v1/ws?ticket=t_9f%2F2%2Bx");
-    expect(seen.map((s) => [s.method, s.url])).toEqual([
-      ["GET", "/api/v1/auth/me"],
-      ["POST", "/api/v1/auth/ws-ticket"],
-    ]);
-  });
-
-  test("auth off: the plain URL, no ticket request", async () => {
-    const seen = stub({ "/api/v1/auth/me": [200, ME_OFF] });
-    expect(await eventsUrl()).toBe("ws://127.0.0.1:7777/api/v1/ws");
-    expect(seen).toHaveLength(1);
-  });
-
-  test("eventsUrl falls back to the plain URL on a hub without /auth/me", async () => {
-    stub({});
-    expect(await eventsUrl()).toBe("ws://127.0.0.1:7777/api/v1/ws");
-  });
-
-  test("a 401 from /auth/me rejects and locks", async () => {
-    stub({ "/api/v1/auth/me": [401, { error: "no session", type: "AuthError" }] });
-    await expect(eventsUrl()).rejects.toBeInstanceOf(ApiError);
-    expect(authState()).toBe("locked");
-  });
-});
-
 describe("phase 3 api", () => {
   test("pair posts the offer, secret and device in the body only", async () => {
     const calls = mockFetch({ user: "alice", scope: "launch", scopes: ["read", "launch"], session_id: "s_91d0aa3f62c8" });
@@ -1327,7 +1295,7 @@ describe("phase 3 api", () => {
     ]);
   });
 
-  test("exportTaskUrl is the same-origin download link with the same query", () => {
+  test("exportTaskUrl constructs the same-origin route with the same query", () => {
     expect(api.exportTaskUrl("toy-classifier", "toy-test", { format: "csv", digits: 2, baselines: false })).toBe(
       "/api/v1/tasks/toy-classifier/toy-test/export?format=csv&digits=2&baselines=false",
     );
@@ -1373,36 +1341,114 @@ describe("phase 3 api", () => {
 Run: `bun test test/api/phase3-client.test.ts test/api/types.test.ts`
 Expected: FAIL. The file does not load: `error: Cannot find module '../../src/api/auth'` (and `setup.ts` fails the same way for every test file until Step 4 creates `auth.ts`).
 
-- [ ] **Step 3: Regenerate `types.ts` from a hub with auth off and no hosts**
+- [ ] **Step 3: Regenerate `types.ts` from a private authenticated hub with no hosts**
 
-From the repo root. Run the whole block as ONE shell command (one Bash call): the temp home is passed with `--home` and the SSH variables are set inline on the `hx serve` line; the port comes from the OS; the block reads `openapi.json` only after the hub on that port answers `/.well-known/hypothex/environment` with the identity it wrote; the wait is bounded and stops when `hx serve` exits; the block stops its own server by its unique home on every path. The empty temp home has no `config.yaml` (auth off, so `openapi.json` needs no session) and no `environments.yaml` (no host connects).
+Run from the repo root after the Phase 3 routes are implemented. This uses the actual `hx token` selected-home command, retains default authentication and fetches OpenAPI with a header only after verifying the expected identity. It never prints the credential, connects a host, or disables OpenAPI protection; cleanup owns only its child process and temporary home. Save the following as a temporary Python script and execute with `uv run python <script>`:
 
-```bash
-H="$(mktemp -d)"
-ID="$(uuidgen | tr -d '-' | tr 'A-Z' 'a-z')"
-P="$(uv run python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-if [ -d "$H" ] && [ -n "$ID" ] && [ -n "$P" ]; then
-  printf '{"environment_id": "%s", "label": "hx-types"}\n' "$ID" > "$H/environment.json"
-  HYPOTHEX_SSH=false HYPOTHEX_SCP=false uv run hx --home "$H" serve --port "$P" > /tmp/hx-serve-types.log 2>&1 &
-  SERVER=$!
-  ok=""
-  for i in $(seq 60); do
-    kill -0 "$SERVER" 2>/dev/null || { echo "hx serve exited at start"; break; }
-    if curl -sf "http://127.0.0.1:$P/.well-known/hypothex/environment" | grep -Fq "\"$ID\""; then ok=1; break; fi
-    sleep 0.5
-  done
-  if [ -n "$ok" ]; then
-    (cd ui && bunx openapi-typescript "http://127.0.0.1:$P/api/openapi.json" -o src/api/types.ts)
-  else
-    echo "no hx serve with the identity of $H on port $P"; tail -20 /tmp/hx-serve-types.log
-  fi
-  kill "$SERVER" 2>/dev/null
-  pkill -f -- "--home $H serve"
-else
-  echo "no temp home, id or free port"
-fi
-head -4 ui/src/api/types.ts
-grep -oE '"/api/v1/(auth|notify|storage|projects/\{project\}/(notebook|digest)|tasks/\{project\}/\{task\}/export|compare/export)[^"]*"' ui/src/api/types.ts | LC_ALL=C sort -u
+```python
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+import httpx
+
+repo = Path.cwd()
+with tempfile.TemporaryDirectory(prefix="hx-phase3-types-") as directory:
+    home = Path(directory)
+    env = {**os.environ, "HYPOTHEX_SSH": "false", "HYPOTHEX_SCP": "false"}
+    env.pop("HYPOTHEX_SERVE_TOKEN", None)
+    with (home / "server.log").open("wb") as log:
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "from hypothex.cli.main import cli; cli()",
+                "--home",
+                str(home),
+                "serve",
+                "--port",
+                "0",
+            ],
+            env=env,
+            stdout=log,
+            stderr=log,
+        )
+        try:
+            deadline = time.monotonic() + 30
+            record = None
+            while time.monotonic() < deadline and child.poll() is None:
+                try:
+                    candidate = json.loads((home / "serve/server.json").read_text())
+                    identity = json.loads((home / "environment.json").read_text())
+                    if candidate.get("pid") == child.pid and candidate.get(
+                        "environment_id"
+                    ) == identity.get("environment_id"):
+                        record = candidate
+                        break
+                except (OSError, ValueError):
+                    pass
+                time.sleep(0.1)
+            if record is None:
+                raise RuntimeError("temporary hub did not publish its owned identity")
+            base = f"http://127.0.0.1:{int(record['port'])}"
+            # CLI verifies the selected home's exact live process birth locally.
+            token = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from hypothex.cli.main import cli; cli()",
+                    "--home",
+                    str(home),
+                    "token",
+                ],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+            with httpx.Client(trust_env=False, follow_redirects=False, timeout=2) as client:
+                while time.monotonic() < deadline:
+                    if child.poll() is not None:
+                        raise RuntimeError("temporary hub exited before readiness")
+                    try:
+                        identity_response = client.get(base + "/.well-known/hypothex/environment")
+                        if identity_response.status_code == 200:
+                            break
+                    except httpx.TransportError:
+                        pass
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("temporary hub readiness timed out")
+                if identity_response.json().get("environment_id") != record["environment_id"]:
+                    raise RuntimeError("temporary hub identity mismatch")
+                response = client.get(
+                    base + "/api/openapi.json", headers={"Authorization": f"Bearer {token}"}
+                )
+                if response.status_code != 200:
+                    raise RuntimeError(
+                        f"authenticated OpenAPI returned HTTP {response.status_code}"
+                    )
+                spec = home / "openapi.json"
+                spec.write_text(response.text)
+            subprocess.run(
+                ["bunx", "openapi-typescript", str(spec), "-o", "src/api/types.ts"],
+                cwd=repo / "ui",
+                check=True,
+                timeout=60,
+            )
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
 ```
 
 Expected: the header contains `This file was auto-generated by openapi-typescript.`, and the `grep` prints these lines
@@ -1432,63 +1478,31 @@ Expected: the header contains `This file was auto-generated by openapi-typescrip
 
 (plus `/api/v1/storage/delete` and `/api/v1/storage/usage` if the hub also registers its env routes; the UI calls neither). If a path is missing, stop: the backend plan is not merged. If a path exists with another placeholder name (for example `{sid}` where this plan has `{session_id}`), the backend spelling wins: use it in `PHASE_3_ROUTES` (Step 1), in `ROUTES` and in the matching `params` keys (Step 5). `bun run typecheck` fails until they agree.
 
-- [ ] **Step 4: Write the auth store**
+- [ ] **Step 4: Extend the merged credential provider with principal context**
 
-Create `ui/src/api/auth.ts`:
+Keep the complete baseline `AuthStore` and `auth` instance from `ui/src/api/auth.ts`. Add `createContext`, `useContext`, `useSyncExternalStore`, and the `Principal` type import. Append these feature-facing aliases; all state remains owned by the baseline store. Async callers must pass their captured generation to `lock`; zero-argument calls are synchronous UI/test actions only.
 
 ```ts
-/**
- * The app's auth state, kept outside React so the API client can set it, and the signed-in
- * principal for components deep in a page (phase 3 contract 1.10, 10).
- *
- * `open`: requests are answered. `locked`: the hub answered 401 (no session, or it was
- * revoked or expired, or the user was disabled) or closed the event stream with 4401. The
- * shell then shows the 401 gate. Only a full page load opens it again (after `/pair`);
- * `unlock` exists for tests.
- */
-import { createContext, useContext, useSyncExternalStore } from "react";
-
-import type { Principal } from "./models";
-
 export type AuthState = "open" | "locked";
-
-let state: AuthState = "open";
-const listeners = new Set<() => void>();
-
-function set(next: AuthState): void {
-  if (state === next) return;
-  state = next;
-  for (const listener of [...listeners]) listener();
-}
-
-/** The current auth state. */
 export function authState(): AuthState {
-  return state;
+  return auth.snapshot().status === "locked" ? "locked" : "open";
 }
-
-/** The hub said 401: show the gate. Idempotent. */
-export function lock(): void {
-  set("locked");
+export function lock(generation = auth.snapshot().generation): void {
+  auth.lock(generation);
 }
-
-/** Back to `open` (tests; the app itself only unlocks by reloading). */
+/** Test reset only; app credentials are validated by the transport AuthGate. */
 export function unlock(): void {
-  set("open");
+  auth.accept(auth.select(null));
 }
-
-/** Call `listener` after every change; returns the unsubscribe function. */
-export function subscribeAuth(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
-}
-
-/** `authState()`, re-rendering on every change. */
+export const subscribeAuth = auth.subscribe;
 export function useAuthState(): AuthState {
   return useSyncExternalStore(subscribeAuth, authState, authState);
 }
+```
 
+Append the principal helpers:
+
+```ts
 /**
  * The principal from the app's one `GET /api/v1/auth/me` (`AppShell`). Null while it
  * loads, on a hub without auth routes (before phase 3), and outside the shell (unit tests
@@ -1512,22 +1526,9 @@ export function isAdmin(principal: Principal | null): boolean {
 }
 ```
 
-- [ ] **Step 5: Send cookies, lock on 401, add text requests, the ticket URL, the routes and the functions**
+- [ ] **Step 5: Extend the authenticated transport, routes and functions**
 
-In `ui/src/api/client.ts`, replace
-
-```ts
-import type * as M from "./models";
-import type { paths } from "./types";
-```
-
-with
-
-```ts
-import { lock } from "./auth";
-import type * as M from "./models";
-import type { paths } from "./types";
-```
+Preserve the baseline request implementation and imports. Add text response support through its existing request path, including credential capture, bearer headers, cookie selection, stale-generation rejection, and current-generation 401 cleanup. Authentication errors must never return stale protected data. Keep 403/404 from locking a valid provider. Reuse the baseline ticket route/helper and `WsTicket` nullability; deduplicate the route and function if already present. Restore exact executable adapters against the merged files before formal Round 5.
 
 Replace
 
@@ -1541,7 +1542,6 @@ with
 ```ts
   compareExamples: "/api/v1/compare/examples",
   authMe: "/api/v1/auth/me",
-  authWsTicket: "/api/v1/auth/ws-ticket",
   authPair: "/api/v1/auth/pair",
   authPairings: "/api/v1/auth/pairings",
   authSessions: "/api/v1/auth/sessions",
@@ -1559,114 +1559,41 @@ with
   hosts: "/api/v1/hosts",
 ```
 
-Replace the whole `request` function
+Extend the actual baseline `request` in place. Rename its body to a private `requestBody` with a `responseType: "json" | "text"` parameter; leave credential capture, headers, combined abort signal, both `current()` checks, 401 handling and error conversion intact. Change only these lines in that body:
 
 ```ts
-/** Send one request and return the parsed JSON body, or throw `ApiError`. */
-export async function request<T>(method: Method, route: Route, opts: RequestOptions = {}): Promise<T> {
-  const url = buildUrl(route, opts.params, opts.query);
-  const headers: Record<string, string> = { Accept: "application/json" };
-  const init: RequestInit = { method, headers, signal: opts.signal };
-  if (opts.body !== undefined) {
-    headers["Content-Type"] = "application/json";
-    init.body = JSON.stringify(opts.body);
-  }
-  let res: Response;
-  try {
-    res = await fetch(url, init);
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") throw err;
-    throw new ApiError(0, "Cannot reach hx serve", "NetworkError", [], null);
-  }
-  const text = await res.text();
-  let data: unknown = null;
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = text;
-    }
-  }
-  if (!res.ok) throw ApiError.from(res.status, data);
-  return data as T;
+async function requestBody<T>(method: Method, route: Route, opts: RequestOptions, responseType: "json" | "text"): Promise<T> {
+  // The remaining body is the baseline request implementation.
+```
+
+```ts
+  const headers: Record<string, string> = { Accept: responseType === "text" ? "text/plain, text/csv" : "application/json" };
+```
+
+```ts
+  const init: RequestInit = { method, headers, signal, credentials: "same-origin" };
+```
+
+After its existing `if (!res.ok) throw ApiError.from(res.status, data);`, replace `return data as T;` with:
+
+```ts
+  return (responseType === "text" ? text : data) as T;
+```
+
+Then add these public wrappers; `websocketTicket` continues using `request`, retaining nullable tickets and protocol validation:
+
+```ts
+export function request<T>(method: Method, route: Route, opts: RequestOptions = {}): Promise<T> {
+  return requestBody<T>(method, route, opts, "json");
+}
+export function requestText(route: Route, opts: RequestOptions = {}): Promise<string> {
+  return requestBody<string>("GET", route, opts, "text");
 }
 ```
 
-with
+Add this pure export query mapper:
 
 ```ts
-/** `text` as JSON when it parses, else the text itself (`null` for an empty body). */
-function parseBody(text: string): unknown {
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
-/**
- * Send one request with the session cookie and return the response and its text. A 401
- * locks the app (the shell shows the 401 gate) before the caller sees the error.
- */
-async function send(method: Method, route: Route, opts: RequestOptions, accept: string): Promise<{ res: Response; text: string }> {
-  const url = buildUrl(route, opts.params, opts.query);
-  const headers: Record<string, string> = { Accept: accept };
-  const init: RequestInit = { method, headers, signal: opts.signal, credentials: "same-origin" };
-  if (opts.body !== undefined) {
-    headers["Content-Type"] = "application/json";
-    init.body = JSON.stringify(opts.body);
-  }
-  let res: Response;
-  try {
-    res = await fetch(url, init);
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") throw err;
-    throw new ApiError(0, "Cannot reach hx serve", "NetworkError", [], null);
-  }
-  const text = await res.text();
-  if (res.status === 401) lock();
-  if (!res.ok) throw ApiError.from(res.status, parseBody(text));
-  return { res, text };
-}
-
-/** Send one request and return the parsed JSON body, or throw `ApiError`. */
-export async function request<T>(method: Method, route: Route, opts: RequestOptions = {}): Promise<T> {
-  const { text } = await send(method, route, opts, "application/json");
-  return parseBody(text) as T;
-}
-
-/** GET a text body (LaTeX, Markdown or CSV) as is, or throw `ApiError`. */
-export async function requestText(route: Route, opts: RequestOptions = {}): Promise<string> {
-  const { text } = await send("GET", route, opts, "text/plain, text/csv");
-  return text;
-}
-```
-
-Directly after the `wsUrl` function, insert:
-
-```ts
-
-/**
- * URL of the live event stream for the next connect. With auth on the hub wants a
- * single-use ticket (`POST /api/v1/auth/ws-ticket`, 30 s) in the query; a long-lived token
- * never goes in a URL. A hub without `/auth/me` (before phase 3) gets the plain URL. A 401
- * rejects (and has locked the app).
- */
-export async function eventsUrl(signal?: AbortSignal): Promise<string> {
-  const base = wsUrl();
-  let principal: M.Principal;
-  try {
-    principal = await api.me(signal);
-  } catch (err) {
-    if (err instanceof ApiError && err.status === 404) return base;
-    throw err;
-  }
-  if (principal.auth !== "on") return base;
-  const { ticket } = await api.wsTicket(signal);
-  return `${base}?ticket=${encodeURIComponent(ticket)}`;
-}
-
 /** Export options as query values: lists become comma lists, unset options are dropped. */
 export function exportQuery(opts: M.ExportOptions): Record<string, QueryValue> {
   return {
@@ -1711,7 +1638,7 @@ with
   // phase 3: auth, notebook, export, notify, storage ---------------------------------------
   me: (signal?: AbortSignal) => get<M.Principal>(ROUTES.authMe, { signal }),
   wsTicket: (signal?: AbortSignal) =>
-    post<{ ticket: string; expires_in: number }>(ROUTES.authWsTicket, { body: {}, signal }),
+    post<{ ticket: string | null; expires_in: number }>(ROUTES.wsTicket, { body: {}, signal }),
   /** Redeem a pairing link (public route); a browser gets the session cookie. */
   pair: (body: M.PairRequest) => post<M.PairResult>(ROUTES.authPair, { body }),
   createPairing: (body: M.PairingRequest) => post<M.PairingOffer>(ROUTES.authPairings, { body }),
@@ -1740,7 +1667,7 @@ with
     }),
   exportTask: (project: string, task: string, opts: M.ExportOptions, signal?: AbortSignal) =>
     requestText(ROUTES.taskExport, { params: { project, task }, query: exportQuery(opts), signal }),
-  /** The same export as a same-origin link for `<a download>`. */
+  /** Export URL construction only; downloads use authenticated text and a Blob. */
   exportTaskUrl: (project: string, task: string, opts: M.ExportOptions) =>
     buildUrl(ROUTES.taskExport, { project, task }, exportQuery(opts)),
   notify: (signal?: AbortSignal) => get<M.NotifyStatus>(ROUTES.notify, { signal }),
@@ -2057,13 +1984,13 @@ git commit -m "feat(ui): queries for principal, sessions, notify, notebook, stor
 - Create: `ui/test/api/phase3-events.test.ts`, `ui/test/api/notebookEditors.test.ts`
 
 **Interfaces:**
-- Consumes: Task 2 `lock`, `authState`, `eventsUrl`; Task 3 lists.
+- Consumes: the merged token provider and event transport; Task 3 invalidation lists.
 - Produces:
   - `BY_PROJECT` gains `notebook` (so `notebook.updated` narrows to its project).
-  - `EventStreamOptions.url?: string` and `resolveUrl?: () => Promise<string>` (one of them; `resolveUrl` is awaited before every connect, so each connect gets a fresh single-use ticket). A failed `resolveUrl` reconnects with the usual backoff, unless the app is locked (then the stream stops).
+  - Preserve the baseline socket options and ticket helper. Before every connection request a fresh one-use ticket and connect to the clean URL with `hypothex.v1` and `hx-ticket.<ticket>` subprotocols; intentional no-auth uses only `hypothex.v1`.
   - A socket closed with code `WS_AUTH_CLOSE = 4401` calls `lock()`, sets `offline` and never reconnects.
   - `keysForEvent`: `notebook.updated` → `["notebook", project]`; `run.artifacts_cleaned` → the narrowed run families plus `["storage"]`; `storage.*` → `STORAGE_EVENT_INVALIDATES`; `notify.*` → `["notify"]`; `digest.sent` → `["notify"]` and `["notebook", project]`; `auth.*` → `AUTH_EVENT_INVALIDATES`.
-  - `EventStreamHookOptions.enabled?: boolean` (false: no socket; `/pair` uses it); with no `url` option the hook uses `resolveUrl: eventsUrl`. `LiveUpdates` takes `enabled`.
+  - Preserve the baseline provider/stream gate; `/pair` opens no socket or protected queries. Adapt its existing enable mechanism rather than creating an independent gate.
   - `ui/src/api/notebookEditors.ts`: `notebookEditorOf(event): {project, day, author, at} | null`; `noteNotebookEditors(events)`; `notebookEditor(project, day)`; `useNotebookEditor(project, day)`; `clearNotebookEditors()` (tests).
 
 - [ ] **Step 1: Write the failing tests**
@@ -2119,53 +2046,12 @@ describe("notebook editors", () => {
 Create `ui/test/api/phase3-events.test.ts`:
 
 ```ts
-import { describe, expect, mock, test } from "bun:test";
-import { authState } from "../../src/api/auth";
-import { type Clock, EventStream, type HxEvent, keysForEvent, type SocketLike, WS_AUTH_CLOSE } from "../../src/api/events";
+import { describe, expect, test } from "bun:test";
+import { type HxEvent, keysForEvent } from "../../src/api/events";
 
 function ev(type: string, project: string | null = "deepretro", run_id: string | null = null): HxEvent {
   return { sequence: 1, type, project, run_id, payload: {}, created_at: "2026-10-04T14:00:00Z" };
 }
-
-class Socket implements SocketLike {
-  readyState = 0;
-  onopen: ((ev: Event) => void) | null = null;
-  onmessage: ((ev: MessageEvent) => void) | null = null;
-  onclose: ((ev: CloseEvent) => void) | null = null;
-  onerror: ((ev: Event) => void) | null = null;
-  readonly sent: string[] = [];
-  constructor(readonly url: string) {}
-  send(data: string): void {
-    this.sent.push(data);
-  }
-  close(): void {
-    this.readyState = 3;
-  }
-  open(): void {
-    this.readyState = 1;
-    this.onopen?.(new Event("open"));
-  }
-  closeWith(code: number): void {
-    this.readyState = 3;
-    this.onclose?.(new CloseEvent("close", { code }));
-  }
-}
-
-class Clock0 implements Clock {
-  readonly timers: { ms: number; fn: () => void }[] = [];
-  setTimeout(fn: () => void, ms: number): unknown {
-    this.timers.push({ ms, fn });
-    return this.timers.length;
-  }
-  clearTimeout(): void {}
-  /** Run the last timer that was set (a reconnect). */
-  fireLast(): void {
-    this.timers.at(-1)?.fn();
-  }
-}
-
-/** Wait for queued promise callbacks (the awaited `resolveUrl`). */
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("phase 3 keys", () => {
   test("notebook.updated refreshes that project's notebook only", () => {
@@ -2195,150 +2081,14 @@ describe("phase 3 keys", () => {
   });
 });
 
-describe("tickets and 4401", () => {
-  test("each connect awaits a fresh URL (a new ticket)", async () => {
-    const clock = new Clock0();
-    const sockets: Socket[] = [];
-    let n = 0;
-    const stream = new EventStream({
-      resolveUrl: async () => `ws://127.0.0.1:7777/api/v1/ws?ticket=t${++n}`,
-      clock,
-      createSocket: (url) => {
-        const s = new Socket(url);
-        sockets.push(s);
-        return s;
-      },
-      onEvents: () => {},
-    });
-    stream.start();
-    await flush();
-    sockets[0]?.open();
-    sockets[0]?.closeWith(1006);
-    clock.fireLast();
-    await flush();
-    expect(sockets.map((s) => s.url)).toEqual([
-      "ws://127.0.0.1:7777/api/v1/ws?ticket=t1",
-      "ws://127.0.0.1:7777/api/v1/ws?ticket=t2",
-    ]);
-    stream.stop();
-  });
-
-  test("head completes before ticket acquisition and subscribe retains the head", async () => {
-    const order: string[] = [];
-    const sockets: Socket[] = [];
-    let finishHead!: (value: number) => void;
-    const stream = new EventStream({
-      head: () => new Promise<number>((resolve) => { finishHead = resolve; }),
-      onHead: () => order.push("head"),
-      resolveUrl: async () => { order.push("ticket"); return "ws://local/ws?ticket=one"; },
-      createSocket: (url) => { const socket = new Socket(url); sockets.push(socket); return socket; },
-      onEvents: () => {},
-    });
-    stream.start();
-    expect(order).toEqual([]);
-    finishHead(42);
-    await flush();
-    expect(order).toEqual(["head", "ticket"]);
-    sockets[0]?.open();
-    expect(sockets[0]?.sent).toEqual([JSON.stringify({ type: "subscribe", after_sequence: 42 })]);
-    stream.stop();
-  });
-
-  test("a ticket from before stop and restart cannot open a socket", async () => {
-    const pending: ((url: string) => void)[] = [];
-    const sockets: Socket[] = [];
-    const stream = new EventStream({
-      resolveUrl: () => new Promise<string>((resolve) => pending.push(resolve)),
-      createSocket: (url) => { const socket = new Socket(url); sockets.push(socket); return socket; },
-      onEvents: () => {},
-    });
-    stream.start();
-    stream.stop();
-    stream.start();
-    pending[0]?.("ws://local/ws?ticket=old");
-    await flush();
-    expect(sockets).toHaveLength(0);
-    pending[1]?.("ws://local/ws?ticket=new");
-    await flush();
-    expect(sockets.map((socket) => socket.url)).toEqual(["ws://local/ws?ticket=new"]);
-    stream.stop();
-  });
-
-  test("close code 4401 locks and never reconnects", async () => {
-    const clock = new Clock0();
-    const statuses: string[] = [];
-    const sockets: Socket[] = [];
-    const stream = new EventStream({
-      url: "ws://127.0.0.1:7777/api/v1/ws",
-      clock,
-      createSocket: (url) => {
-        const s = new Socket(url);
-        sockets.push(s);
-        return s;
-      },
-      onEvents: () => {},
-      onStatus: (s) => statuses.push(s),
-    });
-    stream.start();
-    sockets[0]?.open();
-    sockets[0]?.closeWith(WS_AUTH_CLOSE);
-    expect([authState(), statuses.at(-1), clock.timers.length, sockets.length]).toEqual(["locked", "offline", 1, 1]);
-  });
-
-  test("a ticket request that answers 401 locks and stops the stream", async () => {
-    const clock = new Clock0();
-    const createSocket = mock((url: string) => new Socket(url));
-    const stream = new EventStream({
-      resolveUrl: async () => {
-        // what api.me() does on a 401 before it rejects
-        const { lock } = await import("../../src/api/auth");
-        lock();
-        throw new Error("no session");
-      },
-      clock,
-      createSocket,
-      onEvents: () => {},
-    });
-    stream.start();
-    await flush();
-    expect([createSocket.mock.calls.length, clock.timers.length, authState()]).toEqual([0, 0, "locked"]);
-  });
-
-  test("a ticket request that fails for another reason retries with backoff", async () => {
-    const clock = new Clock0();
-    let fail = true;
-    const sockets: Socket[] = [];
-    const stream = new EventStream({
-      resolveUrl: async () => {
-        if (fail) throw new Error("Cannot reach hx serve");
-        return "ws://127.0.0.1:7777/api/v1/ws?ticket=t9";
-      },
-      clock,
-      createSocket: (url) => {
-        const s = new Socket(url);
-        sockets.push(s);
-        return s;
-      },
-      onEvents: () => {},
-    });
-    stream.start();
-    await flush();
-    expect([sockets.length, clock.timers.map((t) => t.ms)]).toEqual([0, [3_000]]);
-    fail = false;
-    clock.fireLast();
-    await flush();
-    expect(sockets.map((s) => s.url)).toEqual(["ws://127.0.0.1:7777/api/v1/ws?ticket=t9"]);
-    stream.stop();
-  });
-});
 ```
 
-(The `4401` test expects one timer: the stable-connection timer set by `onopen`; no reconnect timer follows the close.)
+Add concrete transport regression tests against the final merged test fixtures before Round 5: head lookup completes before ticket mint; each reconnect uses a new ticket on a clean URL and fixed protocol; an old ticket result after stop/restart or credential replacement cannot open a socket; current 401/4401 clears queries and cursor then locks/stops; stale 401 cannot lock the replacement credential; 429/5xx/network ticket failures retry with bounded backoff and a fresh ticket; `/auth/me` 404 retains root protection; intentional no-auth uses the nullable-ticket contract. Keep the baseline event tests.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `bun test test/api/phase3-events.test.ts test/api/notebookEditors.test.ts`
-Expected: FAIL. `notebookEditors.test.ts`: `error: Cannot find module '../../src/api/notebookEditors'`; `phase3-events.test.ts`: `SyntaxError: Export named 'WS_AUTH_CLOSE' not found in module '.../src/api/events.ts'`.
+Expected: FAIL. `notebookEditors.test.ts`: `error: Cannot find module '../../src/api/notebookEditors'`; `phase3-events.test.ts`: new event families are not yet mapped.
 
 - [ ] **Step 3: Write `notebookEditors.ts`**
 
@@ -2420,77 +2170,9 @@ export function clearNotebookEditors(): void {
 }
 ```
 
-- [ ] **Step 4: Map the events, await the URL, and handle 4401**
+- [ ] **Step 4: Add event mappings to the merged authenticated event stream**
 
-In `ui/src/api/events.ts`, replace
-
-```ts
-import { wsUrl } from "./client";
-import type { HxEvent, WsMessage } from "./models";
-import { noteLostReasons } from "./lostReasons";
-import {
-  fetchLastSequence,
-  HOST_EVENT_INVALIDATES,
-  REMOTE_RUN_INVALIDATES,
-  RUN_EVENT_INVALIDATES,
-} from "./queries";
-```
-
-with
-
-```ts
-import { authState, lock } from "./auth";
-import { eventsUrl } from "./client";
-import type { HxEvent, WsMessage } from "./models";
-import { noteLostReasons } from "./lostReasons";
-import { noteNotebookEditors } from "./notebookEditors";
-import {
-  AUTH_EVENT_INVALIDATES,
-  fetchLastSequence,
-  HOST_EVENT_INVALIDATES,
-  NOTEBOOK_INVALIDATES,
-  NOTIFY_INVALIDATES,
-  REMOTE_RUN_INVALIDATES,
-  RUN_EVENT_INVALIDATES,
-  STORAGE_EVENT_INVALIDATES,
-} from "./queries";
-```
-
-In `EventStreamOptions`, replace
-
-```ts
-  /** WebSocket URL, e.g. `ws://127.0.0.1:7777/api/v1/ws`. */
-  url: string;
-```
-
-with
-
-```ts
-  /** WebSocket URL, e.g. `ws://127.0.0.1:7777/api/v1/ws` (or give `resolveUrl`). */
-  url?: string;
-  /**
-   * Called before every connect for the URL (phase 3: a fresh single-use `?ticket=`). A
-   * rejection retries with the backoff, unless the app is locked (then the stream stops).
-   */
-  resolveUrl?: () => Promise<string>;
-```
-
-In `EventStreamHookOptions`, replace
-
-```ts
-export interface EventStreamHookOptions {
-  url?: string;
-```
-
-with
-
-```ts
-export interface EventStreamHookOptions {
-  /** False: open no socket (the `/pair` page). Default true. */
-  enabled?: boolean;
-  /** A fixed URL (tests); without it every connect asks `eventsUrl()` (ticket when auth is on). */
-  url?: string;
-```
+Keep all baseline imports and transport/provider interfaces. Add `noteNotebookEditors` and the four new invalidation lists (`AUTH_EVENT_INVALIDATES`, `NOTEBOOK_INVALIDATES`, `NOTIFY_INVALIDATES`, `STORAGE_EVENT_INVALIDATES`) to the existing imports. Do not recreate the removed `resolveUrl`/query-ticket implementation. Exact transport adapters and regression tests are required against the merged token baseline before formal Round 5.
 
 Replace
 
@@ -2560,57 +2242,13 @@ export function keysForEvent(event: HxEvent): QueryKey[] {
 }
 ```
 
-In `EventStream`, retain main's `connect`, `lookupHead`, `needHead`, `headTimer`, `headToken`, `restartFromZero`, and head cancellation in `stop`. Rename its existing socket-opening `private open(): void` to `private openSocket(url: string): void`, and replace only `this.createSocket(this.options.url)` in that method with `this.createSocket(url)`. Add `private urlToken = 0` alongside `headToken`; increment `urlToken` in `stop()` so a pending result from a stopped generation cannot open a socket after restart. Add this new `open` method; both existing calls from `connect` and `lookupHead.finish` continue calling `this.open()`:
+Preserve the baseline `EventStreamOptions.ticket?: ((signal: AbortSignal) => Promise<string | null>) | null`, `websocketTicket`, `connectionGeneration`, `ticketController`, and `openSocket(ticket)` protocol assembly. Preserve `connect`/`lookupHead` ordering, head cancellation, replay, backoff and secret-free socket URL. Add `auth` to the existing auth import. In `openSocket`, capture `const credentialGeneration = auth.snapshot().generation;` immediately before installing handlers; replace only its `socket.onclose` callback:
 
 ```ts
-  /** Resolve a ticket only after the initial head decision; each reconnect gets its own. */
-  private open(): void {
-    if (!this.running) return;
-    const token = ++this.urlToken;
-    const current = () => this.running && token === this.urlToken && this.socket === null;
-    const failed = (): void => {
-      if (!current()) return;
-      if (authState() === "locked") {
-        this.stop();
-        this.setStatus("offline");
-        return;
-      }
-      this.setStatus("offline");
-      this.scheduleReconnect();
-    };
-    const resolve = this.options.resolveUrl;
-    if (!resolve) {
-      this.openSocket(this.options.url ?? "");
-      return;
-    }
-    try {
-      resolve().then((url) => {
-        if (current()) this.openSocket(url);
-      }, failed);
-    } catch {
-      failed();
-    }
-  }
-```
-
-Retain the single predicate-based `invalidateForEvents` implementation and its `partialMatchKey` import: one event batch issues one invalidation, including when run and project keys overlap.
-
-Replace
-
-```ts
-    socket.onclose = () => {
-      if (socket === this.socket) this.handleClose();
-    };
-```
-
-with
-
-```ts
-    socket.onclose = (ev) => {
+    socket.onclose = (event) => {
       if (socket !== this.socket) return;
-      if (ev?.code === WS_AUTH_CLOSE) {
-        // the hub revoked or expired this session: lock the app, never reconnect
-        lock();
+      if (event.code === WS_AUTH_CLOSE) {
+        auth.lock(credentialGeneration);
         this.stop();
         this.setStatus("offline");
         return;
@@ -2619,81 +2257,22 @@ with
     };
 ```
 
-In `useEventStream`, replace
+In `useEventStream`, add `noteNotebookEditors(events)` directly after `noteLostReasons(events)`. Keep the single predicate-based batch invalidation and `partialMatchKey`. Extend `onHead`'s existing `const keys` with the four new lists:
 
 ```ts
-  useEffect(() => {
-    const { url, createSocket, clock } = initial.current;
-    const storage = initial.current.storage === undefined ? defaultStorage() : initial.current.storage;
-    const head = initial.current.head === undefined ? () => fetchLastSequence(client) : initial.current.head;
-    const stream = new EventStream({
-      url: url ?? wsUrl(),
-      onEvents: (events) => {
-        noteLostReasons(events);
-        invalidateForEvents(client, events);
-      },
+        const keys = [
+          ...RUN_EVENT_INVALIDATES, ...HOST_EVENT_INVALIDATES,
+          ...NOTEBOOK_INVALIDATES, ...STORAGE_EVENT_INVALIDATES,
+          ...NOTIFY_INVALIDATES, ...AUTH_EVENT_INVALIDATES,
+        ];
 ```
 
-with
-
-```ts
-  useEffect(() => {
-    const { url, createSocket, clock, enabled = true } = initial.current;
-    if (!enabled) return;
-    const storage = initial.current.storage === undefined ? defaultStorage() : initial.current.storage;
-    const head = initial.current.head === undefined ? () => fetchLastSequence(client) : initial.current.head;
-    const stream = new EventStream({
-      url,
-      resolveUrl: url === undefined ? () => eventsUrl() : undefined,
-      onEvents: (events) => {
-        noteLostReasons(events);
-        noteNotebookEditors(events);
-        invalidateForEvents(client, events);
-      },
-```
-
-Keep `head: head ?? undefined`, the existing `onHead` callback, and its `cancelQueries(filters).then(() => invalidateQueries(filters))` ordering. Extend only the callback's key union to include `NOTEBOOK_INVALIDATES`, `STORAGE_EVENT_INVALIDATES`, `NOTIFY_INVALIDATES`, and `AUTH_EVENT_INVALIDATES` alongside the existing run and host lists: their events before the accepted head are also skipped. Do not invalidate the view-editor source or `/auth/me`. The hook's `head?: ... | null` test override remains.
-
-Replace
-
-```ts
-export interface LiveUpdatesProps {
-  children?: ReactNode;
-  /** Test fakes for the stream (read on mount only). */
-  options?: EventStreamHookOptions;
-}
-```
-
-with
-
-```ts
-export interface LiveUpdatesProps {
-  children?: ReactNode;
-  /** Test fakes for the stream (read on mount only). */
-  options?: EventStreamHookOptions;
-  /** False: no socket (the `/pair` page loads without a session). Default true. */
-  enabled?: boolean;
-}
-```
-
-and replace
-
-```ts
-export function LiveUpdates({ children, options }: LiveUpdatesProps) {
-  const status = useEventStream(options);
-```
-
-with
-
-```ts
-export function LiveUpdates({ children, options, enabled = true }: LiveUpdatesProps) {
-  const status = useEventStream({ ...options, enabled });
-```
+Keep `cancelQueries(filters).then(() => invalidateQueries(filters))`, the head test override and `ticket` option forwarding unchanged. Keep the prerequisite's existing class-level `unsubscribeAuth` subscription in `EventStream.start()` and its removal in `stop()`; it synchronously cancels work on credential reset. Do not add a second hook-level subscription. The transport `AuthGate` owns remounting after validation. Retain baseline tests and add captured-generation 4401 and reset-during-ticket tests using the real `ticket`/`createSocket(url, protocols)` options.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `bun test test/api && bun run typecheck`
-Expected: all phase-3 event cases pass, including head-before-ticket and stopped-generation rejection; `notebookEditors.test.ts` 2 pass; `events.test.ts` (phase 1b/2) passes unchanged (its streams pass `url`, so they connect synchronously as before, and its sockets close without a code); `0 fail`; `tsc --noEmit` prints nothing.
+Expected: all phase-3 event cases pass, including head-before-ticket and stopped-generation rejection; `notebookEditors.test.ts` 2 pass; the merged baseline event tests pass with their actual authenticated transport fixtures; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 6: Commit (repo root)**
 
@@ -2760,6 +2339,8 @@ test("locked: the header keeps brand and theme only, the screen shows the gate",
   mockApi({ "GET /api/v1/auth/me": new HttpReply(401, { error: "no session", type: "AuthError" }) });
   renderApp("/");
   await screen.findByText("pair this device:");
+  expect(screen.getByLabelText("Token")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Unlock" })).toBeTruthy();
   expect(authState()).toBe("locked");
   expect(screen.queryByRole("navigation", { name: "Screens" })).toBeNull();
   expect(screen.queryByRole("button", { name: /Find a run/ })).toBeNull();
@@ -2825,84 +2406,46 @@ export function AuthGate() {
 
 - [ ] **Step 4: Gate the shell and keep `/pair` bare**
 
-In `ui/src/router.tsx`, replace
-
-```ts
-  createRouter,
-  useNavigate,
-} from "@tanstack/react-router";
-import { type ReactElement, useState } from "react";
-
-import { ExamplesPage } from "./pages/Examples";
-```
-
-with
-
-```ts
-  createRouter,
-  useNavigate,
-  useRouterState,
-} from "@tanstack/react-router";
-import { type ReactElement, useState } from "react";
-
-import { PrincipalContext, useAuthState } from "./api/auth";
-import { useMe } from "./api/queries";
-import { AuthGate } from "./pages/components/AuthGate";
-import { ExamplesPage } from "./pages/Examples";
-```
-
-Replace the whole `AppShell` function
+In `ui/src/router.tsx`, retain existing imports and add `useRouterState`, `PrincipalContext`, `useMe`, `LiveUpdates`, the existing pairing component under `import { AuthGate as PairingHint } from "./pages/components/AuthGate"`, and the baseline gate under `import { AuthGate as TransportAuthGate } from "./api/AuthGate"`. Rename the old `AppShell` to `AuthenticatedShell`; keep its header, palette, existing lazy routes and reads, and wrap its returned frame in `<PrincipalContext.Provider value={me.data ?? null}>` after `const me = useMe();`. Add this outer shell:
 
 ```tsx
-/** Page frame: header, the routed screen in `<main>`, the command palette. */
+export const PAIR_PATH = "/pair";
 export function AppShell() {
-  const [paletteOpen, setPaletteOpen] = useState(false);
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  if (pathname === PAIR_PATH) return <main className="bare"><Outlet /></main>;
+  return (
+    <TransportAuthGate lockedHeader={<Header locked />} pairingHint={<PairingHint />}>
+      <LiveUpdates><AuthenticatedShell /></LiveUpdates>
+    </TransportAuthGate>
+  );
+}
+```
+
+Extend the existing `ui/src/api/AuthGate.tsx` component signature with two optional presentation slots:
+
+```tsx
+export function AuthGate({ children, lockedHeader, pairingHint }: {
+  children: ReactNode;
+  lockedHeader?: ReactNode;
+  pairingHint?: ReactNode;
+}) {
+```
+
+Keep validation, credential generation, all password-field options, submit behavior and the `unlocked` return unchanged. Move the existing query-reset subscription to the always-mounted `SessionReset` wrapper below so `/pair` also clears the previous principal's data. In the existing locked/validating return, wrap the current `<main>` in a fragment, render `{lockedHeader}` before it and `{pairingHint}` immediately after the existing form inside that main. This is the exact resulting outer structure; the original form body is retained verbatim:
+
+```tsx
   return (
     <>
-      <Header onFind={() => setPaletteOpen(true)} />
-      <main>
-        <Outlet />
+      {lockedHeader}
+      <main style={{ maxWidth: 320, margin: "18vh auto", padding: 24 }}>
+        {/* Existing token form and validation/error status, unchanged. */}
+        {pairingHint}
       </main>
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
     </>
   );
-}
 ```
 
-with
-
-```tsx
-/** The pairing page: public, no header, no `/auth/me`, no event stream. */
-export const PAIR_PATH = "/pair";
-
-/**
- * Page frame: header, the routed screen in `<main>`, the command palette. Reads
- * `/auth/me` once for the whole app (`PrincipalContext`); while the hub's last answer was
- * a 401 the screen is the 401 gate. `/pair` renders bare.
- */
-export function AppShell() {
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const bare = pathname === PAIR_PATH;
-  const auth = useAuthState();
-  const me = useMe(!bare);
-  if (bare) {
-    return (
-      <main className="bare">
-        <Outlet />
-      </main>
-    );
-  }
-  const locked = auth === "locked";
-  return (
-    <PrincipalContext.Provider value={me.data ?? null}>
-      <Header onFind={() => setPaletteOpen(true)} locked={locked} />
-      <main>{locked ? <AuthGate /> : <Outlet />}</main>
-      {locked ? null : <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />}
-    </PrincipalContext.Provider>
-  );
-}
-```
+Both supported credential-entry paths remain visible: the original token form and pairing guidance. The feature `pages/components/AuthGate.tsx` is the reusable hint, not a substitute for `api/AuthGate.tsx`. The header slot supplies only brand/theme while locked; no protected reads or palette mount. `/pair` returns bare before either gate and before any protected query/socket. Update the shell regression to assert Token/Unlock alongside the existing pairing line, brand and colour-mode button; `/auth/me` 404 never removes the token gate.
 
 In `ui/src/shell/Header.tsx`, replace
 
@@ -2967,23 +2510,32 @@ with
 
 and change its signature to `export function Header({ onFind, locked = false }: HeaderProps) {`.
 
-In `ui/src/main.tsx`, replace
+In `ui/src/api/AuthGate.tsx`, move its existing `const qc = useQueryClient()` and reset `useEffect` out of `AuthGate` into this exported wrapper (keep their imports). It must remain mounted on the public pairing page, where selecting the cookie credential also resets protected cache data:
 
 ```tsx
-      <LiveUpdates>
+export function SessionReset({ children }: { children: ReactNode }) {
+  const qc = useQueryClient();
+  useEffect(() => auth.onReset(() => clearSessionQueries(qc)), [qc]);
+  return <>{children}</>;
+}
 ```
 
-with
+In `ui/src/main.tsx`, replace the `AuthGate` import with `SessionReset`, remove the `LiveUpdates` import, and replace the old `AuthGate`/`LiveUpdates` wrappers with `SessionReset`. The router-aware `AppShell` owns the gates/live stream; the reset listener owns the query client's entire lifetime, including `/pair`:
 
 ```tsx
-      {/* /pair loads without a session: no ticket request, no socket */}
-      <LiveUpdates enabled={window.location.pathname !== "/pair"}>
+    <QueryClientProvider client={queryClient}>
+      <SessionReset><RouterProvider router={router} /></SessionReset>
+    </QueryClientProvider>
 ```
+
+Apply the same wrapper in the `renderApp` test helper. Keep other providers and defaults. Add a regression that starts with a populated protected query cache, renders `/pair` with no protected requests, completes pairing, and verifies `auth.select(null)` synchronously clears the old cache and stops any prior stream before the cookie-authenticated shell mounts. The listener is registered exactly once per query-client lifetime; the token form no longer installs a second copy.
+
+At the Pair page's successful `api.pair` completion, call `auth.select(null)` before any navigation or page reload. This removes root bearer/session-storage selection; subsequent requests use the newly set HttpOnly cookie. Import the existing `auth` instance rather than creating a second provider. Tests must pair while a root bearer is selected and assert the next `/auth/me`/projects request has no Authorization header and resolves the cookie principal. Keep root-mode unlock, intentional no-auth, `/pair` with no requests, and `/auth/me` 404 gate tests.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `bun test test/pages/authGate.test.tsx test/shell test/router.test.tsx && bun run typecheck`
-Expected: `authGate.test.tsx` 1 pass, `AppShell.test.tsx` 2 pass; `Header.test.tsx`, `CommandPalette.test.tsx`, `ThemeToggle.test.tsx` and `router.test.tsx` pass unchanged (their hub answers 404 to `/auth/me`, which leaves the app open); `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `authGate.test.tsx` 1 pass, `AppShell.test.tsx` 2 pass; `Header.test.tsx`, `CommandPalette.test.tsx`, `ThemeToggle.test.tsx` and `router.test.tsx` pass unchanged (their fixtures provide valid transport credentials or explicit no-auth; `/auth/me` 404 alone does not open the gate); `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 6: Commit (repo root)**
 
@@ -3270,6 +2822,7 @@ Create `ui/src/pages/Pair.tsx`:
  * POST body. On success the hub sets the `hx_session` cookie; `overview →` is a plain link,
  * so the app loads again with the cookie and opens its event stream.
  */
+import { auth } from "../api/auth";
 import { createElement, type FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { PairResult } from "../api/models";
@@ -3331,6 +2884,7 @@ export function PairPage({ hash, userAgent, host }: PairPageProps = {}) {
     setState({ phase: "sending" });
     try {
       const result = await api.pair({ offer_id: link.offerId, secret: link.secret, device: name, client: "browser" });
+      auth.select(null); // the new HttpOnly session replaces any selected root bearer
       setState({ phase: "done", result, device: name });
     } catch (err) {
       setState({ phase: "failed", text: pairFailure(err) });
@@ -8319,8 +7873,8 @@ The Task page gets `export ▾` in the leaderboard panel's title (mockup `shot-t
 - Create: `ui/test/pages/exportMenu.test.tsx`
 
 **Interfaces:**
-- Consumes: Task 2 `api.exportTaskUrl`; Task 3 `useExportText`; `ErrorBox`, `Loading`.
-- Produces: `EXPORT_FORMATS` (`latex` LaTeX `tex`, `markdown` Markdown `md`, `csv` CSV `csv`); `NOISE_MODES`; `DIGITS` (0–6); `exportFilename(task, format)`; `previewLines(text, n = 6)`; `lineCount(text)`. `ExportMenu({ project, task })`: a button `export ▾` (`aria-expanded`); open, a `role="dialog"` `aria-label="Export"` popover with the format buttons (`aria-pressed`), `Digits` and `Noise` selects, a `Preview` of the first six lines, `N lines`, `Copy` (`Copied` after a write, `blocked` when the clipboard refuses; disabled while the preview still shows the previous options' text, `isPlaceholderData`) and the download link `↓ .tex` (`download="<task>.tex"`, the same query). Escape and a click outside close it; nothing is fetched while it is closed.
+- Consumes: Task 3 `useExportText` through authenticated `api.exportTask`; `ErrorBox`, `Loading`.
+- Produces: `EXPORT_FORMATS` (`latex` LaTeX `tex`, `markdown` Markdown `md`, `csv` CSV `csv`); `NOISE_MODES`; `DIGITS` (0–6); `exportFilename(task, format)`; `previewLines(text, n = 6)`; `lineCount(text)`. `ExportMenu({ project, task })`: a button `export ▾` (`aria-expanded`); open, a `role="dialog"` `aria-label="Export"` popover with the format buttons (`aria-pressed`), `Digits` and `Noise` selects, a `Preview` of the first six lines, `N lines`, `Copy` (`Copied` after a write, `blocked` when the clipboard refuses; disabled while the preview still shows the previous options' text, `isPlaceholderData`) and the download button `↓ .tex` (a Blob of the authenticated current text, saved as `<task>.tex`; disabled on missing/placeholder/error data). Escape and a click outside close it; nothing is fetched while it is closed.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -8379,7 +7933,7 @@ describe("ExportMenu", () => {
     expect(screen.getByRole("button", { name: "export ▾" }).getAttribute("aria-expanded")).toBe("true");
   });
 
-  test("format and digits refetch; the download link carries the same query and file name", async () => {
+  test("format and digits refetch; download uses the authenticated text and file name", async () => {
     const calls = mockApi({
       [`GET ${BASE}?format=latex&noise=both&digits=3`]: LATEX,
       [`GET ${BASE}?format=markdown&noise=both&digits=3`]: MD,
@@ -8392,11 +7946,29 @@ describe("ExportMenu", () => {
     fireEvent.change(screen.getByLabelText("Digits"), { target: { value: "2" } });
     fireEvent.change(screen.getByLabelText("Noise"), { target: { value: "seed" } });
     await waitFor(() => expect(calls.at(-1)?.url).toBe(`${BASE}?format=markdown&noise=seed&digits=2`));
-    const link = screen.getByRole("link", { name: "↓ .md" });
-    expect([link.getAttribute("href"), link.getAttribute("download")]).toEqual([
-      `${BASE}?format=markdown&noise=seed&digits=2`,
-      "toy-test.md",
-    ]);
+    await waitFor(() => expect((screen.getByRole("button", { name: "↓ .md" }) as HTMLButtonElement).disabled).toBe(false));
+    const blobs: Blob[] = [];
+    const downloads: string[][] = [];
+    const revoked: string[] = [];
+    const create = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const revoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    const click = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, "click");
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: (blob: Blob) => { blobs.push(blob); return "blob:hx-export"; } });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: (url: string) => revoked.push(url) });
+    Object.defineProperty(HTMLAnchorElement.prototype, "click", { configurable: true, value: function (this: HTMLAnchorElement) { downloads.push([this.href, this.download]); } });
+    try {
+      const before = calls.length;
+      fireEvent.click(screen.getByRole("button", { name: "↓ .md" }));
+      expect(await blobs[0].text()).toBe(MD);
+      expect(downloads).toEqual([["blob:hx-export", "toy-test.md"]]);
+      expect(calls.length).toBe(before); // the click never navigates to a protected HTTP URL
+      await waitFor(() => expect(revoked).toEqual(["blob:hx-export"]));
+    } finally {
+      for (const [target, key, descriptor] of [[URL, "createObjectURL", create], [URL, "revokeObjectURL", revoke], [HTMLAnchorElement.prototype, "click", click]] as const) {
+        if (descriptor) Object.defineProperty(target, key, descriptor);
+        else Reflect.deleteProperty(target, key);
+      }
+    }
   });
 
   test("Copy puts the whole text on the clipboard", async () => {
@@ -8426,10 +7998,12 @@ describe("ExportMenu", () => {
     fireEvent.click(screen.getByRole("button", { name: "CSV" }));
     const copyButton = () => screen.getByRole("button", { name: "Copy" }) as HTMLButtonElement;
     await waitFor(() => expect(copyButton().disabled).toBe(true)); // LaTeX still shown, CSV not here
+    expect((screen.getByRole("button", { name: "↓ .csv" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(copyButton());
     expect(written).toEqual([]);
     release();
     await waitFor(() => expect(copyButton().disabled).toBe(false));
+    expect((screen.getByRole("button", { name: "↓ .csv" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   test("Escape and a click outside close the menu", () => {
@@ -8501,10 +8075,9 @@ Create `ui/src/pages/components/ExportMenu.tsx`:
  * `export ▾` in the leaderboard panel's title (phase 3 contract 1.6, 10; mockup
  * `shot-task-export-*`): the task's leaderboard as LaTeX (booktabs), Markdown or CSV, with
  * `mean ± std`, the test-set CI, best in bold and the noise marks the hub adds. Copy takes
- * the whole text; `↓` downloads the same export (same-origin link, the cookie goes along).
+ * the whole text; `↓` downloads a Blob of the same authenticated current export.
  */
 import { createElement, type KeyboardEvent, useEffect, useRef, useState } from "react";
-import { api } from "../../api/client";
 import type { ExportFormat, ExportOptions, NoiseMode } from "../../api/models";
 import { useExportText } from "../../api/queries";
 import { DIGITS, EXPORT_FORMATS, NOISE_MODES, exportFilename, lineCount, previewLines } from "./exportFormats";
@@ -8544,7 +8117,7 @@ export function ExportMenu({ project, task }: ExportMenuProps) {
   const text = useExportText(project, task, opts, open);
   // keepPreviousData shows the last format while the new one loads; that text must
   // never be copied as if it were the format now selected
-  const stale = text.data === undefined || text.isPlaceholderData;
+  const stale = text.data === undefined || text.isPlaceholderData || text.isError;
 
   useEffect(() => {
     if (!open) return;
@@ -8573,6 +8146,22 @@ export function ExportMenu({ project, task }: ExportMenuProps) {
       setCopy("copied");
     } catch {
       setCopy("failed");
+    }
+  };
+  const doDownload = () => {
+    if (stale || text.data === undefined) return;
+    const mime = format === "csv" ? "text/csv;charset=utf-8" : "text/plain;charset=utf-8";
+    const url = URL.createObjectURL(new Blob([text.data], { type: mime }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = exportFilename(task, format);
+    document.body.append(link);
+    try {
+      link.click();
+    } finally {
+      link.remove();
+      // Give the browser the current task to start the download before releasing it.
+      setTimeout(() => URL.revokeObjectURL(url), 0);
     }
   };
   const ext = EXPORT_FORMATS.find((f) => f.format === format)?.ext ?? "txt";
@@ -8630,14 +8219,9 @@ export function ExportMenu({ project, task }: ExportMenuProps) {
             <button type="button" className="btn s" disabled={stale} onClick={doCopy}>
               {copy === "copied" ? "Copied" : copy === "failed" ? "blocked" : "Copy"}
             </button>
-            <a
-              className="btn s"
-              href={api.exportTaskUrl(project, task, opts)}
-              download={exportFilename(task, format)}
-              title={exportFilename(task, format)}
-            >
+            <button type="button" className="btn s" disabled={stale} onClick={doDownload} title={exportFilename(task, format)}>
               {`↓ .${ext}`}
-            </a>
+            </button>
           </div>
         </div>
       ) : null}
@@ -10354,7 +9938,7 @@ All automated:
 4. **Baselines reach the panel through the Task page.** The view query's leaderboard panel `meta` has no `baselines`; the Task page copies `GET .../leaderboard`'s into every leaderboard result (`withBaselines`, Task 23). A leaderboard panel drawn elsewhere shows none. Moving `baselines` into the panel `meta` on the backend would make this step unnecessary.
 5. **`@owner` on the Overview.** Running rows carry `owner` (`RunRecord`); backend Task 27 adds `owner` to `TimelineItem`, `IdeaRow` and `FailureRow`, so recent ideas and failures end with `@owner` too (contract 1.12, review round 1). `mine` swaps the Running panel to `GET /api/v1/runs?owner=me&status=running`.
 6. **Encodings the backend must accept.** Export `metrics` and `groups` go as comma lists (`metrics=accuracy/value,macro_f1/value`), like the CLI's `--metrics a,b`; the contract names the parameters but not their encoding. The weekly summary is found by its first line naming the ISO week; `render_digest_markdown` (backend Task 18) starts `**2026-W40** · <headline>` and lists task changes as `- <task> before→after ▲ · N runs` (no Markdown table: the UI's renderer has none), and `NOTEBOOK_TEXT` is that exact shape. Any other format still renders, only without the summary block style.
-7. **Event-stream URL.** `eventsUrl()` calls `/auth/me` before each connect (reconnects are rare: 3/4/8/16 s backoff) so a hub that switches auth on between connects is handled; a phase 2 hub answers 404 and gets the plain URL. A ticket request that answers 401 locks the app and stops the stream, so a revoked session never loops.
+7. **Event-stream transport.** Retain the token baseline fresh-ticket subprotocol flow and clean URL. `/auth/me` 404 never disables transport authentication. Current-generation 401/4401 locks and stops; stale results cannot affect replacement credentials; transient ticket errors use bounded backoff.
 8. **Scopes are hints.** The UI hides `storage`, disables Stop/Cancel for non-owners and limits pairing scopes, but every decision is the server's; a 403 shows as an error line. Since review round 2 a run on the hub's own machine needs admin (contract 1.3): a `launch` collaborator who picks `local` in the phase 2 Launch dialog gets the hub's 403 (`runs on this machine need admin; launch on a host`) as an error line, and a host placement works as before. Admin-only reads are never requested for a non-admin, so the browser console stays clean (Playwright's console guard enforces it).
 9. **Kept out of scope.** No client function for `POST /api/v1/auth/logout` (no screen has a logout button yet; revoking the session in Settings does it), `GET /api/v1/compare/export` (no compare screen exports yet), or the digest routes (the digest shows up as a notebook entry). Their routes are checked in `types.test.ts`.
 10. **Dry run of this plan.** Every task's code was applied, in order, to a copy of the `phase-2` branch as of `1b5de39` (phase 2 Tasks 1–22), with phase 2's final `RunActions.tsx` and Task 28 e2e files taken from the phase 2 plan, and with the phase 3 paths added to a copy of `types.ts` (Task 2 Step 3 needs the backend). Result: `bun test` 858 of 859 pass (the one failure, `tokens.css`, only needs `docs/mockups/ui-v4/` next to the copy), `tsc --noEmit` and `tsc -p e2e` print nothing, and `playwright test --list` shows the 20 team tests (19 run, 1 skipped) and no team spec in the other projects. The dry run found and fixed three plan bugs before this version: `exportMenu.ts` next to `ExportMenu.tsx` clashed on macOS's case-insensitive file system (now `exportFormats.ts`); adding `["export"]` to `RUN_EVENT_INVALIDATES` broke the phase 2 event tests (dropped; since review round 2 the export key lives under `["leaderboard", project]` instead, so run events refresh it with no list change); and testing-library joins a chip's spans with spaces in its accessible name (`01J8…a1b2 ✓ 0.913`).

@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-26-hypothex-design.md`, sections **9** and **13** (phase 3), 3.4 (Postgres + Alembic), 5.3 (auth failures stop retrying until re-pair), 5.4 (`route: url` lab server), 7.2 (`hx export`, `hx storage`), 7.3 (phase 3 auth), 7.4 (`/mcp`), 12 (notifier in the daemon), 14 (decisions log).
 
-**Contract:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-contract.md`, sections 1–9 and 11. Every name, field, route, and file listed there is exact. This plan adds private helpers, a few public helpers (each task's Interfaces lists them), and optional keyword arguments (`AuthStore(session_days=)`, `leaderboard_table(directions=, value_formats=)`, `send_slack(transport=)`, `send_email(ssl_context=)`, `Notifier(ssl_context=)`, `send_digest(since=)`, `upsert(keep_max=)`, `hub_call(text=, discover_token=)`, `create_app(auth=, public_url=, notifier=)`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the contract was ambiguous or silent and how this plan reads it.
+**Contract:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-contract.md`, sections 1–9 and 11. Every name, field, route, and file listed there is exact. This plan adds private helpers, a few public helpers (each task's Interfaces lists them), and optional keyword arguments (`AuthStore(session_days=)`, `leaderboard_table(directions=, value_formats=)`, `send_slack(transport=)`, `send_email(ssl_context=)`, `Notifier(ssl_context=)`, `send_digest(since=)`, `upsert(keep_max=)`, `hub_call(text=, agent=)`, `create_app(auth=, public_url=, notifier=)`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the contract was ambiguous or silent and how this plan reads it.
 
 **Prerequisite:** `main` at `e27a3a2` (phases 1a, 1b, 2, plus `p2-backend-minors`, `p2-docs-ci` (`6ace21d`), `p2-property-tests`, and the phase 2 frontend so far). Every "replace X with Y" anchor below was re-checked against `e27a3a2`; the drift from the first base `738c711` that touches this plan: `cli/main.py::_write_private` is hardened (Task 2 moves that version into `core.settings`), `launch --gpus` is `LaunchGpusOpt` (no task edits `launch`'s signature), `mcp/server.py` `launch_sweep` sends `sweep_checkout(...)` in its remote body (Task 32 Step 4.6 adds `created_by`/`owner` next to it), `api/app.py`'s lifespan `finally` nests the joins in a second `try/finally` (Task 30 adds the notifier thread before the loop that *starts* the threads), `remote/hub.py` `_SAFE_NAME`/`_halt` changed (no task edits them), and `docs/index.rst`'s User guide toctree ends `remote, gpus, slurm, sweeps, cost` (Task 46). Review round 3: `main` is now `8df4760` (the phase 2 frontend merge, PR #12), and `git diff e27a3a2 8df4760 -- src docs/index.rst` is empty, so every anchor still holds. If `main` has moved on when this plan starts, re-run `git diff 8df4760 main -- src docs/index.rst` and re-check each anchor the diff touches. No frontend code is touched. **Frontend:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-frontend.md` (contract section 10) starts after this plan is merged and uses `hx demo --with-team` for fixtures.
 
@@ -2318,7 +2318,6 @@ import os
 import re
 import secrets
 import sqlite3
-import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -2432,8 +2431,6 @@ class AuthStore:
         self.path.chmod(0o600)
         with self._conn() as conn:
             conn.executescript(_SCHEMA)
-        self._tickets: dict[str, tuple[Principal, datetime]] = {}
-        self._ticket_lock = threading.Lock()
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -2879,7 +2876,7 @@ class AuthStore:
             return self._new_session(conn, user, "admin", "local", "hx serve", self.now())
 ```
 
-Note the `Literal` import is already used by `Client`; `threading` is used for the ticket lock (Task 7 adds the ticket methods).
+Note the `Literal` import is already used by `Client`; ticket locking stays inside the baseline `TicketStore` (Task 7).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -2903,10 +2900,10 @@ git commit -m "feat(auth): user, pairing, and session store with hashed secrets"
 **Files:**
 - Modify: `src/hypothex/auth/store.py` (`issue_ticket`, `redeem_ticket`)
 - Create: `src/hypothex/auth/pairing.py`, `src/hypothex/auth/client.py`
-- Test: `tests/auth/test_pairing.py`
+- Test: `tests/auth/test_pairing.py`, `tests/auth/test_tickets.py`
 
 **Interfaces:**
-- Produces (contract 1.10, exact): `AuthStore.issue_ticket(principal) -> str`, `AuthStore.redeem_ticket(ticket) -> Principal | None` (in memory, single use, `TICKET_TTL_SECONDS`); `pairing_url(base_url, offer_id, secret)`, `parse_pairing_url(url)`, `qr_text(url)`.
+- Produces (contract 1.10, exact): `AuthStore.issue_ticket(principal) -> str | None`, `AuthStore.redeem_ticket(ticket) -> Principal | None` (adapters over the reviewed bounded monotonic ticket mechanism: process-local, single use, 30 s, 256 outstanding maximum); `pairing_url(base_url, offer_id, secret)`, `parse_pairing_url(url)`, `qr_text(url)`.
 - Produces (contract 2, `hub-tokens.json`): `hypothex.auth.client.HUB_TOKENS_FILE = "auth/hub-tokens.json"`, `class HubLogin(BaseModel)` (`token`, `user`, `scope`, `session_id`), `hub_key(url) -> str`, `load_hub_logins(layout) -> dict[str, HubLogin]`, `hub_login(layout, url) -> HubLogin | None`, `save_hub_login(layout, url, login) -> None` (0600), `forget_hub_login(layout, url) -> HubLogin | None`.
 
 - [ ] **Step 1: Write the failing test**
@@ -2915,7 +2912,6 @@ Create `tests/auth/test_pairing.py`:
 
 ```python
 import stat
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -2928,24 +2924,10 @@ from hypothex.auth.client import (
     save_hub_login,
 )
 from hypothex.auth.pairing import pairing_url, parse_pairing_url, qr_text
-from hypothex.auth.store import AuthStore, Principal
 from hypothex.core.errors import ConfigError
 from hypothex.core.layout import Layout
 
 SECRET = "A" * 21 + "-_" + "b" * 20
-ALICE = Principal(user="alice", scope="launch", session_id="s_00000000000a", client="browser")
-
-
-def test_ticket_is_single_use_and_short_lived(tmp_path: Path) -> None:
-    now = [datetime(2026, 10, 4, tzinfo=UTC)]
-    store = AuthStore(Layout(tmp_path), now=lambda: now[0])
-    ticket = store.issue_ticket(ALICE)
-    assert store.redeem_ticket(ticket) == ALICE
-    assert store.redeem_ticket(ticket) is None
-    late = store.issue_ticket(ALICE)
-    now[0] += timedelta(seconds=31)
-    assert store.redeem_ticket(late) is None
-    assert store.redeem_ticket("never-issued") is None
 
 
 def test_pairing_url_round_trips() -> None:
@@ -2993,59 +2975,158 @@ def test_hub_logins_are_private_and_round_trip(tmp_path: Path) -> None:
     assert hub_login(Layout(tmp_path / "none"), "https://x") is None
 ```
 
+Create `tests/auth/test_tickets.py` (retaining the token prerequisite's existing root ticket tests):
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from hypothex.auth.store import LOCAL_OWNER, AuthError, AuthStore
+from hypothex.core.layout import Layout
+
+
+def test_ticket_monotonic_boundary_capacity_and_wall_clock(tmp_path: Path) -> None:
+    monotonic = [0.0]
+    wall = [datetime(2026, 10, 5, tzinfo=UTC)]
+    store = AuthStore(
+        Layout(tmp_path),
+        now=lambda: wall[0],
+        ticket_clock=lambda: monotonic[0],
+        ticket_capacity=2,
+    )
+    first = store.issue_ticket(LOCAL_OWNER)
+    second = store.issue_ticket(LOCAL_OWNER)
+    assert first is not None and second is not None and store.issue_ticket(LOCAL_OWNER) is None
+    wall[0] += timedelta(days=365)
+    monotonic[0] = 29.999
+    assert store.redeem_ticket(first) == LOCAL_OWNER
+    assert store.redeem_ticket(first) is None
+    wall[0] -= timedelta(days=730)
+    monotonic[0] = 30.0
+    assert store.redeem_ticket(second) is None
+    assert store.issue_ticket(LOCAL_OWNER) is not None
+
+
+def test_ticket_is_atomic_instance_local_and_rechecks_revocation(tmp_path: Path) -> None:
+    store = AuthStore(Layout(tmp_path / "one"))
+    other = AuthStore(Layout(tmp_path / "two"))
+    store.ensure_owner("sv")
+    session, token = store.mint_local("sv")
+    principal = store.authenticate(token)
+    assert principal is not None
+    ticket = store.issue_ticket(principal)
+    assert ticket is not None and other.redeem_ticket(ticket) is None
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        values = list(pool.map(store.redeem_ticket, [ticket] * 8))
+    assert sum(value is not None for value in values) == 1
+    ticket = store.issue_ticket(principal)
+    assert ticket is not None
+    store.revoke(session.id, by=principal)
+    assert store.redeem_ticket(ticket) is None
+    with pytest.raises(AuthError, match="no longer active"):
+        store.issue_ticket(principal)
+```
+
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run pytest tests/auth/test_pairing.py -v`
+Run: `uv run pytest tests/auth/test_pairing.py tests/auth/test_tickets.py -v`
 Expected: FAIL at collection with `ModuleNotFoundError: No module named 'hypothex.auth.client'`.
 
 - [ ] **Step 3: Write the implementation**
 
-Append to the `AuthStore` class in `src/hypothex/auth/store.py`:
+Extend the actual token prerequisite's `src/hypothex/api/tickets.py` without changing its root `issue()`/`consume()` contract. Change `_tickets` to `dict[str, tuple[float, object]]`, add optional `payload: object = True` to `issue`, prune with `entry[0] > now`, and assign `(now + TICKET_SECONDS, payload)`. Replace `consume`'s body with `return self.redeem(ticket) is not None` and add:
 
 ```python
-    # tickets -------------------------------------------------------------------------
-    def issue_ticket(self, principal: Principal) -> str:
-        """
-        Issue a single-use WebSocket ticket for a principal (in memory, 30 s).
-
-        Parameters
-        ----------
-        principal : Principal
-            The caller of ``POST /api/v1/auth/ws-ticket``.
-
-        Returns
-        -------
-        str
-            The ticket, sent as ``/api/v1/ws?ticket=<t>``.
-        """
-        ticket = secrets.token_urlsafe(24)
-        expires = self.now() + timedelta(seconds=TICKET_TTL_SECONDS)
-        with self._ticket_lock:
-            now = self.now()
-            for key in [k for k, (_, at) in self._tickets.items() if at <= now]:
-                del self._tickets[key]
-            self._tickets[ticket] = (principal, expires)
-        return ticket
-
-    def redeem_ticket(self, ticket: str) -> Principal | None:
-        """
-        Use a WebSocket ticket once.
+    def redeem(self, ticket: str) -> object | None:
+        """Atomically return the stored payload before its monotonic expiry.
 
         Parameters
         ----------
         ticket : str
+            Offered handshake secret.
+
+        Returns
+        -------
+        object or None
+            Stored payload only for the first valid consumption.
+        """
+        with self._lock:
+            found = self._tickets.pop(ticket, None)
+            return found[1] if found is not None and found[0] > self._clock() else None
+```
+
+In `auth/store.py`, import `time` and `TicketStore, TICKET_CAPACITY` from `hypothex.api.tickets`. Extend `AuthStore.__init__` with keyword-only `ticket_clock: Callable[[], float] = time.monotonic` and `ticket_capacity: int = TICKET_CAPACITY` (document them as the injected monotonic test clock and maximum unexpired tickets); after `self.session_days = session_days`, add `self.tickets = TicketStore(clock=ticket_clock, capacity=ticket_capacity)`. This one store is exposed as `app.state.ws_tickets` in scoped mode. Add these methods, including `session_active` now needed by ticket issuance (Task 26 reuses it):
+
+```python
+    def issue_ticket(self, principal: Principal) -> str | None:
+        """Issue a bounded one-use ticket for a currently valid principal.
+
+        Parameters
+        ----------
+        principal : Principal
+            Guard-selected caller; the payload holds no bearer secret.
+
+        Returns
+        -------
+        str or None
+            Ticket, or None at capacity (the HTTP route returns 429).
+        """
+        if principal.session_id and not self.session_active(principal.session_id):
+            raise AuthError("session is no longer active")
+        return self.tickets.issue(principal.model_copy(deep=True))
+
+    def redeem_ticket(self, ticket: str) -> Principal | None:
+        """Consume a ticket once and recheck session revocation and expiry.
+
+        Parameters
+        ----------
+        ticket : str
+            Secret from the ticket subprotocol.
 
         Returns
         -------
         Principal or None
-            The principal it was issued for; None when unknown, used, or expired.
+            Selected caller, or None for an invalid ticket/session.
         """
-        with self._ticket_lock:
-            found = self._tickets.pop(ticket, None)
-        if found is None or found[1] <= self.now():
+        principal = self.tickets.redeem(ticket)
+        if not isinstance(principal, Principal):
             return None
-        return found[0]
+        if principal.session_id and not self.session_active(principal.session_id):
+            return None
+        return principal
+
+    def session_active(self, session_id: str) -> bool:
+        """
+        Tell whether a session is still usable (checked by open WebSockets).
+
+        Parameters
+        ----------
+        session_id : str
+
+        Returns
+        -------
+        bool
+            False when it is unknown, revoked, expired, or its user is disabled.
+            Unlike ``authenticate`` it never slides the session.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                'SELECT s.revoked_at, s.expires_at, u.disabled_at FROM sessions s '
+                'JOIN users u ON u.name = s."user" WHERE s.id = ?',
+                (session_id,),
+            ).fetchone()
+        return (
+            row is not None
+            and row["revoked_at"] is None
+            and row["disabled_at"] is None
+            and datetime.fromisoformat(row["expires_at"]) > self.now()
+        )
 ```
+
+Add deterministic tests with `ticket_clock` and `ticket_capacity=2`: two issues succeed, a third returns None/HTTP 429 with no-store, the exact 30-second boundary frees capacity, wall-clock changes do not extend ticket expiry, concurrent redemption returns one principal, another store cannot redeem, and revocation/disable between issue and redemption rejects. Retain the baseline TicketStore tests so root bool consumption remains compatible. Ticket error/output tests must assert secrets never appear in URLs, responses, negotiated protocols or logs.
 
 Create `src/hypothex/auth/pairing.py`:
 
@@ -11277,7 +11358,6 @@ In `src/hypothex/core/execution.py`, add `from hypothex.core.storage import clea
         if isinstance(exc.__cause__, FileExistsError):  # the run folder exists: id clash
             raise _RunIdTakenError(run_id) from exc
         raise
-    if user_config is not None:
 ```
 
 with
@@ -11291,8 +11371,9 @@ with
         if isinstance(exc.__cause__, FileExistsError):  # preserve exclusive folder ownership
             raise _RunIdTakenError(run_id) from exc
         raise
-    if user_config is not None:
 ```
+
+Keep subsequent pin/config capture in its original order. In reviewed step 6, `_write_pin` now follows successful `create_run`; do not remove it or release another launcher's staging marker after an ID collision.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -11312,13 +11393,13 @@ git commit -m "feat(storage): apply plans with exact confirmation and per-item r
 ---
 ## Part 7: Auth on the HTTP API
 
-Contract 1.2 (identity), 1.3, 1.10 (guard, scopes, tickets), 3 (auth routes), 7 (authorization), 8 (failure modes 10–12). With auth off nothing here changes phase 1–2 behaviour: every request is `LOCAL_OWNER`, and `create_app` keeps `OriginGuard`, `TrustedHostMiddleware`, and the optional `TokenGuard`.
+Contract 1.2 (identity), 1.3, 1.10 (guard, scopes, tickets), 3 (auth routes), 7 (authorization), 8 (failure modes 10–12). Here “auth off” means collaborator scopes are off. The accepted default-token prerequisite still protects HTTP/API/MCP/WebSocket traffic through `TokenGuard`; only explicit loopback no-auth bypasses it. Scoped `AuthGuard` replaces that root-only guard. `OriginGuard` and `TrustedHostMiddleware` run before credential/ticket consumption. The exact adapters below use the inspected token interfaces; the [compatibility checkpoint](2026-10-05-hypothex-phase3-token-compatibility.md) records their evidence and the final merged-source comparison required before formal round 5.
 
 ### Task 23: `hypothex.api.auth` — the guard, scope dependencies, identities
 
 **Files:**
 - Create: `src/hypothex/api/auth.py`
-- Modify: `src/hypothex/api/security.py` (`TokenGuard` marks the request with `HOST_PRINCIPAL`)
+- Modify: `src/hypothex/api/security.py` (preserve default-token transport; mark its selected local-owner or env-host principal only after successful authentication)
 - Modify: `src/hypothex/api/app.py` (`create_app(auth=, public_url=)`, `AuthStore` on `app.state`, `AuthGuard` when auth is on, 401/403 mapping, `annotate_scopes`)
 - Create: `tests/api/authkit.py`
 - Test: `tests/api/test_auth_guard.py`
@@ -11328,7 +11409,7 @@ Contract 1.2 (identity), 1.3, 1.10 (guard, scopes, tickets), 3 (auth routes), 7 
 - Produces (contract 1.10, exact): `SESSION_COOKIE = "hx_session"`, `AGENT_HEADER = "X-Hypothex-Agent"`, `SCOPE_KEY = "x-hx-scope"`, `requires(scope)`, `principal_of(request | websocket)`, `AuthGuard(app, store, *, host_token=None)`, `route_scopes(app)`.
 - Produces (public helpers): `PRINCIPAL_KEY = "hx.principal"` (ASGI scope key); `PUBLIC`, `READ`, `LAUNCH`, `ADMIN` (`[requires(...)]` lists for `dependencies=`); `annotate_scopes(app)` (copies each route's scope into `openapi_extra[SCOPE_KEY]`); `auth_on(conn) -> bool`; `identity(conn, *, created_by, owner) -> tuple[str, str | None]`; `command_key(conn, command_id) -> str | None` (the receipt key of a client command id: `<user>|<scope>|<METHOD> <path>|<command_id>`; every route passes it to `EventLog.run_once` instead of the raw id, because `run_once` hands a stored result to anyone who repeats an id without running the route's checks again).
 - Produces (additive, `create_app`): `auth: bool | None = None` (None = `server.auth` of `config.yaml`), `public_url: str | None = None` (None = `server.public_url`); `app.state.auth` (`AuthStore`), `app.state.auth_on`, `app.state.public_url`.
-- Rules: with auth on, `AuthGuard` (outermost) turns a `Bearer` token (or the env server's `host_token`, which becomes `HOST_PRINCIPAL`), the `hx_session` cookie, or for a WebSocket a `?ticket=` into `scope["hx.principal"]`, and adds `agent` from `X-Hypothex-Agent` (a name matching `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`). Paths under `/api/` and `/mcp` without a principal get 401 `{error, type: "AuthError"}` with `WWW-Authenticate: Bearer realm="hypothex"` (a WebSocket is closed with 4401 before accept), except the public ones: `/.well-known/hypothex/...` and `POST /api/v1/auth/pair`. Every other path (the UI, `/pair`) is public. `identity` returns `(created_by, owner)`: the body's values from the host principal (a hub forwarding), `(created_by, None)` with auth off, else `(principal.identity(), principal.user)`. `AuthError` → 401, `ScopeError` → 403, `PairingError` → 400.
+- Rules: scoped `AuthGuard` replaces root-only `TokenGuard`; it does not stack behind it. Only exact GET/HEAD `/.well-known/hypothex/environment`, actual static resources/known SPA GET/HEAD navigation (including `/pair`), and POST `/api/v1/auth/pair` are public. Unknown/reserved API paths, OpenAPI, `/docs`, `/redoc`, files and `/mcp` remain guarded. Public identity is exactly `{environment_id, protocol_version, hx_version}`; an authenticated session/root caller gets the full descriptor. Host/origin checks happen before ticket consumption. Tickets are accepted only on `/api/v1/ws` through `hx-ticket.<ticket>` alongside fixed `hypothex.v1`; bearer-only nonbrowser WS remains supported. A supplied invalid WS bearer cannot fall through to cookie/ticket auth; duplicate/malformed protocols fail. HTTP keeps the selected-caller rule: a rejected or unusable bearer may resolve a valid session cookie, and only that actual credential is stored in private ASGI state for forwarding. No HTTP fallback may discover a local/root token. `identity` keeps an actual env-host principal's forwarded `(created_by, owner)`, uses `(created_by, None)` in scoped-off local-owner mode, and otherwise derives identity/owner from the session. Failed protected HTTP is 401 with the Bearer challenge; failed WS is 4401.
 
 - [ ] **Step 1: Write the test helpers and the failing test**
 
@@ -11474,9 +11555,6 @@ def test_guards_set_the_principal(tmp_path: Path) -> None:
     assert bad_agent.json()["principal"]["agent"] is None
     hub = guarded.get("/api/v1/x", headers=bearer("hubtoken")).json()["principal"]
     assert hub == HOST_PRINCIPAL.model_dump()
-    assert guarded.get("/pair").json() == {"principal": None}  # UI paths are public
-    token_guard = TestClient(TokenGuard(echo, token="hubtoken"), base_url=BASE)
-    assert token_guard.get("/x", headers=bearer("hubtoken")).json()["principal"]["client"] == "host"
 
 
 def test_identity_rules() -> None:
@@ -11564,26 +11642,19 @@ Create `src/hypothex/api/auth.py`:
 
 Every route declares a scope with ``dependencies=READ`` (or ``LAUNCH``,
 ``ADMIN``, ``PUBLIC``); ``route_scopes`` lists them, and a unit test fails on
-any route without one. ``AuthGuard`` runs only with auth on; with auth off every
-request is ``LOCAL_OWNER`` (phase 1-2 behaviour).
+any route without one. Scoped auth replaces the baseline root guard. The
+transport adapter below extends the inspected token prerequisite.
 """
 
 from __future__ import annotations
 
-import asyncio
-import hmac
 import re
 from http.cookies import CookieError, SimpleCookie
 from typing import Any
-from urllib.parse import parse_qs
 
 from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute, APIWebSocketRoute
-from starlette.datastructures import Headers
 from starlette.requests import HTTPConnection
-from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Send
-from starlette.types import Scope as AsgiScope
 
 from hypothex.auth.scopes import ScopeOrPublic, covers
 from hypothex.auth.store import (
@@ -11599,11 +11670,8 @@ SESSION_COOKIE = "hx_session"
 AGENT_HEADER = "X-Hypothex-Agent"
 SCOPE_KEY = "x-hx-scope"
 PRINCIPAL_KEY = "hx.principal"
-CREDENTIAL_KEY = "hx.credential"  # private ASGI scope state, never a response field
+CREDENTIAL_KEY = "hypothex.auth_token"  # private ASGI scope state, never a response field
 AGENT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-PUBLIC_PREFIX = "/.well-known/hypothex/"
-PUBLIC_ROUTES = frozenset({("POST", "/api/v1/auth/pair")})
-GUARDED_PREFIXES = ("/api/", "/mcp")
 UNAUTHORIZED = {"WWW-Authenticate": 'Bearer realm="hypothex"'}
 SIGN_IN = "401 · pair this device: hx pair"
 
@@ -11824,127 +11892,149 @@ def _cookie(header: str | None, name: str) -> str | None:
     return morsel.value if morsel is not None else None
 
 
-def _public(scope: AsgiScope) -> bool:
-    path: str = scope.get("path", "")
-    if path.startswith(PUBLIC_PREFIX):
-        return True
-    if (scope.get("method"), path) in PUBLIC_ROUTES:
-        return True
-    return not path.startswith(GUARDED_PREFIXES)
 
+```
 
+- [ ] **Step 4: Adapt the reviewed baseline guard and wire `create_app`**
+
+The following adapter targets the inspected token prerequisite, not the older merged main pin. Add `asyncio`, `Callable`, Starlette `Headers`, `JSONResponse`, `ASGIApp`, `Receive`, `Scope as AsgiScope`, `Send`, the baseline security constants `PUBLIC_DESCRIPTOR`, `WS_PATH`, `WS_PROTOCOL`, `TICKET_PREFIX` and `bearer_matches`, and `validate_bearer_token` from `hypothex.core.tokens` to `api/auth.py`'s imports. Append this class to the scope/identity helpers above:
+
+```python
 class AuthGuard:
-    """
-    ASGI middleware: resolve the caller, and refuse guarded paths without one.
+    """Resolve scoped callers through the baseline transport boundary.
 
     Parameters
     ----------
     app : ASGIApp
-        The wrapped application.
+        Wrapped application.
     store : AuthStore
-        Sessions and tickets.
+        Sessions and the shared bounded ticket issuer.
     host_token : str, optional
-        ``HYPOTHEX_SERVE_TOKEN`` of an env server: the hub's ``Bearer`` token,
-        accepted as ``HOST_PRINCIPAL``.
+        Explicit host credential, never a generated local root credential.
+    public_static : callable, optional
+        Baseline exact classifier for installed resources and known SPA paths.
     """
 
-    def __init__(self, app: ASGIApp, store: AuthStore, *, host_token: str | None = None) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        store: AuthStore,
+        *,
+        host_token: str | None = None,
+        public_static: Callable[[str], bool] | None = None,
+    ) -> None:
         self.app = app
         self.store = store
-        self._host = f"Bearer {host_token}".encode() if host_token else None
+        self._host = None if host_token is None else validate_bearer_token(host_token)
+        self._public_static = public_static or (lambda path: False)
+
+    def _bearer(self, given: str) -> tuple[Principal | None, str | None]:
+        if self._host is not None and bearer_matches(given, self._host):
+            return HOST_PRINCIPAL, self._host
+        if not given.startswith("Bearer "):
+            return None, None
+        token = given.removeprefix("Bearer ")
+        principal = self.store.authenticate(token)
+        return principal, token if principal is not None else None
 
     def _resolve(self, scope: AsgiScope) -> Principal | None:
         scope.pop(CREDENTIAL_KEY, None)
         headers = Headers(scope=scope)
-        given = headers.get("authorization", "")
-        credential: str | None = None
+        auth_headers = headers.getlist("authorization")
+        if len(auth_headers) > 1:
+            return None
         principal: Principal | None = None
-        if given:
-            if self._host is not None and hmac.compare_digest(given.encode(), self._host):
-                principal = HOST_PRINCIPAL
-                credential = given.removeprefix("Bearer ")
-            elif given.startswith("Bearer "):
-                token = given.removeprefix("Bearer ").strip()
-                principal = self.store.authenticate(token)
-                if principal is not None:
-                    credential = token
-        if principal is None:
+        credential: str | None = None
+        is_ws = scope["type"] == "websocket"
+        offered: list[str] = []
+        protocols = scope.get("subprotocols", []) if is_ws else []
+        if is_ws:
+            offered = [value for value in protocols if value.startswith(TICKET_PREFIX)]
+            if offered and (
+                scope["path"] != WS_PATH
+                or len(offered) != 1
+                or protocols.count(WS_PROTOCOL) != 1
+                or re.fullmatch(r"hx-ticket\.[A-Za-z0-9_-]{32}", offered[0]) is None
+            ):
+                return None
+        if auth_headers:
+            principal, credential = self._bearer(auth_headers[0])
+            if is_ws and principal is None:
+                return None  # an explicitly invalid WS bearer never falls back
+        if principal is None and is_ws and offered:
+            principal = self.store.redeem_ticket(offered[0][len(TICKET_PREFIX) :])
+            if principal is None:
+                return None  # a cookie cannot bypass one-use ticket consumption
+        elif principal is None:
             token = _cookie(headers.get("cookie"), SESSION_COOKIE)
             if token:
                 principal = self.store.authenticate(token)
                 if principal is not None:
                     credential = token
-        if principal is not None and credential is not None:
+        if principal is not None:
             scope[CREDENTIAL_KEY] = credential
-        if principal is None and scope["type"] == "websocket":
-            query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
-            ticket = query.get("ticket", [""])[0]
-            if ticket:
-                principal = self.store.redeem_ticket(ticket)
-        agent = headers.get(AGENT_HEADER) or ""
-        if principal is not None and principal.client != "host" and AGENT_NAME.match(agent):
-            principal = principal.model_copy(update={"agent": agent})
+            if is_ws and scope["path"] == WS_PATH and protocols.count(WS_PROTOCOL) == 1:
+                scope["hypothex.ws_protocol"] = WS_PROTOCOL
+            agent = headers.get(AGENT_HEADER) or ""
+            if principal.client != "host" and AGENT_NAME.fullmatch(agent):
+                principal = principal.model_copy(update={"agent": agent})
         return principal
 
     async def __call__(self, scope: AsgiScope, receive: Receive, send: Send) -> None:
-        """
-        Resolve the principal; answer 401 (or close 4401) on a guarded path without one.
+        """Resolve the caller or reject a protected request without leaking secrets.
 
         Parameters
         ----------
         scope : Scope
+            ASGI connection scope.
         receive : Receive
+            ASGI incoming event callback.
         send : Send
+            ASGI outgoing event callback.
         """
-        if scope["type"] not in ("http", "websocket"):
+        kind = scope["type"]
+        if kind not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
-        if not str(scope.get("path", "")).startswith(GUARDED_PREFIXES):
-            # static UI files, /pair, /.well-known: public and never read a principal,
-            # so skip the auth.db lookup (a thread hop and a SQLite read per asset)
+        static = (
+            kind == "http"
+            and scope["method"] in ("GET", "HEAD")
+            and self._public_static(scope["path"])
+        )
+        if static:
             await self.app(scope, receive, send)
             return
+        public = kind == "http" and (
+            (scope["method"] in ("GET", "HEAD") and scope["path"] == PUBLIC_DESCRIPTOR)
+            or (scope["method"] == "POST" and scope["path"] == "/api/v1/auth/pair")
+        )
         principal = await asyncio.to_thread(self._resolve, scope)
         if principal is not None:
             scope[PRINCIPAL_KEY] = principal
-        elif not _public(scope):
-            if scope["type"] == "websocket":
-                await receive()  # websocket.connect
+        elif not public:
+            if kind == "websocket":
+                await receive()
                 await send({"type": "websocket.close", "code": 4401})
                 return
-            body = {"error": SIGN_IN, "type": "AuthError"}
-            await JSONResponse(body, status_code=401, headers=UNAUTHORIZED)(scope, receive, send)
+            await JSONResponse(
+                {"error": SIGN_IN, "type": "AuthError"}, status_code=401, headers=UNAUTHORIZED
+            )(scope, receive, send)
             return
         await self.app(scope, receive, send)
 ```
 
-- [ ] **Step 4: Mark `TokenGuard` requests and wire the guard into `create_app`**
-
-In `src/hypothex/api/security.py`, add to the imports:
+In the baseline `TokenGuard`, add `principal: Principal = LOCAL_OWNER` as a trailing constructor parameter (import `Principal` and `LOCAL_OWNER` from `auth.store`) and save `self._principal = principal`. Retain its `_websocket` implementation and complete public/credential checks. Inside its existing `if valid:` branch, after the `hypothex.auth_token` assignment and before forwarding, add:
 
 ```python
-from hypothex.auth.store import HOST_PRINCIPAL
+            if (
+                kind == "websocket"
+                or self._token is None
+                or scope.get("hypothex.auth_token") == self._token
+            ):
+                scope["hx.principal"] = self._principal
 ```
 
-and in `TokenGuard.__call__`, replace
-
-```python
-        if bearer_matches(Headers(scope=scope).get("authorization"), self._token):
-            await self.app(scope, receive, send)
-            return
-```
-
-with
-
-```python
-        if bearer_matches(Headers(scope=scope).get("authorization"), self._token):
-            scope["hx.principal"] = HOST_PRINCIPAL  # api.auth.PRINCIPAL_KEY: a hub forwarding
-            scope["hx.credential"] = self._token  # the exact token authenticated above
-            await self.app(scope, receive, send)
-            return
-```
-
-Keep the current `bearer_matches` helper, minimal unauthenticated descriptor, `same_origin` check and JSON-or-client-header POST requirement. Add principal/credential state only after successful authentication; do not restore the old loopback-host-only origin rule. Run the existing `tests/api/test_security.py` with these auth tests.
+This sets identity only after transport succeeds. The app supplies the token's provenance: local generated roots use `LOCAL_OWNER`; environment servers or explicit host overrides use `HOST_PRINCIPAL`. Keep the baseline `hypothex.auth_token` key shared with `_CallerMCPServer`; never introduce a competing credential key or infer credentials again from headers.
 
 In `src/hypothex/api/app.py`:
 
@@ -11953,8 +12043,8 @@ In `src/hypothex/api/app.py`:
 ```python
 from urllib.parse import urlsplit
 
-from hypothex.api.auth import UNAUTHORIZED, AuthGuard, annotate_scopes
-from hypothex.auth.store import AuthError, AuthStore, ScopeError
+from hypothex.api.auth import UNAUTHORIZED, AuthGuard, annotate_scopes, principal_of, READ
+from hypothex.auth.store import AuthError, AuthStore, ScopeError, HOST_PRINCIPAL, LOCAL_OWNER
 from hypothex.core.settings import load_settings
 ```
 
@@ -11963,6 +12053,7 @@ from hypothex.core.settings import load_settings
 ```python
     auth: bool | None = None,
     public_url: str | None = None,
+    token_is_host: bool = False,
 ```
 
 and document both in the docstring's Parameters:
@@ -11993,39 +12084,50 @@ add:
     store = AuthStore(ctx.layout, session_days=settings.server.session_days)
 ```
 
-4. Replace
+4. Keep the baseline UI/public-static classifier and guard order. Add `/pair` to its known SPA return expression (inside the `ui_installed` check); do not make reserved/unknown paths public. In `create_app`, extend state and replace only `tickets = TicketStore()` with this setup:
 
 ```python
-    app.state.ctx = ctx
-    app.state.hub = manager
-    app.state.mcp = mcp_server
-    hosts = allowed_hosts(host)
-    app.add_middleware(OriginGuard, hosts=hosts)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
-    if auth_token:
-        app.add_middleware(TokenGuard, token=auth_token)  # outermost: checked first
-```
-
-with
-
-```python
-    app.state.ctx = ctx
-    app.state.hub = manager
-    app.state.mcp = mcp_server
     app.state.auth = store
     app.state.auth_on = auth_enabled
     app.state.public_url = public
-    hosts = allowed_hosts(host)
-    public_host = urlsplit(public).hostname if public else None
-    if public_host and public_host not in hosts:
-        hosts.append(public_host)
-    app.add_middleware(OriginGuard, hosts=hosts)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
-    if auth_enabled:
-        app.add_middleware(AuthGuard, store=store, host_token=auth_token)  # outermost
-    elif auth_token:
-        app.add_middleware(TokenGuard, token=auth_token)  # outermost: checked first
+    tickets = store.tickets if auth_enabled else TicketStore()
+    app.state.ws_tickets = tickets
+    root_principal = (
+        HOST_PRINCIPAL if token_is_host or ctx.descriptor.kind in {"ssh", "slurm"} else LOCAL_OWNER
+    )
 ```
+
+After `hosts = allowed_hosts(host)`, add the configured public hostname if absent. Keep GZip innermost. Replace only the existing `app.add_middleware(TokenGuard, ...)` line:
+
+```python
+    if auth_enabled:
+        app.add_middleware(
+            AuthGuard, store=store,
+            host_token=auth_token if root_principal == HOST_PRINCIPAL else None,
+            public_static=public_static,
+        )
+    else:
+        app.add_middleware(
+            TokenGuard, token=auth_token, tickets=tickets,
+            public_static=public_static, principal=root_principal,
+        )
+```
+
+The unchanged `OriginGuard` and `TrustedHostMiddleware` registrations immediately follow, so they execute before credential/ticket consumption. `token_is_host` is documented as explicit token provenance supplied by the CLI; Task 39 passes it from kind/override provenance, never from string comparison. Root-only and scoped guards never stack.
+
+Replace only the `environment` route's current auth condition with:
+
+```python
+        authenticated = (
+            request.scope.get("hx.principal") is not None
+            if auth_enabled
+            else auth_token is None or request.scope.get("hypothex.auth_token") == auth_token
+        )
+        if not authenticated:
+            return {k: full[k] for k in PUBLIC_DESCRIPTOR_FIELDS}
+```
+
+Keep its full descriptor construction and final `return full`. Thus anonymous scoped discovery sees exactly three identity fields, and a valid session sees the full descriptor even though it is not the root bearer.
 
 5. Replace the body of `hypothex_error` with:
 
@@ -12514,7 +12616,6 @@ from hypothex.api.auth import ADMIN, PUBLIC, READ, SESSION_COOKIE, command_key, 
 from hypothex.auth.pairing import pairing_url, qr_text
 from hypothex.auth.scopes import Scope, scopes_of
 from hypothex.auth.store import (
-    TICKET_TTL_SECONDS,
     AuthStore,
     PairingError,
     ScopeError,
@@ -12726,11 +12827,6 @@ def register_auth_routes(app: FastAPI, ctx: Context, store: AuthStore) -> None:
         response.delete_cookie(SESSION_COOKIE, path="/")
         return response
 
-    @app.post("/api/v1/auth/ws-ticket", dependencies=READ)
-    def ws_ticket(request: Request) -> dict[str, Any]:
-        ticket = store.issue_ticket(principal_of(request))
-        return {"ticket": ticket, "expires_in": TICKET_TTL_SECONDS}
-
     @app.post("/api/v1/auth/pairings", dependencies=READ)
     def pairings(body: PairingBody, request: Request) -> dict[str, Any]:
         if not request.app.state.auth_on:
@@ -12797,6 +12893,26 @@ def register_auth_routes(app: FastAPI, ctx: Context, store: AuthStore) -> None:
         return ctx.events.run_once(key, act)
 ```
 
+Replace the token baseline's existing `ws_ticket` handler in `api/app.py` in place; do not register a duplicate in `register_auth_routes`. Retain the existing `WebSocketTicket` response model (`ticket: str | None`) and bounded `TICKET_SECONDS` constant:
+
+```python
+    @app.post("/api/v1/auth/ws-ticket", response_model=WebSocketTicket, dependencies=READ)
+    def ws_ticket(request: Request) -> JSONResponse:
+        if not auth_enabled and auth_token is None:
+            payload: dict[str, Any] = {"ticket": None, "expires_in": 0}
+        else:
+            ticket = store.issue_ticket(principal_of(request)) if auth_enabled else tickets.issue()
+            if ticket is None:
+                return JSONResponse(
+                    {"error": "too many outstanding WebSocket tickets", "type": "RateLimitError"},
+                    status_code=429, headers={"Cache-Control": "no-store"},
+                )
+            payload = {"ticket": ticket, "expires_in": TICKET_SECONDS}
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+```
+
+Add the nullable field to the Phase 3 frontend `WsTicket` model as well. Test root, scoped session, scoped host and explicit-no-auth modes, saturation, no-store, one registered route and the fixed negotiated protocol.
+
 In `src/hypothex/api/app.py`, add `from hypothex.api.routes_auth import register_auth_routes` to the imports and replace
 
 ```python
@@ -12837,7 +12953,7 @@ git commit -m "feat(api): pairing, sessions, users, and websocket ticket routes"
 - Test: `tests/api/test_ws_auth.py`
 
 **Interfaces:**
-- Produces (contract 1.10, 2): the WebSocket accepts a principal from a ticket (`?ticket=`, single use), a cookie, or a bearer header (hubs and the CLI); with auth on it re-checks the session every `WS_RECHECK_SECONDS = 30.0` and closes with code `4401` when it is revoked, expired, or its user disabled; `auth.*` and `notify.*` events go to `admin` principals only (the cursor still moves past them).
+- Produces (contract 1.10, 2): the WebSocket accepts a principal from a ticket (`hx-ticket.<ticket>` plus `hypothex.v1`, single use; URL remains `/api/v1/ws`), a cookie, or a bearer header (hubs and the CLI); with auth on it re-checks the session every `WS_RECHECK_SECONDS = 30.0` and closes with code `4401` when it is revoked, expired, or its user disabled; `auth.*` and `notify.*` events go to `admin` principals only (the cursor still moves past them).
 - Produces (additive): `AuthStore.session_active(session_id) -> bool` (no sliding).
 
 - [ ] **Step 1: Write the failing test**
@@ -12871,12 +12987,13 @@ def test_a_ticket_opens_the_socket_once(home: Path) -> None:
     token = token_for(app.state.auth, "alice", "read", client="browser")
     with TestClient(app, base_url=BASE) as client:
         ticket = client.post("/api/v1/auth/ws-ticket", headers=bearer(token), json={}).json()["ticket"]
-        with client.websocket_connect(f"{WS_URL}?ticket={ticket}") as ws:
+        with client.websocket_connect(WS_URL, subprotocols=["hypothex.v1", f"hx-ticket.{ticket}"]) as ws:
+            assert ws.accepted_subprotocol == "hypothex.v1"
             ws.send_json({"type": "subscribe", "after_sequence": 0})
             drain(ws)
         with (
             pytest.raises(WebSocketDisconnect) as info,
-            client.websocket_connect(f"{WS_URL}?ticket={ticket}"),
+            client.websocket_connect(WS_URL, subprotocols=["hypothex.v1", f"hx-ticket.{ticket}"]),
         ):
             pass
         assert info.value.code == 4401
@@ -12924,6 +13041,25 @@ def test_auth_and_notify_events_go_to_admins_only(home: Path) -> None:
     assert {"auth.session_created", "notify.sent"} <= set(seen["admin"])
 ```
 
+Append to `tests/api/test_ws_auth.py`:
+
+```python
+def test_revoked_session_closes_before_first_subscribe(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hypothex.api.app.WS_RECHECK_SECONDS", 0.01)
+    app = auth_app(home)
+    token = token_for(app.state.auth, "alice", "launch")
+    principal = app.state.auth.authenticate(token)
+    assert principal is not None
+    with TestClient(app, base_url=BASE) as client:
+        with client.websocket_connect(WS_URL, headers=bearer(token)) as ws:
+            app.state.auth.revoke(str(principal.session_id), by=principal)
+            with pytest.raises(WebSocketDisconnect) as closed:
+                ws.receive_json()  # never send a subscribe frame
+            assert closed.value.code == 4401
+```
+
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/api/test_ws_auth.py -v`
@@ -12931,36 +13067,7 @@ Expected: FAIL: `test_revoked_session_closes_the_socket_with_4401` with `Attribu
 
 - [ ] **Step 3: Write the implementation**
 
-In `src/hypothex/auth/store.py`, add to `AuthStore` (after `authenticate`):
-
-```python
-    def session_active(self, session_id: str) -> bool:
-        """
-        Tell whether a session is still usable (checked by open WebSockets).
-
-        Parameters
-        ----------
-        session_id : str
-
-        Returns
-        -------
-        bool
-            False when it is unknown, revoked, expired, or its user is disabled.
-            Unlike ``authenticate`` it never slides the session.
-        """
-        with self._conn() as conn:
-            row = conn.execute(
-                'SELECT s.revoked_at, s.expires_at, u.disabled_at FROM sessions s '
-                'JOIN users u ON u.name = s."user" WHERE s.id = ?',
-                (session_id,),
-            ).fetchone()
-        return (
-            row is not None
-            and row["revoked_at"] is None
-            and row["disabled_at"] is None
-            and datetime.fromisoformat(row["expires_at"]) > self.now()
-        )
-```
+Reuse `AuthStore.session_active` from Task 7; do not define it twice.
 
 In `src/hypothex/api/app.py`:
 
@@ -12975,57 +13082,48 @@ ADMIN_EVENT_PREFIXES = ("auth.", "notify.")
 
 2. Add `principal_of` to the `hypothex.api.auth` import.
 
-3. Replace the whole `events_ws` function with:
+3. In the inspected token baseline `events_ws`, keep `await ws.accept(subprotocol=ws.scope.get("hypothex.ws_protocol"))`. Immediately after acceptance add:
 
 ```python
-    @app.websocket("/api/v1/ws", dependencies=READ)
-    async def events_ws(ws: WebSocket) -> None:
         principal = principal_of(ws)
-        admin = principal.scope == "admin"
-        watch = auth_enabled and principal.session_id is not None
-        await ws.accept()
-        checked = time.monotonic()
-        try:
-            first = await ws.receive()
-            if first["type"] == "websocket.disconnect":
-                return
-            try:
-                sub = SubscribeMessage.model_validate_json(
-                    first.get("text") or first.get("bytes") or ""
-                )
-            except ValidationError:
-                await ws.send_json(
-                    {
-                        "type": "error",
-                        "error": "first message must be {type: subscribe, after_sequence: N}"
-                        " with N an integer >= 0",
-                    }
-                )
-                await ws.close()
-                return
-            last = sub.after_sequence
-            ready = False
+        checked_at = asyncio.get_running_loop().time()
+```
+
+Replace the baseline initial `first = await ws.receive()` with this bounded wait. The connection must also observe revocation before a client sends its subscribe frame:
+
+```python
             while True:
-                if watch and time.monotonic() - checked >= WS_RECHECK_SECONDS:
-                    checked = time.monotonic()
-                    if not await asyncio.to_thread(store.session_active, str(principal.session_id)):
+                try:
+                    first = await asyncio.wait_for(ws.receive(), timeout=WS_RECHECK_SECONDS)
+                    break
+                except TimeoutError:
+                    if principal.session_id and not await asyncio.to_thread(
+                        store.session_active, principal.session_id
+                    ):
                         await ws.close(code=4401)
                         return
-                batch = await asyncio.to_thread(ctx.events.since, last, WS_BATCH)
-                for event in batch:
-                    last = event.sequence
-                    if not admin and event.type.startswith(ADMIN_EVENT_PREFIXES):
-                        continue
-                    await ws.send_json({"type": "event", "event": event.model_dump(mode="json")})
-                if len(batch) < WS_BATCH:
-                    if not ready:
-                        await ws.send_json({"type": "ready", "last_sequence": last})
-                        ready = True
-                    if await client_left(ws, WS_POLL_SECONDS):
-                        return
-        except WebSocketDisconnect:
-            return
 ```
+
+At the top of its existing `while True:` loop add:
+
+```python
+                now = asyncio.get_running_loop().time()
+                if principal.session_id and now - checked_at >= WS_RECHECK_SECONDS:
+                    checked_at = now
+                    if not await asyncio.to_thread(store.session_active, principal.session_id):
+                        await ws.close(code=4401)
+                        return
+```
+
+Replace only the unconditional send inside `for event in batch:` with:
+
+```python
+                    if principal.scope == "admin" or not event.type.startswith(ADMIN_EVENT_PREFIXES):
+                        await ws.send_json({"type": "event", "event": event.model_dump(mode="json")})
+                    last = event.sequence
+```
+
+Keep the existing subscribe validation, head/max-replay reset, ready message, `client_left`, and disconnect handling. A skipped admin event still advances the cursor. Existing bearer clients and baseline ticket/subprotocol tests remain valid.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -14771,7 +14869,7 @@ Contract 1.10 (`scoped`), 5 (tools and scopes), 7. Over `/mcp` with auth on, the
 
 **Interfaces:**
 - Produces (contract 1.10, exact): `scoped(scope) -> Callable[[F], F]` (tool decorator), `tool_scopes(server) -> dict[str, Scope]`.
-- Produces (public helpers): `acting_as(principal)` (context manager: the principal of in-process tool calls, e.g. tests and stdio); `caller() -> Principal` (inside a tool); `caller_token() -> str | None` (the exact credential selected by the guard in private ASGI state, so the tool's own hub calls act as the caller); `tool_hub_token(fallback) -> str | None` (over HTTP `caller_token()` and never the fallback; in-process/stdio `fallback()`); `TOOL_SCOPE_ATTR = "__hx_scope__"`.
+- Produces (public helpers): `acting_as(principal)` (context manager: the principal of in-process tool calls, e.g. tests and stdio); `caller() -> Principal` (inside a tool); `caller_token() -> str | None` (the exact credential selected by the guard in private ASGI state, so the tool's own hub calls act as the caller); `tool_hub_token(fallback) -> TokenChoice` (over HTTP `caller_token()` and never the fallback; in-process/stdio `fallback()`); `TOOL_SCOPE_ATTR = "__hx_scope__"`.
 - Rules: the wrapper finds the principal in `ctx.request_context.request.scope["hx.principal"]` (an HTTP call through `AuthGuard`/`TokenGuard`), else the `acting_as` principal, else `LOCAL_OWNER`; a tool whose scope the caller does not hold raises a tool error `403 · <scope> scope needed; you hold <scope>`. List/get tools are `read`; `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`, `connect_host` are `launch`; `list_sweeps` is `read`. A session principal launches as `agent:<agent>@<user>` with `owner=<user>`; `LOCAL_OWNER` keeps `agent:<agent>` and no owner. Over HTTP a tool's hub calls carry only the caller's credential: a cookie caller forwards its cookie's session token, and a caller without one gets no token, never `hub_token` or the local admin token (that fallback would let any caller act with the server's own rights). Tools apply the same ownership rules as HTTP (contract 1.3): `stop_run` on a local run calls `require_act(caller(), record.owner, "stop")` and `cancel_sweep` on a local sweep `require_act(caller(), spec.owner, "cancel_queued")` before acting, and `launch_run`, `rerun`, `reinfer`, `launch_sweep`, `extend_sweep` call `require_local_exec(caller())` before a run that executes on this machine (a `launch` caller launches on hosts only); forwarded calls are checked by the hub, which sees the caller's own token. Tool errors reach the client as `Error executing tool <name>: <message>` (the SDK's prefix), so tests match the message's end.
 
 - [ ] **Step 1: Write the failing test**
@@ -14793,6 +14891,7 @@ from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep
 from hypothex.mcp.server import (
+    NO_AUTH_TOKEN,
     acting_as,
     build_server,
     caller,
@@ -14859,7 +14958,7 @@ def test_local_owner_keeps_phase_2_identity(home: Path, toy_repo: Path) -> None:
 
 
 def fake_http(credential: str | None) -> SimpleNamespace:
-    request = SimpleNamespace(scope={"hx.principal": ALICE, "hx.credential": credential})
+    request = SimpleNamespace(scope={"hx.principal": ALICE, "hypothex.auth_token": credential})
     return SimpleNamespace(request_context=SimpleNamespace(request=request))
 
 
@@ -14878,7 +14977,7 @@ def test_http_principal_and_token_reach_the_tool() -> None:
     cookie_call = fake_http("hxs_cookie")
     assert wrapped(hx_mcp_ctx=cookie_call)["hub"] == "hxs_cookie"  # never the server's token
     bare_call = fake_http(None)
-    assert wrapped(hx_mcp_ctx=bare_call)["hub"] is None
+    assert wrapped(hx_mcp_ctx=bare_call)["hub"] is NO_AUTH_TOKEN
     local = wrapped(hx_mcp_ctx=None)
     assert local == {"user": "local", "token": None, "hub": "SERVER-ADMIN"}  # stdio
     with pytest.raises(Exception, match="admin scope needed"):
@@ -15061,7 +15160,6 @@ TOOL_SCOPE_ATTR = "__hx_scope__"
 _CTX_PARAM = "hx_mcp_ctx"
 _ACTING: ContextVar[Principal | None] = ContextVar("hx_mcp_acting", default=None)
 _CALLER: ContextVar[Principal] = ContextVar("hx_mcp_caller", default=LOCAL_OWNER)
-_CALLER_TOKEN: ContextVar[str | None] = ContextVar("hx_mcp_caller_token", default=None)
 _OVER_HTTP: ContextVar[bool] = ContextVar("hx_mcp_over_http", default=False)
 
 
@@ -15106,7 +15204,8 @@ def caller_token() -> str | None:
         The exact bearer or cookie credential the guard authenticated; None
         in-process, over stdio, or for an HTTP caller with no selected credential.
     """
-    return _CALLER_TOKEN.get()
+    selected = _caller_token.get()
+    return selected if isinstance(selected, str) else None
 
 
 def _request_of(mcp_ctx: Any) -> Any:
@@ -15132,11 +15231,11 @@ def _credential_from(request: Any) -> str | None:
     # Forward exactly the credential AuthGuard/TokenGuard authenticated, not a second
     # interpretation of the headers. A rejected bearer can coexist with a valid cookie.
     scope = getattr(request, "scope", None)
-    found = scope.get("hx.credential") if isinstance(scope, dict) else None
+    found = scope.get("hypothex.auth_token") if isinstance(scope, dict) else None
     return found if isinstance(found, str) and found else None
 
 
-def tool_hub_token(fallback: Callable[[], str | None]) -> str | None:
+def tool_hub_token(fallback: Callable[[], TokenChoice]) -> TokenChoice:
     """
     Choose the bearer token a tool's own hub calls send.
 
@@ -15148,13 +15247,12 @@ def tool_hub_token(fallback: Callable[[], str | None]) -> str | None:
 
     Returns
     -------
-    str or None
-        Over HTTP the caller's credential (``caller_token()``), even when it is
-        None: a caller never borrows the server's own rights.
+    TokenChoice
+        The selected credential or explicit ``NO_AUTH_TOKEN`` over HTTP;
+        only a missing in-process/stdio choice invokes the fallback.
     """
-    if _OVER_HTTP.get():
-        return caller_token()
-    return fallback()
+    selected = _caller_token.get()
+    return selected if selected is not None else fallback()
 
 
 def scoped(scope: Scope) -> Callable[[F], F]:
@@ -15184,13 +15282,17 @@ def scoped(scope: Scope) -> Callable[[F], F]:
             if not covers(principal.scope, scope):
                 raise ToolError(f"403 · {scope} scope needed; you hold {principal.scope}")
             who = _CALLER.set(principal)
-            token = _CALLER_TOKEN.set(_credential_from(request))
+            token = (
+                _caller_token.set(_credential_from(request) or NO_AUTH_TOKEN)
+                if request is not None else None
+            )
             over_http = _OVER_HTTP.set(request is not None)
             try:
                 return fn(*args, **kwargs)
             finally:
                 _OVER_HTTP.reset(over_http)
-                _CALLER_TOKEN.reset(token)
+                if token is not None:
+                    _caller_token.reset(token)
                 _CALLER.reset(who)
 
         params = list(signature.parameters.values())
@@ -15235,31 +15337,9 @@ def tool_scopes(server: MCPServer) -> dict[str, Scope]:
 
 In `build_server`:
 
-1. Replace `def auth()` with:
+1. Keep the token prerequisite's `_CallerMCPServer`, `NO_AUTH_TOKEN`, `TokenChoice`, `_caller_token`, `hub_call` sentinel handling and existing inner `auth() -> TokenChoice` unchanged. The scoped decorator above sets that same context for direct registered-tool tests; real HTTP tool calls are also bound by `_CallerMCPServer.call_tool` from each SDK message's request scope, not the connection's initial context. The private credential key is exactly `hypothex.auth_token` in both guards. `caller_token()` exposes only the selected string or None; `tool_hub_token` internally preserves `NO_AUTH_TOKEN` so an HTTP caller with no selected credential never activates filesystem discovery.
 
-```python
-    def auth() -> str | None:
-        # over HTTP only the caller's own credential (the hub sees who acts and
-        # applies their scope and ownership); the server's token only in-process/stdio
-        return tool_hub_token(lambda: hub_token or resolve_hub_token(hub_url, ctx().layout.home))
-```
-
-Before adding tool helpers, add `discover_token: bool = True` to `hub_call`'s keyword arguments and document it: local/stdio callers may discover a saved token, while authenticated HTTP forwarding disables discovery. Replace `auth = token or resolve_hub_token(base)` with:
-
-```python
-    auth = (token or resolve_hub_token(base)) if discover_token else token
-```
-
-In `build_server`'s existing `hub` helper, pass `discover_token=not _OVER_HTTP.get()` along with `token=auth()`. Keep this argument when Task 41 replaces the helper. This explicit transport flag must reach the actual `hub_call`; returning `None` from `tool_hub_token` alone does not disable the client's token discovery.
-
-Carry the same flag through the other existing forwarding path: add keyword-only `discover_token: bool = True` to both `sweep_summary` and `locate_sweep`, and document it with the same meaning as `hub_call`. In `sweep_summary`'s missing-local-sweep branch, replace credential resolution and forwarding with:
-
-```python
-        auth = (token or resolve_hub_token(url, ctx.layout.home)) if discover_token else token
-        return hub_call("GET", path, url=url, token=auth, discover_token=discover_token)
-```
-
-In `locate_sweep`, pass `discover_token=discover_token` to `sweep_summary`. In the registered `get_sweep`, `cancel_sweep`, and `extend_sweep` tools, pass `discover_token=not _OVER_HTTP.get()` to their `sweep_summary` / `locate_sweep` calls. Thus both the sweep pre-read and its subsequent mutation use the caller credential only. Stdio and ordinary CLI helper calls keep the default discovery behavior. During the final baseline refresh, apply this same propagation to any new forwarding helpers added on main (including host-state lookups); audit every `token=auth()` call and every `resolve_hub_token` call reached by an HTTP tool.
+The existing `host_states`, `sweep_summary`, `locate_sweep`, `hub_call`, and `build_server` already accept `TokenChoice` and distinguish None from `NO_AUTH_TOKEN`. Preserve their real sentinel propagation, timeout and host-state metadata; do not add the obsolete `discover_token` flag or replace `None` tests with truthiness. Keep `token=auth()` at every tool forwarding call. Add a regression where separate HTTP messages on the same MCP session use different selected credentials, a principal-only HTTP call forwards no Authorization and never invokes discovery, and a stdio call with no message request still discovers the selected home's credential.
 
 2. Add after `def dump(...)`:
 
@@ -15271,14 +15351,6 @@ In `locate_sweep`, pass `discover_token=discover_token` to `sweep_summary`. In t
             return f"agent:{agent}", None
         return f"agent:{agent}@{principal.user}", principal.user
 ```
-
-The merged `host_states(ctx, environment_ids, *, url=None, token=None)` is another forwarding path used by `list_runs` and `get_run`. Add keyword-only `discover_token: bool = True`, documenting the same rule as `hub_call`. Replace its credential selection with:
-
-```python
-        auth = (auth or token or resolve_hub_token(url, ctx.layout.home)) if discover_token else token
-```
-
-Pass `discover_token=discover_token` to its real `hub_call`, retaining `timeout=HOST_STATE_SECONDS`. In both `list_runs` and `get_run`, pass `discover_token=not _OVER_HTTP.get()` at their `host_states` calls alongside `token=auth()`. Keep the merged host-state and untrusted-source metadata on these responses, and the task-wide remote reeval and pinned local sweep behavior.
 
 3. Put `@scoped("read")` or `@scoped("launch")` between `@mcp.tool()` and `@_expose_errors` on every tool: `read` on `list_projects`, `list_tasks`, `get_task`, `get_leaderboard`, `list_runs`, `get_run`, `compare_runs`, `get_predictions`, `list_views`, `get_view`, `query_view`, `list_hosts`, `list_sweeps`, `get_sweep`; `launch` on `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`, `connect_host`. For example:
 
@@ -15940,7 +16012,7 @@ def upsert(
     session.execute(upsert_statement(dialect, model, values, keys, keep_max=keep_max))
 ```
 
-4. Replace `Index.__init__` with:
+4. For the reviewed step-6 prerequisite `a5ddaa0` (merged by `55ca922`), replace `Index.__init__` with the following. This compatibility checkpoint does not change the historical full-plan main pin. Preserve its `_open_schema`/`_move_aside` methods and their SQLite-only locking/quarantine behavior; do not use this snippet on the older merged baseline before that prerequisite exists:
 
 ```python
     def __init__(
@@ -15956,7 +16028,7 @@ def upsert(
             )
             event.listen(self.engine, "connect", _sqlite_pragmas)
             self.dialect = "sqlite"
-            self.rebuilt_schema = self._ensure_schema()
+            self.rebuilt_schema = self._open_schema()
             return
         url = make_url(target)
         if password is not None:
@@ -15983,7 +16055,7 @@ def upsert(
         The Postgres password (``server.index_password_env``).
 ```
 
-5. Add to `Index`, after `_ensure_schema`:
+5. Add to `Index`, after the retained schema/recovery methods:
 
 ```python
     def _check_revision(self, shown: str) -> None:
@@ -18248,7 +18320,7 @@ git commit -m "feat(remote): paired or env-held tokens for url hosts and a re-pa
 **Interfaces:**
 - Consumes: `load_settings`, `check_secrets_file` (Tasks 2–3), `AuthStore.ensure_owner/mint_local/sessions/revoke` (Task 6), `serve_https`/`unserve` (Task 37), `create_app(auth=, public_url=)` (Task 23).
 - Produces (contract 1.10, 1.13, 4): `hx serve [--auth] [--tailscale] [--public-url URL]`; `owner_name() -> str` (`$USER` lowercased with characters outside `[a-z0-9_-]` dropped, else `owner`).
-- Rules: `secrets.env` with group/other bits stops the start (`chmod 600 <path>`). `--auth` or `server.auth: on` turns auth on: `ensure_owner(owner_name())`, earlier `local` sessions of the owner are revoked, `mint_local` writes the new token into `server.json` (an env server's `HYPOTHEX_SERVE_TOKEN` wins when both exist; both pass `AuthGuard`), and the session is revoked when the server stops. A non-loopback `--host` needs auth on or a serve token (the refusal names both). `--tailscale` needs auth on ("tailscale needs server.auth: on"), binds `127.0.0.1`, uses `serve_https(port)` as `public_url`, and calls `unserve()` at stop. The start claims the home (`server.json`, refused while a live server owns it) before any side effect, so a second `hx serve` on the same home exits without touching the running server's tailnet mapping or local session; the minted token is written into the claimed `server.json` after. Cleanup (revoke the local session, `unserve()`) runs once: in the app's lifespan (inside uvicorn's signal handling), or at once when the start fails before the app serves (e.g. `create_app` raises `IndexUnavailableError`).
+- Rules: `secrets.env` with group/other bits stops the start (`chmod 600 <path>`). `--auth` or `server.auth: on` turns auth on: `ensure_owner(owner_name())`, earlier `local` sessions of the owner are revoked, `mint_local` writes the new token into `server.json` (an env server's `HYPOTHEX_SERVE_TOKEN` wins when both exist; both pass `AuthGuard`), and the session is revoked when the server stops. Default root transport also protects a non-loopback bind; only explicit no-auth is loopback-only. Scoped local starts retain the minted owner-session credential in `server.json`, rather than letting default root generation replace it. `--tailscale` needs auth on ("tailscale needs server.auth: on"), binds `127.0.0.1`, uses `serve_https(port)` as `public_url`, and calls `unserve()` at stop. The start claims the home (`server.json`, refused while a live server owns it) before any side effect, so a second `hx serve` on the same home exits without touching the running server's tailnet mapping or local session; the minted token is written into the claimed `server.json` after. Cleanup (revoke the local session, `unserve()`) runs once: in the app's lifespan (inside uvicorn's signal handling), or at once when the start fails before the app serves (e.g. `create_app` raises `IndexUnavailableError`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -18265,7 +18337,7 @@ import httpx
 import pytest
 
 from hypothex.auth.store import AuthStore
-from hypothex.cli.main import _serve_token, owner_name
+from hypothex.cli.main import owner_name
 from hypothex.core.errors import ConfigError
 from hypothex.core.layout import Layout
 from hypothex.core.settings import ServerSettings, Settings, save_settings
@@ -18409,24 +18481,6 @@ def test_a_start_that_fails_before_serving_undoes_its_side_effects(
     assert not (home / "serve" / "server.json").exists()
 
 
-def test_open_bind_needs_auth_or_a_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # the refusal comes before any socket is opened, so nothing listens on 0.0.0.0
-    done = subprocess.run(
-        [*HX, "--home", str(tmp_path / "h"), "serve", "--host", "0.0.0.0", "--port", "0"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert done.returncode == 1
-    assert "server.auth: on" in done.stderr and "HYPOTHEX_SERVE_TOKEN" in done.stderr
-    # with auth on the open bind is allowed; checked on the decision itself, never by
-    # listening on every interface of the developer's machine
-    monkeypatch.delenv("HYPOTHEX_SERVE_TOKEN", raising=False)
-    assert _serve_token("0.0.0.0", "local", False, auth_on=True) is None
-    with pytest.raises(ConfigError, match="server.auth: on"):
-        _serve_token("0.0.0.0", "local", False, auth_on=False)
-
-
 def test_readable_secrets_file_stops_the_start(tmp_path: Path) -> None:
     home = tmp_path / "h"
     home.mkdir()
@@ -18441,6 +18495,45 @@ def test_readable_secrets_file_stops_the_start(tmp_path: Path) -> None:
     )
     assert done.returncode == 1 and f"chmod 600 {secrets}" in done.stderr
     assert "SECRET" not in done.stderr.replace(str(secrets), "")
+```
+
+Append this paused-publication regression to `tests/cli/test_serve_auth.py`; it exercises the actual owner-record helper without starting a listener:
+
+```python
+def test_scoped_claim_exposes_no_provisional_root_and_preserves_record(tmp_path: Path) -> None:
+    from hypothex import __version__
+    from hypothex.cli.main import _server_file, local_server_token
+    from hypothex.core.environment import PROTOCOL_VERSION, load_descriptor
+    from hypothex.remote.bootstrap import ServerInfo
+
+    layout = Layout(tmp_path)
+    layout.ensure()
+    descriptor = load_descriptor(layout)
+    info = ServerInfo(
+        pid=os.getpid(), port=19991, managed=False, hx_version=__version__,
+        protocol_version=PROTOCOL_VERSION, environment_id=descriptor.environment_id,
+        token=None,  # scoped local claim has not minted its owner session yet
+    )
+    with _server_file(tmp_path, info) as set_token:
+        path = tmp_path / "serve" / "server.json"
+        before = json.loads(path.read_text())
+        assert before["token"] is None
+        with pytest.raises(ConfigError, match="no verifiable authenticated local server"):
+            local_server_token(tmp_path)
+        before["extra"] = {"preserved": True}
+        path.write_text(json.dumps(before))
+        store = AuthStore(layout)
+        store.ensure_owner("sv")
+        session, token = store.mint_local("sv")
+        set_token(token)
+        after = json.loads(path.read_text())
+        assert {key: value for key, value in after.items() if key != "token"} == {
+            key: value for key, value in before.items() if key != "token"
+        }
+        assert local_server_token(tmp_path) == token
+        principal = store.authenticate(token)
+        assert principal is not None and principal.session_id == session.id
+        assert principal.user == "sv" and principal.client == "local"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -18478,103 +18571,42 @@ def owner_name() -> str:
     return name if re.fullmatch(USER_NAME, name) else "owner"
 ```
 
-2. Change `_serve_token` to take `*, auth_on: bool = False`, and replace its refusal block with:
+2. Keep `_serve_token(host, kind, no_auth)` unchanged; it generates a fresh token for local/ssh/slurm unless explicitly disabled and validates overrides. Add `auth`, `tailscale`, and `public_url` options to the actual baseline `serve` signature, leaving its existing host/port/kind/no-auth options and explicit `--kind local` wording intact:
 
 ```python
-    if token is None and not auth_on and not is_loopback_bind(host):
-        raise ConfigError(
-            f"refusing to serve on {host!r} without authentication: anyone who can reach "
-            "this address could start arbitrary commands and read run files through the "
-            "API. Turn on auth (server.auth: on in config.yaml, or hx serve --auth), or set "
-            "HYPOTHEX_SERVE_TOKEN to require 'Authorization: Bearer <token>', or keep "
-            "--host 127.0.0.1 and reach it through an SSH tunnel "
-            "(ssh -L 7777:127.0.0.1:7777 HOST)"
-        )
+    auth: Annotated[bool, typer.Option("--auth", help="Require paired sessions.")] = False,
+    tailscale: Annotated[bool, typer.Option("--tailscale", help="Publish with tailscale serve.")] = False,
+    public_url: Annotated[str | None, typer.Option("--public-url", help="URL people reach this hub at.")] = None,
 ```
 
-   and add to its docstring: "auth_on : bool — with auth on, sessions protect every route, so an open bind is allowed."
-
-3. Replace the `serve` command with:
+Add imports for `AuthStore, Principal`, `check_secrets_file, load_settings`, and `serve_https, unserve`. Immediately after `home = _home_path()` and before resolving kind or binding, add:
 
 ```python
-@app.command()
-def serve(
-    host: Annotated[str, typer.Option(help="Bind address.")] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="Port; 0 picks a free one.")] = 7777,
-    kind: Annotated[
-        str | None,
-        typer.Option(
-            "--kind",
-            help="Run as a host's env server: ssh (GPU queue) or slurm. Default: the saved kind.",
-        ),
-    ] = None,
-    no_auth: Annotated[
-        bool,
-        typer.Option(
-            "--no-auth", help="Env server without a bearer token (demo and test hosts only)."
-        ),
-    ] = False,
-    auth: Annotated[
-        bool, typer.Option("--auth", help="Require paired sessions (server.auth: on).")
-    ] = False,
-    tailscale: Annotated[
-        bool, typer.Option("--tailscale", help="Publish over HTTPS with tailscale serve.")
-    ] = False,
-    public_url: Annotated[
-        str | None, typer.Option("--public-url", help="URL people reach this hub at.")
-    ] = None,
-) -> None:
-    """
-    Serve the HTTP/WebSocket API, the UI when built, and (on the hub) the hosts.
-
-    With auth on (``--auth`` or ``server.auth: on``) every route needs a paired
-    session; this machine's CLI uses the owner session written to
-    ``<home>/serve/server.json``. ``--tailscale`` (auth on) publishes the hub
-    on the tailnet with ``tailscale serve``. An env server (``--kind ssh|slurm``)
-    keeps its per-start bearer token. A non-loopback --host needs auth on or a token.
-    """
-    import uvicorn
-
-    from hypothex.api.app import create_app
-    from hypothex.auth.store import AuthStore, Principal
-    from hypothex.core.environment import PROTOCOL_VERSION
-    from hypothex.core.settings import check_secrets_file, load_settings
-    from hypothex.demo import demo_hosts_running
-    from hypothex.remote.bootstrap import ServerInfo
-    from hypothex.remote.tailscale import serve_https, unserve
-
-    home = _home_path()
     layout = Layout(home)
     layout.ensure()
     settings = load_settings(layout)
     check_secrets_file(layout)
     auth_on = auth or settings.server.auth == "on"
+    if no_auth and auth_on:
+        raise ConfigError("--no-auth cannot be combined with server.auth: on or --auth")
     if tailscale and not auth_on:
         raise ConfigError("tailscale needs server.auth: on (or hx serve --auth)")
     if tailscale:
         host = "127.0.0.1"
-    resolved = resolve_serve_kind(home, kind)
-    token = _serve_token(host, resolved, no_auth, auth_on=auth_on)
-    sock = _listen(host, port)
-    bound = sock.getsockname()[1]
+    explicit_token = "HYPOTHEX_SERVE_TOKEN" in os.environ
+```
+
+Immediately after the unchanged `token = _serve_token(host, resolved, no_auth)`, add `token_is_host = explicit_token or resolved in {"ssh", "slurm"}`. Keep the actual `ServerInfo` construction and `environment_id`, changing only its token argument to `token=token if not auth_on or token_is_host else None`. A scoped local claim must not publish a provisional root bearer that its eventual `AuthGuard` will reject; `hx token` fails closed until `set_token(local_token)` completes. Root/host modes keep their actual credential. After `ServerInfo`, add the start-owned lifecycle state:
+
+```python
     public = public_url or settings.server.public_url
     owner = owner_name()
     me = Principal(user=owner, scope="admin", session_id=None, client="local")
     store: AuthStore | None = None
     local_session_id: str | None = None
     published = False
-    info = ServerInfo(
-        pid=os.getpid(),
-        port=bound,
-        managed=False,
-        hx_version=__version__,
-        protocol_version=PROTOCOL_VERSION,
-        token=token,
-    )
 
     def release() -> None:
-        # undo this start's side effects, each at most once: at stop (the lifespan), or at
-        # once when the start fails before the app serves (e.g. the index does not answer)
         nonlocal local_session_id, published
         if store is not None and local_session_id is not None:
             with contextlib.suppress(HypothexError):
@@ -18584,21 +18616,13 @@ def serve(
             with contextlib.suppress(HypothexError):
                 unserve()
             published = False
+```
 
-    class _Server(uvicorn.Server):
-        # uvicorn re-raises SIGTERM/SIGINT once it has shut down, which ends the
-        # process before `with _server_file` cleans up: drop server.json first
-        @contextmanager
-        def capture_signals(self) -> Iterator[None]:
-            with super().capture_signals():
-                try:
-                    yield
-                finally:
-                    _drop_server_file(home, info.pid)
+Keep the baseline `_Server.capture_signals`. Replace only the `demo_hosts` lifespan context manager and `with _server_file` block with:
 
+```python
     @contextmanager
-    def served() -> Iterator[None]:
-        # entered and left by the app's lifespan, so SIGTERM runs this cleanup too
+    def demo_hosts() -> Iterator[None]:
         try:
             with demo_hosts_running(home) as live:
                 if live:
@@ -18607,73 +18631,51 @@ def serve(
         finally:
             release()
 
-    # claim the home first: a second `hx serve` stops here, before it touches the tailnet
-    # mapping or the owner's local session that the running server holds
-    with _server_file(home, info) as set_token:
-        try:
-            if auth_on:
-                store = AuthStore(layout, session_days=settings.server.session_days)
-                store.ensure_owner(owner)
-                for old in store.sessions(owner):
-                    if old.client == "local":
-                        store.revoke(old.id, by=me)
-                session, local_token = store.mint_local(owner)
-                local_session_id = session.id
-                if token is None:  # an env server's HYPOTHEX_SERVE_TOKEN wins
-                    set_token(local_token)
-            if tailscale:
-                public = serve_https(bound)
-                published = True
-            application = create_app(
-                home,
-                host=host,
-                kind=resolved,
-                auth_token=token,
-                hub_url=_url(host, bound),
-                lifespan_context=served,
-                auth=auth_on,
-                public_url=public,
-            )
-            shown = f"{_url(host, bound)}" + (f" · {public}" if public else "")
-            typer.secho(f"hx serve on {shown}" + (" · auth on" if auth_on else ""), err=True)
-            # the socket is bound already: uvicorn logs no "running on" line for it, so
-            # the start script finds the port in server.json (written above, Task 11)
-            config = uvicorn.Config(application, host=host, port=bound, log_level="info")
-            _Server(config).run(sockets=[sock])
-        finally:
-            release()  # a no-op when the lifespan already ran it
-```
-
-4. Make `_server_file` yield a way to add the token once it is minted (the home is claimed before any side effect, and the claim is not given up to write the token). Replace its signature line and the tail of its body:
-
-```python
-@contextmanager
-def _server_file(home: Path, info: ServerInfo) -> Iterator[None]:
-```
-
-with
-
-```python
-@contextmanager
-def _server_file(home: Path, info: ServerInfo) -> Iterator[Callable[[str | None], None]]:
-```
-
-and
-
-```python
     try:
-        yield
+        # Claim before revoking sessions or changing Tailscale resources.
+        with _server_file(home, info) as set_token:
+            try:
+                if auth_on:
+                    store = AuthStore(layout, session_days=settings.server.session_days)
+                    store.ensure_owner(owner)
+                    for old in store.sessions(owner):
+                        if old.client == "local":
+                            store.revoke(old.id, by=me)
+                    session, local_token = store.mint_local(owner)
+                    local_session_id = session.id
+                    if not token_is_host:
+                        set_token(local_token)
+                if tailscale:
+                    public = serve_https(bound)
+                    published = True
+                application = create_app(
+                    home, host=host, kind=resolved,
+                    auth_token=token if not auth_on or token_is_host else None,
+                    token_is_host=token_is_host,
+                    hub_url=_url(host, bound), lifespan_context=demo_hosts,
+                    auth=auth_on, public_url=public,
+                )
+                shown = _url(host, bound) + (f" · {public}" if public else "")
+                typer.secho(f"hx serve on {shown}" + (" · auth on" if auth_on else ""), err=True)
+                config = uvicorn.Config(application, host=host, port=bound, log_level="info")
+                _Server(config).run(sockets=[sock])
+            finally:
+                release()
     finally:
-        _drop_server_file(home, info.pid)
+        sock.close()
 ```
 
-with
+3. Extend the baseline `_server_file` without rebuilding its record. Add `Callable` to imports and change its return annotation to `Iterator[Callable[[str | None], None]]`. Keep the private owner lock, `_refuse_live_owner`, full identity/home/PID-birth/metadata record, and initial write unchanged. Replace only its final `try: yield` with:
 
 ```python
     def set_token(token: str | None) -> None:
-        # the same record with the token minted after the claim; this process owns the
-        # home, so an atomic rewrite needs no lock (a rival start reads a live owner)
-        _write_private(path, json.dumps({**record, "token": token}, indent=2))
+        with (path.parent / ".owner.lock").open("a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            current = json.loads(path.read_text(encoding="utf-8"))
+            keys = ("pid", "pid_create_time", "environment_id", "home", "hostname")
+            if not isinstance(current, dict) or any(current.get(key) != record.get(key) for key in keys):
+                raise ConfigError("server ownership changed before credential publication")
+            _write_private(path, json.dumps({**current, "token": token}, indent=2))
 
     try:
         yield set_token
@@ -18681,12 +18683,12 @@ with
         _drop_server_file(home, info.pid)
 ```
 
-   and add `Callable` to the `collections.abc` import.
+This preserves unknown fields added to the owned record before credential publication. `hx token`, PID birth checks, bootstrap REUSE and private-tunnel behavior remain unchanged. Add first-start/restart tests that use actual `hx token`, CLI `whoami` and stdio discovery and resolve to the owner session; explicit overrides and env-server defaults resolve as HOST; scoped-off defaults remain root-authenticated; no-auth stays loopback-only; a failed second start changes no live session/mapping; record publication retains identity/birth/unknown metadata. Retain the existing token and serve tests. The exact adapters above must be compared to the final merged source before Round 5.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/cli/test_serve_auth.py tests/cli/test_serve.py -v`
-Expected: `tests/cli/test_serve_auth.py` `8 passed`; the phase 2 serve tests still pass.
+Expected: scoped-start tests and the retained default-token serve/token-helper tests pass; final merged source comparison and integration evidence are still required before formal round 5.
 
 Run: `uv run python -m doctest src/hypothex/cli/main.py && uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -18841,7 +18843,7 @@ git commit -m "feat(sdk): run.log_cost for api spend"
 - Consumes: `parse_pairing_url` (Task 7), `HubLogin`/`save_hub_login`/`hub_login`/`forget_hub_login` (Task 7), the auth routes (Task 25).
 - Produces (contract 4, exact): `hx pair [--user NAME] [--new-user] [--scope read|launch|admin] [--client browser|cli|host] [--ttl 300] [--url HUB]` (prints the QR code and the URL; `--json` the offer); `hx login <pairing-url> [--device NAME]` (as `cli`, or `agent` when `HYPOTHEX_AGENT` is set; stores the token in `hub-tokens.json`; never prints it); `hx logout [--hub URL]`; `hx whoami`; `hx sessions list [--all]` / `hx sessions revoke <id>`; `hx users list` / `hx users disable <name>`.
 - Produces (contract 2): `resolve_hub_token(url, home)` order: `$HYPOTHEX_HUB_TOKEN`, then the `hub-tokens.json` login for that URL, then (loopback only) `serve/server.json`.
-- Produces (additive): `hub_call(..., text: bool = False, agent: str | None = None, discover_token: bool = True)` (`text`: return the body as text, for exports; `agent`: the `X-Hypothex-Agent` header, default `$HYPOTHEX_AGENT`); the CLI sends `X-Hypothex-Agent: $HYPOTHEX_AGENT`; an MCP tool's hub call sends the tool's own `agent` argument (default `mcp`), because an authenticated hub takes the agent from that header and overwrites the body's `created_by` (contract 1.2), so `launch_run(agent="claude", host=...)` by alice is `agent:claude@alice`, not `human:alice`.
+- Produces (additive): `hub_call(..., text: bool = False, agent: str | None = None)` (`text`: return the body as text, for exports; `agent`: the `X-Hypothex-Agent` header, default `$HYPOTHEX_AGENT`); the CLI sends `X-Hypothex-Agent: $HYPOTHEX_AGENT`; an MCP tool's hub call sends the tool's own `agent` argument (default `mcp`), because an authenticated hub takes the agent from that header and overwrites the body's `created_by` (contract 1.2), so `launch_run(agent="claude", host=...)` by alice is `agent:claude@alice`, not `human:alice`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -19011,7 +19013,7 @@ In `src/hypothex/mcp/server.py`:
     return token if isinstance(token, str) and token else None
 ```
 
-3. In `hub_call`, preserve Task 32's `discover_token` argument and conditional credential selection; add `text: bool = False,` and `agent: str | None = None,` after `token: str | None = None,`, document them ("text : bool — return the body as text (exports) instead of JSON." and "agent : str, optional — the agent this call acts for (``X-Hypothex-Agent``); default ``$HYPOTHEX_AGENT``."), replace
+3. In `hub_call`, preserve the baseline `TokenChoice`/`NO_AUTH_TOKEN` handling and shared token validation; add `text: bool = False,` and `agent: str | None = None,` after `token: TokenChoice = None,`, document them ("text : bool — return the body as text (exports) instead of JSON." and "agent : str, optional — the agent this call acts for (``X-Hypothex-Agent``); default ``$HYPOTHEX_AGENT``."), replace
 
 ```python
     headers = {"Authorization": f"Bearer {auth}"} if auth else {}
@@ -19057,7 +19059,6 @@ with
             token=auth(),
             agent=agent,
             timeout=timeout,
-            discover_token=not _OVER_HTTP.get(),
         )
 
 
@@ -22036,6 +22037,6 @@ Inputs: the phase 3 contract, spec sections 3.4, 5.3, 5.4, 7.2–7.4, 9, 12, 13,
 - Cleanup counts `vars["checkpoint"]` as a use (`input_paths`, `overlaps`) at plan and at delete; a concurrent second apply of one plan is refused, not a 500 (Tasks 21, 22, 45).
 - Export refuses a comparison that would merge two versions of one metric (Task 12). Folded sweeps follow `rule.events` (Task 16). Digest notices carry the top notes, and the notebook block lists task changes as lines (Task 18).
 - `hub_today` and the API's `today` day make one "today" for the UI, the CLI, MCP, and the digest (Tasks 8, 29, 33, 43).
-- The pairing limit counts failures only, keyed per person behind `tailscale serve` (Task 25). `AuthGuard` skips the session lookup for paths outside `/api/` and `/mcp` (Task 23). `NotifyTestBody` is module-level (Task 30). Overview rows carry `owner` (Task 27). A Postgres URL without `psycopg` is a `ConfigError` (Task 34). The open-bind test checks the decision instead of listening on `0.0.0.0` (Task 39). `write_private` is main's hardened version and the CLI shares it (Task 2).
+- The pairing limit counts failures only, keyed per person behind `tailscale serve` (Task 25). `AuthGuard` reuses the reviewed exact static/identity classification; it never bypasses all non-API paths (Task 23). `NotifyTestBody` is module-level (Task 30). Overview rows carry `owner` (Task 27). A Postgres URL without `psycopg` is a `ConfigError` (Task 34). Default root-token/open-bind and scoped owner-session discovery tests retain the final CLI lifecycle (Task 39). `write_private` is main's hardened version and the CLI shares it (Task 2).
 
 **Order.** Parts 3 (notebook, baselines, export), 4–5 (notify, digest), 6 (storage), and 10 (Postgres) depend only on Parts 1–2 and may run in parallel. Part 7 needs Part 2; Part 8 needs Parts 3–7; Part 9 needs Parts 3–7; Part 11 needs Parts 1, 2, and 7; Part 12 needs Parts 7–9 and 11; Part 13 needs everything.

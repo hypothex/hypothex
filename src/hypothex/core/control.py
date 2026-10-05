@@ -22,6 +22,7 @@ from hypothex.core.execution import (
     SUPERVISOR_PID_FILE,
     TERM_GRACE_SECONDS,
     RunRequest,
+    _update_terminal_run,
     checkout_run_tree,
     execute_run,
     prepare_run,
@@ -100,7 +101,13 @@ def launch_run(ctx: Context, req: RunRequest) -> RunRecord:
         except Exception as exc:
             # any failure (also OSError, ConfigError): a queued run without a
             # marker and with a live launcher pid would never be started or repaired
-            ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": str(exc)})
+            _update_terminal_run(
+                ctx,
+                record.run_id,
+                "run.failed",
+                end_unstarted(RunStatus.FAILED, reason=str(exc)),
+                {"reason": str(exc)},
+            )
             raise
         return ctx.find_record(record.run_id)
     if req.gpus > 0:
@@ -123,7 +130,13 @@ def _checkout_before_submit(ctx: Context, record: RunRecord) -> None:
     try:
         checkout_run_tree(ctx, record)
     except (HypothexError, OSError) as exc:
-        failed = ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": str(exc)})
+        failed = _update_terminal_run(
+            ctx,
+            record.run_id,
+            "run.failed",
+            end_unstarted(RunStatus.FAILED, reason=str(exc)),
+            {"reason": str(exc)},
+        )
         release_worktree(ctx, failed)
         raise RunError(f"could not check out run {record.run_id}: {exc}") from exc
 
@@ -174,7 +187,13 @@ def _prepare_on_free_gpus(
                 f"{req.gpus} GPUs requested; {len(free)} of {len(gpus)} free now "
                 f"(taken while the run was prepared); {hint}"
             )
-            ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": message})
+            _update_terminal_run(
+                ctx,
+                record.run_id,
+                "run.failed",
+                end_unstarted(RunStatus.FAILED, reason=message),
+                {"reason": message},
+            )
             raise RunError(message)
         chosen = free[: req.gpus]
         record = ctx.update_run(
@@ -185,17 +204,19 @@ def _prepare_on_free_gpus(
     return record
 
 
-_fail_unstarted = end_unstarted(RunStatus.FAILED)
-"""Mark a prepared run that never started as failed; it gives back its GPUs."""
-
-
 def _start_supervisor(ctx: Context, record: RunRecord) -> None:
     """Spawn the run's supervisor; a start that never committed fails the run."""
     try:
         spawn_supervisor(ctx, record)
     except OSError as exc:  # nothing will execute it (Task 18), so its GPUs go back
         message = f"could not start the supervisor: {exc}"
-        ctx.update_run(record.run_id, "run.failed", _fail_unstarted, {"reason": message})
+        _update_terminal_run(
+            ctx,
+            record.run_id,
+            "run.failed",
+            end_unstarted(RunStatus.FAILED, reason=message),
+            {"reason": message},
+        )
         raise RunError(message) from exc
 
 
@@ -273,11 +294,11 @@ def _supervisor_alive(run_dir: Path, record: RunRecord) -> bool:
     return process_alive(record.executor.pid, record.executor.pid_create_time)
 
 
-def _mark(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
+def _mark(status: RunStatus, reason: str | None = None) -> Callable[[RunRecord], RunRecord]:
     def mutate(r: RunRecord) -> RunRecord:
         if r.status in TERMINAL_STATUSES:
             return r
-        return r.model_copy(update={"status": status, "ended_at": utcnow()})
+        return r.model_copy(update={"status": status, "ended_at": utcnow(), "end_reason": reason})
 
     return mutate
 
@@ -287,17 +308,19 @@ def _scheduler_held(run_dir: Path) -> bool:
     return (run_dir / QUEUE_FILE).is_file() and not (run_dir / SUPERVISOR_PID_FILE).is_file()
 
 
-_unqueue = end_unstarted(RunStatus.KILLED)
-"""Kill a run removed from the GPU queue before it started."""
-
-
 def _remove_from_queue(ctx: Context, run_id: str, run_dir: Path) -> RunRecord | None:
     """Kill a run still waiting in the GPU queue; None if the scheduler started it."""
     with scheduler_lock(ctx):
         if not _scheduler_held(run_dir):
             return None
         (run_dir / QUEUE_FILE).unlink()
-        killed = ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "removed from queue"})
+        killed = _update_terminal_run(
+            ctx,
+            run_id,
+            "run.killed",
+            end_unstarted(RunStatus.KILLED, reason="removed from queue"),
+            {"reason": "removed from queue"},
+        )
     release_worktree(ctx, killed)  # it never ran: execute_run will not clean up after it
     return killed
 
@@ -353,7 +376,13 @@ def cancel_if_queued(ctx: Context, run_id: str) -> RunRecord:
         os.close(os.open(run_dir / EXECUTION_CLAIM, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
     except FileExistsError:
         return ctx.find_record(run_id)  # it started: leave it alone
-    killed = ctx.update_run(run_id, "run.killed", _unqueue, {"reason": "cancelled while queued"})
+    killed = _update_terminal_run(
+        ctx,
+        run_id,
+        "run.killed",
+        end_unstarted(RunStatus.KILLED, reason="cancelled while queued"),
+        {"reason": "cancelled while queued"},
+    )
     release_worktree(ctx, killed)  # a supervisor that arrives now refuses the run, so no cleanup
     return killed
 
@@ -418,8 +447,12 @@ def cancel_many_if_queued(ctx: Context, run_ids: list[str]) -> CancelBatch:
                     continue
                 try:
                     (run_dir / QUEUE_FILE).unlink()
-                    killed[run_id] = ctx.update_run(
-                        run_id, "run.killed", _unqueue, {"reason": "removed from queue"}
+                    killed[run_id] = _update_terminal_run(
+                        ctx,
+                        run_id,
+                        "run.killed",
+                        end_unstarted(RunStatus.KILLED, reason="removed from queue"),
+                        {"reason": "removed from queue"},
                     )
                 except HypothexError as exc:
                     errors[run_id] = str(exc)
@@ -497,7 +530,9 @@ def stop_run(ctx: Context, run_id: str, *, grace: float = TERM_GRACE_SECONDS) ->
         if not _supervisor_alive(run_dir, current):
             break
         time.sleep(0.1)
-    killed = ctx.update_run(run_id, "run.killed", _mark(RunStatus.KILLED), {"reason": "stopped"})
+    killed = _update_terminal_run(
+        ctx, run_id, "run.killed", _mark(RunStatus.KILLED, "stopped"), {"reason": "stopped"}
+    )
     index_run_points(ctx.index, ctx.store, killed)  # no supervisor is left to index the end
     return killed
 
@@ -821,6 +856,8 @@ def _repair_one(ctx: Context, current: RunRecord) -> RunRecord | None:
     if child is not None and process_alive(child, None):
         terminate_group(child)
         reason += "; orphaned process terminated"
-    lost = ctx.update_run(current.run_id, "run.lost", _mark(RunStatus.LOST), {"reason": reason})
+    lost = _update_terminal_run(
+        ctx, current.run_id, "run.lost", _mark(RunStatus.LOST, reason), {"reason": reason}
+    )
     release_worktree(ctx, lost)  # nothing executes it any more: also frees a staging checkout
     return lost

@@ -145,7 +145,12 @@ class CostTotals(BaseModel):
 
 
 class RunRecord(BaseModel):
-    """All facts about one run; stored as ``run.yaml``."""
+    """All facts about one run; stored as ``run.yaml``.
+
+    ``end_reason`` records a known terminal cause, or None for ordinary
+    completion and legacy records. Warnings and connection errors are not
+    terminal causes. Reruns start with a fresh empty reason.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -172,6 +177,7 @@ class RunRecord(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    end_reason: str | None = None
     exit_code: int | None = None
     artifacts: list[Artifact] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
@@ -201,7 +207,9 @@ class ScoreRecord(BaseModel):
     created_at: datetime
 
 
-def end_unstarted(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
+def end_unstarted(
+    status: RunStatus, *, reason: str | None = None
+) -> Callable[[RunRecord], RunRecord]:
     """
     Build an ``update_run`` mutator that ends a run that never started.
 
@@ -214,6 +222,9 @@ def end_unstarted(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
     status : RunStatus
         The terminal status, e.g. ``failed`` (could not start) or ``killed``
         (removed from the queue).
+    reason : str or None, optional
+        Recorded terminal cause; None when no cause is known. Rejected
+        transitions preserve the existing reason.
 
     Returns
     -------
@@ -230,7 +241,12 @@ def end_unstarted(status: RunStatus) -> Callable[[RunRecord], RunRecord]:
             return r
         executor = r.executor.model_copy(update={"gpus": [], "queue_position": None})
         return r.model_copy(
-            update={"status": status, "ended_at": datetime.now(UTC), "executor": executor}
+            update={
+                "status": status,
+                "ended_at": datetime.now(UTC),
+                "executor": executor,
+                "end_reason": reason,
+            }
         )
 
     return mutate

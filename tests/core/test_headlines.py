@@ -479,3 +479,10 @@ def test_headlines_name_groups_with_the_whole_clause() -> None:
     version = row("v2", [0.5])  # a version label is not the hypothesis: kept as it is
     version.hypothesis = "a hypothesis much longer than thirty-two characters"
     assert task_headline(board("generic", [version])) == "v2 0.500"
+
+
+def test_unscored_backlog_headline_names_reevaluation() -> None:
+    empty = board("generic", [])
+    assert task_headline(empty) == "No scored runs yet"
+    empty.needs_reeval = ["r1", "r2"]
+    assert task_headline(empty) == "2 need re-eval"

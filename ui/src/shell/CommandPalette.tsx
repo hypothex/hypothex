@@ -3,6 +3,9 @@
  * switch colour mode. Items are filtered by every typed word (case-insensitive) over the
  * group, title, subtitle and hidden keywords (hypothesis, tags, paths).
  */
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../api/client";
+import { sweepCrumb } from "../pages/components/remote";
 import { useNavigate } from "@tanstack/react-router";
 import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
@@ -13,10 +16,11 @@ import { toggleTheme } from "./ThemeToggle";
 export type NavTarget =
   | { to: "/" }
   | { to: "/t/$project/$task"; params: { project: string; task: string } }
-  | { to: "/r/$runId"; params: { runId: string } };
+  | { to: "/r/$runId"; params: { runId: string } }
+  | { to: "/s/$project/$id"; params: { project: string; id: string } };
 
 export interface CommandItem {
-  group: "Go to" | "Tasks" | "Runs" | "Paths" | "Commands";
+  group: "Go to" | "Tasks" | "Runs" | "Sweeps" | "Paths" | "Commands";
   title: string;
   subtitle: string;
   keywords?: string;
@@ -30,6 +34,7 @@ export interface CommandHandlers {
 }
 
 export interface CommandData {
+  hubEnvironmentId?: string | null;
   projects: ProjectInfo[];
   tasks: TaskSummary[];
   runs: RunRecord[];
@@ -62,9 +67,18 @@ export function buildCommands(data: CommandData, h: CommandHandlers): CommandIte
       group: "Runs",
       title: r.run_id,
       subtitle: `${clip(r.hypothesis || r.task || r.project)}, ${who}`,
-      keywords: [r.hypothesis, r.project, r.task ?? "", r.created_by, ...r.tags, r.cwd].join(" "),
+      keywords: [r.hypothesis, r.project, r.task ?? "", r.created_by, ...r.tags, ...Object.entries(r.params).map(([key, value]) => `${key}=${value}`), r.cwd].join(" "),
       run: () => h.go({ to: "/r/$runId", params: { runId: r.run_id } }),
     });
+  }
+  const sweeps = new Set<string>();
+  for (const record of runs) {
+    const sweep = sweepCrumb(record, data.hubEnvironmentId ?? null);
+    const key = JSON.stringify([record.project, sweep?.id]);
+    if (!sweep?.href || sweeps.has(key)) continue;
+    sweeps.add(key);
+    items.push({ group: "Sweeps", title: `${record.project} / ${sweep.id}`, subtitle: record.task ?? "",
+      run: () => h.go({ to: "/s/$project/$id", params: { project: record.project, id: sweep.id } }) });
   }
   for (const p of data.projects) {
     items.push({ group: "Paths", title: `Copy ${p.project} repo`, subtitle: p.repo, run: () => h.copy(p.repo) });
@@ -95,6 +109,7 @@ export function filterCommands(items: CommandItem[], query: string): CommandItem
 function PaletteDialog({ onClose, onToast }: { onClose: () => void; onToast: (msg: string) => void }) {
   const navigate = useNavigate();
   const projects = useProjects();
+  const environment = useQuery({ queryKey: ["environment"], queryFn: ({ signal }) => api.environment(signal), staleTime: Number.POSITIVE_INFINITY });
   const tasks = useTasks();
   const runs = useRuns({ limit: 200 });
   const [query, setQuery] = useState("");
@@ -106,7 +121,7 @@ function PaletteDialog({ onClose, onToast }: { onClose: () => void; onToast: (ms
   const all = useMemo(
     () =>
       buildCommands(
-        { projects: projects.data ?? [], tasks: tasks.data ?? [], runs: runs.data ?? [] },
+        { projects: projects.data ?? [], tasks: tasks.data ?? [], runs: runs.data ?? [], hubEnvironmentId: typeof environment.data?.environment_id === "string" ? environment.data.environment_id : null },
         {
           go: (target) => void navigate(target),
           copy: (text) => {
@@ -116,7 +131,7 @@ function PaletteDialog({ onClose, onToast }: { onClose: () => void; onToast: (ms
           toggleTheme: () => void toggleTheme(),
         },
       ),
-    [projects.data, tasks.data, runs.data, navigate, onToast],
+    [projects.data, tasks.data, runs.data, environment.data, navigate, onToast],
   );
   const items = useMemo(() => filterCommands(all, query), [all, query]);
   const loading = projects.isPending || tasks.isPending || runs.isPending;

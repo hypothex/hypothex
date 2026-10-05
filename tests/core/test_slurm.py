@@ -776,6 +776,7 @@ def test_run_child_never_opens_the_index_or_event_log(
     assert indexed is not None and indexed.status == RunStatus.QUEUED
     exit_record = json.loads((ctx.run_dir(final) / EXIT_FILE).read_text())
     assert (exit_record["status"], exit_record["exit_code"]) == ("finished", 0)
+    assert exit_record["end_reason"] is None
 
 
 def test_a_home_without_flock_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -874,6 +875,7 @@ def test_an_unknown_sbatch_outcome_keeps_the_run_and_its_intent(
     req = RunRequest(repo=toy_repo, command=[PY, "-c", "pass"], slurm=SlurmDefaults())
     record = control.launch_run(ctx, req)  # ... and no error: it may well run
     assert record.status == RunStatus.QUEUED and record.executor.slurm_job_id is None
+    assert record.end_reason is None
     entry = json.loads((ctx.layout.home / "slurm" / "outbox" / f"{record.run_id}.json").read_text())
     assert entry["state"] == "unknown" and entry["comment"] == slurm.job("1000")["comment"]
     types = [e.type for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id]
@@ -891,6 +893,7 @@ def test_submit_run_records_sbatch_failure(ctx: Context, toy_repo: Path, slurm: 
     last = [e for e in ctx.events.since(0, limit=10_000) if e.run_id == record.run_id][-1]
     assert last.type == "run.failed"
     assert "invalid partition specified: nope" in last.payload["reason"]
+    assert failed.end_reason == last.payload["reason"]
 
 
 def test_end_to_end_job_runs_hx_run_child(ctx: Context, toy_repo: Path, slurm: FakeSlurm) -> None:
@@ -1156,6 +1159,7 @@ def test_the_lost_reason_keeps_slurm_s_end_state(ctx: Context, slurm: FakeSlurm)
     last = ctx.events.since(0, limit=10_000)[-1]
     assert (last.type, last.payload["slurm_state"]) == ("run.lost", "NODE_FAIL")
     assert last.payload["reason"].startswith("SLURM ended job 1000 with NODE_FAIL on r208u06n02")
+    assert ctx.find_record("r1").end_reason == last.payload["reason"]
 
 
 def test_a_node_that_ends_during_reconcile_is_published_not_lost(
@@ -1209,11 +1213,13 @@ def test_a_late_exit_record_replaces_lost(ctx: Context, slurm: FakeSlurm) -> Non
     record = slurm_run(ctx, "r1", job_id="1000")
     [lost] = reconcile(ctx)
     assert lost.status == RunStatus.LOST
+    assert lost.end_reason is not None
     assert outbox(ctx, "r1").exists()  # kept: a late node end can still replace lost
     assert reconcile(ctx) == []  # nothing new yet
     _exit_record(ctx.run_dir(record))
     [done] = reconcile(ctx)
     assert (done.status, done.exit_code) == (RunStatus.FINISHED, 0)
+    assert done.end_reason is None
     assert ctx.find_record("r1").status == RunStatus.FINISHED
     indexed = ctx.index.get_run("r1")
     assert indexed is not None and indexed.status == RunStatus.FINISHED
@@ -2044,7 +2050,9 @@ def test_cancel_if_queued_cancels_only_a_pending_job(ctx: Context, slurm: FakeSl
     slurm_run(ctx, "r1", job_id="1000", status=RunStatus.QUEUED)
     slurm_run(ctx, "r2", job_id="1001", status=RunStatus.QUEUED)
     assert control.cancel_if_queued(ctx, "r1").status == RunStatus.KILLED
+    assert ctx.find_record("r1").end_reason == "cancelled while queued"
     assert control.cancel_if_queued(ctx, "r2").status == RunStatus.QUEUED
+    assert ctx.find_record("r2").end_reason is None
     assert slurm.job("1001")["state"] == "RUNNING"
     assert slurm.calls("scancel") == [["--state=PENDING", "1000"], ["--state=PENDING", "1001"]]
 
@@ -2091,3 +2099,29 @@ def test_a_slurm_end_indexes_the_whole_history(ctx: Context) -> None:
         ctx, "r2", "run.lost", slurm_module._end(RunStatus.LOST), {"reason": "gone"}
     )
     assert lost is not None and lost.status == RunStatus.LOST
+
+
+def test_exit_reason_validation_and_terminal_rejection(ctx: Context, slurm: FakeSlurm) -> None:
+    record = slurm_run(ctx, "r1", job_id="1000")
+    fields = slurm_module._exit_fields(
+        {"status": "failed", "exit_code": 127, "end_reason": "command not found"}
+    )
+    assert isinstance(fields, dict)
+    assert fields["end_reason"] == "command not found"
+    bad = slurm_module._exit_fields({"status": "failed", "end_reason": 12})
+    assert isinstance(bad, str) and "end_reason" in bad
+    ended = slurm_module._end_if_active(
+        ctx, record.run_id, "run.killed", slurm_module._end(RunStatus.KILLED), {"reason": "stopped"}
+    )
+    assert ended is not None and ended.end_reason == "stopped"
+    assert (
+        slurm_module._end_if_active(
+            ctx,
+            record.run_id,
+            "run.failed",
+            slurm_module._apply_exit(fields),
+            {"reason": "command not found"},
+        )
+        is None
+    )
+    assert ctx.find_record(record.run_id).end_reason == "stopped"

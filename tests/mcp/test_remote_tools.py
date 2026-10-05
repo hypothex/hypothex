@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from mcp import Client
+from mcp.server.mcpserver import MCPServer
 
 from hypothex.api import app as app_module
 from hypothex.api.app import create_app
@@ -12,7 +13,7 @@ from hypothex.core import control
 from hypothex.core.context import Context
 from hypothex.core.records import RunStatus
 from hypothex.core.sweeps import list_sweeps
-from hypothex.mcp.server import MCPServer, _text, build_server
+from hypothex.mcp.server import _text, build_server
 from tests.api.envserver import remote_hub, serve_app, wait_until
 from tests.factories import PREDS_075, git, make_record, seed_finished_run, write_toy_project
 from tests.mcp.test_server import call
@@ -171,7 +172,20 @@ def test_remote_sweep_and_pull_tools(
                 "host": "gpu1",
             },
         )
-        assert not err and out["spec"]["host"] == "gpu1" and len(out["run_ids"]) == 2
+        assert not err and out["spec"]["host"] == "gpu1"
+        assert out["issuance"]["state"] == "queued" and out["run_ids"] == []
+        sid = out["spec"]["id"]
+
+        def issued() -> dict[str, Any] | None:
+            error, current = call(home, "get_sweep", {"project": "toy", "sweep_id": sid})
+            assert not error, current
+            state = current["issuance"]["state"]
+            assert state not in {"incomplete", "interrupted"}, current["issuance"]
+            return current if state == "issued" else None
+
+        current = wait_until(issued, timeout=30)
+        assert current["spec"]["host"] == "gpu1" and len(current["run_ids"]) == 2
+        assert all(r.env.find_record(run_id).sweep_id == sid for run_id in current["run_ids"])
         record = seed_finished_run(r.env, r.env_repo, "e1", predictions=PREDS_075)
         wait_until(lambda: "e1" in r.hub.index.run_ids(), timeout=30)
         rel = "predictions/predictions.jsonl"
@@ -291,9 +305,11 @@ def test_sweep_tool_texts_match_the_contract(home: Path) -> None:
     # SweepSpec has no run_ids (contract round 2): they are on the summary
     assert "spec (with run_ids)" not in texts["launch_sweep"]
     assert "spec, run_ids" in texts["launch_sweep"]
-    # extend is idempotent: a seed already in the sweep is never refused
-    assert "refused" not in texts["extend_sweep"]
-    assert "only their missing runs" in texts["extend_sweep"]
+    # Existing seeds resume missing cells, but an active durable episode conflicts.
+    assert "Existing seeds resume only" in texts["extend_sweep"]
+    assert "missing cells" in texts["extend_sweep"]
+    assert "Active issuance conflicts" in texts["extend_sweep"]
+    assert "queued receipt" in texts["extend_sweep"]
 
 
 def test_launch_run_sends_slurm_fields_to_the_host(

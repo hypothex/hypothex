@@ -11,8 +11,9 @@
  */
 import { type ReactElement, useEffect, useState } from "react";
 import { api } from "../../api/client";
-import type { RunRecord, SweepSpec } from "../../api/models";
+import type { RunRecord, SweepSpec, SweepIssuance } from "../../api/models";
 import { REMOTE_RUN_INVALIDATES } from "../../api/queries";
+import { issuanceActive, issuanceCancellable } from "../../api/sweepIssuance";
 import { ErrorBox } from "./QueryState";
 import { MAX_NEW_SEEDS, nextSeeds, parseSeedCount, sweepCli } from "./SweepModel";
 import { useAction } from "./useAction";
@@ -23,6 +24,7 @@ export interface SweepActionsProps {
   spec: SweepSpec;
   /** Queued runs of the sweep now (summary counts). */
   queued: number;
+  issuance?: SweepIssuance | null;
   /** Param combinations; Add seeds adds this many runs per new seed. */
   cellCount: number;
   /** The sweep's runs, for `--gpus`, `--queue` and `-H` in Copy as CLI. */
@@ -40,6 +42,7 @@ export function SweepActions({
   sweepId,
   spec,
   queued,
+  issuance,
   cellCount,
   runs,
   onRerun,
@@ -66,6 +69,13 @@ export function SweepActions({
       setOpen(false);
     },
   });
+  const active = issuanceActive(issuance);
+  const cancellable = issuanceCancellable(issuance);
+  const cancelDisabled = (queued === 0 && !cancellable) || cancel.pending ||
+    (active && issuance?.cancel_requested === true) || issuance?.state === "preparing";
+  const cancelTitle = cancellable
+    ? "Cancel remaining issuance and queued runs; running members continue"
+    : queued === 0 ? "No queued runs" : `Cancel the ${queued} queued run${queued === 1 ? "" : "s"}`;
   const cli = sweepCli(spec, runs);
   const n = parseSeedCount(count);
   const seeds = n === null ? [] : nextSeeds(spec.seeds.filter((s) => !tried.includes(s)), n);
@@ -96,8 +106,8 @@ export function SweepActions({
         <button
           type="button"
           className="btn"
-          disabled={queued === 0 || cancel.pending}
-          title={queued === 0 ? "No queued runs" : `Cancel the ${queued} queued run${queued === 1 ? "" : "s"}`}
+          disabled={cancelDisabled}
+          title={cancelTitle}
           onClick={() => cancel.run()}
         >
           Cancel queued
@@ -105,6 +115,7 @@ export function SweepActions({
         <button
           type="button"
           className="btn primary"
+          disabled={active || cancel.pending || extend.pending}
           aria-expanded={open}
           title="Add seeds to every cell"
           onClick={() => setOpen((v) => !v)}
@@ -112,13 +123,26 @@ export function SweepActions({
           Add seeds
         </button>
       </div>
+      {issuance?.resume ? (
+        <button
+          type="button"
+          className="btn"
+          title={issuance.resume.message}
+          disabled={active || cancel.pending || extend.pending}
+          onClick={() => {
+            if (issuance.resume && !active && !cancel.pending) extend.run([...issuance.resume.seeds]);
+          }}
+        >
+          Resume
+        </button>
+      ) : null}
       {open ? (
         <form
           className="add-seeds"
           aria-label="Add seeds"
           onSubmit={(e) => {
             e.preventDefault();
-            if (seeds.length === 0) return;
+            if (seeds.length === 0 || active || cancel.pending || extend.pending) return;
             setTried((t) => [...t, ...seeds.filter((s) => !t.includes(s))]);
             extend.run(seeds);
           }}
@@ -139,7 +163,7 @@ export function SweepActions({
               ? `${seeds.join(", ")} × ${cellCount} cells = ${seeds.length * cellCount} runs`
               : `1–${MAX_NEW_SEEDS}`}
           </span>
-          <button type="submit" className="btn primary" disabled={seeds.length === 0 || extend.pending}>
+          <button type="submit" className="btn primary" disabled={active || cancel.pending || seeds.length === 0 || extend.pending}>
             {`Add ${seeds.length * cellCount} runs`}
           </button>
         </form>

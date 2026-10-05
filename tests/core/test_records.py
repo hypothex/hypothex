@@ -30,6 +30,7 @@ def test_phase_1a_run_yaml_still_loads_with_new_defaults() -> None:
     assert record.git.untracked_count == 0 and record.git.untracked == []
     assert record.artifacts[0].step is None and record.artifacts[0].metrics == {}
     assert record.usage is None
+    assert record.end_reason is None
 
 
 def test_usage_totals_defaults() -> None:
@@ -100,3 +101,17 @@ def test_metric_point_step_must_fit_an_index_integer(step: int) -> None:
     with pytest.raises(ValidationError):
         MetricPoint(name="loss", step=step, value=1.0)
     assert MetricPoint(name="loss", step=2**63 - 1, value=1.0).step == 2**63 - 1
+
+
+def test_end_reason_round_trips_and_rejected_unstarted_update_preserves_it(tmp_path: Path) -> None:
+    from hypothex.core.records import RunStatus, end_unstarted
+
+    layout = Layout(tmp_path)
+    layout.ensure()
+    store = RunStore(layout)
+    queued = make_record(status=RunStatus.QUEUED)
+    ended = end_unstarted(RunStatus.FAILED, reason="could not start supervisor")(queued)
+    store.create_run(ended)
+    loaded = store.read_record("toy", "r1")
+    assert loaded.end_reason == "could not start supervisor"
+    assert end_unstarted(RunStatus.KILLED, reason="removed from queue")(loaded) == loaded

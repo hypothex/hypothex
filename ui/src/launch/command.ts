@@ -3,8 +3,15 @@
  * the way `sh` would (quotes, backslashes), because runs execute argv directly, not through
  * a shell. `{seed}` stays in the template; hx fills it from each run's seed.
  */
+import { shellJoin } from "../pages/components/format";
 
 export const SEED_SLOT = "{seed}";
+
+/** Substitute template vars without re-tokenizing argv or consuming the seed slot. */
+export function fillVars(argv: readonly string[], vars: Readonly<Record<string, string>>): string[] {
+  return argv.map((arg) => arg.replace(/\{([^{}]+)\}/g, (slot, key: string) =>
+    key !== "seed" && Object.hasOwn(vars, key) ? vars[key]! : slot));
+}
 
 /** Tooltip on the command field and on each `{seed}` mark. */
 export const SEED_HINT = "{seed} is filled with each seed. In a shell, quote it: '{seed}'";
@@ -88,6 +95,29 @@ export interface Segment {
   text: string;
   /** True for a `{seed}` slot. */
   seed: boolean;
+}
+
+/** Render original template slots once and quote argv, highlighting only seed substitutions. */
+export function previewSegments(argv: readonly string[], vars: Readonly<Record<string, string>>, seed: number): Segment[] {
+  const out: Segment[] = [];
+  argv.forEach((arg, index) => {
+    if (index > 0) out.push({ text: " ", seed: false });
+    const parts: Segment[] = [];
+    let end = 0;
+    for (const match of arg.matchAll(/\{([A-Za-z_][A-Za-z0-9_.]*)\}/g)) {
+      if (match.index > end) parts.push({ text: arg.slice(end, match.index), seed: false });
+      const key = match[1]!;
+      parts.push({ text: key === "seed" ? String(seed) : Object.hasOwn(vars, key) ? vars[key]! : match[0], seed: key === "seed" });
+      end = match.index + match[0].length;
+    }
+    if (end < arg.length) parts.push({ text: arg.slice(end), seed: false });
+    const value = parts.map((part) => part.text).join("");
+    const quoted = shellJoin([value]) !== value;
+    if (quoted) out.push({ text: "'", seed: false });
+    out.push(...parts.map((part) => ({ ...part, text: quoted ? part.text.replace(/'/g, `'"'"'`) : part.text })));
+    if (quoted) out.push({ text: "'", seed: false });
+  });
+  return out;
 }
 
 /** Cut text into plain runs and `{seed}` slots, for highlighting. */

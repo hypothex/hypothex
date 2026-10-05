@@ -4,6 +4,7 @@ import {
   SEED_HINT,
   fillSeed,
   hasSeedSlot,
+  previewSegments,
   splitCommand,
   templateSegments,
 } from "../../src/launch/command";
@@ -72,4 +73,17 @@ test("fillSeed and hasSeedSlot", () => {
 
 test("the hint tells the user to quote {seed} in a shell", () => {
   expect(SEED_HINT).toBe("{seed} is filled with each seed. In a shell, quote it: '{seed}'");
+});
+
+test("preview preserves single-pass values and shell quoting without highlighting inserted slots", () => {
+  const segments = previewSegments(["python", "{config}", "--name={name}-{seed}", "", "{unknown}", "{seed}{seed}"], {
+    config: "models/{seed}/config.json",
+    name: "it's {config}",
+    seed: "ignored",
+  }, 9);
+  expect(splitCommand(segments.map((part) => part.text).join("")).argv).toEqual([
+    "python", "models/{seed}/config.json", "--name=it's {config}-9", "", "{unknown}", "99",
+  ]);
+  expect(segments.filter((part) => part.seed).map((part) => part.text)).toEqual(["9", "9", "9"]);
+  expect(previewSegments([], {}, 1)).toEqual([]);
 });

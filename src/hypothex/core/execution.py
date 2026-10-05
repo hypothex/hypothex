@@ -15,11 +15,11 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, BinaryIO
+from typing import IO, Any, BinaryIO
 
 import psutil
 
@@ -980,6 +980,35 @@ def _forward_termination() -> Iterator[_TermState]:
             signal.signal(sig, old)
 
 
+class _RunUpdateRejected(Exception):
+    """Leave a run untouched when a lifecycle update loses its precondition."""
+
+    def __init__(self, record: RunRecord) -> None:
+        self.record = record
+        super().__init__(record.run_id)
+
+
+def _update_terminal_run(
+    ctx: Context,
+    run_id: str,
+    event_type: str,
+    mutate: Callable[[RunRecord], RunRecord],
+    payload: dict[str, Any] | None = None,
+) -> RunRecord:
+    """Publish an accepted terminal mutation, leaving a rejected update silent."""
+
+    def guarded(current: RunRecord) -> RunRecord:
+        updated = mutate(current)
+        if updated is current:
+            raise _RunUpdateRejected(current)
+        return updated
+
+    try:
+        return ctx.update_run(run_id, event_type, guarded, payload)
+    except _RunUpdateRejected as winner:
+        return winner.record
+
+
 def execute_run(
     ctx: Context,
     run_id: str,
@@ -1025,7 +1054,10 @@ def execute_run(
     RunRecord
         The final record.
     """
-    final = _execute(ctx, run_id, stdout_sink, stderr_sink, auto_evaluate)
+    try:
+        final = _execute(ctx, run_id, stdout_sink, stderr_sink, auto_evaluate)
+    except _RunUpdateRejected as winner:
+        final = winner.record
     if auto_evaluate and final.status in TERMINAL_STATUSES:
         release_worktree(ctx, final)
     return final
@@ -1153,11 +1185,21 @@ def _execute(
         }
     )
     if (run_dir / STOP_MARKER).exists():
-        return ctx.update_run(
+        return _update_terminal_run(
+            ctx,
             run_id,
             "run.killed",
-            lambda r: r.model_copy(
-                update={"status": RunStatus.KILLED, "ended_at": utcnow(), "executor": me}
+            lambda r: (
+                r.model_copy(
+                    update={
+                        "status": RunStatus.KILLED,
+                        "ended_at": utcnow(),
+                        "executor": me,
+                        "end_reason": "stopped before start",
+                    }
+                )
+                if r.status == RunStatus.QUEUED
+                else r
             ),
             {"reason": "stopped before start"},
         )
@@ -1166,10 +1208,11 @@ def _execute(
     except (HypothexError, OSError) as exc:
         with contextlib.suppress(OSError):
             (run_dir / "logs" / "stderr.log").write_text(f"hypothex: {exc}\n")
-        return ctx.update_run(
+        return _update_terminal_run(
+            ctx,
             run_id,
             "run.failed",
-            end_unstarted(RunStatus.FAILED),
+            end_unstarted(RunStatus.FAILED, reason=str(exc)[:500]),
             {"reason": str(exc)[:500]},
         )
     env = {
@@ -1199,35 +1242,44 @@ def _execute(
                 f"hypothex: could not start command: {exc}\n"
             )
             now = utcnow()
-            return ctx.update_run(
+            reason = str(exc)
+            return _update_terminal_run(
+                ctx,
                 run_id,
                 "run.failed",
-                lambda r: r.model_copy(
-                    update={
-                        "status": RunStatus.FAILED,
-                        "started_at": now,
-                        "ended_at": now,
-                        "exit_code": 127,
-                        "executor": me,
-                    }
+                lambda r: (
+                    r.model_copy(
+                        update={
+                            "status": RunStatus.FAILED,
+                            "started_at": now,
+                            "ended_at": now,
+                            "exit_code": 127,
+                            "end_reason": reason,
+                            "executor": me,
+                        }
+                    )
+                    if r.status == RunStatus.QUEUED
+                    else r
                 ),
                 {"reason": str(exc)},
             )
         term.attach(proc.pid)
 
         started = me.model_copy(update={"child_pid": proc.pid})
-        try:
-            ctx.update_run(
-                run_id,
-                "run.started",
-                lambda r: r.model_copy(
-                    update={
-                        "status": RunStatus.RUNNING,
-                        "started_at": utcnow(),
-                        "executor": started,
-                    }
-                ),
+
+        def start(r: RunRecord) -> RunRecord:
+            if r.status in TERMINAL_STATUSES:
+                raise _RunUpdateRejected(r)
+            return r.model_copy(
+                update={
+                    "status": RunStatus.RUNNING,
+                    "started_at": utcnow(),
+                    "executor": started,
+                }
             )
+
+        try:
+            ctx.update_run(run_id, "run.started", start)
         except BaseException:
             assert proc.stdin is not None
             proc.stdin.close()  # never opened: the gate exits without running the command
@@ -1281,11 +1333,21 @@ def _execute(
         ctx.emit("run.warning", record, {"message": message[:500]})
 
     def finish(r: RunRecord) -> RunRecord:
+        # Only the node's observed result may correct the login node's provisional LOST.
+        if r.status in TERMINAL_STATUSES and not (
+            (r.executor.type == "slurm" and r.status == RunStatus.LOST)
+            or r.status == status == RunStatus.KILLED
+        ):
+            raise _RunUpdateRejected(r)
+        reason = "stopped" if stopped else None
+        if r.status == status == RunStatus.KILLED:
+            reason = r.end_reason or reason
         # A path logged twice (e.g. an overwritten last.pt) keeps its latest step/metrics.
         merged = {(a.kind, a.path): a for a in [*r.artifacts, *logged]}
         done = r.model_copy(
             update={
                 "status": status,
+                "end_reason": reason,
                 "ended_at": utcnow(),
                 "exit_code": exit_code,
                 "artifacts": list(merged.values()),
@@ -1306,7 +1368,7 @@ def _execute(
     except Exception as exc:  # noqa: BLE001 - the run ends either way; preserve its warning
         message = f"could not read or index what the run logged: {type(exc).__name__}: {exc}"
         ctx.emit("run.warning", final, {"message": message[:500]})
-    if auto_evaluate and status == RunStatus.FINISHED and final.task:
+    if auto_evaluate and final.status == RunStatus.FINISHED and final.task:
         score_finished_run(ctx, final)
     return ctx.find_record(run_id)
 

@@ -73,6 +73,8 @@ export interface ScoresListProps {
 
 export function ScoresList({ scores, metricNames, primary }: ScoresListProps) {
   const rows = latestScores(scores);
+  const logged = metricNames.slice(0, 20).map((name) => name.length > 48 ? `${name.slice(0, 47)}…` : name);
+  const remaining = metricNames.length > 20 ? ` +${metricNames.length - 20}` : "";
   return (
     <div>
       {rows.length === 0 ? (
@@ -117,7 +119,11 @@ export function ScoresList({ scores, metricNames, primary }: ScoresListProps) {
           </tbody>
         </table>
       )}
-      {metricNames.length > 0 ? <p className="small">{`logged: ${metricNames.join(", ")}`}</p> : null}
+      {metricNames.length > 0 ? (
+        <p className="small" style={{ overflowWrap: "anywhere" }} title={metricNames.join(", ")}>
+          {`logged: ${logged.join(", ")}${remaining}`}
+        </p>
+      ) : null}
     </div>
   );
 }

@@ -3,7 +3,7 @@
  * the host's GPUs (held by a run, used outside hx, or free) and its hx queue in order.
  * The GPU cells are the hosts grid's (`gpuCells` in HostsPanel), so both read a GPU alike.
  */
-import { DASH, firstClause, isAgent, shortId } from "./format";
+import { DASH, queueLabel, isAgent, shortId } from "./format";
 import { type CellKind, gpuCells, gpuRange, meanUtil } from "./HostsPanel";
 import { AppLink, hrefs } from "./links";
 import { fmtWait, secondsSince } from "./remote";
@@ -51,7 +51,7 @@ export function queueRows(
       return {
         position: r.executor.queue_position ?? null,
         runId: r.run_id,
-        label: firstClause(r.hypothesis, `run ${shortId(r.run_id)}`),
+        label: queueLabel(r),
         createdBy: r.created_by,
         gpus: r.gpus_requested ?? 0,
         waiting: waited === null ? DASH : fmtWait(waited),
@@ -95,7 +95,7 @@ export function QueuePanel({ host, hostName, runId, rows }: QueuePanelProps) {
                 style={c.span > 1 ? { gridColumn: `span ${c.span}` } : undefined}
                 title={`${gpuRange(c)}: ${CELL_TIP[kind]}, ${util}% busy`}
               >
-                {c.runId ? shortId(c.runId) : kind}
+                {c.runId ? shortId(c.runId) : kind === "ext" ? "external" : kind}
                 <small>{c.span > 1 ? `${util}% ×${c.span}` : `${util}%`}</small>
               </li>
             );

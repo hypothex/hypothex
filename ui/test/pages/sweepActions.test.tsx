@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import type { SweepIssuance } from "../../src/api/models";
+import { useSweep } from "../../src/api/queries";
 import { SweepActions } from "../../src/pages/components/SweepActions";
 import { sweepCli } from "../../src/pages/components/SweepModel";
 import { HttpReply, mockApi, mockClipboard, renderWithClient, restoreFetch } from "./helpers";
@@ -13,6 +15,57 @@ afterEach(() => {
 
 const SPEC = makeSummary().spec;
 const BASE = `/api/v1/sweeps/${PROJECT}/${SWEEP_ID}`;
+const incompleteIssuance = (state: "incomplete" | "interrupted"): SweepIssuance => ({ state, episode: 1, revision: 3, planned: 8, accepted_at: "now", updated_at: "now", cancel_requested: false, reason: "worker_lost", error: null, resume: { seeds: [2, 7], message: "Resume missing cells" } });
+
+for (const state of ["incomplete", "interrupted"] as const) {
+  test(`${state} with no observed queue allows Cancel and Resume, unless cancellation already requested`, () => {
+    mockApi({});
+    const issuance = incompleteIssuance(state);
+    const tree = (current: SweepIssuance) => <SweepActions project={PROJECT} sweepId={SWEEP_ID} spec={SPEC} queued={0} cellCount={4} runs={[]} issuance={current} />;
+    const { client, rerender } = renderWithClient(tree(issuance));
+    expect(screen.getByRole("button", { name: "Cancel queued" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "Resume" }).hasAttribute("disabled")).toBe(false);
+    for (const current of [{ ...issuance, cancel_requested: true }, { ...issuance, reason: "cancelled" as const }]) {
+      rerender(<QueryClientProvider client={client}>{tree(current)}</QueryClientProvider>);
+      expect(screen.getByRole("button", { name: "Cancel queued" }).hasAttribute("disabled")).toBe(true);
+    }
+  });
+}
+
+test("cancelling unobserved accepted members refetches settling, blocks Resume and polls until terminal cancellation", async () => {
+  let issuance = incompleteIssuance("incomplete");
+  let settlingReads = 0;
+  const calls = mockApi({
+    [`GET ${BASE}`]: () => {
+      if (issuance.state === "settling" && ++settlingReads > 1) issuance = { ...issuance, state: "interrupted", reason: "cancelled", resume: null };
+      return { ...makeSummary(), issuance };
+    },
+    [`POST ${BASE}/cancel_queued`]: () => {
+      issuance = { ...issuance, state: "settling", cancel_requested: true };
+      return { ...makeSummary(), issuance };
+    },
+  });
+  function LiveActions() {
+    const summary = useSweep(PROJECT, SWEEP_ID).data;
+    return summary ? <><output data-testid="issuance-state">{summary.issuance?.state}:{String(summary.issuance?.cancel_requested)}</output><SweepActions project={PROJECT} sweepId={SWEEP_ID} spec={summary.spec} queued={0} cellCount={4} runs={[]} issuance={summary.issuance} /></> : null;
+  }
+  const { client, unmount } = renderWithClient(<LiveActions />);
+  await screen.findByRole("button", { name: "Resume" });
+  fireEvent.click(screen.getByRole("button", { name: "Cancel queued" }));
+  await waitFor(() => expect(screen.getByTestId("issuance-state").textContent).toBe("settling:true"));
+  expect(screen.getByRole("button", { name: "Resume" }).hasAttribute("disabled")).toBe(true);
+  expect(screen.getByRole("button", { name: "Add seeds" }).hasAttribute("disabled")).toBe(true);
+  expect(screen.getByRole("button", { name: "Cancel queued" }).hasAttribute("disabled")).toBe(true);
+  await waitFor(() => expect(screen.getByTestId("issuance-state").textContent).toBe("interrupted:true"), { timeout: 4500 });
+  const reads = calls.filter((call) => call.method === "GET").length;
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2200)); });
+  expect(calls.filter((call) => call.method === "GET")).toHaveLength(reads);
+  expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: "Resume" }) === null).toBe(true);
+  expect(screen.getByRole("button", { name: "Cancel queued" }).hasAttribute("disabled")).toBe(true);
+  unmount();
+  client.clear();
+}, 8000);
 
 function renderActions(queued = 1) {
   return renderWithClient(
@@ -162,4 +215,20 @@ describe("SweepActions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add seeds" }));
     expect(screen.getByText("5, 6 × 4 cells = 8 runs")).toBeTruthy();
   });
+});
+
+test("active issuance with zero mirrored runs remains cancellable and blocks extension", async () => {
+  const calls = mockApi({ [`POST ${BASE}/cancel_queued`]: makeSummary() });
+  const issuance = { state: "issuing" as const, episode: 1, revision: 2, planned: 8, accepted_at: "now", updated_at: "now", cancel_requested: false, reason: null, error: null, resume: null };
+  renderWithClient(<SweepActions project={PROJECT} sweepId={SWEEP_ID} spec={SPEC} queued={0} cellCount={4} runs={[]} issuance={issuance} />);
+  expect(screen.getByRole("button", { name: "Add seeds" }).hasAttribute("disabled")).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Cancel queued" }));
+  await waitFor(() => expect(calls).toHaveLength(1));
+});
+test("explicit Resume sends the server's exact missing seeds", async () => {
+  const calls = mockApi({ [`POST ${BASE}/extend`]: makeSummary() });
+  const issuance = { state: "interrupted" as const, episode: 1, revision: 3, planned: 8, accepted_at: "now", updated_at: "now", cancel_requested: false, reason: "worker_lost" as const, error: null, resume: { seeds: [2, 7], message: "Resume missing cells" } };
+  renderWithClient(<SweepActions project={PROJECT} sweepId={SWEEP_ID} spec={SPEC} queued={0} cellCount={4} runs={[]} issuance={issuance} />);
+  fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+  await waitFor(() => expect(calls[0]?.body).toMatchObject({ seeds: [2, 7] }));
 });

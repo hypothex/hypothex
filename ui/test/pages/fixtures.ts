@@ -83,6 +83,7 @@ export function makeDetail(over: Partial<RunRecord> = {}, rest: Partial<RunDetai
   const record = makeRecord(over);
   const dir = `${STORE}/${record.run_id}`;
   return {
+    served: true,
     record,
     scores: [
       {

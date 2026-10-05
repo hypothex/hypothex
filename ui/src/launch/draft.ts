@@ -5,7 +5,7 @@
 import type { RunRecord } from "../api/models";
 import { shellJoin } from "../pages/components/format";
 import { hasSeedSlot, splitCommand } from "./command";
-import { type LaunchHost, type LaunchPlan, availability, freeGpus, planLaunch, validSlurmTime } from "./plan";
+import { type LaunchHost, type LaunchPlan, availability, freeGpus, gpuLimit, planLaunch, validSlurmTime } from "./plan";
 import { nextSeeds, parseSeeds } from "./seeds";
 
 export interface LaunchDraft {
@@ -56,6 +56,7 @@ export function pinnedCommit(template: RunRecord | null): string | null {
 export interface LaunchDefaults {
   draft: Partial<LaunchDraft>;
   carry: Carry;
+  templateEnvironment?: string;
   /** Why no seeds are proposed (`SEED_HISTORY_CUT`); absent when they are. */
   seedsNote?: string;
 }
@@ -94,10 +95,23 @@ export function launchDefaults(
   if (template === null) return { draft: { seeds: nextSeeds([]).join(", ") }, carry: NO_CARRY };
   const argv = template.command_template.length > 0 ? template.command_template : template.command;
   const carry = { params: { ...template.params }, vars: { ...template.vars } };
-  if (!complete) return { draft: { command: shellJoin(argv), seeds: "" }, carry, seedsNote: SEED_HISTORY_CUT };
+  const request = template.gpus_requested === undefined ? {} : { gpus: template.gpus_requested };
+  const templateEnvironment = template.environment_id;
+  if (!complete) {
+    return {
+      draft: { command: shellJoin(argv), seeds: "", ...request },
+      carry,
+      templateEnvironment,
+      seedsNote: SEED_HISTORY_CUT,
+    };
+  }
   const used = runs.filter((r) => r.config_hash === template.config_hash).map((r) => r.seed);
   used.push(template.seed);
-  return { draft: { command: shellJoin(argv), seeds: nextSeeds(used).join(", ") }, carry };
+  return {
+    draft: { command: shellJoin(argv), seeds: nextSeeds(used).join(", "), ...request },
+    carry,
+    templateEnvironment,
+  };
 }
 
 export interface DraftCheck {
@@ -136,6 +150,9 @@ export function checkDraft(
   } else {
     const av = availability(host, project, now);
     if (!av.ok) blockers.push(av.reason);
+    if (host.state === "connected" && host.kind !== "slurm" && draft.gpus > gpuLimit(host)) {
+      blockers.push(`${draft.gpus} GPUs requested; ${host.name} has ${gpuLimit(host)}`);
+    }
   }
   const parsed = parseSeeds(draft.seeds);
   if (parsed.error !== null) blockers.push(`seeds: ${parsed.error}`);

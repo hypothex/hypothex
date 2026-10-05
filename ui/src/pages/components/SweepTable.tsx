@@ -81,8 +81,8 @@ export function SweepTable({
               {names.map((n) => (
                 <td key={n}>{cell.params[n] ?? DASH}</td>
               ))}
-              <td className="r" title={cell.n < maxSeeds ? `${cell.n} of ${maxSeeds} seeds scored` : undefined}>
-                {cell.n}
+              <td className="r" title={cell.uncounted ? `${cell.n} scored, ${cell.uncounted} uncounted` : cell.n < maxSeeds ? `${cell.n} of ${maxSeeds} seeds scored` : undefined}>
+                {cell.n}{cell.uncounted ? ` +${cell.uncounted}` : ""}
               </td>
               <td className="r">
                 {isBest ? (

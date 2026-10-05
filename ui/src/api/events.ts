@@ -162,6 +162,12 @@ export function backoffDelay(attempt: number): number {
  * - anything else: nothing.
  */
 export function keysForEvent(event: HxEvent): QueryKey[] {
+  if (event.type === "sweep.issuance") {
+    const project = event.project ?? event.payload?.project;
+    const id = event.payload?.sweep_id;
+    if (typeof project !== "string" || typeof id !== "string") return [];
+    return [["sweeps", project, "detail", id], ["sweeps", project, "list"]];
+  }
   if (event.type.startsWith("host.")) return HOST_EVENT_INVALIDATES.map((family) => [...family]);
   if (event.type === MIRROR_RUN_UPDATED) return narrow(REMOTE_RUN_INVALIDATES, event);
   if (event.type.startsWith("run.")) return narrow(RUN_EVENT_INVALIDATES, event);

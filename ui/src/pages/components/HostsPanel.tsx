@@ -293,7 +293,7 @@ export function useNow(intervalMs = 30_000, enabled = true): number {
 
 /** Panel CSS, scoped under `.page .hosts`, `.page .hosts-key` and `.page .hosts-banner` (values from the mockup). */
 export const HOSTS_CSS = `
-.page .hosts { font-variant-numeric: tabular-nums; }
+.page .hosts { container-type: inline-size; font-variant-numeric: tabular-nums; }
 .page .hosts .hrow { display: grid; grid-template-columns: 168px 132px minmax(0, 1fr) 52px 70px 70px; gap: 0 18px; align-items: center; padding: 14px 0; border-top: 1px solid var(--rule-2); }
 .page .hosts .hrow.head { padding: 0 0 8px; border-top: 0; border-bottom: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); align-items: end; }
 .page .hosts .hrow.head + .hrow { border-top: 0; }
@@ -340,6 +340,14 @@ export const HOSTS_CSS = `
 .page .hosts-key .ne { color: var(--fail); font-weight: 650; }
 .page .hosts-banner { margin: 12px 0 0; padding: 10px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-size: 14px; color: var(--ink-2); }
 .page .hosts-banner b { color: var(--ink); font-weight: 600; }
+@container (max-width: 1050px) {
+  .page .hosts .hrow { grid-template-columns: minmax(140px, 1fr) minmax(100px, 1fr) 52px 70px 70px; gap: 12px 18px; }
+  .page .hosts .hrow > :nth-child(3) { grid-column: 1 / -1; grid-row: 2; }
+  .page .hosts .hrow.head .gidx { display: none; }
+  .page .hosts .cells { display: flex; flex-wrap: wrap; }
+  .page .hosts .gc { flex: 1 1 80px; min-width: 0; }
+  .page .hosts .msg { overflow-wrap: anywhere; }
+}
 `;
 
 /**

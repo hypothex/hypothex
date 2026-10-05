@@ -8,7 +8,9 @@
 .hx-ed-act input { height: 32px; width: 160px; padding: 0 10px; border: 1px solid var(--rule); border-radius: 6px; background: transparent; color: var(--ink); font: 400 13px var(--mono); }
 .hx-ed .btn:disabled { background: transparent; }
 .hx-ed-alert { color: var(--fail); font-size: 13px; margin: 12px 0 0; }
-.hx-ed-split { display: grid; grid-template-columns: minmax(0, 640px) minmax(0, 1fr); gap: 40px; margin-top: 28px; align-items: start; }
+/* At the 1100px breakpoint the preview needs at least 434px (404px tracks plus padding).
+   Sharing width keeps that space while retaining the editor's larger column. */
+.hx-ed-split { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 40px; margin-top: 28px; align-items: start; }
 
 .hx-ed-ins { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 14px; }
 .hx-ed-ins > span { font-size: 12.5px; color: var(--ink-3); padding-top: 7px; width: 42px; flex: none; }
@@ -44,3 +46,9 @@
 .hx-ed-fig-h .aside { margin-left: auto; font-size: 12px; color: var(--ink-3); }
 .hx-ed-perr { color: var(--fail); font-size: 13px; padding: 24px 0; text-align: center; }
 .hx-ed-empty { color: var(--ink-3); font-size: 13px; }
+
+@media (max-width: 1100px) {
+  .hx-ed-top, .hx-ed-split { grid-template-columns: minmax(0, 1fr); }
+  .hx-ed-pv { position: static; }
+  .hx-ed-act { flex-wrap: wrap; }
+}

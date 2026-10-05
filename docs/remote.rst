@@ -28,6 +28,10 @@ The env server asks for a bearer token on every request. See :doc:`security`.
 Before you start
 ----------------
 
+Install the hub from a source checkout with its UI built, as in
+:doc:`getting_started`. The PyPI name currently holds a reservation, not the
+working package. Host installation uses the hub's built wheel as described below.
+
 - ``ssh ALIAS`` works from the hub without a password prompt (key login or an agent).
   Hypothex runs ``ssh`` with ``-o BatchMode=yes``, so it never asks for a password.
 - The host has a git checkout of your project, and can ``git fetch`` the commits you

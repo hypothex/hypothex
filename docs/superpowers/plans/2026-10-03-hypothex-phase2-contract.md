@@ -106,7 +106,7 @@ class ExecutorInfo(...):   # add
     host: str | None = None; gpus: list[int] = []; slurm_job_id: str | None = None; node: str | None = None; queue_position: int | None = None
 class CostTotals(BaseModel): gpu_hours: float = 0; gpu_usd: float = 0; api_usd: float = 0; total_usd: float = 0
 class RunRecord(...):      # add
-    cost: CostTotals | None = None; sweep_id: str | None = None; gpus_requested: int = 0
+    cost: CostTotals | None = None; sweep_id: str | None = None; gpus_requested: int = 0; end_reason: str | None = None
 # hypothex.core.gpus
 class GpuInfo(BaseModel): index: int; name: str; util: float; mem_used_mb: int; mem_total_mb: int; external: bool; run_id: str | None = None
 def query_gpus() -> list[GpuInfo]: ...     # nvidia-smi --query-gpu / --query-compute-apps; [] when absent; HYPOTHEX_FAKE_GPUS=<json path> overrides for tests
@@ -138,7 +138,7 @@ def expand(spec: SweepSpec, rng_seed: int = 0) -> list[dict[str, str]]: ...   # 
 def save_sweep(layout: Layout, spec: SweepSpec) -> Path: ...    # <store>/<project>/sweeps/<id>.yaml
 def load_sweep(layout: Layout, project: str, sweep_id: str) -> SweepSpec: ...
 class CancelResult(BaseModel): asked: int = 0; failed: int = 0; errors: list[str] = []
-class SweepSummary(BaseModel): spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []; tag: str = ""; cancel: CancelResult | None = None   # tag = the sweep's member tag sweep:<owner8>:<id>; run_ids derived: indexed runs with that tag, launch order
+class SweepSummary(BaseModel): spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []; tag: str = ""; cancel: CancelResult | None = None; issuance: SweepIssuance | None = None   # tag = the sweep's member tag sweep:<owner8>:<id>; run_ids derived: indexed runs with that tag, launch order
 def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary: ...   # cells: {params, group_id, n, mean, lo, hi, std, uncounted, run_ids, runs}; uncounted = scored members in other seed groups, excluded from this cell's displayed statistics
 ```
 Sweep membership is derived from the tag `sweep:<owner8>:<id>`, never stored; `owner8` is the first 8 characters of the environment id that holds the definition (the hub), so two hubs' sweeps with the same id on one host never share runs. Clients read `SweepSummary.tag` instead of building the tag. Each (params, seed) has one deterministic command id (`run_command_id`: 16 hex of a SHA-256 over the owning environment, project, sweep id, sorted params, seed); launch, a retried launch, and extend save the definition and issue every missing (params, seed) with it, and command receipts make a repeat the same run.
@@ -169,7 +169,7 @@ Hub (and env servers where marked *env*):
 | POST | `/api/v1/sweeps/{project}/{id}/extend` | `{seeds: list[int], command_id?}` | `SweepSummary` (adds runs for every param combination × new seeds, pinned to `spec.commit`/`spec.diff`: the client's commit and diff, else the hub checkout's at create time; audit CONF-1a) |
 | POST | `/api/v1/runs/{id}/pull` | `{artifact: kind or path, command_id?}` | `{local_path}`; 400 when the destination name starts with `.hx-` |
 
-Run actions on remote runs (stop, rerun, reinfer, reeval, tags, star, archive, notes) keep their routes; the hub forwards to the owning host by `environment_id`. A run of an environment no configured host serves gets `503` for stop, rerun, reinfer, and reeval; also for tags, star, archive, and notes when the hub mirrored it from a host (it has a `host_cursors` row), since the host's copy replaces the hub's on the next mirror (audit INT-F2a). `GET /api/v1/runs/{id}` adds `host_state: ConnState | null` (null = local); so does each row of `GET /api/v1/runs`, so the CLI and MCP can show a stale host when they list runs through the hub (audit CONF-4a).
+Run actions on remote runs (stop, rerun, reinfer, reeval, tags, star, archive, notes) keep their routes; the hub forwards to the owning host by `environment_id`. A run of an environment no configured host serves gets `503` for stop, rerun, reinfer, and reeval; also for tags, star, archive, and notes when the hub mirrored it from a host (it has a `host_cursors` row), since the host's copy replaces the hub's on the next mirror (audit INT-F2a). `GET /api/v1/runs/{id}` adds `served: bool` (local ownership or a configured verified host route) and `host_state: ConnState | null` (null means no known host state, not proof of local ownership); so does each row of `GET /api/v1/runs`, so the CLI and MCP can show a stale host when they list runs through the hub (audit CONF-4a).
 
 Additive fields (spec 8A.7): leaderboard rows add `cost: CostTotals | null` (sum of the group's runs); the Overview adds `cost_usd` (runs in the window) and `cost_today_usd`.
 
@@ -215,3 +215,45 @@ Additive unless noted. `SweepSummary.tag` (the member tag); changed: sweep runs 
 ## Changes after review round 4 (2026-10-03)
 
 Hypothex's own state lives only in reserved locations that remote and artifact paths can never address. Changed: the mirror's skip notes move from `<file>.skipped` markers next to the file to `<run_dir>/.hx/mirror-skips.json` (`{path: {reason, size, max_bytes}}`); the env files route answers 404 for any path whose first component is `.hx`, and the mirror never fetches one (`HX_DIR`, `reserved_run_path` in `hypothex.core.layout`). Changed (backend-only): `copy_from(..., work=)` keeps its staging, transaction records, and backups in `<hub home>/pulls/` (`stage/`, `txn/<uuid>.json`, `backup/<uuid>`) instead of `.hx-pull-*` names next to the destination; recovery reads only `pulls/txn/`. `POST /api/v1/runs/{id}/pull` refuses a destination whose name starts with `.hx-` (400). UI: the run page links a run's sweep only when its `sweep:<owner8>:<id>` tag names this hub; otherwise the id is plain text.
+
+
+## Dogfood HTTP and client integration (2026-10-05)
+
+- `ReinferBody.vars: dict[str, str] = {}` carries template overrides through HTTP,
+  `hx reinfer --var name=value`, and MCP `reinfer(..., vars=...)`. Recorded params
+  remain metadata rather than command substitutions.
+- `POST /api/v1/runs/stop_queued` takes `run_ids` (1–50) plus ordinary action
+  identity fields. It conditionally stops queued members and returns `CancelResult`;
+  running members remain running. Remote sweep cancellation uses this batch route.
+- Host rows retain their current verified environment identity while offline and
+  expose `slurm.defaults` for launch defaults. Historical identities cannot override
+  a contradicting current identity. `served` is authoritative for run actions.
+- `RunRecord.end_reason` persists terminal causes. It is nullable for historical
+  records; a later legitimate reconciliation clears or replaces obsolete reasons.
+- `SweepSummary.issuance` and sweep-list `issuance` are nullable for legacy/direct
+  core sweeps. The object contains `state`, `episode`, `revision`, `planned`,
+  `accepted_at`, `updated_at`, `cancel_requested`, `reason`, `error`, and `resume`.
+  States are `preparing|queued|issuing|settling|issued|incomplete|interrupted`.
+  `planned` counts cumulative unique cells in the persisted definition; summary
+  counts remain observed members. `issued` concerns launch accounting, not finished
+  experiment runs. Error is `{type,message}`; resume is `{seeds,message}`.
+- HTTP create and durable-sweep extend accept issuance and return immutable original
+  receipts. Extensions of legacy sweeps retain synchronous behavior.
+  Replaying a command ID does not resume it or return current state; GET does.
+  Preparation is recoverable; accepted queued work resumes automatically. Interrupted
+  or incomplete work requires explicit resume using reported seeds. Concurrent active
+  extension gets 409. Direct local/core issuance keeps synchronous semantics.
+- Cancellation records intent even for zero-member accepted issuance, prevents future
+  launches, drains an in-flight call, and conditionally stops its queued result. Running
+  members continue. Repeated cancellation command IDs return original receipts.
+  Incomplete/interrupted episodes retain known member IDs and unresolved admissions
+  across explicit resume. Cancellation also drains this retained accounting, even
+  when no member is mirrored yet; uncertainty is never resolved from timeout alone.
+- `sweep.issuance` carries `project` and `sweep_id` in its payload; state transition,
+  acceptance receipt and event share a transaction in `events.db`. UI invalidates the
+  matching summary/list and polls active issuance every two seconds.
+- MCP adds compact-by-default `list_runs(..., full=False)`, `get_logs`,
+  `compare_examples`, metric pins on `get_leaderboard`, and default agent attribution
+  inherited from `hx mcp`'s `HYPOTHEX_AGENT` unless a tool call overrides it.
+
+See `docs/http_api.rst`, `docs/mcp.rst` and `docs/sweeps.rst` for examples.

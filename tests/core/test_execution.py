@@ -40,6 +40,7 @@ def test_foreground_run_finishes_with_logs(ctx: Context, toy_repo: Path) -> None
     assert rec.status == RunStatus.QUEUED and rec.git.commit and rec.hypothesis == "smoke"
     done = execute_run(ctx, rec.run_id)
     assert done.status == RunStatus.FINISHED and done.exit_code == 0
+    assert done.end_reason is None
     run_dir = ctx.run_dir(done)
     assert (run_dir / "logs" / "stdout.log").read_text().strip() == "hello"
     assert "warn" in (run_dir / "logs" / "stderr.log").read_text()
@@ -243,6 +244,7 @@ def test_prepare_run_no_warning_when_seed_is_none(ctx: Context, toy_repo: Path) 
 def test_failing_command_is_failed(ctx: Context, toy_repo: Path) -> None:
     done = run_fg(ctx, RunRequest(repo=toy_repo, command=cmd("raise SystemExit(3)")))
     assert done.status == RunStatus.FAILED and done.exit_code == 3
+    assert done.end_reason is None
 
 
 def test_missing_command_fails_before_run_dir(ctx: Context, toy_repo: Path) -> None:
@@ -530,6 +532,7 @@ def test_stop_marker_written_while_the_child_runs_kills_it(ctx: Context, toy_rep
     assert time.monotonic() - start < 15
     done = result[0]
     assert done.status == RunStatus.KILLED
+    assert done.end_reason == "stopped"
     assert not execution.process_alive(done.executor.child_pid, None)
 
 
@@ -807,6 +810,7 @@ def test_execute_terminalizes_a_pinned_run_refused_by_the_project_gate(
         e for e in ctx.events.since(0) if e.run_id == record.run_id and e.type == "run.failed"
     ]
     assert len(events) == 1 and "copied from host gpu1" in events[0].payload["reason"]
+    assert failed.end_reason == events[0].payload["reason"]
     after = {str(p.relative_to(staging)): p.read_bytes() for p in staging.rglob("*") if p.is_file()}
     assert after == before
     with pytest.raises(RunError, match="not queued"):
@@ -942,3 +946,178 @@ def test_queued_pin_survives_checkout_changes_after_preparation(
     done = execute_run(ctx, record.run_id)
     assert done.status == RunStatus.FINISHED
     assert (ctx.run_dir(done) / "logs/stdout.log").read_text().strip() == "original model"
+
+
+@pytest.mark.parametrize(
+    "executor_type, prior_status, expected",
+    [
+        ("local", RunStatus.KILLED, RunStatus.KILLED),
+        ("local", RunStatus.LOST, RunStatus.LOST),
+        ("slurm", RunStatus.LOST, RunStatus.FINISHED),
+    ],
+)
+def test_execution_end_preserves_terminal_winner_but_corrects_slurm_lost(
+    ctx: Context,
+    toy_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    executor_type: str,
+    prior_status: RunStatus,
+    expected: RunStatus,
+) -> None:
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), task="toy-acc"))
+    ctx.store.write_record(
+        rec.model_copy(update={"executor": rec.executor.model_copy(update={"type": executor_type})})
+    )
+    real_wait = execution._wait_unless_stopped
+
+    def wait_then_terminal(*args: Any, **kwargs: Any) -> int:
+        code = real_wait(*args, **kwargs)
+        ctx.update_run(
+            rec.run_id,
+            f"run.{prior_status.value}",
+            lambda r: r.model_copy(
+                update={"status": prior_status, "end_reason": "prior terminal evidence"}
+            ),
+        )
+        return code
+
+    evaluated: list[str] = []
+    monkeypatch.setattr(execution, "_wait_unless_stopped", wait_then_terminal)
+    monkeypatch.setattr(execution, "score_finished_run", lambda _ctx, r: evaluated.append(r.run_id))
+    done = execute_run(ctx, rec.run_id)
+    assert done.status == expected
+    assert done.end_reason == (
+        None if expected == RunStatus.FINISHED else "prior terminal evidence"
+    )
+    assert evaluated == ([rec.run_id] if expected == RunStatus.FINISHED else [])
+    if expected != RunStatus.FINISHED:
+        assert not any(e.type == "run.finished" for e in ctx.events.since(0))
+
+
+def test_repair_winning_during_checkout_keeps_reason_and_command_gated(
+    ctx: Context,
+    toy_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("print('must not run')")))
+
+    def lose_during_checkout(_ctx: Context, record: RunRecord) -> None:
+        ctx.update_run(
+            record.run_id,
+            "run.lost",
+            lambda r: r.model_copy(
+                update={"status": RunStatus.LOST, "end_reason": "supervisor exited"}
+            ),
+        )
+
+    monkeypatch.setattr(execution, "checkout_run_tree", lose_during_checkout)
+    done = execute_run(ctx, rec.run_id)
+    assert done.status == RunStatus.LOST and done.end_reason == "supervisor exited"
+    assert "run.started" not in [e.type for e in ctx.events.since(0)]
+    assert not (ctx.run_dir(done) / "logs" / "stdout.log").exists()
+
+
+@pytest.mark.parametrize(
+    "executor_type, prior_status",
+    [("local", RunStatus.KILLED), ("slurm", RunStatus.KILLED), ("slurm", RunStatus.LOST)],
+)
+def test_same_killed_settlement_keeps_exit_facts(
+    ctx: Context,
+    toy_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prior_status: RunStatus,
+    executor_type: str,
+) -> None:
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    ctx.store.write_record(
+        rec.model_copy(update={"executor": rec.executor.model_copy(update={"type": executor_type})})
+    )
+    real_wait = execution._wait_unless_stopped
+
+    def wait_then_stop(*args: Any, **kwargs: Any) -> int:
+        code = real_wait(*args, **kwargs)
+        ctx.update_run(
+            rec.run_id,
+            "run.killed",
+            lambda r: r.model_copy(
+                update={
+                    "status": prior_status,
+                    "end_reason": "winning stop explanation"
+                    if prior_status == RunStatus.KILLED
+                    else "old lost explanation",
+                }
+            ),
+        )
+        (ctx.run_dir(rec) / execution.STOP_MARKER).touch()
+        (ctx.run_dir(rec) / "usage.jsonl").write_text('{"usd": 0.25, "tokens_in": 7}\n')
+        (ctx.run_dir(rec) / "artifacts.jsonl").write_text(
+            '{"kind": "checkpoint", "path": "/tmp/final.pt"}\n'
+        )
+        return code
+
+    monkeypatch.setattr(execution, "_wait_unless_stopped", wait_then_stop)
+    done = execute_run(ctx, rec.run_id)
+    assert done.status == RunStatus.KILLED and done.exit_code == 0
+    assert done.end_reason == (
+        "winning stop explanation" if prior_status == RunStatus.KILLED else "stopped"
+    )
+    assert done.usage is not None and done.usage.usd == 0.25 and done.usage.tokens_in == 7
+    assert done.cost is not None and done.cost.api_usd == 0.25
+    assert [(a.kind, a.path) for a in done.artifacts] == [("checkpoint", "/tmp/final.pt")]
+
+
+def test_command_spawn_failure_persists_exact_cause(
+    ctx: Context,
+    toy_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+
+    def refused(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("spawn refused")
+
+    monkeypatch.setattr(execution.subprocess, "Popen", refused)
+    done = execute_run(ctx, rec.run_id)
+    assert (done.status, done.exit_code, done.end_reason) == (
+        RunStatus.FAILED,
+        127,
+        "spawn refused",
+    )
+    assert ctx.store.read_record(done.project, done.run_id).end_reason == "spawn refused"
+
+
+@pytest.mark.parametrize("path", ["stop-marker", "checkout-failure", "spawn-failure"])
+def test_rejected_early_terminal_update_keeps_reason_without_false_event(
+    ctx: Context,
+    toy_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    rec = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass")))
+    if path == "stop-marker":
+        (ctx.run_dir(rec) / execution.STOP_MARKER).touch()
+    else:
+
+        def fail(*args: Any, **kwargs: Any) -> Any:
+            raise OSError("cannot start")
+
+        if path == "checkout-failure":
+            monkeypatch.setattr(execution, "checkout_run_tree", fail)
+        else:
+            monkeypatch.setattr(execution.subprocess, "Popen", fail)
+    real_update = ctx.update_run
+
+    def terminal_race(run_id: str, event: str, mutate: Any, payload: Any = None) -> RunRecord:
+        real_update(
+            run_id,
+            "run.lost",
+            lambda r: r.model_copy(
+                update={"status": RunStatus.LOST, "end_reason": "winning evidence"}
+            ),
+        )
+        return real_update(run_id, event, mutate, payload)
+
+    monkeypatch.setattr(ctx, "update_run", terminal_race)
+    done = execute_run(ctx, rec.run_id)
+    assert done.status == RunStatus.LOST and done.end_reason == "winning evidence"
+    assert [e.type for e in ctx.events.since(0)] == ["run.created", "run.lost"]

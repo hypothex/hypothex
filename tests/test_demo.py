@@ -547,6 +547,9 @@ def test_seed_demo_hosts_writes_hosts_runs_and_the_sweep(hosts_home: Path) -> No
     cluster = Context.open(hosts_home / DEMO_HOSTS_DIR / "cluster")
     lost = next(r for r in cluster.index.list_runs(limit=None) if r.status == RunStatus.LOST)
     assert (lost.executor.slurm_job_id, lost.executor.node) == ("48211932", "r208u06n02")
+    assert lost.end_reason == (
+        "SLURM ended job 48211932 with NODE_FAIL on r208u06n02; no exit record"
+    )
     spec = load_sweep(hub.layout, "rxn-forward", DEMO_SWEEP_ID)
     assert spec.host == "gpu1" and spec.seeds == [1, 2, 3]
     tag = f"sweep:{hub.descriptor.environment_id[:8]}:{DEMO_SWEEP_ID}"  # the hub owns it
@@ -691,6 +694,13 @@ def test_demo_hosts_serve_connected_hosts_a_queue_and_a_sweep(tmp_path: Path) ->
                 "pending": 0,
                 "running": 0,
                 "comment_accounting": True,
+                "defaults": {
+                    "account": None,
+                    "extra": [],
+                    "gpus": 2,
+                    "partition": "gpu",
+                    "time": "08:00:00",
+                },
             }
             wait_until(lambda: rows()["gpu1"]["queue"] == 3, timeout=60)
 

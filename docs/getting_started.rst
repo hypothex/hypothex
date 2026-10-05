@@ -7,17 +7,27 @@ first remote GPU host. Each step is short; the linked pages have the details.
 Install
 -------
 
+The working package is not on PyPI yet; the ``hypothex`` entry there is a name
+reservation. Install from a checkout and build the web UI first. This needs
+``uv`` and Bun:
+
 .. code-block:: bash
 
-   uv tool install hypothex     # `hx` on your PATH, outside any project
+   git clone https://github.com/hypothex/hypothex.git
+   cd hypothex
+   cd ui && bun install && bun run build && cd ..
+   uv tool install .            # `hx` on your PATH, outside any project
    hx --version
 
-To log from your own code with the SDK (``import hypothex``), also add Hypothex to the
-project:
+To log from your own code with the SDK (``import hypothex``), add that checkout
+to your experiment project's dependencies:
 
 .. code-block:: bash
 
-   uv add hypothex
+   uv add /absolute/path/to/hypothex
+
+A bare ``git+https://...`` installation does not contain the built UI. The
+checkout above includes it after ``bun run build``.
 
 Hypothex keeps its data in ``~/.hypothex`` (the *home*). ``--home PATH`` or
 ``HYPOTHEX_HOME`` selects another home. A throwaway home is a safe place to try things:

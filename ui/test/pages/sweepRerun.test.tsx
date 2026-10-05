@@ -118,6 +118,10 @@ describe("Rerun sweep", () => {
     fireEvent.change(within(dialog).getByLabelText("Hypothesis"), {
       target: { value: "best cell holds on new seeds" },
     });
+    // The retained 2-GPU template cannot run on this CPU hub without an explicit edit.
+    while (Number(within(dialog).getByLabelText("GPUs per run").textContent) > 0) {
+      fireEvent.click(within(dialog).getByRole("button", { name: "Fewer GPUs per run" }));
+    }
     fireEvent.click(within(dialog).getByRole("button", { name: "Launch 3" }));
 
     // the dialog's `<output>` (GPUs per run) is also a status role: wait for the dialog to
@@ -176,6 +180,10 @@ describe("Rerun sweep", () => {
     await waitFor(() =>
       expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true),
     );
+    // The retained 2-GPU template cannot run on this CPU hub without an explicit edit.
+    while (Number(within(dialog).getByLabelText("GPUs per run").textContent) > 0) {
+      fireEvent.click(within(dialog).getByRole("button", { name: "Fewer GPUs per run" }));
+    }
     fireEvent.click(within(dialog).getByRole("button", { name: "Launch 3" }));
     await waitFor(() => expect(launched).toEqual([3]));
     const sent = calls.filter((c) => c.method === "POST" && c.url === "/api/v1/runs");
@@ -216,7 +224,11 @@ describe("Rerun sweep", () => {
         expect((within(dialog).getByRole("radio", { name: "local" }) as HTMLInputElement).checked).toBe(true),
       );
       fireEvent.change(within(dialog).getByLabelText("Hypothesis"), { target: { value: hypothesis } });
-      fireEvent.click(within(dialog).getByRole("button", { name: "Launch 3" }));
+      // The retained 2-GPU template cannot run on this CPU hub without an explicit edit.
+    while (Number(within(dialog).getByLabelText("GPUs per run").textContent) > 0) {
+      fireEvent.click(within(dialog).getByRole("button", { name: "Fewer GPUs per run" }));
+    }
+    fireEvent.click(within(dialog).getByRole("button", { name: "Launch 3" }));
       await waitFor(() => expect(document.querySelector('[role="dialog"]') === null).toBe(true));
       return seeds;
     };

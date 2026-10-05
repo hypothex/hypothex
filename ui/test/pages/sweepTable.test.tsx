@@ -160,3 +160,10 @@ describe("SweepTable", () => {
     expect(row.querySelector("svg")?.getAttribute("data-glyph")).toBe("queued");
   });
 });
+
+test("table shows uncounted separately without changing n or the score", () => {
+  const row = parseCell({ params: { lr: "0.1" }, n: 3, uncounted: 2, mean: 0.8 })!;
+  renderTable({ cells: [row], best: null });
+  expect(screen.getByText("3 +2").title).toBe("3 scored, 2 uncounted");
+  expect(screen.getByText("0.8000")).toBeTruthy();
+});

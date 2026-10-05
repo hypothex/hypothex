@@ -64,3 +64,24 @@ describe("curves value strip", () => {
     expect(rule(css, ".page .curves .stats")).toContain("margin: 0;");
   });
 });
+
+test("overview and run/sweep columns stack before text tracks collapse", () => {
+  expect(PAGES_CSS).toContain("@media (max-width: 1100px)");
+  expect(PAGES_CSS).toContain(".page .run-top, .page .run-grid, .page .ov-grid { grid-template-columns: minmax(0, 1fr);");
+  expect(rule(PAGES_CSS, ".page .actions")).toContain("flex-wrap: wrap;");
+  expect(rule(PAGES_CSS, ".page .idea")).toContain("minmax(140px, 1fr)");
+});
+test("editor stacks and preview unsticks at narrow viewport", async () => {
+  const css = await read("../../src/editor/editor.css");
+  expect(css).toContain("@media (max-width: 1100px)");
+  expect(css).toContain(".hx-ed-pv { position: static; }");
+  expect(rule(css, ".hx-ed-split")).toContain("grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);");
+});
+
+test("host GPU strips move to their own row and keep readable cells in a narrow container", async () => {
+  const css = await read("../../src/pages/components/HostsPanel.tsx");
+  expect(css).toContain("container-type: inline-size;");
+  expect(css).toContain("@container (max-width: 1050px)");
+  expect(css).toContain(".hrow > :nth-child(3) { grid-column: 1 / -1; grid-row: 2;");
+  expect(css).toContain(".page .hosts .gc { flex: 1 1 80px;");
+});

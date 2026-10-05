@@ -476,7 +476,8 @@ def test_list_sweeps_spans_projects_newest_first(
         ("toy", "s-0002"),
         ("toy", "s-0001"),
     ]
-    assert set(rows[0]) == {"project", "id", "created_at", "n_runs", "best"}
+    assert set(rows[0]) == {"project", "id", "created_at", "n_runs", "best", "issuance"}
+    assert rows[0]["issuance"] is None  # legacy definitions have no durable episode
     assert rows[0]["n_runs"] == 0 and rows[0]["best"] is None
     only = q.list_sweeps(ctx, "toy")
     assert only == [{"project": "toy", **s} for s in list_project_sweeps(ctx, "toy")]

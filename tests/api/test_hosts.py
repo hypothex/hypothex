@@ -96,6 +96,7 @@ def test_slurm_counts_and_cost_today(tmp_path: Path) -> None:
             "pending": 2,
             "running": 1,
             "comment_accounting": False,
+            "defaults": SlurmDefaults(partition="gpu").model_dump(mode="json"),
         }
         assert row["cost_today_usd"] == 3.25
 

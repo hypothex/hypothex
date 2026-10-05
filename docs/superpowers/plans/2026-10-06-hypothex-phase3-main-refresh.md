@@ -105,3 +105,51 @@ plan and current source. Both final approvals and implementation remain pending.
   pass. Mockup scripts bundle with Bun; the six cost DOM checks pass.
 - Backend and frontend plans were frozen by their writers before integration.
   Current main stayed clean throughout. No source implementation is included.
+
+
+## Primary round 2 and next corrections
+
+The [round 2 report](2026-10-06-hypothex-phase3-primary-round2.md) records
+complete review coverage and NOT LGTM on `9cbe8a3`. It confirms the first-round
+P2 fixes, JSON snapshot coverage and cleaned-checkpoint plan. Three new P2s
+remain: trusted home/store aliases in cleanup, exact SPA deep-link routing, and
+an executable installed-package acceptance task with CI ownership.
+
+The contract now states those invariants explicitly. Backend Task 49 is owned
+by [the packaged acceptance supplement](2026-10-06-hypothex-phase3-package-acceptance.md),
+after the backend and frontend implementation tasks; it must exercise the
+installed wheel outside the checkout and the synthetic schema-3 upgrade path.
+The main implementation plans carry focused regression requirements for the
+cleanup and route corrections, plus the review's smaller test/anchor repairs.
+These remain proposed implementation steps, not completed application tests.
+
+Snapshot capture was retried in a fresh native preview tab for the unknown-cost
+mockup and returned the same `PreviewAutomationExecutionError`. DOM inspection
+works; a new saved visual still is not available. The preview and owned loopback
+server were closed after the check. This does not change the runtime gate.
+
+
+### Round 2 correction verification
+
+- Cleanup: 90 bounded assertions against the exact planned storage helpers and
+  recheck logic cover literal/resolved home and store, protected metadata,
+  allowed artifacts and nested symlinks. No deletion or assembled cleanup was
+  claimed by this probe; the plan adds plan/apply regressions for implementation.
+- Deep links: 120 guest guard assertions use the planned AuthGuard and current
+  TokenGuard, covering GET/HEAD, forbidden methods, protected/unknown paths and
+  missing UI. Both modes serve only the exact installed SPA routes publicly.
+- Frontend: 19 prior snippets, 27 current-main source hashes and three additional
+  sweep replacements match; baseline auth emissions and six cost cases were
+  checked. Notebook fixture text now matches the actual planned digest string.
+- Task 49: Python/YAML snippets parse, the CI job has a concrete pytest
+  entrypoint, and a baseline-only probe built a genuine schema-3 fixture with
+  evaluator-issued four-example bindings and a strict comparison oracle.
+  Installed Phase 3 acceptance has not been run; it is an implementation task.
+- The remaining listed P3 test expectations, anchors, task staging/imports and
+  stale current-status prose are corrected. The missing unknown-cost screenshot
+  remains an explicit nonblocking visual limitation.
+
+Evidence directories: `/tmp/hx-phase3-evidence/backend-r2-fixes/`,
+`frontend-r2-fixes/` and `package-r2-fixes/`. Each writer froze its owned document
+before parent integration. Current main remains unchanged. Primary round 3 must
+confirm these corrections before adversarial review begins.

@@ -15,7 +15,7 @@
 **Mockups:** `docs/mockups/phase3/` (`index.html`, `data.js`, `shot-pair-{ready,done,invalid}-*`, `shot-settings-*`, `shot-settings-collab-*`, `shot-storage-*`, `shot-storage-confirm-*`, `shot-storage-result-*`, `shot-notebook-*`, `shot-notebook-conflict-*`, `shot-task-export-*`, `shot-run-*`, `shot-gate-*`).
 
 **Depends on:**
-- The phase 2 frontend and audit/UI improvements are merged. The integration snippets below were refreshed against actual merged-main baseline `a4441256f39d014d9ad43dea976af1b448f163e3`, including the frozen DF-48 and token interfaces. This pin includes merged PRs 21, 23 and 24. Historical rounds 5–6 are complete; their resolution notes are retained below. The current implementation gate is a fresh Claude review followed by an adversarial review, both explicitly LGTM on the same final plan state. Claude round 1 returned NOT LGTM; the repairs below require that review to be rerun. Runtime implementation remains gated. Before implementation, run this check on the intended source checkout. The 12 historical snippet anchors alone are insufficient: whole-file Header replacement and procedural event-stream edits must also match the reviewed source blobs.
+- The phase 2 frontend and audit/UI improvements are merged. The integration snippets below were refreshed against actual merged-main baseline `a4441256f39d014d9ad43dea976af1b448f163e3`, including the frozen DF-48 and token interfaces. This pin includes merged PRs 21, 23 and 24. Historical rounds 5–6 are complete; their resolution notes are retained below. The current implementation gate is a fresh Claude review followed by an adversarial review, both explicitly LGTM on the same final plan state. Claude round 2 returned NOT LGTM; the additional repairs below require another primary review before the adversarial gate. Runtime implementation remains gated. Before implementation, run this check on the intended source checkout. The 12 historical snippet anchors alone are insufficient: whole-file Header replacement and procedural event-stream edits must also match the reviewed source blobs.
 
 ```bash
 uv run python - <<'PY'
@@ -53,6 +53,8 @@ reviewed = {
     'ui/src/pages/components/TaskInsights.tsx': '97660fb9bc2053ef022dce7b76fc3711ed399011',
     'ui/src/pages/Examples.tsx': 'f1468f986114013a391355db1c498492d00591d2',
     'ui/src/pages/components/styles.ts': '1e8caf3c7e354579ee012e4af344a86bea6e1ced',
+    'ui/src/pages/components/SweepModel.ts': 'b5735bb5bcc53007d2d219ca5fc0c93a26122b14',
+    'ui/src/pages/Sweep.tsx': '974a6f9545b0d7bdcbd3c02801c15dfd6cecc152',
 }
 # These replacements were introduced by the current-main reconciliation, beyond
 # the historical phase-2-tagged anchors. Check their old blocks as well.
@@ -78,7 +80,7 @@ assert not bad and not changed, "Re-read changed sources and refresh affected re
 PY
 ```
 
-Expected on the pinned baseline: `12 snippet anchors ok`, `7 current integration anchors ok`, and `reviewed replacement sources ok` (25 reviewed source blobs). A later merge deliberately fails the blob check: re-read changed files and update the snippets, tests and baseline hashes together; do not merely copy new hashes. In particular preserve confirmed recents, WebSocket head/cancellation/single-batch invalidation, `sweep.issuance` events and `issuancePoll`, credential resets including side caches, grouped failure retries, Task unscored counts/metric-drift indicator/templateEnvironment and loading/launch behavior, and per-run e2e homes. Task 25's whole-file `ui/playwright.config.ts` must remain the final baseline plus its team server/projects.
+Expected on the pinned baseline: `12 snippet anchors ok`, `7 current integration anchors ok`, and `reviewed replacement sources ok` (27 reviewed source blobs). A later merge deliberately fails the blob check: re-read changed files and update the snippets, tests and baseline hashes together; do not merely copy new hashes. In particular preserve confirmed recents, WebSocket head/cancellation/single-batch invalidation, `sweep.issuance` events and `issuancePoll`, credential resets including side caches, grouped failure retries, Task unscored counts/metric-drift indicator/templateEnvironment and loading/launch behavior, and per-run e2e homes. Task 25's whole-file `ui/playwright.config.ts` must remain the final baseline plus its team server/projects.
 - Current-main preservation checklist (prospective implementation checks, not tests already run): retain `ui/test/pages/Task.test.tsx`, `selectedRun.test.tsx`, `trainingDetails.test.tsx`, `TaskInsights.test.tsx`, `panelGrid.test.tsx`, and `ui/test/panels/Leaderboard.test.tsx`; preserve backend `tests/core/test_backlog_backend.py` and `test_bound_comparison.py`, plus browser `ui/e2e/backlog.spec.ts` and `examples-layout.spec.ts`. The merged PR24 scoped Examples layout, wrapped tables/paths, contained A/B figure and inline-block headline stay unchanged. The current-main hash/anchor probe checks document compatibility only; it does not prove the future Phase 3 code compiles or passes these tests. Run those affected suites plus repository-required checks after authorized assembly.
 - The phase 3 backend plan (`docs/superpowers/plans/2026-10-04-hypothex-phase3-backend.md`) merged: the contract section 3 routes in `/api/openapi.json`, `RunRecord.owner`, `RunDetail.cleaned`, `Leaderboard.baselines`, the section 2 events, the `4401` close code, `hx serve --auth`, and `hx demo --with-team` (contract 11: owner `sv` admin and `alice` launch, two projects with notebook days and one weekly summary, baselines on `toy-classifier/toy-test`, 6 archived runs with artifacts, outbox entries in every state, one connected fake host, the local session token in `<home>/serve/server.json`).
 - The mockups in `docs/mockups/phase3/` approved.
@@ -186,6 +188,8 @@ All models are additive to the prerequisite. Retain `PanelData.max_points?: numb
 **Files:**
 - Modify: `ui/src/api/models.ts` (end of `RunRecord` after `gpus_requested`; end of `RunDetail` after `host_state`; end of `Leaderboard` after `value_format`; end of `RunsQuery` after `environment_id`; append at end of file)
 - Create: `ui/test/api/phase3-fixtures.ts`
+- Modify: `ui/src/pages/components/SweepModel.ts`, `ui/src/pages/Sweep.tsx` (consume explicit cost completeness)
+- Modify: `ui/test/pages/sweepStats.test.ts`, `ui/test/pages/sweepFixtures.ts`, `ui/test/pages/Sweep.test.tsx` (complete and unknown-cost states)
 
 **Interfaces:**
 - Consumes: nothing new.
@@ -443,6 +447,13 @@ export const NOTEBOOK_DAY: NotebookDay = {
   updated_at: "2026-10-04T11:02:41Z",
 };
 
+/** A saved digest with unpriced GPU time and a positive recorded subtotal. */
+export const NOTEBOOK_UNKNOWN_COST: NotebookDay = {
+  ...NOTEBOOK_DAY,
+  text: NOTEBOOK_TEXT.replace("41.2 GPU-h $86.5", "41.2 GPU-h Cost unknown · $0.25 recorded"),
+  hash: "sha256:0f0447b1908462601f52cddf0310bf39",
+};
+
 /**
  * Two paper baselines on the toy task (`accuracy`, `macro_f1`, versions `v1`): one matches
  * our metric version, one was published under another and scores above our best (0.9222),
@@ -614,7 +625,7 @@ export const DIGEST: Digest = {
   week: "2026-W40",
   counts: { started: 12, finished: 9, failed: 2, lost: 1, killed: 0, queued: 0 },
   by_owner: { "agent:claude@alice": 7, "human:sv": 3, "human:alice": 2 },
-  cost: { gpu_hours: 41.2, gpu_usd: 45.3, api_usd: 41.2, total_usd: 86.5 },
+  cost: { gpu_hours: 41.2, gpu_usd: 45.3, api_usd: 41.2, total_usd: 86.5, gpu_pricing_complete: true },
   tasks: [
     {
       task: "uspto50k-topk",
@@ -1105,6 +1116,96 @@ with:
 
 Keep the merged `CostTotals.gpu_pricing_complete`, `LeaderboardRow.cost_complete`, repeat observations, evaluated population, score binding and metric-direction fields. `cost_complete` missing is unknown; it does not establish completeness or a zero cost. This optional frontend field mirrors the backend notice contract without changing existing leaderboard cost semantics.
 
+- [ ] **Step 3b: Qualify the existing sweep cost statistic**
+
+The main sweep page renders `total_usd` without a completeness qualifier. Consume the optional field added above in this bounded patch. Keep the existing numeric subtotal, GPU-hour provenance, score/interval/count/ETA cells and pending/error behavior.
+
+In `ui/src/pages/components/SweepModel.ts`, replace:
+
+```ts
+  totalUsd: number;
+  best: SweepCellRow | null;
+```
+
+with:
+
+```ts
+  totalUsd: number;
+  /** Only explicit true establishes that the subtotal is a complete cost. */
+  costComplete?: boolean;
+  best: SweepCellRow | null;
+```
+
+In that file, replace the single cost-value expression:
+
+```ts
+      value: input.totalUsd > 0 ? fmtUsd(input.totalUsd) : "$0",
+```
+
+with:
+
+```ts
+      value: input.costComplete === true
+        ? (input.totalUsd > 0 ? fmtUsd(input.totalUsd) : "$0")
+        : input.totalUsd > 0 ? `unknown (${fmtUsd(input.totalUsd)} recorded)` : "unknown",
+```
+
+In `ui/src/pages/Sweep.tsx`, replace:
+
+```tsx
+            totalUsd: summary.total_usd,
+```
+
+with:
+
+```tsx
+            totalUsd: summary.total_usd,
+            costComplete: summary.cost_complete,
+```
+
+Write this regression in `ui/test/pages/sweepStats.test.ts` before the change (existing helpers/imports suffice):
+
+```ts
+test("sweep cost requires explicit completeness, preserving recorded subtotal and other stats", () => {
+  for (const totalUsd of [0, 0.25]) {
+    const input = { counts: COUNTS, totalUsd, best: parseCell(CELL_D), names: ["lr", "beam"],
+      metric: "top1", unit: "", runs: ORDERED, hosts: HOSTS, now: NOW };
+    const complete = sweepStats({ ...input, costComplete: true });
+    expect(complete[6]?.value).toBe(totalUsd === 0 ? "$0" : "$0.25");
+    for (const costComplete of [false, undefined]) {
+      const unknown = sweepStats({ ...input, costComplete });
+      expect(unknown[6]?.value).toBe(totalUsd === 0 ? "unknown" : "unknown ($0.25 recorded)");
+      expect(unknown[6]?.label).toBe(complete[6]?.label);
+      expect(unknown[6]?.tooltip).toBe(complete[6]?.tooltip);
+      expect(unknown.filter((_, index) => index !== 6)).toEqual(complete.filter((_, index) => index !== 6));
+    }
+  }
+});
+```
+
+Mark the existing priced `makeSummary()` fixture in `ui/test/pages/sweepFixtures.ts` explicitly with `cost_complete: true` immediately before `...over`, allowing tests to override it. In `sweepStats.test.ts`, add `costComplete: true` to the existing priced `best, interval, counts, cost with GPU-hours, ETA` and complete-empty `an empty sweep shows dashes` inputs; those existing expected dollars and tooltips remain unchanged. Add this page test inside the existing `SweepPage` describe (the existing helpers/imports suffice):
+
+```tsx
+for (const cost_complete of [false, undefined]) {
+  for (const total_usd of [0, 0.25]) {
+    test(`sweep page preserves unknown cost (${cost_complete}, ${total_usd})`, async () => {
+      mockApi(routes(makeSummary({ cost_complete, total_usd })));
+      renderPage();
+      await waitFor(() => expect(statValue("cost, 11 GPU-h")).toBe(
+        total_usd === 0 ? "unknown" : "unknown ($0.25 recorded)",
+      ));
+      expect(statValue("best top1")).toBe("0.9120");
+      expect(statValue("95% CI")).toBe("0.908–0.916");
+      expect(statValue("finished")).toBe("5 / 8");
+    });
+  }
+}
+```
+
+An older hub omitting the flag therefore shows unknown, never a confirmed zero. The existing known-priced page tests continue to cover `$12.50` while member runs are loading or unavailable; completeness and GPU-time availability are separate. Preserve those assertions and the entire remaining sweep suite. This change qualifies the aggregate statistic only; it does not infer pricing from run count, subtotal positivity or GPU hours.
+
+Run during implementation: `bun test test/pages/sweepStats.test.ts test/pages/Sweep.test.tsx && bun run typecheck`. Before this patch the missing/false-flag cases must fail; after it they must pass, with the existing suite unchanged except for explicitly priced fixture/input metadata.
+
 - [ ] **Step 4: Run the type checker to verify it passes**
 
 Run: `bun run typecheck`
@@ -1113,7 +1214,7 @@ Expected: PASS (`tsc --noEmit` prints nothing).
 - [ ] **Step 5: Commit (repo root)**
 
 ```bash
-git add ui/src/api/models.ts ui/test/api/phase3-fixtures.ts
+git add ui/src/api/models.ts ui/test/api/phase3-fixtures.ts ui/src/pages/components/SweepModel.ts ui/src/pages/Sweep.tsx ui/test/pages/sweepStats.test.ts ui/test/pages/sweepFixtures.ts ui/test/pages/Sweep.test.tsx
 git commit -m "feat(ui): phase 3 api models for auth, notebook, export, notify and storage"
 ```
 
@@ -1250,7 +1351,7 @@ function stub(routes: Record<string, [number, unknown]>): Seen[] {
 }
 
 describe("auth store", () => {
-  test("lock and unlock notify subscribers once per change", () => {
+  test("raw auth subscribers retain baseline credential-generation notifications", () => {
     const seen: string[] = [];
     const off = subscribeAuth(() => seen.push(authState()));
     lock();
@@ -1258,7 +1359,10 @@ describe("auth store", () => {
     unlock();
     off();
     lock();
-    expect(seen).toEqual(["locked", "open"]);
+    // Each synchronous lock captures the CURRENT generation, replaces it and emits.
+    // unlock selects a new generation (validating -> open), then accepts (open).
+    // subscribeAuth is the baseline raw subscription, not a distinct-state stream.
+    expect(seen).toEqual(["locked", "locked", "open", "open"]);
     expect(authState()).toBe("locked");
   });
 });
@@ -1301,7 +1405,7 @@ describe("requests", () => {
   test("an export error keeps the API error shape and a 401 locks", async () => {
     stub({ "/api/v1/tasks/p/t/export?format=csv": [401, { error: "no session", type: "AuthError" }] });
     const err = await api.exportTask("p", "t", { format: "csv" }).catch((e: unknown) => e);
-    expect([(err as ApiError).message, authState()]).toEqual(["no session", "locked"]);
+    expect([(err as ApiError).message, authState()]).toEqual(["Token required", "locked"]);
   });
 });
 
@@ -1557,11 +1661,14 @@ export function lock(generation = auth.snapshot().generation): void {
 export function unlock(): void {
   auth.accept(auth.select(null));
 }
+// Preserve raw notifications, including equal authState values across generations.
 export const subscribeAuth = auth.subscribe;
 export function useAuthState(): AuthState {
   return useSyncExternalStore(subscribeAuth, authState, authState);
 }
 ```
+
+Do not deduplicate or suppress baseline store publication/reset events to satisfy the feature-facing test. `subscribeAuth` is a direct alias; the test asserts all four synchronous emissions. `useSyncExternalStore` reads the primitive `authState` snapshot, so React can skip unchanged displayed states while credential-generation cancellation and side-cache reset still run. Stale captured generations remain ignored by `AuthStore.lock/accept`, covered by the retained baseline tests.
 
 Append the principal helpers:
 
@@ -3337,9 +3444,13 @@ with
  * Storage); `/api/…` is left to the browser, and so is `/pair` (it must load in full).
  */
 export function isAppPath(pathname: string): boolean {
-  return /^\/($|[trsxn]\/|settings$|storage$)/.test(pathname);
+  return /^\/(?:$|r\/[^/]+\/?$|[xs]\/[^/]+\/[^/]+\/?$|t\/[^/]+\/[^/]+(?:\/edit\/[^/]+)?\/?$|n\/[^/]+(?:\/[^/]+)?\/?$|(?:settings|storage)\/?$)/.test(pathname);
 }
 ```
+
+The exact route shapes above agree with backend Task 23's SPA classifier: root, run ID, example/sweep project plus ID, task project/name plus optional edit ID, notebook project plus optional day, settings and storage; each permits one trailing slash. The backend additionally serves `/pair` as public bootstrap HTML, while `isAppPath("/pair")` stays false to force a full load. This exception is about client link interception, not authentication of the HTML document. Unknown shapes and `/api/...` or `/mcp` are never made public by this classifier.
+
+Extend `links.test.tsx` to assert true for `/n/p`, `/n/p/2026-10-04`, `/settings/`, `/storage/`, `/t/p/t/edit/v`; false for `/n`, `/n/p/day/extra`, `/settings/extra`, `/storage/extra`, `/pair`, `/api/v1/runs`, `/mcp`. Task 25 and backend Task 23 must both check direct navigation/reload for notebook, settings, storage and pair in root-token mode and unpaired scoped mode: HTTP 200 HTML loads the appropriate gate/pair screen; protected API reads remain 401. Include these same deep links in the installed-wheel browser lane owned by Task 49.
 
 Keep all merged `Header.test.tsx` not-found and pending-read regressions. Extend those cases to a failed/pending notebook day and sweep read: the previous project recent must remain until the requested page query succeeds; a 404 must never replace it. The helper reads only cache state and must not launch duplicate queries. Keep `OverviewLists` grouped failure/retry tests while adding an owner to both a retry-ok and retry-failed row.
 
@@ -7273,7 +7384,7 @@ import { useState } from "react";
 import { clearNotebookEditors, noteNotebookEditors } from "../../src/api/notebookEditors";
 import type { NotebookDay } from "../../src/api/models";
 import { DayView } from "../../src/notebook/DayView";
-import { NOTEBOOK_DAY, NOW } from "../api/phase3-fixtures";
+import { NOTEBOOK_DAY, NOTEBOOK_UNKNOWN_COST, NOW } from "../api/phase3-fixtures";
 import { type Call, HttpReply, mockApi, renderWithClient, restoreFetch } from "../pages/helpers";
 
 afterEach(() => {
@@ -7293,6 +7404,16 @@ const view = (data: NotebookDay = NOTEBOOK_DAY) => (
 );
 
 describe("view", () => {
+  test("an unpriced digest keeps recorded cost qualified without losing measurements", () => {
+    mockApi({});
+    const { container } = renderWithClient(view(NOTEBOOK_UNKNOWN_COST));
+    const digest = container.querySelector(".ent.dg") as HTMLElement;
+    expect(digest.textContent).toContain("41.2 GPU-h Cost unknown · $0.25 recorded");
+    expect(digest.textContent).not.toContain("$86.5");
+    expect(digest.textContent).toContain("0.598→0.613");
+    expect(screen.getByRole("link", { name: "01J8…a1b2 ✓ 0.913" })).toBeTruthy();
+  });
+
   test("entries with stamps, authors and run chips; the weekly summary is one block", () => {
     mockApi({});
     const { container } = renderWithClient(view());
@@ -7738,7 +7859,7 @@ export function DayView({ project, day, data, now }: DayViewProps) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/notebook && bun run typecheck`
-Expected: `dayView.test.tsx` 7 pass, `model.test.ts` 7 pass; `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `dayView.test.tsx` including unknown-cost digest coverage passes, `model.test.ts` 7 pass; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Commit (repo root)**
 
@@ -9486,6 +9607,8 @@ git commit -m "feat(ui): run page strikes through artifacts a storage cleanup de
 
 A third demo hub, `hx demo --with-team` with auth on, served by `serve-demo.ts --with-team` on its own random port and fresh home, checked by identity before every test like the other two. Every browser signs in through the real `/pair` page with a link the spec makes from that home's own local session token (`<home>/serve/server.json`, written by `hx serve` with auth on), so the specs exercise pairing, cookies, tickets and scopes end to end. All browsers reach the hub from `127.0.0.1`, so the hub's pairing limit (10 per minute per address) would trip if it counted successes; it counts only failed pairings (backend Task 25, contract 3), and only `a used pairing link reads invalid` fails one (once per theme project), so parallel workers never get a 429. Read-only specs run in `team-light`/`team-dark`; the writes (notebook, cleanup) run serially in `team-light-edit` then `team-dark-edit`, and the cleanup itself runs once.
 
+Task 25 retains the source-demo browser suite for contract 11.8. Also supply its browser assertions/helpers to the separately owned backend Task 49 [installed-package acceptance](2026-10-06-hypothex-phase3-package-acceptance.md), whose runner supplies the verified wheel-installed hub for both fresh-home and upgrade/restart lanes. Do not let `serve-demo.ts` start a source-tree substitute in that lane. The package acceptance task owns the isolated environment, server lifetime, identity check, CI wiring and receipt.
+
 Demo requirements this group reads (backend plan, contract 11): users `sv` (admin) and `alice` (launch); at least one run with `owner: "alice"`; two projects with notebook days; baselines on `toy-classifier/toy-test`, whose preset view has a leaderboard panel; archived runs whose dry run (default policy) has items, one `protected` refusal and one `used by <id>` refusal; outbox entries that include `sent`, `failed` and `skipped`; the local token in `serve/server.json`.
 
 ### Task 25: Team demo hub, pairing helpers, and the team specs
@@ -10245,9 +10368,10 @@ git commit -m "docs: pair, settings, storage, notebook, export and baselines in 
 ## Done criteria (contract 11, frontend part)
 
 All automated:
-1. `bun test` and `bun run typecheck` clean (contract 11.9). Every new component has a test with a fake `fetch`.
+1. `bun test` and `bun run typecheck` clean (contract 11.10). Every new component has a test with a fake `fetch`.
 2. Playwright smoke of every new screen in both themes against `hx demo --with-team` (contract 11.8): `/pair` (ready, done, invalid), Settings (owner and collaborator), Storage dry run → apply, Notebook edit + 409, Task export menu, baseline rows, run owner and cleaned artifact, 401 gate.
-3. `uv run pytest tests/test_docs_ui.py` and `uv run sphinx-build -W` clean.
+3. `uv run pytest tests/test_docs_ui.py` and `uv run sphinx-build -W` clean (contract 11.10).
+4. Installed-wheel fresh-home and synthetic existing-home upgrade/restart acceptance is automated and green in CI (contract 11.9). The executable owner is backend Task 49, [Phase 3 package acceptance](2026-10-06-hypothex-phase3-package-acceptance.md). Its browser lane consumes the wheel's packaged UI and `hx demo --with-team` from the isolated installed environment, with no Vite server or source-checkout imports. Verify UI assets load, token/pair authentication and notebook/settings/storage direct links, then repeat after restart for both fresh and upgraded homes. Run the owning entrypoint `uv run pytest -m package tests/packaging/test_installed.py -v`; its driver invokes `ui/playwright.package.config.ts` and `ui/package-e2e/installed.spec.ts` against the installed child server outside the repository. Consume `HX_PACKAGE_DESCRIPTOR` privately and write sanitized evidence to `HX_PACKAGE_ARTIFACTS`. Retain `browser-summary.json`, per-stage preservation JSON, assertions that unexpected console/page/static errors are empty, and the Task 49 provenance/hand-off receipt. Traces, video and screenshots remain off to avoid recording pairing credentials. Task 25's source demo Playwright runs satisfy 11.8; they do not substitute for this installed-package lane.
 
 ## Assembly notes
 

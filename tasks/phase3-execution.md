@@ -89,3 +89,23 @@ Correction verification complete for primary round 2 input: frontend 19 snippet
 anchors and 25 blobs; backend extracted cost 29 failures to zero and export/sweep
 nine failures to zero; plan/probe syntax, lint/type and diff checks pass. These
 checks do not close either review gate or establish assembled runtime behavior.
+
+
+Primary round 2 returned NOT LGTM after complete coverage. Prior P2 findings
+were fixed; new P2s require protecting resolved run metadata under a symlinked
+home, admitting exact new SPA deep links through the credential gate, and an
+executable packaged-install/upgrade acceptance task wired into CI. Backend and
+frontend plan repairs and the Task 49 supplement are in progress. No runtime
+implementation is authorized until both review gates pass.
+
+CI on frozen head 9cbe8a3: Linux, UI and Docker passed. Both macOS jobs were
+cancelled without receiving a runner due to GitHub capacity constraints. The
+two jobs were rerun on the same head (attempt 2); no code/workflow change was
+needed. This is separate from the still-pending plan review gate.
+
+Round 2 corrections are now frozen for primary round 3. Bounded verification:
+90 cleanup and 120 guard assertions; frontend source/semantic probes; genuine
+baseline schema-3 fixture with evaluator-issued bindings; concrete Task 49
+pytest/CI owner and parsed snippets. Source implementation and installed Phase 3
+acceptance remain pending. The native preview still cannot save the new mockup
+screenshot; this is recorded as a nonblocking visual limitation.

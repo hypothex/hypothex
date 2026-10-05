@@ -3379,7 +3379,7 @@ Expected: no doctest output, clean lint, format, and types.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hypothex/auth tests/auth/test_pairing.py
+git add src/hypothex/auth src/hypothex/api/tickets.py tests/auth/test_pairing.py tests/auth/test_tickets.py
 git commit -m "feat(auth): websocket tickets, pairing links with QR text, and CLI hub logins"
 ```
 
@@ -8779,7 +8779,7 @@ Contract 1.8, 8 (failure mode 15). The digest reuses the leaderboard builder on 
 **Interfaces:**
 - Consumes: `build_leaderboard`, `add_costs`, `parse_entries`, `day_path`, `list_sweeps`, `Notice`, `notice_id`.
 - Produces (contract 1.8, exact): `TaskChange`, `NoteItem`, `SweepLine`, `Digest`, `build_digest(ctx, project, *, since, until=None, top_notes=5)`, `render_digest_markdown(digest)`, `digest_notice(digest, *, base_url)`, `week_key(moment)`. (`digest_due`, `send_digest` are Task 19.)
-- Rules: the window is `[since, until]`. `counts`: `started` = runs created in the window, `finished`/`failed`/`lost`/`killed` = runs that ended in it by status, `queued` = runs created in it that still wait. `by_owner` counts created runs per `created_by`. `cost` sums every ended run using its existing cost unchanged or `compute_cost(record, None)` only when absent, retaining known API usage and propagating False/legacy None; only no-ended-runs yields `CostTotals(gpu_pricing_complete=True)` (explicit complete zero). For each task: `before` from runs created and ended before `since` with scores made before `since`, `after` from everything up to `until`; a task is listed when it gained a finished run or a new best group. Notes: run `notes.md` sections and notebook entries stamped in the window (notebook entries by `digest` are skipped), newest first, `top_notes` of them, each cut to 200 characters. Sweeps: those created in the window. `headline` = `▲<started> ✓<finished> ✗<failed> ?<lost>` (`⊘<killed>` when any) `· <gpu_h> GPU-h $<usd>` and, for the first task with a new best, `· <task> <before>→<after> ▲`.
+- Rules: the window is `[since, until]`. `counts`: `started` = runs created in the window, `finished`/`failed`/`lost`/`killed` = runs that ended in it by status, `queued` = runs created in it that still wait. `by_owner` counts created runs per `created_by`. `cost` sums every ended run using its existing cost unchanged or `compute_cost(record, None)` only when absent, retaining known API usage and propagating False/legacy None; only no-ended-runs yields `CostTotals(gpu_pricing_complete=True)` (explicit complete zero). For each task: `before` from runs created and ended before `since` with scores made before `since`, `after` from everything up to `until`; a task is listed when it gained a finished run or a new best group. Notes: run `notes.md` sections and notebook entries stamped in the window (notebook entries by `digest` are skipped), newest first, `top_notes` of them, each cut to 200 characters. Sweeps: those created in the window. `headline` = `▲<started> ✓<finished> ✗<failed> ?<lost>` (`⊘<killed>` when any) `· <gpu_h> GPU-h <cost_text>` (the same completeness-aware `cost_text` as Task 14; partial or legacy pricing remains unknown) and, for the first task with a new best, `· <task> <before>→<after> ▲`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -9928,6 +9928,37 @@ def test_protected_paths(toy: Context, toy_repo: Path, tmp_path: Path) -> None:
     assert protected_reason(toy, str(tmp_path / "scratch" / "ckpt.pt")) is None
 
 
+@pytest.mark.parametrize("relocate", ["home", "store"])
+def test_storage_base_aliases_protect_metadata_and_allow_artifacts(
+    tmp_path: Path,
+    toy_repo: Path,
+    relocate: str,
+) -> None:
+    home = tmp_path / "home"
+    if relocate == "home":
+        real = tmp_path / "real-home"
+        real.mkdir()
+        home.symlink_to(real, target_is_directory=True)
+    else:
+        home.mkdir()
+        real = tmp_path / "real-store"
+        real.mkdir()
+        (home / "store").symlink_to(real, target_is_directory=True)
+    ctx = Context.open(home)
+    ctx.register_project(toy_repo)
+    record = ended_run(ctx, "aliased")
+    folder = ctx.run_dir(record)
+    for base in (folder, folder.resolve()):
+        for name in ("run.yaml", "metrics.jsonl", "scores.jsonl", "predictions", "artifacts"):
+            assert protected_reason(ctx, str(base / name)) == "protected"
+        assert protected_reason(ctx, str(base)) == "protected"
+        assert protected_reason(ctx, str(base / "artifacts" / "model.pt")) is None
+        assert protected_reason(ctx, str(base / "pulled" / "model.pt")) is None
+    outside = write(tmp_path / "outside" / "keep.pt")
+    (folder / "pulled").symlink_to(outside.parent, target_is_directory=True)
+    assert protected_reason(ctx, str(folder / "pulled" / outside.name)) == "protected"
+
+
 def test_a_symlinked_pulled_folder_is_never_entered(toy: Context, tmp_path: Path) -> None:
     keep = write(tmp_path / "unrelated" / "keep.bin")
     run_dir = toy.run_dir(ended_run(toy, "r1"))
@@ -10186,8 +10217,16 @@ def _forms(path: str) -> set[Path]:
     return forms
 
 
+def _base_forms(root: Path) -> set[Path]:
+    """Return both spellings of a trusted storage base, resolving the base itself."""
+    forms = {Path(os.path.abspath(root))}
+    with contextlib.suppress(OSError):
+        forms.add(root.resolve())
+    return forms
+
+
 def _roots(ctx: Context) -> set[Path]:
-    roots = {Path("/"), Path.home(), ctx.layout.home}
+    roots = {Path("/"), Path.home(), ctx.layout.home, ctx.layout.store}
     for entry in ctx.store.list_projects():
         roots.update(Path(p) for p in [entry.repo, *entry.previous_repos])
     resolved = set()
@@ -10224,19 +10263,24 @@ def protected_reason(ctx: Context, path: str) -> str | None:
         ``"protected"`` for ``/``, the user's home, the Hypothex home, a
         registered repo or any of their ancestors, any path in the Hypothex
         home outside a run's ``artifacts/`` or ``pulled/``, and any path in
-        the Hypothex home below a symlinked folder (a ``pulled/`` that links
-        elsewhere reads as ours but is not); else None.
+        the Hypothex store below a nested symlinked folder (a ``pulled/``
+        that links elsewhere reads as ours but is not); else None. Trusted
+        home/store relocation is checked in both literal and resolved forms.
     """
     roots = _roots(ctx)
-    home = ctx.layout.home
+    homes = _base_forms(ctx.layout.home)
+    stores = _base_forms(ctx.layout.store)
     for form in _forms(path):
         if any(root == form or root.is_relative_to(form) for root in roots):
             return "protected"
-        if form.is_relative_to(home):
-            parts = form.relative_to(home).parts
-            in_run = len(parts) >= 6 and parts[0] == "store" and parts[2] == "runs"
-            if not (in_run and parts[4] in CLEANABLE_SUBDIRS) or _linked_below(home, form):
+        matched_stores = [base for base in stores if form.is_relative_to(base)]
+        for base in matched_stores:
+            parts = form.relative_to(base).parts
+            in_run = len(parts) >= 5 and parts[1] == "runs"
+            if not (in_run and parts[3] in CLEANABLE_SUBDIRS) or _linked_below(base, form):
                 return "protected"
+        if not matched_stores and any(form.is_relative_to(base) for base in homes):
+            return "protected"
     return None
 
 
@@ -10924,6 +10968,54 @@ git commit -m "feat(storage): dry-run cleanup plans with shared-checkpoint and p
 Append to `tests/core/test_storage.py` (and add `import fcntl`, `import json`, `import sys`, `import threading`, `import pytest`, `import hypothex.core.storage as storage_module`, `from hypothex.core.execution import RunRequest, prepare_run`, `from hypothex.core.queries import show_run`, and `CleanRefusedError, CleanItem, apply_clean, cleaned_artifacts, cleanup_lock, delete_artifacts, input_paths` to the `hypothex.core.storage` import):
 
 ```python
+@pytest.mark.parametrize("relocate", ["home", "store"])
+@pytest.mark.parametrize("name", ["run.yaml", "metrics.jsonl", "scores.jsonl"])
+def test_alias_metadata_is_refused_at_plan_and_apply(
+    tmp_path: Path,
+    toy_repo: Path,
+    relocate: str,
+    name: str,
+) -> None:
+    home = tmp_path / "home"
+    real = tmp_path / "real"
+    real.mkdir()
+    if relocate == "home":
+        home.symlink_to(real, target_is_directory=True)
+    else:
+        home.mkdir()
+        (home / "store").symlink_to(real, target_is_directory=True)
+    ctx = Context.open(home)
+    ctx.register_project(toy_repo)
+    target = (ctx.layout.store / "toy" / "runs" / "aliased" / name).resolve()
+    record = ended_run(ctx, "aliased", artifacts=[("checkpoint", target)])
+    if not target.exists():
+        target.write_text("metadata\n")
+    before = target.read_bytes()
+    size, _, mtime = measure_path(target)
+    proposed = plan(ctx)
+    assert not any(item.path == str(target) for item in proposed.items)
+    assert any(
+        item["path"] == str(target) and item["reason"] == "protected" for item in proposed.refused
+    )
+    # A saved or tampered plan cannot bypass the apply-time metadata guard.
+    forged = CleanItem(
+        project="toy",
+        run_id=record.run_id,
+        host=LOCAL_HOST,
+        environment_id=ctx.descriptor.environment_id,
+        kind="artifact",
+        artifact_kind="checkpoint",
+        path=str(target),
+        bytes=size,
+        mtime=mtime,
+        reason="test",
+    )
+    result = delete_artifacts(ctx, [forged], actor="test", plan_id="cp-test", older_than_days=30)
+    assert result.deleted == [] and result.freed_bytes == 0
+    assert result.skipped[0]["reason"] == "protected"
+    assert target.read_bytes() == before
+
+
 def test_apply_frees_exactly_the_planned_bytes(lab: Context) -> None:
     result = plan(lab)
     (item,) = result.items
@@ -11300,7 +11392,9 @@ def _recheck(
             return "not an artifact of the run"
     else:
         pulled = ctx.run_dir(record) / "pulled"
-        if not Path(os.path.abspath(item.path)).is_relative_to(pulled):
+        if not any(
+            form.is_relative_to(base) for form in _forms(item.path) for base in _base_forms(pulled)
+        ):
             return "not in pulled/"
     for path, other in users:  # owners and readers; a folder holding the path counts too
         if (
@@ -11537,7 +11631,7 @@ In `src/hypothex/core/queries.py`, add `from hypothex.core.storage import Cleane
     """Artifacts deleted by ``hx storage clean`` (``<run_dir>/.hx/cleaned.json``)."""
 ```
 
-and in `show_run`, add `cleaned=cleaned_artifacts(ctx, record),` after `children=sorted(children),` in the `RunDetail(...)` call.
+and in `show_run`, add `cleaned=cleaned_artifacts(ctx, record),` after `children=sorted(ctx.index.child_run_ids(run_id)),` in the `RunDetail(...)` call.
 
 Still in `src/hypothex/core/queries.py`, add `cleanup_lock` to that `hypothex.core.storage` import and make starring and archiving wait for a cleanup in progress (either can turn a settled run back into one that keeps its files). Replace the body of `star_run` (after its docstring) with:
 
@@ -11601,7 +11695,7 @@ git commit -m "feat(storage): apply plans with exact confirmation and per-item r
 ---
 ## Part 7: Auth on the HTTP API
 
-Contract 1.2 (identity), 1.3, 1.10 (guard, scopes, tickets), 3 (auth routes), 7 (authorization), 8 (failure modes 10–12). Here “auth off” means collaborator scopes are off. The accepted default-token prerequisite still protects HTTP/API/MCP/WebSocket traffic through `TokenGuard`; only explicit loopback no-auth bypasses it. Scoped `AuthGuard` replaces that root-only guard. `OriginGuard` and `TrustedHostMiddleware` run before credential/ticket consumption. The exact adapters below use the inspected token interfaces; the [compatibility checkpoint](2026-10-05-hypothex-phase3-token-compatibility.md) records their evidence and the final merged-source comparison required before formal round 5.
+Contract 1.2 (identity), 1.3, 1.10 (guard, scopes, tickets), 3 (auth routes), 7 (authorization), 8 (failure modes 10–12). Here “auth off” means collaborator scopes are off. The accepted default-token prerequisite still protects HTTP/API/MCP/WebSocket traffic through `TokenGuard`; only explicit loopback no-auth bypasses it. Scoped `AuthGuard` replaces that root-only guard. `OriginGuard` and `TrustedHostMiddleware` run before credential/ticket consumption. The exact adapters below use the inspected token interfaces; the [compatibility checkpoint](2026-10-05-hypothex-phase3-token-compatibility.md) records historical evidence; the current merged-source comparison is against `a444125` and must pass the ordered primary Claude then adversarial review gates.
 
 **Additive JSON-key snapshot acceptance for Task 22.** Include `tests/cli/test_json_snapshots.py` and `tests/cli/snapshots/json_keys.json` in this task. Extend local fake fixtures to exercise `cleaned` and populated cleaned-artifact item paths (empty lists alone cannot expose nested paths). First run `uv run pytest tests/cli/test_json_snapshots.py` without update mode and record the expected additive failure. Then run `HYPOTHEX_UPDATE_SNAPSHOTS=1 uv run pytest tests/cli/test_json_snapshots.py`, inspect `git diff -- tests/cli/snapshots/json_keys.json`, and accept only the intended additions while preserving all existing keys, including bound-score and pricing metadata. Any deletion/rename/unrelated addition is a defect to investigate, not an automatic golden update. Rerun the same test without the update variable and include fixture assertions for populated values. Task 14 uses this same process for `sweep show.cost_complete`.
 
@@ -11726,6 +11820,72 @@ def test_auth_on_needs_a_session(home: Path) -> None:
         cookie = {"Cookie": f"{SESSION_COOKIE}={token}"}
         assert client.get("/api/v1/projects", headers=cookie).status_code == 200
         assert client.get("/api/v1/projects", headers=bearer("hxs_nope")).status_code == 401
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_guest_spa_deep_links_use_the_installed_shell(
+    home: Path, tmp_path: Path, scoped: bool
+) -> None:
+    ui = tmp_path / "ui"
+    ui.mkdir()
+    (ui / "index.html").write_text("<html>installed-shell</html>")
+    (ui / "asset.js").write_text("export {}")
+    outside = tmp_path / "private.js"
+    outside.write_text("private")
+    (ui / "escape.js").symlink_to(outside)
+    app = create_app(
+        home,
+        auth=scoped,
+        auth_token="t" * 43,
+        background_repair=False,
+        hub=False,
+        ui_dir=ui,
+    )
+    paths = [
+        "/",
+        "/r/r1",
+        "/s/toy/s-1",
+        "/x/toy/r1,r2",
+        "/t/toy/t",
+        "/t/toy/t/edit/view",
+        "/settings",
+        "/storage",
+        "/n/toy",
+        "/n/toy/2026-10-04",
+        "/pair",
+    ]
+    with TestClient(app, base_url=BASE) as client:
+        for path in paths:
+            response = client.get(path)
+            assert response.status_code == 200 and "installed-shell" in response.text, path
+            assert client.head(path).status_code == 200, path
+            assert client.post(path).status_code == 401, path
+        assert client.get("/asset.js").status_code == 200
+        for path in [
+            "/api/v1/projects",
+            "/mcp",
+            "/files/private",
+            "/docs",
+            "/redoc",
+            "/openapi.json",
+            "/.well-known/private",
+            "/unknown",
+            "/n",
+            "/n/toy/day/extra",
+            "/escape.js",
+        ]:
+            assert client.get(path).status_code == 401, path
+    without_ui = create_app(
+        home,
+        auth=scoped,
+        auth_token="t" * 43,
+        background_repair=False,
+        hub=False,
+        ui_dir=tmp_path / "missing-ui",
+    )
+    with TestClient(without_ui, base_url=BASE) as client:
+        for path in paths:
+            assert client.get(path).status_code == 401, path
 
 
 def test_revoked_session_is_401(home: Path) -> None:
@@ -12357,7 +12517,20 @@ add:
     store = AuthStore(ctx.layout, session_days=settings.server.session_days)
 ```
 
-4. Keep the baseline UI/public-static classifier and guard order. Add `/pair` to its known SPA return expression (inside the `ui_installed` check); do not make reserved/unknown paths public. In `create_app`, extend state and replace only `tickets = TicketStore()` with this setup:
+4. Preserve the baseline `public_static` preconditions (`ui_installed`, traversal/backslash rejection, reserved first segments, and contained installed asset files). Replace only its final SPA return expression with:
+
+```python
+        return (
+            path == "/"
+            or re.fullmatch(
+                r"/(?:r/[^/]+|[xs]/[^/]+/[^/]+|t/[^/]+/[^/]+(?:/edit/[^/]+)?|n/[^/]+(?:/[^/]+)?|settings|storage|pair)/?",
+                path,
+            )
+            is not None
+        )
+```
+
+This allows guest GET/HEAD to load the installed shell at existing run/task/sweep/compare routes and new notebook, settings, storage, and pairing routes. `/pair` intentionally uses a full browser load; it is a public shell route although the frontend navigation predicate excludes it. API data still requires authentication. Unknown and reserved routes remain protected. Add parametrized guard tests for both root-token `TokenGuard` and scoped `AuthGuard`: each known shell path (including notebook day URLs from digest notices) accepts GET/HEAD, POST returns 401, API/MCP/reserved/unknown paths return 401, assets outside the installed UI root stay protected, and without installed UI every shell route returns 401. In `create_app`, extend state and replace only `tickets = TicketStore()` with this setup:
 
 ```python
     app.state.auth = store
@@ -14516,6 +14689,29 @@ def test_task_export_downloads(team: tuple[FastAPI, TestClient, Context]) -> Non
     assert csv.text.splitlines()[0].startswith("kind,label,key,n,metric,mean")
 
 
+def test_export_http_uses_selected_ranking_and_retains_columns(
+    team: tuple[FastAPI, TestClient, Context],
+) -> None:
+    import csv
+    import io
+
+    from tests.core.test_backlog_backend import indexed
+
+    app, client, ctx = team
+    indexed(ctx, ctx.local_repo("toy"))
+    reader = bearer(token_for(app.state.auth, "reader", "read"))
+    url = "/api/v1/tasks/toy/t/export"
+    base = {"format": "csv", "metrics": "acc/value", "baselines": "false"}
+    default = client.get(url, params=base, headers=reader)
+    selected = client.get(url, params={**base, "primary": "latency/p95"}, headers=reader)
+    assert default.status_code == selected.status_code == 200
+    first = list(csv.DictReader(io.StringIO(default.text)))
+    second = list(csv.DictReader(io.StringIO(selected.text)))
+    assert [row["label"] for row in first] == ["A", "B"]
+    assert [row["label"] for row in second] == ["B", "A"]
+    assert {row["metric"] for row in first + second} == {"acc/value"}
+
+
 def test_export_http_primary_validation(team: tuple[FastAPI, TestClient, Context]) -> None:
     app, client, _ = team
     reader = bearer(token_for(app.state.auth, "reader", "read"))
@@ -16100,7 +16296,7 @@ git commit -m "feat(mcp): per-tool scopes, caller identity over /mcp, and acting
 
 **Interfaces:**
 - Consumes: `export_task`/`export_compare` (Task 12), `get_leaderboard`, `read_day`/`append_entry`/`today` (Task 8), `build_digest` (Task 18), `storage_report`/`plan_clean` (Tasks 20–21), the hub's storage routes (Task 31).
-- Produces (contract 5, exact): `export_table(task, format="markdown", project=None, metrics=None, noise="both", digits=3) -> {text}` (read); `export_compare(run_ids, format="markdown") -> {text}` (read); `get_baselines(task, project=None) -> {baselines}` (read); `get_notebook(project, day=None) -> NotebookDay` (read); `add_notebook_entry(project, text, agent="mcp") -> NotebookDay` (launch); `get_digest(project, days=7) -> Digest` (read); `storage_report(project=None) -> StorageReport` (admin); `plan_storage_clean(older_than_days=30, kinds=None, project=None) -> CleanPlan` (admin, dry run only); `whoami() -> {user, scope}` (read).
+- Produces (contract 5, exact): `export_table(task, format="markdown", project=None, metrics=None, noise="both", digits=3, primary=None) -> {text}` (read); `export_compare(run_ids, format="markdown") -> {text}` (read); `get_baselines(task, project=None) -> {baselines}` (read); `get_notebook(project, day=None) -> NotebookDay` (read); `add_notebook_entry(project, text, agent="mcp") -> NotebookDay` (launch); `get_digest(project, days=7) -> Digest` (read); `storage_report(project=None) -> StorageReport` (admin); `plan_storage_clean(older_than_days=30, kinds=None, project=None) -> CleanPlan` (admin, dry run only); `whoami() -> {user, scope}` (read).
 - Rules: `storage_report` and `plan_storage_clean` ask the hub (with the caller's token) and fall back to this machine when no hub answers. No tool applies a cleanup, sends a notification, or manages users or sessions (agents never delete; skill rule 6).
 
 - [ ] **Step 1: Write the failing test**
@@ -16160,6 +16356,31 @@ def test_export_tools(home: Path, toy_repo: Path) -> None:
     assert not err and out["text"].startswith("| run | n | accuracy/value ↑ |")
     err, out = call(home, "get_baselines", {"task": "toy-acc"})
     assert not err and out == {"baselines": []}
+
+
+def test_registered_export_tool_primary_schema_and_ranking(home: Path, toy_repo: Path) -> None:
+    import csv
+    import io
+
+    from tests.core.test_backlog_backend import indexed
+
+    indexed(Context.open(home), toy_repo)
+    schemas = {tool.name: tool.inputSchema for tool in asyncio.run(build_server(home).list_tools())}
+    schema = schemas["export_table"]
+    assert "primary" not in schema.get("required", [])
+    assert schema["properties"]["primary"]["default"] is None
+    assert {item["type"] for item in schema["properties"]["primary"]["anyOf"]} == {"string", "null"}
+    assert "primary" not in schemas["export_compare"]["properties"]
+    args = {"task": "t", "project": "toy", "format": "csv", "metrics": ["acc/value"]}
+    err, default = call(home, "export_table", args)
+    assert not err
+    err, selected = call(home, "export_table", {**args, "primary": "latency/p95"})
+    assert not err
+    first = list(csv.DictReader(io.StringIO(default["text"])))
+    second = list(csv.DictReader(io.StringIO(selected["text"])))
+    assert [row["label"] for row in first] == ["A", "B"]
+    assert [row["label"] for row in second] == ["B", "A"]
+    assert {row["metric"] for row in first + second} == {"acc/value"}
 
 
 def test_notebook_tools(home: Path, toy_repo: Path) -> None:
@@ -17686,7 +17907,6 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from hypothex.core.settings import ServerSettings, Settings, save_settings
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -17700,6 +17920,7 @@ from hypothex.core.ids import utcnow
 from hypothex.core.index import Index, IndexSchemaError, rebuild_index
 from hypothex.core.layout import Layout
 from hypothex.core.records import MetricPoint, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.settings import ServerSettings, Settings, save_settings
 from hypothex.core.store import RunStore
 from tests.docker.conftest import free_port, run_cmd, wait_until
 from tests.factories import make_record, write_toy_project
@@ -19373,7 +19594,7 @@ This preserves unknown fields added to the owned record before credential public
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/cli/test_serve_auth.py tests/cli/test_serve.py -v`
-Expected: scoped-start tests and the retained default-token serve/token-helper tests pass; final merged source comparison and integration evidence are still required before formal round 5.
+Expected: scoped-start tests and the retained default-token serve/token-helper tests pass; the current `a444125` comparison and both ordered review gates are required before implementation, and assembled integration evidence is required at final acceptance.
 
 Run: `uv run python -m doctest src/hypothex/cli/main.py && uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -21863,7 +22084,7 @@ In `src/hypothex/cli/main.py`, in `demo`:
         text += "\nteam: sv (admin), alice (launch); `hx serve` prints pairing links"
 ```
 
-In `serve` (Task 39), import `from hypothex.demo_team import demo_team_running` and replace the first two lines of `served()`'s `try:` block
+In `serve` (Task 39), import `from hypothex.demo_team import demo_team_running` and replace the first two lines of `demo_hosts()`'s `try:` block
 
 ```python
             with demo_hosts_running(home) as live:
@@ -22724,6 +22945,11 @@ git commit -m "test: phase 3 acceptance for a paired collaborator and end-to-end
 ```
 
 ---
+### Task 49: Package and upgrade acceptance
+
+Continue with the [executable package acceptance plan](2026-10-06-hypothex-phase3-package-acceptance.md). Dependencies: backend Tasks 34–35, 39–42, 45–48 and frontend Task 26. This is part of the implementation sequence and final handoff.
+
+---
 ## Done criteria map (contract 11)
 
 | # | Criterion | Where it is proven |
@@ -22736,7 +22962,8 @@ git commit -m "test: phase 3 acceptance for a paired collaborator and end-to-end
 | 6 | Every route, the WebSocket, and every MCP tool declares a scope; the scope matrix passes | Tasks 24, 28, 32, 33 |
 | 7 | Postgres: `hx db upgrade`, reindex equivalence with SQLite | Task 36 (marker `docker`), Task 35 (Alembic head vs models) |
 | 8 | Playwright smoke of every new screen | Frontend plan (fixtures from Task 45) |
-| 9 | `uv run pytest`, `ruff check`, `ruff format --check`, `ty check` clean | Every task's last steps; Task 48 Step 3 |
+| 9 | Built wheel fresh install and copied SQLite home upgrade preserve resources, credentials and data through restart | [Task 49](2026-10-06-hypothex-phase3-package-acceptance.md) |
+| 10 | `uv run pytest`, `ruff check`, `ruff format --check`, `ty check` clean | Every task's last steps; Tasks 48–49 |
 
 The user's manual steps after this plan: a first send to the real Slack workspace and SMTP server (`hx notify test slack|email`), and a first `hx serve --auth --tailscale` on the real tailnet.
 
@@ -22785,8 +23012,8 @@ Inputs: the phase 3 contract, spec sections 3.4, 5.3, 5.4, 7.2–7.4, 9, 12, 13,
 
 **Order.** Parts 3 (notebook, baselines, export), 4–5 (notify, digest), 6 (storage), and 10 (Postgres) depend only on Parts 1–2 and may run in parallel. Part 7 needs Part 2; Part 8 needs Parts 3–7; Part 9 needs Parts 3–7; Part 11 needs Parts 1, 2, and 7; Part 12 needs Parts 7–9 and 11; Part 13 needs everything.
 
-## Refreshed-main final acceptance (verification only)
+## Refreshed-main final acceptance (Task 49)
 
-After both ordered review gates are LGTM, the user's existing conditional implementation authorization applies; verify the assembled package, not only extracted snippets: build a wheel; install it in a clean temporary uv project with a fresh synthetic home; verify packaged UI assets and migration resources, initial serve/token/login and restart. Repeat upgrade/restart against a copy of a representative existing SQLite home and verify runs, complete score bindings, notebooks/settings and credentials are preserved. Use synthetic local data, fake providers/hosts and bounded test services only. Never upgrade the user's real home or contact real infrastructure. Record the fresh-install and upgrade commands and artifacts alongside the normal complete test/build/docs checks. No claim of later-week readiness rests only on the plan probes.
+Execute [Task 49: package and upgrade acceptance](2026-10-06-hypothex-phase3-package-acceptance.md) after Tasks 34–35, 39–42, 45–48 and frontend Task 26. It owns concrete wheel/upgrade tests, CI, evidence and handoff. After both ordered review gates are LGTM, the user's existing conditional implementation authorization applies; verify the assembled package, not only extracted snippets: build a wheel; install it in a clean temporary uv project with a fresh synthetic home; verify packaged UI assets and migration resources, initial serve/token/login and restart. Repeat upgrade/restart against a copy of a representative existing SQLite home and verify runs, complete score bindings, notebooks/settings and credentials are preserved. Use synthetic local data, fake providers/hosts and bounded test services only. Never upgrade the user's real home or contact real infrastructure. Record the fresh-install and upgrade commands and artifacts alongside the normal complete test/build/docs checks. No claim of later-week readiness rests only on the plan probes.
 
 **Selected-primary interface acceptance:** Task 12 core tests cover opposing metric rankings, noise and configured-primary defaults; include selected-key baselines and a higher-is-better non-time percentile regression. Task 29 HTTP tests must also use that opposite-ranking fixture and confirm `primary` forwards to `get_leaderboard` without changing explicit export columns. Task 33 invokes the actually registered MCP `export_table` through the test client with optional `primary`, checks schema/default and selected row order; `export_compare` exposes no ranking selection and core rejects any non-null option. Task 43 tests both local CLI and fake HTTP client mode for `hx export toy/t --primary latency/p95`, plus `--runs a,b --primary ...` rejection. Task 46 documents those exact HTTP/MCP/CLI names and default configured-primary behavior. No adapter may accept and silently ignore `primary`.

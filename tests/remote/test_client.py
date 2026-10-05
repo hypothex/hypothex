@@ -113,9 +113,9 @@ def test_get_json_drops_none_params_and_post_json(
     runs = env.get_json("/api/v1/runs", project="toy", task=None)
     assert [r["run_id"] for r in runs] == ["r1"]
     assert env.get_json("/api/v1/runs", project="other") == []
-    tagged = env.post_json("/api/v1/runs/r1/tags", {"add": ["sweep:s1"], "command_id": "c-1"})
-    assert tagged["tags"] == ["sweep:s1"]
-    again = env.post_json("/api/v1/runs/r1/tags", {"add": ["sweep:s1"], "command_id": "c-1"})
+    tagged = env.post_json("/api/v1/runs/r1/tags", {"add": ["baseline"], "command_id": "c-1"})
+    assert tagged["tags"] == ["baseline"]
+    again = env.post_json("/api/v1/runs/r1/tags", {"add": ["baseline"], "command_id": "c-1"})
     assert again == tagged
 
 

@@ -127,7 +127,7 @@ def cancel(job_id: str) -> None: ...
 # hypothex.core.cost
 def compute_cost(record: RunRecord, usd_per_gpu_hour: float | None) -> CostTotals: ...
 ```
-`hx serve --kind slurm|ssh` (default from `environment.json` / probe) enables the scheduler loop (ssh, every 5 s) or the SLURM poll loop (every 30 s). Run-start path: `prepare_run` accepts `gpus: int`, `queue: bool`, `slurm: SlurmDefaults | None`, `commit: str | None` (hex sha, fetched when missing), `diff: str | None` (applied on `commit` in a worktree, 8A.4). The hub always sends `commit` with `diff`.
+`hx serve --kind slurm|ssh` (default from `environment.json` / probe) enables the scheduler loop (ssh, every 5 s) or the SLURM poll loop (every 30 s). Run-start path: `prepare_run` accepts `gpus: int`, `queue: bool`, `slurm: SlurmDefaults | None`, `commit: str | None` (hex sha, fetched when missing), `diff: str | None` (applied on `commit` in a worktree, 8A.4). The hub always sends `commit` with `diff`. Changed (DF-50): a pinned run's own worktree `<store>/<project>/worktrees/<run_id>` (its `cwd` and `{repo}`) is made when the run starts (`execution.checkout_run_tree`, from `<run_dir>/.hx/checkout.json` and `.hx/checkout.diff`; a SLURM run gets it before `sbatch`), never while it waits. `prepare_run` reads config and captures from one staging checkout per (commit, diff) at `<store>/<project>/staging/<sha>-<diff hash>`, shared by the queued runs that pin it and removed when the last of them starts or ends.
 
 ### 1.7 Sweeps (`hypothex.core.sweeps`)
 
@@ -137,10 +137,13 @@ class SweepSpec(BaseModel, extra="forbid"): id: str; project: str; task: str | N
 def expand(spec: SweepSpec, rng_seed: int = 0) -> list[dict[str, str]]: ...   # grid product (+ random samples), each dict = params; seeds applied separately
 def save_sweep(layout: Layout, spec: SweepSpec) -> Path: ...    # <store>/<project>/sweeps/<id>.yaml
 def load_sweep(layout: Layout, project: str, sweep_id: str) -> SweepSpec: ...
-class SweepSummary(BaseModel): spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []; tag: str = ""   # tag = the sweep's member tag sweep:<owner8>:<id>; run_ids derived: indexed runs with that tag, launch order
-def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary: ...   # cells: {params, group_id, n, mean, lo, hi, run_ids}
+class CancelResult(BaseModel): asked: int = 0; failed: int = 0; errors: list[str] = []
+class SweepSummary(BaseModel): spec: SweepSpec; counts: dict[str, int]; cells: list[dict[str, Any]]; best: dict[str, Any] | None; headline: str; total_usd: float; run_ids: list[str] = []; tag: str = ""; cancel: CancelResult | None = None   # tag = the sweep's member tag sweep:<owner8>:<id>; run_ids derived: indexed runs with that tag, launch order
+def summarize_sweep(ctx: Context, project: str, sweep_id: str) -> SweepSummary: ...   # cells: {params, group_id, n, mean, lo, hi, std, uncounted, run_ids, runs}; uncounted = scored members in other seed groups, excluded from this cell's displayed statistics
 ```
 Sweep membership is derived from the tag `sweep:<owner8>:<id>`, never stored; `owner8` is the first 8 characters of the environment id that holds the definition (the hub), so two hubs' sweeps with the same id on one host never share runs. Clients read `SweepSummary.tag` instead of building the tag. Each (params, seed) has one deterministic command id (`run_command_id`: 16 hex of a SHA-256 over the owning environment, project, sweep id, sorted params, seed); launch, a retried launch, and extend save the definition and issue every missing (params, seed) with it, and command receipts make a repeat the same run.
+
+For a legacy or direct-local sweep without `spec.commit`, extension uses the first run's recorded commit and saved `git.diff`. A dirty first run whose patch is missing or too large to capture is refused before the definition grows or a member is launched; a missing mirror-side marker does not prove that the recorded commit was clean. `SweepIncompleteError.launched` counts known existing member cells plus acknowledged launches, including already mirrored cells later in launch order. A lost remote response may still conceal an accepted member and is reconciled through its deterministic command ID.
 
 ## 2. HTTP API additions
 
@@ -162,7 +165,7 @@ Hub (and env servers where marked *env*):
 | GET | `/api/v1/sweeps/{project}/{id}` | | `SweepSummary` |
 | GET | `/api/v1/sweeps/{id}` | | `SweepSummary` (any project; for clients on another machine) |
 | GET | `/api/v1/projects/{project}/sweeps` | | `list[{id, created_at, n_runs, best}]` |
-| POST | `/api/v1/sweeps/{project}/{id}/cancel_queued` | `{command_id?}` | `SweepSummary` (queued runs of the sweep stopped as `killed`) |
+| POST | `/api/v1/sweeps/{project}/{id}/cancel_queued` | `{command_id?}` | `SweepSummary` (queued runs of the sweep stopped as `killed`; `cancel: {asked, failed, errors}` counts the stops that failed, DF-49) |
 | POST | `/api/v1/sweeps/{project}/{id}/extend` | `{seeds: list[int], command_id?}` | `SweepSummary` (adds runs for every param combination × new seeds, pinned to `spec.commit`/`spec.diff`: the client's commit and diff, else the hub checkout's at create time; audit CONF-1a) |
 | POST | `/api/v1/runs/{id}/pull` | `{artifact: kind or path, command_id?}` | `{local_path}`; 400 when the destination name starts with `.hx-` |
 

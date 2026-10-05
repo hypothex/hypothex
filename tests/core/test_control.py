@@ -5,6 +5,8 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
@@ -23,7 +25,7 @@ from hypothex.core.execution import (
     process_create_time,
 )
 from hypothex.core.ids import utcnow
-from hypothex.core.records import ExecutorInfo, RunKind, RunStatus
+from hypothex.core.records import ExecutorInfo, RunKind, RunRecord, RunStatus
 from tests.factories import git, make_record
 
 PY = sys.executable
@@ -46,6 +48,43 @@ def test_launch_run_in_background_finishes(ctx: Context, toy_repo: Path) -> None
     run_dir = ctx.run_dir(done)
     assert (run_dir / "logs" / "stdout.log").read_text().strip() == "bg"
     assert (run_dir / "supervisor.pid").is_file()
+
+
+def test_presubmit_terminalizes_a_pinned_run_refused_by_the_project_gate(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import execution
+
+    record = prepare_run(
+        ctx,
+        RunRequest(
+            repo=toy_repo,
+            command=cmd("pass"),
+            commit=git(toy_repo, "rev-parse", "HEAD"),
+            queue=True,
+        ),
+    )
+    entry = ctx.store.load_project("toy")
+    ctx.store.save_project(entry.model_copy(update={"remote_host": "gpu1"}))
+    staging = ctx.layout.project_dir("toy") / execution.STAGING_DIR
+    before = {
+        str(p.relative_to(staging)): p.read_bytes() for p in staging.rglob("*") if p.is_file()
+    }
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("a refused project reached git or submission")
+
+    monkeypatch.setattr(execution, "create_worktree", forbidden)
+    monkeypatch.setattr(execution, "_discard_worktree", forbidden)
+    monkeypatch.setattr(control.slurm, "submit_run", forbidden)
+    with pytest.raises(RunError, match="copied from host gpu1") as error:
+        control._checkout_before_submit(ctx, record)
+    assert isinstance(error.value.__cause__, RemoteProjectError)
+    failed = ctx.find_record(record.run_id)
+    assert failed.status == RunStatus.FAILED and failed.ended_at is not None
+    assert failed.started_at is None and failed.executor.gpus == []
+    after = {str(p.relative_to(staging)): p.read_bytes() for p in staging.rglob("*") if p.is_file()}
+    assert after == before
 
 
 def test_stop_run_kills_background_run(ctx: Context, toy_repo: Path) -> None:
@@ -465,17 +504,27 @@ def _pinned_request(repo: Path, *, gpus: int = 0, queue: bool = False) -> RunReq
     return RunRequest(repo=repo, command=[PY, "train.py"], commit=old, gpus=gpus, queue=queue)
 
 
-def test_cancelling_an_unstarted_pinned_run_releases_its_worktree(
+def _staging(ctx: Context) -> list[Path]:
+    """The shared staging checkouts of project toy."""
+    root = ctx.layout.project_dir("toy") / "staging"
+    return sorted(p for p in root.iterdir() if p.is_dir() and "." not in p.name)
+
+
+def _git_worktrees(repo: Path) -> int:
+    return git(repo, "worktree", "list", "--porcelain").count("worktree ")
+
+
+def test_cancelling_an_unstarted_pinned_run_releases_its_staging_checkout(
     ctx: Context, toy_repo: Path
 ) -> None:
     rec = prepare_run(ctx, _pinned_request(toy_repo))
     tree = ctx.layout.worktrees_dir("toy") / rec.run_id
-    assert tree.is_dir()  # the checkout was made at prepare time
+    assert not tree.exists() and len(_staging(ctx)) == 1  # its own tree waits for the start
     assert control.cancel_if_queued(ctx, rec.run_id).status == RunStatus.KILLED
-    assert not tree.exists()  # no supervisor will ever run it: nothing else removes it
+    assert _staging(ctx) == [] and _git_worktrees(toy_repo) == 1
 
 
-def test_removing_a_pinned_run_from_the_gpu_queue_releases_its_worktree(
+def test_removing_a_pinned_run_from_the_gpu_queue_releases_its_staging_checkout(
     ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_gpus = tmp_path / "gpus.json"
@@ -483,10 +532,39 @@ def test_removing_a_pinned_run_from_the_gpu_queue_releases_its_worktree(
     monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(fake_gpus))
     rec = launch_run(ctx, _pinned_request(toy_repo, gpus=1, queue=True))
     assert rec.status == RunStatus.QUEUED
-    tree = ctx.layout.worktrees_dir("toy") / rec.run_id
-    assert tree.is_dir()
+    assert len(_staging(ctx)) == 1
     assert control.cancel_if_queued(ctx, rec.run_id).status == RunStatus.KILLED
-    assert not tree.exists()
+    assert _staging(ctx) == [] and _git_worktrees(toy_repo) == 1
+
+
+def test_queued_pinned_runs_share_one_checkout_until_they_start(
+    ctx: Context, toy_repo: Path
+) -> None:
+    # DF-50: each queued pinned run made a full worktree at launch
+    req = _pinned_request(toy_repo)
+    first, second, third = (prepare_run(ctx, req) for _ in range(3))
+    trees = ctx.layout.worktrees_dir("toy")
+    assert len(_staging(ctx)) == 1 and _git_worktrees(toy_repo) == 2
+    assert not trees.exists() or list(trees.iterdir()) == []
+    assert first.cwd == str(trees / first.run_id)
+    done = execute_run(ctx, first.run_id)
+    assert done.status == RunStatus.FINISHED
+    assert (ctx.run_dir(done) / "logs" / "stdout.log").read_text().strip() == "train v1"
+    assert len(_staging(ctx)) == 1  # two runs still wait for it
+    assert execute_run(ctx, second.run_id).status == RunStatus.FINISHED
+    control.cancel_if_queued(ctx, third.run_id)
+    assert _staging(ctx) == [] and _git_worktrees(toy_repo) == 1
+
+
+def test_a_pinned_run_whose_commit_is_gone_at_start_fails(ctx: Context, toy_repo: Path) -> None:
+    rec = prepare_run(ctx, _pinned_request(toy_repo))
+    (ctx.run_dir(rec) / ".hx" / "checkout.json").write_text(
+        json.dumps({"repo": str(toy_repo), "commit": "0" * 40, "staging": "x"})
+    )
+    done = execute_run(ctx, rec.run_id)
+    assert done.status == RunStatus.FAILED and done.started_at is None
+    assert "could not check out" in (ctx.run_dir(done) / "logs" / "stderr.log").read_text()
+    assert not (ctx.layout.worktrees_dir("toy") / rec.run_id).exists()
 
 
 def test_stop_run_signals_a_child_its_first_read_missed(
@@ -527,6 +605,93 @@ def test_stop_run_signals_a_child_its_first_read_missed(
         if child.poll() is None:
             os.killpg(child.pid, signal.SIGKILL)
             child.wait()
+
+
+def _sweep_tagged_parent(ctx: Context, toy_repo: Path) -> tuple[str, str]:
+    """A finished run with a checkpoint, a user tag, and a sweep tag."""
+    code = (
+        "import json, os; d = os.environ['HYPOTHEX_RUN_DIR']; "
+        "open(d + '/artifacts.jsonl', 'a').write(json.dumps("
+        "{'kind': 'checkpoint', 'path': '/tmp/model.pt'}) + '\\n')"
+    )
+    tag = "sweep:0a1b2c3d:s-1"
+    req = RunRequest(repo=toy_repo, command=cmd(code), task="toy-acc", tags=["keep", tag])
+    return execute_run(ctx, prepare_run(ctx, req).run_id).run_id, tag
+
+
+@pytest.mark.parametrize("make_child", [rerun, reinfer])
+def test_child_runs_do_not_join_the_parents_sweep(
+    ctx: Context, toy_repo: Path, make_child: Callable[..., RunRecord]
+) -> None:
+    # DF-2: a rerun or re-infer copied the sweep tag, so it counted in the sweep
+    parent, tag = _sweep_tagged_parent(ctx, toy_repo)
+    child = make_child(ctx, parent, background=False)
+    assert child.tags == ["keep"]
+    members = ctx.index.list_runs(project="toy", tag=tag, include_archived=True, limit=None)
+    assert [r.run_id for r in members] == [parent]
+
+
+def test_a_lost_queued_pinned_run_releases_its_staging_checkout(
+    ctx: Context, toy_repo: Path
+) -> None:
+    rec = prepare_run(ctx, _pinned_request(toy_repo))
+    old = utcnow() - timedelta(minutes=5)
+    ctx.update_run(rec.run_id, "test.aged", lambda r: r.model_copy(update={"created_at": old}))
+    _write_supervisor_pid(ctx, rec.run_id, dead_pid())
+    assert [r.run_id for r in repair_runs(ctx)] == [rec.run_id]
+    assert _staging(ctx) == [] and _git_worktrees(toy_repo) == 1
+
+
+def test_reinfer_takes_vars_for_the_infer_stage(ctx: Context, toy_repo: Path) -> None:
+    # DF-22: an infer stage with a new var could not be re-inferred
+    import yaml
+
+    config = yaml.safe_load((toy_repo / "hypothex.yaml").read_text())
+    config["stages"]["infer"] += " --temperature {temperature}"
+    (toy_repo / "hypothex.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+    parent, _ = _sweep_tagged_parent(ctx, toy_repo)
+    with pytest.raises(RunError, match="temperature"):
+        reinfer(ctx, parent, background=False)
+    child = reinfer(ctx, parent, vars={"temperature": "2", "checkpoint": "x"}, background=False)
+    assert child.kind == RunKind.INFER and child.parent == parent
+    assert child.vars == {"temperature": "2", "checkpoint": "/tmp/model.pt"}
+    assert child.command[-2:] == ["--temperature", "2"]
+
+
+def test_batch_cancel_uses_one_lock_and_keeps_queue_tickets(
+    ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core.scheduler import Scheduler
+    from hypothex.core.sweeps import stop_queued_runs
+
+    fake_gpus = tmp_path / "batch-gpus.json"
+    fake_gpus.write_text('[{"index": 0, "external": true}]')
+    monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(fake_gpus))
+    req = RunRequest(repo=toy_repo, command=cmd("pass"), gpus=1, queue=True)
+    ids = [launch_run(ctx, req).run_id for _ in range(5)]
+    before = {i: ctx.find_record(i).executor.queue_position for i in ids}
+    mark = ctx.events.since(0, limit=10_000)[-1].sequence
+    lock_count = 0
+    real_lock = control.scheduler_lock
+
+    @contextmanager
+    def counted_lock(context: Context) -> Iterator[None]:
+        nonlocal lock_count
+        lock_count += 1
+        with real_lock(context):
+            yield
+
+    monkeypatch.setattr(control, "scheduler_lock", counted_lock)
+    batch = stop_queued_runs(ctx, [ids[0], "no-such-run", *ids[1:3]])
+    assert (batch.asked, batch.failed) == (4, 1)
+    assert "no-such-run" in batch.errors[0]
+    assert all(ctx.find_record(i).status == RunStatus.KILLED for i in ids[:3])
+    assert Scheduler(ctx).positions() == {ids[3]: 1, ids[4]: 2}
+    assert {i: ctx.find_record(i).executor.queue_position for i in ids[3:]} == {
+        i: before[i] for i in ids[3:]
+    }
+    assert not any(e.type == "run.queue_moved" for e in ctx.events.since(mark, limit=10_000))
+    assert lock_count == 1
 
 
 def test_stop_of_a_run_without_a_supervisor_indexes_its_whole_history(ctx: Context) -> None:
@@ -588,6 +753,7 @@ def test_a_worktree_is_never_released_through_a_host_copys_repo_path(
     head = git(toy_repo, "rev-parse", "HEAD")
     _commit_train(toy_repo, "train v2")
     record = prepare_run(ctx, RunRequest(repo=toy_repo, command=cmd("pass"), commit=head))
+    control.checkout_run_tree(ctx, record)  # deferred checkouts are made when execution starts
     tree = ctx.layout.worktrees_dir("toy") / record.run_id
     assert tree.is_dir()
     decoy = tmp_path / "decoy"

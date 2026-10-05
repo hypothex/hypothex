@@ -175,8 +175,8 @@ def test_reload_applies_a_removed_host_and_new_project_maps(tmp_path: Path) -> N
 
 
 def test_runs_filter_by_environment_and_honour_large_limits(home: Path, ctx: Context) -> None:
-    for i in range(1005):
-        ctx.index.upsert_run(make_record(f"r{i:04d}", environment_id="env-b" if i % 2 else "env-a"))
+    for i in range(1005):  # real run folders: the startup repair drops index rows without one
+        ctx.create_run(make_record(f"r{i:04d}", environment_id="env-b" if i % 2 else "env-a"))
     with TestClient(create_app(home, background_repair=False, hub=False), base_url=BASE_URL) as c:
         assert len(c.get("/api/v1/runs", params={"limit": 1005}).json()) == 1005
         only_b = c.get("/api/v1/runs", params={"environment_id": "env-b", "limit": 2000}).json()
@@ -187,7 +187,7 @@ def test_runs_page_by_keyset_without_gaps_or_repeats(home: Path, ctx: Context) -
     start = utcnow().replace(microsecond=123456)
     for i in range(11):  # pairs share a created_at: run_id breaks the tie
         when = start + timedelta(seconds=i // 2)
-        ctx.index.upsert_run(make_record(f"r{i:02d}", environment_id="env-a", created_at=when))
+        ctx.create_run(make_record(f"r{i:02d}", environment_id="env-a", created_at=when))
     with TestClient(create_app(home, background_repair=False, hub=False), base_url=BASE_URL) as c:
         everything = [r["run_id"] for r in c.get("/api/v1/runs").json()]
         pages: list[list[str]] = []
@@ -250,3 +250,46 @@ def test_a_disconnected_host_keeps_its_totals(tmp_path: Path, kind: HostKind) ->
         again = create_app(r.hub.layout.home, background_repair=False)
         with TestClient(again, base_url=BASE_URL) as client:
             assert _gpu1_row(client)["cost_today_usd"] == before["cost_today_usd"]
+
+
+def test_queue_positions_are_global_ranks_on_list_and_detail(
+    home: Path, ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    from hypothex.core.control import cancel_many_if_queued, launch_run
+    from hypothex.core.execution import RunRequest
+    from hypothex.core.records import ExecutorInfo
+
+    gpus = write_fake_gpus(tmp_path / "queue-ranks.json", 1, external=(0,))
+    monkeypatch.setenv("HYPOTHEX_FAKE_GPUS", str(gpus))
+    req = RunRequest(repo=toy_repo, command=[sys.executable, "-c", "pass"], gpus=1, queue=True)
+    ids = [launch_run(ctx, req).run_id for _ in range(3)]
+    cancel_many_if_queued(ctx, [ids[0]])
+    for rid, ticket in (("remote-a", 5), ("remote-b", 8)):
+        ctx.create_run(
+            make_record(
+                rid,
+                environment_id="other-env",
+                status=RunStatus.QUEUED,
+                executor=ExecutorInfo(queue_position=ticket),
+            )
+        )
+    with TestClient(create_app(home, background_repair=False, hub=False), base_url=BASE_URL) as c:
+        rows = c.get("/api/v1/runs", params={"status": "queued"}).json()
+        assert {r["run_id"]: r["executor"]["queue_position"] for r in rows} == {
+            ids[1]: 1,
+            ids[2]: 2,
+            "remote-a": 1,
+            "remote-b": 2,
+        }
+        # A filtered page still uses the global host queue, not just its own rows.
+        ctx.update_run(ids[2], "run.tagged", lambda r: r.model_copy(update={"tags": ["last"]}))
+        only = c.get("/api/v1/runs", params={"tag": "last", "limit": 1}).json()
+        assert only[0]["executor"]["queue_position"] == 2
+        for run_id, expected in ((ids[2], 2), ("remote-b", 2)):
+            detail = c.get(f"/api/v1/runs/{run_id}").json()
+            assert detail["record"]["executor"]["queue_position"] == expected
+    # Read paths never rewrite the stable ticket.
+    assert ctx.find_record(ids[2]).executor.queue_position == 3
+    assert ctx.find_record("remote-b").executor.queue_position == 8

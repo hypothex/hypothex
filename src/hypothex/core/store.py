@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
-from typing import Any, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError
@@ -40,7 +40,7 @@ from hypothex.core.records import (
     ScoreRecord,
     UsageTotals,
 )
-from hypothex.core.thin import MAX_POINTS_PER_METRIC, HistoryThinner
+from hypothex.core.thin import MAX_METRIC_NAMES, MAX_POINTS_PER_METRIC, HistoryThinner
 
 log = logging.getLogger(__name__)
 _M = TypeVar("_M", bound=BaseModel)
@@ -48,6 +48,10 @@ _M = TypeVar("_M", bound=BaseModel)
 RUN_SUBDIRS = ("logs", "predictions", "env")
 MAX_METRIC_LINE_BYTES = 64 * 1024
 """Longest ``metrics.jsonl`` line a bounded read parses; a longer line is skipped unread."""
+MAX_METRIC_NAME_CACHE_ENTRIES = 32
+"""Most live metric-name results retained by each store."""
+MAX_METRIC_NAME_CACHE_BYTES = 4 * 1024 * 1024
+"""Maximum retained UTF-8 name bytes across a store's live-name cache."""
 MAX_NAME_WARNINGS = 1024
 """Most recent runs whose metric-name warning each store remembers."""
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
@@ -275,6 +279,24 @@ def run_lock(run_dir: Path) -> Iterator[None]:
         yield
 
 
+_MetricFileStamp = tuple[int, int, int, int, int]
+
+
+class _MetricNameCacheEntry(NamedTuple):
+    stamp: _MetricFileStamp
+    names: tuple[str, ...]
+    name_bytes: int
+
+
+def _metric_file_stamp(path: Path) -> _MetricFileStamp | None:
+    """Identify a file and any content change, including same-size edits with restored mtime."""
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
 class RunStore:
     """
     Read and write projects and runs under ``<home>/store``.
@@ -289,6 +311,9 @@ class RunStore:
         self.layout = layout
         self._name_cap_warned: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._name_warning_lock = Lock()
+        self._metric_name_cache: OrderedDict[tuple[str, str], _MetricNameCacheEntry] = OrderedDict()
+        self._metric_name_cache_bytes = 0
+        self._metric_name_cache_lock = Lock()
 
     # projects -----------------------------------------------------------
     def _project_file(self, project: str) -> Path:
@@ -593,6 +618,80 @@ class RunStore:
             Points in the order written; malformed rows are skipped.
         """
         return _parse_rows(MetricPoint, self.layout.run_dir(project, run_id) / "metrics.jsonl")
+
+    def read_metric_names_bounded(self, project: str, run_id: str) -> list[str]:
+        """
+        List the first distinct metric names in a live run's file, sorted.
+
+        Uses the same validated rows and ``MAX_METRIC_LINE_BYTES`` byte cap as
+        ``read_metric_points_bounded``. Invalid rows, oversized lines and invalid
+        UTF-8 are skipped. Only names are retained, and reading stops as soon as
+        ``MAX_METRIC_NAMES`` distinct names are found: later rows cannot change
+        the names admitted by the live history policy. Unchanged files reuse a
+        per-store cache keyed by device, inode, size, mtime and ctime; any change
+        requires a full bounded scan, including appends. The cache holds at most
+        ``MAX_METRIC_NAME_CACHE_ENTRIES`` results and ``MAX_METRIC_NAME_CACHE_BYTES``
+        UTF-8 name bytes. Larger results are returned without being cached.
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+        run_id : str
+            Run id.
+
+        Returns
+        -------
+        list of str
+            Sorted first ``MAX_METRIC_NAMES`` distinct valid names, or fewer
+            when the file ends first. A missing file returns an empty list.
+
+        Examples
+        --------
+        >>> store.read_metric_names_bounded("toy", "r1")  # doctest: +SKIP
+        ['loss', 'val/accuracy']
+        """
+        path = self.layout.run_dir(project, run_id) / "metrics.jsonl"
+        key = (project, run_id)
+        with self._metric_name_cache_lock:
+            stamp = _metric_file_stamp(path)
+            cached = self._metric_name_cache.get(key)
+            if cached is not None:
+                if cached.stamp == stamp:
+                    self._metric_name_cache.move_to_end(key)
+                    return list(cached.names)
+                self._metric_name_cache.pop(key)
+                self._metric_name_cache_bytes -= cached.name_bytes
+        if stamp is None:
+            return []
+
+        # Scan outside the lock so one large run does not block unrelated names.
+        names: set[str] = set()
+        for point in _iter_rows(MetricPoint, path, MAX_METRIC_LINE_BYTES):
+            names.add(point.name)
+            if len(names) == MAX_METRIC_NAMES:
+                break
+        result = sorted(names)
+        # Escaped surrogate code units accepted by JSON keep their existing
+        # behavior; surrogatepass charges their bytes without rejecting a row.
+        name_bytes = sum(len(name.encode("utf-8", errors="surrogatepass")) for name in result)
+        if name_bytes > MAX_METRIC_NAME_CACHE_BYTES or MAX_METRIC_NAME_CACHE_ENTRIES < 1:
+            return result
+        with self._metric_name_cache_lock:
+            if _metric_file_stamp(path) != stamp:
+                return result  # never publish a snapshot whose file changed during the read
+            previous = self._metric_name_cache.pop(key, None)
+            if previous is not None:
+                self._metric_name_cache_bytes -= previous.name_bytes
+            self._metric_name_cache[key] = _MetricNameCacheEntry(stamp, tuple(result), name_bytes)
+            self._metric_name_cache_bytes += name_bytes
+            while (
+                len(self._metric_name_cache) > MAX_METRIC_NAME_CACHE_ENTRIES
+                or self._metric_name_cache_bytes > MAX_METRIC_NAME_CACHE_BYTES
+            ):
+                _, evicted = self._metric_name_cache.popitem(last=False)
+                self._metric_name_cache_bytes -= evicted.name_bytes
+        return result
 
     def read_metric_points_bounded(
         self, project: str, run_id: str, limit: int = MAX_POINTS_PER_METRIC

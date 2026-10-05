@@ -5,7 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
-import tempfile
+import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -37,33 +37,28 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 
 TEMP_NAME_KEEP = 200
-"""Most bytes of a file name kept in its temp file's name (the rest is cut)."""
+"""Most bytes of a file name kept in its temp file's name."""
 
 
 def temp_prefix(name: str) -> str:
     """
-    Return a ``tempfile.mkstemp`` prefix for a hidden temp file next to ``name``.
-
-    The prefix is ``.<name>.`` with ``name`` cut to ``TEMP_NAME_KEEP`` bytes, so
-    the prefix, mkstemp's 8 random characters and a short suffix stay within
-    the 255-byte name limit even when ``name`` itself uses all of it.
+    Return a hidden temporary-file prefix bounded by the filesystem name limit.
 
     Parameters
     ----------
     name : str
-        Name of the file the temp file will replace.
+        Name of the destination file.
 
     Returns
     -------
     str
-        The prefix, at most ``TEMP_NAME_KEEP + 2`` bytes.
+        ``.<name>.``, with the name shortened to at most 200 encoded bytes,
+        leaving room for a random suffix within a 255-byte filename.
 
     Examples
     --------
-    >>> temp_prefix("a.jsonl")
-    '.a.jsonl.'
-    >>> len(temp_prefix("x" * 255))
-    202
+    >>> temp_prefix("run.yaml")
+    '.run.yaml.'
     """
     keep = name[:TEMP_NAME_KEEP]
     while len(os.fsencode(keep)) > TEMP_NAME_KEEP:
@@ -77,7 +72,9 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
 
     The data goes to a temp file in the same folder, which is flushed
     (``os.fsync``) and renamed over ``path``; then the folder is flushed
-    (``fsync_dir``) so the rename itself survives a crash.
+    (``fsync_dir``) so the rename itself survives a crash. The file mode is
+    ``0666`` minus the umask, as for any new file (``0644`` with the usual
+    umask); write secrets with a mode of their own.
 
     On macOS, ``os.fsync`` hands the data to the drive but does not flush
     the drive's own cache (``F_FULLFSYNC`` does). That is not used here: it
@@ -97,12 +94,15 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     --------
     >>> import tempfile
     >>> target = Path(tempfile.mkdtemp()) / "blob.bin"
-    >>> atomic_write_bytes(target, b"caf\xe9")
+    >>> atomic_write_bytes(target, b"caf\\xe9")
     >>> target.read_bytes()
-    b'caf\xe9'
+    b'caf\\xe9'
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=temp_prefix(path.name), suffix=".tmp")
+    # not mkstemp: its 0600 would make run.yaml and the like unreadable to the
+    # other users of a shared store; 0666 minus the umask matches appended files
+    tmp = path.with_name(f"{temp_prefix(path.name)}{secrets.token_hex(8)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)

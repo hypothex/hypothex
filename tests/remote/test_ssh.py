@@ -1,19 +1,25 @@
+import contextlib
 import functools
 import http.server
 import json
 import os
+import signal
 import socket
 import socketserver
+import subprocess
+import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
+import psutil
 import pytest
 from pydantic import ValidationError
 
+from hypothex.remote import ssh as ssh_module
 from hypothex.remote.ssh import (
     SshError,
     SshTarget,
@@ -21,6 +27,7 @@ from hypothex.remote.ssh import (
     _free_port,
     copy_from,
     copy_to,
+    reap_stale_tunnels,
     run_remote,
 )
 from tests.fakes import DEAD_HUB, FakeRemote
@@ -305,10 +312,10 @@ def test_copy_from_missing_remote_leaves_nothing(
     fake_remote: FakeRemote, tmp_path: Path, work: Path
 ) -> None:
     fake_remote.add_host("gpu1")
-    out_dir = tmp_path / "out"
+    out_dir = tmp_path / "pulled" / "out"
     with pytest.raises(SshError, match="No such file or directory"):
         copy_from(fake_remote.target("gpu1"), "~/nope.pt", out_dir / "nope.pt", work=work)
-    assert list(out_dir.iterdir()) == []
+    assert not (tmp_path / "pulled").exists()  # no empty folder is left behind
     assert list((work / "stage").iterdir()) == []
 
 
@@ -675,3 +682,290 @@ def test_tunnel_missing_ssh_binary_raises(tmp_path: Path) -> None:
     target = SshTarget(alias="gpu1", ssh_bin=str(tmp_path / "no-ssh"))
     with pytest.raises(SshError, match="not found"):
         Tunnel(target, remote_port=40123).start()
+
+
+# --------------------------------------------------------------------------- orphan tunnels
+
+_HOLD_TUNNEL = """
+import sys, time
+from pathlib import Path
+from hypothex.remote.ssh import SshTarget, Tunnel
+target = SshTarget(alias="gpu1", ssh_bin=sys.argv[1])
+tunnel = Tunnel(target, remote_port=int(sys.argv[2]), registry=Path(sys.argv[3]))
+tunnel.start()
+print(tunnel.local_port, flush=True)
+time.sleep(120)
+"""
+
+
+def _wait_until(pred: Callable[[], bool], timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_a_tunnel_records_itself_while_it_runs(
+    fake_remote: FakeRemote, echo_port: int, tmp_path: Path
+) -> None:
+    fake_remote.add_host("gpu1")
+    registry = tmp_path / "tunnels"
+    tunnel = Tunnel(fake_remote.target("gpu1"), remote_port=echo_port, registry=registry)
+    tunnel.start()
+    try:
+        [record] = list(registry.glob("*.json"))
+        data = json.loads(record.read_text())
+        assert data["pid"] == int(record.stem)
+        assert data["owner"] == os.getpid()
+        assert data["argv"] == tunnel.argv()
+        assert data["pid_create_time"] == psutil.Process(data["pid"]).create_time()
+        assert data["owner_create_time"] == psutil.Process().create_time()
+        assert reap_stale_tunnels(registry) == []  # its owner (this process) is alive
+        assert tunnel.alive()
+    finally:
+        tunnel.stop()
+    assert list(registry.iterdir()) == []
+
+
+def test_a_tunnel_left_by_a_killed_process_is_reaped(
+    fake_remote: FakeRemote, echo_port: int, tmp_path: Path
+) -> None:
+    fake_remote.add_host("gpu1")
+    registry = tmp_path / "tunnels"
+    owner = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_TUNNEL, fake_remote.ssh_bin, str(echo_port), str(registry)],
+        stdout=subprocess.PIPE,
+    )
+    assert owner.stdout is not None
+    port = int(owner.stdout.readline())
+    [record] = list(registry.glob("*.json"))
+    pid = int(record.stem)
+    try:
+        os.kill(owner.pid, signal.SIGKILL)  # the hub dies without stopping its tunnel
+        owner.wait()
+        assert _roundtrip(port, b"orphan") == b"orphan"  # the ssh -L process lives on
+        assert reap_stale_tunnels(registry) == [pid]
+        assert _wait_until(lambda: _refused(port))
+        assert list(registry.iterdir()) == []
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_reaping_never_kills_a_process_that_reused_the_pid(tmp_path: Path) -> None:
+    registry = tmp_path / "tunnels"
+    registry.mkdir()
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    other = subprocess.Popen(["sleep", "30"])  # took the pid of a tunnel that is gone
+    try:
+        argv = ["ssh", "-N", "-L", "127.0.0.1:5:127.0.0.1:6", "gpu1"]
+        record = {"pid": other.pid, "owner": dead.pid, "argv": argv}
+        (registry / f"{other.pid}.json").write_text(json.dumps(record))
+        (registry / "junk.json").write_text("{")
+        assert reap_stale_tunnels(registry) == []
+        assert other.poll() is None
+        # The legacy record has no birth identity: keep its uncertain live
+        # process for manual recovery, but discard malformed JSON.
+        assert list(registry.iterdir()) == [registry / f"{other.pid}.json"]
+    finally:
+        other.kill()
+        other.wait()
+
+
+class _ReapProcess:
+    """A process double: no test using it sends an operating-system signal."""
+
+    def __init__(self, pid: int, birth: float, argv: list[str]) -> None:
+        self.pid = pid
+        self.birth = birth
+        self.argv = argv
+        self.signals: list[int] = []
+        self.waits: list[float | None] = []
+        self.wait_failures = 0
+        self.gone = False
+        self.denied = False
+
+    def create_time(self) -> float:
+        if self.denied:
+            raise psutil.AccessDenied(self.pid)
+        return self.birth
+
+    def cmdline(self) -> list[str]:
+        if self.denied:
+            raise psutil.AccessDenied(self.pid)
+        return self.argv
+
+    def status(self) -> str:
+        return psutil.STATUS_SLEEPING
+
+    def terminate(self) -> None:
+        self.signals.append(signal.SIGTERM)
+
+    def kill(self) -> None:
+        self.signals.append(signal.SIGKILL)
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waits.append(timeout)
+        if self.wait_failures:
+            self.wait_failures -= 1
+            raise psutil.TimeoutExpired(timeout or 0, self.pid)
+        self.gone = True
+        return 0
+
+
+def _mock_reaper_processes(
+    monkeypatch: pytest.MonkeyPatch, processes: dict[int, _ReapProcess]
+) -> None:
+    """Replace psutil and the old os.kill/ps paths with the same process table."""
+
+    def find(pid: int | None = None) -> _ReapProcess:
+        chosen = os.getpid() if pid is None else pid
+        proc = processes.get(chosen)
+        if proc is None or proc.gone:
+            raise psutil.NoSuchProcess(chosen)
+        return proc
+
+    def fake_kill(pid: int, sig: int) -> None:
+        try:
+            proc = find(pid)
+        except psutil.NoSuchProcess as exc:
+            raise ProcessLookupError(pid) from exc
+        if sig:
+            proc.signals.append(sig)
+
+    def fake_ps(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        del kwargs
+        try:
+            proc = find(int(args[-1]))
+            line = " ".join(proc.cmdline()).encode()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return subprocess.CompletedProcess(args, 1, b"", b"")
+        return subprocess.CompletedProcess(args, 0, line, b"")
+
+    monkeypatch.setattr(psutil, "Process", find)
+    monkeypatch.setattr(ssh_module.os, "kill", fake_kill)
+    monkeypatch.setattr(ssh_module.subprocess, "run", fake_ps)
+
+
+def _tunnel_record(registry: Path, **changes: object) -> Path:
+    registry.mkdir(exist_ok=True)
+    data: dict[str, object] = {
+        "pid": 880001,
+        "owner": 880002,
+        "argv": ["ssh", "-N", "-L", "127.0.0.1:5:127.0.0.1:6", "gpu1"],
+        "pid_create_time": 100.0,
+        "owner_create_time": 50.0,
+    }
+    data.update(changes)
+    record = registry / "880001.json"
+    record.write_text(json.dumps(data), encoding="utf-8")
+    return record
+
+
+@pytest.mark.parametrize("field", ["pid", "owner"])
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "880001", 2**80, float("inf")])
+def test_reaper_rejects_malformed_pids_without_process_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    record = _tunnel_record(tmp_path, **{field: value})
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        raise AssertionError("malformed record reached a process operation")
+
+    monkeypatch.setattr(ssh_module.os, "kill", unexpected)
+    monkeypatch.setattr(psutil, "Process", unexpected)
+    assert reap_stale_tunnels(tmp_path) == []
+    assert not record.exists()
+
+
+def test_reaper_does_not_signal_reused_child_pid_even_with_identical_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _tunnel_record(tmp_path)
+    child = _ReapProcess(880001, 200.0, json.loads(record.read_text())["argv"])
+    _mock_reaper_processes(monkeypatch, {child.pid: child})
+    assert reap_stale_tunnels(tmp_path) == []
+    assert child.signals == []
+    assert not record.exists()  # the original process is confirmed gone
+
+
+def test_reaper_handles_reused_owner_pid_and_stops_exact_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _tunnel_record(tmp_path)
+    child = _ReapProcess(880001, 100.0, json.loads(record.read_text())["argv"])
+    owner = _ReapProcess(880002, 90.0, ["unrelated"])
+    _mock_reaper_processes(monkeypatch, {child.pid: child, owner.pid: owner})
+    assert reap_stale_tunnels(tmp_path) == [child.pid]
+    assert child.signals == [signal.SIGTERM]
+    assert child.gone
+    assert owner.signals == []
+    assert not record.exists()
+
+
+def test_reaper_preserves_record_when_process_inspection_is_uncertain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _tunnel_record(tmp_path)
+    child = _ReapProcess(880001, 100.0, json.loads(record.read_text())["argv"])
+    child.denied = True
+    _mock_reaper_processes(monkeypatch, {child.pid: child})
+    assert reap_stale_tunnels(tmp_path) == []
+    assert child.signals == []
+    assert record.exists()
+
+
+def test_reaper_keeps_legacy_live_record_without_signalling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _tunnel_record(tmp_path)
+    data = json.loads(record.read_text())
+    del data["pid_create_time"]
+    del data["owner_create_time"]
+    record.write_text(json.dumps(data))
+    child = _ReapProcess(880001, 100.0, data["argv"])
+    _mock_reaper_processes(monkeypatch, {child.pid: child})
+    assert reap_stale_tunnels(tmp_path) == []
+    assert child.signals == []
+    assert record.exists()
+
+
+@pytest.mark.parametrize("wait_failures", [1, 2])
+def test_reaper_bounds_termination_and_preserves_incomplete_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wait_failures: int
+) -> None:
+    record = _tunnel_record(tmp_path)
+    child = _ReapProcess(880001, 100.0, json.loads(record.read_text())["argv"])
+    child.wait_failures = wait_failures
+    _mock_reaper_processes(monkeypatch, {child.pid: child})
+    assert reap_stale_tunnels(tmp_path) == ([child.pid] if wait_failures == 1 else [])
+    assert child.signals == [signal.SIGTERM, signal.SIGKILL]
+    assert len(child.waits) == 2 and all(t is not None and 0 < t <= 5 for t in child.waits)
+    assert record.exists() == (wait_failures == 2)
+
+
+def test_tunnel_registration_failure_stops_spawned_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child = _ReapProcess(880001, 100.0, [])
+
+    def poll() -> int | None:
+        return 0 if child.gone else None
+
+    monkeypatch.setattr(child, "poll", poll, raising=False)
+    monkeypatch.setattr(ssh_module.subprocess, "Popen", lambda *a, **kw: child)
+    monkeypatch.setattr(ssh_module, "_port_open", lambda port: False)
+
+    def fail_registration(*args: object, **kwargs: object) -> None:
+        raise OSError("registry unavailable")
+
+    monkeypatch.setattr(ssh_module, "_register_tunnel", fail_registration)
+    tunnel = Tunnel(SshTarget(alias="fake"), 7777, local_port=55000, registry=tmp_path)
+    with pytest.raises(OSError, match="registry unavailable"):
+        tunnel.start()
+    assert child.gone
+    assert child.signals == [signal.SIGTERM]
+    assert not tunnel.alive()

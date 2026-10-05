@@ -2180,18 +2180,17 @@ def create_app(
             if before_created_at.tzinfo is None:
                 before_created_at = before_created_at.replace(tzinfo=UTC)
             before = (before_created_at.astimezone(UTC), before_run_id)
-        rows = to_jsonable(
-            ctx.index.list_runs(
-                project=project,
-                task=task,
-                status=status,
-                tag=tag,
-                environment_id=environment_id,
-                include_archived=archived,
-                limit=limit,
-                before=before,
-            )
+        records = ctx.index.list_runs(
+            project=project,
+            task=task,
+            status=status,
+            tag=tag,
+            environment_id=environment_id,
+            include_archived=archived,
+            limit=limit,
+            before=before,
         )
+        rows = to_jsonable(q.with_queue_positions(ctx, records))
         # like the run detail: the CLI and MCP list runs through the hub and see a stale host
         states: dict[str, str | None] = {}
         for row in rows:

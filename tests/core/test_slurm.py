@@ -1982,7 +1982,9 @@ def _pinned_slurm_run(ctx: Context, toy_repo: Path, code: str, **kw: Any) -> Run
     )
     record = control.launch_run(ctx, req)
     assert Path(record.cwd).is_relative_to(ctx.layout.worktrees_dir("toy"))
-    assert Path(record.cwd).is_dir()
+    assert Path(record.cwd).is_dir()  # made before sbatch: a compute node may have no git
+    staging = ctx.layout.project_dir("toy") / "staging"
+    assert not any(p.is_dir() for p in staging.iterdir())  # left once its own tree exists
     return record
 
 
@@ -2045,6 +2047,26 @@ def test_cancel_if_queued_cancels_only_a_pending_job(ctx: Context, slurm: FakeSl
     assert control.cancel_if_queued(ctx, "r2").status == RunStatus.QUEUED
     assert slurm.job("1001")["state"] == "RUNNING"
     assert slurm.calls("scancel") == [["--state=PENDING", "1000"], ["--state=PENDING", "1001"]]
+
+
+def test_reconcile_emits_the_warnings_of_scoring(
+    ctx: Context, toy_repo: Path, slurm: FakeSlurm
+) -> None:
+    # DF-6, DF-17: a scoring warning (metric code changed, unmatched ids) was dropped
+    preds = WRITE_PREDS.replace("'ex-' + str(i)", "('ex-' if i < 3 else 'x') + str(i)")
+    slurm.set(mode="run")
+    record = _pinned_slurm_run(ctx, toy_repo, preds, task="toy-acc")
+    assert control.wait_for_run(ctx, record.run_id, timeout=60).status == RunStatus.FINISHED
+    reconcile(ctx)
+    warnings = [
+        e.payload["message"]
+        for e in ctx.events.since(0, limit=10_000)
+        if e.run_id == record.run_id and e.type == "run.warning"
+    ]
+    assert warnings == [
+        "1 of 4 prediction ids are not in dataset 'toyset' split 'test'; "
+        "they are scored with no reference"
+    ]
 
 
 def test_a_slurm_end_indexes_the_whole_history(ctx: Context) -> None:

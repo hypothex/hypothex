@@ -166,6 +166,22 @@ named ``local``.
 ``hx hosts disconnect`` is kept across hub restarts. Connecting, disconnecting, or
 adding one host never drops the other hosts.
 
+Tunnel recovery
+---------------
+
+The hub records each tunnel under ``<home>/hub/tunnels/`` with the tunnel and
+owner PIDs, both process birth times, and the exact forwarding arguments. After
+an owner dies, a later hub can stop the recorded tunnel only when its birth time
+and arguments still match. Reusing a PID does not transfer ownership. Cleanup
+waits at most five seconds after SIGTERM, then checks identity again before
+SIGKILL and another five-second wait.
+
+A process lookup failure or an incomplete stop keeps the record for a later
+attempt. Older records without birth times never authorize a signal: if the
+process is still present, verify and stop the old tunnel manually; the record
+can be removed once that process is gone. A registry-write failure while starting
+a new tunnel stops the spawned process before returning the error.
+
 Host states
 -----------
 
@@ -225,6 +241,10 @@ Launch on a host
   ``HEAD`` and your uncommitted changes (``git diff HEAD``). The host runs
   ``git fetch`` when it does not have that commit, and applies the changes in a clean
   git worktree; its own checkout is not touched.
+- Queued pinned runs share a staging checkout until execution starts. Each execution
+  checkout is reserved exclusively; an existing, unverified destination makes the
+  run fail without running in or deleting that directory. SLURM creates the checkout
+  before submission and records its completion so the compute node can reuse it.
 - A diff that is not UTF-8 text, or is larger than 5 MiB, is refused: commit it first.
 - New files that git does not track are not in ``git diff HEAD``. ``hx launch`` names
   them in a warning; ``git add`` them to send them.

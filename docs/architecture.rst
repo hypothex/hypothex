@@ -16,6 +16,9 @@ Every ``run.yaml`` write is atomic (write to a temp file, then ``os.replace``) a
 happens under a per-run lock. Old scores are never overwritten or deleted;
 re-evaluation only appends.
 
+Atomic writes use a byte-bounded temporary filename, including for long Unicode
+destination names, and new files follow the process umask like appended files.
+
 ``hx reindex`` rebuilds the index from run folders on disk. Because the index is
 disposable, Hypothex stores a schema version and rebuilds it automatically when
 that version changes.
@@ -60,10 +63,11 @@ written in the same transaction). Setting a mirror cursor or marking scores stal
 does not count. ``hypothex.core.index.index_generation(ctx)`` reads it, so a cache
 of anything built from the index can use the generation as its key. Leaderboards
 do this: ``hypothex.core.leaderboard.cached_leaderboard`` keeps up to
-``BOARD_CACHE_SIZE`` boards, keyed by the generation, the project, the task, the
-config, the metric versions, and a ``variant`` for anything else the board depends
-on. ``get_leaderboard``, ``list_tasks``, the overview, view panels, and sweep tables
-all use it.
+``BOARD_CACHE_SIZE`` boards, keyed by the database device and inode plus generation,
+the project, the task, the config, the metric versions, and a ``variant`` for
+anything else the board depends on. File identity prevents a replaced database
+from reusing a board at the same generation. ``get_leaderboard``, ``list_tasks``,
+the overview, view panels, and sweep tables all use it.
 
 .. code-block:: python
 
@@ -177,10 +181,56 @@ even if the hub machine sleeps or the network drops. The hub reaches an
 environment over SSH tunnels or a direct URL, but the environment's identity
 (``environment_id``) is stable regardless of the route.
 
+Seed identity and repeated runs
+-------------------------------
+
+A seed group includes the configuration hash, commit and the recorded dirty-diff
+hash. Launch captures the first eight SHA-256 hex digits of ``git.diff``; if the
+diff exceeds the capture limit, the captured diff stat is hashed instead. The
+stat fallback identifies a summary, not exact content, and cannot support an
+exact rerun. Dirty group ids include all eight digits so distinct stored hashes
+cannot overwrite each other's paired-test data. Legacy dirty runs without a
+hash retain the ``+dirty`` suffix.
+
+Repeated runs of one seed are averaged before computing seed statistics and
+paired-test pools. Per-seed and per-example averaging keeps finite means
+representable when their intermediate sums exceed floating-point range.
+Runs without a seed remain separate samples. Costs and run
+membership still include every run. ``metric_drift`` lists selected metric versions
+whose stored scores contain differing source hashes; reading a leaderboard does
+not execute repository code. ``within_noise_of_best`` is determined by
+the comparison p-value (``p >= 0.05``), or is unknown when no p-value is available.
+
+Queue tickets and remote paths
+------------------------------
+
+Queued runs retain a stable ticket in ``run.yaml``. Run-list and run-detail
+responses replace the ticket with its current one-based position across the
+entire environment queue, including when a response filters or limits runs.
+Batch cancellation takes one scheduler lock and does not rewrite the tickets
+of later runs.
+
+Pinned queued and SLURM runs use a staging checkout even when the requested
+revision initially matches the project working copy. Moving the working copy
+while the job waits therefore cannot change its recorded code. Each executing
+run still receives its own checkout.
+Both delayed checkout and staging cleanup check that the project is local before
+using recorded repository paths; a mirrored project cannot reuse a coincidentally
+matching local path.
+
+Mirrored run details show host-qualified run, repository, working-directory
+and captured-file paths. The hub's local mirror paths are used internally for
+reads, while displayed paths identify the files on the original host.
+Remote task snapshots retain dataset paths as configured on their host. They do
+not expose locally resolved dataset paths or splits, even when the same repository
+path happens to exist on the hub.
+
+
 Run-id reservations
 -------------------
 
-A pinned launch reserves its worktree directory with an exclusive creation before
-checking out the commit. If another launcher claims the same run id between the
-initial existence check and checkout, Hypothex draws a new id. Cleanup removes only
-the directory this launch reserved, preserving the competing launch's worktree.
+Preparation draws a new run id when the selected run directory or execution
+checkout is already claimed. A pinned run reserves its execution directory
+exclusively when it starts (before submission for SLURM). A later collision fails
+that run without executing in or deleting the competing checkout. Cleanup removes
+only a checkout whose successful creation this run recorded.

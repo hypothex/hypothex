@@ -94,7 +94,18 @@ Runs
        run record.
    * - ``GET /api/v1/runs/{id}``
      - Everything about a run, plus ``host_state`` (the state name of its host,
-       such as ``"connected"``; ``null`` for a run of the hub).
+       such as ``"connected"``; ``null`` for a run of the hub). ``metric_names``
+       is sorted. For queued, running and lost runs it reflects the current
+       ``metrics.jsonl``, including names not yet indexed: the first 256 distinct
+       names from valid rows, skipping lines over 64 KiB and invalid UTF-8,
+       matching live curve reads. Name lookup retains no histories and stops
+       at the name cap. Unchanged files reuse a thread-safe per-store cache of
+       at most 32 results and 4 MiB of UTF-8 name bytes; oversized results are
+       returned uncached. Device, inode, size, mtime and ctime changes invalidate
+       a result. Appended or edited files are rescanned, so this cache removes
+       repeated unchanged-file work without delaying newly logged names.
+       Finished, failed and killed runs use indexed names,
+       without a name cap or another history scan when already indexed.
    * - ``GET /api/v1/runs/{id}/metrics``, ``/traces``, ``/traces/{example_id}``,
        ``/logs``, ``/predictions``
      - The run's metrics (``names``, repeatable, keeps only those metrics;

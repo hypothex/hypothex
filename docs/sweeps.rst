@@ -107,6 +107,16 @@ started; ``hx sweep extend`` with the same seeds then starts only the missing on
 ``--seeds`` is required for ``extend``. ``--seeds 4`` adds seed 4 (here a single number
 is a seed, not a count).
 
+An incomplete launch reports the known launched members, including ones already
+mirrored later in launch order. A lost response can still hide a remotely accepted
+run; resuming uses the same member command IDs to reconcile it.
+
+An extension uses the sweep's pinned code, or the first run's recorded commit and
+saved patch when the original sweep had no pin. If that run was dirty and its
+``git.diff`` is missing or was too large to capture, the extension refuses before
+adding seeds. Restore the recorded patch first; it cannot reproduce that run from
+the clean commit alone.
+
 ``cancel`` stops the runs that wait in the queue; they end as ``killed``.
 
 ``show``, ``extend``, and ``cancel`` take ``-p PROJECT`` when two projects have a

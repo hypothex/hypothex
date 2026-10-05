@@ -478,7 +478,14 @@ def test_a_sweep_on_a_fake_8_gpu_host_queues_and_gives_each_run_its_own_gpus(
         assert len(ids) == 5
 
         def hub_view() -> dict[str, RunRecord]:
-            return {rid: r.hub.find_record(rid) for rid in ids}
+            # The API overlays live queue ranks on immutable persisted FIFO tickets.
+            response = r.client.get("/api/v1/runs")
+            assert response.status_code == 200, response.text
+            return {
+                row["run_id"]: RunRecord.model_validate(row)
+                for row in response.json()
+                if row["run_id"] in ids
+            }
 
         def split(view: dict[str, RunRecord]) -> tuple[list[RunRecord], list[RunRecord]]:
             running = [x for x in view.values() if x.status == RunStatus.RUNNING]
@@ -511,6 +518,9 @@ def test_a_sweep_on_a_fake_8_gpu_host_queues_and_gives_each_run_its_own_gpus(
         assert sorted(held) == list(range(8))  # disjoint, and all 8 in use
         [last] = waiting
         assert last.executor.gpus == []
+        assert last.executor.queue_position == 1
+        assert r.hub.find_record(last.run_id).executor.queue_position == 5
+        assert r.env.find_record(last.run_id).executor.queue_position == 5
         # the host's records agree with the hub's mirror
         assert {x.run_id: x.executor.gpus for x in running} == {
             x.run_id: r.env.find_record(x.run_id).executor.gpus for x in running

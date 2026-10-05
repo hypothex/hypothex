@@ -9,10 +9,11 @@ import yaml
 from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.datasets import FingerprintCache
-from hypothex.core.errors import ConfigError, RemoteProjectError, RunError
+from hypothex.core.errors import ConfigError, EvalError, RemoteProjectError, RunError
 from hypothex.core.evaluation import evaluate_run
+from hypothex.core.ids import utcnow
 from hypothex.core.index import store_fingerprint
-from hypothex.core.records import DatasetRef, MetricPoint, RunRecord, RunStatus
+from hypothex.core.records import DatasetRef, MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.store import ProjectEntry
 from hypothex.core.sweeps import SweepSpec, save_sweep
 from hypothex.core.sweeps import list_sweeps as list_project_sweeps
@@ -176,6 +177,92 @@ def test_leaderboard_examples_follow_version_override(ctx: Context, toy_repo: Pa
     assert q.get_leaderboard(ctx, "toy-acc").rows[0].test_interval is None
     old = q.get_leaderboard(ctx, "toy-acc", versions={"accuracy": "v1"})
     assert old.rows[0].test_interval is not None and old.rows[0].test_interval.n == 4
+
+
+def test_predictions_unknown_metric_is_an_error(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    for failures_only in (False, True):
+        with pytest.raises(ConfigError, match="unknown metric 'nonexistent'.*accuracy"):
+            q.get_predictions(ctx, "r1", metric="nonexistent", failures_only=failures_only)
+    with pytest.raises(ConfigError, match="unknown metric 'nonexistent'"):
+        q.get_predictions(ctx, "r1", metric="nonexistent@v1")
+    assert q.get_predictions(ctx, "r1", metric="accuracy").rows[0].scores["accuracy@v1"]
+
+
+def test_predictions_bare_metric_is_current_version(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    write_toy_project(toy_repo, accuracy_version="v2")
+    evaluate_run(ctx, "r1")
+    page = q.get_predictions(ctx, "r1", metric="accuracy")
+    assert list(page.rows[0].scores) == ["accuracy@v2"]
+    old = q.get_predictions(ctx, "r1", metric="accuracy@v1")
+    assert list(old.rows[0].scores) == ["accuracy@v1"]
+
+
+def test_failures_and_examples_need_a_known_field(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "a", predictions=PREDS_075)
+    seed_finished_run(ctx, toy_repo, "b", predictions=ALL_RIGHT)
+    evaluate_run(ctx, "a")
+    evaluate_run(ctx, "b")
+    with pytest.raises(EvalError, match="no per-example field 'brier'.*fields: correct"):
+        q.get_predictions(ctx, "a", failures_only=True, field="brier")
+    with pytest.raises(EvalError, match="no per-example field 'brier'.*fields: correct"):
+        q.compare_examples(ctx, "a", "b", "accuracy", field="brier")
+    with pytest.raises(ConfigError, match="unknown metric 'nope'"):
+        q.compare_examples(ctx, "a", "b", "nope")
+
+
+def test_show_run_lists_every_run_file(ctx: Context, toy_repo: Path) -> None:
+    rec = seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    run_dir = ctx.run_dir(rec)
+    paths = q.show_run(ctx, "r1").paths
+    assert paths["run_yaml"] == str(run_dir / "run.yaml")
+    assert paths["scores"] == str(run_dir / "scores.jsonl")
+    assert not {"metrics", "notes", "diff"} & paths.keys()
+    (run_dir / "metrics.jsonl").write_text("")
+    (run_dir / "git.diff").write_text("diff --git a/x b/x\n")
+    q.add_note(ctx, "r1", "hi")
+    paths = q.show_run(ctx, "r1").paths
+    assert paths["metrics"] == str(run_dir / "metrics.jsonl")
+    assert paths["notes"] == str(run_dir / "notes.md")
+    assert paths["diff"] == str(run_dir / "git.diff")
+
+
+def test_get_task_resolves_local_dataset_paths(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    dataset = q.get_task(ctx, "toy-acc")["dataset"]
+    assert dataset["path"] == "data/test.jsonl"
+    assert dataset["resolved_path"] == str(toy_repo.resolve() / "data" / "test.jsonl")
+    assert dataset["resolved_splits"] == {
+        k: str(toy_repo.resolve() / v) for k, v in dataset["splits"].items()
+    }
+
+
+def test_tag_run_refuses_sweep_tags(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    q.tag_run(ctx, "r1", add=["keep"])
+    for add, remove in ((["sweep:me:s-1"], []), ([], ["sweep:me:s-1"])):
+        with pytest.raises(RunError, match="sweep tag"):
+            q.tag_run(ctx, "r1", add=add, remove=remove)
+    assert ctx.find_record("r1").tags == ["keep"]
+
+
+def test_compare_runs_shows_a_dirty_tree(ctx: Context, toy_repo: Path) -> None:
+    ctx.register_project(toy_repo)
+    ctx.create_run(make_record("a", git={"commit": "c1"}))
+    ctx.create_run(make_record("b", git={"commit": "c1", "dirty": True}))
+    assert q.compare_runs(ctx, ["a", "b"]).fields == {"dirty": [False, True]}
+
+
+def test_compare_runs_distinguishes_two_dirty_models(ctx: Context) -> None:
+    from hypothex.core.records import GitInfo
+
+    ctx.create_run(make_record("a", git=GitInfo(commit="c1", dirty=True, diff_hash="abcd0001")))
+    ctx.create_run(make_record("b", git=GitInfo(commit="c1", dirty=True, diff_hash="abcd0002")))
+    assert q.compare_runs(ctx, ["a", "b"]).fields == {"diff": ["abcd0001", "abcd0002"]}
 
 
 def _copy_from_host(ctx: Context, project: str = "toy") -> None:
@@ -457,3 +544,158 @@ def test_show_run_lists_metric_names_without_reading_the_points(
     monkeypatch.setattr(ctx.index, "metric_points", no_points)
     monkeypatch.setattr(ctx.index, "metric_points_for", no_points)
     assert q.show_run(ctx, "r1").metric_names == ["acc", "lr"]
+
+
+def test_host_task_snapshot_does_not_resolve_remote_dataset_paths_locally(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx.register_project(toy_repo)
+    _copy_from_host(ctx)
+
+    def no_local_resolution(*args: object, **kwargs: object) -> Path:
+        raise AssertionError("resolved a host dataset against a hub-local path")
+
+    monkeypatch.setattr(q, "resolve_dataset_path", no_local_resolution)
+    dataset = q.get_task(ctx, "toy-acc")["dataset"]
+    assert dataset["path"] == "data/test.jsonl"
+    assert "resolved_path" not in dataset and "resolved_splits" not in dataset
+
+
+def test_cached_board_tracks_seed_collapse_dirty_identity_and_metric_drift(
+    ctx: Context, toy_repo: Path
+) -> None:
+    for rid, seed, value in (("a", 1, 0.9), ("b", 2, 0.5)):
+        seed_finished_run(ctx, toy_repo, rid, seed=seed)
+        ctx.index.add_score(
+            rid,
+            ScoreRecord(
+                metric="accuracy",
+                version="v1",
+                key="value",
+                value=value,
+                source_hash="sha256:old",
+                created_at=utcnow(),
+            ),
+        )
+    initial = q.get_leaderboard(ctx, "toy-acc", examples=False)
+    assert len(initial.rows) == 1 and initial.rows[0].n == 2
+    assert q.get_leaderboard(ctx, "toy-acc", examples=False) == initial
+
+    ctx.update_run("b", "run.updated", lambda r: r.model_copy(update={"seed": 1}))
+    collapsed = q.get_leaderboard(ctx, "toy-acc", examples=False)
+    assert collapsed.rows[0].n == 1
+    assert collapsed.rows[0].seed_values["accuracy/value"] == [pytest.approx(0.7)]
+    assert collapsed.rows[0].single_seed
+
+    ctx.update_run(
+        "b",
+        "run.updated",
+        lambda r: r.model_copy(
+            update={"git": r.git.model_copy(update={"dirty": True, "diff_hash": "abcd0001"})}
+        ),
+    )
+    split = q.get_leaderboard(ctx, "toy-acc", examples=False)
+    assert len(split.rows) == 2
+    assert {row.n for row in split.rows} == {1}
+    assert any(row.group_id.endswith("+abcd0001") for row in split.rows)
+    assert split.metric_drift == []
+
+    ctx.index.add_score(
+        "b",
+        ScoreRecord(
+            metric="accuracy",
+            version="v1",
+            key="value",
+            value=0.6,
+            source_hash="sha256:new",
+            created_at=utcnow(),
+        ),
+    )
+    rescored = q.get_leaderboard(ctx, "toy-acc", examples=False)
+    assert rescored.metric_drift == ["accuracy@v1"]
+    assert next(row for row in rescored.rows if "b" in row.run_ids).primary.mean == 0.6
+
+
+def test_cached_board_does_not_survive_corrupt_index_replacement(
+    ctx: Context, toy_repo: Path
+) -> None:
+    record = seed_finished_run(ctx, toy_repo, "r1")
+    old_score = ScoreRecord(
+        metric="accuracy", version="v1", key="value", value=0.5, created_at=utcnow()
+    )
+    ctx.add_score(record, old_score)
+    assert q.get_leaderboard(ctx, "toy-acc", examples=False).rows[0].primary.mean == 0.5
+    old_generation = ctx.index.generation()
+    # The source file has a newer score when the disposable index is corrupted.
+    ctx.store.append_score(
+        "toy", "r1", old_score.model_copy(update={"value": 0.9, "created_at": utcnow()})
+    )
+    ctx.index.engine.dispose()
+    ctx.layout.index_db.write_bytes(b"not a database" * 100)
+    recovered = Context.open(ctx.layout.home)
+    assert list(ctx.layout.home.glob("index.db.corrupt-*"))
+    # Normal writes can reach a generation that belonged to the replaced DB.
+    while recovered.index.generation() < old_generation:
+        recovered.index.upsert_run(record)
+    assert recovered.index.generation() == old_generation
+    assert q.get_leaderboard(recovered, "toy-acc", examples=False).rows[0].primary.mean == 0.9
+
+
+def test_queue_overlay_ranks_local_markers_before_tickets_are_written(ctx: Context) -> None:
+    from hypothex.core.execution import write_queue_marker
+
+    records = [make_record(rid, environment_id=ctx.descriptor.environment_id) for rid in ("a", "b")]
+    for record in records:
+        ctx.create_run(record)
+        write_queue_marker(ctx.run_dir(record))
+    assert all(record.executor.queue_position is None for record in records)
+    selected = q.with_queue_positions(ctx, [records[1]])
+    assert selected[0].executor.queue_position == 2
+    assert ctx.find_record("b").executor.queue_position is None
+
+
+@pytest.mark.parametrize("status", [RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.LOST])
+def test_show_live_run_discovers_unindexed_metric_names(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch, status: RunStatus
+) -> None:
+    from hypothex.core.fsutil import append_jsonl
+
+    record = seed_finished_run(ctx, toy_repo, "r1")
+    ctx.update_run("r1", "run.updated", lambda r: r.model_copy(update={"status": status}))
+    ctx.index.replace_metric_points("r1", [MetricPoint(name="loss", step=0, value=1.0)])
+    path = ctx.run_dir(record) / "metrics.jsonl"
+    append_jsonl(path, {"name": "loss", "step": 0, "value": 1.0})
+    append_jsonl(path, {"name": "new/acc", "step": 1, "value": 0.8})
+    assert ctx.index.metric_names("r1") == ["loss"]
+
+    def no_index_names(*args: object, **kwargs: object) -> list[str]:
+        raise AssertionError("live names came from the stale index")
+
+    monkeypatch.setattr(ctx.index, "metric_names", no_index_names)
+    assert q.show_run(ctx, "r1").metric_names == ["loss", "new/acc"]
+    append_jsonl(path, {"name": "new/lr", "step": 2, "value": 0.01})
+    assert q.show_run(ctx, "r1").metric_names == ["loss", "new/acc", "new/lr"]
+
+
+@pytest.mark.parametrize("status", [RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED])
+def test_show_terminal_run_keeps_exact_index_names_without_scanning(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch, status: RunStatus
+) -> None:
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    record = seed_finished_run(ctx, toy_repo, "r1")
+    ctx.update_run("r1", "run.updated", lambda r: r.model_copy(update={"status": status}))
+    names = [f"m{i:04d}" for i in range(MAX_METRIC_NAMES + 1)]
+    ctx.index.replace_metric_points(
+        "r1", [MetricPoint(name=name, step=0, value=1.0) for name in names]
+    )
+    # Exact terminal names are already indexed; even unreadable file contents are irrelevant.
+    (ctx.run_dir(record) / "metrics.jsonl").write_bytes(b"\xff\n")
+
+    def no_file_scan(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("terminal name lookup scanned metric history")
+
+    monkeypatch.setattr(ctx.store, "read_metric_names_bounded", no_file_scan, raising=False)
+    monkeypatch.setattr(ctx.store, "read_metric_points", no_file_scan)
+    monkeypatch.setattr(ctx.store, "read_metric_points_bounded", no_file_scan)
+    assert q.show_run(ctx, "r1").metric_names == names

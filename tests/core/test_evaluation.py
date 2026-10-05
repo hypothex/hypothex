@@ -5,9 +5,16 @@ import pytest
 import yaml
 
 from hypothex.core import evaluation
+from hypothex.core.config import load_project_config
 from hypothex.core.context import Context
 from hypothex.core.errors import EvalError, RemoteProjectError
-from hypothex.core.evaluation import EvalReport, evaluate_run, reeval, validate_project
+from hypothex.core.evaluation import (
+    EvalReport,
+    evaluate_run,
+    metric_drift,
+    reeval,
+    validate_project,
+)
 from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project
 
 
@@ -113,23 +120,111 @@ def test_version_bump_rescores_and_keeps_old(ctx: Context, toy_repo: Path) -> No
     assert versions == ["v1", "v2"]
 
 
+def _scored(ctx: Context, run_id: str) -> list[tuple[str, str]]:
+    return [(s.metric, s.version) for s in ctx.store.read_scores("toy", run_id)]
+
+
+def test_reeval_scores_only_the_stale_metrics(ctx: Context, toy_repo: Path) -> None:
+    cfg_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["metrics"]["acc2"] = {"version": "v1", "fn": "toymetrics:accuracy"}
+    cfg["tasks"]["toy-acc"]["metrics"] = ["accuracy", "acc2"]
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    cfg["metrics"]["accuracy"]["version"] = "v2"
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    assert reeval(ctx, run_id="r1").evaluated == ["r1"]
+    assert _scored(ctx, "r1") == [("accuracy", "v1"), ("acc2", "v1"), ("accuracy", "v2")]
+    assert reeval(ctx, run_id="r1", force=True).evaluated == ["r1"]
+    assert _scored(ctx, "r1")[3:] == [("accuracy", "v2"), ("acc2", "v1")]
+
+
+def test_reeval_retries_only_the_failing_metric(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", task="toy-broken", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    assert reeval(ctx, run_id="r1").evaluated == ["r1"]
+    assert _scored(ctx, "r1") == [("accuracy", "v1"), ("broken", "v1"), ("broken", "v1")]
+
+
 def test_reeval_rejects_non_current_version(ctx: Context, toy_repo: Path) -> None:
     seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
     with pytest.raises(EvalError, match="only the current version"):
         reeval(ctx, run_id="r1", metric="accuracy@v9")
 
 
-def test_metric_code_change_without_bump_warns(ctx: Context, toy_repo: Path) -> None:
-    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
-    evaluate_run(ctx, "r1")
-    path = toy_repo / "toymetrics.py"
+def _tweak_accuracy(repo: Path) -> None:
+    """Change the accuracy metric's code without bumping its version."""
+    path = repo / "toymetrics.py"
     path.write_text(
         path.read_text().replace(
             "def accuracy(examples):\n", "def accuracy(examples):\n    # tweak\n"
         )
     )
+
+
+def test_metric_code_change_without_bump_warns(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    _tweak_accuracy(toy_repo)
     _, warnings = evaluate_run(ctx, "r1")
     assert any("without a version bump" in w for w in warnings)
+
+
+def test_metric_drift_warning_is_a_run_warning_event(ctx: Context, toy_repo: Path) -> None:
+    # auto-eval (execution, slurm) keeps no report: the warning must reach the run's events
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    _tweak_accuracy(toy_repo)
+    evaluate_run(ctx, "r1")
+    messages = [e.payload["message"] for e in ctx.events.since(0) if e.type == "run.warning"]
+    assert messages == ["metric accuracy code changed without a version bump (still v1)"]
+
+
+def test_metric_drift_names_changed_metrics(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", task="toy-broken", predictions=PREDS_075)
+    config = load_project_config(toy_repo)
+    assert metric_drift(ctx, toy_repo, config) == []  # nothing recorded yet
+    evaluate_run(ctx, "r1")
+    assert metric_drift(ctx, toy_repo, config) == []
+    _tweak_accuracy(toy_repo)
+    assert metric_drift(ctx, toy_repo, config) == ["accuracy@v1"]
+    assert metric_drift(ctx, toy_repo, config, ["broken"]) == []
+    assert any("without a version bump" in w for w in validate_project(ctx, toy_repo).warnings)
+
+
+def test_reeval_warns_about_metric_drift_without_force(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    _tweak_accuracy(toy_repo)
+    report = reeval(ctx, project="toy", task="toy-acc")
+    assert report.skipped == {"r1": "already scored at the current version"}
+    assert report.warnings == ["metric accuracy code changed without a version bump (still v1)"]
+
+
+def test_no_prediction_id_in_the_dataset_is_an_eval_error(ctx: Context, toy_repo: Path) -> None:
+    # every reference would be None: a perfect model would rank with 0.0
+    preds = [{"id": f"x{p['id']}", "prediction": p["prediction"]} for p in PREDS_075]
+    seed_finished_run(ctx, toy_repo, "r1", predictions=preds)
+    with pytest.raises(EvalError, match="none of the 4 prediction ids is in dataset 'toyset'"):
+        evaluate_run(ctx, "r1")
+    assert ctx.store.read_scores("toy", "r1") == []
+    report = reeval(ctx, run_id="r1")
+    assert report.evaluated == [] and "none of the 4 prediction ids" in report.skipped["r1"]
+
+
+def test_some_prediction_ids_missing_from_the_dataset_warn(ctx: Context, toy_repo: Path) -> None:
+    preds = [*PREDS_075[:3], {"id": "x3", "prediction": 0}]
+    seed_finished_run(ctx, toy_repo, "r1", predictions=preds)
+    scores, warnings = evaluate_run(ctx, "r1")
+    assert [s.value for s in scores] == [0.75]  # x3 has no reference, so it counts wrong
+    expected = (
+        "1 of 4 prediction ids are not in dataset 'toyset' split 'test'; "
+        "they are scored with no reference"
+    )
+    assert warnings == [expected]
+    messages = [e.payload["message"] for e in ctx.events.since(0) if e.type == "run.warning"]
+    assert messages == [expected]
 
 
 def test_evaluate_removed_task_is_clear_error(ctx: Context, toy_repo: Path) -> None:

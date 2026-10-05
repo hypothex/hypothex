@@ -56,6 +56,8 @@ class GitInfo(BaseModel):
     commit: str | None = None
     branch: str | None = None
     dirty: bool = False
+    diff_hash: str | None = None
+    """First eight SHA-256 hex digits of the captured diff (stat when too large)."""
     untracked_count: int = 0
     untracked: list[str] = Field(default_factory=list)
 
@@ -107,8 +109,8 @@ class ExecutorInfo(BaseModel):
     ``host`` is the run's host name from the hub's ``environments.yaml``
     (None on the hub itself). ``gpus`` holds the GPU indices given to the run
     (its ``CUDA_VISIBLE_DEVICES``). ``slurm_job_id`` and ``node`` are set for
-    SLURM runs. ``queue_position`` is the 1-based place in the host's queue
-    while the run waits, else None.
+    SLURM runs. Stored ``queue_position`` is the stable FIFO ticket while a
+    run waits, else None; API read models expose its live 1-based rank.
     """
 
     type: str = "local"

@@ -51,6 +51,17 @@ packages = ["src/hypothex"]
 # the build ("Forced include not found") on a checkout without a UI build.
 artifacts = ["src/hypothex/ui_dist/**"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# The agent skill file, so an installed hypothex carries it (tracked, so always present).
+"skills/hypothex/SKILL.md" = "hypothex/skills/hypothex/SKILL.md"
+
+[tool.hatch.build.targets.sdist]
+# A plain `uv build` builds the wheel from the sdist, so the sdist must carry the
+# git-ignored UI build too, or the wheel has no UI and `hx serve` answers 404 at `/`.
+artifacts = ["src/hypothex/ui_dist/**"]
+# Internal plans, specs and UI mockups (about 10 MB) are not part of a release.
+exclude = ["docs/mockups", "docs/superpowers", ".superpowers"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

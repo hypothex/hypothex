@@ -452,3 +452,271 @@ def test_registering_over_a_hosts_copy_forgets_the_hosts_paths(
     entry = store.register_project(cfg, tmp_path / "a")
     assert (entry.remote_host, entry.previous_repos) == (None, [])
     assert store.load_project("toy").previous_repos == []
+
+
+def test_read_metric_names_bounded_uses_the_live_row_policy(store: RunStore) -> None:
+    from hypothex.core.store import MAX_METRIC_LINE_BYTES
+
+    store.create_run(make_record())
+    assert store.read_metric_names_bounded("toy", "r1") == []
+    path = store.layout.run_dir("toy", "r1") / "metrics.jsonl"
+    oversized = json.dumps(
+        {
+            "name": "oversized",
+            "step": 0,
+            "value": 1.0,
+            "padding": "é" * (MAX_METRIC_LINE_BYTES // 2),
+        },
+        ensure_ascii=False,
+    ).encode()
+    assert len(oversized) > MAX_METRIC_LINE_BYTES
+    assert len(oversized.decode()) < MAX_METRIC_LINE_BYTES
+    path.write_bytes(
+        b"not json\n[]\n\xff\n"
+        + oversized
+        + b"\n"
+        + b'{"name":"nonfinite","step":0,"value":NaN}\n'
+        + b'{"name":"bad-step","step":9223372036854775808,"value":1}\n'
+        + b'{"name":"missing-value","step":0}\n'
+    )
+    for name in ("z", "λ/loss", "a", "z"):
+        append_jsonl(path, {"name": name, "step": 0, "value": 1.0})
+    assert store.read_metric_names_bounded("toy", "r1") == ["a", "z", "λ/loss"]
+    assert store.read_metric_names_bounded("toy", "r1") == sorted(
+        {p.name for p in store.read_metric_points_bounded("toy", "r1")}
+    )
+
+
+def test_read_metric_names_bounded_stops_at_first_names_without_history(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from collections.abc import Iterator
+
+    from hypothex.core import store as store_module
+    from hypothex.core.records import MetricPoint
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    store.create_run(make_record())
+    path = store.layout.run_dir("toy", "r1") / "metrics.jsonl"
+    names = [f"m{i:04d}" for i in range(MAX_METRIC_NAMES + 10, 0, -1)]
+    for name in names:
+        for step in (0, 1):
+            append_jsonl(path, {"name": name, "step": step, "value": 1.0})
+    expected = sorted(names[:MAX_METRIC_NAMES])
+    assert sorted({p.name for p in store.read_metric_points_bounded("toy", "r1")}) == expected
+    original = store_module._iter_rows
+    seen: set[str] = set()
+
+    def no_history(*args: object, **kwargs: object) -> list[MetricPoint]:
+        raise AssertionError("name lookup materialized a metric history")
+
+    def stop_after_cap(
+        model: type[MetricPoint], path: Path, max_line_bytes: int | None = None
+    ) -> Iterator[MetricPoint]:
+        for point in original(model, path, max_line_bytes):
+            seen.add(point.name)
+            yield point
+            if len(seen) == MAX_METRIC_NAMES:
+                raise AssertionError("name lookup read past its final allowed name")
+
+    monkeypatch.setattr(store, "read_metric_points", no_history)
+    monkeypatch.setattr(store, "read_metric_points_bounded", no_history)
+    monkeypatch.setattr(store_module, "_iter_rows", stop_after_cap)
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    assert len(seen) == MAX_METRIC_NAMES
+
+
+def _count_metric_name_scans(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    from collections.abc import Iterator
+
+    from hypothex.core import store as store_module
+    from hypothex.core.records import MetricPoint
+
+    original = store_module._iter_rows
+    scanned: list[Path] = []
+
+    def read(
+        model: type[MetricPoint], path: Path, max_line_bytes: int | None = None
+    ) -> Iterator[MetricPoint]:
+        scanned.append(path)
+        yield from original(model, path, max_line_bytes)
+
+    monkeypatch.setattr(store_module, "_iter_rows", read)
+    return scanned
+
+
+def _metric_name_file(store: RunStore, run_id: str, name: str) -> Path:
+    store.create_run(make_record(run_id))
+    path = store.layout.run_dir("toy", run_id) / "metrics.jsonl"
+    append_jsonl(path, {"name": name, "step": 0, "value": 1.0})
+    return path
+
+
+def test_metric_name_cache_reuses_unchanged_files_and_copies_results(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _metric_name_file(store, "r1", "loss")
+    scans = _count_metric_name_scans(monkeypatch)
+    first = store.read_metric_names_bounded("toy", "r1")
+    first.append("caller-only")
+    assert store.read_metric_names_bounded("toy", "r1") == ["loss"]
+    assert scans == [path]
+
+
+@pytest.mark.parametrize("change", ["append", "replace", "truncate", "same-size", "missing"])
+def test_metric_name_cache_invalidates_on_every_file_change(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    import os
+
+    path = _metric_name_file(store, "r1", "old")
+    scans = _count_metric_name_scans(monkeypatch)
+    assert store.read_metric_names_bounded("toy", "r1") == ["old"]
+    assert store.read_metric_names_bounded("toy", "r1") == ["old"]
+    before = path.stat()
+    expected: list[str]
+    if change == "append":
+        append_jsonl(path, {"name": "new", "step": 1, "value": 0.5})
+        expected = ["new", "old"]
+    elif change == "replace":
+        replacement = path.with_name("replacement.jsonl")
+        replacement.write_bytes(path.read_bytes().replace(b"old", b"new"))
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        replacement.replace(path)
+        expected = ["new"]
+    elif change == "truncate":
+        path.write_bytes(b"")
+        expected = []
+    elif change == "same-size":
+        path.write_bytes(path.read_bytes().replace(b"old", b"new"))
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        assert path.stat().st_size == before.st_size
+        assert path.stat().st_mtime_ns == before.st_mtime_ns
+        assert path.stat().st_ctime_ns != before.st_ctime_ns
+        expected = ["new"]
+    else:
+        path.unlink()
+        assert store.read_metric_names_bounded("toy", "r1") == []
+        append_jsonl(path, {"name": "new", "step": 0, "value": 1.0})
+        expected = ["new"]
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    assert scans == [path, path]
+
+
+@pytest.mark.parametrize("max_entries,max_bytes", [(2, 100), (32, 8)])
+def test_metric_name_cache_limits_entries_and_utf8_bytes_with_lru_eviction(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch, max_entries: int, max_bytes: int
+) -> None:
+    from hypothex.core import store as store_module
+
+    monkeypatch.setattr(store_module, "MAX_METRIC_NAME_CACHE_ENTRIES", max_entries, raising=False)
+    monkeypatch.setattr(store_module, "MAX_METRIC_NAME_CACHE_BYTES", max_bytes, raising=False)
+    paths = {rid: _metric_name_file(store, rid, "éé") for rid in ("a", "b", "c")}
+    scans = _count_metric_name_scans(monkeypatch)
+    for rid in ("a", "b", "a", "c", "a"):
+        assert store.read_metric_names_bounded("toy", rid) == ["éé"]
+    assert scans == [paths["a"], paths["b"], paths["c"]]
+    assert store.read_metric_names_bounded("toy", "b") == ["éé"]
+    assert scans[-1] == paths["b"] and len(scans) == 4
+
+
+def test_metric_name_cache_returns_oversized_results_without_retaining_them(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import store as store_module
+
+    monkeypatch.setattr(store_module, "MAX_METRIC_NAME_CACHE_BYTES", 4, raising=False)
+    small = _metric_name_file(store, "small", "ok")
+    large = _metric_name_file(store, "large", "ééé")  # six UTF-8 bytes, three characters
+    scans = _count_metric_name_scans(monkeypatch)
+    for rid in ("small", "large", "large", "small"):
+        assert store.read_metric_names_bounded("toy", rid) == ["ok" if rid == "small" else "ééé"]
+    assert scans == [small, large, large]
+
+
+def test_metric_name_cache_does_not_publish_a_scan_changed_during_read(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from collections.abc import Iterator
+
+    from hypothex.core import store as store_module
+    from hypothex.core.records import MetricPoint
+
+    path = _metric_name_file(store, "r1", "old")
+    original = store_module._iter_rows
+    started, resume = Event(), Event()
+    scans: list[Path] = []
+
+    def paused_old_read(
+        model: type[MetricPoint], file: Path, max_line_bytes: int | None = None
+    ) -> Iterator[MetricPoint]:
+        scans.append(file)
+        for point in original(model, file, max_line_bytes):
+            yield point
+            if point.name == "old":
+                started.set()
+                assert resume.wait(5)
+
+    monkeypatch.setattr(store_module, "_iter_rows", paused_old_read)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        old_read = pool.submit(store.read_metric_names_bounded, "toy", "r1")
+        try:
+            assert started.wait(5)
+            path.write_bytes(path.read_bytes().replace(b"old", b"new"))
+            new_read = pool.submit(store.read_metric_names_bounded, "toy", "r1")
+            assert new_read.result(timeout=5) == ["new"]
+        finally:
+            resume.set()
+        assert old_read.result(timeout=5) == ["old"]
+    assert store.read_metric_names_bounded("toy", "r1") == ["new"]
+    assert scans == [path, path]  # the old scan did not evict the newer cached result
+
+
+def test_metric_name_cache_preserves_the_first_name_cap_after_appends(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core.thin import MAX_METRIC_NAMES
+
+    path = _metric_name_file(store, "r1", "z-first")
+    for i in range(MAX_METRIC_NAMES):
+        append_jsonl(path, {"name": f"m{i:04d}", "step": 0, "value": 1.0})
+    scans = _count_metric_name_scans(monkeypatch)
+    expected = sorted(["z-first", *[f"m{i:04d}" for i in range(MAX_METRIC_NAMES - 1)]])
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    append_jsonl(path, {"name": "a-late", "step": 0, "value": 1.0})
+    assert store.read_metric_names_bounded("toy", "r1") == expected
+    assert scans == [path, path]
+
+
+def test_concurrent_metric_name_cache_keeps_exact_budget_accounting(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.core import store as store_module
+
+    monkeypatch.setattr(store_module, "MAX_METRIC_NAME_CACHE_ENTRIES", 3)
+    monkeypatch.setattr(store_module, "MAX_METRIC_NAME_CACHE_BYTES", 8)
+    for i in range(8):
+        _metric_name_file(store, str(i), f"{i}é")
+    ids = [str(i % 8) for i in range(80)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda rid: store.read_metric_names_bounded("toy", rid), ids))
+    assert results == [[f"{rid}é"] for rid in ids]
+    assert len(store._metric_name_cache) <= 3
+    assert store._metric_name_cache_bytes <= 8
+    assert store._metric_name_cache_bytes == sum(
+        len(name.encode("utf-8"))
+        for entry in store._metric_name_cache.values()
+        for name in entry.names
+    )
+
+
+def test_metric_name_cache_preserves_escaped_surrogate_names(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _metric_name_file(store, "r1", "\ud800")
+    scans = _count_metric_name_scans(monkeypatch)
+    assert store.read_metric_names_bounded("toy", "r1") == ["\ud800"]
+    assert store.read_metric_names_bounded("toy", "r1") == ["\ud800"]
+    assert scans == [path]

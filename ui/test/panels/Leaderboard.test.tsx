@@ -17,6 +17,28 @@ import {
 
 afterEach(cleanup);
 
+test("tick density follows the measured plot column, preserving row height", () => {
+  const original = HTMLElement.prototype.getBoundingClientRect;
+  const counts: number[] = [];
+  try {
+    for (const width of [180, 600]) {
+      HTMLElement.prototype.getBoundingClientRect = () => ({ width }) as DOMRect;
+      const { container, unmount } = render(<Leaderboard result={board()} />);
+      const ticks = [...container.querySelectorAll(".axis-b .tk")];
+      counts.push(ticks.length);
+      const positions = ticks.map((t) => Number(t.getAttribute("x")));
+      for (let i = 1; i < positions.length; i++) {
+        expect(positions[i] - positions[i - 1]).toBeGreaterThanOrEqual(40);
+      }
+      expect(container.querySelector(".fplot svg")?.getAttribute("height")).toBe("104");
+      unmount();
+    }
+    expect(counts[0]).toBeLessThan(counts[1]);
+  } finally {
+    HTMLElement.prototype.getBoundingClientRect = original;
+  }
+});
+
 /*
  * Fixture mirrors docs/mockups/ui-v4 (toy-test, n = 180 test examples).
  * Seed scores are k/180: SVM 166/180 on all three seeds; rf 158, 160, 160;

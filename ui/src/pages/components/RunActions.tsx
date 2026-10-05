@@ -5,9 +5,11 @@
  */
 import { useEffect, useState } from "react";
 import { api } from "../../api/client";
+import type { EvalReport } from "../../api/models";
 import { HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "../../api/queries";
 import { hrefs, useNavigateHref } from "./links";
 import { ErrorBox } from "./QueryState";
+import { ReevalSummary } from "./ReevalSummary";
 import type { RunPhase } from "./remote";
 import { ACTIVE_STATUSES, type HostState, type RunRecord, type RunRef } from "./types";
 import { useAction } from "./useAction";
@@ -24,6 +26,8 @@ export interface RunActionsProps {
    * `POST /api/v1/hosts/<hostname>/connect` names no configured host.
    */
   hostName?: string | null;
+  /** Only a successfully loaded task with an infer stage enables Re-infer. */
+  inferStage?: boolean;
 }
 
 export function RunActions({
@@ -32,6 +36,7 @@ export function RunActions({
   hostName = null,
   served,
   hostsLoaded = false,
+  inferStage,
 }: RunActionsProps) {
   const navigate = useNavigateHref();
   const id = record.run_id;
@@ -48,7 +53,15 @@ export function RunActions({
     invalidate: refresh,
     onSuccess: openNew,
   });
-  const reeval = useAction({ send: (_: void, opts) => api.reevalRun(id, {}, opts), invalidate: refresh });
+  const [report, setReport] = useState<{ runId: string; value: EvalReport } | null>(null);
+  const reeval = useAction({
+    send: async (_: void, opts) => {
+      const runId = id;
+      return { runId, value: await api.reevalRun(runId, {}, opts) };
+    },
+    invalidate: refresh,
+    onSuccess: setReport,
+  });
   const stop = useAction({
     send: (onlyQueued: boolean, opts) => onlyQueued ? api.cancelQueuedRun(id, opts) : api.stop(id, opts),
     invalidate: refresh,
@@ -125,9 +138,13 @@ export function RunActions({
             <button
               type="button"
               className="btn"
-              disabled={!served || reinfer.pending}
+              disabled={!served || reinfer.pending || inferStage !== true}
               onClick={() => reinfer.run()}
-              title={!served ? unavailable : "Run the infer stage again on this run's checkpoint"}
+              title={
+                !served ? unavailable : inferStage === true
+                  ? "Run the infer stage again on this run's checkpoint"
+                  : inferStage === false ? "Task has no infer stage" : "Infer stage not loaded"
+              }
             >
               Re-infer
             </button>
@@ -135,7 +152,10 @@ export function RunActions({
               type="button"
               className={lost ? "btn" : "btn primary"}
               disabled={!served || reeval.pending}
-              onClick={() => reeval.run()}
+              onClick={() => {
+                setReport(null);
+                reeval.run();
+              }}
               title={!served ? unavailable : "Re-score saved predictions with the current metric versions"}
             >
               Re-evaluate
@@ -165,6 +185,7 @@ export function RunActions({
         )}
       </div>
       {error ? <ErrorBox error={error} /> : null}
+      {report?.runId === id ? <ReevalSummary report={report.value} /> : null}
     </div>
   );
 }

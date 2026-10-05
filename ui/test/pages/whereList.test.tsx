@@ -132,6 +132,23 @@ test("WhereList shows command, git state, links, and copies full paths", async (
   await waitFor(() => expect(written).toEqual([`${REPO}/data/test.jsonl`]));
 });
 
+test("WhereList adds slash breaks to roots, children and linked paths without changing copies", async () => {
+  const written = mockClipboard();
+  const detail = makeDetail();
+  const { container } = render(<WhereList detail={detail} />);
+  const paths = [...container.querySelectorAll<HTMLElement>(".root .p, .kids .p")];
+  const rows = buildWhere(detail).flatMap((group) => group.rows);
+  expect(paths).toHaveLength(rows.length);
+  for (const [i, path] of paths.entries()) {
+    const row = rows[i]!;
+    expect(path.textContent).toBe(row.display);
+    expect(path.querySelectorAll("wbr")).toHaveLength(row.display.split("/").length - 1);
+    fireEvent.click(screen.getByRole("button", { name: `Copy ${row.display}` }));
+  }
+  expect(container.querySelector(".kids .p a wbr")).not.toBeNull();
+  await waitFor(() => expect(written).toEqual(rows.map((row) => row.copy)));
+});
+
 test("recorded patch path keeps its remote host instead of reconstructing a local path", () => {
   const detail = makeDetail({}, { paths: { run_dir: "/store/run", diff: "gpu2:/patches/abcdef12.diff" }, has_diff: true });
   const patch = buildWhere(detail).flatMap((group) => group.rows).find((row) => row.note === "tracked diff");

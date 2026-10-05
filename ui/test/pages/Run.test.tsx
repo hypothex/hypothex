@@ -98,3 +98,64 @@ describe("RunPage", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("no run with id nope");
   });
 });
+
+test("a missing run has a not-found heading and an overview recovery link (UI-F14)", async () => {
+  mockApi({ "GET /api/v1/runs/nope": new HttpReply(404, { error: "no run with id nope", type: "StoreError" }) });
+  renderWithClient(<RunPage runId="nope" />, { registry });
+  expect((await screen.findByRole("heading", { name: "Not found" })).textContent).toBe("Not found");
+  expect(screen.getByRole("link", { name: "All projects" }).getAttribute("href")).toBe("/");
+  expect(screen.queryByRole("button", { name: "Rerun" })).toBeNull();
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+});
+
+test("a run service failure is not presented as not found", async () => {
+  mockApi({ "GET /api/v1/runs/nope": new HttpReply(500, { error: "index unavailable", type: "StoreError" }) });
+  renderWithClient(<RunPage runId="nope" />, { registry });
+  expect((await screen.findByRole("alert")).textContent).toBe("index unavailable");
+  expect(screen.queryByRole("heading", { name: "Not found" })).toBeNull();
+});
+
+test("the run page reads task stages before enabling Re-infer (UI-F7)", async () => {
+  mockApi(routes({ [`GET ${TASK}`]: { stages: { infer: { command: ["python", "infer.py"] } } } }));
+  renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
+  const button = await screen.findByRole("button", { name: "Re-infer" });
+  await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
+  cleanup();
+  mockApi(routes({ [`GET ${TASK}`]: { stages: {} } }));
+  renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
+  const missing = await screen.findByRole("button", { name: "Re-infer" });
+  await waitFor(() => expect(missing.title).toBe("Task has no infer stage"));
+  expect(missing.hasAttribute("disabled")).toBe(true);
+});
+
+test("run history metadata narrows the active views query before reading curves", async () => {
+  const detail = { ...makeDetail(), metric_names: ["loss", "sweep/rps", "step", "lr"] };
+  const calls = mockApi(routes({ [`GET /api/v1/runs/${RUN_SVM}`]: detail, [`GET ${TASK}`]: { stages: {} } }));
+  renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
+  await screen.findByRole("region", { name: "a Metrics" });
+  const body = calls.find((c) => c.method === "POST")?.body as {
+    view: { panels: { data: { metrics: string[]; max_points: number } }[] };
+  };
+  expect(body.view.panels[0]?.data.metrics).toEqual(["loss", "lr"]);
+  expect(body.view.panels[0]?.data.max_points).toBe(500);
+  expect(calls.some((c) => /\/runs\/[^/]+\/metrics/.test(c.url))).toBe(false);
+});
+
+test("an unreadable task never grants infer capability", async () => {
+  mockApi(routes({ [`GET ${TASK}`]: new HttpReply(500, { error: "task unavailable", type: "StoreError" }) }));
+  renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
+  const button = await screen.findByRole("button", { name: "Re-infer" });
+  expect(button.hasAttribute("disabled")).toBe(true);
+  expect(button.title).toBe("Infer stage not loaded");
+});
+
+test("a failed task refresh revokes previously cached infer capability", async () => {
+  mockApi(routes({ [`GET ${TASK}`]: { stages: { infer: { command: ["infer"] } } } }));
+  const view = renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
+  const button = await screen.findByRole("button", { name: "Re-infer" });
+  await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
+  mockApi(routes({ [`GET ${TASK}`]: new HttpReply(500, { error: "task unavailable", type: "StoreError" }) }));
+  await view.client.refetchQueries({ queryKey: ["task", "toy-classifier", "toy-test"] });
+  await waitFor(() => expect(button.hasAttribute("disabled")).toBe(true));
+  expect(button.title).toBe("Infer stage not loaded");
+});

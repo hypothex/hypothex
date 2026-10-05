@@ -189,7 +189,7 @@ test("FailureList links to stderr and copies its path", async () => {
   render(<FailureList failures={makeOverview().failures} />);
   expect(screen.getByText("SVM, exit 2")).toBeTruthy();
   expect(screen.getByText("21:01:58 UTC, retry ok")).toBeTruthy();
-  expect(screen.getByText("…/20260926-210158-toy-test-58c5/logs/stderr.log")).toBeTruthy();
+  expect(screen.getByTitle(`${STORE}/${RUN_FAILED}/logs/stderr.log`).textContent).toBe(`…/${RUN_FAILED}/logs/stderr.log`);
   const open = screen.getByRole("link", { name: "Open stderr" });
   expect(open.getAttribute("href")).toBe(`/r/${RUN_FAILED}?log=stderr`);
   fireEvent.click(screen.getByRole("button", { name: "Copy stderr path" }));
@@ -272,12 +272,17 @@ test("ProjectsTable shows the best value with the task's unit", () => {
   expect(screen.getAllByRole("cell").map((c) => c.textContent)[2]).toBe("166 ms");
 });
 
-test("ProjectsTable has fixed number columns with a gap, and clips long task names", () => {
+test("ProjectsTable keeps numeric columns fixed and allows complete project/task names to wrap", () => {
   const { container } = render(<ProjectsTable projects={makeOverview().projects} />);
   const table = container.querySelector("table.projects");
   expect([...(table?.querySelectorAll("col") ?? [])].map((c) => c.className)).toEqual(["", "c-runs", "c-best"]);
   expect(table?.querySelector("td.nm a")?.getAttribute("title")).toBe("toy-classifier / toy-test");
-  for (const rule of [".page .projects { table-layout: fixed; }", ".page .projects td + td", "text-overflow: ellipsis"]) {
+  for (const rule of [".page .projects { table-layout: fixed; }", ".page .projects td + td"]) {
     expect(PAGES_CSS).toContain(rule);
   }
+  const nameRule = PAGES_CSS.match(/\.page \.projects td\.nm\s*\{([^}]+)\}/)?.[1] ?? "";
+  expect(nameRule).toContain("white-space: normal");
+  expect(nameRule).toContain("overflow-wrap: anywhere");
+  expect(nameRule).not.toContain("overflow: hidden");
+  expect(nameRule).not.toContain("ellipsis");
 });

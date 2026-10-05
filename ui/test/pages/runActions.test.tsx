@@ -98,6 +98,64 @@ describe("RunActions", () => {
   });
 });
 
+test("Re-infer requires a confirmed infer stage (UI-F7)", async () => {
+  const calls = mockApi({ [`POST /api/v1/runs/${RUN_SVM}/reinfer`]: { run_id: "INFER" } });
+  for (const inferStage of [undefined, false]) {
+    const view = renderWithClient(<RunActions served record={makeRecord()} inferStage={inferStage} />);
+    const button = screen.getByRole("button", { name: "Re-infer" });
+    expect(button.hasAttribute("disabled")).toBe(true);
+    expect(button.title).toBe(inferStage === false ? "Task has no infer stage" : "Infer stage not loaded");
+    fireEvent.click(button);
+    view.unmount();
+  }
+  expect(calls).toHaveLength(0);
+  const navigate = mock((_href: string) => {});
+  renderWithClient(<RunActions served record={makeRecord()} inferStage={true} />, { navigate });
+  fireEvent.click(screen.getByRole("button", { name: "Re-infer" }));
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith("/r/INFER"));
+});
+
+test("run re-evaluation reports skipped reasons, counts and warnings (UI-F3)", async () => {
+  mockApi({
+    [`POST /api/v1/runs/${RUN_SVM}/reeval`]: {
+      evaluated: [], skipped: { [RUN_SVM]: "no predictions" }, warnings: [],
+    },
+  });
+  renderWithClient(<RunActions served record={makeRecord()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Re-evaluate" }));
+  expect((await screen.findByRole("status", { name: "Re-evaluate" })).textContent).toBe(
+    "0 re-scored · 1 skipped: no predictions",
+  );
+  mockApi({
+    [`POST /api/v1/runs/${RUN_SVM}/reeval`]: {
+      evaluated: [RUN_SVM], skipped: {}, warnings: ["metric version changed"],
+    },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Re-evaluate" }));
+  expect(screen.queryByRole("status", { name: "Re-evaluate" })).toBeNull();
+  await waitFor(() => expect(screen.getByRole("status", { name: "Re-evaluate" }).textContent).toBe(
+    "1 re-scored · 1 warning",
+  ));
+  expect(screen.getByRole("status", { name: "Re-evaluate" }).title).toContain("metric version changed");
+});
+
+test("an old run's pending re-evaluation never becomes the new run's feedback", async () => {
+  let finish!: (value: unknown) => void;
+  const response = new Promise((resolve) => { finish = resolve; });
+  const calls = mockApi({ [`POST /api/v1/runs/${RUN_SVM}/reeval`]: () => response });
+  const view = renderWithClient(<RunActions served record={makeRecord()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Re-evaluate" }));
+  await waitFor(() => expect(calls).toHaveLength(1));
+  view.rerender(
+    <QueryClientProvider client={view.client}>
+      <RunActions served record={makeRecord({ run_id: "OTHER" })} />
+    </QueryClientProvider>,
+  );
+  finish({ evaluated: [RUN_SVM], skipped: {}, warnings: [] });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Re-evaluate" }).hasAttribute("disabled")).toBe(false));
+  expect(screen.queryByRole("status", { name: "Re-evaluate" })).toBeNull();
+});
+
 test("unserved run actions are disabled with a known-unmapped explanation", () => {
   mockApi({});
   renderWithClient(<RunActions record={makeRecord({ status: "running" })} served={false} hostsLoaded />);
@@ -106,6 +164,25 @@ test("unserved run actions are disabled with a known-unmapped explanation", () =
     expect(button.hasAttribute("disabled")).toBe(true);
     expect(button.title).toContain("No configured host");
   }
+});
+
+test("Re-infer needs both a serving host and an infer stage after integration", () => {
+  const calls = mockApi({});
+  const tree = (served: boolean, inferStage: boolean) => (
+    <RunActions record={makeRecord()} served={served} hostsLoaded inferStage={inferStage} />
+  );
+  const { client, rerender } = renderWithClient(tree(false, true));
+  const button = screen.getByRole("button", { name: "Re-infer" });
+  expect(button.hasAttribute("disabled")).toBe(true);
+  expect(button.title).toContain("No configured host");
+  fireEvent.click(button);
+  rerender(<QueryClientProvider client={client}>{tree(true, false)}</QueryClientProvider>);
+  expect(button.hasAttribute("disabled")).toBe(true);
+  expect(button.title).toBe("Task has no infer stage");
+  fireEvent.click(button);
+  rerender(<QueryClientProvider client={client}>{tree(true, true)}</QueryClientProvider>);
+  expect(button.hasAttribute("disabled")).toBe(false);
+  expect(calls).toHaveLength(0);
 });
 test("Stop requires two clicks and disarms on Escape and blur", async () => {
   const calls = mockApi({ [`POST /api/v1/runs/${RUN_SVM}/stop`]: {} });

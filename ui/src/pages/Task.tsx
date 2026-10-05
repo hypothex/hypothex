@@ -31,6 +31,7 @@ import { paramsText, sweepHref } from "./components/SweepModel";
 import type { Leaderboard } from "./components/types";
 import { useAction } from "./components/useAction";
 import { Unbroken } from "./components/Headline";
+import { ReevalSummary } from "./components/ReevalSummary";
 
 export interface TaskPageProps {
   project: string;
@@ -52,33 +53,7 @@ export function boardMeta(board: Leaderboard): string[] {
   return out;
 }
 
-/**
- * What a re-evaluation did, in one line: `0 re-scored · 1 skipped: no predictions`.
- * Skip reasons are counted (`×N`) when there is more than one kind.
- */
-export function reevalLine(report: EvalReport): string {
-  const skipped = Object.values(report.skipped ?? {});
-  const warnings = report.warnings ?? [];
-  const out = [`${(report.evaluated ?? []).length} re-scored`];
-  if (skipped.length > 0) {
-    const reasons = new Map<string, number>();
-    for (const why of skipped) reasons.set(why, (reasons.get(why) ?? 0) + 1);
-    const many = reasons.size > 1;
-    const text = [...reasons].map(([why, n]) => (many ? `${why} ×${n}` : why)).join(", ");
-    out.push(`${skipped.length} skipped: ${text}`);
-  }
-  if (warnings.length > 0) out.push(plural(warnings.length, "warning", "warnings"));
-  return out.join(" · ");
-}
-
-/** The skipped runs and the warnings of a re-evaluation, one per line, for the tooltip. */
-function reevalDetail(report: EvalReport): string | undefined {
-  const lines = [
-    ...Object.entries(report.skipped ?? {}).map(([id, why]) => `${id}: ${why}`),
-    ...(report.warnings ?? []),
-  ];
-  return lines.length > 0 ? lines.join("\n") : undefined;
-}
+export { reevalLine } from "./components/ReevalSummary";
 
 interface LaunchedRuns {
   host: string;
@@ -329,9 +304,7 @@ export function TaskPage({ project, task, view }: TaskPageProps) {
       {views.error ? <ErrorBox error={views.error} /> : null}
       {reeval.error ? <ErrorBox error={reeval.error} /> : null}
       {reevalReport ? (
-        <p className="small" role="status" aria-label="Re-evaluate" title={reevalDetail(reevalReport)}>
-          {reevalLine(reevalReport)}
-        </p>
+        <ReevalSummary report={reevalReport} />
       ) : null}
       {launched ? <LaunchedLine launched={launched} /> : null}
       <SweepsLine project={project} />

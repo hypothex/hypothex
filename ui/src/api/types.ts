@@ -1028,6 +1028,8 @@ export interface components {
             example_id?: string | null;
             /** Step Metric */
             step_metric?: string | null;
+            /** Max Points */
+            max_points?: number | null;
         };
         /**
          * PanelLayout

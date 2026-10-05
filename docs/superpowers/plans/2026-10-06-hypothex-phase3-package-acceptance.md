@@ -139,11 +139,10 @@ Generation README retains exact archive/generation commands and expected compari
 
 ## Step 3 — build and install outside the checkout
 
-`PackageRun.prepare()` runs the following sequence once, with bounded subprocess timeouts and captured sanitized logs:
+Sync the source development environment with `uv sync --locked --all-groups` before invoking pytest, as the CI and local commands below do. `PackageRun.prepare()` requires that prepared environment; it must not synchronize or mutate the active environment from inside pytest. It runs the following sequence once, with bounded subprocess timeouts and captured sanitized logs:
 
 ```sh
 # At the implementation worktree root; do not run in the main checkout.
-uv sync --locked --all-groups
 bun --cwd ui install --frozen-lockfile
 bun --cwd ui run build
 uv build --out-dir "$package_build_dir"
@@ -154,6 +153,8 @@ uv pip install --python "$package_root/venv/bin/python" "$package_wheel"
 Here the runner supplies absolute task-specific paths using argument arrays, checks exactly one newly built wheel and one sdist exist, and hashes both. `uv pip install` is uv's supported wheel-install command; there is no direct pip/poetry/conda invocation. Build output uses a newly created directory, preventing selection of an old wheel. Do not install `.[dev]`, test extras, `-e`, or `--system` into this venv. No source code is copied into site-packages manually. Copy only `installed_checks.py` and fixture input to the external harness directory. Run product probes with `[venv_python, "-I", external_checker, operation, ...]`, `cwd=package_root/cwd`, and product CLI with the absolute `venv/bin/hx` path and explicit `--home`.
 
 Child environment construction removes `PYTHONPATH`, `PYTHONHOME`, `VIRTUAL_ENV`, inherited `HYPOTHEX_*`, `HX_DEMO_*`, and proxy settings, then adds only this test's explicit values. Do not mutate the user's shell/home environment. Retain ordinary OS runtime variables and the baseline refusal wrappers for SSH/SCP, SLURM, `nvidia-smi`, and Tailscale; the wrappers must fail if accidentally invoked. Demo fake hosts use their own documented fake machinery. Check all server/public/notification URLs are loopback; no real SSH, credentials, GPUs, SMTP, Slack, Tailscale, or providers are used. Ordinary package/dependency installation is the only network provisioning step.
+
+For the fresh team scenario only, explicitly set `USER=sv` in its child environment, including the initial seed, every server start/restart and its CLI children. This pins Task 39's `owner_name()` result to the seeded admin; never change `os.environ` globally or the user's shell. Add a harness unit regression that constructs these child environments from both `USER=runner` and `USER=shreyasv`, asserts `USER=sv` for every team child, and verifies the parent and other scenario environments retain their original values. The upgraded-home scenario discovers its actual local owner and does not assert a fixed name.
 
 The installed resource checker implements these executable assertions (no pytest import):
 
@@ -225,8 +226,6 @@ Keep all four `test` matrix combinations, the existing `ui` job and Docker job u
   package:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      HX_PACKAGE_ARTIFACTS: ${{ runner.temp }}/hx-package-artifacts
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
@@ -242,6 +241,8 @@ Keep all four `test` matrix combinations, the existing `ui` job and Docker job u
       - run: bunx tsc -p package-e2e/tsconfig.json
         working-directory: ui
       - run: uv run pytest -m package tests/packaging/test_installed.py -v --junitxml="${HX_PACKAGE_ARTIFACTS}/junit.xml"
+        env:
+          HX_PACKAGE_ARTIFACTS: ${{ runner.temp }}/hx-package-artifacts
       - name: Installed package evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -253,6 +254,8 @@ Keep all four `test` matrix combinations, the existing `ui` job and Docker job u
 ```
 
 Ensure the driver creates the artifact directory before tests/JUnit write (pytest creates missing JUnit parents, but harness results must exist on preparation failure too). Default tests remain free of package builds; Docker keeps its explicit `-m docker`. `package` must be included among required CI checks for release/merge acceptance; a cancelled/skipped package job is not a pass.
+
+Validate the complete resulting workflow with `actionlint .github/workflows/ci.yml` before pushing it. YAML parsing alone does not validate GitHub expression contexts: `runner.temp` is allowed in step `env` and `with`, but not job-level `env` ([GitHub context availability](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability)).
 
 Local reproduction, from the isolated implementation worktree:
 
@@ -280,6 +283,8 @@ env -u PYTHONPATH -u HYPOTHEX_HUB_URL -u HYPOTHEX_HUB_TOKEN "$package_demo_root/
 ```
 
 `serve --port 0` selects an ephemeral port; read the displayed URL/server.json rather than guessing it. Explain browser pairing with a fresh owner link, CLI pairing from a second explicit temporary home with `HYPOTHEX_HUB_URL` set, expected `whoami`, then Ctrl-C and restart on the recorded **same port** for persisted paired-token verification. State that local owner sessions rotate at restart, paired sessions persist, and SQLite automatically rebuilds; `hx db upgrade` is PostgreSQL-only. All temporary paths/credentials remain private. The automated upgrade test restores a new synthetic fixture copy; the guide does not ask the user to experiment on a real home.
+
+Explain in `docs/package-testing.rst` that scoped `hx serve --auth` adds an admin using Task 39's normalized `$USER` (falling back to `owner` for an invalid/empty name). The automated team scenario pins `USER=sv`; the manual demo keeps the caller's identity. The demo's `sv`/`alice` links are the intended browser logins, while local owner discovery may report the caller's normalized name.
 
 Retain sanitized `build.json` (source SHA, wheel/sdist SHA256, commands, versions), `installed.json` (import/resource paths, dependency list, migration head), `fixture.json` (pinned source/schema/hash oracle), per-stage preservation/assertion JSON, `browser-summary.json`, JUnit, and process-cleanup summary. Keep private homes/server logs/pairing files separate from uploaded artifacts and remove them in cleanup. Sanitize before upload; test the redactor against known generated secrets and their URL-encoded representations, and fail artifact publication if scanning finds one. Do not upload browser storage state, traces, cookies, raw home/config/secrets, or pairing-bearing stderr. Preserve enough nonsecret failure detail (operation, status, traceback without tokens) to diagnose failures.
 

@@ -153,3 +153,39 @@ Evidence directories: `/tmp/hx-phase3-evidence/backend-r2-fixes/`,
 `frontend-r2-fixes/` and `package-r2-fixes/`. Each writer froze its owned document
 before parent integration. Current main remains unchanged. Primary round 3 must
 confirm these corrections before adversarial review begins.
+
+
+## Primary round 3 response
+
+The [round 3 report](2026-10-06-hypothex-phase3-primary-round3.md) returned
+NOT LGTM on `4cbc5bb`. It confirmed all round 2 blockers and smaller fixes;
+its independent cleanup probe passed 104 assertions. New findings P2-D and
+P2-E are confined to Task 49's prospective package harness and CI job.
+
+- P2-D: moved `HX_PACKAGE_ARTIFACTS` to the pytest step's `env`; the upload
+  action retains the same `runner.temp` path in `with`. Actionlint 1.7.12 on
+  the full current workflow plus the original job reproduces the forbidden
+  runner-context failure. The corrected full workflow passes. Shellcheck and
+  pyflakes integrations were disabled for this expression-focused check;
+  no repository workflow has been changed or run for Task 49 yet.
+- P2-E: fresh-team children explicitly use `USER=sv` at seed/start/restart/CLI
+  stages; the parent and other scenario environments retain their identity.
+  The plan requires a harness regression for inherited CI/local usernames.
+  The guide must distinguish this test pin from manual owner discovery and
+  the seeded browser logins. Exact planned `owner_name()` probes demonstrate
+  the original assertion failing for runner/shreyasv and the override working.
+- P3: aligned the storage-helper interface summary with trusted home/store
+  aliases. Source `uv sync` stays a pre-pytest prerequisite, removing nested
+  synchronization of the active environment from `PackageRun.prepare()`.
+- Sweep behavior is intentional: an actual empty sweep has incomplete cost
+  and shows unknown; the pure-function complete-empty fixture tests explicit
+  completeness metadata. Digest completeness applies to its own window.
+  These semantics and differing compact labels are unchanged.
+- The unavailable unknown-cost screenshot remains nonblocking and unclaimed.
+
+Evidence: `/tmp/hx-phase3-evidence/package-r3-fixes/` contains the executable
+`test_plan_regressions.py`, before/after full workflow files, actionlint logs
+and pytest results. Five focused tests pass; Ruff formatting/lint and the
+plan diff check pass. The probes test documented snippets/environment rules,
+not an implemented PackageRun or installed Phase 3. Prior unchanged source
+and frontend evidence is reused. Both approval gates remain pending.

@@ -109,3 +109,17 @@ baseline schema-3 fixture with evaluator-issued bindings; concrete Task 49
 pytest/CI owner and parsed snippets. Source implementation and installed Phase 3
 acceptance remain pending. The native preview still cannot save the new mockup
 screenshot; this is recorded as a nonblocking visual limitation.
+
+
+Primary round 3 returned NOT LGTM on 4cbc5bb. All earlier blockers are fixed;
+Task 49 introduced two new failures: runner context in job env and an owner
+assertion dependent on inherited USER. Corrections move the env to its step,
+pin only team child USER=sv, and document manual owner semantics. The full
+before/after workflow was checked with actionlint 1.7.12; five focused tests
+pass. Two minor prose/environment-sync issues are also corrected. No source
+or workflow implementation changed. The detailed response is in main-refresh;
+primary round 4 must approve before independent adversarial review.
+
+The old 9cbe8a3 macOS 3.11 retry was also cancelled before acquiring a runner.
+It is superseded by the current plans head; no old-head rerun is needed. PR22
+remains watched for current-head results.

@@ -543,11 +543,13 @@ function chipHtml(id) {
 const withChips = t => esc(t).replace(/\[\[run:([A-Za-z0-9][A-Za-z0-9_.-]{0,79})\]\]/g, (_m, id) => chipHtml(id)).split("\n").map(l => `<p>${l}</p>`).join("");
 function renderNotebook(state) {
   headerRight(HX.me);
-  const N = HX.notebook, D = N.digest;
+  const N = HX.notebook;
+  const D = state === "cost-unknown" ? { ...N.digest, ...N.digest.incomplete_cost } : N.digest;
+  const costText = D.gpu_pricing_complete === true ? `$${D.usd}` : `Cost unknown · $${D.usd.toFixed(2)} recorded`;
   const days = N.days.map((d, i) => `<li><a href="#notebook" ${i === 0 ? 'aria-current="page"' : ""}><span>${d.day}</span><small>${d.entries}</small></a></li>`).join("");
   const digest = `<div class="ent"><div class="by"><span>09:00</span><span title="Weekly summary, saved by the hub">digest</span></div>
     <div class="dg"><h3>week ${D.week} · ${esc(N.project)}</h3>
-      <div class="cnt"><span title="started">▲${D.counts.started}</span><span title="finished">✓${D.counts.finished}</span><span title="failed">✗${D.counts.failed}</span><span title="lost">?${D.counts.lost}</span><small>· ${D.gpu_h} GPU-h $${D.usd}</small></div>
+      <div class="cnt"><span title="started">▲${D.counts.started}</span><span title="finished">✓${D.counts.finished}</span><span title="failed">✗${D.counts.failed}</span><span title="lost">?${D.counts.lost}</span><small>· ${D.gpu_h} GPU-h · ${esc(costText)}</small></div>
       <table>${D.tasks.map(t => `<tr><td>${esc(t.task)}</td><td>${t.before.toFixed(3)}→${t.after.toFixed(3)}</td><td class="${t.mark === "▲" ? "ok" : "dim"}">${t.mark}</td><td class="dim">${esc(t.best)}</td></tr>`).join("")}</table>
       <div class="by2">${Object.entries(D.by).map(([k, v]) => `<span>${whoHtml(k)} ${v}</span>`).join("")}</div></div></div>`;
   const entries = N.entries.map(e => `<div class="ent"><div class="by"><span>${e.at}</span><span class="who human"><i></i>@${e.author}</span></div><div class="tx">${withChips(e.text)}</div></div>`).join("");

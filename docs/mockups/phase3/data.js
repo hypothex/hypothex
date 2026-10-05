@@ -128,7 +128,8 @@
     digest: {
       week: "2026-W40",
       counts: { started: 12, finished: 9, failed: 2, lost: 1 },
-      gpu_h: 41.2, usd: 86.5,
+      gpu_h: 41.2, usd: 86.5, gpu_pricing_complete: true,
+      incomplete_cost: { usd: 0.25, gpu_pricing_complete: false },
       tasks: [
         { task: "uspto50k-topk", before: 0.598, after: 0.613, mark: "▲", best: "lr 3e-4, beam 10" },
         { task: "uspto50k-top1", before: 0.512, after: 0.512, mark: "·", best: "base" },

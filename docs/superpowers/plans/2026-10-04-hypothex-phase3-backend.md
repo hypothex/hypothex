@@ -1,6 +1,6 @@
 # Hypothex Phase 3 (Backend) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Use `plan-and-execute` and `delegate-and-review`, with bounded independent workers/reviews when useful. Explicit-only workflows require the user's explicit selection; do not auto-activate subagent-driven-development, brainstorming or test-driven-development. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make one hub serve a small lab: a hub settings file with secrets kept out of it, run ownership, the lab notebook, paper baselines, LaTeX/Markdown/CSV export with seed and test-set noise, Slack and email notices with a retrying outbox, a weekly digest, storage reports and a plan-then-apply cleanup, pairing-based auth with scopes on every route, WebSocket and MCP tool, an optional Postgres index with Alembic, Tailscale access and paired `route: url` hosts, `run.log_cost`, and the CLI, MCP, demo, and docs for all of it.
 
@@ -12,7 +12,7 @@
 
 **Contract:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-contract.md`, sections 1–9 and 11. Every name, field, route, and file listed there is exact. This plan adds private helpers, a few public helpers (each task's Interfaces lists them), and optional keyword arguments (`AuthStore(session_days=)`, `leaderboard_table(directions=, value_formats=)`, `send_slack(transport=)`, `send_email(ssl_context=)`, `Notifier(ssl_context=)`, `send_digest(since=)`, `upsert(keep_max=)`, `hub_call(text=, agent=)`, `create_app(auth=, public_url=, notifier=)`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the contract was ambiguous or silent and how this plan reads it.
 
-**Prerequisite:** `main` at `e27a3a2` (phases 1a, 1b, 2, plus `p2-backend-minors`, `p2-docs-ci` (`6ace21d`), `p2-property-tests`, and the phase 2 frontend so far). Every "replace X with Y" anchor below was re-checked against `e27a3a2`; the drift from the first base `738c711` that touches this plan: `cli/main.py::_write_private` is hardened (Task 2 moves that version into `core.settings`), `launch --gpus` is `LaunchGpusOpt` (no task edits `launch`'s signature), `mcp/server.py` `launch_sweep` sends `sweep_checkout(...)` in its remote body (Task 32 Step 4.6 adds `created_by`/`owner` next to it), `api/app.py`'s lifespan `finally` nests the joins in a second `try/finally` (Task 30 adds the notifier thread before the loop that *starts* the threads), `remote/hub.py` `_SAFE_NAME`/`_halt` changed (no task edits them), and `docs/index.rst`'s User guide toctree ends `remote, gpus, slurm, sweeps, cost` (Task 46). Review round 3: `main` is now `8df4760` (the phase 2 frontend merge, PR #12), and `git diff e27a3a2 8df4760 -- src docs/index.rst` is empty, so every anchor still holds. If `main` has moved on when this plan starts, re-run `git diff 8df4760 main -- src docs/index.rst` and re-check each anchor the diff touches. This paragraph records the historical review baseline. The final merged-main prerequisite baseline is now `54259b0fbfff70b20f612e3e508da37d65efeff5` (DF2 `48f8bef`, token `826223e`, lazy MCP `a66540f`, step 8 `acaf680`, final credential-intent guards `1381662`); the final merged-main refresh is complete; formal rounds 5–6 remain pending. See `2026-10-05-hypothex-phase3-local-baseline.md` for the checked adapters and limits. Keep `PanelData.max_points: int | None = Field(None, ge=2, le=500)` and `_curves` passing the selected limit to LTTB; absent/null retains `CURVE_POINTS` (500). Preserve explicit metric selection and the existing 100-reference validation, plus their API/core tests. Phase 3 exports and baselines do not relax this bounded panel contract. No runtime source is changed by this plan merge. **Frontend:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-frontend.md` (contract section 10) starts after this plan is merged and uses `hx demo --with-team` for fixtures.
+**Prerequisite:** current merged main is `a4441256f39d014d9ad43dea976af1b448f163e3` (PR23 backlog and strict bound comparisons included), checked in `/tmp/hx-final-main`. Earlier `e27a3a2`, `8df4760` and `54259b0` pins describe historical reviews only. This refresh addresses Claude round 1; it does not claim either current gate has passed. **Runtime implementation is blocked until Claude, then the adversarial reviewer, each return LGTM on the same refreshed plan revision.** Material plan changes require affected re-review and reconfirmation by the primary reviewer before the adversarial verdict; typo/status-only corrections do not reset the gates. Recheck touched replacement anchors against this pin before applying them; if main changes, refresh and review before runtime edits. Preserve `PanelData.primary`, metric-aware cache variants, `max_points` and the 100-reference limit; selected-primary ranking/direction/unit/per-example evidence and curves metadata; cost completeness, bound score/population/repeat fields; and `compare_examples(..., require_bound=False)` plus HTTP `require_bound`. Keep the existing `BareMcp` exact-path route and mounted MCP child. Preserve PR23/24 regressions: `tests/core/test_backlog_backend.py`, `tests/core/test_bound_comparison.py`, `tests/test_eval_worker.py`, the cost/record/query/API regression files, and frontend `Task.test.tsx`, `selectedRun`, `trainingDetails`, `TaskInsights`, `Leaderboard.test.tsx`, `backlog.spec.ts`, `examples-layout.spec.ts`. No runtime source changes are part of this plan-only refresh. **Frontend:** the companion frontend plan consumes the same contract and pin.
 
 ## Global Constraints
 
@@ -1668,6 +1668,8 @@ git commit -m "feat(records): run and sweep owner, owner filter, index schema 4"
 ```
 
 ---
+**Additive JSON-key snapshot acceptance for Task 4.** Include `tests/cli/test_json_snapshots.py` and `tests/cli/snapshots/json_keys.json` in this task. Extend local fake fixtures to exercise `owner` on run and sweep record payloads (empty lists alone cannot expose nested paths). First run `uv run pytest tests/cli/test_json_snapshots.py` without update mode and record the expected additive failure. Then run `HYPOTHEX_UPDATE_SNAPSHOTS=1 uv run pytest tests/cli/test_json_snapshots.py`, inspect `git diff -- tests/cli/snapshots/json_keys.json`, and accept only the intended additions while preserving all existing keys, including bound-score and pricing metadata. Any deletion/rename/unrelated addition is a defect to investigate, not an automatic golden update. Rerun the same test without the update variable and include fixture assertions for populated values. Task 14 uses this same process for `sweep show.cost_complete`.
+
 ### Task 5: Scopes, principals, and ownership rules (`hypothex.auth`)
 
 **Files:**
@@ -4500,6 +4502,8 @@ git commit -m "feat(leaderboard): paper baselines per task with version match an
 ```
 
 ---
+**Additive JSON-key snapshot acceptance for Task 9.** Include `tests/cli/test_json_snapshots.py` and `tests/cli/snapshots/json_keys.json` in this task. Extend local fake fixtures to exercise `baselines` and populated baseline item paths (empty lists alone cannot expose nested paths). First run `uv run pytest tests/cli/test_json_snapshots.py` without update mode and record the expected additive failure. Then run `HYPOTHEX_UPDATE_SNAPSHOTS=1 uv run pytest tests/cli/test_json_snapshots.py`, inspect `git diff -- tests/cli/snapshots/json_keys.json`, and accept only the intended additions while preserving all existing keys, including bound-score and pricing metadata. Any deletion/rename/unrelated addition is a defect to investigate, not an automatic golden update. Rerun the same test without the update variable and include fixture assertions for populated values. Task 14 uses this same process for `sweep show.cost_complete`.
+
 ### Task 10: Export tables from a leaderboard (`hypothex.core.export`, part 1)
 
 **Files:**
@@ -4774,6 +4778,8 @@ class ExportOptions(BaseModel, extra="forbid"):
 
     format: ExportFormat = "markdown"
     metrics: list[str] | None = None
+    primary: str | None = None
+    """Task ranking metric/key; None retains configured primary. Refused for run comparisons."""
     noise: NoiseMode = "both"
     digits: int = Field(3, ge=0, le=6)
     percent: bool = False
@@ -5621,6 +5627,30 @@ def test_compare_needs_two_to_twenty_runs(scored: Context) -> None:
         compare_table(scored, ["r1"] * 21, ExportOptions())
 
 
+def test_task_export_primary_uses_selected_board_and_rejects_compare(
+    ctx: Context, toy_repo: Path
+) -> None:
+    from hypothex.core.errors import ConfigError
+    from hypothex.core.queries import get_leaderboard
+    from tests.core.test_backlog_backend import indexed
+
+    indexed(ctx, toy_repo)  # acc selects a; latency/p95 selects b, lower is better.
+    opts = ExportOptions(primary="latency/p95", noise="both")
+    board = get_leaderboard(ctx, "t", "toy", primary=opts.primary)
+    table = task_table(ctx, "t", "toy", opts)
+    assert table.columns[0] == "latency/p95"
+    assert table.rows[0].key == board.rows[0].group_id
+    assert table.higher_is_better[board.primary] == board.higher_is_better is False
+    assert table.rows[0].cells[board.primary].lo == board.rows[0].test_interval.lo
+    assert task_table(ctx, "t", "toy", ExportOptions()).columns[0] == "acc/value"
+    with pytest.raises(ConfigError):
+        task_table(ctx, "t", "toy", ExportOptions(primary="latency/unknown"))
+    with pytest.raises(RunError, match="primary"):
+        compare_table(ctx, ["a", "b"], opts)
+    with pytest.raises(RunError, match="primary"):
+        export_compare(ctx, ["a", "b"], opts)
+
+
 def test_export_task_uses_the_live_leaderboard(scored: Context) -> None:
     text = export_task(scored, "toy-acc", "toy", ExportOptions())
     header, _, row = text.splitlines()[:3]
@@ -5711,7 +5741,7 @@ Expected: FAIL at collection with `ImportError: cannot import name 'compare_tabl
 
 - [ ] **Step 4: Write the implementation**
 
-In `src/hypothex/core/leaderboard.py`, replace `_higher_is_better` with the shared rule and a caller of it:
+In `src/hypothex/core/leaderboard.py`, replace only `_higher_is_better` with the shared rule and its caller below. Preserve its existing optional `primary` parameter and the separate `build_leaderboard` branch that honors configured direction for an explicitly selected alternate metric; never overwrite that branch. An explicitly selected configured primary keeps current default semantics:
 
 ```python
 def metric_higher_is_better(config: ProjectConfig, kind: TaskKind | None, ref: str) -> bool:
@@ -5748,8 +5778,10 @@ def metric_higher_is_better(config: ProjectConfig, kind: TaskKind | None, ref: s
     return spec.higher_is_better if spec is not None else True
 
 
-def _higher_is_better(config: ProjectConfig, spec: TaskSpec) -> bool:
-    return metric_higher_is_better(config, spec.kind, spec.primary)
+def _higher_is_better(
+    config: ProjectConfig, spec: TaskSpec, primary: str | None = None
+) -> bool:
+    return metric_higher_is_better(config, spec.kind, primary or spec.primary)
 ```
 
 In `src/hypothex/core/export.py`, add to the imports:
@@ -5797,6 +5829,8 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
     RunNotFoundError
         An unknown run id.
     """
+    if opts.primary is not None:
+        raise RunError("primary applies to task export, not run comparison")
     if not 2 <= len(run_ids) <= COMPARE_MAX_RUNS:
         raise RunError(f"compare export takes 2 to {COMPARE_MAX_RUNS} runs")
     records = [ctx.find_record(r) for r in run_ids]
@@ -5927,9 +5961,10 @@ def task_table(ctx: Context, task: str, project: str | None, opts: ExportOptions
         leaderboard's rule for the task's kind).
     """
     entry, name = resolve_task(ctx, task, project)
-    board = get_leaderboard(ctx, name, entry.project)
+    board = get_leaderboard(ctx, name, entry.project, primary=opts.primary)
     kind = entry.config.tasks[name].kind
     directions = {c: metric_higher_is_better(entry.config, kind, c) for c in _columns(board, opts)}
+    directions[board.primary] = board.higher_is_better
     formats: dict[str, str] = {}
     for column in _columns(board, opts):
         metric = entry.config.metrics.get(parse_metric_key(column)[0])
@@ -5980,7 +6015,7 @@ def export_compare(ctx: Context, run_ids: list[str], opts: ExportOptions) -> str
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_export.py tests/core/test_leaderboard.py -v`
-Expected: `tests/core/test_export.py` `28 passed` (19 from Tasks 10–11, then 9 here); the leaderboard tests still pass (`test_system_bench_percentile_is_lower_is_better` now goes through `metric_higher_is_better`).
+Expected: all export cases, including the selected-primary regressions, pass; the leaderboard tests still pass (`test_system_bench_percentile_is_lower_is_better` now goes through `metric_higher_is_better`).
 
 Run: `uv run ruff check src/hypothex/core tests/core/test_export.py && uv run ruff format --check src/hypothex/core tests/core/test_export.py && uv run ty check src`
 Expected: clean.
@@ -6438,7 +6473,7 @@ git commit -m "test: fake slack webhook and fake smtp server with tls"
 - Consumes: `run_primary` (Task 8), `compute_cost`, `SweepSummary`, `EmailSettings`, `Channel`.
 - Produces (contract 1.7, exact): `NoticeKind`, `Notice`, `run_notice`, `sweep_notice`, `test_notice`, `render_slack`, `render_email`.
 - Produces (public helpers): `STATUS_GLYPH = {"finished": "✓", "failed": "✗", "lost": "?", "killed": "⊘"}`; `notice_id(kind, project, ref, status, n=0) -> str` (16 hex of sha256 of the joined fields); `fmt_duration(seconds) -> str` (`45s`, `12m`, `1h05m`, `2d03h`).
-- Formats: a run title is `<glyph> <project>/<task> <run_id>` plus `<metric> <value>` (3 decimals) for a finished run with a primary score; its first line is `<created_by> · <gpu_h> GPU-h · $<usd> · <duration>`; a failed run adds `exit <code> · <last stderr line, 200 chars>`, a lost run `lost · no exit record`, a killed run `killed`. A sweep title is `<✓|✗> <project> sweep <id> <done>/<total>` (✗ when any run failed or was lost), its lines `✓<n> ✗<n> ?<n> ⊘<n> · $<usd>` and `best <k=v ...> <mean>`. URLs are `<base>/r/<run_id>` and `<base>/s/<project>/<id>` (no URL without a base). Slack: `{"text": title\nlines…\nurl}`. Email: `Subject` = title, `text/plain` body of the lines and the URL.
+- Formats: a run title is `<glyph> <project>/<task> <run_id>` plus `<metric> <value>` (3 decimals) for a finished run with a primary score; its first line is `<created_by> · <gpu_h> GPU-h · <cost_text> · <duration>`; only explicit complete pricing renders `$<usd>`, otherwise `Cost unknown · $<usd> recorded` (including zero); a failed run adds `exit <code> · <last stderr line, 200 chars>`, a lost run `lost · no exit record`, a killed run `killed`. A sweep title is `<✓|✗> <project> sweep <id> <done>/<total>` (✗ when any run failed or was lost), its lines `✓<n> ✗<n> ?<n> ⊘<n> · <cost_text>` with completeness from every member and `best <k=v ...> <mean>`. URLs are `<base>/r/<run_id>` and `<base>/s/<project>/<id>` (no URL without a base). Slack: `{"text": title\nlines…\nurl}`. Email: `Subject` = title, `text/plain` body of the lines and the URL.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -6462,6 +6497,7 @@ from hypothex.notify.messages import (
     render_slack,
     run_notice,
     sweep_notice,
+    cost_text,
 )
 from hypothex.notify.messages import test_notice as make_test_notice  # not a test
 from tests.factories import PREDS_075, seed_finished_run
@@ -6479,7 +6515,7 @@ def ended(ctx: Context, run_id: str, status: RunStatus, *, minutes: float = 12) 
                 "ended_at": T0 + timedelta(minutes=minutes),
                 "exit_code": 0 if status == RunStatus.FINISHED else 1,
                 "created_by": "human:alice",
-                "cost": CostTotals(gpu_hours=0.4, gpu_usd=0.84, total_usd=0.84),
+                "cost": CostTotals(gpu_hours=0.4, gpu_usd=0.84, total_usd=0.84, gpu_pricing_complete=True),
             }
         )
 
@@ -6491,6 +6527,22 @@ def ended(ctx: Context, run_id: str, status: RunStatus, *, minutes: float = 12) 
 )
 def test_fmt_duration(seconds: float, text: str) -> None:
     assert fmt_duration(seconds) == text
+
+
+@pytest.mark.parametrize("complete", [False, None, True])
+@pytest.mark.parametrize("total", [0.0, 0.25])
+def test_cost_notice_preserves_unknown_and_genuine_zero(
+    ctx: Context, toy_repo: Path, complete: bool | None, total: float
+) -> None:
+    seed_finished_run(ctx, toy_repo, "cost-case")
+    record = ended(ctx, "cost-case", RunStatus.FINISHED)
+    record.cost = CostTotals(total_usd=total, gpu_pricing_complete=complete)
+    expected = f"${total:.2f}" if complete is True else f"Cost unknown · ${total:.2f} recorded"
+    notice = run_notice(ctx, record, base_url=None)
+    assert expected in notice.lines[0]
+    assert expected in render_slack(notice)["text"]
+    assert expected in render_email(notice, EMAIL).get_content()
+    assert cost_text(total, complete) == expected
 
 
 def test_finished_run_notice(ctx: Context, toy_repo: Path) -> None:
@@ -6548,6 +6600,7 @@ def test_sweep_notice(ctx: Context) -> None:
         best={"params": {"lr": "3e-4"}, "mean": 0.6131},
         headline="",
         total_usd=12.5,
+        cost_complete=True,
     )
     notice = sweep_notice(ctx, summary, base_url="https://hub.ts.net")
     assert notice.title == "✗ toy sweep s-7f3a 6/6"
@@ -6572,6 +6625,53 @@ def test_test_notice_and_renderers() -> None:
 
 Run: `uv run pytest tests/notify/test_messages.py -v`
 Expected: FAIL at collection with `ModuleNotFoundError: No module named 'hypothex.notify'`.
+
+**Prerequisite within Task 14: sweep cost completeness (test first).** Add `src/hypothex/core/sweeps.py` and `tests/core/test_sweeps.py` to this task's files. Current `a444125` `SweepSummary.total_usd` is a known subtotal only; it cannot certify pricing. Add immediately after that field:
+
+```python
+    cost_complete: bool = False
+    """All nonempty member runs have a cost record with explicitly complete pricing."""
+```
+
+In the existing `_summarize` `SweepSummary(...)` call, preserve the existing subtotal expression and add:
+
+```python
+        total_usd=math.fsum(_run_usd(r) for r in runs),
+        cost_complete=bool(runs) and all(
+            r.cost is not None and r.cost.gpu_pricing_complete is True for r in runs
+        ),
+```
+
+This is additive: `total_usd` keeps all recorded dollars including usage fallback. Empty/unissued sweeps and legacy summaries remain incomplete. Never infer completeness from zero dollars, GPU hours, or one priced member. Preserve all existing `run_ids`, `tag`, issuance, cancellation and membership fields.
+
+Append this regression to existing `tests/core/test_sweeps.py` (reuse its `spec_of`, `make_record`, imports and fixtures):
+
+```python
+@pytest.mark.parametrize("flags", [[], [True], [False], [None], [True, False], [True, None]])
+def test_sweep_cost_complete_requires_every_nonempty_member(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch, flags: list[bool | None]
+) -> None:
+    ctx.register_project(toy_repo)
+    spec = spec_of()
+    save_sweep(ctx.layout, spec)
+    members = [make_record(f"priced-{i}", cost=CostTotals(
+        total_usd=0.25 if i else 0.0, gpu_pricing_complete=flag
+    )) for i, flag in enumerate(flags)]
+    monkeypatch.setattr(sweeps_module, "sweep_runs", lambda *args: members)
+    summary = summarize_sweep(ctx, "toy", spec.id)
+    assert summary.total_usd == sum(r.cost.total_usd for r in members if r.cost is not None)
+    assert summary.cost_complete is (bool(flags) and all(flag is True for flag in flags))
+    if members:
+        members[-1].cost = None
+        members[-1].usage = UsageTotals(usd=0.75)
+        summary = summarize_sweep(ctx, "toy", spec.id)
+        assert summary.cost_complete is False
+        assert summary.total_usd == sum(
+            r.cost.total_usd if r.cost else r.usage.usd if r.usage else 0.0 for r in members
+        )
+```
+
+Extend `test_sweep_notice` by parametrizing the summary's `cost_complete` as True/False and preserving `total_usd=12.5`: complete renders `$12.50`; incomplete renders `Cost unknown · $12.50 recorded`. Include an empty summary (`cost_complete=False`, subtotal 0) and a fully recorded free member (`True`, subtotal 0). Run these core/notify tests RED before the new field/formatting and GREEN afterward. Update the deliberately reviewed CLI `sweep show` snapshot for only the additive `cost_complete` key, using the snapshot procedure below.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -6717,6 +6817,26 @@ def _url(base_url: str | None, path: str) -> str | None:
     return f"{base_url.rstrip('/')}{path}" if base_url else None
 
 
+def cost_text(total_usd: float, complete: bool | None) -> str:
+    """
+    Format a complete total or an explicitly incomplete recorded subtotal.
+
+    Parameters
+    ----------
+    total_usd : float
+        Known recorded dollars; preserve zero without inferring completeness.
+    complete : bool or None
+        Only True certifies complete pricing. False and legacy None are unknown.
+
+    Returns
+    -------
+    str
+        ``$0.00`` for a certified free run, otherwise e.g.
+        ``Cost unknown · $0.25 recorded`` when pricing is incomplete.
+    """
+    return f"${total_usd:.2f}" if complete is True else f"Cost unknown · ${total_usd:.2f} recorded"
+
+
 def run_notice(ctx: Context, record: RunRecord, *, base_url: str | None) -> Notice:
     """
     Build the notice of a run that ended.
@@ -6745,7 +6865,7 @@ def run_notice(ctx: Context, record: RunRecord, *, base_url: str | None) -> Noti
     facts = [
         record.created_by,
         f"{cost.gpu_hours:.1f} GPU-h",
-        f"${cost.total_usd:.2f}",
+        cost_text(cost.total_usd, cost.gpu_pricing_complete),
         fmt_duration(wall) if wall is not None else None,
     ]
     lines = [" · ".join(f for f in facts if f)]
@@ -6789,7 +6909,7 @@ def sweep_notice(ctx: Context, summary: SweepSummary, *, base_url: str | None) -
     bad = counts.get("failed", 0) + counts.get("lost", 0)
     lines = [
         f"✓{counts.get('finished', 0)} ✗{counts.get('failed', 0)} ?{counts.get('lost', 0)} "
-        f"⊘{counts.get('killed', 0)} · ${summary.total_usd:.2f}"
+        f"⊘{counts.get('killed', 0)} · {cost_text(summary.total_usd, summary.cost_complete)}"
     ]
     best: dict[str, Any] | None = summary.best
     if best:
@@ -8659,7 +8779,7 @@ Contract 1.8, 8 (failure mode 15). The digest reuses the leaderboard builder on 
 **Interfaces:**
 - Consumes: `build_leaderboard`, `add_costs`, `parse_entries`, `day_path`, `list_sweeps`, `Notice`, `notice_id`.
 - Produces (contract 1.8, exact): `TaskChange`, `NoteItem`, `SweepLine`, `Digest`, `build_digest(ctx, project, *, since, until=None, top_notes=5)`, `render_digest_markdown(digest)`, `digest_notice(digest, *, base_url)`, `week_key(moment)`. (`digest_due`, `send_digest` are Task 19.)
-- Rules: the window is `[since, until]`. `counts`: `started` = runs created in the window, `finished`/`failed`/`lost`/`killed` = runs that ended in it by status, `queued` = runs created in it that still wait. `by_owner` counts created runs per `created_by`. `cost` sums the `cost` of runs that ended in the window (`CostTotals()` when none). For each task: `before` from runs created and ended before `since` with scores made before `since`, `after` from everything up to `until`; a task is listed when it gained a finished run or a new best group. Notes: run `notes.md` sections and notebook entries stamped in the window (notebook entries by `digest` are skipped), newest first, `top_notes` of them, each cut to 200 characters. Sweeps: those created in the window. `headline` = `▲<started> ✓<finished> ✗<failed> ?<lost>` (`⊘<killed>` when any) `· <gpu_h> GPU-h $<usd>` and, for the first task with a new best, `· <task> <before>→<after> ▲`.
+- Rules: the window is `[since, until]`. `counts`: `started` = runs created in the window, `finished`/`failed`/`lost`/`killed` = runs that ended in it by status, `queued` = runs created in it that still wait. `by_owner` counts created runs per `created_by`. `cost` sums every ended run using its existing cost unchanged or `compute_cost(record, None)` only when absent, retaining known API usage and propagating False/legacy None; only no-ended-runs yields `CostTotals(gpu_pricing_complete=True)` (explicit complete zero). For each task: `before` from runs created and ended before `since` with scores made before `since`, `after` from everything up to `until`; a task is listed when it gained a finished run or a new best group. Notes: run `notes.md` sections and notebook entries stamped in the window (notebook entries by `digest` are skipped), newest first, `top_notes` of them, each cut to 200 characters. Sweeps: those created in the window. `headline` = `▲<started> ✓<finished> ✗<failed> ?<lost>` (`⊘<killed>` when any) `· <gpu_h> GPU-h $<usd>` and, for the first task with a new best, `· <task> <before>→<after> ▲`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -8745,7 +8865,7 @@ def week(ctx: Context, toy_repo: Path) -> Context:
         ended=T0 - 2 * day + timedelta(hours=1),
         chash="sha256:bbbb",
         by="human:alice",
-        cost=CostTotals(gpu_hours=1.0, gpu_usd=1.5, total_usd=1.5),
+        cost=CostTotals(gpu_hours=1.0, gpu_usd=1.5, total_usd=1.5, gpu_pricing_complete=True),
         hypothesis="bigger model",
     )
     score(ctx, "new1", 0.7, T0 - 2 * day + timedelta(hours=2))
@@ -8756,7 +8876,7 @@ def week(ctx: Context, toy_repo: Path) -> Context:
         status=RunStatus.FAILED,
         ended=T0 - day + timedelta(minutes=10),
         by="agent:claude@sv",
-        cost=CostTotals(gpu_hours=0.5, api_usd=0.5, total_usd=0.5),
+        cost=CostTotals(gpu_hours=0.5, api_usd=0.5, total_usd=0.5, gpu_pricing_complete=True),
     )
     run(ctx, "new3", created=T0 - day, status=RunStatus.QUEUED)
     run(
@@ -8804,7 +8924,7 @@ def test_counts_owners_and_cost(week: Context) -> None:
         "started": 4, "finished": 1, "failed": 1, "lost": 1, "killed": 0, "queued": 1,
     }  # fmt: skip
     assert digest.by_owner == {"agent:claude@sv": 1, "human": 1, "human:alice": 2}
-    assert digest.cost == CostTotals(gpu_hours=1.5, gpu_usd=1.5, api_usd=0.5, total_usd=2.0)
+    assert digest.cost == CostTotals(gpu_hours=1.5, gpu_usd=1.5, api_usd=0.5, total_usd=2.0, gpu_pricing_complete=True)
 
 
 def test_leaderboard_change(week: Context) -> None:
@@ -8851,10 +8971,52 @@ def test_markdown_and_notice(week: Context) -> None:
     assert notice.url == "https://hub.ts.net/n/toy"
 
 
+@pytest.mark.parametrize("complete", [False, None, True])
+@pytest.mark.parametrize("total", [0.0, 0.25])
+def test_digest_cost_truth_reaches_every_representation(
+    ctx: Context, toy_repo: Path, complete: bool | None, total: float
+) -> None:
+    from hypothex.notify.messages import render_email, render_slack
+    from hypothex.core.settings import EmailSettings
+
+    ctx.register_project(toy_repo)
+    record = make_record("cost-only", status=RunStatus.FINISHED,
+        created_at=T0, started_at=T0, ended_at=T0,
+        cost=CostTotals(total_usd=total, gpu_pricing_complete=complete))
+    ctx.create_run(record)
+    digest = build_digest(ctx, "toy", since=SINCE, until=T0)
+    expected = f"${total:.2f}" if complete is True else f"Cost unknown · ${total:.2f} recorded"
+    assert expected in digest.headline
+    assert expected in render_digest_markdown(digest)  # exact notebook body in send_digest
+    notice = digest_notice(digest, base_url=None)
+    assert expected in notice.title and expected in render_slack(notice)["text"]
+    email = render_email(notice, EmailSettings(host="127.0.0.1", sender="hx@lab.org", to=["sv@lab.org"]))
+    assert expected in str(email["Subject"])
+
+
+def test_digest_missing_cost_keeps_api_subtotal_and_unknown_gpu(
+    ctx: Context, toy_repo: Path
+) -> None:
+    from hypothex.core.records import ExecutorInfo, UsageTotals
+
+    ctx.register_project(toy_repo)
+    record = make_record("missing-cost", status=RunStatus.FINISHED,
+        created_at=T0-timedelta(hours=2), started_at=T0-timedelta(hours=2), ended_at=T0,
+        executor=ExecutorInfo(gpus=[0, 1, 2, 3]), usage=UsageTotals(usd=0.25), cost=None)
+    ctx.create_run(record)
+    digest = build_digest(ctx, "toy", since=SINCE, until=T0)
+    assert digest.cost.gpu_hours == 8 and digest.cost.total_usd == 0.25
+    assert digest.cost.gpu_pricing_complete is False
+    assert "Cost unknown · $0.25 recorded" in digest.headline
+```
+
+Also add a mixed-week case with one complete $2 record plus an unpriced or legacy $0.25 record; assert $2.25 retained and unknown in headline, Markdown/notebook payload, Slack and email. Verify `send_digest` stores exactly that Markdown and enqueues exactly that uncertain notice using the existing fake notifier; never deliver to a real provider. Resume the test module:
+
+```python
 def test_empty_week_and_unknown_project(ctx: Context, toy_repo: Path) -> None:
     ctx.register_project(toy_repo)
     digest = build_digest(ctx, "toy", since=SINCE, until=T0)
-    assert digest.tasks == [] and digest.notes == [] and digest.cost == CostTotals()
+    assert digest.tasks == [] and digest.notes == [] and digest.cost == CostTotals(gpu_pricing_complete=True)
     assert digest.headline == "▲0 ✓0 ✗0 ?0 · 0.0 GPU-h $0.00"
     assert render_digest_markdown(digest) == "**2026-W41** · ▲0 ✓0 ✗0 ?0 · 0.0 GPU-h $0.00\n"
     with pytest.raises(StoreError):
@@ -8887,13 +9049,13 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from hypothex.core.context import Context
-from hypothex.core.cost import add_costs
+from hypothex.core.cost import add_costs, compute_cost
 from hypothex.core.ids import utcnow
 from hypothex.core.leaderboard import build_leaderboard
 from hypothex.core.notebook import day_path, parse_entries
 from hypothex.core.records import CostTotals, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.sweeps import list_sweeps
-from hypothex.notify.messages import Notice, notice_id
+from hypothex.notify.messages import Notice, cost_text, notice_id
 
 NOTE_CHARS = 200
 DIGEST_AUTHOR = "digest"
@@ -9107,7 +9269,11 @@ def build_digest(
         counts[status.value] = sum(1 for r in ended if r.status == status)
     counts["queued"] = sum(1 for r in created if r.status == RunStatus.QUEUED)
     by_owner = dict(sorted(Counter(r.created_by for r in created).items()))
-    cost = add_costs(r.cost for r in ended) or CostTotals()
+    cost = (
+        add_costs(r.cost or compute_cost(r, None) for r in ended)
+        if ended else CostTotals(gpu_pricing_complete=True)
+    )
+    assert cost is not None
     scores = ctx.index.scores_for(r.run_id for r in runs)
     tasks = _task_changes(ctx, project, runs, scores, since, end)
     notes = _notes(ctx, project, runs, since, end)[:top_notes]
@@ -9119,7 +9285,7 @@ def build_digest(
     head = f"▲{counts['started']} ✓{counts['finished']} ✗{counts['failed']} ?{counts['lost']}" + (
         f" ⊘{counts['killed']}" if counts["killed"] else ""
     )
-    parts = [head, f"{cost.gpu_hours:.1f} GPU-h ${cost.total_usd:.2f}"]
+    parts = [head, f"{cost.gpu_hours:.1f} GPU-h {cost_text(cost.total_usd, cost.gpu_pricing_complete)}"]
     best = next((t for t in tasks if t.new_best and t.after is not None), None)
     if best is not None:
         parts.append(f"{best.task} {_fmt(best.before)}→{_fmt(best.after)} ▲")
@@ -11437,6 +11603,8 @@ git commit -m "feat(storage): apply plans with exact confirmation and per-item r
 
 Contract 1.2 (identity), 1.3, 1.10 (guard, scopes, tickets), 3 (auth routes), 7 (authorization), 8 (failure modes 10–12). Here “auth off” means collaborator scopes are off. The accepted default-token prerequisite still protects HTTP/API/MCP/WebSocket traffic through `TokenGuard`; only explicit loopback no-auth bypasses it. Scoped `AuthGuard` replaces that root-only guard. `OriginGuard` and `TrustedHostMiddleware` run before credential/ticket consumption. The exact adapters below use the inspected token interfaces; the [compatibility checkpoint](2026-10-05-hypothex-phase3-token-compatibility.md) records their evidence and the final merged-source comparison required before formal round 5.
 
+**Additive JSON-key snapshot acceptance for Task 22.** Include `tests/cli/test_json_snapshots.py` and `tests/cli/snapshots/json_keys.json` in this task. Extend local fake fixtures to exercise `cleaned` and populated cleaned-artifact item paths (empty lists alone cannot expose nested paths). First run `uv run pytest tests/cli/test_json_snapshots.py` without update mode and record the expected additive failure. Then run `HYPOTHEX_UPDATE_SNAPSHOTS=1 uv run pytest tests/cli/test_json_snapshots.py`, inspect `git diff -- tests/cli/snapshots/json_keys.json`, and accept only the intended additions while preserving all existing keys, including bound-score and pricing metadata. Any deletion/rename/unrelated addition is a defect to investigate, not an automatic golden update. Rerun the same test without the update variable and include fixture assertions for populated values. Task 14 uses this same process for `sweep show.cost_complete`.
+
 ### Task 23: `hypothex.api.auth` — the guard, scope dependencies, identities
 
 **Files:**
@@ -12269,20 +12437,24 @@ Keep its full descriptor construction and final `return full`. Thus anonymous sc
         return JSONResponse(status_code=status, content=content, headers=headers)
 ```
 
-6. Replace
+6. Insert `annotate_scopes(app)` immediately after the existing `register_env_routes(app, ctx)` call. The exact current-main anchor is:
 
 ```python
     register_env_routes(app, ctx)
-    app.mount("/mcp", mcp_http)
+
+    class BareMcp:
 ```
 
-with
+Replace only that prefix with:
 
 ```python
     register_env_routes(app, ctx)
     annotate_scopes(app)
-    app.mount("/mcp", mcp_http)
+
+    class BareMcp:
 ```
+
+Leave the entire existing `BareMcp.__call__`, `app.router.routes.append(Route("/mcp", endpoint=BareMcp(), methods=["GET", "POST", "DELETE"]))` and `app.mount("/mcp", mcp_http)` intact. Auth/scopes still apply to both exact and child paths; retain existing bare-MCP and lazy-MCP tests.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -14344,6 +14516,16 @@ def test_task_export_downloads(team: tuple[FastAPI, TestClient, Context]) -> Non
     assert csv.text.splitlines()[0].startswith("kind,label,key,n,metric,mean")
 
 
+def test_export_http_primary_validation(team: tuple[FastAPI, TestClient, Context]) -> None:
+    app, client, _ = team
+    reader = bearer(token_for(app.state.auth, "reader", "read"))
+    selected = client.get("/api/v1/tasks/toy/toy-acc/export?primary=accuracy/value", headers=reader)
+    assert selected.status_code == 200 and "accuracy/value" in selected.text
+    assert client.get("/api/v1/tasks/toy/toy-acc/export?primary=accuracy/typo", headers=reader).status_code == 400
+    refused = client.get("/api/v1/compare/export?run_ids=r1,r2&primary=accuracy/value", headers=reader)
+    assert refused.status_code == 400 and refused.json()["type"] == "RunError"
+
+
 def test_compare_export(team: tuple[FastAPI, TestClient, Context]) -> None:
     app, client, _ = team
     reader = bearer(token_for(app.state.auth, "reader", "read"))
@@ -14543,9 +14725,12 @@ def register_team_routes(app: FastAPI, ctx: Context) -> None:
         caption: str | None,
         label: str | None,
         standalone: bool,
+        *,
+        primary: str | None = None,
     ) -> ExportOptions:
         return ExportOptions(
             format=fmt,
+            primary=primary,
             metrics=_split(metrics),
             noise=noise,
             digits=digits,
@@ -14564,6 +14749,7 @@ def register_team_routes(app: FastAPI, ctx: Context) -> None:
         task: str,
         format: ExportFormat = "markdown",
         metrics: str | None = None,
+        primary: str | None = None,
         noise: NoiseMode = "both",
         digits: Annotated[int, Query(ge=0, le=6)] = 3,
         percent: bool = False,
@@ -14576,7 +14762,7 @@ def register_team_routes(app: FastAPI, ctx: Context) -> None:
     ) -> Response:
         opts = options(
             format, metrics, noise, digits, percent, top, groups, baselines, caption, label,
-            standalone,
+            standalone, primary=primary,
         )  # fmt: skip
         return _download(export_task(ctx, task, project, opts), opts.format, task)
 
@@ -14585,6 +14771,7 @@ def register_team_routes(app: FastAPI, ctx: Context) -> None:
         run_ids: str,
         format: ExportFormat = "markdown",
         metrics: str | None = None,
+        primary: str | None = None,
         noise: NoiseMode = "both",
         digits: Annotated[int, Query(ge=0, le=6)] = 3,
         percent: bool = False,
@@ -14600,7 +14787,7 @@ def register_team_routes(app: FastAPI, ctx: Context) -> None:
             raise RunError("run_ids takes 2 to 20 comma-separated run ids")
         opts = options(
             format, metrics, noise, digits, percent, top, groups, baselines, caption, label,
-            standalone,
+            standalone, primary=primary,
         )  # fmt: skip
         return _download(export_compare(ctx, ids, opts), opts.format, "compare")
 
@@ -16078,10 +16265,11 @@ and add these tools at the end of `build_server`, before `return mcp`:
         metrics: list[str] | None = None,
         noise: str = "both",
         digits: int = 3,
+        primary: str | None = None,
     ) -> dict[str, Any]:
         """Export a task's leaderboard as LaTeX (booktabs), Markdown, or CSV for a paper."""
         opts = core_export.ExportOptions.model_validate(
-            {"format": format, "metrics": metrics, "noise": noise, "digits": digits}
+            {"format": format, "metrics": metrics, "primary": primary, "noise": noise, "digits": digits}
         )
         return {"text": core_export.export_task(ctx(), task, project, opts)}
 
@@ -16668,7 +16856,7 @@ Every data mutation keeps its existing `_touch` at the same logical point in the
 
 This mark still does not bump generation. `replace_scores` still atomically deletes the stale mark and replaces scores; `Context.add_score` keeps mark → file append → full score replacement under its run lock. Keep `_DATA_TABLES`, `_CARRIED_TABLES`, `_run_values`, `_score_values`, `RunChangeRow`, `PointsPendingRow`, `ScoresStaleRow`, `_fill_pending_points`, and their current call paths.
 
-Pending backlog compatibility (not part of this prerequisite pin): optional `ScoreRecord.per_example_hash`, `evaluation_examples`, and `evaluation_ids_hash` are additive evaluation provenance. If that backlog lands, preserve them through `score.model_dump(mode="json")` in `RunStore.append_score`, `score.model_dump_json()` in `_score_values`, normal `ScoreRecord` parsing, and the shared `_add_run` staging path. They require no Phase 3-specific score file name, envelope, hand-built payload, or SQL column/Alembic revision: `scores.jsonl` and `scores.record_json` already carry the complete model. Never reconstruct a reduced score dict or synthesize a binding for old/unbound evaluations. The source hash and exact artifact/population bindings remain distinct. Existing complete-model snapshot comparisons must include populated optional bindings when that baseline is adopted; do not implement or backport the unmerged backlog here. Its later `compare_examples(..., require_bound=False)` and optional HTTP `require_bound` query flag also remain additive: preserve the default historical comparison behavior and opt-in strict artifact/population validation used by TaskInsights, including exact read/source bindings. Do not remove the flag in any future route/helper adapter. This backlog is not part of review baseline `54259b0`; preflight the then-current main before a future Phase 3 build.
+Current-main compatibility (`a444125`, mandatory): optional `ScoreRecord.per_example_hash`, `evaluation_examples`, and `evaluation_ids_hash` are landed evaluator-issued provenance. Preserve them through `score.model_dump(mode="json")` in `RunStore.append_score`, `score.model_dump_json()` in `_score_values`, normal `ScoreRecord` parsing, and shared `_add_run` staging. `scores.jsonl` and `scores.record_json` already retain the complete model; no binding-specific SQL column or migration is needed. Never reconstruct reduced score dictionaries or synthesize bindings for old/unbound evaluations. Preserve `compare_examples(..., require_bound=False)` and HTTP `require_bound`, including the same-byte hash/parse snapshot, current healthy metric/version batch, full individual population validation, source/dataset/project/task compatibility, shared-intersection semantics, and concurrent-change rejection. Run `test_backlog_backend.py`, `test_bound_comparison.py`, and worker/evaluation tests against the final implementation.
 
 The merged metric mutator is `_replace_metric_points(self, run_id, points, *, pending_status) -> bool`; public `replace_metric_points` only delegates with `pending_status=None`. Journal and guard the private transaction, before its pending-marker DELETE/EXISTS claim. Preserve its captured `RunRow.status`, `rowcount` check and `_touch` only after a successful claim. `_fill_pending_points` retries by re-reading pending/status outside the transaction through `points_to_index`. A lost claim changes neither data nor generation; a later successful retry is a separate write. The exclusive guard prevents pending-row/generation-row inversion against `delete_run` and final publication. Never replace either method with a pre-CAS body.
 
@@ -19180,7 +19368,7 @@ Keep the baseline `_Server.capture_signals`. Replace only the `demo_hosts` lifes
         _drop_server_file(home, info.pid)
 ```
 
-This preserves unknown fields added to the owned record before credential publication. `hx token`, PID birth checks, bootstrap REUSE and private-tunnel behavior remain unchanged. Add first-start/restart tests that use actual `hx token`, CLI `whoami` and stdio discovery and resolve to the owner session; explicit overrides and env-server defaults resolve as HOST; scoped-off defaults remain root-authenticated; no-auth stays loopback-only; a failed second start changes no live session/mapping; record publication retains identity/birth/unknown metadata. Retain the existing token and serve tests. The exact adapters above must be compared to the final merged source before Round 5.
+This preserves unknown fields added to the owned record before credential publication. `hx token`, PID birth checks, bootstrap REUSE and private-tunnel behavior remain unchanged. Add first-start/restart tests that use actual `hx token`, CLI `whoami` and stdio discovery and resolve to the owner session; explicit overrides and env-server defaults resolve as HOST; scoped-off defaults remain root-authenticated; no-auth stays loopback-only; a failed second start changes no live session/mapping; record publication retains identity/birth/unknown metadata. Retain the existing token and serve tests. These adapters are refreshed against `a444125`; preserve its credential-intent guards and existing tests. Any later source drift requires plan refresh before the ordered Claude/adversarial gate, not an unreviewed implementation-time rewrite.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -20320,6 +20508,7 @@ def export(
     runs: Annotated[str | None, typer.Option("--runs", help="Compare runs: a,b[,c...].")] = None,
     fmt: Annotated[str, typer.Option("--format", help="latex, markdown, or csv.")] = "markdown",
     metrics: Annotated[str | None, typer.Option("--metrics", help="a,b (metric/key).")] = None,
+    primary: Annotated[str | None, typer.Option("--primary", help="Task ranking metric/key.")] = None,
     noise: Annotated[str, typer.Option("--noise", help="both, seed, test, or none.")] = "both",
     digits: Annotated[int, typer.Option("--digits", min=0, max=6)] = 3,
     percent: Annotated[bool, typer.Option("--percent", help="x100 for fractions.")] = False,
@@ -20337,11 +20526,14 @@ def export(
 
     if (task is None) == (runs is None):
         raise ConfigError("give a task, or --runs a,b")
+    if runs is not None and primary is not None:
+        raise ConfigError("--primary applies to task export, not --runs")
     try:
         opts = ex.ExportOptions.model_validate(
             {
                 "format": fmt,
                 "metrics": _split(metrics),
+                "primary": primary,
                 "noise": noise,
                 "digits": digits,
                 "percent": percent,
@@ -22592,3 +22784,9 @@ Inputs: the phase 3 contract, spec sections 3.4, 5.3, 5.4, 7.2–7.4, 9, 12, 13,
 - The pairing limit counts failures only, keyed per person behind `tailscale serve` (Task 25). `AuthGuard` reuses the reviewed exact static/identity classification; it never bypasses all non-API paths (Task 23). `NotifyTestBody` is module-level (Task 30). Overview rows carry `owner` (Task 27). A Postgres URL without `psycopg` is a `ConfigError` (Task 34). Default root-token/open-bind and scoped owner-session discovery tests retain the final CLI lifecycle (Task 39). `write_private` is main's hardened version and the CLI shares it (Task 2).
 
 **Order.** Parts 3 (notebook, baselines, export), 4–5 (notify, digest), 6 (storage), and 10 (Postgres) depend only on Parts 1–2 and may run in parallel. Part 7 needs Part 2; Part 8 needs Parts 3–7; Part 9 needs Parts 3–7; Part 11 needs Parts 1, 2, and 7; Part 12 needs Parts 7–9 and 11; Part 13 needs everything.
+
+## Refreshed-main final acceptance (verification only)
+
+After both ordered review gates are LGTM, the user's existing conditional implementation authorization applies; verify the assembled package, not only extracted snippets: build a wheel; install it in a clean temporary uv project with a fresh synthetic home; verify packaged UI assets and migration resources, initial serve/token/login and restart. Repeat upgrade/restart against a copy of a representative existing SQLite home and verify runs, complete score bindings, notebooks/settings and credentials are preserved. Use synthetic local data, fake providers/hosts and bounded test services only. Never upgrade the user's real home or contact real infrastructure. Record the fresh-install and upgrade commands and artifacts alongside the normal complete test/build/docs checks. No claim of later-week readiness rests only on the plan probes.
+
+**Selected-primary interface acceptance:** Task 12 core tests cover opposing metric rankings, noise and configured-primary defaults; include selected-key baselines and a higher-is-better non-time percentile regression. Task 29 HTTP tests must also use that opposite-ranking fixture and confirm `primary` forwards to `get_leaderboard` without changing explicit export columns. Task 33 invokes the actually registered MCP `export_table` through the test client with optional `primary`, checks schema/default and selected row order; `export_compare` exposes no ranking selection and core rejects any non-null option. Task 43 tests both local CLI and fake HTTP client mode for `hx export toy/t --primary latency/p95`, plus `--runs a,b --primary ...` rejection. Task 46 documents those exact HTTP/MCP/CLI names and default configured-primary behavior. No adapter may accept and silently ignore `primary`.

@@ -1,6 +1,6 @@
 # Hypothex Phase 3 Frontend Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Use `plan-and-execute` for durable execution and `delegate-and-review` for bounded independent work and review. Use explicit-only workflows only when the user selects them. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Show phase 3 in the web UI: pairing a device (`/pair`), the 401 gate, the header's notebook, storage, settings and user chip, Settings (sessions, users, add device with QR, notifications), Storage (bytes by project and host, largest items, dry run, then apply with the number typed back), the lab notebook (`/n/:project/:day` with run chips, append, whole-day edit and the 409 conflict view), the Task page's `export ▾` menu and paper baselines, and run ownership (`@owner`, owner-only stop) plus cleaned artifacts on the Run page, all kept live by the phase 3 events.
 
@@ -15,7 +15,7 @@
 **Mockups:** `docs/mockups/phase3/` (`index.html`, `data.js`, `shot-pair-{ready,done,invalid}-*`, `shot-settings-*`, `shot-settings-collab-*`, `shot-storage-*`, `shot-storage-confirm-*`, `shot-storage-result-*`, `shot-notebook-*`, `shot-notebook-conflict-*`, `shot-task-export-*`, `shot-run-*`, `shot-gate-*`).
 
 **Depends on:**
-- The phase 2 frontend and audit/UI improvements are merged. The integration snippets below were refreshed against actual merged-main baseline `54259b0fbfff70b20f612e3e508da37d65efeff5`, including the frozen DF-48 and token interfaces. PR21 is merged at this exact main commit; the final baseline refresh is complete and formal rounds 5–6 remain pending. Before implementation, run this check on the intended source checkout. The 12 historical snippet anchors alone are insufficient: whole-file Header replacement and procedural event-stream edits must also match the reviewed source blobs.
+- The phase 2 frontend and audit/UI improvements are merged. The integration snippets below were refreshed against actual merged-main baseline `a4441256f39d014d9ad43dea976af1b448f163e3`, including the frozen DF-48 and token interfaces. This pin includes merged PRs 21, 23 and 24. Historical rounds 5–6 are complete; their resolution notes are retained below. The current implementation gate is a fresh Claude review followed by an adversarial review, both explicitly LGTM on the same final plan state. Claude round 1 returned NOT LGTM; the repairs below require that review to be rerun. Runtime implementation remains gated. Before implementation, run this check on the intended source checkout. The 12 historical snippet anchors alone are insufficient: whole-file Header replacement and procedural event-stream edits must also match the reviewed source blobs.
 
 ```bash
 uv run python - <<'PY'
@@ -29,25 +29,47 @@ found = anchor.findall(plan)
 bad = [f for f, block in found if not pathlib.Path(f).is_file() or block not in pathlib.Path(f).read_text()]
 reviewed = {
     'ui/src/api/events.ts': '7256185bf8aea3b9950f480611bb4bc527de9d1a',
-    'ui/src/api/queries.ts': 'c05040ef695e234e7165056c87a3360fef1a435a',
-    'ui/src/api/client.ts': 'a7c990fbbe099a016ff28045d2a271231798702c',
+    'ui/src/api/queries.ts': '2b7936c02b2b409c58e9d02b694999177671da58',
+    'ui/src/api/client.ts': '9e6fc3078c3146135f0e8e7793e926e518b361d9',
     'ui/src/shell/Header.tsx': 'b61fbb21380110a250fb21190ce17d81b289a1d8',
     'ui/src/pages/components/OverviewLists.tsx': 'b332763d7670b1192bc4d05e7d0ef2bbd56198a6',
-    'ui/src/pages/Task.tsx': 'a9f4134b06601564edc191ed1162bca270f2da20',
+    'ui/src/pages/Task.tsx': '0bf4a898ef8c68e4ed6f392e33b5e6a2e3a05dbd',
     'ui/e2e/serve-demo.ts': 'a5148484442f9e2656c3757c98140c9b037a36d4',
     'ui/src/pages/components/RunActions.tsx': '0edaee2caf463d139749f539a1ce797a36193710',
     'ui/playwright.config.ts': '221aaa10fc64bd01c486a48ce0ab00f677277ab1',
     'ui/src/pages/Overview.tsx': 'f9fae51a56733ebc95ab3851aeb7e3a37f7bdb96',
-    'ui/src/pages/Run.tsx': 'dc58c5266a557f0a2258c9fd196d95f62de2169d',
+    'ui/src/pages/Run.tsx': 'ec43feda4faa9e7276dbfbb7a6bb849e08d11567',
     'ui/src/shell/CommandPalette.tsx': 'd6f33215ed15652b23d9f50d3656e598d00088bd',
     'ui/src/pages/components/WhereList.tsx': '2f8b41b3d5289e13aac5763b18381d13f053fa3a',
-    'ui/src/panels/Leaderboard.tsx': '50d1a4ffb5d5e06f02db3fe506908c230ea31bcb',
-    'ui/src/pages/components/useAction.ts': 'cce82cbf60c2e148bbd60faabc217d4088ef64e8',
-    'ui/src/launch/launchApi.ts': '7eb67cab7d6b6442cc74e1ac13becd850465e47d',
-    'ui/src/launch/LaunchDialog.tsx': '6a5f6efb4f96330e78980b06ce4c65a7567dfcbc',
-    'ui/src/pages/components/KindPanels.tsx': '9923dd29c2fa1ded68c95fbedaadd624bfd7d413',
-    'ui/src/api/models.ts': '97e0f932194bfa945510fd3c4804c976b50f1fcf',
+    'ui/src/panels/Leaderboard.tsx': 'e0efc8d5032b01af933b1551370992a38f4f4705',
+    'ui/src/pages/components/useAction.ts': '12ecff8de35690bfa73f69e34992710c0f8158f9',
+    'ui/src/launch/launchApi.ts': '5bac68549f975555576955fb4f198688abca2c2f',
+    'ui/src/launch/LaunchDialog.tsx': '082fdbfd2c6cde46b9676f5d25d21a1baa5512ab',
+    'ui/src/pages/components/KindPanels.tsx': '173225b7f68861abf8540fd7be1c583d8db9d41e',
+    'ui/src/api/models.ts': '738adaf000205ffe33f20a19ff3ee349548ab73c',
+    'ui/src/pages/components/PanelGrid.tsx': 'dab6b4fc49d7fb75f92ade64a9baf90670450a7a',
+    'ui/src/pages/components/SelectedRun.tsx': 'fdb8947b1315d3cbac6d112ad7cdd6a2fdf89fe9',
+    'ui/src/pages/components/TrainingDetails.tsx': 'e8315332380a17bc2b72456f012656bcd19e2806',
+    'ui/src/pages/components/TaskInsights.tsx': '97660fb9bc2053ef022dce7b76fc3711ed399011',
+    'ui/src/pages/Examples.tsx': 'f1468f986114013a391355db1c498492d00591d2',
+    'ui/src/pages/components/styles.ts': '1e8caf3c7e354579ee012e4af344a86bea6e1ced',
 }
+# These replacements were introduced by the current-main reconciliation, beyond
+# the historical phase-2-tagged anchors. Check their old blocks as well.
+extra = []
+for number, filename in [(23, "ui/src/pages/components/PanelGrid.tsx"),
+                         (24, "ui/src/pages/components/TrainingDetails.tsx")]:
+    section = plan.split(f"### Task {number}:", 1)[1].split(f"### Task {number + 1}:", 1)[0]
+    for match in re.finditer(r"(?:replace|Replace):?\n\n```tsx\n(.*?)\n```\n\nwith", section, re.S):
+        block = match.group(1)
+        if number == 24 and not block.startswith("/**"):
+            continue
+        path = filename
+        if number == 23 and ("PanelGrid results=" in block or "import { PanelGrid }" in block):
+            path = "ui/src/pages/Task.tsx"
+        extra.append((path, block))
+bad += [f for f, block in extra if pathlib.Path(f).read_text().count(block) != 1]
+print(f"{len(extra)} current integration anchors", "ok" if not bad else "REFRESH REQUIRED")
 changed = [f for f, blob in reviewed.items()
            if subprocess.check_output(["git", "hash-object", f], text=True).strip() != blob]
 print(f"{len(found)} snippet anchors", "ok" if not bad else f"MISSING in {bad}")
@@ -56,7 +78,8 @@ assert not bad and not changed, "Re-read changed sources and refresh affected re
 PY
 ```
 
-Expected on the pinned baseline: `12 snippet anchors ok` and `reviewed replacement sources ok`. A later merge deliberately fails the blob check: re-read changed files and update the snippets, tests and baseline hashes together; do not merely copy new hashes. In particular preserve confirmed recents, WebSocket head/cancellation/single-batch invalidation, `sweep.issuance` events and `issuancePoll`, credential resets including side caches, grouped failure retries, Task unscored counts/metric-drift indicator/templateEnvironment and loading/launch behavior, and per-run e2e homes. Task 25's whole-file `ui/playwright.config.ts` must remain the final baseline plus its team server/projects.
+Expected on the pinned baseline: `12 snippet anchors ok`, `7 current integration anchors ok`, and `reviewed replacement sources ok` (25 reviewed source blobs). A later merge deliberately fails the blob check: re-read changed files and update the snippets, tests and baseline hashes together; do not merely copy new hashes. In particular preserve confirmed recents, WebSocket head/cancellation/single-batch invalidation, `sweep.issuance` events and `issuancePoll`, credential resets including side caches, grouped failure retries, Task unscored counts/metric-drift indicator/templateEnvironment and loading/launch behavior, and per-run e2e homes. Task 25's whole-file `ui/playwright.config.ts` must remain the final baseline plus its team server/projects.
+- Current-main preservation checklist (prospective implementation checks, not tests already run): retain `ui/test/pages/Task.test.tsx`, `selectedRun.test.tsx`, `trainingDetails.test.tsx`, `TaskInsights.test.tsx`, `panelGrid.test.tsx`, and `ui/test/panels/Leaderboard.test.tsx`; preserve backend `tests/core/test_backlog_backend.py` and `test_bound_comparison.py`, plus browser `ui/e2e/backlog.spec.ts` and `examples-layout.spec.ts`. The merged PR24 scoped Examples layout, wrapped tables/paths, contained A/B figure and inline-block headline stay unchanged. The current-main hash/anchor probe checks document compatibility only; it does not prove the future Phase 3 code compiles or passes these tests. Run those affected suites plus repository-required checks after authorized assembly.
 - The phase 3 backend plan (`docs/superpowers/plans/2026-10-04-hypothex-phase3-backend.md`) merged: the contract section 3 routes in `/api/openapi.json`, `RunRecord.owner`, `RunDetail.cleaned`, `Leaderboard.baselines`, the section 2 events, the `4401` close code, `hx serve --auth`, and `hx demo --with-team` (contract 11: owner `sv` admin and `alice` launch, two projects with notebook days and one weekly summary, baselines on `toy-classifier/toy-test`, 6 archived runs with artifacts, outbox entries in every state, one connected fake host, the local session token in `<home>/serve/server.json`).
 - The mockups in `docs/mockups/phase3/` approved.
 - The local pin includes the final credential-intent guards. Keep `Vars.generation` captured by `useAction.run`, checks before/after `send` and in `onSuccess`, and `shouldRetry` rejecting `AbortError`. Keep `launchSeeds`' captured generation around every `postLaunch` and `LaunchDialog`'s generation checks before progress and after awaiting the outcome, before invalidation/navigation/callbacks. Reusing an idempotency key never authorizes an old intent under a replacement principal. Preserve `ui/test/pages/authActions.test.tsx` and the replacement-credential regression in `ui/test/launch/launchApi.test.ts`. These interfaces need no Phase 3 replacement.
@@ -182,7 +205,7 @@ All models are additive to the prerequisite. Retain `PanelData.max_points?: numb
   - `type OutboxStatus = "pending" | "sending" | "sent" | "failed" | "skipped"`; `interface OutboxEntry { id; channel: Channel; notice: Notice; status: OutboxStatus; attempts; next_at; last_error: string | null; created_at; sent_at: string | null }`; `interface NotifyTestResult { ok: boolean; error_class: string | null }`
   - `interface RunChip { run_id; status: RunStatus | null; task: string | null; label; primary: number | null }`; `interface NotebookDayInfo { day; bytes; entries }`; `interface NotebookDay { project; day; text; hash; runs: RunChip[]; updated_at: string | null }`
   - `interface BaselineRow { name; values: Record<string, number>; std: Record<string, number>; source; source_url; version_match: Record<string, boolean>; primary: number | null; delta_vs_best: number | null }`
-  - `type ExportFormat = "latex" | "markdown" | "csv"`; `type NoiseMode = "both" | "seed" | "test" | "none"`; `interface ExportOptions { format: ExportFormat; metrics?: string[]; noise?: NoiseMode; digits?: number; percent?: boolean; top?: number; groups?: string[]; baselines?: boolean; caption?: string; label?: string; standalone?: boolean }`
+  - `type ExportFormat = "latex" | "markdown" | "csv"`; `type NoiseMode = "both" | "seed" | "test" | "none"`; `interface ExportOptions { format: ExportFormat; primary?: string; metrics?: string[]; noise?: NoiseMode; digits?: number; percent?: boolean; top?: number; groups?: string[]; baselines?: boolean; caption?: string; label?: string; standalone?: boolean }`
   - `type StorageKind = "run" | "artifact" | "pulled"`; `interface StorageItem`, `interface StorageReport`, `interface CleanPolicy`, `interface CleanItem`, `interface CleanPlan`, `interface CleanResult`, `interface CleanedArtifact` (contract 1.9, fields exact)
   - `interface TaskChange`, `interface NoteItem`, `interface SweepLine`, `interface Digest` (contract 1.8, fields exact)
   - Optional additions: `RunRecord.owner?: string | null`, `RunDetail.cleaned?: CleanedArtifact[]`, `Leaderboard.baselines?: BaselineRow[]`, `RunsQuery.owner?: string` (`"me"` = the caller).
@@ -917,6 +940,8 @@ export type NoiseMode = "both" | "seed" | "test" | "none";
 /** Query of `GET /api/v1/tasks/{project}/{task}/export` (`hypothex.core.export.ExportOptions`). */
 export interface ExportOptions {
   format: ExportFormat;
+  /** Task-only selected metric ref; unset means the configured primary. */
+  primary?: string;
   metrics?: string[];
   noise?: NoiseMode;
   digits?: number;
@@ -1060,6 +1085,26 @@ export interface Digest {
 }
 ```
 
+Extend the existing `SweepSummary` in `ui/src/api/models.ts` additively. Replace:
+
+```ts
+  headline: string;
+  total_usd: number;
+}
+```
+
+with:
+
+```ts
+  headline: string;
+  total_usd: number;
+  /** True only when all member runs have complete configured GPU pricing. */
+  cost_complete?: boolean;
+}
+```
+
+Keep the merged `CostTotals.gpu_pricing_complete`, `LeaderboardRow.cost_complete`, repeat observations, evaluated population, score binding and metric-direction fields. `cost_complete` missing is unknown; it does not establish completeness or a zero cost. This optional frontend field mirrors the backend notice contract without changing existing leaderboard cost semantics.
+
 - [ ] **Step 4: Run the type checker to verify it passes**
 
 Run: `bun run typecheck`
@@ -1087,7 +1132,7 @@ git commit -m "feat(ui): phase 3 api models for auth, notebook, export, notify a
 **Interfaces:**
 - Consumes: Task 1 models; `ApiError`, `buildUrl`, `get`, `post`, `request`, `newCommandId` in `client.ts`.
 - Produces:
-  - Preserve the merged token provider's credential state, transitions and public helpers; add `PrincipalContext`, `usePrincipal`, `authOn` (scoped feature mode), and `isAdmin`. Do not replace its generation guards with a separate boolean store. Adapt the test-only lock/reset helpers below to the final reviewed exports before Round 5.
+  - Preserve the merged token provider's credential state, transitions and public helpers; add `PrincipalContext`, `usePrincipal`, `authOn` (scoped feature mode), and `isAdmin`. Do not replace its generation guards with a separate boolean store. Adapt the test-only lock/reset helpers below to the final reviewed exports before the current Claude-then-adversarial implementation gate.
   - Retain bearer selection, same-origin cookies, stale-response rejection, 401 lock/query/cursor cleanup, and 403/404 handling in all JSON and text requests. `requestText` must use that same transport; `exportQuery` joins list options. `/auth/me` 404 hides scoped features only. Reuse the baseline ticket endpoint and socket protocol helpers; do not add a second URL resolver.
   - `api.me(signal?)`, `api.wsTicket(signal?)`, `api.pair(body)`, `api.createPairing(body)`, `api.sessions(signal?)`, `api.revokeSession(id, opts?)`, `api.users(signal?)`, `api.disableUser(name, opts?)`, `api.notebookDays(project, signal?)`, `api.notebookDay(project, day, signal?)`, `api.appendNotebook(project, day, text, opts?)`, `api.saveNotebook(project, day, text, baseHash, opts?)` (PUT), `api.exportTask(project, task, opts, signal?) => Promise<string>`, `api.exportTaskUrl(project, task, opts) => string (URL construction only, never a remote download anchor)`, `api.notify(signal?)`, `api.testNotify(channel, opts?)`, `api.storage(query?, signal?)`, `api.planClean(policy, opts?)`, `api.applyClean(planId, confirmBytes, opts?)`. New writes send `{command_id, …fields}` and no `created_by`.
 
@@ -1313,8 +1358,12 @@ describe("phase 3 api", () => {
     expect(api.exportTaskUrl("toy-classifier", "toy-test", { format: "csv", digits: 2, baselines: false })).toBe(
       "/api/v1/tasks/toy-classifier/toy-test/export?format=csv&digits=2&baselines=false",
     );
+    expect(api.exportTaskUrl("toy-classifier", "toy-test", { format: "csv", primary: "loss/value", noise: "both" })).toBe(
+      "/api/v1/tasks/toy-classifier/toy-test/export?format=csv&primary=loss%2Fvalue&noise=both",
+    );
     expect(exportQuery({ format: "markdown", groups: ["g1", "g2"], top: 5 })).toEqual({
       format: "markdown",
+      primary: undefined,
       metrics: undefined,
       noise: undefined,
       digits: undefined,
@@ -1353,7 +1402,7 @@ describe("phase 3 api", () => {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `bun test test/api/phase3-client.test.ts test/api/types.test.ts`
-Expected: FAIL. The file does not load: `error: Cannot find module '../../src/api/auth'` (and `setup.ts` fails the same way for every test file until Step 4 creates `auth.ts`).
+Expected during authorized implementation: FAIL on the new Phase 3 exports/routes or shapes. The merged `auth.ts` already exists; retain it and its token tests. A missing baseline auth module is an integration error, not the intended red test.
 
 - [ ] **Step 3: Regenerate `types.ts` from a private authenticated hub with no hosts**
 
@@ -1542,7 +1591,7 @@ export function isAdmin(principal: Principal | null): boolean {
 
 - [ ] **Step 5: Extend the authenticated transport, routes and functions**
 
-Preserve the baseline request implementation and imports. Add text response support through its existing request path, including credential capture, bearer headers, cookie selection, stale-generation rejection, and current-generation 401 cleanup. Authentication errors must never return stale protected data. Keep 403/404 from locking a valid provider. Reuse the baseline ticket route/helper and `WsTicket` nullability; deduplicate the route and function if already present. Restore exact executable adapters against the merged files before formal Round 5.
+Preserve the baseline request implementation and imports. Add text response support through its existing request path, including credential capture, bearer headers, cookie selection, stale-generation rejection, and current-generation 401 cleanup. Authentication errors must never return stale protected data. Keep 403/404 from locking a valid provider. Reuse the baseline ticket route/helper and `WsTicket` nullability; deduplicate the route and function if already present. Restore exact executable adapters against the merged files before the current Claude-then-adversarial implementation gate.
 
 Replace
 
@@ -1612,6 +1661,7 @@ Add this pure export query mapper:
 export function exportQuery(opts: M.ExportOptions): Record<string, QueryValue> {
   return {
     format: opts.format,
+    primary: opts.primary,
     metrics: opts.metrics?.join(","),
     noise: opts.noise,
     digits: opts.digits,
@@ -1760,6 +1810,12 @@ function wrapper(client: QueryClient) {
 const fresh = () => new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
 describe("keys and lists", () => {
+  test("selected export metrics have distinct cache entries", () => {
+    const accuracy = queryKeys.exportText("p", "t", { format: "csv", primary: "accuracy/value" });
+    const loss = queryKeys.exportText("p", "t", { format: "csv", primary: "loss/value" });
+    expect(accuracy).not.toEqual(loss);
+    expect(loss).toEqual(["leaderboard", "p", "t", "export", { format: "csv", primary: "loss/value" }]);
+  });
   test("keys are hierarchical by family and project", () => {
     expect([
       queryKeys.me(),
@@ -1981,7 +2037,7 @@ export const useExportText = (project: string, task: string, opts: M.ExportOptio
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/api && bun run typecheck`
-Expected: `phase3-queries.test.tsx` 7 pass; `queries.test.tsx` (phase 1b/2) passes unchanged; `0 fail`; `tsc --noEmit` prints nothing.
+Expected: `phase3-queries.test.tsx` including distinct-primary cache coverage passes; `queries.test.tsx` (phase 1b/2) passes unchanged; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Commit (repo root)**
 
@@ -2106,7 +2162,7 @@ describe("phase 3 keys", () => {
 
 ```
 
-Add concrete transport regression tests against the final merged test fixtures before Round 5: head lookup completes before ticket mint; each reconnect uses a new ticket on a clean URL and fixed protocol; an old ticket result after stop/restart or credential replacement cannot open a socket; current 401/4401 clears queries and cursor then locks/stops; stale 401 cannot lock the replacement credential; 429/5xx/network ticket failures retry with bounded backoff and a fresh ticket; `/auth/me` 404 retains root protection; intentional no-auth uses the nullable-ticket contract. Keep the baseline event tests.
+Add concrete transport regression tests against the final merged test fixtures before the current Claude-then-adversarial implementation gate: head lookup completes before ticket mint; each reconnect uses a new ticket on a clean URL and fixed protocol; an old ticket result after stop/restart or credential replacement cannot open a socket; current 401/4401 clears queries and cursor then locks/stops; stale 401 cannot lock the replacement credential; 429/5xx/network ticket failures retry with bounded backoff and a fresh ticket; `/auth/me` 404 retains root protection; intentional no-auth uses the nullable-ticket contract. Keep the baseline event tests.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -2195,7 +2251,7 @@ export function clearNotebookEditors(): void {
 
 - [ ] **Step 4: Add event mappings to the merged authenticated event stream**
 
-Keep all baseline imports and transport/provider interfaces. Add `noteNotebookEditors` and the four new invalidation lists (`AUTH_EVENT_INVALIDATES`, `NOTEBOOK_INVALIDATES`, `NOTIFY_INVALIDATES`, `STORAGE_EVENT_INVALIDATES`) to the existing imports. Do not recreate the removed `resolveUrl`/query-ticket implementation. Exact transport adapters and regression tests are required against the merged token baseline before formal Round 5.
+Keep all baseline imports and transport/provider interfaces. Add `noteNotebookEditors` and the four new invalidation lists (`AUTH_EVENT_INVALIDATES`, `NOTEBOOK_INVALIDATES`, `NOTIFY_INVALIDATES`, `STORAGE_EVENT_INVALIDATES`) to the existing imports. Do not recreate the removed `resolveUrl`/query-ticket implementation. Exact transport adapters and regression tests are required against the merged token baseline before the current Claude-then-adversarial implementation gate.
 
 Replace
 
@@ -7933,7 +7989,7 @@ The Task page gets `export ▾` in the leaderboard panel's title (mockup `shot-t
 
 **Interfaces:**
 - Consumes: Task 3 `useExportText` through authenticated `api.exportTask`; `ErrorBox`, `Loading`.
-- Produces: `EXPORT_FORMATS` (`latex` LaTeX `tex`, `markdown` Markdown `md`, `csv` CSV `csv`); `NOISE_MODES`; `DIGITS` (0–6); `exportFilename(task, format)`; `previewLines(text, n = 6)`; `lineCount(text)`. `ExportMenu({ project, task })`: a button `export ▾` (`aria-expanded`); open, a `role="dialog"` `aria-label="Export"` popover with the format buttons (`aria-pressed`), `Digits` and `Noise` selects, a `Preview` of the first six lines, `N lines`, `Copy` (`Copied` after a write, `blocked` when the clipboard refuses; disabled while the preview still shows the previous options' text, `isPlaceholderData`) and the download button `↓ .tex` (a Blob of the authenticated current text, saved as `<task>.tex`; disabled on missing/placeholder/error data). Escape and a click outside close it; nothing is fetched while it is closed.
+- Produces: `EXPORT_FORMATS` (`latex` LaTeX `tex`, `markdown` Markdown `md`, `csv` CSV `csv`); `NOISE_MODES`; `DIGITS` (0–6); `exportFilename(task, format)`; `previewLines(text, n = 6)`; `lineCount(text)`. `ExportMenu({ project, task, primary? })`: a button `export ▾` (`aria-expanded`); open, a `role="dialog"` `aria-label="Export"` popover with the format buttons (`aria-pressed`), `Digits` and `Noise` selects, a `Preview` of the first six lines, `N lines`, `Copy` (`Copied` after a write, `blocked` when the clipboard refuses; disabled while the preview still shows the previous options' text, `isPlaceholderData`) and the download button `↓ .tex` (a Blob of the authenticated current text, saved as `<task>.tex`; disabled on missing/placeholder/error data). Escape and a click outside close it; nothing is fetched while it is closed.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -7941,6 +7997,7 @@ Create `ui/test/pages/exportMenu.test.tsx`:
 
 ```tsx
 import { afterEach, describe, expect, test } from "bun:test";
+import { useState } from "react";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { ExportMenu } from "../../src/pages/components/ExportMenu";
 import { exportFilename, lineCount, previewLines } from "../../src/pages/components/exportFormats";
@@ -7980,6 +8037,38 @@ describe("helpers", () => {
 });
 
 describe("ExportMenu", () => {
+  test("a primary change keeps old text uncopyable until the new metric resolves", async () => {
+    let release: () => void = () => {};
+    let requested = false;
+    mockApi({
+      [`GET ${BASE}?format=latex&primary=accuracy%2Fvalue&noise=both&digits=3`]: LATEX,
+      [`GET ${BASE}?format=latex&primary=loss%2Fvalue&noise=both&digits=3`]: async () => {
+        requested = true;
+        await new Promise<void>(done => { release = done; });
+        return "loss ↓ 0.1\n";
+      },
+    });
+    function MetricMenu() {
+      const [primary, setPrimary] = useState("accuracy/value");
+      return <><button type="button" onClick={() => setPrimary("loss/value")}>Select loss</button>
+        <ExportMenu project="toy-classifier" task="toy-test" primary={primary} /></>;
+    }
+    const written = mockClipboard();
+    renderWithClient(<MetricMenu />);
+    fireEvent.click(screen.getByRole("button", { name: "export ▾" }));
+    await waitFor(() => expect(screen.getByLabelText("Preview").textContent).toContain("accuracy"));
+    fireEvent.click(screen.getByRole("button", { name: "Select loss" }));
+    await waitFor(() => expect(requested).toBe(true));
+    expect((screen.getByRole("button", { name: "Copy" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "↓ .tex" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    expect(written).toEqual([]);
+    release();
+    await waitFor(() => expect(screen.getByLabelText("Preview").textContent).toBe("loss ↓ 0.1\n"));
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    await waitFor(() => expect(written).toEqual(["loss ↓ 0.1\n"]));
+  });
+
   test("closed: nothing fetched; open: a LaTeX preview with digits 3 and noise both", async () => {
     const calls = mockApi({ [`GET ${BASE}?format=latex&noise=both&digits=3`]: LATEX });
     renderWithClient(<ExportMenu project="toy-classifier" task="toy-test" />);
@@ -8163,16 +8252,18 @@ type CopyState = "idle" | "copied" | "failed";
 export interface ExportMenuProps {
   project: string;
   task: string;
+  /** Resolved selected board metric; omitted only by standalone/default callers. */
+  primary?: string;
 }
 
-export function ExportMenu({ project, task }: ExportMenuProps) {
+export function ExportMenu({ project, task, primary }: ExportMenuProps) {
   const [open, setOpen] = useState(false);
   const [format, setFormat] = useState<ExportFormat>("latex");
   const [digits, setDigits] = useState(3);
   const [noise, setNoise] = useState<NoiseMode>("both");
   const [copy, setCopy] = useState<CopyState>("idle");
   const box = useRef<HTMLSpanElement>(null);
-  const opts: ExportOptions = { format, noise, digits };
+  const opts: ExportOptions = { format, primary, noise, digits };
   const text = useExportText(project, task, opts, open);
   // keepPreviousData shows the last format while the new one loads; that text must
   // never be copied as if it were the format now selected
@@ -8292,7 +8383,7 @@ export function ExportMenu({ project, task }: ExportMenuProps) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/pages/exportMenu.test.tsx && bun run typecheck`
-Expected: 6 pass, `0 fail`; `tsc --noEmit` prints nothing.
+Expected: all export-menu tests, including the selected-primary race, pass; `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Commit (repo root)**
 
@@ -8868,7 +8959,7 @@ test("the Task page: export in the leaderboard's title, baselines in its meta", 
     [`GET ${BASE}/views/overview`]: doc,
     [`POST ${BASE}/views/query`]: panels,
     "GET /api/v1/projects/toy-classifier/sweeps": [],
-    [`GET ${BASE}/export?format=latex&noise=both&digits=3`]: "% requires \\usepackage{booktabs}\n",
+    [`GET ${BASE}/export?format=latex&primary=accuracy%2Fvalue&noise=both&digits=3`]: "% requires \\usepackage{booktabs}\n",
   });
   const registry = {
     ...fakeRegistry(["stat_strip"]),
@@ -8925,19 +9016,19 @@ import { type ComponentType, type ReactNode, createContext, useContext } from "r
 replace
 
 ```tsx
-export interface PanelGridProps {
+export interface PanelGridProps extends PanelContextProps {
   results: PanelResult[];
   specs?: PanelSpec[];
   startIndex?: number;
 }
 
-export function PanelGrid({ results, specs, startIndex = 0 }: PanelGridProps) {
+export function PanelGrid({ results, specs, startIndex = 0, ...context }: PanelGridProps) {
 ```
 
 with
 
 ```tsx
-export interface PanelGridProps {
+export interface PanelGridProps extends PanelContextProps {
   results: PanelResult[];
   specs?: PanelSpec[];
   startIndex?: number;
@@ -8945,7 +9036,7 @@ export interface PanelGridProps {
   aside?: (result: PanelResult, index: number) => ReactNode;
 }
 
-export function PanelGrid({ results, specs, startIndex = 0, aside }: PanelGridProps) {
+export function PanelGrid({ results, specs, startIndex = 0, aside, ...context }: PanelGridProps) {
 ```
 
 and replace
@@ -8997,7 +9088,7 @@ import { PanelGrid } from "./components/PanelGrid";
 and replace
 
 ```tsx
-        <PanelGrid results={panels.data.panels} specs={detail.data?.view.panels} />
+        <PanelGrid results={panels.data.panels} specs={customized ? effectiveView?.panels : detail.data?.view.panels} />
 ```
 
 with
@@ -9005,15 +9096,21 @@ with
 ```tsx
         <PanelGrid
           results={withBaselines(panels.data.panels, board.data)}
-          specs={detail.data?.view.panels}
-          aside={(result) => (result.type === "leaderboard" ? <ExportMenu project={project} task={task} /> : null)}
+          specs={customized ? effectiveView?.panels : detail.data?.view.panels}
+          aside={(result) => (result.type === "leaderboard" && board.data && !board.isError ? <ExportMenu project={project} task={task} primary={board.data.primary} /> : null)}
         />
 ```
+
+Preserve `PanelContextProps`, `PanelComponent`, `PanelBody({result, ...context})` and `<PanelBody result={result} {...context} />`; the new aside must not consume or discard `selectedItemId`, `currentGroupId` or `runStatus`. Add a fake-registry test receiving all three props while an aside is present. Preserve Task's `customized`/`effectiveView` selection, Metric and Seeds controls, bound comparison, selected-run navigation, Agent Iteration Flips, raw samples, training panes, loading/error behavior and selected-board template environment. Baselines only extend `meta`; all other result fields survive.
+
+Add Task integration regressions (using the existing `Task.test.tsx` selected-metric fixtures): select a lower-is-better metric, toggle Seeds, and open export. Assert both the view-query body and export URL use the resolved selected metric, seed display customization is retained, and the existing strict comparison request still carries `require_bound`. Change the metric while the menu is open and delay its board response: the export control is absent until that selected board loads. Then reopen the menu and assert its export request/preview use the new metric. Separately, the prop-switch regression in Task 21 keeps the menu mounted with delayed export text and verifies stale Copy/Download blocking. Assert a selected board error/loading state offers no export of the default board. Preserve the existing tests rather than replacing the Task fixture with a simplified implementation.
+
+`primary` is task-export-only (contract section 3). Omitting it retains the backend configured default for standalone `ExportMenu` callers. The Task page always supplies the resolved `board.data.primary`; backend validation, ranking direction, baselines and uncertainty use that metric. `GET /compare/export` rejects a supplied primary and has no frontend function here. `queryKeys.exportText` retains the whole options object, including primary, and run/mirror invalidation still reaches every metric's export.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/pages && bun run typecheck`
-Expected: `taskExport.test.tsx` 3 pass; `Task.test.tsx` and `panelGrid.test.tsx` pass unchanged (their leaderboard panels get `baselines: []`, which the fake registry ignores; a panel without warnings and without an aside still has no aside); `0 fail`; `tsc --noEmit` prints nothing.
+Expected: task export, selected-primary/seed and panel-context integration tests pass; existing `Task.test.tsx` and `panelGrid.test.tsx` regressions pass (panels without warnings or controls still have no aside); `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Commit (repo root)**
 
@@ -9024,11 +9121,14 @@ git commit -m "feat(ui): task page export menu and baselines on the leaderboard 
 
 ---
 
-### Task 24: Cleaned artifacts on the Run page
+### Task 24: Cleaned artifacts in Run, selected-run and Task checkpoint views
 
 **Files:**
 - Modify: `ui/src/pages/components/WhereList.tsx` (imports; `WhereRow.cleaned`; `buildWhere`; `WhereList` rows; a scoped style)
 - Create: `ui/test/pages/whereCleaned.test.tsx`
+- Modify: `ui/src/pages/components/TrainingDetails.tsx` (cleanup metadata on recorded checkpoints; bounded shared detail queries)
+- Modify: `ui/src/pages/Run.tsx`, `ui/src/pages/components/SelectedRun.tsx` (pass already-loaded cleanup metadata)
+- Modify: `ui/test/pages/trainingDetails.test.tsx`, `ui/test/pages/Run.test.tsx`, `ui/test/pages/selectedRun.test.tsx` (all checkpoint surfaces and live refresh)
 
 **Interfaces:**
 - Consumes: Task 1 `RunDetail.cleaned`, `CleanedArtifact`; `fmtBytes`, `fmtDate`.
@@ -9245,15 +9345,138 @@ with
                 ))}
 ```
 
+Extend the existing checkpoint surface without replacing `TrainingRunsPage`, evaluated-score selection, history-name discovery/chunking, bounded pagination or run-link behavior. In `ui/src/pages/components/TrainingDetails.tsx`, add `CleanedArtifact` to its existing models type import and import `cleanedText` from `./WhereList`. Replace:
+
+```tsx
+/** Render exactly the metrics recorded on checkpoints, including zero and absent fields. */
+export function CheckpointTable({ artifacts }: { artifacts: readonly Artifact[] }) {
+  const checkpoints = artifacts.filter(artifact => artifact.kind === "checkpoint");
+  const names = [...new Set(checkpoints.flatMap(artifact => Object.keys(artifact.metrics)))].sort();
+  if (!checkpoints.length) return <p className="small">No checkpoints recorded.</p>;
+  return <div style={{ overflowX: "auto" }}>
+    <table className="sw-runs" aria-label="Checkpoint metrics">
+      <thead><tr><th scope="col">Step</th><th scope="col">Path</th>{names.map(name => <th scope="col" key={name}>{name}</th>)}</tr></thead>
+      <tbody>{checkpoints.map((artifact, index) => <tr key={`${artifact.host}:${artifact.path}:${index}`}>
+        <td>{numberText(artifact.step)}</td>
+        <td style={{ overflowWrap: "anywhere" }}>{artifact.host ? `${artifact.host}:` : ""}{artifact.path}</td>
+        {names.map(name => <td key={name}>{numberText(artifact.metrics[name])}</td>)}
+      </tr>)}</tbody>
+    </table>
+    <p className="small">Recorded checkpoint metrics; val/* are validation measurements. Run-level evaluated scores are shown separately.</p>
+  </div>;
+}
+```
+
+with:
+
+```tsx
+/** Render recorded checkpoint metrics and their separately reported cleanup state. */
+export function CheckpointTable({ artifacts, cleaned, cleanupStatus }: {
+  artifacts: readonly Artifact[];
+  cleaned?: readonly CleanedArtifact[];
+  cleanupStatus?: "loading" | "unavailable";
+}) {
+  const checkpoints = artifacts.filter(artifact => artifact.kind === "checkpoint");
+  const names = [...new Set(checkpoints.flatMap(artifact => Object.keys(artifact.metrics)))].sort();
+  const removed = new Map((cleaned ?? []).map(item => [item.path, item]));
+  if (!checkpoints.length) return <p className="small">No checkpoints recorded.</p>;
+  return <div style={{ overflowX: "auto" }}>
+    {cleanupStatus ? <p className="small" role={cleanupStatus === "unavailable" ? "alert" : "status"}>
+      {cleanupStatus === "loading" ? "Loading cleanup status…" : "Cleanup status unavailable."}
+    </p> : null}
+    <table className="sw-runs" aria-label="Checkpoint metrics">
+      <thead><tr><th scope="col">Step</th><th scope="col">Path</th>{names.map(name => <th scope="col" key={name}>{name}</th>)}<th scope="col">Cleanup</th></tr></thead>
+      <tbody>{checkpoints.map((artifact, index) => {
+        const gone = removed.get(artifact.path);
+        const path = `${artifact.host ? `${artifact.host}:` : ""}${artifact.path}`;
+        return <tr key={`${artifact.host}:${artifact.path}:${index}`}>
+          <td>{numberText(artifact.step)}</td>
+          <td style={{ overflowWrap: "anywhere" }}>{gone ? <del>{path}</del> : path}</td>
+          {names.map(name => <td key={name}>{numberText(artifact.metrics[name])}</td>)}
+          <td title={gone ? `cleaned by ${gone.actor}, plan ${gone.plan_id}` : "No cleanup record is not proof that the file exists"}>
+            {gone ? cleanedText(gone) : cleanupStatus === "loading" ? "·" : cleanupStatus === "unavailable" ? "unavailable" : DASH}
+          </td>
+        </tr>;
+      })}</tbody>
+    </table>
+    <p className="small">Recorded checkpoint metrics; val/* are validation measurements. Run-level evaluated scores are shown separately. Cleanup annotations describe file removal; recorded metrics remain historical evidence.</p>
+  </div>;
+}
+```
+
+In the same file replace:
+
+```tsx
+/** Task checkpoints, paged by run; no history or individual run-detail requests. */
+export function TrainingCheckpoints(props: TrainingProps) {
+  return <TrainingCheckpointPage key={JSON.stringify([props.project, props.task])} {...props} />;
+}
+
+function TrainingCheckpointPage({ project, task, onSelectRun }: TrainingProps) {
+  const state = useTrainingPage(project, task);
+  if (state.query.isPending) return <p role="status" className="small">Loading checkpoints…</p>;
+  if (state.query.isError) return <div><p role="alert">Could not load checkpoints: {state.query.error.message}</p><Pager state={state} /></div>;
+  return <div>
+    {!state.runs.length ? <p className="small">No training runs recorded.</p> : state.runs.map(run => <section key={run.run_id} style={{ marginBottom: 16 }}>
+      <h3><RunLink run={run} onSelectRun={onSelectRun} /></h3>
+      <CheckpointTable artifacts={run.artifacts} />
+    </section>)}
+    <Pager state={state} />
+  </div>;
+}
+```
+
+with:
+
+```tsx
+/** Task checkpoints, with shared run-detail cleanup metadata for at most twenty visible runs. */
+export function TrainingCheckpoints(props: TrainingProps) {
+  return <TrainingCheckpointPage key={JSON.stringify([props.project, props.task])} {...props} />;
+}
+
+function TrainingCheckpointPage({ project, task, onSelectRun }: TrainingProps) {
+  const state = useTrainingPage(project, task);
+  const details = useQueries({ queries: state.runs.map(run => ({
+    queryKey: queryKeys.run(run.run_id),
+    queryFn: ({ signal }: { signal: AbortSignal }) => api.run(run.run_id, signal),
+    enabled: run.artifacts.some(artifact => artifact.kind === "checkpoint"),
+  })) });
+  if (state.query.isPending) return <p role="status" className="small">Loading checkpoints…</p>;
+  if (state.query.isError) return <div><p role="alert">Could not load checkpoints: {state.query.error.message}</p><Pager state={state} /></div>;
+  return <div>
+    {!state.runs.length ? <p className="small">No training runs recorded.</p> : state.runs.map((run, index) => {
+      const detail = details[index];
+      return <section key={run.run_id} style={{ marginBottom: 16 }}>
+        <h3><RunLink run={run} onSelectRun={onSelectRun} /></h3>
+        <CheckpointTable artifacts={run.artifacts} cleaned={detail?.data?.cleaned}
+          cleanupStatus={detail?.isError ? "unavailable" : detail?.isPending ? "loading" : undefined} />
+      </section>;
+    })}
+    <Pager state={state} />
+  </div>;
+}
+```
+
+The detail queries reuse `queryKeys.run` and `api.run`, deduplicating with SelectedRun and TrainingRuns. Only visible checkpoint-bearing runs are enabled (at most twenty); the extra pagination sentinel is never requested, and there is no history request for cleanup. `run.artifacts_cleaned` and `storage.cleaned` invalidate these same run keys. Pending/error metadata must not be represented as proof of file availability. Existing positive cleanup records remain visible during a failed refresh. An older hub omitting `cleaned` has no cleanup annotation, and is never labelled as confirmed available.
+
+In `ui/src/pages/Run.tsx`, replace the single `<CheckpointTable artifacts={record.artifacts} />` with `<CheckpointTable artifacts={record.artifacts} cleaned={detail.cleaned} />`. In `ui/src/pages/components/SelectedRun.tsx`, replace the same single call with `<CheckpointTable artifacts={record.artifacts} cleaned={run.data.cleaned} />`. Both already hold that detail; do not add fetches there. Keep historical checkpoint step and metrics, including zero and missing values, after removal. The training-runs best-checkpoint-step remains a recorded validation statistic; it is not a file-availability claim.
+
+Add these regressions to the existing page test files during implementation:
+
+- `trainingDetails.test.tsx`: a checkpoint at step 0 with val/top1 0 and another missing value; matching cleanup strikes only the exact path, retains host/step/all recorded metric cells, and shows date/bytes/actor/plan. An unrelated cleanup path must not add a fabricated checkpoint row. An omitted `cleaned` array preserves historical rendering.
+- Update `checkpoint pages have bounded listing and preserve each run's attribution` to mock `detailRoutes(records)` and assert twenty detail calls for the first visible page, none for its sentinel, then only the next visible checkpoint run. Replace only its obsolete two-total-calls/no-details assertion. Preserve the two paginated list calls, run attribution, previous/next behavior, empty states and modifier navigation; no history endpoint may be called.
+- Pending and failed detail requests retain recorded metrics and explicitly show loading/unavailable cleanup status. A no-checkpoint run causes no detail request. Mounting SelectedRun for an already-fetched checkpoint run shares its query cache. Invalidate its run key after a mocked cleanup event and assert the newly struck path without losing selection or metrics; error after a previously successful cleanup response retains the known removal.
+- `Run.test.tsx` and `selectedRun.test.tsx`: mount a training run with the same cleaned artifact and assert both Where and Checkpoint metrics mark the path removed, with no file copy/open action for that path. Their historical evaluation-score cells are unchanged. Keep selected-run focus restoration, close and full-run navigation.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test test/pages && bun run typecheck`
-Expected: `whereCleaned.test.tsx` 3 pass; `whereList.test.tsx`, `Run.test.tsx` and `RunRemote.test.tsx` pass unchanged (no `cleaned` in their details); `0 fail`; `tsc --noEmit` prints nothing.
+Expected during implementation: Where cleanup tests and the new TrainingDetails/Run/SelectedRun cleanup regressions pass; existing WhereList, RunRemote, selected-run, metric/seed, strict comparison, TaskInsights and training-history regression coverage remains green. Only the explicitly changed checkpoint detail-request contract updates its old assertion. `0 fail`; `tsc --noEmit` prints nothing.
 
 - [ ] **Step 5: Commit (repo root)**
 
 ```bash
-git add ui/src/pages/components/WhereList.tsx ui/test/pages/whereCleaned.test.tsx
+git add ui/src/pages/components/WhereList.tsx ui/src/pages/components/TrainingDetails.tsx ui/src/pages/Run.tsx ui/src/pages/components/SelectedRun.tsx ui/test/pages/whereCleaned.test.tsx ui/test/pages/trainingDetails.test.tsx ui/test/pages/Run.test.tsx ui/test/pages/selectedRun.test.tsx
 git commit -m "feat(ui): run page strikes through artifacts a storage cleanup deleted"
 ```
 
@@ -10046,4 +10269,4 @@ All automated:
 - The export endpoint returns text. `ExportMenu` previews/copies/downloads that text without interpreting metric values; no `ExportTable` browser schema is introduced. Backend Tasks 10 and 12 add mixed-unit/primary-swap regressions and name scaled columns in the footnote. Existing frontend exact-text copy/download tests remain applicable.
 - MCP cookie fallback is resolved in server middleware; private authenticated-credential state is never a frontend model or response field. Deferred sweep triggers likewise remain server-private; existing notification status/events continue to drive the UI after issuance ends.
 
-This historical round-4 handoff is superseded by the final baseline refresh against merged main `54259b0fbfff70b20f612e3e508da37d65efeff5`, including step 9 and the authenticated bootstrap/event interfaces above. During authorized Phase 3 implementation, regenerate OpenAPI types from the assembled backend so the admin-only env preflight appears in the schema. Recheck source anchors if main changes after this review pin; no assembled Phase 3 backend or generated types are claimed here.
+This historical round-4 handoff is superseded by the final baseline refresh against merged main `a4441256f39d014d9ad43dea976af1b448f163e3`, including step 9 and the authenticated bootstrap/event interfaces above. During authorized Phase 3 implementation, regenerate OpenAPI types from the assembled backend so the admin-only env preflight appears in the schema. Recheck source anchors if main changes after this review pin; no assembled Phase 3 backend or generated types are claimed here.

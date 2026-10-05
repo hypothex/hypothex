@@ -69,6 +69,8 @@ function Side({ tag, detail, label, metric }: SideProps) {
               {record.created_by}
             </span>
             <AppLink href={hrefs.run(record.run_id)}>{record.run_id}</AppLink>
+            <span title={record.git.commit ?? "No recorded commit"}>{record.git.commit?.slice(0, 7) ?? "no commit"}{record.git.dirty ? ` · dirty${record.git.diff_hash ? ` · patch ${record.git.diff_hash}` : ""}` : " · clean"}</span>
+            {detail.paths.diff ? <code title="Recorded patch path">{detail.paths.diff}</code> : null}
           </div>
         </div>
         {value !== null && metric ? (

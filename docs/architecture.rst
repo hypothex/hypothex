@@ -90,15 +90,27 @@ Event log and replay
 ---------------------
 
 Each environment (a host running ``hx serve``) keeps an append-only event log with
-a monotonically increasing ``sequence``: ``run.created``, ``run.started``,
-``run.log_chunk``, ``run.metric``, ``run.score_added``, ``run.finished``,
-``run.failed``, ``run.killed``, ``run.lost``, and so on. Run folders are the
-result of applying these events; the event log is the ordered change feed that
-streaming and replay use.
+a monotonically increasing ``sequence``. Current event types include:
 
-Phase 1a simplification: every state change is written synchronously, under the
-per-run file lock, in the order run folder -> event -> index. A reactor model can
-replace this later without changing the file layout or the event schema.
+- Lifecycle: ``run.created``, ``run.launched``, ``run.started``, ``run.finished``,
+  ``run.failed``, ``run.killed``, ``run.lost``.
+- Queue and GPU allocation: ``run.enqueued``, ``run.queue_moved``,
+  ``run.gpus_assigned``, ``run.gpus_released``.
+- SLURM: ``run.submitting``, ``run.submitted``, ``run.submit_unknown``,
+  ``run.slurm_state``.
+- Scores and annotations: ``run.score_added``, ``run.eval_skipped``,
+  ``run.warning``, ``run.note_added``, ``run.tagged``, ``run.starred``,
+  ``run.archived``.
+- Remote state: ``host.state``, ``mirror.run_updated``.
+- Durable sweep issuance: ``sweep.issuance``, including progress before any member
+  run exists. The issuance state and its accepted receipt commit atomically with
+  the event in ``events.db``; this is separate from run-folder lifecycle writes.
+
+Logs and metric points are read through ``/api/v1/runs/{id}/logs`` and
+``/api/v1/runs/{id}/metrics``; there are no ``run.log_chunk`` or ``run.metric``
+events. Run folders remain the source of truth. State changes are written
+synchronously under the per-run file lock in the order run folder -> event ->
+index; the event log is the ordered change feed used for streaming and replay.
 
 Clients subscribe with ``after_sequence=<last seen>``: the server replays missed
 events, then streams live ones, and the client drops anything it has already
@@ -174,15 +186,16 @@ loopback. See :doc:`security` for public-route and credential boundaries.
 
    curl -H 'Host: attacker.example' http://127.0.0.1:7777/api/v1/runs   # 400
 
-Phase 2
--------
+Remote environments
+-------------------
 
-Phase 1a runs everything on one machine. Phase 2 adds env servers per machine
-(SSH boxes, SLURM login nodes) alongside the hub: each environment owns its own
+Env servers run per machine (SSH boxes, SLURM login nodes) alongside the hub.
+Each environment owns its own
 runs, event log, and supervisors, so a run keeps going and keeps being recorded
 even if the hub machine sleeps or the network drops. The hub reaches an
 environment over SSH tunnels or a direct URL, but the environment's identity
 (``environment_id``) is stable regardless of the route.
+See :doc:`remote` for setup, lifecycle and ownership rules.
 
 Seed identity and repeated runs
 -------------------------------

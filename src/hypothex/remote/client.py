@@ -61,7 +61,30 @@ class EnvRequestError(HypothexError):
 
 
 class EnvUnreachableError(EnvRequestError):
-    """The env server could not be reached, timed out, or dropped the connection."""
+    """
+    The env server could not be reached, timed out, or dropped the connection.
+
+    Parameters
+    ----------
+    message : str
+        Bounded transport diagnostic.
+    status_code, error_type : optional
+        Existing request-error metadata.
+    may_have_been_sent : bool
+        Conservative outcome flag. False only for a failure known to precede
+        sending the HTTP request; never infer this from error text or elapsed time.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_type: str | None = None,
+        may_have_been_sent: bool = True,
+    ) -> None:
+        super().__init__(message, status_code=status_code, error_type=error_type)
+        self.may_have_been_sent = may_have_been_sent
 
 
 def _error_from(resp: httpx.Response, what: str, token: str | None = None) -> EnvRequestError:
@@ -282,7 +305,12 @@ class EnvClient:
 
     def _unreachable(self, exc: Exception) -> EnvUnreachableError:
         reason = type(exc).__name__
-        return EnvUnreachableError(f"cannot reach {self.base_url}: {reason}")
+        return EnvUnreachableError(
+            f"cannot reach {self.base_url}: {reason}",
+            may_have_been_sent=not isinstance(
+                exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+            ),
+        )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         """Send one request and return its decoded JSON body."""
@@ -450,6 +478,7 @@ class EnvClient:
         *,
         max_bytes: int,
         tail: bool = False,
+        require_complete: bool = False,
     ) -> bool:
         """
         Copy one run file (or every file of a run folder) to ``dest``.
@@ -472,12 +501,17 @@ class EnvClient:
         tail : bool
             For a file over ``max_bytes``, copy its last ``max_bytes`` bytes instead
             of skipping it (for log tails).
+        require_complete : bool
+            Require every listed descendant to transfer successfully. False keeps
+            best-effort mirror behavior; True is for explicitly requested artifacts
+            whose caller stages the entire folder before installing it.
 
         Returns
         -------
         bool
             ``False`` when skipped: missing, or over ``max_bytes`` without ``tail``.
             ``True`` when the file, or the folder listing, was fetched.
+            With ``require_complete``, False also means a descendant was skipped.
 
         Raises
         ------
@@ -517,13 +551,31 @@ class EnvClient:
                 f"{dest} is a file; cannot fetch folder {rel_path!r} of run {run_id} into it"
             )
         base = PurePosixPath(rel_path)
+        if require_complete:
+            dest.mkdir(parents=True, exist_ok=True)
         for entry in listing:
             parts = _local_parts(entry.path, base)
-            if parts is None or (entry.size > max_bytes and not tail):
+            if parts is None or entry.size < 0:
+                if require_complete:
+                    raise EnvRequestError(
+                        f"invalid folder listing for {rel_path!r}: unsafe path or size",
+                        status_code=502,
+                    )
                 continue
-            self.fetch_file(
-                run_id, entry.path, dest.joinpath(*parts), max_bytes=max_bytes, tail=tail
+            if entry.size > max_bytes and not tail:
+                if require_complete:
+                    return False
+                continue
+            fetched = self.fetch_file(
+                run_id,
+                entry.path,
+                dest.joinpath(*parts),
+                max_bytes=max_bytes,
+                tail=tail,
+                require_complete=require_complete,
             )
+            if require_complete and not fetched:
+                return False
         return True
 
     @staticmethod

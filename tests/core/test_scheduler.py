@@ -1091,6 +1091,7 @@ def test_unstarted_failures_clear_the_gpus_they_never_used(
     failed = ctx.find_record(rid)
     assert failed.status == RunStatus.FAILED
     assert failed.executor.gpus == [] and failed.executor.queue_position is None
+    assert failed.end_reason == "could not start the supervisor: [Errno 28] No space left on device"
     monkeypatch.setattr(execution, "atomic_write_text", real_write)
 
     def broken(c: Context, r: RunRecord) -> int:
@@ -1124,6 +1125,7 @@ def test_any_enqueue_error_fails_the_queued_run(
     assert ctx.find_record(run_id).status == RunStatus.FAILED
     reasons = [e.payload["reason"] for e in ctx.events.since(0) if e.type == "run.failed"]
     assert str(error) in reasons[0]
+    assert ctx.find_record(run_id).end_reason == reasons[0]
 
 
 def test_ticks_scan_only_active_runs_after_the_first(
@@ -1175,3 +1177,31 @@ def test_a_worktree_with_run_outputs_is_kept(ctx: Context, toy_repo: Path) -> No
     assert execute_run(ctx, rec.run_id).status == RunStatus.FINISHED
     assert (Path(rec.cwd) / "ckpt" / "last.pt").read_text() == "weights"
     assert worktrees(ctx) == [Path(rec.cwd)]
+
+
+def test_scheduler_spawn_failure_preserves_winning_end_without_false_event(
+    ctx: Context,
+    toy_repo: Path,
+    gpus: SetGpus,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hypothex.core import scheduler
+
+    gpus([{"index": 0}])
+    run_id = queue_run(ctx, toy_repo, 1)
+
+    def failed_after_terminal(_ctx: Context, record: RunRecord) -> int:
+        ctx.update_run(
+            record.run_id,
+            "run.lost",
+            lambda r: r.model_copy(
+                update={"status": RunStatus.LOST, "end_reason": "winning evidence"}
+            ),
+        )
+        raise OSError("spawn refused")
+
+    monkeypatch.setattr(scheduler, "spawn_supervisor", failed_after_terminal)
+    assert Scheduler(ctx).tick() == []
+    done = ctx.find_record(run_id)
+    assert done.status == RunStatus.LOST and done.end_reason == "winning evidence"
+    assert "run.failed" not in [e.type for e in ctx.events.since(0)]

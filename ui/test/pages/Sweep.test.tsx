@@ -233,3 +233,12 @@ describe("SweepPage", () => {
     }
   });
 });
+
+test("zero-member issuance failure displays the recorded cause and resume guidance", async () => {
+  const summary = { ...makeSummary(), counts: { total: 0 }, run_ids: [], cells: [], best: null, issuance: { state: "incomplete" as const, episode: 1, revision: 3, planned: 8, accepted_at: "now", updated_at: "now", cancel_requested: false, reason: "launch_failed" as const, error: { type: "HostUnavailableError", message: "gpu1 disconnected" }, resume: { seeds: [1, 2], message: "Reconnect gpu1, then resume" } } };
+  mockApi(routes(summary, []));
+  renderPage();
+  expect(await screen.findByText("Issuance incomplete · 0 observed / 8 planned")).toBeTruthy();
+  expect(screen.getByRole("alert").textContent).toBe("HostUnavailableError: gpu1 disconnected");
+  expect(screen.getByRole("button", { name: "Resume" }).title).toBe("Reconnect gpu1, then resume");
+});

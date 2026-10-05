@@ -531,11 +531,12 @@ def task_headline(
         ``generic``/``training``/``agent_eval``: ``"SVM +0.037 over rf, p = 0.15"``;
         ``system_bench``: ``"<best> p95 −30% vs baseline [−34, −24]"``;
         ``agent_iteration``: ``"v9 0.663, +0.263 over v1 [0.206, 0.321]"``;
+        ``"N need re-eval"`` for an unscored re-evaluation backlog, otherwise
         ``"No scored runs yet"`` without scored rows.
     """
     rows = _scored(board)
     if not rows:
-        return NO_RUNS
+        return f"{len(board.needs_reeval)} need re-eval" if board.needs_reeval else NO_RUNS
     best = rows[0]
     ref = _find(rows, reference)
     if board.kind == "system_bench":

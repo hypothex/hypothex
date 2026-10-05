@@ -215,3 +215,14 @@ describe("costShown", () => {
     });
   });
 });
+
+test("a stale host-list match cannot override authoritative unserved status", () => {
+  const detail = remoteDetail(queuedRecord());
+  expect(runHostRow({ ...detail, served: false }, HOSTS)).toBeNull();
+});
+
+test("persisted lost reason survives reload and wins over stale event", () => {
+  const reason = lostReason(makeRecord({ end_reason: "NODE_FAIL" }), "old reason");
+  expect(reason.parts[0]).toBe("NODE_FAIL");
+  expect(reason.tooltip).toContain("record");
+});

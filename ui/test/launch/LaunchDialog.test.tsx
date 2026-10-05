@@ -773,3 +773,66 @@ describe("Launch", () => {
     expect(onClose).toHaveBeenCalledTimes(3);
   });
 });
+
+test("a disconnected template host stays selected with its requested GPUs", async () => {
+  mockApi(HOSTS);
+  renderDialog({ templateEnvironment: DGX.state.environment_id!, initial: { command: CMD, seeds: "4", gpus: 2 } });
+  await ready("dgx");
+  expect(screen.getByLabelText("GPUs per run").textContent).toBe("2");
+  expect(radio("local").checked).toBe(false);
+  typeHypothesis("repeat");
+  expect(launchButton(1).disabled).toBe(true);
+});
+
+test("an unknown template environment requires a deliberate host choice", async () => {
+  mockApi(HOSTS);
+  renderDialog({ templateEnvironment: "removed-env", initial: { command: CMD, seeds: "4", gpus: 2 } });
+  await screen.findByText(/Template environment removed-env has no configured host/);
+  expect(screen.getAllByRole("radio").some((r) => (r as HTMLInputElement).checked)).toBe(false);
+  fireEvent.click(radio("gpu1"));
+  expect(radio("gpu1").checked).toBe(true);
+});
+
+test("SLURM configured default reaches the form and payload and refetch preserves edits", async () => {
+  const defaults = { partition: "gpu", account: null, time: "08:00:00", gpus: 2, extra: [] };
+  const slurm = { ...MCCLEARY, slurm: { pending: 0, running: 0, defaults } };
+  const calls = mockApi({ ...HOSTS, "GET /api/v1/hosts": [slurm], "POST /api/v1/hosts/mccleary/runs": rec(4) });
+  const { client } = renderWithClient(<LaunchDialog project={PROJECT} task={TASK} repo={REPO_PATH} initial={{ host: "mccleary", command: CMD, seeds: "4" }} onClose={() => {}} onLaunched={() => {}} />);
+  await ready("mccleary");
+  expect(screen.getByLabelText("GPUs per job").textContent).toBe("2");
+  fireEvent.click(screen.getByRole("button", { name: "More GPUs per job" }));
+  await client.invalidateQueries({ queryKey: ["hosts"] });
+  expect(screen.getByLabelText("GPUs per job").textContent).toBe("3");
+  typeHypothesis("configured default");
+  fireEvent.click(launchButton(1));
+  await waitFor(() => expect(posts(calls)).toHaveLength(1));
+  expect(posts(calls)[0]?.body).toMatchObject({ gpus: 3, slurm: { gpus: 3 } });
+});
+
+test("preview fills carried vars while conflicting params and unknown slots stay out", async () => {
+  mockApi(HOSTS);
+  renderDialog({ initial: { command: "python {config} {unknown} --seed={seed}", seeds: "4" }, carry: { params: { config: "wrong" }, vars: { config: "a b.yaml" } } });
+  await ready();
+  const preview = screen.getByLabelText("Preview");
+  expect(preview.textContent).toContain("'a b.yaml' {unknown} --seed=4");
+  expect(preview.textContent).not.toContain("wrong");
+});
+
+test("preview substitutes original seed slots only, leaving seed text inside vars literal", async () => {
+  mockApi(HOSTS);
+  renderDialog({ initial: { command: "python {config} --seed={seed}", seeds: "9" }, carry: { params: {}, vars: { config: "models/{seed}/config.json" } } });
+  await ready();
+  const preview = screen.getByLabelText("Preview");
+  expect(preview.textContent).toContain("models/{seed}/config.json --seed=9");
+  expect(Array.from(preview.querySelectorAll("b.tok"), (node) => node.textContent)).toEqual(["9"]);
+});
+
+test("an oversized template GPU request is retained but cannot launch even with Queue", async () => {
+  mockApi(HOSTS);
+  renderDialog({ initial: { host: "gpu1", command: CMD, seeds: "4", gpus: 99 } });
+  await ready("gpu1");
+  expect(screen.getByLabelText("GPUs per run").textContent).toBe("99");
+  typeHypothesis("repeat oversized request");
+  expect(launchButton(1).disabled).toBe(true);
+  expect(launchButton(1).getAttribute("title")).toContain("99 GPUs requested; gpu1 has");
+});

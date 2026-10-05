@@ -113,11 +113,17 @@ tasks:
 stages:                         # command templates; {vars} are filled by hx
   train: python -m deepretro.train --config {config} --out {run_dir}/artifacts
   infer: python -m deepretro.infer --ckpt {checkpoint} --data {dataset.path} --out {run_dir}/predictions
-  eval:  hx eval --run {run_id}   # default: built-in metric runner
 
 env:
-  setup: uv sync                # optional, run before stages on a fresh host
+  python: [uv, run, python]     # metric functions and environment capture
+  setup: uv sync               # accepted metadata; not executed yet
 ```
+
+Scoring is built in: `hx reeval` scores saved predictions with the configured
+metric functions and never executes a stage. `hx reinfer` uses the `infer`
+template. `env.python` is the project's Python argument list (default
+`uv run --project <repo> python`); `env.setup` is stored but not run. Required
+environment setup remains an explicit user step.
 
 Validation: `hx validate` checks schema, that every `fn` imports, and that every task's
 dataset/metric exists. Built-in template variables are `run_id, run_dir, repo, task, seed,
@@ -281,12 +287,13 @@ processes it owns. Execution always happens inside an environment, never in a cl
 
 ### 5.3 Event log, streaming, and reconnect (adapted from T3 Code)
 
-- **Event log is the truth for run state.** Each env server has an append-only event log
+- **Run folders are the truth; events are the change feed.** Each env server has an append-only event log
   (SQLite, per environment) with a monotonically increasing `sequence`:
-  `run.created, run.started, run.log_chunk, run.metric, run.score_added, run.finished,
-  run.failed, run.killed, run.lost, ...`. Run folders are written by a reactor from these
-  events (file layout in 3.2 is unchanged).
-  Phase 1a simplification: every state change is written synchronously under a per-run
+  `run.created, run.launched, run.started, run.score_added, run.finished,
+  run.failed, run.killed, run.lost, ...`. Queue/GPU, SLURM, annotation and remote-state
+  events are listed in `docs/architecture.rst`. Logs and metric points are read from
+  their HTTP endpoints; `run.log_chunk` and `run.metric` are not emitted.
+  Every state change is written synchronously under a per-run
   file lock in the order run folder → event → index; the event log is the ordered change
   feed that streams and replay use. A reactor model can replace this later without
   changing the file layout or the event schema.

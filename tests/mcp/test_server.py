@@ -7,6 +7,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 from mcp import Client
+from mcp.server.mcpserver import MCPServer
 from mcp.types import TextContent
 
 from hypothex.api.app import create_app
@@ -14,7 +15,6 @@ from hypothex.core.context import Context
 from hypothex.core.errors import ConfigError, RemoteProjectError, RunError, StoreError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.mcp.server import (
-    MCPServer,
     build_server,
     list_task_views,
     put_view,
@@ -32,6 +32,8 @@ EXPECTED_TOOLS = {
     "get_leaderboard",
     "list_runs",
     "get_run",
+    "get_logs",
+    "compare_examples",
     "compare_runs",
     "launch_run",
     "rerun",

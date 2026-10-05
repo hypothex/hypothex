@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -24,12 +25,14 @@ import psutil
 import typer
 import yaml
 from pydantic import ValidationError
+from sqlalchemy.exc import DBAPIError
 from typer.core import TyperGroup
 
 from hypothex._version import __version__
 from hypothex.core import queries as q
 from hypothex.core.config import (
     CONFIG_FILENAME,
+    NAME_PATTERN,
     TaskKind,
     find_repo_root,
     load_project_config,
@@ -39,7 +42,7 @@ from hypothex.core.config import (
 from hypothex.core.context import Context
 from hypothex.core.control import launch_run, reinfer, repair_runs, rerun, stop_run, wait_for_run
 from hypothex.core.environment import load_descriptor
-from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
+from hypothex.core.errors import ConfigError, HypothexError, RunError, RunNotFoundError, StoreError
 from hypothex.core.evaluation import EvalReport, reeval, validate_project
 from hypothex.core.execution import (
     RunRequest,
@@ -51,12 +54,15 @@ from hypothex.core.execution import (
 )
 from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gitinfo import git_state_label
+from hypothex.core.headlines import fmt_p
 from hypothex.core.ids import new_command_id
 from hypothex.core.index import rebuild_index
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import Layout, default_home
 from hypothex.core.leaderboard import Leaderboard
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
+from hypothex.core.seeds import Stats
+from hypothex.core.store import RunStore
 from hypothex.core.tokens import validate_bearer_token
 from hypothex.remote.config import (
     HOST_NAME,
@@ -293,9 +299,13 @@ def _created_by() -> str:
     return f"agent:{agent}" if agent else "human"
 
 
-def _stats(s: Any) -> str:
+def _stats(s: Stats | None, identical: bool = False) -> str:
     if s is None:
         return "—"
+    if identical:
+        return f"{s.mean:.4f} ◇×{s.n}"
+    if s.n == 1:
+        return f"{s.mean:.4f} (n=1)"
     return f"{s.mean:.4f} ± {s.std:.4f} (n={s.n})"
 
 
@@ -330,9 +340,14 @@ def _request(
         config_path=config.resolve() if config else None,
         params=_pairs(params, "--param"),
         vars=_pairs(variables, "--var"),
-        cwd=Path.cwd() if repo is None else None,
+        cwd=Path.cwd() if repo is None and argv else None,
         created_by=_created_by(),
     )
+
+
+def _local(dt: datetime | None) -> str:
+    """Format a human timestamp in the machine's local timezone, or a missing marker."""
+    return "—" if dt is None else dt.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
 def _finish(record: RunRecord, as_json: bool) -> None:
@@ -349,8 +364,16 @@ def _finish(record: RunRecord, as_json: bool) -> None:
             fg="green" if record.status == RunStatus.FINISHED else "red",
             err=True,
         )
+    # Read source files, never open an index here: SLURM compute-node --child
+    # also calls _finish and must not open the shared SQLite databases.
+    errors: dict[tuple[str, str], bool] = {}
+    for score in RunStore(Layout(_home_path())).read_scores(record.project, record.run_id):
+        errors[score.metric, score.version] = score.error is not None
+    if count := sum(errors.values()):
+        typer.secho(f"eval: {count} errors", fg="yellow", err=True)
     if record.status in TERMINAL_STATUSES and record.status != RunStatus.FINISHED:
-        raise typer.Exit(record.exit_code or 1)
+        code = record.exit_code or 1
+        raise typer.Exit(128 - code if code < 0 else code)
 
 
 def _warn_seed(record: RunRecord) -> None:
@@ -373,7 +396,13 @@ TagOpt = Annotated[list[str] | None, typer.Option("--tag", help="Tag (repeatable
 ConfigOpt = Annotated[Path | None, typer.Option("--config", help="Config file; use {config}.")]
 ParamOpt = Annotated[list[str] | None, typer.Option("--param", help="name=value (repeatable).")]
 VarOpt = Annotated[list[str] | None, typer.Option("--var", help="Template var name=value.")]
-StageOpt = Annotated[str | None, typer.Option("--stage", help="Run a stage from hypothex.yaml.")]
+StageOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--stage",
+        help="Stage from hypothex.yaml: execute its template, or label an explicit command.",
+    ),
+]
 RepoOpt = Annotated[Path | None, typer.Option("--repo", help="Project repo (default: cwd).")]
 HostOpt = Annotated[
     str | None, typer.Option("--host", help="Run on this host (`hx hosts list`); default here.")
@@ -607,16 +636,24 @@ def _through_hub(run_id: str, action: str, body: dict[str, Any]) -> Any | None:
     """
     Send a mutation of another environment's run through the hub; None for this machine's.
 
-    The hub forwards it to the run's host with the same command id (Task 45). A run of
-    this machine (or of an environment no host serves, on a hub without that run) acts
-    here as in phase 1.
+    The hub forwards it to the run's host with the same command id (Task 45).
+    Only runs of this environment act locally. Unknown runs are looked up at the hub;
+    when that hub is unavailable the error also identifies the missing local run.
     """
-    from hypothex.mcp.server import acts_through_hub
+    from hypothex.mcp.server import (
+        HubUnavailableError,
+        acts_through_hub,
+        missing_run_or_hub_error,
+    )
 
-    if not acts_through_hub(_ctx(), run_id):
+    c = _ctx()
+    if not acts_through_hub(c, run_id):
         return None
     full = {**body, "command_id": new_command_id(), "created_by": _created_by()}
-    return _hub("POST", f"/api/v1/runs/{run_id}/{action}", full)
+    try:
+        return _hub("POST", f"/api/v1/runs/{run_id}/{action}", full)
+    except HubUnavailableError as exc:
+        raise missing_run_or_hub_error(c, run_id, exc) from exc
 
 
 def _launch_remote(
@@ -691,6 +728,32 @@ def _sweep_out(summary: dict[str, Any], as_json: bool) -> None:
         f"on {spec['host'] or 'local'}",
         bold=True,
     )
+    if issuance := summary.get("issuance"):
+        state = issuance["state"]
+        explanations = {
+            "preparing": "not yet accepted",
+            "queued": "accepted; waiting to issue member runs",
+            "issuing": "issuing member runs",
+            "settling": "reconciling launched runs",
+            "issued": "all launches accounted for; experiment runs may still be running",
+            "incomplete": "issuance ended with an error",
+            "interrupted": "issuance stopped before completion",
+        }
+        typer.echo(f"issuance: {state} — {explanations.get(state, state)}")
+        typer.echo(f"episode {issuance['episode']}  planned cells: {issuance['planned']}")
+        if issuance.get("cancel_requested"):
+            typer.echo("cancellation requested; in-flight work must settle before it is final")
+        if reason := issuance.get("reason"):
+            typer.echo(f"reason: {reason}")
+        if error := issuance.get("error"):
+            typer.echo(f"{error['type']}: {error['message']}")
+        if resume := issuance.get("resume"):
+            seeds = ",".join(str(seed) for seed in resume["seeds"])
+            typer.echo(
+                f"resume: hx sweep extend {spec['id']} --project {spec['project']} --seeds {seeds}"
+            )
+            typer.echo(resume["message"])
+        typer.echo(f"current state: hx sweep show {spec['id']} --project {spec['project']}")
     typer.echo(summary["headline"])
     counts = "  ".join(f"{k} {v}" for k, v in summary["counts"].items())
     typer.echo(f"{counts}  cost ${summary['total_usd']:.2f}")
@@ -813,7 +876,18 @@ def init(
     path = Path.cwd() / CONFIG_FILENAME
     if path.exists() and not force:
         raise RunError(f"{path} exists; use --force to overwrite")
-    name = project or re.sub(r"[^a-z0-9_.-]+", "-", Path.cwd().name.lower()).strip("-") or "project"
+    parent_project = next(
+        (p / CONFIG_FILENAME for p in Path.cwd().parents if (p / CONFIG_FILENAME).is_file()), None
+    )
+    if parent_project is not None and not force:
+        raise RunError(f"parent project {parent_project} exists; use --force for a nested project")
+    name = (
+        project
+        if project is not None
+        else re.sub(r"[^a-z0-9_.-]+", "-", Path.cwd().name.lower()).strip("-") or "project"
+    )
+    if re.fullmatch(NAME_PATTERN, name) is None:
+        raise RunError(f"project name {name!r} must match {NAME_PATTERN}")
     path.write_text(starter_config(name), encoding="utf-8")
     if as_json:
         _print_json({"path": str(path), "project": name})
@@ -921,13 +995,22 @@ def leaderboard(
             [
                 i,
                 r.group_id,
-                _stats(r.primary),
+                _stats(r.primary, r.identical_seeds),
+                fmt_p(r.vs_best.p) if r.vs_best and r.vs_best.p is not None else None,
+                None
+                if r.test_interval is None
+                else f"[{r.test_interval.lo:.4f}, {r.test_interval.hi:.4f}]",
                 noise[r.within_noise_of_best],
                 r.latest_run_id,
                 r.hypothesis[:50],
             ]
         )
-    _table(["#", "group", board.primary, "note", "latest run", "hypothesis"], rows)
+    _table(["#", "group", board.primary, "p", "test 95%", "note", "latest run", "hypothesis"], rows)
+    if board.metric_drift:
+        typer.secho(
+            f"warning: {', '.join(board.metric_drift)} have different recorded source hashes",
+            fg="yellow",
+        )
     if board.needs_reeval:
         typer.secho(
             f"{len(board.needs_reeval)} runs scored on older metric versions: "
@@ -1013,7 +1096,7 @@ def list_runs_cmd(
                 r.run_id,
                 r.task,
                 _status_text(r, states.get(r.run_id)),
-                r.created_at.strftime("%Y-%m-%d %H:%M"),
+                _local(r.created_at),
                 r.hypothesis[:50],
             ]
             for r in records
@@ -1034,13 +1117,35 @@ def show(run_id: str, as_json: JsonFlag = False) -> None:
     typer.echo(f"hypothesis: {r.hypothesis or '—'}")
     typer.echo(f"command:    {r.command_display}")
     typer.echo(f"git:        {r.git.commit or '—'}  {git_state_label(r.git)}")
+    for label, value in (
+        ("tags", ", ".join(r.tags)),
+        ("seed", r.seed),
+        ("params", json.dumps(r.params, ensure_ascii=False)),
+        ("vars", json.dumps(r.vars, ensure_ascii=False)),
+        ("parent", r.parent),
+        ("children", ", ".join(detail.children)),
+        ("starred", "yes" if r.starred else "no"),
+        ("exit code", r.exit_code),
+        ("end reason", r.end_reason),
+        ("created", _local(r.created_at)),
+        ("started", _local(r.started_at)),
+        ("ended", _local(r.ended_at)),
+    ):
+        typer.echo(f"{label}: {value if value is not None and value != '' else '—'}")
+    if detail.notes.strip():
+        typer.secho("notes:", bold=True)
+        typer.echo(detail.notes.rstrip())
     typer.secho("paths:", bold=True)
     for k, v in detail.paths.items():
         typer.echo(f"  {k:<22} {v}")
     if detail.scores:
         typer.secho("scores:", bold=True)
         for s in detail.scores:
-            value = s.value if s.error is None else "ERROR"
+            reason = next(
+                (line.strip() for line in reversed((s.error or "").splitlines()) if line.strip()),
+                "unknown error",
+            )
+            value = s.value if s.error is None else f"ERROR: {reason}"
             typer.echo(f"  {s.metric}@{s.version}/{s.key} = {value}")
 
 
@@ -1223,21 +1328,24 @@ def rerun_cmd(run_id: str, foreground: ForegroundOpt = False, as_json: JsonFlag 
 def reinfer_cmd(
     run_id: str,
     checkpoint: Annotated[str | None, typer.Option(help="Checkpoint path override.")] = None,
+    var: VarOpt = None,
     foreground: ForegroundOpt = False,
     as_json: JsonFlag = False,
 ) -> None:
-    """Run the `infer` stage again with this run's checkpoint."""
+    """Run the `infer` stage with this run's checkpoint and optional --var overrides."""
     from hypothex.mcp.server import acts_through_hub
 
+    variables = _pairs(var, "--var")
     if acts_through_hub(_ctx(), run_id):
         _not_foreground(run_id, foreground)
-        out = _through_hub(run_id, "reinfer", {"checkpoint": checkpoint})
+        out = _through_hub(run_id, "reinfer", {"checkpoint": checkpoint, "vars": variables})
         _started(RunRecord.model_validate(out), False, as_json)
         return
     record = reinfer(
         _ctx(),
         run_id,
         checkpoint=checkpoint,
+        vars=variables,
         background=not foreground,
         created_by=_created_by(),
         stdout_sink=None if as_json else sys.stdout.buffer,
@@ -1340,8 +1448,7 @@ def reeval_cmd(
     c = _ctx()
     body = {"metric": metric, "force": force, "created_by": _created_by()}
     if run_id is not None and acts_through_hub(c, run_id):
-        path = f"/api/v1/runs/{run_id}/reeval"
-        out = _hub("POST", path, {**body, "command_id": new_command_id()})
+        out = _through_hub(run_id, "reeval", body)
         report = EvalReport.model_validate(out)
     elif run_id is not None:
         report = reeval(c, run_id=run_id, metric=metric, force=force)
@@ -1441,24 +1548,47 @@ def predictions(
 @app.command()
 def logs(
     run_id: str,
-    stream: Annotated[str, typer.Option(help="stdout, stderr, or supervisor.")] = "stdout",
+    stream: Annotated[
+        str | None,
+        typer.Option(
+            help="stdout, stderr, or supervisor (default stdout; failed runs also show stderr)."
+        ),
+    ] = None,
     follow: Annotated[bool, typer.Option(help="Keep printing until the run ends.")] = False,
     as_json: JsonFlag = False,
 ) -> None:
     """Print a run's log (tail), optionally following it."""
-    read, ended = _log_reader(_ctx(), run_id, stream)
+    c = _ctx()
+    read, ended = _log_reader(c, run_id, stream or "stdout")
     chunk = read(None)
     if as_json:
         _print_json(chunk)
         return
     typer.echo(chunk.text, nl=False)
+    line_ended = not chunk.text or chunk.text.endswith("\n")
     while follow:
-        if ended():
-            typer.echo(read(chunk.offset).text, nl=False)
-            return
-        time.sleep(1)
+        done = ended()
+        if not done:
+            time.sleep(1)
         chunk = read(chunk.offset)
         typer.echo(chunk.text, nl=False)
+        if chunk.text:
+            line_ended = chunk.text.endswith("\n")
+        if done:
+            break
+    if stream is None:
+        try:
+            record = c.find_record(run_id)
+        except RunNotFoundError:
+            record = RunRecord.model_validate(_hub("GET", f"/api/v1/runs/{run_id}")["record"])
+        if record.status in {RunStatus.FAILED, RunStatus.KILLED, RunStatus.LOST}:
+            stderr, _ = _log_reader(c, run_id, "stderr")
+            tail = stderr(None).text
+            if tail:
+                if not line_ended:
+                    typer.echo()
+                typer.echo("-- stderr --")
+                typer.echo(tail, nl=False)
 
 
 # curation -------------------------------------------------------------------------
@@ -1603,13 +1733,13 @@ def sweep_show(sweep_id: str, project: ProjectOpt = None, as_json: JsonFlag = Fa
 
 @sweep_app.command("cancel")
 def sweep_cancel(sweep_id: str, project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
-    """Stop the sweep's queued runs; running runs keep going."""
+    """Stop queued members and future issuance; running runs keep going."""
     from hypothex.core.sweeps import cancel_queued
-    from hypothex.mcp.server import is_remote, locate_sweep
+    from hypothex.mcp.server import locate_sweep, sweep_acts_through_hub
 
     c = _ctx()
     spec, here = locate_sweep(c, sweep_id, project, token=_hub_token())
-    if is_remote(spec.host) or not here:
+    if sweep_acts_through_hub(c, spec, here):
         body = {"command_id": new_command_id(), "created_by": _created_by()}
         summary = _hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/cancel_queued", body)
     else:
@@ -1624,14 +1754,14 @@ def sweep_extend(
     project: ProjectOpt = None,
     as_json: JsonFlag = False,
 ) -> None:
-    """Add runs for every combination x the new seeds."""
+    """Add seeds, or resume missing cells with existing seeds after interrupted issuance."""
     from hypothex.core.sweeps import extend_sweep
-    from hypothex.mcp.server import is_remote, locate_sweep, parse_seeds
+    from hypothex.mcp.server import locate_sweep, parse_seeds, sweep_acts_through_hub
 
     c = _ctx()
     spec, here = locate_sweep(c, sweep_id, project, token=_hub_token())
     seed_list = parse_seeds(seeds, count_ok=False)
-    if is_remote(spec.host) or not here:
+    if sweep_acts_through_hub(c, spec, here):
         body = {"seeds": seed_list, "command_id": new_command_id(), "created_by": _created_by()}
         summary = _hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/extend", body)
     else:
@@ -1650,13 +1780,14 @@ def sweeps_cmd(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
         _print_json(rows)
         return
     _table(
-        ["sweep", "project", "created", "runs", "best"],
+        ["sweep", "project", "created", "runs", "issuance", "best"],
         [
             [
                 s["id"],
                 s["project"],
-                s["created_at"].strftime("%Y-%m-%d %H:%M"),
+                _local(s["created_at"]),
                 s["n_runs"],
+                (s.get("issuance") or {}).get("state"),
                 None if s["best"] is None else json.dumps(s["best"].get("params"))[:40],
             ]
             for s in rows
@@ -2159,7 +2290,9 @@ def serve(
         typer.secho(f"hx serve on {_url(host, bound)}", err=True)
         # the socket is bound already: uvicorn logs no "running on" line for it, so
         # the start script finds the port in server.json (written above, Task 11)
-        config = uvicorn.Config(application, host=host, port=bound, log_level="info")
+        config = uvicorn.Config(
+            application, host=host, port=bound, log_level="info", access_log=False
+        )
         _Server(config).run(sockets=[sock])
 
 
@@ -2381,7 +2514,7 @@ def mcp() -> None:
     """Run the MCP server over stdio (for Claude Code, Codex, ...)."""
     from hypothex.mcp.server import build_server
 
-    build_server(_state.home).run()
+    build_server(_state.home, agent=os.environ.get("HYPOTHEX_AGENT") or "mcp").run()
 
 
 @app.command(hidden=True)
@@ -2440,7 +2573,7 @@ def cli() -> None:
     """Console entry point: expected errors print cleanly (JSON with --json)."""
     try:
         app()
-    except HypothexError as exc:
+    except (HypothexError, OSError, sqlite3.Error, DBAPIError, json.JSONDecodeError) as exc:
         issues = [to_jsonable(i) for i in getattr(exc, "issues", [])]
         if "--json" in sys.argv:
             payload: dict[str, Any] = {"error": str(exc), "type": type(exc).__name__}

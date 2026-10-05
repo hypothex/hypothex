@@ -31,6 +31,7 @@ export interface GitInfo {
   commit: string | null;
   branch: string | null;
   dirty: boolean;
+  diff_hash?: string | null;
   untracked_count: number;
   untracked: string[];
 }
@@ -108,6 +109,7 @@ export interface RunRecord {
   created_at: string;
   started_at: string | null;
   ended_at: string | null;
+  end_reason?: string | null;
   exit_code: number | null;
   artifacts: Artifact[];
   tags: string[];
@@ -177,6 +179,8 @@ export interface TaskDetail {
 }
 
 export interface RunDetail {
+  /** This hub owns the environment or can route it to a configured verified host. */
+  served: boolean;
   record: RunRecord;
   scores: ScoreRecord[];
   paths: Record<string, string>;
@@ -296,6 +300,7 @@ export interface Leaderboard {
   metric_versions: Record<string, string>;
   rows: LeaderboardRow[];
   needs_reeval: string[];
+  metric_drift?: string[];
   unscored: string[];
   headline: string;
   kind: TaskKind;
@@ -661,7 +666,7 @@ export interface HostRow {
    * SLURM job counts; null on SSH hosts. `comment_accounting` false: the cluster's accounting
    * keeps no job comments, so an unknown submission stays unknown; null: not known yet.
    */
-  slurm: { pending: number; running: number; comment_accounting?: boolean | null } | null;
+  slurm: { pending: number; running: number; comment_accounting?: boolean | null; defaults?: SlurmDefaults } | null;
   cost_today_usd: number;
   /** `$/GPU-h` from `environments.yaml`; null when no rate is set (contract section 2). */
   usd_per_gpu_hour?: number | null;
@@ -737,6 +742,7 @@ export interface SweepSpec {
 
 /** One parameter combination of a sweep: primary-metric mean and 95% CI over its seeds. */
 export interface SweepCell {
+  uncounted?: number;
   params: Record<string, string>;
   /**
    * Leaderboard group of the cell's best-scored runs; null while no run of the cell is
@@ -753,8 +759,23 @@ export interface SweepCell {
   run_ids: string[];
 }
 
+export type SweepIssuanceState = "preparing" | "queued" | "issuing" | "settling" | "issued" | "incomplete" | "interrupted";
+export interface SweepIssuance {
+  state: SweepIssuanceState;
+  episode: number;
+  revision: number;
+  planned: number;
+  accepted_at: string | null;
+  updated_at: string;
+  cancel_requested: boolean;
+  reason: "launch_failed" | "worker_lost" | "shutdown" | "cancelled" | null;
+  error: { type: string; message: string } | null;
+  resume: { seeds: number[]; message: string } | null;
+}
+
 /** `GET /api/v1/sweeps/{project}/{id}` and every sweep action. */
 export interface SweepSummary {
+  issuance?: SweepIssuance | null;
   spec: SweepSpec;
   /**
    * The sweep's runs, derived by the backend from the runs tagged `tag`, oldest
@@ -777,6 +798,7 @@ export interface SweepSummary {
 
 /** One row of `GET /api/v1/projects/{project}/sweeps`. */
 export interface SweepListItem {
+  issuance?: SweepIssuance | null;
   id: string;
   created_at: string;
   n_runs: number;

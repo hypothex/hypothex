@@ -129,16 +129,16 @@ describe("queue", () => {
       {
         position: 1,
         runId: "20261003-142000-toy-test-b7e0",
-        label: "aug plus seed 5",
+        label: "aug plus seed 5 · seed 3",
         createdBy: "human:shreyas",
         gpus: 2,
         waiting: "14m",
       },
-      { position: 2, runId: QUEUED_ID, label: "lr 1e-3 with beam 1", createdBy: "agent:tuner", gpus: 2, waiting: "12m" },
+      { position: 2, runId: QUEUED_ID, label: "lr 1e-3 with beam 1 · seed 3", createdBy: "agent:tuner", gpus: 2, waiting: "12m" },
       {
         position: 3,
         runId: "20261003-142500-toy-test-93e7",
-        label: "lr 1e-3 with beam 5",
+        label: "lr 1e-3 with beam 5 · seed 3",
         createdBy: "agent:tuner",
         gpus: 2,
         waiting: "9m",
@@ -175,7 +175,7 @@ describe("queue", () => {
     renderWithClient(<QueuePanel host={{ ...GPU1, gpus }} hostName="gpu1" runId={QUEUED_ID} rows={[]} />);
     const cells = [...document.querySelectorAll<HTMLElement>(".gpu-cells li")];
     expect(cells.map((c) => [c.className, c.textContent, c.style.gridColumn, c.title])).toEqual([
-      ["c ext", "ext40%", "", "GPU 0: process outside hx, 40% busy"],
+      ["c ext", "external40%", "", "GPU 0: process outside hx, 40% busy"],
       ["c run", "ab1271% ×2", "span 2", "GPU 1–2: hx run, 71% busy"],
       ["c free", "free0%", "", "GPU 3: free, 0% busy"],
     ]);
@@ -188,7 +188,7 @@ describe("queue", () => {
     const cells = [...document.querySelectorAll(".gpu-cells li")].map((c) => [c.className, c.textContent]);
     expect(cells).toEqual([
       ["c run", "6b0e92%"],
-      ["c ext", "ext63%"],
+      ["c ext", "external63%"],
       ["c free", "free0%"],
     ]);
     const rows = [...document.querySelectorAll(".queue-t tbody tr")];
@@ -288,4 +288,13 @@ test("remote CSS stays inside .page", () => {
   const rules = REMOTE_CSS.split("\n").filter((line) => line.trim() !== "");
   expect(rules.length).toBeGreaterThan(10);
   expect(rules.filter((line) => !line.startsWith(".page "))).toEqual([]);
+});
+
+test("queue labels distinguish equal hypotheses by params and seed, preserving global rank", () => {
+  const base = makeRecord({ status: "queued", hypothesis: "same", seed: 3, params: { lr: "0.1" }, executor: { ...makeRecord().executor, queue_position: 17 } });
+  const rows = queueRows([base, { ...base, run_id: "other", params: { lr: "0.2" } }], base.environment_id);
+  expect(rows[0]?.position).toBe(17);
+  expect(rows[0]?.label).toContain("lr=0.1");
+  expect(rows[0]?.label).toContain("seed 3");
+  expect(rows[0]?.label).not.toBe(rows[1]?.label);
 });

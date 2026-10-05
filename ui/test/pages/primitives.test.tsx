@@ -66,7 +66,7 @@ test("PageStyles scopes every rule under .page", () => {
   const { container } = render(<PageStyles />);
   expect(container.querySelector("style[data-hx='pages']")?.textContent).toBe(PAGES_CSS);
   const selectors = PAGES_CSS.split("}")
-    .map((block) => block.split("{")[0]?.trim() ?? "")
+    .map((block) => block.split("{").at(-2)?.trim() ?? "")
     .filter((sel) => sel && !sel.startsWith("/*"));
   for (const sel of selectors) {
     for (const part of sel.split(",")) expect(part.trim().startsWith(".page")).toBe(true);

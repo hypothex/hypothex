@@ -19,6 +19,7 @@ import {
 
 import { ApiError, api } from "./client";
 import type * as M from "./models";
+import { issuancePoll } from "./sweepIssuance";
 
 export const queryKeys = {
   overview: (since?: string) => ["overview", since ?? null] as const,
@@ -327,6 +328,7 @@ export const useSweep = (project: string, sweepId: string) =>
   useQuery({
     queryKey: queryKeys.sweep(project, sweepId),
     queryFn: ({ signal }) => api.sweep(project, sweepId, signal),
+    refetchInterval: (query) => issuancePoll(query.state.data?.issuance),
   });
 
 export const useProjectSweeps = (project: string) =>

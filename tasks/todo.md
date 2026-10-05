@@ -258,3 +258,75 @@ an isolated live server. Evidence is under `/tmp/hx-handoff-evidence/token-*`.
 Merge the ordered dogfood/UI prerequisite branches and run affected integration
 checks before PR publication. This local checkpoint does not claim merged-main or
 CI completion. Phase 3 remains documentation-only in its separate branch.
+
+
+## Remaining dogfood integration (step 7)
+
+Base: merged main `55ca922` (PR #18; six current-head CI checks passed).
+Readiness maps under `/tmp/hx-handoff-evidence/` preserve the complete H/I/J/K/L/O
+and cross-layer scope. Worktree: `/tmp/hx-df2`, branch `dogfood-fixes-2`.
+
+- [x] API/core: verified current/offline identity, SLURM defaults, served state,
+  reinfer vars, exact MCP dispatch, transactional pulls, batch queued cancellation,
+  structured errors and durable asynchronous sweep acceptance/issuance/recovery.
+- [x] CLI/MCP: all 14 I/J findings plus vars, dirty/diff and statistical provenance,
+  terminal reasons and accepted sweep states; preserve uncertain timeout outcomes.
+- [x] Lifecycle: nullable evidence-only terminal reasons, race winners, late node
+  settlement, rerun reset and retained accounting; regression tests before changes.
+- [x] UI: all 12 K/L findings plus stored metric drift, patch provenance, uncounted
+  cells, terminal reasons, bounded names and issuance-aware existing sweep actions.
+- [x] Recheck O: packaging/license/skill artifacts already verified in step 6;
+  remove nonexistent eval command and false setup claims; source-install quickstart;
+  current event list and remote architecture prose. Two real documentation examples
+  failed the current CLI-command check before repair; five docs tests now pass,
+  and warning-as-error Sphinx build passes.
+- [x] Integrate response types and public/spec/interface documentation for new behavior.
+- [x] Review complete diff, required checks, meaningful runtime/Docker/browser
+  acceptance, and actual built artifacts.
+- [ ] Publish/link and merge only green current-head CI.
+
+DF-21 release status was checked live at https://pypi.org/project/hypothex/ on
+2026-10-05: 0.0.1 is explicitly a name reservation. Source installation remains
+required for the working package; build the UI before installing it.
+
+Checkpoints: CLI/MCP 138 changed-contract tests plus retained affected evidence;
+lifecycle 365 affected tests; UI 890 unit tests, both type checks/build, and 50
+real-browser tests with light/dark geometry at 800/1099/1101/1600 pixels.
+Independent UI review corrected queued-cancel races, single-pass template preview,
+and over-capacity GPU admission without silently changing requested resources.
+Actual OpenAPI regenerated the response types; Sphinx passes. Two documented
+configuration examples and all 31 statistics properties pass. The Welch oracle now
+normalizes SciPy inputs before its squared-variance calculation; the exact failing
+tiny-variance example is retained and production statistics are unchanged.
+
+Independent API review reproduced partial HTTP folder pulls replacing complete
+local artifacts; explicit pulls now require every descendant before installation,
+and eight failure probes preserve the original destination. Mirrors retain their
+best-effort default. Durable issuance has process-death tests at four acceptance
+boundaries, worker death, repeated/anonymous acceptance, original pins/options,
+and cross-process owner exclusion. Cancellation preserves unresolved outcomes
+across resume episodes and atomically excludes a competing extension. The final
+independent CAS review passed three regressions and separate stale-revision,
+competing-extension and historical-cancellation probes.
+
+Final local evidence: full Python 2,273 passed, 3 skipped, 11 Docker deselected,
+with six old synchronous-contract assertions subsequently corrected. All six,
+the final issuance/CAS changes, queries and statistics are covered by the final
+211-test passing rerun. Docker: 11 passed. UI: 890 full unit tests and 50 browser
+tests; the later cancellation follow-up passed all 65 affected tests, types and
+build. Ruff/format (172 files), source ty, warning-as-error Sphinx and diff checks
+pass. Final wheel contents match the final issuer/events/API/client source bytes;
+compiled UI is present and the sdist excludes internal plans/mockups. Evidence is
+under `/tmp/hx-handoff-evidence/step7-*`. Publication and CI remain the merge gate.
+
+Step-7 integration checkpoint: merged reviewed `48f8bef` locally while PR #19 runs
+CI. The MCP credential subclass now loads lazily so ordinary CLI calls avoid the
+SDK; request-selected credentials and explicit no-credential semantics survive
+both `/mcp` paths. Safe transport errors retain the typed pre-send outcome flag,
+strict explicit folder pulls, and uncertain timeout classification without exposing
+exception chains. Eleven obsolete transport/logging test seams failed first;
+after adaptation all 53 affected tests pass. An additional 16 credential tests
+cover slashless calls and read/write timeout redaction. The initial composed run
+passed 272 other MCP/client/issuance/API tests. Ruff/format (179 files), source ty,
+source TypeScript and regenerated combined schema pass. Final full integration
+checks still wait for the ordered UI prerequisite; no publication yet.

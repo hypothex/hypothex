@@ -8,9 +8,10 @@ from hypothex.api.app import create_app
 from hypothex.mcp import server
 
 
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
 @pytest.mark.parametrize("token", [None, "synthetic-caller"])
 def test_http_mcp_forwards_only_guard_selected_credential(
-    home: Path, monkeypatch: pytest.MonkeyPatch, token: str | None
+    home: Path, monkeypatch: pytest.MonkeyPatch, token: str | None, path: str
 ) -> None:
     seen: list[dict[str, str]] = []
 
@@ -26,7 +27,7 @@ def test_http_mcp_forwards_only_guard_selected_credential(
         headers["Authorization"] = "Bearer " + token
     with TestClient(app, base_url="http://127.0.0.1:7777") as c:
         response = c.post(
-            "/mcp/",
+            path,
             headers=headers,
             json={
                 "jsonrpc": "2.0",
@@ -41,10 +42,10 @@ def test_http_mcp_forwards_only_guard_selected_credential(
         )
         headers["mcp-session-id"] = response.headers["mcp-session-id"]
         c.post(
-            "/mcp/", headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"}
+            path, headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"}
         )
         response = c.post(
-            "/mcp/",
+            path,
             headers=headers,
             json={
                 "jsonrpc": "2.0",
@@ -86,16 +87,19 @@ def test_http_missing_or_wrong_token_never_calls_mcp(
             assert c.post("/mcp/", json={}, headers=headers).status_code == 401
 
 
-def test_hub_call_transport_error_never_exposes_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("error", [httpx.TransportError, httpx.ReadTimeout, httpx.WriteTimeout])
+def test_hub_call_transport_error_never_exposes_credential(
+    monkeypatch: pytest.MonkeyPatch, error: type[httpx.TransportError]
+) -> None:
     import traceback
 
     token = "synthetic-client-credential"
 
     def broken(*args: object, **kwargs: object) -> httpx.Response:
-        raise httpx.TransportError("library reflected " + token)
+        raise error("library reflected " + token)
 
     monkeypatch.setattr(server, "_hub_request", broken)
-    with pytest.raises(server.HubUnavailableError) as failure:
+    with pytest.raises(server.HypothexError) as failure:
         server.hub_call("GET", "/api/v1/hosts", token=token)
     assert token not in "".join(traceback.format_exception(failure.value))
 

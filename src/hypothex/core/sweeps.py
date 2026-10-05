@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from random import Random
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -608,6 +608,40 @@ class CancelResult(BaseModel):
                 self.errors.append(message)
 
 
+class SweepIssuanceError(BaseModel):
+    """A bounded safe failure description, never a traceback or credential-bearing response."""
+
+    type: str = Field(max_length=100)
+    message: str = Field(max_length=500)
+
+
+class SweepResume(BaseModel):
+    """Explicit extension inputs for resuming only missing cells of a stopped episode."""
+
+    seeds: list[int]
+    message: str
+
+
+SweepIssuanceState = Literal[
+    "preparing", "queued", "issuing", "settling", "issued", "incomplete", "interrupted"
+]
+
+
+class SweepIssuance(BaseModel):
+    """Durable issuance progress; experiment run status and observed member counts stay separate."""
+
+    state: SweepIssuanceState
+    episode: int = Field(ge=1)
+    revision: int = Field(ge=0)
+    planned: int = Field(ge=0)
+    accepted_at: datetime | None
+    updated_at: datetime
+    cancel_requested: bool = False
+    reason: Literal["launch_failed", "worker_lost", "shutdown", "cancelled"] | None = None
+    error: SweepIssuanceError | None = None
+    resume: SweepResume | None = None
+
+
 class SweepSummary(BaseModel):
     """
     A sweep's spec, progress, and per-cell results.
@@ -633,6 +667,8 @@ class SweepSummary(BaseModel):
     """The sweep's member tag ``sweep:<owner8>:<id>`` (ask ``GET /api/v1/runs?tag=``)."""
     cancel: CancelResult | None = None
     """What ``cancel_queued`` asked and what failed; None for any other summary."""
+    issuance: SweepIssuance | None = None
+    """Current durable HTTP issuance episode; None for legacy or direct-core sweeps."""
 
 
 def sweep_runs(ctx: Context, spec: SweepSpec) -> list[RunRecord]:
@@ -888,6 +924,7 @@ def _summarize(ctx: Context, spec: SweepSpec) -> SweepSummary:
         headline = unknown_task_headline(spec.task)
     else:
         headline = _headline(board, ranked, _p_between(ctx, spec, config, runs, board, ranked))
+    operation = ctx.events.sweep_operation(spec.project, spec.id)
     return SweepSummary(
         spec=spec,
         counts=counts,
@@ -897,6 +934,7 @@ def _summarize(ctx: Context, spec: SweepSpec) -> SweepSummary:
         total_usd=math.fsum(_run_usd(r) for r in runs),
         run_ids=[r.run_id for r in runs],
         tag=sweep_tag(ctx.descriptor.environment_id, spec.id),
+        issuance=SweepIssuance.model_validate(operation["issuance"]) if operation else None,
     )
 
 
@@ -914,7 +952,7 @@ def list_sweeps(ctx: Context, project: str) -> list[dict[str, Any]]:
     Returns
     -------
     list of dict
-        ``{id, created_at, n_runs, best}`` per sweep; unreadable sweep files are
+        ``{id, created_at, n_runs, best, issuance}`` per sweep; unreadable sweep files are
         skipped (and logged).
 
     Raises
@@ -937,6 +975,7 @@ def list_sweeps(ctx: Context, project: str) -> list[dict[str, Any]]:
                 "created_at": summary.spec.created_at,
                 "n_runs": summary.counts["total"],
                 "best": summary.best,
+                "issuance": summary.issuance.model_dump(mode="json") if summary.issuance else None,
             }
         )
     out.sort(key=lambda s: (s["created_at"], s["id"]), reverse=True)

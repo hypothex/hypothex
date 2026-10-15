@@ -211,7 +211,7 @@ Computed server-side per task (so the UI, CLI and MCP agree) by
 - API: `POST /api/v1/runs/{id}/name {"name": str | null}` (null resets), forwarded to the
   owning host like tags; emits a `run.renamed` event so open UIs update live. Bulk rename
   of a group renames each run in it.
-- CLI: `hx run rename <run_id> "<name>"`, `hx run rename <run_id> --reset`.
+- CLI: `hx rename <run_id> "<name>"`, `hx rename <run_id> --reset` (flat command like `hx tag`).
 - MCP: `rename_run(run_id, name)`; the agent skill tells agents to name runs by what they
   change and to rename when a name is wrong.
 - Index: `name` is stored in the index and searchable from `⌘K` and the sidebar filter.

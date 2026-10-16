@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useState, useSyncExternalStore } from "react";
+import { type ReactNode, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { auth } from "./auth";
 import { api, ApiError } from "./client";
@@ -30,7 +30,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
 
   useEffect(() => auth.onReset(() => clearSessionQueries(qc)), [qc]);
-  useEffect(() => { void validate(auth.snapshot().generation); }, []);
+  // Validate the starting credential once. StrictMode runs mount effects twice; a second
+  // request still in flight when the page navigates fails and would lock (and forget) the
+  // credential the first one accepted.
+  const started = useRef<number | null>(null);
+  useEffect(() => {
+    const generation = auth.snapshot().generation;
+    if (started.current === generation) return;
+    started.current = generation;
+    void validate(generation);
+  }, []);
 
   if (state.status === "unlocked") return <>{children}</>;
   return (

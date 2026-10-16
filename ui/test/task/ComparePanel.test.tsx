@@ -15,7 +15,7 @@ const columns = items.map((i, n) => ({ id: i.id, name: i.name, color: `var(--c${
 
 function Harness({ initial }: { initial: CompareState }) {
   const [state, setState] = useState(initial);
-  return <ComparePanel model={model} state={state} onState={setState} columns={columns} higherIsBetter />;
+  return <ComparePanel model={model} state={state} onState={setState} columns={columns} higherIsBetter={() => true} />;
 }
 const start = () => render(<Harness initial={defaultCompare(model, EVAL_PRIMARY, data.key_parts)} />);
 const panelOf = () => screen.getByRole("region", { name: /^Compare datasets/ });

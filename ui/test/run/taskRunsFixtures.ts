@@ -95,6 +95,7 @@ export function makeTaskRuns(over: Partial<TaskRuns> = {}): TaskRuns {
     varying_keys: ["model"],
     metric_names: ["train_accuracy"],
     score_keys: ["accuracy/value", "macro_f1/value"],
+    key_higher_is_better: { "accuracy/value": true, "macro_f1/value": true },
     key_parts: null,
     metric_versions: { accuracy: "v1", macro_f1: "v1" },
     runs,

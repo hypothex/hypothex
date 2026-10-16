@@ -972,6 +972,8 @@ export interface TaskRuns {
   varying_keys: string[];
   metric_names: string[];
   score_keys: string[];
+  /** Direction of each score key (`{"latency/p95": false, "throughput/rps": true}`); `higher_is_better` is the primary's. */
+  key_higher_is_better: Record<string, boolean>;
   /** The task's current version per metric (`{"accuracy": "v1"}`), the versions `scores` are read at. */
   metric_versions: Record<string, string>;
   /** Part names from `hypothex.yaml` `score_keys`, e.g. ["dataset", "model", "metric"]. */

@@ -14,7 +14,7 @@ import { PanelSection } from "../chrome/PanelSection";
 import { type KeySection, sectionsFromKeys } from "../lib/scoreKeys";
 import { rowBest } from "./compareModel";
 import { matchesSearch } from "./stepMetrics";
-import { type Identity, scoreOf } from "./useRunSelection";
+import { type Identity, keyHigherIsBetter, scoreOf } from "./useRunSelection";
 
 /** Key sections with the panels the search shows (the primary panel first); empty sections dropped. */
 export function visibleKeySections(data: TaskRuns, query: string): KeySection[] {
@@ -28,10 +28,10 @@ export function visibleKeySections(data: TaskRuns, query: string): KeySection[] 
     .filter((s) => s.panels.length > 0);
 }
 
-/** One bar per identity for `key`; whiskers on the primary key only. */
+/** One bar per identity for `key`, its best in `key`'s direction; whiskers on the primary key only. */
 export function barRows(items: readonly Identity[], key: string, data: TaskRuns, colorOf: (id: string) => string): BarRow[] {
   const values = items.map((i) => scoreOf(i, key));
-  const best = rowBest(values, data.higher_is_better);
+  const best = rowBest(values, keyHigherIsBetter(data, key));
   return items.map((i, n) => {
     const g = i.kind === "group" ? i.group : null;
     const t = key === data.primary ? g?.test_interval : null;

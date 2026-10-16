@@ -12,6 +12,7 @@
  * `makeEvalTaskRuns()`: eval task, keys `reported/<test-a..test-e>.<model-x|model-y>.<top1|top10>`,
  * one run per `db v1..v3` (v3 best), `key_parts` `["dataset", "model", "metric"]`; run v1
  * lacks `reported/test-e.model-y.top1`.
+ * `makeBenchTaskRuns()`: a `system_bench`-like task whose score keys differ in direction.
  */
 import type { Stats, TaskGroup, TaskRun, TaskRuns, ViewDocument, ViewInfo } from "../../src/api/models";
 import { RUN_RF, RUN_SVM } from "../pages/fixtures";
@@ -108,6 +109,7 @@ export function makeTaskRuns(over: Partial<TaskRuns> = {}): TaskRuns {
     metric_names: ["train/loss", "val/loss", "val/top1", "sys/gpu_util"],
     score_keys: ["top1/value", "top1/final"],
     metric_versions: { top1: "v1" },
+    key_higher_is_better: { "top1/value": true, "top1/final": true },
     key_parts: null,
     runs,
     groups,
@@ -170,7 +172,62 @@ export function makeEvalTaskRuns(): TaskRuns {
     metric_names: [],
     score_keys: keys,
     metric_versions: { reported: "v1" },
+    key_higher_is_better: Object.fromEntries(keys.map((k) => [k, true])),
     key_parts: ["dataset", "model", "metric"],
+    runs,
+    groups,
+  };
+}
+
+/**
+ * A `system_bench`-like task: primary `latency/p95` (lower is better), `throughput/rps`
+ * (higher is better) and `throughput/peak` (direction unknown: the task's). Configs
+ * `fast` (40 ms, 900 rps, peak 1000) and `wide` (60 ms, 1200 rps, peak 1100).
+ */
+export function makeBenchTaskRuns(): TaskRuns {
+  const bench = [
+    ["fast", 40, 900, 1000],
+    ["wide", 60, 1200, 1100],
+  ] as const;
+  const runs = bench.map(([id, latency, rps, peak], i) =>
+    makeTaskRun({
+      run_id: `run-${id}`,
+      group_id: `g-${id}`,
+      seed: null,
+      name: id,
+      derived_name: id,
+      params: { cache: id },
+      created_at: `2026-10-0${i + 1}T09:00:00Z`,
+      scores: { "latency/p95": latency, "throughput/rps": rps, "throughput/peak": peak },
+      primary: latency,
+      gpu_hours: null,
+    }),
+  );
+  const groups = runs.map((run) =>
+    makeTaskGroup({
+      group_id: run.group_id,
+      name: run.derived_name,
+      run_ids: [run.run_id],
+      primary: stats(run.primary ?? 0, 0, 1),
+      scores: run.scores,
+      seed_values: [run.primary ?? 0],
+      is_best: run.run_id === "run-fast",
+    }),
+  );
+  return {
+    project: PROJECT,
+    task: TASK,
+    kind: "system_bench",
+    primary: "latency/p95",
+    higher_is_better: false,
+    unit: "ms",
+    value_format: "duration",
+    varying_keys: ["cache"],
+    metric_names: [],
+    score_keys: ["latency/p95", "throughput/peak", "throughput/rps"],
+    metric_versions: { latency: "v1", throughput: "v1" },
+    key_higher_is_better: { "latency/p95": false, "throughput/rps": true },
+    key_parts: null,
     runs,
     groups,
   };
@@ -218,6 +275,7 @@ export function toyTaskRuns(): TaskRuns {
     metric_names: [],
     score_keys: ["accuracy/value"],
     metric_versions: { accuracy: "v1" },
+    key_higher_is_better: { "accuracy/value": true },
     key_parts: null,
     runs,
     groups: [

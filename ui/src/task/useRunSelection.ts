@@ -60,6 +60,14 @@ export function keyLabel(key: string): string {
   return rest === "value" || rest === "" ? key.slice(0, cut) : rest;
 }
 
+/**
+ * Whether a higher value of score `key` is better: the key's own direction from the server
+ * (`key_higher_is_better`), the task's only when that is unknown.
+ */
+export function keyHigherIsBetter(data: Pick<TaskRuns, "higher_is_better" | "key_higher_is_better">, key: string): boolean {
+  return data.key_higher_is_better[key] ?? data.higher_is_better;
+}
+
 /** The run's explicit name when renamed, else its derived name. */
 export function runBaseName(run: TaskRun): string {
   return run.renamed ? run.name : run.derived_name;

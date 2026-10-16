@@ -6,7 +6,7 @@ import { getHighlight } from "../../src/task/highlight";
 import { RunsSidebar } from "../../src/task/RunsSidebar";
 import { type Selection, parseSelection } from "../../src/task/useRunSelection";
 import { type Call, HttpReply, mockApi, renderWithClient, restoreFetch } from "../pages/helpers";
-import { makeTaskGroup, makeTaskRun, makeTaskRuns } from "./fixtures";
+import { makeBenchTaskRuns, makeTaskGroup, makeTaskRun, makeTaskRuns } from "./fixtures";
 
 afterEach(restoreFetch);
 
@@ -218,6 +218,20 @@ describe("RunsSidebar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sort created ↓" }));
     fireEvent.click(screen.getByRole("menuitemradio", { name: "created ↓" }));
     expect(patches.at(-1)).toEqual({ sort: { key: "created", dir: "asc" } });
+  });
+
+  test("sort chip: a new key sorts best first in that key's own direction", () => {
+    const { patches } = setup(makeBenchTaskRuns());
+    const pick = (name: string) => {
+      fireEvent.click(screen.getByRole("button", { name: /^Sort / }));
+      fireEvent.click(within(screen.getByRole("menu", { name: "Sort by" })).getByRole("menuitemradio", { name }));
+    };
+    pick("rps");
+    expect(patches.at(-1)).toEqual({ sort: { key: "throughput/rps", dir: "desc" } });
+    pick("peak");
+    expect(patches.at(-1)).toEqual({ sort: { key: "throughput/peak", dir: "asc" } });
+    pick("p95");
+    expect(patches.at(-1)).toEqual({ sort: { key: "primary", dir: "asc" } });
   });
 
   test("a menu takes focus: first item on open, arrows move, Escape returns to the chip", () => {

@@ -852,6 +852,7 @@ def test_task_runs_route_lists_named_runs_and_hides_archived(
     assert body["primary"] == "accuracy/value" and body["key_parts"] is None
     assert [r["run_id"] for r in body["runs"]] == ["r1"]
     assert body["runs"][0]["scores"] == {"accuracy/value": 0.75}
+    assert body["key_higher_is_better"] == {"accuracy/value": True}
     assert body["groups"][0]["is_best"] is True
     shown = client.get("/api/v1/tasks/toy/toy-acc/runs", params={"archived": "true"}).json()
     assert {r["run_id"] for r in shown["runs"]} == {"r1", "r2"}

@@ -476,6 +476,40 @@ def _higher_is_better(config: ProjectConfig, spec: TaskSpec, primary: str | None
     return config.metrics[metric].higher_is_better
 
 
+def key_higher_is_better(config: ProjectConfig, spec: TaskSpec, key: str) -> bool:
+    """
+    Return the direction of one ``metric/key`` of a task, the one a board ranks it by.
+
+    The task's configured primary key takes the task direction (a ``system_bench``
+    percentile is lower-is-better); any other key its metric's ``higher_is_better``.
+
+    Parameters
+    ----------
+    config : ProjectConfig
+        The task's project config.
+    spec : TaskSpec
+        The task.
+    key : str
+        A score key of one of the task's metrics (``latency/p95``, ``reported/a.top1``).
+
+    Returns
+    -------
+    bool
+        True when a higher value of ``key`` is better.
+
+    Examples
+    --------
+    >>> key_higher_is_better(config, config.tasks["bench"], "latency/p95")  # doctest: +SKIP
+    False
+    >>> key_higher_is_better(config, config.tasks["bench"], "throughput/rps")  # doctest: +SKIP
+    True
+    """
+    metric, sub = parse_metric_key(key)
+    if f"{metric}/{sub}" == "/".join(parse_metric_key(spec.primary)):
+        return _higher_is_better(config, spec)
+    return config.metrics[metric].higher_is_better
+
+
 # caches ------------------------------------------------------------------------------
 STATS_CACHE_SIZE = 8192
 """Bootstrap results kept per kind (row intervals, paired p-values), least recently used out."""
@@ -1257,14 +1291,9 @@ def build_leaderboard(
     """
     spec = config.tasks[task]
     chosen = {m: (versions or {}).get(m, config.metrics[m].version) for m in spec.metrics}
-    requested_primary = primary
     primary = _selected_primary(config, task, primary, scores, chosen)
     primary_metric, primary_key = parse_metric_key(primary)
-    higher = (
-        config.metrics[primary_metric].higher_is_better
-        if requested_primary is not None and primary != "/".join(parse_metric_key(spec.primary))
-        else _higher_is_better(config, spec)
-    )
+    higher = key_higher_is_better(config, spec, primary)
     eligible = [
         r for r in runs if r.task == task and r.status == RunStatus.FINISHED and not r.archived
     ]

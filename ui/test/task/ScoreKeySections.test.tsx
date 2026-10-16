@@ -3,7 +3,7 @@ import { screen, within } from "@testing-library/react";
 import { ScoreKeySections, barRows, visibleKeySections } from "../../src/task/ScoreKeySections";
 import { listIdentities, parseSelection } from "../../src/task/useRunSelection";
 import { renderWithClient } from "../pages/helpers";
-import { EVAL_PRIMARY, makeEvalTaskRuns } from "./fixtures";
+import { EVAL_PRIMARY, makeBenchTaskRuns, makeEvalTaskRuns } from "./fixtures";
 
 const sel = parseSelection(new URLSearchParams(), { sortDir: "desc" });
 const colorOf = (id: string) => `color-${id}`;
@@ -38,7 +38,7 @@ test("bar rows: each identity's score, whiskers on the primary only, missing key
   expect(barRows(items, "reported/test-e.model-y.top1", data, colorOf).find((r) => r.id === "g-v1")?.value).toBeNull();
 });
 
-test("bar rows: the best value of that key is marked, in the task direction, never from one value", () => {
+test("bar rows: the best value of that key is marked, in the task direction when the key's is unknown, never from one value", () => {
   const data = makeEvalTaskRuns();
   const key = "reported/test-b.model-x.top1";
   const v1 = data.groups.find((g) => g.group_id === "g-v1");
@@ -47,8 +47,11 @@ test("bar rows: the best value of that key is marked, in the task direction, nev
   const items = listIdentities(sel, data);
   const bestOf = (k: string, d = data) => barRows(items, k, d, colorOf).filter((r) => r.best).map((r) => r.id);
   expect(bestOf(key)).toEqual(["g-v1"]);
-  expect(bestOf(EVAL_PRIMARY, { ...data, higher_is_better: false })).toEqual(["g-v1"]);
-  expect(bestOf(key, { ...data, higher_is_better: false })).toEqual(["g-v2"]);
+  const lower = { ...data, higher_is_better: false, key_higher_is_better: {} };
+  expect(bestOf(EVAL_PRIMARY, lower)).toEqual(["g-v1"]);
+  expect(bestOf(key, lower)).toEqual(["g-v2"]);
+  // a key's own direction wins over the task's
+  expect(bestOf(key, { ...data, higher_is_better: false })).toEqual(["g-v1"]);
   expect(barRows(items.slice(0, 1), key, data, colorOf).some((r) => r.best)).toBe(false);
 });
 
@@ -60,4 +63,13 @@ test("sections: the primary's open and marked, the others closed", () => {
   expect(within(top10).getAllByRole("button", { expanded: true }).length).toBeGreaterThan(0);
   expect(within(top1).getAllByRole("button", { expanded: false }).length).toBeGreaterThan(0);
   expect(within(top10).getByText("★ primary")).toBeTruthy();
+});
+
+test("bar rows: each key is marked in its own direction, the task's only when the key's is unknown", () => {
+  const data = makeBenchTaskRuns();
+  const items = listIdentities(sel, data);
+  const bestOf = (k: string) => barRows(items, k, data, colorOf).filter((r) => r.best).map((r) => r.id);
+  expect(bestOf("latency/p95")).toEqual(["g-fast"]);
+  expect(bestOf("throughput/rps")).toEqual(["g-wide"]);
+  expect(bestOf("throughput/peak")).toEqual(["g-fast"]);
 });

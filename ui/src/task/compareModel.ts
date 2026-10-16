@@ -115,7 +115,7 @@ export function compareKeyFor(model: CompareModel, dataset: string, modelName: s
 }
 
 /**
- * The best of two or more distinct finite values in the task direction, else null (one
+ * The best of two or more distinct finite values in the given direction, else null (one
  * value, or all equal, marks nothing). Shared with the Score keys bars.
  */
 export function rowBest(values: readonly (number | null)[], higherIsBetter: boolean): number | null {
@@ -124,14 +124,20 @@ export function rowBest(values: readonly (number | null)[], higherIsBetter: bool
   return higherIsBetter ? Math.max(...v) : Math.min(...v);
 }
 
-export function compareRows(model: CompareModel, state: CompareState, columns: readonly CompareColumn[], higherIsBetter: boolean): CompareRow[] {
+/** One row per selected metric × dataset; each row's best in its key's direction (`higherIsBetter(key)`). */
+export function compareRows(
+  model: CompareModel,
+  state: CompareState,
+  columns: readonly CompareColumn[],
+  higherIsBetter: (key: string) => boolean,
+): CompareRow[] {
   const metrics = model.metrics.filter((m) => state.metrics.includes(m));
   const datasets = model.datasets.filter((d) => state.datasets.includes(d));
   return metrics.flatMap((metric) =>
     datasets.map((dataset) => {
       const key = compareKeyFor(model, dataset, state.model, metric);
       const values = columns.map((c) => (key === undefined ? null : (c.scores[key] ?? null)));
-      return { metric, dataset, values, best: rowBest(values, higherIsBetter) };
+      return { metric, dataset, values, best: key === undefined ? null : rowBest(values, higherIsBetter(key)) };
     }),
   );
 }

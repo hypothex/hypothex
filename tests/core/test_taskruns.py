@@ -11,6 +11,7 @@ from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.fsutil import append_jsonl
 from hypothex.core.ids import utcnow
+from hypothex.core.leaderboard import key_higher_is_better
 from hypothex.core.overview import build_overview
 from hypothex.core.records import (
     CostTotals,
@@ -165,6 +166,46 @@ def test_cost_and_key_parts(ctx: Context, toy_repo: Path) -> None:
     assert (by_id["queued"].gpu_hours, by_id["queued"].cost_usd) == (None, None)
     assert by_id["queued"].progress is None
     assert out.key_parts == ["dataset", "metric"]
+
+
+def test_each_score_key_carries_its_own_direction(ctx: Context, toy_repo: Path) -> None:
+    # a system_bench-like task: lower-is-better latency primary, higher-is-better throughput
+    cfg_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["metrics"]["latency"] = {
+        "version": "v1",
+        "fn": "toymetrics:accuracy",
+        "higher_is_better": False,
+    }
+    cfg["metrics"]["throughput"] = {"version": "v1", "fn": "toymetrics:accuracy"}
+    cfg["tasks"]["toy-acc"].update(
+        kind="system_bench", metrics=["latency", "throughput"], primary="latency/p95"
+    )
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    rec = _run(ctx, toy_repo, "r1", "aaaa")
+    for metric, key, value in [("latency", "p95", 41.0), ("throughput", "rps", 900.0)]:
+        score = ScoreRecord(metric=metric, version="v1", key=key, value=value, created_at=T0)
+        ctx.add_score(rec, score)
+    out = task_runs(ctx, "toy-acc")
+    assert out.higher_is_better is False
+    assert out.key_higher_is_better == {"latency/p95": False, "throughput/rps": True}
+
+
+def test_key_direction_follows_the_leaderboard_rule(ctx: Context, toy_repo: Path) -> None:
+    cfg_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["metrics"]["speed"] = {"version": "v1", "fn": "toymetrics:accuracy"}
+    cfg["tasks"]["toy-acc"].update(kind="system_bench", metrics=["speed"], primary="speed/p95")
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    ctx.register_project(toy_repo)
+    entry, _ = q.resolve_task(ctx, "toy-acc")
+    config = entry.config
+    spec = config.tasks["toy-acc"]
+    # the primary of a system_bench task: a percentile is lower-is-better
+    assert key_higher_is_better(config, spec, "speed/p95") is False
+    # any other key: its metric's own direction
+    assert key_higher_is_better(config, spec, "speed/p50") is True
+    assert key_higher_is_better(config, spec, "speed/rps") is True
 
 
 def test_groups_with_the_same_params_on_two_commits_get_distinct_names(

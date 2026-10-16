@@ -18,6 +18,7 @@ from hypothex.core.leaderboard import (
     VersusBest,
     cached_names,
     group_id_for,
+    key_higher_is_better,
     seed_buckets,
 )
 from hypothex.core.naming import (
@@ -105,6 +106,8 @@ class TaskRuns(BaseModel):
     ``metric_versions`` holds the task's current version per metric
     (``Leaderboard.metric_versions``), the versions ``scores`` are read at.
     ``key_parts`` are the task's ``score_keys`` part names.
+    ``key_higher_is_better`` holds the direction of each of ``score_keys``
+    (``leaderboard.key_higher_is_better``); ``higher_is_better`` is the primary's.
     """
 
     project: str
@@ -118,6 +121,7 @@ class TaskRuns(BaseModel):
     varying_keys: list[str]
     metric_names: list[str]
     score_keys: list[str]
+    key_higher_is_better: dict[str, bool]
     key_parts: list[str] | None
     runs: list[TaskRun]
     groups: list[TaskGroup]
@@ -358,6 +362,8 @@ def task_runs(
         _group(g, members[g], rows.get(g), names[g], board.primary, best)
         for g in [*rows, *unranked]
     ]
+    score_keys = sorted({k for run in runs for k in run.scores})
+    spec = entry.config.tasks[task]
     return TaskRuns(
         project=entry.project,
         task=task,
@@ -369,8 +375,9 @@ def task_runs(
         metric_versions=dict(board.metric_versions),
         varying_keys=varying_keys([run_settings(r) for r in oldest_first]),
         metric_names=_metric_names(ctx, shown),
-        score_keys=sorted({k for run in runs for k in run.scores}),
-        key_parts=entry.config.tasks[task].key_parts,
+        score_keys=score_keys,
+        key_higher_is_better={k: key_higher_is_better(entry.config, spec, k) for k in score_keys},
+        key_parts=spec.key_parts,
         runs=runs,
         groups=groups,
     )

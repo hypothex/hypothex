@@ -19,7 +19,8 @@ export interface CompareBodyProps {
   state: CompareState;
   onState: (next: CompareState) => void;
   columns: readonly CompareColumn[];
-  higherIsBetter: boolean;
+  /** Direction of a score key, for each row's best value. */
+  higherIsBetter: (key: string) => boolean;
   /** Draw the Table | Bars switch inside the body (a saved view panel); the Charts tab puts it in the header. */
   showSwitch?: boolean;
 }

@@ -26,7 +26,7 @@ import { ScoreKeySections } from "./ScoreKeySections";
 import { ScoresSection } from "./ScoresSection";
 import { StepMetricsSection, useStepCurves } from "./StepMetricsSection";
 import { type SeedsMode, type XMode, hasTime, matchesSearch, metricSections, stepMetrics } from "./stepMetrics";
-import { type Selection, listIdentities } from "./useRunSelection";
+import { type Selection, keyHigherIsBetter, listIdentities } from "./useRunSelection";
 
 export interface ChartsTabProps {
   project: string;
@@ -168,7 +168,7 @@ export function ChartsTab(props: ChartsTabProps): ReactElement {
                     model={cmp}
                     state={state}
                     columns={columns}
-                    higherIsBetter={data.higher_is_better}
+                    higherIsBetter={(key) => keyHigherIsBetter(data, key)}
                     onState={(next) => setCompares(compareList.map((s, j) => (j === index ? next : s)))}
                     onRemove={index > 0 ? () => setCompares(compareList.filter((_, j) => j !== index)) : undefined}
                   />

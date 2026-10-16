@@ -26,7 +26,7 @@ export function ComparePanelResult({ result }: PanelProps): ReactElement {
       state={state ?? { ...built.state, render }}
       onState={setState}
       columns={columns}
-      higherIsBetter={result.meta?.higher_is_better !== false}
+      higherIsBetter={() => result.meta?.higher_is_better !== false}
     />
   );
 }

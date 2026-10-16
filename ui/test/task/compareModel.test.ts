@@ -61,7 +61,7 @@ describe("rows", () => {
       { id: "g-v1", name: "db v1", color: "c1", scores: data.runs[0]?.scores ?? {} },
       { id: "g-v3", name: "db v3", color: "c3", scores: data.runs[2]?.scores ?? {} },
     ];
-    const rows = compareRows(model, { datasets: ["test-e", "test-a"], model: "model-y", metrics: ["top1", "top10"], render: "table" }, cols, true);
+    const rows = compareRows(model, { datasets: ["test-e", "test-a"], model: "model-y", metrics: ["top1", "top10"], render: "table" }, cols, () => true);
     expect(rows.map((r) => [r.metric, r.dataset, r.values, r.best])).toEqual([
       ["top1", "test-a", [evalValue(0, 0, 1, 0), evalValue(2, 0, 1, 0)], evalValue(2, 0, 1, 0)],
       ["top1", "test-e", [null, evalValue(2, 4, 1, 0)], null],
@@ -71,6 +71,19 @@ describe("rows", () => {
     expect(rowBest([0.5, 0.5], true)).toBeNull();
     expect(rowBest([0.2, 0.4], false)).toBe(0.2);
     expect(rowBest([0.3, null], true)).toBeNull();
+  });
+
+  test("each row's best follows the direction of that row's key", () => {
+    const cols = [
+      { id: "g-v1", name: "db v1", color: "c1", scores: data.runs[0]?.scores ?? {} },
+      { id: "g-v3", name: "db v3", color: "c3", scores: data.runs[2]?.scores ?? {} },
+    ];
+    const higher = (key: string) => !key.endsWith(".top1");
+    const rows = compareRows(model, { datasets: ["test-a"], model: "model-x", metrics: ["top1", "top10"], render: "table" }, cols, higher);
+    expect(rows.map((r) => [r.metric, r.best])).toEqual([
+      ["top1", evalValue(0, 0, 0, 0)],
+      ["top10", evalValue(2, 0, 0, 1)],
+    ]);
   });
 
   test("a view panel spec for Save as view, and saved rows back to a model", () => {

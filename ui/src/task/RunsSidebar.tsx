@@ -34,6 +34,7 @@ import {
   SORT_PRIMARY,
   identities,
   isSuperseded,
+  keyHigherIsBetter,
   keyLabel,
   latestRun,
   listIdentities,
@@ -75,13 +76,11 @@ export function RunsSidebar({ data, selection, onChange, onOpen }: RunsSidebarPr
     key === SORT_PRIMARY ? keyLabel(data.primary) : key === SORT_CREATED ? "created" : keyLabel(key);
   const scoreKeys = [SORT_PRIMARY, ...data.score_keys.filter((k) => k !== data.primary)];
   const sort = selection.sort;
+  // a new score key sorts best first in its own direction; created sorts newest first
+  const firstDir = (key: string): SortDir =>
+    key !== SORT_CREATED && !keyHigherIsBetter(data, key === SORT_PRIMARY ? data.primary : key) ? "asc" : "desc";
   const pickSort = (key: string): void =>
-    onChange({
-      sort:
-        key === sort.key
-          ? { key, dir: sort.dir === "desc" ? "asc" : "desc" }
-          : { key, dir: key === SORT_PRIMARY && !data.higher_is_better ? "asc" : "desc" },
-    });
+    onChange({ sort: key === sort.key ? { key, dir: sort.dir === "desc" ? "asc" : "desc" } : { key, dir: firstDir(key) } });
   const toggle = (id: string): void =>
     onChange({
       hidden: selection.hidden.includes(id) ? selection.hidden.filter((h) => h !== id) : [...selection.hidden, id],

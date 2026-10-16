@@ -4,6 +4,7 @@ import { type APIRequestContext, test as base, expect, type Page } from "@playwr
 import {
   DEMO_FILE,
   DEMO_LABEL,
+  type Extra,
   HOME_DIR,
   HOSTS_DEMO_LABEL,
   HOSTS_HOME_DIR,
@@ -169,8 +170,8 @@ export async function expectTheme(page: Page, theme: Theme): Promise<void> {
   await expect(page.locator("body")).toHaveCSS("background-color", PAPER[theme]);
 }
 
-/** Project and task that `hx demo` seeded for `kind` (read after the server started). */
-export function demoTask(kind: Kind): { project: string; task: string } {
+/** Project and task that `hx demo` seeded for `kind` or extra (read after the server started). */
+export function demoTask(kind: Kind | Extra): { project: string; task: string } {
   const seeded = JSON.parse(readFileSync(DEMO_FILE, "utf8")) as Record<string, string>;
   const ref = seeded[kind];
   if (!ref || !ref.includes("/")) throw new Error(`hx demo did not seed kind ${kind}`);

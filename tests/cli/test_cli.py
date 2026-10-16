@@ -307,6 +307,13 @@ def test_demo_is_hidden_and_seeds(home: Path) -> None:
         runner.invoke(app, ["demo", "--kinds", "generic,nope"], catch_exceptions=False)
 
 
+def test_demo_without_kinds_also_seeds_the_eval_demo(home: Path) -> None:
+    out = hx("demo")
+    assert isinstance(out, dict)
+    assert out["eval_matrix"] == "eval-matrix/multi-dataset"
+    assert set(DEMO_TASKS) <= set(out)
+
+
 def test_demo_refuses_a_home_with_real_projects(in_repo: Path) -> None:
     _run()
     with pytest.raises(ConfigError, match=r"already has projects \(toy\)"):

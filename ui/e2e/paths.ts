@@ -88,6 +88,9 @@ export const KINDS = [
   "system_bench",
 ] as const;
 export type Kind = (typeof KINDS)[number];
+/** Demo projects `hx demo` seeds that are not a task kind (keys of `DEMO_EXTRAS`). */
+export const EXTRAS = ["eval_matrix"] as const;
+export type Extra = (typeof EXTRAS)[number];
 
 /** Hub home of the `hx demo --with-hosts` server (fake remote hosts), wiped on every start. */
 export const HOSTS_HOME_DIR = join(RUN_DIR, "home-hosts");

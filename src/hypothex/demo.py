@@ -1,4 +1,4 @@
-"""Seed a Hypothex home with demo projects, one per task kind.
+"""Seed a Hypothex home with demo projects, one per task kind, plus ``DEMO_EXTRAS``.
 
 The demo mirrors the approved mockups in ``docs/mockups/kinds/*/data.js`` (and
 ``docs/mockups/ui-v4/data.js`` for the generic kind): the same seeded generators,
@@ -18,7 +18,7 @@ Examples
 --------
 >>> import pathlib, tempfile
 >>> from hypothex.demo import seed_demo
->>> seed_demo(pathlib.Path(tempfile.mkdtemp()), kinds=["generic"])
+>>> seed_demo(pathlib.Path(tempfile.mkdtemp()), kinds=["generic"], extras={})
 {'generic': 'toy-classifier/toy-test'}
 """
 
@@ -34,7 +34,7 @@ import struct
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -90,6 +90,8 @@ DEMO_TASKS: dict[str, tuple[str, str]] = {
     "agent_iteration": ("retro-agent", "retro-bench-200"),
     "system_bench": ("route-search", "route-api-latency"),
 }
+DEMO_EXTRAS: dict[str, tuple[str, str]] = {"eval_matrix": ("eval-matrix", "multi-dataset")}
+"""Demo projects that are not one of the five task kinds (seeded by a plain ``hx demo``)."""
 
 _M32 = 0xFFFFFFFF
 
@@ -710,6 +712,85 @@ def _seed_generic(sd: _Seeder) -> None:
         final = scored(record, run, _GEN_BOTH_FAIL + _GEN_BROKEN)
         if seed == 3:
             sd.ctx.store.append_note(project, final.run_id, _GEN_NOTE, "agent:acceptance")
+
+
+# --------------------------------------------------------------------- eval_matrix
+_EVAL_DATASETS = ("test-a", "test-b", "holdout")
+_EVAL_MODELS = ("model-x", "model-y")
+# db version -> (top10 base, tags, archived); later versions are better, "b" re-runs supersede.
+_EVAL_DBS: tuple[tuple[str, float, tuple[str, ...], bool], ...] = (
+    ("v1", 1.06, ("rescore",), False),
+    ("v2", 1.40, ("rescore", "superseded"), False),
+    ("v2b", 1.40, ("rescore",), False),
+    ("v3", 1.52, ("rescore", "superseded"), False),
+    ("v3b", 1.53, ("rescore", "final"), False),
+    ("v4", 1.57, ("rescore", "final"), False),
+    ("v0", 0.91, ("rescore",), True),
+)
+
+
+def _seed_eval_matrix(sd: _Seeder) -> None:
+    """
+    Seed ``eval-matrix/multi-dataset``: one eval per database version.
+
+    Every run reports ``reported/<dataset>.<model>.<metric>`` for three datasets, two
+    models and three metrics (``top10``, ``max``, ``n``), the shape the v5 Compare
+    panel and score-key sections are built for.
+
+    Parameters
+    ----------
+    sd : _Seeder
+        Target home.
+    """
+    project, task = DEMO_EXTRAS["eval_matrix"]
+    dataset = {"version": "v1", "path": "data/items.jsonl", "splits": {"test": "data/items.jsonl"}}
+    repo = sd.project(
+        _task_config(
+            project,
+            task,
+            kind="generic",
+            dataset=dataset,
+            metrics={"reported": {"version": "v1", "fn": "demo_metrics:accuracy"}},
+            primary="reported/test-a.model-x.top10",
+            description="Re-score saved predictions against each database version.",
+            score_keys="{dataset}.{model}.{metric}",
+        ),
+        {"data/items.jsonl": _jsonl({"id": f"item-{i}"} for i in range(40))},
+    )
+    draw = _mulberry32(11)
+    for i, (db, base, tags, archived) in enumerate(_EVAL_DBS):
+        record, _ = sd.start(
+            _RunSpec(
+                project=project,
+                task=task,
+                repo=repo,
+                hypothesis=f"Re-score the test sets with database {db}.",
+                command_template=["python", "rescore.py", "--db", db],
+                params={"db": db},
+                seed=None,
+                created_at=sd.at(f"2026-09-27T0{i}:10:00Z"),
+                created_by="agent:rescorer",
+                host="laptop",
+                commit=_GEN_NEW,
+                key=f"eval-{db}",
+                tags=list(tags),
+                archived=archived,
+            )
+        )
+        scores: list[tuple[str, str, str, float]] = []
+        for d_i, ds in enumerate(_EVAL_DATASETS):
+            for m_i, model in enumerate(_EVAL_MODELS):
+                top10 = _fixed(base - 0.18 * d_i - 0.07 * m_i + 0.02 * _gauss(draw), 4)
+                scores.append(("reported", "v1", f"{ds}.{model}.top10", top10))
+                scores.append(("reported", "v1", f"{ds}.{model}.max", _fixed(top10 * 2.6, 3)))
+                scores.append(("reported", "v1", f"{ds}.{model}.n", float(124 + 3 * d_i)))
+        sd.finish(
+            record,
+            status=RunStatus.FINISHED,
+            ended_at=record.created_at + timedelta(minutes=4),
+            exit_code=0,
+            scores=scores,
+        )
 
 
 # --------------------------------------------------------------------- training
@@ -1946,9 +2027,15 @@ _SEEDERS: dict[str, Callable[[_Seeder], None]] = {
     "agent_iteration": _seed_agent_iteration,
     "system_bench": _seed_system_bench,
 }
+_EXTRA_SEEDERS: dict[str, Callable[[_Seeder], None]] = {"eval_matrix": _seed_eval_matrix}
 
 
-def _seed_demo(home: Path, kinds: Iterable[str], anchor: datetime) -> dict[str, str]:
+def _seed_demo(
+    home: Path,
+    kinds: Iterable[str],
+    anchor: datetime,
+    extras: Mapping[str, tuple[str, str]] = DEMO_EXTRAS,
+) -> dict[str, str]:
     """
     Seed the demo with every timestamp placed relative to ``anchor``.
 
@@ -1960,16 +2047,18 @@ def _seed_demo(home: Path, kinds: Iterable[str], anchor: datetime) -> dict[str, 
         Task kinds to seed.
     anchor : datetime
         Where ``DEMO_EPOCH`` lands. The same anchor gives the same run ids and data.
+    extras : mapping of str to (str, str)
+        Extra demo projects to seed after the kinds (keys of ``DEMO_EXTRAS``).
 
     Returns
     -------
     dict of str to str
-        ``{kind: "project/task"}`` in the order given.
+        ``{kind: "project/task"}`` in the order given, then ``{extra: "project/task"}``.
 
     Raises
     ------
     ValueError
-        For an unknown kind.
+        For an unknown kind or extra.
     StoreError
         If a demo project already exists in ``home`` (nothing is written).
     """
@@ -1977,23 +2066,30 @@ def _seed_demo(home: Path, kinds: Iterable[str], anchor: datetime) -> dict[str, 
     unknown = [k for k in wanted if k not in _SEEDERS]
     if unknown:
         raise ValueError(f"unknown demo kinds {unknown}; choose from {list(KINDS)}")
+    unknown = [e for e in extras if e not in _EXTRA_SEEDERS]
+    if unknown:
+        raise ValueError(f"unknown demo extras {unknown}; choose from {list(DEMO_EXTRAS)}")
+    refs = {kind: DEMO_TASKS[kind] for kind in wanted} | {e: DEMO_EXTRAS[e] for e in extras}
     ctx = Context.open(home)
-    for kind in wanted:
-        project = DEMO_TASKS[kind][0]
+    for project, _ in refs.values():
         if ctx.layout.project_dir(project).exists():
             raise StoreError(
                 f"demo project {project!r} already exists in {ctx.layout.home}; "
                 "seed the demo into an empty HYPOTHEX_HOME"
             )
     seeder = _Seeder(ctx, anchor)
-    for kind in wanted:
-        _SEEDERS[kind](seeder)
-    return {kind: "/".join(DEMO_TASKS[kind]) for kind in wanted}
+    for name in refs:
+        (_SEEDERS.get(name) or _EXTRA_SEEDERS[name])(seeder)
+    return {name: "/".join(ref) for name, ref in refs.items()}
 
 
-def seed_demo(home: Path, kinds: Iterable[TaskKind] = KINDS) -> dict[str, str]:
+def seed_demo(
+    home: Path,
+    kinds: Iterable[TaskKind] = KINDS,
+    extras: Mapping[str, tuple[str, str]] = DEMO_EXTRAS,
+) -> dict[str, str]:
     """
-    Write demo projects and runs for the given task kinds into ``home``.
+    Write demo projects and runs for the given task kinds and extras into ``home``.
 
     Timestamps keep the mockups' distance to ``DEMO_EPOCH`` but are moved so
     that ``DEMO_EPOCH`` falls on the current hour; the Overview's default 24-hour
@@ -2006,27 +2102,32 @@ def seed_demo(home: Path, kinds: Iterable[TaskKind] = KINDS) -> dict[str, str]:
         Hypothex home (created if missing). Demo repos go to ``<home>/demo-repos/``.
     kinds : iterable of TaskKind
         Which kinds to seed; default all five.
+    extras : mapping of str to (str, str)
+        Demo projects that are not a task kind, keyed like ``DEMO_EXTRAS`` (the
+        default, all of them); ``{}`` seeds none.
 
     Returns
     -------
     dict of str to str
-        ``{kind: "project/task"}``.
+        ``{kind: "project/task"}``, then ``{extra: "project/task"}``.
 
     Raises
     ------
     ValueError
-        For an unknown kind.
+        For an unknown kind or extra.
     StoreError
         If a demo project already exists in ``home``.
 
     Examples
     --------
     >>> import pathlib, tempfile
-    >>> seed_demo(pathlib.Path(tempfile.mkdtemp()), kinds=["generic"])
+    >>> seed_demo(pathlib.Path(tempfile.mkdtemp()), kinds=["generic"], extras={})
     {'generic': 'toy-classifier/toy-test'}
+    >>> seed_demo(pathlib.Path(tempfile.mkdtemp()), kinds=[])
+    {'eval_matrix': 'eval-matrix/multi-dataset'}
     """
     anchor = utcnow().replace(minute=0, second=0, microsecond=0)
-    return _seed_demo(home, kinds, anchor)
+    return _seed_demo(home, kinds, anchor, extras)
 
 
 # --------------------------------------------------------------------- fake hosts

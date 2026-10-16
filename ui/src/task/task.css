@@ -18,6 +18,7 @@
 .runs .rname { min-width: 0; }
 .runs .rname .t { display: flex; align-items: center; min-width: 0; font-weight: 500; }
 .runs .rname .run-name .rn-t { cursor: pointer; }
+.runs .rrow:hover .run-name .pen, .runs .rrow:focus-within .run-name .pen { opacity: 1; }
 .runs .rname .run-name .rename { font-size: 13px; height: 24px; padding: 0 6px; width: 100%; }
 .runs .rname .s { display: flex; gap: 6px; align-items: center; color: var(--ink-3); font-size: 12px; white-space: nowrap; overflow: hidden; }
 .runs .rname .s .final { color: var(--ok); }

@@ -85,3 +85,13 @@ test("host GPU strips move to their own row and keep readable cells in a narrow 
   expect(css).toContain(".hrow > :nth-child(3) { grid-column: 1 / -1; grid-row: 2;");
   expect(css).toContain(".page .hosts .gc { flex: 1 1 80px;");
 });
+
+describe("runs sidebar pencil (spec 4.2)", () => {
+  test("the pencil shows on row hover or row focus, not only on name hover", async () => {
+    const pen = rule(
+      await read("../../src/task/task.css"),
+      ".runs .rrow:hover .run-name .pen, .runs .rrow:focus-within .run-name .pen",
+    );
+    expect(pen).toContain("opacity: 1;");
+  });
+});

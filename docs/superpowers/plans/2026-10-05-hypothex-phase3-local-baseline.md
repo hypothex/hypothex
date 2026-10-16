@@ -1,0 +1,27 @@
+# Phase 3 local prerequisite integration
+
+Superseded locally by `2026-10-05-hypothex-phase3-final-candidate.md`, which includes the final credential-intent guards. The evidence below remains the `a66540f` checkpoint.
+
+This is a local merge checkpoint, not formal review round 5. The Phase 3 plan branch at `bbae18c86f0a60773eed9aee067327689748e447` merges `a66540f5d93a9b69c9644a06f323b12af43db231` without rebasing. The incoming history contains frozen DF2 `48f8bef12909a7b40f6037b2331aa1f0300dcffe`, token implementation `826223e4534439f863420bbf97e6a9a93feb078e`, and the lazy MCP factory. The merge had no conflicts. Runtime, UI, tests, dependencies and task files are inherited exactly from the incoming commit; all additional edits are Phase 3 plan documents.
+
+The final merged `origin/main` checkpoint is still required after the prerequisite PRs and documentation work land. The pending credential-generation repair for mutation intents (`useAction` and `launchSeeds`) is not in this pin. Preserve its final implementation and regressions before the next formal review. No Phase 3 runtime implementation, formal round 5, push or PR is part of this checkpoint.
+
+## Reconciled adapters
+
+- Backend Task 4 adds sweep ownership after the actual `_draft` call, then carries `spec.owner` through the shared `_requests` path. Task 27 stamps the durable accepted spec before serialization, passes caller/route-bound keys to `SweepIssuer.accept` and `extend`, keeps the immutable receipt/worker/recovery lifecycle, and checks cancellation ownership before the issuer's cooperative cancellation and `stop_batch`. It retains the legacy synchronous fallback. Worker identity comes from the saved spec rather than request-local state.
+- Task 16 uses current `SweepSummary.issuance`: all four active states (`preparing`, `queued`, `issuing`, `settling`) defer a folded notice even if every observed member has ended and no legacy launch lock is held. Legacy/direct-core `issuance=None` keeps the old lock/count check. Pending terminal triggers still survive restart and retry without a new event; terminal issuance does not bypass queued/running-member checks. The plan adds a 12-case active-to-terminal restart regression, alongside the existing partial-launch regression.
+- Task 32 retains `_caller_server()` and its nested `_CallerMCPServer`, the module-level credential context and `NO_AUTH_TOKEN`. SDK Context/ToolError imports occur during tool registration, so importing CLI hub helpers stays SDK-free. Agent identity retains the real optional override and `default_agent`. Durable local sweep cancel/extend keeps `sweep_acts_through_hub`, and existing receipt/issuance guidance stays in MCP instructions.
+- Frontend Task 4 keeps `sweep.issuance` detail/list invalidation, credential reset and fresh-ticket transport. `useSweep` retains `issuancePoll`; observed member counts are not planned work. Task loading, unscored counts, metric drift, launch `templateEnvironment`, confirmed recents and grouped retry behavior remain additive integration boundaries.
+- Task 8 retains authoritative `served`/`hostsLoaded`, conditional queued cancellation, and the timed two-click running-stop confirmation while adding the ownership condition. The owner gate cannot enable an unserved run. Existing and new test fixtures supply the required serving state.
+- Task 25 keeps the Vite authentication project and proxy server, isolated-home credential selection, identity checks, removal of inherited root credentials, owned-process shutdown and secret-safe trace/screenshot settings. Team projects use `unlock: false` so the real Pair page selects the scoped cookie instead of first unlocking with the owner bearer.
+
+## Verification
+
+Evidence: `/tmp/hx-handoff-evidence/phase3-local-baseline/`.
+
+- `probe-auth.py` composes the exact current plan snippets with inherited token modules in memory. `probe-auth.log` records root ticket capacity/expiry/bool compatibility, scoped credential/Origin/protocol behavior, concurrent ticket use and revocation, lazy SDK imports, per-message credential/sentinel handling, stdio discovery, and bounded pre-subscribe revocation checks.
+- `probe-adapters.py` executes the exact notifier decision method for all durable states, live-member deferral and legacy fallback. It executes the exact extend/cancel route bodies with controlled seams to check caller receipt keys, authorization before cancellation, and preserved `stop_batch`. This is a bounded adapter probe, not execution of the full notifier restart test or assembled API suite.
+- `probe-frontend.ts` executes the extracted event mapper and Playwright configuration with controlled constants. It checks durable event keys, malformed-event rejection, Vite auth, four owned servers, team pairing mode and trace/screenshot settings. The actual baseline RunActions source with the plan's replacements parses and retains conditional cancel/armed stop controls. This does not establish full UI typechecking, rendering or browser acceptance.
+- The frontend preflight passes all 12 exact snippet anchors and 9 inspected source blob identities. `git diff --check` passes. A diff against `a66540f` for `src`, `ui`, `tests`, `pyproject.toml`, `uv.lock` and `tasks` is empty.
+
+No real host, SSH configuration or deployment was accessed. No full Phase 3 assembly, full suite, Docker/PostgreSQL, browser acceptance or formal review was run. Earlier checkpoint evidence remains historical and is not relabeled as verification against this pin.

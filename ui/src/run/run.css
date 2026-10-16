@@ -46,8 +46,10 @@
 .run-page .rmain > section > h3 { margin: 0 0 12px; font-size: 13px; font-weight: 600; display: flex; align-items: baseline; gap: 10px; }
 .run-page .rmain > section > h3 .more { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--ink-3); }
 .run-page .rmain > section > h3 .more:hover { color: var(--ink); }
-.run-page .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); border: 1px solid var(--line); border-radius: var(--r-panel); overflow: hidden; }
-.run-page .tile { padding: 14px 16px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); margin: 0 -1px -1px 0; min-width: 0; }
+/* the strip is as wide as its tiles (1–3 tiles leave no empty frame); a full row wraps and
+   every row's tiles grow to the frame's width */
+.run-page .tiles { display: flex; flex-wrap: wrap; width: fit-content; max-width: 100%; border: 1px solid var(--line); border-radius: var(--r-panel); overflow: hidden; }
+.run-page .tile { flex: 1 0 180px; padding: 14px 16px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); margin: 0 -1px -1px 0; min-width: 0; }
 .run-page .tile.prim { background: var(--panel-2); }
 .run-page .tk { display: flex; gap: 8px; align-items: center; color: var(--ink-2); font-size: 12px; font-weight: 500; min-width: 0; }
 .run-page .tk .tl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

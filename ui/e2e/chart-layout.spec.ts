@@ -233,3 +233,35 @@ for (const kind of ["training", "system_bench"] as const) {
     }
   });
 }
+
+/** A finished, scored run of a demo task. */
+async function scoredRun(request: APIRequestContext, kind: "generic" | "eval_matrix"): Promise<string> {
+  const { project, task } = demoTask(kind);
+  const data = await getJson<TaskRunsLite>(request, `/api/v1/tasks/${project}/${task}/runs`);
+  const run = data.runs.find((r) => !r.archived && r.primary !== null);
+  if (!run) throw new Error(`${kind} demo has no scored run`);
+  return run.run_id;
+}
+
+// mockup #run: the score strip is as wide as its tiles; 1–3 tiles never stretch an empty frame
+for (const kind of ["generic", "eval_matrix"] as const) {
+  test(`run ${kind}: score tiles fill their frame, with no empty box`, async ({ page, request, theme }) => {
+    await page.goto(`/r/${await scoredRun(request, kind)}`);
+    await expectTheme(page, theme);
+    const strip = page.locator(".run-page .tiles");
+    await expect(strip.locator(".tile").first()).toBeVisible();
+    for (const width of [1440, 2000]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.waitForTimeout(150);
+      const geo = await strip.evaluate((frame) => {
+        const f = frame.getBoundingClientRect();
+        const tiles = Array.from(frame.children).map((t) => t.getBoundingClientRect());
+        const rows = new Map<number, number>();
+        for (const t of tiles) rows.set(Math.round(t.top), Math.max(rows.get(Math.round(t.top)) ?? 0, t.right));
+        return { n: tiles.length, frame: f.width, gaps: [...rows.values()].map((right) => Math.round(f.right - right)) };
+      });
+      expect(geo.gaps.every((g) => g <= 2), `${geo.n} tiles at ${width}: empty space ${JSON.stringify(geo.gaps)}`).toBe(true);
+      if (geo.n === 1) expect(geo.frame, `one tile at ${width}`).toBeLessThanOrEqual(280);
+    }
+  });
+}

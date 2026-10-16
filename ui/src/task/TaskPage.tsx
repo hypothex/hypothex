@@ -18,6 +18,7 @@ import { useAction } from "../pages/components/useAction";
 import { ChartsTab } from "./ChartsTab";
 import { ExamplesTab } from "./ExamplesTab";
 import { type TaskFacts, type TaskTab, boardWarnings, metricVersions, notFound, parseTab, sameTab, tabParam, taskFacts } from "./facts";
+import { RunsTab } from "./RunsTab";
 import { useRunSelection } from "./useRunSelection";
 import { applySearch, useSearchState } from "./useSearchState";
 import { ViewTab } from "./ViewTab";
@@ -72,6 +73,14 @@ function TaskPageScope({ project, task }: TaskPageProps): ReactElement {
   const custom = (views.data ?? []).filter((v) => v.origin !== "preset");
   const tabs: { tab: TaskTab; label: ReactNode; title?: string }[] = [
     { tab: { kind: "charts" }, label: "Charts" },
+    {
+      tab: { kind: "runs" },
+      label: (
+        <>
+          Runs<span className="n">{data?.runs.length ?? ""}</span>
+        </>
+      ),
+    },
     { tab: { kind: "examples" }, label: "Examples" },
     ...custom.map((v) => ({ tab: { kind: "view", name: v.name } as TaskTab, label: v.title || v.name, title: v.path ?? `${v.origin} view` })),
   ];
@@ -92,6 +101,18 @@ function TaskPageScope({ project, task }: TaskPageProps): ReactElement {
     body = runs.isPending ? <Loading /> : null;
   } else if (tab.kind === "examples") {
     body = <ExamplesTab data={data} board={board.data} selection={selection} />;
+  } else if (tab.kind === "runs") {
+    body = (
+      <RunsTab
+        project={project}
+        task={task}
+        data={data}
+        selection={selection}
+        onSelection={setSelection}
+        onOpenCharts={() => go({ kind: "charts" })}
+        onOpenRun={openRun}
+      />
+    );
   } else {
     body = (
       <ChartsTab

@@ -119,12 +119,21 @@ describe("header", () => {
 });
 
 describe("tabs", () => {
+  test("the Runs tab shows the runs table", async () => {
+    mockApi(routes());
+    page();
+    await ready();
+    fireEvent.click(screen.getByRole("tab", { name: "Runs 4" }));
+    expect(window.location.search).toBe("?tab=runs");
+    expect(within(screen.getByRole("table", { name: "Runs" })).getAllByRole("link").map((a) => a.textContent)).toEqual(["model svm", "model rf"]);
+  });
+
   test("Charts, Examples and each saved view; + View opens the editor", async () => {
     mockApi(routes());
     page();
     await ready();
     const tabs = screen.getByRole("tablist", { name: "Task" });
-    expect(within(tabs).getAllByRole("tab").map((t) => t.textContent)).toEqual(["Charts", "Examples", "route quality"]);
+    expect(within(tabs).getAllByRole("tab").map((t) => t.textContent)).toEqual(["Charts", "Runs4", "Examples", "route quality"]);
     expect(within(tabs).getByRole("tab", { name: "Charts" }).getAttribute("aria-selected")).toBe("true");
     const custom = within(tabs).getByRole("tab", { name: "route quality" });
     expect(custom.getAttribute("href")).toBe(`${PATH}?tab=view%3Aroute-quality`);

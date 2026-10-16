@@ -38,6 +38,8 @@ export const ROUTES = {
   runReeval: "/api/v1/runs/{run_id}/reeval",
   runStop: "/api/v1/runs/{run_id}/stop",
   runNotes: "/api/v1/runs/{run_id}/notes",
+  runTags: "/api/v1/runs/{run_id}/tags",
+  runArchive: "/api/v1/runs/{run_id}/archive",
   runName: "/api/v1/runs/{run_id}/name",
   compareExamples: "/api/v1/compare/examples",
   hosts: "/api/v1/hosts",
@@ -251,6 +253,15 @@ export const api = {
       params: { run_id: runId },
       body: { ...action(opts), text, author: opts?.created_by ?? "human" },
     }),
+  /** Add or remove tags (forwarded to the owning host like every run action). */
+  tagRun: (runId: string, change: { add?: readonly string[]; remove?: readonly string[] }, opts?: M.ActionOptions) =>
+    post<M.RunRecord>(ROUTES.runTags, {
+      params: { run_id: runId },
+      body: { ...action(opts), add: [...(change.add ?? [])], remove: [...(change.remove ?? [])] },
+    }),
+  /** Archive (`on: true`) or restore a run. */
+  archiveRun: (runId: string, on: boolean, opts?: M.ActionOptions) =>
+    post<M.RunRecord>(ROUTES.runArchive, { params: { run_id: runId }, body: { ...action(opts), on } }),
   /** v5 task workspace: runs with derived names, config groups and score keys. */
   taskRuns: (project: string, task: string, archived = false, signal?: AbortSignal) =>
     get<M.TaskRuns>(ROUTES.taskRuns, {

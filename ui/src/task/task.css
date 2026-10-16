@@ -94,3 +94,30 @@
 .cmp-body .legend .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; margin-right: 5px; }
 .cmp-body .facets { display: grid; gap: 20px; }
 .cmp-body .facet-h { font-size: 12px; font-weight: 500; color: var(--ink-2); margin-bottom: 4px; }
+
+/* Runs tab: toolbar, bulk forms, the full table with a sticky header */
+.task-page .runs-tab { display: flex; flex-direction: column; min-height: 0; flex: 1; padding: 0 16px 16px; }
+.task-page .runs-tab .bulk-form { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.task-page .runs-tab .bulk-form input { height: 26px; border: 1px solid var(--line-2); border-radius: var(--r-ctl); padding: 0 8px; font: inherit; background: var(--panel); color: var(--ink); }
+.task-page .runs-tab .bulk-form [role="alert"] { color: var(--fail); font-size: 12px; }
+.task-page .runs-table { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--panel); }
+.task-page .runs-table table.t { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; font-variant-numeric: tabular-nums; }
+.task-page .runs-table th, .task-page .runs-table td { padding: 6px 10px; border-bottom: 1px solid var(--grid); text-align: left; white-space: nowrap; vertical-align: middle; }
+.task-page .runs-table thead th { position: sticky; top: 0; z-index: 2; background: var(--panel); color: var(--ink-3); font-weight: 500; font-size: 12px; border-bottom: 1px solid var(--line); }
+.task-page .runs-table thead th button { all: unset; cursor: pointer; }
+.task-page .runs-table thead th button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 3px; }
+.task-page .runs-table thead th[aria-sort] button { color: var(--ink); }
+.task-page .runs-table .num { text-align: right; }
+.task-page .runs-table .muted { color: var(--ink-3); font-weight: 400; }
+.task-page .runs-table td.best { color: var(--ok); font-weight: 600; }
+.task-page .runs-table tr.g td.name { font-weight: 500; }
+.task-page .runs-table tr.seed td.name { padding-left: 32px; color: var(--ink-2); }
+.task-page .runs-table tr.off td { color: var(--ink-3); }
+.task-page .runs-table .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; box-shadow: inset 0 0 0 1.5px var(--line-2); }
+.task-page .runs-table .caret { border: 0; background: transparent; color: var(--ink-3); width: 16px; cursor: pointer; padding: 0; transition: transform .12s; }
+.task-page .runs-table .caret[aria-expanded="true"] { transform: rotate(90deg); }
+.task-page .runs-table td.name a { color: inherit; text-decoration: none; }
+.task-page .runs-table td.name a:hover { text-decoration: underline; }
+.task-page .runs-table .sts { display: inline-flex; gap: 10px; }
+.task-page .runs-table .mono { font-family: var(--mono); font-size: 12px; }
+.task-page .runs-table .tag { margin-right: 4px; }

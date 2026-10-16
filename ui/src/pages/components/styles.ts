@@ -18,48 +18,7 @@ export const PAGES_CSS = `
 .page .copy[data-state="failed"] { color: var(--fail); }
 .page .row { display: flex; gap: 8px; align-items: center; }
 .page .panel:not(.full), .page .pgrid { margin-top: 24px; }
-.page .pgrid > .panel, .page .two-x > .panel, .page .sw-grid > .panel, .page .ov-grid .panel { margin-top: 0; }
-.page .side > .panel + .panel:not(.full) { margin-top: 16px; }
-.page .plain { list-style: none; margin: 0; padding: 0; }
-.page .plain li { padding: 6px 0; }
-.page .ov-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 72px; margin-top: 64px; }
-.page .timeline svg { display: block; overflow: visible; }
-.page .timeline .ln { font: 600 13px var(--sans); fill: var(--ink); }
-.page .timeline .lc { font: 400 12px var(--sans); fill: var(--ink-3); }
-.page .timeline .grid { stroke: var(--rule-2); }
-.page .timeline .lane, .page .timeline .axis { stroke: var(--rule); }
-.page .timeline .tick { font: 400 11px var(--sans); fill: var(--ink-3); }
-.page .timeline .cl { font: 400 12px var(--sans); fill: var(--ink-3); }
-.page .timeline .cl.more { fill: var(--ink-2); cursor: help; }
-.page .timeline .cl.best { fill: var(--ink); font-weight: 600; }
-.page .timeline .mark { cursor: pointer; }
-.page .timeline .key { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 14px; font-size: 13px; color: var(--ink-2); }
-.page .timeline .key span { display: inline-flex; align-items: center; gap: 7px; }
-.page .timeline .key svg { display: block; overflow: visible; }
-.page .ideas { list-style: none; margin: 0; padding: 0; }
-.page .idea { display: grid; grid-template-columns: 56px minmax(140px, 1fr) minmax(0, 420px) 84px; gap: 0 20px; align-items: center; padding: 14px 0; border-top: 1px solid var(--rule-2); }
-.page .idea:first-child { border-top: 0; }
-.page .idea .mks { display: flex; gap: 4px; align-items: center; }
-.page .idea .nm { font-weight: 550; font-size: 15px; }
-.page .idea .meta { font-size: 13px; color: var(--ink-3); margin-top: 1px; }
-.page .idea .sc { text-align: right; font-size: 15px; font-variant-numeric: tabular-nums; }
-.page .idea .sc small { display: block; font-size: 12.5px; color: var(--ink-3); }
-.page .idea.dim .nm, .page .idea.dim .sc { color: var(--ink-3); font-weight: 400; }
-.page .idea svg.iv { width: 100%; height: 30px; overflow: visible; }
-.page .idea-axis svg { width: 100%; height: 24px; overflow: visible; }
-.page .idea-axis text { font: 400 11px var(--sans); fill: var(--ink-3); }
-.page .idea-axis .ax-l { font-size: 12.5px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.page .idea-group + .idea-group { margin-top: 18px; }
-.page .projects { table-layout: fixed; }
-.page .projects col.c-runs { width: 48px; }
-.page .projects col.c-best { width: 76px; }
-.page .projects th + th, .page .projects td + td { padding-left: 14px; }
-.page .projects td { white-space: nowrap; }
-.page .projects td.nm { white-space: normal; overflow-wrap: anywhere; }
-.page .fail-b { font: 400 15.5px/1.5 var(--font); color: var(--ink-2); margin: 0 0 16px; }
-.page .fail-b b { color: var(--ink); font-weight: 650; }
-.page .fail-b .x { color: var(--fail); font-family: var(--sans); font-weight: 600; margin-right: 6px; }
-.page .fail-b .row { margin-top: 8px; }
+.page .pgrid > .panel, .page .two-x > .panel, .page .sw-grid > .panel { margin-top: 0; }
 .page .view-tabs { display: flex; align-items: center; gap: 4px; margin-top: 36px; border-bottom: 1px solid var(--rule); font-size: 14px; }
 .page .view-tabs > a { padding: 10px 12px; text-decoration: none; color: var(--ink-3); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .page .view-tabs > a small { margin-left: 6px; font-size: 12px; color: var(--ink-3); }
@@ -138,10 +97,6 @@ export const PAGES_CSS = `
 .page .signtest .obs { stroke: var(--ink-3); }
 .page .signtest text.obs-l { fill: var(--ink); font-weight: 600; }
 .page .sweep-issuance { overflow-wrap: anywhere; font-size: 14px; color: var(--ink-2); }
-@media (max-width: 1100px) {
-  .page .ov-grid { grid-template-columns: minmax(0, 1fr); gap: 32px; }
-  .page .idea { grid-template-columns: 56px minmax(140px, 1fr) minmax(80px, 2fr) 84px; }
-}
 `;
 
 /** Inject the page CSS (React dedupes nothing here; one `<style>` per mounted page). */

@@ -21,7 +21,7 @@ const settled = (router: AppRouter, routeId: RouteId) =>
   waitFor(() => expect(leaf(router)?.routeId).toBe(routeId));
 
 describe("routes", () => {
-  test("/ is the overview", async () => {
+  test("/ is Home", async () => {
     const { router } = renderApp("/");
     await settled(router, "/");
   });

@@ -56,11 +56,10 @@ describe("curves value strip", () => {
   });
 });
 
-test("overview columns stack before text tracks collapse", () => {
-  expect(PAGES_CSS).toContain("@media (max-width: 1100px)");
-  expect(PAGES_CSS).toContain(".page .ov-grid { grid-template-columns: minmax(0, 1fr);");
+test("Home columns stack before text tracks collapse", async () => {
+  const css = await read("../../src/home/home.css");
+  expect(css).toContain("@media (max-width: 1100px) { .home .two { grid-template-columns: minmax(0, 1fr); } }");
   expect(rule(PAGES_CSS, ".page .actions")).toContain("flex-wrap: wrap;");
-  expect(rule(PAGES_CSS, ".page .idea")).toContain("minmax(140px, 1fr)");
 });
 test("editor stacks and preview unsticks at narrow viewport", async () => {
   const css = await read("../../src/editor/editor.css");

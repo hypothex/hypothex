@@ -36,6 +36,8 @@ export const hrefs = {
     withSearch(`/r/${enc(runId)}`, { ...search, tab: search.tab === "overview" ? undefined : search.tab }),
   examples: (a: string, b: string, metric?: string): string =>
     withSearch(`/x/${enc(a)}/${enc(b)}`, { metric }),
+  hosts: (): string => "/hosts",
+  queue: (): string => "/queue",
 };
 
 interface HistoryLike {

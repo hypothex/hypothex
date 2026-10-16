@@ -19,7 +19,7 @@ import {
 import { type ReactElement } from "react";
 
 import { ExamplesPage } from "./pages/Examples";
-import { OverviewPage } from "./pages/Overview";
+import { HomePage } from "./home/HomePage";
 import { RunPage } from "./run/RunPage";
 import { SweepPage } from "./pages/Sweep";
 import { TaskPage } from "./pages/Task";
@@ -148,7 +148,7 @@ export const rootRoute = createRootRoute({ component: AppShell, notFoundComponen
 export const overviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: OverviewPage,
+  component: HomePage,
 });
 
 export const taskRoute = createRoute({

@@ -26,7 +26,9 @@ import {
   useLeaderboard,
   useProjectSweeps,
   useRenameRun,
+  useRunMetrics,
   useRunPredictions,
+  useRunsMetrics,
   useSaveView,
   useSweep,
   useTask,
@@ -587,5 +589,30 @@ describe("v5 task runs and rename", () => {
     act(() => result.current.mutate({ runId: "r1", name: null }));
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect((calls[0]?.body as { name: unknown }).name).toBeNull();
+  });
+});
+
+describe("run metrics", () => {
+  const point = (name: string, value: number) => ({ name, step: 0, value, t: null });
+
+  test("useRunMetrics reads the named series at a point cap; with no names it stays idle", async () => {
+    const calls = mockApi({ "GET /api/v1/runs/r1/metrics?names=loss&names=lr&max_points=300": [point("loss", 1)] });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useRunMetrics("r1", ["loss", "lr"]), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual([point("loss", 1)]);
+    const idle = renderHook(() => useRunMetrics("r1", []), { wrapper });
+    expect(idle.result.current.fetchStatus).toBe("idle");
+    expect(calls.map((c) => c.url)).toEqual(["/api/v1/runs/r1/metrics?names=loss&names=lr&max_points=300"]);
+  });
+
+  test("useRunsMetrics: one request per run, points by run id, and any run's error", async () => {
+    mockApi({ "GET /api/v1/runs/a/metrics?names=loss&max_points=50": [point("loss", 2)] });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useRunsMetrics(["a", "b"], ["loss"], 50), { wrapper });
+    expect(result.current.pending).toBe(true);
+    await waitFor(() => expect(result.current.error).toBeInstanceOf(ApiError));
+    await waitFor(() => expect(result.current.pending).toBe(false));
+    expect([...result.current.byRun]).toEqual([["a", [point("loss", 2)]]]);
   });
 });

@@ -11,6 +11,7 @@ import { useNow } from "../pages/components/HostsPanel";
 import { AppLink, hrefs } from "../pages/components/links";
 import { ErrorBox, Loading } from "../pages/components/QueryState";
 import { runHostRow, runPhase } from "../pages/components/remote";
+import { OverviewTab } from "./OverviewTab";
 import { RunHeader } from "./RunHeader";
 import { type RunContext, type RunTab, asLogStream, compareTarget, runIdentity, shownTab } from "./runContext";
 import { runTitle } from "./RunName";
@@ -105,7 +106,12 @@ export function RunPage({ runId, tab, log, example, clockMs = RUN_CLOCK_MS }: Ru
   );
 }
 
-/** The main column of one tab; R3 and R5 fill in the tabs. */
+/** The main column of one tab; R5 fills in the other tabs. */
 function RunTabBody({ ctx, tab }: { ctx: RunContext; tab: RunTab }) {
-  return <div className="rmain" data-tab={tab} data-run={ctx.runId} />;
+  switch (tab) {
+    case "overview":
+      return <OverviewTab ctx={ctx} />;
+    default:
+      return <div className="rmain" data-tab={tab} data-run={ctx.runId} />;
+  }
 }

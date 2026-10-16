@@ -29,6 +29,7 @@ export const ROUTES = {
   viewQuery: "/api/v1/tasks/{project}/{task}/views/query",
   runs: "/api/v1/runs",
   run: "/api/v1/runs/{run_id}",
+  runMetrics: "/api/v1/runs/{run_id}/metrics",
   runLogs: "/api/v1/runs/{run_id}/logs",
   runPredictions: "/api/v1/runs/{run_id}/predictions",
   runTraces: "/api/v1/runs/{run_id}/traces",
@@ -225,6 +226,9 @@ export const api = {
     get<M.RunRecord[]>(ROUTES.runs, { query: { ...query }, signal }),
   run: (runId: string, signal?: AbortSignal) =>
     get<M.RunDetail>(ROUTES.run, { params: { run_id: runId }, signal }),
+  /** Downsampled metric history; `names` filters in SQL, `max_points` caps each series (PERF-F9). */
+  runMetrics: (runId: string, q: { names?: readonly string[]; max_points?: number } = {}, signal?: AbortSignal) =>
+    get<M.MetricPoint[]>(ROUTES.runMetrics, { params: { run_id: runId }, query: { names: q.names, max_points: q.max_points }, signal }),
   runLogs: (runId: string, stream: M.LogStream = "stdout", offset?: number, signal?: AbortSignal) =>
     get<M.LogChunk>(ROUTES.runLogs, { params: { run_id: runId }, query: { stream, offset }, signal }),
   runPredictions: (runId: string, query: M.PredictionsQuery = {}, signal?: AbortSignal) =>

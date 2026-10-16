@@ -25,6 +25,7 @@ from hypothex.core.leaderboard import (
     build_leaderboard,
     cached_leaderboard,
     group_id_for,
+    key_higher_is_better,
     pick_field,
     seed_group_label,
     seed_group_labels,
@@ -1750,17 +1751,20 @@ def _compare(scope: _Scope, panel: PanelSpec) -> PanelResult:
     Returns
     -------
     PanelResult
-        One row ``{dataset, model, metric, key, run_id, group_id, name, value}``
-        per kept key and ranked group (``run_id`` is the group's latest run,
-        ``name`` the distinct group name, ``naming.group_names``), ordered by the
-        selected metrics, then datasets, then rank; at most ``MAX_TABLE_ROWS``.
-        ``meta`` holds the selection, ``render`` (``table`` or ``bars``),
-        ``key_parts``, ``options`` (every dataset, model and metric the groups
-        have), ``higher_is_better`` (a bool: the direction of the kept keys'
-        metric, else the task primary's) and ``total``.
+        One row ``{dataset, model, metric, key, run_id, group_id, name, value,
+        higher_is_better}`` per kept key and ranked group (``run_id`` is the
+        group's latest run, ``name`` the distinct group name,
+        ``naming.group_names``, ``higher_is_better`` the key's direction,
+        ``leaderboard.key_higher_is_better``), ordered by the selected metrics,
+        then datasets, then rank; at most ``MAX_TABLE_ROWS``. ``meta`` holds the
+        selection, ``render`` (``table`` or ``bars``), ``key_parts``, ``options``
+        (every dataset, model and metric the groups have), ``higher_is_better``
+        (a bool: the kept rows' direction when they all agree, else the task
+        primary's) and ``total``.
     """
     config = scope.entry.config
-    names = config.tasks[scope.task].key_parts
+    spec = config.tasks[scope.task]
+    names = spec.key_parts
     datasets, metrics = panel.data.datasets or [], panel.data.metrics or []
     model = panel.data.model
     board = scope.board()
@@ -1770,7 +1774,7 @@ def _compare(scope: _Scope, panel: PanelSpec) -> PanelResult:
     by_id = {r.run_id: r for r in every}
     derived = derived_names(scope.ctx, scope.entry.project, scope.task)
     options: dict[str, set[str]] = {"datasets": set(), "models": set(), "metrics": set()}
-    prefixes: set[str] = set()
+    directions: dict[str, bool] = {}
     kept: list[tuple[int, int, int, dict[str, Any]]] = []
     members = {row.group_id: [by_id[i] for i in row.run_ids if i in by_id] for row in board.rows}
     labels = group_names({g: m for g, m in members.items() if m}, derived)
@@ -1788,7 +1792,8 @@ def _compare(scope: _Scope, panel: PanelSpec) -> PanelResult:
                 continue
             if model is not None and parts.model != model:
                 continue
-            prefixes.add(parts.prefix)
+            if key not in directions:
+                directions[key] = key_higher_is_better(config, spec, key)
             item = {
                 "dataset": parts.dataset,
                 "model": parts.model,
@@ -1798,15 +1803,12 @@ def _compare(scope: _Scope, panel: PanelSpec) -> PanelResult:
                 "group_id": row.group_id,
                 "name": label,
                 "value": stat.mean,
+                "higher_is_better": directions[key],
             }
             kept.append((metrics.index(parts.metric), datasets.index(parts.dataset), rank, item))
     kept.sort(key=lambda entry: entry[:3])
-    only = next(iter(prefixes)) if len(prefixes) == 1 else None
-    higher = (
-        config.metrics[only].higher_is_better
-        if only is not None and only in config.metrics
-        else board.higher_is_better
-    )
+    agreed = set(directions.values())
+    higher = agreed.pop() if len(agreed) == 1 else board.higher_is_better
     meta: dict[str, Any] = {
         "datasets": datasets,
         "model": model,

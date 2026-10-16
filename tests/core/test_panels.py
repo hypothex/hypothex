@@ -1780,6 +1780,7 @@ def test_compare_rows_hold_the_selected_datasets_metrics_and_model(
         "group_id": "aaaa@c1",
         "name": "lr 1",
         "value": 1.0,
+        "higher_is_better": True,
     }
     assert result.rows[0]["name"] == "wide"
     assert (result.meta["render"], result.meta["higher_is_better"]) == ("table", True)
@@ -1854,7 +1855,39 @@ def test_compare_direction_follows_the_compared_metric(ctx: Context, toy_repo: P
     two = {"datasets": ["set-1"], "metrics": ["err", "p50"]}
     result = query_panel(ctx, "toy", "toy-broken", _panel("compare", data=two))
     assert [r["key"] for r in result.rows] == ["broken/set-1.m.err", "latency/set-1.m.p50"]
-    assert result.meta["higher_is_better"] is True  # two metrics: the task primary's direction
+    assert [r["higher_is_better"] for r in result.rows] == [False, False]  # each row's key
+    assert result.meta["higher_is_better"] is False  # the rows agree
+    cfg["metrics"]["latency"]["higher_is_better"] = True
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    result = query_panel(ctx, "toy", "toy-broken", _panel("compare", data=two))
+    assert [r["higher_is_better"] for r in result.rows] == [False, True]
+    assert result.meta["higher_is_better"] is True  # rows differ: the task primary's direction
+
+
+def test_compare_rows_of_a_system_bench_percentile_are_lower_is_better(
+    ctx: Context, toy_repo: Path
+) -> None:
+    cfg_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["metrics"]["lat"] = {"version": "v1", "fn": "toymetrics:accuracy"}  # no direction set
+    cfg["tasks"]["toy-acc"].update(
+        kind="system_bench",
+        metrics=["lat"],
+        primary="lat/us-east.p95",
+        score_keys="{dataset}.{metric}",
+    )
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    for rid, value in (("a", 40.0), ("b", 60.0)):
+        rec = _run(ctx, toy_repo, rid, rid * 4, minute=len(rid))
+        for region in ("us-east", "us-west"):
+            _key_score(ctx, rec, f"{region}.p95", value, metric="lat")
+    data = {"datasets": ["us-east", "us-west"], "metrics": ["p95"]}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("compare", data=data))
+    assert {r["key"]: r["higher_is_better"] for r in result.rows} == {
+        "lat/us-east.p95": False,
+        "lat/us-west.p95": False,
+    }
+    assert result.meta["higher_is_better"] is False
 
 
 def test_compare_caps_rows_and_warns(

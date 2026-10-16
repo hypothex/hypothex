@@ -60,6 +60,8 @@ export interface CompareResultRow {
   group_id: string;
   name: string;
   value: number | null;
+  /** The key's direction (`leaderboard.key_higher_is_better`); absent from older servers. */
+  higher_is_better?: boolean;
 }
 
 export const DEFAULT_DATASETS = 4;
@@ -179,18 +181,26 @@ export function comparePanelSpec(state: CompareState, labels: CompareLabels, tit
   };
 }
 
-/** A saved compare panel's rows as a model, one column per group, everything selected. */
-export function compareFromRows(
-  rows: readonly CompareResultRow[],
-): { model: CompareModel; columns: Omit<CompareColumn, "color">[]; state: Omit<CompareState, "render"> } | null {
+/**
+ * A saved compare panel's rows as a model, one column per group, everything selected;
+ * `directions` holds each key's direction where its rows carry one.
+ */
+export function compareFromRows(rows: readonly CompareResultRow[]): {
+  model: CompareModel;
+  columns: Omit<CompareColumn, "color">[];
+  state: Omit<CompareState, "render">;
+  directions: Record<string, boolean>;
+} | null {
   if (rows.length === 0) return null;
   const keys = new Map<string, CompareKey>();
+  const directions: Record<string, boolean> = {};
   const columns = new Map<string, { id: string; name: string; scores: Record<string, number | null> }>();
   for (const r of rows) {
     if (!keys.has(r.key)) {
       const cut = r.key.indexOf("/");
       keys.set(r.key, { key: r.key, prefix: cut > 0 ? r.key.slice(0, cut) : "", dataset: r.dataset, model: r.model, metric: r.metric });
     }
+    if (typeof r.higher_is_better === "boolean") directions[r.key] = r.higher_is_better;
     const id = r.group_id || r.run_id;
     const col = columns.get(id) ?? { id, name: r.name, scores: {} };
     col.scores[r.key] = r.value;
@@ -204,5 +214,10 @@ export function compareFromRows(
     metrics: uniq(list.map((k) => k.metric)),
     labels: compareLabels(null),
   };
-  return { model, columns: [...columns.values()], state: { datasets: model.datasets, model: list[0]?.model ?? null, metrics: model.metrics } };
+  return {
+    model,
+    columns: [...columns.values()],
+    state: { datasets: model.datasets, model: list[0]?.model ?? null, metrics: model.metrics },
+    directions,
+  };
 }

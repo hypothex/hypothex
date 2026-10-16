@@ -125,6 +125,11 @@ describe("rows", () => {
       ["g-v3", "db v3", { "reported/test-a.model-x.top10": 0.9 }],
     ]);
     expect(back?.state).toEqual({ datasets: ["test-a", "test-b"], model: "model-x", metrics: ["top10"] });
+    expect(back?.directions).toEqual({});
+    const directed = compareFromRows([
+      { dataset: "us-east", model: null, metric: "p95", key: "lat/us-east.p95", run_id: "r1", group_id: "g1", name: "a", value: 40, higher_is_better: false },
+    ]);
+    expect(directed?.directions).toEqual({ "lat/us-east.p95": false });
     expect(compareFromRows([])).toBeNull();
   });
 

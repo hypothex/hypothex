@@ -35,3 +35,16 @@ test("control labels come from the view's key parts; the direction from meta", (
     ["0.9000", false],
   ]);
 });
+
+test("each row's best follows that row's own direction; meta only for rows without one", () => {
+  const directed = [
+    { ...rows[0], higher_is_better: false },
+    { ...rows[1], higher_is_better: true },
+    { ...rows[2], higher_is_better: false },
+    { ...rows[1], run_id: "run-v3", group_id: "g-v3", name: "db v3", value: 0.95, higher_is_better: true },
+  ];
+  render(<ComparePanelResult result={{ type: "compare", title: "Compare", rows: directed, meta: { higher_is_better: false } }} />);
+  const table = screen.getByRole("table", { name: "Compare table" });
+  const marked = within(table).getAllByRole("cell").filter((c) => c.className.includes("best")).map((c) => c.textContent);
+  expect(marked).toEqual(["0.7000", "0.9500"]);
+});

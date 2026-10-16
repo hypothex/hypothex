@@ -1,8 +1,9 @@
 /**
  * `compare` view panel (spec 4.2 "Save as view"): a saved Compare panel drawn from its
- * `views/query` rows (`{dataset, model, metric, key, run_id, group_id, name, value}`).
- * `meta.render` picks table or bars; `meta.higher_is_better` the best direction;
- * `meta.key_parts` (the task's `score_keys` names) label the controls.
+ * `views/query` rows (`{dataset, model, metric, key, run_id, group_id, name, value,
+ * higher_is_better}`). `meta.render` picks table or bars; each row's `higher_is_better`
+ * its best direction (`meta.higher_is_better` for rows without one); `meta.key_parts`
+ * (the task's `score_keys` names) label the controls.
  */
 import { type ReactElement, useMemo, useState } from "react";
 import { colorFor } from "../lib/color";
@@ -26,7 +27,7 @@ export function ComparePanelResult({ result }: PanelProps): ReactElement {
       state={state ?? { ...built.state, render }}
       onState={setState}
       columns={columns}
-      higherIsBetter={() => result.meta?.higher_is_better !== false}
+      higherIsBetter={(key) => built.directions[key] ?? result.meta?.higher_is_better !== false}
     />
   );
 }

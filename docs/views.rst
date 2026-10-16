@@ -116,9 +116,11 @@ compare        Chosen datasets side by side for an eval task whose score keys ha
                (``model`` omitted or null: every model). ``render: table`` (the default)
                draws one row per dataset and one column per run; ``render: bars``
                draws grouped bars. Rows are one per seed group and key,
-               ``{dataset, model, metric, key, run_id, group_id, name, value}``:
-               the group's mean (as on the leaderboard), its latest run and its
-               name; ``meta.higher_is_better`` is the compared metric's direction.
+               ``{dataset, model, metric, key, run_id, group_id, name, value,
+               higher_is_better}``: the group's mean (as on the leaderboard), its
+               latest run, its name and the key's direction;
+               ``meta.higher_is_better`` is the rows' direction when they agree,
+               else the task primary's.
 ============== ==========================================================================
 
 For curves, request just the visible metric names with ``data.metrics``; an empty

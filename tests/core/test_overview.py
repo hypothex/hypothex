@@ -262,13 +262,15 @@ def test_headline_without_scored_ideas_has_no_board(ctx: Context, toy_repo: Path
     assert summary.headline == overview_headline(summary) == "1 running. No scored runs yet"
 
 
-def test_projects_table_counts_finished_runs_and_best(ctx: Context, scene: datetime) -> None:
+def test_projects_table_counts_unarchived_runs_and_best(ctx: Context, scene: datetime) -> None:
     rows = [(p.project, p.task, p.runs, p.best, p.kind) for p in build_overview(ctx).projects]
-    # finished, unarchived runs of toy-acc: a1, a2, b1, o1
+    # unarchived runs of toy-acc in any state: a1, a2, f1, b1, f2, r1, o1 (x1 is archived)
     assert rows == [
-        ("toy", "toy-acc", 4, 1.0, "generic"),
+        ("toy", "toy-acc", 7, 1.0, "generic"),
         ("toy", "toy-broken", 0, None, "generic"),
     ]
+    # the same count as the nav and the task header (TaskSummary.n_runs)
+    assert rows[0][2] == ctx.index.count_runs(project="toy", task="toy-acc")
 
 
 def test_ideas_and_projects_carry_the_primary_unit(ctx: Context, toy_repo: Path) -> None:
@@ -484,7 +486,8 @@ def test_projects_table_counts_a_project_without_tasks(ctx: Context, tmp_path: P
         )
         ctx.create_run(record)
     rows = [(p.project, p.task, p.runs, p.kind) for p in build_overview(ctx).projects]
-    assert rows == [("bare", None, 2, "generic")]
+    # unarchived runs in any state: b1, b2, b4
+    assert rows == [("bare", None, 3, "generic")]
 
 
 def test_recent_runs_are_the_newest_of_any_age_with_names_and_scores(

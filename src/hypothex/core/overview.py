@@ -96,6 +96,7 @@ class ProjectRow(BaseModel):
     project: str
     task: str | None
     runs: int
+    """Unarchived runs in any state, as ``TaskSummary.n_runs`` (the nav and task header)."""
     best: float | None
     kind: TaskKind
     unit: str = ""
@@ -243,9 +244,11 @@ def _recent_runs(ctx: Context, start: datetime, today: datetime) -> list[RunReco
         return [RunRecord.model_validate_json(j) for j in session.scalars(stmt)]
 
 
-def _finished_counts(ctx: Context) -> dict[tuple[str, str | None], int]:
+def _run_counts(ctx: Context) -> dict[tuple[str, str | None], int]:
     """
-    Count the finished, unarchived runs of every task with one ``GROUP BY``.
+    Count the unarchived runs of every task, in any state, with one ``GROUP BY``.
+
+    The same count as ``TaskSummary.n_runs`` (the nav and the task header).
 
     Parameters
     ----------
@@ -260,7 +263,7 @@ def _finished_counts(ctx: Context) -> dict[tuple[str, str | None], int]:
     """
     stmt = (
         select(RunRow.project, RunRow.task, func.count())
-        .where(RunRow.status == RunStatus.FINISHED.value, RunRow.archived.is_(False))
+        .where(RunRow.archived.is_(False))
         .group_by(RunRow.project, RunRow.task)
     )
     with Session(ctx.index.engine) as session:
@@ -439,14 +442,14 @@ def _boards(
         Leaderboard keyed by ``(project, task)``.
     projects : list of ProjectRow
         Sorted by project, then task; projects without tasks get one row
-        with ``task=None``. ``runs`` counts finished, unarchived runs.
+        with ``task=None``. ``runs`` counts unarchived runs in any state.
     """
-    finished = _finished_counts(ctx)
+    counts = _run_counts(ctx)
     boards: dict[tuple[str, str], Leaderboard] = {}
     rows: list[ProjectRow] = []
     for entry in q.list_projects(ctx):
         if not entry.config.tasks:
-            runs = sum(n for (project, _), n in finished.items() if project == entry.project)
+            runs = sum(n for (project, _), n in counts.items() if project == entry.project)
             rows.append(
                 ProjectRow(project=entry.project, task=None, runs=runs, best=None, kind="generic")
             )
@@ -460,7 +463,7 @@ def _boards(
                 ProjectRow(
                     project=entry.project,
                     task=task,
-                    runs=finished.get(key, 0),
+                    runs=counts.get(key, 0),
                     best=best.mean if best is not None else None,
                     kind=entry.config.tasks[task].kind,
                     unit=board.unit,

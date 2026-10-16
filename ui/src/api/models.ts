@@ -419,6 +419,7 @@ export interface RunProgress {
 export interface ProjectRow {
   project: string;
   task: string;
+  /** Unarchived runs in any state, the nav's count (hubs before v5 sent finished runs). */
   runs: number;
   best: number | null;
   kind: TaskKind;

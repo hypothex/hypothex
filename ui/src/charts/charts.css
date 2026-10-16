@@ -24,6 +24,7 @@ svg.chart .sarea { stroke: none; opacity: .12; }
 svg.chart .sarea.dim { opacity: .04; }
 svg.chart .xh { stroke: var(--ink-3); stroke-width: 1; pointer-events: none; }
 svg.chart .mk { stroke: var(--panel); stroke-width: 1.5; pointer-events: none; }
+svg.chart .mk.dim { opacity: .12; }
 svg.chart .live { stroke: var(--panel); stroke-width: 1.5; }
 svg.chart .fail-x { stroke: var(--fail); stroke-width: 1.6; fill: none; stroke-linecap: round; }
 svg.chart .hit { fill: transparent; cursor: inherit; }

@@ -7,6 +7,7 @@ import { type ReactElement, useState } from "react";
 
 import { cx } from "../lib/cx";
 import { niceTicks, tickFormatter } from "../lib/ticks";
+import { useChartLabel } from "./chartLabel";
 import { fmtValue } from "./Scale";
 import { type TipRow, hideTip, showTip } from "./Tooltip";
 import "./charts.css";
@@ -82,6 +83,7 @@ export function ParallelCoords({
   onOpen,
 }: ParallelCoordsProps): ReactElement {
   const [hot, setHot] = useState<string | null>(null);
+  const label = useChartLabel("Parallel coordinates");
   const n = axes.length;
   const ph = height - M.t - M.b;
   const AX = (i: number): number => M.l + (n <= 1 ? (width - M.l - M.r) / 2 : (i * (width - M.l - M.r)) / (n - 1));
@@ -154,7 +156,7 @@ export function ParallelCoords({
     });
   const r1 = (v: number): number => Math.round(v * 10) / 10;
   return (
-    <svg className="chart" width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+    <svg className="chart" width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label}>
       {axes.map((a, i) => (
         <line key={`ax-${a.key}`} className="ax" x1={AX(i)} x2={AX(i)} y1={M.t} y2={height - M.b} />
       ))}

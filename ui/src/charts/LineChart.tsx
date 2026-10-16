@@ -9,6 +9,7 @@
 import { type MouseEvent, type ReactElement, useId, useMemo } from "react";
 
 import { niceTicks, tickFormatter } from "../lib/ticks";
+import { useChartLabel } from "./chartLabel";
 import { useCrosshair } from "./crosshair";
 import { fmtValue, kStep } from "./Scale";
 import { type XAxisKind, fmtClock, fmtClockTip, fmtSpan, localOffset, timeTicks } from "./timeAxis";
@@ -182,6 +183,7 @@ export function LineChart({
   highlight = null,
 }: LineChartProps): ReactElement {
   const localGroup = useId();
+  const label = useChartLabel("Line chart");
   const [hoverX, setHoverX] = useCrosshair(crosshairGroup ?? localGroup);
   const alpha = Math.min(Math.max(smoothing, 0), 0.99);
   const m = LINE_MARGIN;
@@ -279,7 +281,7 @@ export function LineChart({
   const showCross = hoverX !== null && hoverX >= geo.x0 && hoverX <= geo.x1;
 
   return (
-    <svg className="chart" width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img">
+    <svg className="chart" width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label}>
       {geo.yTicks.map((v) => (
         <g key={`y${v}`}>
           <line className="gl" x1={m.l} x2={width - m.r} y1={r1(Y(v))} y2={r1(Y(v))} />
@@ -294,7 +296,7 @@ export function LineChart({
         </text>
       ))}
       <line className="ax" x1={m.l} x2={width - m.r} y1={height - m.b} y2={height - m.b} />
-      {geo.lines.map(({ series: s, smooth }) => (
+      {geo.lines.map(({ series: s, smooth, done }) => (
         <g key={s.id} data-id={s.id} data-series={s.groupId ?? s.id}>
           {s.band && s.band.length > 0
             ? bandPath(s.band, X, Y)
@@ -310,6 +312,10 @@ export function LineChart({
             d={linePath(smooth, X, Y)}
             stroke={s.color}
           />
+          {/* one logged point: a one-point path draws nothing, so mark it (the end marks cover running and failed) */}
+          {done.length === 1 && done[0] && !s.failed && !s.running ? (
+            <circle className={`mk${dimClass(s)}`} cx={r1(X(done[0][0]))} cy={r1(Y(done[0][1]))} r={3.5} fill={s.color} />
+          ) : null}
         </g>
       ))}
       {geo.lines.map(({ series: s, done }) => {

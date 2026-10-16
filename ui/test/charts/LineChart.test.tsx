@@ -80,6 +80,16 @@ describe("geometry", () => {
     expect(yLabels(svgOf(container)).length).toBeGreaterThanOrEqual(2);
   });
 
+  test("a series with one finite point draws a 3.5 px marker (a one-point path draws nothing)", () => {
+    const one: LineSeries = { id: "one", name: "train_accuracy", color: "var(--c1)", points: [[0, Number.NaN], [10, 0.9], [20, Number.NaN]] };
+    const { container } = render(<LineChart series={[one, up]} width={420} />);
+    const dots = [...svgOf(container).querySelectorAll('g[data-id="one"] circle.mk')];
+    expect(dots.map((c) => c.getAttribute("r"))).toEqual(["3.5"]);
+    expect(dots[0]?.getAttribute("fill")).toBe("var(--c1)");
+    // a series with more points keeps its line only
+    expect(svgOf(container).querySelectorAll('g[data-id="up"] circle.mk')).toHaveLength(0);
+  });
+
   test("highlight dims every other series", () => {
     const { container } = render(<LineChart series={[up, down]} width={420} highlight="down" />);
     const cls = [...svgOf(container).querySelectorAll("g[data-id] path.ln")].map((p) => p.getAttribute("class"));

@@ -7,6 +7,7 @@ import { type MouseEvent, type ReactElement } from "react";
 
 import { cx } from "../lib/cx";
 import { niceExtent, niceTicks, tickFormatter } from "../lib/ticks";
+import { useChartLabel } from "./chartLabel";
 import { clip } from "./labels";
 import { fmtValue } from "./Scale";
 import { type TipRow, hideTip, showTip } from "./Tooltip";
@@ -78,6 +79,7 @@ function XAxis({ ticks, d0, X, y0, y1 }: XAxisProps): ReactElement {
 }
 
 export function BarPanel({ rows, width, metric, format = fmtValue, highlight = null }: BarPanelProps): ReactElement {
+  const label = useChartLabel(`${metric} by run`);
   const lch = Math.min(Math.max(6, ...rows.map((r) => r.name.length)), 22);
   const m = { l: Math.min(150, Math.round(lch * 6.4) + 10), r: 46, t: 4, b: 20 };
   const H = m.t + m.b + Math.max(1, rows.length) * BAR_ROW_H;
@@ -90,7 +92,7 @@ export function BarPanel({ rows, width, metric, format = fmtValue, highlight = n
     ...(r.ci ? [{ value: `${format(r.ci.lo)}–${format(r.ci.hi)}`, name: `95% CI${r.ci.method ? ` · ${r.ci.method}` : ""}` }] : []),
   ];
   return (
-    <svg className="chart" width={width} height={H} viewBox={`0 0 ${width} ${H}`}>
+    <svg className="chart" width={width} height={H} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={label}>
       <XAxis ticks={ticks} d0={d0} X={X} y0={m.t} y1={H - m.b} />
       {rows.map((r, i) => {
         const cy = m.t + i * BAR_ROW_H + BAR_ROW_H / 2;
@@ -160,6 +162,7 @@ export interface GroupedBarsProps {
 }
 
 export function GroupedBars({ categories, series, valueOf, width, best, format = fmtValue }: GroupedBarsProps): ReactElement {
+  const label = useChartLabel("Grouped bars");
   const barH = 12;
   const gap = 3;
   const catPad = 14;
@@ -171,7 +174,7 @@ export function GroupedBars({ categories, series, valueOf, width, best, format =
   const { d0, d1, ticks } = zeroDomain(vals);
   const X = (v: number): number => m.l + ((v - d0) / (d1 - d0)) * Math.max(1, width - m.l - m.r);
   return (
-    <svg className="chart" width={width} height={H} viewBox={`0 0 ${width} ${H}`}>
+    <svg className="chart" width={width} height={H} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={label}>
       <XAxis ticks={ticks} d0={d0} X={X} y0={m.t} y1={H - m.b} />
       {categories.map((c, ci) => {
         const y0 = m.t + ci * catH;

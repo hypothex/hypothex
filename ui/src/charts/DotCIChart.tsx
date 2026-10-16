@@ -8,6 +8,7 @@ import { type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactElement
 import { cx } from "../lib/cx";
 import { niceTicks, tickFormatter } from "../lib/ticks";
 import { charsFor, clip } from "./labels";
+import { useChartLabel } from "./chartLabel";
 import { fmtValue } from "./Scale";
 import { type TipRow, hideTip, showTip } from "./Tooltip";
 import "./charts.css";
@@ -63,12 +64,13 @@ export function dotTipRows(row: DotCIRow, bestMean: number | null, format: (v: n
 }
 
 export function DotCIChart({ rows, width, band = null, format = fmtValue, highlight = null, onOpen }: DotCIChartProps): ReactElement {
+  const label = useChartLabel("Scores by config");
   const m = DOT_MARGIN;
   const H = m.t + m.b + Math.max(1, rows.length) * DOT_ROW_H;
   const vals: number[] = [];
   for (const r of rows) for (const v of [r.mean, r.lo, r.hi, ...(r.seeds ?? [])]) if (isNum(v)) vals.push(v);
   if (band) vals.push(band.lo, band.hi);
-  // no role="img" on the chart: its rows are focusable buttons
+  // a named group, not role="img": its rows are focusable buttons
   const svgProps = { className: "chart", width, height: H, viewBox: `0 0 ${width} ${H}` } as const;
   if (vals.length === 0) {
     return (
@@ -101,7 +103,7 @@ export function DotCIChart({ rows, width, band = null, format = fmtValue, highli
   };
 
   return (
-    <svg {...svgProps}>
+    <svg {...svgProps} role="group" aria-label={label}>
       {ticks.map((v) => (
         <g key={v}>
           <line className="gl" x1={X(v)} x2={X(v)} y1={m.t} y2={H - m.b} />

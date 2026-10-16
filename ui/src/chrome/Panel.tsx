@@ -5,6 +5,7 @@
  * `data-panel` so tests and pages can find the enclosing panel.
  */
 import { type CSSProperties, type ReactElement, type ReactNode, type Ref, useEffect, useRef, useState } from "react";
+import { ChartLabelContext } from "../charts/chartLabel";
 import { cx } from "../lib/cx";
 import { Icon } from "./Icon";
 import "./chrome.css";
@@ -127,7 +128,9 @@ export function Panel({ title, label, headingRef, unit, aside, tools, onEdit, me
           ) : null}
         </span>
       </header>
-      <div className="panel-b">{children}</div>
+      <div className="panel-b">
+        <ChartLabelContext.Provider value={label ?? title}>{children}</ChartLabelContext.Provider>
+      </div>
     </section>
   );
 }

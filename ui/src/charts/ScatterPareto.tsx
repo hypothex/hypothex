@@ -6,6 +6,7 @@
 import { type MouseEvent, type ReactElement } from "react";
 
 import { niceExtent, niceTicks, tickFormatter } from "../lib/ticks";
+import { useChartLabel } from "./chartLabel";
 import { fmtValue } from "./Scale";
 import { hideTip, showTip } from "./Tooltip";
 import "./charts.css";
@@ -67,6 +68,7 @@ export function ScatterPareto({
   yFormat = fmtValue,
   higherIsBetter = true,
 }: ScatterParetoProps): ReactElement {
+  const label = useChartLabel(`${yName} vs ${xName}`);
   const pts = points.filter((q) => isNum(q.x) && isNum(q.y));
   const H = height ?? Math.max(150, 26 * pts.length + 28);
   if (pts.length === 0) {
@@ -95,7 +97,7 @@ export function ScatterPareto({
     .map((q, i) => (i === 0 ? `M${X(q.x)},${Y(q.y)}` : `H${X(q.x)}V${Y(q.y)}`))
     .join("");
   return (
-    <svg className="chart" width={width} height={H} viewBox={`0 0 ${width} ${H}`}>
+    <svg className="chart" width={width} height={H} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={label}>
       {yTicks.map((v) => (
         <g key={`y${v}`}>
           <line className="gl" x1={M.l} x2={width - M.r} y1={Y(v)} y2={Y(v)} />

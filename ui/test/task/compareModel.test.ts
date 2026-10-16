@@ -48,6 +48,17 @@ describe("model", () => {
     expect(compareLabels(null)).toEqual({ datasets: "Datasets", model: "Model", metrics: "Metrics" });
   });
 
+  test("labels resolve dataset and model by name, as splitKey does, not by position", () => {
+    expect(compareLabels(["model", "dataset", "metric"])).toEqual({ datasets: "Datasets", model: "Model", metrics: "Metrics" });
+    expect(compareLabels(["model", "bench", "metric"])).toEqual({ datasets: "Benchs", model: "Model", metrics: "Metrics" });
+    expect(compareLabels(["metric", "split"])).toEqual({ datasets: "Splits", model: "Model", metrics: "Metrics" });
+    const keys = ["r/gpt4.test-a.top1", "r/gpt4.test-b.top1", "r/llama.test-a.top1"];
+    const built = compareModel(keys, keys[0] as string, ["model", "dataset", "metric"]);
+    expect(built?.datasets).toEqual(["test-a", "test-b"]);
+    expect(built?.models).toEqual(["gpt4", "llama"]);
+    expect(built?.labels).toEqual({ datasets: "Datasets", model: "Model", metrics: "Metrics" });
+  });
+
   test("keep-one toggling: the last selected value stays; added values keep the model's order", () => {
     expect(toggleKeepOne(["test-a"], "test-a", DATASETS)).toEqual(["test-a"]);
     expect(toggleKeepOne(["test-c", "test-a"], "test-b", DATASETS)).toEqual(["test-a", "test-b", "test-c"]);

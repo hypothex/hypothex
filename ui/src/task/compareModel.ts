@@ -6,7 +6,7 @@
  * distinct values.
  */
 import type { PanelSpec } from "../api/models";
-import { type KeyParts, splitKey } from "../lib/scoreKeys";
+import { type KeyParts, partRoles, splitKey } from "../lib/scoreKeys";
 
 export type CompareRender = "table" | "bars";
 
@@ -66,11 +66,18 @@ export const DEFAULT_DATASETS = 4;
 
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** Control labels from `hypothex.yaml` `score_keys` names (`{split}.{arch}.{metric}` → Splits, Arch). */
+/**
+ * Control labels from `hypothex.yaml` `score_keys` names, the dataset and model parts
+ * resolved as `splitKey` does (`partRoles`): `{split}.{arch}.{metric}` → Splits, Arch;
+ * `{model}.{dataset}.{metric}` → Datasets, Model.
+ */
 export function compareLabels(names?: readonly string[] | null): CompareLabels {
-  if (!names || names.length < 2) return { datasets: "Datasets", model: "Model", metrics: "Metrics" };
-  const others = names.filter((n) => n !== "metric");
-  return { datasets: `${cap(others[0] ?? "dataset")}s`, model: cap(others[1] ?? "model"), metrics: "Metrics" };
+  const roles = partRoles(names);
+  return {
+    datasets: `${cap(roles?.dataset ?? "dataset")}s`,
+    model: cap(roles?.model ?? "model"),
+    metrics: "Metrics",
+  };
 }
 
 function uniq(values: readonly (string | null)[]): string[] {

@@ -1447,7 +1447,7 @@ def _y_higher_is_better(scope: _Scope, y_ref: str) -> bool:
         return board.higher_is_better
     metrics = scope.entry.config.metrics
     if name in metrics:
-        return metrics[name].higher_is_better
+        return metrics[name].higher_is_better is not False
     return not _lower_is_better(y_ref)
 
 

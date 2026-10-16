@@ -437,11 +437,21 @@ def test_board_headline_and_stat_strip_generic() -> None:
 
 
 def test_every_system_bench_percentile_key_is_lower_is_better() -> None:
-    spec = KINDS.tasks["sb"]  # lat sets no direction (default higher)
+    spec = KINDS.tasks["sb"]  # lat sets no direction
     assert key_higher_is_better(KINDS, spec, "lat/p95") is False  # the primary
     assert key_higher_is_better(KINDS, spec, "lat/p50") is False
     assert key_higher_is_better(KINDS, spec, "lat/p99") is False
     assert key_higher_is_better(KINDS, KINDS.tasks["t"], "acc/value") is True
+    # a board re-ranked by another percentile ranks it the same way
+    runs, scores = bench_runs()
+    for rows in scores.values():
+        p95 = rows[0].value or 0.0
+        rows.append(
+            ScoreRecord(metric="lat", version="v1", key="p50", value=p95 / 2, created_at=T0)
+        )
+    board = build_leaderboard("toy", "sb", KINDS, runs, scores, primary="lat/p50")
+    assert board.higher_is_better is False
+    assert [r.label for r in board.rows] == ["fast", "base"]
 
 
 def test_system_bench_headline_vs_baseline() -> None:

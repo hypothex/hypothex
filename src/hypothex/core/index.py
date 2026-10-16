@@ -474,7 +474,7 @@ class Index:
                     name=n,
                     version=m.version,
                     fn=m.fn,
-                    higher_is_better=m.higher_is_better,
+                    higher_is_better=m.higher_is_better is not False,
                 )
                 for n, m in cfg.metrics.items()
             )
@@ -1388,7 +1388,7 @@ def _add_project(batch: _Batch, entry: ProjectEntry) -> None:
             "name": n,
             "version": m.version,
             "fn": m.fn,
-            "higher_is_better": m.higher_is_better,
+            "higher_is_better": m.higher_is_better is not False,
         }
         batch.add(MetricRow.__tablename__, row)
     for n, t in cfg.tasks.items():

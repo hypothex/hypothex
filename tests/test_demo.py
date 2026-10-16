@@ -25,6 +25,7 @@ from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_view
 from hypothex.core.records import RunRecord, RunStatus
 from hypothex.core.sweeps import load_sweep
+from hypothex.core.taskruns import task_runs
 from hypothex.core.views import ViewSpec, get_view
 from hypothex.demo import (
     _SEEDERS,
@@ -303,6 +304,8 @@ def test_agent_iteration_mirrors_mockup(dctx: Context) -> None:
 def test_system_bench_mirrors_mockup(dctx: Context) -> None:
     board = q.get_leaderboard(dctx, REFS["system_bench"])
     assert board.kind == "system_bench" and not board.higher_is_better
+    directions = task_runs(dctx, REFS["system_bench"]).key_higher_is_better
+    assert directions["latency/p95"] is False and directions["throughput/rps"] is True
     runs = [r for r in _runs(dctx, "route-search") if r.status == RunStatus.FINISHED]
     # p95 (linear interpolation) over each run's Float32 latencies, computed by bun
     # from kinds/system_bench/data.js

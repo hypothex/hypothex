@@ -524,14 +524,13 @@ def test_explicit_percentile_primary_respects_nonlatency_direction() -> None:
     cfg.tasks["t"].primary = "latency/p95"
     cfg.metrics["acc"].unit = "requests/s"
     runs = [member("a"), member("b")]
-    board = build_leaderboard(
-        "toy",
-        "t",
-        cfg,
-        runs,
-        {"a": [score("acc", 100, key="p95")], "b": [score("acc", 200, key="p95")]},
-        primary="acc/p95",
-    )
+    scores = {"a": [score("acc", 100, key="p95")], "b": [score("acc", 200, key="p95")]}
+    # acc sets no direction: on system_bench its percentile is lower-is-better
+    board = build_leaderboard("toy", "t", cfg, runs, scores, primary="acc/p95")
+    assert board.higher_is_better is False and board.rows[0].run_ids == ["a"]
+    # a metric that sets higher_is_better wins for all its keys, percentiles too
+    cfg.metrics["acc"].higher_is_better = True
+    board = build_leaderboard("toy", "t", cfg, runs, scores, primary="acc/p95")
     assert board.higher_is_better is True and board.rows[0].run_ids == ["b"]
 
 
@@ -617,10 +616,15 @@ def test_bound_population_rejects_artifact_hash_and_population_identity_mismatch
 def test_explicit_configured_primary_preserves_default_direction() -> None:
     cfg = config("system_bench")
     cfg.tasks["t"].primary = "latency/p95"
-    cfg.metrics["latency"].higher_is_better = True  # Existing percentile default convention.
+    cfg.metrics["latency"].higher_is_better = None  # not set: the percentile rule
     runs = [member("a"), member("b")]
     scores = {"a": [score("latency", 100, key="p95")], "b": [score("latency", 10, key="p95")]}
     original = build_leaderboard("toy", "t", cfg, runs, scores)
     selected = build_leaderboard("toy", "t", cfg, runs, scores, primary="latency/p95")
     assert selected.higher_is_better == original.higher_is_better is False
     assert selected.rows[0].run_ids == original.rows[0].run_ids == ["b"]
+    cfg.metrics["latency"].higher_is_better = True  # set: wins over the percentile rule
+    original = build_leaderboard("toy", "t", cfg, runs, scores)
+    selected = build_leaderboard("toy", "t", cfg, runs, scores, primary="latency/p95")
+    assert selected.higher_is_better == original.higher_is_better is True
+    assert selected.rows[0].run_ids == original.rows[0].run_ids == ["a"]

@@ -1944,7 +1944,11 @@ def _seed_system_bench(sd: _Seeder) -> None:
             metrics={
                 "latency": lower,
                 "errors": lower,
-                "throughput": {"version": "v1", "fn": "demo_metrics:harness"},
+                "throughput": {
+                    "higher_is_better": True,
+                    "version": "v1",
+                    "fn": "demo_metrics:harness",
+                },
             },
             primary="latency/p95",
             description="POST /v2/route, 5,000 requests after 200 warm-up, concurrency 16.",

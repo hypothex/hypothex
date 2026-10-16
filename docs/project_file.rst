@@ -22,7 +22,7 @@ score it), stage command templates, and the Python command used for scoring.
      topk:
        version: v2
        fn: deepretro.eval.metrics:topk_accuracy   # module:function in this repo
-       higher_is_better: true
+       higher_is_better: true                      # optional; see ``metrics`` below
        unit: ""                                    # optional display unit: ms, $, tokens
        params: {k: [1, 5, 10]}
        changelog:
@@ -58,6 +58,21 @@ Sections
    never overwritten. ``unit`` is optional and only changes display (``166 ms``,
    ``$0.55``); without it the unit comes from the name (``latency``, ``_ms`` → ``ms``;
    ``usd``, ``cost`` → ``$``; ``token`` → ``tokens``; ``seconds`` → ``s``).
+
+   ``higher_is_better`` is optional. One rule gives the direction of every score key,
+   for the leaderboard (also when re-ranked by another key), the task workspace and
+   saved ``compare`` panels: a metric that sets ``higher_is_better`` wins for all its
+   keys; else, on a ``system_bench`` task, a percentile key (``p50``, ``p95``, ...)
+   is lower-is-better; else the key takes the task's direction (that of its
+   ``primary``; a primary whose metric sets no direction is higher-is-better). Set
+   it on a metric whose direction differs from the task's, such as ``throughput``
+   on a latency benchmark.
+
+   .. code-block:: yaml
+
+      metrics:
+        latency: {version: v1, fn: bench:harness}          # p95: lower is better
+        throughput: {version: v1, fn: bench:harness, higher_is_better: true}
 
 ``tasks``
    A task pairs a ``dataset`` (and optional ``split``) with one or more ``metrics``,

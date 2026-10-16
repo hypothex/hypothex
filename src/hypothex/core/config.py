@@ -225,7 +225,9 @@ class MetricSpec(_Strict):
 
     version: str
     fn: str = Field(pattern=r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
-    higher_is_better: bool = True
+    higher_is_better: bool | None = None
+    """Direction of every key of the metric; None (not set): ``leaderboard.key_higher_is_better``
+    decides (a ``system_bench`` percentile is lower-is-better, else the task's direction)."""
     params: dict[str, Any] = Field(default_factory=dict)
     changelog: dict[str, str] = Field(default_factory=dict)
     unit: str = Field(default="", max_length=8)

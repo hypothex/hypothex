@@ -469,21 +469,16 @@ def _select_group(
     return None
 
 
-def _higher_is_better(config: ProjectConfig, spec: TaskSpec, primary: str | None = None) -> bool:
-    metric, key = parse_metric_key(primary or spec.primary)
-    if spec.kind == "system_bench" and percentile_of(f"{metric}/{key}"):
-        return False
-    return config.metrics[metric].higher_is_better
-
-
 def key_higher_is_better(config: ProjectConfig, spec: TaskSpec, key: str) -> bool:
     """
-    Return the direction of one ``metric/key`` of a task, the one its best value is marked in.
+    Return the direction of one ``metric/key`` of a task: the one rule of boards and panels.
 
-    The task's board direction rule applied to ``key``: a percentile key (``p50``,
-    ``p95``, ...) of a ``system_bench`` task is lower-is-better, the primary's and
-    every other one; any other key takes its metric's ``higher_is_better``. (A board
-    explicitly re-ranked by a non-configured key ranks by that metric's flag.)
+    The leaderboard (configured or re-ranked primary), the task workspace and saved
+    ``compare`` panels all use it. A metric that sets ``higher_is_better`` wins for
+    all its keys; else, on a ``system_bench`` task, a percentile key (``p50``,
+    ``p95``, ...) is lower-is-better; else the task's direction (that of its
+    configured primary, by the same rule; a primary of a metric without a set
+    direction is higher-is-better).
 
     Parameters
     ----------
@@ -506,7 +501,14 @@ def key_higher_is_better(config: ProjectConfig, spec: TaskSpec, key: str) -> boo
     >>> key_higher_is_better(config, config.tasks["bench"], "throughput/rps")  # doctest: +SKIP
     True
     """
-    return _higher_is_better(config, spec, key)
+    metric, sub = parse_metric_key(key)
+    flag = config.metrics[metric].higher_is_better
+    if flag is not None:
+        return flag
+    if spec.kind == "system_bench" and percentile_of(f"{metric}/{sub}"):
+        return False
+    primary = "/".join(parse_metric_key(spec.primary))
+    return True if f"{metric}/{sub}" == primary else key_higher_is_better(config, spec, primary)
 
 
 # caches ------------------------------------------------------------------------------
@@ -1290,14 +1292,9 @@ def build_leaderboard(
     """
     spec = config.tasks[task]
     chosen = {m: (versions or {}).get(m, config.metrics[m].version) for m in spec.metrics}
-    requested_primary = primary
     primary = _selected_primary(config, task, primary, scores, chosen)
     primary_metric, primary_key = parse_metric_key(primary)
-    higher = (
-        config.metrics[primary_metric].higher_is_better
-        if requested_primary is not None and primary != "/".join(parse_metric_key(spec.primary))
-        else _higher_is_better(config, spec)
-    )
+    higher = key_higher_is_better(config, spec, primary)
     eligible = [
         r for r in runs if r.task == task and r.status == RunStatus.FINISHED and not r.archived
     ]

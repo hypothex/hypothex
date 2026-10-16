@@ -168,50 +168,64 @@ def test_cost_and_key_parts(ctx: Context, toy_repo: Path) -> None:
     assert out.key_parts == ["dataset", "metric"]
 
 
-def test_each_score_key_carries_its_own_direction(ctx: Context, toy_repo: Path) -> None:
-    # a system_bench-like task: lower-is-better latency primary, higher-is-better throughput
+def _bench_config(toy_repo: Path, metrics: dict[str, dict[str, Any]], primary: str) -> None:
+    """Make toy-acc a system_bench task over ``metrics`` (fn and version filled in)."""
     cfg_path = toy_repo / "hypothex.yaml"
     cfg = yaml.safe_load(cfg_path.read_text())
-    cfg["metrics"]["latency"] = {
-        "version": "v1",
-        "fn": "toymetrics:accuracy",
-        "higher_is_better": False,
-    }
-    cfg["metrics"]["throughput"] = {"version": "v1", "fn": "toymetrics:accuracy"}
-    cfg["tasks"]["toy-acc"].update(
-        kind="system_bench", metrics=["latency", "throughput"], primary="latency/p95"
-    )
+    for name, extra in metrics.items():
+        cfg["metrics"][name] = {"version": "v1", "fn": "toymetrics:accuracy", **extra}
+    cfg["tasks"]["toy-acc"].update(kind="system_bench", metrics=list(metrics), primary=primary)
     cfg_path.write_text(yaml.safe_dump(cfg))
+
+
+def test_each_score_key_carries_its_own_direction(ctx: Context, toy_repo: Path) -> None:
+    # a system_bench-like task: lower-is-better latency primary, higher-is-better throughput
+    flags = {"latency": {"higher_is_better": False}, "throughput": {"higher_is_better": True}}
+    _bench_config(toy_repo, {**flags, "errors": {}}, "latency/p95")
     rec = _run(ctx, toy_repo, "r1", "aaaa")
-    scored = [("latency", "p95", 41.0), ("throughput", "rps", 900.0), ("throughput", "p99", 7.0)]
+    scored = [
+        ("latency", "p95", 41.0),
+        ("throughput", "rps", 900.0),
+        ("throughput", "p99", 7.0),
+        ("errors", "rate", 0.01),
+        ("errors", "p99", 3.0),
+    ]
     for metric, key, value in scored:
         score = ScoreRecord(metric=metric, version="v1", key=key, value=value, created_at=T0)
         ctx.add_score(rec, score)
     out = task_runs(ctx, "toy-acc")
     assert out.higher_is_better is False
     assert out.key_higher_is_better == {
-        "latency/p95": False,
-        "throughput/p99": False,
+        "errors/p99": False,  # no flag, a percentile: lower
+        "errors/rate": False,  # no flag, no percentile: the task's direction
+        "latency/p95": False,  # the metric's flag
+        "throughput/p99": True,  # the metric's flag wins over the percentile rule
         "throughput/rps": True,
     }
+    # one rule: a board re-ranked by any key ranks it in the same direction
+    for key, higher in out.key_higher_is_better.items():
+        assert q.get_leaderboard(ctx, "toy-acc", primary=key).higher_is_better is higher, key
 
 
-def test_key_direction_follows_the_leaderboard_rule(ctx: Context, toy_repo: Path) -> None:
-    cfg_path = toy_repo / "hypothex.yaml"
-    cfg = yaml.safe_load(cfg_path.read_text())
-    cfg["metrics"]["speed"] = {"version": "v1", "fn": "toymetrics:accuracy"}
-    cfg["tasks"]["toy-acc"].update(kind="system_bench", metrics=["speed"], primary="speed/p95")
-    cfg_path.write_text(yaml.safe_dump(cfg))
+def test_key_direction_rule_branches(ctx: Context, toy_repo: Path) -> None:
+    _bench_config(toy_repo, {"speed": {}, "up": {"higher_is_better": True}}, "speed/p95")
     ctx.register_project(toy_repo)
     entry, _ = q.resolve_task(ctx, "toy-acc")
     config = entry.config
     spec = config.tasks["toy-acc"]
-    # a system_bench percentile is lower-is-better, the primary's and every other one
+    # 1. a metric that sets higher_is_better wins for all its keys
+    assert key_higher_is_better(config, spec, "up/p95") is True
+    assert key_higher_is_better(config, spec, "up/rps") is True
+    # 2. else, on system_bench, a percentile key is lower-is-better
     assert key_higher_is_better(config, spec, "speed/p95") is False
     assert key_higher_is_better(config, spec, "speed/p50") is False
     assert key_higher_is_better(config, spec, "speed/p99") is False
-    # any other key: its metric's own direction
-    assert key_higher_is_better(config, spec, "speed/rps") is True
+    # 3. else the task's direction (the primary's: lower here)
+    assert key_higher_is_better(config, spec, "speed/rps") is False
+    # a generic task without flags: higher, percentiles too
+    toy = config.tasks["toy-broken"]
+    assert key_higher_is_better(config, toy, "accuracy/p95") is True
+    assert key_higher_is_better(config, toy, "broken/value") is True
 
 
 def test_groups_with_the_same_params_on_two_commits_get_distinct_names(

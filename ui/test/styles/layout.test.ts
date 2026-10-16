@@ -83,3 +83,8 @@ describe("runs sidebar pencil (spec 4.2)", () => {
     expect(pen).toContain("opacity: 1;");
   });
 });
+
+test("an empty run list takes no height, so its empty state sits under the list header", async () => {
+  const css = await read("../../src/task/task.css");
+  expect(rule(css, ".runs .runs-list:empty")).toContain("flex: 0;");
+});

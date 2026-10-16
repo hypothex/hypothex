@@ -10,6 +10,7 @@
 .runs .runs-head { padding: 6px 12px; color: var(--ink-3); font-size: 12px; border-bottom: 1px solid var(--line); }
 .runs .runs-head .num { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .runs .runs-list { overflow: auto; flex: 1; }
+.runs .runs-list:empty { flex: 0; }
 .runs .rrow { padding: 7px 12px; border-bottom: 1px solid var(--grid); cursor: pointer; }
 .runs .rrow:hover, .runs .rrow:focus-within { background: var(--hover); }
 .runs .rrow:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }

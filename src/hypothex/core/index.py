@@ -627,13 +627,14 @@ class Index:
         tag: str | None = None,
         environment_id: str | None = None,
         include_archived: bool = False,
+        search: str | None = None,
     ) -> int:
         """
         Count the runs ``list_runs`` would return with no limit, without reading them.
 
         Parameters
         ----------
-        project, task, status, tag, environment_id, include_archived : optional
+        project, task, status, tag, environment_id, include_archived, search : optional
             The same filters as ``list_runs``.
 
         Returns
@@ -653,6 +654,7 @@ class Index:
             tag=tag,
             environment_id=environment_id,
             include_archived=include_archived,
+            search=search,
         )
         with Session(self.engine) as session:
             return int(session.scalar(stmt) or 0)

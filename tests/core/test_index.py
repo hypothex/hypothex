@@ -84,7 +84,7 @@ def test_count_runs_matches_list_runs_without_parsing_records(
     idx = Index(tmp_path / "i.db")
     idx.upsert_run(make_record("r1", task="a", tags=["x"]))
     idx.upsert_run(make_record("r2", task="b", archived=True, tags=["x"]))
-    idx.upsert_run(make_record("r3", status=RunStatus.FINISHED, environment_id="e2"))
+    idx.upsert_run(make_record("r3", status=RunStatus.FINISHED, environment_id="e2", name="Wide"))
     cases: list[dict] = [
         {},
         {"include_archived": True},
@@ -94,6 +94,8 @@ def test_count_runs_matches_list_runs_without_parsing_records(
         {"status": RunStatus.FINISHED},
         {"environment_id": "e2"},
         {"project": "nope"},
+        {"search": "wide"},
+        {"search": "r", "include_archived": True},
     ]
     want = [len(idx.list_runs(limit=None, **c)) for c in cases]
 
@@ -101,7 +103,7 @@ def test_count_runs_matches_list_runs_without_parsing_records(
         raise AssertionError("count_runs parsed a record")
 
     monkeypatch.setattr(RunRecord, "model_validate_json", no_parse)
-    assert [idx.count_runs(**c) for c in cases] == want == [2, 3, 1, 1, 2, 1, 1, 0]
+    assert [idx.count_runs(**c) for c in cases] == want == [2, 3, 1, 1, 2, 1, 1, 0, 1, 3]
 
 
 def test_upsert_run_replaces_tags(tmp_path: Path) -> None:

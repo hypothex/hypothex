@@ -1614,7 +1614,9 @@ def tag(
 @app.command()
 def rename(
     run_id: str,
-    name: Annotated[str | None, typer.Argument(help="New name, 1-80 characters.")] = None,
+    name: Annotated[
+        str | None, typer.Argument(help="New name, 1-80 characters, one line (never blank).")
+    ] = None,
     reset: Annotated[
         bool, typer.Option("--reset", help="Drop the name; the run shows its derived name.")
     ] = False,
@@ -1624,6 +1626,9 @@ def rename(
     if reset == (name is not None):
         raise RunError("give a NAME or --reset")
     wanted = None if reset else clean_run_name(name)
+    if not reset and wanted is None:
+        # an empty shell variable must not drop a name by accident
+        raise RunError("NAME is blank; use --reset to show the derived name")
     out = _through_hub(run_id, "name", {"name": wanted})
     record = (
         RunRecord.model_validate(out) if out is not None else q.rename_run(_ctx(), run_id, wanted)

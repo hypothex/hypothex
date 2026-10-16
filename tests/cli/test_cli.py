@@ -156,6 +156,12 @@ def test_rename_names_and_resets_a_run(in_repo: Path) -> None:
     assert result.exit_code != 0 and "give a NAME or --reset" in str(result.exception)
     result = runner.invoke(app, ["rename", rid, "x" * 81])
     assert result.exit_code != 0 and "at most 80" in str(result.exception)
+    # a blank NAME (an empty shell variable) never resets silently: --reset says so
+    hx("rename", rid, "kept")
+    for blank in ["", "   "]:
+        result = runner.invoke(app, ["rename", rid, blank])
+        assert result.exit_code != 0 and "--reset" in str(result.exception)
+    assert hx("show", rid)["record"]["name"] == "kept"
 
 
 def test_launch_wait_and_rerun(in_repo: Path) -> None:

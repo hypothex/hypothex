@@ -197,7 +197,8 @@ Archive a run (``--off`` to unarchive) to hide a dead end without deleting it.
 
 Name a run by what it changes (1–80 characters, one line). Without a name a run shows
 its derived name: the params that differ inside its task (``lr 3e-4 · beam 10``).
-``--reset`` drops the name. A run of a host is renamed on that host, through the hub.
+``--reset`` drops the name; a blank NAME is refused, so an empty shell variable never
+drops a name by accident. A run of a host is renamed on that host, through the hub.
 
 .. code-block:: bash
 

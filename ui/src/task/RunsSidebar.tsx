@@ -64,8 +64,10 @@ export function RunsSidebar({ data, selection, onChange, onOpen }: RunsSidebarPr
   const listed = listIdentities(selection, data);
   const visible = listed.filter((i) => !i.hidden).map((i) => i.id);
   const superseded = all.filter(isSuperseded).length;
-  // identities the filter matches that only the superseded chip hides (explains a "0/N shown")
-  const hiddenBySuperseded = selection.showSuperseded ? 0 : listIdentities({ ...selection, showSuperseded: true }, data).length - listed.length;
+  // identities the filter matches that only the superseded chip hides (explains a "0/N
+  // shown"); only an empty list shows it, so only then list again
+  const hiddenBySuperseded =
+    listed.length > 0 || selection.showSuperseded ? 0 : listIdentities({ ...selection, showSuperseded: true }, data).length;
   // a stale `?col=` (the key is gone) shows the primary
   const column =
     selection.column !== data.primary && data.score_keys.includes(selection.column) ? selection.column : SORT_PRIMARY;

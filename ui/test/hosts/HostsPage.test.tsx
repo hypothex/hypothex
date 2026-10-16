@@ -67,3 +67,14 @@ test("StateGlyph: every ConnState has its own SVG shape", () => {
   });
   expect(new Set(shapes).size).toBe(states.length);
 });
+
+test("launch-only readers cannot administer hosts and auth failures require explicit repair", async () => {
+  const hosts=makeHosts();hosts[0]={...hosts[0]!,state:{...hosts[0]!.state,state:'error',message:'auth failed: hx hosts pair gpu1 <pairing-url>'}};
+  const calls=mockApi({...ENV,'GET /api/v1/hosts':hosts,'GET /api/v1/auth/me':{auth:'on',user:'alice',scope:'launch',scopes:['read','launch'],session_id:'s_1',client:'browser',public_url:null}});
+  renderWithClient(<HostsPage/>);const gpu=await screen.findByRole('row',{name:'gpu1'});expect(within(gpu).getByRole('status').textContent).toContain('hx hosts pair');
+  for(const button of screen.getAllByRole('button')) expect((button as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(within(gpu).getByRole('button',{name:'Reconnect'}));fireEvent.click(screen.getByRole('button',{name:'Reload'}));expect(calls.some(call=>call.method==='POST')).toBe(false);
+});
+test("admin sees auth repair instructions instead of replaying a failed credential", async () => {
+ const hosts=makeHosts();hosts[0]={...hosts[0]!,state:{...hosts[0]!.state,state:'error',message:'auth failed: hx hosts pair gpu1 <pairing-url>'}};mockApi({...ENV,'GET /api/v1/hosts':hosts});renderWithClient(<HostsPage/>);const row=await screen.findByRole('row',{name:'gpu1'});expect((within(row).getByRole('button',{name:'Reconnect'}) as HTMLButtonElement).disabled).toBe(true);
+});

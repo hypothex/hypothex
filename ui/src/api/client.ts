@@ -5,7 +5,7 @@
  * renamed or removed backend route fails `bun run typecheck` after `bun run gen:types`.
  * Response bodies use the hand-written contract shapes in models.ts.
  */
-import { auth } from "./auth";
+import { auth, type Credential } from "./auth";
 import type * as M from "./models";
 import type { paths } from "./types";
 
@@ -13,6 +13,22 @@ export type * from "./models";
 
 /** Every HTTP route the UI calls. Keys are client names; values must exist in `paths`. */
 export const ROUTES = {
+  me: "/api/v1/auth/me",
+  pair: "/api/v1/auth/pair",
+  pairings: "/api/v1/auth/pairings",
+  sessions: "/api/v1/auth/sessions",
+  revokeSession: "/api/v1/auth/sessions/{session_id}/revoke",
+  users: "/api/v1/auth/users",
+  disableUser: "/api/v1/auth/users/{name}/disable",
+  notebookDays: "/api/v1/projects/{project}/notebook",
+  notebookDay: "/api/v1/projects/{project}/notebook/{day}",
+  taskExport: "/api/v1/tasks/{project}/{task}/export",
+  notify: "/api/v1/notify",
+  notifyTest: "/api/v1/notify/test",
+  storage: "/api/v1/storage",
+  cleanPlan: "/api/v1/storage/plan",
+  cleanApply: "/api/v1/storage/plans/{plan_id}/apply",
+
   wsTicket: "/api/v1/auth/ws-ticket",
   environment: "/.well-known/hypothex/environment",
   overview: "/api/v1/overview",
@@ -62,6 +78,8 @@ export type QueryValue = string | number | boolean | readonly string[] | null | 
 export type Method = "GET" | "POST" | "PUT" | "DELETE";
 
 export interface RequestOptions {
+  credential?: Credential;
+  public?: boolean;
   params?: Record<string, string>;
   query?: Record<string, QueryValue>;
   body?: unknown;
@@ -127,17 +145,17 @@ export function buildUrl(route: string, params: Record<string, string> = {}, que
 }
 
 /** Send one request and return the parsed JSON body, or throw `ApiError`. */
-export async function request<T>(method: Method, route: Route, opts: RequestOptions = {}): Promise<T> {
+async function transport<T>(method: Method, route: Route, opts: RequestOptions = {}, textMode = false): Promise<T> {
   const url = buildUrl(route, opts.params, opts.query);
   const headers: Record<string, string> = { Accept: "application/json" };
-  const credential = auth.capture();
-  if (credential.token) headers.Authorization = `Bearer ${credential.token}`;
+  const credential = opts.credential ?? auth.capture();
+  if (!opts.public && credential.token) headers.Authorization = `Bearer ${credential.token}`;
   const signal = opts.signal ? AbortSignal.any([opts.signal, credential.signal]) : credential.signal;
   const current = (): void => {
     if (signal.aborted || !auth.current(credential.generation)) throw new DOMException("Request superseded", "AbortError");
   };
   current();
-  const init: RequestInit = { method, headers, signal };
+  const init: RequestInit = { method, headers, signal, credentials: "same-origin" };
   if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(opts.body);
@@ -151,7 +169,7 @@ export async function request<T>(method: Method, route: Route, opts: RequestOpti
     throw new ApiError(0, "Cannot reach hx serve", "NetworkError", [], null);
   }
   current();
-  if (res.status === 401) {
+  if (res.status === 401 && !opts.public) {
     auth.lock(credential.generation);
     throw new ApiError(401, "Token required", "AuthError", [], null);
   }
@@ -166,8 +184,12 @@ export async function request<T>(method: Method, route: Route, opts: RequestOpti
     }
   }
   if (!res.ok) throw ApiError.from(res.status, data);
-  return data as T;
+  return (textMode ? text : data) as T;
 }
+
+/** JSON and text responses share credential selection and cancellation. */
+export function request<T>(method: Method, route: Route, opts: RequestOptions = {}): Promise<T> { return transport<T>(method, route, opts); }
+export function requestText(method: Method, route: Route, opts: RequestOptions = {}): Promise<string> { return transport<string>(method, route, opts, true); }
 
 /** Ticket route checked against the generated OpenAPI schema. */
 export const WS_TICKET_ROUTE = ROUTES.wsTicket;
@@ -200,6 +222,23 @@ const get = <T>(route: Route, opts: RequestOptions = {}): Promise<T> => request<
 const post = <T>(route: Route, opts: RequestOptions = {}): Promise<T> => request<T>("POST", route, opts);
 
 export const api = {
+  me: (signal?: AbortSignal) => get<M.Principal>(ROUTES.me, {signal}),
+  pair: (body: {offer_id:string;secret:string;device:string;client:"browser"}, credential = auth.capture()) => post<M.PairResult>(ROUTES.pair, {body, credential, public:true}),
+  pairings: (body: {user?:string;new_user?:boolean;scope:M.Scope;ttl_seconds?:number;client_hint?:string}, opts?: M.ActionOptions) => post<M.PairingOffer>(ROUTES.pairings, {body, credential:opts?.credential}),
+  sessions: (user?:string, signal?:AbortSignal) => get<M.SessionRow[]>(ROUTES.sessions,{query:{user},signal}),
+  revokeSession: (session_id:string, opts?:M.ActionOptions) => post<{ok:boolean}>(ROUTES.revokeSession,{params:{session_id},body:action(opts),credential:opts?.credential}),
+  users: (signal?:AbortSignal) => get<M.UserRow[]>(ROUTES.users,{signal}),
+  disableUser: (name:string, opts?:M.ActionOptions) => post<M.UserRow>(ROUTES.disableUser,{params:{name},body:action(opts),credential:opts?.credential}),
+  notebookDays: (project:string, signal?:AbortSignal) => get<M.NotebookDayRow[]>(ROUTES.notebookDays,{params:{project},signal}),
+  notebookDay: (project:string,day:string,signal?:AbortSignal) => get<M.NotebookDay>(ROUTES.notebookDay,{params:{project,day},signal}),
+  appendNotebook: (project:string,day:string,text:string,opts?:M.ActionOptions) => post<M.NotebookDay>(ROUTES.notebookDay,{params:{project,day},body:{text,command_id:action(opts).command_id},credential:opts?.credential}),
+  replaceNotebook: (project:string,day:string,text:string,base_hash:string,opts?:M.ActionOptions) => request<M.NotebookDay>("PUT",ROUTES.notebookDay,{params:{project,day},body:{text,base_hash,command_id:action(opts).command_id},credential:opts?.credential}),
+  exportTask: (project:string,task:string,opts:M.ExportOptions,signal?:AbortSignal) => requestText("GET",ROUTES.taskExport,{params:{project,task},query:{...opts,metrics:opts.metrics?.join(","),groups:opts.groups?.join(",")},signal}),
+  notify: (signal?:AbortSignal) => get<M.NotifyStatus>(ROUTES.notify,{signal}),
+  notifyTest: (channel:M.Channel,opts?:M.ActionOptions) => post<{ok:boolean;error_class:string|null}>(ROUTES.notifyTest,{body:{channel,command_id:action(opts).command_id},credential:opts?.credential}),
+  storage: (project?:string,remote=true,signal?:AbortSignal) => get<M.StorageReport>(ROUTES.storage,{query:{project,remote},signal}),
+  cleanPlan: (policy:M.CleanPolicy,opts?:M.ActionOptions) => post<M.CleanPlan>(ROUTES.cleanPlan,{body:{...policy,command_id:action(opts).command_id},credential:opts?.credential}),
+  cleanApply: (plan_id:string,confirm_bytes:number,opts?:M.ActionOptions) => post<M.CleanResult>(ROUTES.cleanApply,{params:{plan_id},body:{confirm_bytes,command_id:action(opts).command_id},credential:opts?.credential}),
   environment: (signal?: AbortSignal) => get<Record<string, unknown>>(ROUTES.environment, { signal }),
   overview: (since?: string, signal?: AbortSignal) =>
     get<M.OverviewSummary>(ROUTES.overview, { query: { since }, signal }),
@@ -219,7 +258,7 @@ export const api = {
   saveView: (project: string, task: string, name: string, text: string, opts: M.ActionOptions = {}) =>
     request<M.SavedView>("PUT", ROUTES.view, {
       params: { project, task, name },
-      body: { text, command_id: action(opts).command_id },
+      credential: opts?.credential, body: { text, command_id: action(opts).command_id },
     }),
   validateView: (project: string, task: string, text: string, signal?: AbortSignal) =>
     post<M.ViewValidation>(ROUTES.viewValidate, { params: { project, task }, body: { text }, signal }),
@@ -243,31 +282,31 @@ export const api = {
   compareExamples: (a: string, b: string, metric: string, field?: string, signal?: AbortSignal, requireBound = false) =>
     get<M.ExampleDiff>(ROUTES.compareExamples, { query: { a, b, metric, field, require_bound: requireBound ? true : undefined }, signal }),
   rerun: (runId: string, opts?: M.ActionOptions) =>
-    post<M.RunRecord>(ROUTES.runRerun, { params: { run_id: runId }, body: action(opts) }),
+    post<M.RunRecord>(ROUTES.runRerun, { params: { run_id: runId }, credential: opts?.credential, body: action(opts) }),
   reinfer: (runId: string, checkpoint?: string, opts?: M.ActionOptions) =>
-    post<M.RunRecord>(ROUTES.runReinfer, { params: { run_id: runId }, body: { ...action(opts), checkpoint } }),
+    post<M.RunRecord>(ROUTES.runReinfer, { params: { run_id: runId }, credential: opts?.credential, body: { ...action(opts), checkpoint } }),
   reevalRun: (runId: string, args: { metric?: string; force?: boolean } = {}, opts?: M.ActionOptions) =>
-    post<M.EvalReport>(ROUTES.runReeval, { params: { run_id: runId }, body: { ...action(opts), ...args } }),
+    post<M.EvalReport>(ROUTES.runReeval, { params: { run_id: runId }, credential: opts?.credential, body: { ...action(opts), ...args } }),
   reevalTask: (project: string, task: string, args: { metric?: string; force?: boolean } = {}, opts?: M.ActionOptions) =>
-    post<M.EvalReport>(ROUTES.taskReeval, { params: { project, task }, body: { ...action(opts), ...args } }),
+    post<M.EvalReport>(ROUTES.taskReeval, { params: { project, task }, credential: opts?.credential, body: { ...action(opts), ...args } }),
   stop: (runId: string, opts?: M.ActionOptions) =>
-    post<M.RunRecord>(ROUTES.runStop, { params: { run_id: runId }, body: action(opts) }),
+    post<M.RunRecord>(ROUTES.runStop, { params: { run_id: runId }, credential: opts?.credential, body: action(opts) }),
   cancelQueuedRun: (runId: string, opts?: M.ActionOptions) =>
-    post<M.RunRecord>(ROUTES.runStop, { params: { run_id: runId }, body: { ...action(opts), only_queued: true } }),
+    post<M.RunRecord>(ROUTES.runStop, { params: { run_id: runId }, credential: opts?.credential, body: { ...action(opts), only_queued: true } }),
   note: (runId: string, text: string, opts?: M.ActionOptions) =>
     post<{ ok: true }>(ROUTES.runNotes, {
       params: { run_id: runId },
-      body: { ...action(opts), text, author: opts?.created_by ?? "human" },
+      credential: opts?.credential, body: { ...action(opts), text, author: opts?.created_by ?? "human" },
     }),
   /** Add or remove tags (forwarded to the owning host like every run action). */
   tagRun: (runId: string, change: { add?: readonly string[]; remove?: readonly string[] }, opts?: M.ActionOptions) =>
     post<M.RunRecord>(ROUTES.runTags, {
       params: { run_id: runId },
-      body: { ...action(opts), add: [...(change.add ?? [])], remove: [...(change.remove ?? [])] },
+      credential: opts?.credential, body: { ...action(opts), add: [...(change.add ?? [])], remove: [...(change.remove ?? [])] },
     }),
   /** Archive (`on: true`) or restore a run. */
   archiveRun: (runId: string, on: boolean, opts?: M.ActionOptions) =>
-    post<M.RunRecord>(ROUTES.runArchive, { params: { run_id: runId }, body: { ...action(opts), on } }),
+    post<M.RunRecord>(ROUTES.runArchive, { params: { run_id: runId }, credential: opts?.credential, body: { ...action(opts), on } }),
   /** v5 task workspace: runs with derived names, config groups and score keys. */
   taskRuns: (project: string, task: string, archived = false, signal?: AbortSignal) =>
     get<M.TaskRuns>(ROUTES.taskRuns, {
@@ -277,7 +316,7 @@ export const api = {
     }),
   /** Rename a run; `null` resets it to the derived name (the server trims and validates). */
   renameRun: (runId: string, name: string | null, opts?: M.ActionOptions) =>
-    post<M.RunRecord>(ROUTES.runName, { params: { run_id: runId }, body: { ...action(opts), name } }),
+    post<M.RunRecord>(ROUTES.runName, { params: { run_id: runId }, credential: opts?.credential, body: { ...action(opts), name } }),
   // phase 2: hosts, launch, sweeps, pull ---------------------------------------------------
   hosts: (signal?: AbortSignal) => get<M.HostRow[]>(ROUTES.hosts, { signal }),
   /** The hub's own GPUs (an env route: the hub is the env server of its own runs). */
@@ -285,17 +324,17 @@ export const api = {
   /** The hub's own run queue, in order. */
   queue: (signal?: AbortSignal) => get<M.QueueEntry[]>(ROUTES.queue, { signal }),
   connectHost: (host: string, opts?: M.ActionOptions) =>
-    post<M.HostState>(ROUTES.hostConnect, { params: { host }, body: action(opts) }),
+    post<M.HostState>(ROUTES.hostConnect, { params: { host }, credential: opts?.credential, body: action(opts) }),
   disconnectHost: (host: string, opts?: M.ActionOptions) =>
-    post<M.HostState>(ROUTES.hostDisconnect, { params: { host }, body: action(opts) }),
+    post<M.HostState>(ROUTES.hostDisconnect, { params: { host }, credential: opts?.credential, body: action(opts) }),
   /** Re-read environments.yaml (after `hx hosts add|map|rm`); returns the hosts list. */
-  reloadHosts: (opts?: M.ActionOptions) => post<M.HostRow[]>(ROUTES.hostsReload, { body: action(opts) }),
+  reloadHosts: (opts?: M.ActionOptions) => post<M.HostRow[]>(ROUTES.hostsReload, { credential: opts?.credential, body: action(opts) }),
   /** Start a run on the hub itself. */
   launch: (body: M.LaunchRequest, opts?: M.ActionOptions) =>
-    post<M.RunRecord>(ROUTES.runs, { body: { ...action(opts), ...body } }),
+    post<M.RunRecord>(ROUTES.runs, { credential: opts?.credential, body: { ...action(opts), ...body } }),
   /** Start or queue a run on a remote host; the hub forwards it and returns the host's record. */
   launchOnHost: (host: string, body: M.HostLaunchRequest, opts?: M.ActionOptions) =>
-    post<M.RunRecord>(ROUTES.hostRuns, { params: { host }, body: { ...action(opts), ...body } }),
+    post<M.RunRecord>(ROUTES.hostRuns, { params: { host }, credential: opts?.credential, body: { ...action(opts), ...body } }),
   sweep: (project: string, sweepId: string, signal?: AbortSignal) =>
     get<M.SweepSummary>(ROUTES.sweep, { params: { project, sweep_id: sweepId }, signal }),
   projectSweeps: (project: string, signal?: AbortSignal) =>
@@ -304,15 +343,15 @@ export const api = {
   cancelQueued: (project: string, sweepId: string, opts?: M.ActionOptions) =>
     post<M.SweepSummary>(ROUTES.sweepCancelQueued, {
       params: { project, sweep_id: sweepId },
-      body: action(opts),
+      credential: opts?.credential, body: action(opts),
     }),
   /** Add runs for every parameter combination x each new seed. */
   extendSweep: (project: string, sweepId: string, seeds: readonly number[], opts?: M.ActionOptions) =>
     post<M.SweepSummary>(ROUTES.sweepExtend, {
       params: { project, sweep_id: sweepId },
-      body: { ...action(opts), seeds: [...seeds] },
+      credential: opts?.credential, body: { ...action(opts), seeds: [...seeds] },
     }),
   /** Copy one remote artifact (a kind such as `checkpoint`, or a run-relative path) to the hub. */
   pull: (runId: string, artifact: string, opts?: M.ActionOptions) =>
-    post<M.PullResult>(ROUTES.runPull, { params: { run_id: runId }, body: { ...action(opts), artifact } }),
+    post<M.PullResult>(ROUTES.runPull, { params: { run_id: runId }, credential: opts?.credential, body: { ...action(opts), artifact } }),
 };

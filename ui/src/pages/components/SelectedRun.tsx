@@ -79,7 +79,7 @@ export function SelectedRun({ runId, onClose }: SelectedRunProps) {
       <ScoresList scores={run.data.scores} metricNames={run.data.metric_names} primary={null} />
       {kind.data?.kind === "training" ? <>
         <h4>Checkpoint metrics</h4>
-        <CheckpointTable artifacts={record.artifacts} />
+        <CheckpointTable artifacts={record.artifacts} environmentId={record.environment_id} cleaned={run.data.cleaned} />
       </> : null}
     </> : null}
   </Panel>;

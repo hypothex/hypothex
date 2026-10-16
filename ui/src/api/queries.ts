@@ -1,3 +1,5 @@
+import { auth, type Credential } from "./auth";
+import { clearNotebookEditors } from "./notebookEditors";
 import { clearLostReasons } from "./lostReasons";
 /**
  * TanStack Query keys, hooks and mutations over the API client.
@@ -23,6 +25,14 @@ import type * as M from "./models";
 import { issuancePoll } from "./sweepIssuance";
 
 export const queryKeys = {
+  me: () => ["auth", "me"] as const,
+  sessions: (user?:string) => ["auth", "sessions", user ?? null] as const,
+  users: () => ["auth", "users"] as const,
+  notebookDays: (project:string) => ["notebook",project,"days"] as const,
+  notebookDay: (project:string,day:string) => ["notebook",project,"day",day] as const,
+  notify: () => ["notify"] as const,
+  storage: (project?:string,remote=true) => ["storage",project ?? null,remote] as const,
+  export: (project:string,task:string,options:M.ExportOptions) => ["leaderboard",project,task,"export",options] as const,
   environment: () => ["environment"] as const,
   overview: (since?: string) => ["overview", since ?? null] as const,
   projects: () => ["projects"] as const,
@@ -131,6 +141,7 @@ export function clearSessionQueries(qc: QueryClient): void {
   qc.clear();
   lastKnownRows.delete(qc);
   clearLostReasons();
+  clearNotebookEditors();
 }
 
 /** Store every row of `rows` that has data (connected, or GPUs carried) in `known`. */
@@ -187,6 +198,7 @@ export async function fetchLastSequence(qc: QueryClient): Promise<number | null>
 
 /** Retry transient failures twice; never retry a 4xx (the answer will not change). */
 export function shouldRetry(failureCount: number, error: unknown): boolean {
+  if (error instanceof Error && error.name === "AbortError") return false;
   if (error instanceof ApiError && error.status >= 400 && error.status < 500) return false;
   return failureCount < 2;
 }
@@ -267,8 +279,8 @@ export const useTaskRuns = (project: string, task: string, opts: ReadOptions & {
     ...readOptions(opts),
   });
 
-export const useRuns = (query: M.RunsQuery = {}) =>
-  useQuery({ queryKey: queryKeys.runs(query), queryFn: ({ signal }) => api.runs(query, signal) });
+export const useRuns = (query: M.RunsQuery = {},opts:ReadOptions={}) =>
+  useQuery({ queryKey: queryKeys.runs(query), queryFn: ({ signal }) => api.runs(query, signal),...readOptions(opts) });
 
 export const useRun = (runId: string) =>
   useQuery({ queryKey: queryKeys.run(runId), queryFn: ({ signal }) => api.run(runId, signal) });
@@ -472,10 +484,11 @@ export const useAllRuns = (query: Omit<M.RunsQuery, "limit">, enabled = true) =>
 export function useSaveView(project: string, task: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ name, text }: { name: string; text: string }) => api.saveView(project, task, name, text),
+    mutationFn: async ({ name, text, credential=auth.capture() }: { name: string; text: string; credential?: Credential }) => { const result=await api.saveView(project, task, name, text,{credential}); return {saved:result,generation:credential.generation}; },
     // Not awaited: the caller's `onSuccess` (the editor navigates away) must not wait
     // for the editor's own preview query to refetch.
-    onSuccess: (_data, { name }) => {
+    onSuccess: ({generation}, { name }) => {
+      if(!auth.current(generation)) return;
       void qc.invalidateQueries({ queryKey: queryKeys.views(project, task) });
       void qc.invalidateQueries({ queryKey: queryKeys.view(project, task, name) });
       void qc.invalidateQueries({ queryKey: ["views", "query", project, task] });
@@ -490,8 +503,9 @@ export function useSaveView(project: string, task: string) {
 export function useRenameRun() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ runId, name }: { runId: string; name: string | null }) => api.renameRun(runId, name),
-    onSuccess: (record, { runId }) => {
+    mutationFn: async ({ runId, name, credential = auth.capture() }: { runId: string; name: string | null; credential?: Credential }) => { const result = await api.renameRun(runId, name, {credential}); return {record:result,generation:credential.generation}; },
+    onSuccess: ({record,generation}, { runId }) => {
+      if (!auth.current(generation)) return;
       const taskRuns = record.task ? ["taskRuns", record.project, record.task] : ["taskRuns", record.project];
       void qc.invalidateQueries({ queryKey: taskRuns });
       void qc.invalidateQueries({ queryKey: queryKeys.run(runId) });
@@ -499,3 +513,17 @@ export function useRenameRun() {
     },
   });
 }
+
+/** A 404 means scoped features are absent, never that transport auth is disabled. */
+export async function fetchMe(signal?: AbortSignal): Promise<M.Capability> {
+ try { return await api.me(signal); }
+ catch(error) { if (error instanceof ApiError && error.status === 404) { await api.projects(signal); return {auth:"legacy",legacy:true}; } throw error; }
+}
+export function useMe(opts:ReadOptions={}) { const query=useQuery({queryKey:queryKeys.me(),queryFn:({signal})=>fetchMe(signal),...readOptions(opts)}); return {...query,data:query.isError ? undefined : query.data}; }
+export const useSessions = (user?:string,opts:ReadOptions={}) => useQuery({queryKey:queryKeys.sessions(user),queryFn:({signal})=>api.sessions(user,signal),...readOptions(opts)});
+export const useUsers = (opts:ReadOptions={}) => useQuery({queryKey:queryKeys.users(),queryFn:({signal})=>api.users(signal),...readOptions(opts)});
+export const useNotebookDays = (project:string,opts:ReadOptions={}) => useQuery({queryKey:queryKeys.notebookDays(project),queryFn:({signal})=>api.notebookDays(project,signal),...readOptions(opts)});
+export const useNotebookDay = (project:string,day:string,opts:ReadOptions={}) => useQuery({queryKey:queryKeys.notebookDay(project,day),queryFn:({signal})=>api.notebookDay(project,day,signal),...readOptions(opts)});
+export const useNotify = (opts:ReadOptions={}) => useQuery({queryKey:queryKeys.notify(),queryFn:({signal})=>api.notify(signal),...readOptions(opts)});
+export const useStorage = (project?:string,remote=true,opts:ReadOptions={}) => useQuery({queryKey:queryKeys.storage(project,remote),queryFn:({signal})=>api.storage(project,remote,signal),staleTime:60000,...readOptions(opts)});
+export const useExport = (project:string,task:string,options:M.ExportOptions,opts:ReadOptions={}) => useQuery({queryKey:queryKeys.export(project,task,options),queryFn:({signal})=>api.exportTask(project,task,options,signal),enabled:opts.enabled ?? true});

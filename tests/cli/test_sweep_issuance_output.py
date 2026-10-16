@@ -88,7 +88,7 @@ def test_sweep_text_retains_cancel_and_resume_diagnostics(
 def test_local_durable_sweep_actions_use_hub_but_legacy_actions_stay_direct(
     durable: bool, action: str, ctx: Context, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    spec = SimpleNamespace(project="toy", id="s-1", host=None)
+    spec = SimpleNamespace(project="toy", id="s-1", host=None, owner=None)
     out = summary("queued" if durable else None)
     seen: list[dict[str, Any]] = []
     direct: list[str] = []

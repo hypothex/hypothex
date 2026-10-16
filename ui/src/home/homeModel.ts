@@ -120,7 +120,7 @@ export function taskRows(summary: OverviewSummary): TaskRow[] {
 export function groupFailures(failures: FailureRow[]): FailureRow[][] {
   const groups = new Map<string, FailureRow[]>();
   for (const f of failures) {
-    const key = JSON.stringify([f.label, f.exit_code]);
+    const key = JSON.stringify([f.label, f.exit_code, f.owner ?? null]);
     const group = groups.get(key);
     if (group) group.push(f);
     else groups.set(key, [f]);
@@ -136,6 +136,7 @@ export function reasonText(status: RunStatus, exitCode: number | null, reason: s
 }
 
 export interface RecentRow {
+  owner?: string | null;
   runId: string;
   at: string;
   name: string;
@@ -161,6 +162,7 @@ function fromTimeline(summary: OverviewSummary): RecentRun[] {
     .filter((t) => t.status !== "queued" && !t.archived)
     .map((t) => ({
       run_id: t.run_id,
+      owner:t.owner,
       project: t.project,
       task: t.task,
       name: t.label,
@@ -188,6 +190,7 @@ export function recentRows(summary: OverviewSummary, max = 12): RecentRow[] {
     const f = failures.get(r.run_id);
     return {
       runId: r.run_id,
+      owner:r.owner,
       at: r.created_at,
       name: names[r.run_id] ?? r.name,
       project: r.project,
@@ -214,6 +217,7 @@ export function recentRows(summary: OverviewSummary, max = 12): RecentRow[] {
       const item = items.get(f.run_id);
       rows.push({
         runId: f.run_id,
+        owner:f.owner,
         at: f.created_at,
         name: names[f.run_id] ?? f.label,
         project: item?.project ?? "",

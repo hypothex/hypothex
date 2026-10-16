@@ -20,6 +20,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from hypothex.api.tickets import TicketStore
+from hypothex.auth.store import LOCAL_OWNER, Principal
 from hypothex.core.tokens import validate_bearer_token
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
@@ -320,10 +321,12 @@ class TokenGuard:
         token: str | None,
         tickets: TicketStore,
         public_static: Callable[[str], bool],
+        principal: Principal = LOCAL_OWNER,
     ) -> None:
         self.app = app
         self._token = None if token is None else validate_bearer_token(token)
         self._tickets = tickets
+        self._principal = principal
         self._public_static = public_static
 
     def _websocket(self, scope: Scope, headers: Headers) -> bool:
@@ -388,6 +391,12 @@ class TokenGuard:
                     and bearer_matches(auth[0], self._token)
                     else None
                 )
+            if (
+                kind == "websocket"
+                or self._token is None
+                or scope.get("hypothex.auth_token") == self._token
+            ):
+                scope["hx.principal"] = self._principal
             await self.app(scope, receive, send)
             return
         if kind == "websocket":
@@ -395,6 +404,8 @@ class TokenGuard:
             await send({"type": "websocket.close", "code": 1008})
             return
         response = JSONResponse(
-            {"error": "missing or wrong bearer token", "type": "AuthError"}, status_code=401
+            {"error": "missing or wrong bearer token", "type": "AuthError"},
+            status_code=401,
+            headers={"WWW-Authenticate": 'Bearer realm="hypothex"'},
         )
         await response(scope, receive, send)

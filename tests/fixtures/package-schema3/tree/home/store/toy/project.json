@@ -1,0 +1,80 @@
+{
+  "project": "toy",
+  "repo": "__HX_FIXTURE_ROOT__/toy",
+  "config": {
+    "project": "toy",
+    "description": "",
+    "datasets": {
+      "toyset": {
+        "version": "v1",
+        "path": "data/test.jsonl",
+        "host": "local",
+        "description": "",
+        "splits": {
+          "test": "data/test.jsonl"
+        },
+        "id_field": "id",
+        "reference_field": "reference"
+      }
+    },
+    "metrics": {
+      "accuracy": {
+        "version": "v1",
+        "fn": "toymetrics:accuracy",
+        "higher_is_better": true,
+        "params": {},
+        "changelog": {},
+        "unit": ""
+      },
+      "broken": {
+        "version": "v1",
+        "fn": "toymetrics:broken",
+        "higher_is_better": true,
+        "params": {},
+        "changelog": {},
+        "unit": ""
+      }
+    },
+    "tasks": {
+      "toy-acc": {
+        "dataset": "toyset",
+        "split": "test",
+        "metrics": [
+          "accuracy"
+        ],
+        "primary": "accuracy",
+        "description": "",
+        "kind": "generic",
+        "views": {},
+        "baseline": null,
+        "version_param": "version"
+      },
+      "toy-broken": {
+        "dataset": "toyset",
+        "split": "test",
+        "metrics": [
+          "accuracy",
+          "broken"
+        ],
+        "primary": "accuracy",
+        "description": "",
+        "kind": "generic",
+        "views": {},
+        "baseline": null,
+        "version_param": "version"
+      }
+    },
+    "stages": {
+      "infer": "__HX_FIXTURE_PYTHON__ infer.py --ckpt {checkpoint}"
+    },
+    "env": {
+      "setup": null,
+      "python": [
+        "__HX_FIXTURE_PYTHON__"
+      ]
+    }
+  },
+  "registered_at": "2026-10-16T21:27:35.337631Z",
+  "previous_repos": [],
+  "remote_host": null
+}

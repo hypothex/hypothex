@@ -1,0 +1,6 @@
+.paper-baselines { margin-top: 16px; min-width: 0; border-top: 1px dashed var(--ink-3); padding-top: 12px; }
+.paper-baselines h3 { margin: 0 0 10px; font: 600 13px var(--sans); }
+.paper-baselines table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.paper-baselines th, .paper-baselines td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule); }
+.paper-baselines th { font-weight: 500; color: var(--ink-2); }
+.paper-baselines td:first-child { white-space: nowrap; }

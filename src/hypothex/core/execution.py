@@ -34,7 +34,14 @@ from hypothex.core.context import Context
 from hypothex.core.cost import compute_cost
 from hypothex.core.datasets import FingerprintCache, dataset_ref, resolve_dataset_path
 from hypothex.core.envcapture import capture_env
-from hypothex.core.errors import GitError, HypothexError, RunError, StoreError, TemplateError
+from hypothex.core.errors import (
+    ConfigError,
+    GitError,
+    HypothexError,
+    RunError,
+    StoreError,
+    TemplateError,
+)
 from hypothex.core.evalrunner import default_python_cmd
 from hypothex.core.evaluation import evaluate_run, run_checkout
 from hypothex.core.fsutil import atomic_write_bytes, atomic_write_text, read_yaml, write_yaml
@@ -53,6 +60,8 @@ from hypothex.core.records import (
     end_unstarted,
 )
 from hypothex.core.seeds import config_hash, run_fingerprint
+from hypothex.core.settings import Settings, load_settings, scrub_env, secret_env_names
+from hypothex.core.storage import cleanup_lock, input_paths
 from hypothex.core.store import dir_lock, sum_usage
 from hypothex.remote.config import SlurmDefaults
 
@@ -107,6 +116,7 @@ class RunRequest:
     apply on top of it (``git diff HEAD --binary``: text from the hub, raw bytes
     from a rerun's ``git.diff``); when the repo is not already at exactly that
     state the run uses a git worktree (spec 8A.4).
+    ``owner`` is the user who asked for the run (``RunRecord.owner``).
     """
 
     repo: Path
@@ -128,6 +138,7 @@ class RunRequest:
     slurm: SlurmDefaults | None = None
     commit: str | None = None
     diff: str | bytes | None = None
+    owner: str | None = None
 
 
 def process_create_time(pid: int) -> float | None:
@@ -828,10 +839,12 @@ def _prepare_in(
         created_at=utcnow(),
         tags=sorted(set(req.tags)),
         created_by=req.created_by,
+        owner=req.owner,
         gpus_requested=req.gpus,
     )
     try:
-        ctx.create_run(record)
+        with cleanup_lock(ctx.layout) if input_paths(record) else contextlib.nullcontext():
+            ctx.create_run(record)
     except StoreError as exc:
         if isinstance(exc.__cause__, FileExistsError):  # the run folder exists: id clash
             raise _RunIdTakenError(run_id) from exc
@@ -1158,6 +1171,17 @@ def _disposable(path: bytes) -> bool:
     return b"__pycache__/" in path or path.endswith((b".pyc", b"__pycache__"))
 
 
+def _secret_names(ctx: Context) -> set[str]:
+    """Secret variable names to keep out of a run (defaults when config.yaml is bad)."""
+    from hypothex.remote.config import host_token_env_names
+
+    try:
+        settings = load_settings(ctx.layout)
+    except ConfigError:
+        settings = Settings()
+    return secret_env_names(settings) | host_token_env_names(ctx.layout)
+
+
 def _execute(
     ctx: Context,
     run_id: str,
@@ -1216,7 +1240,7 @@ def _execute(
             {"reason": str(exc)[:500]},
         )
     env = {
-        **os.environ,
+        **scrub_env(os.environ, _secret_names(ctx)),
         "HYPOTHEX_RUN_DIR": str(run_dir),
         "HYPOTHEX_RUN_ID": record.run_id,
         "HYPOTHEX_PROJECT": record.project,

@@ -504,6 +504,7 @@ export function sortCells(cells: readonly SweepCellRow[], sort: SortState): Swee
 // -------------------------------------------------------------------------- stats
 /** Inputs of the sweep stat strip. */
 export interface SweepStatsInput {
+  costComplete?: boolean | null;
   counts: Readonly<Record<string, number>>;
   totalUsd: number;
   best: SweepCellRow | null;
@@ -557,8 +558,8 @@ export function sweepStats(input: SweepStatsInput): StatItem[] {
     },
     {
       label: `cost, ${input.runsState === "loading" ? "·" : input.runsState === "error" ? DASH : fmtGpuHours(total)} GPU-h`,
-      value: input.totalUsd > 0 ? fmtUsd(input.totalUsd) : "$0",
-      tooltip:
+      value: input.costComplete === true ? (input.totalUsd > 0 ? fmtUsd(input.totalUsd) : "$0") : "Cost unknown",
+      tooltip: input.costComplete !== true ? `${fmtUsd(input.totalUsd)} recorded subtotal; total unknown` :
         input.runsState === "loading" ? "Loading GPU time" : input.runsState === "error" ? "GPU time unavailable" : hours.size > 0
           ? [...hours].map(([host, h]) => `${host} ${fmtGpuHours(h)} GPU-h`).join("\n")
           : "No GPU time yet",

@@ -189,3 +189,48 @@ def refuse_host_tools(base: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             stub.chmod(0o755)
     monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
     return folder
+
+
+@dataclass(frozen=True)
+class FakeTailscale:
+    """Handle on a fake ``tailscale`` (``HYPOTHEX_TAILSCALE``)."""
+
+    bin: str
+    state_path: Path
+
+    def state(self) -> dict:
+        """The fake's current state (serve mappings and recorded calls)."""
+        return json.loads(self.state_path.read_text())
+
+
+def install_fake_tailscale(
+    base: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    logged_in: bool = True,
+    dns_name: str = "hub.tail1234.ts.net.",
+) -> FakeTailscale:
+    """
+    Install the fake ``tailscale`` and point ``HYPOTHEX_TAILSCALE`` at it.
+
+    Parameters
+    ----------
+    base : Path
+        Directory for the wrapper and the state file.
+    monkeypatch : pytest.MonkeyPatch
+    logged_in : bool
+        Whether ``tailscale status`` reports a running node.
+    dns_name : str
+        The node's MagicDNS name (with the trailing dot tailscale prints).
+
+    Returns
+    -------
+    FakeTailscale
+    """
+    base.mkdir(parents=True, exist_ok=True)
+    state = base / "tailscale-state.json"
+    state.write_text(json.dumps({"logged_in": logged_in, "dns_name": dns_name, "serve": {}}))
+    wrapper = _wrapper(base / "tailscale", FAKES_DIR / "fake_tailscale.py")
+    monkeypatch.setenv("HYPOTHEX_TAILSCALE", wrapper)
+    monkeypatch.setenv("HYPOTHEX_FAKE_TAILSCALE_STATE", str(state))
+    return FakeTailscale(bin=wrapper, state_path=state)

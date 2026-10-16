@@ -65,10 +65,16 @@ Try it with no setup: `hx --home /tmp/hx-demo demo --with-hosts && hx --home /tm
 - [Getting started](docs/getting_started.rst) and a runnable example in [`examples/toy-classifier`](examples/toy-classifier)
 - [CLI](docs/cli.rst), [project file](docs/project_file.rst), [views](docs/views.rst), [web UI](docs/ui.rst), [SDK](docs/sdk.rst)
 - [Remote hosts](docs/remote.rst), [GPU queue](docs/gpus.rst), [SLURM](docs/slurm.rst), [sweeps](docs/sweeps.rst), [cost](docs/cost.rst)
+- [Team pairing](docs/team.rst), [notebook](docs/notebook.rst), [notifications](docs/notifications.rst), [table exports](docs/export.rst), [storage cleanup](docs/storage.rst)
+- [Configuration](docs/configuration.rst), [authentication](docs/authentication.rst), [PostgreSQL server](docs/server.rst)
 - [Agent guide](docs/agents.rst), [MCP tools](docs/mcp.rst), [HTTP API](docs/http_api.rst)
 - [Security model](docs/security.rst), [troubleshooting](docs/troubleshooting.rst), [architecture](docs/architecture.rst)
 
 Build the docs locally: `uv run sphinx-build -b html docs docs/_build/html`.
+
+[Installed-package acceptance](docs/package-testing.rst) covers a built wheel,
+the packaged UI, team pairing, and upgrades from existing schema-3 and schema-4
+homes. See [testing](docs/testing.rst) for the isolated source and Docker suites.
 
 ## For agents
 

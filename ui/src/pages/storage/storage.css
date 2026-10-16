@@ -1,0 +1,4 @@
+.storage-bar { display: grid; grid-template-columns: 1fr auto; gap: 7px; margin-bottom: 16px; }
+.storage-bar meter, .storage-bar small { grid-column: 1 / -1; width: 100%; }
+.storage-bar small { color: var(--ink-2); overflow-wrap: anywhere; }
+.storage-path { font-family: var(--mono); overflow-wrap: anywhere; min-width: 130px; max-width: 500px; }

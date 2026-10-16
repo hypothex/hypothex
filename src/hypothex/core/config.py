@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Literal, NamedTuple
+from typing import Annotated, Any, Literal, NamedTuple
 
 import yaml
 from pydantic import (
@@ -40,6 +40,8 @@ VIEW_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
 RESERVED_VIEW_NAMES = frozenset({"overview"})
 TaskKind = Literal["generic", "training", "agent_eval", "agent_iteration", "system_bench"]
 _FIELD = re.compile(r"\{([A-Za-z_][A-Za-z0-9_.]*)\}")
+BASELINE_SOURCE = r"^(arXiv:\d{4}\.\d{4,5}(v\d+)?|doi:10\.\d{4,9}/\S+|https://\S+)$"
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 
 
 def template_fields(template: str) -> set[str]:
@@ -234,6 +236,69 @@ class MetricSpec(_Strict):
     """Display unit (``ms``, ``$``, ``tokens``); empty: inferred from the name."""
 
 
+def metric_ref(ref: str) -> str:
+    """
+    Normalize a metric reference to ``metric/key``.
+
+    Parameters
+    ----------
+    ref : str
+        ``metric`` or ``metric/key``.
+
+    Returns
+    -------
+    str
+
+    Examples
+    --------
+    >>> metric_ref("acc"), metric_ref("topk/k=1")
+    ('acc/value', 'topk/k=1')
+    """
+    name, key = parse_metric_key(ref)
+    return f"{name}/{key}"
+
+
+class BaselineSpec(_Strict):
+    """
+    A published result shown next to a task's leaderboard; never ranked.
+
+    ``values`` and ``std`` are keyed by metric reference (``metric`` or
+    ``metric/key``). ``metric_version_equivalent`` says which of our metric
+    versions the paper's number matches: per metric, or one string for every
+    metric of the task.
+
+    Examples
+    --------
+    >>> spec = BaselineSpec(name="He 2016", values={"acc": 0.9}, source="arXiv:1512.03385")
+    >>> spec.equivalent_version("acc") is None
+    True
+    """
+
+    name: str = Field(min_length=1, max_length=64)
+    values: dict[str, FiniteFloat] = Field(min_length=1)
+    std: dict[str, FiniteFloat] = Field(default_factory=dict)
+    source: str = Field(pattern=BASELINE_SOURCE)
+    metric_version_equivalent: dict[str, str] | str = Field(default_factory=dict)
+    note: str = Field("", max_length=200)
+
+    def equivalent_version(self, metric: str) -> str | None:
+        """
+        Return our version of ``metric`` that the paper's number matches.
+
+        Parameters
+        ----------
+        metric : str
+            Metric name.
+
+        Returns
+        -------
+        str or None
+            The version, or None when the baseline does not say.
+        """
+        mve = self.metric_version_equivalent
+        return mve if isinstance(mve, str) else mve.get(metric)
+
+
 class TaskSpec(_Strict):
     """
     Dataset + metrics + primary metric: the unit of comparison.
@@ -246,6 +311,7 @@ class TaskSpec(_Strict):
     ``agent_iteration`` groups. ``score_keys`` names the dotted parts of the
     task's score keys, for example ``"{dataset}.{model}.{metric}"``
     (``scorekeys.parse_key_pattern``); the UI labels its controls with them.
+    ``baselines`` lists published results shown under the leaderboard.
     """
 
     dataset: str
@@ -258,6 +324,7 @@ class TaskSpec(_Strict):
     baseline: str | None = None
     version_param: str = Field(default="version", min_length=1)
     score_keys: str | None = None
+    baselines: list[BaselineSpec] = Field(default_factory=list)
 
     @field_validator("score_keys")
     @classmethod
@@ -335,6 +402,30 @@ class ProjectConfig(_Strict):
                     )
                 elif view in RESERVED_VIEW_NAMES:
                     errors.append(f"task {name!r}: view name {view!r} is reserved for the preset")
+            seen: set[str] = set()
+            for base in task.baselines:
+                if base.name in seen:
+                    errors.append(f"task {name!r}: baseline name {base.name!r} is repeated")
+                seen.add(base.name)
+                for key in sorted({*base.values, *base.std}):
+                    if parse_metric_key(key)[0] not in task.metrics:
+                        errors.append(
+                            f"task {name!r}: baseline {base.name!r}: unknown metric {key!r}"
+                        )
+                std_refs = {metric_ref(k) for k in base.std}
+                extra = sorted(std_refs - {metric_ref(k) for k in base.values})
+                if extra:
+                    errors.append(
+                        f"task {name!r}: baseline {base.name!r}: std without a value: "
+                        f"{', '.join(extra)}"
+                    )
+                if isinstance(base.metric_version_equivalent, dict):
+                    errors.extend(
+                        f"task {name!r}: baseline {base.name!r}: metric_version_equivalent "
+                        f"names {m!r}, not a metric of the task"
+                        for m in base.metric_version_equivalent
+                        if m not in task.metrics
+                    )
         if errors:
             raise ValueError("; ".join(errors))
         return self

@@ -19,6 +19,8 @@ dependencies = [
   "mcp>=2.0",
   "httpx>=0.27",
   "websockets>=17.1",
+  "alembic>=1.13",
+  "segno>=1.6",
 ]
 
 [project.urls]
@@ -26,6 +28,11 @@ Homepage = "https://github.com/hypothex/hypothex"
 
 [project.scripts]
 hx = "hypothex.cli.main:cli"
+
+[project.optional-dependencies]
+server = [
+    "psycopg[binary]>=3.2",
+]
 
 [dependency-groups]
 dev = [
@@ -38,6 +45,9 @@ dev = [
   "numpydoc>=1.8",
   "hypothesis>=6.168.3",
   "scipy>=1.17.1",
+  "aiosmtpd>=1.4",
+  "trustme>=1.1",
+  "psycopg[binary]>=3.2",
 ]
 
 [build-system]
@@ -49,7 +59,7 @@ packages = ["src/hypothex"]
 # The built UI (bun run build -> src/hypothex/ui_dist) is git-ignored. `artifacts`
 # includes it when present and is a no-op when absent; `force-include` would fail
 # the build ("Forced include not found") on a checkout without a UI build.
-artifacts = ["src/hypothex/ui_dist/**"]
+artifacts = ["src/hypothex/ui_dist/**", "src/hypothex/core/migrations/script.py.mako"]
 
 [tool.hatch.build.targets.wheel.force-include]
 # The agent skill file, so an installed hypothex carries it (tracked, so always present).
@@ -58,7 +68,7 @@ artifacts = ["src/hypothex/ui_dist/**"]
 [tool.hatch.build.targets.sdist]
 # A plain `uv build` builds the wheel from the sdist, so the sdist must carry the
 # git-ignored UI build too, or the wheel has no UI and `hx serve` answers 404 at `/`.
-artifacts = ["src/hypothex/ui_dist/**"]
+artifacts = ["src/hypothex/ui_dist/**", "src/hypothex/core/migrations/script.py.mako"]
 # Internal plans, specs and UI mockups (about 10 MB) are not part of a release.
 exclude = ["docs/mockups", "docs/superpowers", ".superpowers"]
 
@@ -72,7 +82,8 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not docker'"
+addopts = "-m 'not docker and not package'"
 markers = [
+  "package: installed-wheel and legacy-home upgrade acceptance; run with -m package",
   "docker: integration test against throwaway Docker containers (sshd, SLURM); run with -m docker",
 ]

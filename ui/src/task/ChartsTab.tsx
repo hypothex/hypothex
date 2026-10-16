@@ -1,3 +1,6 @@
+import { auth } from "../api/auth";
+import { hasScope } from "../api/scopes";
+import { useMe } from "../api/queries";
 /**
  * Charts tab (spec 4.2): the runs sidebar and the panel area. Toolbar: panel search,
  * smoothing (EMA, value shown), x axis, seeds, `+ Panel`, `Save as view`. Sections:
@@ -50,6 +53,7 @@ export interface AddPanelItem {
 
 export function ChartsTab(props: ChartsTabProps): ReactElement {
   const { project, task, data, board, selection, onSelection, onOpenRun, onOpenView, viewNames } = props;
+  const me=useMe();
   const [query, setQuery] = useState("");
   const [smoothing, setSmoothing] = useState(0.6);
   const [x, setX] = useState<XMode>("step");
@@ -137,7 +141,7 @@ export function ChartsTab(props: ChartsTabProps): ReactElement {
                 { label: "Custom view…", onPick: addView },
               ]}
             />
-            <button type="button" className="btn sm" aria-expanded={saving} onClick={() => setSaving((s) => !s)}>
+            <button type="button" className="btn sm" disabled={!hasScope(me.data,"launch")} aria-expanded={saving} onClick={() => setSaving((s) => !s)}>
               Save as view
             </button>
           </span>
@@ -155,6 +159,7 @@ export function ChartsTab(props: ChartsTabProps): ReactElement {
             onCancel={() => setSaving(false)}
           />
         ) : null}
+        {items.length === 0 && <ScoresSection data={data} items={items} baselines={board?.baselines ?? []} colorOf={colorOf} highlight={highlight} query={query} />}
         {items.length === 0 ? (
           <EmptyState title={data.runs.length === 0 ? "No runs yet" : "No runs shown"} />
         ) : (
@@ -175,7 +180,7 @@ export function ChartsTab(props: ChartsTabProps): ReactElement {
                 ))}
               </PanelSection>
             ) : null}
-            <ScoresSection data={data} items={items} colorOf={colorOf} highlight={highlight} query={query} />
+            <ScoresSection data={data} items={items} baselines={board?.baselines ?? []} colorOf={colorOf} highlight={highlight} query={query} />
             <StepMetricsSection
               curves={curves}
               sections={sections}
@@ -276,7 +281,8 @@ function SaveViewForm({ project, task, panels, taken, onSaved, onCancel }: SaveV
       onSubmit={(e) => {
         e.preventDefault();
         if (!ok || save.isPending) return;
-        save.mutate({ name, text: viewYaml({ title: name, panels: [...panels] }) }, { onSuccess: () => onSaved(name) });
+        const credential=auth.capture();
+        save.mutate({ name, text: viewYaml({ title: name, panels: [...panels] }),credential }, { onSuccess: () => {if(auth.current(credential.generation)) onSaved(name);} });
       }}
     >
       <input aria-label="View name" value={name} placeholder="view_name" spellCheck={false} onChange={(e) => setName(e.target.value.trim())} />

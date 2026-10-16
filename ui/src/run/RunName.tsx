@@ -7,7 +7,9 @@
  */
 import { type KeyboardEvent, type ReactElement, useEffect, useRef, useState } from "react";
 import type { RunRecord, TaskRun } from "../api/models";
-import { useRenameRun } from "../api/queries";
+import { auth } from "../api/auth";
+import { hasScope } from "../api/scopes";
+import { useMe, useRenameRun } from "../api/queries";
 import { Icon } from "../chrome/Icon";
 import { firstClause, shortId } from "../pages/components/format";
 import "./run.css";
@@ -83,17 +85,23 @@ export async function renameEach(
   name: string | null,
   rename: (runId: string, name: string | null) => Promise<unknown>,
 ): Promise<void> {
+  const generation=auth.snapshot().generation;
+  const check=():void=>{if(!auth.current(generation)) throw new DOMException("Rename superseded","AbortError");};
   const done: RenameTarget[] = [];
   try {
     for (const t of targets) {
+      check();
       await rename(t.runId, name);
+      check();
       done.push(t);
     }
   } catch (err) {
+    check();
     const reason = err instanceof Error ? err.message : String(err);
     let kept = 0;
     for (const t of done) {
       try {
+        check();
         await rename(t.runId, t.previous);
       } catch {
         kept += 1;
@@ -132,12 +140,16 @@ export function RunName({
   label = "Rename",
   className,
 }: RunNameProps): ReactElement {
+  const me=useMe();
+  const allowed=hasScope(me.data,"launch");
   const rename = useRenameRun();
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(display);
   const [shown, setShown] = useState<Shown | null>(null);
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
+  const mounted = useRef(true);
+  useEffect(()=>{mounted.current=true;return ()=>{mounted.current=false;};},[]);
   // new server data replaces the optimistic name (adjusted while rendering, not in an effect)
   const [seen, setSeen] = useState<Shown>({ display, renamed });
   if (seen.display !== display || seen.renamed !== renamed) {
@@ -153,6 +165,7 @@ export function RunName({
   const cls = (extra: string) => ["run-name", extra, className].filter(Boolean).join(" ");
 
   const start = () => {
+    if(!allowed) return;
     setText(current.display);
     setError(null);
     setEditing(true);
@@ -162,6 +175,8 @@ export function RunName({
     setError(null);
   };
   const send = (name: string | null) => {
+    if(!allowed) return;
+    const credential=auth.capture();
     const before = current;
     setShown(name === null ? { display: derived, renamed: false } : { display: name, renamed: true });
     setEditing(false);
@@ -169,8 +184,9 @@ export function RunName({
     const targets = runs && runs.length > 0 ? runs : [{ runId, previous: before.renamed ? before.display : null }];
     void (async () => {
       try {
-        await renameEach(targets, name, (id, to) => rename.mutateAsync({ runId: id, name: to }));
+        await renameEach(targets, name, (id, to) => rename.mutateAsync({ runId: id, name: to, credential }));
       } catch (err) {
+        if(!mounted.current || !auth.current(credential.generation)) return;
         setShown(before);
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -233,7 +249,7 @@ export function RunName({
       <span className="rn-t" {...open}>
         {current.display}
       </span>
-      <button type="button" className="pen" aria-label={label} title="Rename" onClick={start}>
+      <button type="button" className="pen" disabled={!allowed} aria-label={label} title="Rename" onClick={start}>
         <Icon name="edit" />
       </button>
       {error ? (

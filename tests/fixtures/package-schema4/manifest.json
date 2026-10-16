@@ -1,0 +1,333 @@
+{
+  "expected_path_fields": [
+    [
+      "projects",
+      0,
+      "repo"
+    ],
+    [
+      "projects",
+      0,
+      "config",
+      "stages",
+      "infer"
+    ],
+    [
+      "projects",
+      0,
+      "config",
+      "env",
+      "python",
+      0
+    ],
+    [
+      "records",
+      "a",
+      "cwd"
+    ],
+    [
+      "records",
+      "b",
+      "cwd"
+    ],
+    [
+      "records",
+      "bench-0",
+      "cwd"
+    ],
+    [
+      "records",
+      "bench-1",
+      "cwd"
+    ],
+    [
+      "records",
+      "direction-0",
+      "cwd"
+    ],
+    [
+      "records",
+      "direction-1",
+      "cwd"
+    ],
+    [
+      "records",
+      "legacy",
+      "cwd"
+    ],
+    [
+      "records",
+      "matrix-0",
+      "cwd"
+    ],
+    [
+      "records",
+      "matrix-1",
+      "cwd"
+    ],
+    [
+      "records",
+      "parent-child",
+      "cwd"
+    ]
+  ],
+  "files": {
+    "events.sql": "77b413652f22dcd5f329f4b15aa7490b1bf787dbfb7e6fd3a9045bcd3981f27b",
+    "expected.json": "d954dbeab5994a84ebe90643e0ceed5a47b8a5daebc9e2fb6156da7a5aa5f064",
+    "index.sql": "83f59a6857d3a2a200613090b32ddc5fe87a5b0a2d290c2a2d674103bf59cb1a",
+    "tree/home/environment.json": "5e875b4466d95d09f09481d08a9314e0742b10271ce4355e33c9f117034e07a8",
+    "tree/home/index.db.rebuild.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tree/home/serve/server.json": "30a7730717471952b6a4e418a0210c688b5858ebb09366e80ce2e3aea0152bb6",
+    "tree/home/store/toy/metric_hashes.json": "6636800c53e4ff42a20d39d8634864f7a55cbcd5212493c6134ba6eaa4cc5b77",
+    "tree/home/store/toy/project.json": "69e9a43945a1ee1ae687e81dae41d581b06c2087cd86263e95e8be6dfb6679f4",
+    "tree/home/store/toy/runs/a/metrics.jsonl": "1e908e0962c81817c6fa3c9519af82f7e9d43f5557a3512178eaca1ba0621d0b",
+    "tree/home/store/toy/runs/a/predictions/predictions.jsonl": "b82ecdde5949a9c5bc64e149a92080d482949545d7847809f731710cd3b8f958",
+    "tree/home/store/toy/runs/a/predictions/scores.accuracy@v1.jsonl": "f8a464d1f0028aa38c98e3a5caac32cdae9e1900ce027dadbcfeb7b76682219c",
+    "tree/home/store/toy/runs/a/run.yaml": "4925bc680db1b1ab9a3215c8e86da71e7cc165226fe2080a9c4d8d649a8679b9",
+    "tree/home/store/toy/runs/a/scores.jsonl": "b3462866ac98d2bbc6e4de0233f043edbab8b29536fc7f204a0e535a2db8c2ba",
+    "tree/home/store/toy/runs/b/predictions/predictions.jsonl": "f7653cee968429dbcfa1235619717f237307c7f7a2450f68f6d6c2aeb7c32e99",
+    "tree/home/store/toy/runs/b/predictions/scores.accuracy@v1.jsonl": "da381988a1793f8e55dd5ed42077d51a3d76c75e750ca2d6bd30be1820b77d0a",
+    "tree/home/store/toy/runs/b/run.yaml": "2f10c2848673c27781f8bd8f0213c92aa15d530cf0cc5029f282e51a67e96deb",
+    "tree/home/store/toy/runs/b/scores.jsonl": "6cad2fd8ba2c367e1fd1a3e9531d4886364c101f529ae3512fa8b6b4d1a99ccf",
+    "tree/home/store/toy/runs/bench-0/predictions/scores.latency@v1.jsonl": "bb229b1674e4339c6103c53ebce23eafecefca32c0d1d6c8774e84aaccd10744",
+    "tree/home/store/toy/runs/bench-0/run.yaml": "236d3f3870e2a8c46739c89bd29351d63ce8415c495c351c4b31608d56738e7e",
+    "tree/home/store/toy/runs/bench-0/scores.jsonl": "adaf3d7a7f2a21d53bf698201f806fae4007f7f67d4a1a67d43d60195a4ffab8",
+    "tree/home/store/toy/runs/bench-1/predictions/scores.latency@v1.jsonl": "7f3bcbb85a749904de7f4a2b10679c4d3032b733c47ba231f48f55b7a5e6a457",
+    "tree/home/store/toy/runs/bench-1/run.yaml": "9cc861c099e96cfff69eb70c2f1b63ccceffde1f8cefc4117cc995ede7691b15",
+    "tree/home/store/toy/runs/bench-1/scores.jsonl": "052b5ff4b6a57961409f01a334e921c49fb876f503c366d4203130f46807c6a1",
+    "tree/home/store/toy/runs/direction-0/run.yaml": "e0ec1586c78f92f8f7b984f00bc596eda206dcfbba8db6658bf519995ed9377a",
+    "tree/home/store/toy/runs/direction-0/scores.jsonl": "8b848d3c3d5a5e5ccdee4a8d6774010e91e282b2d8d1d8a11a60542e293d4ea3",
+    "tree/home/store/toy/runs/direction-1/run.yaml": "887abf7c239b73a95d12466201d8c94121b075dc456a1c0a18ff69a7bb26f915",
+    "tree/home/store/toy/runs/direction-1/scores.jsonl": "469dfcc991f683f0785d3dc7720f25979b322ba33634c35f4359403bc17e2435",
+    "tree/home/store/toy/runs/legacy/run.yaml": "fd7e29525f6dac95ae76ec864995e2914047e97d01d3d5de5db14488a77e2b6a",
+    "tree/home/store/toy/runs/legacy/scores.jsonl": "8c463f12e881a6bf086fb9790d4c9514aac6e14925fa7cd20a344e4fe6b50ab2",
+    "tree/home/store/toy/runs/matrix-0/run.yaml": "6bf14123bb9d08955c6b68a747ec2bcdd203ade18571c4667602faa55db0aa63",
+    "tree/home/store/toy/runs/matrix-0/scores.jsonl": "54b2e502ed3c1e4a8ee997d5141bdd6ce1151ce72c8193a5a82ce5398cc29eb0",
+    "tree/home/store/toy/runs/matrix-1/run.yaml": "5acaf21a6bea794aa7d5bedb9dae142ab985ad41ef268f385e9a05128f85a2bb",
+    "tree/home/store/toy/runs/matrix-1/scores.jsonl": "998f499867846657b90d833e0b74ce81207517d041ecba0a29e9e46f05c5466f",
+    "tree/home/store/toy/runs/parent-child/run.yaml": "d0b290cf8e2fde7fa2839611257d11f53d13cbe51a822facb21f04dae65ca933",
+    "tree/toy/.hypothex/views/matrix/package.yaml": "69636971ef6aa7ef1227dc27424e47ce6778c1ed2b2e1528ea0aaf66533600b9",
+    "tree/toy/data/test.jsonl": "605125773c56e24c54980a90b1d34857d6336a20c1068bd263a0f88fa0956c2b",
+    "tree/toy/hypothex.yaml": "3e94d7a3a25bb5db69216b8a367f606aa7209401fdf43f117ef811250571b16d",
+    "tree/toy/infer.py": "d43ee7aba3562307c6ec8fae9ee750a82f8915f411da80116a1cf9191d15e470",
+    "tree/toy/toymetrics.py": "d1d7aa7c145f3a4aae301e46ec30d2e9723ab54b60f0139338c64b67f66a8cf4"
+  },
+  "generator_entry_sha256": "af933b10158eff5b4bcb3c4e90eaa9b479d86cd8e8e660657c89ef6d28400952",
+  "generator_sha256": "1134c6c0facde02628095cffdb64dcb48cb42355f19f2294795db4ae76eb50d8",
+  "old_import_path": "src/hypothex/__init__.py",
+  "path_fields": {
+    "home/serve/server.json": [
+      [
+        "home"
+      ]
+    ],
+    "home/store/toy/project.json": [
+      [
+        "repo"
+      ],
+      [
+        "config",
+        "stages",
+        "infer"
+      ],
+      [
+        "config",
+        "env",
+        "python",
+        0
+      ]
+    ],
+    "home/store/toy/runs/a/run.yaml": [
+      [
+        "cwd"
+      ]
+    ],
+    "home/store/toy/runs/b/run.yaml": [
+      [
+        "cwd"
+      ]
+    ],
+    "home/store/toy/runs/bench-0/run.yaml": [
+      [
+        "cwd"
+      ]
+    ],
+    "home/store/toy/runs/bench-1/run.yaml": [
+      [
+        "cwd"
+      ]
+    ],
+    "home/store/toy/runs/direction-0/run.yaml": [
+      [
+        "cwd"
+      ]
+    ],
+    "home/store/toy/runs/direction-1/run.yaml": [
+      [
+        "cwd"
+      ]
+    ],
+    "home/store/toy/runs/legacy/run.yaml": [
+      [
+        "cwd"
+      ]
+    ],
+    "home/store/toy/runs/matrix-0/run.yaml": [
+      [
+        "cwd"
+      ]
+    ],
+    "home/store/toy/runs/matrix-1/run.yaml": [
+      [
+        "cwd"
+      ]
+    ],
+    "home/store/toy/runs/parent-child/run.yaml": [
+      [
+        "cwd"
+      ]
+    ],
+    "toy/hypothex.yaml": [
+      [
+        "stages",
+        "infer"
+      ],
+      [
+        "env",
+        "python",
+        0
+      ]
+    ]
+  },
+  "pre_relocation_hashes": {
+    "home/environment.json": "5e875b4466d95d09f09481d08a9314e0742b10271ce4355e33c9f117034e07a8",
+    "home/index.db.rebuild.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "home/serve/server.json": "eb15d7ce0bc6388e157e31a406f64f5599063fabd2fe3cdb059c06154e65c1d5",
+    "home/store/toy/metric_hashes.json": "6636800c53e4ff42a20d39d8634864f7a55cbcd5212493c6134ba6eaa4cc5b77",
+    "home/store/toy/project.json": "b12ac04ceeb564aa8d3444a134a9909fd14da88b808d5cd19511f5c2959e0d47",
+    "home/store/toy/runs/a/metrics.jsonl": "1e908e0962c81817c6fa3c9519af82f7e9d43f5557a3512178eaca1ba0621d0b",
+    "home/store/toy/runs/a/predictions/predictions.jsonl": "b82ecdde5949a9c5bc64e149a92080d482949545d7847809f731710cd3b8f958",
+    "home/store/toy/runs/a/predictions/scores.accuracy@v1.jsonl": "f8a464d1f0028aa38c98e3a5caac32cdae9e1900ce027dadbcfeb7b76682219c",
+    "home/store/toy/runs/a/run.yaml": "5fc294d8ed6a4a0f4bcdcea746a12c20c5ac13e3d6f6608660266ccdda677009",
+    "home/store/toy/runs/a/scores.jsonl": "b3462866ac98d2bbc6e4de0233f043edbab8b29536fc7f204a0e535a2db8c2ba",
+    "home/store/toy/runs/b/predictions/predictions.jsonl": "f7653cee968429dbcfa1235619717f237307c7f7a2450f68f6d6c2aeb7c32e99",
+    "home/store/toy/runs/b/predictions/scores.accuracy@v1.jsonl": "da381988a1793f8e55dd5ed42077d51a3d76c75e750ca2d6bd30be1820b77d0a",
+    "home/store/toy/runs/b/run.yaml": "5915dbdc8a69bc6261c1fe0f92ec5aaeb1408686b6319dc9dd9696b533bbeec3",
+    "home/store/toy/runs/b/scores.jsonl": "6cad2fd8ba2c367e1fd1a3e9531d4886364c101f529ae3512fa8b6b4d1a99ccf",
+    "home/store/toy/runs/bench-0/predictions/scores.latency@v1.jsonl": "bb229b1674e4339c6103c53ebce23eafecefca32c0d1d6c8774e84aaccd10744",
+    "home/store/toy/runs/bench-0/run.yaml": "66ff3be22317cff3f1cc19bb8408efe396017cc94817b1072006fa8e8911f08b",
+    "home/store/toy/runs/bench-0/scores.jsonl": "adaf3d7a7f2a21d53bf698201f806fae4007f7f67d4a1a67d43d60195a4ffab8",
+    "home/store/toy/runs/bench-1/predictions/scores.latency@v1.jsonl": "7f3bcbb85a749904de7f4a2b10679c4d3032b733c47ba231f48f55b7a5e6a457",
+    "home/store/toy/runs/bench-1/run.yaml": "77b35b0b265965c76b4ddbb28d2419121e12284b8d2b7cd41709eba954a31a8c",
+    "home/store/toy/runs/bench-1/scores.jsonl": "052b5ff4b6a57961409f01a334e921c49fb876f503c366d4203130f46807c6a1",
+    "home/store/toy/runs/direction-0/run.yaml": "3d95fd094d445eda0422fa91f9ecc033ccca0d1e5bd8e54f041f5640238a0e8e",
+    "home/store/toy/runs/direction-0/scores.jsonl": "8b848d3c3d5a5e5ccdee4a8d6774010e91e282b2d8d1d8a11a60542e293d4ea3",
+    "home/store/toy/runs/direction-1/run.yaml": "9582b1524b5e56e17386d3114dd64cc1b6dd229c0e8a025bb55f1140b11a2a63",
+    "home/store/toy/runs/direction-1/scores.jsonl": "469dfcc991f683f0785d3dc7720f25979b322ba33634c35f4359403bc17e2435",
+    "home/store/toy/runs/legacy/run.yaml": "22e8520a212b5fb4b274d3df002d6015f62651e3617a9aae01828071a5ce4415",
+    "home/store/toy/runs/legacy/scores.jsonl": "8c463f12e881a6bf086fb9790d4c9514aac6e14925fa7cd20a344e4fe6b50ab2",
+    "home/store/toy/runs/matrix-0/run.yaml": "f8f5637861747c2d98bf970255f46c8b94413b1787cd12a0c1fff3b782634c1d",
+    "home/store/toy/runs/matrix-0/scores.jsonl": "54b2e502ed3c1e4a8ee997d5141bdd6ce1151ce72c8193a5a82ce5398cc29eb0",
+    "home/store/toy/runs/matrix-1/run.yaml": "8ff4ba1cb5740548b4326a8110931aebfbc1404ba5d09be9f3c1c397ec0bd4f4",
+    "home/store/toy/runs/matrix-1/scores.jsonl": "998f499867846657b90d833e0b74ce81207517d041ecba0a29e9e46f05c5466f",
+    "home/store/toy/runs/parent-child/run.yaml": "d3dacaa10935786089dc07788db7813c45b124de3e159d850321e95202aa08f4",
+    "toy/.hypothex/views/matrix/package.yaml": "69636971ef6aa7ef1227dc27424e47ce6778c1ed2b2e1528ea0aaf66533600b9",
+    "toy/data/test.jsonl": "605125773c56e24c54980a90b1d34857d6336a20c1068bd263a0f88fa0956c2b",
+    "toy/hypothex.yaml": "3e9712238532ef2e230a4a7171986d4a79c4c06477b4519fe838b5c930792edf",
+    "toy/infer.py": "d43ee7aba3562307c6ec8fae9ee750a82f8915f411da80116a1cf9191d15e470",
+    "toy/toymetrics.py": "d1d7aa7c145f3a4aae301e46ec30d2e9723ab54b60f0139338c64b67f66a8cf4"
+  },
+  "protected_bytes": {
+    "home/store/toy/runs/a/metrics.jsonl": "1e908e0962c81817c6fa3c9519af82f7e9d43f5557a3512178eaca1ba0621d0b",
+    "home/store/toy/runs/a/predictions/predictions.jsonl": "b82ecdde5949a9c5bc64e149a92080d482949545d7847809f731710cd3b8f958",
+    "home/store/toy/runs/a/predictions/scores.accuracy@v1.jsonl": "f8a464d1f0028aa38c98e3a5caac32cdae9e1900ce027dadbcfeb7b76682219c",
+    "home/store/toy/runs/a/scores.jsonl": "b3462866ac98d2bbc6e4de0233f043edbab8b29536fc7f204a0e535a2db8c2ba",
+    "home/store/toy/runs/b/predictions/predictions.jsonl": "f7653cee968429dbcfa1235619717f237307c7f7a2450f68f6d6c2aeb7c32e99",
+    "home/store/toy/runs/b/predictions/scores.accuracy@v1.jsonl": "da381988a1793f8e55dd5ed42077d51a3d76c75e750ca2d6bd30be1820b77d0a",
+    "home/store/toy/runs/b/scores.jsonl": "6cad2fd8ba2c367e1fd1a3e9531d4886364c101f529ae3512fa8b6b4d1a99ccf",
+    "home/store/toy/runs/bench-0/predictions/scores.latency@v1.jsonl": "bb229b1674e4339c6103c53ebce23eafecefca32c0d1d6c8774e84aaccd10744",
+    "home/store/toy/runs/bench-0/scores.jsonl": "adaf3d7a7f2a21d53bf698201f806fae4007f7f67d4a1a67d43d60195a4ffab8",
+    "home/store/toy/runs/bench-1/predictions/scores.latency@v1.jsonl": "7f3bcbb85a749904de7f4a2b10679c4d3032b733c47ba231f48f55b7a5e6a457",
+    "home/store/toy/runs/bench-1/scores.jsonl": "052b5ff4b6a57961409f01a334e921c49fb876f503c366d4203130f46807c6a1",
+    "home/store/toy/runs/direction-0/scores.jsonl": "8b848d3c3d5a5e5ccdee4a8d6774010e91e282b2d8d1d8a11a60542e293d4ea3",
+    "home/store/toy/runs/direction-1/scores.jsonl": "469dfcc991f683f0785d3dc7720f25979b322ba33634c35f4359403bc17e2435",
+    "home/store/toy/runs/legacy/scores.jsonl": "8c463f12e881a6bf086fb9790d4c9514aac6e14925fa7cd20a344e4fe6b50ab2",
+    "home/store/toy/runs/matrix-0/scores.jsonl": "54b2e502ed3c1e4a8ee997d5141bdd6ce1151ce72c8193a5a82ce5398cc29eb0",
+    "home/store/toy/runs/matrix-1/scores.jsonl": "998f499867846657b90d833e0b74ce81207517d041ecba0a29e9e46f05c5466f",
+    "toy/data/test.jsonl": "605125773c56e24c54980a90b1d34857d6336a20c1068bd263a0f88fa0956c2b",
+    "toy/infer.py": "d43ee7aba3562307c6ec8fae9ee750a82f8915f411da80116a1cf9191d15e470",
+    "toy/toymetrics.py": "d1d7aa7c145f3a4aae301e46ec30d2e9723ab54b60f0139338c64b67f66a8cf4"
+  },
+  "run_ids": [
+    "a",
+    "b",
+    "bench-0",
+    "bench-1",
+    "direction-0",
+    "direction-1",
+    "legacy",
+    "matrix-0",
+    "matrix-1",
+    "parent-child"
+  ],
+  "schema": 4,
+  "score_bindings": {
+    "a": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": 4,
+        "evaluation_ids_hash": "sha256:903a03ca18c11fedb2d6fc7aaee555f9732e525a680044d1bba28ae8209d3f23",
+        "key": "value",
+        "metric": "accuracy",
+        "per_example_hash": "sha256:f8a464d1f0028aa38c98e3a5caac32cdae9e1900ce027dadbcfeb7b76682219c",
+        "source_hash": "sha256:30bca6684e8b747a",
+        "value": 0.75,
+        "version": "v1"
+      }
+    ],
+    "b": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": 4,
+        "evaluation_ids_hash": "sha256:903a03ca18c11fedb2d6fc7aaee555f9732e525a680044d1bba28ae8209d3f23",
+        "key": "value",
+        "metric": "accuracy",
+        "per_example_hash": "sha256:da381988a1793f8e55dd5ed42077d51a3d76c75e750ca2d6bd30be1820b77d0a",
+        "source_hash": "sha256:30bca6684e8b747a",
+        "value": 1.0,
+        "version": "v1"
+      }
+    ],
+    "legacy": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "value",
+        "metric": "accuracy",
+        "per_example_hash": null,
+        "source_hash": null,
+        "value": 0.5,
+        "version": "v1"
+      }
+    ]
+  },
+  "source_hashes": {
+    "src/hypothex/core/index.py": "0d1bdc89d18686dc4d7205a9b118757d6cea82f249b6077ee899a8e3e725755e",
+    "src/hypothex/core/records.py": "2915f589493f964b687ff1dc8cfc8d3da2294d75af94d6dd985772feafb58910",
+    "tests/core/test_bound_comparison.py": "1e3f9698a8f385273608a99d3526333a1d81f857293ab120dba3a30535423c40",
+    "tests/factories.py": "f84e6deb4c9575d8aab1c2c4c65f1d6a9f82013e946c345fe1b8fb66b16aafd7"
+  },
+  "source_revision": "e73b8105df32a1d2488477c48e680cb5de922771",
+  "sql_path_columns": {
+    "events.sql": [],
+    "index.sql": [
+      "projects.entry_json",
+      "projects.repo",
+      "runs.record_json"
+    ]
+  }
+}

@@ -2089,8 +2089,7 @@ def test_an_auth_failure_stops_retrying_until_connect(tmp_path: Path) -> None:
             try:
                 await until(lambda: hub.state("a").state == "error")
                 state = hub.state("a")
-                assert state.message.startswith("authentication failed (HTTP 403)")
-                assert "hx hosts connect a" in state.message
+                assert state.message == "auth failed: hx hosts pair a <pairing-url>"
                 await asyncio.sleep(1.0)  # many backoff periods: nothing retries
                 assert guards[0].subscriptions == 1
                 assert hub._sups["a"].task is not None and hub._sups["a"].task.done()

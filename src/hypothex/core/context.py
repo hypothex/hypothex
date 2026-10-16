@@ -13,12 +13,15 @@ from hypothex.core.errors import RemoteProjectError
 from hypothex.core.events import EventLog
 from hypothex.core.index import (
     Index,
+    open_index,
     rebuild_index_if_stale,
     repair_index_if_changed,
+    repair_pending,
     repair_stale_scores,
 )
 from hypothex.core.layout import Layout, default_home
 from hypothex.core.records import RunRecord, ScoreRecord
+from hypothex.core.settings import load_settings
 from hypothex.core.store import ProjectEntry, RunStore, run_lock
 
 
@@ -49,7 +52,14 @@ class Context:
         schema, is rebuilt from files (``index.rebuild_index_if_stale``): other
         processes read the old index until the rebuilt one replaces it. A
         score whose add was cut short after its file append is indexed here
-        too (``index.repair_stale_scores``).
+        too (``index.repair_stale_scores``). Failed index writes are replayed
+        from the pending journal under each run lock.
+
+        The index is SQLite unless ``server.index_url`` in ``config.yaml``
+        names PostgreSQL. An unavailable server raises ``IndexUnavailableError``;
+        an unupgraded schema raises ``IndexSchemaError`` naming ``hx db upgrade``.
+        Settings are read on every open, so invalid settings stop commands
+        rather than silently selecting SQLite or disabling authentication.
 
         Parameters
         ----------
@@ -63,7 +73,7 @@ class Context:
         layout = Layout((home or default_home()).expanduser().resolve())
         layout.ensure()
         store = RunStore(layout)
-        index = Index(layout.index_db, store=store)
+        index = open_index(layout, load_settings(layout).server, store=store)
         ctx = cls(
             layout=layout,
             store=store,
@@ -76,6 +86,7 @@ class Context:
         else:
             repair_index_if_changed(index, store)
         repair_stale_scores(index, store)
+        repair_pending(index, store)
         return ctx
 
     def find_record(self, run_id: str) -> RunRecord:

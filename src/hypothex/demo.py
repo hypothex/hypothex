@@ -65,6 +65,7 @@ from hypothex.core.records import (
     ScoreRecord,
 )
 from hypothex.core.seeds import config_hash, run_fingerprint
+from hypothex.core.settings import resolve_secret
 from hypothex.core.stats import quantile
 from hypothex.core.store import sum_usage
 from hypothex.core.sweeps import SweepParam, SweepSpec, save_sweep, sweep_tag
@@ -2239,6 +2240,8 @@ class _DemoHost(BaseModel):
     repo: str
     fake_gpus: str | None = None
     bin: str | None = None
+    token_env: str | None = None
+    """Hub secret variable for this host; None allows the unauthenticated fake."""
 
 
 def _fake_gpu_rows() -> list[dict[str, Any]]:
@@ -2263,6 +2266,25 @@ def _fake_gpu_rows() -> list[dict[str, Any]]:
         }
         for i in range(8)
     ]
+
+
+def _prepare_demo_repository(repo: Path) -> None:
+    """Commit generated demo code before copying it to fake hosts.
+
+    Parameters
+    ----------
+    repo : Path
+        Validated generated demo directory, never a user's registered checkout.
+        Its own Git root prevents discovery of an enclosing source repository.
+    """
+    atomic_write_text(repo / "train.py", _TRAIN_PY)
+    git = [
+        "git", "-C", str(repo), "-c", "core.hooksPath=/dev/null",
+        "-c", "commit.gpgSign=false", "-c", "user.name=Hypothex demo",
+        "-c", "user.email=demo@hypothex.invalid",
+    ]  # fmt: skip
+    for args in (["init", "-q"], ["add", "."], ["commit", "-qm", "Seed fake host demo"]):
+        subprocess.run([*git, *args], check=True, capture_output=True)
 
 
 def _demo_host_home(root: Path, name: str, hub_repo: Path) -> tuple[Context, Path]:
@@ -2512,16 +2534,9 @@ def seed_demo_hosts(home: Path) -> dict[str, str]:
     repo = Path(entry.repo)
     if repo.resolve() != (home / "demo-repos" / project).resolve():
         raise ConfigError("--with-hosts requires the generated training demo repository")
-    atomic_write_text(repo / "train.py", _TRAIN_PY)
     # A demo home may be nested in a source checkout (the browser fixture is).
     # Give it its own history before copying so hub pins exist on both fake hosts.
-    git = [
-        "git", "-C", str(repo), "-c", "core.hooksPath=/dev/null",
-        "-c", "commit.gpgSign=false", "-c", "user.name=Hypothex demo",
-        "-c", "user.email=demo@hypothex.invalid",
-    ]  # fmt: skip
-    for args in (["init", "-q"], ["add", "."], ["commit", "-qm", "Seed fake host demo"]):
-        subprocess.run([*git, *args], check=True, capture_output=True)
+    _prepare_demo_repository(repo)
     anchor = utcnow().replace(minute=0, second=0, microsecond=0)
     gpu_ctx, gpu_repo = _demo_host_home(root, "gpu1", repo)
     slurm_ctx, slurm_repo = _demo_host_home(root, "cluster", repo)
@@ -2598,8 +2613,22 @@ def seed_demo_hosts(home: Path) -> dict[str, str]:
     }
 
 
-def _start_demo_host(host: _DemoHost) -> subprocess.Popen[bytes]:
-    """Start ``hx serve --kind <kind> --port 0 --no-auth`` for one fake host."""
+def _start_demo_host(host: _DemoHost, hub: Layout | None = None) -> subprocess.Popen[bytes]:
+    """
+    Start a loopback fake host, optionally with the hub's paired bearer token.
+
+    Parameters
+    ----------
+    host : _DemoHost
+        Synthetic host configuration.
+    hub : Layout, optional
+        Hub whose secrets.env supplies the configured token variable.
+
+    Returns
+    -------
+    subprocess.Popen
+        Owned child server process.
+    """
     env = {
         k: v for k, v in os.environ.items() if k not in ("HYPOTHEX_FAKE_GPUS", "HYPOTHEX_HUB_URL")
     }
@@ -2613,11 +2642,17 @@ def _start_demo_host(host: _DemoHost) -> subprocess.Popen[bytes]:
     serve_dir = Path(host.home) / "serve"
     serve_dir.mkdir(parents=True, exist_ok=True)
     # server.json stays: a live owner of this home makes the child refuse (one server per home)
-    # --no-auth: the hub reaches these fake hosts by `route: url`, which carries no token
     argv = [
         sys.executable, "-m", "hypothex.cli.main", "--home", host.home,
-        "serve", "--host", "127.0.0.1", "--port", "0", "--kind", host.kind, "--no-auth",
+        "serve", "--host", "127.0.0.1", "--port", "0", "--kind", host.kind,
     ]  # fmt: skip
+    if host.token_env:
+        token = resolve_secret(hub, host.token_env) if hub is not None else None
+        if token is None:
+            raise StoreError("the configured demo host token is unavailable")
+        env["HYPOTHEX_SERVE_TOKEN"] = token.get_secret_value()
+    else:
+        argv.append("--no-auth")
     # own session: Ctrl-C on `hx serve` must not reach these hosts before the hub stops their runs
     with (serve_dir / "demo-host.log").open("ab") as log:
         return subprocess.Popen(
@@ -2817,11 +2852,12 @@ def demo_hosts_running(home: Path, *, ready_timeout: float = 60.0) -> Iterator[l
     started: list[str] = []
     try:
         for host in hosts:
-            procs.append(_start_demo_host(host))
+            procs.append(_start_demo_host(host, Layout(home)))
         for host, proc in zip(hosts, procs, strict=True):
             urls[host.name] = _wait_demo_host(host, proc, ready_timeout)
         _point_hub_at(home, urls)
-        _launch_live_runs(home, hosts, urls, started)
+        if gpu is not None:
+            _launch_live_runs(home, hosts, urls, started)
         yield started
     finally:
         if gpu is not None and gpu.name in urls and started:

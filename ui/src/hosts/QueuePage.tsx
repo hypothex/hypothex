@@ -1,7 +1,8 @@
 /** Queue (spec 4.4): every queued run, grouped by host, in queue order, with a confirmed Stop. */
 import type { ReactElement } from "react";
 import { api } from "../api/client";
-import { REMOTE_RUN_INVALIDATES, useAllRuns, useHosts, useOverview } from "../api/queries";
+import { mayAct } from "../api/scopes";
+import { useMe, REMOTE_RUN_INVALIDATES, useAllRuns, useHosts, useOverview } from "../api/queries";
 import { Launcher } from "../chrome/Launcher";
 import { StatusIcon } from "../chrome/StatusIcon";
 import { DASH } from "../pages/components/format";
@@ -15,6 +16,8 @@ import { type QueueGroup, queueGroups } from "./queueModel";
 import "./hosts.css";
 
 function QueueLine({ row }: { row: QueueGroup["rows"][number] }): ReactElement {
+  const me=useMe();
+  const allowed=mayAct(me.data,row.record.owner);
   const stop = useAction({ send: (_: void, opts) => api.cancelQueuedRun(row.runId, opts), invalidate: REMOTE_RUN_INVALIDATES });
   const { armed, arm, disarm } = useArmed([row.runId]);
   const r = row.record;
@@ -26,7 +29,7 @@ function QueueLine({ row }: { row: QueueGroup["rows"][number] }): ReactElement {
       </td>
       <td className="ink2">{r.task ? <AppLink href={hrefs.task(r.project, r.task)}>{r.task}</AppLink> : r.project}</td>
       <td>
-        <Launcher who={row.createdBy} />
+        <Launcher who={row.createdBy} />{r.owner && <span> @{r.owner}</span>}
       </td>
       <td className="num">{row.gpus}</td>
       <td className="num">{row.waiting}</td>
@@ -37,7 +40,7 @@ function QueueLine({ row }: { row: QueueGroup["rows"][number] }): ReactElement {
         <button
           type="button"
           className="btn sm"
-          disabled={stop.pending}
+          disabled={!allowed || stop.pending}
           onClick={() => {
             if (armed) {
               disarm();

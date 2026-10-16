@@ -1,8 +1,9 @@
 /** Hosts (spec 4.4): every host with its state, version, GPU cells, queue, rate and cost; connect actions. */
 import { Fragment, type ReactElement } from "react";
 import { api } from "../api/client";
+import { hasScope } from "../api/scopes";
 import type { HostRow, HostState } from "../api/models";
-import { HOST_EVENT_INVALIDATES, useHosts, useHubEnvironment } from "../api/queries";
+import { HOST_EVENT_INVALIDATES, useHosts, useHubEnvironment, useMe } from "../api/queries";
 import {
   HostVersion,
   LOCAL_HOST,
@@ -23,6 +24,9 @@ import { GpuCells } from "./GpuCells";
 import "./hosts.css";
 
 function HostAction({ row }: { row: HostRow }): ReactElement | null {
+  const me=useMe();
+  const admin=hasScope(me.data,"admin");
+  const repair=row.state.state==="error" && /auth.*failed|authentication failed/i.test(row.state.message);
   const connect = useAction<HostState>({ send: (_: void, opts) => api.connectHost(row.name, opts), invalidate: HOST_EVENT_INVALIDATES });
   const disconnect = useAction<HostState>({ send: (_: void, opts) => api.disconnectHost(row.name, opts), invalidate: HOST_EVENT_INVALIDATES });
   const st = row.state.state;
@@ -33,9 +37,9 @@ function HostAction({ row }: { row: HostRow }): ReactElement | null {
         <button
           type="button"
           className="btn sm"
-          disabled={disconnect.pending}
+          disabled={!admin || disconnect.pending}
           onClick={() => disconnect.run()}
-          title={`Stop talking to ${row.name}; its runs keep going`}
+          title={!admin ? "Admin scope required" : `Stop talking to ${row.name}; its runs keep going`}
         >
           Disconnect
         </button>
@@ -44,10 +48,11 @@ function HostAction({ row }: { row: HostRow }): ReactElement | null {
           Connecting
         </button>
       ) : (
-        <button type="button" className="btn sm" disabled={connect.pending} onClick={() => connect.run()} title={`Try ${row.name} again now`}>
+        <button type="button" className="btn sm" disabled={!admin || repair || connect.pending} onClick={() => {if(admin && !repair) connect.run();}} title={repair ? row.state.message : !admin ? "Admin scope required" : `Try ${row.name} again now`}>
           {st === "disabled" ? "Connect" : "Reconnect"}
         </button>
       )}
+      {repair ? <p role="status">{row.state.message}</p> : null}
       {error ? <ErrorBox error={error} /> : null}
     </>
   );
@@ -92,6 +97,8 @@ function HostLine({ row, hub, now }: { row: HostRow; hub: string | null; now: nu
 }
 
 export function HostsPage(): ReactElement {
+  const me=useMe();
+  const admin=hasScope(me.data,"admin");
   const hosts = useHosts();
   const env = useHubEnvironment();
   const now = useNow();
@@ -115,9 +122,9 @@ export function HostsPage(): ReactElement {
         <button
           type="button"
           className="btn sm"
-          disabled={reload.pending}
+          disabled={!admin || reload.pending}
           onClick={() => reload.run()}
-          title="Read environments.yaml again (after hx hosts add, map or rm)"
+          title={!admin ? "Admin scope required" : "Read environments.yaml again (after hx hosts add, map or rm)"}
         >
           Reload
         </button>

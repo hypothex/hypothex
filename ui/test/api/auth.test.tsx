@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { AuthStore, auth, TOKEN_KEY } from "../../src/api/auth";
+import { SessionReset } from "../../src/api/SessionReset";
 import { AuthGate } from "../../src/api/AuthGate";
 import { api, ApiError } from "../../src/api/client";
 import { createQueryClient } from "../../src/api/queries";
@@ -57,7 +58,7 @@ test("gate waits for protected validation, supports noauth, clears cache/replay 
   const pending = deferred<Response>(); const calls: string[] = [];
   globalThis.fetch = ((url: RequestInfo | URL) => { calls.push(String(url)); return pending.promise; }) as unknown as typeof fetch;
   const qc = createQueryClient();
-  render(<QueryClientProvider client={qc}><AuthGate><div>protected children</div></AuthGate></QueryClientProvider>);
+  render(<QueryClientProvider client={qc}><SessionReset><AuthGate><div>protected children</div></AuthGate></SessionReset></QueryClientProvider>);
   expect(screen.queryByText("protected children")).toBeNull();
   expect(calls).toEqual(["/api/v1/projects"]);
   await act(async () => { pending.resolve(response()); });
@@ -76,7 +77,7 @@ test("wrong token stays gated, typed secret is cleared, valid unlock persists fo
     return new Headers(init?.headers).get("Authorization") === "Bearer correct-synthetic" ? response() : response(401);
   }) as unknown as typeof fetch;
   const qc = createQueryClient();
-  render(<QueryClientProvider client={qc}><AuthGate><div>private page</div></AuthGate></QueryClientProvider>);
+  render(<QueryClientProvider client={qc}><SessionReset><AuthGate><div>private page</div></AuthGate></SessionReset></QueryClientProvider>);
   await waitFor(() => expect(auth.snapshot().status).toBe("locked"));
   fireEvent.change(screen.getByLabelText("Token"), { target: { value: "wrong-synthetic" } });
   fireEvent.click(screen.getByText("Unlock"));
@@ -95,7 +96,7 @@ test("locking cancels an in-flight query even when its fetch ignores AbortSignal
   auth.select("old-synthetic");
   globalThis.fetch = (async () => response()) as unknown as typeof fetch;
   const qc = createQueryClient();
-  render(<QueryClientProvider client={qc}><AuthGate><div>private query page</div></AuthGate></QueryClientProvider>);
+  render(<QueryClientProvider client={qc}><SessionReset><AuthGate><div>private query page</div></AuthGate></SessionReset></QueryClientProvider>);
   await waitFor(() => expect(screen.getByText("private query page")).toBeTruthy());
   const pending = deferred<Response>();
   globalThis.fetch = (() => pending.promise) as unknown as typeof fetch;
@@ -120,7 +121,7 @@ test("a stored credential is validated once, so a cancelled duplicate cannot loc
     return response();
   }) as unknown as typeof fetch;
   const qc = createQueryClient();
-  render(<StrictMode><QueryClientProvider client={qc}><AuthGate><div>strict page</div></AuthGate></QueryClientProvider></StrictMode>);
+  render(<StrictMode><QueryClientProvider client={qc}><SessionReset><AuthGate><div>strict page</div></AuthGate></SessionReset></QueryClientProvider></StrictMode>);
   await waitFor(() => expect(screen.getByText("strict page")).toBeTruthy());
   await act(async () => { await Promise.resolve(); });
   expect(calls).toBe(1);

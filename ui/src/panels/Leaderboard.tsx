@@ -10,6 +10,7 @@ import type { ReactElement } from "react";
 import { AxisBottom, GridX } from "../charts/Axis";
 import {
   BestBand,
+  PaperReferenceMark,
   IdenticalSeeds,
   Key,
   KeyGlyph,
@@ -31,6 +32,8 @@ import {
 import { useTooltip, type Tooltip } from "../charts/Tooltip";
 import { fmtDuration, valueFormatter, type ValueFormatter } from "../charts/valueFormat";
 import type { CostTotals, LeaderboardRow, NoiseInterval, Stats, UsageTotals, VersusBest } from "../api/models";
+import { PaperBaselines, baselineValue } from "../pages/components/BaselineRows";
+import type { BaselineRow } from "../api/models";
 import type { PanelProps } from "./index";
 import { repeatFlags, type RepeatFlagResult } from "../pages/components/TaskInsights";
 
@@ -371,13 +374,15 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
   const rows = result.rows as unknown as LeaderboardRowJson[];
   const [plotRef, width] = useElementWidth<HTMLDivElement>(PLOT_FALLBACK_W);
   const tip = useTooltip();
-  if (rows.length === 0) return <p className="panel-empty">No scored runs yet</p>;
+  const baselines = Array.isArray(result.meta?.baselines) ? result.meta.baselines as BaselineRow[] : [];
+  if (rows.length === 0 && baselines.length === 0) return <p className="panel-empty">No scored runs yet</p>;
 
   const meta = result.meta;
   const noise = Array.isArray(meta?.noise) ? (meta.noise as string[]) : ["seed", "test_set"];
   const showSeeds = noise.includes("seed");
   const showTest = noise.includes("test_set");
-  const pkey = primaryKey(rows, meta) ?? "";
+  const pkey = typeof meta?.primary === "string" && meta.primary.includes("/") ? meta.primary : primaryKey(rows, meta) ?? "";
+  const references = baselines.filter((row) => baselineValue(row, pkey) !== null);
   const secondKey = [...new Set(rows.flatMap((r) => Object.keys(r.scores)))]
     .sort()
     .find((k) => k !== pkey);
@@ -392,7 +397,7 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
   );
   const unitTip = fmt.unit ? ` (${fmt.unit})` : "";
 
-  const values: number[] = [];
+  const values: number[] = references.map((r) => baselineValue(r, pkey)!);
   for (const r of rows) {
     if (!r.primary) continue;
     values.push(r.primary.mean);
@@ -510,6 +515,12 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
             </div>
           );
         })}
+        {references.map((reference, i) => <div className="frow paper-reference" key={reference.name} style={i === 0 ? { borderTop: "1px dashed var(--ink-3)" } : undefined}>
+          <div>{reference.name}</div><div className="acc">{fmt.value(baselineValue(reference, pkey)!)}{Number.isFinite(reference.std[pkey]) ? ` ± ${fmt.num(reference.std[pkey])} published std` : ""}</div>
+          <div className="fplot"><svg className="hx-chart" width={width} height={ROW_H} role="img" aria-label={`${reference.name}: published ${pkey} ${baselineValue(reference, pkey)}`}><PaperReferenceMark x={x.at(baselineValue(reference, pkey)!)} y={CI_Y} /></svg></div>
+          <div>{secondKey && baselineValue(reference, secondKey) !== null ? fmt2.value(baselineValue(reference, secondKey)!) : ""}</div>
+          <div title="Published value minus current run best; arithmetic difference only">{best?.scores[pkey] ? `${baselineValue(reference, pkey)! - best.scores[pkey].mean >= 0 ? "+" : ""}${Number((baselineValue(reference, pkey)! - best.scores[pkey].mean).toPrecision(8))}` : ""}</div>
+        </div>)}
         <div className="frow axisrow">
           <div />
           <div />
@@ -532,6 +543,7 @@ export function Leaderboard({ result }: PanelProps): ReactElement {
         </div>
       </div>
       {keyItems.length ? <Key items={keyItems} /> : null}
+      <PaperBaselines baselines={baselines} primary={pkey} secondary={secondKey} versions={(meta?.metric_versions as Record<string, string>) ?? {}} best={best?.scores[pkey]?.mean} />
       {tip.node}
     </div>
   );

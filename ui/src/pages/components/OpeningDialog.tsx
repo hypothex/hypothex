@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useId, useRef } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { LaunchStyles } from "../../launch/styles";
 import { ErrorBox, Loading } from "./QueryState";
 
@@ -10,7 +10,6 @@ export function OpeningDialog({ title, onClose, error, onRetry, children }: {
   onRetry?: () => void;
   children?: ReactNode;
 }) {
-  const titleId = useId();
   const dialog = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const previous = document.activeElement;
@@ -26,7 +25,7 @@ export function OpeningDialog({ title, onClose, error, onRetry, children }: {
     if (event.target === event.currentTarget) onClose();
   }}>
     <LaunchStyles />
-    <div ref={dialog} className="dlg" role="dialog" aria-modal="true" aria-labelledby={titleId} onKeyDown={(event) => {
+    <div ref={dialog} className="dlg" role="dialog" aria-modal="true" aria-label={title} onKeyDown={(event) => {
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
       if (event.key === "Tab") {
         const items = [...(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]') ?? [])];
@@ -36,7 +35,7 @@ export function OpeningDialog({ title, onClose, error, onRetry, children }: {
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
       }
     }}>
-      <header className="dlg-h"><h2 id={titleId}>{title}</h2><button type="button" className="x" aria-label="Close" onClick={onClose}>×</button></header>
+      <header className="dlg-h"><h2>{title}</h2><button type="button" className="x" aria-label="Close" onClick={onClose}>×</button></header>
       <div className="dlg-b">{error ? <ErrorBox error={error} /> : children ?? <Loading />}</div>
       {error && onRetry ? <footer className="dlg-f"><button type="button" className="btn" onClick={onRetry}>Retry</button></footer> : null}
     </div>

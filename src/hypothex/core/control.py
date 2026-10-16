@@ -618,6 +618,7 @@ def rerun(
     *,
     background: bool = True,
     created_by: str = "human",
+    owner: str | None = None,
     stdout_sink: BinaryIO | None = None,
     stderr_sink: BinaryIO | None = None,
 ) -> RunRecord:
@@ -641,6 +642,8 @@ def rerun(
         The parent run to reproduce.
     background : bool
         Run in a detached supervisor process.
+    owner : str, optional
+        User name of the caller; the child run is theirs.
     created_by : str
         Who requested the rerun.
     stdout_sink, stderr_sink : binary file, optional
@@ -694,6 +697,7 @@ def rerun(
         parent=parent.run_id,
         cwd=repo / relative,
         created_by=created_by,
+        owner=owner,
         gpus=parent.gpus_requested,
         queue=parent.gpus_requested > 0,  # wait for GPUs; never start with none
         slurm=slurm.run_slurm_settings(parent_dir),
@@ -711,6 +715,7 @@ def reinfer(
     vars: dict[str, str] | None = None,
     background: bool = True,
     created_by: str = "human",
+    owner: str | None = None,
     stdout_sink: BinaryIO | None = None,
     stderr_sink: BinaryIO | None = None,
 ) -> RunRecord:
@@ -734,6 +739,8 @@ def reinfer(
         always comes from ``checkpoint``.
     background : bool
         Run in a detached supervisor process.
+    owner : str, optional
+        User name of the caller; the child run is theirs.
     created_by : str
         Who requested the re-infer.
     stdout_sink, stderr_sink : binary file, optional
@@ -781,6 +788,7 @@ def reinfer(
         kind=RunKind.INFER,
         parent=parent.run_id,
         created_by=created_by,
+        owner=owner,
         gpus=parent.gpus_requested,
         queue=parent.gpus_requested > 0,
         slurm=slurm.run_slurm_settings(ctx.run_dir(parent)),

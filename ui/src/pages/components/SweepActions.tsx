@@ -10,9 +10,11 @@
  * the seeds after them.
  */
 import { type ReactElement, useEffect, useState } from "react";
+import { auth } from "../../api/auth";
+import { hasScope, mayAct } from "../../api/scopes";
 import { api } from "../../api/client";
 import type { RunRecord, SweepSpec, SweepIssuance } from "../../api/models";
-import { REMOTE_RUN_INVALIDATES } from "../../api/queries";
+import { useMe, REMOTE_RUN_INVALIDATES } from "../../api/queries";
 import { issuanceActive, issuanceCancellable } from "../../api/sweepIssuance";
 import { ErrorBox } from "./QueryState";
 import { MAX_NEW_SEEDS, nextSeeds, parseSeedCount, sweepCli } from "./SweepModel";
@@ -47,6 +49,10 @@ export function SweepActions({
   runs,
   onRerun,
 }: SweepActionsProps): ReactElement {
+  const me=useMe();
+  const writable=hasScope(me.data,"launch");
+  const executable=writable && (!!spec.host || hasScope(me.data,"admin"));
+  const ownerAction=mayAct(me.data,spec.owner);
   const [copy, setCopy] = useState<CopyState>("idle");
   const [open, setOpen] = useState(false);
   const [count, setCount] = useState(String(Math.min(MAX_NEW_SEEDS, Math.max(1, spec.seeds.length))));
@@ -71,7 +77,7 @@ export function SweepActions({
   });
   const active = issuanceActive(issuance);
   const cancellable = issuanceCancellable(issuance);
-  const cancelDisabled = (queued === 0 && !cancellable) || cancel.pending ||
+  const cancelDisabled = !ownerAction || (queued === 0 && !cancellable) || cancel.pending ||
     (active && issuance?.cancel_requested === true) || issuance?.state === "preparing";
   const cancelTitle = cancellable
     ? "Cancel remaining issuance and queued runs; running members continue"
@@ -80,11 +86,12 @@ export function SweepActions({
   const n = parseSeedCount(count);
   const seeds = n === null ? [] : nextSeeds(spec.seeds.filter((s) => !tried.includes(s)), n);
   const doCopy = async (): Promise<void> => {
+    const generation=auth.snapshot().generation;
     try {
       await navigator.clipboard.writeText(cli);
-      setCopy("copied");
+      if(auth.current(generation)) setCopy("copied");
     } catch {
-      setCopy("failed");
+      if(auth.current(generation)) setCopy("failed");
     }
   };
   return (
@@ -95,7 +102,7 @@ export function SweepActions({
             type="button"
             className="btn"
             title="Launch the best cell again on new seeds, on any host"
-            onClick={onRerun}
+            disabled={!writable} onClick={onRerun}
           >
             Rerun sweep
           </button>
@@ -115,7 +122,7 @@ export function SweepActions({
         <button
           type="button"
           className="btn primary"
-          disabled={active || cancel.pending || extend.pending}
+          disabled={!executable || active || cancel.pending || extend.pending}
           aria-expanded={open}
           title="Add seeds to every cell"
           onClick={() => {
@@ -131,7 +138,7 @@ export function SweepActions({
           type="button"
           className="btn"
           title={issuance.resume.message}
-          disabled={active || cancel.pending || extend.pending}
+          disabled={!executable || active || cancel.pending || extend.pending}
           onClick={() => {
             if (issuance.resume && !active && !cancel.pending) extend.run([...issuance.resume.seeds]);
           }}
@@ -166,7 +173,7 @@ export function SweepActions({
               ? `${seeds.join(", ")} × ${cellCount} cells = ${seeds.length * cellCount} runs`
               : `1–${MAX_NEW_SEEDS}`}
           </span>
-          <button type="submit" className="btn primary" disabled={active || cancel.pending || seeds.length === 0 || extend.pending}>
+          <button type="submit" className="btn primary" disabled={!executable || active || cancel.pending || seeds.length === 0 || extend.pending}>
             {`Add ${seeds.length * cellCount} runs`}
           </button>
         </form>

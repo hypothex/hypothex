@@ -1,0 +1,49 @@
+{
+  "project": "toy",
+  "datasets": {
+    "toyset": {
+      "version": "v1",
+      "path": "data/test.jsonl",
+      "splits": {
+        "test": "data/test.jsonl"
+      }
+    }
+  },
+  "metrics": {
+    "accuracy": {
+      "version": "v1",
+      "fn": "toymetrics:accuracy"
+    },
+    "broken": {
+      "version": "v1",
+      "fn": "toymetrics:broken"
+    }
+  },
+  "tasks": {
+    "toy-acc": {
+      "dataset": "toyset",
+      "split": "test",
+      "metrics": [
+        "accuracy"
+      ],
+      "primary": "accuracy"
+    },
+    "toy-broken": {
+      "dataset": "toyset",
+      "split": "test",
+      "metrics": [
+        "accuracy",
+        "broken"
+      ],
+      "primary": "accuracy"
+    }
+  },
+  "stages": {
+    "infer": "__HX_FIXTURE_PYTHON__ infer.py --ckpt {checkpoint}"
+  },
+  "env": {
+    "python": [
+      "__HX_FIXTURE_PYTHON__"
+    ]
+  }
+}

@@ -79,6 +79,14 @@ export const PORT = runPort("HX_E2E_PORT");
 export const HOSTS_PORT = runPort("HX_E2E_HOSTS_PORT");
 /** Vite same-origin proxy used by the authentication acceptance project. */
 export const VITE_PORT = runPort("HX_E2E_VITE_PORT");
+export const TEAM_PORT = runPort("HX_E2E_TEAM_PORT");
+export const TEAM_DARK_PORT = runPort("HX_E2E_TEAM_DARK_PORT");
+export const TEAM_HOME_DIR = join(RUN_DIR,"home-team");
+export const TEAM_DARK_HOME_DIR = join(RUN_DIR,"home-team-dark");
+export const TEAM_DEMO_FILE = join(RUN_DIR,"demo-team.json");
+export const TEAM_DARK_DEMO_FILE = join(RUN_DIR,"demo-team-dark.json");
+export const TEAM_LABEL = "hx-e2e-team";
+export const TEAM_DARK_LABEL = "hx-e2e-team-dark";
 
 export const KINDS = [
   "generic",
@@ -148,7 +156,7 @@ export async function answersAs(base: string, want: Identity): Promise<boolean> 
 
 /** Read only this suite's fresh owner-home credential through the local CLI. Never log it. */
 export function localToken(home: string): string {
-  if (home !== HOME_DIR && home !== HOSTS_HOME_DIR) throw new Error("Not an isolated test home");
+  if (![HOME_DIR,HOSTS_HOME_DIR,TEAM_HOME_DIR,TEAM_DARK_HOME_DIR].includes(home)) throw new Error("Not an isolated test home");
   const result = spawnSync("uv", ["run", "--project", REPO_ROOT, "hx", "--home", home, "token"], {
     cwd: REPO_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   });

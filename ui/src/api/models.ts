@@ -87,6 +87,7 @@ export interface UsageTotals {
 }
 
 export interface RunRecord {
+  owner?: string | null;
   run_id: string;
   project: string;
   task: string | null;
@@ -186,6 +187,7 @@ export interface TaskDetail {
 }
 
 export interface RunDetail {
+  cleaned?: CleanedArtifact[];
   /** This hub owns the environment or can route it to a configured verified host. */
   served: boolean;
   record: RunRecord;
@@ -233,6 +235,7 @@ export interface LogChunk {
 }
 
 export interface RunsQuery {
+  owner?: string;
   project?: string;
   task?: string;
   status?: RunStatus;
@@ -328,6 +331,7 @@ export interface LeaderboardRow {
 }
 
 export interface Leaderboard {
+  baselines?: BaselineRow[];
   project: string;
   task: string;
   primary: string;
@@ -348,6 +352,7 @@ export interface Leaderboard {
 
 // overview (contract 1.9) ----------------------------------------------------------------
 export interface TimelineItem {
+  owner?: string | null;
   run_id: string;
   project: string;
   task: string | null;
@@ -361,6 +366,7 @@ export interface TimelineItem {
 }
 
 export interface IdeaRow {
+  owner?: string | null;
   project: string;
   task: string | null;
   group_id: string;
@@ -377,6 +383,7 @@ export interface IdeaRow {
 }
 
 export interface FailureRow {
+  owner?: string | null;
   run_id: string;
   label: string;
   exit_code: number | null;
@@ -387,6 +394,7 @@ export interface FailureRow {
 
 /** One of the newest runs (Home's Recent runs); a v5 hub sends it in `OverviewSummary.recent`. */
 export interface RecentRun {
+  owner?: string | null;
   run_id: string;
   project: string;
   task: string | null;
@@ -653,6 +661,7 @@ export interface TaskKindInfo {
 
 // actions and events ----------------------------------------------------------------------
 export interface ActionOptions {
+  credential?: import("./auth").Credential;
   /** Idempotency key; a fresh UUID is used when omitted. */
   command_id?: string;
   created_by?: string;
@@ -819,6 +828,7 @@ export interface SweepParam {
  * (`SweepSummary.run_ids`), never stored here.
  */
 export interface SweepSpec {
+  owner?: string | null;
   id: string;
   project: string;
   task: string | null;
@@ -866,6 +876,7 @@ export interface SweepIssuance {
 
 /** `GET /api/v1/sweeps/{project}/{id}` and every sweep action. */
 export interface SweepSummary {
+  cost_complete?: boolean | null;
   issuance?: SweepIssuance | null;
   spec: SweepSpec;
   /**
@@ -912,6 +923,7 @@ export interface QueueEntry {
 // v5 task workspace: GET /api/v1/tasks/{project}/{task}/runs (ui-v5 contract) --------------
 /** One run of a task, as the v5 sidebar, charts and tables show it. */
 export interface TaskRun {
+  owner?: string | null;
   run_id: string;
   /** Display name: the explicit rename if any, else the derived name (the backend resolves it). */
   name: string;
@@ -981,3 +993,37 @@ export interface TaskRuns {
   runs: TaskRun[];
   groups: TaskGroup[];
 }
+
+// Phase 3 wire models. Auth capability and transport credentials are separate.
+export type Scope = "read" | "launch" | "admin";
+export type Client = "browser" | "cli" | "agent" | "host" | "local";
+export interface Principal { auth: "on" | "off"; user: string; scope: Scope; scopes: Scope[]; client: Client; session_id: string | null; public_url: string | null }
+export interface LegacyPrincipal { auth: "legacy"; legacy: true }
+export type Capability = Principal | LegacyPrincipal;
+export interface SessionRow { id: string; user: string; scope: Scope; client: Client; device: string; created_at: string; last_seen_at: string; expires_at: string; revoked_at: string | null }
+export interface UserRow { name: string; role: Scope; created_at: string; created_by: string; disabled_at: string | null }
+export interface PairingOffer { offer_id: string; url: string; expires_at: string; qr: string }
+export interface PairResult { user: string; scope: Scope; scopes: Scope[]; session_id: string }
+export type ExportFormat = "latex" | "markdown" | "csv";
+export type NoiseMode = "both" | "seed" | "test" | "none";
+export interface ExportOptions { primary?: string | null; format?: ExportFormat; metrics?: string[] | null; noise?: NoiseMode; digits?: number; percent?: boolean; top?: number | null; groups?: string[] | null; baselines?: boolean; caption?: string | null; label?: string | null; standalone?: boolean; mark_noise?: boolean }
+export interface RunChip { run_id: string; status: RunStatus | null; task: string | null; label: string; primary: number | null }
+export interface NotebookDay { project: string; day: string; text: string; hash: string; runs: RunChip[]; updated_at: string | null }
+export interface NotebookDayRow { day: string; bytes: number; entries: number }
+export interface BaselineRow { name: string; values: Record<string, number>; std: Record<string, number>; source: string; source_url: string; version_match: Record<string, boolean>; primary: number | null; delta_vs_best: number | null }
+export type Channel = "slack" | "email";
+export interface ProjectRule { events: ("finished" | "failed" | "lost" | "killed")[]; channels: Channel[]; min_seconds: number; fold_sweeps: boolean }
+export interface DigestSettings { enabled: boolean; weekday: "mon"|"tue"|"wed"|"thu"|"fri"|"sat"|"sun"; hour: number; timezone: string | null; channels: Channel[]; projects: string[] | "all"; save_to_notebook: boolean; top_notes: number }
+export interface Notice { id: string; kind: "run"|"sweep"|"digest"|"test"; project: string | null; run_id: string | null; sweep_id: string | null; status: string | null; title: string; lines: string[]; url: string | null; created_at: string }
+export interface OutboxEntry { id: string; channel: Channel; notice: Notice; status: "pending"|"sending"|"sent"|"failed"|"skipped"; attempts: number; next_at: string; last_error: string | null; created_at: string; sent_at: string | null }
+export interface NotifyChannelStatus { configured: boolean; env: string | null; set: boolean; host?: string | null; to?: string[] }
+export interface NotifyStatus { channels: {slack: NotifyChannelStatus; email: NotifyChannelStatus}; projects: Record<string, ProjectRule>; default: ProjectRule | null; digest: DigestSettings; recent: OutboxEntry[] }
+export interface TaskChange { task: string; primary: string; before: number | null; after: number | null; best_label: string; best_group_id: string | null; new_best: boolean; n_new_runs: number }
+export interface Digest { project: string; since: string; until: string; week: string; counts: Record<string, number>; by_owner: Record<string, number>; cost: CostTotals; tasks: TaskChange[]; notes: {source:"run"|"notebook";run_id:string|null;day:string|null;author:string;at:string;text:string}[]; sweeps:{id:string;n_runs:number;best:Record<string,unknown>|null}[]; headline:string }
+export interface StorageItem { project: string; run_id: string; host: string; environment_id: string; kind: "run"|"artifact"|"pulled"; artifact_kind: string | null; path: string; bytes: number; files: number; mtime: number | null; exists: boolean; archived: boolean; starred: boolean; status: RunStatus; ended_at: string | null }
+export interface StorageReport { items: StorageItem[]; by_project: Record<string,number>; by_host: Record<string,number>; by_kind: Record<string,number>; total_bytes:number; errors: Record<string,string>[]; generated_at:string }
+export interface CleanPolicy { archived: true; older_than_days: number; kinds: string[]; projects?: string[] | null; hosts?: string[] | null; include_pulled: boolean }
+export interface CleanItem { project:string;run_id:string;host:string;environment_id:string;kind:"artifact"|"pulled";artifact_kind:string|null;path:string;bytes:number;mtime:number|null;reason:string }
+export interface CleanPlan { plan_id:string;policy:CleanPolicy;items:CleanItem[];refused:Record<string,string>[];total_bytes:number;created_at:string;expires_at:string;created_by:string }
+export interface CleanResult { plan_id:string;deleted:CleanItem[];skipped:Record<string,unknown>[];freed_bytes:number;errors:Record<string,string>[] }
+export interface CleanedArtifact { path:string;bytes:number;at:string;actor:string;plan_id:string;environment_id?:string|null }

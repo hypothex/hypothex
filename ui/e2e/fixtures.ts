@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { type APIRequestContext, test as base, expect, type Page } from "@playwright/test";
 import {
+  TEAM_PORT, TEAM_DARK_PORT, TEAM_HOME_DIR, TEAM_DARK_HOME_DIR, TEAM_LABEL, TEAM_DARK_LABEL,
   DEMO_FILE,
   DEMO_LABEL,
   type Extra,
@@ -24,6 +25,7 @@ export type Theme = "light" | "dark";
 export interface ThemeOptions {
   theme: Theme;
   unlock: boolean;
+  expectedResourceStatuses: number[];
 }
 
 /** v5 page colour `--bg` (spec section 7, `styles/tokens.css`): #f7f7f8 (light), #111113 (dark). */
@@ -86,6 +88,8 @@ interface Fixtures {
  * `PORT` and `HOSTS_PORT` are this run's random ports (every worker reads the same ones).
  */
 export const OWN_HUBS: Record<string, { home: string; label: string }> = {
+  [`http://127.0.0.1:${TEAM_PORT}`]:{home:TEAM_HOME_DIR,label:TEAM_LABEL},
+  [`http://127.0.0.1:${TEAM_DARK_PORT}`]:{home:TEAM_DARK_HOME_DIR,label:TEAM_DARK_LABEL},
   [`http://127.0.0.1:${VITE_PORT}`]: { home: HOME_DIR, label: DEMO_LABEL },
   [`http://127.0.0.1:${PORT}`]: { home: HOME_DIR, label: DEMO_LABEL },
   [`http://127.0.0.1:${HOSTS_PORT}`]: { home: HOSTS_HOME_DIR, label: HOSTS_DEMO_LABEL },
@@ -114,6 +118,7 @@ export async function expectIsolatedHub(request: APIRequestContext, baseURL: str
 export const test = base.extend<ThemeOptions & Fixtures>({
   theme: ["light", { option: true }],
   unlock: [true, { option: true }],
+  expectedResourceStatuses: [[], { option: true }],
   authToken: async ({ playwright, baseURL }, use) => {
     const own = baseURL === undefined ? undefined : OWN_HUBS[baseURL];
     if (!own) throw new Error("Not an isolated test origin");
@@ -154,11 +159,12 @@ export const test = base.extend<ThemeOptions & Fixtures>({
     { auto: true },
   ],
   consoleErrors: [
-    async ({ page }, use) => {
+    async ({ page, expectedResourceStatuses }, use) => {
       const errors: string[] = [];
       page.on("console", (message) => {
         // A deliberate unauthenticated validation gets the browser's ordinary 401 console entry.
-        if (message.type() === "error" && !/^Failed to load resource: the server responded with a status of 401/.test(message.text())) errors.push(message.text());
+        const status = /^Failed to load resource: the server responded with a status of (\d+)/.exec(message.text());
+        if (message.type() === "error" && !(status && [401,...expectedResourceStatuses].includes(Number(status[1])))) errors.push(message.text());
       });
       page.on("pageerror", (error) => {
         errors.push(`pageerror: ${error.message}`);

@@ -2,8 +2,9 @@ import { defineConfig, devices } from "@playwright/test";
 import type { ThemeOptions } from "./e2e/fixtures";
 // Loading paths.ts picks this run's two free ports and puts them in process.env, which the
 // workers and both web servers inherit (never a fixed port, ruling S1).
-import { HOSTS_PORT, IDENTITY_ROUTE, PORT, VITE_PORT } from "./e2e/paths";
+import { TEAM_PORT, TEAM_DARK_PORT, HOSTS_PORT, IDENTITY_ROUTE, PORT, VITE_PORT } from "./e2e/paths";
 
+const TEAM=/team\.spec\.ts$/;
 const WRITES = /(editor|live)\.spec\.ts$/;
 /** Specs against the `hx demo --with-hosts` hub; `launch` starts runs, so it runs last. */
 const HOSTS_READS = /hosts\.spec\.ts$/;
@@ -33,6 +34,8 @@ export default defineConfig<ThemeOptions>({
     screenshot: "off",
   },
   projects: [
+    {name:"team-light",testMatch:TEAM,use:{...devices["Desktop Chrome"],viewport:{width:1440,height:900},baseURL:`http://127.0.0.1:${TEAM_PORT}`,colorScheme:"light",theme:"light"}},
+    {name:"team-dark",testMatch:TEAM,use:{...devices["Desktop Chrome"],viewport:{width:1440,height:900},baseURL:`http://127.0.0.1:${TEAM_DARK_PORT}`,colorScheme:"dark",theme:"dark"}},
     {
       name: "vite-auth",
       testMatch: /auth\.spec\.ts$/,
@@ -40,12 +43,12 @@ export default defineConfig<ThemeOptions>({
     },
     {
       name: "light",
-      testIgnore: [WRITES, HOSTS_READS, HOSTS_WRITES],
+      testIgnore: [WRITES, HOSTS_READS, HOSTS_WRITES, TEAM],
       use: { ...devices["Desktop Chrome"], colorScheme: "light", theme: "light" },
     },
     {
       name: "dark",
-      testIgnore: [WRITES, HOSTS_READS, HOSTS_WRITES],
+      testIgnore: [WRITES, HOSTS_READS, HOSTS_WRITES, TEAM],
       use: { ...devices["Desktop Chrome"], colorScheme: "dark", theme: "dark" },
     },
     {
@@ -93,6 +96,7 @@ export default defineConfig<ThemeOptions>({
   // start instead, a web server whose command exits stops the run at once, and every test
   // checks the hub's identity first (`isolatedHub` in e2e/fixtures.ts).
   webServer: [
+    ...[[TEAM_PORT,""],[TEAM_DARK_PORT," --dark"]].map(([port,extra])=>({command:`bun e2e/serve-demo.ts --with-team${extra}`,url:`http://127.0.0.1:${port}${IDENTITY_ROUTE}`,reuseExistingServer:false,gracefulShutdown:GRACEFUL,timeout:180000,stdout:"pipe" as const,stderr:"pipe" as const})) ,
     {
       command: `bun run dev --host 127.0.0.1 --port ${VITE_PORT}`,
       env: { HX_API: `http://127.0.0.1:${PORT}` },

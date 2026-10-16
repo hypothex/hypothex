@@ -1,0 +1,13 @@
+kind,label,key,n,metric,mean,std,identical,ci_lo,ci_hi,ci_method,n_examples,best,within_noise,version_mismatch,source
+group,svm,aaaa0001@c1,3,acc/value,0.92,0.01,false,0.871,0.954,wilson,200,true,false,false,
+group,svm,aaaa0001@c1,3,f1/value,0.89,0.01,false,,,,,false,false,false,
+group,rf,aaaa0002@c1,3,acc/value,0.91,0.005,false,0.862,0.947,wilson,200,false,true,false,
+group,rf,aaaa0002@c1,3,f1/value,0.91,0.01,false,,,,,true,true,false,
+group,logreg,aaaa0003@c1,3,acc/value,0.88,0.0,true,0.826,0.925,wilson,200,false,false,false,
+group,logreg,aaaa0003@c1,3,f1/value,0.86,0.01,false,,,,,false,false,false,
+group,knn,aaaa0004@c1,1,acc/value,0.85,,false,0.794,0.894,wilson,200,false,false,false,
+group,knn,aaaa0004@c1,1,f1/value,0.8,,false,,,,,false,false,false,
+baseline,Smith_2024 & co,Smith_2024 & co,0,acc/value,0.9,0.004,false,,,,,false,false,false,arXiv:2401.01234
+baseline,Smith_2024 & co,Smith_2024 & co,0,f1/value,0.87,,false,,,,,false,false,false,arXiv:2401.01234
+baseline,Lee 2023,Lee 2023,0,acc/value,0.93,,false,,,,,false,false,true,doi:10.1000/xyz123
+baseline,Lee 2023,Lee 2023,0,f1/value,,,false,,,,,false,false,true,doi:10.1000/xyz123

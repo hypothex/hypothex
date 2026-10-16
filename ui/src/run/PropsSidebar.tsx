@@ -1,7 +1,8 @@
 /** Run properties sidebar (spec 4.3, mockup .rside): facts, config, tags, notes, ids. */
 import { type ReactNode, useState } from "react";
 import { api } from "../api/client";
-import { RUN_EVENT_INVALIDATES } from "../api/queries";
+import { hasScope } from "../api/scopes";
+import { useMe, RUN_EVENT_INVALIDATES } from "../api/queries";
 import { Launcher } from "../chrome/Launcher";
 import { StatusIcon } from "../chrome/StatusIcon";
 import { CopyButton } from "../pages/components/CopyButton";
@@ -27,6 +28,8 @@ function Prop({ k, children }: { k: string; children: ReactNode }) {
 
 /** The run's tags with a remove button each and "+ Add" (Enter adds, Escape cancels). */
 export function TagEditor({ runId, tags, served }: { runId: string; tags: string[]; served: boolean }) {
+  const me=useMe();
+  const writable=hasScope(me.data,"launch");
   const [adding, setAdding] = useState(false);
   const [text, setText] = useState("");
   const close = () => {
@@ -52,7 +55,7 @@ export function TagEditor({ runId, tags, served }: { runId: string; tags: string
             type="button"
             className="tag-x"
             aria-label={`Remove tag ${tag}`}
-            disabled={!served || change.pending}
+            disabled={!writable || !served || change.pending}
             onClick={() => change.run({ remove: [tag] })}
           >
             ×
@@ -65,7 +68,7 @@ export function TagEditor({ runId, tags, served }: { runId: string; tags: string
           aria-label="New tag"
           autoFocus
           value={text}
-          disabled={change.pending}
+          disabled={!writable || change.pending}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
@@ -78,7 +81,7 @@ export function TagEditor({ runId, tags, served }: { runId: string; tags: string
           }}
         />
       ) : (
-        <button type="button" className="tag add" disabled={!served} onClick={() => setAdding(true)}>
+        <button type="button" className="tag add" disabled={!writable || !served} onClick={() => setAdding(true)}>
           + Add
         </button>
       )}
@@ -115,6 +118,7 @@ export function PropsSidebar({ ctx }: { ctx: RunContext }) {
         <Prop k="Status">
           <StatusIcon status={state} label={statusText(record, phase, host, now, ctx.lostWhy)} />
         </Prop>
+        {record.owner && <Prop k="Owner">@{record.owner}</Prop>}
         <Prop k="Launcher">
           <Launcher who={record.created_by} />
         </Prop>

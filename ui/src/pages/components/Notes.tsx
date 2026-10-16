@@ -1,7 +1,8 @@
 /** Run panel: notes (`notes.md`), newest first shown, with Add note. */
 import { useCallback, useRef, useState } from "react";
 import { api } from "../../api/client";
-import { queryKeys } from "../../api/queries";
+import { hasScope } from "../../api/scopes";
+import { useMe, queryKeys } from "../../api/queries";
 import { fmtDate, isAgent } from "./format";
 import { ErrorBox } from "./QueryState";
 import { useAction } from "./useAction";
@@ -53,6 +54,8 @@ function useClipped(text: string): [(el: HTMLElement | null) => void, boolean] {
 }
 
 export function Notes({ runId, notes }: { runId: string; notes: string }) {
+  const me=useMe();
+  const writable=hasScope(me.data,"launch");
   const entries = parseNotes(notes);
   const [all, setAll] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -89,12 +92,12 @@ export function Notes({ runId, notes }: { runId: string; notes: string }) {
       ))}
       {editing ? (
         <div className="note-edit">
-          <textarea aria-label="Note" value={text} onChange={(e) => setText(e.target.value)} />
+          <textarea readOnly={add.pending} aria-label="Note" value={text} onChange={(e) => setText(e.target.value)} />
           <div className="row">
             <button
               type="button"
               className="btn primary"
-              disabled={add.pending || text.trim() === ""}
+              disabled={!writable || add.pending || text.trim() === ""}
               onClick={() => add.run(text.trim())}
             >
               Save
@@ -111,7 +114,7 @@ export function Notes({ runId, notes }: { runId: string; notes: string }) {
               {all ? "Less" : "More"}
             </button>
           ) : null}
-          <button type="button" className="btn" onClick={() => setEditing(true)}>
+          <button type="button" className="btn" disabled={!writable} title={!writable ? "Launch scope required" : undefined} onClick={() => setEditing(true)}>
             Add note
           </button>
         </div>

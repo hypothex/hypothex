@@ -1,0 +1,73 @@
+{
+  "run_id": "a",
+  "project": "toy",
+  "task": "toy-acc",
+  "hypothesis": "",
+  "kind": "full",
+  "parent": null,
+  "stage": null,
+  "command": [
+    "echo",
+    "hi"
+  ],
+  "command_template": [
+    "echo",
+    "hi"
+  ],
+  "vars": {},
+  "params": {},
+  "cwd": "__HX_FIXTURE_ROOT__/toy",
+  "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+  "host": "mac",
+  "executor": {
+    "type": "local",
+    "pid": null,
+    "pid_create_time": null,
+    "child_pid": null,
+    "host": null,
+    "gpus": [],
+    "slurm_job_id": null,
+    "node": null,
+    "queue_position": null
+  },
+  "git": {
+    "repo": null,
+    "commit": "c1",
+    "branch": null,
+    "dirty": false,
+    "diff_hash": null,
+    "untracked_count": 0,
+    "untracked": []
+  },
+  "datasets": [
+    {
+      "name": "toyset",
+      "version": "v1",
+      "split": "test",
+      "host": "local",
+      "path": "data/test.jsonl",
+      "hash": "sha256:605125773c56e24c54980a90b1d34857d6336a20c1068bd263a0f88fa0956c2b",
+      "hash_mode": "full",
+      "size": null,
+      "checked_at": null
+    }
+  ],
+  "seed": null,
+  "config_hash": "sha256:aaaa",
+  "status": "finished",
+  "created_at": "2026-10-06T12:00:00Z",
+  "started_at": null,
+  "ended_at": null,
+  "end_reason": null,
+  "exit_code": null,
+  "artifacts": [],
+  "tags": [],
+  "starred": false,
+  "archived": false,
+  "name": "wide %_ beam",
+  "created_by": "human",
+  "usage": null,
+  "cost": null,
+  "sweep_id": null,
+  "gpus_requested": 0
+}

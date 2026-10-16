@@ -1,4 +1,4 @@
-# Phase 3 review gates and implementation readiness
+# Phase 3 implementation and verification
 
 User direction (2026-10-06): obtain a primary review followed by an independent
 adversarial review. Start implementation only after both return LGTM on the final
@@ -8,8 +8,9 @@ integrated workflows are acceptance requirements, not just unit-test totals.
 ## Baseline and scope
 
 - Plan branch: `p3-plans`, initial head `4392c8b90f96a23b6d35477520f86ebf45075bb1`.
-- Current fetched main: `f6f130cfa2669bfcccbadcb36282dd5fea881d1f` (UI v5 with PR26 viewport fix).
-- Existing draft PR: https://github.com/hypothex/hypothex/pull/22.
+- Pre-gate main: `f6f130cfa2669bfcccbadcb36282dd5fea881d1f` (UI v5 with PR26 viewport fix).
+- Implementation base: merged plans head `244d55f9c3be775b8c335bb258bbe9d5858ef83e`.
+- Plan PR (merged): https://github.com/hypothex/hypothex/pull/22.
 - Authoritative scope: the Phase 3 contract, backend/frontend plans and mockups
   under `docs/superpowers/plans/` and `docs/mockups/phase3/`.
 - Preserve all 13 contract scope items. Reconcile the later backlog and final
@@ -17,23 +18,72 @@ integrated workflows are acceptance requirements, not just unit-test totals.
 - Existing review rounds 4–6 and their bounded fixes are prior evidence, not the
   two approvals requested now. New material plan changes require re-review.
 
-## Gates
+## Gates (cleared 2026-10-17)
 
-- [ ] Primary review against the spec, all three plan documents and actual main.
-- [ ] Reproduce and resolve actionable findings in documents; obtain LGTM.
-- [ ] Independent adversarial review of the resulting plan and current main.
-- [ ] Resolve findings; obtain adversarial LGTM and reconfirm primary approval
-  where the reviewed plan changed materially.
-- [ ] Record exact reviewed revisions and both final verdicts before source work.
+- [x] Primary R5 full-plan LGTM on `2ebfc28` against `f6f130c`.
+- [x] Independent adversarial R2 full-plan LGTM on the same input.
+- [x] Parent inspected reports, coverage and probes; verified all 38 primary and
+  26 adversarial artifact hashes and all eight live plan input hashes.
+- [x] All six CI checks passed that exact plans head.
+- [x] PR22 merged as `244d55f9c3be775b8c335bb258bbe9d5858ef83e`.
+- [x] Implementation started in `/tmp/hx-phase3-implementation`, branch
+  `phase3-implementation`; the user checkout remains untouched.
+
+These gates approve implementation of every scope item, not runtime completion.
+The optional UI documentation paragraph preservation is carried into frontend
+implementation. Detailed receipts remain in the durable evidence directory under
+`primary-refresh-r5/`, `adversarial-gate-r2/`, and the corresponding parent
+verification JSON files. Fresh review probes: primary 73 guard tests plus two
+bootstrap child tests; adversarial 67 probes. Reused evidence is hash documented;
+assembled, installed-package and Docker acceptance remains required below.
+
+## Active ownership and progress
+
+| Tasks | Owner | State |
+| --- | --- | --- |
+| Backend 1 | isolation worker | 244 guard + 23 loopback tests pass; parent reviewed guard/source receipt |
+| Backend 2–4 | settings/owners worker | 70 focused + 263 regressions pass; source handoffs complete |
+| Backend 5–7 | auth foundation worker | 99 focused pass; parent inspected auth contracts/client and found/fixed duplicate test package init |
+| Backend 8 | parent | 20 notebook tests pass, including concurrent writes/conflicts; docs complete |
+| Backend 9–12 | papers/export worker | 114 focused + 262 regression tests pass; five golden outputs |
+| Backend 13–19, 30 providers | notifications worker | 257 scoped tests pass; final notification suite 115 pass after independently verified partial-recipient fix |
+| Backend 20–22 | storage worker | 111 affected tests pass after independently verified pulled-copy ownership fix; local non-root descriptor checks |
+| Backend 23–31 | API worker | 385 API/core tests pass; final 138 affected receipt tests pass; independent actual launch retry executes once |
+| Backend 32–33, MCP 41 | MCP worker | 197 MCP tests pass; new tools and existing regressions |
+| Backend 34–36 | Postgres worker | 13 actual PostgreSQL Docker tests, 305 core/remote and 252 evaluator tests pass |
+| Backend 37–44, CLI 35 | CLI/remote worker | 232 CLI tests and 14 lifecycle tests pass; selected-home isolation fixed; pairing leak 15 red/green plus nine independent probes pass |
+| Backend 45 | parent + CLI adapter owner | 47 final demo tests pass; actual shared-host launch/stop verified with an independent generated repository |
+| Backend 46 | parent + feature docs owners | Pages/skill/index integrated; final Sphinx warnings-as-errors passes; populated additive JSON snapshots verified |
+| Backend 47 | parent | Final assembled scan passes with successful API/CLI/channel operations and scrubbed child environment |
+| Backend 48 | acceptance worker | Four actual subprocess/HTTP/MCP acceptance scenarios pass, including 30-second WebSocket revocation and restart dedupe |
+| Backend 49 | package worker | 21 harness tests and all five final installed checks pass; 20 browser executions; genuine schema-3/4 upgrades; exact wheel/source hashes verified |
+| Frontend 1–8, 24–26 | UI integration worker | 1510 Bun tests, typecheck/build pass; 122 existing browser tests plus final 28 affected tests pass; six screenshots verified |
+| Frontend 9–23 | UI features worker | Leaf screens complete; export/cleanup accessibility and notebook concurrency regressions pass in final full UI suite |
+
+Counts are scoped evidence from their recorded revisions; overlapping runs are
+not additive totals and do not yet establish final whole-application acceptance.
+Parent JSON snapshots exercised populated owner/baseline/cleanup values: observed
+only intended additive paths (plus host token_env and sweep cost_complete), with
+zero removed baseline keys; final rerun is recorded in implementation evidence.
+The parent started the previously stopped Colima default VM for authorized Docker
+checks using --activate=false --ssh-config=false --ssh-agent=false --save-config=false.
+All Docker commands used its explicit socket. After the 24 passing Docker tests,
+no containers remained running and the owned VM was stopped. Both existing
+profiles are now stopped; the user's default context and SSH configuration were
+not changed.
+
+One writer owns each file. The parent owns shared docs/index, dependency files,
+CLI JSON snapshots, this tracker, integration and final review/acceptance.
+Implementation evidence is under the durable sibling `implementation/` directory.
 
 ## Execution after both review gates
 
-- [ ] Refresh the plans against main, preserving the accepted contract and scope.
-- [ ] Implement dependency-ready backend and frontend increments in isolated
+- [x] Refresh the plans against main, preserving the accepted contract and scope.
+- [x] Implement dependency-ready backend and frontend increments in isolated
   `/tmp/hx-*` worktrees, with failing tests first and one writer per owned file.
 - [ ] Review actual diffs, run affected and required checks, link every PR, and
   merge only after all current-head CI checks pass. Retain PR branches.
-- [ ] Verify the complete collaborator pairing/shared-host/revocation workflow,
+- [x] Verify the complete collaborator pairing/shared-host/revocation workflow,
   notebook, baselines/exports, notifications/digest, storage protections,
   Postgres migration/rebuild equivalence, authenticated MCP and SDK cost logging.
 - [ ] Verify fresh installation and existing-home upgrade behavior with synthetic
@@ -43,9 +93,41 @@ integrated workflows are acceptance requirements, not just unit-test totals.
 - [ ] Write a concise testing handoff with setup commands, version/commit,
   supported workflows, expected results and material remaining limitations.
 
+## Final integration status (2026-10-17)
+
+All 13 scope items are implemented. The independent whole-source review has no
+remaining runtime findings after fixing duplicate execution on completed legacy
+receipts and the browser device-name length mismatch. The final independent
+verdict is **LGTM**, including the final installed-package artifacts. Parent
+verified all 343 reviewed file hashes and all 28 evidence hashes. The verbatim
+report is committed as `2026-10-17-hypothex-phase3-implementation-review.md`;
+its SHA256 is `53029efdb2a25fdead262ac22e3ed44bf7281a6ce9a23fc94f9f8bc10015cdc1`.
+Separate independent reviews
+verified fixes for pairing-error secret reflection, protected pulled-copy deletion,
+and partial SMTP recipient handling. Historical source hashes and probe limits
+are retained in the durable evidence directory; earlier receipts do not silently
+cover later source changes.
+
+Local evidence includes 24 actual Docker tests (including 13 PostgreSQL cases),
+1510 UI unit tests, successful TypeScript/production build, 122 existing browser
+cases and 28 final affected cases, and passing Ruff/format/ty/Sphinx checks.
+The full Python suite passed 3675 tests with 3 macOS-only `flock` skips and
+24 deselections. This run excluded package-harness tests; the later legacy-completed-receipt change
+has 138 affected tests and six independent probes. Final seven-job CI, merge,
+and the clean-merged-main installed-package handoff remain required.
+The installed candidate passed all five checks in 191.71 seconds, including 20
+light/dark browser executions. All 12 owned servers and two tracked descendants
+were stopped; zero remained. Its wheel hash is
+`419c184c02562ee6eccd20b624a55060642735f83e4d98d0df35be047f9b345a`.
+The candidate records a dirty source tree separately from base HEAD; it is not
+a clean build of the base commit. Parent verified all 108 source/resource hashes,
+104 packaged source/resource byte identities, the force-included skill, and both
+archive hashes. The clean merged-main handoff remains required. Existing branches
+and worktrees are retained.
+
 ## Boundaries
 
-No runtime implementation until both review gates pass. Use uv, Ruff, ty, pytest,
+Both review gates passed as recorded above. Use uv, Ruff, ty, pytest,
 Sphinx and Bun. Never edit tracked files or commit in the main checkout. Never
 touch `~/.ssh` or connect to real SSH/SLURM hosts, Slack, SMTP, Tailscale or external
 Postgres. Use loopback fakes and throwaway Docker containers. Real deployment,
@@ -53,8 +135,8 @@ real notifications and first public exposure remain separate user actions.
 No attribution trailers or model/tool references in commit messages or PR text.
 
 Historical review receipts and prompts used `/tmp/hx-phase3-evidence/`; that temporary location is not the current evidence source. The October 16 durable receipts are under `/Users/shreyasv/Desktop/code/hypothex-phase3-evidence/2026-10-16/` (outside source trees).
-This plan records authorization and progress; it does not claim either review
-gate or any Phase 3 implementation has passed yet.
+The historical entries below retain their original status at the time. The current
+gate status and active work are recorded above; runtime completion is still pending.
 
 ## Historical review cycle before the October 16 main refresh
 
@@ -301,8 +383,8 @@ adversarial round. No Phase 3 runtime implementation has started.
 - [x] Preserve schema-3 a444125/schema-4 e73b810 fixture provenance and all scope.
 - [x] Check all 51 frontend anchors and absence of runtime diff versus new main.
 - [x] Require delayed-chart visibility/user-takeover regressions in Task24.
-- [ ] Obtain renewed full-plan Claude R5 LGTM on the frozen input.
-- [ ] Obtain new independent adversarial R2 LGTM on the same input.
+- [x] Obtain renewed full-plan Claude R5 LGTM on the frozen input.
+- [x] Obtain new independent adversarial R2 LGTM on the same input.
 
 The empty-PG correction remains the previously verified exact guard. The UI
 baseline fix is fully tested independently; no unchanged application suite was

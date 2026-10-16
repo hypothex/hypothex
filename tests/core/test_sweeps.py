@@ -1612,3 +1612,30 @@ def test_a_sweep_never_uses_a_host_copys_repo_path_even_when_it_exists_here(
     )
     assert len(summary.run_ids) == 2
     assert ctx.store.load_project("toy").remote_host == "gpu1"
+
+
+@pytest.mark.parametrize("flags", [[], [True], [False], [None], [True, False], [True, None]])
+def test_sweep_cost_complete_requires_every_nonempty_member(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch, flags: list[bool | None]
+) -> None:
+    ctx.register_project(toy_repo)
+    spec = spec_of()
+    save_sweep(ctx.layout, spec)
+    members = [
+        make_record(
+            f"priced-{i}", cost=CostTotals(total_usd=0.25 if i else 0.0, gpu_pricing_complete=flag)
+        )
+        for i, flag in enumerate(flags)
+    ]
+    monkeypatch.setattr(sweeps_module, "sweep_runs", lambda *args: members)
+    summary = summarize_sweep(ctx, "toy", spec.id)
+    assert summary.total_usd == sum(r.cost.total_usd for r in members if r.cost is not None)
+    assert summary.cost_complete is (bool(flags) and all(flag is True for flag in flags))
+    if members:
+        members[-1].cost = None
+        members[-1].usage = UsageTotals(usd=0.75)
+        summary = summarize_sweep(ctx, "toy", spec.id)
+        assert summary.cost_complete is False
+        assert summary.total_usd == sum(
+            r.cost.total_usd if r.cost else r.usage.usd if r.usage else 0.0 for r in members
+        )

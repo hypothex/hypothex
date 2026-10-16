@@ -1,3 +1,5 @@
+import type { CleanedArtifact } from "../../api/models";
+import { cleanedArtifact, cleanedLabel } from "./cleaned";
 /**
  * Run panel "where everything is" (spec 8.1): code, data, run folder, logs,
  * predictions, checkpoints as host:path. The run folder is shown once and its
@@ -10,6 +12,7 @@ import { AppLink, hrefs } from "./links";
 import type { GitInfo, RunDetail } from "./types";
 
 export interface WhereRow {
+  cleaned?:CleanedArtifact;
   display: string;
   copy: string;
   indent: boolean;
@@ -117,7 +120,7 @@ export function buildWhere(detail: RunDetail): WhereGroup[] {
         isNum(art.step) ? `step ${art.step}` : null,
         isNum(art.size) ? fmtBytes(art.size) : null,
       ]);
-      const row = whereRow({ host: art.host, path: art.path }, dir, { note });
+      const row = whereRow({ host: art.host, path: art.path }, dir, { note,cleaned:cleanedArtifact(art.path,record.environment_id,detail.cleaned) });
       if (!row.indent && row.display.length > LONG_PATH) {
         row.display = displayPath(art.host, tailPath(art.path, 2));
         row.title = row.copy;
@@ -169,7 +172,7 @@ export function WhereList({ detail }: { detail: RunDetail }) {
                   <li key={`${row.copy}-${i}`}>
                     <span className="br">{row.indent ? (i === kids.length - 1 ? "└" : "├") : "·"}</span>
                     <span className="p" title={row.title}>
-                      {row.href ? (
+                      {row.cleaned ? <><s><SlashPath path={row.display}/></s> <span title={`Deleted by ${row.cleaned.actor}`}>{cleanedLabel(row.cleaned)}</span></> : row.href ? (
                         <AppLink href={row.href} title="Open" aria-label={row.display}>
                           <SlashPath path={row.display} />
                         </AppLink>
@@ -178,7 +181,7 @@ export function WhereList({ detail }: { detail: RunDetail }) {
                       )}
                     </span>
                     <span className="what">{row.note ?? ""}</span>
-                    <CopyButton text={row.copy} label={row.display} />
+                    {!row.cleaned && <CopyButton text={row.copy} label={row.display} />}
                   </li>
                 ))}
               </ul>

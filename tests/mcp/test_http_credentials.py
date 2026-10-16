@@ -55,7 +55,11 @@ def test_http_mcp_forwards_only_guard_selected_credential(
             },
         )
         assert response.status_code == 200
-    assert seen == ([{"Authorization": "Bearer " + token}] if token else [{}])
+    assert seen == (
+        [{"Authorization": "Bearer " + token, "X-Hypothex-Agent": "mcp"}]
+        if token
+        else [{"X-Hypothex-Agent": "mcp"}]
+    )
 
 
 def test_explicit_no_credential_never_discovers_owner(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -43,6 +43,10 @@ export const hrefs = {
     withSearch(`/x/${enc(a)}/${enc(b)}`, { metric }),
   hosts: (): string => "/hosts",
   queue: (): string => "/queue",
+  settings: (): string => "/settings",
+  storage: (): string => "/storage",
+  pair: (): string => "/pair",
+  notebook: (project:string,day?:string):string => `/n/${enc(project)}${day ? `/${enc(day)}` : ""}`,
 };
 
 interface HistoryLike {
@@ -80,7 +84,9 @@ export type AppLinkProps = Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href">
 
 /** True for a path the SPA routes (Home, Task, Run, Examples, Sweep, Hosts, Queue); `/api/…` is left to the browser. */
 export function isAppPath(pathname: string): boolean {
-  return /^\/($|[trsx]\/|hosts$|queue$)/.test(pathname);
+  if (/%(?:2f|5c)/i.test(pathname) || pathname.includes("\\")) return false;
+  try { decodeURIComponent(pathname); } catch { return false; }
+  return /^(?:\/|\/(?:hosts|queue|settings|storage)\/?|\/t\/[^/]+\/[^/]+(?:\/edit\/[^/]+)?\/?|\/r\/[^/]+\/?|\/[xs]\/[^/]+\/[^/]+\/?|\/n\/[^/]+(?:\/[^/]+)?\/?)$/.test(pathname);
 }
 
 /**
@@ -113,7 +119,9 @@ export function AppLink({ href, onClick, target, children, ...rest }: AppLinkPro
   const navigate = useNavigateHref();
   const handle = (e: MouseEvent<HTMLAnchorElement>) => {
     onClick?.(e);
-    if (e.defaultPrevented || target || !isPlainClick(e)) return;
+    if (e.defaultPrevented || target || rest.download !== undefined || !isPlainClick(e)) return;
+    const url = new URL(href, window.location.href);
+    if (url.origin !== window.location.origin || !isAppPath(url.pathname)) return;
     e.preventDefault();
     navigate(href);
   };

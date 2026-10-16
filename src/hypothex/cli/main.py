@@ -16,7 +16,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast, get_args
 from urllib.parse import urlencode
@@ -63,6 +63,7 @@ from hypothex.core.leaderboard import Leaderboard
 from hypothex.core.naming import clean_run_name
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
 from hypothex.core.seeds import Stats
+from hypothex.core.settings import write_private as _write_private
 from hypothex.core.store import RunStore
 from hypothex.core.tokens import validate_bearer_token
 from hypothex.remote.config import (
@@ -100,6 +101,26 @@ hosts_app = typer.Typer(
     help="Remote hosts (SSH GPU boxes, SLURM clusters) that the hub runs on.",
 )
 app.add_typer(hosts_app, name="hosts")
+
+db_app = typer.Typer(no_args_is_help=True, help="The Postgres index (server mode).")
+app.add_typer(db_app, name="db")
+
+sessions_app = typer.Typer(no_args_is_help=True, help="Your sessions on the hub.")
+app.add_typer(sessions_app, name="sessions")
+users_app = typer.Typer(no_args_is_help=True, help="People on the hub (admin).")
+app.add_typer(users_app, name="users")
+SCOPES = ("read", "launch", "admin")
+
+notebook_app = typer.Typer(no_args_is_help=True, help="The project lab notebook.")
+app.add_typer(notebook_app, name="notebook")
+ProjectReq = Annotated[str, typer.Option("--project", "-p", help="Project name.")]
+DURATION = re.compile(r"^(\d+)([hdw])$")
+
+notify_app = typer.Typer(no_args_is_help=True, help="Slack and email notices (hub).")
+app.add_typer(notify_app, name="notify")
+storage_app = typer.Typer(no_args_is_help=True, help="Bytes on disk and cleanup of old artifacts.")
+app.add_typer(storage_app, name="storage")
+SENT_GLYPH = {"sent": "✓", "failed": "✗", "pending": "…", "sending": "…", "skipped": "○"}
 KindOpt = Annotated[
     str | None,
     typer.Option("--kind", help="What this machine is to the hub: ssh, slurm, or local."),
@@ -165,22 +186,6 @@ def _url(host: str, port: int) -> str:
     return f"http://[{reach}]:{port}" if ":" in reach else f"http://{reach}:{port}"
 
 
-def _write_private(path: Path, text: str) -> None:
-    """Atomically write ``path`` as mode 0600 inside a 0700 folder (it holds a token)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.unlink(missing_ok=True)  # a stale tmp keeps its old mode, which os.replace carries
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -235,7 +240,7 @@ def _refuse_live_owner(home: Path, path: Path) -> None:
 
 
 @contextmanager
-def _server_file(home: Path, info: ServerInfo) -> Iterator[None]:
+def _server_file(home: Path, info: ServerInfo) -> Iterator[Callable[[str | None], None]]:
     # <home>/serve/server.json says which server owns this home (bootstrap reuses it);
     # the hostname tells login nodes that share a home apart (Task 11); the token is
     # why it is owner-only. A live owner keeps it: checked and written under a lock
@@ -257,8 +262,20 @@ def _server_file(home: Path, info: ServerInfo) -> Iterator[None]:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         _refuse_live_owner(home, path)
         _write_private(path, json.dumps(record, indent=2))
+
+    def set_token(token: str | None) -> None:
+        with (path.parent / ".owner.lock").open("a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            current = json.loads(path.read_text(encoding="utf-8"))
+            keys = ("pid", "pid_create_time", "environment_id", "home", "hostname")
+            if not isinstance(current, dict) or any(
+                current.get(key) != record.get(key) for key in keys
+            ):
+                raise ConfigError("server ownership changed before credential publication")
+            _write_private(path, json.dumps({**current, "token": token}, indent=2))
+
     try:
-        yield
+        yield set_token
     finally:
         _drop_server_file(home, info.pid)
 
@@ -440,7 +457,7 @@ app.add_typer(sweep_app, name="sweep")
 
 
 def _hub_token() -> str | None:
-    # a hub that requires a token: $HYPOTHEX_HUB_TOKEN, or this home's server.json
+    # Use only the selected home: environment token, matching login, or server.json.
     from hypothex.mcp.server import resolve_hub_token
 
     return resolve_hub_token(home=_home_path())
@@ -450,9 +467,9 @@ def _hub(
     method: str, path: str, body: dict[str, Any] | None = None, *, timeout: float = 120.0
 ) -> Any:
     # The hub client lives with the MCP helpers; import lazily to keep `hx` fast.
-    from hypothex.mcp.server import hub_call
+    from hypothex.mcp.server import NO_AUTH_TOKEN, hub_call
 
-    return hub_call(method, path, body, token=_hub_token(), timeout=timeout)
+    return hub_call(method, path, body, token=_hub_token() or NO_AUTH_TOKEN, timeout=timeout)
 
 
 def _hub_try(
@@ -916,25 +933,33 @@ def validate(repo: RepoOpt = None, as_json: JsonFlag = False) -> None:
 @app.command()
 def projects(as_json: JsonFlag = False) -> None:
     """List projects."""
-    entries = q.list_projects(_ctx())
+    if _client_hub() is not None:
+        rows = [
+            {"project": p["project"], "repo": p["repo"], "tasks": p["tasks"]}
+            for p in _hub("GET", "/api/v1/projects")
+        ]
+    else:
+        rows = [
+            {"project": e.project, "repo": e.repo, "tasks": sorted(e.config.tasks)}
+            for e in q.list_projects(_ctx())
+        ]
     if as_json:
-        _print_json(
-            [
-                {"project": e.project, "repo": e.repo, "tasks": sorted(e.config.tasks)}
-                for e in entries
-            ]
-        )
+        _print_json(rows)
         return
     _table(
         ["project", "repo", "tasks"],
-        [[e.project, e.repo, ", ".join(sorted(e.config.tasks))] for e in entries],
+        [[r["project"], r["repo"], ", ".join(r["tasks"])] for r in rows],
     )
 
 
 @app.command()
 def tasks(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
     """List tasks with their dataset, metric versions, and best score."""
-    items = q.list_tasks(_ctx(), project)
+    if _client_hub() is not None:
+        path = "/api/v1/tasks" + (f"?project={project}" if project else "")
+        items = [q.TaskSummary.model_validate(t) for t in _hub("GET", path)]
+    else:
+        items = q.list_tasks(_ctx(), project)
     if as_json:
         _print_json(items)
         return
@@ -1062,19 +1087,30 @@ def list_runs_cmd(
     task: TaskOpt = None,
     status: Annotated[RunStatus | None, typer.Option(help="Filter by status.")] = None,
     tag: Annotated[str | None, typer.Option(help="Filter by tag.")] = None,
+    owner: Annotated[
+        str | None, typer.Option("--owner", help="Runs of this user; `me` for yours.")
+    ] = None,
     archived: Annotated[bool, typer.Option(help="Include archived runs.")] = False,
     limit: Annotated[int, typer.Option(help="Maximum rows.")] = 50,
     as_json: JsonFlag = False,
 ) -> None:
     """List runs, newest first: this store's, and the hub's when one answers."""
+    who = _me() if owner == "me" else owner
     records = _ctx().index.list_runs(
-        project=project, task=task, status=status, tag=tag, include_archived=archived, limit=limit
+        project=project,
+        task=task,
+        status=status,
+        tag=tag,
+        owner=who,
+        include_archived=archived,
+        limit=limit,
     )
     filters = {
         "project": project,
         "task": task,
         "status": None if status is None else status.value,
         "tag": tag,
+        "owner": owner,
         "archived": "true" if archived else None,
         "limit": limit,
     }
@@ -1657,15 +1693,35 @@ def archive(run_id: str, off: OffFlag = False, as_json: JsonFlag = False) -> Non
 
 @app.command()
 def note(
-    run_id: str,
-    text: str,
+    args: Annotated[list[str], typer.Argument(help="RUN_ID TEXT, or TEXT with --project.")],
+    project: ProjectOpt = None,
+    day: Annotated[str | None, typer.Option("--day", help="YYYY-MM-DD (default today).")] = None,
     author: Annotated[str | None, typer.Option(help="Author (default: human/agent).")] = None,
     as_json: JsonFlag = False,
 ) -> None:
-    """Add a note to a run."""
-    if _through_hub(run_id, "notes", {"text": text, "author": author or _created_by()}) is None:
-        q.add_note(_ctx(), run_id, text, author or _created_by())
-    _emit({"ok": True}, as_json, "noted")
+    """Add a note to a run, or with --project an entry to the project's lab notebook."""
+    from hypothex.core import notebook
+
+    if project is None:
+        if len(args) != 2:
+            raise ConfigError("usage: hx note RUN_ID TEXT (or hx note --project P TEXT)")
+        run_id, body = args
+        sent = _through_hub(run_id, "notes", {"text": body, "author": author or _created_by()})
+        if sent is None:
+            q.add_note(_ctx(), run_id, body, author or _created_by())
+        _emit({"ok": True}, as_json, "noted")
+        return
+    if len(args) != 1:
+        raise ConfigError("usage: hx note --project P TEXT")
+    when = notebook.parse_day(day) if day else None
+    if _client_hub() is not None:
+        target = when.isoformat() if when else "today"  # the hub picks its own today
+        path = f"/api/v1/projects/{project}/notebook/{target}"
+        out = _hub("POST", path, {"text": args[0], "command_id": new_command_id()})
+    else:
+        entry = notebook.append_entry(_ctx(), project, args[0], author or _created_by(), day=when)
+        out = to_jsonable(entry)
+    _emit(out, as_json, f"noted · {project} {out['day']}")
 
 
 # sweeps ---------------------------------------------------------------------------
@@ -1753,19 +1809,21 @@ def sweep_create(
 @sweep_app.command("show")
 def sweep_show(sweep_id: str, project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
     """Show a sweep: progress, params x primary metric, best cell, cost."""
-    from hypothex.mcp.server import sweep_summary
+    from hypothex.mcp.server import NO_AUTH_TOKEN, sweep_summary
 
-    _sweep_out(sweep_summary(_ctx(), sweep_id, project, token=_hub_token()), as_json)
+    _sweep_out(
+        sweep_summary(_ctx(), sweep_id, project, token=_hub_token() or NO_AUTH_TOKEN), as_json
+    )
 
 
 @sweep_app.command("cancel")
 def sweep_cancel(sweep_id: str, project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
     """Stop queued members and future issuance; running runs keep going."""
     from hypothex.core.sweeps import cancel_queued
-    from hypothex.mcp.server import locate_sweep, sweep_acts_through_hub
+    from hypothex.mcp.server import NO_AUTH_TOKEN, locate_sweep, sweep_acts_through_hub
 
     c = _ctx()
-    spec, here = locate_sweep(c, sweep_id, project, token=_hub_token())
+    spec, here = locate_sweep(c, sweep_id, project, token=_hub_token() or NO_AUTH_TOKEN)
     if sweep_acts_through_hub(c, spec, here):
         body = {"command_id": new_command_id(), "created_by": _created_by()}
         summary = _hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/cancel_queued", body)
@@ -1783,10 +1841,10 @@ def sweep_extend(
 ) -> None:
     """Add seeds, or resume missing cells with existing seeds after interrupted issuance."""
     from hypothex.core.sweeps import extend_sweep
-    from hypothex.mcp.server import locate_sweep, parse_seeds, sweep_acts_through_hub
+    from hypothex.mcp.server import NO_AUTH_TOKEN, locate_sweep, parse_seeds, sweep_acts_through_hub
 
     c = _ctx()
-    spec, here = locate_sweep(c, sweep_id, project, token=_hub_token())
+    spec, here = locate_sweep(c, sweep_id, project, token=_hub_token() or NO_AUTH_TOKEN)
     seed_list = parse_seeds(seeds, count_ok=False)
     if sweep_acts_through_hub(c, spec, here):
         body = {"seeds": seed_list, "command_id": new_command_id(), "created_by": _created_by()}
@@ -2082,6 +2140,29 @@ def resolve_serve_kind(home: Path, kind: str | None) -> str:
     return kind
 
 
+def owner_name() -> str:
+    """
+    Return the hub owner's user name for a first ``hx serve --auth``.
+
+    Returns
+    -------
+    str
+        ``$USER`` lowercased with characters outside ``[a-z0-9_-]`` dropped,
+        when that is a valid user name; else ``owner``.
+
+    Examples
+    --------
+    >>> import os
+    >>> os.environ["USER"] = "Sv"
+    >>> owner_name()
+    'sv'
+    """
+    from hypothex.auth.store import USER_NAME
+
+    name = re.sub(r"[^a-z0-9_-]", "", os.environ.get("USER", "").lower())[:32]
+    return name if re.fullmatch(USER_NAME, name) else "owner"
+
+
 def _serve_token(host: str, kind: str | None, no_auth: bool) -> str | None:
     """
     Take the bearer token ``hx serve`` requires, and refuse an open network bind.
@@ -2255,6 +2336,13 @@ def serve(
             "--no-auth", help="Disable token authentication on loopback (demo/test only)."
         ),
     ] = False,
+    auth: Annotated[bool, typer.Option("--auth", help="Require paired sessions.")] = False,
+    tailscale: Annotated[
+        bool, typer.Option("--tailscale", help="Publish with tailscale serve.")
+    ] = False,
+    public_url: Annotated[
+        str | None, typer.Option("--public-url", help="URL people reach this hub at.")
+    ] = None,
 ) -> None:
     """
     Serve the HTTP/WebSocket API, the UI when built, and (on the hub) the hosts.
@@ -2267,13 +2355,31 @@ def serve(
     import uvicorn
 
     from hypothex.api.app import create_app
+    from hypothex.auth.store import AuthStore, Principal
     from hypothex.core.environment import PROTOCOL_VERSION
+    from hypothex.core.settings import check_secrets_file, load_settings
     from hypothex.demo import demo_hosts_running
+    from hypothex.demo_team import OWNER as DEMO_OWNER
+    from hypothex.demo_team import TEAM_DIR, TEAM_FILE, demo_team_running
     from hypothex.remote.bootstrap import ServerInfo
+    from hypothex.remote.tailscale import serve_https, unserve
 
     home = _home_path()
+    layout = Layout(home)
+    layout.ensure()
+    settings = load_settings(layout)
+    check_secrets_file(layout)
+    auth_on = auth or settings.server.auth == "on"
+    if no_auth and auth_on:
+        raise ConfigError("--no-auth cannot be combined with server.auth: on or --auth")
+    if tailscale and not auth_on:
+        raise ConfigError("tailscale needs server.auth: on (or hx serve --auth)")
+    if tailscale:
+        host = "127.0.0.1"
+    explicit_token = "HYPOTHEX_SERVE_TOKEN" in os.environ
     resolved = resolve_serve_kind(home, kind)
     token = _serve_token(host, resolved, no_auth)
+    token_is_host = explicit_token or resolved in {"ssh", "slurm"}
     sock = _listen(host, port)
     bound = sock.getsockname()[1]
     info = ServerInfo(
@@ -2282,9 +2388,27 @@ def serve(
         managed=False,
         hx_version=__version__,
         protocol_version=PROTOCOL_VERSION,
-        token=token,
+        token=token if not auth_on or token_is_host else None,
         environment_id=load_descriptor(Layout(home)).environment_id,
     )
+
+    public = public_url or settings.server.public_url
+    owner = DEMO_OWNER if (home / TEAM_DIR / TEAM_FILE).is_file() else owner_name()
+    me = Principal(user=owner, scope="admin", session_id=None, client="local")
+    store: AuthStore | None = None
+    local_session_id: str | None = None
+    published = False
+
+    def release() -> None:
+        nonlocal local_session_id, published
+        if store is not None and local_session_id is not None:
+            with contextlib.suppress(HypothexError):
+                store.revoke(local_session_id, by=me)
+            local_session_id = None
+        if published:
+            with contextlib.suppress(HypothexError):
+                unserve()
+            published = False
 
     class _Server(uvicorn.Server):
         # uvicorn re-raises SIGTERM/SIGINT once it has shut down, which ends the
@@ -2299,28 +2423,55 @@ def serve(
 
     @contextmanager
     def demo_hosts() -> Iterator[None]:
-        # entered and left by the app's lifespan, so SIGTERM stops the demo hosts too
-        with demo_hosts_running(home) as live:
-            if live:
-                typer.secho(f"demo hosts up; {len(live)} sweep runs launched on gpu1", err=True)
-            yield
+        try:
+            base = public or _url(host, bound)
+            with demo_hosts_running(home) as live, demo_team_running(home, base) as links:
+                for user, link in links.items():
+                    typer.secho(f"pair {user}: {link}", err=True)
+                if live:
+                    typer.secho(f"demo hosts up; {len(live)} sweep runs launched on gpu1", err=True)
+                yield
+        finally:
+            release()
 
-    with _server_file(home, info):
-        application = create_app(
-            home,
-            host=host,
-            kind=resolved,
-            auth_token=token,
-            hub_url=_url(host, bound),
-            lifespan_context=demo_hosts,
-        )
-        typer.secho(f"hx serve on {_url(host, bound)}", err=True)
-        # the socket is bound already: uvicorn logs no "running on" line for it, so
-        # the start script finds the port in server.json (written above, Task 11)
-        config = uvicorn.Config(
-            application, host=host, port=bound, log_level="info", access_log=False
-        )
-        _Server(config).run(sockets=[sock])
+    try:
+        # Claim before revoking sessions or changing Tailscale resources.
+        with _server_file(home, info) as set_token:
+            try:
+                if auth_on:
+                    store = AuthStore(layout, session_days=settings.server.session_days)
+                    store.ensure_owner(owner)
+                    for old in store.sessions(owner):
+                        if old.client == "local":
+                            store.revoke(old.id, by=me)
+                    session, local_token = store.mint_local(owner)
+                    local_session_id = session.id
+                    if not token_is_host:
+                        set_token(local_token)
+                if tailscale:
+                    public = serve_https(bound)
+                    published = True
+                application = create_app(
+                    home,
+                    host=host,
+                    kind=resolved,
+                    auth_token=token if not auth_on or token_is_host else None,
+                    token_is_host=token_is_host,
+                    hub_url=_url(host, bound),
+                    lifespan_context=demo_hosts,
+                    auth=auth_on,
+                    public_url=public,
+                )
+                shown = _url(host, bound) + (f" · {public}" if public else "")
+                typer.secho(f"hx serve on {shown}" + (" · auth on" if auth_on else ""), err=True)
+                config = uvicorn.Config(
+                    application, host=host, port=bound, log_level="info", access_log=False
+                )
+                _Server(config).run(sockets=[sock])
+            finally:
+                release()
+    finally:
+        sock.close()
 
 
 @service_app.command("install")
@@ -2371,6 +2522,12 @@ def hosts_add(
     usd: Annotated[
         float | None, typer.Option("--usd-per-gpu-hour", help="Price, for cost.")
     ] = None,
+    token_env: Annotated[
+        str | None, typer.Option("--token-env", help="Variable holding a --url host's token.")
+    ] = None,
+    pair_link: Annotated[
+        str | None, typer.Option("--pair", help="Pairing link from the --url host's hx pair.")
+    ] = None,
     install_uv: InstallUvOpt = False,
     as_json: JsonFlag = False,
 ) -> None:
@@ -2383,6 +2540,10 @@ def hosts_add(
         raise ConfigError(f"host name {name!r} must match {HOST_NAME} and not be 'local'")
     if not slurm and (partition or account):
         raise ConfigError("--partition and --account need --slurm")
+    if (token_env or pair_link) and url is None:
+        raise ConfigError("--token-env and --pair are for --url hosts")
+    if token_env and pair_link:
+        raise ConfigError("give --token-env or --pair, not both")
     c, hosts = _hosts()
     if name in hosts.environments:
         raise ConfigError(f"host {name} exists; remove it first with `hx hosts rm {name}`")
@@ -2392,6 +2553,7 @@ def hosts_add(
             kind="slurm" if slurm else "ssh",
             ssh_alias=ssh,
             url=url,
+            token_env=token_env,
             home=remote_home,
             usd_per_gpu_hour=usd,
             slurm=SlurmDefaults(partition=partition, account=account, time=time_limit, gpus=gpus)
@@ -2405,9 +2567,12 @@ def hosts_add(
     server = _bootstrap(c, name, spec, install_uv=install_uv) if spec.route == "ssh" else None
     environments = {**hosts.environments, name: spec}
     save_hosts(c.layout, hosts.model_copy(update={"environments": environments}))
+    paired = _pair_host(c, name, url, pair_link) if pair_link and url else None
     state = _hub_try("POST", f"/api/v1/hosts/{name}/connect", {})
     if as_json:
-        _print_json({"name": name, "host": spec, "server": server, "state": state})
+        _print_json(
+            {"name": name, "host": spec, "server": server, "state": state, "paired": paired}
+        )
         return
     typer.echo(f"added {name} to {environments_path(c.layout)}")
     if server is not None:
@@ -2561,10 +2726,19 @@ def demo(
             "sweep; `hx serve` starts them.",
         ),
     ] = False,
+    with_team: Annotated[
+        bool,
+        typer.Option(
+            "--with-team",
+            help="Also seed a team hub (auth on: sv admin, alice launch; notebook, baselines, "
+            "storage, notices, a shared host); `hx serve` prints pairing links.",
+        ),
+    ] = False,
     as_json: JsonFlag = False,
 ) -> None:
     """Seed demo projects and runs into an empty home (UI tests, docs screenshots)."""
     from hypothex.demo import DEMO_EXTRAS, DEMO_TASKS, seed_demo, seed_demo_hosts
+    from hypothex.demo_team import seed_demo_team
 
     known = get_args(TaskKind)
     chosen = [k.strip() for item in kinds or [] for k in item.split(",") if k.strip()]
@@ -2586,6 +2760,10 @@ def demo(
             "empty home instead: hx --home /tmp/hx-demo demo"
         )
     selected = cast("list[TaskKind]", chosen or list(known))
+    if with_team and not {"generic", "training"} <= set(selected):
+        raise ConfigError(
+            "--with-team needs the generic and training demos; add --kinds generic,training"
+        )
     if with_hosts and "training" not in selected:
         try:
             _ctx().store.load_project(DEMO_TASKS["training"][0])
@@ -2597,7 +2775,718 @@ def demo(
     if with_hosts:
         made["hosts"] = seed_demo_hosts(home)
         text += "\nhosts: gpu1 (8 GPUs), cluster (SLURM); `hx serve` starts them"
+    if with_team:
+        made["team"] = seed_demo_team(home)
+        text += "\nteam: sv (admin), alice (launch); `hx serve` prints pairing links"
     _emit(made, as_json, text)
+
+
+@db_app.command("upgrade")
+def db_upgrade(as_json: JsonFlag = False) -> None:
+    """Upgrade the Postgres index to the newest schema (never needed for SQLite)."""
+    from hypothex.core.migrations import upgrade
+    from hypothex.core.settings import load_settings
+
+    layout = Layout(_home_path())
+    revision = upgrade(layout, load_settings(layout).server)
+    _emit({"revision": revision}, as_json, f"index at {revision}")
+
+
+@db_app.command("current")
+def db_current(as_json: JsonFlag = False) -> None:
+    """Show the Postgres index's schema revision."""
+    from hypothex.core.migrations import current
+    from hypothex.core.settings import load_settings
+
+    layout = Layout(_home_path())
+    revision = current(layout, load_settings(layout).server)
+    _emit({"revision": revision}, as_json, revision or "none")
+
+
+def _redeem(pairing: str, client: str, device: str) -> tuple[str, dict[str, Any]]:
+    """Redeem a pairing link with the hub it names; the secret travels in the body only."""
+    import httpx
+
+    from hypothex.auth.pairing import parse_pairing_url
+    from hypothex.core.tokens import redact_bearer_token
+    from hypothex.remote.http import TokenSafeHTTPTransport
+
+    base, offer_id, secret = parse_pairing_url(pairing)
+    body = {"offer_id": offer_id, "secret": secret, "client": client, "device": device}
+    try:
+        # A peer can reflect the submitted secret in headers or its reason phrase;
+        # keep HTTPX/httpcore diagnostics safe as well as our own error below.
+        transport = TokenSafeHTTPTransport(secret, unix_socket=None)
+        with httpx.Client(
+            transport=transport, trust_env=False, follow_redirects=False, timeout=30
+        ) as http:
+            resp = http.post(f"{base}/api/v1/auth/pair", json=body)
+    except httpx.HTTPError as exc:
+        message = f"the hub at {base} did not answer ({type(exc).__name__})"
+        raise HypothexError(redact_bearer_token(message, secret)) from None
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    if resp.status_code >= 400:
+        error = data.get("error") if isinstance(data, dict) else None
+        message = error if isinstance(error, str) and error else f"hub answered {resp.status_code}"
+        raise HypothexError(redact_bearer_token(message, secret)) from None
+    return base, data
+
+
+def _device() -> str:
+    return (socket.gethostname() or "device")[:64]
+
+
+@app.command()
+def login(
+    pairing_url: Annotated[str, typer.Argument(help="The link from `hx pair`.")],
+    device: Annotated[
+        str | None, typer.Option("--device", help="Name in the sessions list.")
+    ] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Pair this CLI with a hub; the token is kept in <home>/auth/hub-tokens.json."""
+    from hypothex.auth.client import HubLogin, save_hub_login
+    from hypothex.mcp.server import hub_url
+
+    client = "agent" if os.environ.get("HYPOTHEX_AGENT") else "cli"
+    base, data = _redeem(pairing_url, client, device or _device())
+    entry = HubLogin(
+        token=data["token"], user=data["user"], scope=data["scope"], session_id=data["session_id"]
+    )
+    save_hub_login(Layout(_home_path()), base, entry)
+    out = {"hub": base, "user": entry.user, "scope": entry.scope, "session_id": entry.session_id}
+    text = f"✓ {entry.user} · {entry.scope} · {base}"
+    if hub_url() != base:
+        text += f"\nset HYPOTHEX_HUB_URL={base}"
+    _emit(out, as_json, text)
+
+
+@app.command()
+def logout(
+    hub: Annotated[
+        str | None, typer.Option("--hub", help="Hub URL (default: HYPOTHEX_HUB_URL).")
+    ] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Revoke this CLI's session on a hub and forget its token."""
+    from hypothex.auth.client import forget_hub_login, hub_login
+    from hypothex.mcp.server import hub_call, hub_url
+
+    url = (hub or hub_url()).rstrip("/")
+    layout = Layout(_home_path())
+    entry = hub_login(layout, url)
+    if entry is not None:
+        with contextlib.suppress(HypothexError):
+            hub_call(
+                "POST", "/api/v1/auth/logout", {}, url=url, token=entry.token.get_secret_value()
+            )
+        forget_hub_login(layout, url)
+    text = f"logged out of {url}" if entry is not None else f"no login for {url}"
+    _emit({"hub": url, "logged_out": entry is not None}, as_json, text)
+
+
+@app.command()
+def whoami(as_json: JsonFlag = False) -> None:
+    """Who this CLI is on the hub, and with what scope."""
+    me = _hub("GET", "/api/v1/auth/me")
+    _emit(me, as_json, f"{me['user']} · {me['scope']} · auth {me['auth']}")
+
+
+@app.command()
+def pair(
+    user: Annotated[str | None, typer.Option("--user", help="User (default: you).")] = None,
+    new_user: Annotated[bool, typer.Option("--new-user", help="Create the user.")] = False,
+    scope: Annotated[str, typer.Option("--scope", help="read, launch, or admin.")] = "launch",
+    client: Annotated[str, typer.Option("--client", help="browser, cli, or host.")] = "browser",
+    ttl: Annotated[int, typer.Option("--ttl", min=1, max=300, help="Seconds (at most 300).")] = 300,
+    url: Annotated[str | None, typer.Option("--url", help="Hub URL.")] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Make a one-time pairing link (5 min) and its QR code."""
+    from hypothex.mcp.server import NO_AUTH_TOKEN, hub_call, hub_url, resolve_hub_token
+
+    if scope not in SCOPES:
+        raise ConfigError(f"--scope must be one of {', '.join(SCOPES)}")
+    if client not in ("browser", "cli", "host"):
+        raise ConfigError("--client must be browser, cli, or host")
+    if client == "host" and scope != "admin":
+        raise ConfigError("--client host needs --scope admin")  # AuthStore.redeem refuses less
+    base = (url or hub_url()).rstrip("/")
+    body = {
+        "user": user,
+        "new_user": new_user,
+        "scope": scope,
+        "ttl_seconds": ttl,
+        "client_hint": client,
+    }
+    token = resolve_hub_token(base, _home_path())
+    offer = hub_call("POST", "/api/v1/auth/pairings", body, url=base, token=token or NO_AUTH_TOKEN)
+    if as_json:
+        _print_json(offer)
+        return
+    typer.echo(offer["qr"])
+    typer.echo(offer["url"])
+    typer.echo(f"{user or 'you'} · {scope} · {ttl // 60}:{ttl % 60:02d}")
+
+
+def _age(when: str) -> str:
+    from datetime import datetime
+
+    from hypothex.core.ids import utcnow
+    from hypothex.notify.messages import fmt_duration
+
+    return fmt_duration((utcnow() - datetime.fromisoformat(when)).total_seconds())
+
+
+@sessions_app.command("list")
+def sessions_list(
+    all_users: Annotated[bool, typer.Option("--all", help="Everyone's (admin).")] = False,
+    as_json: JsonFlag = False,
+) -> None:
+    """List active sessions (yours, or everyone's with --all)."""
+    if all_users:
+        rows = _hub("GET", "/api/v1/auth/sessions")
+    else:
+        me = _hub("GET", "/api/v1/auth/me")
+        rows = _hub("GET", f"/api/v1/auth/sessions?user={me['user']}")
+    if as_json:
+        _print_json(rows)
+        return
+    _table(
+        ["session", "user", "client", "device", "scope", "seen"],
+        [
+            [s["id"], s["user"], s["client"], s["device"], s["scope"], _age(s["last_seen_at"])]
+            for s in rows
+        ],
+    )
+
+
+@sessions_app.command("revoke")
+def sessions_revoke(session_id: str, as_json: JsonFlag = False) -> None:
+    """Revoke a session (yours, or anyone's as admin)."""
+    path = f"/api/v1/auth/sessions/{session_id}/revoke"
+    out = _hub("POST", path, {"command_id": new_command_id()})
+    _emit(out, as_json, f"revoked {session_id}")
+
+
+@users_app.command("list")
+def users_list(as_json: JsonFlag = False) -> None:
+    """List users and their roles (admin)."""
+    rows = _hub("GET", "/api/v1/auth/users")
+    if as_json:
+        _print_json(rows)
+        return
+    _table(
+        ["user", "role", "disabled"],
+        [[u["name"], u["role"], "×" if u["disabled_at"] else None] for u in rows],
+    )
+
+
+@users_app.command("disable")
+def users_disable(name: str, as_json: JsonFlag = False) -> None:
+    """Disable a user and revoke their sessions (admin)."""
+    out = _hub("POST", f"/api/v1/auth/users/{name}/disable", {"command_id": new_command_id()})
+    _emit(out, as_json, f"disabled {name}")
+
+
+def _client_hub() -> str | None:
+    """The hub URL when this home logged in to it (`hx login`): reads go through it."""
+    from hypothex.auth.client import hub_login
+    from hypothex.mcp.server import hub_url
+
+    url = hub_url()
+    return url if hub_login(Layout(_home_path()), url) is not None else None
+
+
+def _me() -> str | None:
+    """
+    The caller's user name on the hub (client mode, or a hub on this machine).
+
+    None when the hub has auth off: ``--owner me`` filters nothing, including
+    historical owned rows (the API does the same).
+    """
+    me = _hub_try("GET", "/api/v1/auth/me")
+    if me is None:
+        raise ConfigError("--owner me needs a hub: run hx serve, or hx login <pairing-url>")
+    return None if me.get("auth") == "off" else str(me["user"])
+
+
+def _pair_host(c: Context, name: str, host_url: str, link: str) -> dict[str, Any]:
+    """Redeem a host's pairing link as `host`; keep the token bound to that host's URL."""
+    from hypothex.auth.pairing import parse_pairing_url
+    from hypothex.remote.config import same_origin, save_host_token
+
+    base, _, _ = parse_pairing_url(link)
+    if not same_origin(base, host_url):
+        # never redeem (or later send) one server's token for another host name
+        raise ConfigError(f"the link is for {base}, but {name} is {host_url}")
+    _, data = _redeem(link, "host", f"hub:{_device()}")
+    save_host_token(c.layout, name, base, data["token"])
+    return {"user": data["user"], "scope": data["scope"], "session_id": data["session_id"]}
+
+
+@hosts_app.command("pair")
+def hosts_pair(
+    name: Annotated[str, typer.Argument(help="A --url host from `hx hosts list`.")],
+    pairing: Annotated[str, typer.Argument(help="The link its owner made with hx pair.")],
+    as_json: JsonFlag = False,
+) -> None:
+    """Pair the hub with a --url host (a lab server with auth on); then reconnect it."""
+    c, hosts = _hosts()
+    spec = _known_host(hosts, name)
+    if spec.route != "url":
+        raise ConfigError(f"{name} is reached over ssh; it needs no pairing")
+    paired = _pair_host(c, name, str(spec.url), pairing)
+    state = _hub_try("POST", f"/api/v1/hosts/{name}/connect", {})
+    out = {"name": name, **paired, "state": state}
+    text = f"✓ {name} paired · {paired['user']} · {paired['scope']}"
+    _emit(out, as_json, text + (f" · {state['state']}" if state else ""))
+
+
+def parse_duration(text: str) -> timedelta:
+    """
+    Parse ``Nh``, ``Nd``, or ``Nw``.
+
+    Parameters
+    ----------
+    text : str
+
+    Returns
+    -------
+    timedelta
+
+    Raises
+    ------
+    ConfigError
+        Anything else.
+
+    Examples
+    --------
+    >>> parse_duration("30d").days
+    30
+    """
+    match = DURATION.match(text.strip())
+    if match is None:
+        raise ConfigError(f"duration must look like 30d, 12h, or 2w; got {text!r}")
+    n, unit = int(match.group(1)), match.group(2)
+    if unit == "h":
+        return timedelta(hours=n)
+    return timedelta(days=n * (7 if unit == "w" else 1))
+
+
+def _split(value: str | None) -> list[str] | None:
+    items = [v.strip() for v in (value or "").split(",") if v.strip()]
+    return items or None
+
+
+def _hub_text(path: str, params: dict[str, Any]) -> str:
+    from urllib.parse import urlencode
+
+    from hypothex.mcp.server import NO_AUTH_TOKEN, hub_call
+
+    query = urlencode({k: v for k, v in params.items() if v is not None})
+    return hub_call("GET", f"{path}?{query}", token=_hub_token() or NO_AUTH_TOKEN, text=True)
+
+
+@app.command()
+def export(
+    task: Annotated[str | None, typer.Argument(help="Task, or project/task.")] = None,
+    project: ProjectOpt = None,
+    runs: Annotated[str | None, typer.Option("--runs", help="Compare runs: a,b[,c...].")] = None,
+    fmt: Annotated[str, typer.Option("--format", help="latex, markdown, or csv.")] = "markdown",
+    metrics: Annotated[str | None, typer.Option("--metrics", help="a,b (metric/key).")] = None,
+    primary: Annotated[
+        str | None, typer.Option("--primary", help="Task ranking metric/key.")
+    ] = None,
+    noise: Annotated[str, typer.Option("--noise", help="both, seed, test, or none.")] = "both",
+    digits: Annotated[int, typer.Option("--digits", min=0, max=6)] = 3,
+    percent: Annotated[bool, typer.Option("--percent", help="x100 for fractions.")] = False,
+    top: Annotated[int | None, typer.Option("--top", min=1)] = None,
+    groups: Annotated[str | None, typer.Option("--groups", help="g1,g2 (id or label).")] = None,
+    no_baselines: Annotated[bool, typer.Option("--no-baselines")] = False,
+    caption: Annotated[str | None, typer.Option("--caption")] = None,
+    label: Annotated[str | None, typer.Option("--label")] = None,
+    standalone: Annotated[bool, typer.Option("--standalone", help="LaTeX table env.")] = False,
+    output: Annotated[Path | None, typer.Option("--output", "-o", help="Write to FILE.")] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Export a leaderboard (or runs) as a paper table: LaTeX booktabs, Markdown, or CSV."""
+    from hypothex.core import export as ex
+
+    if (task is None) == (runs is None):
+        raise ConfigError("give a task, or --runs a,b")
+    if runs is not None and primary is not None:
+        raise ConfigError("--primary applies to task export, not --runs")
+    try:
+        opts = ex.ExportOptions.model_validate(
+            {
+                "format": fmt,
+                "metrics": _split(metrics),
+                "primary": primary,
+                "noise": noise,
+                "digits": digits,
+                "percent": percent,
+                "top": top,
+                "groups": _split(groups),
+                "baselines": not no_baselines,
+                "caption": caption,
+                "label": label,
+                "standalone": standalone,
+            }
+        )
+    except ValidationError as exc:
+        raise ConfigError(f"invalid export options: {exc.errors()[0]['msg']}") from None
+    table: ex.ExportTable | None = None
+    if _client_hub() is not None:
+        params = opts.model_dump(mode="json")
+        for key in ("metrics", "groups"):
+            params[key] = ",".join(params[key]) if params[key] else None
+        if runs is not None:
+            body = _hub_text("/api/v1/compare/export", {**params, "run_ids": runs})
+        else:
+            assert task is not None
+            proj, sep, name = task.partition("/")
+            if not sep:
+                proj, name = project or "", task
+            if not proj:
+                raise ConfigError("give -p PROJECT (or project/task): the hub needs it")
+            body = _hub_text(f"/api/v1/tasks/{proj}/{name}/export", params)
+    else:
+        c = _ctx()
+        if runs is not None:
+            table = ex.compare_table(c, _split(runs) or [], opts)
+        else:
+            assert task is not None
+            table = ex.task_table(c, task, project, opts)
+        body = ex.render(table, opts)
+    if output is not None:
+        output.write_text(body, encoding="utf-8")
+    if as_json:
+        _print_json({"format": opts.format, "text": body, "table": table})
+        return
+    if output is not None:
+        typer.echo(f"wrote {output}")
+    else:
+        typer.echo(body, nl=False)
+
+
+@notebook_app.command("list")
+def notebook_list(project: ProjectReq, as_json: JsonFlag = False) -> None:
+    """List a project's notebook days, newest first."""
+    from hypothex.core import notebook
+
+    if _client_hub() is not None:
+        days = _hub("GET", f"/api/v1/projects/{project}/notebook")
+    else:
+        days = notebook.list_days(_ctx(), project)
+    if as_json:
+        _print_json(days)
+        return
+    _table(["day", "entries", "bytes"], [[d["day"], d["entries"], d["bytes"]] for d in days])
+
+
+@notebook_app.command("show")
+def notebook_show(
+    project: ProjectReq,
+    day: Annotated[str | None, typer.Option("--day", help="YYYY-MM-DD (default today).")] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Show one notebook day, then its run chips as `run status primary`."""
+    from hypothex.core import notebook
+
+    when = notebook.parse_day(day) if day else None
+    if _client_hub() is not None:
+        target = when.isoformat() if when else "today"  # the hub picks its own today
+        data = _hub("GET", f"/api/v1/projects/{project}/notebook/{target}")
+    else:
+        c = _ctx()
+        data = to_jsonable(notebook.read_day(c, project, when or notebook.hub_today(c)))
+    if as_json:
+        _print_json(data)
+        return
+    typer.echo(data["text"].rstrip() or "—")
+    if data["runs"]:
+        _table(
+            ["run", "status", "primary"],
+            [
+                [
+                    r["run_id"],
+                    r["status"] or "?",
+                    None if r["primary"] is None else f"{r['primary']:.3f}",
+                ]
+                for r in data["runs"]
+            ],
+        )
+
+
+@app.command()
+def digest(
+    project: ProjectOpt = None,
+    since: Annotated[str, typer.Option("--since", help="Window: 7d, 12h, 2w.")] = "7d",
+    send: Annotated[
+        bool, typer.Option("--send", help="Send it and save it to the notebook.")
+    ] = False,
+    channels: Annotated[str | None, typer.Option("--channels", help="slack,email.")] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Print the weekly digest (all projects without -p); --send enqueues it."""
+    from hypothex.core import digest as dg
+    from hypothex.core.ids import utcnow
+    from hypothex.core.settings import load_settings
+
+    now = utcnow()
+    start = now - parse_duration(since)
+    client = _client_hub() is not None
+    c = None if client else _ctx()
+    if project is not None:
+        projects = [project]
+    elif c is None:
+        projects = [p["project"] for p in _hub("GET", "/api/v1/projects")]
+    else:
+        projects = [e.project for e in c.store.list_projects()]
+    out: list[dict[str, Any]] = []
+    for name in projects:
+        if c is None:
+            from urllib.parse import quote
+
+            found = _hub("GET", f"/api/v1/projects/{name}/digest?since={quote(start.isoformat())}")
+        else:
+            top = load_settings(c.layout).digest.top_notes
+            found = to_jsonable(dg.build_digest(c, name, since=start, until=now, top_notes=top))
+        sent = None
+        if send:
+            body = {
+                "since": start.isoformat(),
+                "channels": _split(channels),
+                "command_id": new_command_id(),
+            }
+            sent = _hub_try("POST", f"/api/v1/projects/{name}/digest/send", body)
+            if sent is None:
+                local = c or _ctx()
+                settings = load_settings(local.layout)
+                wanted = cast("list[Any] | None", _split(channels))
+                done = dg.send_digest(local, settings, name, now=now, channels=wanted, since=start)
+                day = None
+                if settings.digest.save_to_notebook:
+                    from hypothex.core.notebook import today
+
+                    day = today(now, settings.digest.timezone).isoformat()
+                sent = {"channels": done, "notebook_day": day}
+        out.append({"project": name, "digest": found, "sent": sent})
+    if as_json:
+        _print_json(out)
+        return
+    for item in out:
+        typer.echo(dg.render_digest_markdown(dg.Digest.model_validate(item["digest"])), nl=False)
+        if item["sent"] is not None:
+            typer.echo(f"sent · {', '.join(item['sent']['channels']) or 'no channel'}")
+
+
+@notify_app.command("status")
+def notify_status_cmd(as_json: JsonFlag = False) -> None:
+    """Channel status (never a secret) and recent sends."""
+    from hypothex.core.settings import load_settings
+    from hypothex.notify.notifier import notify_status
+
+    data = _hub_try("GET", "/api/v1/notify")
+    if data is None:
+        c = _ctx()
+        data = notify_status(c, load_settings(c.layout))
+    if as_json:
+        _print_json(data)
+        return
+    for name in ("slack", "email"):
+        channel = data["channels"][name]
+        state = "set" if channel["set"] else ("unset" if channel["configured"] else "off")
+        mark = "●" if channel["configured"] and channel["set"] else "○"
+        typer.echo(f"{name} {mark} {state}" + (f" {channel['env']}" if channel["env"] else ""))
+    if data["recent"]:
+        _table(
+            ["time", "kind", "run", "channel", "", "tries", "error"],
+            [
+                [
+                    str(e["created_at"])[11:16],
+                    e["notice"]["kind"],
+                    e["notice"]["run_id"] or e["notice"]["project"],
+                    e["channel"],
+                    SENT_GLYPH.get(e["status"], "?"),
+                    e["attempts"],
+                    e["last_error"],
+                ]
+                for e in data["recent"]
+            ],
+        )
+
+
+@notify_app.command("test")
+def notify_test_cmd(
+    channel: Annotated[str, typer.Argument(help="slack or email.")], as_json: JsonFlag = False
+) -> None:
+    """Send a test notice now (through the hub when it runs)."""
+    from hypothex.core.settings import load_settings
+    from hypothex.notify.notifier import Notifier
+
+    if channel not in ("slack", "email"):
+        raise ConfigError("channel must be slack or email")
+    data = _hub_try(
+        "POST", "/api/v1/notify/test", {"channel": channel, "command_id": new_command_id()}
+    )
+    if data is None:
+        c = _ctx()
+        data = Notifier(c, load_settings(c.layout)).send_test(channel)  # type: ignore[arg-type]
+    shown = f"✓ {channel}" if data["ok"] else f"✗ {channel} {data['error_class']}"
+    _emit(data, as_json, shown)
+    if not data["ok"]:
+        raise typer.Exit(1)
+
+
+@storage_app.command("report")
+def storage_report_cmd(
+    project: ProjectOpt = None,
+    local_only: Annotated[bool, typer.Option("--local-only", help="Skip hosts.")] = False,
+    as_json: JsonFlag = False,
+) -> None:
+    """Bytes by project, host, and kind, and the 20 largest items."""
+    from urllib.parse import urlencode
+
+    from hypothex.core import storage as st
+
+    query = urlencode(
+        {
+            k: v
+            for k, v in {"project": project, "remote": "false" if local_only else None}.items()
+            if v
+        }
+    )
+    data = _hub_try("GET", f"/api/v1/storage?{query}")
+    if data is None:
+        data = to_jsonable(st.storage_report(_ctx(), None, project=project, remote=False))
+    if as_json:
+        _print_json(data)
+        return
+    typer.echo(f"{st.fmt_bytes(data['total_bytes'])} · {len(data['items'])} items")
+    for title in ("by_project", "by_host", "by_kind"):
+        _table(
+            [title.removeprefix("by_"), "bytes"],
+            [[k, st.fmt_bytes(v)] for k, v in data[title].items()],
+        )
+    largest = sorted(data["items"], key=lambda i: i["bytes"], reverse=True)[:20]
+    _table(
+        ["run", "host", "kind", "path", "bytes", ""],
+        [
+            [
+                i["run_id"],
+                i["host"],
+                i["artifact_kind"] or i["kind"],
+                i["path"],
+                st.fmt_bytes(i["bytes"]),
+                ("★" if i["starred"] else "") + ("archived" if i["archived"] else ""),
+            ]
+            for i in largest
+        ],
+    )
+    for error in data["errors"]:
+        typer.secho(f"{error['host']}: {error['error']}", fg="yellow", err=True)
+
+
+def _apply_plan(plan_id: str, yes: bool, confirm_bytes: int | None, as_json: bool) -> None:
+    from hypothex.core import storage as st
+
+    total = confirm_bytes
+    path = st.plans_dir(Layout(_home_path())) / f"{plan_id}.json"
+    if total is None and st.PLAN_ID.match(plan_id) and path.is_file():
+        total = st.CleanPlan.model_validate_json(path.read_text(encoding="utf-8")).total_bytes
+    if total is None:
+        raise ConfigError(
+            f"plan {plan_id} is not in this home; pass --confirm-bytes N (the total it printed)"
+        )
+    if not yes:
+        typed = typer.prompt(
+            f"delete {st.fmt_bytes(total)}: type {total} to confirm", default="", show_default=False
+        )
+        if typed.strip() != str(total):
+            raise ConfigError("not confirmed; nothing deleted")
+    body = {"confirm_bytes": total, "command_id": new_command_id()}
+    result = _hub_try("POST", f"/api/v1/storage/plans/{plan_id}/apply", body)
+    if result is None:
+        result = to_jsonable(
+            st.apply_clean(_ctx(), None, plan_id, confirm_bytes=total, actor=_created_by())
+        )
+    shown = f"freed {st.fmt_bytes(result['freed_bytes'])} · {len(result['skipped'])} skipped"
+    if result["errors"]:
+        shown += f" · {len(result['errors'])} hosts unreachable"
+    _emit(result, as_json, shown)
+
+
+@storage_app.command("clean")
+def storage_clean(
+    archived: Annotated[
+        bool, typer.Option("--archived", help="Required: archived runs only.")
+    ] = False,
+    older_than: Annotated[str | None, typer.Option("--older-than", help="E.g. 30d.")] = None,
+    kind: Annotated[
+        list[str] | None, typer.Option("--kind", help="Artifact kind (repeat).")
+    ] = None,
+    all_kinds: Annotated[bool, typer.Option("--all-kinds", help="Every artifact kind.")] = False,
+    project: ProjectOpt = None,
+    host: Annotated[list[str] | None, typer.Option("--host", help="Host (repeat).")] = None,
+    no_pulled: Annotated[bool, typer.Option("--no-pulled", help="Keep pulled copies.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Plans are always dry runs.")] = False,
+    apply: Annotated[str | None, typer.Option("--apply", help="Delete what a plan lists.")] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Do not ask to type the total.")] = False,
+    confirm_bytes: Annotated[
+        int | None, typer.Option("--confirm-bytes", help="The plan's total (remote plans).")
+    ] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Plan a cleanup of archived runs' artifacts (a dry run); --apply PLAN deletes it."""
+    from hypothex.core import storage as st
+    from hypothex.core.settings import load_settings
+
+    if apply is not None:
+        _apply_plan(apply, yes, confirm_bytes, as_json)
+        return
+    if not archived:
+        raise ConfigError("add --archived: only artifacts of archived, unstarred runs are cleaned")
+    layout = Layout(_home_path())
+    defaults = load_settings(layout).storage
+    days = parse_duration(older_than).days if older_than else defaults.older_than_days
+    policy = st.CleanPolicy(
+        older_than_days=days,
+        kinds=["*"] if all_kinds else (kind or defaults.kinds),
+        projects=[project] if project else None,
+        hosts=host or None,
+        include_pulled=not no_pulled,
+    )
+    body = {**policy.model_dump(mode="json"), "command_id": new_command_id()}
+    plan = _hub_try("POST", "/api/v1/storage/plan", body)
+    if plan is None:
+        made = st.plan_clean(_ctx(), None, policy, created_by=_created_by(), settings=defaults)
+        plan = to_jsonable(made)
+    if as_json:
+        _print_json(plan)
+        return
+    _table(
+        ["run", "host", "kind", "path", "bytes", "reason"],
+        [
+            [i["run_id"], i["host"], i["artifact_kind"] or i["kind"], i["path"],
+             st.fmt_bytes(i["bytes"]), i["reason"]]
+            for i in plan["items"]
+        ],
+    )  # fmt: skip
+    if plan["refused"]:
+        _table(
+            ["refused", "path", "reason"],
+            [[r["run_id"], r["path"], r["reason"]] for r in plan["refused"]],
+        )
+    hosts = len({i["host"] for i in plan["items"]})
+    typer.echo(
+        f"plan {plan['plan_id']} · {st.fmt_bytes(plan['total_bytes'])} · {len(plan['items'])} "
+        f"paths · {hosts} hosts · hx storage clean --apply {plan['plan_id']}"
+    )
 
 
 def cli() -> None:

@@ -36,6 +36,7 @@ export function mockRoutes(routes: Record<string, unknown>): Call[] {
     const key = Object.keys(routes)
       .sort((a, b) => b.length - a.length)
       .find((prefix) => url.startsWith(prefix));
+    if (key === undefined && url === "/api/v1/auth/me") return new Response(JSON.stringify({auth:"off",user:"local",scope:"admin",scopes:["read","launch","admin"],client:"local",session_id:null,public_url:null}));
     if (key === undefined || routes[key] === null) {
       return new Response(JSON.stringify({ error: "no route", type: "StoreError" }), { status: 404 });
     }

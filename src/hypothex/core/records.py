@@ -192,6 +192,8 @@ class RunRecord(BaseModel):
     name: str | None = None
     """A name a person or agent gave the run (``queries.rename_run``); None: derived."""
     created_by: str = "human"
+    owner: str | None = None
+    """User name of the creator; None with auth off or before phase 3."""
     usage: UsageTotals | None = None
     cost: CostTotals | None = None
     sweep_id: str | None = None

@@ -28,12 +28,17 @@ class TicketStore:
     ) -> None:
         self._clock = clock
         self._capacity = capacity
-        self._tickets: dict[str, float] = {}
+        self._tickets: dict[str, tuple[float, object]] = {}
         self._lock = threading.Lock()
 
-    def issue(self) -> str | None:
+    def issue(self, payload: object = True) -> str | None:
         """
         Return a random ticket, or None when the outstanding limit is reached.
+
+        Parameters
+        ----------
+        payload : object, optional
+            Private handshake context; defaults to the root guard's boolean marker.
 
         Returns
         -------
@@ -42,11 +47,11 @@ class TicketStore:
         """
         with self._lock:
             now = self._clock()
-            self._tickets = {key: end for key, end in self._tickets.items() if end > now}
+            self._tickets = {key: entry for key, entry in self._tickets.items() if entry[0] > now}
             if len(self._tickets) >= self._capacity:
                 return None
             ticket = secrets.token_urlsafe(24)
-            self._tickets[ticket] = now + TICKET_SECONDS
+            self._tickets[ticket] = (now + TICKET_SECONDS, payload)
             return ticket
 
     def consume(self, ticket: str) -> bool:
@@ -63,6 +68,22 @@ class TicketStore:
         bool
             True only for the first consumption before expiry.
         """
+        return self.redeem(ticket) is not None
+
+    def redeem(self, ticket: str) -> object | None:
+        """
+        Atomically return a payload before its monotonic expiry.
+
+        Parameters
+        ----------
+        ticket : str
+            Offered handshake secret.
+
+        Returns
+        -------
+        object or None
+            Stored payload only for its first valid consumption.
+        """
         with self._lock:
-            end = self._tickets.pop(ticket, None)
-            return end is not None and end > self._clock()
+            found = self._tickets.pop(ticket, None)
+            return found[1] if found is not None and found[0] > self._clock() else None

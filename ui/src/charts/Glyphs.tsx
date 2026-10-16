@@ -295,3 +295,8 @@ export function Key({ items }: { items: KeyItem[] }): ReactElement {
     </div>
   );
 }
+
+/** A neutral published reference; never a seed, interval, or best candidate. */
+export function PaperReferenceMark({ x, y, size = 5 }: { x: number; y: number; size?: number }) {
+  return <path data-paper-reference="" d={`M ${x} ${y - size} L ${x + size} ${y} L ${x} ${y + size} L ${x - size} ${y} Z`} fill="none" stroke="var(--ink-2)" strokeWidth={1.5} />;
+}

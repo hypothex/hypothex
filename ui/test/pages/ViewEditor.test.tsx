@@ -64,6 +64,7 @@ function json(status: number, body: unknown): Response {
 
 /** A fake view server: validation fails on "acuracy"; panels come from the YAML outline. */
 function fakeServer(url: string, method: string, body: Record<string, unknown> | null): Response {
+  if(url === "/api/v1/auth/me") return json(200,{auth:"off",scope:"admin",scopes:["read","launch","admin"],user:"local",client:"local",session_id:null,public_url:null});
   if (url.endsWith("/leaderboard")) return json(200, { primary: "accuracy/value" });
   if (url === `${VIEWS}/validate`) {
     const text = String(body?.text);

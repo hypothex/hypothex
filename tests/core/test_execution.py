@@ -15,7 +15,9 @@ from hypothex.core.context import Context
 from hypothex.core.errors import RemoteProjectError, RunError
 from hypothex.core.execution import RunRequest, execute_run, prepare_run, seed_warning
 from hypothex.core.index import rebuild_index
+from hypothex.core.layout import Layout
 from hypothex.core.records import RunRecord, RunStatus, UsageTotals
+from hypothex.core.settings import NotifySettings, Settings, SlackSettings, save_settings
 from tests.factories import git, write_toy_project
 
 PY = sys.executable
@@ -1121,3 +1123,39 @@ def test_rejected_early_terminal_update_keeps_reason_without_false_event(
     done = execute_run(ctx, rec.run_id)
     assert done.status == RunStatus.LOST and done.end_reason == "winning evidence"
     assert [e.type for e in ctx.events.since(0)] == ["run.created", "run.lost"]
+
+
+def test_run_environment_never_holds_secret_variables(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_settings(
+        Layout(ctx.layout.home),
+        Settings(notify=NotifySettings(slack=SlackSettings(webhook_env="LAB_HOOK"))),
+    )
+    monkeypatch.setenv("LAB_HOOK", "https://hooks.example/SECRETXYZ")
+    monkeypatch.setenv("HYPOTHEX_SMTP_PASSWORD", "hunter2")
+    monkeypatch.setenv("HYPOTHEX_HUB_TOKEN", "hxs_s_000000000000_bearer")
+    monkeypatch.setenv("KEEP_ME", "visible")
+    code = (
+        "import os; print(os.environ.get('LAB_HOOK', '-'), "
+        "os.environ.get('HYPOTHEX_SMTP_PASSWORD', '-'), "
+        "os.environ.get('HYPOTHEX_HUB_TOKEN', '-'), os.environ.get('KEEP_ME', '-'))"
+    )
+    record = prepare_run(ctx, RunRequest(repo=toy_repo, command=[sys.executable, "-c", code]))
+    execute_run(ctx, record.run_id)
+    stdout = (ctx.run_dir(record) / "logs" / "stdout.log").read_text()
+    assert stdout.strip() == "- - - visible"
+
+
+def test_run_environment_never_holds_a_host_token(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.remote.config import EnvironmentsFile, HostSpec, save_hosts
+
+    lab = HostSpec(route="url", url="http://127.0.0.1:9", token_env="LAB_TOKEN")
+    save_hosts(ctx.layout, EnvironmentsFile(environments={"lab": lab}))
+    monkeypatch.setenv("LAB_TOKEN", "hxs_s_000000000000_hosttoken")
+    code = "import os; print(os.environ.get('LAB_TOKEN', '-'))"
+    record = prepare_run(ctx, RunRequest(repo=toy_repo, command=[sys.executable, "-c", code]))
+    execute_run(ctx, record.run_id)
+    assert (ctx.run_dir(record) / "logs" / "stdout.log").read_text().strip() == "-"

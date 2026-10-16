@@ -1,0 +1,3823 @@
+{
+  "boards": {
+    "bench:latency/p95": {
+      "headline": "group bench-0@c1 p95 25 ms",
+      "higher_is_better": false,
+      "kind": "system_bench",
+      "metric_drift": [],
+      "metric_versions": {
+        "latency": "v1"
+      },
+      "needs_reeval": [],
+      "primary": "latency/p95",
+      "project": "toy",
+      "rows": [
+        {
+          "commit": "c1",
+          "config_hash": "bench-0",
+          "cost": null,
+          "cost_complete": false,
+          "created_by": [
+            "human"
+          ],
+          "evaluation_population": null,
+          "group_id": "bench-0@c1",
+          "hypothesis": "",
+          "identical_seeds": false,
+          "label": "group bench-0@c1",
+          "latest_run_id": "bench-0",
+          "n": 1,
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 25.0,
+            "n": 1,
+            "std": 0.0
+          },
+          "repeat_observations": [],
+          "run_ids": [
+            "bench-0"
+          ],
+          "scores": {
+            "latency/p95": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 25.0,
+              "n": 1,
+              "std": 0.0
+            }
+          },
+          "seed_values": {
+            "latency/p95": [
+              25.0
+            ]
+          },
+          "single_seed": true,
+          "test_interval": {
+            "hi": 25.0,
+            "lo": 25.0,
+            "method": "bootstrap",
+            "n": 1
+          },
+          "usage": null,
+          "vs_best": null,
+          "within_noise_of_best": null
+        },
+        {
+          "commit": "c1",
+          "config_hash": "bench-1",
+          "cost": null,
+          "cost_complete": false,
+          "created_by": [
+            "human"
+          ],
+          "evaluation_population": null,
+          "group_id": "bench-1@c1",
+          "hypothesis": "",
+          "identical_seeds": false,
+          "label": "group bench-1@c1",
+          "latest_run_id": "bench-1",
+          "n": 1,
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 75.0,
+            "n": 1,
+            "std": 0.0
+          },
+          "repeat_observations": [],
+          "run_ids": [
+            "bench-1"
+          ],
+          "scores": {
+            "latency/p95": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 75.0,
+              "n": 1,
+              "std": 0.0
+            }
+          },
+          "seed_values": {
+            "latency/p95": [
+              75.0
+            ]
+          },
+          "single_seed": true,
+          "test_interval": {
+            "hi": 75.0,
+            "lo": 75.0,
+            "method": "bootstrap",
+            "n": 1
+          },
+          "usage": null,
+          "vs_best": {
+            "broken": null,
+            "delta": 50.0,
+            "delta_rel": 2.0,
+            "examples_needed": null,
+            "fixed": null,
+            "p": 0.001998001998001998,
+            "test": "paired_bootstrap"
+          },
+          "within_noise_of_best": false
+        }
+      ],
+      "stat_strip": [
+        {
+          "label": "p95",
+          "tooltip": "group bench-0@c1, mean of repeats",
+          "unit": "ms",
+          "value": "25"
+        },
+        {
+          "label": "repeats",
+          "tooltip": "Repeats of group bench-0@c1",
+          "unit": "",
+          "value": "1"
+        },
+        {
+          "label": "repeat \u03c3",
+          "tooltip": "group bench-0@c1: single repeat",
+          "unit": "",
+          "value": "\u2014"
+        }
+      ],
+      "task": "bench",
+      "unit": "ms",
+      "unscored": [],
+      "value_format": "percent_delta"
+    },
+    "direction:down": {
+      "headline": "group directio@c1 \u22120.500 over group directio@c1",
+      "higher_is_better": false,
+      "kind": "generic",
+      "metric_drift": [],
+      "metric_versions": {
+        "down": "v1",
+        "up": "v1"
+      },
+      "needs_reeval": [],
+      "primary": "down/value",
+      "project": "toy",
+      "rows": [
+        {
+          "commit": "c1",
+          "config_hash": "direction-0",
+          "cost": null,
+          "cost_complete": false,
+          "created_by": [
+            "human"
+          ],
+          "evaluation_population": null,
+          "group_id": "directio@c1",
+          "hypothesis": "",
+          "identical_seeds": false,
+          "label": "group directio@c1",
+          "latest_run_id": "direction-0",
+          "n": 1,
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 0.25,
+            "n": 1,
+            "std": 0.0
+          },
+          "repeat_observations": [],
+          "run_ids": [
+            "direction-0"
+          ],
+          "scores": {
+            "down/value": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.25,
+              "n": 1,
+              "std": 0.0
+            },
+            "up/value": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.25,
+              "n": 1,
+              "std": 0.0
+            }
+          },
+          "seed_values": {
+            "down/value": [
+              0.25
+            ],
+            "up/value": [
+              0.25
+            ]
+          },
+          "single_seed": true,
+          "test_interval": null,
+          "usage": null,
+          "vs_best": null,
+          "within_noise_of_best": null
+        },
+        {
+          "commit": "c1",
+          "config_hash": "direction-1",
+          "cost": null,
+          "cost_complete": false,
+          "created_by": [
+            "human"
+          ],
+          "evaluation_population": null,
+          "group_id": "directio@c1",
+          "hypothesis": "",
+          "identical_seeds": false,
+          "label": "group directio@c1",
+          "latest_run_id": "direction-1",
+          "n": 1,
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 0.75,
+            "n": 1,
+            "std": 0.0
+          },
+          "repeat_observations": [],
+          "run_ids": [
+            "direction-1"
+          ],
+          "scores": {
+            "down/value": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.75,
+              "n": 1,
+              "std": 0.0
+            },
+            "up/value": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.75,
+              "n": 1,
+              "std": 0.0
+            }
+          },
+          "seed_values": {
+            "down/value": [
+              0.75
+            ],
+            "up/value": [
+              0.75
+            ]
+          },
+          "single_seed": true,
+          "test_interval": null,
+          "usage": null,
+          "vs_best": {
+            "broken": null,
+            "delta": 0.5,
+            "delta_rel": 2.0,
+            "examples_needed": null,
+            "fixed": null,
+            "p": null,
+            "test": null
+          },
+          "within_noise_of_best": null
+        }
+      ],
+      "stat_strip": [
+        {
+          "label": "\u0394 down",
+          "tooltip": "group directio@c1 minus group directio@c1, mean down",
+          "unit": "",
+          "value": "\u22120.500"
+        },
+        {
+          "label": "seed \u03c3",
+          "tooltip": "group directio@c1: single seed",
+          "unit": "",
+          "value": "\u2014"
+        }
+      ],
+      "task": "direction",
+      "unit": "",
+      "unscored": [],
+      "value_format": "fraction"
+    },
+    "direction:up": {
+      "headline": "group directio@c1 +0.500 over group directio@c1",
+      "higher_is_better": true,
+      "kind": "generic",
+      "metric_drift": [],
+      "metric_versions": {
+        "down": "v1",
+        "up": "v1"
+      },
+      "needs_reeval": [],
+      "primary": "up/value",
+      "project": "toy",
+      "rows": [
+        {
+          "commit": "c1",
+          "config_hash": "direction-1",
+          "cost": null,
+          "cost_complete": false,
+          "created_by": [
+            "human"
+          ],
+          "evaluation_population": null,
+          "group_id": "directio@c1",
+          "hypothesis": "",
+          "identical_seeds": false,
+          "label": "group directio@c1",
+          "latest_run_id": "direction-1",
+          "n": 1,
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 0.75,
+            "n": 1,
+            "std": 0.0
+          },
+          "repeat_observations": [],
+          "run_ids": [
+            "direction-1"
+          ],
+          "scores": {
+            "down/value": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.75,
+              "n": 1,
+              "std": 0.0
+            },
+            "up/value": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.75,
+              "n": 1,
+              "std": 0.0
+            }
+          },
+          "seed_values": {
+            "down/value": [
+              0.75
+            ],
+            "up/value": [
+              0.75
+            ]
+          },
+          "single_seed": true,
+          "test_interval": null,
+          "usage": null,
+          "vs_best": null,
+          "within_noise_of_best": null
+        },
+        {
+          "commit": "c1",
+          "config_hash": "direction-0",
+          "cost": null,
+          "cost_complete": false,
+          "created_by": [
+            "human"
+          ],
+          "evaluation_population": null,
+          "group_id": "directio@c1",
+          "hypothesis": "",
+          "identical_seeds": false,
+          "label": "group directio@c1",
+          "latest_run_id": "direction-0",
+          "n": 1,
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 0.25,
+            "n": 1,
+            "std": 0.0
+          },
+          "repeat_observations": [],
+          "run_ids": [
+            "direction-0"
+          ],
+          "scores": {
+            "down/value": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.25,
+              "n": 1,
+              "std": 0.0
+            },
+            "up/value": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.25,
+              "n": 1,
+              "std": 0.0
+            }
+          },
+          "seed_values": {
+            "down/value": [
+              0.25
+            ],
+            "up/value": [
+              0.25
+            ]
+          },
+          "single_seed": true,
+          "test_interval": null,
+          "usage": null,
+          "vs_best": {
+            "broken": null,
+            "delta": -0.5,
+            "delta_rel": -0.6666666666666666,
+            "examples_needed": null,
+            "fixed": null,
+            "p": null,
+            "test": null
+          },
+          "within_noise_of_best": null
+        }
+      ],
+      "stat_strip": [
+        {
+          "label": "\u0394 up",
+          "tooltip": "group directio@c1 minus group directio@c1, mean up",
+          "unit": "",
+          "value": "+0.500"
+        },
+        {
+          "label": "seed \u03c3",
+          "tooltip": "group directio@c1: single seed",
+          "unit": "",
+          "value": "\u2014"
+        }
+      ],
+      "task": "direction",
+      "unit": "",
+      "unscored": [],
+      "value_format": "fraction"
+    },
+    "matrix:None": {
+      "headline": "group matrix-1@c1 +0.500 over group matrix-0@c1",
+      "higher_is_better": true,
+      "kind": "generic",
+      "metric_drift": [],
+      "metric_versions": {
+        "accuracy": "v1"
+      },
+      "needs_reeval": [],
+      "primary": "accuracy/set-0.m-a.top1",
+      "project": "toy",
+      "rows": [
+        {
+          "commit": "c1",
+          "config_hash": "matrix-1",
+          "cost": null,
+          "cost_complete": false,
+          "created_by": [
+            "human"
+          ],
+          "evaluation_population": null,
+          "group_id": "matrix-1@c1",
+          "hypothesis": "",
+          "identical_seeds": false,
+          "label": "group matrix-1@c1",
+          "latest_run_id": "matrix-1",
+          "n": 1,
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 0.75,
+            "n": 1,
+            "std": 0.0
+          },
+          "repeat_observations": [],
+          "run_ids": [
+            "matrix-1"
+          ],
+          "scores": {
+            "accuracy/set-0.m-a.top1": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.75,
+              "n": 1,
+              "std": 0.0
+            },
+            "accuracy/set-1.m-a.top1": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.375,
+              "n": 1,
+              "std": 0.0
+            }
+          },
+          "seed_values": {
+            "accuracy/set-0.m-a.top1": [
+              0.75
+            ],
+            "accuracy/set-1.m-a.top1": [
+              0.375
+            ]
+          },
+          "single_seed": true,
+          "test_interval": null,
+          "usage": null,
+          "vs_best": null,
+          "within_noise_of_best": null
+        },
+        {
+          "commit": "c1",
+          "config_hash": "matrix-0",
+          "cost": null,
+          "cost_complete": false,
+          "created_by": [
+            "human"
+          ],
+          "evaluation_population": null,
+          "group_id": "matrix-0@c1",
+          "hypothesis": "",
+          "identical_seeds": false,
+          "label": "group matrix-0@c1",
+          "latest_run_id": "matrix-0",
+          "n": 1,
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 0.25,
+            "n": 1,
+            "std": 0.0
+          },
+          "repeat_observations": [],
+          "run_ids": [
+            "matrix-0"
+          ],
+          "scores": {
+            "accuracy/set-0.m-a.top1": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.25,
+              "n": 1,
+              "std": 0.0
+            },
+            "accuracy/set-1.m-a.top1": {
+              "ci_high": null,
+              "ci_low": null,
+              "mean": 0.125,
+              "n": 1,
+              "std": 0.0
+            }
+          },
+          "seed_values": {
+            "accuracy/set-0.m-a.top1": [
+              0.25
+            ],
+            "accuracy/set-1.m-a.top1": [
+              0.125
+            ]
+          },
+          "single_seed": true,
+          "test_interval": null,
+          "usage": null,
+          "vs_best": {
+            "broken": null,
+            "delta": -0.5,
+            "delta_rel": -0.6666666666666666,
+            "examples_needed": null,
+            "fixed": null,
+            "p": null,
+            "test": null
+          },
+          "within_noise_of_best": null
+        }
+      ],
+      "stat_strip": [
+        {
+          "label": "\u0394 accuracy/set-0.m-a.top1",
+          "tooltip": "group matrix-1@c1 minus group matrix-0@c1, mean accuracy/set-0.m-a.top1",
+          "unit": "",
+          "value": "+0.500"
+        },
+        {
+          "label": "seed \u03c3",
+          "tooltip": "group matrix-1@c1: single seed",
+          "unit": "",
+          "value": "\u2014"
+        }
+      ],
+      "task": "matrix",
+      "unit": "",
+      "unscored": [],
+      "value_format": "fraction"
+    }
+  },
+  "comparison": {
+    "a": "a",
+    "b": "b",
+    "both_fail": 0,
+    "both_pass": 3,
+    "broken": [],
+    "field": "correct",
+    "fixed": [
+      "ex-3"
+    ],
+    "metric": "accuracy@v1"
+  },
+  "curves": {
+    "meta": {
+      "best_group_id": "aaaa@c1",
+      "checkpoints": [],
+      "events": [],
+      "groups": [
+        {
+          "group_id": "aaaa@c1",
+          "label": "group aaaa@c1",
+          "params": {},
+          "run_ids": [
+            "a",
+            "b"
+          ]
+        },
+        {
+          "group_id": "legacy@c1",
+          "label": "group legacy@c1",
+          "params": {},
+          "run_ids": [
+            "legacy"
+          ]
+        },
+        {
+          "group_id": "parented@c1",
+          "label": "group parented@c1",
+          "params": {},
+          "run_ids": [
+            "parent-child"
+          ]
+        }
+      ],
+      "metrics": [
+        "loss"
+      ],
+      "x": "step"
+    },
+    "rows": [
+      {
+        "group_id": "aaaa@c1",
+        "name": "loss",
+        "run_id": "a",
+        "seed": null,
+        "step": 0,
+        "t": 1791288000.0,
+        "value": 1.0
+      },
+      {
+        "group_id": "aaaa@c1",
+        "name": "loss",
+        "run_id": "a",
+        "seed": null,
+        "step": 1,
+        "t": 1791288000.0,
+        "value": 0.5
+      },
+      {
+        "group_id": "aaaa@c1",
+        "name": "loss",
+        "run_id": "a",
+        "seed": null,
+        "step": 2,
+        "t": 1791288000.0,
+        "value": 0.25
+      }
+    ],
+    "title": "",
+    "type": "curves"
+  },
+  "history": [
+    {
+      "name": "loss",
+      "step": 0,
+      "t": 1791288000.0,
+      "value": 1.0
+    },
+    {
+      "name": "loss",
+      "step": 1,
+      "t": 1791288000.0,
+      "value": 0.5
+    },
+    {
+      "name": "loss",
+      "step": 2,
+      "t": 1791288000.0,
+      "value": 0.25
+    }
+  ],
+  "home": {
+    "cost_today_usd": 0.0,
+    "cost_usd": 0.0,
+    "counts": {
+      "agent": 0,
+      "archived": 0,
+      "failed": 0,
+      "finished": 10,
+      "human": 10,
+      "killed": 0,
+      "lost": 0,
+      "queued": 0,
+      "running": 0,
+      "total": 10
+    },
+    "failures": [],
+    "headline": "Idle. group matrix-1@c1 leads matrix by 0.500",
+    "ideas": [
+      {
+        "best_band": {
+          "hi": 1.0,
+          "lo": 0.5101091635454027,
+          "method": "wilson",
+          "n": 4
+        },
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "parented@c1",
+        "identical_seeds": false,
+        "label": "group parented@c1",
+        "primary": null,
+        "project": "toy",
+        "statuses": [
+          "finished"
+        ],
+        "task": "toy-acc",
+        "test_interval": null,
+        "unit": ""
+      },
+      {
+        "best_band": null,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "matrix-1@c1",
+        "identical_seeds": false,
+        "label": "group matrix-1@c1",
+        "primary": {
+          "ci_high": null,
+          "ci_low": null,
+          "mean": 0.75,
+          "n": 1,
+          "std": 0.0
+        },
+        "project": "toy",
+        "statuses": [
+          "finished"
+        ],
+        "task": "matrix",
+        "test_interval": null,
+        "unit": ""
+      },
+      {
+        "best_band": null,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "matrix-0@c1",
+        "identical_seeds": false,
+        "label": "group matrix-0@c1",
+        "primary": {
+          "ci_high": null,
+          "ci_low": null,
+          "mean": 0.25,
+          "n": 1,
+          "std": 0.0
+        },
+        "project": "toy",
+        "statuses": [
+          "finished"
+        ],
+        "task": "matrix",
+        "test_interval": null,
+        "unit": ""
+      },
+      {
+        "best_band": {
+          "hi": 1.0,
+          "lo": 0.5101091635454027,
+          "method": "wilson",
+          "n": 4
+        },
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "legacy@c1",
+        "identical_seeds": false,
+        "label": "group legacy@c1",
+        "primary": {
+          "ci_high": null,
+          "ci_low": null,
+          "mean": 0.5,
+          "n": 1,
+          "std": 0.0
+        },
+        "project": "toy",
+        "statuses": [
+          "finished"
+        ],
+        "task": "toy-acc",
+        "test_interval": null,
+        "unit": ""
+      },
+      {
+        "best_band": null,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "directio@c1",
+        "identical_seeds": false,
+        "label": "group directio@c1",
+        "primary": {
+          "ci_high": null,
+          "ci_low": null,
+          "mean": 0.25,
+          "n": 1,
+          "std": 0.0
+        },
+        "project": "toy",
+        "statuses": [
+          "finished",
+          "finished"
+        ],
+        "task": "direction",
+        "test_interval": null,
+        "unit": ""
+      },
+      {
+        "best_band": {
+          "hi": 25.0,
+          "lo": 25.0,
+          "method": "bootstrap",
+          "n": 1
+        },
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "bench-1@c1",
+        "identical_seeds": false,
+        "label": "group bench-1@c1",
+        "primary": {
+          "ci_high": null,
+          "ci_low": null,
+          "mean": 75.0,
+          "n": 1,
+          "std": 0.0
+        },
+        "project": "toy",
+        "statuses": [
+          "finished"
+        ],
+        "task": "bench",
+        "test_interval": {
+          "hi": 75.0,
+          "lo": 75.0,
+          "method": "bootstrap",
+          "n": 1
+        },
+        "unit": "ms"
+      },
+      {
+        "best_band": {
+          "hi": 25.0,
+          "lo": 25.0,
+          "method": "bootstrap",
+          "n": 1
+        },
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "bench-0@c1",
+        "identical_seeds": false,
+        "label": "group bench-0@c1",
+        "primary": {
+          "ci_high": null,
+          "ci_low": null,
+          "mean": 25.0,
+          "n": 1,
+          "std": 0.0
+        },
+        "project": "toy",
+        "statuses": [
+          "finished"
+        ],
+        "task": "bench",
+        "test_interval": {
+          "hi": 25.0,
+          "lo": 25.0,
+          "method": "bootstrap",
+          "n": 1
+        },
+        "unit": "ms"
+      },
+      {
+        "best_band": {
+          "hi": 1.0,
+          "lo": 0.5101091635454027,
+          "method": "wilson",
+          "n": 4
+        },
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "aaaa@c1",
+        "identical_seeds": false,
+        "label": "group aaaa@c1",
+        "primary": {
+          "ci_high": 1.0,
+          "ci_low": 0.0,
+          "mean": 0.875,
+          "n": 2,
+          "std": 0.1767766952966369
+        },
+        "project": "toy",
+        "statuses": [
+          "finished",
+          "finished"
+        ],
+        "task": "toy-acc",
+        "test_interval": {
+          "hi": 1.0,
+          "lo": 0.5101091635454027,
+          "method": "wilson",
+          "n": 4
+        },
+        "unit": ""
+      }
+    ],
+    "names": {
+      "a": "wide %_ beam",
+      "b": "b",
+      "bench-0": "bench-0 \u00b7 seed 0",
+      "bench-1": "bench-1 \u00b7 seed 1",
+      "direction-0": "direction-0 \u00b7 seed 0",
+      "direction-1": "direction-1 \u00b7 seed 1",
+      "legacy": "legacy",
+      "matrix-0": "matrix-0 \u00b7 seed 0",
+      "matrix-1": "matrix-1 \u00b7 seed 1",
+      "parent-child": "parent-child"
+    },
+    "progress": {},
+    "projects": [
+      {
+        "best": 25.0,
+        "best_7d_ago": null,
+        "best_history": [
+          25.0,
+          25.0
+        ],
+        "higher_is_better": false,
+        "kind": "system_bench",
+        "primary": "latency/p95",
+        "project": "toy",
+        "queued": 0,
+        "running": 0,
+        "runs": 2,
+        "task": "bench",
+        "unit": "ms"
+      },
+      {
+        "best": 0.75,
+        "best_7d_ago": null,
+        "best_history": [
+          0.25,
+          0.75
+        ],
+        "higher_is_better": true,
+        "kind": "generic",
+        "primary": "up/value",
+        "project": "toy",
+        "queued": 0,
+        "running": 0,
+        "runs": 2,
+        "task": "direction",
+        "unit": ""
+      },
+      {
+        "best": 0.75,
+        "best_7d_ago": null,
+        "best_history": [
+          0.25,
+          0.75
+        ],
+        "higher_is_better": true,
+        "kind": "generic",
+        "primary": "accuracy/set-0.m-a.top1",
+        "project": "toy",
+        "queued": 0,
+        "running": 0,
+        "runs": 2,
+        "task": "matrix",
+        "unit": ""
+      },
+      {
+        "best": 0.875,
+        "best_7d_ago": null,
+        "best_history": [
+          0.5,
+          0.875
+        ],
+        "higher_is_better": true,
+        "kind": "generic",
+        "primary": "accuracy/value",
+        "project": "toy",
+        "queued": 0,
+        "running": 0,
+        "runs": 4,
+        "task": "toy-acc",
+        "unit": ""
+      },
+      {
+        "best": null,
+        "best_7d_ago": null,
+        "best_history": [],
+        "higher_is_better": true,
+        "kind": "generic",
+        "primary": "accuracy/value",
+        "project": "toy",
+        "queued": 0,
+        "running": 0,
+        "runs": 0,
+        "task": "toy-broken",
+        "unit": ""
+      }
+    ],
+    "recent": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "delta_best": null,
+        "end_reason": null,
+        "ended_at": null,
+        "exit_code": null,
+        "hypothesis": "",
+        "name": "parent-child",
+        "primary": null,
+        "project": "toy",
+        "run_id": "parent-child",
+        "status": "finished",
+        "task": "toy-acc"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "delta_best": 0.0,
+        "end_reason": null,
+        "ended_at": null,
+        "exit_code": null,
+        "hypothesis": "",
+        "name": "matrix-1 \u00b7 seed 1",
+        "primary": 0.75,
+        "project": "toy",
+        "run_id": "matrix-1",
+        "status": "finished",
+        "task": "matrix"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "delta_best": -0.5,
+        "end_reason": null,
+        "ended_at": null,
+        "exit_code": null,
+        "hypothesis": "",
+        "name": "matrix-0 \u00b7 seed 0",
+        "primary": 0.25,
+        "project": "toy",
+        "run_id": "matrix-0",
+        "status": "finished",
+        "task": "matrix"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "delta_best": -0.375,
+        "end_reason": null,
+        "ended_at": null,
+        "exit_code": null,
+        "hypothesis": "",
+        "name": "legacy",
+        "primary": 0.5,
+        "project": "toy",
+        "run_id": "legacy",
+        "status": "finished",
+        "task": "toy-acc"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "delta_best": 0.0,
+        "end_reason": null,
+        "ended_at": null,
+        "exit_code": null,
+        "hypothesis": "",
+        "name": "direction-1 \u00b7 seed 1",
+        "primary": 0.75,
+        "project": "toy",
+        "run_id": "direction-1",
+        "status": "finished",
+        "task": "direction"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "delta_best": -0.5,
+        "end_reason": null,
+        "ended_at": null,
+        "exit_code": null,
+        "hypothesis": "",
+        "name": "direction-0 \u00b7 seed 0",
+        "primary": 0.25,
+        "project": "toy",
+        "run_id": "direction-0",
+        "status": "finished",
+        "task": "direction"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "delta_best": 50.0,
+        "end_reason": null,
+        "ended_at": null,
+        "exit_code": null,
+        "hypothesis": "",
+        "name": "bench-1 \u00b7 seed 1",
+        "primary": 75.0,
+        "project": "toy",
+        "run_id": "bench-1",
+        "status": "finished",
+        "task": "bench"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "delta_best": 0.0,
+        "end_reason": null,
+        "ended_at": null,
+        "exit_code": null,
+        "hypothesis": "",
+        "name": "bench-0 \u00b7 seed 0",
+        "primary": 25.0,
+        "project": "toy",
+        "run_id": "bench-0",
+        "status": "finished",
+        "task": "bench"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "delta_best": 0.125,
+        "end_reason": null,
+        "ended_at": null,
+        "exit_code": null,
+        "hypothesis": "",
+        "name": "b",
+        "primary": 1.0,
+        "project": "toy",
+        "run_id": "b",
+        "status": "finished",
+        "task": "toy-acc"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "delta_best": -0.125,
+        "end_reason": null,
+        "ended_at": null,
+        "exit_code": null,
+        "hypothesis": "",
+        "name": "wide %_ beam",
+        "primary": 0.75,
+        "project": "toy",
+        "run_id": "a",
+        "status": "finished",
+        "task": "toy-acc"
+      }
+    ],
+    "running": [],
+    "timeline": [
+      {
+        "archived": false,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "aaaa@c1",
+        "is_best": true,
+        "label": "group aaaa@c1",
+        "project": "toy",
+        "run_id": "a",
+        "status": "finished",
+        "task": "toy-acc"
+      },
+      {
+        "archived": false,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "aaaa@c1",
+        "is_best": true,
+        "label": "group aaaa@c1",
+        "project": "toy",
+        "run_id": "b",
+        "status": "finished",
+        "task": "toy-acc"
+      },
+      {
+        "archived": false,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "bench-0@c1",
+        "is_best": true,
+        "label": "group bench-0@c1",
+        "project": "toy",
+        "run_id": "bench-0",
+        "status": "finished",
+        "task": "bench"
+      },
+      {
+        "archived": false,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "bench-1@c1",
+        "is_best": false,
+        "label": "group bench-1@c1",
+        "project": "toy",
+        "run_id": "bench-1",
+        "status": "finished",
+        "task": "bench"
+      },
+      {
+        "archived": false,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "directio@c1",
+        "is_best": false,
+        "label": "group directio@c1",
+        "project": "toy",
+        "run_id": "direction-0",
+        "status": "finished",
+        "task": "direction"
+      },
+      {
+        "archived": false,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "directio@c1",
+        "is_best": true,
+        "label": "group directio@c1",
+        "project": "toy",
+        "run_id": "direction-1",
+        "status": "finished",
+        "task": "direction"
+      },
+      {
+        "archived": false,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "legacy@c1",
+        "is_best": false,
+        "label": "group legacy@c1",
+        "project": "toy",
+        "run_id": "legacy",
+        "status": "finished",
+        "task": "toy-acc"
+      },
+      {
+        "archived": false,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "matrix-0@c1",
+        "is_best": false,
+        "label": "group matrix-0@c1",
+        "project": "toy",
+        "run_id": "matrix-0",
+        "status": "finished",
+        "task": "matrix"
+      },
+      {
+        "archived": false,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "matrix-1@c1",
+        "is_best": true,
+        "label": "group matrix-1@c1",
+        "project": "toy",
+        "run_id": "matrix-1",
+        "status": "finished",
+        "task": "matrix"
+      },
+      {
+        "archived": false,
+        "created_at": "2026-10-06T12:00:00Z",
+        "created_by": "human",
+        "group_id": "parented@c1",
+        "is_best": false,
+        "label": "group parented@c1",
+        "project": "toy",
+        "run_id": "parent-child",
+        "status": "finished",
+        "task": "toy-acc"
+      }
+    ]
+  },
+  "index_state": {
+    "carried": {
+      "host_cursors": [
+        [
+          "fixture-host",
+          "fixture-remote",
+          17
+        ],
+        [
+          "reserved-host",
+          "reserved-remote",
+          0
+        ]
+      ],
+      "run_changes": [
+        [
+          "a",
+          15
+        ],
+        [
+          "b",
+          9
+        ],
+        [
+          "bench-0",
+          32
+        ],
+        [
+          "bench-1",
+          36
+        ],
+        [
+          "direction-0",
+          23
+        ],
+        [
+          "direction-1",
+          28
+        ],
+        [
+          "legacy",
+          12
+        ],
+        [
+          "matrix-0",
+          41
+        ],
+        [
+          "matrix-1",
+          46
+        ],
+        [
+          "parent-child",
+          18
+        ]
+      ],
+      "scores_stale": [
+        [
+          "legacy"
+        ]
+      ]
+    },
+    "generation": 46,
+    "pending": [
+      "a"
+    ],
+    "schema": {
+      "datasets": [
+        [
+          0,
+          "project",
+          "VARCHAR",
+          1,
+          null,
+          1
+        ],
+        [
+          1,
+          "name",
+          "VARCHAR",
+          1,
+          null,
+          2
+        ],
+        [
+          2,
+          "version",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          3,
+          "host",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          4,
+          "path",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ]
+      ],
+      "host_cursors": [
+        [
+          0,
+          "host",
+          "VARCHAR",
+          1,
+          null,
+          1
+        ],
+        [
+          1,
+          "environment_id",
+          "VARCHAR",
+          1,
+          null,
+          2
+        ],
+        [
+          2,
+          "last_sequence",
+          "INTEGER",
+          1,
+          null,
+          0
+        ]
+      ],
+      "meta": [
+        [
+          0,
+          "key",
+          "VARCHAR",
+          1,
+          null,
+          1
+        ],
+        [
+          1,
+          "value",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ]
+      ],
+      "metric_points": [
+        [
+          0,
+          "id",
+          "INTEGER",
+          1,
+          null,
+          1
+        ],
+        [
+          1,
+          "run_id",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          2,
+          "name",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          3,
+          "step",
+          "INTEGER",
+          1,
+          null,
+          0
+        ],
+        [
+          4,
+          "value",
+          "FLOAT",
+          1,
+          null,
+          0
+        ],
+        [
+          5,
+          "t",
+          "FLOAT",
+          0,
+          null,
+          0
+        ]
+      ],
+      "metric_points_pending": [
+        [
+          0,
+          "run_id",
+          "VARCHAR",
+          1,
+          null,
+          1
+        ]
+      ],
+      "metrics": [
+        [
+          0,
+          "project",
+          "VARCHAR",
+          1,
+          null,
+          1
+        ],
+        [
+          1,
+          "name",
+          "VARCHAR",
+          1,
+          null,
+          2
+        ],
+        [
+          2,
+          "version",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          3,
+          "fn",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          4,
+          "higher_is_better",
+          "BOOLEAN",
+          1,
+          null,
+          0
+        ]
+      ],
+      "projects": [
+        [
+          0,
+          "name",
+          "VARCHAR",
+          1,
+          null,
+          1
+        ],
+        [
+          1,
+          "repo",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          2,
+          "entry_json",
+          "TEXT",
+          1,
+          null,
+          0
+        ]
+      ],
+      "run_changes": [
+        [
+          0,
+          "run_id",
+          "VARCHAR",
+          1,
+          null,
+          1
+        ],
+        [
+          1,
+          "generation",
+          "INTEGER",
+          1,
+          null,
+          0
+        ]
+      ],
+      "run_tags": [
+        [
+          0,
+          "run_id",
+          "VARCHAR",
+          1,
+          null,
+          1
+        ],
+        [
+          1,
+          "tag",
+          "VARCHAR",
+          1,
+          null,
+          2
+        ]
+      ],
+      "runs": [
+        [
+          0,
+          "run_id",
+          "VARCHAR",
+          1,
+          null,
+          1
+        ],
+        [
+          1,
+          "project",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          2,
+          "task",
+          "VARCHAR",
+          0,
+          null,
+          0
+        ],
+        [
+          3,
+          "status",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          4,
+          "created_at",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          5,
+          "config_hash",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          6,
+          "commit",
+          "VARCHAR",
+          0,
+          null,
+          0
+        ],
+        [
+          7,
+          "environment_id",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          8,
+          "parent",
+          "VARCHAR",
+          0,
+          null,
+          0
+        ],
+        [
+          9,
+          "archived",
+          "BOOLEAN",
+          1,
+          null,
+          0
+        ],
+        [
+          10,
+          "starred",
+          "BOOLEAN",
+          1,
+          null,
+          0
+        ],
+        [
+          11,
+          "name",
+          "VARCHAR",
+          0,
+          null,
+          0
+        ],
+        [
+          12,
+          "record_json",
+          "TEXT",
+          1,
+          null,
+          0
+        ]
+      ],
+      "scores": [
+        [
+          0,
+          "id",
+          "INTEGER",
+          1,
+          null,
+          1
+        ],
+        [
+          1,
+          "run_id",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          2,
+          "record_json",
+          "TEXT",
+          1,
+          null,
+          0
+        ],
+        [
+          3,
+          "created_at",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ]
+      ],
+      "scores_stale": [
+        [
+          0,
+          "run_id",
+          "VARCHAR",
+          1,
+          null,
+          1
+        ]
+      ],
+      "tasks": [
+        [
+          0,
+          "project",
+          "VARCHAR",
+          1,
+          null,
+          1
+        ],
+        [
+          1,
+          "name",
+          "VARCHAR",
+          1,
+          null,
+          2
+        ],
+        [
+          2,
+          "dataset",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          3,
+          "split",
+          "VARCHAR",
+          0,
+          null,
+          0
+        ],
+        [
+          4,
+          "primary",
+          "VARCHAR",
+          1,
+          null,
+          0
+        ],
+        [
+          5,
+          "metrics_json",
+          "TEXT",
+          1,
+          null,
+          0
+        ]
+      ]
+    }
+  },
+  "projects": [
+    {
+      "config": {
+        "datasets": {
+          "toyset": {
+            "description": "",
+            "host": "local",
+            "id_field": "id",
+            "path": "data/test.jsonl",
+            "reference_field": "reference",
+            "splits": {
+              "test": "data/test.jsonl"
+            },
+            "version": "v1"
+          }
+        },
+        "description": "",
+        "env": {
+          "python": [
+            "__HX_FIXTURE_PYTHON__"
+          ],
+          "setup": null
+        },
+        "metrics": {
+          "accuracy": {
+            "changelog": {},
+            "fn": "toymetrics:accuracy",
+            "params": {},
+            "unit": "",
+            "version": "v1"
+          },
+          "broken": {
+            "changelog": {},
+            "fn": "toymetrics:broken",
+            "params": {},
+            "unit": "",
+            "version": "v1"
+          },
+          "down": {
+            "changelog": {},
+            "fn": "toymetrics:accuracy",
+            "higher_is_better": false,
+            "params": {},
+            "unit": "",
+            "version": "v1"
+          },
+          "latency": {
+            "changelog": {},
+            "fn": "toymetrics:accuracy",
+            "params": {},
+            "unit": "",
+            "version": "v1"
+          },
+          "up": {
+            "changelog": {},
+            "fn": "toymetrics:accuracy",
+            "higher_is_better": true,
+            "params": {},
+            "unit": "",
+            "version": "v1"
+          }
+        },
+        "project": "toy",
+        "stages": {
+          "infer": "__HX_FIXTURE_PYTHON__ infer.py --ckpt {checkpoint}"
+        },
+        "tasks": {
+          "bench": {
+            "baseline": null,
+            "dataset": "toyset",
+            "description": "",
+            "kind": "system_bench",
+            "metrics": [
+              "latency"
+            ],
+            "primary": "latency/p95",
+            "score_keys": null,
+            "split": "test",
+            "version_param": "version",
+            "views": {}
+          },
+          "direction": {
+            "baseline": null,
+            "dataset": "toyset",
+            "description": "",
+            "kind": "generic",
+            "metrics": [
+              "up",
+              "down"
+            ],
+            "primary": "up",
+            "score_keys": null,
+            "split": "test",
+            "version_param": "version",
+            "views": {}
+          },
+          "matrix": {
+            "baseline": null,
+            "dataset": "toyset",
+            "description": "",
+            "kind": "generic",
+            "metrics": [
+              "accuracy"
+            ],
+            "primary": "accuracy/set-0.m-a.top1",
+            "score_keys": "{dataset}.{model}.{metric}",
+            "split": "test",
+            "version_param": "version",
+            "views": {}
+          },
+          "toy-acc": {
+            "baseline": null,
+            "dataset": "toyset",
+            "description": "",
+            "kind": "generic",
+            "metrics": [
+              "accuracy"
+            ],
+            "primary": "accuracy",
+            "score_keys": null,
+            "split": "test",
+            "version_param": "version",
+            "views": {}
+          },
+          "toy-broken": {
+            "baseline": null,
+            "dataset": "toyset",
+            "description": "",
+            "kind": "generic",
+            "metrics": [
+              "accuracy",
+              "broken"
+            ],
+            "primary": "accuracy",
+            "score_keys": null,
+            "split": "test",
+            "version_param": "version",
+            "views": {}
+          }
+        }
+      },
+      "config_format": 2,
+      "previous_repos": [],
+      "project": "toy",
+      "registered_at": "2026-10-16T21:27:35.403181Z",
+      "remote_host": null,
+      "repo": "__HX_FIXTURE_ROOT__/toy"
+    }
+  ],
+  "records": {
+    "a": {
+      "archived": false,
+      "artifacts": [],
+      "command": [
+        "echo",
+        "hi"
+      ],
+      "command_template": [
+        "echo",
+        "hi"
+      ],
+      "config_hash": "sha256:aaaa",
+      "cost": null,
+      "created_at": "2026-10-06T12:00:00Z",
+      "created_by": "human",
+      "cwd": "__HX_FIXTURE_ROOT__/toy",
+      "datasets": [
+        {
+          "checked_at": null,
+          "hash": "sha256:605125773c56e24c54980a90b1d34857d6336a20c1068bd263a0f88fa0956c2b",
+          "hash_mode": "full",
+          "host": "local",
+          "name": "toyset",
+          "path": "data/test.jsonl",
+          "size": null,
+          "split": "test",
+          "version": "v1"
+        }
+      ],
+      "end_reason": null,
+      "ended_at": null,
+      "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+      "executor": {
+        "child_pid": null,
+        "gpus": [],
+        "host": null,
+        "node": null,
+        "pid": null,
+        "pid_create_time": null,
+        "queue_position": null,
+        "slurm_job_id": null,
+        "type": "local"
+      },
+      "exit_code": null,
+      "git": {
+        "branch": null,
+        "commit": "c1",
+        "diff_hash": null,
+        "dirty": false,
+        "repo": null,
+        "untracked": [],
+        "untracked_count": 0
+      },
+      "gpus_requested": 0,
+      "host": "mac",
+      "hypothesis": "",
+      "kind": "full",
+      "name": "wide %_ beam",
+      "params": {},
+      "parent": null,
+      "project": "toy",
+      "run_id": "a",
+      "seed": null,
+      "stage": null,
+      "starred": false,
+      "started_at": null,
+      "status": "finished",
+      "sweep_id": null,
+      "tags": [],
+      "task": "toy-acc",
+      "usage": null,
+      "vars": {}
+    },
+    "b": {
+      "archived": false,
+      "artifacts": [],
+      "command": [
+        "echo",
+        "hi"
+      ],
+      "command_template": [
+        "echo",
+        "hi"
+      ],
+      "config_hash": "sha256:aaaa",
+      "cost": null,
+      "created_at": "2026-10-06T12:00:00Z",
+      "created_by": "human",
+      "cwd": "__HX_FIXTURE_ROOT__/toy",
+      "datasets": [
+        {
+          "checked_at": null,
+          "hash": "sha256:605125773c56e24c54980a90b1d34857d6336a20c1068bd263a0f88fa0956c2b",
+          "hash_mode": "full",
+          "host": "local",
+          "name": "toyset",
+          "path": "data/test.jsonl",
+          "size": null,
+          "split": "test",
+          "version": "v1"
+        }
+      ],
+      "end_reason": null,
+      "ended_at": null,
+      "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+      "executor": {
+        "child_pid": null,
+        "gpus": [],
+        "host": null,
+        "node": null,
+        "pid": null,
+        "pid_create_time": null,
+        "queue_position": null,
+        "slurm_job_id": null,
+        "type": "local"
+      },
+      "exit_code": null,
+      "git": {
+        "branch": null,
+        "commit": "c1",
+        "diff_hash": null,
+        "dirty": false,
+        "repo": null,
+        "untracked": [],
+        "untracked_count": 0
+      },
+      "gpus_requested": 0,
+      "host": "mac",
+      "hypothesis": "",
+      "kind": "full",
+      "name": null,
+      "params": {},
+      "parent": null,
+      "project": "toy",
+      "run_id": "b",
+      "seed": null,
+      "stage": null,
+      "starred": false,
+      "started_at": null,
+      "status": "finished",
+      "sweep_id": null,
+      "tags": [],
+      "task": "toy-acc",
+      "usage": null,
+      "vars": {}
+    },
+    "bench-0": {
+      "archived": false,
+      "artifacts": [],
+      "command": [
+        "echo",
+        "hi"
+      ],
+      "command_template": [
+        "echo",
+        "hi"
+      ],
+      "config_hash": "bench-0",
+      "cost": null,
+      "created_at": "2026-10-06T12:00:00Z",
+      "created_by": "human",
+      "cwd": "__HX_FIXTURE_ROOT__/toy",
+      "datasets": [],
+      "end_reason": null,
+      "ended_at": null,
+      "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+      "executor": {
+        "child_pid": null,
+        "gpus": [],
+        "host": null,
+        "node": null,
+        "pid": null,
+        "pid_create_time": null,
+        "queue_position": null,
+        "slurm_job_id": null,
+        "type": "local"
+      },
+      "exit_code": null,
+      "git": {
+        "branch": null,
+        "commit": "c1",
+        "diff_hash": null,
+        "dirty": false,
+        "repo": null,
+        "untracked": [],
+        "untracked_count": 0
+      },
+      "gpus_requested": 0,
+      "host": "mac",
+      "hypothesis": "",
+      "kind": "full",
+      "name": null,
+      "params": {},
+      "parent": null,
+      "project": "toy",
+      "run_id": "bench-0",
+      "seed": 0,
+      "stage": null,
+      "starred": false,
+      "started_at": null,
+      "status": "finished",
+      "sweep_id": null,
+      "tags": [],
+      "task": "bench",
+      "usage": null,
+      "vars": {}
+    },
+    "bench-1": {
+      "archived": false,
+      "artifacts": [],
+      "command": [
+        "echo",
+        "hi"
+      ],
+      "command_template": [
+        "echo",
+        "hi"
+      ],
+      "config_hash": "bench-1",
+      "cost": null,
+      "created_at": "2026-10-06T12:00:00Z",
+      "created_by": "human",
+      "cwd": "__HX_FIXTURE_ROOT__/toy",
+      "datasets": [],
+      "end_reason": null,
+      "ended_at": null,
+      "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+      "executor": {
+        "child_pid": null,
+        "gpus": [],
+        "host": null,
+        "node": null,
+        "pid": null,
+        "pid_create_time": null,
+        "queue_position": null,
+        "slurm_job_id": null,
+        "type": "local"
+      },
+      "exit_code": null,
+      "git": {
+        "branch": null,
+        "commit": "c1",
+        "diff_hash": null,
+        "dirty": false,
+        "repo": null,
+        "untracked": [],
+        "untracked_count": 0
+      },
+      "gpus_requested": 0,
+      "host": "mac",
+      "hypothesis": "",
+      "kind": "full",
+      "name": null,
+      "params": {},
+      "parent": null,
+      "project": "toy",
+      "run_id": "bench-1",
+      "seed": 1,
+      "stage": null,
+      "starred": false,
+      "started_at": null,
+      "status": "finished",
+      "sweep_id": null,
+      "tags": [],
+      "task": "bench",
+      "usage": null,
+      "vars": {}
+    },
+    "direction-0": {
+      "archived": false,
+      "artifacts": [],
+      "command": [
+        "echo",
+        "hi"
+      ],
+      "command_template": [
+        "echo",
+        "hi"
+      ],
+      "config_hash": "direction-0",
+      "cost": null,
+      "created_at": "2026-10-06T12:00:00Z",
+      "created_by": "human",
+      "cwd": "__HX_FIXTURE_ROOT__/toy",
+      "datasets": [],
+      "end_reason": null,
+      "ended_at": null,
+      "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+      "executor": {
+        "child_pid": null,
+        "gpus": [],
+        "host": null,
+        "node": null,
+        "pid": null,
+        "pid_create_time": null,
+        "queue_position": null,
+        "slurm_job_id": null,
+        "type": "local"
+      },
+      "exit_code": null,
+      "git": {
+        "branch": null,
+        "commit": "c1",
+        "diff_hash": null,
+        "dirty": false,
+        "repo": null,
+        "untracked": [],
+        "untracked_count": 0
+      },
+      "gpus_requested": 0,
+      "host": "mac",
+      "hypothesis": "",
+      "kind": "full",
+      "name": null,
+      "params": {},
+      "parent": null,
+      "project": "toy",
+      "run_id": "direction-0",
+      "seed": 0,
+      "stage": null,
+      "starred": false,
+      "started_at": null,
+      "status": "finished",
+      "sweep_id": null,
+      "tags": [],
+      "task": "direction",
+      "usage": null,
+      "vars": {}
+    },
+    "direction-1": {
+      "archived": false,
+      "artifacts": [],
+      "command": [
+        "echo",
+        "hi"
+      ],
+      "command_template": [
+        "echo",
+        "hi"
+      ],
+      "config_hash": "direction-1",
+      "cost": null,
+      "created_at": "2026-10-06T12:00:00Z",
+      "created_by": "human",
+      "cwd": "__HX_FIXTURE_ROOT__/toy",
+      "datasets": [],
+      "end_reason": null,
+      "ended_at": null,
+      "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+      "executor": {
+        "child_pid": null,
+        "gpus": [],
+        "host": null,
+        "node": null,
+        "pid": null,
+        "pid_create_time": null,
+        "queue_position": null,
+        "slurm_job_id": null,
+        "type": "local"
+      },
+      "exit_code": null,
+      "git": {
+        "branch": null,
+        "commit": "c1",
+        "diff_hash": null,
+        "dirty": false,
+        "repo": null,
+        "untracked": [],
+        "untracked_count": 0
+      },
+      "gpus_requested": 0,
+      "host": "mac",
+      "hypothesis": "",
+      "kind": "full",
+      "name": null,
+      "params": {},
+      "parent": null,
+      "project": "toy",
+      "run_id": "direction-1",
+      "seed": 1,
+      "stage": null,
+      "starred": false,
+      "started_at": null,
+      "status": "finished",
+      "sweep_id": null,
+      "tags": [],
+      "task": "direction",
+      "usage": null,
+      "vars": {}
+    },
+    "legacy": {
+      "archived": false,
+      "artifacts": [],
+      "command": [
+        "echo",
+        "hi"
+      ],
+      "command_template": [
+        "echo",
+        "hi"
+      ],
+      "config_hash": "legacy",
+      "cost": null,
+      "created_at": "2026-10-06T12:00:00Z",
+      "created_by": "human",
+      "cwd": "__HX_FIXTURE_ROOT__/toy",
+      "datasets": [],
+      "end_reason": null,
+      "ended_at": null,
+      "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+      "executor": {
+        "child_pid": null,
+        "gpus": [],
+        "host": null,
+        "node": null,
+        "pid": null,
+        "pid_create_time": null,
+        "queue_position": null,
+        "slurm_job_id": null,
+        "type": "local"
+      },
+      "exit_code": null,
+      "git": {
+        "branch": null,
+        "commit": "c1",
+        "diff_hash": null,
+        "dirty": false,
+        "repo": null,
+        "untracked": [],
+        "untracked_count": 0
+      },
+      "gpus_requested": 0,
+      "host": "mac",
+      "hypothesis": "",
+      "kind": "full",
+      "name": null,
+      "params": {},
+      "parent": null,
+      "project": "toy",
+      "run_id": "legacy",
+      "seed": null,
+      "stage": null,
+      "starred": false,
+      "started_at": null,
+      "status": "finished",
+      "sweep_id": null,
+      "tags": [],
+      "task": "toy-acc",
+      "usage": null,
+      "vars": {}
+    },
+    "matrix-0": {
+      "archived": false,
+      "artifacts": [],
+      "command": [
+        "echo",
+        "hi"
+      ],
+      "command_template": [
+        "echo",
+        "hi"
+      ],
+      "config_hash": "matrix-0",
+      "cost": null,
+      "created_at": "2026-10-06T12:00:00Z",
+      "created_by": "human",
+      "cwd": "__HX_FIXTURE_ROOT__/toy",
+      "datasets": [],
+      "end_reason": null,
+      "ended_at": null,
+      "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+      "executor": {
+        "child_pid": null,
+        "gpus": [],
+        "host": null,
+        "node": null,
+        "pid": null,
+        "pid_create_time": null,
+        "queue_position": null,
+        "slurm_job_id": null,
+        "type": "local"
+      },
+      "exit_code": null,
+      "git": {
+        "branch": null,
+        "commit": "c1",
+        "diff_hash": null,
+        "dirty": false,
+        "repo": null,
+        "untracked": [],
+        "untracked_count": 0
+      },
+      "gpus_requested": 0,
+      "host": "mac",
+      "hypothesis": "",
+      "kind": "full",
+      "name": null,
+      "params": {},
+      "parent": null,
+      "project": "toy",
+      "run_id": "matrix-0",
+      "seed": 0,
+      "stage": null,
+      "starred": false,
+      "started_at": null,
+      "status": "finished",
+      "sweep_id": null,
+      "tags": [],
+      "task": "matrix",
+      "usage": null,
+      "vars": {}
+    },
+    "matrix-1": {
+      "archived": false,
+      "artifacts": [],
+      "command": [
+        "echo",
+        "hi"
+      ],
+      "command_template": [
+        "echo",
+        "hi"
+      ],
+      "config_hash": "matrix-1",
+      "cost": null,
+      "created_at": "2026-10-06T12:00:00Z",
+      "created_by": "human",
+      "cwd": "__HX_FIXTURE_ROOT__/toy",
+      "datasets": [],
+      "end_reason": null,
+      "ended_at": null,
+      "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+      "executor": {
+        "child_pid": null,
+        "gpus": [],
+        "host": null,
+        "node": null,
+        "pid": null,
+        "pid_create_time": null,
+        "queue_position": null,
+        "slurm_job_id": null,
+        "type": "local"
+      },
+      "exit_code": null,
+      "git": {
+        "branch": null,
+        "commit": "c1",
+        "diff_hash": null,
+        "dirty": false,
+        "repo": null,
+        "untracked": [],
+        "untracked_count": 0
+      },
+      "gpus_requested": 0,
+      "host": "mac",
+      "hypothesis": "",
+      "kind": "full",
+      "name": null,
+      "params": {},
+      "parent": null,
+      "project": "toy",
+      "run_id": "matrix-1",
+      "seed": 1,
+      "stage": null,
+      "starred": false,
+      "started_at": null,
+      "status": "finished",
+      "sweep_id": null,
+      "tags": [],
+      "task": "matrix",
+      "usage": null,
+      "vars": {}
+    },
+    "parent-child": {
+      "archived": false,
+      "artifacts": [],
+      "command": [
+        "echo",
+        "hi"
+      ],
+      "command_template": [
+        "echo",
+        "hi"
+      ],
+      "config_hash": "parented",
+      "cost": null,
+      "created_at": "2026-10-06T12:00:00Z",
+      "created_by": "human",
+      "cwd": "__HX_FIXTURE_ROOT__/toy",
+      "datasets": [],
+      "end_reason": null,
+      "ended_at": null,
+      "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+      "executor": {
+        "child_pid": null,
+        "gpus": [],
+        "host": null,
+        "node": null,
+        "pid": null,
+        "pid_create_time": null,
+        "queue_position": null,
+        "slurm_job_id": null,
+        "type": "local"
+      },
+      "exit_code": null,
+      "git": {
+        "branch": null,
+        "commit": "c1",
+        "diff_hash": null,
+        "dirty": false,
+        "repo": null,
+        "untracked": [],
+        "untracked_count": 0
+      },
+      "gpus_requested": 0,
+      "host": "mac",
+      "hypothesis": "",
+      "kind": "full",
+      "name": null,
+      "params": {},
+      "parent": "a",
+      "project": "toy",
+      "run_id": "parent-child",
+      "seed": null,
+      "stage": null,
+      "starred": false,
+      "started_at": null,
+      "status": "finished",
+      "sweep_id": null,
+      "tags": [],
+      "task": "toy-acc",
+      "usage": null,
+      "vars": {}
+    }
+  },
+  "scores": {
+    "a": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": 4,
+        "evaluation_ids_hash": "sha256:903a03ca18c11fedb2d6fc7aaee555f9732e525a680044d1bba28ae8209d3f23",
+        "key": "value",
+        "metric": "accuracy",
+        "per_example_hash": "sha256:f8a464d1f0028aa38c98e3a5caac32cdae9e1900ce027dadbcfeb7b76682219c",
+        "source_hash": "sha256:30bca6684e8b747a",
+        "value": 0.75,
+        "version": "v1"
+      }
+    ],
+    "b": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": 4,
+        "evaluation_ids_hash": "sha256:903a03ca18c11fedb2d6fc7aaee555f9732e525a680044d1bba28ae8209d3f23",
+        "key": "value",
+        "metric": "accuracy",
+        "per_example_hash": "sha256:da381988a1793f8e55dd5ed42077d51a3d76c75e750ca2d6bd30be1820b77d0a",
+        "source_hash": "sha256:30bca6684e8b747a",
+        "value": 1.0,
+        "version": "v1"
+      }
+    ],
+    "bench-0": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "p95",
+        "metric": "latency",
+        "per_example_hash": null,
+        "source_hash": "sha256:synthetic",
+        "value": 25.0,
+        "version": "v1"
+      },
+      {
+        "created_at": "2026-10-06T12:00:01Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "p95",
+        "metric": "latency",
+        "per_example_hash": null,
+        "source_hash": "sha256:obsolete",
+        "value": 99.0,
+        "version": "v0"
+      }
+    ],
+    "bench-1": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "p95",
+        "metric": "latency",
+        "per_example_hash": null,
+        "source_hash": "sha256:synthetic",
+        "value": 75.0,
+        "version": "v1"
+      },
+      {
+        "created_at": "2026-10-06T12:00:01Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "p95",
+        "metric": "latency",
+        "per_example_hash": null,
+        "source_hash": "sha256:obsolete",
+        "value": 99.0,
+        "version": "v0"
+      }
+    ],
+    "direction-0": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "value",
+        "metric": "up",
+        "per_example_hash": null,
+        "source_hash": "sha256:synthetic",
+        "value": 0.25,
+        "version": "v1"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "value",
+        "metric": "down",
+        "per_example_hash": null,
+        "source_hash": "sha256:synthetic",
+        "value": 0.25,
+        "version": "v1"
+      },
+      {
+        "created_at": "2026-10-06T12:00:01Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "value",
+        "metric": "up",
+        "per_example_hash": null,
+        "source_hash": "sha256:obsolete",
+        "value": 99.0,
+        "version": "v0"
+      }
+    ],
+    "direction-1": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "value",
+        "metric": "up",
+        "per_example_hash": null,
+        "source_hash": "sha256:synthetic",
+        "value": 0.75,
+        "version": "v1"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "value",
+        "metric": "down",
+        "per_example_hash": null,
+        "source_hash": "sha256:synthetic",
+        "value": 0.75,
+        "version": "v1"
+      },
+      {
+        "created_at": "2026-10-06T12:00:01Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "value",
+        "metric": "up",
+        "per_example_hash": null,
+        "source_hash": "sha256:obsolete",
+        "value": 99.0,
+        "version": "v0"
+      }
+    ],
+    "legacy": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "value",
+        "metric": "accuracy",
+        "per_example_hash": null,
+        "source_hash": null,
+        "value": 0.5,
+        "version": "v1"
+      }
+    ],
+    "matrix-0": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "set-0.m-a.top1",
+        "metric": "accuracy",
+        "per_example_hash": null,
+        "source_hash": "sha256:synthetic",
+        "value": 0.25,
+        "version": "v1"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "set-1.m-a.top1",
+        "metric": "accuracy",
+        "per_example_hash": null,
+        "source_hash": "sha256:synthetic",
+        "value": 0.125,
+        "version": "v1"
+      },
+      {
+        "created_at": "2026-10-06T12:00:01Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "set-0.m-a.top1",
+        "metric": "accuracy",
+        "per_example_hash": null,
+        "source_hash": "sha256:obsolete",
+        "value": 99.0,
+        "version": "v0"
+      }
+    ],
+    "matrix-1": [
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "set-0.m-a.top1",
+        "metric": "accuracy",
+        "per_example_hash": null,
+        "source_hash": "sha256:synthetic",
+        "value": 0.75,
+        "version": "v1"
+      },
+      {
+        "created_at": "2026-10-06T12:00:00Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "set-1.m-a.top1",
+        "metric": "accuracy",
+        "per_example_hash": null,
+        "source_hash": "sha256:synthetic",
+        "value": 0.375,
+        "version": "v1"
+      },
+      {
+        "created_at": "2026-10-06T12:00:01Z",
+        "error": null,
+        "evaluation_examples": null,
+        "evaluation_ids_hash": null,
+        "key": "set-0.m-a.top1",
+        "metric": "accuracy",
+        "per_example_hash": null,
+        "source_hash": "sha256:obsolete",
+        "value": 99.0,
+        "version": "v0"
+      }
+    ],
+    "parent-child": []
+  },
+  "search": {
+    "%": {
+      "count": 1,
+      "first": [
+        "a"
+      ],
+      "next": []
+    },
+    "_": {
+      "count": 1,
+      "first": [
+        "a"
+      ],
+      "next": []
+    },
+    "a": {
+      "count": 5,
+      "first": [
+        "parent-child",
+        "matrix-1"
+      ],
+      "next": [
+        "matrix-0",
+        "legacy"
+      ]
+    },
+    "missing": {
+      "count": 0,
+      "first": [],
+      "next": []
+    },
+    "parent": {
+      "count": 1,
+      "first": [
+        "parent-child"
+      ],
+      "next": []
+    },
+    "wide %_": {
+      "count": 1,
+      "first": [
+        "a"
+      ],
+      "next": []
+    }
+  },
+  "tasks": [
+    {
+      "best": 25.0,
+      "dataset": "toyset",
+      "dataset_version": "v1",
+      "description": "",
+      "higher_is_better": false,
+      "metrics": {
+        "latency": "v1"
+      },
+      "n_finished": 2,
+      "n_runs": 2,
+      "name": "bench",
+      "primary": "latency/p95",
+      "project": "toy",
+      "split": "test"
+    },
+    {
+      "best": 0.75,
+      "dataset": "toyset",
+      "dataset_version": "v1",
+      "description": "",
+      "higher_is_better": true,
+      "metrics": {
+        "down": "v1",
+        "up": "v1"
+      },
+      "n_finished": 2,
+      "n_runs": 2,
+      "name": "direction",
+      "primary": "up/value",
+      "project": "toy",
+      "split": "test"
+    },
+    {
+      "best": 0.75,
+      "dataset": "toyset",
+      "dataset_version": "v1",
+      "description": "",
+      "higher_is_better": true,
+      "metrics": {
+        "accuracy": "v1"
+      },
+      "n_finished": 2,
+      "n_runs": 2,
+      "name": "matrix",
+      "primary": "accuracy/set-0.m-a.top1",
+      "project": "toy",
+      "split": "test"
+    },
+    {
+      "best": 0.875,
+      "dataset": "toyset",
+      "dataset_version": "v1",
+      "description": "",
+      "higher_is_better": true,
+      "metrics": {
+        "accuracy": "v1"
+      },
+      "n_finished": 4,
+      "n_runs": 4,
+      "name": "toy-acc",
+      "primary": "accuracy/value",
+      "project": "toy",
+      "split": "test"
+    },
+    {
+      "best": null,
+      "dataset": "toyset",
+      "dataset_version": "v1",
+      "description": "",
+      "higher_is_better": true,
+      "metrics": {
+        "accuracy": "v1",
+        "broken": "v1"
+      },
+      "n_finished": 0,
+      "n_runs": 0,
+      "name": "toy-broken",
+      "primary": "accuracy/value",
+      "project": "toy",
+      "split": "test"
+    }
+  ],
+  "view": {
+    "invalid_issues": [
+      [
+        [
+          "line",
+          6
+        ],
+        [
+          "path",
+          "panels[0].render"
+        ],
+        [
+          "message",
+          "compare renders as table or bars"
+        ],
+        [
+          "suggestion",
+          "table"
+        ]
+      ]
+    ],
+    "issues": [],
+    "panels": [
+      {
+        "meta": {
+          "datasets": [
+            "set-1",
+            "set-0"
+          ],
+          "higher_is_better": true,
+          "key_parts": [
+            "dataset",
+            "model",
+            "metric"
+          ],
+          "metrics": [
+            "top1"
+          ],
+          "model": "m-a",
+          "options": {
+            "datasets": [
+              "set-0",
+              "set-1"
+            ],
+            "metrics": [
+              "top1"
+            ],
+            "models": [
+              "m-a"
+            ]
+          },
+          "render": "bars",
+          "total": 4
+        },
+        "rows": [
+          {
+            "dataset": "set-1",
+            "group_id": "matrix-1@c1",
+            "higher_is_better": true,
+            "key": "accuracy/set-1.m-a.top1",
+            "metric": "top1",
+            "model": "m-a",
+            "name": "matrix-1",
+            "run_id": "matrix-1",
+            "value": 0.375
+          },
+          {
+            "dataset": "set-1",
+            "group_id": "matrix-0@c1",
+            "higher_is_better": true,
+            "key": "accuracy/set-1.m-a.top1",
+            "metric": "top1",
+            "model": "m-a",
+            "name": "matrix-0",
+            "run_id": "matrix-0",
+            "value": 0.125
+          },
+          {
+            "dataset": "set-0",
+            "group_id": "matrix-1@c1",
+            "higher_is_better": true,
+            "key": "accuracy/set-0.m-a.top1",
+            "metric": "top1",
+            "model": "m-a",
+            "name": "matrix-1",
+            "run_id": "matrix-1",
+            "value": 0.75
+          },
+          {
+            "dataset": "set-0",
+            "group_id": "matrix-0@c1",
+            "higher_is_better": true,
+            "key": "accuracy/set-0.m-a.top1",
+            "metric": "top1",
+            "model": "m-a",
+            "name": "matrix-0",
+            "run_id": "matrix-0",
+            "value": 0.25
+          }
+        ],
+        "title": "Across datasets",
+        "type": "compare"
+      }
+    ],
+    "spec": {
+      "from": null,
+      "panels": [
+        {
+          "data": {
+            "datasets": [
+              "set-1",
+              "set-0"
+            ],
+            "example_id": null,
+            "fields": null,
+            "filter": null,
+            "group_by": null,
+            "max_points": null,
+            "metrics": [
+              "top1"
+            ],
+            "model": "m-a",
+            "pick": null,
+            "primary": null,
+            "run_id": null,
+            "source": null,
+            "step_metric": null,
+            "x": null,
+            "y": null
+          },
+          "layout": {
+            "row": null,
+            "span": 12
+          },
+          "noise": [
+            "seed",
+            "test_set"
+          ],
+          "pareto": null,
+          "render": "bars",
+          "scale": "linear",
+          "spec": null,
+          "text": null,
+          "title": "Across datasets",
+          "type": "compare"
+        }
+      ],
+      "runs": {
+        "created_by": null,
+        "since": null,
+        "status": null,
+        "tags": null
+      },
+      "title": "Package comparison"
+    },
+    "text": "title: Package comparison\npanels:\n  - type: compare\n    title: Across datasets\n    data: {datasets: [set-1, set-0], model: m-a, metrics: [top1]}\n    render: bars\n"
+  },
+  "workspace": {
+    "bench": {
+      "groups": [
+        {
+          "group_id": "bench-0@c1",
+          "is_best": true,
+          "n": 1,
+          "name": "bench-0",
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 25.0,
+            "n": 1,
+            "std": 0.0
+          },
+          "run_ids": [
+            "bench-0"
+          ],
+          "scores": {
+            "latency/p95": 25.0
+          },
+          "seed_values": [
+            25.0
+          ],
+          "test_interval": {
+            "hi": 25.0,
+            "lo": 25.0,
+            "method": "bootstrap",
+            "n": 1
+          },
+          "vs_best": null,
+          "within_noise_of_best": false
+        },
+        {
+          "group_id": "bench-1@c1",
+          "is_best": false,
+          "n": 1,
+          "name": "bench-1",
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 75.0,
+            "n": 1,
+            "std": 0.0
+          },
+          "run_ids": [
+            "bench-1"
+          ],
+          "scores": {
+            "latency/p95": 75.0
+          },
+          "seed_values": [
+            75.0
+          ],
+          "test_interval": {
+            "hi": 75.0,
+            "lo": 75.0,
+            "method": "bootstrap",
+            "n": 1
+          },
+          "vs_best": {
+            "broken": null,
+            "delta": 50.0,
+            "delta_rel": 2.0,
+            "examples_needed": null,
+            "fixed": null,
+            "p": 0.001998001998001998,
+            "test": "paired_bootstrap"
+          },
+          "within_noise_of_best": false
+        }
+      ],
+      "higher_is_better": false,
+      "key_higher_is_better": {
+        "latency/p95": false
+      },
+      "key_parts": null,
+      "kind": "system_bench",
+      "metric_names": [],
+      "metric_versions": {
+        "latency": "v1"
+      },
+      "primary": "latency/p95",
+      "project": "toy",
+      "runs": [
+        {
+          "archived": false,
+          "commit": "c1",
+          "cost_usd": null,
+          "created_at": "2026-10-06T12:00:00Z",
+          "created_by": "human",
+          "derived_name": "bench-1",
+          "end_reason": null,
+          "ended_at": null,
+          "exit_code": null,
+          "gpu_hours": null,
+          "group_id": "bench-1@c1",
+          "host": "mac",
+          "name": "bench-1",
+          "params": {},
+          "primary": 75.0,
+          "progress": null,
+          "renamed": false,
+          "run_id": "bench-1",
+          "scores": {
+            "latency/p95": 75.0
+          },
+          "seed": 1,
+          "starred": false,
+          "started_at": null,
+          "status": "finished",
+          "sweep_id": null,
+          "tags": []
+        },
+        {
+          "archived": false,
+          "commit": "c1",
+          "cost_usd": null,
+          "created_at": "2026-10-06T12:00:00Z",
+          "created_by": "human",
+          "derived_name": "bench-0",
+          "end_reason": null,
+          "ended_at": null,
+          "exit_code": null,
+          "gpu_hours": null,
+          "group_id": "bench-0@c1",
+          "host": "mac",
+          "name": "bench-0",
+          "params": {},
+          "primary": 25.0,
+          "progress": null,
+          "renamed": false,
+          "run_id": "bench-0",
+          "scores": {
+            "latency/p95": 25.0
+          },
+          "seed": 0,
+          "starred": false,
+          "started_at": null,
+          "status": "finished",
+          "sweep_id": null,
+          "tags": []
+        }
+      ],
+      "score_keys": [
+        "latency/p95"
+      ],
+      "task": "bench",
+      "unit": "ms",
+      "value_format": "percent_delta",
+      "varying_keys": []
+    },
+    "direction": {
+      "groups": [
+        {
+          "group_id": "directio@c1",
+          "is_best": true,
+          "n": 1,
+          "name": "direction-1",
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 0.25,
+            "n": 1,
+            "std": 0.0
+          },
+          "run_ids": [
+            "direction-0",
+            "direction-1"
+          ],
+          "scores": {
+            "down/value": 0.25,
+            "up/value": 0.25
+          },
+          "seed_values": [
+            0.25
+          ],
+          "test_interval": null,
+          "vs_best": {
+            "broken": null,
+            "delta": -0.5,
+            "delta_rel": -0.6666666666666666,
+            "examples_needed": null,
+            "fixed": null,
+            "p": null,
+            "test": null
+          },
+          "within_noise_of_best": false
+        }
+      ],
+      "higher_is_better": true,
+      "key_higher_is_better": {
+        "down/value": false,
+        "up/value": true
+      },
+      "key_parts": null,
+      "kind": "generic",
+      "metric_names": [],
+      "metric_versions": {
+        "down": "v1",
+        "up": "v1"
+      },
+      "primary": "up/value",
+      "project": "toy",
+      "runs": [
+        {
+          "archived": false,
+          "commit": "c1",
+          "cost_usd": null,
+          "created_at": "2026-10-06T12:00:00Z",
+          "created_by": "human",
+          "derived_name": "direction-1",
+          "end_reason": null,
+          "ended_at": null,
+          "exit_code": null,
+          "gpu_hours": null,
+          "group_id": "directio@c1",
+          "host": "mac",
+          "name": "direction-1",
+          "params": {},
+          "primary": 0.75,
+          "progress": null,
+          "renamed": false,
+          "run_id": "direction-1",
+          "scores": {
+            "down/value": 0.75,
+            "up/value": 0.75
+          },
+          "seed": 1,
+          "starred": false,
+          "started_at": null,
+          "status": "finished",
+          "sweep_id": null,
+          "tags": []
+        },
+        {
+          "archived": false,
+          "commit": "c1",
+          "cost_usd": null,
+          "created_at": "2026-10-06T12:00:00Z",
+          "created_by": "human",
+          "derived_name": "direction-0",
+          "end_reason": null,
+          "ended_at": null,
+          "exit_code": null,
+          "gpu_hours": null,
+          "group_id": "directio@c1",
+          "host": "mac",
+          "name": "direction-0",
+          "params": {},
+          "primary": 0.25,
+          "progress": null,
+          "renamed": false,
+          "run_id": "direction-0",
+          "scores": {
+            "down/value": 0.25,
+            "up/value": 0.25
+          },
+          "seed": 0,
+          "starred": false,
+          "started_at": null,
+          "status": "finished",
+          "sweep_id": null,
+          "tags": []
+        }
+      ],
+      "score_keys": [
+        "down/value",
+        "up/value"
+      ],
+      "task": "direction",
+      "unit": "",
+      "value_format": "fraction",
+      "varying_keys": []
+    },
+    "matrix": {
+      "groups": [
+        {
+          "group_id": "matrix-1@c1",
+          "is_best": true,
+          "n": 1,
+          "name": "matrix-1",
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 0.75,
+            "n": 1,
+            "std": 0.0
+          },
+          "run_ids": [
+            "matrix-1"
+          ],
+          "scores": {
+            "accuracy/set-0.m-a.top1": 0.75,
+            "accuracy/set-1.m-a.top1": 0.375
+          },
+          "seed_values": [
+            0.75
+          ],
+          "test_interval": null,
+          "vs_best": null,
+          "within_noise_of_best": false
+        },
+        {
+          "group_id": "matrix-0@c1",
+          "is_best": false,
+          "n": 1,
+          "name": "matrix-0",
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 0.25,
+            "n": 1,
+            "std": 0.0
+          },
+          "run_ids": [
+            "matrix-0"
+          ],
+          "scores": {
+            "accuracy/set-0.m-a.top1": 0.25,
+            "accuracy/set-1.m-a.top1": 0.125
+          },
+          "seed_values": [
+            0.25
+          ],
+          "test_interval": null,
+          "vs_best": {
+            "broken": null,
+            "delta": -0.5,
+            "delta_rel": -0.6666666666666666,
+            "examples_needed": null,
+            "fixed": null,
+            "p": null,
+            "test": null
+          },
+          "within_noise_of_best": false
+        }
+      ],
+      "higher_is_better": true,
+      "key_higher_is_better": {
+        "accuracy/set-0.m-a.top1": true,
+        "accuracy/set-1.m-a.top1": true
+      },
+      "key_parts": [
+        "dataset",
+        "model",
+        "metric"
+      ],
+      "kind": "generic",
+      "metric_names": [],
+      "metric_versions": {
+        "accuracy": "v1"
+      },
+      "primary": "accuracy/set-0.m-a.top1",
+      "project": "toy",
+      "runs": [
+        {
+          "archived": false,
+          "commit": "c1",
+          "cost_usd": null,
+          "created_at": "2026-10-06T12:00:00Z",
+          "created_by": "human",
+          "derived_name": "matrix-1",
+          "end_reason": null,
+          "ended_at": null,
+          "exit_code": null,
+          "gpu_hours": null,
+          "group_id": "matrix-1@c1",
+          "host": "mac",
+          "name": "matrix-1",
+          "params": {},
+          "primary": 0.75,
+          "progress": null,
+          "renamed": false,
+          "run_id": "matrix-1",
+          "scores": {
+            "accuracy/set-0.m-a.top1": 0.75,
+            "accuracy/set-1.m-a.top1": 0.375
+          },
+          "seed": 1,
+          "starred": false,
+          "started_at": null,
+          "status": "finished",
+          "sweep_id": null,
+          "tags": []
+        },
+        {
+          "archived": false,
+          "commit": "c1",
+          "cost_usd": null,
+          "created_at": "2026-10-06T12:00:00Z",
+          "created_by": "human",
+          "derived_name": "matrix-0",
+          "end_reason": null,
+          "ended_at": null,
+          "exit_code": null,
+          "gpu_hours": null,
+          "group_id": "matrix-0@c1",
+          "host": "mac",
+          "name": "matrix-0",
+          "params": {},
+          "primary": 0.25,
+          "progress": null,
+          "renamed": false,
+          "run_id": "matrix-0",
+          "scores": {
+            "accuracy/set-0.m-a.top1": 0.25,
+            "accuracy/set-1.m-a.top1": 0.125
+          },
+          "seed": 0,
+          "starred": false,
+          "started_at": null,
+          "status": "finished",
+          "sweep_id": null,
+          "tags": []
+        }
+      ],
+      "score_keys": [
+        "accuracy/set-0.m-a.top1",
+        "accuracy/set-1.m-a.top1"
+      ],
+      "task": "matrix",
+      "unit": "",
+      "value_format": "fraction",
+      "varying_keys": []
+    },
+    "toy-acc": {
+      "groups": [
+        {
+          "group_id": "aaaa@c1",
+          "is_best": true,
+          "n": 2,
+          "name": "wide %_ beam",
+          "primary": {
+            "ci_high": 1.0,
+            "ci_low": 0.0,
+            "mean": 0.875,
+            "n": 2,
+            "std": 0.1767766952966369
+          },
+          "run_ids": [
+            "a",
+            "b"
+          ],
+          "scores": {
+            "accuracy/value": 0.875
+          },
+          "seed_values": [
+            0.75,
+            1.0
+          ],
+          "test_interval": {
+            "hi": 1.0,
+            "lo": 0.5101091635454027,
+            "method": "wilson",
+            "n": 4
+          },
+          "vs_best": null,
+          "within_noise_of_best": false
+        },
+        {
+          "group_id": "legacy@c1",
+          "is_best": false,
+          "n": 1,
+          "name": "legacy",
+          "primary": {
+            "ci_high": null,
+            "ci_low": null,
+            "mean": 0.5,
+            "n": 1,
+            "std": 0.0
+          },
+          "run_ids": [
+            "legacy"
+          ],
+          "scores": {
+            "accuracy/value": 0.5
+          },
+          "seed_values": [
+            0.5
+          ],
+          "test_interval": null,
+          "vs_best": {
+            "broken": null,
+            "delta": -0.375,
+            "delta_rel": -0.42857142857142855,
+            "examples_needed": null,
+            "fixed": null,
+            "p": null,
+            "test": null
+          },
+          "within_noise_of_best": false
+        },
+        {
+          "group_id": "parented@c1",
+          "is_best": false,
+          "n": 1,
+          "name": "parent-child",
+          "primary": null,
+          "run_ids": [
+            "parent-child"
+          ],
+          "scores": {},
+          "seed_values": [],
+          "test_interval": null,
+          "vs_best": null,
+          "within_noise_of_best": false
+        }
+      ],
+      "higher_is_better": true,
+      "key_higher_is_better": {
+        "accuracy/value": true
+      },
+      "key_parts": null,
+      "kind": "generic",
+      "metric_names": [
+        "loss"
+      ],
+      "metric_versions": {
+        "accuracy": "v1"
+      },
+      "primary": "accuracy/value",
+      "project": "toy",
+      "runs": [
+        {
+          "archived": false,
+          "commit": "c1",
+          "cost_usd": null,
+          "created_at": "2026-10-06T12:00:00Z",
+          "created_by": "human",
+          "derived_name": "parent-child",
+          "end_reason": null,
+          "ended_at": null,
+          "exit_code": null,
+          "gpu_hours": null,
+          "group_id": "parented@c1",
+          "host": "mac",
+          "name": "parent-child",
+          "params": {},
+          "primary": null,
+          "progress": null,
+          "renamed": false,
+          "run_id": "parent-child",
+          "scores": {},
+          "seed": null,
+          "starred": false,
+          "started_at": null,
+          "status": "finished",
+          "sweep_id": null,
+          "tags": []
+        },
+        {
+          "archived": false,
+          "commit": "c1",
+          "cost_usd": null,
+          "created_at": "2026-10-06T12:00:00Z",
+          "created_by": "human",
+          "derived_name": "legacy",
+          "end_reason": null,
+          "ended_at": null,
+          "exit_code": null,
+          "gpu_hours": null,
+          "group_id": "legacy@c1",
+          "host": "mac",
+          "name": "legacy",
+          "params": {},
+          "primary": 0.5,
+          "progress": null,
+          "renamed": false,
+          "run_id": "legacy",
+          "scores": {
+            "accuracy/value": 0.5
+          },
+          "seed": null,
+          "starred": false,
+          "started_at": null,
+          "status": "finished",
+          "sweep_id": null,
+          "tags": []
+        },
+        {
+          "archived": false,
+          "commit": "c1",
+          "cost_usd": null,
+          "created_at": "2026-10-06T12:00:00Z",
+          "created_by": "human",
+          "derived_name": "b",
+          "end_reason": null,
+          "ended_at": null,
+          "exit_code": null,
+          "gpu_hours": null,
+          "group_id": "aaaa@c1",
+          "host": "mac",
+          "name": "b",
+          "params": {},
+          "primary": 1.0,
+          "progress": null,
+          "renamed": false,
+          "run_id": "b",
+          "scores": {
+            "accuracy/value": 1.0
+          },
+          "seed": null,
+          "starred": false,
+          "started_at": null,
+          "status": "finished",
+          "sweep_id": null,
+          "tags": []
+        },
+        {
+          "archived": false,
+          "commit": "c1",
+          "cost_usd": null,
+          "created_at": "2026-10-06T12:00:00Z",
+          "created_by": "human",
+          "derived_name": "a",
+          "end_reason": null,
+          "ended_at": null,
+          "exit_code": null,
+          "gpu_hours": null,
+          "group_id": "aaaa@c1",
+          "host": "mac",
+          "name": "wide %_ beam",
+          "params": {},
+          "primary": 0.75,
+          "progress": null,
+          "renamed": true,
+          "run_id": "a",
+          "scores": {
+            "accuracy/value": 0.75
+          },
+          "seed": null,
+          "starred": false,
+          "started_at": null,
+          "status": "finished",
+          "sweep_id": null,
+          "tags": []
+        }
+      ],
+      "score_keys": [
+        "accuracy/value"
+      ],
+      "task": "toy-acc",
+      "unit": "",
+      "value_format": "fraction",
+      "varying_keys": []
+    },
+    "toy-broken": {
+      "groups": [],
+      "higher_is_better": true,
+      "key_higher_is_better": {},
+      "key_parts": null,
+      "kind": "generic",
+      "metric_names": [],
+      "metric_versions": {
+        "accuracy": "v1",
+        "broken": "v1"
+      },
+      "primary": "accuracy/value",
+      "project": "toy",
+      "runs": [],
+      "score_keys": [],
+      "task": "toy-broken",
+      "unit": "",
+      "value_format": "fraction",
+      "varying_keys": []
+    }
+  }
+}

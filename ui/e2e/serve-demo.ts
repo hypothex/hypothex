@@ -33,7 +33,9 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import {
+  TEAM_PORT, TEAM_DARK_PORT, TEAM_HOME_DIR, TEAM_DARK_HOME_DIR, TEAM_DEMO_FILE, TEAM_DARK_DEMO_FILE, TEAM_LABEL, TEAM_DARK_LABEL,
   DEMO_FILE,
   DEMO_LABEL,
   HOME_DIR,
@@ -50,12 +52,15 @@ import {
 } from "./paths";
 import { demoOwner, killOwned, listProcs, type Owner } from "./procs";
 
+const withTeam=process.argv.includes("--with-team");
+const dark=process.argv.includes("--dark");
 const withHosts = process.argv.includes("--with-hosts");
-const home = withHosts ? HOSTS_HOME_DIR : HOME_DIR;
-const demoFile = withHosts ? HOSTS_DEMO_FILE : DEMO_FILE;
-const port = withHosts ? HOSTS_PORT : PORT;
-const label = withHosts ? HOSTS_DEMO_LABEL : DEMO_LABEL;
+const home = withTeam ? (dark ? TEAM_DARK_HOME_DIR : TEAM_HOME_DIR) : withHosts ? HOSTS_HOME_DIR : HOME_DIR;
+const demoFile = withTeam ? (dark ? TEAM_DARK_DEMO_FILE : TEAM_DEMO_FILE) : withHosts ? HOSTS_DEMO_FILE : DEMO_FILE;
+const port = withTeam ? (dark ? TEAM_DARK_PORT : TEAM_PORT) : withHosts ? HOSTS_PORT : PORT;
+const label = withTeam ? (dark ? TEAM_DARK_LABEL : TEAM_LABEL) : withHosts ? HOSTS_DEMO_LABEL : DEMO_LABEL;
 const env: NodeJS.ProcessEnv = { ...process.env, HYPOTHEX_HOME: home, HYPOTHEX_SSH: "false", HYPOTHEX_SCP: "false" };
+if(withTeam) env.USER="sv";
 // The suite exercises newly generated credentials, never an inherited user token.
 delete env.HYPOTHEX_SERVE_TOKEN;
 delete env.HYPOTHEX_HUB_TOKEN;
@@ -89,13 +94,14 @@ writeFileSync(
 );
 
 const hx = venvHx();
-const demoArgs = withHosts ? ["demo", "--with-hosts", "--json"] : ["demo", "--json"];
+const demoArgs = ["demo",...(withHosts ? ["--with-hosts"] : []),...(withTeam ? ["--with-team"] : []),"--json"];
 const seeded = spawnSync(hx, ["--home", home, ...demoArgs], {
   cwd: REPO_ROOT,
   encoding: "utf8",
   env,
-  stdio: ["ignore", "pipe", "inherit"],
+  stdio: ["ignore", "pipe", withTeam ? "pipe" : "inherit"],
 });
+if(withTeam && seeded.stderr) process.stderr.write(seeded.stderr.replace(/\/pair#[^\s]+/g,"/pair#[redacted]"));
 if (seeded.status !== 0) {
   const why = seeded.error ? seeded.error.message : `exit code ${seeded.status}`;
   console.error(`hx ${demoArgs.join(" ")} failed: ${why}`);
@@ -106,9 +112,13 @@ writeFileSync(demoFile, seeded.stdout);
 const server: ChildProcess = spawn(hx, ["--home", home, "serve", "--port", String(port)], {
   cwd: REPO_ROOT,
   env,
-  stdio: "inherit",
+  // Team CLI prints one-time pairing links; sanitize complete lines before artifacts.
+  stdio: withTeam ? ["ignore","pipe","pipe"] : "inherit",
   detached: true,
 });
+if(withTeam) for(const stream of [server.stdout,server.stderr]) if(stream) {
+  createInterface({input:stream}).on("line",line=>process.stderr.write(line.replace(/\/pair#[^\s]+/g,"/pair#[redacted]")+"\n"));
+}
 // the hub could not be spawned at all: stop now, nothing else will ever answer on the port
 server.on("error", (err) => {
   console.error(`hx serve did not start: ${err.message}`);

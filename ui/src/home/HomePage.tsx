@@ -6,9 +6,9 @@
  * Running now shows elapsed time, the latest step and the latest primary value: runs
  * report no total, so there is no progress bar and no ETA (controller ruling on M27).
  */
-import { Fragment, type ReactElement } from "react";
+import { Fragment, useState, type ReactElement } from "react";
 import type { HostRow, OverviewSummary, RunRecord } from "../api/models";
-import { useHosts, useOverview } from "../api/queries";
+import { useMe, useRuns, useHosts, useOverview } from "../api/queries";
 import { Sparkline } from "../charts/Sparkline";
 import { Avatar } from "../chrome/Avatar";
 import { Launcher } from "../chrome/Launcher";
@@ -65,7 +65,7 @@ function RunningTable({ summary, hosts, now }: { summary: OverviewSummary; hosts
                 </td>
                 <td className="one-line">{row?.name ?? r.host}</td>
                 <td>
-                  <Launcher who={r.created_by} />
+                  <Launcher who={r.created_by} />{r.owner && <span> @{r.owner}</span>}
                 </td>
               </tr>
             );
@@ -189,7 +189,7 @@ function RecentTable({ rows, now }: { rows: RecentRow[]; now: number }) {
               </td>
               <td className="num">{r.score === null ? "" : fmtScore(r.score)}</td>
               <td className="num muted">{r.deltaBest === null ? "" : fmtDelta(r.deltaBest)}</td>
-              <td>{r.by ? <Launcher who={r.by} /> : null}</td>
+              <td>{r.by ? <Launcher who={r.by} /> : null}{r.owner && <span> @{r.owner}</span>}</td>
               <td className="hyp ink2" title={r.hypothesis}>
                 <span>{r.hypothesis}</span>
               </td>
@@ -212,6 +212,10 @@ function RecentTable({ rows, now }: { rows: RecentRow[]; now: number }) {
 }
 
 export function HomePage(): ReactElement {
+  const me=useMe();
+  const [mine,setMine]=useState(false);
+  const mineOn=mine && me.data?.auth === "on";
+  const mineRuns=useRuns({owner:"me",status:"running"},{enabled:mineOn});
   const overview = useOverview();
   const hosts = useHosts();
   const now = useNow();
@@ -238,6 +242,7 @@ export function HomePage(): ReactElement {
   const runs = new Map(summary.running.map((r) => [r.run_id, r]));
   const running = summary.running.filter((r) => r.status === "running");
   const queued = summary.running.length - running.length;
+  const runningSummary=mineOn ? {...summary,running:mineRuns.data ?? []} : summary;
   return (
     <div className="home">
       <div className="kpis">
@@ -265,10 +270,11 @@ export function HomePage(): ReactElement {
       <div className="two">
         <section aria-labelledby="home-running">
           <h2 id="home-running">
-            Running now <span className="n">{`${running.length} runs`}</span>
+            Running now <span className="n">{`${runningSummary.running.filter(r=>r.status==="running").length} runs`}</span>
             {queued > 0 ? <AppLink href={hrefs.queue()}>{`${queued} queued`}</AppLink> : null}
           </h2>
-          <RunningTable summary={summary} hosts={rows} now={now} />
+          {me.data?.auth === "on" && <button className="btn sm" type="button" aria-pressed={mineOn} onClick={()=>setMine(v=>!v)}>Mine</button>}
+          {mineOn && mineRuns.isPending ? <p role="status">Loading your running runs…</p> : mineOn && mineRuns.error ? <ErrorBox error={mineRuns.error}/> : <RunningTable summary={runningSummary} hosts={rows} now={now} />}
         </section>
         <section aria-labelledby="home-hosts">
           <h2 id="home-hosts">

@@ -134,17 +134,19 @@ const S = {
 } satisfies Record<string, CSSProperties>;
 
 /** Render inline Markdown (code, bold, italic, links) as React nodes. */
-export function renderInline(text: string, key = "i"): ReactNode[] {
+export type InlineRenderer = (text: string, key: string) => ReactNode;
+
+export function renderInline(text: string, key = "i", inline?: InlineRenderer): ReactNode[] {
   const out: ReactNode[] = [];
   let rest = text;
   let n = 0;
   while (rest) {
     const m = INLINE.exec(rest);
     if (!m) {
-      out.push(rest);
+      out.push(inline ? inline(rest, `${key}.plain${n}`) : rest);
       break;
     }
-    if (m.index > 0) out.push(rest.slice(0, m.index));
+    if (m.index > 0) out.push(inline ? inline(rest.slice(0, m.index), `${key}.plain${n}`) : rest.slice(0, m.index));
     const tok = m[0];
     const k = `${key}.${n++}`;
     if (m[1]) {
@@ -156,7 +158,7 @@ export function renderInline(text: string, key = "i"): ReactNode[] {
     } else if (m[2]) {
       out.push(
         <b key={k} style={S.b}>
-          {renderInline(tok.slice(2, -2), k)}
+          {renderInline(tok.slice(2, -2), k, inline)}
         </b>,
       );
     } else if (m[3]) {
@@ -177,22 +179,22 @@ export function renderInline(text: string, key = "i"): ReactNode[] {
           </a>,
         );
     } else {
-      out.push(<i key={k}>{renderInline(tok.slice(1, -1), k)}</i>);
+      out.push(<i key={k}>{renderInline(tok.slice(1, -1), k, inline)}</i>);
     }
     rest = rest.slice(m.index + tok.length);
   }
   return out;
 }
 
-function renderBlock(b: Block, i: number): ReactNode {
+function renderBlock(b: Block, i: number, inline?: InlineRenderer): ReactNode {
   const k = String(i);
   switch (b.kind) {
     case "p":
       return (
         <p key={k} style={S.p}>
           {b.lines.flatMap((line, j) => {
-            const inline = renderInline(line, `${k}.${j}`);
-            return j === 0 ? inline : [<br key={`${k}.br${j}`} />, ...inline];
+            const nodes = renderInline(line, `${k}.${j}`, inline);
+            return j === 0 ? nodes : [<br key={`${k}.br${j}`} />, ...nodes];
           })}
         </p>
       );
@@ -200,7 +202,7 @@ function renderBlock(b: Block, i: number): ReactNode {
       const Tag = (["h3", "h4", "h5"] as const)[b.level - 1];
       return (
         <Tag key={k} style={S.h}>
-          {renderInline(b.text, k)}
+          {renderInline(b.text, k, inline)}
         </Tag>
       );
     }
@@ -210,7 +212,7 @@ function renderBlock(b: Block, i: number): ReactNode {
       return (
         <Tag key={k} style={S.list}>
           {b.items.map((item, j) => (
-            <li key={j}>{renderInline(item, `${k}.${j}`)}</li>
+            <li key={j}>{renderInline(item, `${k}.${j}`, inline)}</li>
           ))}
         </Tag>
       );
@@ -226,6 +228,10 @@ function renderBlock(b: Block, i: number): ReactNode {
   }
 }
 
+export function SafeMarkdown({ text, inline }: { text: string; inline?: InlineRenderer }) {
+  return <div className="safe-markdown">{parseBlocks(text).map((block, i) => renderBlock(block, i, inline))}</div>;
+}
+
 /** Markdown panel. Reads `result.meta.text`. */
 export function MarkdownPanel({ result }: { result: PanelResult }) {
   const meta = (result.meta ?? {}) as Record<string, unknown>;
@@ -233,7 +239,7 @@ export function MarkdownPanel({ result }: { result: PanelResult }) {
   if (!text.trim()) return <p style={S.empty}>No text</p>;
   return (
     <div className="notes" style={S.notes}>
-      {parseBlocks(text).map(renderBlock)}
+      {parseBlocks(text).map((block, i) => renderBlock(block, i))}
     </div>
   );
 }

@@ -245,6 +245,7 @@ describe("sweepStats", () => {
     const items = sweepStats({
       counts: COUNTS,
       totalUsd: 12.5,
+      costComplete: true,
       best: parseCell(CELL_D),
       names: ["lr", "beam"],
       metric: "top1",
@@ -274,6 +275,7 @@ describe("sweepStats", () => {
     const items = sweepStats({
       counts,
       totalUsd: 0,
+      costComplete: true,
       best: null,
       names: ["lr"],
       metric: "score",

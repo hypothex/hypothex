@@ -1,0 +1,13 @@
+.notebook-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 24px; }
+.notebook-layout nav { display: flex; flex-direction: column; gap: 12px; }
+.notebook-entry, .notebook-week { padding: 14px 0; border-bottom: 1px solid var(--line, var(--rule)); }
+.notebook-week { border: 1px solid var(--line, var(--rule)); border-radius: 10px; padding: 16px; margin: 12px 0; }
+.notebook-entry > header, .notebook-week > header { color: var(--ink-2); font-size: 12px; margin-bottom: 10px; }
+.notebook-chip { display: inline-flex; gap: 6px; align-items: center; border: 1px solid var(--line, var(--rule)); border-radius: 7px; padding: 2px 5px; font-size: 12px; }
+.notebook-chip small { color: var(--ink-2); }
+.notebook-chip.unknown { color: var(--ink-3); }
+.notebook-editor { width: 100%; margin: 16px 0 8px; }
+.notebook-conflict { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.notebook-conflict section { min-width: 0; }
+.notebook-day { min-width: 0; }
+@media (max-width: 720px) { .notebook-layout, .notebook-conflict { grid-template-columns: 1fr; } .notebook-layout nav { flex-direction: row; overflow-x: auto; } }

@@ -377,3 +377,27 @@ The demo adds two fake hosts as separate homes under ``/tmp/hx-demo/demo-hosts``
 with fake ``sbatch``, ``squeue``, and ``sacct``). ``hx serve`` starts both, fills the
 GPU queue on ``gpu1`` with three running and three queued runs of sweep ``s-7f3a``,
 and stops them when it exits. No real host is contacted.
+
+Tailscale and paired URL hosts
+------------------------------
+
+With Tailscale installed and logged in, ``hx serve --auth --tailscale`` publishes
+the hub through ``tailscale serve``. The HTTP listener remains on ``127.0.0.1``.
+The public HTTPS URL is used for pairing, and the mapping and local owner session
+are removed at shutdown. A second start for the same live home is refused before
+it changes that session or mapping. ``--public-url`` can also identify a separately
+configured HTTPS proxy. ``secrets.env`` must be owned by the current user and have
+mode ``0600``.
+
+A lab server with scoped auth can issue an admin host pairing::
+
+   hx pair --client host --scope admin
+   hx hosts add lab --url https://lab.example --pair 'https://lab.example/pair#...'
+   hx hosts pair lab 'https://lab.example/pair#...'
+
+Alternatively, use ``hx hosts add lab --url https://lab.example --token-env LAB_TOKEN``.
+The paired token is stored privately in ``auth/host-tokens.json`` and sent only to
+the origin that issued it. A changed host URL cannot receive the old paired token.
+A paired token takes precedence over ``--token-env``. Run commands do not inherit
+configured host token variables. Rejected credentials stop retries and report
+``hx hosts pair NAME <pairing-url>``; reconnecting rereads the paired credential.

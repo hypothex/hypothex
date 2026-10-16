@@ -7,6 +7,14 @@ import { RUN_SVM, makeBoard, makeDetail } from "../pages/fixtures";
 import { renderApp } from "../render-app";
 import { makeTaskRuns } from "../run/taskRunsFixtures";
 
+// a page's own header is a second banner to Testing Library: find the top bar itself
+const topBar = (): Promise<HTMLElement> =>
+  waitFor(() => {
+    const el = document.querySelector<HTMLElement>("header.top");
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  });
+
 const realFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = realFetch;
@@ -111,21 +119,15 @@ describe("AppShell", () => {
     cleanup();
     mockRoutes({ "/api/v1/projects": PROJECTS });
     renderApp("/hosts");
-    const button = within(await screen.findByRole("banner")).getByRole("button", { name: "New run" });
+    const button = within(await topBar()).getByRole("button", { name: "New run" });
     await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
     expect(button.getAttribute("title")).toBe("New run in toy");
     fireEvent.click(button);
     expect(await screen.findByRole("dialog", { name: "New run" })).not.toBeNull();
     cleanup();
-    // the task page's own header is a second banner to Testing Library: use the top bar
     mockRoutes({ "/api/v1/projects": PROJECTS, "/api/v1/tasks/toy/acc/leaderboard": makeBoard() });
     renderApp("/t/toy/acc");
-    const top = await waitFor(() => {
-      const el = document.querySelector<HTMLElement>("header.top");
-      expect(el).not.toBeNull();
-      return el as HTMLElement;
-    });
-    const onTask = within(top).getByRole("button", { name: "New run" });
+    const onTask = within(await topBar()).getByRole("button", { name: "New run" });
     await waitFor(() => expect(onTask.hasAttribute("disabled")).toBe(false));
     expect(onTask.getAttribute("title")).toBe("New run in toy / acc, from the best config");
     fireEvent.click(onTask);

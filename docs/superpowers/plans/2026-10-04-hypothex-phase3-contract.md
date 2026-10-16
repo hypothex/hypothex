@@ -492,8 +492,10 @@ Errors keep `{error, type}`: `AuthError` 401, `ScopeError` 403, `PairingError` 4
 | `hx hosts pair <name> <pairing-url>` | redeems as `host`, writes `host-tokens.json`, reconnects the host |
 | `hx serve [--auth] [--tailscale] [--public-url URL]` | `--auth` = `server.auth: on` for this process |
 | `hx db upgrade` / `hx db current` | Alembic on the Postgres index (`ConfigError` on SQLite: "the SQLite index needs no migrations") |
-| `hx runs --owner me\|NAME` | filter |
+| `hx runs --owner me\|NAME` | additive filter over the existing local-plus-hub runs list |
 | `hx demo --with-team` (hidden) | seeds the phase 3 fixtures for the UI (section 10) |
+
+`hx runs` retains the current local-plus-hub merge for every supported hub credential source, including environment tokens without `hx login`. Preserve hub precedence for duplicate run IDs, newest-first sorting and final limit, the `host_state` key on every JSON row, disconnected-host status text and local-time formatting. Add `--owner` to the existing flow: resolve `me` through the hub for the local index filter and forward the raw owner value to the hub query for server-side principal resolution. An auth-off hub resolves `me` to no owner filter; without a reachable hub it is an explicit error. Existing remote-CLI and JSON-schema regressions must pass unchanged except for intended additive owner model keys; owner-filter tests must cover local and merged results, credential sources, deduplication and limits.
 
 The CLI sends `X-Hypothex-Agent` when `HYPOTHEX_AGENT` is set. Duration flags accept `Nd`, `Nh`, `Nw`.
 

@@ -56,7 +56,7 @@ Historical review receipts and prompts used `/tmp/hx-phase3-evidence/`; that tem
 This plan records authorization and progress; it does not claim either review
 gate or any Phase 3 implementation has passed yet.
 
-## Current review cycle
+## Historical review cycle before the October 16 main refresh
 
 - Primary round 1: NOT LGTM, two P2 findings (stale main-source plan and
   incomplete cost shown as a complete total). The report also lists three P3
@@ -67,8 +67,8 @@ gate or any Phase 3 implementation has passed yet.
 - Current corrections are limited to plans and mockups. The refreshed contract
   makes task export use the selected primary, rejects it for compare export,
   and preserves pricing completeness in run/sweep/digest output.
-- Both approvals remain pending. The review baseline is current main a444125;
-  subsequent material changes must return to review.
+- At that historical point both approvals were pending against main a444125.
+  The October 16 refresh and its renewed review cycle below supersede this status.
 
 ## Testing handoff requirements
 
@@ -190,3 +190,38 @@ exact hash, carrying the original brief and every finding/response. Then start
 a new independent adversarial gate only if primary approves. No implementation
 yet. CI on ebb06c9 had an unchanged UI-v5 viewport failure; the new docs-only
 head's CI supersedes that head and must be green before integration.
+
+
+### Renewed primary refresh R2 result (2026-10-17)
+
+Claude reviewed frozen8737bc4 against e73b810, read all49/backend26/frontend
+tasks in full, and returned NOT LGTM: one blocking P2-A in Task42. Its complete
+replacement of `hx runs` dropped current-main hub merging, host_state JSON,
+disconnected-host status and local-time formatting. Existing main tests pass6
+on unchanged main; the old plan's partial assembly fails3. The parent accepted
+this defect and corrected Task42 additively, preserving the established CLI
+behavior while adding owner filtering. The Task12 missing task_table test import
+and historical-baseline label are also corrected.
+
+The cleanup fix passed23 exact-helper tests in each of four non-root runtimes:
+macOS Python3.11/3.14 and Linux Python3.11/3.12. Parent read the new cases/logs and
+verified all12 helper hashes and22 protected/zero-leak observations in each
+receipt. This supersedes the earlier snippet-level Linux execution gap; full
+assembled cleanup/API/host acceptance remains prospective. Review evidence is
+in durable `primary-refresh-r2/`. All F1–F9 remain accepted plan corrections.
+
+CI on8737bc4 passed all6 checks (four Python jobs, UI, Docker); the earlier UI
+viewport failure did not recur. Saved receipt: `ci-8737bc4.json`. No gate is
+cleared by CI alone. After the CLI correction is verified and frozen, request a
+new Claude primary review, then independent adversarial review on the same hash.
+
+
+The corrected Task42 probe passes6 original remote/JSON-schema regressions with
+unchanged snapshot assertions and data, then10 focused owner/token cases with
+real SQLite owner plumbing and explicit fake hub/login/HTTP boundaries. The
+parent inspected the replay script and minimal prerequisite diff, verified all10
+evidence hashes and exact plan test-fence equality, and confirmed disposable
+source cleanup. Evidence: durable `parent-primary-r2-cli-fix/report.md` and
+receipts. Full real login/scoped-route acceptance remains mandatory. The parent
+also removed Task42's stale fixed auth-test count after adding new integration
+requirements; tests must all pass, rather than match an obsolete count.

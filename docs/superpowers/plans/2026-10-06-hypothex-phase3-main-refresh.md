@@ -343,3 +343,49 @@ primary round must inspect their full task instructions and cross-task fit in
 the current plan as well as rechecking the new correction, and state precisely
 what was read, executed or reused. No historical LGTM substitutes for approval
 of this final plan. The ordered independent adversarial gate remains pending.
+
+
+### Renewed primary refresh R2 response (2026-10-17)
+
+Claude read every backend task in full, including previously unchanged tasks,
+and returned NOT LGTM on8737bc4 with one P2-A in Task42. The plan's replacement
+of `list_runs_cmd` discarded current-main hub merging, `host_state` JSON,
+disconnected-host status text and local time display. A bounded partial assembly
+of the exact old replacement fails three existing tests that pass on unchanged
+main. The parent accepted this concrete regression. Full report, all49/26 scope
+ledger, applied diff and test logs remain in durable `primary-refresh-r2/`.
+
+Correction: extend the current function additively. Preserve existing hub-read
+credential resolution, merge and hub duplicate precedence, newest-first order,
+final limit, JSON status metadata and formatted text. Add the owner option,
+resolve `me` through the configured hub only for the local index, and forward
+raw owner to the hub. No separate login-only runs branch is needed. Current
+contract section4 explicitly preserves these behaviors and requires both the
+original regressions and dedicated local/merged owner cases. The Task12 test
+also imports its called `task_table`; the tracker labels the old a444125 status
+as historical. Exact correction evidence is retained separately in durable
+`parent-primary-r2-cli-fix/`. The additive replay passes6 original regression/
+snapshot tests with unchanged assertions and expected keys. With actual owner
+SQLite plumbing,7 owner cases and3 credential-resolution probes pass. The latter
+execute the exact Task41 resolver but fake login persistence and HTTP transport;
+real loopback/scoped-login acceptance remains mandatory in `test_auth_cli.py`.
+Parent inspected the replay/prerequisite diff, verified all10 evidence hashes
+and the exact planned test fence against the executed file. Ruff, formatting and
+ty checks pass for the harness; Task12 import correction is static only. The
+stale fixed Task42 auth-test count was removed because the test set grew.
+
+R2 independently verified R1's cleanup correction in four non-root environments:
+macOS Python3.11/3.14 and Linux Python3.11/3.12. Each passed23 exact-snippet tests
+(including a receipt writer), with22 removal observations, intact protected bytes
+and zero leaked descriptors. Parent read the added boundary cases and logs and
+verified all12 helper hashes in every receipt against the actual plan. This
+closes only the prior Linux snippet-execution gap. It does not establish full
+storage/API/host integration. The local VM was stopped after the review.
+
+All nine original diagnostic resolutions and the mint_local allegation rejection
+remain intact. R2's type-aware migration probe reports zero differences; route,
+MCP and frontend inventories remain covered. Full PostgreSQL/wheel/browser and
+assembled Phase3 acceptance are still future implementation requirements. The
+six CI checks passed on8737bc4, including the previously failing UI job; CI is
+not approval of future runtime behavior. A new primary verdict is required on
+the corrected frozen input, followed by a new independent adversarial verdict.

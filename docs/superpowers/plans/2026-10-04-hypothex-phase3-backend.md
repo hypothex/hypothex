@@ -5588,7 +5588,7 @@ run,r2,r2,1,accuracy/value,0.25,,false,,,,,false,false,false,
 
 - [ ] **Step 2: Write the failing test**
 
-Append to `tests/core/test_export.py` (and add `import yaml`, `from hypothex.core.context import Context`, `from hypothex.core.errors import RunError`, `from hypothex.core.evaluation import evaluate_run`, `from hypothex.core.ids import utcnow`, `from hypothex.core.records import RunStatus, ScoreRecord`, `from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project`, plus `compare_table, export_compare, export_task` to the `hypothex.core.export` import):
+Append to `tests/core/test_export.py` (and add `import yaml`, `from hypothex.core.context import Context`, `from hypothex.core.errors import RunError`, `from hypothex.core.evaluation import evaluate_run`, `from hypothex.core.ids import utcnow`, `from hypothex.core.records import RunStatus, ScoreRecord`, `from tests.factories import PREDS_075, make_record, seed_finished_run, write_toy_project`, plus `compare_table, export_compare, export_task, task_table` to the `hypothex.core.export` import):
 
 ```python
 PREDS_025 = [{"id": f"ex-{i}", "prediction": 1} for i in range(4)]  # 1 of 4 correct
@@ -20459,14 +20459,17 @@ git commit -m "feat(cli): pair, login, logout, whoami, sessions, and users"
 ### Task 42: Client mode for reads, `hx runs --owner`, and `hx hosts pair`
 
 **Files:**
-- Modify: `src/hypothex/cli/main.py` (`_client_hub`; `projects`, `tasks`, `runs --owner` read through a logged-in hub; `hx hosts pair`; `hx hosts add --token-env/--pair`)
+- Modify: `src/hypothex/cli/main.py` (`_client_hub`; `projects`, `tasks` read through a logged-in hub; additive `runs --owner` on the existing local/hub merge; `hx hosts pair`; `hx hosts add --token-env/--pair`)
 - Test: `tests/cli/test_auth_cli.py` (append)
+- Create: `tests/cli/test_runs_owner.py`
+- Preserve: `tests/cli/test_remote_cli.py`, `tests/cli/test_json_snapshots.py` and their assertions (Task 4 owner fields are intentional additive schema changes only)
 
 **Interfaces:**
 - Consumes: `hub_login` (Task 7), `save_host_token` (Task 38), `_redeem` (Task 41).
 - Produces (contract 4, exact): `hx runs --owner me|NAME`; `hx hosts add <name> --url URL [--token-env VAR | --pair PAIRING_URL]`; `hx hosts pair <name> <pairing-url>` (redeems as `host`, writes `host-tokens.json`, reconnects the host through a running hub).
 - Produces (public helper): `_client_hub() -> str | None` (the hub URL when this home holds a login for it).
-- Rules: in client mode `projects`, `tasks`, and `runs` print the hub's data in the same shape as phase 1; `--owner me` asks the hub who "me" is (client mode, or a hub running on this machine), else it is an error; a hub with auth off answers `auth: "off"`, and `me` then filters nothing (runs have no owner; every run is the caller's), like the API.
+- Rules: `projects` and `tasks` use the logged-in hub in client mode. `runs` always extends the existing local-plus-hub read, with or without `hx login`: `_hub_read` already uses Task 41's token resolver (explicit environment token, matching login, then matching loopback server token). Preserve hub-preferred deduplication by run ID, newest-first `(created_at, run_id)` sorting, the final limit, `host_state` on every JSON row, `_status_text`, `_local`, and all existing filters. Only add the owner filter; do not branch on `_client_hub` or replace the whole function.
+- Identity: resolve `--owner me` through the configured hub's `/api/v1/auth/me` once for filtering the local index; forward the raw string `me` in the hub query so that server resolves its caller. The OS `$USER`, a different local server, and a cached login's display name do not define this identity. If local stored owners differ from the configured hub user, only the matching local owner tag is included. Auth off returns `None` for the local owner filter and sends `owner=me` to the hub (both unfiltered, including historical owned rows). If the identity endpoint is unreachable, `me` is an explicit error. Named or absent owner needs no identity lookup and retains `_hub_read`'s normal local fallback and warning/error behavior.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -20525,9 +20528,181 @@ def test_hosts_pair_and_add_with_a_token_env(tmp_path: Path) -> None:
     assert load_hosts(layout).environments["lab2"].token_env == "LAB_TOKEN"
 ```
 
+Create `tests/cli/test_runs_owner.py` (real local index, fake hub responses; the existing remote tests below exercise the loopback transport):
+
+```python
+"""Owner filtering retains the existing local/hub merge and presentation."""
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
+from typer.testing import CliRunner
+
+from hypothex.cli import main as cli_main
+from hypothex.core.context import Context
+from hypothex.core.errors import ConfigError
+from hypothex.core.jsonutil import to_jsonable
+from hypothex.core.records import RunStatus
+from hypothex.mcp.server import HubUnavailableError
+from tests.factories import make_record
+
+runner = CliRunner()
+STAMP = datetime(2026, 10, 1, 12, tzinfo=UTC)
+
+
+def rows(*args: str) -> list[dict[str, Any]]:
+    """Return the actual CLI's JSON list for the supplied options."""
+    result = runner.invoke(cli_main.app, ["runs", *args, "--json"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("owner", [None, "alice", "me"])
+def test_owner_preserves_merged_filters_and_presentation(
+    home: Path, monkeypatch: pytest.MonkeyPatch, owner: str | None
+) -> None:
+    ctx = Context.open(home)
+    eid = ctx.descriptor.environment_id
+    for run_id, who in (("a-local", "alice"), ("b-dup", "alice"), ("x-local", "sv")):
+        ctx.create_run(
+            make_record(
+                run_id,
+                owner=who,
+                environment_id=eid,
+                created_at=STAMP,
+                status=RunStatus.RUNNING,
+                task="toy-acc",
+                tags=["team"],
+            )
+        )
+    remote = [
+        {
+            **to_jsonable(
+                make_record(
+                    run_id,
+                    owner=who,
+                    created_at=STAMP,
+                    status=RunStatus.RUNNING,
+                    task="toy-acc",
+                    tags=["team"],
+                    hypothesis="hub version",
+                )
+            ),
+            "host_state": "disabled",
+        }
+        for run_id, who in (("b-dup", "alice"), ("c-hub", "alice"), ("y-hub", "sv"))
+    ]
+    seen: list[tuple[str, dict[str, list[str]]]] = []
+    # A different OS/local-owner name must never resolve --owner me.
+    monkeypatch.setenv("USER", "sv")
+
+    def hub(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+        assert method == "GET"
+        parts = urlsplit(path)
+        query = parse_qs(parts.query)
+        seen.append((parts.path, query))
+        if parts.path == "/api/v1/auth/me":
+            return {"auth": "on", "user": "alice"}
+        assert parts.path == "/api/v1/runs"
+        wanted = {
+            "project": ["toy"],
+            "task": ["toy-acc"],
+            "status": ["running"],
+            "tag": ["team"],
+            "archived": ["true"],
+            "limit": ["3"],
+        }
+        if owner is not None:
+            wanted["owner"] = [owner]  # literal me, never rewritten to alice
+        assert query == wanted
+        resolved = "alice" if owner == "me" else owner
+        return [r for r in remote if resolved is None or r["owner"] == resolved]
+
+    monkeypatch.setattr(cli_main, "_hub", hub)
+    args = [
+        "--project",
+        "toy",
+        "--task",
+        "toy-acc",
+        "--status",
+        "running",
+        "--tag",
+        "team",
+        "--archived",
+        "--limit",
+        "3",
+    ]
+    if owner is not None:
+        args += ["--owner", owner]
+    result = rows(*args)
+    expected = ["y-hub", "x-local", "c-hub"] if owner is None else ["c-hub", "b-dup", "a-local"]
+    assert [r["run_id"] for r in result] == expected
+    assert all("host_state" in r for r in result)
+    assert all(
+        r["host_state"] == (None if r["run_id"].endswith("local") else "disabled") for r in result
+    )
+    if owner is not None:
+        assert result[1]["hypothesis"] == "hub version"  # hub wins duplicate
+    assert sum(path == "/api/v1/auth/me" for path, _ in seen) == (owner == "me")
+    monkeypatch.setattr(cli_main, "_local", lambda when: "LOCAL-TIME-SENTINEL")
+    output = runner.invoke(cli_main.app, ["runs", *args], catch_exceptions=False)
+    assert output.exit_code == 0
+    assert "host disabled" in output.stdout and "LOCAL-TIME-SENTINEL" in output.stdout
+
+
+@pytest.mark.parametrize("owner", [None, "alice"])
+def test_local_owner_filter_without_hub(
+    home: Path, monkeypatch: pytest.MonkeyPatch, owner: str | None
+) -> None:
+    ctx = Context.open(home)
+    for run_id, who in (("a", "alice"), ("b", "sv")):
+        ctx.create_run(make_record(run_id, owner=who, environment_id=ctx.descriptor.environment_id))
+
+    def unavailable(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+        assert path.startswith("/api/v1/runs")  # no /auth/me for named/no owner
+        raise HubUnavailableError("offline")
+
+    monkeypatch.setattr(cli_main, "_hub", unavailable)
+    result = rows(*([] if owner is None else ["--owner", owner]))
+    assert {r["run_id"] for r in result} == ({"a", "b"} if owner is None else {"a"})
+    assert all(r["host_state"] is None for r in result)
+
+
+def test_owner_me_auth_off_is_unfiltered(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = Context.open(home)
+    # Historical owned rows also remain visible when auth is subsequently off.
+    ctx.create_run(make_record("local", owner="sv", environment_id=ctx.descriptor.environment_id))
+    called: list[str] = []
+
+    def hub(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+        called.append(path)
+        if path == "/api/v1/auth/me":
+            return {"auth": "off"}
+        assert parse_qs(urlsplit(path).query)["owner"] == ["me"]
+        return [{**to_jsonable(make_record("remote")), "host_state": "connected"}]
+
+    monkeypatch.setattr(cli_main, "_hub", hub)
+    assert {r["run_id"] for r in rows("--owner", "me")} == {"local", "remote"}
+    assert len(called) == 2
+
+
+def test_owner_me_without_identity_is_error(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(method: str, path: str, *args: Any, **kwargs: Any) -> Any:
+        assert path == "/api/v1/auth/me"
+        raise HubUnavailableError("offline")
+
+    monkeypatch.setattr(cli_main, "_hub", unavailable)
+    with pytest.raises(ConfigError, match="--owner me needs a hub"):
+        rows("--owner", "me")
+```
+
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run pytest tests/cli/test_auth_cli.py tests/mcp/test_scoped_tools.py -v`
+Run: `uv run pytest tests/cli/test_auth_cli.py tests/cli/test_runs_owner.py tests/mcp/test_scoped_tools.py -v`
 Expected: FAIL: `test_a_logged_in_cli_reads_the_hub` lists no projects (the laptop's home is empty), `test_owner_me_needs_a_hub` with `No such option: --owner`, and `test_hosts_pair_and_add_with_a_token_env` with `No such command 'pair'`.
 
 - [ ] **Step 3: Write the implementation**
@@ -20550,8 +20725,8 @@ def _me() -> str | None:
     """
     The caller's user name on the hub (client mode, or a hub on this machine).
 
-    None when the hub has auth off: runs then have no owner and every run is
-    the caller's, so ``--owner me`` filters nothing (the API does the same).
+    None when the hub has auth off: ``--owner me`` filters nothing, including
+    historical owned rows (the API does the same).
     """
     me = _hub_try("GET", "/api/v1/auth/me")
     if me is None:
@@ -20612,66 +20787,38 @@ def tasks(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
     )
 ```
 
-3. Replace `list_runs_cmd` with:
+3. Extend current-main `list_runs_cmd` **in place**, using these three precise edits; keep every other statement and output column unchanged.
+
+After its `tag` argument, insert:
 
 ```python
-@app.command("runs")
-def list_runs_cmd(
-    project: ProjectOpt = None,
-    task: TaskOpt = None,
-    status: Annotated[RunStatus | None, typer.Option(help="Filter by status.")] = None,
-    tag: Annotated[str | None, typer.Option(help="Filter by tag.")] = None,
     owner: Annotated[
         str | None, typer.Option("--owner", help="Runs of this user; `me` for yours.")
     ] = None,
-    archived: Annotated[bool, typer.Option(help="Include archived runs.")] = False,
-    limit: Annotated[int, typer.Option(help="Maximum rows.")] = 50,
-    as_json: JsonFlag = False,
-) -> None:
-    """List runs, newest first."""
-    if _client_hub() is not None:
-        from urllib.parse import urlencode
+```
 
-        params = {
-            "project": project,
-            "task": task,
-            "status": status.value if status else None,
-            "tag": tag,
-            "owner": owner,
-            "archived": "true" if archived else None,
-            "limit": limit,
-        }
-        query = urlencode({k: v for k, v in params.items() if v is not None})
-        records = [RunRecord.model_validate(r) for r in _hub("GET", f"/api/v1/runs?{query}")]
-    else:
-        who = _me() if owner == "me" else owner
-        records = _ctx().index.list_runs(
-            project=project,
-            task=task,
-            status=status,
-            tag=tag,
-            owner=who,
-            include_archived=archived,
-            limit=limit,
-        )
-    if as_json:
-        _print_json(records)
-        return
-    _table(
-        ["run", "task", "status", "owner", "created", "hypothesis"],
-        [
-            [
-                r.run_id,
-                r.task,
-                r.status.value,
-                f"@{r.owner}" if r.owner else None,
-                r.created_at.strftime("%Y-%m-%d %H:%M"),
-                r.hypothesis[:50],
-            ]
-            for r in records
-        ],
+Replace only its initial local `records = _ctx().index.list_runs(...)` call with:
+
+```python
+    who = _me() if owner == "me" else owner
+    records = _ctx().index.list_runs(
+        project=project,
+        task=task,
+        status=status,
+        tag=tag,
+        owner=who,
+        include_archived=archived,
+        limit=limit,
     )
 ```
+
+In its existing `filters` dictionary, immediately after `"tag": tag,`, insert:
+
+```python
+        "owner": owner,
+```
+
+Keep `_hub_read(_query("/api/v1/runs", filters))`, `states`, hub-preferred merge, sorting and final slicing verbatim. Keep the JSON expression `{**to_jsonable(r), "host_state": states.get(r.run_id)}` and the `_status_text`/`_local` table cells verbatim. No new owner column is needed; Task 4 already adds `owner` to each record's JSON. Task 41 supplies login credentials through the existing `_hub` client, so `runs` needs no `_client_hub` branch.
 
 4. Add to `hosts_add` two options after `usd`:
 
@@ -20739,7 +20886,16 @@ def hosts_pair(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/cli -v`
-Expected: `tests/cli/test_auth_cli.py` `9 passed`; the phase 1–2 CLI tests (`projects`, `tasks`, `runs`, `hosts add`) still pass.
+Expected: all auth and owner cases pass; the phase 1–2 CLI tests (`projects`, `tasks`, `runs`, `hosts add`) still pass. Explicitly retain and run:
+
+```bash
+uv run pytest -v \
+  tests/cli/test_remote_cli.py::test_a_cli_on_another_machine_reads_back_what_it_launched \
+  tests/cli/test_remote_cli.py::test_show_and_runs_mark_a_run_whose_host_is_not_connected \
+  tests/cli/test_json_snapshots.py
+```
+
+The JSON snapshot assertions must remain strict; inspect only the intentional additive Task 4 owner paths when updating the expected snapshot, with no removed or renamed key paths (`[].host_state` is mandatory). In `tests/cli/test_auth_cli.py`, add a loopback authenticated-hub regression using `HYPOTHEX_HUB_URL` and `HYPOTHEX_HUB_TOKEN` with **no** `hub-tokens.json`, and the equivalent Task 41 saved-login path. Both must return hub rows merged with local rows through `_hub_read`; assert token precedence and raw `owner=me`. Keep Task 41's other-URL login isolation test. The dedicated owner cases assert local filtering, a different OS identity, raw hub filters, combined project/task/status/tag/archived/limit, duplicate hub precedence, sorting, final limit, host-state JSON/text, local-time formatting, auth-off historical rows, and no-hub behavior. Fake response tests alone do not establish the integrated Task 25/27 auth route or Task 41 login path; the loopback/login cases are required at implementation acceptance.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -20747,7 +20903,7 @@ Expected: clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hypothex/cli/main.py tests/cli/test_auth_cli.py
+git add src/hypothex/cli/main.py tests/cli/test_auth_cli.py tests/cli/test_runs_owner.py tests/cli/snapshots/json_keys.json
 git commit -m "feat(cli): read through a logged-in hub, runs --owner, and hosts pair"
 ```
 

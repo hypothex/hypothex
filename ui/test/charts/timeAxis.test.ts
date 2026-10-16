@@ -16,18 +16,30 @@ describe("timeTicks", () => {
     for (const v of ticks) expect((v + off) % 3600).toBe(0);
   });
 
-  test("a span across a DST change keeps every tick on a whole local hour", () => {
+  test("a span across a DST change keeps every tick on the real step in local time", () => {
     const change = 1_792_000_000; // local time jumps from UTC+1 to UTC+2 here
     const off = (t: number): number => (t < change ? 3600 : 7200);
     const ticks = timeTicks(change - 3 * 3600 - 600, change + 3 * 3600, 4, off);
+    const step = (ticks[1] ?? 0) - (ticks[0] ?? 0);
+    expect(step).toBe(7200); // 2 h ticks: an hour shift breaks them, unlike 1 h ticks
     expect(ticks.some((v) => v < change) && ticks.some((v) => v >= change)).toBe(true);
-    for (const v of ticks) expect((v + off(v)) % 3600).toBe(0);
+    for (const v of ticks) expect((v + off(v)) % step).toBe(0);
     expect(new Set(ticks).size).toBe(ticks.length);
     // the clock back (UTC+2 to UTC+1): a repeated local hour gives no duplicate tick
     const back = (t: number): number => (t < change ? 7200 : 3600);
-    const again = timeTicks(change - 4 * 3600, change + 4 * 3600, 6, back);
-    for (const v of again) expect((v + back(v)) % 3600).toBe(0);
+    const again = timeTicks(change - 4 * 3600, change + 4 * 3600, 4, back);
+    const step2 = (again[1] ?? 0) - (again[0] ?? 0);
+    for (const v of again) expect((v + back(v)) % step2).toBe(0);
     expect([...again].sort((x, y) => x - y)).toEqual(again);
+  });
+
+  test("day ticks across a DST change are all local midnight", () => {
+    const change = 1_792_000_000;
+    const off = (t: number): number => (t < change ? 3600 : 7200);
+    const ticks = timeTicks(change - 3 * 86400, change + 3 * 86400, 4, off);
+    expect((ticks[1] ?? 0) - (ticks[0] ?? 0)).toBeGreaterThanOrEqual(86400 - 3600);
+    expect(ticks.filter((v) => v >= change).length).toBeGreaterThan(0);
+    for (const v of ticks) expect((v + off(v)) % 86400).toBe(0);
   });
 
   test("sub-second spans at epoch seconds keep decimal steps; empty spans give one tick", () => {

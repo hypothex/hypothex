@@ -38,6 +38,7 @@ from hypothex.core.execution import RunRequest
 from hypothex.core.ids import new_command_id
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import default_home
+from hypothex.core.naming import clean_run_name
 from hypothex.core.records import RunRecord, RunStatus
 from hypothex.core.store import ProjectEntry
 from hypothex.core.sweeps import SweepParam, SweepSpec, load_sweep, summarize_sweep, sweep_path
@@ -124,6 +125,7 @@ Loop for a new iteration:
    within_noise_of_best means p >= 0.05: insufficient evidence of a difference, not equality.
    compare_runs accepts individual run IDs only; compare_examples shows paired examples.
    add_note with what you learned. Use get_logs for a failed run's stderr.
+   rename_run gives a run a short name for what it changes; fix a wrong name the same way.
 Never delete runs. Never change a metric's code without bumping its version in
 hypothex.yaml; then call reevaluate for the task.
 
@@ -157,6 +159,7 @@ COMPACT_RUN_FIELDS = {
     "sweep_id",
     "tags",
     "starred",
+    "name",
     "created_by",
     "environment_id",
 }
@@ -1817,6 +1820,20 @@ def build_server(
         if out is not None:
             return {"run": out}
         return {"run": dump(q.tag_run(ctx(), run_id, add or [], remove or []))}
+
+    @mcp.tool()
+    @_expose_errors
+    def rename_run(run_id: str, name: str | None, agent: str | None = None) -> dict[str, Any]:
+        """
+        Name a run by what it changes (``lr 3e-4, wide beam``): 1-80 characters, one line.
+
+        name=None resets it to the derived name (the params that differ in its task).
+        """
+        clean = clean_run_name(name)
+        out = via_hub(run_id, "name", {"name": clean}, agent)
+        if out is not None:
+            return {"run": out}
+        return {"run": dump(q.rename_run(ctx(), run_id, clean))}
 
     @mcp.tool()
     @_expose_errors

@@ -43,6 +43,10 @@ author, and Hypothex rejects runs that have no hypothesis.
    examples got fixed or broken.
 6. Write down what you learned: `hx note <run_id> "<finding and next step>"`.
    Tag useful runs: `hx tag <run_id> --add baseline`.
+7. Name each run by what it changes, in a few words:
+   `hx rename <run_id> "lr 3e-4, wide beam" --json`. If a name is wrong, rename it
+   the same way (`--reset` goes back to the name Hypothex derives from the params).
+   MCP: `rename_run`.
 
 ## Rules
 

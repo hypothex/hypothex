@@ -191,6 +191,15 @@ Archive a run (``--off`` to unarchive) to hide a dead end without deleting it.
 
 .. code-block:: bash
 
+   hx rename RUN_ID "lr 3e-4, wide beam" --json
+   hx rename RUN_ID --reset --json
+
+Name a run by what it changes (1–80 characters, one line). Without a name a run shows
+its derived name: the params that differ inside its task (``lr 3e-4 · beam 10``).
+``--reset`` drops the name. A run of a host is renamed on that host, through the hub.
+
+.. code-block:: bash
+
    hx note RUN_ID "beam width 20 helps top-10, not top-1" --json
 
 Add a note to a run.

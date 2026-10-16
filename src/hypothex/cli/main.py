@@ -60,6 +60,7 @@ from hypothex.core.index import rebuild_index
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import Layout, default_home
 from hypothex.core.leaderboard import Leaderboard
+from hypothex.core.naming import clean_run_name
 from hypothex.core.records import TERMINAL_STATUSES, RunRecord, RunStatus
 from hypothex.core.seeds import Stats
 from hypothex.core.store import RunStore
@@ -1607,6 +1608,26 @@ def tag(
         else q.tag_run(_ctx(), run_id, add or [], remove or [])
     )
     _emit(record, as_json, ", ".join(record.tags) or "(no tags)")
+
+
+@app.command()
+def rename(
+    run_id: str,
+    name: Annotated[str | None, typer.Argument(help="New name, 1-80 characters.")] = None,
+    reset: Annotated[
+        bool, typer.Option("--reset", help="Drop the name; the run shows its derived name.")
+    ] = False,
+    as_json: JsonFlag = False,
+) -> None:
+    """Name a run by what it changes (or --reset it to its derived name)."""
+    if reset == (name is not None):
+        raise RunError("give a NAME or --reset")
+    wanted = None if reset else clean_run_name(name)
+    out = _through_hub(run_id, "name", {"name": wanted})
+    record = (
+        RunRecord.model_validate(out) if out is not None else q.rename_run(_ctx(), run_id, wanted)
+    )
+    _emit(record, as_json, record.name or "(derived name)")
 
 
 OffFlag = Annotated[bool, typer.Option("--off", help="Undo.")]

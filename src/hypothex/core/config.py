@@ -7,10 +7,18 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from hypothex.core.errors import ConfigError, TemplateError
 from hypothex.core.fsutil import read_yaml
+from hypothex.core.scorekeys import parse_key_pattern
 
 CONFIG_FILENAME = "hypothex.yaml"
 BUILTIN_TEMPLATE_VARS = frozenset(
@@ -233,7 +241,9 @@ class TaskSpec(_Strict):
     (validated by ``hypothex.core.views``). ``baseline`` is a seed-group
     selector (``tag:<tag>`` or a group id) that ``system_bench`` compares
     against. ``version_param`` names the run param that orders
-    ``agent_iteration`` groups.
+    ``agent_iteration`` groups. ``score_keys`` names the dotted parts of the
+    task's score keys, for example ``"{dataset}.{model}.{metric}"``
+    (``scorekeys.parse_key_pattern``); the UI labels its controls with them.
     """
 
     dataset: str
@@ -245,6 +255,28 @@ class TaskSpec(_Strict):
     views: dict[str, dict[str, Any]] = Field(default_factory=dict)
     baseline: str | None = None
     version_param: str = Field(default="version", min_length=1)
+    score_keys: str | None = None
+
+    @field_validator("score_keys")
+    @classmethod
+    def _key_pattern(cls, value: str | None) -> str | None:
+        """Reject a pattern that is not 2-3 ``{name}`` parts with a ``{metric}``."""
+        if value is not None:
+            parse_key_pattern(value)
+        return value
+
+    @property
+    def key_parts(self) -> list[str] | None:
+        """
+        The part names of ``score_keys``, or None when the task has no pattern.
+
+        Examples
+        --------
+        >>> spec = TaskSpec(dataset="d", metrics=["r"], primary="r", score_keys="{a}.{metric}")
+        >>> spec.key_parts
+        ['a', 'metric']
+        """
+        return parse_key_pattern(self.score_keys) if self.score_keys else None
 
 
 class EnvSpec(_Strict):

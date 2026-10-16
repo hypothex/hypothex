@@ -28,6 +28,7 @@ from sqlalchemy import (
     event,
     func,
     insert,
+    or_,
     select,
     text,
     tuple_,
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
     from hypothex.core.context import Context
 
 log = logging.getLogger(__name__)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _IN_CHUNK = 450
 """Most values bound in one ``IN (...)`` list of an index query."""
 GENERATION_KEY = "generation"
@@ -119,6 +120,7 @@ class RunRow(Base):
     parent: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     starred: Mapped[bool] = mapped_column(Boolean, default=False)
+    name: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     record_json: Mapped[str] = mapped_column(Text)
 
 
@@ -233,6 +235,7 @@ def _run_values(record: RunRecord) -> dict[str, Any]:
         "parent": record.parent,
         "archived": record.archived,
         "starred": record.starred,
+        "name": record.name,
         "record_json": record.model_dump_json(),
     }
 
@@ -291,6 +294,7 @@ def _filter_runs(
     tag: str | None,
     environment_id: str | None,
     include_archived: bool,
+    search: str | None = None,
 ) -> Select[Any]:
     """Add the ``list_runs`` filters to a select over ``runs``."""
     if project is not None:
@@ -305,6 +309,13 @@ def _filter_runs(
         stmt = stmt.where(RunRow.environment_id == environment_id)
     if not include_archived:
         stmt = stmt.where(RunRow.archived.is_(False))
+    if search:
+        stmt = stmt.where(
+            or_(
+                RunRow.name.icontains(search, autoescape=True),
+                RunRow.run_id.icontains(search, autoescape=True),
+            )
+        )
     return stmt
 
 
@@ -554,6 +565,7 @@ class Index:
         include_archived: bool = False,
         limit: int | None = 500,
         before: tuple[datetime | str, str] | None = None,
+        search: str | None = None,
     ) -> list[RunRecord]:
         """
         List runs, newest first.
@@ -571,6 +583,9 @@ class Index:
         before : tuple of (datetime or str, str), optional
             Keyset cursor ``(created_at, run_id)`` of the last run of the
             previous page: only runs after it in this order are returned.
+        search : str, optional
+            Only runs whose ``name`` or ``run_id`` contains this text, ignoring
+            ASCII case (``%`` and ``_`` match themselves).
 
         Returns
         -------
@@ -581,6 +596,7 @@ class Index:
         >>> page = idx.list_runs(limit=200)  # doctest: +SKIP
         >>> last = page[-1]  # doctest: +SKIP
         >>> idx.list_runs(limit=200, before=(last.created_at, last.run_id))  # doctest: +SKIP
+        >>> idx.list_runs(search="wide beam")  # doctest: +SKIP
         """
         stmt = select(RunRow.record_json).order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
         stmt = _filter_runs(
@@ -591,6 +607,7 @@ class Index:
             tag=tag,
             environment_id=environment_id,
             include_archived=include_archived,
+            search=search,
         )
         if before is not None:
             created, run_id = before
@@ -980,6 +997,39 @@ class Index:
         )
         with Session(self.engine) as session:
             return list(session.scalars(stmt))
+
+    def metric_names_for(self, run_ids: Iterable[str]) -> list[str]:
+        """
+        Return the distinct names of the indexed metrics of many runs, sorted.
+
+        Reads only names through the ``(run_id, name, step)`` index, ``_IN_CHUNK``
+        run ids per statement. Points a rebuild skipped are read first, as in
+        ``metric_points``.
+
+        Parameters
+        ----------
+        run_ids : iterable of str
+            Runs to read.
+
+        Returns
+        -------
+        list of str
+            Distinct metric names over all the runs; empty when none has points.
+
+        Examples
+        --------
+        >>> idx.metric_names_for(["r1", "r2"])  # doctest: +SKIP
+        ['loss', 'lr', 'val/acc']
+        """
+        ids = list(dict.fromkeys(run_ids))
+        self._fill_pending_points(ids)
+        names: set[str] = set()
+        with Session(self.engine) as session:
+            for start in range(0, len(ids), _IN_CHUNK):
+                chunk = ids[start : start + _IN_CHUNK]
+                stmt = select(MetricPointRow.name).where(MetricPointRow.run_id.in_(chunk))
+                names.update(session.scalars(stmt.distinct()))
+        return sorted(names)
 
     def _fill_pending_points(self, run_ids: list[str]) -> None:
         """Index the metric files of the runs whose points a rebuild skipped."""

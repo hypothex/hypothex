@@ -100,7 +100,7 @@ a monotonically increasing ``sequence``. Current event types include:
   ``run.slurm_state``.
 - Scores and annotations: ``run.score_added``, ``run.eval_skipped``,
   ``run.warning``, ``run.note_added``, ``run.tagged``, ``run.starred``,
-  ``run.archived``.
+  ``run.archived``, ``run.renamed``.
 - Remote state: ``host.state``, ``mirror.run_updated``.
 - Durable sweep issuance: ``sweep.issuance``, including progress before any member
   run exists. The issuance state and its accepted receipt commit atomically with

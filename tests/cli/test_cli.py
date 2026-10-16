@@ -132,6 +132,17 @@ def test_curation_commands(in_repo: Path) -> None:
     assert hx("runs") == []
 
 
+def test_rename_names_and_resets_a_run(in_repo: Path) -> None:
+    rid = _run()["run_id"]
+    assert hx("rename", rid, "  wide beam ")["name"] == "wide beam"
+    assert hx("show", rid)["record"]["name"] == "wide beam"
+    assert hx("rename", rid, "--reset")["name"] is None
+    result = runner.invoke(app, ["rename", rid, "x", "--reset"])
+    assert result.exit_code != 0 and "give a NAME or --reset" in str(result.exception)
+    result = runner.invoke(app, ["rename", rid, "x" * 81])
+    assert result.exit_code != 0 and "at most 80" in str(result.exception)
+
+
 def test_launch_wait_and_rerun(in_repo: Path) -> None:
     out = hx("launch", "--wait", "-H", "bg", "--", PY, "-c", "print('bg')")
     assert out["status"] == "finished"

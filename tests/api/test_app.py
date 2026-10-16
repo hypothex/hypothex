@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 import threading
 import time
@@ -15,7 +16,8 @@ import hypothex.api.app as app_mod
 from hypothex.api.app import create_app
 from hypothex.core.context import Context
 from hypothex.core.evaluation import evaluate_run
-from hypothex.core.records import MetricPoint
+from hypothex.core.ids import utcnow
+from hypothex.core.records import MetricPoint, ScoreRecord
 from hypothex.core.views import get_view, load_preset
 from hypothex.sdk import Run
 from tests.factories import PREDS_075, make_record, seed_finished_run
@@ -816,3 +818,62 @@ def test_shutdown_stops_background_threads_when_the_hub_stop_fails(
         pass
     assert info.group_contains(RuntimeError, match="hub stop failed")
     assert stopped.wait(5)
+
+
+def test_rename_route_names_resets_and_validates(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    out = client.post("/api/v1/runs/r1/name", json={"name": " wide beam "})
+    assert out.status_code == 200 and out.json()["name"] == "wide beam"
+    assert [r["run_id"] for r in client.get("/api/v1/runs", params={"q": "BEAM"}).json()] == ["r1"]
+    assert client.get("/api/v1/runs", params={"q": "nothing"}).json() == []
+    too_long = client.post("/api/v1/runs/r1/name", json={"name": "x" * 81})
+    assert too_long.status_code == 422 and "at most 80" in too_long.json()["error"]
+    two_lines = client.post("/api/v1/runs/r1/name", json={"name": "a\nb"})
+    assert two_lines.status_code == 422 and "one line" in two_lines.json()["error"]
+    assert ctx.find_record("r1").name == "wide beam"
+    first = client.post("/api/v1/runs/r1/name", json={"name": "once", "command_id": "R1"})
+    again = client.post("/api/v1/runs/r1/name", json={"name": "twice", "command_id": "R1"})
+    assert first.json()["name"] == again.json()["name"] == "once"  # a retry replays
+    assert ctx.find_record("r1").name == "once"
+    reset = client.post("/api/v1/runs/r1/name", json={"name": None})
+    assert reset.status_code == 200 and reset.json()["name"] is None
+    assert client.post("/api/v1/runs/nope/name", json={"name": "x"}).status_code == 404
+
+
+def test_task_runs_route_lists_named_runs_and_hides_archived(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    ctx.create_run(make_record("r2", task="toy-acc", archived=True, cwd=str(toy_repo)))
+    body = client.get("/api/v1/tasks/toy/toy-acc/runs").json()
+    assert body["primary"] == "accuracy/value" and body["key_parts"] is None
+    assert [r["run_id"] for r in body["runs"]] == ["r1"]
+    assert body["runs"][0]["scores"] == {"accuracy/value": 0.75}
+    assert body["groups"][0]["is_best"] is True
+    shown = client.get("/api/v1/tasks/toy/toy-acc/runs", params={"archived": "true"}).json()
+    assert {r["run_id"] for r in shown["runs"]} == {"r1", "r2"}
+    assert client.get("/api/v1/tasks/toy/nope/runs").status_code == 400
+
+
+def test_non_finite_scores_never_reach_the_json(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    rec = seed_finished_run(ctx, toy_repo, "r1", predictions=PREDS_075)
+    evaluate_run(ctx, "r1")
+    version = ctx.index.scores_for(["r1"])["r1"][0].version
+    for value in (float("inf"), float("nan")):
+        bad = ScoreRecord(
+            metric="accuracy", version=version, key="value", value=value, created_at=utcnow()
+        )
+        ctx.add_score(rec, bad)
+
+    def reject(constant: str) -> float:
+        raise AssertionError(f"non-finite {constant} in the JSON")
+
+    res = client.get("/api/v1/tasks/toy/toy-acc/runs")
+    body = json.loads(res.text, parse_constant=reject)
+    assert body["runs"][0]["scores"] == {"accuracy/value": 0.75}
+    assert body["runs"][0]["primary"] == 0.75

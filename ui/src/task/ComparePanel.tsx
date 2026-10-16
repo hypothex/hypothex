@@ -174,12 +174,12 @@ export function CompareBody({ model, state, onState, columns, higherIsBetter, sh
   );
 }
 
-export function ComparePanel({ onRemove, ...body }: CompareBodyProps & { onRemove?: () => void }): ReactElement {
+export function ComparePanel({ onRemove, title, ...body }: CompareBodyProps & { onRemove?: () => void; title?: string }): ReactElement {
   const shown = body.model.datasets.filter((d) => body.state.datasets.includes(d)).length;
   return (
     <Panel
       className="cmp-panel"
-      title={compareTitle(body.state, body.model.labels)}
+      title={title ?? compareTitle(body.state, body.model.labels)}
       aside={`${shown} × ${body.columns.length} runs`}
       tools={
         <span className="cmp-aside">

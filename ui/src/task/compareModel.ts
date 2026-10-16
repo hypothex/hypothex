@@ -141,11 +141,26 @@ export function compareTitle(state: CompareState, labels: CompareLabels): string
   return `Compare ${labels.datasets.toLowerCase()}${state.model ? ` · ${state.model}` : ""}`;
 }
 
-/** The view panel "Save as view" writes (`type: compare`). */
-export function comparePanelSpec(state: CompareState, labels: CompareLabels): PanelSpec {
+/**
+ * One title per Compare panel, all distinct: a repeat of an earlier title gets ` · 2`,
+ * ` · 3`, ... (a view must not have two panels with the same title).
+ */
+export function compareTitles(states: readonly CompareState[], labels: CompareLabels): string[] {
+  const used = new Set<string>();
+  return states.map((state) => {
+    const base = compareTitle(state, labels);
+    let title = base;
+    for (let n = 2; used.has(title); n++) title = `${base} · ${n}`;
+    used.add(title);
+    return title;
+  });
+}
+
+/** The view panel "Save as view" writes (`type: compare`); `title` defaults to `compareTitle`. */
+export function comparePanelSpec(state: CompareState, labels: CompareLabels, title: string = compareTitle(state, labels)): PanelSpec {
   return {
     type: "compare",
-    title: compareTitle(state, labels),
+    title,
     data: { datasets: [...state.datasets], model: state.model, metrics: [...state.metrics] },
     render: state.render,
   };

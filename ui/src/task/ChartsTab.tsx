@@ -16,7 +16,7 @@ import { hrefs, useNavigateHref } from "../pages/components/links";
 import { ErrorBox } from "../pages/components/QueryState";
 import { isViewName } from "../pages/ViewEditor";
 import { ComparePanel } from "./ComparePanel";
-import { type CompareColumn, type CompareState, compareModel, comparePanelSpec, compareTitle, defaultCompare } from "./compareModel";
+import { type CompareColumn, type CompareState, compareModel, comparePanelSpec, compareTitles, defaultCompare } from "./compareModel";
 import { useHighlight } from "./highlight";
 import { KindSection } from "./KindSection";
 import { RunsSidebar } from "./RunsSidebar";
@@ -71,9 +71,10 @@ export function ChartsTab(props: ChartsTabProps): ReactElement {
     color: colorOf(i.id),
     scores: i.kind === "group" && i.group ? i.group.scores : (i.runs[0]?.scores ?? {}),
   }));
+  const compareNames = cmp ? compareTitles(compareList, cmp.labels) : [];
   const shownCompares = compareList
-    .map((state, index) => ({ state, index }))
-    .filter(({ state }) => cmp !== null && matchesSearch(compareTitle(state, cmp.labels), query));
+    .map((state, index) => ({ state, index, title: compareNames[index] ?? "" }))
+    .filter(({ title }) => matchesSearch(title, query));
   const names = stepMetrics(data.metric_names);
   const sections = metricSections(names);
   const curves = useStepCurves(project, task, names, items);
@@ -81,7 +82,7 @@ export function ChartsTab(props: ChartsTabProps): ReactElement {
   const seedWord = data.kind === "system_bench" ? "Repeats" : "Seeds";
   const addView = (): void => navigate(hrefs.edit(project, task, "new"));
   const savedPanels: PanelSpec[] = [
-    ...(cmp ? shownCompares.map(({ state }) => comparePanelSpec(state, cmp.labels)) : []),
+    ...(cmp ? shownCompares.map(({ state, title }) => comparePanelSpec(state, cmp.labels, title)) : []),
     ...stepMetricPanels(sections, query),
   ];
   return (
@@ -158,9 +159,10 @@ export function ChartsTab(props: ChartsTabProps): ReactElement {
           <>
             {cmp && shownCompares.length > 0 ? (
               <PanelSection title="Compare" count={shownCompares.length} storageKey={`${project}/${task}`} grid="wide">
-                {shownCompares.map(({ state, index }) => (
+                {shownCompares.map(({ state, index, title }) => (
                   <ComparePanel
                     key={index}
+                    title={title}
                     model={cmp}
                     state={state}
                     columns={columns}

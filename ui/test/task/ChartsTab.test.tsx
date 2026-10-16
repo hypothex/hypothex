@@ -220,6 +220,30 @@ describe("Compare in the Charts tab", () => {
     );
   });
 
+  test("two Compare panels with the same model get distinct titles, shown and saved", async () => {
+    const calls = mockApi({
+      ...EVAL_ROUTES,
+      [`PUT ${BASE}/views/cmp2`]: { info: { name: "cmp2", title: "cmp2", origin: "file", path: null, kind: null }, view: { title: "cmp2", panels: [] } },
+    });
+    renderWithClient(charts({ data: makeEvalTaskRuns() }), { registry: fakeRegistry(["stat_strip"]) });
+    fireEvent.click(screen.getByRole("button", { name: "+ Panel" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Compare" }));
+    expect(screen.getAllByRole("region", { name: /^Compare datasets/ }).map((r) => r.getAttribute("aria-label"))).toEqual([
+      "Compare datasets · model-x",
+      "Compare datasets · model-x · 2",
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Save as view" }));
+    const form = screen.getByRole("form", { name: "Save as view" });
+    fireEvent.change(within(form).getByRole("textbox", { name: "View name" }), { target: { value: "cmp2" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    const text = (calls.find((c) => c.method === "PUT")?.body as { text: string }).text;
+    expect(text.split("\n").filter((l) => l.startsWith("    title:"))).toEqual([
+      '    title: "Compare datasets · model-x"',
+      '    title: "Compare datasets · model-x · 2"',
+    ]);
+  });
+
   test("the panel search hides Compare panels, and Save as view leaves hidden ones out", () => {
     mockApi(EVAL_ROUTES);
     renderWithClient(charts({ data: makeEvalTaskRuns() }), { registry: fakeRegistry(["stat_strip"]) });

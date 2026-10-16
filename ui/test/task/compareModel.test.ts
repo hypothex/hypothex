@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type CompareState,
   compareFromRows,
   compareLabels,
   compareModel,
   comparePanelSpec,
   compareRows,
   compareTitle,
+  compareTitles,
   defaultCompare,
   rowBest,
   toggleKeepOne,
@@ -79,6 +81,15 @@ describe("rows", () => {
       render: "bars",
     });
     expect(compareTitle({ datasets: ["test-a"], model: null, metrics: ["top10"], render: "table" }, compareLabels(["split", "metric"]))).toBe("Compare splits");
+    const x: CompareState = { datasets: ["test-a"], model: "model-x", metrics: ["top10"], render: "table" };
+    const y = { ...x, model: "model-y" };
+    expect(compareTitles([x, y, { ...x, metrics: ["top1"] }, x], model.labels)).toEqual([
+      "Compare datasets · model-x",
+      "Compare datasets · model-y",
+      "Compare datasets · model-x · 2",
+      "Compare datasets · model-x · 3",
+    ]);
+    expect(comparePanelSpec(x, model.labels, "Compare datasets · model-x · 2").title).toBe("Compare datasets · model-x · 2");
     const back = compareFromRows([
       { dataset: "test-a", model: "model-x", metric: "top10", key: "reported/test-a.model-x.top10", run_id: "run-v1", group_id: "g-v1", name: "db v1", value: 0.7 },
       { dataset: "test-b", model: "model-x", metric: "top10", key: "reported/test-b.model-x.top10", run_id: "run-v1", group_id: "g-v1", name: "db v1", value: 0.65 },

@@ -15,8 +15,9 @@ describe("hrefs", () => {
   test("builds the contract routes", () => {
     expect(hrefs.overview()).toBe("/");
     expect(hrefs.task("toy-classifier", "toy-test")).toBe("/t/toy-classifier/toy-test");
-    expect(hrefs.task("toy-classifier", "toy-test", "overview")).toBe("/t/toy-classifier/toy-test");
-    expect(hrefs.task("p", "t", "route-quality")).toBe("/t/p/t?view=route-quality");
+    expect(hrefs.task("toy-classifier", "toy-test", "charts")).toBe("/t/toy-classifier/toy-test");
+    expect(hrefs.task("p", "t", "runs")).toBe("/t/p/t?tab=runs");
+    expect(hrefs.taskView("p", "t", "route-quality")).toBe("/t/p/t?tab=view%3Aroute-quality");
     expect(hrefs.edit("p", "t", "new")).toBe("/t/p/t/edit/new");
     expect(hrefs.run("r1", { log: "stderr" })).toBe("/r/r1?log=stderr");
     expect(hrefs.run("r1", { example: "T-014" })).toBe("/r/r1?example=T-014");
@@ -26,7 +27,7 @@ describe("hrefs", () => {
 
   test("encodes every path segment", () => {
     expect(hrefs.run("r 1/2")).toBe("/r/r%201%2F2");
-    expect(hrefs.task("my proj", "a/b", "my view")).toBe("/t/my%20proj/a%2Fb?view=my+view");
+    expect(hrefs.taskView("my proj", "a/b", "my view")).toBe("/t/my%20proj/a%2Fb?tab=view%3Amy+view");
   });
 });
 

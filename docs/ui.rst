@@ -40,13 +40,17 @@ Screens
   ``$/GPU-h`` and cost today. GPU use refreshes every 10 s. The hub reports GPUs only for a
   connected host; when a host goes stale the page keeps the cells it last saw, greyed, with
   ``as of HH:MM`` (a page opened after the host went stale has none to show).
-- **Task** (``/t/<project>/<task>?view=<name>``): the task's views as tabs. ``overview``
-  is the preset for the task kind; every other tab is a saved view (see :doc:`views`).
-  ``+ view`` opens the view editor; ``New run`` opens the Launch dialog. The project's
-  sweeps are listed under the tabs, each with its run count and best config, linking its
-  Sweep page. Each leaderboard group shows its cost: dollars, GPU-h and agent time
-  (``$6.51 · 11 GPU-h · 4m 10s``), with GPU and API dollars in the tooltip.
-- **Launch dialog** (``New run`` on a Task page, ``Rerun sweep`` on a Sweep page): pick a
+- **Task** (``/t/<project>/<task>?tab=<tab>``): a header with the task name, its kind and
+  one facts line (primary metric and direction, the best config's mean linking its best
+  run, run and config counts, running and queued runs, dataset, runs that need re-eval or
+  are unscored; the Primary tooltip lists the metric versions), ``Re-evaluate all``, and
+  tabs: ``Charts`` (default: the runs sidebar and the task kind's preset panels), ``Examples``
+  (two finished configs side by side), then one tab per saved view (``?tab=view:<name>``,
+  see :doc:`views`) with ``Metric``, ``Seeds`` and ``Edit``. ``+ View`` opens the view
+  editor. An old ``?view=<name>`` link opens that view's tab. On a task page the top bar's
+  ``New run`` starts from the best config's latest run. The project's sweeps are listed
+  under the tabs, each with its run count and best config, linking its Sweep page.
+- **Launch dialog** (``New run`` in the top bar, ``Rerun sweep`` on a Sweep page): pick a
   host (the hub first, then every host with its free GPUs, queue and state; a host that is
   stale, still installing hx, or has no path for the project is disabled and says why),
   GPUs per run and ``wait for GPUs`` (SSH hosts) or partition, time and account (SLURM

@@ -22,14 +22,14 @@ import { ExamplesPage } from "./pages/Examples";
 import { OverviewPage } from "./pages/Overview";
 import { RunPage } from "./pages/Run";
 import { SweepPage } from "./pages/Sweep";
-import { TaskPage } from "./pages/Task";
 import { ViewEditor } from "./pages/ViewEditor";
 import { AppShell } from "./shell/AppShell";
+import { TaskPage } from "./task/TaskPage";
 
 /** The task URL: `tab` is `charts|runs|sweeps|examples|view:<name>`; the rest is the run selection. */
 export interface TaskSearch {
   tab?: string;
-  /** v4 view name (old Task page); the v5 page uses `tab=view:<name>`. */
+  /** Legacy view link (v4); the Task page reads it as `tab=view:<name>` (`task/facts` `parseTab`). */
   view?: string;
   sweep?: string;
   filter?: string;
@@ -38,12 +38,6 @@ export interface TaskSearch {
   hide?: string;
   sup?: string;
   col?: string;
-}
-
-/** The view the old Task page shows: `?view=`, else `?tab=view:<name>`. */
-export function legacyView(search: TaskSearch): string | undefined {
-  if (search.view) return search.view;
-  return search.tab?.startsWith("view:") ? search.tab.slice(5) || undefined : undefined;
 }
 
 export interface ExamplesSearch {
@@ -102,11 +96,13 @@ export function NotFound() {
   );
 }
 
-/** `/t/$project/$task`: the Task page. Screens declare their return type, which keeps the route types free of cycles. */
+/**
+ * `/t/$project/$task`: the Task page; it reads its own search keys (`task/useSearchState`).
+ * Screens declare their return type, which keeps the route types free of cycles.
+ */
 function TaskScreen(): ReactElement {
   const { project, task } = taskRoute.useParams();
-  const search = taskRoute.useSearch();
-  return <TaskPage project={project} task={task} view={legacyView(search)} />;
+  return <TaskPage project={project} task={task} />;
 }
 
 /** `/r/$runId?log=&example=`: the Run page. */
@@ -139,7 +135,7 @@ function ViewEditorScreen(): ReactElement {
       project={project}
       task={task}
       view={view}
-      onSaved={(name) => void navigate({ to: "/t/$project/$task", params: { project, task }, search: { view: name } })}
+      onSaved={(name) => void navigate({ to: "/t/$project/$task", params: { project, task }, search: { tab: `view:${name}` } })}
     />
   );
 }

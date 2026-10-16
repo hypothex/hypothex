@@ -26,10 +26,12 @@ function withSearch(path: string, search: Record<string, string | undefined>): s
 
 export const hrefs = {
   overview: (): string => "/",
-  task: (project: string, task: string, view?: string): string =>
-    withSearch(`/t/${enc(project)}/${enc(task)}`, {
-      view: view === "overview" ? undefined : view,
-    }),
+  /** `/t/<project>/<task>`, with `?tab=` unless `tab` is Charts (the default). */
+  task: (project: string, task: string, tab?: string): string =>
+    withSearch(`/t/${enc(project)}/${enc(task)}`, { tab: tab === "charts" ? undefined : tab }),
+  /** A saved view's tab: `?tab=view:<view>`. */
+  taskView: (project: string, task: string, view: string): string =>
+    withSearch(`/t/${enc(project)}/${enc(task)}`, { tab: `view:${view}` }),
   edit: (project: string, task: string, view: string): string =>
     `/t/${enc(project)}/${enc(task)}/edit/${enc(view)}`,
   run: (runId: string, search: { log?: string; example?: string } = {}): string =>

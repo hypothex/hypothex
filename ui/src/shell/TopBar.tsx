@@ -1,6 +1,8 @@
 /**
  * Top bar (spec section 3): breadcrumb from the route, the command palette button (⌘K),
- * the live-updates indicator and `New run` (the existing Launch dialog).
+ * the live-updates indicator and `New run` (the existing Launch dialog). On a task route
+ * `New run` opens `task/NewRun`: prefilled from the best config's latest run at the click,
+ * with the next unused seeds; the runs it launched stay linked in the bar on that page.
  */
 import { useQuery } from "@tanstack/react-query";
 import { useRouterState } from "@tanstack/react-router";
@@ -9,12 +11,13 @@ import { type ReactElement, useState } from "react";
 import { api } from "../api/client";
 import { useStreamStatus } from "../api/events";
 import type { RunDetail } from "../api/models";
-import { queryKeys, useProjects } from "../api/queries";
+import { queryKeys, useLeaderboard, useProjects } from "../api/queries";
 import { shortId } from "../charts/valueFormat";
 import { Button } from "../chrome/Button";
 import { Icon } from "../chrome/Icon";
 import { LaunchDialog } from "../launch/LaunchDialog";
 import { AppLink, hrefs, useNavigateHref } from "../pages/components/links";
+import { LaunchedLine, type LaunchedRuns, NewRun } from "../task/NewRun";
 import "./shell.css";
 
 export interface Crumb {
@@ -98,6 +101,13 @@ interface LaunchTarget {
   repo: string;
 }
 
+/** A task route's launch: the template run is the best config's latest run at the click. */
+interface TaskLaunch {
+  project: string;
+  task: string;
+  templateRunId: string | null;
+}
+
 export interface TopBarProps {
   onSearch: () => void;
   navOpen: boolean;
@@ -127,6 +137,23 @@ export function TopBar({ onSearch, navOpen, onToggleNav }: TopBarProps): ReactEl
   const routeTask = parts[0] === "t" ? (parts[2] ?? null) : (record?.task ?? null);
   const info = routeProject ? projects.data?.find((p) => p.project === routeProject) : projects.data?.[0];
   const target: LaunchTarget | null = info ? { project: info.project, task: routeProject ? routeTask : null, repo: info.repo } : null;
+  // a task route: the task page reads the same leaderboard key, so this adds no request
+  const scope = parts[0] === "t" && parts[1] && parts[2] ? { project: parts[1], task: parts[2] } : null;
+  const board = useLeaderboard(scope?.project ?? "", scope?.task ?? "", [], { enabled: scope !== null });
+  const [taskLaunch, setTaskLaunch] = useState<TaskLaunch | null>(null);
+  const [launched, setLaunched] = useState<{ pathname: string; runs: LaunchedRuns } | null>(null);
+  const disabled = scope ? board.isPending || board.isError : target === null;
+  const title = scope
+    ? board.isError
+      ? `New run unavailable: ${board.error.message}`
+      : `New run in ${scope.project} / ${scope.task}, from the best config`
+    : target
+      ? `New run in ${target.project}${target.task ? ` / ${target.task}` : ""}`
+      : "No project yet: run hx init";
+  const open = (): void => {
+    if (scope) setTaskLaunch({ ...scope, templateRunId: board.data?.rows[0]?.latest_run_id ?? null });
+    else setLaunching(true);
+  };
 
   return (
     <header className="top">
@@ -149,6 +176,7 @@ export function TopBar({ onSearch, navOpen, onToggleNav }: TopBarProps): ReactEl
         })}
       </nav>
       <span className="sp" />
+      {launched?.pathname === pathname ? <LaunchedLine launched={launched.runs} /> : null}
       <button className="search" id="findBtn" type="button" aria-haspopup="dialog" onClick={onSearch}>
         <Icon name="search" size={13} />
         <span>Search runs, tasks, paths</span>
@@ -158,12 +186,24 @@ export function TopBar({ onSearch, navOpen, onToggleNav }: TopBarProps): ReactEl
       <Button
         variant="primary"
         icon="plus"
-        disabled={target === null}
-        title={target ? `New run in ${target.project}${target.task ? ` / ${target.task}` : ""}` : "No project yet: run hx init"}
-        onClick={() => setLaunching(true)}
+        disabled={disabled}
+        title={title}
+        onClick={open}
       >
         New run
       </Button>
+      {taskLaunch ? (
+        <NewRun
+          project={taskLaunch.project}
+          task={taskLaunch.task}
+          templateRunId={taskLaunch.templateRunId}
+          onClose={() => setTaskLaunch(null)}
+          onLaunched={(records, host) => {
+            setTaskLaunch(null);
+            setLaunched({ pathname, runs: { host, records } });
+          }}
+        />
+      ) : null}
       {launching && target ? (
         <LaunchDialog
           project={target.project}

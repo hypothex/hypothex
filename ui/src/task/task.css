@@ -35,3 +35,32 @@
 :is(.task-page, .runs) .popover button, :is(.task-page, .runs) .popover label { text-align: left; border: 0; background: transparent; padding: 5px 8px; border-radius: 5px; font: inherit; font-size: 12px; color: var(--ink-2); cursor: pointer; white-space: nowrap; display: flex; gap: 6px; align-items: center; }
 :is(.task-page, .runs) .popover button:hover, :is(.task-page, .runs) .popover label:hover { background: var(--hover); color: var(--ink); }
 :is(.task-page, .runs) .popover button[aria-checked="true"] { color: var(--ink); font-weight: 500; }
+
+/* Page shell: header, facts line, tabs, body */
+.task-page { display: flex; flex-direction: column; min-height: 100%; }
+.task-page .task-head { padding: 16px 20px 0; background: var(--panel); border-bottom: 1px solid var(--line); }
+.task-page .task-head .crumb { margin: 0 0 6px; font-size: 12px; color: var(--ink-3); }
+.task-page .task-head .title-row { display: flex; align-items: center; gap: 10px; }
+.task-page .task-head h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.005em; }
+.task-page .task-head .sp, .task-page .ptools .sp { flex: 1; }
+.task-page .task-head .facts { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 6px 0 0; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.task-page .task-head .facts b { color: var(--ink); font-weight: 500; }
+.task-page .task-head .facts b.ok { color: var(--ok); }
+.task-page .task-head .facts .warn { color: var(--warn); }
+.task-page .task-head .tabs-row { display: flex; align-items: flex-end; gap: 8px; margin-top: 12px; }
+.task-page .task-head .tabs { display: flex; gap: 2px; }
+.task-page .task-head .tabs a, .task-page .task-head .tab-add { padding: 8px 10px; color: var(--ink-2); text-decoration: none; border-bottom: 2px solid transparent; white-space: nowrap; }
+.task-page .task-head .tabs a:hover, .task-page .task-head .tab-add:hover { color: var(--ink); }
+.task-page .task-head .tabs a.on { color: var(--ink); border-color: var(--ink); font-weight: 500; }
+.task-page .task-head .tabs a:focus-visible, .task-page .task-head .tab-add:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 4px; }
+.task-page .task-head .tabs .n { color: var(--ink-3); font-size: 12px; margin-left: 4px; font-weight: 400; }
+.task-page > .sweeps, .task-page > [role="status"], .task-page > .err { margin: 8px 20px 0; }
+.task-page .task-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.task-page .panels { overflow: auto; min-height: 0; min-width: 0; padding: 0 16px 24px; }
+.task-page .ptools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 0; position: sticky; top: 0; z-index: 5; background: var(--page, var(--panel-2)); }
+.task-page .ptools label { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-2); font-size: 12px; }
+.task-page .ptools .val { color: var(--ink); font-weight: 500; min-width: 30px; font-variant-numeric: tabular-nums; }
+.task-page .ptools .muted { color: var(--ink-3); font-size: 12px; }
+/* .pgrid and its variants come from chrome/chrome.css (F11); task-local full-row cells: */
+.task-page .pgrid > .wide { grid-column: 1 / -1; min-width: 0; }
+@media (max-width: 1300px) { .ws { grid-template-columns: 300px minmax(0, 1fr); } }

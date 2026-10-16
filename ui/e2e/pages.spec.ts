@@ -41,18 +41,18 @@ for (const kind of KINDS) {
 
     await page.goto(`/t/${project}/${task}`);
     await expectTheme(page, theme);
-    await expect(page.getByText(board.headline).first()).toBeVisible();
-    const tabs = page.getByRole("navigation", { name: "Views" });
-    await expect(tabs).toBeVisible();
-    for (const view of views) {
-      await expect(tabs.getByRole("link", { name: view.title }).first()).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: task })).toBeVisible();
+    const tabs = page.getByRole("tablist", { name: "Task" });
+    await expect(tabs.getByRole("tab", { name: "Charts" })).toHaveAttribute("aria-selected", "true");
+    for (const view of views.filter((v) => v.origin !== "preset")) {
+      await expect(tabs.getByRole("tab", { name: view.title || view.name })).toBeVisible();
     }
-    await expect(tabs.locator('a[aria-current="page"]')).toContainText(views[0]?.title ?? "");
+    // the preset's panels in the Charts kind section; Scores and Step metrics draw leaderboards and curves
     for (const panel of query.panels) {
-      if (!panel.title) continue;
-      await expect(page.getByRole("heading", { name: panel.title }).first()).toBeVisible();
+      if (!panel.title || panel.type === "leaderboard" || panel.type === "curves") continue;
+      await expect(page.getByRole("region", { name: panel.title }).first()).toBeVisible();
     }
-    await expect(page.getByRole("link", { name: "+ view" })).toHaveAttribute(
+    await expect(page.getByRole("link", { name: "+ View" })).toHaveAttribute(
       "href",
       `/t/${project}/${task}/edit/new`,
     );

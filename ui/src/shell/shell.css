@@ -31,6 +31,8 @@
 .top .crumb a:hover { color: var(--ink); }
 .top .crumb .sep { color: var(--line-2); flex: none; }
 .top .sp { flex: 1; }
+.top .launched { margin: 0; min-width: 0; color: var(--ink-2); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.top .launched a { font-family: var(--mono); }
 .search {
   display: flex; align-items: center; gap: 8px; width: 280px; height: 30px; padding: 0 10px; border: 1px solid var(--line);
   border-radius: 6px; background: var(--panel-2); color: var(--ink-3); cursor: pointer; font-size: 13px;

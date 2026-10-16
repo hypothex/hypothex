@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { screen, waitFor } from "@testing-library/react";
 
-import { legacyView, parseSearch, stringifySearch } from "../src/router";
+import { parseSearch, stringifySearch } from "../src/router";
 import { mockRoutes } from "./api/fetch-mock";
 import { renderApp } from "./render-app";
 
@@ -156,15 +156,4 @@ describe("search serialization", () => {
     expect(stringifySearch({ view: undefined })).toBe("");
     expect(stringifySearch({ n: 3 })).toBe("?n=3");
   });
-});
-
-test("legacyView: ?view, else tab=view:<name>, for the old Task page", () => {
-  expect([
-    legacyView({ view: "route" }),
-    legacyView({ tab: "view:latency" }),
-    legacyView({ tab: "charts" }),
-    legacyView({ tab: "view:" }),
-    legacyView({ view: "a", tab: "view:b" }),
-    legacyView({}),
-  ]).toEqual(["route", "latency", undefined, undefined, "a", undefined]);
 });

@@ -3,6 +3,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { NAV_KEY } from "../../src/shell/AppShell";
 import { crumbsFor, paletteShortcut } from "../../src/shell/TopBar";
 import { mockRoutes } from "../api/fetch-mock";
+import { makeBoard } from "../pages/fixtures";
 import { renderApp } from "../render-app";
 
 const realFetch = globalThis.fetch;
@@ -87,7 +88,7 @@ describe("AppShell", () => {
     expect(localStorage.getItem(NAV_KEY)).toBe("1");
   });
 
-  test("New run waits for a project, then opens the Launch dialog for the page's task", async () => {
+  test("New run waits for a project, then opens the Launch dialog; on a task it waits for the leaderboard", async () => {
     mockRoutes({});
     const { cleanup } = await import("@testing-library/react");
     renderApp("/");
@@ -95,12 +96,25 @@ describe("AppShell", () => {
     expect([disabled.hasAttribute("disabled"), disabled.getAttribute("title")]).toEqual([true, "No project yet: run hx init"]);
     cleanup();
     mockRoutes({ "/api/v1/projects": PROJECTS });
-    renderApp("/t/toy/acc");
-    const bar = await screen.findByRole("banner");
-    const button = within(bar).getByRole("button", { name: "New run" });
+    renderApp("/hosts");
+    const button = within(await screen.findByRole("banner")).getByRole("button", { name: "New run" });
     await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
-    expect(button.getAttribute("title")).toBe("New run in toy / acc");
+    expect(button.getAttribute("title")).toBe("New run in toy");
     fireEvent.click(button);
+    expect(await screen.findByRole("dialog", { name: "New run" })).not.toBeNull();
+    cleanup();
+    // the task page's own header is a second banner to Testing Library: use the top bar
+    mockRoutes({ "/api/v1/projects": PROJECTS, "/api/v1/tasks/toy/acc/leaderboard": makeBoard() });
+    renderApp("/t/toy/acc");
+    const top = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>("header.top");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    const onTask = within(top).getByRole("button", { name: "New run" });
+    await waitFor(() => expect(onTask.hasAttribute("disabled")).toBe(false));
+    expect(onTask.getAttribute("title")).toBe("New run in toy / acc, from the best config");
+    fireEvent.click(onTask);
     expect(await screen.findByRole("dialog", { name: "New run" })).not.toBeNull();
   });
 });

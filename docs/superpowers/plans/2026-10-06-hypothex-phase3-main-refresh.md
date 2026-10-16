@@ -6,7 +6,8 @@ claims without rewriting its historical evidence.
 ## Revisions and authorization
 
 - Historical plans head: `4392c8b90f96a23b6d35477520f86ebf45075bb1`.
-- Current source baseline: `a4441256f39d014d9ad43dea976af1b448f163e3`.
+- Historical October 6 source baseline: `a4441256f39d014d9ad43dea976af1b448f163e3`.
+- Current source baseline: `f6f130cfa2669bfcccbadcb36282dd5fea881d1f` (PR26; see October 17 update below).
 - Plans PR: https://github.com/hypothex/hypothex/pull/22.
 - Implementation requires a complete primary review followed by an independent
   adversarial review, both LGTM on the final plan. Earlier rounds 4–6 do not
@@ -457,3 +458,28 @@ failure caused by late chart layout growth. Its review and CI are independent
 of Phase 3 approval. Once merged, update the baseline and renew the ordered
 primary/adversarial reviews on the same final plan revision. R4's LGTM does not
 cover the subsequent empty-default correction or a future baseline update.
+
+### PR26 merged; renewed frozen input (2026-10-17)
+
+PR26 merged as f6f130c after all six checks passed exact head eb503ee. Independent
+local review returned LGTM and GitHub Codex review completed with no findings.
+The baseline delta contains only SelectedRun's initial reveal lifecycle, its unit
+and delayed-response browser regressions, user documentation and its tracker.
+The parent inspected the complete diff and retained review/CI/merge receipts in
+`ui-selection-ci/`. Local evidence is 1,414 unit tests, 122 full browser tests,
+12 repeated focused browser cases, build/type checks, Sphinx and all three demo
+shutdown modes. This is baseline UI evidence, not Phase 3 runtime acceptance.
+
+The plan checkout merges f6f130c at 86e0336 and retains the accepted empty-PG
+correction from b6cc9eb. Contract/frontend Task24 explicitly preserve observer
+cleanup, user takeover, focus restoration and delayed-layout regressions when
+adding cleaned-artifact markers. All 51 frontend source anchors were rechecked;
+only SelectedRun's blob changed. No backend source, dependency, workflow, schema
+or API changed. The immutable schema-3 a444125 and schema-4 e73b810 fixture pins
+remain unchanged. Runtime/source/UI/tests/dependencies/CI in the plan checkout
+are byte-identical to f6f130c; the refreshed plan adds no runtime functionality.
+Fresh evidence: durable `post-pr26-refresh/` and `final-review-input.json`.
+
+Freeze and submit this complete input for primary Claude R5, then independent
+adversarial R2 on the same hash after LGTM. R4 approved the preceding input only;
+no final adversarial approval or implementation authorization is claimed.

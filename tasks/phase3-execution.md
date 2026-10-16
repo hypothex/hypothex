@@ -8,7 +8,7 @@ integrated workflows are acceptance requirements, not just unit-test totals.
 ## Baseline and scope
 
 - Plan branch: `p3-plans`, initial head `4392c8b90f96a23b6d35477520f86ebf45075bb1`.
-- Current fetched main: `e73b8105df32a1d2488477c48e680cb5de922771` (UI v5).
+- Current fetched main: `f6f130cfa2669bfcccbadcb36282dd5fea881d1f` (UI v5 with PR26 viewport fix).
 - Existing draft PR: https://github.com/hypothex/hypothex/pull/22.
 - Authoritative scope: the Phase 3 contract, backend/frontend plans and mockups
   under `docs/superpowers/plans/` and `docs/mockups/phase3/`.
@@ -292,3 +292,21 @@ regression evidence; integration still requires its full checks and green CI.
 After that baseline fix is merged, refresh the plans and source pin together,
 freeze the new input, renew Claude primary approval, then launch a new independent
 adversarial round. No Phase 3 runtime implementation has started.
+
+### PR26 integration and primary R5 input (2026-10-17)
+
+- [x] PR26 independent local LGTM, GitHub Codex no findings, all six CI checks
+  successful on eb503ee, merged as f6f130c; retain isolated worktree and receipts.
+- [x] Merge f6f130c into plans at 86e0336; update active pins and SelectedRun blob.
+- [x] Preserve schema-3 a444125/schema-4 e73b810 fixture provenance and all scope.
+- [x] Check all 51 frontend anchors and absence of runtime diff versus new main.
+- [x] Require delayed-chart visibility/user-takeover regressions in Task24.
+- [ ] Obtain renewed full-plan Claude R5 LGTM on the frozen input.
+- [ ] Obtain new independent adversarial R2 LGTM on the same input.
+
+The empty-PG correction remains the previously verified exact guard. The UI
+baseline fix is fully tested independently; no unchanged application suite was
+rerun merely to accompany the plan refresh. New PR22 CI covers the published
+plan revision; full Phase 3 implementation/package acceptance remains future
+work after both ordered approvals. Durable evidence is `post-pr26-refresh/`,
+`ui-selection-ci/` and the prior guard/review directories.

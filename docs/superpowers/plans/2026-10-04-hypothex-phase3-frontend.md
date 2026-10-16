@@ -1,8 +1,8 @@
 # Hypothex Phase 3 frontend implementation plan — UI v5 refresh
 
-**Status: plan only; refreshed 2026-10-16.** This document supersedes the old frontend implementation blocks in full. Its 26 task numbers retain their feature responsibilities. No Phase 3 runtime is implemented by this refresh. Implementation requires renewed primary Claude LGTM followed by independent adversarial LGTM on the frozen complete plan set. Historical approval on `e10e6ff` is not approval of this refresh. Material changes after either gate require reconfirmation. The concurrent diagnostic is not an implementation gate.
+**Status: plan only; refreshed 2026-10-17.** This document supersedes the old frontend implementation blocks in full. Its 26 task numbers retain their feature responsibilities. No Phase 3 runtime is implemented by this refresh. Implementation requires renewed primary Claude LGTM followed by independent adversarial LGTM on the frozen complete plan set. Historical approval on `e10e6ff` is not approval of this refresh. Material changes after either gate require reconfirmation. The concurrent diagnostic is not an implementation gate.
 
-**Source pin:** merged main `e73b8105df32a1d2488477c48e680cb5de922771` (PR25, UI v5), inspected read-only at `/tmp/hx-p3-main-current`. The refresh checkout `/tmp/hx-p3-plans` starts at merge `1987f7297ff6d966641f43fe34271a6430532d1b`. Its runtime source equals pinned main. The parent owns the contract and execution tracker; backend and installed-package writers own their plans. This worker owns only this frontend plan. Do not edit or commit in the user's main checkout.
+**Source pin:** merged main `f6f130cfa2669bfcccbadcb36282dd5fea881d1f` (PR26 viewport fix atop UI v5), inspected read-only at `/tmp/hx-p3-main-current`. The refresh checkout `/tmp/hx-p3-plans` includes baseline merge `86e03367fd8fde5d4f28b115d2d3ca337083ee27`. Its runtime source equals pinned main. The parent owns the contract and execution tracker; backend and installed-package writers own their plans. This worker owns only this frontend plan. Do not edit or commit in the user's main checkout.
 
 Binding references: [Phase 3 contract](2026-10-04-hypothex-phase3-contract.md), [backend Tasks 1–49](2026-10-04-hypothex-phase3-backend.md), [installed-package acceptance](2026-10-06-hypothex-phase3-package-acceptance.md), [design specification](../specs/2026-09-26-hypothex-design.md), and the current UI v5 specification `docs/superpowers/specs/2026-10-16-hypothex-ui-v5-design.md`. Current main SQLite is schema **4**; Phase 3 ownership advances it to **5**. Frontend neither owns migrations nor invents schema fixtures. Backend Task49 preserves distinct authentic schema-3 and schema-4 upgrade inputs.
 
@@ -49,9 +49,9 @@ Before implementation, record the implementation HEAD and verify ancestry and th
 ```sh
 # From the isolated implementation checkout. These commands are read-only.
 git rev-parse HEAD
-git merge-base --is-ancestor e73b8105df32a1d2488477c48e680cb5de922771 HEAD
+git merge-base --is-ancestor f6f130cfa2669bfcccbadcb36282dd5fea881d1f HEAD
 git status --short
-git diff e73b8105df32a1d2488477c48e680cb5de922771 -- ui/src ui/test ui/e2e ui/package.json ui/bun.lock
+git diff f6f130cfa2669bfcccbadcb36282dd5fea881d1f -- ui/src ui/test ui/e2e ui/package.json ui/bun.lock
 rg -n 'AppShell|TaskPage|RunPage|SweepRedirect|parseSearch|stringifySearch' ui/src/router.tsx
 rg -n 'taskRuns|renameRun|require_bound|max_points' ui/src/api/{client,queries,models}.ts
 ```
@@ -332,7 +332,7 @@ Use `/n/$project` to query literal `today` from backend and display its returned
 **Depends:** 1, 3–4, 16; backend22/31 location contract. **Modify:** `run/files.ts`, `run/FileList.tsx`, `run/OverviewTab.tsx`, `run/FilesTab.tsx`, `pages/components/WhereList.tsx`, `pages/components/TrainingDetails.tsx`, `pages/components/SelectedRun.tsx`; **create:** shared pure `pages/components/cleaned.ts` if useful; tests on all owners.
 
 - Add cleaned metadata to FileRow while preserving raw full location before relative display. Match exact path or true slash-boundary descendant of a deleted directory, trim trailing separators safely; `/artifacts/a` must not match `/artifacts/ab`. Only eligible artifact/pulled rows can be struck through: never run folder, code, dataset, metadata, logs, env/config, or scores by broad prefix.
-- Render struck-through path plus `✕ <date> <bytes>` and actor tooltip; remove/disable file-open and copy-as-existing controls for deleted artifact while keeping run navigation/status/history/scores. In FilesTab pass cleaned explicitly to CheckpointTable; OverviewTab file generation receives detail.cleaned; SelectedRun already has RunDetail and must pass it to retained WhereList/CheckpointTable.
+- Render struck-through path plus `✕ <date> <bytes>` and actor tooltip; remove/disable file-open and copy-as-existing controls for deleted artifact while keeping run navigation/status/history/scores. In FilesTab pass cleaned explicitly to CheckpointTable; OverviewTab file generation receives detail.cleaned; SelectedRun already has RunDetail and must pass it to retained WhereList/CheckpointTable. Preserve its ancestor ResizeObserver, focus restoration, user-input release and queued-callback guard: delayed chart growth must reveal the focused heading until the user takes over. Retain `ui/test/pages/selectedRun.test.tsx` and both-theme `ui/e2e/selectedRun.spec.ts` delayed-chart/manual-scroll regressions when adding cleaned markers.
 - The reconciled contract adds `CleanedArtifact.environment_id: str | None = None`: new entries copy CleanItem.environment_id (actual deletion target), and hub merges preserve that value. Match environment plus unmodified raw path before display formatting. Source artifacts use record.environment_id; hub pulled copies use the shared hub descriptor environment_id. If row location is unknown, leave deletion state unknown. Legacy absent/null marker location is not guessed, even if a raw path happens to match. Do not infer identity from display host aliases or resolve remote paths on the hub. This is additive file/DTO metadata, not another SQL schema change.
 - Task TrainingDetails currently holds RunRecord/artifacts, not RunDetail. Fetch details only for its visible checkpoint page (max20 run IDs), dedupe via existing queryKeys.run and reuse cached details. Do not fetch every run/one per artifact or send sentinel IDs. Preserve paging, selected-run context, error/loading and known deletion evidence during refetch. A failed cleanup-detail fetch is unknown, not proof the artifact still exists.
 - Live run.artifacts_cleaned reaches both RunDetail and taskRuns/query owners. Historical checkpoint metric values remain visible but cannot trigger reinfer from a known deleted checkpoint.
@@ -474,7 +474,7 @@ Link backend docs for notifications/config/env variable names, Tailscale/url hos
 
 Frontend done means all 26 tasks implemented with their meaningful regressions, full Bun unit/type/build/browser checks current, current-main v5 regression matrix preserved, no secret artifacts, docs built, and backend49 installed browser assertions passing with authentic schema3/schema4 upgrade/restart receipts. A screenshot, source build or plan probe alone satisfies none of that. Real Slack/SMTP/Tailscale exposure remains a separate user action.
 
-The plan-refresh worker's done means this file is internally coherent, all26 coverage preserved, source anchors checked against e73b810, old replacements removed, cross-owner dependencies reported, and an exact frozen hash/change receipt saved. It is **ready for primary review**, not LGTM, implementation authorization, or runtime validation.
+The plan-refresh worker's done means this file is internally coherent, all26 coverage preserved, source anchors checked against f6f130c, old replacements removed, cross-owner dependencies reported, and an exact frozen hash/change receipt saved. It is **ready for primary review**, not LGTM, implementation authorization, or runtime validation.
 
 Cross-owner reconciliation before the plan set can receive final approval:
 
@@ -484,7 +484,7 @@ Cross-owner reconciliation before the plan set can receive final approval:
 4. Backend45/49 demo mapping, deterministic USER only in team children, scope/owner assertions, current UI-v5 selectors, exact-byte cleanup and real package identity guards agree with Task25. No old `Run <id>` h1 or lettered-figure locator; packaged assertions use actual run names.
 5. Parent owns schema5, source pins and renewed review gates across all documents. Historical references remain historical; no active text may still prescribe Phase3 schema4 or claim old LGTM approves current-main assembly.
 
-## Source inventory at e73b810
+## Source inventory at f6f130c
 
 The following generated inventory records actual paths/symbols/line anchors and Git blob IDs, not future implementation files. Re-run the external compatibility probe before relying on these anchors after main changes. It also compares this refresh checkout's source bytes with pinned main and records absent historical replacement paths. The probe is read-only; passing it establishes source compatibility only.
 | Existing path and source anchor | Git blob at pin |
@@ -524,7 +524,7 @@ The following generated inventory records actual paths/symbols/line anchors and 
 | `ui/src/pages/components/RunActions.tsx:57` — `export function RunActions` | `c81bfe7424ac18f51cf0e3793675d65f3c760fb4` |
 | `ui/src/pages/components/SweepModel.ts:526` — `export function sweepStats` | `b5735bb5bcc53007d2d219ca5fc0c93a26122b14` |
 | `ui/src/pages/components/TrainingDetails.tsx:74` — `export function TrainingCheckpoints` | `e8315332380a17bc2b72456f012656bcd19e2806` |
-| `ui/src/pages/components/SelectedRun.tsx:18` — `export function SelectedRun` | `5b21ef03aaa21b4de0c585a6be03b251df7e89af` |
+| `ui/src/pages/components/SelectedRun.tsx:18` — `export function SelectedRun` | `058583660ed8dc961315c16e0fcfbc2ed87a97b2` |
 | `ui/src/pages/components/WhereList.tsx:132` — `export function WhereList` | `2f8b41b3d5289e13aac5763b18381d13f053fa3a` |
 | `ui/src/pages/components/PanelGrid.tsx:62` — `export function PanelGrid` | `2a70abb7b9e6f5adbb22236bcf1ca4893345e1c0` |
 | `ui/src/charts/DotCIChart.tsx:66` — `export function DotCIChart` | `7c777da2dbee4cebb0916a879bad73fb6ea22569` |

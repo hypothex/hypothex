@@ -7,7 +7,7 @@ Baseline: e73b810 (runtime byte-identical to PR22 1a81663). UI jobs failed inter
 - [x] Observe layout ancestors until user input or focus movement; add delayed-chart and manual-scroll regressions without weakening the original assertion.
 - [x] Verify 12 focused browser cases, 1,414 unit tests, build and both TypeScript checks; inspect independent LGTM and its 15 independently passing unit tests.
 - [x] Run the full browser suite (122 passed, all projects) and Sphinx with warnings as errors.
-- [ ] Integrate only with appropriate reviewed/green-CI evidence, preserving the Phase 3 gate.
+- [x] PR26 merged as f6f130c after independent LGTM, GitHub Codex review with no findings and all six CI checks passing eb503ee; Phase 3 gate preserved.
 
 Evidence is retained under the external Phase 3 evidence directory in ui-selection-ci/.
 

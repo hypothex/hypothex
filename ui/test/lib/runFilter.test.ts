@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { TaskRun } from "../../src/api/models";
-import { globMatch, parseFilter, tokenize } from "../../src/lib/runFilter";
+import { compileGlob, globMatch, parseFilter, tokenize } from "../../src/lib/runFilter";
 
 function run(over: Partial<TaskRun> = {}): TaskRun {
   return {
@@ -68,4 +68,50 @@ test("globMatch: * is any run of characters, the rest is literal, case-insensiti
   expect([globMatch("res*", "ResNet50"), globMatch("a.b", "axb"), globMatch("*", ""), globMatch("x", "xy")]).toEqual([
     true, false, true, false,
   ]);
+});
+
+describe("compileGlob", () => {
+  test("anchors the first and last segment and scans the middle in order", () => {
+    const m = (p: string, v: string) => compileGlob(p)(v);
+    expect([m("a*b*c", "aXbYc"), m("a*b*c", "acb"), m("a*c", "ac"), m("ab*ba", "aba"), m("*mid*", "a mid b")]).toEqual([
+      true, false, true, false, true,
+    ]);
+    expect([m("**", "x"), m("x**", "x"), m("*x", "yx"), m("x*", "xy"), m("RES*", "resnet"), m("a*", "A\nb")]).toEqual([
+      true, true, true, true, true, true,
+    ]);
+    expect([m("", ""), m("", "x"), m("a?b", "axb"), m("a.b", "a.b"), m("[x]", "[x]")]).toEqual([true, false, false, true, true]);
+  });
+
+  test("a pathological pattern stays fast (no backtracking)", () => {
+    const pattern = `${"a*".repeat(50)}b`;
+    const value = "a".repeat(10_000);
+    const t0 = performance.now();
+    expect(globMatch(pattern, value)).toBe(false);
+    expect(compileGlob(`${"a*".repeat(50)}a`)(value)).toBe(true);
+    expect(compileGlob(`*${"a*".repeat(50)}c*`)(value)).toBe(false);
+    expect(performance.now() - t0).toBeLessThan(50);
+  });
+
+  test("parseFilter never builds a RegExp from the filter text", () => {
+    const Original = globalThis.RegExp;
+    let built = 0;
+    globalThis.RegExp = new Proxy(Original, {
+      construct(target, args) {
+        built += 1;
+        return Reflect.construct(target, args);
+      },
+      apply(target, self, args) {
+        built += 1;
+        return Reflect.apply(target, self, args);
+      },
+    });
+    try {
+      const pred = parseFilter("model:res* tag:fin* status:fin* by:agent* name:lr* lr=3e-4 beam");
+      expect(keep("model:res* tag:fin*", [run({ run_id: "a" })])).toEqual(["a"]);
+      pred(run());
+    } finally {
+      globalThis.RegExp = Original;
+    }
+    expect(built).toBe(0);
+  });
 });

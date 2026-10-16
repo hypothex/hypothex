@@ -13,10 +13,42 @@ import type { TaskRun } from "../api/models";
 
 export type RunPredicate = (run: TaskRun) => boolean;
 
-const escape = (s: string): string => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+export type GlobMatcher = (value: string) => boolean;
 
 /**
- * `*` glob over the whole value, case-insensitive.
+ * Prepare a `*` glob over the whole value, case-insensitive.
+ *
+ * The pattern is split on `*` once; the first and last pieces are anchored and the middle
+ * pieces are found left to right with `indexOf`. No RegExp is built from the pattern, so a
+ * crafted pattern (a shared `?q=` link) cannot cause catastrophic backtracking.
+ *
+ * Examples
+ * --------
+ * >>> compileGlob("res*")("ResNet50")
+ * true
+ */
+export function compileGlob(pattern: string): GlobMatcher {
+  const parts = pattern.toLowerCase().split("*");
+  const head = parts[0] ?? "";
+  if (parts.length === 1) return (value) => value.toLowerCase() === head;
+  const tail = parts[parts.length - 1] ?? "";
+  const middle = parts.slice(1, -1).filter(Boolean);
+  return (raw) => {
+    const value = raw.toLowerCase();
+    const end = value.length - tail.length;
+    if (end < head.length || !value.startsWith(head) || !value.endsWith(tail)) return false;
+    let at = head.length;
+    for (const piece of middle) {
+      const found = value.indexOf(piece, at);
+      if (found < 0 || found + piece.length > end) return false;
+      at = found + piece.length;
+    }
+    return true;
+  };
+}
+
+/**
+ * `*` glob over the whole value, case-insensitive (see `compileGlob`).
  *
  * Examples
  * --------
@@ -24,21 +56,26 @@ const escape = (s: string): string => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
  * true
  */
 export function globMatch(pattern: string, value: string): boolean {
-  return new RegExp(`^${pattern.split("*").map(escape).join(".*")}$`, "is").test(value);
+  return compileGlob(pattern)(value);
 }
 
-function valueMatch(pattern: string, value: string | undefined): boolean {
-  if (value === undefined) return false;
-  if (!pattern.includes("*") && pattern.trim() !== "" && value.trim() !== "") {
-    const a = Number(pattern);
-    const b = Number(value);
-    if (Number.isFinite(a) && Number.isFinite(b)) return a === b;
-  }
-  return globMatch(pattern, value);
+function valueMatcher(pattern: string): (value: string | undefined) => boolean {
+  const glob = compileGlob(pattern);
+  const a = !pattern.includes("*") && pattern.trim() !== "" ? Number(pattern) : Number.NaN;
+  return (value) => {
+    if (value === undefined) return false;
+    if (Number.isFinite(a) && value.trim() !== "") {
+      const b = Number(value);
+      if (Number.isFinite(b)) return a === b;
+    }
+    return glob(value);
+  };
 }
 
-const launcherMatch = (pattern: string, who: string): boolean =>
-  globMatch(pattern, who) || who.split(":").some((part) => globMatch(pattern, part));
+function launcherMatcher(pattern: string): GlobMatcher {
+  const glob = compileGlob(pattern);
+  return (who) => glob(who) || who.split(":").some(glob);
+}
 
 /**
  * Tokens of a filter, with spaces around `=`, `!=` and `:` removed.
@@ -64,20 +101,30 @@ function tokenPredicate(token: string): RunPredicate {
   const [, key = "", op = ":", pattern = ""] = m;
   let pred: RunPredicate;
   switch (key.toLowerCase()) {
-    case "tag":
-      pred = (r) => r.tags.some((t) => globMatch(pattern, t));
+    case "tag": {
+      const glob = compileGlob(pattern);
+      pred = (r) => r.tags.some(glob);
       break;
-    case "status":
-      pred = (r) => globMatch(pattern, r.status);
+    }
+    case "status": {
+      const glob = compileGlob(pattern);
+      pred = (r) => glob(r.status);
       break;
-    case "by":
-      pred = (r) => launcherMatch(pattern, r.created_by);
+    }
+    case "by": {
+      const match = launcherMatcher(pattern);
+      pred = (r) => match(r.created_by);
       break;
-    case "name":
-      pred = (r) => globMatch(pattern, r.name);
+    }
+    case "name": {
+      const glob = compileGlob(pattern);
+      pred = (r) => glob(r.name);
       break;
-    default:
-      pred = (r) => valueMatch(pattern, r.params[key]);
+    }
+    default: {
+      const match = valueMatcher(pattern);
+      pred = (r) => match(r.params[key]);
+    }
   }
   return op === "!=" ? (r) => !pred(r) : pred;
 }

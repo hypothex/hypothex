@@ -1,0 +1,51 @@
+/* v5 shell (docs/mockups/ui-v5): 216 px nav, 48 px top bar, the routed page scrolls. */
+.app { display: grid; grid-template-columns: 216px minmax(0, 1fr); height: 100vh; }
+.app.nav-off { grid-template-columns: minmax(0, 1fr); }
+.nav { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.brand { display: flex; align-items: center; gap: 8px; padding: 14px 14px 12px; font-weight: 600; font-size: 14px; color: var(--ink); }
+.brand svg { flex: none; }
+.nav-tree { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.nav-sec { padding: 6px 8px; }
+.nav-sec.grow { flex: 1; overflow: auto; }
+.nav-h { padding: 10px 16px 4px; color: var(--ink-3); font-size: 12px; }
+.nav .item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 5px; color: var(--ink-2); min-width: 0; }
+.nav a.item:hover { background: var(--hover); color: var(--ink); }
+.nav a.item.on { background: var(--select); color: var(--ink); font-weight: 500; }
+.nav .item > svg { color: var(--ink-3); }
+.nav .item.on > svg { color: var(--ink); }
+.nav .item.proj { color: var(--ink); font-weight: 500; }
+.nav .item.task { padding-left: 34px; white-space: nowrap; }
+.nav .tn, .nav .pn { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.nav .count { margin-left: auto; color: var(--ink-3); font-size: 12px; font-weight: 400; }
+.nav-empty { margin: 0; padding: 6px 8px; color: var(--ink-3); font-size: 12px; }
+.nav-foot { border-top: 1px solid var(--line); padding: 8px; display: flex; gap: 6px; align-items: center; }
+.nav-foot .hub { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); margin-right: auto; padding-left: 6px; }
+.nav-foot .hub i { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); }
+.nav-foot .hub.live i { background: var(--ok); }
+
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.top { height: 48px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.top .crumb { display: flex; align-items: center; gap: 6px; color: var(--ink-3); min-width: 0; margin: 0; }
+.top .crumb > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.top .crumb b { color: var(--ink); font-weight: 500; }
+.top .crumb a:hover { color: var(--ink); }
+.top .crumb .sep { color: var(--line-2); flex: none; }
+.top .sp { flex: 1; }
+.search {
+  display: flex; align-items: center; gap: 8px; width: 280px; height: 30px; padding: 0 10px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--panel-2); color: var(--ink-3); cursor: pointer; font-size: 13px;
+}
+.search:hover { border-color: var(--line-2); }
+.search kbd { margin-left: auto; font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.live { display: flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12px; white-space: nowrap; }
+.live i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.live.connecting i { background: var(--ink-3); }
+.live.offline { color: var(--fail); }
+.live.offline i { background: var(--fail); }
+.app-page { flex: 1; overflow: auto; min-height: 0; }
+/* v4 pages, the view editor and placeholders keep their centred column until replaced */
+.app-page > .page, .app-page > .hx-ed, .app-page > .pending { max-width: 1280px; margin: 0 auto; padding: 32px 40px 80px; }
+@media (max-width: 1100px) {
+  .search { width: auto; }
+  .search > span { display: none; }
+}

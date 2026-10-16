@@ -213,6 +213,34 @@ def display_name(run: RunRecord, derived: Mapping[str, str]) -> str:
     return run.name or derived.get(run.run_id) or short_run_id(run.run_id)
 
 
+def run_view_name(run: RunRecord, derived: Mapping[str, str]) -> str:
+    """
+    Return a run's name as run views show it: its own ``name``, else derived plus seed.
+
+    Parameters
+    ----------
+    run : RunRecord
+        The run.
+    derived : mapping of str to str
+        Derived names per run id (``derive_names``).
+
+    Returns
+    -------
+    str
+        ``run.name`` when set; else the derived name followed by ``" · seed N"``
+        when the run has a seed (spec 5.1, rule 4).
+
+    Examples
+    --------
+    >>> run_view_name(make_record("a", seed=2), {"a": "lr 1e-3"})  # doctest: +SKIP
+    'lr 1e-3 · seed 2'
+    """
+    if run.name:
+        return run.name
+    base = derived.get(run.run_id) or short_run_id(run.run_id)
+    return f"{base}{SEPARATOR}seed {run.seed}" if run.seed is not None else base
+
+
 def group_display_name(runs: Sequence[RunRecord], derived: Mapping[str, str]) -> str:
     """
     Return the name of a seed group.

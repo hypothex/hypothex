@@ -233,7 +233,16 @@ Other routes
 ------------
 
 - ``GET /api/v1/overview`` (``since``): the Overview, with ``cost_usd`` and
-  ``cost_today_usd``.
+  ``cost_today_usd``. ``recent`` lists the 12 newest unarchived, non-queued runs of
+  any age (name, status, ``end_reason``, ``exit_code``, ``primary`` at the current
+  metric version, ``delta_best`` to the task's best config); ``names`` maps every
+  run in ``running``, ``failures`` and ``recent`` to its run view name (a rename,
+  else the derived name with ``· seed N``); ``progress`` maps each running run (at
+  most 50) to the newest point of its task's primary metric read from the end of
+  its ``metrics.jsonl`` (``metric``, ``step``, ``value``; ``progress`` and
+  ``eta_seconds`` are ``null``). Each task row also has ``primary``,
+  ``higher_is_better``, ``best_history`` (the best so far after each scored config,
+  the last 24), ``best_7d_ago``, ``running`` and ``queued``.
 - ``GET /api/v1/projects``, ``GET /api/v1/tasks``, ``GET /api/v1/tasks/{project}/{task}``,
   ``GET /api/v1/tasks/{project}/{task}/leaderboard`` (optional ``primary=metric/key``),
   ``POST /api/v1/tasks/{project}/{task}/reeval``, ``GET .../kind``, and the views

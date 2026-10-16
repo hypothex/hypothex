@@ -66,7 +66,9 @@ Sections
    is lower-is-better; else higher is better (the default). A task's direction is
    that of its ``primary``. Set it to ``true`` to keep a metric's percentiles
    higher-is-better on a ``system_bench`` task, and to ``false`` for any other
-   lower-is-better metric.
+   lower-is-better metric. Project snapshots stored by older versions wrote
+   ``higher_is_better: true`` for every metric; Hypothex reads those as not set
+   until the project's ``hypothex.yaml`` is read again.
 
    .. code-block:: yaml
 

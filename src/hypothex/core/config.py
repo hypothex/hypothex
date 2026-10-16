@@ -660,7 +660,7 @@ metrics:
   accuracy:
     version: v1
     fn: my_package.metrics:accuracy  # module:function in this repo
-    higher_is_better: true
+    # higher_is_better: false        # unset: higher is better (system_bench percentiles: lower)
 
 tasks:
   example-test:

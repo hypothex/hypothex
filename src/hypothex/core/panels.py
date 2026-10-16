@@ -1434,8 +1434,8 @@ def _y_higher_is_better(scope: _Scope, y_ref: str) -> bool:
     Direction of a scatter y reference.
 
     ``usage.*`` (cost, tokens, time) is lower-is-better; the task's primary
-    uses the leaderboard's direction; another configured metric uses its
-    ``higher_is_better``; any other name is lower-is-better when it names a
+    uses the leaderboard's direction; another configured metric's key uses
+    ``leaderboard.key_higher_is_better``; any other name is lower-is-better when it names a
     loss or an error.
     """
     if y_ref.startswith("usage."):
@@ -1445,9 +1445,9 @@ def _y_higher_is_better(scope: _Scope, y_ref: str) -> bool:
     name, _ = parse_metric_version(head)
     if f"{name}/{key or 'value'}" == board.primary:
         return board.higher_is_better
-    metrics = scope.entry.config.metrics
-    if name in metrics:
-        return metrics[name].higher_is_better is not False
+    config = scope.entry.config
+    if name in config.metrics:
+        return key_higher_is_better(config, config.tasks[scope.task], f"{name}/{key or 'value'}")
     return not _lower_is_better(y_ref)
 
 

@@ -145,6 +145,9 @@ def test_starter_config_is_valid(tmp_path: Path) -> None:
     cfg = load_project_config(_write(tmp_path, starter_config("my-proj")))
     assert cfg.project == "my-proj"
     assert cfg.tasks["example-test"].kind == "generic"
+    # the starter sets no direction, so a system_bench percentile stays lower-is-better
+    assert cfg.metrics["accuracy"].higher_is_better is None
+    assert "higher_is_better" in starter_config("my-proj")  # documented as a comment
 
 
 def test_task_kind_and_view_fields_default(tmp_path: Path) -> None:

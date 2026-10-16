@@ -1097,6 +1097,30 @@ def test_scatter_meta_carries_y_direction_and_best_group(ctx: Context, toy_repo:
     assert meta({"x": "usage.usd", "y": "nothing"}) == (True, None)  # no rows
 
 
+def test_scatter_y_direction_uses_the_one_key_rule(ctx: Context, toy_repo: Path) -> None:
+    cfg_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["metrics"]["latency"] = {"version": "v1", "fn": "toymetrics:accuracy"}  # no direction
+    cfg["tasks"]["toy-acc"].update(
+        kind="system_bench", metrics=["latency", "accuracy"], primary="latency/p95"
+    )
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    rows = [("a1", "aaaa", 0.1, 90.0, 0), ("b1", "bbbb", 0.3, 30.0, 1)]
+    for rid, group, usd, p99, minute in rows:
+        rec = _run(ctx, toy_repo, rid, group, minute=minute, usage=UsageTotals(usd=usd))
+        for key, value in (("p95", p99 / 2), ("p99", p99)):
+            score = ScoreRecord(metric="latency", version="v1", key=key, value=value, created_at=T0)
+            ctx.add_score(rec, score)
+        _score(ctx, rec, 0.5)
+    data = {"x": "usage.usd", "y": "latency/p99"}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("scatter", data=data))
+    # unset latency on system_bench: p99 is lower-is-better, 30 ms wins
+    assert (result.meta["y_higher_is_better"], result.meta["best_group"]) == (False, "bbbb@c1")
+    data = {"x": "usage.usd", "y": "accuracy"}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("scatter", data=data))
+    assert result.meta["y_higher_is_better"] is True  # unset, no percentile: the default
+
+
 def test_scatter_uses_the_test_interval_only_at_the_board_version(
     ctx: Context, toy_repo: Path
 ) -> None:

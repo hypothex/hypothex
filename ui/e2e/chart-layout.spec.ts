@@ -6,7 +6,7 @@
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import type { PanelResult, PanelSpec, ViewSpec } from "../src/api/models";
 import { demoTask, expect, expectTheme, getJson, type TaskRunsLite, test } from "./fixtures";
-import { checkLayout, LAYOUT_REGIONS, LAYOUT_WIDTHS } from "./layout-geometry";
+import { checkLayout, LAYOUT_REGIONS, LAYOUT_WIDTHS, measureLayout } from "./layout-geometry";
 
 function taskUrl(kind: "training" | "eval_matrix", tab?: string): string {
   const { project, task } = demoTask(kind);
@@ -47,6 +47,19 @@ for (const screen of SCREENS) {
     }
   });
 }
+
+// The page scrolls in `main.app-page`, not the document: a screen whose only checked regions
+// are tables (home, hosts, queue) must still fail when that scroller overflows.
+test("layout check catches page overflow on a screen of tables", async ({ page, theme }) => {
+  await page.goto("/");
+  await expectTheme(page, theme);
+  await expect(page.getByRole("heading", { name: "Recent runs" })).toBeVisible();
+  const clean = await measureLayout(page, 1280, LAYOUT_REGIONS);
+  expect(clean.overflowing).toEqual([]);
+  await page.addStyleTag({ content: ".home { min-width: 1600px; }" });
+  const wide = await measureLayout(page, 1280, LAYOUT_REGIONS);
+  expect(wide.overflowing.map((frame) => frame.frame)).toContain("main.app-page");
+});
 
 test("chart text does not grow with the window", async ({ page, theme }) => {
   await page.goto(taskUrl("training"));

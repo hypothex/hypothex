@@ -156,7 +156,7 @@ describe("CommandPalette", () => {
 
   test("Ctrl+K opens it with the input focused; Escape closes and refocuses Find", async () => {
     renderApp("/");
-    await screen.findByRole("button", { name: /Find a run, task or path/ });
+    await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
     const dialog = await openWithShortcut();
     const input = screen.getByPlaceholderText("Find a run, task, path or command");
     expect(document.activeElement).toBe(input);
@@ -167,7 +167,7 @@ describe("CommandPalette", () => {
 
   test("the input is a named combobox for the list, and Tab stays inside the dialog", async () => {
     renderApp("/");
-    await screen.findByRole("button", { name: /Find a run, task or path/ });
+    await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
     const dialog = await openWithShortcut();
     const input = screen.getByRole("combobox", { name: "Find a run, task, path or command" });
     expect(input.getAttribute("aria-expanded")).toBe("true");
@@ -185,8 +185,8 @@ describe("CommandPalette", () => {
 
   test("typing filters, Enter opens the selected task", async () => {
     const { router } = renderApp("/");
-    await screen.findByRole("button", { name: /Find a run, task or path/ });
-    fireEvent.click(screen.getByRole("button", { name: /Find a run, task or path/ }));
+    await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
+    fireEvent.click(screen.getByRole("button", { name: /Search runs, tasks, paths/ }));
     await screen.findByRole("option", { name: /toy \/ acc/ });
     const input = screen.getByPlaceholderText("Find a run, task, path or command");
     fireEvent.change(input, { target: { value: "acc" } });
@@ -200,7 +200,7 @@ describe("CommandPalette", () => {
 
   test("arrow keys move the selection and stop at the ends", async () => {
     renderApp("/");
-    await screen.findByRole("button", { name: /Find a run, task or path/ });
+    await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
     const dialog = await openWithShortcut();
     await screen.findByRole("option", { name: /r-gpu/ });
     fireEvent.change(screen.getByPlaceholderText(/Find a run/), { target: { value: "copy" } });
@@ -213,16 +213,16 @@ describe("CommandPalette", () => {
 
   test("a path item copies and shows a toast", async () => {
     renderApp("/");
-    await screen.findByRole("button", { name: /Find a run, task or path/ });
+    await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
     await openWithShortcut();
     fireEvent.click(await screen.findByRole("option", { name: /Copy toy repo/ }));
     expect(writeText).toHaveBeenCalledWith("/Users/me/toy");
-    expect(screen.getByRole("status").textContent).toBe("Copied /Users/me/toy");
+    expect(document.querySelector(".toast")?.textContent).toBe("Copied /Users/me/toy");
   });
 
   test("the colour mode command toggles the theme", async () => {
     renderApp("/");
-    await screen.findByRole("button", { name: /Find a run, task or path/ });
+    await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
     await openWithShortcut();
     await act(async () => {
       fireEvent.click(screen.getByRole("option", { name: /Switch colour mode/ }));
@@ -234,7 +234,7 @@ describe("CommandPalette", () => {
   test("with the API failing it still offers Overview and the colour switch", async () => {
     mockRoutes({});
     renderApp("/");
-    await screen.findByRole("button", { name: /Find a run, task or path/ });
+    await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
     await openWithShortcut();
     await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
     expect(screen.getAllByRole("option").map((o) => o.querySelector("span")?.textContent)).toEqual([
@@ -245,7 +245,7 @@ describe("CommandPalette", () => {
 
   test("shows Nothing matches for a query with no hits", async () => {
     renderApp("/");
-    await screen.findByRole("button", { name: /Find a run, task or path/ });
+    await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
     await openWithShortcut();
     await screen.findByRole("option", { name: /r-svm/ });
     fireEvent.change(screen.getByPlaceholderText(/Find a run/), { target: { value: "zzzz" } });

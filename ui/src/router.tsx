@@ -10,14 +10,13 @@
  */
 import {
   Link,
-  Outlet,
   type RouterHistory,
   createRootRoute,
   createRoute,
   createRouter,
   useNavigate,
 } from "@tanstack/react-router";
-import { type ReactElement, useState } from "react";
+import { type ReactElement } from "react";
 
 import { ExamplesPage } from "./pages/Examples";
 import { OverviewPage } from "./pages/Overview";
@@ -25,8 +24,7 @@ import { RunPage } from "./pages/Run";
 import { SweepPage } from "./pages/Sweep";
 import { TaskPage } from "./pages/Task";
 import { ViewEditor } from "./pages/ViewEditor";
-import { CommandPalette } from "./shell/CommandPalette";
-import { Header } from "./shell/Header";
+import { AppShell } from "./shell/AppShell";
 
 /** The task URL: `tab` is `charts|runs|sweeps|examples|view:<name>`; the rest is the run selection. */
 export interface TaskSearch {
@@ -84,34 +82,22 @@ export function stringifySearch(search: Record<string, unknown>): string {
 /** Stand-in until the screen's own component is wired in; shows the screen name. */
 export function ScreenPending({ name }: { name: string }) {
   return (
-    <h1 className="finding" data-testid="screen-pending">
-      {name}
-    </h1>
+    <div className="pending">
+      <h1 className="finding" data-testid="screen-pending">
+        {name}
+      </h1>
+    </div>
   );
 }
 
 export function NotFound() {
   return (
-    <>
+    <div className="pending">
       <h1 className="finding">Not found</h1>
       <p className="metaline">
-        <Link to="/">Overview</Link>
+        <Link to="/">Home</Link>
       </p>
-    </>
-  );
-}
-
-/** Page frame: header, the routed screen in `<main>`, the command palette. */
-export function AppShell() {
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  return (
-    <>
-      <Header onFind={() => setPaletteOpen(true)} />
-      <main>
-        <Outlet />
-      </main>
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
-    </>
+    </div>
   );
 }
 

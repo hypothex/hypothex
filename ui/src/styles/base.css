@@ -70,38 +70,8 @@ input[type=range].ctl::-moz-range-thumb { width: 13px; height: 13px; border-radi
 
 /* ================================================================== kept v4 classes
    Restyled only through the v4 token aliases in tokens.css. Each block goes with its last
-   user: the v4 header block with the Header component (Task F16), figures (.fig ...) with
-   the Figure component (Task F17), the rest with the old pages. */
-
-/* v4 header (shell/Header.tsx) */
-.bar {
-  position: sticky; top: 0; z-index: 20;
-  background: color-mix(in srgb, var(--paper) 92%, transparent);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--rule);
-}
-.bar-in { max-width: 1280px; margin: 0 auto; padding: 0 40px; height: 60px; display: flex; align-items: stretch; gap: 40px; }
-.bar .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 600 17px/1 var(--font); letter-spacing: -.01em; }
-.bar .brand svg { display: block; }
-.bar .tabs { display: flex; gap: 4px; }
-.bar .tabs a {
-  display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: var(--ink-3);
-  font-size: 14px; border-bottom: 2px solid transparent; margin-bottom: -1px;
-}
-.bar .tabs a:hover { color: var(--ink); }
-.bar .tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
-.bar-r { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-.bar .live { font-size: 12px; color: var(--ink-3); white-space: nowrap; }
-.bar .live.off { color: var(--ink-2); }
-.bar .find {
-  display: flex; align-items: center; gap: 28px; height: 32px; padding: 0 8px 0 12px; min-width: 250px;
-  border: 1px solid var(--rule); border-radius: 7px; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 13px;
-}
-.bar .find:hover { border-color: var(--ink-3); }
-.bar .find kbd { margin-left: auto; font-family: var(--font); font-size: 12px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; }
-.bar .theme { height: 32px; padding: 0 12px; border: 1px solid var(--rule); border-radius: 7px; background: transparent; cursor: pointer; font-size: 13px; color: var(--ink-2); display: flex; gap: 8px; align-items: center; }
-.bar .theme:hover { border-color: var(--ink-3); color: var(--ink); }
-main { max-width: 1280px; margin: 0 auto; padding: 44px 40px 120px; }
+   user: figures (.fig ...) with the Figure component (Task F17), the rest with the old
+   pages. */
 
 /* v4 page type (old pages; .crumb also in the view editor) */
 .crumb { margin: 0 0 18px; font-size: 13px; color: var(--ink-3); }
@@ -214,13 +184,3 @@ svg .hit { fill: transparent; cursor: default; }
 .pal-foot kbd { font-family: var(--font); font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--ink-2); }
 .toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px); opacity: 0; background: var(--ink); color: var(--panel); padding: 9px 14px; border-radius: var(--r-ctl); font-size: 13px; transition: all .18s ease; pointer-events: none; z-index: 60; }
 .toast.on { opacity: 1; transform: translate(-50%, 0); }
-
-@media (max-width: 1100px) {
-  .bar .find { min-width: 0; } .bar .find span { display: none; }
-}
-@media (max-width: 720px) {
-  .bar-in { padding: 0 16px; gap: 16px; } main { padding: 28px 16px 80px; }
-  .bar .tabs a { padding: 0 6px; font-size: 13px; }
-  h1.finding { font-size: 24px; }
-  .bar .brand span { display: none; }
-}

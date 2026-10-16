@@ -126,7 +126,7 @@ describe("routes", () => {
   test("an unknown path shows Not found with a way home", async () => {
     renderApp("/nope/at/all");
     expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Not found");
-    expect(screen.getAllByRole("link", { name: "Overview" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("link", { name: "Home" }).length).toBeGreaterThan(0);
   });
 });
 

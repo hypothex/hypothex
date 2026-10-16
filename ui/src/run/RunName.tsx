@@ -46,9 +46,12 @@ export function runTitle(
   return own ? { display: own, derived, renamed: true } : { display: derived, derived, renamed: false };
 }
 
+/** Every line boundary of Python's `str.splitlines`, the hub's one-line check. */
+const LINE_BREAK = /[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/;
+
 /** Why `text` cannot be a name, or null (an empty text is a reset, not a problem). */
 export function nameProblem(text: string): string | null {
-  if (/[\r\n]/.test(text)) return "One line only";
+  if (LINE_BREAK.test(text)) return "One line only";
   if (text.trim().length > MAX_NAME) return `At most ${MAX_NAME} characters`;
   return null;
 }

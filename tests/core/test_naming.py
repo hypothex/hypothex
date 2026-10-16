@@ -128,7 +128,14 @@ def test_clean_run_name_trims_and_resets_blank_names() -> None:
     assert clean_run_name(None) is None
 
 
-@pytest.mark.parametrize("bad", ["two\nlines", "carriage\rreturn", "x" * (NAME_MAX + 1)])
+# every line boundary of str.splitlines; the UI's nameProblem rejects the same set
+LINE_BREAKS = ["\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [f"two{br}lines" for br in LINE_BREAKS] + ["x" * (NAME_MAX + 1)],
+)
 def test_clean_run_name_rejects_long_or_multiline_names(bad: str) -> None:
     with pytest.raises(RunNameError) as caught:
         clean_run_name(bad)

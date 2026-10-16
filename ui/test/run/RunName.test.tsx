@@ -45,6 +45,11 @@ describe("names", () => {
 
   test("nameProblem and nameToSend", () => {
     expect(nameProblem("a\nb")).toBe("One line only");
+    // every line boundary Python's str.splitlines knows (the hub's check)
+    for (const br of ["\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]) {
+      expect(nameProblem(`a${br}b`)).toBe("One line only");
+    }
+    expect(nameProblem("a\tb")).toBeNull();
     expect(nameProblem("x".repeat(81))).toBe("At most 80 characters");
     expect(nameProblem("  ok  ")).toBeNull();
     expect(nameToSend("   ", "model svm · seed 3")).toBeNull();

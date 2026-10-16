@@ -388,8 +388,8 @@ def clean_run_name(name: str | None) -> str | None:
     ------
     RunNameError
         If the trimmed name is longer than ``NAME_MAX`` (80) characters or
-        contains a line break. It is a ``ValueError`` too, so a request body
-        that validates with it answers 422.
+        contains a line break (any ``str.splitlines`` boundary). It is a
+        ``ValueError`` too, so a request body that validates with it answers 422.
 
     Examples
     --------
@@ -403,7 +403,7 @@ def clean_run_name(name: str | None) -> str | None:
     text = name.strip()
     if not text:
         return None
-    if "\n" in text or "\r" in text:
+    if len(text.splitlines()) > 1:  # any line boundary: \n \r \v \f \x1c-\x1e \x85 U+2028/9
         raise RunNameError("a run name is one line")
     if len(text) > NAME_MAX:
         raise RunNameError(f"a run name has at most {NAME_MAX} characters, not {len(text)}")

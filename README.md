@@ -2,6 +2,8 @@
 
 Experiment tracker and control panel for AI researchers and their agents.
 
+![The task page: the run list on the left drives every panel](docs/_static/ui/task-light.png)
+
 ## Features
 
 - **Every experiment, one place**: task, hypothesis, dataset (host, path, hash), metric (name + version), git commit + diff, environment, logs, predictions, scores, and where checkpoints live.
@@ -12,7 +14,7 @@ Experiment tracker and control panel for AI researchers and their agents.
 - **SLURM**: `sbatch` with partition, time, account, and extra options; `squeue`/`sacct` tracking; `scancel`; lost-job detection.
 - **Sweeps**: a grid (or random search) x seeds in one command, with a params x metric table and the best cell.
 - **Cost**: GPU hours at each host's price plus API spend, per run, seed group, sweep, host, and day.
-- **Web UI**: Overview with a live Hosts panel, task dashboards, run pages, examples.
+- **Web UI**: a run list that drives every chart, one colour per config, readable run names you can rename, a Compare table for eval tasks, run pages, live hosts and queue.
 - **Built for agents**: `hx --json` CLI, MCP server, HTTP API, and a skill file.
 - **Safe by default**: servers bind `127.0.0.1` and require a bearer token; `hx token` unlocks the UI; no secrets in run files.
 

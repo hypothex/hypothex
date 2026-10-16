@@ -68,8 +68,8 @@ are easy to name, filter, compare and act on.
 ### 4.1 Home (`/`)
 
 Status strip (projects with live runs, running, queued, failed today, lost, GPUs busy,
-spent today); **Running now** table (run swatch + name, task, progress bar, latest
-primary-metric value, host, launcher, ETA); **Hosts** (one row per host: GPU cells filled
+spent today); **Running now** table (run name, task, elapsed time, latest step, latest
+primary-metric value, host, launcher; no progress bar or ETA, see §10); **Hosts** (one row per host: GPU cells filled
 by utilisation, cost today); **Tasks** table (task, project, kind, primary metric with
 direction, best, 7-day Δ, best-over-time sparkline, runs, now); **Recent runs** table
 (time, run, task, status with reason, score, Δ best, launcher, hypothesis). Rows link to
@@ -275,4 +275,6 @@ Fonts: Geist 400/500/600 for UI, Geist Mono 400/500 for ids, paths, commands and
 ## 10. Out of scope
 
 Reports, run comparer panel beyond the existing Compare/Examples page, drag-to-resize
-panels, per-panel settings cascade, artifacts browser beyond the Files list.
+panels, per-panel settings cascade, artifacts browser beyond the Files list, run
+progress and ETA on Home (runs report no total step count, so there is no source for
+either).

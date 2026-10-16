@@ -93,3 +93,26 @@
 .run-page .queue-t .r { text-align: right; }
 .run-page .queue-t tr.me td { background: var(--panel-2); }
 .run-page .queue-t tr.me td:first-child { box-shadow: inset 2px 0 0 var(--ink); }
+.run-page .rside { border-left: 1px solid var(--line); padding: 16px 20px 40px; display: grid; gap: 4px; align-content: start; background: var(--panel); min-width: 0; }
+.run-page .pgroup { padding: 12px 0; border-bottom: 1px solid var(--line); display: grid; gap: 2px; }
+.run-page .pgroup:last-child { border-bottom: 0; }
+.run-page .ph4 { font-size: 12px; font-weight: 600; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: baseline; }
+.run-page .ph4 .muted { font-weight: 400; font-size: 11px; }
+.run-page .prop { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 10px; padding: 4px 0; font-size: 12.5px; align-items: center; }
+.run-page .prop .k { color: var(--ink-3); }
+.run-page .prop .v { min-width: 0; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; }
+.run-page .prop .v small { color: var(--ink-3); }
+.run-page .chg { background: color-mix(in srgb, var(--rc, var(--c1)) 15%, transparent); padding: 0 5px; border-radius: 4px; font-weight: 500; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--rc, var(--c1)) 25%, transparent); }
+.run-page .tagrow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.run-page .rside .tag { display: inline-flex; align-items: center; gap: 4px; }
+.run-page .tag .tag-x { border: 0; background: transparent; padding: 0; color: var(--ink-3); cursor: pointer; line-height: 1; }
+.run-page .tag-in { height: 22px; width: 120px; font: inherit; font-size: 12px; padding: 0 6px; border: 1px solid var(--focus); border-radius: 4px; background: var(--panel); color: var(--ink); }
+.run-page .notes { font-size: 12.5px; color: var(--ink-2); margin: 0 0 8px; }
+.run-page .notes .by { font-size: 11.5px; color: var(--ink-3); margin-bottom: 4px; display: flex; gap: 8px; }
+.run-page .notes p { margin: 0; white-space: pre-wrap; }
+.run-page .notes p.clip { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.run-page .note-edit textarea { width: 100%; min-height: 80px; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--r-ctl); padding: 6px 8px; margin-bottom: 6px; }
+.run-page .rside .row { display: flex; gap: 6px; }
+.run-page .rside .small { color: var(--ink-3); margin: 0 0 6px; }
+.run-page .ids { font-size: 11.5px; color: var(--ink-3); overflow-wrap: anywhere; }
+@media (max-width: 1100px) { .run-page .rside { border-left: 0; border-top: 1px solid var(--line); } }

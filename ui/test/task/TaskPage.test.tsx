@@ -102,23 +102,18 @@ describe("header", () => {
     expect(status.textContent).toBe("0 re-scored · 1 skipped: no predictions");
     expect(status.getAttribute("title")).toBe("r9: no predictions");
   });
-
-  test("lists the project's sweeps with their best config", async () => {
-    mockApi({
-      ...routes(),
-      "GET /api/v1/projects/toy-classifier/sweeps": [
-        { id: "s-7f3a", created_at: "2026-10-03T09:12:00Z", n_runs: 6, best: { params: { lr: "3e-4", beam: "10" }, group_id: "g-7e3f", n: 3, mean: 0.9121, lo: 0.9109, hi: 0.9133, run_ids: [] } },
-        { id: "s-1b2c", created_at: "2026-10-02T09:00:00Z", n_runs: 4, best: null },
-      ],
-    });
-    page();
-    const line = await screen.findByLabelText("Sweeps");
-    expect(line.textContent).toBe("sweeps: s-7f3a ×6 lr 3e-4, beam 10 0.9121 · s-1b2c ×4");
-    expect(within(line).getByRole("link", { name: "s-7f3a" }).getAttribute("href")).toBe("/s/toy-classifier/s-7f3a");
-  });
 });
 
 describe("tabs", () => {
+  test("the Sweeps tab lists the task's sweeps", async () => {
+    mockApi(routes());
+    page();
+    await ready();
+    fireEvent.click(screen.getByRole("tab", { name: "Sweeps" }));
+    expect(window.location.search).toBe("?tab=sweeps");
+    expect(await screen.findByText("No sweeps")).toBeTruthy();
+  });
+
   test("the Runs tab shows the runs table", async () => {
     mockApi(routes());
     page();
@@ -133,7 +128,7 @@ describe("tabs", () => {
     page();
     await ready();
     const tabs = screen.getByRole("tablist", { name: "Task" });
-    expect(within(tabs).getAllByRole("tab").map((t) => t.textContent)).toEqual(["Charts", "Runs4", "Examples", "route quality"]);
+    expect(within(tabs).getAllByRole("tab").map((t) => t.textContent)).toEqual(["Charts", "Runs4", "Sweeps", "Examples", "route quality"]);
     expect(within(tabs).getByRole("tab", { name: "Charts" }).getAttribute("aria-selected")).toBe("true");
     const custom = within(tabs).getByRole("tab", { name: "route quality" });
     expect(custom.getAttribute("href")).toBe(`${PATH}?tab=view%3Aroute-quality`);

@@ -4,21 +4,22 @@
  * selection (`useRunSelection`) lives in the URL and every tab shares it. `New run` is the
  * top bar's (it opens `NewRun` from the best config on a task route).
  */
-import { Fragment, type MouseEvent, type ReactElement, type ReactNode, useState } from "react";
+import { type MouseEvent, type ReactElement, type ReactNode, useState } from "react";
 import { api } from "../api/client";
 import type { EvalReport, Leaderboard } from "../api/models";
-import { RUN_EVENT_INVALIDATES, useLeaderboard, useProjectSweeps, useTask, useTaskRuns, useViews } from "../api/queries";
+import { RUN_EVENT_INVALIDATES, useLeaderboard, useTask, useTaskRuns, useViews } from "../api/queries";
 import { StatusIcon } from "../chrome/StatusIcon";
 import { fmtScore } from "../pages/components/format";
 import { AppLink, hrefs, isPlainClick, useNavigateHref } from "../pages/components/links";
 import { ErrorBox, Loading } from "../pages/components/QueryState";
 import { ReevalSummary } from "../pages/components/ReevalSummary";
-import { paramsText, sweepHref } from "../pages/components/SweepModel";
 import { useAction } from "../pages/components/useAction";
 import { ChartsTab } from "./ChartsTab";
 import { ExamplesTab } from "./ExamplesTab";
 import { type TaskFacts, type TaskTab, boardWarnings, metricVersions, notFound, parseTab, sameTab, tabParam, taskFacts } from "./facts";
 import { RunsTab } from "./RunsTab";
+import { taskSweepIds } from "./sweepMath";
+import { SweepsTab } from "./SweepsTab";
 import { useRunSelection } from "./useRunSelection";
 import { applySearch, useSearchState } from "./useSearchState";
 import { ViewTab } from "./ViewTab";
@@ -71,6 +72,7 @@ function TaskPageScope({ project, task }: TaskPageProps): ReactElement {
     `${hrefs.task(project, task)}${applySearch(params.toString(), { tab: tabParam(next), view: null })}`;
   const openRun = (runId: string): void => navigate(hrefs.run(runId));
   const custom = (views.data ?? []).filter((v) => v.origin !== "preset");
+  const sweepCount = data ? taskSweepIds(data).length : 0;
   const tabs: { tab: TaskTab; label: ReactNode; title?: string }[] = [
     { tab: { kind: "charts" }, label: "Charts" },
     {
@@ -78,6 +80,14 @@ function TaskPageScope({ project, task }: TaskPageProps): ReactElement {
       label: (
         <>
           Runs<span className="n">{data?.runs.length ?? ""}</span>
+        </>
+      ),
+    },
+    {
+      tab: { kind: "sweeps" },
+      label: (
+        <>
+          Sweeps{sweepCount > 0 ? <span className="n">{sweepCount}</span> : null}
         </>
       ),
     },
@@ -113,6 +123,8 @@ function TaskPageScope({ project, task }: TaskPageProps): ReactElement {
         onOpenRun={openRun}
       />
     );
+  } else if (tab.kind === "sweeps") {
+    body = <SweepsTab project={project} data={data} sweepId={params.get("sweep")} onSelect={(id) => setSearch({ sweep: id })} />;
   } else {
     body = (
       <ChartsTab
@@ -172,7 +184,6 @@ function TaskPageScope({ project, task }: TaskPageProps): ReactElement {
       {views.error ? <ErrorBox error={views.error} /> : null}
       {reeval.error ? <ErrorBox error={reeval.error} /> : null}
       {reevalReport ? <ReevalSummary report={reevalReport} /> : null}
-      <SweepsLine project={project} />
       <div className="task-body">{body}</div>
     </div>
   );
@@ -235,31 +246,6 @@ function Facts({ facts, board, dataset }: { facts: TaskFacts; board: Leaderboard
       ) : null}
       {dataset ? <span>{dataset}</span> : null}
       {board ? boardWarnings(board).map((text) => <span key={text} className="warn">{text}</span>) : null}
-    </p>
-  );
-}
-
-/**
- * The project's sweeps with their best config, each linking its sweep. Nothing while there
- * are none, or when the list fails. Replaced by the Sweeps tab in T7.
- */
-function SweepsLine({ project }: { project: string }): ReactElement | null {
-  const sweeps = useProjectSweeps(project);
-  const items = sweeps.data ?? [];
-  if (items.length === 0) return null;
-  return (
-    <p className="small sweeps" aria-label="Sweeps" title={`Sweeps of project ${project}`}>
-      sweeps:{" "}
-      {items.map((s, i) => (
-        <Fragment key={s.id}>
-          {i > 0 ? " · " : ""}
-          <AppLink href={sweepHref(project, s.id)} title={`${s.n_runs} runs, created ${s.created_at}`}>
-            {s.id}
-          </AppLink>
-          {` ×${s.n_runs}`}
-          {s.best && s.best.mean !== null ? ` ${paramsText(s.best.params, Object.keys(s.best.params))} ${fmtScore(s.best.mean)}` : ""}
-        </Fragment>
-      ))}
     </p>
   );
 }

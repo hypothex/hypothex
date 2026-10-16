@@ -1,7 +1,7 @@
 /**
  * Code-defined routes (ui-v5 contract): `/` Home, `/t/$project/$task?tab=&filter=&group=
  * &sort=&hide=&sup=&sweep=` Task, `/t/$project/$task/edit/$view` view editor (`new` for a
- * new view), `/r/$runId?tab=` Run, `/x/$a/$b?metric=` Examples, `/s/$project/$id` Sweep,
+ * new view), `/r/$runId?tab=` Run, `/x/$a/$b?metric=` Examples, `/s/$project/$id` sweep link (to the task's Sweeps tab),
  * `/hosts`, `/queue`.
  *
  * Old v4 pages stay mounted until their v5 replacement lands; each swap is one `component`
@@ -21,9 +21,9 @@ import { type ReactElement } from "react";
 import { ExamplesPage } from "./pages/Examples";
 import { OverviewPage } from "./pages/Overview";
 import { RunPage } from "./pages/Run";
-import { SweepPage } from "./pages/Sweep";
 import { ViewEditor } from "./pages/ViewEditor";
 import { AppShell } from "./shell/AppShell";
+import { SweepRedirect } from "./task/SweepRedirect";
 import { TaskPage } from "./task/TaskPage";
 
 /** The task URL: `tab` is `charts|runs|sweeps|examples|view:<name>`; the rest is the run selection. */
@@ -119,10 +119,10 @@ function ExamplesScreen(): ReactElement {
   return <ExamplesPage a={a} b={b} metric={metric} />;
 }
 
-/** `/s/$project/$id`: the Sweep page; keyed so a new sweep starts with fresh UI state. */
+/** `/s/$project/$id`: opens the sweep in its task's Sweeps tab (`SweepRedirect`). */
 function SweepScreen(): ReactElement {
   const { project, id } = sweepRoute.useParams();
-  return <SweepPage key={`${project}/${id}`} project={project} sweepId={id} />;
+  return <SweepRedirect key={`${project}/${id}`} project={project} sweepId={id} />;
 }
 
 /** `/t/$project/$task/edit/$view`: the view editor; Save opens the saved view's tab. */

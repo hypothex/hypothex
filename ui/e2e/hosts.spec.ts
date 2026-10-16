@@ -24,7 +24,7 @@ test("the Overview Hosts panel lists every fake host", async ({ page, request, t
   }
 });
 
-test("the sweep page renders the demo sweep", async ({ page, request, theme }) => {
+test("a sweep link opens the demo sweep in its task's Sweeps tab", async ({ page, request, theme }) => {
   await connectedHosts(request);
   const { project, id } = await firstSweep(request);
   const path = `${encodeURIComponent(project)}/${encodeURIComponent(id)}`;
@@ -34,7 +34,11 @@ test("the sweep page renders the demo sweep", async ({ page, request, theme }) =
 
   await page.goto(`/s/${path}`);
   await expectTheme(page, theme);
-  await expect(page.getByText(summary.headline).first()).toBeVisible();
+  if (summary.spec.task !== null) {
+    const task = `/t/${encodeURIComponent(project)}/${encodeURIComponent(summary.spec.task)}`;
+    await expect(page).toHaveURL((url) => url.pathname === task && url.searchParams.get("tab") === "sweeps" && url.searchParams.get("sweep") === id);
+  }
+  await expect(page.getByRole("heading", { level: 2, name: id })).toBeVisible();
   for (const name of ["Copy as CLI", "Cancel queued", "Add seeds"]) {
     await expect(page.getByRole("button", { name })).toBeVisible();
   }
@@ -87,9 +91,9 @@ test("step7 host, sweep, and queue switch geometry at breakpoint widths", async 
   }
   const { project, id } = await firstSweep(request);
   await page.goto(`/s/${encodeURIComponent(project)}/${encodeURIComponent(id)}`);
-  await expect(page.locator(".sw-grid")).toBeVisible();
+  await expect(page.locator(".sweep-grid")).toBeVisible();
   for (const width of LAYOUT_WIDTHS) {
-    await checkLayout(page, info, "sweep", width, [".run-top h1", ".run-top .actions", ".run-top button", ".sw-grid"]);
+    await checkLayout(page, info, "sweep", width, [".sweep-head h2", ".sweep-head .actions", ".sweep-head button", ".sweep-grid"]);
   }
   const tasks = await getJson<{ name: string }[]>(request, `/api/v1/tasks?project=${encodeURIComponent(run.project)}`);
   const task = tasks[0]?.name;

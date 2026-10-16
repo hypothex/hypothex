@@ -3,6 +3,7 @@ import { screen, waitFor } from "@testing-library/react";
 
 import { parseSearch, stringifySearch } from "../src/router";
 import { mockRoutes } from "./api/fetch-mock";
+import { makeSummary } from "./pages/sweepFixtures";
 import { renderApp } from "./render-app";
 
 const realFetch = globalThis.fetch;
@@ -52,10 +53,19 @@ describe("routes", () => {
     expect(leaf(router)?.search).toEqual({ metric: "accuracy@v1" });
   });
 
-  test("/s/:project/:id is the sweep page", async () => {
+  test("/s/:project/:id redirects to the task's Sweeps tab", async () => {
+    mockRoutes({ "/api/v1/sweeps/rxn/s-7f3a": makeSummary() });
     const { router } = renderApp("/s/rxn/s-7f3a");
-    await settled(router, "/s/$project/$id");
-    expect(leaf(router)?.params).toEqual({ project: "rxn", id: "s-7f3a" });
+    await waitFor(() => expect(router.state.location.pathname).toBe("/t/rxn/fwd"));
+    expect(router.state.location.search).toEqual({ tab: "sweeps", sweep: "s-7f3a" });
+  });
+
+  test("/s/:project/:id of a sweep without a task shows the sweep in place", async () => {
+    mockRoutes({ "/api/v1/sweeps/rxn/s-7f3a": makeSummary({}, { task: null }) });
+    const { router } = renderApp("/s/rxn/s-7f3a");
+    expect(await screen.findByRole("heading", { level: 2, name: "s-7f3a" })).toBeTruthy();
+    expect(leaf(router)?.routeId).toBe("/s/$project/$id");
+    expect(router.state.location.pathname).toBe("/s/rxn/s-7f3a");
   });
 
   test("a numeric-looking ?view stays a string (no JSON parsing)", async () => {

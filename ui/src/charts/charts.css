@@ -60,7 +60,7 @@ svg.spark polyline { fill: none; stroke: var(--ink-2); stroke-width: 1.5; stroke
 .tip .k { width: 12px; height: 2px; border-radius: 1px; display: block; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-2); margin-bottom: 8px; }
 
-/* ---- v4 chart marks still drawn by panels/* (Curves, Leaderboard, ...) and SweepForest */
+/* ---- v4 chart marks still drawn by panels/* (Curves, Leaderboard, ...) */
 .hx-chart { display: block; overflow: visible; }
 .hx-chart.glyph { display: inline-block; vertical-align: middle; }
 .hx-chart text { font-family: var(--font); fill: var(--ink-2); }

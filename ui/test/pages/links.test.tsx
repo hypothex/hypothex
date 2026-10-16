@@ -18,6 +18,7 @@ describe("hrefs", () => {
     expect(hrefs.task("toy-classifier", "toy-test", "charts")).toBe("/t/toy-classifier/toy-test");
     expect(hrefs.task("p", "t", "runs")).toBe("/t/p/t?tab=runs");
     expect(hrefs.taskView("p", "t", "route-quality")).toBe("/t/p/t?tab=view%3Aroute-quality");
+    expect(hrefs.taskSweep("p", "t", "s-7f3a")).toBe("/t/p/t?tab=sweeps&sweep=s-7f3a");
     expect(hrefs.edit("p", "t", "new")).toBe("/t/p/t/edit/new");
     expect(hrefs.run("r1", { log: "stderr" })).toBe("/r/r1?log=stderr");
     expect(hrefs.run("r1", { example: "T-014" })).toBe("/r/r1?example=T-014");

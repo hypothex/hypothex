@@ -6,7 +6,7 @@ import type { RunRecord } from "../../src/api/models";
 import { SEED_HISTORY_CUT } from "../../src/launch/draft";
 import { parseCell, type SweepCellRow } from "../../src/pages/components/SweepModel";
 import { rerunDefaults, SweepRerun } from "../../src/pages/components/SweepRerun";
-import { SweepPage } from "../../src/pages/Sweep";
+import { SweepDetail as SweepPage } from "../../src/task/SweepDetail";
 import { makeRecord } from "./fixtures";
 import { type Call, HttpReply, mockApi, renderWithClient, restoreFetch } from "./helpers";
 import {

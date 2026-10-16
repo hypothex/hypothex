@@ -4,8 +4,8 @@
  * never HTML. Charts call `showTip`/`hideTip`; `TooltipHost` (mounted once by the shell)
  * draws it next to the pointer and keeps it inside the window.
  *
- * `useTooltip` is the v4 per-chart hook still used by panels/Curves, panels/Leaderboard and
- * pages/components/SweepForest; it keeps its signature and takes the v5 look.
+ * `useTooltip` is the v4 per-chart hook still used by panels/Curves and panels/Leaderboard;
+ * it keeps its signature and takes the v5 look.
  */
 import {
   type FocusEvent,

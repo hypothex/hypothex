@@ -32,6 +32,9 @@ export const hrefs = {
   /** A saved view's tab: `?tab=view:<view>`. */
   taskView: (project: string, task: string, view: string): string =>
     withSearch(`/t/${enc(project)}/${enc(task)}`, { tab: `view:${view}` }),
+  /** A sweep in its task's Sweeps tab. */
+  taskSweep: (project: string, task: string, sweepId: string): string =>
+    withSearch(`/t/${enc(project)}/${enc(task)}`, { tab: "sweeps", sweep: sweepId }),
   edit: (project: string, task: string, view: string): string =>
     `/t/${enc(project)}/${enc(task)}/edit/${enc(view)}`,
   run: (runId: string, search: { log?: string; example?: string } = {}): string =>

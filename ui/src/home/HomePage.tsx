@@ -179,10 +179,10 @@ function RecentTable({ rows, now }: { rows: RecentRow[]; now: number }) {
               <td className="muted" title={r.at}>
                 {when(r.at, now)}
               </td>
-              <td className="nm">
+              <td className="nm one-line">
                 <AppLink href={hrefs.run(r.runId)}>{r.name}</AppLink>
               </td>
-              <td className="ink2">{r.task ? <AppLink href={hrefs.task(r.project, r.task)}>{r.task}</AppLink> : null}</td>
+              <td className="ink2 one-line">{r.task ? <AppLink href={hrefs.task(r.project, r.task)}>{r.task}</AppLink> : null}</td>
               <td>
                 <StatusIcon status={r.status} label={r.count > 1 ? `${r.reason} ×${r.count}` : r.reason} />
                 {r.retried ? <small className="muted"> · retry ok</small> : null}
@@ -191,7 +191,7 @@ function RecentTable({ rows, now }: { rows: RecentRow[]; now: number }) {
               <td className="num muted">{r.deltaBest === null ? "" : fmtDelta(r.deltaBest)}</td>
               <td>{r.by ? <Launcher who={r.by} /> : null}</td>
               <td className="hyp ink2" title={r.hypothesis}>
-                {r.hypothesis}
+                <span>{r.hypothesis}</span>
               </td>
               <td>
                 {r.stderr ? (

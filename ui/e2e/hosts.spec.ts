@@ -55,6 +55,36 @@ for (const screen of ["Hosts", "Queue"]) {
   });
 }
 
+// Home with live runs (spec section 9): the Running now + Hosts row and the tables stay
+// inside the page, and a long hypothesis is cut in its own cell, never pushing the page wider
+// or squeezing the Run and Task names onto several lines.
+const LONG_HYPOTHESIS = Array(5).fill("lr x beam: find the best beam width for each learning rate").join(", ");
+
+test(`home with running runs: no overflow at ${LAYOUT_WIDTHS.join("/")}, one-line names`, async ({ page, request, theme }, info) => {
+  await runningRemoteRun(request, remoteHosts(await connectedHosts(request)));
+  await page.route("**/api/v1/overview**", async (route) => {
+    const response = await route.fetch();
+    const body = (await response.json()) as { recent?: { hypothesis: string }[] };
+    for (const row of body.recent ?? []) row.hypothesis = LONG_HYPOTHESIS;
+    await route.fulfill({ response, json: body });
+  });
+  await page.goto("/");
+  await expectTheme(page, theme);
+  await expect(page.getByRole("heading", { level: 2, name: /Running now/ })).toBeVisible();
+  const running = page.locator("section[aria-labelledby='home-running'] table");
+  const recent = page.locator("section[aria-labelledby='home-recent'] table");
+  await expect(running).toBeVisible();
+  await expect(recent.getByText(LONG_HYPOTHESIS).first()).toBeAttached();
+  for (const width of LAYOUT_WIDTHS) {
+    await checkLayout(page, info, "home-live", width, [...LAYOUT_REGIONS, ".home section"]);
+    // Run and Task names: one line box each (an inline link that wraps has several rects)
+    const lines = await recent.locator("tbody tr td:nth-child(2) a, tbody tr td:nth-child(3) a")
+      .evaluateAll((links) => links.map((a) => [a.textContent, a.getClientRects().length] as const));
+    expect(lines.length).toBeGreaterThan(0);
+    expect.soft(lines.filter(([, n]) => n !== 1), `Recent runs names wrap at ${width}`).toEqual([]);
+  }
+});
+
 test("queue page lists queued runs with their position", async ({ page, request, theme }) => {
   const { run } = await lastQueuedRun(request);
   await page.goto("/queue");

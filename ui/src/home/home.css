@@ -25,7 +25,10 @@
 .home table.t td.one-line { white-space: nowrap; }
 .home .proj { display: inline-flex; align-items: center; gap: 6px; }
 .home .st.running a, .home .st.stale a { color: var(--ink); }
-.home .hostrow { display: grid; grid-template-columns: 150px minmax(0, 1fr) 70px; gap: 10px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--grid); }
+/* Hosts: the GPU cells keep their natural width on one row; the name column takes the rest. */
+.home .hostrow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(44px, auto); gap: 12px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--grid); }
+.home .hostrow > div:first-child > * { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home .hostrow .gpus { flex-wrap: nowrap; }
 .home .hostrow:last-child { border-bottom: 0; }
 .home .hostrow .muted { font-size: 12px; }
 .home .delta-up { color: var(--ok); }
@@ -44,4 +47,5 @@
 .home-empty .cmd .copy { border: 0; background: transparent; color: var(--ink-3); cursor: pointer; line-height: 0; }
 .home-empty .links { margin-top: 14px; display: flex; gap: 18px; font-size: 12px; }
 .home-empty .links a { color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
-@media (max-width: 1100px) { .home .two { grid-template-columns: minmax(0, 1fr); } }
+/* Running now needs ~800 px for one-line rows beside Hosts; below that the two stack. */
+@media (max-width: 1360px) { .home .two { grid-template-columns: minmax(0, 1fr); } }

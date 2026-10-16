@@ -54,16 +54,16 @@ function RunningTable({ summary, hosts, now }: { summary: OverviewSummary; hosts
             const elapsed = runSeconds(r, now);
             return (
               <tr key={r.run_id}>
-                <td className="nm">
+                <td className="nm one-line">
                   <StatusIcon status={state} label={<AppLink href={hrefs.run(r.run_id)}>{runLabel(summary, r)}</AppLink>} />
                 </td>
-                <td className="ink2">{r.task ? <AppLink href={hrefs.task(r.project, r.task)}>{r.task}</AppLink> : r.project}</td>
+                <td className="ink2 one-line">{r.task ? <AppLink href={hrefs.task(r.project, r.task)}>{r.task}</AppLink> : r.project}</td>
                 <td className="num muted">{elapsed === null ? "—" : fmtWait(elapsed)}</td>
                 <td className="num muted">{p?.step ?? "—"}</td>
                 <td className="num" title={p?.metric ?? undefined}>
                   {p?.value !== null && p?.value !== undefined ? fmtScore(p.value) : "—"}
                 </td>
-                <td>{row?.name ?? r.host}</td>
+                <td className="one-line">{row?.name ?? r.host}</td>
                 <td>
                   <Launcher who={r.created_by} />
                 </td>

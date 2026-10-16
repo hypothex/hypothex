@@ -82,6 +82,16 @@ test(`home with running runs: no overflow at ${LAYOUT_WIDTHS.join("/")}, one-lin
       .evaluateAll((links) => links.map((a) => [a.textContent, a.getClientRects().length] as const));
     expect(lines.length).toBeGreaterThan(0);
     expect.soft(lines.filter(([, n]) => n !== 1), `Recent runs names wrap at ${width}`).toEqual([]);
+    // Running now: run, task and host stay on one line each
+    const live = await running.locator("tbody tr td:nth-child(1) a, tbody tr td:nth-child(2) a, tbody tr td:nth-child(6)")
+      .evaluateAll((cells) => cells.map((c) => [c.textContent, c.getClientRects().length, c.tagName === "TD" ? c.getBoundingClientRect().height : 0] as const));
+    expect(live.length).toBeGreaterThan(0);
+    expect.soft(live.filter(([, n, h]) => n !== 1 || h > 44), `Running now names wrap at ${width}`).toEqual([]);
+    // Hosts: the GPU cells of one host sit on one row
+    const rows = await page.locator("section[aria-labelledby='home-hosts'] .gpus").evaluateAll((sets) =>
+      sets.map((set) => [set.getAttribute("aria-label"), new Set([...set.children].map((c) => Math.round(c.getBoundingClientRect().top))).size] as const));
+    expect(rows.length).toBeGreaterThan(0);
+    expect.soft(rows.filter(([, n]) => n !== 1), `GPU cells wrap at ${width}`).toEqual([]);
   }
 });
 

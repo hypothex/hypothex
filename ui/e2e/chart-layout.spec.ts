@@ -1,7 +1,65 @@
-/** UI-F4: actual SVG text geometry at narrow spans, with isolated read-only fixtures. */
-import type { Locator } from "@playwright/test";
+/**
+ * Spec section 9 layout checks: every screen without page overflow at the v5 layout widths,
+ * chart text at a constant pixel size whatever the window width, and chart text that fits
+ * narrow and wide panels (UI-F4, isolated read-only fixtures).
+ */
+import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import type { PanelResult, PanelSpec, ViewSpec } from "../src/api/models";
-import { demoTask, expect, expectTheme, getJson, test } from "./fixtures";
+import { demoTask, expect, expectTheme, getJson, type TaskRunsLite, test } from "./fixtures";
+import { checkLayout, LAYOUT_REGIONS, LAYOUT_WIDTHS } from "./layout-geometry";
+
+function taskUrl(kind: "training" | "eval_matrix", tab?: string): string {
+  const { project, task } = demoTask(kind);
+  return `/t/${project}/${task}${tab ? `?tab=${tab}` : ""}`;
+}
+
+async function scoredRunUrl(request: APIRequestContext): Promise<string> {
+  const { project, task } = demoTask("training");
+  const data = await getJson<TaskRunsLite>(request, `/api/v1/tasks/${project}/${task}/runs`);
+  const run = data.runs.find((r) => !r.archived && r.primary !== null);
+  if (!run) throw new Error("training demo has no scored run");
+  return `/r/${run.run_id}`;
+}
+
+interface Screen {
+  name: string;
+  url: (request: APIRequestContext) => string | Promise<string>;
+  /** Visible once the screen has loaded its data, so the check never measures a spinner. */
+  ready: (page: Page) => Locator;
+}
+
+const SCREENS: Screen[] = [
+  { name: "home", url: () => "/", ready: (page) => page.getByRole("heading", { name: "Recent runs" }) },
+  { name: "task-training", url: () => taskUrl("training"), ready: (page) => page.locator("[data-panel] svg").first() },
+  { name: "task-eval", url: () => taskUrl("eval_matrix"), ready: (page) => page.getByRole("region", { name: "Scores", exact: true }) },
+  { name: "runs-table", url: () => taskUrl("training", "runs"), ready: (page) => page.getByRole("table", { name: "Runs" }) },
+  { name: "sweeps", url: () => taskUrl("training", "sweeps"), ready: (page) => page.getByRole("tab", { name: /^Sweeps/, selected: true }) },
+  { name: "run", url: scoredRunUrl, ready: (page) => page.getByRole("complementary", { name: "Properties" }) },
+];
+
+for (const screen of SCREENS) {
+  test(`${screen.name}: no overflow at ${LAYOUT_WIDTHS.join("/")}`, async ({ page, request, theme }, info) => {
+    await page.goto(await screen.url(request));
+    await expectTheme(page, theme);
+    await expect(screen.ready(page)).toBeVisible();
+    for (const width of LAYOUT_WIDTHS) {
+      await checkLayout(page, info, screen.name, width, LAYOUT_REGIONS);
+    }
+  });
+}
+
+test("chart text does not grow with the window", async ({ page, theme }) => {
+  await page.goto(taskUrl("training"));
+  await expectTheme(page, theme);
+  const text = page.locator("[data-panel] svg text").first();
+  const sizes: number[] = [];
+  for (const width of LAYOUT_WIDTHS) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.waitForTimeout(250);
+    sizes.push(await text.evaluate((el) => el.getBoundingClientRect().height));
+  }
+  expect(Math.max(...sizes) - Math.min(...sizes), `text heights ${sizes.join(", ")}`).toBeLessThan(1.5);
+});
 
 type Box = { left: number; right: number; top: number; bottom: number; width: number; height: number };
 

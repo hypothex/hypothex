@@ -1,5 +1,5 @@
 import type { APIRequestContext } from "@playwright/test";
-import { checkLayout, LAYOUT_WIDTHS } from "./layout-geometry";
+import { checkLayout, LAYOUT_REGIONS, LAYOUT_WIDTHS } from "./layout-geometry";
 import { expect, expectTheme, getJson, test } from "./fixtures";
 import {
   connectedHosts,
@@ -40,6 +40,20 @@ test("hosts page shows every configured host with GPU cells", async ({ page, req
     await expect(row.locator("[data-gpu]")).toHaveCount(host.gpus.length);
   }
 });
+
+// spec section 9 on the hosts hub: Hosts and Queue without overflow at every layout width
+for (const screen of ["Hosts", "Queue"]) {
+  test(`${screen.toLowerCase()} page: no overflow at ${LAYOUT_WIDTHS.join("/")}`, async ({ page, request, theme }, info) => {
+    await connectedHosts(request);
+    await page.goto(`/${screen.toLowerCase()}`);
+    await expectTheme(page, theme);
+    await expect(page.getByRole("heading", { level: 1, name: screen })).toBeVisible();
+    await expect(page.getByRole("table").first()).toBeVisible();
+    for (const width of LAYOUT_WIDTHS) {
+      await checkLayout(page, info, screen.toLowerCase(), width, LAYOUT_REGIONS);
+    }
+  });
+}
 
 test("queue page lists queued runs with their position", async ({ page, request, theme }) => {
   const { run } = await lastQueuedRun(request);

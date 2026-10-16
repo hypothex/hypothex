@@ -29,8 +29,10 @@ from hypothex.core.leaderboard import (
     seed_group_label,
     seed_group_labels,
 )
+from hypothex.core.naming import derive_names, group_display_name
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.scorekeys import split_score_key
 from hypothex.core.seeds import summarize
 from hypothex.core.sources import group_labels, iter_rows, metric_points, select_fields
 from hypothex.core.stats import ecdf_points, lttb, quantile
@@ -1725,6 +1727,103 @@ def _solved_column(rows: list[dict[str, Any]], prefix: str) -> str | None:
     return None
 
 
+def _compare(scope: _Scope, panel: PanelSpec) -> PanelResult:
+    """
+    Score means of chosen datasets and metrics (of one model), one row per group and key.
+
+    The values are the leaderboard's group means (``LeaderboardRow.scores``, the
+    task's current metric versions), so they match the Scores panels and the
+    workspace's ``TaskGroup.scores``. Each key is split into dataset, model and
+    metric (``scorekeys.split_score_key`` with the task's ``score_keys`` names).
+    A key is kept when its dataset is in ``data.datasets``, its metric in
+    ``data.metrics`` and, when ``data.model`` is set, its model is that model.
+
+    Parameters
+    ----------
+    scope : _Scope
+        The panel's runs and task-level data.
+    panel : PanelSpec
+        The compare panel.
+
+    Returns
+    -------
+    PanelResult
+        One row ``{dataset, model, metric, key, run_id, group_id, name, value}``
+        per kept key and ranked group (``run_id`` is the group's latest run,
+        ``name`` the group name, ``naming.group_display_name``), ordered by the
+        selected metrics, then datasets, then rank; at most ``MAX_TABLE_ROWS``.
+        ``meta`` holds the selection, ``render`` (``table`` or ``bars``),
+        ``key_parts``, ``options`` (every dataset, model and metric the groups
+        have), ``higher_is_better`` (a bool: the direction of the kept keys'
+        metric, else the task primary's) and ``total``.
+    """
+    config = scope.entry.config
+    names = config.tasks[scope.task].key_parts
+    datasets, metrics = panel.data.datasets or [], panel.data.metrics or []
+    model = panel.data.model
+    board = scope.board()
+    every = scope.ctx.index.list_runs(
+        project=scope.entry.project, task=scope.task, include_archived=True, limit=None
+    )
+    by_id = {r.run_id: r for r in every}
+    derived = derive_names(sorted(every, key=lambda r: (r.created_at, r.run_id)))
+    options: dict[str, set[str]] = {"datasets": set(), "models": set(), "metrics": set()}
+    prefixes: set[str] = set()
+    kept: list[tuple[int, int, int, dict[str, Any]]] = []
+    for rank, row in enumerate(board.rows):
+        members = [by_id[i] for i in row.run_ids if i in by_id]
+        label = group_display_name(members, derived) if members else row.label
+        for key, stat in row.scores.items():
+            parts = split_score_key(key, names)
+            if parts is None:
+                continue
+            options["datasets"].add(parts.dataset)
+            options["metrics"].add(parts.metric)
+            if parts.model is not None:
+                options["models"].add(parts.model)
+            if parts.dataset not in datasets or parts.metric not in metrics:
+                continue
+            if model is not None and parts.model != model:
+                continue
+            prefixes.add(parts.prefix)
+            item = {
+                "dataset": parts.dataset,
+                "model": parts.model,
+                "metric": parts.metric,
+                "key": key,
+                "run_id": row.latest_run_id,
+                "group_id": row.group_id,
+                "name": label,
+                "value": stat.mean,
+            }
+            kept.append((metrics.index(parts.metric), datasets.index(parts.dataset), rank, item))
+    kept.sort(key=lambda entry: entry[:3])
+    only = next(iter(prefixes)) if len(prefixes) == 1 else None
+    higher = (
+        config.metrics[only].higher_is_better
+        if only is not None and only in config.metrics
+        else board.higher_is_better
+    )
+    meta: dict[str, Any] = {
+        "datasets": datasets,
+        "model": model,
+        "metrics": metrics,
+        "render": "bars" if panel.render == "bars" else "table",
+        "key_parts": names,
+        "options": {k: sorted(v, key=_natural_key) for k, v in options.items()},
+        "higher_is_better": higher,
+        "total": len(kept),
+    }
+    if len(kept) > MAX_TABLE_ROWS:
+        meta["warnings"] = [f"showing the first {MAX_TABLE_ROWS} of {len(kept)} rows"]
+    return PanelResult(
+        type="compare",
+        title=panel.title,
+        rows=[item for *_, item in kept[:MAX_TABLE_ROWS]],
+        meta=meta,
+    )
+
+
 _HANDLERS = {
     "stat_strip": _stat_strip,
     "leaderboard": _leaderboard,
@@ -1735,4 +1834,5 @@ _HANDLERS = {
     "table": _table,
     "vega_lite": _vega_lite,
     "trace": _trace,
+    "compare": _compare,
 }

@@ -108,6 +108,15 @@ markdown       Static ``text``.
 vega_lite      A Vega-Lite ``spec`` drawn over rows from a ``source``. Rows arrive inline
                only: ``url``, ``href``, ``embedOptions`` (at any depth) and ``image``
                marks are rejected.
+compare        Chosen datasets side by side for an eval task whose score keys have
+               dotted parts (``<dataset>.<model>.<metric>``, or ``<dataset>.<metric>``):
+               ``data: {datasets: [set-1, set-2], model: m-a, metrics: [top10]}``
+               (``model`` omitted or null: every model). ``render: table`` (the default)
+               draws one row per dataset and one column per run; ``render: bars``
+               draws grouped bars. Rows are one per seed group and key,
+               ``{dataset, model, metric, key, run_id, group_id, name, value}``:
+               the group's mean (as on the leaderboard), its latest run and its
+               name; ``meta.higher_is_better`` is the compared metric's direction.
 ============== ==========================================================================
 
 For curves, request just the visible metric names with ``data.metrics``; an empty

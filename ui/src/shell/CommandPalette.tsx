@@ -7,13 +7,13 @@
  * newest list are found too.
  */
 import { sweepCrumb } from "../pages/components/remote";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client";
 import type { ProjectInfo, RunRecord, RunsQuery, TaskRuns, TaskSummary } from "../api/models";
-import { queryKeys, useHubEnvironment, useProjects, useRuns, useTasks } from "../api/queries";
+import { queryKeys, useHubEnvironment, useOverview, useProjects, useRuns, useTasks } from "../api/queries";
 import { firstClause, shortId } from "../pages/components/format";
 import { withSeed } from "../run/RunName";
 import { toggleTheme } from "./ThemeToggle";
@@ -162,6 +162,20 @@ function useSearchText(query: string): string | null {
   return settled.length >= SEARCH_MIN ? settled : null;
 }
 
+/** A counter that changes whenever a `["taskRuns", …]` query in the cache is added, updated or removed. */
+function useTaskRunsCacheVersion(qc: QueryClient): number {
+  const [version, setVersion] = useState(0);
+  useEffect(
+    () =>
+      qc.getQueryCache().subscribe((event) => {
+        if (event.query.queryKey[0] !== "taskRuns") return;
+        if (event.type === "added" || event.type === "updated" || event.type === "removed") setVersion((v) => v + 1);
+      }),
+    [qc],
+  );
+  return version;
+}
+
 function PaletteDialog({ onClose, onToast }: { onClose: () => void; onToast: (msg: string) => void }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -179,7 +193,15 @@ function PaletteDialog({ onClose, onToast }: { onClose: () => void; onToast: (ms
     queryFn: ({ signal }) => api.runs(searchQuery, signal),
     enabled: searchText !== null,
   });
-  const names = useMemo(() => cachedRunNames(qc.getQueriesData<TaskRuns>({ queryKey: ["taskRuns"] })), [qc, runs.data]);
+  // Run names: the hub's (Home's running and recent runs), then every task-run list in the
+  // cache; a list that loads or changes while the palette is open re-titles its runs.
+  const overview = useOverview();
+  const cachedTaskRuns = useTaskRunsCacheVersion(qc);
+  const names = useMemo(() => {
+    const out = new Map(Object.entries(overview.data?.names ?? {}));
+    for (const [id, name] of cachedRunNames(qc.getQueriesData<TaskRuns>({ queryKey: ["taskRuns"] }))) out.set(id, name);
+    return out;
+  }, [qc, cachedTaskRuns, overview.data]);
   const hits = searchText !== null ? found.data : undefined;
 
   useEffect(() => input.current?.focus(), []);

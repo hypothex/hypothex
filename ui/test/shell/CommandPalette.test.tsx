@@ -158,6 +158,23 @@ describe("CommandPalette", () => {
     return screen.findByRole("dialog", { name: "Find and run commands" });
   };
 
+  test("run titles follow task-run lists cached while it is open, and the hub's run names", async () => {
+    mockRoutes({
+      "/api/v1/projects": PROJECTS, "/api/v1/tasks": TASKS, "/api/v1/tasks/": null, "/api/v1/runs": RUNS,
+      "/api/v1/overview": { counts: {}, running: [], failures: [], recent: [], timeline: [], projects: [], names: { "r-gpu": "lr 3e-4 · seed 1" } },
+    });
+    const { queryClient } = renderApp("/");
+    await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
+    await openWithShortcut();
+    await screen.findByRole("option", { name: /RBF-kernel SVM beats rf · seed 1/ });
+    // the hub's names (Home) title runs no task page has loaded yet
+    await screen.findByRole("option", { name: /lr 3e-4 · seed 1/ });
+    // a task page loads its runs after the palette opened: the title follows at once
+    const run = { run_id: "r-svm", name: "svm", derived_name: "svm", renamed: false, seed: 1 };
+    act(() => queryClient.setQueryData(["taskRuns", "toy", "acc", false], { runs: [run] }));
+    await screen.findByRole("option", { name: /^svm · seed 1/ });
+  });
+
   test("Ctrl+K opens it with the input focused; Escape closes and refocuses Find", async () => {
     renderApp("/");
     await screen.findByRole("button", { name: /Search runs, tasks, paths/ });

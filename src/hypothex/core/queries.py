@@ -36,6 +36,7 @@ from hypothex.core.errors import ConfigError, EvalError, RunError, StoreError
 from hypothex.core.fsutil import read_jsonl, read_yaml
 from hypothex.core.index import Index
 from hypothex.core.leaderboard import Leaderboard, build_leaderboard, cached_leaderboard
+from hypothex.core.naming import clean_run_name
 from hypothex.core.records import (
     INDEXED_POINT_STATUSES,
     MetricPoint,
@@ -1292,6 +1293,46 @@ def archive_run(ctx: Context, run_id: str, on: bool = True) -> RunRecord:
     """
     return ctx.update_run(
         run_id, "run.archived", lambda r: r.model_copy(update={"archived": on}), {"on": on}
+    )
+
+
+def rename_run(ctx: Context, run_id: str, name: str | None) -> RunRecord:
+    """
+    Name a run, or reset it to its derived name.
+
+    The name is trimmed; ``None`` or a blank name resets it, so the run shows
+    its derived name again (``naming.derive_names``). Emits ``run.renamed``
+    with the new ``name``.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    run_id : str
+        Run id to update.
+    name : str or None
+        New name (1-80 characters, one line), or None to reset.
+
+    Returns
+    -------
+    RunRecord
+        The updated record.
+
+    Raises
+    ------
+    RunNameError
+        If the name is longer than 80 characters or has a line break.
+
+    Examples
+    --------
+    >>> rename_run(ctx, "r1", "wide beam").name  # doctest: +SKIP
+    'wide beam'
+    >>> rename_run(ctx, "r1", None).name is None  # doctest: +SKIP
+    True
+    """
+    clean = clean_run_name(name)
+    return ctx.update_run(
+        run_id, "run.renamed", lambda r: r.model_copy(update={"name": clean}), {"name": clean}
     )
 
 

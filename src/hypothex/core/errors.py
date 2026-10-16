@@ -35,6 +35,15 @@ class RunError(HypothexError):
     """A run cannot be created, started, or controlled."""
 
 
+class RunNameError(RunError, ValueError):
+    """
+    A requested run name is too long or not one line.
+
+    It is a ``ValueError`` as well, so a pydantic request body that validates a
+    name with ``naming.clean_run_name`` answers ``422``.
+    """
+
+
 class EvalError(HypothexError):
     """Evaluation of a run failed."""
 

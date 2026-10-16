@@ -9,7 +9,7 @@ import yaml
 from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.datasets import FingerprintCache
-from hypothex.core.errors import ConfigError, EvalError, RemoteProjectError, RunError
+from hypothex.core.errors import ConfigError, EvalError, RemoteProjectError, RunError, RunNameError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.ids import utcnow
 from hypothex.core.index import store_fingerprint
@@ -700,3 +700,30 @@ def test_show_terminal_run_keeps_exact_index_names_without_scanning(
     monkeypatch.setattr(ctx.store, "read_metric_points", no_file_scan)
     monkeypatch.setattr(ctx.store, "read_metric_points_bounded", no_file_scan)
     assert q.show_run(ctx, "r1").metric_names == names
+
+
+def test_rename_run_sets_trims_resets_and_emits(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    assert q.rename_run(ctx, "r1", "  wide beam ").name == "wide beam"
+    assert ctx.find_record("r1").name == "wide beam"
+    indexed = ctx.index.get_run("r1")
+    assert indexed is not None and indexed.name == "wide beam"
+    event = ctx.events.since(0)[-1]
+    assert (event.type, event.payload) == (
+        "run.renamed",
+        {"status": "finished", "name": "wide beam"},
+    )
+    assert q.rename_run(ctx, "r1", None).name is None
+    assert q.rename_run(ctx, "r1", "x").name == "x"
+    assert q.rename_run(ctx, "r1", "   ").name is None  # blank resets
+    assert ctx.events.since(0)[-1].payload["name"] is None
+
+
+def test_rename_run_refuses_long_or_multiline_names(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    q.rename_run(ctx, "r1", "keep")
+    with pytest.raises(RunNameError, match="at most 80"):
+        q.rename_run(ctx, "r1", "x" * 81)
+    with pytest.raises(RunNameError, match="one line"):
+        q.rename_run(ctx, "r1", "a\nb")
+    assert ctx.find_record("r1").name == "keep"

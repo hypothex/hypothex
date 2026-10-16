@@ -20,6 +20,8 @@ import { type ReactElement } from "react";
 
 import { ExamplesPage } from "./pages/Examples";
 import { HomePage } from "./home/HomePage";
+import { HostsPage } from "./hosts/HostsPage";
+import { QueuePage } from "./hosts/QueuePage";
 import { RunPage } from "./run/RunPage";
 import { SweepPage } from "./pages/Sweep";
 import { TaskPage } from "./pages/Task";
@@ -77,17 +79,6 @@ export function stringifySearch(search: Record<string, unknown>): string {
   }
   const out = params.toString();
   return out ? `?${out}` : "";
-}
-
-/** Stand-in until the screen's own component is wired in; shows the screen name. */
-export function ScreenPending({ name }: { name: string }) {
-  return (
-    <div className="pending">
-      <h1 className="finding" data-testid="screen-pending">
-        {name}
-      </h1>
-    </div>
-  );
 }
 
 export function NotFound() {
@@ -200,13 +191,13 @@ export const sweepRoute = createRoute({
 export const hostsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/hosts",
-  component: () => <ScreenPending name="Hosts" />,
+  component: HostsPage,
 });
 
 export const queueRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/queue",
-  component: () => <ScreenPending name="Queue" />,
+  component: QueuePage,
 });
 
 export const routeTree = rootRoute.addChildren([

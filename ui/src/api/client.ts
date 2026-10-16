@@ -45,6 +45,8 @@ export const ROUTES = {
   compareExamples: "/api/v1/compare/examples",
   hosts: "/api/v1/hosts",
   hostConnect: "/api/v1/hosts/{host}/connect",
+  hostDisconnect: "/api/v1/hosts/{host}/disconnect",
+  hostsReload: "/api/v1/hosts/reload",
   hostRuns: "/api/v1/hosts/{host}/runs",
   sweep: "/api/v1/sweeps/{project}/{sweep_id}",
   sweepCancelQueued: "/api/v1/sweeps/{project}/{sweep_id}/cancel_queued",
@@ -284,6 +286,10 @@ export const api = {
   queue: (signal?: AbortSignal) => get<M.QueueEntry[]>(ROUTES.queue, { signal }),
   connectHost: (host: string, opts?: M.ActionOptions) =>
     post<M.HostState>(ROUTES.hostConnect, { params: { host }, body: action(opts) }),
+  disconnectHost: (host: string, opts?: M.ActionOptions) =>
+    post<M.HostState>(ROUTES.hostDisconnect, { params: { host }, body: action(opts) }),
+  /** Re-read environments.yaml (after `hx hosts add|map|rm`); returns the hosts list. */
+  reloadHosts: (opts?: M.ActionOptions) => post<M.HostRow[]>(ROUTES.hostsReload, { body: action(opts) }),
   /** Start a run on the hub itself. */
   launch: (body: M.LaunchRequest, opts?: M.ActionOptions) =>
     post<M.RunRecord>(ROUTES.runs, { body: { ...action(opts), ...body } }),

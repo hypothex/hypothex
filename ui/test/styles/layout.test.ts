@@ -68,10 +68,8 @@ test("editor stacks and preview unsticks at narrow viewport", async () => {
   expect(rule(css, ".hx-ed-split")).toContain("grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);");
 });
 
-test("host GPU strips move to their own row and keep readable cells in a narrow container", async () => {
-  const css = await read("../../src/pages/components/HostsPanel.tsx");
-  expect(css).toContain("container-type: inline-size;");
-  expect(css).toContain("@container (max-width: 1050px)");
-  expect(css).toContain(".hrow > :nth-child(3) { grid-column: 1 / -1; grid-row: 2;");
-  expect(css).toContain(".page .hosts .gc { flex: 1 1 80px;");
+test("Hosts and Queue tables scroll inside their frame and GPU cells wrap in a narrow viewport", async () => {
+  const css = await read("../../src/hosts/hosts.css");
+  expect(rule(css, ".hosts-page .tblwrap")).toContain("overflow-x: auto;");
+  expect(rule(css, ".gpus")).toContain("flex-wrap: wrap;");
 });

@@ -73,9 +73,9 @@ export type AppLinkProps = Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href">
   href: string;
 };
 
-/** True for a path the SPA routes (Overview, Task, Run, Examples, Sweep); `/api/…` is left to the browser. */
+/** True for a path the SPA routes (Home, Task, Run, Examples, Sweep, Hosts, Queue); `/api/…` is left to the browser. */
 export function isAppPath(pathname: string): boolean {
-  return /^\/($|[trsx]\/)/.test(pathname);
+  return /^\/($|[trsx]\/|hosts$|queue$)/.test(pathname);
 }
 
 /**

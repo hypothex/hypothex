@@ -80,6 +80,9 @@ describe("useInAppLinks", () => {
       false,
       false,
     ]);
+    expect(isAppPath("/hosts")).toBe(true);
+    expect(isAppPath("/queue")).toBe(true);
+    expect(isAppPath("/hostsx")).toBe(false);
     const navigate = mock((_href: string) => {});
     const handled: [string, boolean][] = [];
     function Panel() {

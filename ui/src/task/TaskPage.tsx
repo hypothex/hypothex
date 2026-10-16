@@ -102,6 +102,8 @@ function TaskPageScope({ project, task }: TaskPageProps): ReactElement {
         selection={selection}
         onSelection={setSelection}
         onOpenRun={openRun}
+        onOpenView={(name) => go({ kind: "view", name })}
+        viewNames={(views.data ?? []).map((v) => v.name)}
       />
     );
   }

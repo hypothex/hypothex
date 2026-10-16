@@ -5,6 +5,7 @@
  * sections draw them. Extras keep their v4 behaviour: training run and checkpoint tables,
  * iteration example changes, benchmark raw samples scoped to the inline-selected run.
  * The section uses the one-column grid: the preset panels bring their own `PanelGrid`.
+ * `query` (panel search) hides non-matching panels, and the section when none match.
  */
 import { type ReactElement, type ReactNode, useState } from "react";
 import type { Leaderboard, PanelSpec, TaskKind, ViewSpec } from "../api/models";
@@ -15,7 +16,8 @@ import { ErrorBox, Loading } from "../pages/components/QueryState";
 import { SelectedRun } from "../pages/components/SelectedRun";
 import { AgentIterationFlips, SystemRawSamples } from "../pages/components/TaskInsights";
 import { TrainingCheckpoints, TrainingRuns } from "../pages/components/TrainingDetails";
-import { ViewPanels } from "./ViewPanels";
+import { matchesSearch } from "./stepMetrics";
+import { ViewPanels, panelTitle } from "./ViewPanels";
 
 export const KIND_TITLE: Record<TaskKind, string> = {
   generic: "Summary",
@@ -37,9 +39,11 @@ export interface KindSectionProps {
   task: string;
   kind: TaskKind;
   board: Leaderboard | undefined;
+  /** Panel search of the Charts tab. */
+  query?: string;
 }
 
-export function KindSection({ project, task, kind, board }: KindSectionProps): ReactElement {
+export function KindSection({ project, task, kind, board, query = "" }: KindSectionProps): ReactElement | null {
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const preset = useView(project, task, "overview");
   const panels = preset.data ? presetPanels(preset.data.view) : [];
@@ -57,18 +61,22 @@ export function KindSection({ project, task, kind, board }: KindSectionProps): R
         : kind === "system_bench"
           ? [{ title: "Raw samples", node: <SystemRawSamples project={project} task={task} selectedRunId={selectedRun ?? undefined} /> }]
           : [];
+  const shownExtras = extras.filter((x) => matchesSearch(x.title, query));
+  const searching = query.trim() !== "";
+  const shownPanels = searching ? (results.data?.panels ?? []).filter((r, i) => matchesSearch(panelTitle(r, panels[i]), query)).length : panels.length;
+  if (searching && shownPanels + shownExtras.length === 0) return null;
   return (
-    <PanelSection title={KIND_TITLE[kind]} count={panels.length + extras.length} storageKey={`${project}/${task}`} grid="wide">
+    <PanelSection title={KIND_TITLE[kind]} count={shownPanels + shownExtras.length} storageKey={`${project}/${task}`} grid="wide">
       {preset.error ? (
         <ErrorBox error={preset.error} />
       ) : results.error ? (
         <ErrorBox error={results.error} />
       ) : body === null ? null : results.data && !results.isPlaceholderData ? (
-        <ViewPanels results={results.data.panels} specs={panels} kind={kind} onSelectRun={select} />
+        <ViewPanels results={results.data.panels} specs={panels} kind={kind} onSelectRun={select} query={query} />
       ) : (
         <Loading />
       )}
-      {extras.map((x) => (
+      {shownExtras.map((x) => (
         <Panel key={x.title} title={x.title}>
           {x.node}
         </Panel>

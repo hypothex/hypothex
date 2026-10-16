@@ -1,7 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
+import { useState } from "react";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
-import type { TaskKind, ViewQueryBody } from "../../src/api/models";
+import type { PanelResult, TaskKind, ViewQueryBody } from "../../src/api/models";
 import { KindSection } from "../../src/task/KindSection";
+import { panelTitle } from "../../src/task/ViewPanels";
 import { makeBoard, makeDetail } from "../pages/fixtures";
 import { type Call, HttpReply, fakeRegistry, mockApi, renderWithClient, restoreFetch } from "../pages/helpers";
 import { BASE, PROJECT, TASK, presetDoc } from "./fixtures";
@@ -87,4 +89,36 @@ test("a failed preset read shows its error", async () => {
   mockApi({ ...routes(), [`GET ${BASE}/views/overview`]: new HttpReply(500, { error: "views unreadable", type: "StoreError" }) });
   renderWithClient(section("generic"), { registry: fakeRegistry(["stat_strip"]) });
   expect((await screen.findByRole("alert")).textContent).toBe("views unreadable");
+});
+
+function Searched() {
+  const [query, setQuery] = useState("");
+  return (
+    <>
+      <input aria-label="query" value={query} onChange={(e) => setQuery(e.target.value)} />
+      <KindSection project={PROJECT} task={TASK} kind="training" board={makeBoard()} query={query} />
+    </>
+  );
+}
+
+test("panel search keeps matching preset panels and extras, and drops the section when none match", async () => {
+  mockApi(routes("training"));
+  renderWithClient(<Searched />, { registry: fakeRegistry(["stat_strip", "table", "curves"]) });
+  const kind = await screen.findByRole("region", { name: "Training" });
+  await within(kind).findByRole("region", { name: "Summary" });
+  fireEvent.change(screen.getByRole("textbox", { name: "query" }), { target: { value: "CHECK" } });
+  expect(within(kind).queryByRole("region", { name: "Summary" })).toBeNull();
+  expect(within(kind).getByRole("region", { name: "Checkpoints" })).toBeTruthy();
+  expect(within(kind).getByRole("region", { name: "Checkpoint metrics" })).toBeTruthy();
+  expect(within(kind).queryByRole("region", { name: "Training runs" })).toBeNull();
+  expect(within(kind).getByRole("button", { name: /Training/ }).textContent).toBe("Training2");
+  fireEvent.change(screen.getByRole("textbox", { name: "query" }), { target: { value: "no such panel" } });
+  expect(screen.queryByRole("region", { name: "Training" })).toBeNull();
+});
+
+test("a panel is searched by the result title, else the spec title, else its type", () => {
+  const result: PanelResult = { type: "table", title: "", rows: [], meta: {} };
+  expect(panelTitle({ ...result, title: "Runs" }, { type: "table", title: "Spec" })).toBe("Runs");
+  expect(panelTitle(result, { type: "table", title: "Spec" })).toBe("Spec");
+  expect(panelTitle(result, undefined)).toBe("table");
 });

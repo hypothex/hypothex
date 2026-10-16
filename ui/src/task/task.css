@@ -64,3 +64,11 @@
 /* .pgrid and its variants come from chrome/chrome.css (F11); task-local full-row cells: */
 .task-page .pgrid > .wide { grid-column: 1 / -1; min-width: 0; }
 @media (max-width: 1300px) { .ws { grid-template-columns: 300px minmax(0, 1fr); } }
+
+/* Charts tab: toolbar, Save as view, score-key primary mark */
+.task-page .ptools input[type="range"] { width: 110px; accent-color: var(--ink-2); }
+.task-page .ptools .add-panel .popover { left: auto; right: 0; }
+.task-page .save-view { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 8px; }
+.task-page .save-view input { height: 26px; border: 1px solid var(--line-2); border-radius: var(--r-ctl); padding: 0 8px; font: inherit; font-family: var(--mono); background: var(--panel); color: var(--ink); }
+.task-page .save-view .muted { color: var(--ink-3); font-size: 12px; }
+.task-page .panels .star { color: var(--ok); font-size: 11px; white-space: nowrap; }

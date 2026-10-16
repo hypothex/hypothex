@@ -15,6 +15,7 @@ import {
   type MetricSection,
   type SeedsMode,
   type XMode,
+  X_AXIS,
   X_LABEL,
   curveSeries,
   matchesSearch,
@@ -78,6 +79,7 @@ export function StepMetricsSection(props: StepMetricsSectionProps): ReactElement
                         series={curveSeries(curves.points, m, items, colorOf, seeds, x)}
                         smoothing={smoothing}
                         crosshairGroup={`step:${s.title}`}
+                        xAxis={X_AXIS[x]}
                         xLabel={X_LABEL[x]}
                         highlight={highlight}
                       />

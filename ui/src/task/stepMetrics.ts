@@ -14,12 +14,15 @@
  */
 import type { PanelSpec, TaskRun, ViewQueryBody } from "../api/models";
 import type { Band, LineSeries, Point } from "../charts/LineChart";
+import type { XAxisKind } from "../charts/timeAxis";
 import { SWEEP_PREFIX } from "../pages/components/KindPanels";
 import { type Identity, runLabel } from "./useRunSelection";
 
 export type SeedsMode = "mean" | "band" | "each";
 export type XMode = "step" | "wall" | "relative";
 export const X_LABEL: Record<XMode, string> = { step: "step", wall: "wall time", relative: "relative time" };
+/** How the line chart reads each x mode: steps, wall-clock epoch seconds, seconds since start. */
+export const X_AXIS: Record<XMode, XAxisKind> = { step: "step", wall: "clock", relative: "duration" };
 export const CURVE_POINTS = 300;
 export const METRICS_PER_PANEL = 100;
 

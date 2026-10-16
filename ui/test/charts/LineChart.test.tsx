@@ -206,3 +206,72 @@ describe("helpers", () => {
     expect([nearestX([0, 100, 200], 149), nearestX([], 1)]).toEqual([100, null]);
   });
 });
+
+describe("time x axes", () => {
+  // epoch seconds around 2026-10-15: 30 min of points, one a minute
+  const T0 = 1_792_152_689;
+  const wall: LineSeries = {
+    id: "w", name: "wall", color: "var(--c1)",
+    points: Array.from({ length: 31 }, (_, i) => [T0 + i * 60, i / 30] as const),
+  };
+  const xTicks = (svg: Element) => [...svg.querySelectorAll("text.xt")].map((t) => [t.textContent ?? "", Number(t.getAttribute("x"))] as const);
+  const clock = (s: number, sec = false): string => {
+    const d = new Date(s * 1000);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${p(d.getHours())}:${p(d.getMinutes())}${sec ? `:${p(d.getSeconds())}` : ""}`;
+  };
+
+  test("clock: the domain is the data extent (not from 0), ticks are HH:MM on whole minutes inside the plot", () => {
+    const { container } = render(<LineChart series={[wall]} width={420} xAxis="clock" />);
+    const svg = svgOf(container);
+    const d = svg.querySelector("path.ln")?.getAttribute("d") ?? "";
+    // the first point sits on the left edge of the plot, the last on the right
+    expect(d.startsWith("M44,")).toBe(true);
+    expect(d).toContain("L410,");
+    const ticks = xTicks(svg);
+    expect(ticks.length).toBeGreaterThanOrEqual(3);
+    for (const [label, x] of ticks) {
+      expect(label).toMatch(/^\d\d:\d\d$/);
+      expect(x).toBeGreaterThanOrEqual(44);
+      expect(x).toBeLessThanOrEqual(410);
+    }
+    expect(new Set(ticks.map(([l]) => l)).size).toBe(ticks.length);
+    expect(ticks.map(([l]) => l)).not.toContain("1000M");
+  });
+
+  test("clock: the tooltip header is the wall-clock time of the hovered point", () => {
+    const { container } = render(
+      <>
+        <LineChart series={[wall]} width={420} xAxis="clock" xLabel="wall time" />
+        <TooltipHost />
+      </>,
+    );
+    fireEvent.mouseMove(svgOf(container).querySelector("rect.hit") as Element, { clientX: 44, clientY: 40 });
+    expect(screen.getByRole("tooltip").querySelector(".h")?.textContent).toBe(`wall time ${clock(T0, true)}`);
+  });
+
+  test("duration: ticks and tooltip carry units (s, m, h)", () => {
+    const rel: LineSeries = { id: "r", name: "rel", color: "var(--c1)", points: [[0, 1], [1800, 2], [5400, 3]] };
+    const { container } = render(
+      <>
+        <LineChart series={[rel]} width={420} xAxis="duration" xLabel="relative time" />
+        <TooltipHost />
+      </>,
+    );
+    const svg = svgOf(container);
+    expect(xTicks(svg).map(([l]) => l)).toEqual(["0", "30m", "1h", "1.5h"]);
+    fireEvent.mouseMove(svg.querySelector("rect.hit") as Element, { clientX: 410, clientY: 40 });
+    expect(screen.getByRole("tooltip").querySelector(".h")?.textContent).toBe("relative time 1.5h");
+  });
+
+  test("duration: sub-second spans read in ms, short spans in s", () => {
+    const fast: LineSeries = { id: "f", name: "f", color: "var(--c1)", points: [[0, 1], [0.0004, 2], [0.0008, 3]] };
+    const { container, rerender } = render(<LineChart series={[fast]} width={420} xAxis="duration" />);
+    const ms = xTicks(svgOf(container)).map(([l]) => l);
+    expect(ms[0]).toBe("0");
+    expect(ms.slice(1).every((l) => /^\d+(\.\d+)?ms$/.test(l))).toBe(true);
+    const short: LineSeries = { id: "s", name: "s", color: "var(--c1)", points: [[0, 1], [45, 2]] };
+    rerender(<LineChart series={[short]} width={420} xAxis="duration" />);
+    expect(xTicks(svgOf(container)).map(([l]) => l)).toEqual(["0", "15s", "30s", "45s"]);
+  });
+});

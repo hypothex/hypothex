@@ -2,13 +2,16 @@
  * Step-metric line chart (spec 4.2 "Step metrics"), ported from the v5 mockup's
  * `lineChart`: nice ticks, EMA smoothing with the raw line faint, NaN gaps, a × at a failed
  * run's last point, a dot at a running run's head, and a crosshair shared by every chart of
- * one `crosshairGroup` with one marker per series and one tooltip.
+ * one `crosshairGroup` with one marker per series and one tooltip. The x axis reads steps
+ * (from 0), wall-clock epoch seconds (`xAxis="clock"`, the data's own extent) or seconds
+ * since a start (`xAxis="duration"`, from 0).
  */
 import { type MouseEvent, type ReactElement, useId, useMemo } from "react";
 
 import { niceTicks, tickFormatter } from "../lib/ticks";
 import { useCrosshair } from "./crosshair";
 import { fmtValue, kStep } from "./Scale";
+import { type XAxisKind, fmtClock, fmtClockTip, fmtSpan, localOffset, timeTicks } from "./timeAxis";
 import { type TipRow, hideTip, showTip } from "./Tooltip";
 import "./charts.css";
 
@@ -43,6 +46,9 @@ export interface LineChartProps {
   /** EMA weight of the previous value, 0 (raw) to 0.99. */
   smoothing?: number;
   yFormat?: (v: number) => string;
+  /** What x is: "step" (default), "clock" (epoch seconds) or "duration" (seconds). */
+  xAxis?: XAxisKind;
+  /** Overrides the x tick labels and the tooltip's x. */
   xFormat?: (v: number) => string;
   /** Word before the hovered x in the tooltip, e.g. "step" or "s". */
   xLabel?: string;
@@ -169,7 +175,8 @@ export function LineChart({
   height = 190,
   smoothing = 0,
   yFormat,
-  xFormat = kStep,
+  xAxis = "step",
+  xFormat,
   xLabel = "step",
   crosshairGroup,
   highlight = null,
@@ -210,13 +217,17 @@ export function LineChart({
     const pad = (yMax - yMin) * 0.06 || Math.abs(yMax) * 0.05 || 1;
     const y0 = yMin - pad;
     const y1 = yMax + pad;
-    const x0 = Math.min(0, xMin);
+    // steps and durations start at 0; a wall clock spans the data only
+    const x0 = xAxis === "clock" ? xMin : Math.min(0, xMin);
     const x1 = xMax > x0 ? xMax : x0 + 1;
     const yTicks = niceTicks(y0, y1, height >= 160 ? 5 : 4);
-    const xTicks = niceTicks(x0, x1, width > 500 ? 6 : 4);
+    const xCount = width > 500 ? 6 : 4;
+    const xTicks =
+      xAxis === "step" ? niceTicks(x0, x1, xCount) : timeTicks(x0, x1, xCount, xAxis === "clock" ? localOffset(x0) : 0);
+    const xStep = xTicks.length > 1 ? (xTicks[1] ?? 0) - (xTicks[0] ?? 0) : x1 - x0;
     const xs = [...new Set(lines.flatMap((l) => l.done.map((p) => p[0])))].sort((a, b) => a - b);
-    return { lines, x0, x1, y0, y1, yTicks, xTicks, xs };
-  }, [series, alpha, height, width]);
+    return { lines, x0, x1, y0, y1, yTicks, xTicks, xStep, xs };
+  }, [series, alpha, height, width, xAxis]);
 
   if (!geo) {
     return (
@@ -232,6 +243,16 @@ export function LineChart({
   const Y = (v: number): number => m.t + (1 - (v - geo.y0) / (geo.y1 - geo.y0)) * ph;
   const yTick = yFormat ?? tickFormatter(geo.yTicks);
   const yValue = yFormat ?? fmtValue;
+  const xTick =
+    xFormat ??
+    (xAxis === "clock" ? (v: number) => fmtClock(v, geo.xStep) : xAxis === "duration" ? fmtSpan : kStep);
+  const xTip =
+    xFormat ??
+    (xAxis === "clock"
+      ? (v: number) => fmtClockTip(v, geo.xStep)
+      : xAxis === "duration"
+        ? fmtSpan
+        : (v: number) => v.toLocaleString("en-US"));
   const xAnchor = (px: number): "start" | "middle" | "end" =>
     px < m.l + 12 ? "start" : px > width - m.r - 12 ? "end" : "middle";
   const dimClass = (s: LineSeries): string =>
@@ -248,7 +269,7 @@ export function LineChart({
       x,
       yValue,
     );
-    showTip(e.clientX, e.clientY, `${xLabel} ${x.toLocaleString("en-US")}`, rows);
+    showTip(e.clientX, e.clientY, `${xLabel} ${xTip(x)}`, rows);
   };
   const onLeave = (): void => {
     setHoverX(null);
@@ -269,7 +290,7 @@ export function LineChart({
       ))}
       {geo.xTicks.map((v) => (
         <text key={`x${v}`} className="xt" x={r1(X(v))} y={height - 6} textAnchor={xAnchor(X(v))}>
-          {xFormat(v)}
+          {xTick(v)}
         </text>
       ))}
       <line className="ax" x1={m.l} x2={width - m.r} y1={height - m.b} y2={height - m.b} />

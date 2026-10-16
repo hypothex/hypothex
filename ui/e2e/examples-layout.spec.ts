@@ -18,13 +18,19 @@ for (const [shape, labels] of Object.entries(LABELS)) {
       const metric = board.primary.split("/")[0] ?? board.primary;
       const diff = await getJson<ExampleDiffLite>(request,
         `/api/v1/compare/examples?a=${a}&b=${b}&metric=${encodeURIComponent(metric)}`);
-      // Exercise the reported label shape while retaining the demo's actual outcomes.
+      // Exercise the reported label shape while retaining the demo's actual outcomes: the
+      // page names runs by the task's run names, else by the records' hypotheses.
       for (const [index, id] of [a, b].entries()) {
         const detail = await getJson<RunDetail>(request, `/api/v1/runs/${id}`);
         await page.route(`**/api/v1/runs/${id}`, route => route.fulfill({
           json: { ...detail, record: { ...detail.record, hypothesis: labels[index] } },
         }));
       }
+      const runs = await getJson<{ runs: { run_id: string; name: string }[] }>(request, `/api/v1/tasks/${project}/${task}/runs`);
+      const named = new Map([[a, labels[0]], [b, labels[1]]]);
+      await page.route(`**/api/v1/tasks/${project}/${task}/runs`, route => route.fulfill({
+        json: { ...runs, runs: runs.runs.map((r) => ({ ...r, name: named.get(r.run_id) ?? r.name })) },
+      }));
       await page.setViewportSize({ width, height: 1200 });
       await page.goto(`/x/${a}/${b}?metric=${encodeURIComponent(metric)}`);
       await expectTheme(page, theme);

@@ -42,10 +42,13 @@ export function PanelSection({
   children,
 }: PanelSectionProps): ReactElement {
   const key = storageKey ? keyOf(storageKey, title) : null;
-  const [open, setOpen] = useState(() => readOpen(key, defaultOpen));
+  const [state, setState] = useState(() => ({ key, open: readOpen(key, defaultOpen) }));
+  // The router keeps the page mounted across tasks: a new key re-reads that task's state.
+  if (state.key !== key) setState({ key, open: readOpen(key, defaultOpen) });
+  const { open } = state;
   const toggle = (): void => {
     const next = !open;
-    setOpen(next);
+    setState({ key, open: next });
     if (key === null) return;
     try {
       localStorage.setItem(key, next ? "1" : "0");

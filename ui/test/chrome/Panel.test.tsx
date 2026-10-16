@@ -119,6 +119,20 @@ describe("PanelSection", () => {
     expect(screen.queryByTestId("q")).toBeNull();
   });
 
+  test("a new storageKey on the same mounted section reads that task's state", () => {
+    localStorage.setItem("hx-section:rxn/eval:top10", "1");
+    const view = (storageKey: string) => (
+      <PanelSection title="top10" defaultOpen={false} storageKey={storageKey}>
+        <div data-testid="p" />
+      </PanelSection>
+    );
+    const { rerender } = render(view("rxn/eval"));
+    expect(screen.queryByTestId("p") === null).toBe(false);
+    rerender(view("rxn/other"));
+    expect(screen.queryByTestId("p") === null).toBe(true);
+    expect(localStorage.getItem("hx-section:rxn/other:top10")).toBeNull();
+  });
+
   test("+ Add panel only when the page offers it", () => {
     const add = mock(() => {});
     render(<PanelSection title="Eval">x</PanelSection>);

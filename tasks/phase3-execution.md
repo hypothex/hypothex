@@ -194,7 +194,7 @@ head's CI supersedes that head and must be green before integration.
 
 ### Renewed primary refresh R2 result (2026-10-17)
 
-Claude reviewed frozen8737bc4 against e73b810, read all49/backend26/frontend
+Claude reviewed frozen8737bc4 against e73b810, read all 49 backend and 26 frontend
 tasks in full, and returned NOT LGTM: one blocking P2-A in Task42. Its complete
 replacement of `hx runs` dropped current-main hub merging, host_state JSON,
 disconnected-host status and local-time formatting. Existing main tests pass6
@@ -225,3 +225,41 @@ source cleanup. Evidence: durable `parent-primary-r2-cli-fix/report.md` and
 receipts. Full real login/scoped-route acceptance remains mandatory. The parent
 also removed Task42's stale fixed auth-test count after adding new integration
 requirements; tests must all pass, rather than match an obsolete count.
+
+
+### Independent adversarial gate R1 result (2026-10-17)
+
+Claude primary R3 approved c9ea398 and all six CI checks passed that head.
+The subsequent independent adversarial gate returned NOT LGTM with one new
+P2/A1: Task 1 checks explicit psycopg host parameters but inherited PGHOSTADDR
+can redirect an explicitly loopback connection, and PGHOST can supply an unseen
+external destination. The exact guard reaches the intercepted driver boundary
+with those external effective addresses. Service selection also reaches that
+boundary unresolved; no service-derived connection was executed. No connection
+generator or database was entered in these bounded diagnostics.
+
+Parent read the complete report, coverage, exact guard probe and receipt. The
+review independently covered all 49 backend tasks, 26 frontend tasks and 13
+scope items; all previous fixes remain satisfactory. Its33 passing diagnostics
+include tests that deliberately assert the defective guard behavior and do not
+approve it. Evidence remains immutable in durable `adversarial-gate-r1/`.
+
+The scoped plan correction is complete for effective PostgreSQL destination
+checks and test/subprocess environment hygiene. Runtime implementation remains
+gated. The changed final plan needs renewed Claude approval followed by a new
+independent adversarial verdict on the same hash. The two prior nonblocking
+wording nits are corrected with this material revision.
+
+Task 1 rejects nonempty reintroduced PG defaults and service selection, validates
+every host/hostaddr entry and pins local aliases/defaults. Tasks 36/39 and package
+acceptance sanitize final child mappings after overrides; Task 36 explicitly
+corrects the existing run_cmd helper's second merge. Exact proof: 57 parent tests
+pass (53 corrected-behavior/proof, 3 old-bypass diagnostics, 1 receipt writer), plus
+2 bootstrap-child tests. No real connection was possible through the intercepted
+driver boundary. Parent inspected the complete proof and final logs, checked 33
+artifact hashes and exact old/final guard extraction; Ruff/format/ty/Sphinx pass.
+Evidence: durable `parent-adversarial-r1-pg-fix/report.md` and
+`parent-a1-verification.json`. Package/runtime integration remains prospective.
+Fresh origin/main still pins e73b810; runtime/source/UI/tests/dependencies/CI
+diff against it is empty. Freeze this input for renewed Claude primary R4,
+then a new independent adversarial gate R2 after LGTM.

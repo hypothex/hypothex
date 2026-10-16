@@ -16,7 +16,7 @@
 
 ## Global Constraints
 
-- **NEVER touch real services.** No step or test connects to a real Slack workspace, SMTP server, Tailscale tailnet, Postgres server outside Docker, SSH host, or SLURM cluster, and nothing reads or writes `~/.ssh`. Task 1 Step 1 (the first step of the plan) installs a session-wide network guard in `tests/conftest.py`: `socket.socket.connect`, `connect_ex`, `socket.getaddrinfo`, and `psycopg.connect` refuse every address that is not loopback (`NetworkBlockedError`), in `pytest_configure` (session) and again per test. The same hook removes `HYPOTHEX_SLACK_WEBHOOK`, `HYPOTHEX_SMTP_PASSWORD`, `HYPOTHEX_INDEX_PASSWORD`, and `HYPOTHEX_HUB_TOKEN`, and points `HYPOTHEX_TAILSCALE` at a stub that always fails. Tests use `tests/fakes/webhook.py` (`FakeWebhook`), `tests/fakes/smtp.py` (`FakeSmtp`, `aiosmtpd` + `trustme`), `tests/fakes/fake_tailscale.py` (installed with `install_fake_tailscale`), fake clocks (`now=` callables), in-process env servers (`route: url`, `tests/api/envserver.py`), and a throwaway `postgres:16-alpine` container (marker `docker`). Phase 2's `isolate_remote` stays as it is.
+- **NEVER touch real services.** No step or test connects to a real Slack workspace, SMTP server, Tailscale tailnet, Postgres server outside Docker, SSH host, or SLURM cluster, and nothing reads or writes `~/.ssh`. Task 1 Step 1 (the first step of the plan) installs a session-wide network guard in `tests/conftest.py`: `socket.socket.connect`, `connect_ex`, `socket.getaddrinfo`, and `psycopg.connect` refuse every address that is not loopback (`NetworkBlockedError`), in `pytest_configure` (session) and again per test. The same hook removes all inherited `PG*` defaults (and each connection rejects nonempty defaults reintroduced later), plus `HYPOTHEX_SLACK_WEBHOOK`, `HYPOTHEX_SMTP_PASSWORD`, `HYPOTHEX_INDEX_PASSWORD`, and `HYPOTHEX_HUB_TOKEN`, and points `HYPOTHEX_TAILSCALE` at a stub that always fails. Tests use `tests/fakes/webhook.py` (`FakeWebhook`), `tests/fakes/smtp.py` (`FakeSmtp`, `aiosmtpd` + `trustme`), `tests/fakes/fake_tailscale.py` (installed with `install_fake_tailscale`), fake clocks (`now=` callables), in-process env servers (`route: url`, `tests/api/envserver.py`), and a throwaway `postgres:16-alpine` container (marker `docker`). Phase 2's `isolate_remote` stays as it is.
 - Python `>=3.11`. Package manager **uv** only (`uv add`, `uv run`, `uv sync`); never pip.
 - Lint and format with **ruff** (line length 100, rules `E F I B UP SIM`), types with **ty** (`uv run ty check src`), tests with **pytest** in `tests/` mirroring `src/`. Every task ends with its tests green and `ruff check`, `ruff format --check`, `ty check src` clean.
 - Every public function has type annotations and a numpydoc docstring (summary, Parameters, Returns, Raises where any, Examples where they help).
@@ -143,6 +143,7 @@ Contract 1.1, 7 (secrets), 9 (network guard). The guard comes first so every lat
 **Interfaces:**
 - Produces (tests only):
   - `tests.fakes.network.SECRET_VARS: tuple[str, ...]` = `("HYPOTHEX_SLACK_WEBHOOK", "HYPOTHEX_SMTP_PASSWORD", "HYPOTHEX_INDEX_PASSWORD", "HYPOTHEX_HUB_TOKEN")`.
+  - `scrub_pg_environment(monkeypatch) -> None` (removes every `PG*` variable); `pg_child_environment(environment: dict[str, str]) -> dict[str, str]` (copies without `PG*`, applied after overrides).
   - `class NetworkBlockedError(OSError)`; `allowed_address(host: object) -> bool` (loopback or unspecified IPs, `localhost`, `None`, `""`); `guard_network(monkeypatch) -> None` (patches `socket.socket.connect`, `socket.socket.connect_ex`, `socket.getaddrinfo`, and, when installed, `psycopg.connect` and `psycopg.Connection.connect`); `refuse_tailscale(base: Path, monkeypatch) -> Path` (a stub that prints `blocked` and exits 255, set as `HYPOTHEX_TAILSCALE`).
 - Dependencies: main `alembic`, `segno`; optional extra `server = ["psycopg[binary]>=3.2"]`; dev `aiosmtpd`, `trustme`, `psycopg[binary]`.
 
@@ -200,8 +201,14 @@ def test_raw_socket_connect_is_blocked() -> None:
         sock.close()
 
 
-def test_psycopg_cannot_reach_a_public_server() -> None:
+def test_psycopg_cannot_reach_a_public_server(monkeypatch: pytest.MonkeyPatch) -> None:
     psycopg = pytest.importorskip("psycopg")
+
+    def stopped(cls: type, conninfo: str) -> None:
+        raise AssertionError("guard let an unsafe request reach the inert libpq boundary")
+
+    # Install before either call so a broken/red guard cannot contact a server.
+    monkeypatch.setattr(psycopg.Connection, "_connect_gen", classmethod(stopped))
     with pytest.raises(NetworkBlockedError):
         psycopg.connect("host=203.0.113.5 dbname=hx user=hx connect_timeout=1")
     with pytest.raises(NetworkBlockedError):
@@ -266,6 +273,7 @@ Examples
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from collections.abc import Callable
 from pathlib import Path
@@ -350,16 +358,81 @@ def _getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
     return _REAL_GETADDRINFO(host, *args, **kwargs)
 
 
-def _psycopg_hosts(conninfo: str, kwargs: dict[str, Any]) -> list[str]:
+def scrub_pg_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Remove every PostgreSQL environment default before fixtures run.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Session or test patch owner. Includes connection, service, password-file,
+        TLS and future PG-prefixed variables without maintaining a partial list.
+    """
+    for name in tuple(os.environ):
+        if name.startswith("PG"):
+            monkeypatch.delenv(name, raising=False)
+
+
+def pg_child_environment(environment: dict[str, str]) -> dict[str, str]:
+    """
+    Copy a child environment without any PostgreSQL defaults.
+
+    Parameters
+    ----------
+    environment : dict[str, str]
+        Parent environment plus scenario overrides, neither of which is mutated.
+
+    Returns
+    -------
+    dict[str, str]
+        Fresh mapping; fixtures pass synthetic database credentials explicitly.
+
+    Examples
+    --------
+    >>> pg_child_environment({"PGHOSTADDR": "203.0.113.1", "USER": "sv"})
+    {'USER': 'sv'}
+    """
+    return {name: value for name, value in environment.items() if not name.startswith("PG")}
+
+
+def _psycopg_parameters(conninfo: str, kwargs: dict[str, Any]) -> dict[str, str]:
     from psycopg.conninfo import conninfo_to_dict
 
-    params = conninfo_to_dict(conninfo) if conninfo else {}
-    hosts: list[str] = []
+    # These are Python connection options, not libpq parameters. None-valued
+    # conninfo overrides are ignored by the documented psycopg parser.
+    options = {"autocommit", "prepare_threshold", "context", "row_factory", "cursor_factory"}
+    parsed = conninfo_to_dict(conninfo, **{k: v for k, v in kwargs.items() if k not in options})
+    params = {key: str(value) for key, value in parsed.items() if value is not None}
+    # No ambient PG configuration is allowed in tests. Reject even a safe new
+    # default: fixtures must pass explicit values. Do not print secret values.
+    ambient = sorted(name for name, value in os.environ.items() if name.startswith("PG") and value)
+    if ambient:
+        raise NetworkBlockedError("tests block PG defaults: " + ", ".join(ambient))
+    if "service" in params:
+        raise NetworkBlockedError("tests never resolve PostgreSQL services: service blocked")
+    params.setdefault("host", "/tmp")  # intentional macOS/Linux test-only socket default
     for key in ("host", "hostaddr"):
-        raw = kwargs.get(key, params.get(key))
-        if raw:
-            hosts += [h.strip() for h in str(raw).split(",") if h.strip()]
-    return hosts
+        if key not in params:
+            continue
+        pinned: list[str] = []
+        for host in params[key].split(","):
+            if not host:
+                pinned.append("/tmp" if key == "host" else "")
+                continue
+            if key == "host" and host.startswith("/"):
+                pinned.append(host)  # absolute local Unix socket directory
+                continue
+            if key == "host" and host.lower() in LOCAL_NAMES:
+                host = "::1" if host.lower() == "ip6-localhost" else "127.0.0.1"
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                raise _blocked(host) from None
+            if not address.is_loopback:
+                raise _blocked(host)
+            pinned.append(str(address))
+        params[key] = ",".join(pinned)
+    return params
 
 
 def _guard_psycopg(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -372,15 +445,17 @@ def _guard_psycopg(monkeypatch: pytest.MonkeyPatch) -> None:
     real: Callable[..., Any] = _PSYCOPG["connect"].__func__
 
     def guarded(cls: type, conninfo: str = "", **kwargs: Any) -> Any:
-        for host in _psycopg_hosts(conninfo, kwargs):
-            if not host.startswith("/") and not allowed_address(host):  # "/..." is a socket dir
-                raise _blocked(host)
-        return real(cls, conninfo, **kwargs)
+        params = _psycopg_parameters(conninfo, kwargs)
+        # Pin validated host aliases before real preprocessing; no local-name DNS
+        # or unvalidated kwargs override can change the accepted destinations.
+        destinations = {key: params[key] for key in ("host", "hostaddr") if key in params}
+        return real(cls, conninfo, **{**kwargs, **destinations})
+
+    def connect(conninfo: str = "", **kwargs: Any) -> Any:
+        return psycopg.Connection.connect(conninfo, **kwargs)
 
     monkeypatch.setattr(psycopg.Connection, "connect", classmethod(guarded))
-    monkeypatch.setattr(
-        psycopg, "connect", lambda conninfo="", **kw: psycopg.Connection.connect(conninfo, **kw)
-    )
+    monkeypatch.setattr(psycopg, "connect", connect)
 
 
 def guard_network(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -423,17 +498,28 @@ def refuse_tailscale(base: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return stub
 ```
 
+**PostgreSQL test-only contract (A1):** inherited libpq defaults are not an input channel for test fixtures. Remove **every `PG*` variable** (including `PGHOST`, `PGHOSTADDR`, `PGSERVICE`, `PGSERVICEFILE`, `PGSYSCONFDIR`, `PGPASSWORD`, `PGPASSFILE` and TLS defaults) at session setup and again before each test. At connection time, any reintroduced nonempty `PG*` variable fails closed, even if it looks local; fixtures must pass synthetic connection/credential arguments explicitly. This simple conservative rule covers libpq environment precedence without trusting a partial environment-variable inventory or resolving service files. Explicit `service` is always rejected, including an empty service value. Apply only in tests, never to runtime product connections.
+
+Use psycopg's public `conninfo_to_dict(conninfo, **kwargs)` merge behavior (kwargs win; `None` is ignored), excluding Python-only connection options. Validate **every** comma-separated host and hostaddr entry; validate hostaddr as an IP, never as a socket path. Only numeric loopback TCP addresses, recognized localhost names pinned to numeric loopback, and absolute Unix socket directories are permitted. Absent/empty host entries are pinned to `/tmp`, an intentional safe macOS/Linux test-only Unix socket default (not a discovery of libpq's platform-specific compiled socket directory); explicit absolute socket paths are preserved. Empty hostaddr entries fall back to their validated/pinned host. Unspecified TCP addresses are not permitted for PostgreSQL. Validate all entries before passing even the first to psycopg. A local `host` cannot excuse an external `hostaddr`, and a local `hostaddr` cannot excuse an external `host`. Reject unsupported names and malformed entries conservatively. Do not print conninfo or credential values on rejection. Tests must not mutate process environment concurrently with connections; parallel workers have separate environments.
+
+Semantics reference: [libpq connection parameters and defaults](https://www.postgresql.org/docs/16/libpq-connect.html#LIBPQ-PARAMKEYWORDS), [libpq environment variables](https://www.postgresql.org/docs/16/libpq-envars.html), and [psycopg conninfo parsing](https://www.psycopg.org/psycopg3/docs/api/conninfo.html). The guard uses public parsing APIs; the proof-only interception described below uses the installed psycopg connection boundary, checked against its locked source version.
+
+**Mandatory bounded regression matrix:** replace `test_psycopg_cannot_reach_a_public_server` with a parameterized test using real psycopg parsing/preprocessing and an inert `Connection._connect_gen` installed **before invoking the guard or any connect**. The recorder raises a private non-psycopg sentinel immediately; forbidden cases must raise `NetworkBlockedError` with zero boundary entries. Install DNS and socket tripwires too. A broken guard may reach the recorder, never a real database. Do not mock `psycopg.connect` itself as proof. Cover explicit external hosts/hostaddr (including IPv6), `PGHOST` without explicit host, `PGHOSTADDR` despite explicit loopback, newly introduced safe `PGHOST` (also rejected), explicit and environment-selected service with a disposable service file, service-file/password defaults, all multihost entries including an unsafe second host/hostaddr, hostaddr paths, unspecified addresses, kwargs precedence in both directions and `None` overrides, numeric IPv4/IPv6 loopback, pinned localhost names, explicit Unix directories, default/empty Unix entries and safe multihost combinations. Verify accepted destination parameters at the intercepted boundary. Exercise both `psycopg.connect` and `Connection.connect` and repeated guard installation without recursion.
+
+Additionally run a disposable pytest child with synthetic `PG*` values injected by its launcher. Its real `pytest_configure` and autouse isolation hook use the exact installation snippets below: a module fixture must see the session scrub, a test-added default must be rejected at connect time, and the next test must see the per-test scrub. Install the inert boundary before any PostgreSQL calls in that child. Verify child-environment cloning strips all `PG*` keys even after scenario overrides, retains non-PG synthetic fixture credentials/ordinary OS keys, and leaves the parent mapping unchanged. Record the locked psycopg/libpq versions and boundary evidence; these are isolated guard tests, not real PostgreSQL acceptance.
+
 - [ ] **Step 5: Install the guard for the session and every test**
 
 In `tests/conftest.py`, add to the imports:
 
 ```python
-from tests.fakes.network import SECRET_VARS, guard_network, refuse_tailscale
+from tests.fakes.network import SECRET_VARS, guard_network, refuse_tailscale, scrub_pg_environment
 ```
 
 In `pytest_configure`, after `refuse_host_tools(base, session)`, add:
 
 ```python
+    scrub_pg_environment(session)
     guard_network(session)
     for name in SECRET_VARS:
         session.delenv(name, raising=False)
@@ -443,18 +529,19 @@ In `pytest_configure`, after `refuse_host_tools(base, session)`, add:
 In `isolate_remote`, after `refuse_host_tools(_isolation_bin, monkeypatch)`, add:
 
 ```python
+    scrub_pg_environment(monkeypatch)
     guard_network(monkeypatch)
     for name in SECRET_VARS:
         monkeypatch.delenv(name, raising=False)
     refuse_tailscale(_isolation_bin / "no-tailscale", monkeypatch)
 ```
 
-and extend its docstring's first paragraph with: "Sockets, name lookups, and ``psycopg`` reach loopback only, the secret variables (``SECRET_VARS``) are unset, and ``HYPOTHEX_TAILSCALE`` points at a refusing stub."
+and extend its docstring's first paragraph with: "Sockets, name lookups, and ``psycopg`` reach loopback only, all ``PG*`` defaults and the secret variables (``SECRET_VARS``) are unset, and ``HYPOTHEX_TAILSCALE`` points at a refusing stub."
 
 - [ ] **Step 6: Run the tests**
 
 Run: `uv run pytest tests/test_isolation.py -v`
-Expected: `21 passed` (12 phase 2 tests + 9 new).
+Expected: all existing isolation tests, the nine basic cases above, and the mandatory PostgreSQL boundary/bootstrap/child-environment matrix above pass; do not retain a stale fixed count.
 
 Run: `uv run pytest -q`
 Expected: every test passes (the in-process servers of phases 1–2 bind and connect on `127.0.0.1` only).
@@ -18103,6 +18190,7 @@ git commit -m "feat(index): alembic migrations for the postgres index and hx db 
 
 **Files:**
 - Test: `tests/docker/test_postgres_index.py`
+- Modify: `tests/docker/conftest.py` (`run_cmd` final child-environment merge)
 
 **Interfaces:**
 - Consumes: `run_cmd`, `free_port`, `wait_until` (`tests/docker/conftest.py`, phase 2), `upgrade`/`current` (Task 35), `open_index` (Task 34), `rebuild_index`.
@@ -18110,11 +18198,16 @@ git commit -m "feat(index): alembic migrations for the postgres index and hx db 
 
 **UI-v5 PostgreSQL regressions:** extend `snapshot` and the live/rebuilt/SQLite comparison with named/unnamed runs, `parent`, literal `%`/`_` name/id search plus owner/status/keyset/count combinations, deferred and live metric names, config_format=2 direction tri-state, and every score binding field. Exercise actual `get_leaderboard`, `task_runs`, `build_overview` and a `compare` panel via `query_panel` before/after rename, reindex and reconnect. Assert names update in both caches; no SQLite path or `json_extract` reaches PostgreSQL. Check `/overview`, `/tasks/{project}/{task}/runs`, selected-primary `/leaderboard` and `views/query` through scoped HTTP. Include score-key datasets/model/metrics/table-bars and curve timestamps. Run Alembic `compare_metadata(..., compare_type=True)` against the real PostgreSQL connection as well as SQLite; compare indexes, nullability and signed-int64/autoincrement columns, not merely table names. Use Task 36's throwaway Docker only. These are required integrated tests, not covered by a source-snippet compilation receipt.
 
+**Environment ownership:** all PostgreSQL connections here and `CliRunner` calls run in-process behind Task 1's guard with explicit synthetic parameters. The shared `tests/docker/conftest.py::run_cmd` already accepts `env` as **overrides** and merges it with `os.environ`; passing a filtered mapping alone reintroduces ambient defaults. Import `pg_child_environment` there and replace its final `env={**os.environ, **(env or {})}` with `env=pg_child_environment({**os.environ, **(env or {})})`. Preserve all other behavior. Include this helper edit in the Task 36 commit. Unit-test that actual helper with synthetic PGHOST/PGHOSTADDR/service/password defaults in both parent and overrides: intercept `subprocess.run`, assert no `PG*` key reaches its final environment, non-PG fixture credentials remain, and parent/override mappings are unchanged. Also pass explicitly cleaned mappings to Docker launch/cleanup below. Container `POSTGRES_*` values remain synthetic fixture configuration.
+
+Any external `hx db`/Python PG worker added to this fixture must receive the same final scrubbed environment, explicit loopback URL, synthetic credentials and owned temporary home. A parent's Python monkeypatches do not cross exec. Audit all PG-using subprocess fixtures: Task 39's failed-PG server start uses the same environment helper after overlays, and Task 49's installed runner uses the equivalent stdlib-only rule from the package supplement. Capture actual final child environments in those harness unit tests; do not rely on the earlier session scrub.
+
 - [ ] **Step 1: Write the test**
 
 Create `tests/docker/test_postgres_index.py`:
 
 ```python
+import os
 import secrets
 import threading
 from collections.abc import Callable, Iterator
@@ -18138,6 +18231,7 @@ from hypothex.core.settings import ServerSettings, Settings, save_settings
 from hypothex.core.store import RunStore
 from tests.docker.conftest import free_port, run_cmd, wait_until
 from tests.factories import make_record, write_toy_project
+from tests.fakes.network import pg_child_environment
 
 pytestmark = pytest.mark.docker
 IMAGE = "postgres:16-alpine"
@@ -18162,7 +18256,8 @@ def postgres() -> Iterator[tuple[int, str]]:
             "docker", "run", "-d", "--rm", "--name", name, "-e", f"POSTGRES_PASSWORD={password}",
             "-e", "POSTGRES_USER=hx", "-e", "POSTGRES_DB=hypothex", "-p", f"127.0.0.1:{port}:5432",
             IMAGE,
-        ]
+        ],
+        env=pg_child_environment(dict(os.environ)),
     )  # fmt: skip
     try:
         wait_until(
@@ -18172,7 +18267,10 @@ def postgres() -> Iterator[tuple[int, str]]:
         )
         yield port, password
     finally:
-        run_cmd(["docker", "rm", "-f", name], check=False)
+        run_cmd(
+            ["docker", "rm", "-f", name], check=False,
+            env=pg_child_environment(dict(os.environ)),
+        )
 
 
 @pytest.fixture
@@ -18712,7 +18810,7 @@ Expected: the Docker tests are deselected; everything else passes.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add tests/docker/test_postgres_index.py
+git add tests/docker/test_postgres_index.py tests/docker/conftest.py
 git commit -m "test(docker): postgres index upgrade, rebuild equivalence, and concurrent upserts"
 ```
 
@@ -19461,6 +19559,7 @@ from hypothex.core.layout import Layout
 from hypothex.core.settings import ServerSettings, Settings, save_settings
 from tests.api.envserver import wait_until
 from tests.fakes import install_fake_tailscale
+from tests.fakes.network import pg_child_environment
 
 HX = [sys.executable, "-m", "hypothex.cli.main"]
 
@@ -19468,6 +19567,7 @@ HX = [sys.executable, "-m", "hypothex.cli.main"]
 def start(home: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.Popen[bytes]:
     full = {k: v for k, v in os.environ.items() if k != "HYPOTHEX_SERVE_TOKEN"}
     full.update(env or {})
+    full = pg_child_environment(full)
     return subprocess.Popen(
         [*HX, "--home", str(home), "serve", "--port", "0", *args],
         env=full,
@@ -19520,6 +19620,7 @@ def test_serve_with_auth_mints_a_local_owner_session(tmp_path: Path) -> None:
 def test_tailscale_needs_auth(tmp_path: Path) -> None:
     done = subprocess.run(
         [*HX, "--home", str(tmp_path / "h"), "serve", "--tailscale"],
+        env=pg_child_environment(dict(os.environ)),
         capture_output=True,
         text=True,
         timeout=60,
@@ -19566,7 +19667,7 @@ def test_a_second_start_leaves_the_running_server_alone(
         wait_until(lambda: httpx.get(f"{base}/api/v1/auth/me", headers=auth, timeout=2), timeout=30)
         second = subprocess.run(
             [*HX, "--home", str(home), "serve", "--auth", "--tailscale", "--port", "0"],
-            env={**os.environ, "USER": "sv"},
+            env=pg_child_environment({**os.environ, "USER": "sv"}),
             capture_output=True,
             text=True,
             timeout=60,
@@ -19588,7 +19689,7 @@ def test_a_start_that_fails_before_serving_undoes_its_side_effects(
     save_settings(Layout(home), Settings(server=ServerSettings(index_url=dead)))
     done = subprocess.run(
         [*HX, "--home", str(home), "serve", "--auth", "--tailscale", "--port", "0"],
-        env={**os.environ, "USER": "sv"},
+        env=pg_child_environment({**os.environ, "USER": "sv"}),
         capture_output=True,
         text=True,
         timeout=60,
@@ -19607,6 +19708,7 @@ def test_readable_secrets_file_stops_the_start(tmp_path: Path) -> None:
     secrets.chmod(0o640)
     done = subprocess.run(
         [*HX, "--home", str(home), "serve", "--port", "0"],
+        env=pg_child_environment(dict(os.environ)),
         capture_output=True,
         text=True,
         timeout=60,

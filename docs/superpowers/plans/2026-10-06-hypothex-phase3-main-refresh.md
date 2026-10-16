@@ -389,3 +389,55 @@ assembled Phase3 acceptance are still future implementation requirements. The
 six CI checks passed on8737bc4, including the previously failing UI job; CI is
 not approval of future runtime behavior. A new primary verdict is required on
 the corrected frozen input, followed by a new independent adversarial verdict.
+
+
+### Independent adversarial gate R1 response (2026-10-17)
+
+Claude primary R3 returned LGTM for c9ea398; all six CI checks passed that
+revision. The subsequent independent adversarial review returned NOT LGTM
+with one P2/A1 in Task 1's PostgreSQL test guard. The guard checked explicit
+connection arguments but ignored inherited libpq defaults. An explicit local
+host with external PGHOSTADDR, or a hostless connection with external PGHOST,
+reached the intercepted psycopg connection boundary. An explicit service also
+reached that boundary unresolved. The probe stopped before entering the
+connection generator, so no external database was contacted; service-derived
+destination resolution was not executed. The finding is accepted.
+
+The complete independent report and all 49/backend, 26/frontend, 13-scope coverage remain in
+durable `adversarial-gate-r1/`. Its33 passing diagnostics include five tests
+that assert the old guard's behavior, including the bypasses; passing those
+tests is evidence of the blocker, not approval. Previous F1–F9, cleanup and
+CLI corrections remain satisfactory. The two nonblocking wording nits in the
+tracker and historical schema paragraph are corrected in this revision.
+
+The correction is confined to the planned test harness and subprocess
+acceptance. Production PostgreSQL configuration support is unchanged. Both
+ordered independent review verdicts must be renewed on the corrected final
+plan before implementation. Full PostgreSQL, installed-wheel and assembled
+application acceptance remain future implementation requirements.
+
+Correction: Task 1 now scrubs every PG-prefixed default at session/per-test
+setup and rejects any nonempty reintroduced default at connection time, exposing
+names only. Explicit service selection is refused. Public psycopg parsing
+preserves keyword precedence and ignored None values; every host/hostaddr is
+validated, localhost names are pinned numeric, and absent/empty hosts use the
+deliberate test-only /tmp Unix directory. Explicit absolute socket paths remain
+valid. The Task 36 shared run_cmd helper filters after its actual final environment
+merge; a sanitized override alone would have reintroduced ambient variables.
+Task 39 launchers and Task 49's installed-runner requirements use the same final
+filtering rule. Child processes do not inherit the parent's Python guard.
+
+Durable `parent-adversarial-r1-pg-fix/` contains exact old/final guard copies,
+reproducible probes and locked dependency/source receipts. The57 passing parent
+tests comprise 53 corrected-behavior/proof checks, 3 deliberate old-bypass
+reproductions and 1 receipt writer; the bootstrap check also runs 2 passing child
+tests. Tests cover every safe multihost attempt, precedence, aliases/Unix paths,
+services/defaults, idempotent installation and actual child-environment
+construction. All connection probes install an inert driver boundary before
+invocation, with DNS/socket tripwires; no database connection occurs. Ruff,
+formatting, ty and the evidence project's Sphinx build pass. Parent read the
+complete test source, changed snippets and final logs, verified 33 artifact hashes,
+and matched old/final guard copies to the exact plan fences. The package runner
+regression is prescribed acceptance, not executed here. This closes the bounded
+A1 proof obligation; independent approval and full runtime acceptance remain
+pending.

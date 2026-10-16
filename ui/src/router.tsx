@@ -19,9 +19,11 @@ import {
 import { type ReactElement } from "react";
 
 import { ExamplesPage } from "./pages/Examples";
-import { OverviewPage } from "./pages/Overview";
-import { RunPage } from "./pages/Run";
+import { HomePage } from "./home/HomePage";
+import { HostsPage } from "./hosts/HostsPage";
+import { QueuePage } from "./hosts/QueuePage";
 import { ViewEditor } from "./pages/ViewEditor";
+import { RunPage } from "./run/RunPage";
 import { AppShell } from "./shell/AppShell";
 import { SweepRedirect } from "./task/SweepRedirect";
 import { TaskPage } from "./task/TaskPage";
@@ -74,17 +76,6 @@ export function stringifySearch(search: Record<string, unknown>): string {
   return out ? `?${out}` : "";
 }
 
-/** Stand-in until the screen's own component is wired in; shows the screen name. */
-export function ScreenPending({ name }: { name: string }) {
-  return (
-    <div className="pending">
-      <h1 className="finding" data-testid="screen-pending">
-        {name}
-      </h1>
-    </div>
-  );
-}
-
 export function NotFound() {
   return (
     <div className="pending">
@@ -105,11 +96,11 @@ function TaskScreen(): ReactElement {
   return <TaskPage project={project} task={task} />;
 }
 
-/** `/r/$runId?log=&example=`: the Run page. */
+/** `/r/$runId?tab=&log=&example=`: the Run page; keyed so another run starts with fresh UI state. */
 function RunScreen(): ReactElement {
   const { runId } = runRoute.useParams();
-  const { log, example } = runRoute.useSearch();
-  return <RunPage runId={runId} log={log} example={example} />;
+  const { tab, log, example } = runRoute.useSearch();
+  return <RunPage key={runId} runId={runId} tab={tab} log={log} example={example} />;
 }
 
 /** `/x/$a/$b?metric=`: the Examples page. */
@@ -145,7 +136,7 @@ export const rootRoute = createRootRoute({ component: AppShell, notFoundComponen
 export const overviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: OverviewPage,
+  component: HomePage,
 });
 
 export const taskRoute = createRoute({
@@ -198,13 +189,13 @@ export const sweepRoute = createRoute({
 export const hostsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/hosts",
-  component: () => <ScreenPending name="Hosts" />,
+  component: HostsPage,
 });
 
 export const queueRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/queue",
-  component: () => <ScreenPending name="Queue" />,
+  component: QueuePage,
 });
 
 export const routeTree = rootRoute.addChildren([

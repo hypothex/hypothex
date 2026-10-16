@@ -4,6 +4,7 @@ import { type ReactNode, useEffect, useState, useSyncExternalStore } from "react
 import { auth } from "./auth";
 import { api, ApiError } from "./client";
 import { clearSessionQueries } from "./queries";
+import "../shell/kept.css";
 
 /** Validate through a protected read before mounting any page or live query. */
 export function AuthGate({ children }: { children: ReactNode }) {
@@ -33,8 +34,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   if (state.status === "unlocked") return <>{children}</>;
   return (
-    <main style={{ maxWidth: 320, margin: "18vh auto", padding: 24 }}>
-      <form onSubmit={(event) => {
+    <main className="auth-gate">
+      <form className="auth-box" onSubmit={(event) => {
         event.preventDefault();
         const supplied = token;
         setToken("");
@@ -42,18 +43,19 @@ export function AuthGate({ children }: { children: ReactNode }) {
         const generation = auth.select(supplied || null);
         void validate(generation);
       }}>
+        <h1>Hypothex</h1>
         <label htmlFor="hx-token">Token</label>
         <input
           id="hx-token"
+          className="auth-in"
           type="password"
           autoComplete="off"
           autoCapitalize="none"
           spellCheck={false}
           value={token}
           onChange={(event) => setToken(event.target.value)}
-          style={{ display: "block", width: "100%", margin: "8px 0 12px" }}
         />
-        <button type="submit">Unlock</button>
+        <button type="submit" className="btn primary">Unlock</button>
         {state.status === "validating" && <p role="status">Connecting…</p>}
         {failed && state.status === "locked" && <p role="alert">Unable to unlock. Check token and connection.</p>}
       </form>

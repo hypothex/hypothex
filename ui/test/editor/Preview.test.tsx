@@ -64,11 +64,11 @@ test("panelLetter counts a..z, then aa, ab", () => {
 describe("LayoutRuler", () => {
   test("lights the selected panel's columns", () => {
     const { container } = render(
-      <LayoutRuler placement={{ col: 8, span: 5, row: 2, overflow: false }} label="c: span 5, row 2" />,
+      <LayoutRuler placement={{ col: 8, span: 5, row: 2, overflow: false }} label="Note: span 5, row 2" />,
     );
     const lit = [...container.querySelectorAll(".hx-ed-ruler span.on")].map((s) => s.textContent);
     expect(lit).toEqual(["8", "9", "10", "11", "12"]);
-    expect(screen.getByTestId("ruler-label").textContent).toBe("c: span 5, row 2");
+    expect(screen.getByTestId("ruler-label").textContent).toBe("Note: span 5, row 2");
   });
 
   test("lights nothing without a selection", () => {
@@ -86,7 +86,7 @@ const RESULTS: PanelResult[] = [
 const LAYOUTS = [{ span: 12, row: 1 }, { span: 5, row: 2 }, { span: 7, row: 2 }];
 
 describe("Preview", () => {
-  test("draws lettered panels at their grid cells through renderPanel", () => {
+  test("draws panels at their grid cells through renderPanel", () => {
     const onSelect = mock((_i: number) => {});
     render(
       <Preview
@@ -103,8 +103,8 @@ describe("Preview", () => {
     expect(note.className).toBe("hx-ed-pp sel");
     expect(note.style.gridColumn).toBe("6 / span 7");
     expect(note.style.gridRow).toBe("2");
-    expect(note.textContent).toBe("cNote7/12markdown body");
-    expect(screen.getByTestId("ruler-label").textContent).toBe("c: span 7, row 2");
+    expect(note.textContent).toBe("Note7/12markdown body");
+    expect(screen.getByTestId("ruler-label").textContent).toBe("Note: span 7, row 2");
     fireEvent.click(screen.getByRole("region", { name: "Best config" }));
     expect(onSelect).toHaveBeenCalledWith(0);
   });
@@ -124,9 +124,9 @@ describe("Preview", () => {
     );
     const pressed = screen.getAllByRole("button").map((b) => [b.textContent, b.getAttribute("aria-pressed")]);
     expect(pressed).toEqual([
-      ["aBest config12/12", "false"],
-      ["bLength vs time5/12", "false"],
-      ["cNote7/12", "true"],
+      ["Best config12/12", "false"],
+      ["Length vs time5/12", "false"],
+      ["Note7/12", "true"],
     ]);
     // The button is the one tab stop per panel; the region is not focusable itself.
     expect(screen.getByRole("region", { name: "Note" }).hasAttribute("tabindex")).toBe(false);

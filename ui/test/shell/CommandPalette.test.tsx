@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 
-import type { ProjectInfo, RunRecord, TaskSummary } from "../../src/api/models";
-import { type CommandHandlers, MAX_RUNS, buildCommands, filterCommands } from "../../src/shell/CommandPalette";
+import type { ProjectInfo, RunRecord, TaskRuns, TaskSummary } from "../../src/api/models";
+import { type CommandHandlers, MAX_RUNS, buildCommands, cachedRunNames, filterCommands } from "../../src/shell/CommandPalette";
 import { mockRoutes } from "../api/fetch-mock";
 import { renderApp } from "../render-app";
 
@@ -71,14 +71,16 @@ function handlers(): CommandHandlers & { calls: unknown[] } {
 }
 
 describe("buildCommands", () => {
-  test("lists go-to, tasks, unarchived runs, paths and commands in order", () => {
-    const items = buildCommands({ projects: PROJECTS, tasks: TASKS, runs: RUNS }, handlers());
+  test("lists go-to, tasks, unarchived runs by name, paths and commands in order", () => {
+    const items = buildCommands({ projects: PROJECTS, tasks: TASKS, runs: RUNS, names: new Map([["r-gpu", "lr 3e-4 · seed 1"]]) }, handlers());
     expect(items.map((c) => [c.group, c.title, c.subtitle])).toEqual([
-      ["Go to", "Overview", "all projects"],
+      ["Go to", "Home", "all projects"],
+      ["Go to", "Hosts", "GPUs and connections"],
+      ["Go to", "Queue", "queued runs"],
       ["Tasks", "toy / acc", "6 runs"],
       ["Tasks", "toy / f1", "1 run"],
-      ["Runs", "r-svm", "RBF-kernel SVM beats rf, seed 1, finished"],
-      ["Runs", "r-gpu", "acc, running"],
+      ["Runs", "RBF-kernel SVM beats rf · seed 1", "toy / acc · svm · finished"],
+      ["Runs", "lr 3e-4 · seed 1", "toy / acc · gpu · running"],
       ["Paths", "Copy toy repo", "/Users/me/toy"],
       ["Paths", "Copy toy data", "/data/test.jsonl"],
       ["Paths", "Copy big data", "gpu1:/scratch/train.jsonl"],
@@ -89,7 +91,7 @@ describe("buildCommands", () => {
   test("items call the matching handler", () => {
     const h = handlers();
     const items = buildCommands({ projects: PROJECTS, tasks: TASKS, runs: RUNS }, h);
-    for (const title of ["toy / acc", "r-gpu", "Copy big data", "Switch colour mode"]) {
+    for (const title of ["toy / acc", "run gpu", "Copy big data", "Switch colour mode", "Hosts"]) {
       items.find((c) => c.title === title)?.run();
     }
     expect(h.calls).toEqual([
@@ -97,14 +99,15 @@ describe("buildCommands", () => {
       ["go", { to: "/r/$runId", params: { runId: "r-gpu" } }],
       ["copy", "gpu1:/scratch/train.jsonl"],
       ["theme"],
+      ["go", { to: "/hosts" }],
     ]);
   });
 });
 
 describe("buildCommands edge cases", () => {
-  test("an empty store still offers Overview and the colour switch", () => {
+  test("an empty store still offers the go-to items and the colour switch", () => {
     const items = buildCommands({ projects: [], tasks: [], runs: [] }, handlers());
-    expect(items.map((c) => c.title)).toEqual(["Overview", "Switch colour mode"]);
+    expect(items.map((c) => c.title)).toEqual(["Home", "Hosts", "Queue", "Switch colour mode"]);
   });
 
   test(`lists at most ${MAX_RUNS} runs`, () => {
@@ -122,14 +125,15 @@ describe("filterCommands", () => {
     expect(titles("  ")).toHaveLength(items.length);
   });
 
-  test("matches hypothesis and tags case-insensitively", () => {
-    expect(titles("SVM")).toEqual(["r-svm"]);
-    expect(titles("baseline")).toEqual(["r-svm"]);
+  test("matches names, hypothesis and tags case-insensitively; run ids still match", () => {
+    expect(titles("SVM")).toEqual(["RBF-kernel SVM beats rf · seed 1"]);
+    expect(titles("baseline")).toEqual(["RBF-kernel SVM beats rf · seed 1"]);
+    expect(titles("r-svm")).toEqual(["RBF-kernel SVM beats rf · seed 1"]);
   });
 
   test("every word must match; paths are searchable", () => {
     expect(titles("gpu1 train")).toEqual(["Copy big data"]);
-    expect(titles("/users/me/toy")).toEqual(["r-svm", "Copy toy repo"]);
+    expect(titles("/users/me/toy")).toEqual(["RBF-kernel SVM beats rf · seed 1", "Copy toy repo"]);
     expect(titles("svm running")).toEqual([]);
   });
 });
@@ -191,7 +195,7 @@ describe("CommandPalette", () => {
     const input = screen.getByPlaceholderText("Find a run, task, path or command");
     fireEvent.change(input, { target: { value: "acc" } });
     const options = screen.getAllByRole("option");
-    expect(options.map((o) => o.querySelector("span")?.textContent)).toEqual(["toy / acc", "r-svm", "r-gpu"]);
+    expect(options.map((o) => o.querySelector("span")?.textContent)).toEqual(["toy / acc", "RBF-kernel SVM beats rf · seed 1", "run gpu"]);
     expect(options[0]?.getAttribute("aria-selected")).toBe("true");
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(router.state.location.pathname).toBe("/t/toy/acc"));
@@ -202,7 +206,7 @@ describe("CommandPalette", () => {
     renderApp("/");
     await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
     const dialog = await openWithShortcut();
-    await screen.findByRole("option", { name: /r-gpu/ });
+    await screen.findByRole("option", { name: /run gpu/ });
     fireEvent.change(screen.getByPlaceholderText(/Find a run/), { target: { value: "copy" } });
     const selected = () => screen.getAllByRole("option").findIndex((o) => o.getAttribute("aria-selected") === "true");
     fireEvent.keyDown(dialog, { key: "ArrowUp" });
@@ -231,23 +235,41 @@ describe("CommandPalette", () => {
     expect(screen.getByRole("button", { name: "Switch colour mode" }).textContent).toBe("Light");
   });
 
-  test("with the API failing it still offers Overview and the colour switch", async () => {
+  test("with the API failing it still offers the go-to items and the colour switch", async () => {
     mockRoutes({});
     renderApp("/");
     await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
     await openWithShortcut();
     await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
     expect(screen.getAllByRole("option").map((o) => o.querySelector("span")?.textContent)).toEqual([
-      "Overview",
+      "Home",
+      "Hosts",
+      "Queue",
       "Switch colour mode",
     ]);
+  });
+
+  test("typed text of two or more characters finds runs by name through the API", async () => {
+    const far = makeRun({ run_id: "r-far", name: "db v3", task: "f1", hypothesis: "wider hash table" });
+    const calls = mockRoutes({ "/api/v1/projects": PROJECTS, "/api/v1/tasks": TASKS, "/api/v1/runs": RUNS, "/api/v1/runs?q=": [far] });
+    renderApp("/");
+    await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
+    await openWithShortcut();
+    await screen.findByRole("option", { name: /RBF-kernel SVM/ });
+    const input = screen.getByPlaceholderText(/Find a run/);
+    fireEvent.change(input, { target: { value: "d" } });
+    fireEvent.change(input, { target: { value: "db v3" } });
+    const hit = await screen.findByRole("option", { name: /db v3/ });
+    expect(hit.querySelector("small")?.textContent).toBe("toy / f1 · far · finished");
+    const searches = calls.map((c) => c.url).filter((u) => u.startsWith("/api/v1/runs?q="));
+    expect(searches).toEqual(["/api/v1/runs?q=db+v3&limit=20"]);
   });
 
   test("shows Nothing matches for a query with no hits", async () => {
     renderApp("/");
     await screen.findByRole("button", { name: /Search runs, tasks, paths/ });
     await openWithShortcut();
-    await screen.findByRole("option", { name: /r-svm/ });
+    await screen.findByRole("option", { name: /RBF-kernel SVM/ });
     fireEvent.change(screen.getByPlaceholderText(/Find a run/), { target: { value: "zzzz" } });
     expect(screen.queryAllByRole("option")).toHaveLength(0);
     expect(screen.getByText("Nothing matches")).toBeTruthy();
@@ -264,4 +286,17 @@ test("run params are searchable and owned sweeps are unique per project", () => 
   items.find((i) => i.group === "Sweeps")?.run();
   expect(h.calls[0]).toEqual(["go", { to: "/s/$project/$id", params: { project: "toy", id: "s-one" } }]);
   expect(buildCommands({ ...data, hubEnvironmentId: null }, h).some((i) => i.group === "Sweeps")).toBe(false);
+});
+
+test("cachedRunNames reads every cached task's run names as the run page shows them", () => {
+  const runs = [
+    { run_id: "r1", name: "db v3", derived_name: "lr 3e-4", renamed: true, seed: 1 },
+    { run_id: "r2", name: "lr 3e-4", derived_name: "lr 3e-4", renamed: false, seed: 2 },
+    { run_id: "r3", name: "lr 1e-3", derived_name: "lr 1e-3", renamed: false, seed: null },
+  ];
+  const names = cachedRunNames([
+    [["taskRuns", "toy", "acc", false], { runs } as unknown as TaskRuns],
+    [["taskRuns", "toy", "f1", false], undefined],
+  ]);
+  expect([...names]).toEqual([["r1", "db v3"], ["r2", "lr 3e-4 · seed 2"], ["r3", "lr 1e-3"]]);
 });

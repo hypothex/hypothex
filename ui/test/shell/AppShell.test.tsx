@@ -3,8 +3,9 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { NAV_KEY } from "../../src/shell/AppShell";
 import { crumbsFor, paletteShortcut } from "../../src/shell/TopBar";
 import { mockRoutes } from "../api/fetch-mock";
-import { makeBoard } from "../pages/fixtures";
+import { RUN_SVM, makeBoard, makeDetail } from "../pages/fixtures";
 import { renderApp } from "../render-app";
+import { makeTaskRuns } from "../run/taskRunsFixtures";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -56,6 +57,19 @@ describe("AppShell", () => {
     expect(within(bar).getByRole("button", { name: /Search runs, tasks, paths/ }).id).toBe("findBtn");
     expect(await screen.findByText("hub · v0.5.0")).not.toBeNull();
     expect(screen.getByRole("button", { name: "Switch colour mode" })).not.toBeNull();
+  });
+
+  test("the run crumb is the run's display name: derived name with seed, else from the hypothesis", async () => {
+    const { cleanup } = await import("@testing-library/react");
+    const runRoutes = { [`/api/v1/runs/${RUN_SVM}`]: makeDetail() };
+    const page = () => screen.getByRole("navigation", { name: "Breadcrumb" }).querySelector('[aria-current="page"]');
+    mockRoutes({ ...runRoutes, "/api/v1/tasks/toy-classifier/toy-test/runs": makeTaskRuns() });
+    renderApp(`/r/${RUN_SVM}`);
+    await waitFor(() => expect(page()?.textContent).toBe("model svm · seed 3"));
+    cleanup();
+    mockRoutes(runRoutes);
+    renderApp(`/r/${RUN_SVM}`);
+    await waitFor(() => expect(page()?.textContent).toBe("RBF-kernel SVM · seed 3"));
   });
 
   test("the live indicator says when updates are off or reconnecting", async () => {

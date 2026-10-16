@@ -1,5 +1,5 @@
 /** Pure helpers for the two-run Examples page (spec 8.3.4 and 8.5). */
-import { firstClause, fmtDelta, fmtP, fmtSigned, shortId } from "./format";
+import { firstClause, fmtDelta, fmtSigned, shortId } from "./format";
 import type { ExampleDiff, RunRecord } from "./types";
 
 function logFactorials(n: number): number[] {
@@ -61,12 +61,6 @@ export function pairLabels(a: RunRecord, b: RunRecord): [string, string] {
   const lb = firstClause(b.hypothesis, `run ${shortId(b.run_id)}`);
   if (la !== lb) return [la, lb];
   return [`${la} ${shortId(a.run_id)}`, `${lb} ${shortId(b.run_id)}`];
-}
-
-/** `B fixes 9, breaks 3 vs A, p = 0.15`. */
-export function examplesHeadline(labelA: string, labelB: string, diff: ExampleDiff): string {
-  const p = signTestP(diff.fixed.length, diff.broken.length);
-  return `${labelB} fixes ${diff.fixed.length}, breaks ${diff.broken.length} vs ${labelA}, ${fmtP(p)}`;
 }
 
 /** `n = 180`, `net +6`, `Δ +0.0333` (the change in pass rate). */

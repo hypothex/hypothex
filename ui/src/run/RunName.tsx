@@ -93,8 +93,12 @@ export function RunName({
   const [shown, setShown] = useState<Shown | null>(null);
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
-  // new server data replaces the optimistic name
-  useEffect(() => setShown(null), [display, renamed]);
+  // new server data replaces the optimistic name (adjusted while rendering, not in an effect)
+  const [seen, setSeen] = useState<Shown>({ display, renamed });
+  if (seen.display !== display || seen.renamed !== renamed) {
+    setSeen({ display, renamed });
+    setShown(null);
+  }
   useEffect(() => {
     if (!editing) return;
     input.current?.focus();

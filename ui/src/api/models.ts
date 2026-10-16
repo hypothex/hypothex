@@ -239,6 +239,8 @@ export interface RunsQuery {
   tag?: string;
   archived?: boolean;
   limit?: number;
+  /** Runs whose stored name or run id contains this text (case-insensitive), for ⌘K. */
+  q?: string;
   /** Phase 2: runs of one environment (one host), e.g. a host's queue (Task 27). */
   environment_id?: string;
 }
@@ -383,6 +385,37 @@ export interface FailureRow {
   retried_ok: boolean;
 }
 
+/** One of the newest runs (Home's Recent runs); a v5 hub sends it in `OverviewSummary.recent`. */
+export interface RecentRun {
+  run_id: string;
+  project: string;
+  task: string | null;
+  /** Run view name: the rename, else the derived name with `· seed N`. */
+  name: string;
+  status: RunStatus;
+  end_reason: string | null;
+  exit_code: number | null;
+  created_at: string;
+  ended_at?: string | null;
+  created_by: string;
+  hypothesis: string;
+  primary: number | null;
+  delta_best: number | null;
+}
+
+/**
+ * How far a running run is (Home's Running now): the newest logged point of the task's
+ * primary metric. `progress` and `eta_seconds` are always null for now (runs report no
+ * total).
+ */
+export interface RunProgress {
+  progress: number | null;
+  metric: string | null;
+  step: number | null;
+  value: number | null;
+  eta_seconds: number | null;
+}
+
 export interface ProjectRow {
   project: string;
   task: string;
@@ -391,6 +424,15 @@ export interface ProjectRow {
   kind: TaskKind;
   /** Display unit of the task's primary metric; `""` without one. */
   unit: string;
+  /** v5 (older hubs omit these): the task's primary `metric/key` and its direction. */
+  primary?: string;
+  higher_is_better?: boolean;
+  /** The best config mean among configs more than 7 days old. */
+  best_7d_ago?: number | null;
+  /** Running best after each scored config in time order, oldest first (at most 24). */
+  best_history?: number[];
+  running?: number;
+  queued?: number;
 }
 
 export interface OverviewSummary {
@@ -404,6 +446,12 @@ export interface OverviewSummary {
   /** Phase 2 (spec 8A.7): cost of the runs in the window, and of the runs today. */
   cost_usd?: number;
   cost_today_usd?: number;
+  /** v5: the 12 newest unarchived, non-queued runs of any age, newest first. */
+  recent?: RecentRun[];
+  /** v5: run view names of the runs in `running`, `failures` and `recent`. */
+  names?: Record<string, string>;
+  /** v5: progress of each running run, by run id. */
+  progress?: Record<string, RunProgress>;
 }
 
 // views and panels (contract 1.4, 1.6) --------------------------------------------------

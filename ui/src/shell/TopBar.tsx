@@ -11,12 +11,14 @@ import { type ReactElement, useState } from "react";
 import { api } from "../api/client";
 import { useStreamStatus } from "../api/events";
 import type { RunDetail } from "../api/models";
-import { queryKeys, useLeaderboard, useProjects } from "../api/queries";
+import { queryKeys, useLeaderboard, useProjects, useTaskRuns } from "../api/queries";
 import { shortId } from "../charts/valueFormat";
 import { Button } from "../chrome/Button";
 import { Icon } from "../chrome/Icon";
 import { LaunchDialog } from "../launch/LaunchDialog";
 import { AppLink, hrefs, useNavigateHref } from "../pages/components/links";
+import { runIdentity } from "../run/runContext";
+import { runTitle } from "../run/RunName";
 import { LaunchedLine, type LaunchedRuns, NewRun } from "../task/NewRun";
 import "./shell.css";
 
@@ -125,9 +127,16 @@ export function TopBar({ onSearch, navOpen, onToggleNav }: TopBarProps): ReactEl
     enabled: runId !== null,
   });
   const record = runId !== null ? run.data?.record : undefined;
+  // same key as the run page's read (archived runs included for an archived run): no extra request
+  const taskRuns = useTaskRuns(record?.project ?? "", record?.task ?? "", {
+    archived: record?.archived === true,
+    enabled: Boolean(record?.task),
+  });
   const crumbs = crumbsFor(
     pathname,
-    record ? { project: record.project, task: record.task, name: record.name ?? shortId(record.run_id) } : null,
+    record && runId !== null
+      ? { project: record.project, task: record.task, name: runTitle(runIdentity(taskRuns.data, runId).run, record).display }
+      : null,
   );
 
   const projects = useProjects();

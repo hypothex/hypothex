@@ -1,19 +1,19 @@
 /**
- * Examples screen (spec 8.3.4): two runs compared example by example: 2×2 outcome
- * table, sign-test p, one mark per example, and B's failing examples.
+ * Examples screen (spec 8.3.4, restyled in v5 4.2): two runs compared example by example:
+ * 2×2 outcome table, sign-test p, one mark per example, and B's failing examples. The
+ * heading names the pair; the counts and p-value are plain facts under it.
  */
 import { useState } from "react";
 import { useCompareExamples, useRun, useRunPredictions, useTask } from "../api/queries";
 import { ErrorsTable, ExampleStrip, OutcomeTable, SignTestChart } from "./components/ExampleCharts";
-import { examplesHeadline, examplesMeta, exampleTotal, pairLabels } from "./components/examples";
+import { examplesMeta, exampleTotal, pairLabels, signTestP } from "./components/examples";
 import { Panel } from "../chrome/Panel";
-import { fmtScore, isAgent, primaryMetricName } from "./components/format";
+import { fmtP, fmtScore, isAgent, primaryMetricName } from "./components/format";
 import { AppLink, hrefs } from "./components/links";
 import { ErrorBox, Loading } from "./components/QueryState";
 import { scoreFor } from "./components/ScoresList";
-import { PageStyles } from "./components/styles";
 import type { PredictionPage, RunDetail } from "./components/types";
-import { Unbroken } from "./components/Headline";
+import "./examples.css";
 
 export interface ExamplesPageProps {
   a: string;
@@ -115,29 +115,18 @@ export function ExamplesPage({ a, b, metric }: ExamplesPageProps) {
   const changed = diff ? diff.fixed.length + diff.broken.length : 0;
 
   return (
-    <div className="page examples-page">
-      <PageStyles />
-      <p className="crumb">
-        {project || "…"}
-        <span className="sep">/</span>
-        {task ? (
-          <>
-            <AppLink href={hrefs.task(project, task)}>{task}</AppLink>
-            <span className="sep">/</span>
-          </>
-        ) : null}
-        examples
-      </p>
-      <h1 className="headline">
-        <Unbroken text={diff && labels ? examplesHeadline(labelA, labelB, diff) : "Examples"} />
-      </h1>
-      {diff ? (
-        <p className="metaline">
-          {examplesMeta(diff).map((text) => (
-            <span key={text}>{text}</span>
-          ))}
-        </p>
-      ) : null}
+    <div className="examples-page">
+      <header className="ph">
+        <h1>{labels ? `${labelB} vs ${labelA}` : "Examples"}</h1>
+        <div className="facts">
+          {task ? <AppLink href={hrefs.task(project, task)}>{`${project} / ${task}`}</AppLink> : null}
+          {diff
+            ? [`fixes ${diff.fixed.length}`, `breaks ${diff.broken.length}`, fmtP(signTestP(diff.fixed.length, diff.broken.length)), ...examplesMeta(diff)].map((text) => (
+                <span key={text}>{text}</span>
+              ))
+            : null}
+        </div>
+      </header>
       {runA.data && runB.data ? (
         <div className="ab">
           <Side tag="A" detail={runA.data} label={labelA} metric={diff?.metric ?? null} />

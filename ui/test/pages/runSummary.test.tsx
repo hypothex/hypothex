@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, screen } from "@testing-library/react";
-import { runStats } from "../../src/pages/components/runStats";
 import {
   ScoresList,
   latestScores,
@@ -74,46 +73,6 @@ describe("scores", () => {
   });
 });
 
-describe("runStats", () => {
-  test("primary score, interval, seeds, wall time", () => {
-    const board = makeBoard();
-    const row = board.rows[0] ?? null;
-    const stats = runStats(makeDetail(), primaryRef(board, row), row);
-    expect(stats.map((s) => [s.label, s.value])).toEqual([
-      ["accuracy v1", "0.9222"],
-      ["95% CI", "0.874–0.953"],
-      ["seeds", "◇×3"],
-      ["wall", "0.8 s"],
-    ]);
-  });
-
-  test("the board's unit: suffix units go in the unit field, $ leads the value", () => {
-    const board = { ...makeBoard(), unit: "ms", value_format: "percent_delta" };
-    const row = board.rows[0] ?? null;
-    const primary = primaryRef(board, row);
-    expect(primary?.unit).toBe("ms");
-    const [first] = runStats(makeDetail(), primary, row);
-    expect([first?.value, first?.unit]).toEqual(["0.922", "ms"]);
-    const usd = runStats(makeDetail(), primaryRef({ ...board, unit: "$", value_format: "number" }, row), row)[0];
-    expect([usd?.value, usd?.unit]).toEqual(["$0.922", null]);
-  });
-
-  test("usage and a failing exit code; no board means no score stats", () => {
-    const detail = makeDetail({
-      status: "failed",
-      exit_code: 2,
-      usage: { tokens_in: 153000, tokens_out: 4500, usd: 0.25, seconds: 68.4, calls: 13 },
-    });
-    expect(runStats(detail, null, null).map((s) => [s.label, s.value])).toEqual([
-      ["wall", "0.8 s"],
-      ["tokens in", "153k"],
-      ["tokens out", "4.5k"],
-      ["cost", "$0.25"],
-      ["exit", "2"],
-    ]);
-  });
-});
-
 test("StatusLine lists status, time, launcher, host, tags, and parent", () => {
   render(<StatusLine record={makeRecord({ kind: "infer", parent: RUN_RF })} />);
   for (const text of ["finished", "0.8 s", "seed 3", "21:03:06 UTC", "agent:acceptance", "mbp.local", "infer", "best", "svm"]) {
@@ -153,22 +112,9 @@ test("scoreFor never replaces a failed preferred value with another field", () =
 test("score summaries hide failed reevaluation while ScoresList retains timestamped records", () => {
   const detail = makeDetail({}, { scores: [score({ value: 0.8 }), score({ key: "*", value: null, error: "reevaluation failed", created_at: "2026-09-26T22:00:00Z" })] });
   const primary = { metric: "accuracy", version: "v1", key: "value", interval: null };
-  expect(runStats(detail, primary, null).some(item => item.label === "accuracy v1")).toBe(false);
   render(<ScoresList scores={detail.scores} metricNames={[]} primary={primary} />);
   expect(screen.getByText("0.8000")).toBeTruthy();
   expect(screen.getByText("error").getAttribute("title")).toBe("reevaluation failed");
   expect(screen.getByText("21:00")).toBeTruthy();
   expect(screen.getByText("22:00")).toBeTruthy();
-});
-
-test("runStats suppresses a cached primary interval after that run's reevaluation fails", () => {
-  const board = makeBoard();
-  const row = board.rows[0]!;
-  const detail = makeDetail();
-  detail.scores.push(score({ key: "*", value: null, error: "reevaluation failed", created_at: "2026-09-27T00:00:00Z" }));
-  const primary = primaryRef(board, row);
-  expect(primary?.interval).not.toBeNull();
-  const labels = runStats(detail, primary, row).map(item => item.label);
-  expect(labels.includes("accuracy v1")).toBe(false);
-  expect(labels.includes("95% CI")).toBe(false);
 });

@@ -13,6 +13,7 @@ import {
   type QueryKey,
   keepPreviousData,
   useMutation,
+  useQueries,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -34,6 +35,8 @@ export const queryKeys = {
   runs: (query: M.RunsQuery = {}) => ["runs", query] as const,
   run: (runId: string) => ["run", runId] as const,
   runLogs: (runId: string, stream: M.LogStream) => ["run", runId, "logs", stream] as const,
+  runMetrics: (runId: string, names: readonly string[], maxPoints: number) =>
+    ["run", runId, "metrics", [...names], maxPoints] as const,
   runPredictions: (runId: string, query: M.PredictionsQuery = {}) =>
     ["run", runId, "predictions", query] as const,
   runTraces: (runId: string) => ["run", runId, "traces"] as const,
@@ -275,6 +278,35 @@ export const useRunLogs = (runId: string, stream: M.LogStream = "stdout") =>
     queryKey: queryKeys.runLogs(runId, stream),
     queryFn: ({ signal }) => api.runLogs(runId, stream, undefined, signal),
   });
+
+/** One run's history of `names` (idle with no names: an empty list would read every series). */
+export const useRunMetrics = (runId: string, names: readonly string[], maxPoints = 300) =>
+  useQuery({
+    queryKey: queryKeys.runMetrics(runId, names, maxPoints),
+    queryFn: ({ signal }) => api.runMetrics(runId, { names, max_points: maxPoints }, signal),
+    enabled: names.length > 0,
+  });
+
+/** The same names for several runs (a run and its seeds), one request per run. */
+export function useRunsMetrics(runIds: readonly string[], names: readonly string[], maxPoints = 300) {
+  const results = useQueries({
+    queries: runIds.map((runId) => ({
+      queryKey: queryKeys.runMetrics(runId, names, maxPoints),
+      queryFn: ({ signal }: { signal: AbortSignal }) => api.runMetrics(runId, { names, max_points: maxPoints }, signal),
+      enabled: names.length > 0,
+    })),
+  });
+  const byRun = new Map<string, M.MetricPoint[]>();
+  results.forEach((result, i) => {
+    const id = runIds[i];
+    if (id !== undefined && result.data) byRun.set(id, result.data);
+  });
+  return {
+    byRun,
+    error: results.find((r) => r.error)?.error ?? null,
+    pending: names.length > 0 && results[0]?.isPending === true,
+  };
+}
 
 export const useRunPredictions = (runId: string, query: M.PredictionsQuery = {}, opts: ReadOptions = {}) =>
   useQuery({

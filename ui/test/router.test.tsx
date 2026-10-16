@@ -22,7 +22,7 @@ const settled = (router: AppRouter, routeId: RouteId) =>
   waitFor(() => expect(leaf(router)?.routeId).toBe(routeId));
 
 describe("routes", () => {
-  test("/ is the overview", async () => {
+  test("/ is Home", async () => {
     const { router } = renderApp("/");
     await settled(router, "/");
   });
@@ -120,16 +120,29 @@ describe("routes", () => {
     expect(leaf(router)?.search).toEqual({ tab: "logs" });
   });
 
-  test("/hosts and /queue are routes", async () => {
+  test("/r/:runId reads ?tab with ?log and ?example", async () => {
+    const { router } = renderApp("/r/r1?tab=logs&log=stderr");
+    await settled(router, "/r/$runId");
+    expect(leaf(router)?.search).toEqual({ tab: "logs", log: "stderr" });
+  });
+
+  test("/r/:runId renders the v5 run page", async () => {
+    const { router } = renderApp("/r/r1?tab=logs");
+    await settled(router, "/r/$runId");
+    await waitFor(() => expect(document.querySelector(".run-page")).not.toBeNull());
+  });
+
+  test("/hosts and /queue are their own pages", async () => {
     const { cleanup } = await import("@testing-library/react");
-    for (const [path, id, name] of [
-      ["/hosts", "/hosts", "Hosts"],
-      ["/queue", "/queue", "Queue"],
+    for (const [path, name] of [
+      ["/hosts", "Hosts"],
+      ["/queue", "Queue"],
     ] as const) {
       const { router } = renderApp(path);
-      await settled(router, id);
-      expect(leaf(router)?.routeId).toBe(id);
-      expect((await screen.findByTestId("screen-pending")).textContent).toBe(name);
+      await settled(router, path);
+      expect(leaf(router)?.routeId).toBe(path);
+      expect(await screen.findByRole("heading", { level: 1, name })).toBeTruthy();
+      expect(document.querySelector(".hosts-page")).not.toBeNull();
       cleanup();
     }
   });
@@ -139,16 +152,6 @@ describe("routes", () => {
     expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Not found");
     expect(screen.getAllByRole("link", { name: "Home" }).length).toBeGreaterThan(0);
   });
-});
-
-test("every route renders its own screen, not the placeholder", async () => {
-  const { cleanup } = await import("@testing-library/react");
-  for (const path of ["/", "/t/toy/acc", "/t/toy/acc/edit/new", "/r/r1", "/x/r1/r2?metric=accuracy", "/s/rxn/s-7f3a"]) {
-    const { router } = renderApp(path);
-    await waitFor(() => expect(router.state.status).toBe("idle"));
-    expect([path, screen.queryByTestId("screen-pending")]).toEqual([path, null]);
-    cleanup();
-  }
 });
 
 describe("search serialization", () => {

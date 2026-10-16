@@ -1,0 +1,43 @@
+/* ui/src/home/home.css — Home (spec 4.1, mockup #home). Status colours come from chrome.css `.st`. */
+.home { padding: 20px; display: grid; gap: 20px; max-width: 1480px; }
+.home h2 { font-size: 14px; margin: 0 0 8px; font-weight: 600; display: flex; gap: 8px; align-items: baseline; }
+.home h2 .n { color: var(--ink-3); font-weight: 400; font-size: 12px; }
+.home h2 a { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--ink-3); }
+.home .two { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+.home .kpis { display: flex; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-panel); }
+.home .kpi { padding: 12px 18px; border-right: 1px solid var(--line); min-width: 120px; }
+.home .kpi:last-child { border-right: 0; }
+.home .kpi .v { font-size: 22px; font-weight: 500; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.home .kpi .l { color: var(--ink-3); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.home .tblwrap { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-panel); overflow-x: auto; }
+.home table.t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.home table.t th { text-align: left; color: var(--ink-3); font-weight: 500; padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.home table.t td { padding: 8px 12px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+.home table.t tr:last-child td { border-bottom: 0; }
+.home table.t tbody tr:hover { background: var(--hover); }
+.home table.t .num, .home .num { text-align: right; font-variant-numeric: tabular-nums; }
+.home .nm { font-weight: 500; color: var(--ink); }
+.home .best { font-weight: 600; }
+.home .hyp { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home .proj { display: inline-flex; align-items: center; gap: 6px; }
+.home .st.running a, .home .st.stale a { color: var(--ink); }
+.home .hostrow { display: grid; grid-template-columns: 150px minmax(0, 1fr) 70px; gap: 10px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--grid); }
+.home .hostrow:last-child { border-bottom: 0; }
+.home .hostrow .muted { font-size: 12px; }
+.home .delta-up { color: var(--ok); }
+.home .delta-dn { color: var(--fail); }
+.home .fail-act { display: inline-flex; gap: 6px; align-items: center; }
+.home .hosts-banner { margin: 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--panel-2); color: var(--ink-2); }
+.home .hosts-banner b { color: var(--ink); }
+.home-empty { display: grid; justify-items: center; text-align: center; padding: 96px 20px; color: var(--ink-3); gap: 6px; }
+.home-empty h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--ink); }
+.home-empty p { margin: 0; max-width: 46ch; }
+.home-empty .cmds { margin-top: 16px; display: grid; gap: 6px; text-align: left; width: min(100%, 560px); }
+.home-empty .cmd { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto 24px; gap: 10px; align-items: center; padding: 8px 10px 8px 12px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--panel); color: var(--ink); }
+.home-empty .cmd .n { color: var(--ink-3); font-size: 11px; font-weight: 500; }
+.home-empty .cmd .c { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-empty .cmd .what { color: var(--ink-3); font-size: 12px; }
+.home-empty .cmd .copy { border: 0; background: transparent; color: var(--ink-3); cursor: pointer; line-height: 0; }
+.home-empty .links { margin-top: 14px; display: flex; gap: 18px; font-size: 12px; }
+.home-empty .links a { color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
+@media (max-width: 1100px) { .home .two { grid-template-columns: minmax(0, 1fr); } }

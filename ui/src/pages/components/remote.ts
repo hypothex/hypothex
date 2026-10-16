@@ -167,8 +167,7 @@ export interface CostShown {
 }
 
 /**
- * How the run page shows a run's cost (spec 8A.7), in the stat strip and the Placement
- * panel alike. No cost, or an all-zero one (a hub or CPU run), is nothing to show. GPU
+ * How the run page shows a run's cost (spec 8A.7), in the sidebar's Cost row. No cost, or an all-zero one (a hub or CPU run), is nothing to show. GPU
  * hours left unpriced because the host row says it has no rate (`null`) make the total
  * unknown (`—`); zero GPU dollars alone prove nothing (free GPUs, a tiny charge rounded).
  * `host` is the run's hosts row, or null without the hosts list.

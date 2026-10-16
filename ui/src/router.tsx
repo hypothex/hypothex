@@ -20,7 +20,7 @@ import { type ReactElement } from "react";
 
 import { ExamplesPage } from "./pages/Examples";
 import { OverviewPage } from "./pages/Overview";
-import { RunPage } from "./pages/Run";
+import { RunPage } from "./run/RunPage";
 import { SweepPage } from "./pages/Sweep";
 import { TaskPage } from "./pages/Task";
 import { ViewEditor } from "./pages/ViewEditor";
@@ -108,11 +108,11 @@ function TaskScreen(): ReactElement {
   return <TaskPage project={project} task={task} view={legacyView(search)} />;
 }
 
-/** `/r/$runId?log=&example=`: the Run page. */
+/** `/r/$runId?tab=&log=&example=`: the Run page; keyed so another run starts with fresh UI state. */
 function RunScreen(): ReactElement {
   const { runId } = runRoute.useParams();
-  const { log, example } = runRoute.useSearch();
-  return <RunPage runId={runId} log={log} example={example} />;
+  const { tab, log, example } = runRoute.useSearch();
+  return <RunPage key={runId} runId={runId} tab={tab} log={log} example={example} />;
 }
 
 /** `/x/$a/$b?metric=`: the Examples page. */

@@ -1,25 +1,18 @@
-/** A run log tail (opened from failures and the Where list via `?log=<stream>`). */
+/** A run log tail (the run page's Logs tab; failures link here with `?tab=logs&log=stderr`). */
 import { useRunLogs } from "../../api/queries";
-import { Panel } from "../../chrome/Panel";
+import type { LogStream } from "../../run/runContext";
 import { fmtBytes } from "./format";
-import { AppLink, hrefs } from "./links";
 import { ErrorBox, Loading } from "./QueryState";
-import type { LogStream } from "./types";
 
 export function LogView({ runId, stream }: { runId: string; stream: LogStream }) {
   const log = useRunLogs(runId, stream);
   return (
-    <Panel title={stream} aside={log.data ? fmtBytes(log.data.size) : undefined}>
-      {log.error ? (
-        <ErrorBox error={log.error} />
-      ) : log.data ? (
-        <pre className="log">{log.data.text.trimEnd() || "empty"}</pre>
-      ) : (
-        <Loading />
-      )}
-      <AppLink className="btn link" href={hrefs.run(runId)}>
-        close
-      </AppLink>
-    </Panel>
+    <section aria-label={stream} className="logview">
+      <h3>
+        {stream}
+        {log.data ? <span className="muted">{fmtBytes(log.data.size)}</span> : null}
+      </h3>
+      {log.error ? <ErrorBox error={log.error} /> : log.data ? <pre className="log">{log.data.text.trimEnd() || "empty"}</pre> : <Loading />}
+    </section>
   );
 }

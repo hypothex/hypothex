@@ -109,6 +109,18 @@ describe("routes", () => {
     expect(leaf(router)?.search).toEqual({ tab: "logs" });
   });
 
+  test("/r/:runId reads ?tab with ?log and ?example", async () => {
+    const { router } = renderApp("/r/r1?tab=logs&log=stderr");
+    await settled(router, "/r/$runId");
+    expect(leaf(router)?.search).toEqual({ tab: "logs", log: "stderr" });
+  });
+
+  test("/r/:runId renders the v5 run page", async () => {
+    const { router } = renderApp("/r/r1?tab=logs");
+    await settled(router, "/r/$runId");
+    await waitFor(() => expect(document.querySelector(".run-page")).not.toBeNull());
+  });
+
   test("/hosts and /queue are routes", async () => {
     const { cleanup } = await import("@testing-library/react");
     for (const [path, id, name] of [

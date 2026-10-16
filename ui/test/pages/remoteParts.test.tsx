@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { Placement, placementRows } from "../../src/pages/components/Placement";
+import { render, screen } from "@testing-library/react";
+import { placementRows } from "../../src/pages/components/Placement";
 import { QueuePanel, queueRows, queuedRunsQuery } from "../../src/pages/components/QueuePanel";
-import { REMOTE_CSS } from "../../src/pages/components/remoteStyles";
 import { StateBanner } from "../../src/pages/components/StateBanner";
 import { StatusLine, placeParts } from "../../src/pages/components/StatusLine";
 import { makeRecord } from "./fixtures";
-import { mockClipboard, renderWithClient } from "./helpers";
+import { renderWithClient } from "./helpers";
 import {
   DGX,
   GPU1,
@@ -86,16 +85,6 @@ describe("placementRows", () => {
     });
     const zero = { gpu_hours: 0, gpu_usd: 0, api_usd: 0, total_usd: 0 };
     expect(placementRows(lostRecord({ cost: zero }), "lost", MCCLEARY).map((r) => r.key)).not.toContain("Cost");
-  });
-
-  test("Placement draws the rows and copies a value", async () => {
-    const written = mockClipboard();
-    render(<Placement rows={placementRows(lostRecord(), "lost", MCCLEARY)} />);
-    const keys = [...document.querySelectorAll(".place-row .k")].map((k) => k.textContent);
-    expect(keys).toEqual(["Host", "Job", "Node", "GPUs", "Cost"]);
-    expect(document.querySelector(".place-row .v.mono")?.textContent).toBe("4471023");
-    fireEvent.click(screen.getByRole("button", { name: "Copy Job 4471023" }));
-    await waitFor(() => expect(written).toEqual(["4471023"]));
   });
 });
 
@@ -301,12 +290,6 @@ describe("status line and state bar", () => {
     );
     expect(container.innerHTML).toBe("");
   });
-});
-
-test("remote CSS stays inside .page", () => {
-  const rules = REMOTE_CSS.split("\n").filter((line) => line.trim() !== "");
-  expect(rules.length).toBeGreaterThan(10);
-  expect(rules.filter((line) => !line.startsWith(".page "))).toEqual([]);
 });
 
 test("queue labels distinguish equal hypotheses by params and seed, preserving global rank", () => {

@@ -10,15 +10,6 @@ function rule(css: string, selector: string): string {
   return css.slice(css.indexOf("{", at) + 1, css.indexOf("}", at)).trim();
 }
 
-describe("run-top action error (UI-F2)", () => {
-  test("the error adds no width to the actions column, so the headline keeps its width", () => {
-    const err = rule(PAGES_CSS, ".page .run-top .err");
-    expect(err).toContain("width: 0;");
-    expect(err).toContain("min-width: 100%;");
-    expect(err).toContain("overflow-wrap: anywhere;");
-  });
-});
-
 describe("leaderboard rows (UI-F4)", () => {
   test("name and plot tracks both flex, the name has a floor", async () => {
     const frow = rule(await read("../../src/panels/panels.css"), ".frow");
@@ -65,9 +56,9 @@ describe("curves value strip", () => {
   });
 });
 
-test("overview and run/sweep columns stack before text tracks collapse", () => {
+test("overview columns stack before text tracks collapse", () => {
   expect(PAGES_CSS).toContain("@media (max-width: 1100px)");
-  expect(PAGES_CSS).toContain(".page .run-top, .page .run-grid, .page .ov-grid { grid-template-columns: minmax(0, 1fr);");
+  expect(PAGES_CSS).toContain(".page .ov-grid { grid-template-columns: minmax(0, 1fr);");
   expect(rule(PAGES_CSS, ".page .actions")).toContain("flex-wrap: wrap;");
   expect(rule(PAGES_CSS, ".page .idea")).toContain("minmax(140px, 1fr)");
 });

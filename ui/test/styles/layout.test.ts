@@ -58,7 +58,7 @@ describe("curves value strip", () => {
 
 test("Home columns stack before text tracks collapse", async () => {
   const css = await read("../../src/home/home.css");
-  expect(css).toContain("@media (max-width: 1100px) { .home .two { grid-template-columns: minmax(0, 1fr); } }");
+  expect(css).toContain("@media (max-width: 1360px) { .home .two { grid-template-columns: minmax(0, 1fr); } }");
   expect(rule(PAGES_CSS, ".page .actions")).toContain("flex-wrap: wrap;");
 });
 test("editor stacks and preview unsticks at narrow viewport", async () => {

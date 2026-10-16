@@ -129,16 +129,17 @@ export function ChartsTab(props: ChartsTabProps): ReactElement {
               </label>
             </>
           ) : null}
-          <span className="sp" />
-          <AddPanelMenu
-            items={[
-              { label: "Compare", onPick: addCompare, disabled: cmp === null },
-              { label: "Custom view…", onPick: addView },
-            ]}
-          />
-          <button type="button" className="btn sm" aria-expanded={saving} onClick={() => setSaving((s) => !s)}>
-            Save as view
-          </button>
+          <span className="pbtns">
+            <AddPanelMenu
+              items={[
+                { label: "Compare", onPick: addCompare, disabled: cmp === null },
+                { label: "Custom view…", onPick: addView },
+              ]}
+            />
+            <button type="button" className="btn sm" aria-expanded={saving} onClick={() => setSaving((s) => !s)}>
+              Save as view
+            </button>
+          </span>
         </div>
         {saving ? (
           <SaveViewForm

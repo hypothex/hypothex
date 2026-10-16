@@ -193,3 +193,43 @@ for (const span of [5, 7, 12]) {
     expect(widths[2]).toBeCloseTo(widths[0], 0);
   });
 }
+
+/** Items per visual row of the children of `selector`: a child starts a new row when it is below the current row's bottom. */
+async function rowsOf(page: Page, selector: string): Promise<number[][]> {
+  return page.locator(selector).evaluateAll((sets) =>
+    sets.map((set) => {
+      const boxes = [...set.children].map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0).sort((a, b) => a.top - b.top);
+      const rows: number[] = [];
+      let bottom = Number.NEGATIVE_INFINITY;
+      for (const box of boxes) {
+        if (box.top >= bottom - 1) {
+          rows.push(1);
+          bottom = box.bottom;
+        } else {
+          rows[rows.length - 1] = (rows[rows.length - 1] ?? 0) + 1;
+          bottom = Math.max(bottom, box.bottom);
+        }
+      }
+      return rows;
+    }),
+  );
+}
+
+// spec 4.2: the panel toolbar wraps under ~1300 px; at 1440 it fits one row (mockup #workspace)
+for (const kind of ["training", "system_bench"] as const) {
+  test(`${kind}: the Charts toolbar fits one row at 1440 and keeps its buttons together`, async ({ page, theme }) => {
+    const { project, task } = demoTask(kind);
+    await page.goto(`/t/${project}/${task}`);
+    await expectTheme(page, theme);
+    await expect(page.getByRole("button", { name: "Save as view" })).toBeVisible();
+    for (const width of LAYOUT_WIDTHS) {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.waitForTimeout(150);
+      const [rows] = await rowsOf(page, ".task-page .ptools");
+      if (width >= 1440) expect(rows, `toolbar rows at ${width}`).toHaveLength(1);
+      const panel = await page.getByRole("button", { name: /Panel/ }).first().boundingBox();
+      const save = await page.getByRole("button", { name: "Save as view" }).boundingBox();
+      expect(Math.round(panel?.y ?? -1), `+ Panel and Save as view on one row at ${width}`).toBe(Math.round(save?.y ?? -2));
+    }
+  });
+}

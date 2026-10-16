@@ -175,3 +175,20 @@ test("the launch dialog's queue switch keeps its label on one line", async ({ pa
     expect.soft(shape.labelWidth).toBeGreaterThan(shape.textWidth + 30);
   }
 });
+
+test("sweeps: the stat tiles fit one row at 1440 and never leave one tile alone on a row", async ({ page, request, theme }) => {
+  await connectedHosts(request);
+  const { project, id } = await firstSweep(request);
+  await page.goto(`/s/${encodeURIComponent(project)}/${encodeURIComponent(id)}`);
+  await expectTheme(page, theme);
+  const tiles = page.locator(".sweep-stats .stats");
+  await expect(tiles.locator("dt", { hasText: "ETA" })).toBeVisible();
+  for (const width of LAYOUT_WIDTHS) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.waitForTimeout(150);
+    const tops = await tiles.locator(":scope > div").evaluateAll((divs) => divs.map((d) => Math.round(d.getBoundingClientRect().top)));
+    const rows = [...new Set(tops)].map((top) => tops.filter((t) => t === top).length);
+    if (width >= 1440) expect(rows, `tile rows at ${width}`).toHaveLength(1);
+    expect(rows.filter((n) => n < 2), `a lone tile at ${width}: ${JSON.stringify(rows)}`).toEqual([]);
+  }
+});

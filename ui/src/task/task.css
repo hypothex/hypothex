@@ -57,7 +57,7 @@
 .task-page > [role="status"], .task-page > .err { margin: 8px 20px 0; }
 .task-page .task-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .task-page .panels { overflow: auto; min-height: 0; min-width: 0; padding: 0 16px 24px; }
-.task-page .ptools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 0; position: sticky; top: 0; z-index: 5; background: var(--page, var(--panel-2)); }
+.task-page .ptools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 10px 0; position: sticky; top: 0; z-index: 5; background: var(--page, var(--panel-2)); }
 .task-page .ptools label { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-2); font-size: 12px; }
 .task-page .ptools .val { color: var(--ink); font-weight: 500; min-width: 30px; font-variant-numeric: tabular-nums; }
 .task-page .ptools .muted { color: var(--ink-3); font-size: 12px; }
@@ -66,7 +66,9 @@
 @media (max-width: 1300px) { .ws { grid-template-columns: 300px minmax(0, 1fr); } }
 
 /* Charts tab: toolbar, Save as view, score-key primary mark */
-.task-page .ptools input[type="range"] { width: 110px; accent-color: var(--ink-2); }
+.task-page .ptools input[type="range"] { width: 90px; accent-color: var(--ink-2); }
+/* + Panel and Save as view wrap together, at the right end of the toolbar */
+.task-page .ptools .pbtns { display: inline-flex; gap: 8px; margin-left: auto; white-space: nowrap; }
 .task-page .ptools .add-panel .popover { left: auto; right: 0; }
 .task-page .save-view { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 8px; }
 .task-page .save-view input { height: 26px; border: 1px solid var(--line-2); border-radius: var(--r-ctl); padding: 0 8px; font: inherit; font-family: var(--mono); background: var(--panel); color: var(--ink); }
@@ -138,7 +140,19 @@
 .sweep .sweep-title b { color: var(--ink); font-weight: 500; }
 .sweep .sweep-issuance { margin: 8px 0; color: var(--ink-2); }
 .sweep .sweep-issuance p { margin: 2px 0; }
-.sweep .sweep-stats { margin-top: 12px; }
+.sweep .sweep-stats { margin: 12px 0 14px; container-type: inline-size; }
+/* one row when it fits; else two even rows of four (never one tile alone on a row) */
+.sweep .sweep-stats .stats > div { padding: 0 20px; }
+.sweep .sweep-stats .stats > div:first-child { padding-left: 0; }
+@container (max-width: 860px) {
+  .sweep .sweep-stats .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .sweep .sweep-stats .stats > div:nth-child(4n + 1) { padding-left: 0; border-left: 0; }
+}
+@container (max-width: 520px) {
+  .sweep .sweep-stats .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sweep .sweep-stats .stats > div:nth-child(odd) { padding-left: 0; border-left: 0; }
+  .sweep .sweep-stats .stats > div:nth-child(even) { padding-left: 20px; border-left: 1px solid var(--rule-2); }
+}
 .sweep .kv { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 6px 12px; margin: 6px 0; }
 .sweep .kv dt { color: var(--ink-3); }
 .sweep .kv dd { margin: 0; font-variant-numeric: tabular-nums; }

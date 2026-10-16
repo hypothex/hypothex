@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, mock, test } from "bun:test";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { SelectedRun } from "../../src/pages/components/SelectedRun";
@@ -91,3 +91,50 @@ test("selected run renders in v5 panel chrome with its actions in the panel head
   fireEvent.click(close);
   expect(closed).toBe(1);
 });
+
+/** Browser layout is covered by the delayed-response e2e; this tests user takeover. */
+function observeSelection() {
+  const original = globalThis.ResizeObserver;
+  let callback!: ResizeObserverCallback;
+  const disconnect = mock(() => {});
+  const observer = {
+    observe: mock(() => {}), unobserve: mock(() => {}), disconnect,
+  } as unknown as ResizeObserver;
+  globalThis.ResizeObserver = class {
+    constructor(cb: ResizeObserverCallback) { callback = cb; return observer; }
+  } as unknown as typeof ResizeObserver;
+  mockApi({ "GET /api/v1/runs/focus": makeDetail({ run_id: "focus", task: null }) });
+  const view = renderWithClient(<SelectedRun runId="focus" onClose={() => {}} />);
+  const heading = screen.getByRole("heading", { name: "Selected run · focus" });
+  const scroll = mock(() => {});
+  heading.scrollIntoView = scroll;
+  return {
+    heading, scroll, disconnect,
+    resize: (): void => callback([], observer),
+    close: (): void => { view.unmount(); globalThis.ResizeObserver = original; },
+  };
+}
+
+test("late layout movement reveals the selected heading without refocusing it", () => {
+  const selection = observeSelection();
+  try {
+    selection.resize();
+    expect(selection.scroll).toHaveBeenCalledWith({ block: "center", inline: "nearest" });
+    expect(document.activeElement).toBe(selection.heading);
+  } finally { selection.close(); }
+  expect(selection.disconnect).toHaveBeenCalled();
+  selection.resize(); // A queued callback must be harmless after cleanup.
+  expect(selection.scroll).toHaveBeenCalledTimes(1);
+});
+
+for (const type of ["wheel", "touchstart", "pointerdown", "keydown", "focusin"]) {
+  test(`selected heading stops automatic reveal after user ${type}`, () => {
+    const selection = observeSelection();
+    try {
+      document.dispatchEvent(new Event(type, { bubbles: true }));
+      selection.resize(); // queued before disconnect, delivered afterwards
+      expect(selection.scroll).not.toHaveBeenCalled();
+      expect(selection.disconnect).toHaveBeenCalledTimes(1);
+    } finally { selection.close(); }
+  });
+}

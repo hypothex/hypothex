@@ -20,9 +20,36 @@ export function SelectedRun({ runId, onClose }: SelectedRunProps) {
   useEffect(() => {
     const previous = document.activeElement;
     const pane = headingRef.current?.closest("[data-panel]");
-    // Selection can originate many panels above this detail; reveal its heading.
-    headingRef.current?.focus();
+    const heading = headingRef.current;
+    // Selection can originate many panels above this detail. Late chart responses
+    // can move it again after focus has scrolled it into view. Keep the initial
+    // selection visible until the user takes over scrolling or focus.
+    heading?.focus();
+    let revealing = true;
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => {
+      if (revealing && heading && document.activeElement === heading) {
+        heading.scrollIntoView({ block: "center", inline: "nearest" });
+      }
+    });
+    const release = (): void => {
+      revealing = false;
+      observer?.disconnect();
+      for (const type of ["wheel", "touchstart", "pointerdown", "keydown", "focusin"]) {
+        document.removeEventListener(type, release, true);
+      }
+    };
+    if (heading && observer) {
+      // Observe layout ancestors: async siblings can move the heading without
+      // changing the heading's own size or crossing an intersection threshold.
+      for (let element = heading.parentElement; element; element = element.parentElement) {
+        observer.observe(element);
+      }
+      for (const type of ["wheel", "touchstart", "pointerdown", "keydown", "focusin"]) {
+        document.addEventListener(type, release, { capture: true, passive: true });
+      }
+    }
     return () => {
+      release();
       const active = document.activeElement;
       if ((active === document.body || pane?.contains(active)) && previous instanceof HTMLElement && previous.isConnected) previous.focus();
     };

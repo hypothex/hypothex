@@ -355,6 +355,9 @@ A view tab's Metric selector requests a new ranking for the selected recorded
 Seeds (Repeats for system benchmarks) toggles the leaderboard seed or repeat
 marks while retaining the authored test-set interval. Selecting a run on training, agent evaluation, agent iteration or system
 benchmark task pages opens its stored details; Open run opens the full route.
+The selected detail heading receives focus and stays visible while delayed
+charts finish loading. Scrolling, touching, clicking, typing, or moving focus
+ends this automatic reveal so subsequent layout changes respect user navigation.
 
 Training run and checkpoint tables page through twenty runs at a time. Best
 checkpoint step comes from recorded ``val/top1`` checkpoint metadata. Evaluated

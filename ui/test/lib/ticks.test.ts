@@ -36,6 +36,15 @@ describe("niceTicks", () => {
     expect(niceTicks(Number.NaN, 1)).toEqual([]);
   });
 
+  test("ends that differ only by float noise are one tick, not an endless loop", () => {
+    expect(niceTicks(0.3, 0.1 + 0.2)).toEqual([0.3]);
+    expect(niceTicks(0.9131, 0.9131 + 1.2e-16)).toEqual([0.9131]);
+  });
+
+  test("a span that overflows gives the two ends", () => {
+    expect(niceTicks(-1e308, 1e308)).toEqual([-1e308, 1e308]);
+  });
+
   test("any range gives >= 2 ascending ticks on one 1/2/2.5/5 step", () => {
     let s = 7;
     const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
@@ -64,6 +73,26 @@ describe("niceExtent", () => {
     expect(niceExtent(0, 0)).toEqual([0, 1]);
     expect(niceExtent(5, 5)).toEqual([4.6, 5.4]);
     expect(niceExtent(Number.NaN, 1)).toEqual([0, 1]);
+  });
+
+  test("pads ends that differ only by float noise", () => {
+    expect(niceExtent(0.3, 0.1 + 0.2)).toEqual([0.28, 0.32]);
+    const [lo, hi] = niceExtent(0.9131, 0.9131 + 2.2e-16);
+    expect(hi).toBeGreaterThan(lo);
+    expect(lo).toBeLessThanOrEqual(0.9131);
+    expect(hi).toBeGreaterThanOrEqual(0.9131);
+  });
+
+  test("keeps finite, ordered ends for an overflowing or subnormal domain", () => {
+    for (const [a, b] of [
+      [-1e308, 1e308],
+      [0, 1.7e308],
+      [1e-323, 1e-323],
+    ] as const) {
+      const [lo, hi] = niceExtent(a, b);
+      expect(Number.isFinite(lo) && Number.isFinite(hi)).toBe(true);
+      expect(hi).toBeGreaterThan(lo);
+    }
   });
 });
 

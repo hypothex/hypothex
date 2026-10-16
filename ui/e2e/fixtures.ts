@@ -69,7 +69,7 @@ export interface OverviewLite {
 /** The fields of `GET /api/v1/tasks/{project}/{task}/runs` (B5 `TaskRuns`) the specs read. */
 export interface TaskRunsLite {
   primary: string;
-  runs: { run_id: string; name: string; tags: string[]; archived: boolean; primary: number | null }[];
+  runs: { run_id: string; name: string; renamed: boolean; tags: string[]; archived: boolean; primary: number | null }[];
   groups: { group_id: string; name: string; run_ids: string[] }[];
   score_keys: string[];
   metric_names: string[];

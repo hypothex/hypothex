@@ -266,6 +266,13 @@ describe("ViewEditor", () => {
     expect(calls.find((c) => c.method === "PUT")?.url).toBe(`${VIEWS}/acc2`);
   });
 
+  test("no breadcrumb of its own: the top bar already shows project / task / view", async () => {
+    renderEditor("new");
+    await waitFor(() => expect(status()).toContain("✓ valid · 0 panels"));
+    expect(document.querySelector(".hx-ed .crumb")).toBeNull();
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("New view");
+  });
+
   test("a new name that is already a view blocks Save and never PUTs", async () => {
     renderEditor("new");
     await waitFor(() => expect(status()).toContain("✓ valid · 0 panels"));

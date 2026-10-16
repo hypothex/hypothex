@@ -1,7 +1,8 @@
 /**
  * Keyboard focus for popover menus (WAI-ARIA menu button pattern): the first item takes
  * focus when the menu opens, the arrow keys (and Home/End) move between enabled items,
- * and focus goes back to the trigger when the menu closes from inside.
+ * and focus goes back to the trigger when the menu closes while focus was inside it (not
+ * after Tab moved focus out).
  */
 import { type KeyboardEvent, type RefObject, useEffect, useRef } from "react";
 
@@ -29,9 +30,19 @@ export function useMenuFocus(open: boolean, menu: RefObject<HTMLElement | null>,
       const track = (): void => {
         inside.current = root?.contains(document.activeElement) ?? false;
       };
+      // focus moving to another element outside (Tab out) leaves the menu; focus moving to
+      // nothing (the focused item removed, a click on plain page) keeps the last state
+      const leave = (e: FocusEvent): void => {
+        const to = e.relatedTarget;
+        if (to instanceof Node && !root?.contains(to)) inside.current = false;
+      };
       track();
       root?.addEventListener("focusin", track);
-      return () => root?.removeEventListener("focusin", track);
+      root?.addEventListener("focusout", leave);
+      return () => {
+        root?.removeEventListener("focusin", track);
+        root?.removeEventListener("focusout", leave);
+      };
     }
     // closed: the menu is gone, so focus that was inside it fell to the body
     const lost = document.activeElement === null || document.activeElement === document.body;

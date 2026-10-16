@@ -55,15 +55,22 @@ test("Tags: add with Enter, remove with ×; each posts a command", async () => {
   expect(calls[1]?.body).toMatchObject({ add: ["final"], remove: [] });
 });
 
-test("an existing tag or an empty one posts nothing; Escape closes the input", () => {
+test("an existing tag or an empty one posts nothing; Escape closes the input", async () => {
   const calls = mockApi({});
   renderWithClient(<PropsSidebar ctx={makeCtx()} />);
+  const box = () => screen.queryByRole("textbox", { name: "New tag" });
   fireEvent.click(screen.getByRole("button", { name: "+ Add" }));
   fireEvent.change(screen.getByRole("textbox", { name: "New tag" }), { target: { value: "best" } });
   fireEvent.keyDown(screen.getByRole("textbox", { name: "New tag" }), { key: "Enter" });
+  expect(box()).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "+ Add" }));
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "New tag" }), { key: "Enter" });
+  expect(box()).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "+ Add" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "New tag" }), { target: { value: "draft" } });
   fireEvent.keyDown(screen.getByRole("textbox", { name: "New tag" }), { key: "Escape" });
-  expect(screen.queryByRole("textbox", { name: "New tag" })).toBeNull();
+  expect(box()).toBeNull();
+  await new Promise((r) => setTimeout(r, 0));
   expect(calls).toHaveLength(0);
 });
 

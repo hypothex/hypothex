@@ -102,7 +102,17 @@ def test_public_shell_is_exact_and_read_only(home: Path, tmp_path: Path) -> None
     (ui / "index.html").write_text("<html>gate</html>")
     (ui / "assets" / "app.js").write_text("app")
     with TestClient(create_app(home, hub=False, auth_token=TOKEN, ui_dir=ui), base_url=BASE) as c:
-        for path in ["/", "/index.html", "/assets/app.js", "/t/p/t", "/r/r1", "/s/p/s1", "/x/a/b"]:
+        for path in [
+            "/",
+            "/index.html",
+            "/assets/app.js",
+            "/t/p/t",
+            "/r/r1",
+            "/s/p/s1",
+            "/x/a/b",
+            "/hosts",
+            "/queue",
+        ]:
             assert c.get(path).status_code == 200, path
             assert c.head(path).status_code == 200, path
             assert c.post(path, json={}).status_code == 401, path

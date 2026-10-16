@@ -137,6 +137,8 @@ WS_POLL_SECONDS = 0.5
 WS_BATCH = 500
 UI_DIST = Path(__file__).resolve().parent.parent / "ui_dist"
 NO_UI_FALLBACK = frozenset({"api", "mcp", ".well-known", "assets"})
+#: Browser routes of the UI (``ui/src/router.tsx``) that load the app shell without a token.
+UI_ROUTE = re.compile(r"/(?:hosts|queue|r/[^/]+|[xs]/[^/]+/[^/]+|t/[^/]+/[^/]+(?:/edit/[^/]+)?)/?")
 FILE_MAX_BYTES = 200 * 1024 * 1024
 FILE_CHUNK_BYTES = 64 * 1024
 GPU_CACHE_SECONDS = 10.0
@@ -1917,11 +1919,7 @@ def create_app(
         candidate = (ui / path.lstrip("/")).resolve()
         if candidate.is_relative_to(ui.resolve()) and candidate.is_file():
             return True
-        return (
-            path == "/"
-            or re.fullmatch(r"/(?:r/[^/]+|[xs]/[^/]+/[^/]+|t/[^/]+/[^/]+(?:/edit/[^/]+)?)/?", path)
-            is not None
-        )
+        return path == "/" or UI_ROUTE.fullmatch(path) is not None
 
     hosts = allowed_hosts(host)
     # innermost: the guards answer first, and the hub's tunnels carry compressed JSON

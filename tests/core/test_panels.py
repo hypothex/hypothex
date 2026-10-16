@@ -1743,8 +1743,10 @@ def test_stat_strip_reuses_primary_examples_for_cost_denominators(
     assert reads == [path]
 
 
-def _key_score(ctx: Context, rec: RunRecord, key: str, value: float) -> None:
-    score = ScoreRecord(metric="accuracy", version="v1", key=key, value=value, created_at=utcnow())
+def _key_score(
+    ctx: Context, rec: RunRecord, key: str, value: float, metric: str = "accuracy"
+) -> None:
+    score = ScoreRecord(metric=metric, version="v1", key=key, value=value, created_at=utcnow())
     ctx.add_score(rec, score)
 
 
@@ -1812,12 +1814,26 @@ def test_compare_without_a_model_keeps_every_model_and_renders_bars(
 def test_compare_direction_follows_the_compared_metric(ctx: Context, toy_repo: Path) -> None:
     cfg_path = toy_repo / "hypothex.yaml"
     cfg = yaml.safe_load(cfg_path.read_text())
-    cfg["metrics"]["accuracy"]["higher_is_better"] = False
+    # the primary (accuracy) stays higher-is-better; both compared metrics are lower
+    cfg["metrics"]["broken"]["higher_is_better"] = False
+    cfg["metrics"]["latency"] = {
+        "version": "v1",
+        "fn": "toymetrics:accuracy",
+        "higher_is_better": False,
+    }
+    cfg["tasks"]["toy-broken"]["metrics"].append("latency")
     cfg_path.write_text(yaml.safe_dump(cfg))
-    _key_score(ctx, _run(ctx, toy_repo, "a", "aaaa"), "set-1.m.err", 0.1)
-    data = {"datasets": ["set-1"], "metrics": ["err"]}
-    result = query_panel(ctx, "toy", "toy-acc", _panel("compare", data=data))
-    assert result.meta["higher_is_better"] is False
+    rec = _run(ctx, toy_repo, "a", "aaaa", task="toy-broken")
+    _key_score(ctx, rec, "set-1.m.err", 0.1, metric="broken")
+    _key_score(ctx, rec, "set-1.m.p50", 3.0, metric="latency")
+    one = {"datasets": ["set-1"], "metrics": ["err"]}
+    result = query_panel(ctx, "toy", "toy-broken", _panel("compare", data=one))
+    assert [r["key"] for r in result.rows] == ["broken/set-1.m.err"]
+    assert result.meta["higher_is_better"] is False  # the compared metric's direction
+    two = {"datasets": ["set-1"], "metrics": ["err", "p50"]}
+    result = query_panel(ctx, "toy", "toy-broken", _panel("compare", data=two))
+    assert [r["key"] for r in result.rows] == ["broken/set-1.m.err", "latency/set-1.m.p50"]
+    assert result.meta["higher_is_better"] is True  # two metrics: the task primary's direction
 
 
 def test_compare_caps_rows_and_warns(

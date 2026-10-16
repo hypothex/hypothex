@@ -8,7 +8,7 @@ integrated workflows are acceptance requirements, not just unit-test totals.
 ## Baseline and scope
 
 - Plan branch: `p3-plans`, initial head `4392c8b90f96a23b6d35477520f86ebf45075bb1`.
-- Current fetched main: `a4441256f39d014d9ad43dea976af1b448f163e3`.
+- Current fetched main: `e73b8105df32a1d2488477c48e680cb5de922771` (UI v5).
 - Existing draft PR: https://github.com/hypothex/hypothex/pull/22.
 - Authoritative scope: the Phase 3 contract, backend/frontend plans and mockups
   under `docs/superpowers/plans/` and `docs/mockups/phase3/`.
@@ -123,3 +123,43 @@ primary round 4 must approve before independent adversarial review.
 The old 9cbe8a3 macOS 3.11 retry was also cancelled before acquiring a runner.
 It is superseded by the current plans head; no old-head rerun is needed. PR22
 remains watched for current-head results.
+
+
+## 2026-10-16 recovery and moved-main refresh
+
+Primary R4 approved e10e6ff against a444125; all six CI checks passed that head.
+Neither interrupted adversarial attempt returned a final verdict. The planned
+T3 restart was interrupted before launch, and temporary evidence later vanished.
+No Phase 3 implementation was performed. This is an unfinished review cycle.
+
+Recovered p3-plans in /tmp/hx-p3-plans and merged current main e73b810 without
+conflicts at 1987f72. Current source/UI/tests/dependencies/workflows match main.
+The immutable diagnostic input is /tmp/hx-p3-review-input at 1987f72. No tracked
+file in the user's main checkout was edited.
+
+Durable prompts, task IDs, recovered primary result, drift inventory and new
+reports live at /Users/shreyasv/Desktop/code/hypothex-phase3-evidence/2026-10-16/.
+Three app-owned tasks were launched: frontend-refresh, backend-refresh and
+adversarial-diagnostic; each task.json records its exact taskId. Both refresh
+writers have completed and frozen their files. The parent is reconciling the
+contract and receipts. The diagnostic completed against immutable1987f72 with
+NOT LGTM (2 P1,7 P2); all nine have responses in main-refresh and current plan
+corrections. Neither diagnostic nor writer verdict approves implementation.
+
+Main is already SQLite schema 4 with run names, literal search and new query
+interfaces. Phase 3 must advance to 5 and retain genuine schema-3 and schema-4
+upgrade fixtures. UI-v5 routes/components/tests must replace obsolete anchors.
+The cleanup race and zero-timeout WebSocket concerns require fresh reproduction.
+
+Next: freeze/push the complete refreshed draft revision, obtain renewed Claude
+LGTM and then independent adversarial LGTM. Only then begin implementation.
+
+Parent integration verified all three worker plan hashes, all17 backend evidence
+hashes, 51 frontend source hashes and all12 extracted final cleanup helper hashes.
+Read all26 frontend tasks, the backend refresh diff and Task49 changes. The
+contract now names current UI-v5 owners/routes, exact-byte confirmation,
+environment-aware cleanup markers, Mine's one-section scope and both real
+upgrade inputs. Runtime/source/UI/tests/workflows/dependencies remain identical
+to e73b810. The parent additionally corrected the planned cleanup-marker helper
+to trim trailing directory separators, with a fresh bounded snippet test; this
+supersedes the frontend worker's hash and does not constitute runtime validation.

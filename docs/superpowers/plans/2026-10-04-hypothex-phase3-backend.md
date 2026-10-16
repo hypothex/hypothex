@@ -12,7 +12,7 @@
 
 **Contract:** `docs/superpowers/plans/2026-10-04-hypothex-phase3-contract.md`, sections 1–9 and 11. Every name, field, route, and file listed there is exact. This plan adds private helpers, a few public helpers (each task's Interfaces lists them), and optional keyword arguments (`AuthStore(session_days=)`, `leaderboard_table(directions=, value_formats=)`, `send_slack(transport=)`, `send_email(ssl_context=)`, `Notifier(ssl_context=)`, `send_digest(since=)`, `upsert(keep_max=)`, `hub_call(text=, agent=)`, `create_app(auth=, public_url=, notifier=)`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)`); it never renames or reshapes a contract name. The Assembly notes at the end list every place where the contract was ambiguous or silent and how this plan reads it.
 
-**Prerequisite:** current merged main is `a4441256f39d014d9ad43dea976af1b448f163e3` (PR23 backlog and strict bound comparisons included), checked in `/tmp/hx-final-main`. Earlier `e27a3a2`, `8df4760` and `54259b0` pins describe historical reviews only. This refresh addresses Claude round 1; it does not claim either current gate has passed. **Runtime implementation is blocked until Claude, then the adversarial reviewer, each return LGTM on the same refreshed plan revision.** Material plan changes require affected re-review and reconfirmation by the primary reviewer before the adversarial verdict; typo/status-only corrections do not reset the gates. Recheck touched replacement anchors against this pin before applying them; if main changes, refresh and review before runtime edits. Preserve `PanelData.primary`, metric-aware cache variants, `max_points` and the 100-reference limit; selected-primary ranking/direction/unit/per-example evidence and curves metadata; cost completeness, bound score/population/repeat fields; and `compare_examples(..., require_bound=False)` plus HTTP `require_bound`. Keep the existing `BareMcp` exact-path route and mounted MCP child. Preserve PR23/24 regressions: `tests/core/test_backlog_backend.py`, `tests/core/test_bound_comparison.py`, `tests/test_eval_worker.py`, the cost/record/query/API regression files, and frontend `Task.test.tsx`, `selectedRun`, `trainingDetails`, `TaskInsights`, `Leaderboard.test.tsx`, `backlog.spec.ts`, `examples-layout.spec.ts`. No runtime source changes are part of this plan-only refresh. **Frontend:** the companion frontend plan consumes the same contract and pin.
+**Prerequisite:** current merged main is `e73b8105df32a1d2488477c48e680cb5de922771` (PR25 UI v5, naming/task workspace, PR23 backlog and strict bound comparisons included), read-only in `/tmp/hx-p3-main-current`; the plan merge base is `1987f7297ff6d966641f43fe34271a6430532d1b` in `/tmp/hx-p3-plans`. Earlier `e27a3a2`, `8df4760` and `54259b0` pins describe historical reviews only. This 2026-10-16 refresh supersedes the a444125 integration assumptions; historical R4 approval does not cover it; it does not claim either current gate has passed. **Runtime implementation is blocked until Claude, then the adversarial reviewer, each return LGTM on the same refreshed plan revision.** Material plan changes require affected re-review and reconfirmation by the primary reviewer before the adversarial verdict; typo/status-only corrections do not reset the gates. Recheck touched replacement anchors against this pin before applying them; if main changes, refresh and review before runtime edits. Preserve `PanelData.primary`, metric-aware cache variants, `max_points` and the 100-reference limit; selected-primary ranking/direction/unit/per-example evidence and curves metadata; cost completeness, bound score/population/repeat fields; and `compare_examples(..., require_bound=False)` plus HTTP `require_bound`. Keep the existing `BareMcp` exact-path route and mounted MCP child. Preserve PR23/24 regressions: `tests/core/test_backlog_backend.py`, `tests/core/test_bound_comparison.py`, `tests/test_eval_worker.py`, the cost/record/query/API regression files, and frontend `pages.spec.ts`, `selectedRun`, `trainingDetails`, `TaskInsights`, `Leaderboard.test.tsx`, `backlog.spec.ts`, `examples-layout.spec.ts`. No runtime source changes are part of this plan-only refresh. **Frontend:** the companion frontend plan consumes the same contract and pin.
 
 ## Global Constraints
 
@@ -54,7 +54,7 @@ src/hypothex/
     records.py                 RunRecord.owner (4)
     sweeps.py                  SweepSpec.owner, launch_sweep(owner=) (4)
     control.py                 rerun/reinfer(owner=) (4)
-    index.py                   SCHEMA_VERSION 4, RunRow.owner, list_runs(owner=) (4); dialects,
+    index.py                   SCHEMA_VERSION 5, RunRow.owner, list_runs(owner=) (4); dialects,
                                upsert, json_text, open_index, IndexUnavailableError,
                                IndexSchemaError, HEAD_REVISION, Index.pending, repair_pending (34)
     migrations/          NEW   Alembic env + 0001_phase3; alembic_config, upgrade, current (35)
@@ -62,7 +62,9 @@ src/hypothex/
     notebook.py          NEW   lab notebook (8)
     config.py                  BaselineSpec, TaskSpec.baselines, checks (9)
     leaderboard.py             BaselineRow, Leaderboard.baselines, baseline_url (9);
-                               metric_higher_is_better (12)
+                               reuse key_higher_is_better (12); dialect-aware _index_key (34)
+    overview.py                RecentRun.owner (27); portable recent-run JSON query (34)
+    taskruns.py                TaskRun.owner (27), preserving every UI-v5 workspace field
     export.py            NEW   ExportOptions, tables, render latex/markdown/csv (10-12)
     digest.py            NEW   weekly digest (18-19)
     storage.py           NEW   report, plan, apply, cleaned.json, cleanup_lock (20-22)
@@ -1496,20 +1498,20 @@ git commit -m "feat(settings): resolve secrets from env or a 0600 secrets.env an
 
 Contract 1.2, 1.3, 1.10 (store, scopes, pairing). Nothing here touches HTTP; Part 7 wires it in.
 
-### Task 4: `owner` on runs, sweeps, and launch requests; index schema 4
+### Task 4: `owner` on runs, sweeps, and launch requests; index schema 5
 
 **Files:**
 - Modify: `src/hypothex/core/records.py` (`RunRecord.owner`)
 - Modify: `src/hypothex/core/execution.py` (`RunRequest.owner`, copied in `_prepare_in`)
 - Modify: `src/hypothex/core/control.py` (`rerun`, `reinfer` take `owner`)
 - Modify: `src/hypothex/core/sweeps.py` (`SweepSpec.owner`, `launch_sweep(owner=)`, `_requests` copies it)
-- Modify: `src/hypothex/core/index.py` (`SCHEMA_VERSION = 4`, `RunRow.owner`, `list_runs(owner=)`)
+- Modify: `src/hypothex/core/index.py` (`SCHEMA_VERSION = 5`, `RunRow.owner`, `list_runs(owner=)`)
 - Test: `tests/core/test_records_phase3.py`
 
 **Interfaces:**
-- Produces (contract 1.2, exact): `RunRecord.owner: str | None = None`; `SweepSpec.owner: str | None = None`; `RunRequest.owner: str | None = None` (copied to `RunRecord.owner`); `SCHEMA_VERSION = 4`; `Index.list_runs(..., owner: str | None = None)`.
+- Produces (contract 1.2, exact): `RunRecord.owner: str | None = None`; `SweepSpec.owner: str | None = None`; `RunRequest.owner: str | None = None` (copied to `RunRecord.owner`); `SCHEMA_VERSION = 5`; `Index.list_runs(..., owner: str | None = None)`.
 - Produces (additive keywords): `control.rerun(..., owner: str | None = None)`, `control.reinfer(..., owner: str | None = None)` (the child run is owned by the caller); `launch_sweep(..., owner: str | None = None)` (stored on the spec; every run of the sweep, and of later `extend_sweep` calls, gets `spec.owner`).
-- An index with `schema_version` 3 is rebuilt from files on the next `Context.open` (phase 1 rule).
+- An index with `schema_version` 3 or current-main 4 is rebuilt from files on the next `Context.open` (phase 1 rule).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1519,6 +1521,7 @@ Create `tests/core/test_records_phase3.py`:
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 from hypothex.core import control
@@ -1600,20 +1603,21 @@ def test_list_runs_filters_by_owner(ctx: Context) -> None:
     assert {r.run_id for r in ctx.index.list_runs()} == {"a", "b", "c"}
 
 
-def test_schema_3_index_is_rebuilt(tmp_path: Path) -> None:
+@pytest.mark.parametrize("old_version", ["3", "4"])
+def test_old_index_marker_requests_rebuild(tmp_path: Path, old_version: str) -> None:
     from sqlalchemy.orm import Session
 
     index = Index(tmp_path / "index.db")
     with Session(index.engine) as session, session.begin():
-        session.merge(MetaRow(key="schema_version", value="3"))
-    assert SCHEMA_VERSION == 4
+        session.merge(MetaRow(key="schema_version", value=old_version))
+    assert SCHEMA_VERSION == 5
     assert Index(tmp_path / "index.db").rebuilt_schema is True
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/core/test_records_phase3.py -v`
-Expected: FAIL; `test_owner_round_trips` with `AttributeError: 'RunRecord' object has no attribute 'owner'`, `test_request_owner_reaches_the_record` with `TypeError: RunRequest.__init__() got an unexpected keyword argument 'owner'`, `test_schema_3_index_is_rebuilt` with `assert 3 == 4`.
+Expected: FAIL; `test_owner_round_trips` with `AttributeError: 'RunRecord' object has no attribute 'owner'`, `test_request_owner_reaches_the_record` with `TypeError: RunRequest.__init__() got an unexpected keyword argument 'owner'`, `test_old_index_marker_requests_rebuild` with `assert 4 == 5`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -1640,17 +1644,17 @@ In `src/hypothex/core/sweeps.py`:
 - in `_requests`, in the `RunRequest(...)` call, after `created_by=spec.created_by,` add `owner=spec.owner,`.
 
 In `src/hypothex/core/index.py`:
-- `SCHEMA_VERSION = 4`;
+- `SCHEMA_VERSION = 5`;
 - in `RunRow`, after `starred` add `owner: Mapped[str | None] = mapped_column(String, nullable=True, index=True)`;
-- in the shared `_run_values(record)` dictionary, after `"starred": record.starred,` add `"owner": record.owner,`; retain `"parent": record.parent`. Both `upsert_run` and staged `_add_run` use this helper, so live writes and rebuilds retain owner and parent;
-- add `owner: str | None = None,` to `list_runs` and `count_runs`, document it alongside their existing filters, and add an `owner: str | None = None` keyword to `_filter_runs`. Pass `owner=owner` at both calls to `_filter_runs`, retaining all existing filters and keyset pagination. In `_filter_runs`, before its return, add:
+- in the shared `_run_values(record)` dictionary, after `"starred": record.starred,` add `"owner": record.owner,`; retain `"parent": record.parent` and `"name": record.name`. Both `upsert_run` and staged `_add_run` use this helper, so live writes and rebuilds retain owner, parent and name;
+- add `owner: str | None = None,` to `list_runs` and `count_runs`, document it alongside their existing filters, and add an `owner: str | None = None` keyword to `_filter_runs`. Pass `owner=owner` at both calls to `_filter_runs`, retaining `search` (literal name/id matching), all existing filters and keyset pagination. In `_filter_runs`, before its return, add:
 
 ```python
     if owner is not None:
         stmt = stmt.where(RunRow.owner == owner)
 ```
 
-The existing parent index, `_touch` generation/change markers, and all staging/recovery helpers stay. Extend `test_list_runs_filters_by_owner` to assert `count_runs(owner="alice") == 1` and owner-filtered keyset pagination. Add a file-backed child with `owner="alice", parent="a"`, rebuild through `rebuild_index`, then assert both the returned record and SQL `RunRow.owner`/`RunRow.parent` retain those values. Reopen a home whose schema marker was set to 3 and assert `Context.open` rebuilds it to 4 while retaining that child and its scores. Keep the original schema-marker probe as a narrow constructor test, not evidence of a completed rebuild.
+The existing name and parent indexes, `_touch` generation/change markers, and all staging/recovery helpers stay. Extend `test_list_runs_filters_by_owner` to assert `count_runs(owner="alice") == 1` and owner-filtered keyset pagination. Add a file-backed child with `owner="alice", parent="a", name="wide %_ beam"`, rebuild through `rebuild_index`, then assert both the returned record and SQL `RunRow.owner`/`RunRow.parent`/`RunRow.name` retain those values. Reopen a home whose schema marker was set to 3 or 4 and assert `Context.open` rebuilds it to 5 while retaining that child and its scores. Keep the original schema-marker probe as a narrow constructor test, not evidence of a completed rebuild.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1664,11 +1668,14 @@ Expected: every test passes; lint, format, and types clean.
 
 ```bash
 git add src/hypothex/core/records.py src/hypothex/core/execution.py src/hypothex/core/control.py src/hypothex/core/sweeps.py src/hypothex/core/index.py tests/core/test_records_phase3.py
-git commit -m "feat(records): run and sweep owner, owner filter, index schema 4"
+git commit -m "feat(records): run and sweep owner, owner filter, index schema 5"
 ```
 
 ---
-**Additive JSON-key snapshot acceptance for Task 4.** Include `tests/cli/test_json_snapshots.py` and `tests/cli/snapshots/json_keys.json` in this task. Extend local fake fixtures to exercise `owner` on run and sweep record payloads (empty lists alone cannot expose nested paths). First run `uv run pytest tests/cli/test_json_snapshots.py` without update mode and record the expected additive failure. Then run `HYPOTHEX_UPDATE_SNAPSHOTS=1 uv run pytest tests/cli/test_json_snapshots.py`, inspect `git diff -- tests/cli/snapshots/json_keys.json`, and accept only the intended additions while preserving all existing keys, including bound-score and pricing metadata. Any deletion/rename/unrelated addition is a defect to investigate, not an automatic golden update. Rerun the same test without the update variable and include fixture assertions for populated values. Task 14 uses this same process for `sweep show.cost_complete`.
+**Additive JSON-key snapshot acceptance for Task 4.** Include `tests/cli/test_json_snapshots.py` and `tests/cli/snapshots/json_keys.json` in this task. Extend local fake fixtures to exercise `owner` on run and sweep record payloads (empty lists alone cannot expose nested paths). First run `uv run pytest tests/cli/test_json_snapshots.py` without update mode and record the expected additive failure. Then run `HYPOTHEX_UPDATE_SNAPSHOTS=1 uv run pytest tests/cli/test_json_snapshots.py`, inspect `git diff -- tests/cli/snapshots/json_keys.json`, and accept only the intended additions while preserving all existing keys, including bound-score and pricing metadata, `name`, task `n_finished`, view `datasets`/`model` and all current-main JSON paths; use e73b810 snapshots as the starting oracle. Any deletion/rename/unrelated addition is a defect to investigate, not an automatic golden update. Rerun the same test without the update variable and include fixture assertions for populated values. Task 14 uses this same process for `sweep show.cost_complete`.
+
+
+**Real upgrade evidence:** the marker-only constructor test above is not a legacy-schema fixture. Task 49 restores independently generated, immutable schema-3 (`a444125`) and schema-4 (`e73b810`) SQL/file fixtures. Exercise both upgrades to 5, run-name search/count/pagination together with owner, all carried rows and deferred metrics, and unchanged bound-score bytes; do not manufacture a schema-4 database using Phase 3 models.
 
 ### Task 5: Scopes, principals, and ownership rules (`hypothex.auth`)
 
@@ -1963,7 +1970,7 @@ from hypothex.auth.store import Principal, ScopeError
 
 RunAction = Literal[
     "stop", "archive", "tag", "star", "note", "rerun", "reinfer", "reeval", "cancel_queued",
-    "extend", "pull",
+    "extend", "pull", "name",
 ]  # fmt: skip
 OWNER_ACTIONS = frozenset({"stop", "archive", "cancel_queued"})
 
@@ -4502,7 +4509,7 @@ git commit -m "feat(leaderboard): paper baselines per task with version match an
 ```
 
 ---
-**Additive JSON-key snapshot acceptance for Task 9.** Include `tests/cli/test_json_snapshots.py` and `tests/cli/snapshots/json_keys.json` in this task. Extend local fake fixtures to exercise `baselines` and populated baseline item paths (empty lists alone cannot expose nested paths). First run `uv run pytest tests/cli/test_json_snapshots.py` without update mode and record the expected additive failure. Then run `HYPOTHEX_UPDATE_SNAPSHOTS=1 uv run pytest tests/cli/test_json_snapshots.py`, inspect `git diff -- tests/cli/snapshots/json_keys.json`, and accept only the intended additions while preserving all existing keys, including bound-score and pricing metadata. Any deletion/rename/unrelated addition is a defect to investigate, not an automatic golden update. Rerun the same test without the update variable and include fixture assertions for populated values. Task 14 uses this same process for `sweep show.cost_complete`.
+**Additive JSON-key snapshot acceptance for Task 9.** Include `tests/cli/test_json_snapshots.py` and `tests/cli/snapshots/json_keys.json` in this task. Extend local fake fixtures to exercise `baselines` and populated baseline item paths (empty lists alone cannot expose nested paths). First run `uv run pytest tests/cli/test_json_snapshots.py` without update mode and record the expected additive failure. Then run `HYPOTHEX_UPDATE_SNAPSHOTS=1 uv run pytest tests/cli/test_json_snapshots.py`, inspect `git diff -- tests/cli/snapshots/json_keys.json`, and accept only the intended additions while preserving all existing keys, including bound-score and pricing metadata, `name`, task `n_finished`, view `datasets`/`model` and all current-main JSON paths; use e73b810 snapshots as the starting oracle. Any deletion/rename/unrelated addition is a defect to investigate, not an automatic golden update. Rerun the same test without the update variable and include fixture assertions for populated values. Task 14 uses this same process for `sweep show.cost_complete`.
 
 ### Task 10: Export tables from a leaderboard (`hypothex.core.export`, part 1)
 
@@ -5547,15 +5554,15 @@ git commit -m "feat(export): render booktabs LaTeX, Markdown, and CSV with golde
 
 **Files:**
 - Modify: `src/hypothex/core/export.py` (`compare_table`, `export_task`, `export_compare`)
-- Modify: `src/hypothex/core/leaderboard.py` (`metric_higher_is_better`; `_higher_is_better` calls it)
+- Consume unchanged: `src/hypothex/core/leaderboard.py` (`key_higher_is_better`, `primary_field`)
 - Create: `tests/core/golden/export/compare.md`, `compare.csv`
 - Test: `tests/core/test_export.py` (append)
 
 **Interfaces:**
 - Consumes: `get_leaderboard`, `resolve_task` (`hypothex.core.queries`), `Context`, `group_label`.
 - Produces (contract 1.6, exact): `compare_table(ctx, run_ids, opts)`, `export_task(ctx, task, project, opts)`, `export_compare(ctx, run_ids, opts)`.
-- Produces (public helper): `task_table(ctx, task, project, opts) -> ExportTable` (the table `export_task` renders; `hx export --json` returns it, Task 43); `COMPARE_MAX_RUNS = 20`; `leaderboard.metric_higher_is_better(config, kind, ref) -> bool` (the leaderboard's one direction rule, now shared: a percentile key of a `system_bench` task, e.g. `latency/p95`, ranks lower-first whatever the metric says; else the metric's `higher_is_better`).
-- Rules: `compare_table` takes 2 to 20 runs (else `RunError`); one row per run (`kind="run"`, `n=1`, label = hypothesis clause or run id, key = run id); scores are each run's newest valid score at its project's current metric versions; columns are `opts.metrics` or the first run's task primary, then every other key, sorted; each column's direction is `metric_higher_is_better` for the run's task kind, so a benchmark's latency 300 is best over 440, as on the leaderboard; a shown metric whose version or direction differs between the compared runs' projects is refused (`RunError` "accuracy is accuracy@v1 in toy and accuracy@v2 in toy2; compare runs at one metric version"), and so is a column that ranks lower-first for some runs and higher-first for others; never merged into one column; no seed or test-set noise; `percent` multiplies a column by 100 only when it is a fraction (`headlines.value_format` of its unit and values is `fraction`, the leaderboard's rule; a latency of 440 ms stays 440) and the footnote `values ×100` appears only when a column was scaled; footnotes `metric versions: ...` and `one run per row`. `export_task` passes every column's `metric_higher_is_better` and independently computed `value_format(metric_unit(...), values, direction)` to `leaderboard_table` (a `system_bench` task's other percentile keys rank lower-first too).
+- Produces (public helper): `task_table(ctx, task, project, opts) -> ExportTable` (the table `export_task` renders; `hx export --json` returns it, Task 43); `COMPARE_MAX_RUNS = 20`; existing `leaderboard.key_higher_is_better(config, spec, key) -> bool` (explicit direction wins; an unset system_bench percentile defaults lower, all other unset directions default higher). No new direction API is introduced.
+- Rules: `compare_table` takes 2 to 20 runs (else `RunError`); one row per run (`kind="run"`, `n=1`, label = hypothesis clause or run id, key = run id); scores are each run's newest valid score at its project's current metric versions; columns are `opts.metrics` or the first run's task primary, then every other key, sorted; each column's direction is `key_higher_is_better` for the run's task spec, so an unset-direction benchmark's latency 300 is best over 440, as on the leaderboard; a shown metric whose version or direction differs between the compared runs' projects is refused (`RunError` "accuracy is accuracy@v1 in toy and accuracy@v2 in toy2; compare runs at one metric version"), and so is a column that ranks lower-first for some runs and higher-first for others; never merged into one column; no seed or test-set noise; `percent` multiplies a column by 100 only when it is a fraction (`headlines.value_format` of its unit and values is `fraction`, the leaderboard's rule; a latency of 440 ms stays 440) and the footnote `values ×100` appears only when a column was scaled; footnotes `metric versions: ...` and `one run per row`. `export_task` passes every column's `key_higher_is_better` and independently computed `value_format(metric_unit(...), values, direction)` to `leaderboard_table` (unset-direction percentile keys on `system_bench` rank lower-first too; explicit flags win).
 
 - [ ] **Step 1: Create the golden files**
 
@@ -5734,6 +5741,8 @@ def test_compare_percent_leaves_latency_alone(bench: Context) -> None:
     assert "values ×100" not in table.footnotes
 ```
 
+**Current-main direction/provenance regression matrix:** parametrize `higher_is_better` as omitted/None, explicit True and explicit False for generic and system_bench tasks, configured and alternate primary, percentile and ordinary keys. Compare table arrows, best markers and baseline deltas with the same current-main `get_leaderboard`, `task_runs.key_higher_is_better` and compare-panel result. Explicit True on latency/p95 must rank high, unset must rank low only on system_bench. A generic metric with unset direction and one with explicit True have the same effective direction and must not be refused solely for None versus True; an unset percentile and explicit True on system_bench disagree and must be refused. Round-trip format-2 project snapshots without converting omitted direction to True; legacy format-1 conversion retains its documented semantics. Include `primary_field` cases where `ok=True` accompanies a numeric zero value and an unrelated binary field cannot substitute for the selected metric. Preserve bound-evaluation and current-primary interval tests. Do not accept old lower-first goldens for an explicitly higher-first metric.
+
 - [ ] **Step 3: Run test to verify it fails**
 
 Run: `uv run pytest tests/core/test_export.py -v`
@@ -5741,48 +5750,7 @@ Expected: FAIL at collection with `ImportError: cannot import name 'compare_tabl
 
 - [ ] **Step 4: Write the implementation**
 
-In `src/hypothex/core/leaderboard.py`, replace only `_higher_is_better` with the shared rule and its caller below. Preserve its existing optional `primary` parameter and the separate `build_leaderboard` branch that honors configured direction for an explicitly selected alternate metric; never overwrite that branch. An explicitly selected configured primary keeps current default semantics:
-
-```python
-def metric_higher_is_better(config: ProjectConfig, kind: TaskKind | None, ref: str) -> bool:
-    """
-    Tell which way one score key ranks on a task of ``kind``.
-
-    The leaderboard and the exports share this rule: a percentile key of a
-    ``system_bench`` task (``latency/p95``) ranks lower-first whatever the
-    metric says; any other key follows the metric's ``higher_is_better``.
-
-    Parameters
-    ----------
-    config : ProjectConfig
-        The project config (its ``metrics``).
-    kind : TaskKind or None
-        The task's kind; None for a run without a task.
-    ref : str
-        A metric reference, ``metric`` or ``metric/key``.
-
-    Returns
-    -------
-    bool
-        True when a larger value is better; True for an unknown metric.
-
-    Examples
-    --------
-    >>> metric_higher_is_better(config, "system_bench", "lat/p95")  # doctest: +SKIP
-    False
-    """
-    metric, key = parse_metric_key(ref)
-    if kind == "system_bench" and percentile_of(f"{metric}/{key}"):
-        return False
-    spec = config.metrics.get(metric)
-    return spec.higher_is_better if spec is not None else True
-
-
-def _higher_is_better(
-    config: ProjectConfig, spec: TaskSpec, primary: str | None = None
-) -> bool:
-    return metric_higher_is_better(config, spec.kind, primary or spec.primary)
-```
+Use current-main `leaderboard.key_higher_is_better(config, spec, key)` unchanged. `_higher_is_better` and its alternate-primary branch no longer exist on e73b810. Do not resurrect them or add a competing direction helper. Explicit metric `higher_is_better=True/False` wins for every key; only an unset flag falls back to lower-first system-benchmark percentiles, otherwise higher-first. Preserve `primary_field` (noise must measure the actual selected quantity), `cached_names`, the primary-aware board cache and `ProjectEntry.config_format=2` serialization.
 
 In `src/hypothex/core/export.py`, add to the imports:
 
@@ -5794,11 +5762,11 @@ from hypothex.core.config import ProjectConfig
 from hypothex.core.context import Context
 from hypothex.core.errors import RunError
 from hypothex.core.headlines import metric_unit, value_format
-from hypothex.core.leaderboard import group_label, metric_higher_is_better
+from hypothex.core.leaderboard import group_label, key_higher_is_better
 from hypothex.core.queries import get_leaderboard, resolve_task
 ```
 
-(merge `group_label` and `metric_higher_is_better` into the existing `hypothex.core.leaderboard` import), and append:
+(merge `group_label` and `key_higher_is_better` into the existing `hypothex.core.leaderboard` import), and append:
 
 ```python
 COMPARE_MAX_RUNS = 20
@@ -5842,14 +5810,13 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
     values: dict[str, dict[str, float]] = {}
     versions: dict[str, str] = {}
     units: dict[str, str] = {}
-    # metric -> (version, higher_is_better) -> the first project that scores it so
-    seen: dict[str, dict[tuple[str, bool], str]] = defaultdict(dict)
+    # metric -> version -> first project; effective direction is checked per key below
+    seen: dict[str, dict[str, str]] = defaultdict(dict)
     # column -> effective direction (the leaderboard's rule, per run's task kind) -> a run
     ranks: dict[str, dict[bool, str]] = defaultdict(dict)
     for record in records:
         config = configs[record.project]
         task_spec = config.tasks.get(record.task) if record.task is not None else None
-        kind = task_spec.kind if task_spec is not None else None
         current: dict[str, float] = {}
         for score in sorted(scores.get(record.run_id, []), key=lambda s: s.created_at):
             metric = config.metrics.get(score.metric)
@@ -5865,8 +5832,12 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
             current[ref] = score.value
             units[ref] = metric_unit(ref, metric.unit)
             versions[score.metric] = metric.version
-            seen[score.metric].setdefault((metric.version, metric.higher_is_better), record.project)
-            ranks[ref].setdefault(metric_higher_is_better(config, kind, ref), record.run_id)
+            seen[score.metric].setdefault(metric.version, record.project)
+            higher = (
+                key_higher_is_better(config, task_spec, ref)
+                if task_spec is not None else metric.higher_is_better is not False
+            )
+            ranks[ref].setdefault(higher, record.run_id)
         values[record.run_id] = current
     primary = next(
         (
@@ -5884,7 +5855,7 @@ def compare_table(ctx: Context, run_ids: list[str], opts: ExportOptions) -> Expo
         columns = [*first, *sorted(present - set(first))]
     for name in dict.fromkeys(parse_metric_key(c)[0] for c in columns):
         if len(seen.get(name, {})) > 1:  # one column must mean one metric definition
-            forms = " and ".join(f"{name}@{v} in {p}" for (v, _), p in seen[name].items())
+            forms = " and ".join(f"{name}@{v} in {p}" for v, p in seen[name].items())
             raise RunError(f"{name} is {forms}; compare runs at one metric version")
     for column in columns:
         if len(ranks.get(column, {})) > 1:  # a system_bench percentile ranks lower-first
@@ -5957,13 +5928,13 @@ def task_table(ctx: Context, task: str, project: str | None, opts: ExportOptions
     Returns
     -------
     ExportTable
-        With each column's direction by ``metric_higher_is_better`` (the
+        With each column's direction by ``key_higher_is_better`` (the
         leaderboard's rule for the task's kind).
     """
     entry, name = resolve_task(ctx, task, project)
     board = get_leaderboard(ctx, name, entry.project, primary=opts.primary)
-    kind = entry.config.tasks[name].kind
-    directions = {c: metric_higher_is_better(entry.config, kind, c) for c in _columns(board, opts)}
+    spec = entry.config.tasks[name]
+    directions = {c: key_higher_is_better(entry.config, spec, c) for c in _columns(board, opts)}
     directions[board.primary] = board.higher_is_better
     formats: dict[str, str] = {}
     for column in _columns(board, opts):
@@ -6015,7 +5986,7 @@ def export_compare(ctx: Context, run_ids: list[str], opts: ExportOptions) -> str
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/core/test_export.py tests/core/test_leaderboard.py -v`
-Expected: all export cases, including the selected-primary regressions, pass; the leaderboard tests still pass (`test_system_bench_percentile_is_lower_is_better` now goes through `metric_higher_is_better`).
+Expected: all export cases, including the selected-primary regressions, pass; the leaderboard tests still pass (`test_system_bench_percentile_is_lower_is_better` now goes through `key_higher_is_better`).
 
 Run: `uv run ruff check src/hypothex/core tests/core/test_export.py && uv run ruff format --check src/hypothex/core tests/core/test_export.py && uv run ty check src`
 Expected: clean.
@@ -10135,6 +10106,8 @@ class CleanedArtifact(BaseModel):
     """A deleted artifact, as recorded in ``<run_dir>/.hx/cleaned.json``."""
 
     path: str
+    environment_id: str | None = None
+    """Deletion target environment; None only for legacy manifests with unknown location."""
     bytes: int
     at: datetime
     actor: str
@@ -10300,13 +10273,15 @@ def _run_folder_bytes(run_dir: Path) -> tuple[int, int, float | None]:
     return total, files, newest
 
 
-def _item(record: RunRecord, kind: StorageKind, path: Path | str, **extra: Any) -> StorageItem:
+def _item(
+    ctx: Context, record: RunRecord, kind: StorageKind, path: Path | str, **extra: Any
+) -> StorageItem:
     size, files, mtime = measure_path(Path(path))
     return StorageItem(
         project=record.project,
         run_id=record.run_id,
         host=LOCAL_HOST,
-        environment_id=record.environment_id,
+        environment_id=ctx.descriptor.environment_id,
         kind=kind,
         artifact_kind=extra.get("artifact_kind"),
         path=str(path),
@@ -10341,15 +10316,15 @@ def local_usage(ctx: Context, *, project: str | None = None) -> list[StorageItem
     for record in ctx.index.list_runs(project=project, include_archived=True, limit=None):
         run_dir = ctx.run_dir(record)
         size, files, mtime = _run_folder_bytes(run_dir)
-        items.append(_item(record, "run", run_dir, bytes=size, files=files, mtime=mtime))
+        items.append(_item(ctx, record, "run", run_dir, bytes=size, files=files, mtime=mtime))
         if record.environment_id == own:
             kinds = {a.path: a.kind for a in record.artifacts if a.host in labels}
             for path, kind in kinds.items():
-                items.append(_item(record, "artifact", path, artifact_kind=kind))
+                items.append(_item(ctx, record, "artifact", path, artifact_kind=kind))
         pulled = run_dir / "pulled"
         if pulled.is_dir() and not pulled.is_symlink():  # a linked pulled/ is not ours
             for entry in sorted(pulled.iterdir()):
-                items.append(_item(record, "pulled", entry))
+                items.append(_item(ctx, record, "pulled", entry))
     return items
 
 
@@ -10961,11 +10936,13 @@ git commit -m "feat(storage): dry-run cleanup plans with shared-checkpoint and p
 **Interfaces:**
 - Produces (contract 1.9, exact): `apply_clean(ctx, hosts, plan_id, *, confirm_bytes, actor, now=None) -> CleanResult`, `delete_artifacts(ctx, items, *, actor, plan_id, older_than_days) -> CleanResult`, `cleaned_artifacts(ctx, record) -> list[CleanedArtifact]`, `cleanup_lock(layout)`, `RunDetail.cleaned: list[CleanedArtifact] = []`.
 - Produces (public helper): `CLEANED_FILE = "cleaned.json"`; `record_cleaned(ctx, run_id, items, *, actor, plan_id) -> None` (appends to `<run_dir>/.hx/cleaned.json` under the run lock and emits `run.artifacts_cleaned` `{paths, freed_bytes, plan_id}`; the hub calls it for mirrored runs after a host deleted).
-- Rules: `apply_clean` refuses (`CleanRefusedError`, nothing deleted) an id that is not `cp-<8 hex>` or has no plan file, an expired plan (the file is removed), and a `confirm_bytes` that is not the plan's `total_bytes` (the plan stays). Otherwise it removes the plan file first (one use), deletes local items with `delete_artifacts`, sends each host's items to that host's `POST /api/v1/storage/delete` (command id `<plan_id>:<host>`) and records the deleted ones on the hub's mirrored runs, puts an unreachable host in `errors` while other hosts go on, and emits `storage.cleaned` `{plan_id, freed_bytes, n_deleted, n_skipped}`. `delete_artifacts` re-checks every item where the file lives, with the plan's own `older_than_days` (apply passes `plan.policy.older_than_days` to it and to each host's delete route): run known, archived, unstarred, ended, and ended at or before `now − older_than_days` (`too recent`); the path still a recorded artifact of that run with that kind (or inside its `pulled/`); no other run that is not archived-unstarred-ended-by-that-cutoff records it, or a path inside or above it (`overlaps`), as an artifact (`used by <id>`); not protected; still there; bytes and mtime unchanged (`changed since plan`). The `used by` check also covers runs that read the path as an input (`input_paths`, `overlaps`), so a `reinfer` child queued after the plan keeps its checkpoint, and so does an archived child that ended yesterday under a 30-day policy. The whole check-and-delete runs under `cleanup_lock` (`<home>/storage/.lock`, cross-process) with the index read inside it; creating a run that reads an input (`execution._prepare_in`), `star_run`, and `archive_run` take the same lock, so a reader or owner made or changed during an apply waits for it to end instead of slipping between a check and its deletion (deleting files takes seconds; these are rare user actions). A failing check puts `{path, run_id, host, reason}` in `skipped`. A symlink is unlinked, never its target; a folder is removed with `shutil.rmtree` (which unlinks symlinks inside it). `run.yaml` is never written.
+- Rules: `apply_clean` refuses (`CleanRefusedError`, nothing deleted) an id that is not `cp-<8 hex>` or has no plan file, an expired plan (the file is removed), and a `confirm_bytes` that is not the plan's `total_bytes` (the plan stays). Otherwise it removes the plan file first (one use), deletes local items with `delete_artifacts`, sends each host's items to that host's `POST /api/v1/storage/delete` (command id `<plan_id>:<host>`) and records the deleted ones on the hub's mirrored runs, puts an unreachable host in `errors` while other hosts go on, and emits `storage.cleaned` `{plan_id, freed_bytes, n_deleted, n_skipped}`. `delete_artifacts` re-checks every item where the file lives, with the plan's own `older_than_days` (apply passes `plan.policy.older_than_days` to it and to each host's delete route): run known, archived, unstarred, ended, and ended at or before `now − older_than_days` (`too recent`); the path still a recorded artifact of that run with that kind (or inside its `pulled/`); no other run that is not archived-unstarred-ended-by-that-cutoff records it, or a path inside or above it (`overlaps`), as an artifact (`used by <id>`); not protected; still there; bytes and mtime unchanged (`changed since plan`). The `used by` check also covers runs that read the path as an input (`input_paths`, `overlaps`), so a `reinfer` child queued after the plan keeps its checkpoint, and so does an archived child that ended yesterday under a 30-day policy. The whole check-and-delete runs under `cleanup_lock` (`<home>/storage/.lock`, cross-process) with the index read inside it; creating a run that reads an input (`execution._prepare_in`), `star_run`, and `archive_run` take the same lock, so a reader or owner made or changed during an apply waits for it to end instead of slipping between a check and its deletion (deleting files takes seconds; these are rare user actions). A failing check puts `{path, run_id, host, reason}` in `skipped`. A symlink is unlinked, never its target. Removal pins the physical parent through no-follow directory descriptors, checks both path spellings plus descriptor identity, and uses only `os.unlink(name, dir_fd=parent_fd)` or symlink-resistant `shutil.rmtree(name, dir_fd=parent_fd)`. No absolute pathname is resolved again by a destructive operation. A replaced/unreadable path is skipped; unavailable no-follow/dir-fd support fails closed (`safe removal unavailable`), never a path-based fallback. The advisory lock does not exclude external filesystem writers; descriptor safety is mandatory independently of that lock. `run.yaml` is never written.
+
+**Environment-aware cleaned manifest:** new `CleanedArtifact.environment_id: str | None = None` copies each `CleanItem.environment_id` in `record_cleaned`, including mirrored host results. It identifies the deletion target, not the hub or source run. Hub merge changes only `host`; retain environment_id. A legacy missing field remains None and is never inferred from path or run ownership. Add a regression with identical absolute path strings in two environments: cleaning a hub pulled copy records the hub environment and must not mark the host source cleaned; cleaning the host source retains the host environment through hub mirroring. Read legacy path-only JSON successfully but require consumers to avoid cross-environment guesses. Add the populated `cleaned[].environment_id` JSON-key snapshot, preserving all existing keys. Task 31 verifies environment identity comes from the owning env route rather than an untrusted caller.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/core/test_storage.py` (and add `import fcntl`, `import json`, `import sys`, `import threading`, `import pytest`, `import hypothex.core.storage as storage_module`, `from hypothex.core.execution import RunRequest, prepare_run`, `from hypothex.core.queries import show_run`, and `CleanRefusedError, CleanItem, apply_clean, cleaned_artifacts, cleanup_lock, delete_artifacts, input_paths` to the `hypothex.core.storage` import):
+Append to `tests/core/test_storage.py` (and add `import fcntl`, `import json`, `import sys`, `import threading`, `import pytest`, `import hypothex.core.storage as storage_module`, `from hypothex.core.execution import RunRequest, prepare_run`, `from hypothex.core.queries import show_run`, and `CleanRefusedError, CleanItem, CleanedArtifact, apply_clean, cleaned_artifacts, cleanup_lock, delete_artifacts, input_paths, record_cleaned` to the `hypothex.core.storage` import):
 
 ```python
 @pytest.mark.parametrize("relocate", ["home", "store"])
@@ -11049,6 +11026,47 @@ def test_apply_frees_exactly_the_planned_bytes(lab: Context) -> None:
     }
     with pytest.raises(CleanRefusedError, match="unknown plan"):
         apply_clean(lab, None, result.plan_id, confirm_bytes=result.total_bytes, actor="x")
+
+
+def test_pulled_copy_records_local_deletion_environment(toy: Context) -> None:
+    record = ended_run(toy, "mirror", environment_id="env-host")
+    path = write(toy.run_dir(record) / "pulled" / "weights.pt")
+    row = next(i for i in local_usage(toy) if i.path == str(path))
+    assert row.environment_id == toy.descriptor.environment_id
+    proposed = plan(toy)
+    (item,) = proposed.items
+    assert item.environment_id == toy.descriptor.environment_id
+    done = apply_clean(toy, None, proposed.plan_id, confirm_bytes=proposed.total_bytes, actor="x")
+    assert done.deleted == [item] and not path.exists()
+    (cleaned,) = cleaned_artifacts(toy, record)
+    assert cleaned.environment_id == toy.descriptor.environment_id != record.environment_id
+
+
+def test_wrong_target_environment_cannot_delete_local_path(lab: Context) -> None:
+    (item,) = plan(lab).items
+    forged = item.model_copy(update={"environment_id": "env-other"})
+    result = delete_artifacts(lab, [forged], actor="x", plan_id="cp-test", older_than_days=30)
+    assert result.deleted == [] and result.skipped[0]["reason"] == "wrong environment"
+    assert Path(item.path).exists()
+
+
+def test_cleaned_manifest_preserves_distinct_environments_and_legacy(lab: Context) -> None:
+    (item,) = plan(lab).items
+    record = lab.find_record(item.run_id)
+    raw = {"path": item.path, "bytes": item.bytes, "at": utcnow().isoformat(),
+           "actor": "old", "plan_id": "cp-old"}
+    legacy = CleanedArtifact.model_validate(raw)
+    assert legacy.environment_id is None
+    manifest = lab.run_dir(record) / ".hx" / "cleaned.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps([raw]))
+    local = item.model_copy(update={"environment_id": lab.descriptor.environment_id})
+    remote = item.model_copy(update={"environment_id": "env-host", "host": "gpu1"})
+    # Manifest append takes actual completed items; identical spelling is not identity.
+    record_cleaned(lab, item.run_id, [local, remote], actor="x", plan_id="cp-test")
+    rows = cleaned_artifacts(lab, record)
+    assert [r.path for r in rows] == [item.path] * 3
+    assert [r.environment_id for r in rows] == [None, lab.descriptor.environment_id, "env-host"]
 
 
 def test_wrong_confirmation_or_expired_plan_deletes_nothing(lab: Context) -> None:
@@ -11193,7 +11211,9 @@ def test_apply_checks_and_deletes_under_the_cleanup_lock(
     real_remove = storage_module._remove
     held: list[bool] = []
 
-    def remove(path: str) -> str | None:
+    def remove(
+        ctx: Context, item: CleanItem, users: list[tuple[str, RunRecord]], cutoff: datetime
+    ) -> str | None:
         with (toy.layout.home / "storage" / ".lock").open("a") as fh:
             try:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -11202,7 +11222,7 @@ def test_apply_checks_and_deletes_under_the_cleanup_lock(
             else:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
                 held.append(False)
-        return real_remove(path)
+        return real_remove(ctx, item, users, cutoff)
 
     monkeypatch.setattr(storage_module, "_remove", remove)
     apply_clean(toy, None, result.plan_id, confirm_bytes=result.total_bytes, actor="x")
@@ -11244,6 +11264,7 @@ def test_remote_hosts_delete_their_items(toy: Context, tmp_path: Path) -> None:
     assert gpu1.posted[0]["command_id"] == f"{result.plan_id}:gpu1"
     hub_file = toy.run_dir(toy.find_record("g1")) / ".hx" / "cleaned.json"
     assert [c["path"] for c in json.loads(hub_file.read_text())] == ["/scratch/g1.pt"]
+    assert [c["environment_id"] for c in json.loads(hub_file.read_text())] == ["env-gpu1"]
 
 
 def test_unreachable_host_lands_in_errors(toy: Context, tmp_path: Path) -> None:
@@ -11260,6 +11281,50 @@ def test_unreachable_host_lands_in_errors(toy: Context, tmp_path: Path) -> None:
     assert {e["host"] for e in done.errors} == {"dead"}
     assert {i.run_id for i in done.deleted} == {"local1", "g9"}
 ```
+
+**Prospective race regressions (mandatory, before the removal implementation):** keep the original `_recheck` and `_remove(path)` as the red revision in an isolated implementation test worktree; a metadata-preservation assertion must fail because the protected file was deleted, not because a helper import/signature is missing. After the fix run the same interleaving through public `apply_clean` and the env `POST /api/v1/storage/delete` route (Task 31). No artificial `cleanup_lock` acquisition by the filesystem writer is allowed.
+
+Append to `tests/core/test_storage.py` (add `datetime` to its datetime import):
+
+```python
+@pytest.mark.parametrize("name", ["run.yaml", "metrics.jsonl", "scores.jsonl"])
+def test_parent_symlink_swap_after_recheck_preserves_metadata(
+    toy: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    protected_run = ended_run(toy, "protected")
+    target = toy.run_dir(protected_run) / name
+    if not target.exists():
+        target.write_bytes(b"protected metadata\n")
+    before = target.read_bytes()
+    parent = tmp_path / "scratch"
+    candidate = write(parent / name)
+    ended_run(toy, "artifact-owner", artifacts=[("checkpoint", candidate)])
+    proposed = plan(toy)
+    assert [i.path for i in proposed.items] == [str(candidate)]
+    original = storage_module._recheck
+    calls = 0
+
+    def recheck(
+        ctx: Context, item: CleanItem, users: list[tuple[str, RunRecord]], cutoff: datetime
+    ) -> str | None:
+        nonlocal calls
+        why = original(ctx, item, users, cutoff)
+        if why is None and calls == 0:
+            calls += 1
+            parent.rename(tmp_path / "old-scratch")
+            parent.symlink_to(target.parent, target_is_directory=True)
+        return why
+
+    monkeypatch.setattr(storage_module, "_recheck", recheck)
+    done = apply_clean(toy, None, proposed.plan_id, confirm_bytes=proposed.total_bytes, actor="test")
+    assert calls == 1
+    assert target.read_bytes() == before
+    assert done.deleted == [] and done.freed_bytes == 0
+    assert len(done.skipped) == 1
+    assert cleaned_artifacts(toy, toy.find_record("artifact-owner")) == []
+```
+
+Add equivalent deterministic cases for a directory artifact, a parent swapped **before descriptor acquisition**, and a swap at the final `unlink`/`rmtree` boundary **after** all user-space checks. For the last boundary, instrument the real syscall wrapper and forward its actual `dir_fd`: every protected byte must survive, and only the originally pinned candidate may be removed (or the item skipped); never follow the replacement alias. Directory cases include a child symlink to protected metadata and verify the target bytes survive, with the link itself removable. Test a leaf replacement between pin/recheck and measure, an unreadable descendant, and unavailable `rmtree.avoids_symlink_attacks`; failure yields skipped/zero claimed freed bytes/no cleaned marker and no path-based fallback. Keep the existing successful-file/folder, unchanged-byte-count, alias-home/store, age/input-reader and lock tests. Instrument `os.open`/`os.close` on success and every injected failure to assert no descriptor leak. The loopback host test must exercise its own filesystem boundary, not trust a hub-side recheck.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -11353,7 +11418,10 @@ def record_cleaned(
     with run_lock(ctx.run_dir(record)):
         done = cleaned_artifacts(ctx, record)
         done += [
-            CleanedArtifact(path=i.path, bytes=i.bytes, at=now, actor=actor, plan_id=plan_id)
+            CleanedArtifact(
+                path=i.path, environment_id=i.environment_id, bytes=i.bytes,
+                at=now, actor=actor, plan_id=plan_id,
+            )
             for i in items
         ]
         text = json.dumps([d.model_dump(mode="json") for d in done], indent=2)
@@ -11372,6 +11440,8 @@ def _recheck(
     users: list[tuple[str, RunRecord]],
     cutoff: datetime,
 ) -> str | None:
+    if item.environment_id != ctx.descriptor.environment_id:
+        return "wrong environment"
     try:
         record = ctx.find_record(item.run_id)
     except StoreError:
@@ -11385,6 +11455,8 @@ def _recheck(
     if record.ended_at is None or record.ended_at > cutoff:
         return "too recent"
     if item.kind == "artifact":
+        if record.environment_id != ctx.descriptor.environment_id:
+            return "wrong artifact environment"
         kinds = {a.kind for a in record.artifacts if a.path == item.path}
         if not kinds:
             return "not an artifact of the run"
@@ -11450,16 +11522,108 @@ def check_artifacts(
     return refused
 
 
-def _remove(path: str) -> str | None:
-    try:
-        if os.path.islink(path) or not os.path.isdir(path):
-            os.unlink(path)
-        else:
-            shutil.rmtree(path)
-    except OSError as exc:
-        return exc.strerror or type(exc).__name__
-    return None
+def _open_cleanup_parent(path: str) -> tuple[int, Path]:
+    """Pin the resolved parent with no-follow opens for every physical component.
 
+    The caller checks both the literal and physical target against the storage
+    policy. Resolving a trusted home/store alias does not authorize its target.
+    Every descriptor belongs to this call and is closed on all error paths.
+    """
+    physical = Path(path).absolute().parent.resolve(strict=True)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(physical.anchor, flags)
+    try:
+        for part in physical.parts[1:]:
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd, physical
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _same_node(left: os.stat_result, right: os.stat_result) -> bool:
+    """Compare device, inode and type, never a pathname or file contents."""
+    return (left.st_dev, left.st_ino, stat.S_IFMT(left.st_mode)) == (
+        right.st_dev, right.st_ino, stat.S_IFMT(right.st_mode)
+    )
+
+
+def _measure_at(parent_fd: int, name: str) -> tuple[int, int, float]:
+    """Measure through pinned directory descriptors without following symlinks.
+
+    Unlike the reporting walk, any unreadable or replaced descendant aborts
+    destructive apply. Directory allocation is excluded, as in measure_path.
+    """
+    info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode):
+        return _allocated(info), 1, info.st_mtime
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        if not _same_node(info, os.fstat(fd)):
+            raise OSError("changed since plan")
+        size, count, newest = 0, 0, info.st_mtime
+        for child in os.listdir(fd):
+            added, files, mtime = _measure_at(fd, child)
+            size, count, newest = size + added, count + files, max(newest, mtime)
+        return size, count, newest
+    finally:
+        os.close(fd)
+
+
+def _remove(
+    ctx: Context, item: CleanItem, users: list[tuple[str, RunRecord]], cutoff: datetime
+) -> str | None:
+    """Recheck and remove a candidate through a pinned, no-follow parent.
+
+    Never fall back to path-based deletion. The cleanup lock coordinates
+    Hypothex writers; these descriptors prevent an unrelated filesystem writer
+    from redirecting unlink/rmtree through a replaced parent symlink.
+    """
+    if (
+        not hasattr(os, "O_NOFOLLOW")
+        or not hasattr(os, "O_DIRECTORY")
+        or os.open not in os.supports_dir_fd
+        or os.stat not in os.supports_dir_fd
+        or os.unlink not in os.supports_dir_fd
+        or not shutil.rmtree.avoids_symlink_attacks
+    ):
+        return "safe removal unavailable"
+    fd: int | None = None
+    try:
+        literal = Path(os.path.abspath(item.path))
+        fd, physical = _open_cleanup_parent(item.path)
+        original = os.stat(literal.name, dir_fd=fd, follow_symlinks=False)
+        why = _recheck(ctx, item, users, cutoff)
+        if why is not None:
+            return why
+        # A parent resolved before _recheck may differ from the one it sees.
+        # Both spellings must pass; the actual removal uses only this fd/name.
+        if protected_reason(ctx, str(physical / literal.name)) is not None:
+            return "protected"
+        live_fd, _ = _open_cleanup_parent(item.path)
+        try:
+            if not _same_node(os.fstat(fd), os.fstat(live_fd)):
+                return "changed since plan"
+        finally:
+            os.close(live_fd)
+        current = os.stat(literal.name, dir_fd=fd, follow_symlinks=False)
+        if not _same_node(original, current):
+            return "changed since plan"
+        size, _, mtime = _measure_at(fd, literal.name)
+        if size != item.bytes or mtime != item.mtime:
+            return "changed since plan"
+        if stat.S_ISDIR(current.st_mode):
+            shutil.rmtree(literal.name, dir_fd=fd)
+        else:
+            os.unlink(literal.name, dir_fd=fd)
+    except OSError:
+        return "changed or inaccessible since plan"
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return None
 
 def delete_artifacts(
     ctx: Context, items: list[CleanItem], *, actor: str, plan_id: str, older_than_days: int
@@ -11499,7 +11663,7 @@ def delete_artifacts(
             users += [(path, record) for path in {a.path for a in record.artifacts}]
             users += [(path, record) for path in input_paths(record, local=True)]
         for item in items:
-            why = _recheck(ctx, item, users, cutoff) or _remove(item.path)
+            why = _remove(ctx, item, users, cutoff)
             if why is not None:
                 skipped.append(
                     {"path": item.path, "run_id": item.run_id, "host": item.host, "reason": why}
@@ -11695,9 +11859,9 @@ git commit -m "feat(storage): apply plans with exact confirmation and per-item r
 ---
 ## Part 7: Auth on the HTTP API
 
-Contract 1.2 (identity), 1.3, 1.10 (guard, scopes, tickets), 3 (auth routes), 7 (authorization), 8 (failure modes 10–12). Here “auth off” means collaborator scopes are off. The accepted default-token prerequisite still protects HTTP/API/MCP/WebSocket traffic through `TokenGuard`; only explicit loopback no-auth bypasses it. Scoped `AuthGuard` replaces that root-only guard. `OriginGuard` and `TrustedHostMiddleware` run before credential/ticket consumption. The exact adapters below use the inspected token interfaces; the [compatibility checkpoint](2026-10-05-hypothex-phase3-token-compatibility.md) records historical evidence; the current merged-source comparison is against `a444125` and must pass the ordered primary Claude then adversarial review gates.
+Contract 1.2 (identity), 1.3, 1.10 (guard, scopes, tickets), 3 (auth routes), 7 (authorization), 8 (failure modes 10–12). Here “auth off” means collaborator scopes are off. The accepted default-token prerequisite still protects HTTP/API/MCP/WebSocket traffic through `TokenGuard`; only explicit loopback no-auth bypasses it. Scoped `AuthGuard` replaces that root-only guard. `OriginGuard` and `TrustedHostMiddleware` run before credential/ticket consumption. The exact adapters below use the inspected token interfaces; the [compatibility checkpoint](2026-10-05-hypothex-phase3-token-compatibility.md) records historical evidence; the current merged-source comparison is against `e73b810` and must pass the ordered primary Claude then adversarial review gates.
 
-**Additive JSON-key snapshot acceptance for Task 22.** Include `tests/cli/test_json_snapshots.py` and `tests/cli/snapshots/json_keys.json` in this task. Extend local fake fixtures to exercise `cleaned` and populated cleaned-artifact item paths (empty lists alone cannot expose nested paths). First run `uv run pytest tests/cli/test_json_snapshots.py` without update mode and record the expected additive failure. Then run `HYPOTHEX_UPDATE_SNAPSHOTS=1 uv run pytest tests/cli/test_json_snapshots.py`, inspect `git diff -- tests/cli/snapshots/json_keys.json`, and accept only the intended additions while preserving all existing keys, including bound-score and pricing metadata. Any deletion/rename/unrelated addition is a defect to investigate, not an automatic golden update. Rerun the same test without the update variable and include fixture assertions for populated values. Task 14 uses this same process for `sweep show.cost_complete`.
+**Additive JSON-key snapshot acceptance for Task 22.** Include `tests/cli/test_json_snapshots.py` and `tests/cli/snapshots/json_keys.json` in this task. Extend local fake fixtures to exercise `cleaned` and populated cleaned-artifact item paths (empty lists alone cannot expose nested paths). First run `uv run pytest tests/cli/test_json_snapshots.py` without update mode and record the expected additive failure. Then run `HYPOTHEX_UPDATE_SNAPSHOTS=1 uv run pytest tests/cli/test_json_snapshots.py`, inspect `git diff -- tests/cli/snapshots/json_keys.json`, and accept only the intended additions while preserving all existing keys, including bound-score and pricing metadata, `name`, task `n_finished`, view `datasets`/`model` and all current-main JSON paths; use e73b810 snapshots as the starting oracle. Any deletion/rename/unrelated addition is a defect to investigate, not an automatic golden update. Rerun the same test without the update variable and include fixture assertions for populated values. Task 14 uses this same process for `sweep show.cost_complete`.
 
 ### Task 23: `hypothex.api.auth` — the guard, scope dependencies, identities
 
@@ -12523,14 +12687,14 @@ add:
         return (
             path == "/"
             or re.fullmatch(
-                r"/(?:r/[^/]+|[xs]/[^/]+/[^/]+|t/[^/]+/[^/]+(?:/edit/[^/]+)?|n/[^/]+(?:/[^/]+)?|settings|storage|pair)/?",
+                r"/(?:hosts|queue|r/[^/]+|[xs]/[^/]+/[^/]+|t/[^/]+/[^/]+(?:/edit/[^/]+)?|n/[^/]+(?:/[^/]+)?|settings|storage|pair)/?",
                 path,
             )
             is not None
         )
 ```
 
-This allows guest GET/HEAD to load the installed shell at existing run/task/sweep/compare routes and new notebook, settings, storage, and pairing routes. `/pair` intentionally uses a full browser load; it is a public shell route although the frontend navigation predicate excludes it. API data still requires authentication. Unknown and reserved routes remain protected. Add parametrized guard tests for both root-token `TokenGuard` and scoped `AuthGuard`: each known shell path (including notebook day URLs from digest notices) accepts GET/HEAD, POST returns 401, API/MCP/reserved/unknown paths return 401, assets outside the installed UI root stay protected, and without installed UI every shell route returns 401. In `create_app`, extend state and replace only `tickets = TicketStore()` with this setup:
+This allows guest GET/HEAD to load the installed shell at existing home/hosts/queue/run/task/sweep/compare routes and new notebook, settings, storage, and pairing routes. `/pair` intentionally uses a full browser load; it is a public shell route although the frontend navigation predicate excludes it. API data still requires authentication. Unknown and reserved routes remain protected. Add parametrized guard tests for both root-token `TokenGuard` and scoped `AuthGuard`: each known shell path (including notebook day URLs from digest notices) accepts GET/HEAD, POST returns 401, API/MCP/reserved/unknown paths return 401, assets outside the installed UI root stay protected, and without installed UI every shell route returns 401. In `create_app`, extend state and replace only `tickets = TicketStore()` with this setup:
 
 ```python
     app.state.auth = store
@@ -12684,6 +12848,7 @@ PHASE_1_2 = {
     "GET /api/v1/tasks": "read",
     "GET /api/v1/tasks/{project}/{task}": "read",
     "GET /api/v1/tasks/{project}/{task}/leaderboard": "read",
+    "GET /api/v1/tasks/{project}/{task}/runs": "read",
     "POST /api/v1/tasks/{project}/{task}/reeval": "launch",
     "GET /api/v1/tasks/{project}/{task}/kind": "read",
     "GET /api/v1/tasks/{project}/{task}/views": "read",
@@ -12706,6 +12871,7 @@ PHASE_1_2 = {
     "POST /api/v1/runs/{run_id}/reeval": "launch",
     "POST /api/v1/runs/{run_id}/stop": "launch",
     "POST /api/v1/runs/{run_id}/tags": "launch",
+    "POST /api/v1/runs/{run_id}/name": "launch",
     "POST /api/v1/runs/{run_id}/star": "launch",
     "POST /api/v1/runs/{run_id}/archive": "launch",
     "POST /api/v1/runs/{run_id}/notes": "launch",
@@ -12806,6 +12972,7 @@ In `create_app`, in file order:
     @app.get("/api/v1/tasks", dependencies=READ)
     @app.get("/api/v1/tasks/{project}/{task}", dependencies=READ)
     @app.get("/api/v1/tasks/{project}/{task}/leaderboard", dependencies=READ)
+    @app.get("/api/v1/tasks/{project}/{task}/runs", dependencies=READ)
     @app.post("/api/v1/tasks/{project}/{task}/reeval", dependencies=LAUNCH)
     @app.get("/api/v1/tasks/{project}/{task}/kind", dependencies=READ)
     @app.get("/api/v1/tasks/{project}/{task}/views", dependencies=READ)
@@ -12828,6 +12995,7 @@ In `create_app`, in file order:
     @app.post("/api/v1/runs/{run_id}/reeval", dependencies=LAUNCH)
     @app.post("/api/v1/runs/{run_id}/stop", dependencies=LAUNCH)
     @app.post("/api/v1/runs/{run_id}/tags", dependencies=LAUNCH)
+    @app.post("/api/v1/runs/{run_id}/name", dependencies=LAUNCH)
     @app.post("/api/v1/runs/{run_id}/star", dependencies=LAUNCH)
     @app.post("/api/v1/runs/{run_id}/archive", dependencies=LAUNCH)
     @app.post("/api/v1/runs/{run_id}/notes", dependencies=LAUNCH)
@@ -13469,7 +13637,7 @@ def test_a_ticket_opens_the_socket_once(home: Path) -> None:
 def test_revoked_session_closes_the_socket_with_4401(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(app_module, "WS_RECHECK_SECONDS", 0.0)
+    monkeypatch.setattr(app_module, "WS_RECHECK_SECONDS", 0.01)
     app = auth_app(home)
     store: AuthStore = app.state.auth
     token = token_for(store, "alice", "read")
@@ -13527,10 +13695,14 @@ def test_revoked_session_closes_before_first_subscribe(
             assert closed.value.code == 4401
 ```
 
+**No zero-timeout shortcut.** `asyncio.wait_for(receive(), timeout=0)` cancels an unstarted coroutine: a queued subscribe can remain unread forever. All fast WebSocket tests use a strictly positive `0.01` recheck interval. Add an async fake-ASGI regression that executes the actual `events_ws` handler: queue a subscribe before entry, count receive invocations, and require exactly one subscribe consumed and `ready` observed before revoking. Wrap the whole exchange in `asyncio.wait_for(..., timeout=2.0)` and clean up/cancel every owned task in `finally`; a regression is a bounded timeout failure, never a hung pytest process. Revoke after ready, before first subscribe, after an ordinary event, and while only admin-filtered events arrive; assert 4401 within the configured positive interval plus the existing poll budget. Parametrize expired and disabled-user sessions too. Keep a narrow red reproduction using the old zero-valued test setup: receive count is 0; with 0.01 it is 1. This demonstrates the test defect without claiming assembled application validation.
+
+For the synchronous `TestClient` tests above, run the entire WebSocket exchange in an owned subprocess with a 5-second deadline and guaranteed termination, or replace them with the bounded async ASGI driver; `drain`/`receive_json` must not be allowed to block the test runner indefinitely. Do not lower production `WS_RECHECK_SECONDS=30.0` or weaken before-subscribe revocation. The normal handler must continue preserving the baseline `client_left`, replay reset/ready and cancellation cleanup.
+
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/api/test_ws_auth.py -v`
-Expected: FAIL: `test_revoked_session_closes_the_socket_with_4401` with `AttributeError: 'AuthStore' object has no attribute 'session_active'`, and `test_auth_and_notify_events_go_to_admins_only` because the `launch` socket sees `auth.session_created`.
+Expected: FAIL on bounded behavioral assertions: the baseline handler does not close a revoked session and a launch socket sees an admin event. `session_active` already exists from Task 7; a missing-method failure is not the intended red evidence.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -13595,7 +13767,7 @@ Keep the existing subscribe validation, head/max-replay reset, ready message, `c
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/api/test_ws_auth.py tests/api/test_app.py -v`
-Expected: `tests/api/test_ws_auth.py` `3 passed`; the phase 1 WebSocket tests in `tests/api/test_app.py` still pass.
+Expected: every WebSocket auth regression passes with bounded completion; the phase 1 WebSocket tests in `tests/api/test_app.py` still pass.
 
 Run: `uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -13613,14 +13785,15 @@ git commit -m "feat(api): websocket tickets, 4401 on revoked sessions, admin-onl
 
 **Files:**
 - Modify: `src/hypothex/api/app.py` (`ActionBody.owner`, `run_request`, `stamp`, `launcher_for`, `once` and `forward` keyed by `command_key`, routes `POST /api/v1/runs`, `POST /api/v1/hosts/{host}/runs`, rerun, reinfer, reeval, stop, tags, star, archive, notes, pull, task reeval, view PUT, sweeps POST, extend and cancel, `GET /api/v1/runs`)
-- Modify: `src/hypothex/core/overview.py` (`owner` on `TimelineItem`, `IdeaRow`, `FailureRow`)
+- Modify: `src/hypothex/core/overview.py` (`owner` on `TimelineItem`, `IdeaRow`, `FailureRow`, `RecentRun`)
+- Modify: `src/hypothex/core/taskruns.py` (`TaskRun.owner`, preserving every workspace field)
 - Test: `tests/api/test_ownership_api.py`
 
 **Interfaces:**
 - Consumes: `identity`, `principal_of`, `command_key` (Task 23), `require_act` (Task 5), `RunRequest.owner`, `control.rerun/reinfer(owner=)`, `launch_sweep(owner=)` (Task 4).
 - Produces (contract 1.2, exact): `ActionBody.owner: str | None = None`; `GET /api/v1/runs?owner=` (`me` = the caller; with auth off `me` filters nothing, since runs then have no owner).
 - Produces (public helper): `stamp(conn, body) -> body` (a copy with `created_by`/`owner` from `identity`).
-- Produces (additive, contract 1.12 "the Overview shows `owner`" on running and recent rows): `TimelineItem.owner`, `IdeaRow.owner` (the group's first run's, like its `created_by`), `FailureRow.owner`, each `str | None = None`.
+- Produces (additive, contract 1.12 "the Overview shows `owner`" on running and recent rows): `TimelineItem.owner`, `IdeaRow.owner` (the group's first run's, like its `created_by`), `FailureRow.owner`, `RecentRun.owner` and `TaskRun.owner`, each `str | None = None`. RecentRun/TaskRun copy the corresponding RunRecord owner; TaskGroup gains no owner (derive distinct owners from its member runs).
 - Rules: a run that would execute on this machine (`POST /api/v1/runs`, a host launch to `local`, a rerun or reinfer of a local run, a sweep or sweep extension placed here) needs `require_local_exec` (admin; contract 1.3, 7): its command runs as the server's Unix user and could read the owner's token in `server.json`, so a `launch` collaborator launches on hosts only, and gets 403 `runs on this machine need admin; launch on a host` here; launches, host launches, reruns, reinfers, and sweeps get `created_by`/`owner` from `identity` (a collaborator's body values are ignored; a hub's are kept); a note's `author` becomes the caller's identity; stop and archive need `require_act(..., record.owner, ...)` and sweep cancel `require_act(..., spec.owner, "cancel_queued")`; forwarded bodies carry `created_by` and `owner` to the host. Every receipt is stored under `command_key(request, command_id)` (Task 23): `once(conn, body, fn)` and `forward(conn, ...)` take the request; a forwarded body, a host launch, a sweep's own claim, and a cancel's per-run stops carry the hub's key instead of the raw id, so the host's receipts are per hub caller too. The same caller retrying gets the stored result even with an edited body (phase 1); another caller, or another route, with the same id runs its own command.
 
 - [ ] **Step 1: Write the failing test**
@@ -14269,6 +14442,10 @@ and replace these routes, which item 7 does not replace, so that they pass the r
 
         return forward(request, run_id, "tags", body, act)
 
+    @app.post("/api/v1/runs/{run_id}/name", dependencies=LAUNCH)
+    def run_name(run_id: str, body: NameBody, request: Request) -> dict[str, Any]:
+        return forward(request, run_id, "name", body, lambda: q.rename_run(ctx, run_id, body.name))
+
     @app.post("/api/v1/runs/{run_id}/star", dependencies=LAUNCH)
     def run_star(run_id: str, body: FlagBody, request: Request) -> dict[str, Any]:
         return forward(request, run_id, "star", body, lambda: q.star_run(ctx, run_id, body.on))
@@ -14312,6 +14489,7 @@ The complete `forward`, `task_reeval`, and `runs` bodies below retain actual mer
         limit: Annotated[int, Query(ge=1)] = 200,
         before_created_at: datetime | None = None,
         before_run_id: str | None = None,
+        search: Annotated[str | None, Query(alias="q", max_length=200)] = None,
     ) -> list[dict[str, Any]]:
         who = principal_of(request).user if owner == "me" and auth_on(request) else owner
         if owner == "me" and not auth_on(request):
@@ -14335,6 +14513,7 @@ The complete `forward`, `task_reeval`, and `runs` bodies below retain actual mer
             include_archived=archived,
             limit=limit,
             before=before,
+            search=search,
         )
         rows = to_jsonable(q.with_queue_positions(ctx, records))
         # like the run detail: the CLI and MCP list runs through the hub and see a stale host
@@ -14502,14 +14681,18 @@ Replace `sweep_cancel` with:
 
 Keep the frozen DF-48 API and crash tests. Add scoped integration tests to `test_ownership_api.py`: two callers reusing the same command ID obtain separate receipts; the same caller's retry returns the original queued receipt with no second launch; a queued owner-stamped spec survives reopen and issues owner-stamped runs; a launch-only caller cannot create/extend a local durable episode; a non-owner cancellation fails before setting `cancel_requested`; an authorized cancellation sets it before queued-member stops; an active extension retains the baseline 409. Exercise `SweepIssuer` with its worker paused and fake launchers, never real hosts.
 
-In `src/hypothex/core/overview.py`, add this field as the last field of `TimelineItem` (after `label: str`), of `IdeaRow` (after its `unit` docstring), and of `FailureRow` (after `retried_ok: bool`):
+In `src/hypothex/core/overview.py`, add this field as the last field of `TimelineItem` (after `label: str`), of `IdeaRow` (after its `unit` docstring), of `FailureRow` (after `retried_ok: bool`), of `RecentRun` (after `delta_best: float | None`), and of `TaskRun` in `core/taskruns.py` (after `cost_usd: float | None`):
 
 ```python
     owner: str | None = None
     """The run's owner (``RunRecord.owner``); None with auth off or before phase 3."""
 ```
 
-then pass it where `build_overview` builds them: `owner=run.owner,` after `label=label(run),` in `TimelineItem(...)`; `owner=members[0].owner,` after `created_by=members[0].created_by,` in `IdeaRow(...)`; `owner=run.owner,` after `retried_ok=_retried_ok(run, everything),` in `FailureRow(...)`. (`running` is a list of `RunRecord`, which carries `owner` since Task 4.)
+then pass it where `build_overview` builds them: `owner=run.owner,` after `label=label(run),` in `TimelineItem(...)`; `owner=members[0].owner,` after `created_by=members[0].created_by,` in `IdeaRow(...)`; `owner=run.owner,` after `retried_ok=_retried_ok(run, window),` in `FailureRow(...)`. In `_recent_rows`, pass `owner=run.owner,` immediately after `name=names[run.run_id],` in `RecentRun(...)`. In `task_runs`, pass `owner=r.owner,` immediately after `created_by=r.created_by,` in `TaskRun(...)`. (`running` is a list of `RunRecord`, which carries `owner` since Task 4.)
+
+Retain `name`, `derived_name`, `renamed`, `params`, `scores`, `metric_versions`, `key_higher_is_better`, `key_parts`, every cost/noise field, grouped status counts and bounded metric-name reads. Do not collapse these DTOs to Phase 3-only fields. Add populated HTTP and core regressions for auth on/off, a legacy record with no owner and a mixed-owner group; require individual owner values while the group retains all members and no invented single owner. The UI's Mine toggle calls `/api/v1/runs?owner=me&status=running`; no overview filter or new route is introduced. Extend JSON-key fixtures with populated RecentRun/TaskRun paths, preserving the entire current-main key set.
+
+The new name mutation must use `forward(request, ...)` above. Add a scoped API regression with a read caller rejected, launch caller rename/reset accepted, an edited-body retry returning the first caller/route receipt, another caller reusing the same command ID receiving an independent receipt, and a mirrored run forwarded to its owner host. Combine `owner=me`, `q=wide%_`, status and keyset paging in the list route; `%`/`_` remain literal search characters, not SQL wildcards. Keep NameBody validation and local/forwarded `hx rename --reset` and MCP `rename_run` behavior unchanged.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -14522,13 +14705,15 @@ Expected: clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hypothex/api/app.py src/hypothex/core/overview.py tests/api/test_ownership_api.py
+git add src/hypothex/api/app.py src/hypothex/core/overview.py src/hypothex/core/taskruns.py tests/api/test_ownership_api.py tests/core/test_taskruns.py tests/core/test_overview.py
 git commit -m "feat(api): server-set run identity, owner-only stop and archive, owner filter"
 ```
 
 ---
 
 ### Task 28: The scope matrix test
+
+**Current-main matrix expansion:** the exact route inventory includes task `/runs` (read) and run `/name` (launch). Seed a real task/run, send `{"name":"wide beam"}` and `{"name":null}` to the name route, and assert both successful mutation and read-role refusal; a 404/422 from a missing fixture is not authorization evidence. Task-runs read preserves the v5 payload and the new per-run owner field. MCP `rename_run` is included in both launch-tool sets (Tasks 32 and 33), with reader rejection and caller-credential forwarding tests.
 
 **Files:**
 - Test: `tests/api/test_route_scopes.py` (append)
@@ -15354,6 +15539,8 @@ git commit -m "feat(api): notification status and test routes; notifier thread i
 - Produces (public helper): `register_storage_routes(app, ctx, hosts)`.
 - Rules: `created_by`/`actor` are the caller's identity (`human` with auth off). There is no MCP path to apply or delete (Task 33).
 
+**Environment identity regression:** through authenticated `/storage/check` and `/storage/delete`, send a genuine eligible local artifact with only `environment_id` changed to another environment. Require refusal `wrong environment`, unchanged bytes, no cleaned manifest and zero freed bytes. A forged source artifact belonging to a mirrored run must also fail even if the caller stamps the local environment. A genuine local `pulled` item of that mirrored run succeeds and records the receiving server's environment. Repeat the source/pulled distinction on an env server and through hub host-response merge; do not normalize incoming identity to make a forged request pass. The shared `_recheck` in Task 22 implements this for both routes.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/api/test_storage_routes.py`:
@@ -15690,7 +15877,7 @@ Contract 1.10 (`scoped`), 5 (tools and scopes), 7. Over `/mcp` with auth on, the
 **Interfaces:**
 - Produces (contract 1.10, exact): `scoped(scope) -> Callable[[F], F]` (tool decorator), `tool_scopes(server) -> dict[str, Scope]`.
 - Produces (public helpers): `acting_as(principal)` (context manager: the principal of in-process tool calls, e.g. tests and stdio); `caller() -> Principal` (inside a tool); `caller_token() -> str | None` (the exact credential selected by the guard in private ASGI state, so the tool's own hub calls act as the caller); `tool_hub_token(fallback) -> TokenChoice` (over HTTP `caller_token()` and never the fallback; in-process/stdio `fallback()`); `TOOL_SCOPE_ATTR = "__hx_scope__"`.
-- Rules: the wrapper finds the principal in `ctx.request_context.request.scope["hx.principal"]` (an HTTP call through `AuthGuard`/`TokenGuard`), else the `acting_as` principal, else `LOCAL_OWNER`; a tool whose scope the caller does not hold raises a tool error `403 · <scope> scope needed; you hold <scope>`. List/get tools are `read`; `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`, `connect_host` are `launch`; `list_sweeps` is `read`. A session principal launches as `agent:<agent>@<user>` with `owner=<user>`; `LOCAL_OWNER` keeps `agent:<agent>` and no owner. Over HTTP a tool's hub calls carry only the caller's credential: a cookie caller forwards its cookie's session token, and a caller without one gets no token, never `hub_token` or the local admin token (that fallback would let any caller act with the server's own rights). Tools apply the same ownership rules as HTTP (contract 1.3): `stop_run` on a local run calls `require_act(caller(), record.owner, "stop")` and `cancel_sweep` on a local sweep `require_act(caller(), spec.owner, "cancel_queued")` before acting, and `launch_run`, `rerun`, `reinfer`, `launch_sweep`, `extend_sweep` call `require_local_exec(caller())` before a run that executes on this machine (a `launch` caller launches on hosts only); forwarded calls are checked by the hub, which sees the caller's own token. Tool errors reach the client as `Error executing tool <name>: <message>` (the SDK's prefix), so tests match the message's end.
+- Rules: the wrapper finds the principal in `ctx.request_context.request.scope["hx.principal"]` (an HTTP call through `AuthGuard`/`TokenGuard`), else the `acting_as` principal, else `LOCAL_OWNER`; a tool whose scope the caller does not hold raises a tool error `403 · <scope> scope needed; you hold <scope>`. List/get tools are `read`; `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `rename_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`, `connect_host` are `launch`; `list_sweeps` is `read`. A session principal launches as `agent:<agent>@<user>` with `owner=<user>`; `LOCAL_OWNER` keeps `agent:<agent>` and no owner. Over HTTP a tool's hub calls carry only the caller's credential: a cookie caller forwards its cookie's session token, and a caller without one gets no token, never `hub_token` or the local admin token (that fallback would let any caller act with the server's own rights). Tools apply the same ownership rules as HTTP (contract 1.3): `stop_run` on a local run calls `require_act(caller(), record.owner, "stop")` and `cancel_sweep` on a local sweep `require_act(caller(), spec.owner, "cancel_queued")` before acting, and `launch_run`, `rerun`, `reinfer`, `launch_sweep`, `extend_sweep` call `require_local_exec(caller())` before a run that executes on this machine (a `launch` caller launches on hosts only); forwarded calls are checked by the hub, which sees the caller's own token. Tool errors reach the client as `Error executing tool <name>: <message>` (the SDK's prefix), so tests match the message's end.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -15728,7 +15915,7 @@ READER = Principal(user="bob", scope="read", session_id="s_00000000000b", client
 ALICE = Principal(user="alice", scope="launch", session_id="s_00000000000a", client="cli")
 CAROL = Principal(user="carol", scope="admin", session_id="s_00000000000c", client="cli")
 LAUNCH_TOOLS = {
-    "launch_run", "rerun", "reinfer", "reevaluate", "stop_run", "add_note", "tag_run",
+    "launch_run", "rerun", "reinfer", "reevaluate", "stop_run", "add_note", "tag_run", "rename_run",
     "add_view", "launch_sweep", "cancel_sweep", "extend_sweep", "pull_artifact", "connect_host",
 }  # fmt: skip
 
@@ -16228,7 +16415,7 @@ The existing `host_states`, `sweep_summary`, `locate_sweep`, `hub_call`, and `bu
         return f"agent:{agent}@{principal.user}", principal.user
 ```
 
-3. Put `@scoped("read")` or `@scoped("launch")` between `@mcp.tool()` and `@_expose_errors` on every tool: `read` on `list_projects`, `list_tasks`, `get_task`, `get_leaderboard`, `list_runs`, `get_run`, `get_logs`, `compare_examples`, `compare_runs`, `get_predictions`, `list_views`, `get_view`, `query_view`, `list_hosts`, `list_sweeps`, `get_sweep`; `launch` on `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`, `connect_host`. For example:
+3. Put `@scoped("read")` or `@scoped("launch")` between `@mcp.tool()` and `@_expose_errors` on every tool: `read` on `list_projects`, `list_tasks`, `get_task`, `get_leaderboard`, `list_runs`, `get_run`, `get_logs`, `compare_examples`, `compare_runs`, `get_predictions`, `list_views`, `get_view`, `query_view`, `list_hosts`, `list_sweeps`, `get_sweep`; `launch` on `launch_run`, `rerun`, `reinfer`, `reevaluate`, `stop_run`, `add_note`, `tag_run`, `rename_run`, `add_view`, `launch_sweep`, `cancel_sweep`, `extend_sweep`, `pull_artifact`, `connect_host`. For example:
 
 ```python
     @mcp.tool()
@@ -16438,7 +16625,7 @@ In `tests/mcp/test_scoped_tools.py` (Task 32), `add_notebook_entry` is a new `la
 
 ```python
 LAUNCH_TOOLS = {
-    "launch_run", "rerun", "reinfer", "reevaluate", "stop_run", "add_note", "tag_run",
+    "launch_run", "rerun", "reinfer", "reevaluate", "stop_run", "add_note", "tag_run", "rename_run",
     "add_view", "launch_sweep", "cancel_sweep", "extend_sweep", "pull_artifact",
     "add_notebook_entry", "connect_host",
 }  # fmt: skip
@@ -16608,13 +16795,15 @@ Contract 1.11, 8 (failure mode 13), 9 (Docker test). The index is the only thing
 **Files:**
 - Modify: `src/hypothex/core/index.py` (`Index(target, store=None, *, password=)`, `dialect`, `upsert`, `upsert_statement`, `json_text`, `open_index`, `IndexUnavailableError`, `IndexSchemaError`, `HEAD_REVISION`; every `session.merge` and `sqlite_insert` goes through `upsert`; `Index.pending`, `INDEX_PENDING_FILE`, `repair_pending`)
 - Modify: `src/hypothex/core/context.py` (`Context.open` uses `open_index`, then `repair_pending`)
+- Modify: `src/hypothex/core/leaderboard.py` (`_index_key` supports PostgreSQL for both board and name caches)
+- Modify: `src/hypothex/core/overview.py` (`_recent_runs` uses the dialect JSON adapter)
 - Modify: `src/hypothex/api/app.py` (`environment_runs` uses `json_text`; 503 for `IndexUnavailableError` and SQLAlchemy `OperationalError`; `_repair_loop` runs `repair_pending`)
 - Test: `tests/core/test_index_dialects.py`
 
 **Interfaces:**
 - Produces (contract 1.11, exact): `Index.__init__(target: Path | str, store: RunStore | None = None, *, password: SecretStr | None = None)`, `Index.dialect`, `upsert(session, model, values, keys)`, `open_index(layout, settings)`, `IndexUnavailableError` (API 503), `IndexSchemaError` (a `ConfigError`: "run hx db upgrade").
 - Produces (additive): `upsert(..., *, keep_max: str | None = None)` (keeps the larger value of one column, for `set_cursor`); `upsert_statement(dialect, model, values, keys, *, keep_max=None)`; `Index.json_text(column, key)` (`json_extract` on SQLite, `json_extract_path_text` on Postgres); `HEAD_REVISION = "0001_phase3"`; `INDEX_PENDING_FILE = "index-pending.txt"`; `Index.pending: Path | None` (set by `open_index` to `<home>/index-pending.txt`); `repair_pending(index, store) -> list[str]`.
-- Rebuild/recovery: preserve main `1b769f4ce9210096640a7054f5d757f09f4bb4df` generation/change markers, schema-3 parent/deferred-point/stale-score state and atomic concurrent SQLite rebuild. `Index.store` is retained on both dialects; PostgreSQL gets the explicit staged transaction below and never accesses a SQLite path. PostgreSQL mutation transactions take one exclusive advisory guard before any live DML; final swap takes the same guard, while staging and ordinary reads remain available.
+- Rebuild/recovery: preserve e73b810 generation/change markers, schema-4 name/parent/deferred-point/stale-score state and atomic concurrent SQLite rebuild. `Index.store` is retained on both dialects; PostgreSQL gets the explicit staged transaction below and never accesses a SQLite path. PostgreSQL mutation transactions take one exclusive advisory guard before any live DML; final swap takes the same guard, while staging and ordinary reads remain available.
 - Rules: a `Path` target is SQLite exactly as before; a `postgresql+psycopg://` URL opens a pooled engine (`pool_pre_ping=True`) with the password from `server.index_password_env`, never from the URL, and checks that the Alembic revision is `HEAD_REVISION` (`IndexSchemaError` otherwise). A server that does not answer raises `IndexUnavailableError` naming the URL with `***` for any password. A Postgres URL without `psycopg` installed raises `ConfigError` "a Postgres index needs psycopg: uv tool install 'hypothex[server]'" (never a bare `ModuleNotFoundError` from SQLAlchemy). Mid-request index failures answer 503 `{error, type: "IndexUnavailableError"}`. Run files are written before the index, so a failed write leaves the index row missing (a new run: `repair_index_gaps` adds it) or stale (an archive, star, status change, or score append on an indexed run, which `repair_index_gaps` never looks at): every run write of `Index` (`upsert_run`, `add_score`, `replace_scores`, `_replace_metric_points` (public replacement and deferred hydration), `delete_run`) that fails with `OperationalError`/`InterfaceError` appends its run id to `Index.pending` (under the file's `flock`, re-opening when a repair moved the file) before re-raising, and `repair_pending` re-indexes those runs from their files (drops the ones whose folder is gone) on the next `Context.open` and every 30 s in the server's repair loop, so the index catches up once Postgres answers. The claim is recoverable: the journal is moved to `index-pending.txt.<8 hex>.claim`, every claim file (a crashed process's too) is read, and each is removed only after all its runs are indexed. Each run is re-read and indexed under its `run_lock` (the lock `Context.update_run` holds), so a repair racing an archive never writes the old value back.
 
 - [ ] **Step 1: Write the failing test**
@@ -16803,7 +16992,7 @@ Expected: FAIL at collection with `ImportError: cannot import name 'IndexUnavail
 
 In `src/hypothex/core/index.py`:
 
-1. Keep the merged-main imports (including `errno`, `sqlite3`, `datetime`, `TemporaryDirectory`, `TYPE_CHECKING`, `Select`, `insert`, `tuple_`, `SqlIndex`, `RunNotFoundError`, and `lttb`). Merge these additions into their existing groups:
+1. Keep the merged-main imports (including `errno`, `sqlite3`, `datetime`, `TemporaryDirectory`, `TYPE_CHECKING`, `Select`, `insert`, `or_`, `tuple_`, `SqlIndex`, `RunNotFoundError`, and `lttb`). Merge these additions into their existing groups:
 
 ```python
 import os
@@ -16824,7 +17013,7 @@ from hypothex.core.settings import ServerSettings, redact_url, resolve_secret
 
 `sqlite_insert`, `OperationalError`, `Session`, `RunStore` and the other existing imports stay. Do not replace this module's import block with a pre-audit version.
 
-2. After `MAX_POINTS_PER_METRIC = 1000` add:
+2. After `SCHEMA_VERSION = 5` (Task 4) add. `MAX_POINTS_PER_METRIC` is now imported from records, so do not look for a local assignment or redefine it:
 
 ```python
 HEAD_REVISION = "0001_phase3"
@@ -16914,13 +17103,14 @@ def upsert(
     session.execute(upsert_statement(dialect, model, values, keys, keep_max=keep_max))
 ```
 
-4. For the reviewed step-6 prerequisite `a5ddaa0` (merged by `55ca922`), replace `Index.__init__` with the following. This compatibility checkpoint does not change the historical full-plan main pin. Preserve its `_open_schema`/`_move_aside` methods and their SQLite-only locking/quarantine behavior; do not use this snippet on the older merged baseline before that prerequisite exists:
+4. Replace e73b810 `Index.__init__` with the following, after Task 4 adds schema 5. Preserve `_open_schema`/`_move_aside` and all existing SQLite locking/quarantine behavior (the historical step-6 prerequisite is already included in this main).
 
 ```python
     def __init__(
         self, target: Path | str, store: RunStore | None = None, *, password: SecretStr | None = None
     ) -> None:
         self.store = store
+        self.cache_identity: object = object()  # private, secret-free lifetime identity
         self.dialect: Literal["sqlite", "postgresql"]
         if isinstance(target, Path):
             self.path = target  # SQLite staging/rebuild owns a local database path
@@ -17014,7 +17204,7 @@ def upsert(
             upsert(session, RunRow, _run_values(record), ["run_id"])
 ```
 
-   Keep `_touch(session, record.run_id)` before it. Task 4 adds owner to `_run_values`; the shared dictionary also retains parent and is used by staging rebuilds.
+   Keep `_touch(session, record.run_id)` before it. Task 4 adds owner to `_run_values`; the shared dictionary also retains parent and name and is used by staging rebuilds. Retain `RunRow.name` and `ix_runs_name`, `search` in list/count/_filter_runs, `metric_names_for`, and the e73b810 `m.higher_is_better is not False` conversion in both project-write paths. `entry.model_dump_json()` must retain config_format=2 and its unset-direction serializer.
 
    the body of `set_meta` with:
 
@@ -17077,7 +17267,7 @@ Every data mutation keeps its existing `_touch` at the same logical point in the
 
 This mark still does not bump generation. `replace_scores` still atomically deletes the stale mark and replaces scores; `Context.add_score` keeps mark → file append → full score replacement under its run lock. Keep `_DATA_TABLES`, `_CARRIED_TABLES`, `_run_values`, `_score_values`, `RunChangeRow`, `PointsPendingRow`, `ScoresStaleRow`, `_fill_pending_points`, and their current call paths.
 
-Current-main compatibility (`a444125`, mandatory): optional `ScoreRecord.per_example_hash`, `evaluation_examples`, and `evaluation_ids_hash` are landed evaluator-issued provenance. Preserve them through `score.model_dump(mode="json")` in `RunStore.append_score`, `score.model_dump_json()` in `_score_values`, normal `ScoreRecord` parsing, and shared `_add_run` staging. `scores.jsonl` and `scores.record_json` already retain the complete model; no binding-specific SQL column or migration is needed. Never reconstruct reduced score dictionaries or synthesize bindings for old/unbound evaluations. Preserve `compare_examples(..., require_bound=False)` and HTTP `require_bound`, including the same-byte hash/parse snapshot, current healthy metric/version batch, full individual population validation, source/dataset/project/task compatibility, shared-intersection semantics, and concurrent-change rejection. Run `test_backlog_backend.py`, `test_bound_comparison.py`, and worker/evaluation tests against the final implementation.
+Current-main compatibility (`e73b810`, mandatory): optional `ScoreRecord.per_example_hash`, `evaluation_examples`, and `evaluation_ids_hash` are landed evaluator-issued provenance. Preserve them through `score.model_dump(mode="json")` in `RunStore.append_score`, `score.model_dump_json()` in `_score_values`, normal `ScoreRecord` parsing, and shared `_add_run` staging. `scores.jsonl` and `scores.record_json` already retain the complete model; no binding-specific SQL column or migration is needed. Never reconstruct reduced score dictionaries or synthesize bindings for old/unbound evaluations. Preserve `compare_examples(..., require_bound=False)` and HTTP `require_bound`, including the same-byte hash/parse snapshot, current healthy metric/version batch, full individual population validation, source/dataset/project/task compatibility, shared-intersection semantics, and concurrent-change rejection. Run `test_backlog_backend.py`, `test_bound_comparison.py`, and worker/evaluation tests against the final implementation.
 
 The merged metric mutator is `_replace_metric_points(self, run_id, points, *, pending_status) -> bool`; public `replace_metric_points` only delegates with `pending_status=None`. Journal and guard the private transaction, before its pending-marker DELETE/EXISTS claim. Preserve its captured `RunRow.status`, `rowcount` check and `_touch` only after a successful claim. `_fill_pending_points` retries by re-reading pending/status outside the transaction through `points_to_index`. A lost claim changes neither data nor generation; a later successful retry is a separate write. The exclusive guard prevents pending-row/generation-row inversion against `delete_run` and final publication. Never replace either method with a pre-CAS body.
 
@@ -17403,9 +17593,24 @@ In `src/hypothex/api/app.py`:
 
 3. In `hypothex_error`, after `elif isinstance(exc, HostUnavailableError): status = 503` add `elif isinstance(exc, IndexUnavailableError): status = 503`.
 
+**Current-main cache and Home integration (mandatory before Task 34 is green).** In `core/overview.py::_recent_runs`, replace the current `ended = func.json_extract(RunRow.record_json, "$.ended_at")` with `ended = ctx.index.json_text(RunRow.record_json, "ended_at")`; retain the widened UTC bounds, active statuses, ordering and exact Python filters. Do not remove `func`, which the other aggregation queries still use.
+
+In `core/leaderboard.py`, replace the body of the current shared `_index_key` (after its docstring) with:
+
+```python
+    if ctx.index.dialect == "postgresql":
+        return ("postgresql", ctx.index.cache_identity, index_generation(ctx))
+    identity = ctx.index.path.stat()
+    return (str(ctx.index.path), identity.st_dev, identity.st_ino, index_generation(ctx))
+```
+
+Update its docstring: SQLite retains path/device/inode/generation; PostgreSQL uses an opaque per-Index lifetime identity and generation. Never use a password-bearing URL as a cache key, never access `index.path` for PostgreSQL, and never share an old generation across reopened connections. Preserve both `cached_leaderboard` and `cached_names` callers, primary variants and deep-copy behavior. A write during a build still only wastes that cache entry.
+
+Add focused tests that construct a PostgreSQL-shaped index whose `path` property raises on access, exercise both cache builders twice, then bump generation and require recomputation of both; reopen with a new `cache_identity` at the same generation and require recomputation again. Check SQLite database replacement still changes identity. Task 36 additionally runs the actual PostgreSQL paths below; these unit fakes alone cannot prove SQL portability.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/core/test_index_dialects.py tests/core/test_index.py tests/core/test_context.py -v`
+Run: `uv run pytest tests/core/test_index_dialects.py tests/core/test_index.py tests/core/test_context.py tests/core/test_leaderboard.py tests/core/test_overview.py -v`
 Expected: `tests/core/test_index_dialects.py` `12 passed`; the phase 1–2 index and context tests still pass.
 
 Run: `uv run pytest -q && uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
@@ -17414,7 +17619,7 @@ Expected: every test passes; clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hypothex/core/index.py src/hypothex/core/context.py src/hypothex/api/app.py tests/core/test_index_dialects.py
+git add src/hypothex/core/index.py src/hypothex/core/context.py src/hypothex/core/leaderboard.py src/hypothex/core/overview.py src/hypothex/api/app.py tests/core/test_index_dialects.py tests/core/test_leaderboard.py tests/core/test_overview.py
 git commit -m "feat(index): postgres dialect with portable upserts, open_index, and 503 when down"
 ```
 
@@ -17428,7 +17633,7 @@ git commit -m "feat(index): postgres dialect with portable upserts, open_index, 
 - Test: `tests/core/test_migrations.py`, `tests/cli/test_db_cli.py`
 
 **Interfaces:**
-- Produces (contract 1.11, exact): `alembic_config(index_url, password) -> alembic.config.Config`, `upgrade(layout, settings) -> str`, `current(layout, settings) -> str | None`; revision `0001_phase3` creates exactly `Base.metadata` at `SCHEMA_VERSION = 4` (and its `meta` row); `hx db upgrade` / `hx db current` (`ConfigError` on SQLite: "the SQLite index needs no migrations").
+- Produces (contract 1.11, exact): `alembic_config(index_url, password) -> alembic.config.Config`, `upgrade(layout, settings) -> str`, `current(layout, settings) -> str | None`; revision `0001_phase3` creates exactly `Base.metadata` at `SCHEMA_VERSION = 5` (and its `meta` row); `hx db upgrade` / `hx db current` (`ConfigError` on SQLite: "the SQLite index needs no migrations").
 - Rules: the URL (with the password) is handed to `env.py` as `config.attributes["url"]`, never written into an Alembic option (no `%` interpolation, no password in text). The Alembic files ship in the wheel (they are inside `src/hypothex`). `hx db` never calls `Context.open` (that would refuse an index that is not upgraded yet).
 
 - [ ] **Step 1: Write the failing tests**
@@ -17461,6 +17666,12 @@ def test_head_creates_exactly_the_models(tmp_path: Path) -> None:
     with engine.connect() as conn:
         context = MigrationContext.configure(conn, opts={"compare_type": True})
         assert compare_metadata(context, Base.metadata) == []
+        assert SCHEMA_VERSION == 5
+        assert "name" in Base.metadata.tables["runs"].columns
+        assert "owner" in Base.metadata.tables["runs"].columns
+        assert {"ix_runs_name", "ix_runs_parent", "ix_runs_owner"} <= {
+            index.name for index in Base.metadata.tables["runs"].indexes
+        }
         version = conn.execute(text("SELECT value FROM meta WHERE key = 'schema_version'"))
         assert version.scalar() == str(SCHEMA_VERSION)
         assert (
@@ -17703,7 +17914,7 @@ def downgrade() -> None:
 Create `src/hypothex/core/migrations/versions/0001_phase3.py`:
 
 ```python
-"""phase 3: the whole index at SCHEMA_VERSION 4
+"""phase 3: the whole index at SCHEMA_VERSION 5
 
 Revision ID: 0001_phase3
 Revises:
@@ -17771,10 +17982,11 @@ def upgrade() -> None:
         sa.Column("parent", sa.String(), nullable=True),
         sa.Column("archived", sa.Boolean(), nullable=False),
         sa.Column("starred", sa.Boolean(), nullable=False),
+        sa.Column("name", sa.String(), nullable=True),
         sa.Column("owner", sa.String(), nullable=True),
         sa.Column("record_json", sa.Text(), nullable=False),
     )
-    for column in ("project", "task", "status", "created_at", "parent", "owner"):
+    for column in ("project", "task", "status", "created_at", "parent", "name", "owner"):
         op.create_index(f"ix_runs_{column}", "runs", [column])
     op.create_table(
         "run_tags",
@@ -17823,7 +18035,7 @@ def upgrade() -> None:
     )
     for name in ("metric_points_pending", "scores_stale"):
         op.create_table(name, sa.Column("run_id", sa.String(), primary_key=True))
-    op.bulk_insert(meta, [{"key": "schema_version", "value": "4"}])
+    op.bulk_insert(meta, [{"key": "schema_version", "value": "5"}])
 
 
 def downgrade() -> None:
@@ -17895,6 +18107,8 @@ git commit -m "feat(index): alembic migrations for the postgres index and hx db 
 **Interfaces:**
 - Consumes: `run_cmd`, `free_port`, `wait_until` (`tests/docker/conftest.py`, phase 2), `upgrade`/`current` (Task 35), `open_index` (Task 34), `rebuild_index`.
 - Produces: contract 9's Docker test (marker `docker`): a throwaway `postgres:16-alpine` on a random 127.0.0.1 port with a random password; `hx db upgrade`, then `Context.open` works; the index built live equals the index rebuilt from files, and equals SQLite's answers for the same store; concurrent `upsert_run`/`set_cursor` from 8 threads never fail and the cursor ends at the maximum; `Context.open` before the upgrade raises `IndexSchemaError`.
+
+**UI-v5 PostgreSQL regressions:** extend `snapshot` and the live/rebuilt/SQLite comparison with named/unnamed runs, `parent`, literal `%`/`_` name/id search plus owner/status/keyset/count combinations, deferred and live metric names, config_format=2 direction tri-state, and every score binding field. Exercise actual `get_leaderboard`, `task_runs`, `build_overview` and a `compare` panel via `query_panel` before/after rename, reindex and reconnect. Assert names update in both caches; no SQLite path or `json_extract` reaches PostgreSQL. Check `/overview`, `/tasks/{project}/{task}/runs`, selected-primary `/leaderboard` and `views/query` through scoped HTTP. Include score-key datasets/model/metrics/table-bars and curve timestamps. Run Alembic `compare_metadata(..., compare_type=True)` against the real PostgreSQL connection as well as SQLite; compare indexes, nullability and signed-int64/autoincrement columns, not merely table names. Use Task 36's throwaway Docker only. These are required integrated tests, not covered by a source-snippet compilation receipt.
 
 - [ ] **Step 1: Write the test**
 
@@ -19589,12 +19803,12 @@ Keep the baseline `_Server.capture_signals`. Replace only the `demo_hosts` lifes
         _drop_server_file(home, info.pid)
 ```
 
-This preserves unknown fields added to the owned record before credential publication. `hx token`, PID birth checks, bootstrap REUSE and private-tunnel behavior remain unchanged. Add first-start/restart tests that use actual `hx token`, CLI `whoami` and stdio discovery and resolve to the owner session; explicit overrides and env-server defaults resolve as HOST; scoped-off defaults remain root-authenticated; no-auth stays loopback-only; a failed second start changes no live session/mapping; record publication retains identity/birth/unknown metadata. Retain the existing token and serve tests. These adapters are refreshed against `a444125`; preserve its credential-intent guards and existing tests. Any later source drift requires plan refresh before the ordered Claude/adversarial gate, not an unreviewed implementation-time rewrite.
+This preserves unknown fields added to the owned record before credential publication. `hx token`, PID birth checks, bootstrap REUSE and private-tunnel behavior remain unchanged. Add first-start/restart tests that use actual `hx token`, CLI `whoami` and stdio discovery and resolve to the owner session; explicit overrides and env-server defaults resolve as HOST; scoped-off defaults remain root-authenticated; no-auth stays loopback-only; a failed second start changes no live session/mapping; record publication retains identity/birth/unknown metadata. Retain the existing token and serve tests. These adapters are refreshed against `e73b810`; preserve its credential-intent guards and existing tests. Any later source drift requires plan refresh before the ordered Claude/adversarial gate, not an unreviewed implementation-time rewrite.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/cli/test_serve_auth.py tests/cli/test_serve.py -v`
-Expected: scoped-start tests and the retained default-token serve/token-helper tests pass; the current `a444125` comparison and both ordered review gates are required before implementation, and assembled integration evidence is required at final acceptance.
+Expected: scoped-start tests and the retained default-token serve/token-helper tests pass; the current `e73b810` comparison and both ordered review gates are required before implementation, and assembled integration evidence is required at final acceptance.
 
 Run: `uv run python -m doctest src/hypothex/cli/main.py && uv run ruff check src tests && uv run ruff format --check src tests && uv run ty check src`
 Expected: clean.
@@ -20382,7 +20596,7 @@ def tasks(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
         _print_json(items)
         return
     _table(
-        ["task", "dataset", "metrics", "primary", "runs", "best"],
+        ["task", "dataset", "metrics", "primary", "runs", "finished", "best"],
         [
             [
                 f"{t.project}/{t.name}",
@@ -20390,6 +20604,7 @@ def tasks(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
                 ", ".join(f"{m}@{v}" for m, v in t.metrics.items()),
                 t.primary,
                 t.n_runs,
+                t.n_finished,
                 None if t.best is None else f"{t.best:.4f}",
             ]
             for t in items
@@ -21481,6 +21696,26 @@ def test_demo_hosts_start_the_shared_host(team_home: Path) -> None:
         assert httpx.get(f"{url}/api/v1/projects", timeout=5).status_code == 401
 
 
+@pytest.mark.parametrize("team", [False, True])
+def test_default_demo_keeps_all_current_kinds_and_extras(tmp_path: Path, team: bool) -> None:
+    from hypothex.demo import DEMO_EXTRAS, DEMO_TASKS
+
+    home = tmp_path / "default-demo"
+    args = ["--home", str(home), "demo", "--json"]
+    if team:
+        args.append("--with-team")
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    expected = {**DEMO_TASKS, **DEMO_EXTRAS}
+    assert set(data) == set(expected) | ({"team"} if team else set())
+    assert {key: data[key] for key in expected} == {
+        key: f"{project}/{task}" for key, (project, task) in expected.items()
+    }
+    ctx = Context.open(home)
+    assert all(ctx.store.load_project(project) for project, _ in expected.values())
+
+
 def test_cli_seeds_the_team(tmp_path: Path) -> None:
     home = tmp_path / "cli-home"
     result = CliRunner().invoke(
@@ -21488,6 +21723,7 @@ def test_cli_seeds_the_team(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["team"]["users"] == {"sv": "admin", "alice": "launch"}
+    assert set(json.loads(result.stdout)) == {"generic", "training", "team"}
     refused = CliRunner().invoke(
         app, ["--home", str(tmp_path / "x"), "demo", "--kinds", "generic", "--with-team"]
     )
@@ -22076,7 +22312,7 @@ In `src/hypothex/cli/main.py`, in `demo`:
         )
 ```
 
-3. Change the import to `from hypothex.demo import DEMO_TASKS, seed_demo, seed_demo_hosts` plus `from hypothex.demo_team import seed_demo_team`, and before `_emit(made, as_json, text)` add:
+3. Retain the current import `from hypothex.demo import DEMO_EXTRAS, DEMO_TASKS, seed_demo, seed_demo_hosts`, including the current `seed_demo(home, selected, {} if chosen else DEMO_EXTRAS)` call, plus `from hypothex.demo_team import seed_demo_team`, and before `_emit(made, as_json, text)` add:
 
 ```python
     if with_team:
@@ -22977,7 +23213,7 @@ Inputs: the phase 3 contract, spec sections 3.4, 5.3, 5.4, 7.2–7.4, 9, 12, 13,
 - **Literal-secret hint.** Contract 1.1 says the hint is "use <key>_env: NAME". For `webhook`/`password` that is exactly the real field; for `url`, `token`, `secret`, and `webhook_url` the plan names the real field (`webhook_env` under Slack, `password_env` under email), since `url_env` does not exist.
 - **Remote storage sizes** come from each host's env route `GET /api/v1/storage/usage` (contract 1.9), not `du` over SSH (spec 9), so they also work for `route: url` hosts. The hub can only partly check a host path for protection (`/`, the host's run folders, mapped checkouts, an absolute host home); the hub also calls the owner's read-only `POST /api/v1/storage/check` before including remote candidates. The owner resolves input aliases, then repeats all checks under the deletion lock at apply; failures there return `skipped` (Tasks 21–22, 31).
 - **CSV export and test-set intervals** are kept from the contract (the spec names only LaTeX and Markdown). `noise` drops data from the table itself (not only from the rendering), so CSV follows the same choice. `percent` scales the table's numbers (CSV too) per column, only when that column's `value_format` is `fraction`, for both leaderboard and comparison tables. Leaderboard footnotes name the scaled columns (`values ×100: <columns>`); comparisons retain `values ×100` (contract 1.6). Baseline rows show `—`/`--` in the `n` column and `n = 0` in CSV.
-- **Metric directions in export.** A `Leaderboard` knows only the primary's direction, so `leaderboard_table` takes `directions=` (column ref, else metric name → higher is better); `task_table`/`export_task` and `compare_table` use `leaderboard.metric_higher_is_better`, the leaderboard's own rule (a `system_bench` percentile key ranks lower-first), so an export never ranks against its leaderboard (Tasks 10, 12).
+- **Metric directions in export.** A `Leaderboard` knows only the primary's direction, so `leaderboard_table` takes `directions=` (column ref, else metric name → higher is better); `task_table`/`export_task` and `compare_table` use `leaderboard.key_higher_is_better`, the current-main rule (explicit direction wins; an unset `system_bench` percentile ranks lower-first), so an export never ranks against its leaderboard (Tasks 10, 12).
 - **Route scope keys** use FastAPI's `path_format` (`/api/v1/runs/{run_id}/files/{path}`), as OpenAPI does, so the matrix test can fill parameters with one regex (Tasks 23, 24, 28).
 - **`/mcp` principal.** Tools read the principal from the MCP SDK's request context (`ctx.request_context.request.scope["hx.principal"]`) through a hidden `hx_mcp_ctx` parameter that `@scoped` adds; in-process calls use `acting_as`, else `LOCAL_OWNER`. Over HTTP a tool's own hub calls carry the caller's credential (`caller_token`: the bearer token, else the `hx_session` cookie) and never the server's `hub_token` or local admin token (`tool_hub_token`), so the hub sees who acts and applies their scope and ownership; `stop_run` and `cancel_sweep` check `require_act` on local runs and sweeps (Task 32). `tool_scopes` reads the SDK's tool registry (`_tool_manager`), the only place the decorated functions are kept (Task 32).
 - **Auth failure message** `auth failed: hx hosts pair <name> <pairing-url>` is used for `route: url` hosts; `route: ssh` hosts keep phase 2's `hx hosts connect` message, because their token is re-read from `server.json` on connect (Task 38). The phase 2 test of that message is updated.

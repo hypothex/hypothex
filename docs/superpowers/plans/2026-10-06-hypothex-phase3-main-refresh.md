@@ -189,3 +189,121 @@ and pytest results. Five focused tests pass; Ruff formatting/lint and the
 plan diff check pass. The probes test documented snippets/environment rules,
 not an implemented PackageRun or installed Phase 3. Prior unchanged source
 and frontend evidence is reused. Both approval gates remain pending.
+
+
+## 2026-10-16 moved-main refresh (ready for renewed primary review)
+
+Current main e73b810 includes UI v5 and SQLite schema 4. The plan branch was
+synchronized at 1987f72; no Phase 3 runtime code was added. Refreshed plans
+must use schema 5, retain current run names/search/query interfaces and metric
+direction precedence, and cover both pinned schema-3 and schema-4 upgrades.
+Backend/frontend writers have completed their owned documents; the parent is
+integrating them while an independent adversarial diagnostic uses the immutable
+pre-refresh input. Renewed primary and final adversarial approvals are still
+required on the completed refresh.
+
+The backend writer reproduced the prior cleanup concern using exact pre-refresh
+helpers in disposable homes: after parent replacement with a protected-run
+symlink, the policy rejected the new path but the old remover still deleted
+run.yaml, metrics and scores. The revised private remover pins no-follow parent
+descriptors and never falls back to absolute-path deletion. Its bounded probe
+preserved all nine protected metadata cases across before-pin, after-recheck
+and syscall-boundary windows. Parent inspected the probe and receipts and
+verified all twelve extracted helper hashes still match the current plan.
+Directory artifacts, missing capabilities, descriptor cleanup and full plan/apply
+regressions remain implementation acceptance requirements, not completed tests.
+
+The exact WebSocket receive-loop probe demonstrated zero receive invocations
+with the former zero-second test interval; the positive 0.01-second test interval
+consumes subscribe. Production remains thirty seconds; tests require bounded
+ASGI/subprocess deadlines. This is an extracted loop test, not an assembled hub.
+The alleged USER=alice privilege escalation is not substantiated: mint_local
+requires an existing enabled admin, so that collision fails closed.
+
+Current UI ownership DTO additions are RecentRun.owner and TaskRun.owner; group
+owners derive from members. Mine uses the runs API with owner=me/status=running.
+The contract also records current-main rename scopes, names/search, tri-state
+metric direction and PostgreSQL cache/overview portability requirements.
+
+Durable evidence and task receipts:
+/Users/shreyasv/Desktop/code/hypothex-phase3-evidence/2026-10-16/.
+No final refreshed-plan approval or Phase 3 readiness is claimed yet.
+
+
+Frontend/backend coordination found that a path-only cleaned marker cannot
+distinguish a host source from a same-path pulled copy on the hub. The contract
+now adds optional CleanedArtifact.environment_id: new entries always copy the
+deleted CleanItem's target environment, including host-response merges. UI
+matching uses environment plus raw path; legacy null identity is not inferred.
+The plan adds same-path/different-environment and legacy regression coverage
+and permits the additive JSON field. This does not change SQL schema 5.
+
+### Parent integration receipt
+
+Both refresh tasks returned completed results with no pending children. Parent
+read all26 frontend tasks, the backend refresh diff/all49 task inventory and
+Task49 changes. Verified all three submitted plan hashes, all17 backend evidence
+hashes, all51 frontend source hashes and all12 final cleanup-helper hashes after
+the environment fix. Runtime/source/UI/tests/workflows/dependencies are still
+byte-identical to e73b810. The contract's frontend section now uses UI-v5 owners,
+accessible labels and current route/DTO behavior; historical mockup geometry,
+selectors and illustrative totals no longer override current acceptance.
+
+Final backend delta evidence is 9 failed/11 passed before and20 passed after,
+covering SQLite migration metadata/schema5, direction precedence, the PG-shaped
+cache key, active-admin mint guards and deletion-target environment. The race
+red contains three actual old after-recheck interleavings, not nine distinct
+windows; all three delete protected metadata. Green contains nine distinct
+before-pin/after-recheck/at-unlink cases preserving protected bytes. The earlier
+description of nine green cases is unchanged. These are bounded snippets, not
+assembled storage/HTTP/PostgreSQL/package validation.
+
+The parent found one small frontend helper mismatch: the requirement allowed
+trailing directory separators, but the proposed matcher missed an exact path
+when the marker ended in a slash. Its planned code now strips trailing separators
+without resolving aliases and still rejects the root. The original worker freeze
+receipt is retained; the parent revision supersedes that frontend hash. A fresh
+extracted Bun test passed all12 assertions (the original9 plus trailing-slash,
+repeated-slash and root cases). Evidence is `parent-cleaned-marker.test.ts` and
+the parent integration receipt in the durable evidence directory. No product
+code or repository tests were implemented by this correction.
+
+The independent diagnostic is complete. Its response is recorded below before
+freezing/pushing the full review input. Obtain renewed Claude LGTM followed by
+independent adversarial LGTM on the same final revision. Neither writer's READY
+verdict nor the old-input diagnostic satisfies those gates.
+
+### Response to the 2026-10-16 independent diagnostic
+
+The diagnostic returned NOT LGTM on immutable1987f72 (old plans plus current
+main), with two P1 and seven P2 findings. Its full report/coverage/probes are in
+`adversarial-diagnostic/` under the durable evidence directory. Parent read the
+report, all49/26 coverage ledger, reproduction instructions and integrity receipt.
+All findings are accepted as defects in that reviewed input. The responses below
+describe authored plan corrections; they are not independent acceptance of the
+new revision or claims of implemented behavior.
+
+| Finding | Correction in refreshed input | Evidence and remaining acceptance |
+|---|---|---|
+| F1 P1: parent-swap metadata deletion | Backend22 pins no-follow parent descriptors, rechecks policy/identity and removes fd-relative without fallback; contract1.9 and backend31 propagate it. | Exact snippets: red3 protected-file deletions; green9 protected-file preservation cases. Planned public apply/env-route, directory/leaf/replacement/capability/leak tests remain mandatory. MCP has dry-run/report only, never destructive apply. |
+| F2 P1: schema4 collision/missing name | Backend4/34/35/36 and package49 advance to5, retain name/index and all current fields; separate authentic schema3 and schema4 fixtures. | Exact migration versus extracted current metadata plus intended deltas has no SQLite differences. Real old-home/wheel/restart/reindex and PostgreSQL metadata checks remain mandatory. |
+| F3 P2: zero-timeout subscribe starvation | Backend26 uses positive0.01 test interval and bounded ASGI/subprocess completion; production30 seconds unchanged. | Old receive0 versus revised receive1 in bounded loop probes. Full revocation/filter/cursor lifecycle tests remain mandatory. |
+| F4 P2: scope inventory/rename forwarding | Backend5/24/27/28/32/33 includes task-runs read and name/rename_run launch; rename passes request to forward and uses caller receipts. | Exact current route/call reviewed; scoped read/launch/admin/host, reset, forwarding and revoked-session cases required by contract9 and task matrices. |
+| F5 P2: hosts/queue public shell | Backend23 retains both paths and optional trailing slashes; frontend7 preserves exact path shapes and full-load pair exception. | Current-source route anchors checked. Default-token/scoped GET/HEAD/POST with/without installed UI and reserved-path rejection remain required. |
+| F6 P2: q search removed | Backend27 retains search Query(alias=q,max_length=200) and search forwarding alongside owner/status/paging. | Exact replacement inspected; contract9 explicitly requires q-only, combined, no-match, overlong, literal wildcard and rename-refresh cases. |
+| F7 P2: obsolete UI integration | All26 frontend tasks reassigned to current shell/Home/task/run owners; FilesTab/FileList/checkpoint table plus retained selected/training surfaces receive cleaned metadata. | 51 source anchors/hashes checked; full v5 browser/component/type/build acceptance and installed UI are still required. Environment+raw-path cleanup matching adds source/pulled disambiguation. |
+| F8 P2: conflicting direction helper | Backend12 reuses key_higher_is_better, handles taskless unset as higher and rejects only differing effective directions; current primary_field/config_format2 preserved. | Twelve direction cases in bounded matrix; assembled selected-primary export/goldens/best marks and panel checks remain required. |
+| F9 P2: PG cache path access | Backend34 adds secret-free per-Index cache_identity+generation for both names/board caches; SQLite device/inode identity retained; overview JSON query made portable. | PG-shaped key probe passes without a path; backend36 requires real PostgreSQL names/taskRuns/overview/panels/reopen/rebuild/invalidation and concurrent recovery. |
+
+The diagnostic independently rejected the mint_local escalation allegation;
+the existing enabled-admin guard is retained and tested. No change widens it.
+Notebook chip labels remain the explicit NotebookDay API hypothesis-clause/id
+contract; current RunPage names are preserved separately. The frontend wording
+was clarified so it cannot invent a different chip-label policy. No additional
+unresolved design choice was assigned to the user.
+
+Reviewers must independently reassess all nine responses and the complete plan,
+especially the descriptor-removal boundary and compressed UI-v5 implementation
+instructions. Historical probe files that vanished are not current evidence.
+The eleven diagnostic tests confirm old defects/disputed claims only; the
+writer/parent probes validate limited new snippets, not assembled Phase3.

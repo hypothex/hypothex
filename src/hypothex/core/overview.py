@@ -25,10 +25,10 @@ from hypothex.core.leaderboard import (
     group_id_for,
     group_label,
 )
-from hypothex.core.naming import derive_names, run_view_name
+from hypothex.core.naming import run_view_name
 from hypothex.core.records import ACTIVE_STATUSES, MetricPoint, RunRecord, RunStatus
 from hypothex.core.seeds import Stats
-from hypothex.core.taskruns import latest_scores
+from hypothex.core.taskruns import derived_names, latest_scores
 
 DEFAULT_WINDOW = timedelta(hours=24)
 FAILED_STATUSES = frozenset({RunStatus.FAILED, RunStatus.LOST})
@@ -492,8 +492,9 @@ def _view_names(ctx: Context, runs: Iterable[RunRecord]) -> dict[str, str]:
     """
     Return the run view name of each run (``naming.run_view_name``).
 
-    Names derive over every run of the run's task (archived ones too), one
-    index query per task; a run without a task gets ``_short_label``.
+    Names derive over every run of the run's task (archived ones too),
+    memoized per task until the index changes (``taskruns.derived_names``); a
+    run without a task gets ``_short_label``.
 
     Parameters
     ----------
@@ -510,8 +511,7 @@ def _view_names(ctx: Context, runs: Iterable[RunRecord]) -> dict[str, str]:
     wanted = {r.run_id: r for r in runs}
     derived: dict[str, str] = {}
     for project, task in sorted({(r.project, r.task) for r in wanted.values() if r.task}):
-        every = ctx.index.list_runs(project=project, task=task, include_archived=True, limit=None)
-        derived.update(derive_names(sorted(every, key=lambda r: (r.created_at, r.run_id))))
+        derived.update(derived_names(ctx, project, task))
     return {
         rid: run_view_name(r, derived) if r.task else (r.name or _short_label(r))
         for rid, r in wanted.items()

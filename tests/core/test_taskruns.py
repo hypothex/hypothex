@@ -3,12 +3,15 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
+from hypothex.core import naming
 from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.fsutil import append_jsonl
 from hypothex.core.ids import utcnow
+from hypothex.core.overview import build_overview
 from hypothex.core.records import (
     CostTotals,
     GitInfo,
@@ -17,7 +20,7 @@ from hypothex.core.records import (
     RunStatus,
     ScoreRecord,
 )
-from hypothex.core.taskruns import latest_scores, run_names, task_runs
+from hypothex.core.taskruns import derived_names, latest_scores, run_names, task_runs
 from tests.factories import make_record
 
 T0 = utcnow()
@@ -191,3 +194,33 @@ def test_groups_with_the_same_params_on_two_commits_get_distinct_names(
     q.rename_run(ctx, "a", "first try")
     names = sorted(g.name for g in task_runs(ctx, "toy-acc").groups)
     assert names == ["first try", "lr 1e-3", "lr 3e-4"]  # no clash left
+
+
+def test_derived_names_are_memoised_until_the_index_changes(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(ctx, toy_repo, "a", "aaaa", params={"lr": "1e-3"})
+    _run(ctx, toy_repo, "b", "bbbb", minute=1, params={"lr": "3e-4"}, status=RunStatus.RUNNING)
+    calls: list[int] = []
+    real = naming.derive_names
+
+    def counting(runs: Any) -> dict[str, str]:
+        calls.append(len(runs))
+        return real(runs)
+
+    for module in ("hypothex.core.taskruns", "hypothex.core.overview", "hypothex.core.panels"):
+        monkeypatch.setattr(f"{module}.derive_names", counting, raising=False)
+    first = derived_names(ctx, "toy", "toy-acc")
+    assert first == {"a": "lr 1e-3", "b": "lr 3e-4"}
+    first["a"] = "changed by a caller"
+    # the same index generation: no new derivation from any caller, and a copy each time
+    assert derived_names(ctx, "toy", "toy-acc") == {"a": "lr 1e-3", "b": "lr 3e-4"}
+    task_runs(ctx, "toy-acc")
+    run_names(ctx, "toy", "toy-acc")
+    build_overview(ctx)
+    build_overview(ctx)
+    assert calls == [2]
+    # a write bumps the generation: the next call derives again
+    _run(ctx, toy_repo, "c", "cccc", minute=2, params={"lr": "1e-2"})
+    assert derived_names(ctx, "toy", "toy-acc")["c"] == "lr 1e-2"
+    assert calls == [2, 3]

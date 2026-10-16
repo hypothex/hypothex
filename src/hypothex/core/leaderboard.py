@@ -481,6 +481,8 @@ STATS_CACHE_SIZE = 8192
 """Bootstrap results kept per kind (row intervals, paired p-values), least recently used out."""
 BOARD_CACHE_SIZE = 128
 """Leaderboards kept by ``cached_leaderboard``, least recently used out."""
+NAMES_CACHE_SIZE = 256
+"""Derived run names kept by ``cached_names`` (one entry per task), least recently used out."""
 
 _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
@@ -519,6 +521,7 @@ class _Lru(Generic[_K, _V]):
 _INTERVALS: _Lru[bytes, tuple[float, float]] = _Lru(STATS_CACHE_SIZE)
 _PAIRED_P: _Lru[bytes, float] = _Lru(STATS_CACHE_SIZE)
 _BOARDS: _Lru[tuple[Hashable, ...], Leaderboard] = _Lru(BOARD_CACHE_SIZE)
+_NAMES: _Lru[tuple[Hashable, ...], dict[str, str]] = _Lru(NAMES_CACHE_SIZE)
 
 
 def _digest(values: list[float]) -> bytes:
@@ -540,6 +543,7 @@ def clear_caches() -> None:
     _INTERVALS.clear()
     _PAIRED_P.clear()
     _BOARDS.clear()
+    _NAMES.clear()
 
 
 def cached_leaderboard(
@@ -593,12 +597,8 @@ def cached_leaderboard(
     ...     ctx, "toy", "t", config, lambda: build_leaderboard("toy", "t", config, runs, scores)
     ... )
     """
-    identity = ctx.index.path.stat()
     key = (
-        str(ctx.index.path),
-        identity.st_dev,
-        identity.st_ino,
-        index_generation(ctx),
+        *_index_key(ctx),
         project,
         task,
         xxhash.xxh3_128_digest(config.model_dump_json().encode()),
@@ -606,6 +606,63 @@ def cached_leaderboard(
         variant,
     )
     return _BOARDS.get(key, build).model_copy(deep=True)
+
+
+def _index_key(ctx: Context) -> tuple[Hashable, ...]:
+    """
+    Identify the index state: its path, device/inode identity and generation.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open context.
+
+    Returns
+    -------
+    tuple
+        ``(path, st_dev, st_ino, index_generation)``; the generation is read
+        before any build, so a write during a build only wastes the entry.
+
+    Examples
+    --------
+    >>> _index_key(ctx)  # doctest: +SKIP
+    ('/home/me/.hypothex/index.sqlite', 16777230, 1234567, 42)
+    """
+    identity = ctx.index.path.stat()
+    return (str(ctx.index.path), identity.st_dev, identity.st_ino, index_generation(ctx))
+
+
+def cached_names(
+    ctx: Context, project: str, task: str, build: Callable[[], dict[str, str]]
+) -> dict[str, str]:
+    """
+    Return ``build()`` (a task's derived run names), memoized until the index changes.
+
+    Keyed like ``cached_leaderboard`` (index identity and generation, project,
+    task). ``build`` must read only index data. Each call returns a copy.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open context whose index ``build`` reads.
+    project : str
+        Project name.
+    task : str
+        Task name.
+    build : callable
+        Derives the names on a miss (``taskruns.derived_names``).
+
+    Returns
+    -------
+    dict of str to str
+        A copy of the cached or new names.
+
+    Examples
+    --------
+    >>> cached_names(ctx, "toy", "t", lambda: {"r1": "lr 1e-3"})  # doctest: +SKIP
+    {'r1': 'lr 1e-3'}
+    """
+    return dict(_NAMES.get((*_index_key(ctx), project, task), build))
 
 
 # test-set noise --------------------------------------------------------------------

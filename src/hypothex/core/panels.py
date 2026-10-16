@@ -29,7 +29,7 @@ from hypothex.core.leaderboard import (
     seed_group_label,
     seed_group_labels,
 )
-from hypothex.core.naming import derive_names, group_names
+from hypothex.core.naming import group_names
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.scorekeys import split_score_key
@@ -37,6 +37,7 @@ from hypothex.core.seeds import summarize
 from hypothex.core.sources import group_labels, iter_rows, metric_points, select_fields
 from hypothex.core.stats import ecdf_points, lttb, quantile
 from hypothex.core.store import ProjectEntry
+from hypothex.core.taskruns import derived_names
 from hypothex.core.views import (
     VERSION_REF,
     PanelSpec,
@@ -1767,7 +1768,7 @@ def _compare(scope: _Scope, panel: PanelSpec) -> PanelResult:
         project=scope.entry.project, task=scope.task, include_archived=True, limit=None
     )
     by_id = {r.run_id: r for r in every}
-    derived = derive_names(sorted(every, key=lambda r: (r.created_at, r.run_id)))
+    derived = derived_names(scope.ctx, scope.entry.project, scope.task)
     options: dict[str, set[str]] = {"datasets": set(), "models": set(), "metrics": set()}
     prefixes: set[str] = set()
     kept: list[tuple[int, int, int, dict[str, Any]]] = []

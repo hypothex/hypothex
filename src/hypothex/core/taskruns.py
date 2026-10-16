@@ -16,6 +16,7 @@ from hypothex.core.leaderboard import (
     LeaderboardRow,
     NoiseInterval,
     VersusBest,
+    cached_names,
     group_id_for,
     seed_buckets,
 )
@@ -205,6 +206,41 @@ def _group(
     )
 
 
+def derived_names(ctx: Context, project: str, task: str) -> dict[str, str]:
+    """
+    Return the derived name of every run of a task, archived runs too.
+
+    ``naming.derive_names`` over all the task's runs, oldest first, memoized
+    until the index changes (``leaderboard.cached_names``), so a poll that names
+    runs reads and parses the task's records only after a write.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    project : str
+        Project name.
+    task : str
+        Task name.
+
+    Returns
+    -------
+    dict of str to str
+        Derived name per run id (a copy; callers may change it).
+
+    Examples
+    --------
+    >>> derived_names(ctx, "toy", "toy-acc")  # doctest: +SKIP
+    {'r1': 'lr 1e-3', 'r2': 'lr 3e-4'}
+    """
+
+    def build() -> dict[str, str]:
+        every = ctx.index.list_runs(project=project, task=task, include_archived=True, limit=None)
+        return derive_names(sorted(every, key=lambda r: (r.created_at, r.run_id)))
+
+    return cached_names(ctx, project, task, build)
+
+
 def run_names(ctx: Context, project: str, task: str) -> dict[str, str]:
     """
     Return the display name of every run of a task, archived runs too.
@@ -232,7 +268,7 @@ def run_names(ctx: Context, project: str, task: str) -> dict[str, str]:
     {'r1': 'lr 1e-3', 'r2': 'wide beam'}
     """
     every = ctx.index.list_runs(project=project, task=task, include_archived=True, limit=None)
-    derived = derive_names(sorted(every, key=lambda r: (r.created_at, r.run_id)))
+    derived = derived_names(ctx, project, task)
     return {r.run_id: display_name(r, derived) for r in every}
 
 
@@ -272,7 +308,7 @@ def task_runs(
     board = get_leaderboard(ctx, task, entry.project)
     every = ctx.index.list_runs(project=entry.project, task=task, include_archived=True, limit=None)
     oldest_first = sorted(every, key=lambda r: (r.created_at, r.run_id))
-    derived = derive_names(oldest_first)
+    derived = derived_names(ctx, entry.project, task)
     shown = [r for r in every if archived or not r.archived]
     stored = ctx.index.scores_for(r.run_id for r in shown)
     runs: list[TaskRun] = []

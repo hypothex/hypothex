@@ -615,7 +615,9 @@ def _is_number(v: Any) -> bool:
 
 def pick_field(rows: Iterable[dict[str, Any]], key: str = "value") -> tuple[str, bool] | None:
     """
-    Choose the per-example field used for test-set noise and paired tests.
+    Choose the per-example field shown for a metric in per-example panels.
+
+    Test-set noise and paired tests use :func:`primary_field` instead.
 
     Parameters
     ----------
@@ -662,6 +664,94 @@ def pick_field(rows: Iterable[dict[str, Any]], key: str = "value") -> tuple[str,
         if all(_is_number(v) for v in values[k]):
             return k, False
     return None
+
+
+def _numbers(values: list[Any]) -> bool:
+    """Whether ``values`` is nonempty and every value is a bool or a finite number."""
+    return bool(values) and all(
+        isinstance(v, bool) or (isinstance(v, int | float) and math.isfinite(v)) for v in values
+    )
+
+
+def primary_field(
+    examples: PerExample, key: str, recorded: Mapping[str, float]
+) -> tuple[str, bool] | None:
+    """
+    Choose the per-example field that holds the primary metric key, or None.
+
+    The test-set interval and the paired tests are computed on this field, so
+    it must hold the same quantity as the primary score:
+
+    1. The field named ``key`` (``value`` for ``acc``, ``p95`` for ``latency/p95``),
+       when its values are numbers. It is binary when they are all 0/1 or bools.
+    2. Only for the default key ``value``: ``correct``, then ``solved``, then any
+       other field in name order, whose mean over each run's examples equals that
+       run's recorded score (``recorded``, relative tolerance 1e-6) in every run.
+       A status flag such as ``ok: true`` next to a ``value`` of 0 is never used.
+
+    ``None`` values are ignored.
+
+    Parameters
+    ----------
+    examples : dict
+        run_id -> example_id -> per-example fields of the primary metric.
+    key : str
+        The primary metric's key, for example ``value``.
+    recorded : mapping of str to float
+        run_id -> the run's recorded primary score.
+
+    Returns
+    -------
+    tuple of (str, bool) or None
+        Field name and whether it is binary; None when no field holds the key.
+
+    Examples
+    --------
+    >>> ex = {"r": {"e1": {"ok": True, "value": 0.0}, "e2": {"ok": True, "value": 0.0}}}
+    >>> primary_field(ex, "value", {"r": 0.0})
+    ('value', False)
+    >>> half = {"r": {"e1": {"correct": True}, "e2": {"correct": False}}}
+    >>> primary_field(half, "value", {"r": 0.5})
+    ('correct', True)
+    >>> primary_field({"r": {"e1": {"ok": True}}}, "value", {"r": 0.0}) is None
+    True
+    """
+    columns: dict[str, list[Any]] = defaultdict(list)
+    for rows in examples.values():
+        for row in rows.values():
+            for name, v in row.items():
+                if v is not None:
+                    columns[name].append(v)
+
+    def binary(name: str) -> bool:
+        vs = columns[name]
+        if all(isinstance(v, bool) for v in vs):
+            return True
+        own = name == key or name in BINARY_FIELDS
+        return own and all(type(v) is int and v in (0, 1) for v in vs)
+
+    if _numbers(columns.get(key, [])):
+        return key, binary(key)
+    if key != "value":
+        return None
+    others = sorted(n for n in columns if n not in BINARY_FIELDS and n != key)
+    for name in (*BINARY_FIELDS, *others):
+        if _numbers(columns.get(name, [])) and _averages_to(examples, name, recorded):
+            return name, binary(name)
+    return None
+
+
+def _averages_to(examples: PerExample, name: str, recorded: Mapping[str, float]) -> bool:
+    """Whether field ``name`` averages to the recorded score in every run that has both."""
+    checked = 0
+    for rid, rows in examples.items():
+        if rid not in recorded:
+            continue
+        values = [float(r[name]) for r in rows.values() if r.get(name) is not None]
+        if not values or not math.isclose(_mean(values), recorded[rid], rel_tol=1e-6, abs_tol=1e-9):
+            return False
+        checked += 1
+    return checked > 0
 
 
 def _mean(values: list[float]) -> float:
@@ -1159,18 +1249,8 @@ def build_leaderboard(
             groups[(r.config_hash, r.git.commit, diff_key(r.git))].append(r)
 
     examples = {rid: ex for rid, ex in (per_example or {}).items() if rid in per_run}
-    picked = pick_field((f for ex in examples.values() for f in ex.values()), primary_key)
-    if requested_primary is not None and (
-        primary_key != "value"
-        or any(primary_key in row for ex in examples.values() for row in ex.values())
-    ):
-        # An explicitly selected output key must not borrow another binary or
-        # numeric field from the metric's per-example payload.
-        fields = [row.get(primary_key) for ex in examples.values() for row in ex.values()]
-        if fields and all(isinstance(v, (bool, int, float)) and math.isfinite(v) for v in fields):
-            picked = (primary_key, all(type(v) in (bool, int) and v in (0, 1) for v in fields))
-        else:
-            picked = None
+    recorded = {rid: values[primary] for rid, values in per_run.items() if primary in values}
+    picked = primary_field(examples, primary_key, recorded)
     rows: list[LeaderboardRow] = []
     pooled: dict[str, dict[str, float]] = {}
     for identity, members in groups.items():

@@ -1186,7 +1186,7 @@ def _solved(scope: _Scope, run: RunRecord) -> int | None:
     Count the examples a run solved on the task's primary metric.
 
     ``None`` when the run has no per-example file or its field (chosen by
-    ``pick_field``, as for test-set noise) is not binary.
+    ``pick_field``) is not binary.
     """
     primary = _primary_rows(scope, run)
     if primary is None:

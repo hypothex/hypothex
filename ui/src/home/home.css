@@ -28,7 +28,8 @@
 /* Hosts: the GPU cells keep their natural width on one row; the name column takes the rest. */
 .home .hostrow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(44px, auto); gap: 12px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--grid); }
 .home .hostrow > div:first-child > * { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.home .hostrow .gpus { flex-wrap: nowrap; }
+/* at most 8 cells a row (8 × 22 px + 7 × 3 px gaps): a 16-GPU host wraps to 2 rows */
+.home .hostrow .gpus { flex-wrap: wrap; max-width: 197px; }
 .home .hostrow:last-child { border-bottom: 0; }
 .home .hostrow .muted { font-size: 12px; }
 .home .delta-up { color: var(--ok); }

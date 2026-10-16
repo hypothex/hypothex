@@ -192,3 +192,29 @@ test("sweeps: the stat tiles fit one row at 1440 and never leave one tile alone 
     expect(rows.filter((n) => n < 2), `a lone tile at ${width}: ${JSON.stringify(rows)}`).toEqual([]);
   }
 });
+
+test("home hosts: a 16-GPU host wraps its cells in rows of 8 and keeps its name column", async ({ page, request, theme }, info) => {
+  await connectedHosts(request);
+  await page.route("**/api/v1/hosts", async (route) => {
+    const response = await route.fetch();
+    const hosts = (await response.json()) as { name: string; gpus: { index: number; run_id: string | null }[] }[];
+    for (const h of hosts) {
+      if (h.gpus.length === 8) h.gpus = [...h.gpus, ...h.gpus.map((g) => ({ ...g, index: g.index + 8, run_id: null }))];
+    }
+    await route.fulfill({ response, json: hosts });
+  });
+  await page.goto("/");
+  await expectTheme(page, theme);
+  const big = page.locator("section[aria-labelledby='home-hosts'] .gpus").filter({ has: page.locator("[data-gpu='15']") });
+  await expect(big).toBeVisible();
+  for (const width of LAYOUT_WIDTHS) {
+    await checkLayout(page, info, "home-16gpu", width, [...LAYOUT_REGIONS, ".home section"]);
+    const rows = await big.evaluate((set) => {
+      const tops = Array.from(set.children).map((c) => Math.round(c.getBoundingClientRect().top));
+      return [...new Set(tops)].map((top) => tops.filter((t) => t === top).length);
+    });
+    expect(rows, `GPU rows at ${width}`).toEqual([8, 8]);
+    const name = await big.evaluate((set) => set.closest(".hostrow")?.firstElementChild?.getBoundingClientRect().width ?? 0);
+    expect(name, `name column at ${width}`).toBeGreaterThanOrEqual(100);
+  }
+});

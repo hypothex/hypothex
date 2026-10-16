@@ -89,7 +89,7 @@ test(`home with running runs: no overflow at ${LAYOUT_WIDTHS.join("/")}, one-lin
     expect.soft(live.filter(([, n, h]) => n !== 1 || h > 44), `Running now names wrap at ${width}`).toEqual([]);
     // Hosts: the GPU cells of one host sit on one row
     const rows = await page.locator("section[aria-labelledby='home-hosts'] .gpus").evaluateAll((sets) =>
-      sets.map((set) => [set.getAttribute("aria-label"), new Set([...set.children].map((c) => Math.round(c.getBoundingClientRect().top))).size] as const));
+      sets.map((set) => [set.getAttribute("aria-label"), new Set(Array.from(set.children).map((c) => Math.round(c.getBoundingClientRect().top))).size] as const));
     expect(rows.length).toBeGreaterThan(0);
     expect.soft(rows.filter(([, n]) => n !== 1), `GPU cells wrap at ${width}`).toEqual([]);
   }

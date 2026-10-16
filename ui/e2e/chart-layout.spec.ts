@@ -198,7 +198,7 @@ for (const span of [5, 7, 12]) {
 async function rowsOf(page: Page, selector: string): Promise<number[][]> {
   return page.locator(selector).evaluateAll((sets) =>
     sets.map((set) => {
-      const boxes = [...set.children].map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0).sort((a, b) => a.top - b.top);
+      const boxes = Array.from(set.children).map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0).sort((a, b) => a.top - b.top);
       const rows: number[] = [];
       let bottom = Number.NEGATIVE_INFINITY;
       for (const box of boxes) {

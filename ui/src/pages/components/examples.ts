@@ -1,5 +1,5 @@
 /** Pure helpers for the two-run Examples page (spec 8.3.4 and 8.5). */
-import { firstClause, fmtDelta, fmtP, fmtSigned, shortId } from "./format";
+import { firstClause, fmtDelta, fmtSigned, shortId } from "./format";
 import type { ExampleDiff, RunRecord } from "./types";
 
 function logFactorials(n: number): number[] {
@@ -55,18 +55,18 @@ export function exampleTotal(diff: ExampleDiff): number {
   return diff.fixed.length + diff.broken.length + diff.both_fail + diff.both_pass;
 }
 
-/** Short labels for runs A and B; equal labels get the run's short id. */
-export function pairLabels(a: RunRecord, b: RunRecord): [string, string] {
-  const la = firstClause(a.hypothesis, `run ${shortId(a.run_id)}`);
-  const lb = firstClause(b.hypothesis, `run ${shortId(b.run_id)}`);
+/**
+ * Short labels for runs A and B: the task's run name (`TaskRun.name` in `names`), else the
+ * record's own name, else the first clause of its hypothesis; equal labels get the run's
+ * short id.
+ */
+export function pairLabels(a: RunRecord, b: RunRecord, names?: ReadonlyMap<string, string>): [string, string] {
+  const label = (r: RunRecord): string =>
+    names?.get(r.run_id) ?? (r.name?.trim() || firstClause(r.hypothesis, `run ${shortId(r.run_id)}`));
+  const la = label(a);
+  const lb = label(b);
   if (la !== lb) return [la, lb];
   return [`${la} ${shortId(a.run_id)}`, `${lb} ${shortId(b.run_id)}`];
-}
-
-/** `B fixes 9, breaks 3 vs A, p = 0.15`. */
-export function examplesHeadline(labelA: string, labelB: string, diff: ExampleDiff): string {
-  const p = signTestP(diff.fixed.length, diff.broken.length);
-  return `${labelB} fixes ${diff.fixed.length}, breaks ${diff.broken.length} vs ${labelA}, ${fmtP(p)}`;
 }
 
 /** `n = 180`, `net +6`, `Δ +0.0333` (the change in pass rate). */

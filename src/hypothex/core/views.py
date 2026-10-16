@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
 
 from hypothex.core.config import (
     CONFIG_FILENAME,
@@ -44,6 +51,7 @@ PanelType = Literal[
     "trace",
     "markdown",
     "vega_lite",
+    "compare",
 ]
 Source = Literal["runs", "scores", "metrics", "predictions", "samples", "usage", "traces", "groups"]
 Noise = Literal["seed", "test_set"]
@@ -155,12 +163,19 @@ class PanelData(BaseModel):
     max_points: int | None = Field(None, ge=2, le=500)
     """Curves only: points per run and metric; None retains the 500-point default."""
 
-    @field_validator("metrics")
+    datasets: list[str] | None = None
+    """Compare only: the dataset parts of the score keys shown side by side."""
+    model: str | None = None
+    """Compare only: the model part of the score keys; None matches every model."""
+
+    @field_validator("metrics", "datasets")
     @classmethod
-    def _few_metrics(cls, value: list[str] | None) -> list[str] | None:
-        """Reject more than ``MAX_PANEL_REFS`` metric references."""
+    def _few_metrics(cls, value: list[str] | None, info: ValidationInfo) -> list[str] | None:
+        """Reject more than ``MAX_PANEL_REFS`` metric or dataset references."""
         if value is not None and len(value) > MAX_PANEL_REFS:
-            raise ValueError(f"a panel lists at most {MAX_PANEL_REFS} metrics, not {len(value)}")
+            raise ValueError(
+                f"a panel lists at most {MAX_PANEL_REFS} {info.field_name}, not {len(value)}"
+            )
         return value
 
 
@@ -183,7 +198,8 @@ class PanelSpec(BaseModel):
     spec: dict[str, Any] | None = None
     text: str | None = None
     scale: Literal["linear", "log"] = "linear"
-    render: Literal["chart", "table"] = "chart"
+    render: Literal["chart", "table", "bars"] = "chart"
+    """``table`` for distribution tables; ``table`` (the default) or ``bars`` for compare."""
 
 
 class ViewSpec(BaseModel):
@@ -565,10 +581,13 @@ def _panel_issues(
     known_fields: dict[str, set[str]],
 ) -> list[tuple[Loc, str, str | None]]:
     """Return ``(loc, message, suggestion)`` for one panel's semantic problems."""
-    out: list[tuple[Loc, str, str | None]] = []
+    out: list[tuple[Loc, str, str | None]] = _compare_issues(panel, at)
     data = panel.data
+    # a compare panel's data.metrics are the metric parts of score keys, not references
     refs: list[tuple[Loc, str]] = [
-        ((*at, "data", "metrics", j), ref) for j, ref in enumerate(data.metrics or [])
+        ((*at, "data", "metrics", j), ref)
+        for j, ref in enumerate(data.metrics or [])
+        if panel.type != "compare"
     ]
     if data.primary is not None:
         if panel.type not in {"leaderboard", "stat_strip", "curves"}:
@@ -611,6 +630,49 @@ def _panel_issues(
         out += [(loc, msg, None) for loc, msg in vega_spec_problems(panel.spec, (*at, "spec"))]
     if panel.pareto and set(panel.pareto) - {"x", "y"}:
         out.append(((*at, "pareto"), "pareto keys are x and y", None))
+    return out
+
+
+def _compare_issues(panel: PanelSpec, at: Loc) -> list[tuple[Loc, str, str | None]]:
+    """
+    Return ``(loc, message, suggestion)`` for the compare-only keys and rules.
+
+    A ``compare`` panel needs ``data.datasets`` and ``data.metrics`` and renders
+    as ``table`` or ``bars``; ``data.datasets``, ``data.model`` and
+    ``render: bars`` belong to compare panels only.
+
+    Parameters
+    ----------
+    panel : PanelSpec
+        The panel to check.
+    at : Loc
+        The panel's location in the view (``("panels", i)``).
+
+    Returns
+    -------
+    list of tuple
+        ``(loc, message, suggestion)`` per problem; empty when there is none.
+
+    Examples
+    --------
+    >>> panel = PanelSpec(type="compare", data=PanelData(datasets=["set-1"]))
+    >>> [msg for _, msg, _ in _compare_issues(panel, ("panels", 0))]
+    ['compare needs data.metrics']
+    """
+    data = panel.data
+    out: list[tuple[Loc, str, str | None]] = []
+    if panel.type != "compare":
+        for key in ("datasets", "model"):
+            if getattr(data, key) is not None:
+                out.append(((*at, "data", key), f"{key} applies to compare panels", None))
+        if panel.render == "bars":
+            out.append(((*at, "render"), "render: bars applies to compare panels", None))
+        return out
+    for key in ("datasets", "metrics"):
+        if not getattr(data, key):
+            out.append(((*at, "data"), f"compare needs data.{key}", None))
+    if "render" in panel.model_fields_set and panel.render == "chart":
+        out.append(((*at, "render"), "compare renders as table or bars", "table"))
     return out
 
 

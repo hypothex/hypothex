@@ -1,18 +1,28 @@
 /**
- * ⌘K / Ctrl+K palette (ui-v4 mockup): go to a task or run, copy a repo or dataset path,
- * switch colour mode. Items are filtered by every typed word (case-insensitive) over the
- * group, title, subtitle and hidden keywords (hypothesis, tags, paths).
+ * ⌘K / Ctrl+K palette: go to Home, Hosts, Queue, a task or a run (titled by its display
+ * name), copy a repo or dataset path, switch colour mode. Items are filtered by every typed
+ * word (case-insensitive) over the group, title, subtitle and hidden keywords (run id, name,
+ * hypothesis, tags, params, paths). Typed text of two or more characters also asks the hub
+ * for runs whose stored name or id contains it (spec 5.2), so renamed runs outside the
+ * newest list are found too.
  */
 import { sweepCrumb } from "../pages/components/remote";
+import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
-import type { ProjectInfo, RunRecord, TaskSummary } from "../api/models";
-import { useHubEnvironment, useProjects, useRuns, useTasks } from "../api/queries";
+import { api } from "../api/client";
+import type { ProjectInfo, RunRecord, RunsQuery, TaskRuns, TaskSummary } from "../api/models";
+import { queryKeys, useHubEnvironment, useOverview, useProjects, useRuns, useTasks } from "../api/queries";
+import { firstClause, shortId } from "../pages/components/format";
+import { withSeed } from "../run/RunName";
 import { toggleTheme } from "./ThemeToggle";
+import "./kept.css";
 
 export type NavTarget =
   | { to: "/" }
+  | { to: "/hosts" }
+  | { to: "/queue" }
   | { to: "/t/$project/$task"; params: { project: string; task: string } }
   | { to: "/r/$runId"; params: { runId: string } }
   | { to: "/s/$project/$id"; params: { project: string; id: string } };
@@ -36,18 +46,49 @@ export interface CommandData {
   projects: ProjectInfo[];
   tasks: TaskSummary[];
   runs: RunRecord[];
+  /** Run id → display name (derived or renamed), from task-runs lists already cached. */
+  names?: ReadonlyMap<string, string>;
 }
 
 /** Most runs listed in the palette (newest first, archived runs left out). */
 export const MAX_RUNS = 50;
 
-const clip = (s: string, n = 60): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+/** Most runs the hub returns for a typed name search. */
+const SEARCH_LIMIT = 20;
+/** Typed text shorter than this does not search the hub. */
+const SEARCH_MIN = 2;
+/** The hub's `q` length limit. */
+const SEARCH_MAX = 200;
+/** Wait after the last keystroke before searching the hub. */
+const SEARCH_DELAY_MS = 150;
+
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/**
+ * Run display names from every task-runs list already in the query cache (no extra request),
+ * as the run page shows them: a rename as typed, else the derived name with its seed.
+ */
+export function cachedRunNames(entries: readonly (readonly [unknown, TaskRuns | undefined])[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const [, data] of entries) {
+    for (const run of data?.runs ?? []) out.set(run.run_id, run.renamed ? run.name : withSeed(run.derived_name, run.seed));
+  }
+  return out;
+}
+
+/** A run's palette title: its display name, else its own name, else its hypothesis clause, with the seed. */
+export function runCommandTitle(r: RunRecord, names?: ReadonlyMap<string, string>): string {
+  const known = names?.get(r.run_id) ?? r.name?.trim();
+  if (known) return known;
+  return withSeed(r.hypothesis ? firstClause(r.hypothesis, r.run_id, 60) : `run ${shortId(r.run_id)}`, r.seed);
+}
 
 /** Build the palette items, grouped in display order. */
 export function buildCommands(data: CommandData, h: CommandHandlers): CommandItem[] {
   const items: CommandItem[] = [
-    { group: "Go to", title: "Overview", subtitle: "all projects", run: () => h.go({ to: "/" }) },
+    { group: "Go to", title: "Home", subtitle: "all projects", run: () => h.go({ to: "/" }) },
+    { group: "Go to", title: "Hosts", subtitle: "GPUs and connections", run: () => h.go({ to: "/hosts" }) },
+    { group: "Go to", title: "Queue", subtitle: "queued runs", run: () => h.go({ to: "/queue" }) },
   ];
   for (const t of data.tasks) {
     items.push({
@@ -60,12 +101,12 @@ export function buildCommands(data: CommandData, h: CommandHandlers): CommandIte
   }
   const runs = data.runs.filter((r) => !r.archived).slice(0, MAX_RUNS);
   for (const r of runs) {
-    const who = r.seed === null ? r.status : `seed ${r.seed}, ${r.status}`;
     items.push({
       group: "Runs",
-      title: r.run_id,
-      subtitle: `${clip(r.hypothesis || r.task || r.project)}, ${who}`,
-      keywords: [r.hypothesis, r.project, r.task ?? "", r.created_by, ...r.tags, ...Object.entries(r.params).map(([key, value]) => `${key}=${value}`), r.cwd].join(" "),
+      title: runCommandTitle(r, data.names),
+      subtitle: `${r.project} / ${r.task ?? "—"} · ${shortId(r.run_id)} · ${r.status}`,
+      keywords: [r.run_id, r.name ?? "", r.hypothesis, r.project, r.task ?? "", r.created_by, ...r.tags,
+        ...Object.entries(r.params).map(([key, value]) => `${key}=${value}`), r.cwd].join(" "),
       run: () => h.go({ to: "/r/$runId", params: { runId: r.run_id } }),
     });
   }
@@ -104,8 +145,40 @@ export function filterCommands(items: CommandItem[], query: string): CommandItem
   });
 }
 
+/** Hub search hits first (they matched the typed text), then the newest runs not among them. */
+function mergeRuns(hits: readonly RunRecord[], recent: readonly RunRecord[]): RunRecord[] {
+  const seen = new Set(hits.map((r) => r.run_id));
+  return [...hits, ...recent.filter((r) => !seen.has(r.run_id))];
+}
+
+/** The typed text, trimmed and held until typing pauses; null when too short to search. */
+function useSearchText(query: string): string | null {
+  const text = query.trim().slice(0, SEARCH_MAX);
+  const [settled, setSettled] = useState(text);
+  useEffect(() => {
+    const t = setTimeout(() => setSettled(text), SEARCH_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [text]);
+  return settled.length >= SEARCH_MIN ? settled : null;
+}
+
+/** A counter that changes whenever a `["taskRuns", …]` query in the cache is added, updated or removed. */
+function useTaskRunsCacheVersion(qc: QueryClient): number {
+  const [version, setVersion] = useState(0);
+  useEffect(
+    () =>
+      qc.getQueryCache().subscribe((event) => {
+        if (event.query.queryKey[0] !== "taskRuns") return;
+        if (event.type === "added" || event.type === "updated" || event.type === "removed") setVersion((v) => v + 1);
+      }),
+    [qc],
+  );
+  return version;
+}
+
 function PaletteDialog({ onClose, onToast }: { onClose: () => void; onToast: (msg: string) => void }) {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const projects = useProjects();
   const environment = useHubEnvironment();
   const tasks = useTasks();
@@ -113,13 +186,30 @@ function PaletteDialog({ onClose, onToast }: { onClose: () => void; onToast: (ms
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
   const input = useRef<HTMLInputElement>(null);
+  const searchText = useSearchText(query);
+  const searchQuery: RunsQuery = { q: searchText ?? "", limit: SEARCH_LIMIT };
+  const found = useQuery({
+    queryKey: queryKeys.runs(searchQuery),
+    queryFn: ({ signal }) => api.runs(searchQuery, signal),
+    enabled: searchText !== null,
+  });
+  // Run names: the hub's (Home's running and recent runs), then every task-run list in the
+  // cache; a list that loads or changes while the palette is open re-titles its runs.
+  const overview = useOverview();
+  const cachedTaskRuns = useTaskRunsCacheVersion(qc);
+  const names = useMemo(() => {
+    const out = new Map(Object.entries(overview.data?.names ?? {}));
+    for (const [id, name] of cachedRunNames(qc.getQueriesData<TaskRuns>({ queryKey: ["taskRuns"] }))) out.set(id, name);
+    return out;
+  }, [qc, cachedTaskRuns, overview.data]);
+  const hits = searchText !== null ? found.data : undefined;
 
   useEffect(() => input.current?.focus(), []);
 
   const all = useMemo(
     () =>
       buildCommands(
-        { projects: projects.data ?? [], tasks: tasks.data ?? [], runs: runs.data ?? [], hubEnvironmentId: typeof environment.data?.environment_id === "string" ? environment.data.environment_id : null },
+        { projects: projects.data ?? [], tasks: tasks.data ?? [], runs: mergeRuns(hits ?? [], runs.data ?? []), names, hubEnvironmentId: typeof environment.data?.environment_id === "string" ? environment.data.environment_id : null },
         {
           go: (target) => void navigate(target),
           copy: (text) => {
@@ -129,7 +219,7 @@ function PaletteDialog({ onClose, onToast }: { onClose: () => void; onToast: (ms
           toggleTheme: () => void toggleTheme(),
         },
       ),
-    [projects.data, tasks.data, runs.data, environment.data, navigate, onToast],
+    [projects.data, tasks.data, runs.data, hits, names, environment.data, navigate, onToast],
   );
   const items = useMemo(() => filterCommands(all, query), [all, query]);
   const loading = projects.isPending || tasks.isPending || runs.isPending;

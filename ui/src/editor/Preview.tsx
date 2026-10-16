@@ -1,11 +1,20 @@
 import type { ReactNode } from "react";
 import type { PanelResult } from "../api/models";
-import { panelLetter } from "../pages/components/Figure";
 import { clampSpan } from "../pages/components/PanelGrid";
 
-/** One computed panel from `POST views/query` (contract 1.6), and the journal-style letter. */
+/** One computed panel from `POST views/query` (contract 1.6). */
 export type { PanelResult };
-export { panelLetter };
+
+/** 0 -> "a", 25 -> "z", 26 -> "aa": the editor's names for panels on the layout ruler. */
+export function panelLetter(index: number): string {
+  let n = index;
+  let out = "";
+  do {
+    out = String.fromCharCode(97 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return out;
+}
 
 /** A panel's `layout:` block; missing values take the contract defaults. */
 export interface LayoutHint {
@@ -123,7 +132,7 @@ export interface PreviewProps {
 export function Preview({ results, layouts, selected, problems, stale, renderPanel, onSelect }: PreviewProps) {
   const places = placePanels(results.map((_, i) => layouts[i] ?? {}));
   const sel = selected !== null && selected < results.length ? selected : null;
-  const label = sel === null ? "" : `${panelLetter(sel)}: span ${places[sel].span}, row ${places[sel].row}`;
+  const label = sel === null ? "" : `${results[sel]?.title ?? ""}: span ${places[sel].span}, row ${places[sel].row}`;
   return (
     <div className={stale ? "hx-ed-pv stale" : "hx-ed-pv"} title={stale ? "Last valid view" : undefined}>
       <LayoutRuler placement={sel === null ? null : places[sel]} label={label} />
@@ -153,7 +162,6 @@ export function Preview({ results, layouts, selected, problems, stale, renderPan
                     onSelect?.(i);
                   }}
                 >
-                  <span className="pl">{panelLetter(i)}</span>
                   <span className="t">{r.title}</span>
                   <span className="aside" title={`span ${p.span} of 12, row ${p.row}`}>
                     {p.overflow ? "over 12 columns" : `${p.span}/12`}

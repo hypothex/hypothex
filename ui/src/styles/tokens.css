@@ -1,36 +1,61 @@
-/* Design tokens, copied verbatim from docs/mockups/ui-v4/index.html. Do not edit by hand. */
+/* Hypothex v5 design tokens (spec section 7), copied from docs/mockups/ui-v5/index.html
+   `:root` and `[data-theme="dark"]`. Identity slots c0..c8 live in palette.css. */
 :root {
-  --paper: #F6F7F3;
-  --paper-2: #ECEEE8;
-  --ink: #15181E;
-  --ink-2: #464C57;
-  --ink-3: #767C87;
-  --rule: #D5D8D0;
-  --rule-2: #E4E6E0;
-  --best: #00846A;
-  --best-wash: rgba(0, 132, 106, .12);
-  --best-edge: rgba(0, 132, 106, .50);
-  --fail: #C8412B;
-  --agent: #5B48C2;
-  --human: #A66A12;
-  --serif: "Newsreader", "Iowan Old Style", Georgia, serif;
-  --sans: "Geist", ui-sans-serif, system-ui, sans-serif;
-  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font: "Geist", system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, monospace;
+  --bg: #f7f7f8;
+  --panel: #ffffff;
+  --panel-2: #fafafa;
+  --hover: #f1f1f3;
+  --select: #ececef;
+  --line: #e7e7ea;
+  --line-2: #d6d6dc;
+  --ink: #18181b;
+  --ink-2: #52525b;
+  --ink-3: #8b8b94;
+  --focus: #2a78d6;
+  --grid: #f0f0f2;
+  --axis: #d4d4d8;
+  --ok: #138a43;
+  --ok-wash: #e9f6ee;
+  --fail: #d03b3b;
+  --warn: #b97800;
+  --run: #2a78d6;
+  --r-panel: 10px;
+  --r-ctl: 7px;
   color-scheme: light;
 }
 [data-theme="dark"] {
-  --paper: #12161C;
-  --paper-2: #1A1F27;
-  --ink: #E9ECEF;
-  --ink-2: #AEB5BF;
-  --ink-3: #7C8490;
-  --rule: #2C333D;
-  --rule-2: #222830;
-  --best: #1FA282;
-  --best-wash: rgba(31, 162, 130, .17);
-  --best-edge: rgba(31, 162, 130, .60);
-  --fail: #DE5F49;
-  --agent: #8C7BEA;
-  --human: #C08629;
+  --bg: #111113;
+  --panel: #18181b;
+  --panel-2: #1c1c20;
+  --hover: #222226;
+  --select: #27272c;
+  --line: #27272a;
+  --line-2: #3a3a40;
+  --ink: #ededef;
+  --ink-2: #a1a1aa;
+  --ink-3: #71717a;
+  --grid: #222226;
+  --axis: #3f3f46;
+  --ok: #2fbf62;
+  --ok-wash: #15281d;
+  --fail: #e66767;
+  --warn: #e0a321;
+  --run: #3987e5;
   color-scheme: dark;
+}
+/* v4 token names still read by kept modules (panels/*, launch, editor, the old pages).
+   Each maps to a v5 token; delete a line when nothing reads that name any more. */
+:root {
+  --paper: var(--panel);
+  --paper-2: var(--panel-2);
+  --rule: var(--line-2);
+  --rule-2: var(--line);
+  --best: var(--ok);
+  --best-wash: color-mix(in srgb, var(--ok) 12%, transparent);
+  --best-edge: color-mix(in srgb, var(--ok) 50%, transparent);
+  --agent: var(--c7);
+  --human: var(--c4);
+  --sans: var(--font);
 }

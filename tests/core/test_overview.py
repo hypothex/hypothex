@@ -9,7 +9,7 @@ from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.headlines import overview_headline
 from hypothex.core.ids import utcnow
-from hypothex.core.overview import build_overview
+from hypothex.core.overview import RECENT_RUNS, best_trend, build_overview, latest_point
 from hypothex.core.records import CostTotals, GitInfo, RunRecord, RunStatus, ScoreRecord
 from tests.factories import make_record
 
@@ -262,13 +262,15 @@ def test_headline_without_scored_ideas_has_no_board(ctx: Context, toy_repo: Path
     assert summary.headline == overview_headline(summary) == "1 running. No scored runs yet"
 
 
-def test_projects_table_counts_finished_runs_and_best(ctx: Context, scene: datetime) -> None:
+def test_projects_table_counts_unarchived_runs_and_best(ctx: Context, scene: datetime) -> None:
     rows = [(p.project, p.task, p.runs, p.best, p.kind) for p in build_overview(ctx).projects]
-    # finished, unarchived runs of toy-acc: a1, a2, b1, o1
+    # unarchived runs of toy-acc in any state: a1, a2, f1, b1, f2, r1, o1 (x1 is archived)
     assert rows == [
-        ("toy", "toy-acc", 4, 1.0, "generic"),
+        ("toy", "toy-acc", 7, 1.0, "generic"),
         ("toy", "toy-broken", 0, None, "generic"),
     ]
+    # the same count as the nav and the task header (TaskSummary.n_runs)
+    assert rows[0][2] == ctx.index.count_runs(project="toy", task="toy-acc")
 
 
 def test_ideas_and_projects_carry_the_primary_unit(ctx: Context, toy_repo: Path) -> None:
@@ -416,6 +418,8 @@ def test_overview_does_not_parse_runs_outside_the_window(
     # PERF-F2: every run record was parsed only to be dropped by the window in Python
     now = utcnow()
     _run(ctx, toy_repo, "old", ago=timedelta(days=3), now=now, task=None)
+    for i in range(RECENT_RUNS):  # newer than "old": they fill the Recent runs list
+        _run(ctx, toy_repo, f"mid{i}", ago=timedelta(days=2, minutes=i), now=now, task=None)
     _run(ctx, toy_repo, "new", ago=timedelta(minutes=5), now=now, task=None)
     parsed: list[str] = []
     real = RunRecord.model_validate_json
@@ -482,4 +486,107 @@ def test_projects_table_counts_a_project_without_tasks(ctx: Context, tmp_path: P
         )
         ctx.create_run(record)
     rows = [(p.project, p.task, p.runs, p.kind) for p in build_overview(ctx).projects]
-    assert rows == [("bare", None, 2, "generic")]
+    # unarchived runs in any state: b1, b2, b4
+    assert rows == [("bare", None, 3, "generic")]
+
+
+def test_recent_runs_are_the_newest_of_any_age_with_names_and_scores(
+    ctx: Context, scene: datetime
+) -> None:
+    q.rename_run(ctx, "b1", "tuned svm")
+    summary = build_overview(ctx)
+    assert [r.run_id for r in summary.recent] == ["r1", "e1", "f2", "b1", "f1", "a2", "a1", "o1"]
+    rows = {r.run_id: r for r in summary.recent}
+    assert (rows["b1"].name, rows["b1"].primary, rows["b1"].delta_best) == ("tuned svm", 1.0, 0.0)
+    assert rows["a1"].primary == 0.75 and rows["a1"].delta_best == -0.25
+    assert (rows["f1"].primary, rows["f1"].exit_code) == (None, 2)
+    assert rows["a1"].name == summary.names["a1"]
+    assert summary.names["e1"] == "poke"  # no task: the short label
+    assert {"r1", "f1", "f2"} <= summary.names.keys()  # running and failures are named too
+
+
+def test_recent_runs_are_capped(ctx: Context, toy_repo: Path) -> None:
+    now = utcnow()
+    for i in range(RECENT_RUNS + 3):
+        _run(ctx, toy_repo, f"r{i:02d}", ago=timedelta(minutes=i), now=now, task=None)
+    summary = build_overview(ctx)
+    assert [r.run_id for r in summary.recent] == [f"r{i:02d}" for i in range(RECENT_RUNS)]
+
+
+def test_run_view_names_differ_by_param_and_carry_the_seed(ctx: Context, toy_repo: Path) -> None:
+    now = utcnow()
+    for rid, lr, seed in (("s1", "1e-3", 1), ("s2", "3e-4", 2)):
+        _run(ctx, toy_repo, rid, ago=timedelta(minutes=5), now=now, params={"lr": lr}, seed=seed)
+    assert build_overview(ctx).names == {"s1": "lr 1e-3 · seed 1", "s2": "lr 3e-4 · seed 2"}
+
+
+def test_project_rows_carry_primary_trend_and_live_counts(
+    ctx: Context, toy_repo: Path, scene: datetime
+) -> None:
+    _run(ctx, toy_repo, "q1", ago=timedelta(minutes=1), now=scene, status=RunStatus.QUEUED)
+    row = next(p for p in build_overview(ctx).projects if p.task == "toy-acc")
+    assert (row.primary, row.higher_is_better) == ("accuracy/value", True)
+    # configs in time order: dddd 0.5 (3 days ago), aaaa 0.75, bbbb 1.0 -> best so far
+    assert row.best_history == [0.5, 0.75, 1.0]
+    assert row.best_7d_ago is None  # nothing is older than 7 days
+    assert (row.running, row.queued) == (1, 1)
+
+
+def test_best_trend_for_both_directions() -> None:
+    t = [utcnow() - timedelta(days=d) for d in (10, 8, 1)]
+    cutoff = utcnow() - timedelta(days=7)
+    assert best_trend(zip(t, [0.6, 0.8, 0.7], strict=True), True, cutoff) == ([0.6, 0.8, 0.8], 0.8)
+    assert best_trend(zip(t, [50.0, 44.3, 41.2], strict=True), False, cutoff) == (
+        [50.0, 44.3, 41.2],
+        44.3,
+    )
+    many = [(utcnow() - timedelta(minutes=i), float(i)) for i in range(40)]
+    assert len(best_trend(many, True, cutoff)[0]) == 24
+
+
+def test_progress_has_the_latest_primary_metric_of_running_runs(
+    ctx: Context, scene: datetime
+) -> None:
+    path = ctx.run_dir(ctx.find_record("r1")) / "metrics.jsonl"
+    rows = [
+        {"name": "train/loss", "step": 1, "value": 2.0},
+        {"name": "val/accuracy", "step": 1, "value": 0.6},
+        {"name": "val/accuracy", "step": 2, "value": 0.7},
+        {"name": "train/loss", "step": 3, "value": 1.0},
+    ]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    progress = build_overview(ctx).progress
+    assert progress.keys() == {"r1"}
+    got = progress["r1"]
+    assert (got.metric, got.step, got.value) == ("val/accuracy", 2, 0.7)
+    assert (got.progress, got.eta_seconds) == (None, None)
+
+
+def test_latest_point_reads_only_the_end_of_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "metrics.jsonl"
+    early = json.dumps({"name": "accuracy", "step": 0, "value": 0.1}) + "\n"
+    filler = "".join(
+        json.dumps({"name": "loss", "step": i, "value": 1.0}) + "\n" for i in range(5000)
+    )
+    path.write_text(
+        early
+        + filler
+        + "not json\n"
+        + json.dumps({"name": "x/accuracy", "step": 9, "value": 0.5})
+        + "\n"
+    )
+    point = latest_point(path, "accuracy")
+    assert point is not None and (point.name, point.step) == ("x/accuracy", 9)
+    assert latest_point(path, "accuracy", tail_bytes=10) is None  # a cut line is skipped
+    path.write_text(early)
+    exact = latest_point(path, "accuracy")
+    assert exact is not None and exact.value == 0.1
+
+
+def test_latest_point_keeps_a_whole_first_line_at_the_cut(tmp_path: Path) -> None:
+    path = tmp_path / "metrics.jsonl"
+    last = json.dumps({"name": "accuracy", "step": 2, "value": 0.9}) + "\n"
+    path.write_text(json.dumps({"name": "loss", "step": 1, "value": 1.0}) + "\n" + last)
+    point = latest_point(path, "accuracy", tail_bytes=len(last))
+    assert point is not None and point.step == 2
+    assert latest_point(path, "accuracy", tail_bytes=len(last) - 1) is None

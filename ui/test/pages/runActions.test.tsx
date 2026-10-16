@@ -6,6 +6,12 @@ import { RunActions } from "../../src/pages/components/RunActions";
 import { RUN_SVM, makeRecord } from "./fixtures";
 import { HttpReply, mockApi, renderWithClient, restoreFetch } from "./helpers";
 
+/** Open the ⋯ menu (if closed) and return one of its items. */
+function item(name: string): HTMLElement {
+  if (!screen.queryByRole("menu")) fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+  return screen.getByRole("menuitem", { name });
+}
+
 afterEach(() => {
   cleanup();
   restoreFetch();
@@ -74,13 +80,13 @@ describe("RunActions", () => {
   test("Stop is enabled only while the run is active", async () => {
     const calls = mockApi({ [`POST /api/v1/runs/${RUN_SVM}/stop`]: { run_id: RUN_SVM, status: "killed" } });
     renderWithClient(<RunActions served record={makeRecord()} />);
-    expect(screen.getByRole("button", { name: "Stop" }).hasAttribute("disabled")).toBe(true);
+    expect(item("Stop").hasAttribute("disabled")).toBe(true);
     cleanup();
     renderWithClient(<RunActions served record={makeRecord({ status: "running", ended_at: null })} />);
-    const stop = screen.getByRole("button", { name: "Stop" });
+    const stop = item("Stop");
     expect(stop.hasAttribute("disabled")).toBe(false);
     fireEvent.click(stop);
-    fireEvent.click(screen.getByRole("button", { name: "Stop ✓?" }));
+    fireEvent.click(item("Stop ✓?"));
     await waitFor(() => expect(calls.map((c) => c.url)).toEqual([`/api/v1/runs/${RUN_SVM}/stop`]));
     expect((calls[0]?.body as Record<string, unknown>).only_queued).not.toBe(true);
   });
@@ -93,7 +99,7 @@ describe("RunActions", () => {
       }),
     });
     renderWithClient(<RunActions served record={makeRecord()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Re-evaluate" }));
+    fireEvent.click(item("Re-evaluate"));
     expect((await screen.findByRole("alert")).textContent).toBe("run has no predictions to score");
   });
 });
@@ -102,7 +108,7 @@ test("Re-infer requires a confirmed infer stage (UI-F7)", async () => {
   const calls = mockApi({ [`POST /api/v1/runs/${RUN_SVM}/reinfer`]: { run_id: "INFER" } });
   for (const inferStage of [undefined, false]) {
     const view = renderWithClient(<RunActions served record={makeRecord()} inferStage={inferStage} />);
-    const button = screen.getByRole("button", { name: "Re-infer" });
+    const button = item("Re-infer");
     expect(button.hasAttribute("disabled")).toBe(true);
     expect(button.title).toBe(inferStage === false ? "Task has no infer stage" : "Infer stage not loaded");
     fireEvent.click(button);
@@ -111,7 +117,7 @@ test("Re-infer requires a confirmed infer stage (UI-F7)", async () => {
   expect(calls).toHaveLength(0);
   const navigate = mock((_href: string) => {});
   renderWithClient(<RunActions served record={makeRecord()} inferStage={true} />, { navigate });
-  fireEvent.click(screen.getByRole("button", { name: "Re-infer" }));
+  fireEvent.click(item("Re-infer"));
   await waitFor(() => expect(navigate).toHaveBeenCalledWith("/r/INFER"));
 });
 
@@ -122,7 +128,7 @@ test("run re-evaluation reports skipped reasons, counts and warnings (UI-F3)", a
     },
   });
   renderWithClient(<RunActions served record={makeRecord()} />);
-  fireEvent.click(screen.getByRole("button", { name: "Re-evaluate" }));
+  fireEvent.click(item("Re-evaluate"));
   expect((await screen.findByRole("status", { name: "Re-evaluate" })).textContent).toBe(
     "0 re-scored · 1 skipped: no predictions",
   );
@@ -131,7 +137,7 @@ test("run re-evaluation reports skipped reasons, counts and warnings (UI-F3)", a
       evaluated: [RUN_SVM], skipped: {}, warnings: ["metric version changed"],
     },
   });
-  fireEvent.click(screen.getByRole("button", { name: "Re-evaluate" }));
+  fireEvent.click(item("Re-evaluate"));
   expect(screen.queryByRole("status", { name: "Re-evaluate" })).toBeNull();
   await waitFor(() => expect(screen.getByRole("status", { name: "Re-evaluate" }).textContent).toBe(
     "1 re-scored · 1 warning",
@@ -144,7 +150,7 @@ test("an old run's pending re-evaluation never becomes the new run's feedback", 
   const response = new Promise((resolve) => { finish = resolve; });
   const calls = mockApi({ [`POST /api/v1/runs/${RUN_SVM}/reeval`]: () => response });
   const view = renderWithClient(<RunActions served record={makeRecord()} />);
-  fireEvent.click(screen.getByRole("button", { name: "Re-evaluate" }));
+  fireEvent.click(item("Re-evaluate"));
   await waitFor(() => expect(calls).toHaveLength(1));
   view.rerender(
     <QueryClientProvider client={view.client}>
@@ -152,15 +158,15 @@ test("an old run's pending re-evaluation never becomes the new run's feedback", 
     </QueryClientProvider>,
   );
   finish({ evaluated: [RUN_SVM], skipped: {}, warnings: [] });
-  await waitFor(() => expect(screen.getByRole("button", { name: "Re-evaluate" }).hasAttribute("disabled")).toBe(false));
+  await waitFor(() => expect(item("Re-evaluate").hasAttribute("disabled")).toBe(false));
   expect(screen.queryByRole("status", { name: "Re-evaluate" })).toBeNull();
 });
 
 test("unserved run actions are disabled with a known-unmapped explanation", () => {
   mockApi({});
   renderWithClient(<RunActions record={makeRecord({ status: "running" })} served={false} hostsLoaded />);
-  for (const name of ["Rerun", "Re-infer", "Re-evaluate", "Stop"]) {
-    const button = screen.getByRole("button", { name });
+  for (const name of ["Rerun", "Re-infer", "Re-evaluate", "Stop", "Archive"]) {
+    const button = name === "Rerun" ? screen.getByRole("button", { name }) : item(name);
     expect(button.hasAttribute("disabled")).toBe(true);
     expect(button.title).toContain("No configured host");
   }
@@ -172,7 +178,7 @@ test("Re-infer needs both a serving host and an infer stage after integration", 
     <RunActions record={makeRecord()} served={served} hostsLoaded inferStage={inferStage} />
   );
   const { client, rerender } = renderWithClient(tree(false, true));
-  const button = screen.getByRole("button", { name: "Re-infer" });
+  const button = item("Re-infer");
   expect(button.hasAttribute("disabled")).toBe(true);
   expect(button.title).toContain("No configured host");
   fireEvent.click(button);
@@ -187,13 +193,13 @@ test("Re-infer needs both a serving host and an infer stage after integration", 
 test("Stop requires two clicks and disarms on Escape and blur", async () => {
   const calls = mockApi({ [`POST /api/v1/runs/${RUN_SVM}/stop`]: {} });
   renderWithClient(<RunActions served record={makeRecord({ status: "running" })} />);
-  fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+  fireEvent.click(item("Stop"));
   expect(calls).toHaveLength(0);
-  fireEvent.keyDown(screen.getByRole("button", { name: "Stop ✓?" }), { key: "Escape" });
-  fireEvent.click(screen.getByRole("button", { name: "Stop" }));
-  fireEvent.blur(screen.getByRole("button", { name: "Stop ✓?" }));
-  fireEvent.click(screen.getByRole("button", { name: "Stop" }));
-  fireEvent.click(screen.getByRole("button", { name: "Stop ✓?" }));
+  fireEvent.keyDown(item("Stop ✓?"), { key: "Escape" });
+  fireEvent.click(item("Stop"));
+  fireEvent.blur(item("Stop ✓?"));
+  fireEvent.click(item("Stop"));
+  fireEvent.click(item("Stop ✓?"));
   await waitFor(() => expect(calls).toHaveLength(1));
 });
 
@@ -201,19 +207,71 @@ test("Stop disarms when the record changes or its serving status is revoked", ()
   mockApi({});
   const first = makeRecord({ status: "running" });
   const { rerender, client } = renderWithClient(<RunActions served record={first} />);
-  fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+  fireEvent.click(item("Stop"));
   rerender(<QueryClientProvider client={client}><RunActions served record={{ ...first, run_id: "second" }} /></QueryClientProvider>);
-  expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+  expect(item("Stop")).toBeTruthy();
+  fireEvent.click(item("Stop"));
   rerender(<QueryClientProvider client={client}><RunActions record={{ ...first, run_id: "second" }} served={false} hostsLoaded /></QueryClientProvider>);
-  expect(screen.getByRole("button", { name: "Stop" }).hasAttribute("disabled")).toBe(true);
+  expect(item("Stop").hasAttribute("disabled")).toBe(true);
 });
 
 test("armed Stop expires after three seconds without sending anything", async () => {
   const calls = mockApi({});
   renderWithClient(<RunActions served record={makeRecord({ status: "running" })} />);
-  fireEvent.click(screen.getByRole("button", { name: "Stop" }));
-  expect(screen.getByRole("button", { name: "Stop ✓?" })).toBeTruthy();
-  await waitFor(() => expect(screen.queryByRole("button", { name: "Stop ✓?" }) === null).toBe(true), { timeout: 3500 });
+  fireEvent.click(item("Stop"));
+  expect(item("Stop ✓?")).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("menuitem", { name: "Stop ✓?" }) === null).toBe(true), { timeout: 3500 });
   expect(calls).toHaveLength(0);
+});
+
+test("Archive posts on: true; an archived run offers Unarchive", async () => {
+  const calls = mockApi({ [`POST /api/v1/runs/${RUN_SVM}/archive`]: makeRecord({ archived: true }) });
+  const view = renderWithClient(<RunActions served record={makeRecord()} />);
+  fireEvent.click(item("Archive"));
+  await waitFor(() => expect(calls).toHaveLength(1));
+  expect(calls[0]?.body).toMatchObject({ on: true, created_by: "human" });
+  expect(screen.queryByRole("menu")).toBeNull();
+  view.unmount();
+  renderWithClient(<RunActions served record={makeRecord({ archived: true })} />);
+  expect(item("Unarchive")).toBeTruthy();
+});
+
+test("Compare is a link when there is another config, disabled when not, absent without a task", () => {
+  mockApi({});
+  const view = renderWithClient(<RunActions served record={makeRecord()} compareHref="/x/A/B" />);
+  expect(screen.getByRole("link", { name: "Compare" }).getAttribute("href")).toBe("/x/A/B");
+  view.unmount();
+  const second = renderWithClient(<RunActions served record={makeRecord()} compareHref={null} />);
+  expect(screen.getByRole("button", { name: "Compare" }).hasAttribute("disabled")).toBe(true);
+  second.unmount();
+  renderWithClient(<RunActions served record={makeRecord()} />);
+  expect(screen.queryByRole("button", { name: "Compare" })).toBeNull();
+});
+
+test("the menu closes on Escape", () => {
+  mockApi({});
+  renderWithClient(<RunActions served record={makeRecord()} />);
+  item("Re-infer");
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(screen.queryByRole("menu")).toBeNull();
+});
+
+test("the ⋯ menu takes focus and moves with the arrow keys, skipping disabled items", () => {
+  mockApi({});
+  renderWithClient(<RunActions served record={makeRecord()} />);
+  const more = screen.getByRole("button", { name: "More actions" });
+  more.focus();
+  fireEvent.click(more);
+  const enabled = screen.getAllByRole("menuitem").filter((b) => !(b as HTMLButtonElement).disabled);
+  expect(enabled.length).toBeGreaterThan(1);
+  expect(document.activeElement === (enabled[0])).toBe(true);
+  fireEvent.keyDown(enabled[0]!, { key: "ArrowDown" });
+  expect(document.activeElement === (enabled[1])).toBe(true);
+  fireEvent.keyDown(enabled[1]!, { key: "End" });
+  expect(document.activeElement === (enabled[enabled.length - 1])).toBe(true);
+  fireEvent.keyDown(document.activeElement!, { key: "Home" });
+  expect(document.activeElement === (enabled[0])).toBe(true);
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(document.activeElement === (more)).toBe(true);
 });

@@ -171,7 +171,11 @@ def test_run_actions_are_forwarded_with_the_same_command_id(tmp_path: Path) -> N
         assert note.json() == {"ok": True}
         assert "seen on gpu1" in r.env.store.read_notes("toy", "e1")
         assert r.client.post("/api/v1/runs/e1/star", json={"on": True}).json()["starred"] is True
+        named = r.client.post("/api/v1/runs/e1/name", json={"name": "on gpu1", "command_id": "N1"})
+        assert named.json()["name"] == "on gpu1"
+        assert r.env.find_record("e1").name == "on gpu1"
         wait_until(lambda: r.hub.find_record("e1").tags == ["remote"], timeout=30)
+        wait_until(lambda: r.hub.find_record("e1").name == "on gpu1", timeout=30)
         stop = r.client.post("/api/v1/runs/e1/stop", json={})
         assert stop.status_code == 400 and "only queued or running" in stop.json()["error"]
         r.client.post("/api/v1/hosts/gpu1/disconnect", json={})
@@ -214,12 +218,18 @@ def test_curation_of_a_run_mirrored_from_a_removed_host_is_refused(tmp_path: Pat
             ("star", {"on": True}),
             ("archive", {"on": True}),
             ("notes", {"text": "hub-only note"}),
+            ("name", {"name": "hub-only"}),
         ):
             resp = r.client.post(f"/api/v1/runs/m1/{action}", json=body)
             assert resp.status_code == 503, action
             assert "mirrored from host gpu-old" in resp.json()["error"]
         record = r.hub.find_record("m1")
-        assert (record.tags, record.starred, record.archived) == ([], False, False)
+        assert (record.tags, record.starred, record.archived, record.name) == (
+            [],
+            False,
+            False,
+            None,
+        )
         assert "hub-only note" not in r.hub.store.read_notes("toy", "m1")
 
 

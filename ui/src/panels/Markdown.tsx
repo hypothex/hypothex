@@ -105,7 +105,7 @@ const LINK = /^\[([^\]]+)\]\(([^)\s]+)\)$/;
 
 const S = {
   notes: {
-    font: "400 17px/1.6 var(--serif)",
+    font: "400 17px/1.6 var(--font)",
     color: "var(--ink-2)",
     textWrap: "pretty",
   },

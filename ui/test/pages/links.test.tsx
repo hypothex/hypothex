@@ -15,18 +15,22 @@ describe("hrefs", () => {
   test("builds the contract routes", () => {
     expect(hrefs.overview()).toBe("/");
     expect(hrefs.task("toy-classifier", "toy-test")).toBe("/t/toy-classifier/toy-test");
-    expect(hrefs.task("toy-classifier", "toy-test", "overview")).toBe("/t/toy-classifier/toy-test");
-    expect(hrefs.task("p", "t", "route-quality")).toBe("/t/p/t?view=route-quality");
+    expect(hrefs.task("toy-classifier", "toy-test", "charts")).toBe("/t/toy-classifier/toy-test");
+    expect(hrefs.task("p", "t", "runs")).toBe("/t/p/t?tab=runs");
+    expect(hrefs.taskView("p", "t", "route-quality")).toBe("/t/p/t?tab=view%3Aroute-quality");
+    expect(hrefs.taskSweep("p", "t", "s-7f3a")).toBe("/t/p/t?tab=sweeps&sweep=s-7f3a");
     expect(hrefs.edit("p", "t", "new")).toBe("/t/p/t/edit/new");
     expect(hrefs.run("r1", { log: "stderr" })).toBe("/r/r1?log=stderr");
     expect(hrefs.run("r1", { example: "T-014" })).toBe("/r/r1?example=T-014");
+    expect(hrefs.run("r1", { tab: "logs", log: "stderr" })).toBe("/r/r1?tab=logs&log=stderr");
+    expect(hrefs.run("r1", { tab: "overview" })).toBe("/r/r1");
     expect(hrefs.examples("A", "B")).toBe("/x/A/B");
     expect(hrefs.examples("A", "B", "accuracy@v1")).toBe("/x/A/B?metric=accuracy%40v1");
   });
 
   test("encodes every path segment", () => {
     expect(hrefs.run("r 1/2")).toBe("/r/r%201%2F2");
-    expect(hrefs.task("my proj", "a/b", "my view")).toBe("/t/my%20proj/a%2Fb?view=my+view");
+    expect(hrefs.taskView("my proj", "a/b", "my view")).toBe("/t/my%20proj/a%2Fb?tab=view%3Amy+view");
   });
 });
 
@@ -78,6 +82,9 @@ describe("useInAppLinks", () => {
       false,
       false,
     ]);
+    expect(isAppPath("/hosts")).toBe(true);
+    expect(isAppPath("/queue")).toBe(true);
+    expect(isAppPath("/hostsx")).toBe(false);
     const navigate = mock((_href: string) => {});
     const handled: [string, boolean][] = [];
     function Panel() {

@@ -18,17 +18,23 @@ for (const [shape, labels] of Object.entries(LABELS)) {
       const metric = board.primary.split("/")[0] ?? board.primary;
       const diff = await getJson<ExampleDiffLite>(request,
         `/api/v1/compare/examples?a=${a}&b=${b}&metric=${encodeURIComponent(metric)}`);
-      // Exercise the reported label shape while retaining the demo's actual outcomes.
+      // Exercise the reported label shape while retaining the demo's actual outcomes: the
+      // page names runs by the task's run names, else by the records' hypotheses.
       for (const [index, id] of [a, b].entries()) {
         const detail = await getJson<RunDetail>(request, `/api/v1/runs/${id}`);
         await page.route(`**/api/v1/runs/${id}`, route => route.fulfill({
           json: { ...detail, record: { ...detail.record, hypothesis: labels[index] } },
         }));
       }
+      const runs = await getJson<{ runs: { run_id: string; name: string }[] }>(request, `/api/v1/tasks/${project}/${task}/runs`);
+      const named = new Map([[a, labels[0]], [b, labels[1]]]);
+      await page.route(`**/api/v1/tasks/${project}/${task}/runs`, route => route.fulfill({
+        json: { ...runs, runs: runs.runs.map((r) => ({ ...r, name: named.get(r.run_id) ?? r.name })) },
+      }));
       await page.setViewportSize({ width, height: 1200 });
       await page.goto(`/x/${a}/${b}?metric=${encodeURIComponent(metric)}`);
       await expectTheme(page, theme);
-      const outcomes = page.getByRole("region", { name: "a Outcomes", exact: true });
+      const outcomes = page.getByRole("region", { name: "Outcomes", exact: true });
       const table = outcomes.locator("table.ot");
       await expect(table.locator("td.fx .n")).toHaveText(String(diff.fixed.length));
       await expect(table.locator("td.bk .n")).toHaveText(String(diff.broken.length));
@@ -36,13 +42,20 @@ for (const [shape, labels] of Object.entries(LABELS)) {
       await expect(table.locator("thead th")).toHaveText(["", `${labels[1]} right`, `${labels[1]} wrong`]);
       await expect(table.locator("tbody th")).toHaveText([`${labels[0]} right`, `${labels[0]} wrong`]);
       await page.evaluate(() => document.fonts.ready);
+      const title = page.locator(".examples-page .ph h1");
+      await expect(title).toContainText(labels[1]!);
       if (shape === "words") {
-        const token = page.locator(".headline .nb").filter({ hasText: /^1e-4$/ });
-        await expect(token).toHaveCount(1);
-        expect(await token.evaluate(element => {
-          const range = document.createRange();
-          range.selectNodeContents(element);
-          return range.getClientRects().length;
+        expect(await title.evaluate(element => {
+          const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const at = node.textContent?.indexOf("1e-4") ?? -1;
+            if (at < 0) continue;
+            const range = document.createRange();
+            range.setStart(node, at);
+            range.setEnd(node, at + "1e-4".length);
+            return range.getClientRects().length;
+          }
+          return 0;
         }), "a fitting scientific token stays on one line").toBe(1);
       }
       await page.screenshot({ path: info.outputPath(`examples-${theme}-${width}.png`), fullPage: true });
@@ -82,9 +95,9 @@ for (const [shape, labels] of Object.entries(LABELS)) {
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
         "Examples content must stay within the viewport").toBeLessThanOrEqual(0);
-      const summaryText = await page.locator(".ab .nm, .ab .acc, .headline .nb").evaluateAll(elements =>
+      const summaryText = await page.locator(".ab .nm, .ab .acc, .examples-page .ph h1, .examples-page .ph .facts span").evaluateAll(elements =>
         elements.flatMap(element => {
-          const container = element.closest(".ab > div") ?? element.closest(".headline")!;
+          const container = element.closest(".ab > div") ?? element.closest(".ph")!;
           const { left, right } = container.getBoundingClientRect();
           const range = document.createRange();
           range.selectNodeContents(element);

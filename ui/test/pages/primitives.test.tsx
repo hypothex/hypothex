@@ -1,29 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { CopyButton } from "../../src/pages/components/CopyButton";
-import { Figure, panelLetter } from "../../src/pages/components/Figure";
 import { ErrorBox } from "../../src/pages/components/QueryState";
 import { StatStrip } from "../../src/pages/components/StatStrip";
 import { PAGES_CSS, PageStyles } from "../../src/pages/components/styles";
 import { mockClipboard } from "./helpers";
 
 afterEach(cleanup);
-
-test("panelLetter runs a..z then aa, ab", () => {
-  expect([0, 1, 25, 26, 27, 51, 52].map(panelLetter)).toEqual(["a", "b", "z", "aa", "ab", "az", "ba"]);
-});
-
-test("Figure is a named region with its letter and title", () => {
-  render(
-    <Figure letter="b" title="Scores" aside="2 metrics">
-      <p>body</p>
-    </Figure>,
-  );
-  const region = screen.getByRole("region", { name: "b Scores" });
-  expect(region.querySelector(".pl")?.textContent).toBe("b");
-  expect(region.querySelector("h2")?.textContent).toBe("Scores");
-  expect(region.querySelector(".aside")?.textContent).toBe("2 metrics");
-});
 
 test("StatStrip shows value, unit, label, and tooltip", () => {
   render(<StatStrip items={[{ label: "wall", value: "68.4", unit: "s", tooltip: "wall-clock time" }]} />);
@@ -71,4 +54,19 @@ test("PageStyles scopes every rule under .page", () => {
   for (const sel of selectors) {
     for (const part of sel.split(",")) expect(part.trim().startsWith(".page")).toBe(true);
   }
+});
+
+test("page spacing never shifts a full-screen panel off its fixed inset", () => {
+  render(
+    <div className="page">
+      <PageStyles />
+      <div className="side">
+        <section className="panel">a</section>
+        <section className="panel full" data-testid="full">b</section>
+      </div>
+      <section className="panel" data-testid="plain">c</section>
+    </div>,
+  );
+  expect(getComputedStyle(screen.getByTestId("plain")).marginTop).toBe("24px");
+  expect(["", "0px"]).toContain(getComputedStyle(screen.getByTestId("full")).marginTop);
 });

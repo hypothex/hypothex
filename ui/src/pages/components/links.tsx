@@ -26,16 +26,23 @@ function withSearch(path: string, search: Record<string, string | undefined>): s
 
 export const hrefs = {
   overview: (): string => "/",
-  task: (project: string, task: string, view?: string): string =>
-    withSearch(`/t/${enc(project)}/${enc(task)}`, {
-      view: view === "overview" ? undefined : view,
-    }),
+  /** `/t/<project>/<task>`, with `?tab=` unless `tab` is Charts (the default). */
+  task: (project: string, task: string, tab?: string): string =>
+    withSearch(`/t/${enc(project)}/${enc(task)}`, { tab: tab === "charts" ? undefined : tab }),
+  /** A saved view's tab: `?tab=view:<view>`. */
+  taskView: (project: string, task: string, view: string): string =>
+    withSearch(`/t/${enc(project)}/${enc(task)}`, { tab: `view:${view}` }),
+  /** A sweep in its task's Sweeps tab. */
+  taskSweep: (project: string, task: string, sweepId: string): string =>
+    withSearch(`/t/${enc(project)}/${enc(task)}`, { tab: "sweeps", sweep: sweepId }),
   edit: (project: string, task: string, view: string): string =>
     `/t/${enc(project)}/${enc(task)}/edit/${enc(view)}`,
-  run: (runId: string, search: { log?: string; example?: string } = {}): string =>
-    withSearch(`/r/${enc(runId)}`, search),
+  run: (runId: string, search: { tab?: string; log?: string; example?: string } = {}): string =>
+    withSearch(`/r/${enc(runId)}`, { ...search, tab: search.tab === "overview" ? undefined : search.tab }),
   examples: (a: string, b: string, metric?: string): string =>
     withSearch(`/x/${enc(a)}/${enc(b)}`, { metric }),
+  hosts: (): string => "/hosts",
+  queue: (): string => "/queue",
 };
 
 interface HistoryLike {
@@ -71,9 +78,9 @@ export type AppLinkProps = Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href">
   href: string;
 };
 
-/** True for a path the SPA routes (Overview, Task, Run, Examples, Sweep); `/api/…` is left to the browser. */
+/** True for a path the SPA routes (Home, Task, Run, Examples, Sweep, Hosts, Queue); `/api/…` is left to the browser. */
 export function isAppPath(pathname: string): boolean {
-  return /^\/($|[trsx]\/)/.test(pathname);
+  return /^\/($|[trsx]\/|hosts$|queue$)/.test(pathname);
 }
 
 /**

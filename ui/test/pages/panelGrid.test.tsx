@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { NavigateContext } from "../../src/pages/components/links";
-import { PanelGrid, PanelRegistryContext, clampSpan } from "../../src/pages/components/PanelGrid";
+import { PanelGrid, PanelRegistryContext, clampSpan, panelGridStyle } from "../../src/pages/components/PanelGrid";
 import type { PanelResult } from "../../src/pages/components/types";
 import { fakeRegistry } from "./helpers";
 
@@ -13,16 +13,20 @@ const results: PanelResult[] = [
   { type: "vega_lite", title: "Depth", rows: [], meta: {} },
 ];
 
-test("clampSpan keeps spans in 1..12", () => {
+test("clampSpan keeps spans in 1..12; a full span takes the row, others one cell", () => {
   expect([undefined, 0, 4, 12, 13, 5.6].map(clampSpan)).toEqual([12, 1, 4, 12, 12, 6]);
+  expect([panelGridStyle(undefined), panelGridStyle(12), panelGridStyle(8)]).toEqual([
+    { gridColumn: "1 / -1" },
+    { gridColumn: "1 / -1" },
+    undefined,
+  ]);
 });
 
-test("letters panels in order, applies layout, shows warnings and unknown types", () => {
-  render(
+test("panels sit in v5 panel chrome on the min-330 grid, named by title, no letters", () => {
+  const { container } = render(
     <PanelRegistryContext.Provider value={fakeRegistry(["markdown", "curves"])}>
       <PanelGrid
         results={results}
-        startIndex={2}
         specs={[
           { type: "markdown", layout: { span: 4, row: 2 } },
           { type: "curves", title: "Loss", layout: { span: 8, row: null } },
@@ -31,19 +35,17 @@ test("letters panels in order, applies layout, shows warnings and unknown types"
       />
     </PanelRegistryContext.Provider>,
   );
-  const note = screen.getByRole("region", { name: "c Note" });
-  expect(note.style.gridColumn).toBe("span 4");
-  expect(note.style.gridRow).toBe("2");
+  expect(container.firstElementChild?.className).toBe("pgrid panel-grid");
+  expect(screen.getAllByRole("region").map((r) => r.getAttribute("aria-label"))).toEqual(["Note", "Loss", "Depth"]);
+  const note = screen.getByRole("region", { name: "Note" });
+  expect([note.className, note.style.gridColumn, note.style.gridRow]).toEqual(["panel", "", ""]);
+  expect(note.querySelector(".pl")).toBeNull();
   expect(within(note).getByTestId("panel-markdown").textContent).toBe("Note:0");
-
-  const loss = screen.getByRole("region", { name: "d Loss" });
-  expect(loss.style.gridColumn).toBe("span 8");
+  const loss = screen.getByRole("region", { name: "Loss" });
   const warn = loss.querySelector(".aside span") as HTMLElement;
-  expect(warn.textContent).toBe("⚠ 1");
-  expect(warn.getAttribute("title")).toBe("metric lr not logged");
-
-  const depth = screen.getByRole("region", { name: "e Depth" });
-  expect(depth.style.gridColumn).toBe("span 12");
+  expect([warn.textContent, warn.getAttribute("title")]).toEqual(["⚠ 1", "metric lr not logged"]);
+  const depth = screen.getByRole("region", { name: "Depth" });
+  expect(depth.style.gridColumn).toBe("1 / -1");
   expect(within(depth).getByRole("alert").textContent).toBe("Unknown panel type: vega_lite");
 });
 
@@ -57,11 +59,10 @@ test("a panel whose query failed shows the server's reason, not its empty state"
       <PanelGrid results={failed} />
     </PanelRegistryContext.Provider>,
   );
-  const bad = screen.getByRole("region", { name: "a Cost vs quality" });
+  const bad = screen.getByRole("region", { name: "Cost vs quality" });
   expect(within(bad).getByRole("alert").textContent).toBe("scatter panel needs data.x and data.y");
   expect(within(bad).queryByTestId("panel-scatter")).toBeNull();
-  const note = screen.getByRole("region", { name: "b Note" });
-  expect(within(note).getByTestId("panel-markdown").textContent).toBe("Note:0");
+  expect(within(screen.getByRole("region", { name: "Note" })).getByTestId("panel-markdown").textContent).toBe("Note:0");
 });
 
 test("a panel that throws shows its error and the other panels still draw", () => {
@@ -79,10 +80,8 @@ test("a panel that throws shows its error and the other panels still draw", () =
   } finally {
     console.error = quiet;
   }
-  const broken = screen.getByRole("region", { name: "b curves" });
-  expect(within(broken).getByRole("alert").textContent).toBe("Panel failed: bad rows");
-  const note = screen.getByRole("region", { name: "a Note" });
-  expect(within(note).getByTestId("panel-markdown").textContent).toBe("Note:0");
+  expect(within(screen.getByRole("region", { name: "curves" })).getByRole("alert").textContent).toBe("Panel failed: bad rows");
+  expect(within(screen.getByRole("region", { name: "Note" })).getByTestId("panel-markdown").textContent).toBe("Note:0");
 });
 
 test("a plain run link inside a panel navigates in-app", () => {

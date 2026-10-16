@@ -114,6 +114,21 @@ def test_read_commands(in_repo: Path) -> None:
     assert "text" in hx("logs", a["run_id"])
 
 
+def test_tasks_table_shows_run_and_finished_counts(in_repo: Path) -> None:
+    _run(1)
+    failed = runner.invoke(
+        app, ["run", "--json", "-t", "toy-acc", "--", PY, "-c", "raise SystemExit(3)"]
+    )
+    assert json.loads(failed.stdout)["status"] == "failed"
+    [task] = [t for t in hx("tasks") if t["name"] == "toy-acc"]
+    assert (task["n_runs"], task["n_finished"]) == (2, 1)
+    lines = runner.invoke(app, ["tasks"], catch_exceptions=False).stdout.splitlines()
+    header = lines[0].split()
+    row = next(line.split() for line in lines[1:] if line.startswith("toy/toy-acc "))
+    assert header[4:6] == ["runs", "finished"]
+    assert row[4:6] == ["2", "1"]
+
+
 def test_reeval_after_version_bump(in_repo: Path) -> None:
     _run()
     write_toy_project(in_repo, accuracy_version="v2")
@@ -130,6 +145,23 @@ def test_curation_commands(in_repo: Path) -> None:
     assert "works" in hx("show", rid)["notes"]
     assert hx("archive", rid)["archived"] is True
     assert hx("runs") == []
+
+
+def test_rename_names_and_resets_a_run(in_repo: Path) -> None:
+    rid = _run()["run_id"]
+    assert hx("rename", rid, "  wide beam ")["name"] == "wide beam"
+    assert hx("show", rid)["record"]["name"] == "wide beam"
+    assert hx("rename", rid, "--reset")["name"] is None
+    result = runner.invoke(app, ["rename", rid, "x", "--reset"])
+    assert result.exit_code != 0 and "give a NAME or --reset" in str(result.exception)
+    result = runner.invoke(app, ["rename", rid, "x" * 81])
+    assert result.exit_code != 0 and "at most 80" in str(result.exception)
+    # a blank NAME (an empty shell variable) never resets silently: --reset says so
+    hx("rename", rid, "kept")
+    for blank in ["", "   "]:
+        result = runner.invoke(app, ["rename", rid, blank])
+        assert result.exit_code != 0 and "--reset" in str(result.exception)
+    assert hx("show", rid)["record"]["name"] == "kept"
 
 
 def test_launch_wait_and_rerun(in_repo: Path) -> None:
@@ -279,6 +311,13 @@ def test_demo_is_hidden_and_seeds(home: Path) -> None:
     assert out["generic"] in refs
     with pytest.raises(ConfigError, match="nope"):
         runner.invoke(app, ["demo", "--kinds", "generic,nope"], catch_exceptions=False)
+
+
+def test_demo_without_kinds_also_seeds_the_eval_demo(home: Path) -> None:
+    out = hx("demo")
+    assert isinstance(out, dict)
+    assert out["eval_matrix"] == "eval-matrix/multi-dataset"
+    assert set(DEMO_TASKS) <= set(out)
 
 
 def test_demo_refuses_a_home_with_real_projects(in_repo: Path) -> None:

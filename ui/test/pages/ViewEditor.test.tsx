@@ -196,7 +196,7 @@ describe("ViewEditor", () => {
     expect(button("Save").disabled).toBe(true);
     expect(button("Discard").disabled).toBe(true);
     fireEvent.click(board);
-    await waitFor(() => expect(screen.getByTestId("ruler-label").textContent).toBe("a: span 12, row 1"));
+    await waitFor(() => expect(screen.getByTestId("ruler-label").textContent).toBe("board: span 12, row 1"));
   });
 
   test("palette inserts at the cursor, validation is debounced, Save PUTs the text", async () => {
@@ -264,6 +264,13 @@ describe("ViewEditor", () => {
     fireEvent.click(button("Save"));
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith("acc2"));
     expect(calls.find((c) => c.method === "PUT")?.url).toBe(`${VIEWS}/acc2`);
+  });
+
+  test("no breadcrumb of its own: the top bar already shows project / task / view", async () => {
+    renderEditor("new");
+    await waitFor(() => expect(status()).toContain("✓ valid · 0 panels"));
+    expect(document.querySelector(".hx-ed .crumb")).toBeNull();
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("New view");
   });
 
   test("a new name that is already a view blocks Save and never PUTs", async () => {

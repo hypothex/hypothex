@@ -1,15 +1,4 @@
-/**
- * Kind-specific run detail (spec 8.4): the task kind's `run_view` panels from
- * `GET /tasks/{p}/{t}/kind`, scoped to one run, plus a trace section for agent kinds.
- */
-import { useMemo } from "react";
-
-import type { RunStatus } from "../../api/models";
-import { useRunTrace, useRunTraces, useViewQuery } from "../../api/queries";
-import { Figure, panelLetter } from "./Figure";
-import { AppLink, hrefs } from "./links";
-import { PanelBody, PanelGrid } from "./PanelGrid";
-import { ErrorBox, Loading } from "./QueryState";
+/** Pure helpers for the task kind's run panels (spec 8.4); `run/KindSection.tsx` draws them. */
 import type { PanelResult, PanelSpec, TraceSummary } from "./types";
 
 /**
@@ -101,111 +90,7 @@ export function runViewPanels(
   });
 }
 
-/** How many lettered panels `KindPanels` draws for these specs. */
-export function kindPanelCount(specs: PanelSpec[]): number {
-  const { regular, trace } = splitRunView(specs);
-  return regular.length + (trace ? 1 : 0);
-}
-
 /** The example to show first: the first failed trace, else the first trace. */
 export function pickExample(traces: TraceSummary[]): string | null {
   return (traces.find((t) => t.failed) ?? traces[0])?.example_id ?? null;
-}
-
-export interface TraceSectionProps {
-  runId: string;
-  example?: string;
-  letter: string;
-  title: string;
-}
-
-export function TraceSection({ runId, example, letter, title }: TraceSectionProps) {
-  const list = useRunTraces(runId);
-  const traces = list.data ?? [];
-  const chosen = example ? String(example) : pickExample(traces);
-  const trace = useRunTrace(runId, chosen);
-  return (
-    <Figure
-      letter={letter}
-      title={chosen ? `${title} · ${chosen}` : title}
-      aside={list.data ? `${traces.length} traced` : undefined}
-    >
-      {list.error ? <ErrorBox error={list.error} /> : null}
-      {traces.length > 0 ? (
-        <nav className="trace-pick" aria-label="Traced examples">
-          {traces.map((t) => (
-            <AppLink
-              key={t.example_id}
-              href={hrefs.run(runId, { example: t.example_id })}
-              aria-current={t.example_id === chosen ? "true" : undefined}
-              className={t.failed ? "failed" : undefined}
-              title={`${t.turns} turns${t.failed ? ", failed" : ""}`}
-            >
-              {t.example_id}
-            </AppLink>
-          ))}
-        </nav>
-      ) : list.data ? (
-        <p className="small">no traces</p>
-      ) : null}
-      {trace.error ? (
-        <ErrorBox error={trace.error} />
-      ) : trace.data ? (
-        <PanelBody result={trace.data} />
-      ) : chosen ? (
-        <Loading />
-      ) : null}
-    </Figure>
-  );
-}
-
-export interface KindPanelsProps {
-  project: string;
-  task: string;
-  runId: string;
-  specs: PanelSpec[];
-  example?: string;
-  startIndex: number;
-  currentGroupId?: string;
-  runStatus?: RunStatus;
-}
-
-export function KindPanels({ project, task, runId, specs, example, startIndex, currentGroupId, runStatus }: KindPanelsProps) {
-  // `specs` is memoized by the caller, so `regular` and `results` keep their identity across renders
-  const { regular, trace } = useMemo(() => splitRunView(specs), [specs]);
-  const traceList = useRunTraces(runId, trace !== null);
-  const chosen = example ? String(example) : pickExample(traceList.data ?? []);
-  const traceFirst = specs[0]?.type === "trace";
-  // A current-target grid must never briefly render every target while selection loads.
-  const waitingForTarget = trace !== null && regular.some((p) => p.type === "grid") && chosen === null;
-  const trajectory = trace ? (
-    <TraceSection runId={runId} example={chosen ?? undefined}
-      letter={panelLetter(startIndex + (traceFirst ? 0 : regular.length))}
-      title={trace.title || "Trajectory"} />
-  ) : null;
-  const panels = useViewQuery(
-    project,
-    task,
-    regular.length > 0 ? { view: { title: "run", panels: regular.map((p) => scopeToRun(p, runId)) } } : null,
-  );
-  const results = useMemo(
-    () => panels.data?.panels.map((result, i) => withoutSweeps(result, regular[i])),
-    [panels.data, regular],
-  );
-  if (specs.length === 0) return null;
-  return (
-    <>
-      {traceFirst ? trajectory : null}
-      {panels.error ? <ErrorBox error={panels.error} /> : null}
-      {regular.length > 0 && results && !waitingForTarget ? (
-        <PanelGrid results={results} specs={regular} startIndex={startIndex + (traceFirst ? 1 : 0)}
-          selectedItemId={chosen ?? undefined} currentGroupId={currentGroupId} runStatus={runStatus} />
-      ) : waitingForTarget && traceList.data ? (
-        <p className="small">No traced example available for comparison</p>
-      ) : regular.length > 0 && !panels.error && !traceList.error ? (
-        <Loading />
-      ) : null}
-      {traceFirst ? null : trajectory}
-    </>
-  );
 }

@@ -1,7 +1,7 @@
-/** Lay out panel results on the 12-column grid, lettered, via the panel registry. */
-import { type ComponentType, createContext, useContext } from "react";
+/** Lay out panel results in v5 panel chrome on the min-330 px grid, via the panel registry. */
+import { type CSSProperties, type ComponentType, createContext, useContext } from "react";
+import { Panel } from "../../chrome/Panel";
 import { PANELS, PanelBoundary, PanelError } from "../../panels";
-import { Figure, panelLetter } from "./Figure";
 import { useInAppLinks } from "./links";
 import type { RunStatus } from "../../api/models";
 import type { PanelResult, PanelSpec } from "./types";
@@ -44,6 +44,11 @@ export function clampSpan(span?: number): number {
   return Math.min(12, Math.max(1, Math.round(span)));
 }
 
+/** A full-width view panel (span 12, or no span) takes the whole row; any other span one cell. */
+export function panelGridStyle(span?: number): CSSProperties | undefined {
+  return clampSpan(span) === 12 ? { gridColumn: "1 / -1" } : undefined;
+}
+
 function warnings(result: PanelResult): string[] {
   const raw = result.meta.warnings;
   return Array.isArray(raw) ? raw.filter((w): w is string => typeof w === "string") : [];
@@ -52,29 +57,23 @@ function warnings(result: PanelResult): string[] {
 export interface PanelGridProps extends PanelContextProps {
   results: PanelResult[];
   specs?: PanelSpec[];
-  startIndex?: number;
 }
 
-export function PanelGrid({ results, specs, startIndex = 0, ...context }: PanelGridProps) {
+export function PanelGrid({ results, specs, ...context }: PanelGridProps) {
   return (
-    <div className="panel-grid">
+    <div className="pgrid panel-grid">
       {results.map((result, i) => {
         const spec = specs?.[i];
-        const row = spec?.layout?.row ?? undefined;
         const warn = warnings(result);
         return (
-          <Figure
+          <Panel
             key={`${i}-${result.type}`}
-            letter={panelLetter(startIndex + i)}
             title={result.title || spec?.title || result.type}
             aside={warn.length ? <span title={warn.join("\n")}>⚠ {warn.length}</span> : undefined}
-            style={{
-              gridColumn: `span ${clampSpan(spec?.layout?.span)}`,
-              gridRow: row ? String(row) : undefined,
-            }}
+            style={panelGridStyle(spec?.layout?.span)}
           >
             <PanelBody result={result} {...context} />
-          </Figure>
+          </Panel>
         );
       })}
     </div>

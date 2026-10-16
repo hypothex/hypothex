@@ -1,33 +1,45 @@
 /**
- * Code-defined routes (contract section 4):
- * `/` Overview, `/t/$project/$task?view=` Task, `/t/$project/$task/edit/$view` View editor
- * (`new` for a new view), `/r/$runId` Run, `/x/$a/$b?metric=` Examples, `/s/$project/$id` Sweep.
+ * Code-defined routes (ui-v5 contract): `/` Home, `/t/$project/$task?tab=&filter=&group=
+ * &sort=&hide=&sup=&sweep=` Task, `/t/$project/$task/edit/$view` view editor (`new` for a
+ * new view), `/r/$runId?tab=` Run, `/x/$a/$b?metric=` Examples, `/s/$project/$id` sweep link (to the task's Sweeps tab),
+ * `/hosts`, `/queue`.
  *
- * Each screen replaces its `ScreenPending` component below with the real screen. Screens
- * read params with `getRouteApi("<route id>")` to avoid importing this module.
+ * Old v4 pages stay mounted until their v5 replacement lands; each swap is one `component`
+ * line here (see docs/superpowers/plans/2026-10-16-hypothex-ui-v5.md, "How routes switch").
+ * Screens read params with `getRouteApi("<route id>")` to avoid importing this module.
  */
 import {
   Link,
-  Outlet,
   type RouterHistory,
   createRootRoute,
   createRoute,
   createRouter,
   useNavigate,
 } from "@tanstack/react-router";
-import { type ReactElement, useState } from "react";
+import { type ReactElement } from "react";
 
 import { ExamplesPage } from "./pages/Examples";
-import { OverviewPage } from "./pages/Overview";
-import { RunPage } from "./pages/Run";
-import { SweepPage } from "./pages/Sweep";
-import { TaskPage } from "./pages/Task";
+import { HomePage } from "./home/HomePage";
+import { HostsPage } from "./hosts/HostsPage";
+import { QueuePage } from "./hosts/QueuePage";
 import { ViewEditor } from "./pages/ViewEditor";
-import { CommandPalette } from "./shell/CommandPalette";
-import { Header } from "./shell/Header";
+import { RunPage } from "./run/RunPage";
+import { AppShell } from "./shell/AppShell";
+import { SweepRedirect } from "./task/SweepRedirect";
+import { TaskPage } from "./task/TaskPage";
 
+/** The task URL: `tab` is `charts|runs|sweeps|examples|view:<name>`; the rest is the run selection. */
 export interface TaskSearch {
+  tab?: string;
+  /** Legacy view link (v4); the Task page reads it as `tab=view:<name>` (`task/facts` `parseTab`). */
   view?: string;
+  sweep?: string;
+  filter?: string;
+  group?: string;
+  sort?: string;
+  hide?: string;
+  sup?: string;
+  col?: string;
 }
 
 export interface ExamplesSearch {
@@ -35,6 +47,7 @@ export interface ExamplesSearch {
 }
 
 export interface RunSearch {
+  tab?: string;
   log?: string;
   example?: string;
 }
@@ -63,52 +76,31 @@ export function stringifySearch(search: Record<string, unknown>): string {
   return out ? `?${out}` : "";
 }
 
-/** Stand-in until the screen's own component is wired in; shows the screen name. */
-export function ScreenPending({ name }: { name: string }) {
-  return (
-    <h1 className="finding" data-testid="screen-pending">
-      {name}
-    </h1>
-  );
-}
-
 export function NotFound() {
   return (
-    <>
+    <div className="pending">
       <h1 className="finding">Not found</h1>
       <p className="metaline">
-        <Link to="/">Overview</Link>
+        <Link to="/">Home</Link>
       </p>
-    </>
+    </div>
   );
 }
 
-/** Page frame: header, the routed screen in `<main>`, the command palette. */
-export function AppShell() {
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  return (
-    <>
-      <Header onFind={() => setPaletteOpen(true)} />
-      <main>
-        <Outlet />
-      </main>
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
-    </>
-  );
-}
-
-/** `/t/$project/$task?view=`: the Task page. Screens declare their return type, which keeps the route types free of cycles. */
+/**
+ * `/t/$project/$task`: the Task page; it reads its own search keys (`task/useSearchState`).
+ * Screens declare their return type, which keeps the route types free of cycles.
+ */
 function TaskScreen(): ReactElement {
   const { project, task } = taskRoute.useParams();
-  const { view } = taskRoute.useSearch();
-  return <TaskPage project={project} task={task} view={view} />;
+  return <TaskPage project={project} task={task} />;
 }
 
-/** `/r/$runId?log=&example=`: the Run page. */
+/** `/r/$runId?tab=&log=&example=`: the Run page; keyed so another run starts with fresh UI state. */
 function RunScreen(): ReactElement {
   const { runId } = runRoute.useParams();
-  const { log, example } = runRoute.useSearch();
-  return <RunPage runId={runId} log={log} example={example} />;
+  const { tab, log, example } = runRoute.useSearch();
+  return <RunPage key={runId} runId={runId} tab={tab} log={log} example={example} />;
 }
 
 /** `/x/$a/$b?metric=`: the Examples page. */
@@ -118,10 +110,10 @@ function ExamplesScreen(): ReactElement {
   return <ExamplesPage a={a} b={b} metric={metric} />;
 }
 
-/** `/s/$project/$id`: the Sweep page; keyed so a new sweep starts with fresh UI state. */
+/** `/s/$project/$id`: opens the sweep in its task's Sweeps tab (`SweepRedirect`). */
 function SweepScreen(): ReactElement {
   const { project, id } = sweepRoute.useParams();
-  return <SweepPage key={`${project}/${id}`} project={project} sweepId={id} />;
+  return <SweepRedirect key={`${project}/${id}`} project={project} sweepId={id} />;
 }
 
 /** `/t/$project/$task/edit/$view`: the view editor; Save opens the saved view's tab. */
@@ -134,7 +126,7 @@ function ViewEditorScreen(): ReactElement {
       project={project}
       task={task}
       view={view}
-      onSaved={(name) => void navigate({ to: "/t/$project/$task", params: { project, task }, search: { view: name } })}
+      onSaved={(name) => void navigate({ to: "/t/$project/$task", params: { project, task }, search: { tab: `view:${name}` } })}
     />
   );
 }
@@ -144,13 +136,23 @@ export const rootRoute = createRootRoute({ component: AppShell, notFoundComponen
 export const overviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: OverviewPage,
+  component: HomePage,
 });
 
 export const taskRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/t/$project/$task",
-  validateSearch: (search: Record<string, unknown>): TaskSearch => ({ view: str(search.view) }),
+  validateSearch: (search: Record<string, unknown>): TaskSearch => ({
+    tab: str(search.tab),
+    view: str(search.view),
+    sweep: str(search.sweep),
+    filter: str(search.filter),
+    group: str(search.group),
+    sort: str(search.sort),
+    hide: str(search.hide),
+    sup: str(search.sup),
+    col: str(search.col),
+  }),
   component: TaskScreen,
 });
 
@@ -164,6 +166,7 @@ export const runRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/r/$runId",
   validateSearch: (search: Record<string, unknown>): RunSearch => ({
+    tab: str(search.tab),
     log: str(search.log),
     example: str(search.example),
   }),
@@ -183,6 +186,18 @@ export const sweepRoute = createRoute({
   component: SweepScreen,
 });
 
+export const hostsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/hosts",
+  component: HostsPage,
+});
+
+export const queueRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/queue",
+  component: QueuePage,
+});
+
 export const routeTree = rootRoute.addChildren([
   overviewRoute,
   taskRoute,
@@ -190,6 +205,8 @@ export const routeTree = rootRoute.addChildren([
   runRoute,
   examplesRoute,
   sweepRoute,
+  hostsRoute,
+  queueRoute,
 ]);
 
 /** Build the router; tests pass a memory history. */

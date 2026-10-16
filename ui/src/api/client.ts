@@ -22,12 +22,14 @@ export const ROUTES = {
   leaderboard: "/api/v1/tasks/{project}/{task}/leaderboard",
   taskReeval: "/api/v1/tasks/{project}/{task}/reeval",
   taskKind: "/api/v1/tasks/{project}/{task}/kind",
+  taskRuns: "/api/v1/tasks/{project}/{task}/runs",
   views: "/api/v1/tasks/{project}/{task}/views",
   view: "/api/v1/tasks/{project}/{task}/views/{name}",
   viewValidate: "/api/v1/tasks/{project}/{task}/views/validate",
   viewQuery: "/api/v1/tasks/{project}/{task}/views/query",
   runs: "/api/v1/runs",
   run: "/api/v1/runs/{run_id}",
+  runMetrics: "/api/v1/runs/{run_id}/metrics",
   runLogs: "/api/v1/runs/{run_id}/logs",
   runPredictions: "/api/v1/runs/{run_id}/predictions",
   runTraces: "/api/v1/runs/{run_id}/traces",
@@ -37,9 +39,14 @@ export const ROUTES = {
   runReeval: "/api/v1/runs/{run_id}/reeval",
   runStop: "/api/v1/runs/{run_id}/stop",
   runNotes: "/api/v1/runs/{run_id}/notes",
+  runTags: "/api/v1/runs/{run_id}/tags",
+  runArchive: "/api/v1/runs/{run_id}/archive",
+  runName: "/api/v1/runs/{run_id}/name",
   compareExamples: "/api/v1/compare/examples",
   hosts: "/api/v1/hosts",
   hostConnect: "/api/v1/hosts/{host}/connect",
+  hostDisconnect: "/api/v1/hosts/{host}/disconnect",
+  hostsReload: "/api/v1/hosts/reload",
   hostRuns: "/api/v1/hosts/{host}/runs",
   sweep: "/api/v1/sweeps/{project}/{sweep_id}",
   sweepCancelQueued: "/api/v1/sweeps/{project}/{sweep_id}/cancel_queued",
@@ -222,6 +229,9 @@ export const api = {
     get<M.RunRecord[]>(ROUTES.runs, { query: { ...query }, signal }),
   run: (runId: string, signal?: AbortSignal) =>
     get<M.RunDetail>(ROUTES.run, { params: { run_id: runId }, signal }),
+  /** Downsampled metric history; `names` filters in SQL, `max_points` caps each series (PERF-F9). */
+  runMetrics: (runId: string, q: { names?: readonly string[]; max_points?: number } = {}, signal?: AbortSignal) =>
+    get<M.MetricPoint[]>(ROUTES.runMetrics, { params: { run_id: runId }, query: { names: q.names, max_points: q.max_points }, signal }),
   runLogs: (runId: string, stream: M.LogStream = "stdout", offset?: number, signal?: AbortSignal) =>
     get<M.LogChunk>(ROUTES.runLogs, { params: { run_id: runId }, query: { stream, offset }, signal }),
   runPredictions: (runId: string, query: M.PredictionsQuery = {}, signal?: AbortSignal) =>
@@ -249,6 +259,25 @@ export const api = {
       params: { run_id: runId },
       body: { ...action(opts), text, author: opts?.created_by ?? "human" },
     }),
+  /** Add or remove tags (forwarded to the owning host like every run action). */
+  tagRun: (runId: string, change: { add?: readonly string[]; remove?: readonly string[] }, opts?: M.ActionOptions) =>
+    post<M.RunRecord>(ROUTES.runTags, {
+      params: { run_id: runId },
+      body: { ...action(opts), add: [...(change.add ?? [])], remove: [...(change.remove ?? [])] },
+    }),
+  /** Archive (`on: true`) or restore a run. */
+  archiveRun: (runId: string, on: boolean, opts?: M.ActionOptions) =>
+    post<M.RunRecord>(ROUTES.runArchive, { params: { run_id: runId }, body: { ...action(opts), on } }),
+  /** v5 task workspace: runs with derived names, config groups and score keys. */
+  taskRuns: (project: string, task: string, archived = false, signal?: AbortSignal) =>
+    get<M.TaskRuns>(ROUTES.taskRuns, {
+      params: { project, task },
+      query: { archived: archived ? true : undefined },
+      signal,
+    }),
+  /** Rename a run; `null` resets it to the derived name (the server trims and validates). */
+  renameRun: (runId: string, name: string | null, opts?: M.ActionOptions) =>
+    post<M.RunRecord>(ROUTES.runName, { params: { run_id: runId }, body: { ...action(opts), name } }),
   // phase 2: hosts, launch, sweeps, pull ---------------------------------------------------
   hosts: (signal?: AbortSignal) => get<M.HostRow[]>(ROUTES.hosts, { signal }),
   /** The hub's own GPUs (an env route: the hub is the env server of its own runs). */
@@ -257,6 +286,10 @@ export const api = {
   queue: (signal?: AbortSignal) => get<M.QueueEntry[]>(ROUTES.queue, { signal }),
   connectHost: (host: string, opts?: M.ActionOptions) =>
     post<M.HostState>(ROUTES.hostConnect, { params: { host }, body: action(opts) }),
+  disconnectHost: (host: string, opts?: M.ActionOptions) =>
+    post<M.HostState>(ROUTES.hostDisconnect, { params: { host }, body: action(opts) }),
+  /** Re-read environments.yaml (after `hx hosts add|map|rm`); returns the hosts list. */
+  reloadHosts: (opts?: M.ActionOptions) => post<M.HostRow[]>(ROUTES.hostsReload, { body: action(opts) }),
   /** Start a run on the hub itself. */
   launch: (body: M.LaunchRequest, opts?: M.ActionOptions) =>
     post<M.RunRecord>(ROUTES.runs, { body: { ...action(opts), ...body } }),

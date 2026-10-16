@@ -18,8 +18,9 @@ List every project Hypothex knows about, with its repo path and tasks.
 
    hx tasks --json
 
-List tasks with their dataset, metric versions, primary metric, run count, and best
-score.
+List tasks with their dataset, metric versions, primary metric, run counts, and best
+score. ``n_runs`` counts every unarchived run of the task (queued and running too);
+``n_finished`` only the finished ones.
 
 .. code-block:: bash
 
@@ -188,6 +189,16 @@ Star a run (``--off`` to unstar) to mark it as worth remembering.
    hx archive RUN_ID --json
 
 Archive a run (``--off`` to unarchive) to hide a dead end without deleting it.
+
+.. code-block:: bash
+
+   hx rename RUN_ID "lr 3e-4, wide beam" --json
+   hx rename RUN_ID --reset --json
+
+Name a run by what it changes (1–80 characters, one line). Without a name a run shows
+its derived name: the params that differ inside its task (``lr 3e-4 · beam 10``).
+``--reset`` drops the name; a blank NAME is refused, so an empty shell variable never
+drops a name by accident. A run of a host is renamed on that host, through the hub.
 
 .. code-block:: bash
 

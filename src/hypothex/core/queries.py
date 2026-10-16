@@ -36,6 +36,7 @@ from hypothex.core.errors import ConfigError, EvalError, RunError, StoreError
 from hypothex.core.fsutil import read_jsonl, read_yaml
 from hypothex.core.index import Index
 from hypothex.core.leaderboard import Leaderboard, build_leaderboard, cached_leaderboard
+from hypothex.core.naming import clean_run_name
 from hypothex.core.records import (
     INDEXED_POINT_STATUSES,
     MetricPoint,
@@ -51,7 +52,12 @@ LOG_STREAMS = ("stdout", "stderr", "supervisor")
 
 
 class TaskSummary(BaseModel):
-    """A task with its current metric versions and best primary value."""
+    """
+    A task with its current metric versions and best primary value.
+
+    ``n_runs`` counts the task's unarchived runs in any state (queued and
+    running too); ``n_finished`` only the finished ones.
+    """
 
     project: str
     name: str
@@ -63,6 +69,7 @@ class TaskSummary(BaseModel):
     primary: str
     higher_is_better: bool
     n_runs: int
+    n_finished: int = 0
     best: float | None
 
 
@@ -375,6 +382,7 @@ class _Ranked(NamedTuple):
     higher_is_better: bool
     best: float | None
     n_runs: int
+    n_finished: int
 
 
 _RANKED: weakref.WeakKeyDictionary[Index, dict[tuple[str, str], _Ranked]] = (
@@ -404,7 +412,10 @@ def _ranked(ctx: Context, entry: ProjectEntry, name: str) -> _Ranked:
         primary=board.primary,
         higher_is_better=board.higher_is_better,
         best=top.mean if top else None,
-        n_runs=ctx.index.count_runs(project=entry.project, task=name, status=RunStatus.FINISHED),
+        n_runs=ctx.index.count_runs(project=entry.project, task=name),
+        n_finished=ctx.index.count_runs(
+            project=entry.project, task=name, status=RunStatus.FINISHED
+        ),
     )
     memo[(entry.project, name)] = ranked
     return ranked
@@ -424,6 +435,7 @@ def _summary(ctx: Context, entry: ProjectEntry, name: str) -> TaskSummary:
         primary=ranked.primary,
         higher_is_better=ranked.higher_is_better,
         n_runs=ranked.n_runs,
+        n_finished=ranked.n_finished,
         best=ranked.best,
     )
 
@@ -1292,6 +1304,46 @@ def archive_run(ctx: Context, run_id: str, on: bool = True) -> RunRecord:
     """
     return ctx.update_run(
         run_id, "run.archived", lambda r: r.model_copy(update={"archived": on}), {"on": on}
+    )
+
+
+def rename_run(ctx: Context, run_id: str, name: str | None) -> RunRecord:
+    """
+    Name a run, or reset it to its derived name.
+
+    The name is trimmed; ``None`` or a blank name resets it, so the run shows
+    its derived name again (``naming.derive_names``). Emits ``run.renamed``
+    with the new ``name``.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open Hypothex context.
+    run_id : str
+        Run id to update.
+    name : str or None
+        New name (1-80 characters, one line), or None to reset.
+
+    Returns
+    -------
+    RunRecord
+        The updated record.
+
+    Raises
+    ------
+    RunNameError
+        If the name is longer than 80 characters or has a line break.
+
+    Examples
+    --------
+    >>> rename_run(ctx, "r1", "wide beam").name  # doctest: +SKIP
+    'wide beam'
+    >>> rename_run(ctx, "r1", None).name is None  # doctest: +SKIP
+    True
+    """
+    clean = clean_run_name(name)
+    return ctx.update_run(
+        run_id, "run.renamed", lambda r: r.model_copy(update={"name": clean}), {"name": clean}
     )
 
 

@@ -179,6 +179,7 @@ describe("keysForEvent", () => {
       ["views", "query", "toy"],
       ["compareExamples"],
       ["sweeps", "toy"],
+      ["taskRuns", "toy"],
     ]);
   });
 
@@ -192,6 +193,7 @@ describe("keysForEvent", () => {
       ["views", "query"],
       ["compareExamples"],
       ["sweeps"],
+      ["taskRuns"],
     ]);
   });
 
@@ -206,6 +208,7 @@ describe("keysForEvent", () => {
       ["views", "query", "toy"],
       ["compareExamples"],
       ["sweeps", "toy"],
+      ["taskRuns", "toy"],
       ["hosts"],
     ]);
   });
@@ -229,13 +232,18 @@ describe("keysForEvent", () => {
     // Runs finished while the hub was offline; on reconnect it replays 300 mirror events for 3 runs.
     const burst = Array.from({ length: 300 }, (_, i) => ev(i + 1, MIRROR_RUN_UPDATED, "toy", `r${i % 3}`));
     const keys = keysForEvents(burst);
-    expect(keys).toHaveLength(12);
+    expect(keys).toHaveLength(13);
     expect(keys.filter((k) => k[0] === "hosts")).toEqual([["hosts"]]);
     expect(keys.filter((k) => k[0] === "run")).toEqual([
       ["run", "r0"],
       ["run", "r1"],
       ["run", "r2"],
     ]);
+  });
+
+  test("a run.renamed event refreshes the task's runs, the run and the overview", () => {
+    const keys = keysForEvent(ev(1, "run.renamed", "toy", "r1"));
+    for (const key of [["taskRuns", "toy"], ["run", "r1"], ["overview"]]) expect(keys).toContainEqual(key);
   });
 
   test("a non-run event invalidates nothing", () => {
@@ -258,6 +266,7 @@ describe("keysForEvent", () => {
       ["views", "query", "toy"],
       ["compareExamples"],
       ["sweeps", "toy"],
+      ["taskRuns", "toy"],
       ["run", "r2"],
     ]);
   });
@@ -734,7 +743,7 @@ describe("useEventStream", () => {
     const predicate = spy.mock.calls[0]?.[0]?.predicate;
     const matches = (queryKey: readonly unknown[]) => predicate?.({ queryKey } as never) ?? false;
     const hit = [["overview"], ["tasks"], ["task", "toy", "acc"], ["runs", {}], ["run", "r1", "logs"]];
-    const hit2 = [["leaderboard", "toy"], ["views", "query", "toy"], ["compareExamples"], ["sweeps", "toy"]];
+    const hit2 = [["leaderboard", "toy"], ["views", "query", "toy"], ["compareExamples"], ["sweeps", "toy"], ["taskRuns", "toy", "acc", false]];
     expect([...hit, ...hit2].map(matches)).toEqual([...hit, ...hit2].map(() => true));
     expect([["run", "r2"], ["task", "other"], ["hosts"], ["views", "list"]].map(matches)).toEqual([
       false,

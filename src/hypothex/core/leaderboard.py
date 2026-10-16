@@ -469,11 +469,42 @@ def _select_group(
     return None
 
 
-def _higher_is_better(config: ProjectConfig, spec: TaskSpec, primary: str | None = None) -> bool:
-    metric, key = parse_metric_key(primary or spec.primary)
-    if spec.kind == "system_bench" and percentile_of(f"{metric}/{key}"):
-        return False
-    return config.metrics[metric].higher_is_better
+def key_higher_is_better(config: ProjectConfig, spec: TaskSpec, key: str) -> bool:
+    """
+    Return the direction of one ``metric/key`` of a task: the one rule of boards and panels.
+
+    The leaderboard (configured or re-ranked primary), the task workspace and saved
+    ``compare`` panels all use it. A metric that sets ``higher_is_better`` wins for
+    all its keys; else, on a ``system_bench`` task, a percentile key (``p50``,
+    ``p95``, ...) is lower-is-better; else the documented metric default,
+    higher-is-better. (A task has no direction of its own: it is its primary's.)
+
+    Parameters
+    ----------
+    config : ProjectConfig
+        The task's project config.
+    spec : TaskSpec
+        The task.
+    key : str
+        A score key of one of the task's metrics (``latency/p95``, ``reported/a.top1``).
+
+    Returns
+    -------
+    bool
+        True when a higher value of ``key`` is better.
+
+    Examples
+    --------
+    >>> key_higher_is_better(config, config.tasks["bench"], "latency/p95")  # doctest: +SKIP
+    False
+    >>> key_higher_is_better(config, config.tasks["bench"], "throughput/rps")  # doctest: +SKIP
+    True
+    """
+    metric, sub = parse_metric_key(key)
+    flag = config.metrics[metric].higher_is_better
+    if flag is not None:
+        return flag
+    return not (spec.kind == "system_bench" and percentile_of(f"{metric}/{sub}"))
 
 
 # caches ------------------------------------------------------------------------------
@@ -481,6 +512,8 @@ STATS_CACHE_SIZE = 8192
 """Bootstrap results kept per kind (row intervals, paired p-values), least recently used out."""
 BOARD_CACHE_SIZE = 128
 """Leaderboards kept by ``cached_leaderboard``, least recently used out."""
+NAMES_CACHE_SIZE = 256
+"""Derived run names kept by ``cached_names`` (one entry per task), least recently used out."""
 
 _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
@@ -519,6 +552,7 @@ class _Lru(Generic[_K, _V]):
 _INTERVALS: _Lru[bytes, tuple[float, float]] = _Lru(STATS_CACHE_SIZE)
 _PAIRED_P: _Lru[bytes, float] = _Lru(STATS_CACHE_SIZE)
 _BOARDS: _Lru[tuple[Hashable, ...], Leaderboard] = _Lru(BOARD_CACHE_SIZE)
+_NAMES: _Lru[tuple[Hashable, ...], dict[str, str]] = _Lru(NAMES_CACHE_SIZE)
 
 
 def _digest(values: list[float]) -> bytes:
@@ -540,6 +574,7 @@ def clear_caches() -> None:
     _INTERVALS.clear()
     _PAIRED_P.clear()
     _BOARDS.clear()
+    _NAMES.clear()
 
 
 def cached_leaderboard(
@@ -593,12 +628,8 @@ def cached_leaderboard(
     ...     ctx, "toy", "t", config, lambda: build_leaderboard("toy", "t", config, runs, scores)
     ... )
     """
-    identity = ctx.index.path.stat()
     key = (
-        str(ctx.index.path),
-        identity.st_dev,
-        identity.st_ino,
-        index_generation(ctx),
+        *_index_key(ctx),
         project,
         task,
         xxhash.xxh3_128_digest(config.model_dump_json().encode()),
@@ -608,6 +639,63 @@ def cached_leaderboard(
     return _BOARDS.get(key, build).model_copy(deep=True)
 
 
+def _index_key(ctx: Context) -> tuple[Hashable, ...]:
+    """
+    Identify the index state: its path, device/inode identity and generation.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open context.
+
+    Returns
+    -------
+    tuple
+        ``(path, st_dev, st_ino, index_generation)``; the generation is read
+        before any build, so a write during a build only wastes the entry.
+
+    Examples
+    --------
+    >>> _index_key(ctx)  # doctest: +SKIP
+    ('/home/me/.hypothex/index.sqlite', 16777230, 1234567, 42)
+    """
+    identity = ctx.index.path.stat()
+    return (str(ctx.index.path), identity.st_dev, identity.st_ino, index_generation(ctx))
+
+
+def cached_names(
+    ctx: Context, project: str, task: str, build: Callable[[], dict[str, str]]
+) -> dict[str, str]:
+    """
+    Return ``build()`` (a task's derived run names), memoized until the index changes.
+
+    Keyed like ``cached_leaderboard`` (index identity and generation, project,
+    task). ``build`` must read only index data. Each call returns a copy.
+
+    Parameters
+    ----------
+    ctx : Context
+        Open context whose index ``build`` reads.
+    project : str
+        Project name.
+    task : str
+        Task name.
+    build : callable
+        Derives the names on a miss (``taskruns.derived_names``).
+
+    Returns
+    -------
+    dict of str to str
+        A copy of the cached or new names.
+
+    Examples
+    --------
+    >>> cached_names(ctx, "toy", "t", lambda: {"r1": "lr 1e-3"})  # doctest: +SKIP
+    {'r1': 'lr 1e-3'}
+    """
+    return dict(_NAMES.get((*_index_key(ctx), project, task), build))
+
+
 # test-set noise --------------------------------------------------------------------
 def _is_number(v: Any) -> bool:
     return isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
@@ -615,7 +703,9 @@ def _is_number(v: Any) -> bool:
 
 def pick_field(rows: Iterable[dict[str, Any]], key: str = "value") -> tuple[str, bool] | None:
     """
-    Choose the per-example field used for test-set noise and paired tests.
+    Choose the per-example field shown for a metric in per-example panels.
+
+    Test-set noise and paired tests use :func:`primary_field` instead.
 
     Parameters
     ----------
@@ -662,6 +752,94 @@ def pick_field(rows: Iterable[dict[str, Any]], key: str = "value") -> tuple[str,
         if all(_is_number(v) for v in values[k]):
             return k, False
     return None
+
+
+def _numbers(values: list[Any]) -> bool:
+    """Whether ``values`` is nonempty and every value is a bool or a finite number."""
+    return bool(values) and all(
+        isinstance(v, bool) or (isinstance(v, int | float) and math.isfinite(v)) for v in values
+    )
+
+
+def primary_field(
+    examples: PerExample, key: str, recorded: Mapping[str, float]
+) -> tuple[str, bool] | None:
+    """
+    Choose the per-example field that holds the primary metric key, or None.
+
+    The test-set interval and the paired tests are computed on this field, so
+    it must hold the same quantity as the primary score:
+
+    1. The field named ``key`` (``value`` for ``acc``, ``p95`` for ``latency/p95``),
+       when its values are numbers. It is binary when they are all 0/1 or bools.
+    2. Only for the default key ``value``: ``correct``, then ``solved``, then any
+       other field in name order, whose mean over each run's examples equals that
+       run's recorded score (``recorded``, relative tolerance 1e-6) in every run.
+       A status flag such as ``ok: true`` next to a ``value`` of 0 is never used.
+
+    ``None`` values are ignored.
+
+    Parameters
+    ----------
+    examples : dict
+        run_id -> example_id -> per-example fields of the primary metric.
+    key : str
+        The primary metric's key, for example ``value``.
+    recorded : mapping of str to float
+        run_id -> the run's recorded primary score.
+
+    Returns
+    -------
+    tuple of (str, bool) or None
+        Field name and whether it is binary; None when no field holds the key.
+
+    Examples
+    --------
+    >>> ex = {"r": {"e1": {"ok": True, "value": 0.0}, "e2": {"ok": True, "value": 0.0}}}
+    >>> primary_field(ex, "value", {"r": 0.0})
+    ('value', False)
+    >>> half = {"r": {"e1": {"correct": True}, "e2": {"correct": False}}}
+    >>> primary_field(half, "value", {"r": 0.5})
+    ('correct', True)
+    >>> primary_field({"r": {"e1": {"ok": True}}}, "value", {"r": 0.0}) is None
+    True
+    """
+    columns: dict[str, list[Any]] = defaultdict(list)
+    for rows in examples.values():
+        for row in rows.values():
+            for name, v in row.items():
+                if v is not None:
+                    columns[name].append(v)
+
+    def binary(name: str) -> bool:
+        vs = columns[name]
+        if all(isinstance(v, bool) for v in vs):
+            return True
+        own = name == key or name in BINARY_FIELDS
+        return own and all(type(v) is int and v in (0, 1) for v in vs)
+
+    if _numbers(columns.get(key, [])):
+        return key, binary(key)
+    if key != "value":
+        return None
+    others = sorted(n for n in columns if n not in BINARY_FIELDS and n != key)
+    for name in (*BINARY_FIELDS, *others):
+        if _numbers(columns.get(name, [])) and _averages_to(examples, name, recorded):
+            return name, binary(name)
+    return None
+
+
+def _averages_to(examples: PerExample, name: str, recorded: Mapping[str, float]) -> bool:
+    """Whether field ``name`` averages to the recorded score in every run that has both."""
+    checked = 0
+    for rid, rows in examples.items():
+        if rid not in recorded:
+            continue
+        values = [float(r[name]) for r in rows.values() if r.get(name) is not None]
+        if not values or not math.isclose(_mean(values), recorded[rid], rel_tol=1e-6, abs_tol=1e-9):
+            return False
+        checked += 1
+    return checked > 0
 
 
 def _mean(values: list[float]) -> float:
@@ -1110,14 +1288,9 @@ def build_leaderboard(
     """
     spec = config.tasks[task]
     chosen = {m: (versions or {}).get(m, config.metrics[m].version) for m in spec.metrics}
-    requested_primary = primary
     primary = _selected_primary(config, task, primary, scores, chosen)
     primary_metric, primary_key = parse_metric_key(primary)
-    higher = (
-        config.metrics[primary_metric].higher_is_better
-        if requested_primary is not None and primary != "/".join(parse_metric_key(spec.primary))
-        else _higher_is_better(config, spec)
-    )
+    higher = key_higher_is_better(config, spec, primary)
     eligible = [
         r for r in runs if r.task == task and r.status == RunStatus.FINISHED and not r.archived
     ]
@@ -1159,18 +1332,8 @@ def build_leaderboard(
             groups[(r.config_hash, r.git.commit, diff_key(r.git))].append(r)
 
     examples = {rid: ex for rid, ex in (per_example or {}).items() if rid in per_run}
-    picked = pick_field((f for ex in examples.values() for f in ex.values()), primary_key)
-    if requested_primary is not None and (
-        primary_key != "value"
-        or any(primary_key in row for ex in examples.values() for row in ex.values())
-    ):
-        # An explicitly selected output key must not borrow another binary or
-        # numeric field from the metric's per-example payload.
-        fields = [row.get(primary_key) for ex in examples.values() for row in ex.values()]
-        if fields and all(isinstance(v, (bool, int, float)) and math.isfinite(v) for v in fields):
-            picked = (primary_key, all(type(v) in (bool, int) and v in (0, 1) for v in fields))
-        else:
-            picked = None
+    recorded = {rid: values[primary] for rid, values in per_run.items() if primary in values}
+    picked = primary_field(examples, primary_key, recorded)
     rows: list[LeaderboardRow] = []
     pooled: dict[str, dict[str, float]] = {}
     for identity, members in groups.items():

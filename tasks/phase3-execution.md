@@ -52,7 +52,7 @@ Postgres. Use loopback fakes and throwaway Docker containers. Real deployment,
 real notifications and first public exposure remain separate user actions.
 No attribution trailers or model/tool references in commit messages or PR text.
 
-Review receipts and prompts: `/tmp/hx-phase3-evidence/` (outside source trees).
+Historical review receipts and prompts used `/tmp/hx-phase3-evidence/`; that temporary location is not the current evidence source. The October 16 durable receipts are under `/Users/shreyasv/Desktop/code/hypothex-phase3-evidence/2026-10-16/` (outside source trees).
 This plan records authorization and progress; it does not claim either review
 gate or any Phase 3 implementation has passed yet.
 
@@ -151,8 +151,9 @@ interfaces. Phase 3 must advance to 5 and retain genuine schema-3 and schema-4
 upgrade fixtures. UI-v5 routes/components/tests must replace obsolete anchors.
 The cleanup race and zero-timeout WebSocket concerns require fresh reproduction.
 
-Next: freeze/push the complete refreshed draft revision, obtain renewed Claude
-LGTM and then independent adversarial LGTM. Only then begin implementation.
+The refreshed draft was frozen and pushed at ebb06c9. Renewed Claude R1
+returned NOT LGTM; the correction and next gate are recorded below. Only a
+renewed Claude LGTM followed by independent adversarial LGTM permits implementation.
 
 Parent integration verified all three worker plan hashes, all17 backend evidence
 hashes, 51 frontend source hashes and all12 extracted final cleanup helper hashes.
@@ -163,3 +164,29 @@ upgrade inputs. Runtime/source/UI/tests/workflows/dependencies remain identical
 to e73b810. The parent additionally corrected the planned cleanup-marker helper
 to trim trailing directory separators, with a fresh bounded snippet test; this
 supersedes the frontend worker's hash and does not constitute runtime validation.
+
+
+### Renewed primary refresh R1 and correction (2026-10-16)
+
+Claude reviewed frozen ebb06c9 and returned NOT LGTM: one blocking P2 for
+search-only ancestor traversal; no P0/P1. It accepted the nine diagnostic
+corrections. Its report and coverage are under durable `primary-refresh-r1/`.
+The parent accepted P2-1 and corrected the Task22 ancestor descriptor mode,
+retaining no-follow/dir-fd/policy/identity safeguards and readable directory
+measurement. Backend23 now extends the existing UI_ROUTE constant; redundant
+Field-import and stale source/evidence labels were clarified.
+
+Parent evidence is in `parent-primary-r1-fixes/`: before correction, four
+file/directory permission cases fail; after correction, 20 tests pass (19
+removal cases and a receipt writer), zero descriptor leaks, all protected bytes
+intact. Nine additional parent-swap cases also preserve protected bytes. Ruff,
+format and ty checks pass for the adapted regression harness. These are bounded
+exact-snippet macOS probes; Linux is not executed because Docker is unavailable.
+The plan explicitly requires non-root Linux/macOS behavior tests during
+implementation. No assembled application acceptance is claimed.
+
+Next: freeze this correction and request a new Claude primary round on its
+exact hash, carrying the original brief and every finding/response. Then start
+a new independent adversarial gate only if primary approves. No implementation
+yet. CI on ebb06c9 had an unchanged UI-v5 viewport failure; the new docs-only
+head's CI supersedes that head and must be green before integration.

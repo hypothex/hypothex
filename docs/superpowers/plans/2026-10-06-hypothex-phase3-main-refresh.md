@@ -307,3 +307,39 @@ especially the descriptor-removal boundary and compressed UI-v5 implementation
 instructions. Historical probe files that vanished are not current evidence.
 The eleven diagnostic tests confirm old defects/disputed claims only; the
 writer/parent probes validate limited new snippets, not assembled Phase3.
+
+
+### Renewed primary refresh R1 response (2026-10-16)
+
+The independent Claude review of ebb06c9 returned NOT LGTM with one blocking
+P2-1: `_open_cleanup_parent` requested O_RDONLY on every ancestor and therefore
+rejected valid search-only project paths. All F1–F9 responses above were accepted
+as plan corrections. Original report/coverage/probes are retained in the durable
+`primary-refresh-r1/` evidence directory; this response does not change its verdict.
+
+Accepted P2-1: Task22 now prefers O_PATH, then O_SEARCH, then conservative
+O_RDONLY for ancestor pins while retaining O_DIRECTORY/O_NOFOLLOW and every
+identity/policy/dir-fd check. Directories actually enumerated remain readable.
+Non-root Linux/macOS cases cover file/directory artifacts below mode0100/0300
+ancestors, writable search-only immediate parents, conservative fallback and
+all existing race/refusal/leak regressions. Copied exact-snippet probes reproduce
+four failures before the fix and pass20 tests after it, including19 removal
+observations and a receipt writer. All protected bytes survive and descriptor
+deltas are zero. Nine additional parent-swap cases pass. MacOS O_SEARCH was
+executed; Linux O_PATH was documentation-checked only because Docker is absent.
+Full application and real non-root Linux acceptance remain prospective.
+
+Nonblocking P3 dispositions: extend the existing UI_ROUTE constant and retain
+its public_static use/comment; retain the already-present Field import; clarify
+that the final syscall race requirement concerns a parent swap, without claiming
+atomic leaf identity. Existing notebook-label and exact-byte-confirmation
+contracts were accepted and are unchanged. Sweep cost source is relabeled to
+current e73b810 (code unchanged), and old /tmp evidence is marked historical.
+The SPA regex probe still admits current/new known routes and rejects forbidden
+ones after moving the definition into the existing constant.
+
+The review coverage ledger used R4 evidence for unchanged tasks. The next
+primary round must inspect their full task instructions and cross-task fit in
+the current plan as well as rechecking the new correction, and state precisely
+what was read, executed or reused. No historical LGTM substitutes for approval
+of this final plan. The ordered independent adversarial gate remains pending.

@@ -4390,7 +4390,7 @@ and extend the `TaskSpec` docstring with "``baselines`` lists published results 
                     )
 ```
 
-In `src/hypothex/core/leaderboard.py`, change `from pydantic import BaseModel` to `from pydantic import BaseModel, Field`, add `metric_ref` to the `hypothex.core.config` import, and add after `class LeaderboardRow`:
+In `src/hypothex/core/leaderboard.py`, retain the existing `from pydantic import BaseModel, Field` import, add `metric_ref` to the `hypothex.core.config` import, and add after `class LeaderboardRow`:
 
 ```python
 class BaselineRow(BaseModel):
@@ -6597,7 +6597,7 @@ def test_test_notice_and_renderers() -> None:
 Run: `uv run pytest tests/notify/test_messages.py -v`
 Expected: FAIL at collection with `ModuleNotFoundError: No module named 'hypothex.notify'`.
 
-**Prerequisite within Task 14: sweep cost completeness (test first).** Add `src/hypothex/core/sweeps.py` and `tests/core/test_sweeps.py` to this task's files. Current `a444125` `SweepSummary.total_usd` is a known subtotal only; it cannot certify pricing. Add immediately after that field:
+**Prerequisite within Task 14: sweep cost completeness (test first).** Add `src/hypothex/core/sweeps.py` and `tests/core/test_sweeps.py` to this task's files. Current `e73b810` `SweepSummary.total_usd` is a known subtotal only; it cannot certify pricing. Add immediately after that field:
 
 ```python
     cost_complete: bool = False
@@ -11324,7 +11324,9 @@ def test_parent_symlink_swap_after_recheck_preserves_metadata(
     assert cleaned_artifacts(toy, toy.find_record("artifact-owner")) == []
 ```
 
-Add equivalent deterministic cases for a directory artifact, a parent swapped **before descriptor acquisition**, and a swap at the final `unlink`/`rmtree` boundary **after** all user-space checks. For the last boundary, instrument the real syscall wrapper and forward its actual `dir_fd`: every protected byte must survive, and only the originally pinned candidate may be removed (or the item skipped); never follow the replacement alias. Directory cases include a child symlink to protected metadata and verify the target bytes survive, with the link itself removable. Test a leaf replacement between pin/recheck and measure, an unreadable descendant, and unavailable `rmtree.avoids_symlink_attacks`; failure yields skipped/zero claimed freed bytes/no cleaned marker and no path-based fallback. Keep the existing successful-file/folder, unchanged-byte-count, alias-home/store, age/input-reader and lock tests. Instrument `os.open`/`os.close` on success and every injected failure to assert no descriptor leak. The loopback host test must exercise its own filesystem boundary, not trust a hub-side recheck.
+Add equivalent deterministic cases for a directory artifact, a parent swapped **before descriptor acquisition**, and a **parent** swap at the final `unlink`/`rmtree` boundary **after** all user-space checks. For the last boundary, instrument the real syscall wrapper and forward its actual `dir_fd`: every protected byte must survive, and only the originally pinned candidate may be removed (or the item skipped); never follow the replacement alias. Directory cases include a child symlink to protected metadata and verify the target bytes survive, with the link itself removable. Test a leaf replacement between pin/recheck and measure, an unreadable descendant, and unavailable `rmtree.avoids_symlink_attacks`; failure yields skipped/zero claimed freed bytes/no cleaned marker and no path-based fallback. Keep the existing successful-file/folder, unchanged-byte-count, alias-home/store, age/input-reader and lock tests. Instrument `os.open`/`os.close` on success and every injected failure to assert no descriptor leak. The loopback host test must exercise its own filesystem boundary, not trust a hub-side recheck.
+
+Ancestor descriptors must use `O_PATH` where available (Linux), otherwise `O_SEARCH` where available (macOS/BSD), otherwise the conservative `O_RDONLY` mode. Always retain `O_DIRECTORY | O_NOFOLLOW` and all identity checks. The fallback may skip a search-only ancestor on a platform lacking both traversal modes; it never retries with path-based deletion. Directories actually listed by `_measure_at` or `rmtree` still require read access. Add non-root, real-filesystem tests on Linux and macOS for both file and directory artifacts below ancestors with modes `0o100` and `0o300`; ordinary traversal and planning must succeed, apply must delete the candidate and record only actual freed bytes. A search-only immediate parent with write permission must also permit file unlink. Retain the unreadable-descendant refusal and all race/capability/descriptor-leak tests under the platform-selected mode. Exercise the `O_RDONLY` fallback via a module proxy lacking both traversal flags: listable ancestors succeed and search-only ancestors are safely skipped. These tests must not run as root or silently count a permission-bypassing run as acceptance.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -11530,7 +11532,10 @@ def _open_cleanup_parent(path: str) -> tuple[int, Path]:
     Every descriptor belongs to this call and is closed on all error paths.
     """
     physical = Path(path).absolute().parent.resolve(strict=True)
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    # Pin ancestors for traversal, without demanding directory-list permission.
+    # Keep O_RDONLY in _measure_at: directories being measured must be listable.
+    access = getattr(os, "O_PATH", getattr(os, "O_SEARCH", os.O_RDONLY))
+    flags = access | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open(physical.anchor, flags)
     try:
         for part in physical.parts[1:]:
@@ -12681,17 +12686,12 @@ add:
     store = AuthStore(ctx.layout, session_days=settings.server.session_days)
 ```
 
-4. Preserve the baseline `public_static` preconditions (`ui_installed`, traversal/backslash rejection, reserved first segments, and contained installed asset files). Replace only its final SPA return expression with:
+4. Preserve the baseline `public_static` preconditions (`ui_installed`, traversal/backslash rejection, reserved first segments, and contained installed asset files), its final `return path == "/" or UI_ROUTE.fullmatch(path) is not None`, and the existing `UI_ROUTE` browser-route comment. Extend that single module-level constant in `src/hypothex/api/app.py` to:
 
 ```python
-        return (
-            path == "/"
-            or re.fullmatch(
-                r"/(?:hosts|queue|r/[^/]+|[xs]/[^/]+/[^/]+|t/[^/]+/[^/]+(?:/edit/[^/]+)?|n/[^/]+(?:/[^/]+)?|settings|storage|pair)/?",
-                path,
-            )
-            is not None
-        )
+UI_ROUTE = re.compile(
+    r"/(?:hosts|queue|r/[^/]+|[xs]/[^/]+/[^/]+|t/[^/]+/[^/]+(?:/edit/[^/]+)?|n/[^/]+(?:/[^/]+)?|settings|storage|pair)/?"
+)
 ```
 
 This allows guest GET/HEAD to load the installed shell at existing home/hosts/queue/run/task/sweep/compare routes and new notebook, settings, storage, and pairing routes. `/pair` intentionally uses a full browser load; it is a public shell route although the frontend navigation predicate excludes it. API data still requires authentication. Unknown and reserved routes remain protected. Add parametrized guard tests for both root-token `TokenGuard` and scoped `AuthGuard`: each known shell path (including notebook day URLs from digest notices) accepts GET/HEAD, POST returns 401, API/MCP/reserved/unknown paths return 401, assets outside the installed UI root stay protected, and without installed UI every shell route returns 401. In `create_app`, extend state and replace only `tickets = TicketStore()` with this setup:

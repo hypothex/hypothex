@@ -476,9 +476,8 @@ def key_higher_is_better(config: ProjectConfig, spec: TaskSpec, key: str) -> boo
     The leaderboard (configured or re-ranked primary), the task workspace and saved
     ``compare`` panels all use it. A metric that sets ``higher_is_better`` wins for
     all its keys; else, on a ``system_bench`` task, a percentile key (``p50``,
-    ``p95``, ...) is lower-is-better; else the task's direction (that of its
-    configured primary, by the same rule; a primary of a metric without a set
-    direction is higher-is-better).
+    ``p95``, ...) is lower-is-better; else the documented metric default,
+    higher-is-better. (A task has no direction of its own: it is its primary's.)
 
     Parameters
     ----------
@@ -505,10 +504,7 @@ def key_higher_is_better(config: ProjectConfig, spec: TaskSpec, key: str) -> boo
     flag = config.metrics[metric].higher_is_better
     if flag is not None:
         return flag
-    if spec.kind == "system_bench" and percentile_of(f"{metric}/{sub}"):
-        return False
-    primary = "/".join(parse_metric_key(spec.primary))
-    return True if f"{metric}/{sub}" == primary else key_higher_is_better(config, spec, primary)
+    return not (spec.kind == "system_bench" and percentile_of(f"{metric}/{sub}"))
 
 
 # caches ------------------------------------------------------------------------------

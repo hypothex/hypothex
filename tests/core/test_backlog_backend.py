@@ -528,6 +528,10 @@ def test_explicit_percentile_primary_respects_nonlatency_direction() -> None:
     # acc sets no direction: on system_bench its percentile is lower-is-better
     board = build_leaderboard("toy", "t", cfg, runs, scores, primary="acc/p95")
     assert board.higher_is_better is False and board.rows[0].run_ids == ["a"]
+    # an unset non-percentile key keeps the metric default (higher) on this lower task
+    values = {"a": [score("acc", 100)], "b": [score("acc", 200)]}
+    board = build_leaderboard("toy", "t", cfg, runs, values, primary="acc/value")
+    assert board.higher_is_better is True and board.rows[0].run_ids == ["b"]
     # a metric that sets higher_is_better wins for all its keys, percentiles too
     cfg.metrics["acc"].higher_is_better = True
     board = build_leaderboard("toy", "t", cfg, runs, scores, primary="acc/p95")

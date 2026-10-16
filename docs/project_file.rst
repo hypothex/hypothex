@@ -63,15 +63,16 @@ Sections
    for the leaderboard (also when re-ranked by another key), the task workspace and
    saved ``compare`` panels: a metric that sets ``higher_is_better`` wins for all its
    keys; else, on a ``system_bench`` task, a percentile key (``p50``, ``p95``, ...)
-   is lower-is-better; else the key takes the task's direction (that of its
-   ``primary``; a primary whose metric sets no direction is higher-is-better). Set
-   it on a metric whose direction differs from the task's, such as ``throughput``
-   on a latency benchmark.
+   is lower-is-better; else higher is better (the default). A task's direction is
+   that of its ``primary``. Set it to ``true`` to keep a metric's percentiles
+   higher-is-better on a ``system_bench`` task, and to ``false`` for any other
+   lower-is-better metric.
 
    .. code-block:: yaml
 
       metrics:
-        latency: {version: v1, fn: bench:harness}          # p95: lower is better
+        latency: {version: v1, fn: bench:harness}          # p95, p99: lower is better
+        errors: {version: v1, fn: bench:harness, higher_is_better: false}
         throughput: {version: v1, fn: bench:harness, higher_is_better: true}
 
 ``tasks``

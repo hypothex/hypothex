@@ -197,7 +197,7 @@ def test_each_score_key_carries_its_own_direction(ctx: Context, toy_repo: Path) 
     assert out.higher_is_better is False
     assert out.key_higher_is_better == {
         "errors/p99": False,  # no flag, a percentile: lower
-        "errors/rate": False,  # no flag, no percentile: the task's direction
+        "errors/rate": True,  # no flag, no percentile: the metric default (higher)
         "latency/p95": False,  # the metric's flag
         "throughput/p99": True,  # the metric's flag wins over the percentile rule
         "throughput/rps": True,
@@ -220,8 +220,8 @@ def test_key_direction_rule_branches(ctx: Context, toy_repo: Path) -> None:
     assert key_higher_is_better(config, spec, "speed/p95") is False
     assert key_higher_is_better(config, spec, "speed/p50") is False
     assert key_higher_is_better(config, spec, "speed/p99") is False
-    # 3. else the task's direction (the primary's: lower here)
-    assert key_higher_is_better(config, spec, "speed/rps") is False
+    # 3. else the documented metric default, higher-is-better (even on this lower task)
+    assert key_higher_is_better(config, spec, "speed/rps") is True
     # a generic task without flags: higher, percentiles too
     toy = config.tasks["toy-broken"]
     assert key_higher_is_better(config, toy, "accuracy/p95") is True

@@ -114,6 +114,21 @@ def test_read_commands(in_repo: Path) -> None:
     assert "text" in hx("logs", a["run_id"])
 
 
+def test_tasks_table_shows_run_and_finished_counts(in_repo: Path) -> None:
+    _run(1)
+    failed = runner.invoke(
+        app, ["run", "--json", "-t", "toy-acc", "--", PY, "-c", "raise SystemExit(3)"]
+    )
+    assert json.loads(failed.stdout)["status"] == "failed"
+    [task] = [t for t in hx("tasks") if t["name"] == "toy-acc"]
+    assert (task["n_runs"], task["n_finished"]) == (2, 1)
+    lines = runner.invoke(app, ["tasks"], catch_exceptions=False).stdout.splitlines()
+    header = lines[0].split()
+    row = next(line.split() for line in lines[1:] if line.startswith("toy/toy-acc "))
+    assert header[4:6] == ["runs", "finished"]
+    assert row[4:6] == ["2", "1"]
+
+
 def test_reeval_after_version_bump(in_repo: Path) -> None:
     _run()
     write_toy_project(in_repo, accuracy_version="v2")

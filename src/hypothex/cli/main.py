@@ -939,7 +939,7 @@ def tasks(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
         _print_json(items)
         return
     _table(
-        ["task", "dataset", "metrics", "primary", "runs", "best"],
+        ["task", "dataset", "metrics", "primary", "runs", "finished", "best"],
         [
             [
                 f"{t.project}/{t.name}",
@@ -947,6 +947,7 @@ def tasks(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
                 ", ".join(f"{m}@{v}" for m, v in t.metrics.items()),
                 t.primary,
                 t.n_runs,
+                t.n_finished,
                 None if t.best is None else f"{t.best:.4f}",
             ]
             for t in items

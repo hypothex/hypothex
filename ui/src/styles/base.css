@@ -72,7 +72,7 @@ input[type=range].ctl::-moz-range-thumb { width: 13px; height: 13px; border-radi
    Restyled only through the v4 token aliases in tokens.css. Each block goes with its last
    user: the old pages. */
 
-/* v4 page type (old pages; .crumb also in the view editor) */
+/* v4 page type (old pages) */
 .crumb { margin: 0 0 18px; font-size: 13px; color: var(--ink-3); }
 .crumb a { color: var(--ink-2); text-decoration: none; }
 .crumb a:hover { text-decoration: underline; }

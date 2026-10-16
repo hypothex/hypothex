@@ -378,14 +378,17 @@ def test_overview_of_demo(dctx: Context) -> None:
     # the newest scored idea is a system_bench task: same phrasing as its task headline
     assert summary.headline == "1 running. async-worker p95 −29% vs baseline [−32, −26]"
     assert len(summary.failures) == 4 and all(f.retried_ok for f in summary.failures)
+    # every unarchived run in any state: the nav's and the task header's count
     assert [(p.project, p.runs, p.kind) for p in summary.projects] == [
         ("eval-matrix", 6, "generic"),
         ("retro-agent", 27, "agent_iteration"),
         ("retro-agents", 12, "agent_eval"),
-        ("route-search", 9, "system_bench"),
-        ("rxn-forward", 8, "training"),
+        ("route-search", 10, "system_bench"),
+        ("rxn-forward", 10, "training"),
         ("toy-classifier", 12, "generic"),
     ]
+    for p in summary.projects:
+        assert p.runs == dctx.index.count_runs(project=p.project, task=p.task)
 
 
 def test_every_kind_overview_queries_cleanly(dctx: Context) -> None:

@@ -61,7 +61,11 @@ Sections
 
 ``tasks``
    A task pairs a ``dataset`` (and optional ``split``) with one or more ``metrics``,
-   and names the ``primary`` metric/key that the leaderboard sorts by.
+   and names the ``primary`` metric/key that the leaderboard sorts by. An eval task
+   whose score keys have dotted parts (``reported/set-1.m-a.top10``) may name
+   them with ``score_keys: "{dataset}.{model}.{metric}"``: two or three ``{name}``
+   parts joined by ``.``, one of them ``{metric}``. The UI labels its dataset, model
+   and metric controls with these names.
 
 ``stages``
    Named command templates (``train``, ``infer``, ...) that ``hx run`` and

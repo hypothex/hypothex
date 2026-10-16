@@ -274,3 +274,25 @@ def test_metric_unit_is_optional_and_short() -> None:
     assert MetricSpec(version="v1", fn="m:f", unit="ms").unit == "ms"
     with pytest.raises(ValidationError):
         MetricSpec(version="v1", fn="m:f", unit="milliseconds")
+
+
+def test_task_score_keys_pattern_loads_with_its_parts(tmp_path: Path) -> None:
+    text = VALID.replace(
+        "    primary: topk/k=1\n",
+        '    primary: topk/k=1\n    score_keys: "{dataset}.{model}.{metric}"\n',
+    )
+    task = load_project_config(_write(tmp_path, text)).tasks["uspto-topk"]
+    assert task.score_keys == "{dataset}.{model}.{metric}"
+    assert task.key_parts == ["dataset", "model", "metric"]
+    assert load_project_config(_write(tmp_path, VALID)).tasks["uspto-topk"].key_parts is None
+
+
+def test_a_bad_score_keys_pattern_is_a_config_error(tmp_path: Path) -> None:
+    text = VALID.replace(
+        "    primary: topk/k=1\n", '    primary: topk/k=1\n    score_keys: "{dataset}.{model}"\n'
+    )
+    with pytest.raises(ConfigError) as caught:
+        load_project_config(_write(tmp_path, text))
+    assert str(caught.value).endswith(
+        "tasks.uspto-topk.score_keys: score_keys needs a {metric} part"
+    )

@@ -87,6 +87,7 @@ from hypothex.core.sweeps import (
     stop_queued_runs,
     summarize_sweep,
 )
+from hypothex.core.taskruns import task_runs
 from hypothex.core.tokens import validate_bearer_token
 from hypothex.core.views import PanelData, PanelSpec, ViewSpec
 from hypothex.mcp.server import (
@@ -2207,6 +2208,10 @@ def create_app(
                 raise RunError(f"metric needs name@version, got {item!r}")
             versions[name] = version
         return to_jsonable(q.get_leaderboard(ctx, task, project, versions or None, primary=primary))
+
+    @app.get("/api/v1/tasks/{project}/{task}/runs")
+    def task_run_list(project: str, task: str, archived: bool = False) -> dict[str, Any]:
+        return to_jsonable(task_runs(ctx, task, project, archived=archived))
 
     @app.post("/api/v1/tasks/{project}/{task}/reeval")
     def task_reeval(project: str, task: str, body: ReevalBody) -> dict[str, Any]:

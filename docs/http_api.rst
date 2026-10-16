@@ -238,6 +238,18 @@ Other routes
   ``GET /api/v1/tasks/{project}/{task}/leaderboard`` (optional ``primary=metric/key``),
   ``POST /api/v1/tasks/{project}/{task}/reeval``, ``GET .../kind``, and the views
   routes under ``/api/v1/tasks/{project}/{task}/views``.
+- ``GET /api/v1/tasks/{project}/{task}/runs`` (``archived``, default false): the task
+  workspace. Every run with its display ``name``, ``derived_name``, ``renamed``,
+  ``group_id``, status, times, host, ``commit`` (full sha), ``params`` (params and
+  template vars),
+  ``scores`` (``metric/key`` at the current metric versions), ``primary``,
+  ``gpu_hours`` and ``cost_usd`` (``progress`` is always ``null``); every seed group
+  with ``name``, ``run_ids``, ``n`` and the leaderboard's ``primary``,
+  ``test_interval``, ``scores``, ``seed_values``, ``vs_best``,
+  ``within_noise_of_best`` and ``is_best`` (unranked groups have none); and the
+  task's ``primary``, ``higher_is_better``, ``unit``, ``value_format``,
+  ``metric_versions``, ``varying_keys``, ``metric_names``, ``score_keys`` and
+  ``key_parts``.
 - Leaderboard ``primary`` recomputes ranking, direction, units, intervals and
   headline from a configured task metric and recorded output key. Version pins
   remain independent; omitting ``primary`` preserves the configured selection.

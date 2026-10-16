@@ -59,6 +59,11 @@ test("run page shows scores, rank strip and properties", async ({ page, request,
   await page.goto(`/r/${run.run_id}`);
   await expectTheme(page, theme);
   await expect(page.getByRole("heading", { level: 1 })).toContainText(run.name);
+  // the status pill's word takes the pill colour, like its glyph (mockup #run)
+  const pill = page.locator(".run-page .pill").first();
+  await expect(pill).toBeVisible();
+  const colours = await pill.evaluate((el) => [el, el.querySelector(".st"), el.querySelector("svg")].map((n) => (n ? getComputedStyle(n).color : null)));
+  expect(new Set(colours).size, `pill, word and glyph colours ${colours.join(" / ")}`).toBe(1);
   await expect(page.getByRole("region", { name: "Scores", exact: true })).toBeVisible();
   await expect(page.getByText("Where it ranks", { exact: true })).toBeVisible();
   const props = page.getByRole("complementary", { name: "Properties" });

@@ -20,6 +20,8 @@
 .run-page .pill.failed, .run-page .pill.killed { color: var(--fail); }
 .run-page .pill.lost, .run-page .pill.stale { color: var(--warn); }
 .run-page .pill.running { color: var(--run); }
+/* the word takes the pill colour like its glyph (the inner .st colour would win otherwise) */
+.run-page .pill .st { color: inherit; }
 .run-page .rhyp { margin: 6px 0 0 26px; color: var(--ink-2); font-size: 14px; max-width: 80ch; }
 .run-page .rderived { margin: 2px 0 0 26px; color: var(--ink-3); font-size: 12px; }
 .run-page .rhead .tabs { display: flex; gap: 2px; margin: 14px 0 0 18px; }

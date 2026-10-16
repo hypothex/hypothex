@@ -45,3 +45,16 @@ test("an empty queue says so", async () => {
   renderWithClient(<QueuePage />);
   expect(await screen.findByText("Nothing queued")).toBeTruthy();
 });
+
+test("queued runs read the hub's run names (as on Home), not the v4 label", async () => {
+  const id = queuedRecord().run_id;
+  mockApi({
+    [QUEUE]: [queuedRecord({ params: { lr: "1e-3", beam: "1" }, seed: 3 }), pendingRecord()],
+    "GET /api/v1/hosts": HOSTS,
+    "GET /api/v1/overview": { counts: {}, running: [], names: { [id]: "lr 1e-3 · beam 1 · seed 3" } },
+  });
+  renderWithClient(<QueuePage />);
+  const gpu1 = await screen.findByRole("region", { name: "gpu1" });
+  await waitFor(() => expect(within(gpu1).getByRole("link", { name: "lr 1e-3 · beam 1 · seed 3" })).toBeTruthy());
+  expect(gpu1.textContent).not.toContain("lr=1e-3");
+});

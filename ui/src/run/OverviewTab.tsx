@@ -1,6 +1,6 @@
 /** Run Overview tab (spec 4.3): queue (queued runs), scores, where it ranks, curves, kind panels, files. */
 import { useMemo, useState } from "react";
-import { useAllRuns, useRunTraces } from "../api/queries";
+import { useAllRuns, useOverview, useRunTraces } from "../api/queries";
 import { Fit } from "../charts/Fit";
 import { ScoreStrip } from "../charts/ScoreStrip";
 import { fmtDelta, fmtScore, fmtScoreUnit } from "../pages/components/format";
@@ -112,6 +112,7 @@ function RankStrip({ rank, label }: { rank: RankModel; label: string }) {
 function QueueSection({ ctx }: { ctx: RunContext }) {
   const { record, host, now } = ctx;
   const queued = useAllRuns(queuedRunsQuery(record.environment_id), true);
+  const names = useOverview().data?.names;
   const where = hostLabel(record, host);
   return (
     <section aria-label="Queue">
@@ -122,7 +123,7 @@ function QueueSection({ ctx }: { ctx: RunContext }) {
         <ErrorBox error={queued.error} />
       ) : queued.data ? (
         <>
-          <QueuePanel host={host} hostName={where} runId={ctx.runId} rows={queueRows(queued.data.runs, record.environment_id, now, record)} />
+          <QueuePanel host={host} hostName={where} runId={ctx.runId} rows={queueRows(queued.data.runs, record.environment_id, now, record, names)} />
           {queued.data.complete ? null : <p className="muted">{`first ${queued.data.runs.length} queued runs on ${where}`}</p>}
         </>
       ) : (

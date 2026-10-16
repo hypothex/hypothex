@@ -18,7 +18,12 @@ export interface QueueGroup {
  * Queued runs grouped by environment (one host serves one environment), each group in
  * queue order; the hub's own `local` group first, the rest by host name.
  */
-export function queueGroups(runs: readonly RunRecord[], hosts: readonly HostRow[] | undefined, now: number): QueueGroup[] {
+export function queueGroups(
+  runs: readonly RunRecord[],
+  hosts: readonly HostRow[] | undefined,
+  now: number,
+  names?: Readonly<Record<string, string>>,
+): QueueGroup[] {
   const byEnv = new Map<string, RunRecord[]>();
   for (const r of runs) byEnv.set(r.environment_id, [...(byEnv.get(r.environment_id) ?? []), r]);
   const groups: QueueGroup[] = [];
@@ -27,7 +32,7 @@ export function queueGroups(runs: readonly RunRecord[], hosts: readonly HostRow[
     if (!first) continue;
     const row = hostRowForRun(first, hosts);
     const records = new Map(list.map((r) => [r.run_id, r]));
-    const rows = queueRows(list, env, now).flatMap((q) => {
+    const rows = queueRows(list, env, now, undefined, names).flatMap((q) => {
       const record = records.get(q.runId);
       return record ? [{ ...q, record }] : [];
     });

@@ -1,7 +1,7 @@
 /** Queue (spec 4.4): every queued run, grouped by host, in queue order, with a confirmed Stop. */
 import type { ReactElement } from "react";
 import { api } from "../api/client";
-import { REMOTE_RUN_INVALIDATES, useAllRuns, useHosts } from "../api/queries";
+import { REMOTE_RUN_INVALIDATES, useAllRuns, useHosts, useOverview } from "../api/queries";
 import { Launcher } from "../chrome/Launcher";
 import { StatusIcon } from "../chrome/StatusIcon";
 import { DASH } from "../pages/components/format";
@@ -22,7 +22,7 @@ function QueueLine({ row }: { row: QueueGroup["rows"][number] }): ReactElement {
     <tr>
       <td className="num">{row.position ?? DASH}</td>
       <td className="nm">
-        <AppLink href={hrefs.run(row.runId)}>{r.name ?? row.label}</AppLink>
+        <AppLink href={hrefs.run(row.runId)}>{row.label}</AppLink>
       </td>
       <td className="ink2">{r.task ? <AppLink href={hrefs.task(r.project, r.task)}>{r.task}</AppLink> : r.project}</td>
       <td>
@@ -61,8 +61,10 @@ function QueueLine({ row }: { row: QueueGroup["rows"][number] }): ReactElement {
 export function QueuePage(): ReactElement {
   const queued = useAllRuns({ status: "queued" });
   const hosts = useHosts();
+  // the hub's run names (as on Home); a failed overview poll keeps the fallback labels
+  const names = useOverview().data?.names;
   const now = useNow(10_000);
-  const groups = queued.data ? queueGroups(queued.data.runs, hosts.data, now) : [];
+  const groups = queued.data ? queueGroups(queued.data.runs, hosts.data, now, names) : [];
   const total = groups.reduce((a, g) => a + g.rows.length, 0);
   return (
     <div className="hosts-page">

@@ -84,3 +84,17 @@ test("a queued remote run shows its host queue and no scores", async () => {
   expect(screen.queryByRole("region", { name: "Scores" })).toBeNull();
   expect(screen.queryByRole("region", { name: "Curves" })).toBeNull();
 });
+
+test("the queue panel names queued runs like Home (the hub's run names)", async () => {
+  const QUEUE = `GET /api/v1/runs?status=queued&environment_id=env-gpu1&limit=1000`;
+  const other = queuedRecord({ run_id: "20261003-142200-uspto-9a9a", params: { lr: "1e-3", beam: "1" }, seed: 3, executor: { ...queuedRecord().executor, queue_position: 3 } });
+  mockApi({
+    [QUEUE]: [queuedRecord(), other],
+    "GET /api/v1/overview": { counts: {}, running: [], names: { [other.run_id]: "lr 1e-3 · beam 1 · seed 3" } },
+  });
+  const detail = remoteDetail(queuedRecord());
+  renderWithClient(<OverviewTab ctx={makeCtx({ phase: "queued", host: GPU1, hostsLoaded: true, remote: true, taskRuns: null }, detail, null)} />);
+  const queue = screen.getByRole("region", { name: "Queue" });
+  await waitFor(() => expect(within(queue).getByText("lr 1e-3 · beam 1 · seed 3")).toBeTruthy());
+  expect(queue.textContent).not.toContain("lr=1e-3");
+});

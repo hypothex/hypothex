@@ -441,3 +441,19 @@ and matched old/final guard copies to the exact plan fences. The package runner
 regression is prescribed acceptance, not executed here. This closes the bounded
 A1 proof obligation; independent approval and full runtime acceptance remain
 pending.
+
+### Primary R4 response and baseline UI correction (2026-10-17)
+
+Primary R4 approved 1a81663 against e73b810 with one nonblocking P3. Its
+empty-PGSERVICE probe demonstrated that empty values can still select a service
+section. The accepted correction rejects every present PG-prefixed variable,
+including empty values. The exact final guard passes 26 behavior checks; an
+additional old-guard reproduction and receipt test bring the total to 28.
+Parent-verified evidence and full limitations are recorded in
+`tasks/phase3-execution.md` and durable `parent-r4-verification.json`.
+
+A separate baseline UI patch addresses the reproduced selected-run viewport CI
+failure caused by late chart layout growth. Its review and CI are independent
+of Phase 3 approval. Once merged, update the baseline and renew the ordered
+primary/adversarial reviews on the same final plan revision. R4's LGTM does not
+cover the subsequent empty-default correction or a future baseline update.

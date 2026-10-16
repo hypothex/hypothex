@@ -263,3 +263,32 @@ Evidence: durable `parent-adversarial-r1-pg-fix/report.md` and
 Fresh origin/main still pins e73b810; runtime/source/UI/tests/dependencies/CI
 diff against it is empty. Freeze this input for renewed Claude primary R4,
 then a new independent adversarial gate R2 after LGTM.
+
+### Renewed primary R4 and empty-default correction (2026-10-17)
+
+Claude primary R4 returned LGTM for 1a81663 against e73b810, with no P0/P1/P2
+findings and one P3. Its 59 fresh guard/subprocess probes passed, with prior
+full-plan coverage reused only where hashes were unchanged. The parent inspected
+the report, coverage, receipts and probe evidence and verified all 16 artifact
+hashes. This approval is historical once the following correction changes its
+input; the independent adversarial gate has not yet approved Phase 3.
+
+The P3 is accepted: an empty PGSERVICE introduced after fixture scrubbing can
+select an empty service-file section. The old guard admitted it; real libpq
+option resolution exposed an external hostaddr at an inert driver boundary,
+without connecting. Task 1 now rejects every present PG-prefixed variable,
+including empty values, and continues to report names only. The exact corrected
+snippet passes 26 behavior checks, plus one old-behavior reproduction and one
+receipt test (28 total). The parent read the entire probe, verified 23 new and
+33 prior evidence hashes and exact old/new guard extraction. Ruff, format, ty
+and the probe's Sphinx build pass. Evidence: durable
+`parent-primary-r4-empty-pg-fix/` and `parent-r4-verification.json`.
+
+PR22's UI job independently reproduced the intermittent selected-run viewport
+failure already seen on an earlier plan-only head. A separate baseline UI fix
+in /tmp/hx-ui-selection-ci keeps the focused heading visible during delayed
+chart growth and yields on user interaction. It has independent LGTM and local
+regression evidence; integration still requires its full checks and green CI.
+After that baseline fix is merged, refresh the plans and source pin together,
+freeze the new input, renew Claude primary approval, then launch a new independent
+adversarial round. No Phase 3 runtime implementation has started.

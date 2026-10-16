@@ -34,6 +34,33 @@ test("a seed row: its own value and status, Δ against the best config", () => {
   expect(cells.delta).toBeCloseTo(-0.012, 10);
 });
 
+test("a run of the best config: Δ muted, no claim about the best interval", () => {
+  // The backend leaves the best row's flag unset, so it reaches the UI as false.
+  const shaped = { ...data, groups: data.groups.map((g) => (g.group_id === "g-a" ? { ...g, within_noise_of_best: false } : g)) };
+  const run = shaped.runs.find((r) => r.run_id === "run-a2");
+  if (!run) throw new Error("fixture");
+  const cells = runCells(run, shaped.groups.find((g) => g.group_id === "g-a") ?? null, shaped);
+  expect(cells.delta).toBeCloseTo(-0.001, 10);
+  expect(cells.deltaMuted).toBe(true);
+  expect(cells.deltaTitle).toBe("a run of the best config");
+});
+
+test("a config with no test against the best: Δ shown, not muted, no inside/outside claim", () => {
+  const untested = {
+    ...data,
+    groups: data.groups.map((g) => (g.group_id === "g-b" ? { ...g, vs_best: null, within_noise_of_best: false } : g)),
+  };
+  const b = identityCells(listIdentities(sel, untested).find((i) => i.id === "g-b") ?? byId("g-b"), untested);
+  expect(b.delta).toBeCloseTo(-0.013, 10);
+  expect(b.deltaMuted).toBe(false);
+  expect(b.deltaTitle).toBe("no test against the best config");
+  const run = untested.runs.find((r) => r.run_id === "run-b1");
+  if (!run) throw new Error("fixture");
+  const seed = runCells(run, untested.groups.find((g) => g.group_id === "g-b") ?? null, untested);
+  expect(seed.deltaMuted).toBe(false);
+  expect(seed.deltaTitle).toBe("no test against the best config");
+});
+
 test("sort by a column; missing values last; null column keeps the list order", () => {
   expect(sortItems(items, data, "param:host", "desc").map((i) => i.id)).toEqual(["g-a", "g-b", "g-c"]);
   expect(sortItems(items, data, "host", "desc").map((i) => i.id)).toEqual(["g-a", "g-c", "g-b"]);

@@ -63,10 +63,20 @@ export function cellsFor(
   asGroup: boolean,
 ): Cells {
   const best = bestGroup(data);
-  const isBest = asGroup && best !== undefined && group?.group_id === best.group_id;
-  const delta = best?.primary && value !== null && !isBest ? value - best.primary.mean : null;
-  const within = group?.within_noise_of_best === true;
+  const ofBest = best !== undefined && group?.group_id === best.group_id;
+  const delta = best?.primary && value !== null && !(asGroup && ofBest) ? value - best.primary.mean : null;
+  // Claim inside/outside only with a test; a run of the best config is its own reference.
   const p = group?.vs_best?.p;
+  const tested = !ofBest && typeof p === "number";
+  const within = tested && group?.within_noise_of_best === true;
+  const deltaTitle =
+    delta === null
+      ? undefined
+      : ofBest
+        ? "a run of the best config"
+        : tested
+          ? `${within ? "inside" : "outside"} the best config's interval · ${fmtP(p)}`
+          : "no test against the best config";
   const hours = runs.map((r) => r.gpu_hours).filter((h): h is number => typeof h === "number" && Number.isFinite(h));
   return {
     status: STATUS_ORDER.map((s): [RunStatus, number] => [s, runs.filter((r) => r.status === s).length]).filter(([, n]) => n > 0),
@@ -75,9 +85,8 @@ export function cellsFor(
     sd,
     ci: asGroup && group?.test_interval ? { lo: group.test_interval.lo, hi: group.test_interval.hi } : null,
     delta,
-    deltaMuted: delta !== null && within,
-    deltaTitle:
-      delta === null ? undefined : `${within ? "inside" : "outside"} the best config's interval${typeof p === "number" ? ` · ${fmtP(p)}` : ""}`,
+    deltaMuted: delta !== null && (ofBest || within),
+    deltaTitle,
     launcher: uniq(runs.map((r) => r.created_by)),
     host: uniq(runs.map((r) => r.host)),
     gpu: hours.length ? hours.reduce((a, b) => a + b, 0) : null,

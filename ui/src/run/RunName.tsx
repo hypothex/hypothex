@@ -2,7 +2,8 @@
  * A run's name with inline rename (spec 5.2): the name, a pencil to rename, and while
  * editing an input with Save, Cancel and, for a renamed run, Reset name. Enter saves,
  * Escape cancels. The new name shows at once and goes back if the server refuses it.
- * With `runIds` (a config of several seeds) each of those runs is renamed (spec 5.2).
+ * With `runs` (a config of several seeds) each of those runs is renamed (spec 5.2), all or
+ * none: a refusal puts the runs already renamed back to their old names (`renameEach`).
  */
 import { type KeyboardEvent, type ReactElement, useEffect, useRef, useState } from "react";
 import type { RunRecord, TaskRun } from "../api/models";
@@ -58,10 +59,51 @@ export function nameToSend(typed: string, derived: string): string | null {
   return v === "" || v === derived ? null : v;
 }
 
+/** A run to rename and the name it has now: its rename, or null (it shows its derived name). */
+export interface RenameTarget {
+  runId: string;
+  previous: string | null;
+}
+
+/** The rename target of a task run. */
+export function toRenameTarget(run: Pick<TaskRun, "run_id" | "name" | "renamed">): RenameTarget {
+  return { runId: run.run_id, previous: run.renamed ? run.name : null };
+}
+
+/**
+ * Give every target `name`, one at a time. On a refusal the runs already renamed get their
+ * previous names back (best effort) and the refusal is thrown; when a roll back fails too
+ * the error says how many runs kept the new name: `renamed 1 of 3: <reason>`.
+ */
+export async function renameEach(
+  targets: readonly RenameTarget[],
+  name: string | null,
+  rename: (runId: string, name: string | null) => Promise<unknown>,
+): Promise<void> {
+  const done: RenameTarget[] = [];
+  try {
+    for (const t of targets) {
+      await rename(t.runId, name);
+      done.push(t);
+    }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    let kept = 0;
+    for (const t of done) {
+      try {
+        await rename(t.runId, t.previous);
+      } catch {
+        kept += 1;
+      }
+    }
+    throw new Error(kept === 0 ? reason : `renamed ${kept} of ${targets.length}: ${reason}`);
+  }
+}
+
 export interface RunNameProps {
   runId: string;
   /** Rename each of these runs instead of `runId` alone (a config: every run of the group). */
-  runIds?: readonly string[];
+  runs?: readonly RenameTarget[];
   display: string;
   derived: string;
   renamed: boolean;
@@ -79,7 +121,7 @@ interface Shown {
 
 export function RunName({
   runId,
-  runIds,
+  runs,
   display,
   derived,
   renamed,
@@ -121,11 +163,10 @@ export function RunName({
     setShown(name === null ? { display: derived, renamed: false } : { display: name, renamed: true });
     setEditing(false);
     setError(null);
-    const ids = runIds && runIds.length > 0 ? runIds : [runId];
+    const targets = runs && runs.length > 0 ? runs : [{ runId, previous: before.renamed ? before.display : null }];
     void (async () => {
       try {
-        // one at a time: a refused run stops the rest
-        for (const id of ids) await rename.mutateAsync({ runId: id, name });
+        await renameEach(targets, name, (id, to) => rename.mutateAsync({ runId: id, name: to }));
       } catch (err) {
         setShown(before);
         setError(err instanceof Error ? err.message : String(err));

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
-import { RunName, nameProblem, nameToSend, runTitle, withSeed } from "../../src/run/RunName";
+import { RunName, nameProblem, nameToSend, runTitle, toRenameTarget, withSeed } from "../../src/run/RunName";
 import { RUN_RF, RUN_SVM, makeRecord } from "../pages/fixtures";
 import { HttpReply, mockApi, renderWithClient, restoreFetch } from "../pages/helpers";
 
@@ -36,6 +36,11 @@ describe("names", () => {
       renamed: true,
     });
     expect(runTitle(null, makeRecord({ hypothesis: "", seed: null })).display).toBe("run 6f71");
+  });
+
+  test("toRenameTarget: a renamed run's previous name is its rename, else null (derived)", () => {
+    expect(toRenameTarget({ run_id: "r1", name: "wide", renamed: true })).toEqual({ runId: "r1", previous: "wide" });
+    expect(toRenameTarget({ run_id: "r2", name: "lr 3e-4", renamed: false })).toEqual({ runId: "r2", previous: null });
   });
 
   test("nameProblem and nameToSend", () => {
@@ -127,12 +132,12 @@ describe("RunName", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("runIds: a config's rename goes to each of its runs, in order", async () => {
+  test("runs: a config's rename goes to each of its runs, in order", async () => {
     const calls = mockApi({
       [NAME_ROUTE]: makeRecord({ name: "wide" }),
       [`POST /api/v1/runs/${RUN_RF}/name`]: makeRecord({ run_id: RUN_RF, name: "wide" }),
     });
-    renderWithClient(<RunName {...PROPS} runIds={[RUN_SVM, RUN_RF]} />);
+    renderWithClient(<RunName {...PROPS} runs={[{ runId: RUN_SVM, previous: null }, { runId: RUN_RF, previous: null }]} />);
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Run name" }), { target: { value: " wide " } });
     fireEvent.keyDown(screen.getByRole("textbox", { name: "Run name" }), { key: "Enter" });
@@ -143,18 +148,41 @@ describe("RunName", () => {
     ]);
   });
 
-  test("runIds: a refused run stops the rest and the old name comes back", async () => {
+  test("runs: the second run's host is down (503): the first run gets its old name back, the name stays unchanged, error inline", async () => {
     const calls = mockApi({
       [NAME_ROUTE]: makeRecord({ name: "wide" }),
       [`POST /api/v1/runs/${RUN_RF}/name`]: new HttpReply(503, { error: "host gpu1 is down", type: "HostError" }),
     });
-    renderWithClient(<RunName {...PROPS} runIds={[RUN_SVM, RUN_RF, "run-third"]} />);
-    fireEvent.click(screen.getByText("model svm · seed 3"));
+    const runs = [
+      { runId: RUN_SVM, previous: "svm, tuned C" },
+      { runId: RUN_RF, previous: null },
+      { runId: "run-third", previous: null },
+    ];
+    renderWithClient(<RunName {...PROPS} display="svm, tuned C" renamed runs={runs} />);
+    fireEvent.click(screen.getByText("svm, tuned C"));
     fireEvent.change(screen.getByRole("textbox", { name: "Run name" }), { target: { value: "wide" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect((await screen.findByRole("alert")).textContent).toBe("host gpu1 is down");
-    expect(screen.getByText("model svm · seed 3")).toBeTruthy();
-    expect(calls).toHaveLength(2);
+    expect(screen.getByText("svm, tuned C")).toBeTruthy();
+    // the third run is never touched; the first one is put back to its own previous name
+    expect(calls.map((c) => [c.url, (c.body as { name: string | null }).name])).toEqual([
+      [`/api/v1/runs/${RUN_SVM}/name`, "wide"],
+      [`/api/v1/runs/${RUN_RF}/name`, "wide"],
+      [`/api/v1/runs/${RUN_SVM}/name`, "svm, tuned C"],
+    ]);
+  });
+
+  test("runs: when the roll back fails too, the error says how many runs kept the new name", async () => {
+    let svm = 0;
+    mockApi({
+      [NAME_ROUTE]: () => (++svm === 1 ? makeRecord({ name: "wide" }) : new HttpReply(503, { error: "host gpu0 is down", type: "HostError" })),
+      [`POST /api/v1/runs/${RUN_RF}/name`]: new HttpReply(503, { error: "host gpu1 is down", type: "HostError" }),
+    });
+    renderWithClient(<RunName {...PROPS} runs={[{ runId: RUN_SVM, previous: null }, { runId: RUN_RF, previous: null }]} />);
+    fireEvent.click(screen.getByText("model svm · seed 3"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Run name" }), { target: { value: "wide" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("renamed 1 of 2: host gpu1 is down");
   });
 
   test('editOn="dblclick": one click on the text does not edit, a double click does', () => {

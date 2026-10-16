@@ -164,6 +164,25 @@ describe("RunsTab", () => {
     expect(calls.map((c) => (c.body as { name: string }).name)).toEqual(["wide beam", "wide beam", "wide beam"]);
   });
 
+  test("Rename: the second run's host is down (503): the first run gets its old name back, error inline", async () => {
+    const calls = mockApi({
+      "POST /api/v1/runs/run-a1/name": makeTaskRun({ run_id: "run-a1" }),
+      "POST /api/v1/runs/run-a2/name": new HttpReply(503, { error: "host gpu1 is down", type: "HostError" }),
+    });
+    setup();
+    pick("lr 3e-4 · beam 10");
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    const form = screen.getByRole("form", { name: "Rename" });
+    fireEvent.change(within(form).getByRole("textbox", { name: "Name" }), { target: { value: "wide beam" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save name" }));
+    await waitFor(() => expect(within(screen.getByRole("form", { name: "Rename" })).getByRole("alert").textContent).toBe("host gpu1 is down"));
+    expect(calls.map((c) => [c.url, (c.body as { name: string | null }).name])).toEqual([
+      ["/api/v1/runs/run-a1/name", "wide beam"],
+      ["/api/v1/runs/run-a2/name", "wide beam"],
+      ["/api/v1/runs/run-a1/name", null],
+    ]);
+  });
+
   test("Rename checks the name first and shows the server's refusal inline", async () => {
     const calls = mockApi({ "POST /api/v1/runs/run-b1/name": new HttpReply(422, { detail: "name is too long" }) });
     setup();

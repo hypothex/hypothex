@@ -22,7 +22,7 @@ import { hrefs, isPlainClick } from "../pages/components/links";
 import { ErrorBox } from "../pages/components/QueryState";
 import { fmtGpuHours } from "../pages/components/SweepModel";
 import { useAction } from "../pages/components/useAction";
-import { nameProblem, nameToSend } from "../run/RunName";
+import { nameProblem, nameToSend, renameEach, toRenameTarget } from "../run/RunName";
 import {
   type Cells,
   type RunsColumn,
@@ -115,8 +115,8 @@ export function RunsTab({ project, task, data, selection, onSelection, onOpenCha
       return;
     }
     try {
-      // one at a time: a refused run stops the rest
-      for (const run of item.runs) await rename.mutateAsync({ runId: run.run_id, name });
+      // all or none: a refusal puts the runs already renamed back
+      await renameEach(item.runs.map(toRenameTarget), name, (runId, to) => rename.mutateAsync({ runId, name: to }));
       setForm(null);
     } catch (err) {
       setRenameError(err instanceof Error ? err.message : String(err));

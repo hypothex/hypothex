@@ -22,7 +22,7 @@ import { cx } from "../lib/cx";
 import { colorFor } from "../lib/color";
 import { fmtClock, fmtDate, fmtScore } from "../pages/components/format";
 import { hrefs, isPlainClick } from "../pages/components/links";
-import { RunName, withSeed } from "../run/RunName";
+import { RunName, toRenameTarget, withSeed } from "../run/RunName";
 import { getHighlight, setHighlight } from "./highlight";
 import {
   type GroupMode,
@@ -295,7 +295,7 @@ function SidebarRow({ item, color, column, onToggle, onOpen }: RowProps): ReactE
         <div className="t" title={item.name}>
           <RunName
             runId={latest?.run_id ?? item.id}
-            runIds={item.kind === "group" ? item.runs.map((r) => r.run_id) : undefined}
+            runs={item.kind === "group" ? item.runs.map(toRenameTarget) : undefined}
             display={item.name}
             derived={name.derived}
             renamed={name.renamed}

@@ -63,6 +63,8 @@ export function RunsSidebar({ data, selection, onChange, onOpen }: RunsSidebarPr
   const listed = listIdentities(selection, data);
   const visible = listed.filter((i) => !i.hidden).map((i) => i.id);
   const superseded = all.filter(isSuperseded).length;
+  // identities the filter matches that only the superseded chip hides (explains a "0/N shown")
+  const hiddenBySuperseded = selection.showSuperseded ? 0 : listIdentities({ ...selection, showSuperseded: true }, data).length - listed.length;
   // a stale `?col=` (the key is gone) shows the primary
   const column =
     selection.column !== data.primary && data.score_keys.includes(selection.column) ? selection.column : SORT_PRIMARY;
@@ -140,7 +142,20 @@ export function RunsSidebar({ data, selection, onChange, onOpen }: RunsSidebarPr
           />
         ))}
       </div>
-      {all.length === 0 ? <EmptyState title="No runs yet" /> : listed.length === 0 ? <EmptyState title="No runs match" /> : null}
+      {all.length === 0 ? (
+        <EmptyState title="No runs yet" />
+      ) : listed.length === 0 ? (
+        <EmptyState
+          title="No runs match"
+          body={
+            hiddenBySuperseded > 0 ? (
+              <button type="button" className="linkish" title="Show superseded runs" onClick={() => onChange({ showSuperseded: true })}>
+                {`${hiddenBySuperseded} hidden by superseded`}
+              </button>
+            ) : undefined
+          }
+        />
+      ) : null}
     </aside>
   );
 }

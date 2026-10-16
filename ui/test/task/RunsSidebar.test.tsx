@@ -300,6 +300,15 @@ describe("RunsSidebar", () => {
     expect(screen.getByText("0/0 shown")).toBeTruthy();
   });
 
+  test("a filter whose only matches are superseded says how many the chip hides, and the hint shows them", () => {
+    const { patches } = setup(makeTaskRuns(), "filter=baseline");
+    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+    expect(screen.getByText("0/4 shown")).toBeTruthy();
+    const hint = screen.getByRole("button", { name: "1 hidden by superseded" });
+    fireEvent.click(hint);
+    expect(patches.at(-1)).toEqual({ showSuperseded: true });
+  });
+
   test("a filter that matches nothing says so", () => {
     setup(makeTaskRuns(), "filter=status:killed");
     expect(screen.queryAllByRole("listitem")).toHaveLength(0);

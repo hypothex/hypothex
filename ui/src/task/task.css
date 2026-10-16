@@ -218,3 +218,4 @@
 .sweep .sw-runs td a { display: inline-flex; align-items: center; gap: 6px; }
 .sweep .more-runs { margin-top: 10px; }
 @media (max-width: 1100px) { .task-page .sweeps { grid-template-columns: 1fr; } }
+.task-page .runs .empty .linkish { border: 0; background: none; padding: 0; font: inherit; color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; cursor: pointer; }

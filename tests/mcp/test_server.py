@@ -42,6 +42,7 @@ EXPECTED_TOOLS = {
     "stop_run",
     "add_note",
     "tag_run",
+    "rename_run",
     "get_predictions",
     "list_views",
     "get_view",
@@ -151,6 +152,20 @@ def test_reevaluate_note_and_tag(home: Path, ctx: Context, toy_repo: Path) -> No
     assert call(home, "add_note", {"run_id": "r1", "text": "fine"}) == (False, {"ok": True})
     err, tagged = call(home, "tag_run", {"run_id": "r1", "add": ["mcp"]})
     assert tagged["run"]["tags"] == ["mcp"]
+
+
+def test_rename_run_names_resets_and_reports_bad_names(
+    home: Path, ctx: Context, toy_repo: Path
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    err, out = call(home, "rename_run", {"run_id": "r1", "name": "wide beam"})
+    assert not err and out["run"]["name"] == "wide beam"
+    err, listed = call(home, "list_runs", {})
+    assert not err and listed["runs"][0]["name"] == "wide beam"
+    err, out = call(home, "rename_run", {"run_id": "r1", "name": None})
+    assert not err and out["run"]["name"] is None
+    err, text = call(home, "rename_run", {"run_id": "r1", "name": "a\nb"})
+    assert err and "one line" in text
 
 
 def test_mcp_is_served_over_http(home: Path) -> None:

@@ -816,3 +816,25 @@ def test_shutdown_stops_background_threads_when_the_hub_stop_fails(
         pass
     assert info.group_contains(RuntimeError, match="hub stop failed")
     assert stopped.wait(5)
+
+
+def test_rename_route_names_resets_and_validates(
+    client: TestClient, ctx: Context, toy_repo: Path
+) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    out = client.post("/api/v1/runs/r1/name", json={"name": " wide beam "})
+    assert out.status_code == 200 and out.json()["name"] == "wide beam"
+    assert [r["run_id"] for r in client.get("/api/v1/runs", params={"q": "BEAM"}).json()] == ["r1"]
+    assert client.get("/api/v1/runs", params={"q": "nothing"}).json() == []
+    too_long = client.post("/api/v1/runs/r1/name", json={"name": "x" * 81})
+    assert too_long.status_code == 422 and "at most 80" in too_long.json()["error"]
+    two_lines = client.post("/api/v1/runs/r1/name", json={"name": "a\nb"})
+    assert two_lines.status_code == 422 and "one line" in two_lines.json()["error"]
+    assert ctx.find_record("r1").name == "wide beam"
+    first = client.post("/api/v1/runs/r1/name", json={"name": "once", "command_id": "R1"})
+    again = client.post("/api/v1/runs/r1/name", json={"name": "twice", "command_id": "R1"})
+    assert first.json()["name"] == again.json()["name"] == "once"  # a retry replays
+    assert ctx.find_record("r1").name == "once"
+    reset = client.post("/api/v1/runs/r1/name", json={"name": None})
+    assert reset.status_code == 200 and reset.json()["name"] is None
+    assert client.post("/api/v1/runs/nope/name", json={"name": "x"}).status_code == 404

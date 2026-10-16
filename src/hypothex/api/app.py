@@ -28,7 +28,7 @@ from fastapi.exception_handlers import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -59,6 +59,7 @@ from hypothex.core.ids import utcnow
 from hypothex.core.index import RunRow
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import reserved_run_path
+from hypothex.core.naming import clean_run_name
 from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_panel
 from hypothex.core.records import Artifact, RunRecord, RunStatus
@@ -318,6 +319,30 @@ class TagBody(ActionBody):
 
     add: list[str] = Field(default_factory=list)
     remove: list[str] = Field(default_factory=list)
+
+
+class NameBody(ActionBody):
+    """Body of ``POST /api/v1/runs/{id}/name``: a new name, or null to reset it."""
+
+    name: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _clean(cls, value: str | None) -> str | None:
+        """
+        Trim the name; one over 80 characters or with a line break answers 422.
+
+        Parameters
+        ----------
+        value : str or None
+            The requested name.
+
+        Returns
+        -------
+        str or None
+            The trimmed name, or None to reset it.
+        """
+        return clean_run_name(value)
 
 
 class FlagBody(ActionBody):
@@ -2294,6 +2319,7 @@ def create_app(
         limit: Annotated[int, Query(ge=1)] = 200,
         before_created_at: datetime | None = None,
         before_run_id: str | None = None,
+        search: Annotated[str | None, Query(alias="q", max_length=200)] = None,
     ) -> list[dict[str, Any]]:
         # no cap below `limit`. Keyset paging: the next page starts after the last row of
         # this one (`before_created_at`, `before_run_id`), so a page costs `limit` rows
@@ -2313,6 +2339,7 @@ def create_app(
             include_archived=archived,
             limit=limit,
             before=before,
+            search=search,
         )
         rows = to_jsonable(q.with_queue_positions(ctx, records))
         # like the run detail: the CLI and MCP list runs through the hub and see a stale host
@@ -2440,6 +2467,10 @@ def create_app(
     @app.post("/api/v1/runs/{run_id}/tags")
     def run_tags(run_id: str, body: TagBody) -> dict[str, Any]:
         return forward(run_id, "tags", body, lambda: q.tag_run(ctx, run_id, body.add, body.remove))
+
+    @app.post("/api/v1/runs/{run_id}/name")
+    def run_name(run_id: str, body: NameBody) -> dict[str, Any]:
+        return forward(run_id, "name", body, lambda: q.rename_run(ctx, run_id, body.name))
 
     @app.post("/api/v1/runs/{run_id}/star")
     def run_star(run_id: str, body: FlagBody) -> dict[str, Any]:

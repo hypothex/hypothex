@@ -99,7 +99,8 @@ Runs
      - Body and answer
    * - ``GET /api/v1/runs``
      - Query: ``project``, ``task``, ``status``, ``tag``, ``environment_id``,
-       ``archived``, ``limit`` (default 200), and the keyset cursor
+       ``archived``, ``q`` (only runs whose ``name`` or ``run_id`` contains it,
+       ignoring case), ``limit`` (default 200), and the keyset cursor
        ``before_created_at`` + ``before_run_id`` (both or neither: the ``created_at``
        and ``run_id`` of the last row of the previous page). Answers run records,
        newest first, each with ``host_state`` as in ``GET /api/v1/runs/{id}``.
@@ -134,8 +135,11 @@ Runs
        started remain running; the result reports cancellations and failures.
    * - ``POST /api/v1/runs/{id}/rerun``, ``/reinfer``, ``/reeval``
      - Rerun, re-infer (``{checkpoint?, vars?}``), re-evaluate (``{metric?, force?}``).
-   * - ``POST /api/v1/runs/{id}/tags``, ``/star``, ``/archive``, ``/notes``
-     - ``{add, remove}``, ``{on}``, ``{on}``, ``{text, author}``.
+   * - ``POST /api/v1/runs/{id}/tags``, ``/star``, ``/archive``, ``/notes``, ``/name``
+     - ``{add, remove}``, ``{on}``, ``{on}``, ``{text, author}``, ``{name}``. A name is
+       trimmed, 1–80 characters and one line (else ``422``); ``null`` or a blank
+       name resets it to the derived name. Answers the run record and emits
+       ``run.renamed`` (payload ``{status, name}``).
    * - ``POST /api/v1/runs/{id}/pull``
      - ``{artifact}`` (default ``checkpoint``): an artifact kind, an artifact path, or
        a run-folder path. Copies the file from the run's host and answers

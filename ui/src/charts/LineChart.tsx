@@ -225,7 +225,7 @@ export function LineChart({
     const yTicks = niceTicks(y0, y1, height >= 160 ? 5 : 4);
     const xCount = width > 500 ? 6 : 4;
     const xTicks =
-      xAxis === "step" ? niceTicks(x0, x1, xCount) : timeTicks(x0, x1, xCount, xAxis === "clock" ? localOffset(x0) : 0);
+      xAxis === "step" ? niceTicks(x0, x1, xCount) : timeTicks(x0, x1, xCount, xAxis === "clock" ? localOffset : 0);
     const xStep = xTicks.length > 1 ? (xTicks[1] ?? 0) - (xTicks[0] ?? 0) : x1 - x0;
     const xs = [...new Set(lines.flatMap((l) => l.done.map((p) => p[0])))].sort((a, b) => a - b);
     return { lines, x0, x1, y0, y1, yTicks, xTicks, xStep, xs };

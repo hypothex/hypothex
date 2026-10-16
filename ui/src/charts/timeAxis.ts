@@ -19,14 +19,16 @@ export function localOffset(t: number): number {
 
 /**
  * Ticks inside `[x0, x1]` on whole time units, about `count` of them. `offset` shifts the
- * grid (local time for clocks). Sub-second spans fall back to decimal steps.
+ * grid: seconds to add for local time, a number or a function of the time (`localOffset`,
+ * so a span across a DST change keeps every tick on a whole local unit). Sub-second spans
+ * fall back to decimal steps.
  *
  * Examples
  * --------
  * >>> timeTicks(0, 5400, 4)
  * [0, 1800, 3600, 5400]
  */
-export function timeTicks(x0: number, x1: number, count: number, offset = 0): number[] {
+export function timeTicks(x0: number, x1: number, count: number, offset: number | ((t: number) => number) = 0): number[] {
   if (!Number.isFinite(x0) || !Number.isFinite(x1)) return [];
   const span = x1 - x0;
   if (!(span > 0)) return [x0];
@@ -37,8 +39,19 @@ export function timeTicks(x0: number, x1: number, count: number, offset = 0): nu
     return niceTicks(x0 - base, x1 - base, count).map((v) => base + v);
   }
   const step = STEPS.find((s) => s >= raw * (1 - 1e-9)) ?? DAY * Math.max(1, Math.ceil(niceStep(span / DAY, count)));
+  const off = typeof offset === "number" ? () => offset : offset;
+  // walk the grid in local time; each local tick maps back with the offset in force then
+  const toUtc = (local: number): number => {
+    const guess = local - off(local - off(x0));
+    return local - off(guess);
+  };
   const out: number[] = [];
-  for (let v = Math.ceil((x0 + offset) / step - 1e-9) * step - offset; v <= x1 + step * 1e-9 && out.length < MAX_TICKS; v += step) {
+  const first = Math.ceil((x0 + off(x0)) / step - 1e-9) * step;
+  for (let local = first, n = 0; n < MAX_TICKS + 2 && out.length < MAX_TICKS; local += step, n += 1) {
+    const v = toUtc(local);
+    if (v > x1 + step * 1e-9) break;
+    // a local time the clock skips maps off the grid, one it repeats maps twice: keep each once
+    if (v < x0 - step * 1e-9 || (v + off(v)) % step !== 0 || out.includes(v)) continue;
     out.push(v || 0); // no -0
   }
   return out;

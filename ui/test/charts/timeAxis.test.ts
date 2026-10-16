@@ -16,6 +16,20 @@ describe("timeTicks", () => {
     for (const v of ticks) expect((v + off) % 3600).toBe(0);
   });
 
+  test("a span across a DST change keeps every tick on a whole local hour", () => {
+    const change = 1_792_000_000; // local time jumps from UTC+1 to UTC+2 here
+    const off = (t: number): number => (t < change ? 3600 : 7200);
+    const ticks = timeTicks(change - 3 * 3600 - 600, change + 3 * 3600, 4, off);
+    expect(ticks.some((v) => v < change) && ticks.some((v) => v >= change)).toBe(true);
+    for (const v of ticks) expect((v + off(v)) % 3600).toBe(0);
+    expect(new Set(ticks).size).toBe(ticks.length);
+    // the clock back (UTC+2 to UTC+1): a repeated local hour gives no duplicate tick
+    const back = (t: number): number => (t < change ? 7200 : 3600);
+    const again = timeTicks(change - 4 * 3600, change + 4 * 3600, 6, back);
+    for (const v of again) expect((v + back(v)) % 3600).toBe(0);
+    expect([...again].sort((x, y) => x - y)).toEqual(again);
+  });
+
   test("sub-second spans at epoch seconds keep decimal steps; empty spans give one tick", () => {
     const t = 1_792_152_689;
     const ticks = timeTicks(t + 0.1, t + 0.9, 4);

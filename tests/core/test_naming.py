@@ -1,4 +1,5 @@
 from datetime import timedelta
+from typing import Any
 
 import pytest
 
@@ -8,12 +9,15 @@ from hypothex.core.naming import (
     NAME_MAX,
     clean_run_name,
     derive_names,
+    disambiguate,
     display_name,
     group_display_name,
+    group_names,
     run_settings,
     short_run_id,
     varying_keys,
 )
+from hypothex.core.records import GitInfo, RunRecord
 from tests.factories import make_record
 
 T0 = utcnow()
@@ -133,3 +137,43 @@ def test_clean_run_name_rejects_long_or_multiline_names(bad: str) -> None:
 
 def test_clean_run_name_accepts_exactly_80_characters() -> None:
     assert clean_run_name("x" * NAME_MAX) == "x" * NAME_MAX
+
+
+def test_disambiguate_appends_the_commit_then_a_group_tag() -> None:
+    names = {
+        "aaaa1111@aaaaaaa": "lr 3e-4",
+        "aaaa1111@bbbbbbb": "lr 3e-4",
+        "aaaa1111@bbbbbbb+d1ff0001": "lr 3e-4",
+        "cccc2222@bbbbbbb": "lr 1e-3",
+    }
+    commits = {gid: gid.split("@")[1][:7] + "999" for gid in names}
+    out = disambiguate(names, commits, fixed=())
+    assert out == {
+        "aaaa1111@aaaaaaa": "lr 3e-4 · @aaaaaaa",
+        "aaaa1111@bbbbbbb": "lr 3e-4 · @bbbbbbb · #aaaa1111",
+        "aaaa1111@bbbbbbb+d1ff0001": "lr 3e-4 · @bbbbbbb · #d1ff0001",
+        "cccc2222@bbbbbbb": "lr 1e-3",
+    }
+
+
+def test_disambiguate_never_touches_renamed_groups() -> None:
+    out = disambiguate({"a@1": "best", "b@2": "best"}, {"a@1": "1111111", "b@2": None}, {"a@1"})
+    assert out == {"a@1": "best", "b@2": "best · #b"}
+
+
+def test_group_names_disambiguate_by_the_newest_run_commit_and_keep_renames() -> None:
+    def rec(run_id: str, commit: str, minute: int, **kw: Any) -> RunRecord:
+        at = T0 + timedelta(minutes=minute)
+        return make_record(run_id, git=GitInfo(commit=commit), created_at=at, **kw)
+
+    members = {
+        "aaaa1111@aaaaaaa": [rec("a", "aaaaaaa1111", 0)],
+        "aaaa1111@bbbbbbb": [rec("b", "bbbbbbb2222", 1)],
+        "cccc2222@ccccccc": [rec("c", "ccccccc3333", 2, name="lr 3e-4")],
+    }
+    derived = {"a": "lr 3e-4", "b": "lr 3e-4", "c": "lr 1e-3"}
+    assert group_names(members, derived) == {
+        "aaaa1111@aaaaaaa": "lr 3e-4 · @aaaaaaa",
+        "aaaa1111@bbbbbbb": "lr 3e-4 · @bbbbbbb",
+        "cccc2222@ccccccc": "lr 3e-4",  # renamed: kept as is
+    }

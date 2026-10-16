@@ -29,6 +29,7 @@ from hypothex.core.views import ViewSpec, get_view
 from hypothex.demo import (
     _SEEDERS,
     DEMO_EPOCH,
+    DEMO_EXTRAS,
     DEMO_HOSTS_DIR,
     DEMO_SWEEP_ID,
     DEMO_TASKS,
@@ -51,6 +52,7 @@ REFS = {
     "agent_iteration": "retro-agent/retro-bench-200",
     "system_bench": "route-search/route-api-latency",
 }
+EVAL_REF = "eval-matrix/multi-dataset"
 
 
 @pytest.fixture(scope="module")
@@ -152,12 +154,36 @@ def test_refuses_existing_project_and_unknown_kind(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown demo kinds"):
         seed_demo(home, bad)
     assert not home.exists()
-    assert seed_demo(home, ["generic", "generic"]) == {"generic": REFS["generic"]}
+    with pytest.raises(ValueError, match="unknown demo extras"):
+        seed_demo(home, [], {"nope": ("a", "b")})
+    assert not home.exists()
+    assert seed_demo(home, ["generic", "generic"]) == {
+        "generic": REFS["generic"],
+        "eval_matrix": EVAL_REF,
+    }
     ctx = Context.open(home)
     before = len(ctx.index.list_runs(include_archived=True, limit=None))
     with pytest.raises(StoreError, match="already exists"):
-        seed_demo(home, ["generic"])
+        seed_demo(home, ["generic"], {})
+    with pytest.raises(StoreError, match="eval-matrix"):
+        seed_demo(home, [])
     assert len(ctx.index.list_runs(include_archived=True, limit=None)) == before
+
+
+def test_eval_matrix_demo_has_structured_score_keys(tmp_path: Path) -> None:
+    seeded = seed_demo(tmp_path, kinds=[], extras=DEMO_EXTRAS)
+    assert seeded == {"eval_matrix": EVAL_REF}
+    ctx = Context.open(tmp_path)
+    every = ctx.index.list_runs(project="eval-matrix", include_archived=True, limit=None)
+    assert sorted(r.params["db"] for r in every if r.archived) == ["v0"]
+    runs = [r for r in every if not r.archived]
+    assert sorted(r.params["db"] for r in runs) == ["v1", "v2", "v2b", "v3", "v3b", "v4"]
+    tags = {t for r in runs for t in r.tags}
+    assert {"final", "superseded"} <= tags
+    scores = [s for r in runs for s in ctx.store.read_scores(r.project, r.run_id)]
+    keys = {s.metric + "/" + s.key for s in scores}
+    assert "reported/test-a.model-x.top10" in keys
+    assert "reported/holdout.model-y.max" in keys
 
 
 def test_training_mirrors_mockup(dctx: Context) -> None:
@@ -323,11 +349,11 @@ def test_seed_demo_is_fast_and_registers_every_kind(tmp_path: Path) -> None:
     start = time.perf_counter()
     refs = seed_demo(tmp_path / "home")
     assert time.perf_counter() - start < 10.0
-    assert refs == REFS
+    assert refs == {**REFS, "eval_matrix": EVAL_REF}
     ctx = Context.open(tmp_path / "home")
-    for kind, ref in refs.items():
+    for name, ref in refs.items():
         entry, task = q.resolve_task(ctx, ref)
-        assert entry.config.tasks[task].kind == kind
+        assert entry.config.tasks[task].kind == (name if name in REFS else "generic")
         assert Path(entry.repo) == (tmp_path / "home" / "demo-repos" / entry.project).resolve()
     # the newest run (the one still training) starts 40 min before the current hour
     newest = max(r.created_at for r in ctx.index.list_runs(include_archived=True, limit=None))
@@ -337,15 +363,15 @@ def test_seed_demo_is_fast_and_registers_every_kind(tmp_path: Path) -> None:
 def test_overview_of_demo(dctx: Context) -> None:
     summary = build_overview(dctx, since=DEMO_EPOCH - timedelta(hours=24))
     assert summary.counts == {
-        "total": 45,
+        "total": 52,
         "queued": 0,
         "running": 1,
-        "finished": 40,
+        "finished": 47,
         "failed": 4,
         "killed": 0,
         "lost": 0,
-        "archived": 7,
-        "agent": 30,
+        "archived": 8,
+        "agent": 37,
         "human": 15,
     }
     assert [r.params["config"] for r in summary.running] == ["lr2e-4"]
@@ -353,6 +379,7 @@ def test_overview_of_demo(dctx: Context) -> None:
     assert summary.headline == "1 running. async-worker p95 −29% vs baseline [−32, −26]"
     assert len(summary.failures) == 4 and all(f.retried_ok for f in summary.failures)
     assert [(p.project, p.runs, p.kind) for p in summary.projects] == [
+        ("eval-matrix", 6, "generic"),
         ("retro-agent", 27, "agent_iteration"),
         ("retro-agents", 12, "agent_eval"),
         ("route-search", 9, "system_bench"),

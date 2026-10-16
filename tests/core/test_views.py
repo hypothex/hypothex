@@ -886,3 +886,54 @@ def test_save_and_delete_view_refuse_a_bad_task(tmp_path: Path, task: str) -> No
     with pytest.raises(ConfigError, match="task name"):
         delete_view(repo, task, "pwned")
     assert not (tmp_path / "proj" / "escaped").exists()
+
+
+COMPARE = """\
+title: datasets
+panels:
+  - type: compare
+    title: top10 by dataset
+    data: {datasets: [set-1, set-0], model: m-a, metrics: [top10]}
+    render: bars
+"""
+
+
+def test_a_compare_panel_validates_without_metric_references() -> None:
+    view, issues = _check(COMPARE)
+    assert issues == []  # top10 is a key part, not a known metric
+    assert view is not None
+    panel = view.panels[0]
+    assert (panel.data.datasets, panel.data.model, panel.render) == (
+        ["set-1", "set-0"],
+        "m-a",
+        "bars",
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected"),
+    [
+        ("datasets: [set-1, set-0], ", "", (5, "panels[0].data", "compare needs data.datasets")),
+        (", metrics: [top10]", "", (5, "panels[0].data", "compare needs data.metrics")),
+        (
+            "render: bars",
+            "render: chart",
+            (6, "panels[0].render", "compare renders as table or bars"),
+        ),
+        (
+            "type: compare",
+            "type: leaderboard",
+            (5, "panels[0].data.datasets", "datasets applies to compare panels"),
+        ),
+    ],
+)
+def test_compare_rules(old: str, new: str, expected: tuple[int, str, str]) -> None:
+    _, issues = _check(COMPARE.replace(old, new))
+    assert issues[0][:3] == expected
+
+
+def test_render_bars_belongs_to_compare_panels() -> None:
+    _, issues = validate_view_text(
+        "title: t\npanels:\n  - type: leaderboard\n    render: bars\n", set(), {}
+    )
+    assert [(i.line, i.message) for i in issues] == [(4, "render: bars applies to compare panels")]

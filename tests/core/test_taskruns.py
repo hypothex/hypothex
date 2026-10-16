@@ -162,3 +162,32 @@ def test_cost_and_key_parts(ctx: Context, toy_repo: Path) -> None:
     assert (by_id["queued"].gpu_hours, by_id["queued"].cost_usd) == (None, None)
     assert by_id["queued"].progress is None
     assert out.key_parts == ["dataset", "metric"]
+
+
+def test_groups_with_the_same_params_on_two_commits_get_distinct_names(
+    ctx: Context, toy_repo: Path
+) -> None:
+    _run(ctx, toy_repo, "a", "aaaa", params={"lr": "3e-4"}, git=GitInfo(commit="aaaaaaa1111"))
+    _run(
+        ctx,
+        toy_repo,
+        "b",
+        "aaaa",
+        minute=1,
+        params={"lr": "3e-4"},
+        git=GitInfo(commit="bbbbbbb2222"),
+    )
+    _run(
+        ctx,
+        toy_repo,
+        "c",
+        "cccc",
+        minute=2,
+        params={"lr": "1e-3"},
+        git=GitInfo(commit="bbbbbbb2222"),
+    )
+    names = sorted(g.name for g in task_runs(ctx, "toy-acc").groups)
+    assert names == ["lr 1e-3", "lr 3e-4 · @aaaaaaa", "lr 3e-4 · @bbbbbbb"]
+    q.rename_run(ctx, "a", "first try")
+    names = sorted(g.name for g in task_runs(ctx, "toy-acc").groups)
+    assert names == ["first try", "lr 1e-3", "lr 3e-4"]  # no clash left

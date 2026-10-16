@@ -18,8 +18,9 @@ List every project Hypothex knows about, with its repo path and tasks.
 
    hx tasks --json
 
-List tasks with their dataset, metric versions, primary metric, run count, and best
-score.
+List tasks with their dataset, metric versions, primary metric, run counts, and best
+score. ``n_runs`` counts every unarchived run of the task (queued and running too);
+``n_finished`` only the finished ones.
 
 .. code-block:: bash
 

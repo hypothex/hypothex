@@ -40,7 +40,9 @@ Look around with the demo
 -------------------------
 
 The demo fills an empty home with example projects and runs, so the UI has something
-to show. Nothing is trained and no host is contacted.
+to show: one project per task kind, plus ``eval-matrix``, an eval task whose score keys
+follow the ``{dataset}.{model}.{metric}`` pattern. ``--kinds generic,training`` seeds only
+the kinds you name. Nothing is trained and no host is contacted.
 
 .. code-block:: bash
 

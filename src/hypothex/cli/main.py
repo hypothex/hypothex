@@ -939,7 +939,7 @@ def tasks(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
         _print_json(items)
         return
     _table(
-        ["task", "dataset", "metrics", "primary", "runs", "best"],
+        ["task", "dataset", "metrics", "primary", "runs", "finished", "best"],
         [
             [
                 f"{t.project}/{t.name}",
@@ -947,6 +947,7 @@ def tasks(project: ProjectOpt = None, as_json: JsonFlag = False) -> None:
                 ", ".join(f"{m}@{v}" for m, v in t.metrics.items()),
                 t.primary,
                 t.n_runs,
+                t.n_finished,
                 None if t.best is None else f"{t.best:.4f}",
             ]
             for t in items
@@ -2542,7 +2543,10 @@ def mcp() -> None:
 def demo(
     kinds: Annotated[
         list[str] | None,
-        typer.Option("--kinds", help="Kinds to seed (repeat or comma-separate; default: all)."),
+        typer.Option(
+            "--kinds",
+            help="Kinds to seed (repeat or comma-separate; default: all, plus the eval demo).",
+        ),
     ] = None,
     with_hosts: Annotated[
         bool,
@@ -2555,7 +2559,7 @@ def demo(
     as_json: JsonFlag = False,
 ) -> None:
     """Seed demo projects and runs into an empty home (UI tests, docs screenshots)."""
-    from hypothex.demo import DEMO_TASKS, seed_demo, seed_demo_hosts
+    from hypothex.demo import DEMO_EXTRAS, DEMO_TASKS, seed_demo, seed_demo_hosts
 
     known = get_args(TaskKind)
     chosen = [k.strip() for item in kinds or [] for k in item.split(",") if k.strip()]
@@ -2582,7 +2586,8 @@ def demo(
             _ctx().store.load_project(DEMO_TASKS["training"][0])
         except StoreError as exc:
             raise ConfigError("--with-hosts needs the training demo; add --kinds training") from exc
-    made: dict[str, Any] = dict(seed_demo(home, selected))
+    # --kinds seeds only those kinds, so kinds can be added to a demo home one by one
+    made: dict[str, Any] = dict(seed_demo(home, selected, {} if chosen else DEMO_EXTRAS))
     text = "\n".join(f"{kind}: {ref}" for kind, ref in made.items())
     if with_hosts:
         made["hosts"] = seed_demo_hosts(home)

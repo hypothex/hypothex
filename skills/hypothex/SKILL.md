@@ -66,8 +66,8 @@ author, and Hypothex rejects runs that have no hypothesis.
 
 A view is YAML: `title`, optional `from: <kind>` (start from a preset), optional
 `runs:` filter, and `panels` (`stat_strip`, `leaderboard`, `curves`, `scatter`,
-`distribution`, `grid`, `table`, `trace`, `markdown`, `vega_lite`). Files live in
-`.hypothex/views/<task>/<name>.yaml` in the repo; commit them.
+`distribution`, `grid`, `table`, `trace`, `markdown`, `vega_lite`, `compare`).
+Files live in `.hypothex/views/<task>/<name>.yaml` in the repo; commit them.
 
 - See: `hx view list <task> --json`, `hx view show <task> <name> --json`.
 - Start: `hx view init <task> --from <kind> --name <name> --json`.

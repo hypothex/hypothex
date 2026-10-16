@@ -345,24 +345,26 @@ def test_show_run_finds_children_without_listing_the_project(
     assert q.show_run(ctx, "other").children == []
 
 
-def test_list_tasks_counts_finished_runs_and_follows_new_scores(
+def test_list_tasks_counts_runs_and_finished_runs_and_follows_new_scores(
     ctx: Context, toy_repo: Path
 ) -> None:
-    # PERF-F7: n_runs is a COUNT; the ranking is reused only while the index is unchanged
+    # PERF-F7: the counts are COUNTs; the ranking is reused only while the index is unchanged
+    # n_runs: every unarchived run (the queued one too); n_finished: the finished ones
     seed_finished_run(ctx, toy_repo, "a", predictions=PREDS_075)
     evaluate_run(ctx, "a")
     ctx.create_run(make_record("queued", task="toy-acc", status=RunStatus.QUEUED))
     seed_finished_run(ctx, toy_repo, "hidden", predictions=ALL_RIGHT)
     q.archive_run(ctx, "hidden")
     first = {t.name: t for t in q.list_tasks(ctx)}["toy-acc"]
-    assert (first.n_runs, first.best) == (1, 0.75)
+    assert (first.n_runs, first.n_finished, first.best) == (2, 1, 0.75)
     seed_finished_run(ctx, toy_repo, "b", predictions=ALL_RIGHT, config_hash="sha256:bbbb")
     evaluate_run(ctx, "b")
     second = {t.name: t for t in q.list_tasks(ctx)}["toy-acc"]
-    assert (second.n_runs, second.best) == (2, 1.0)
+    assert (second.n_runs, second.n_finished, second.best) == (3, 2, 1.0)
     write_toy_project(toy_repo, accuracy_version="v2")
     bumped = {t.name: t for t in q.list_tasks(ctx)}["toy-acc"]
-    assert (bumped.n_runs, bumped.best, bumped.metrics) == (2, None, {"accuracy": "v2"})
+    assert (bumped.n_runs, bumped.n_finished, bumped.best) == (3, 2, None)
+    assert bumped.metrics == {"accuracy": "v2"}
 
 
 def test_list_tasks_reads_runs_once_per_task_and_not_again_when_unchanged(

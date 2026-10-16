@@ -30,6 +30,7 @@ export const queryKeys = {
   leaderboard: (project: string, task: string, metrics: readonly string[] = [], primary?: string) =>
     primary ? ["leaderboard", project, task, [...metrics], primary] as const : ["leaderboard", project, task, [...metrics]] as const,
   taskKind: (project: string, task: string) => ["taskKind", project, task] as const,
+  taskRuns: (project: string, task: string, archived = false) => ["taskRuns", project, task, archived] as const,
   runs: (query: M.RunsQuery = {}) => ["runs", query] as const,
   run: (runId: string) => ["run", runId] as const,
   runLogs: (runId: string, stream: M.LogStream) => ["run", runId, "logs", stream] as const,
@@ -54,7 +55,7 @@ export const queryKeys = {
 /**
  * Key families a `run.*` event or a run action can change (contract section 4: runs,
  * leaderboard, overview, views/query; plus the task summary, run detail, example
- * comparisons and sweeps that read the same runs). View lists, view documents and `/kind`
+ * comparisons and sweeps that read the same runs, and the v5 task runs). View lists, view documents and `/kind`
  * are never in this list, so an open editor is not reloaded under the user. The hosts list
  * is not either: a hub run does not change a remote host.
  */
@@ -68,6 +69,7 @@ export const RUN_EVENT_INVALIDATES: readonly QueryKey[] = [
   ["views", "query"],
   ["compareExamples"],
   ["sweeps"],
+  ["taskRuns"],
 ];
 
 /**
@@ -254,6 +256,14 @@ export const useTaskKind = (project: string, task: string, opts: ReadOptions = {
     ...readOptions(opts),
   });
 
+/** The v5 task workspace read; archived runs only with `archived: true`. */
+export const useTaskRuns = (project: string, task: string, opts: ReadOptions & { archived?: boolean } = {}) =>
+  useQuery({
+    queryKey: queryKeys.taskRuns(project, task, opts.archived ?? false),
+    queryFn: ({ signal }) => api.taskRuns(project, task, opts.archived ?? false, signal),
+    ...readOptions(opts),
+  });
+
 export const useRuns = (query: M.RunsQuery = {}) =>
   useQuery({ queryKey: queryKeys.runs(query), queryFn: ({ signal }) => api.runs(query, signal) });
 
@@ -437,6 +447,23 @@ export function useSaveView(project: string, task: string) {
       void qc.invalidateQueries({ queryKey: queryKeys.views(project, task) });
       void qc.invalidateQueries({ queryKey: queryKeys.view(project, task, name) });
       void qc.invalidateQueries({ queryKey: ["views", "query", project, task] });
+    },
+  });
+}
+
+/**
+ * Rename a run (`name: null` resets it). Refreshes the run's task runs, the run and the
+ * overview; the `run.renamed` event refreshes other open tabs the same way.
+ */
+export function useRenameRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ runId, name }: { runId: string; name: string | null }) => api.renameRun(runId, name),
+    onSuccess: (record, { runId }) => {
+      const taskRuns = record.task ? ["taskRuns", record.project, record.task] : ["taskRuns", record.project];
+      void qc.invalidateQueries({ queryKey: taskRuns });
+      void qc.invalidateQueries({ queryKey: queryKeys.run(runId) });
+      void qc.invalidateQueries({ queryKey: ["overview"] });
     },
   });
 }

@@ -31,6 +31,19 @@ describe("buildUrl", () => {
 });
 
 describe("api", () => {
+  test("taskRuns and renameRun use the v5 routes", async () => {
+    const calls = mockFetch({ run_id: "r1" });
+    await api.taskRuns("toy", "acc");
+    await api.taskRuns("toy", "acc", true);
+    await api.renameRun("r1", "  warm restart ", { command_id: "c-1" });
+    expect(calls.map((c) => [c.method, c.url])).toEqual([
+      ["GET", "/api/v1/tasks/toy/acc/runs"],
+      ["GET", "/api/v1/tasks/toy/acc/runs?archived=true"],
+      ["POST", "/api/v1/runs/r1/name"],
+    ]);
+    expect(calls[2]?.body).toEqual({ command_id: "c-1", created_by: "human", name: "  warm restart " });
+  });
+
   test("queued cancellation carries the atomic queue precondition; Stop does not", async () => {
     const calls = mockFetch({ run_id: "r1", status: "killed" });
     await api.cancelQueuedRun("r1", { command_id: "cancel-1" });

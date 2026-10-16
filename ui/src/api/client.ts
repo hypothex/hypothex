@@ -22,6 +22,7 @@ export const ROUTES = {
   leaderboard: "/api/v1/tasks/{project}/{task}/leaderboard",
   taskReeval: "/api/v1/tasks/{project}/{task}/reeval",
   taskKind: "/api/v1/tasks/{project}/{task}/kind",
+  taskRuns: "/api/v1/tasks/{project}/{task}/runs",
   views: "/api/v1/tasks/{project}/{task}/views",
   view: "/api/v1/tasks/{project}/{task}/views/{name}",
   viewValidate: "/api/v1/tasks/{project}/{task}/views/validate",
@@ -37,6 +38,7 @@ export const ROUTES = {
   runReeval: "/api/v1/runs/{run_id}/reeval",
   runStop: "/api/v1/runs/{run_id}/stop",
   runNotes: "/api/v1/runs/{run_id}/notes",
+  runName: "/api/v1/runs/{run_id}/name",
   compareExamples: "/api/v1/compare/examples",
   hosts: "/api/v1/hosts",
   hostConnect: "/api/v1/hosts/{host}/connect",
@@ -249,6 +251,16 @@ export const api = {
       params: { run_id: runId },
       body: { ...action(opts), text, author: opts?.created_by ?? "human" },
     }),
+  /** v5 task workspace: runs with derived names, config groups and score keys. */
+  taskRuns: (project: string, task: string, archived = false, signal?: AbortSignal) =>
+    get<M.TaskRuns>(ROUTES.taskRuns, {
+      params: { project, task },
+      query: { archived: archived ? true : undefined },
+      signal,
+    }),
+  /** Rename a run; `null` resets it to the derived name (the server trims and validates). */
+  renameRun: (runId: string, name: string | null, opts?: M.ActionOptions) =>
+    post<M.RunRecord>(ROUTES.runName, { params: { run_id: runId }, body: { ...action(opts), name } }),
   // phase 2: hosts, launch, sweeps, pull ---------------------------------------------------
   hosts: (signal?: AbortSignal) => get<M.HostRow[]>(ROUTES.hosts, { signal }),
   /** The hub's own GPUs (an env route: the hub is the env server of its own runs). */

@@ -17,7 +17,9 @@ from hypothex.core.leaderboard import (
     clear_caches,
     distinct_labels,
     group_label,
+    key_higher_is_better,
     pick_field,
+    primary_field,
     seed_group_labels,
 )
 from hypothex.core.records import (
@@ -434,6 +436,24 @@ def test_board_headline_and_stat_strip_generic() -> None:
     assert build_leaderboard("toy", "t", KINDS, [], {}).headline == "No scored runs yet"
 
 
+def test_every_system_bench_percentile_key_is_lower_is_better() -> None:
+    spec = KINDS.tasks["sb"]  # lat sets no direction
+    assert key_higher_is_better(KINDS, spec, "lat/p95") is False  # the primary
+    assert key_higher_is_better(KINDS, spec, "lat/p50") is False
+    assert key_higher_is_better(KINDS, spec, "lat/p99") is False
+    assert key_higher_is_better(KINDS, KINDS.tasks["t"], "acc/value") is True
+    # a board re-ranked by another percentile ranks it the same way
+    runs, scores = bench_runs()
+    for rows in scores.values():
+        p95 = rows[0].value or 0.0
+        rows.append(
+            ScoreRecord(metric="lat", version="v1", key="p50", value=p95 / 2, created_at=T0)
+        )
+    board = build_leaderboard("toy", "sb", KINDS, runs, scores, primary="lat/p50")
+    assert board.higher_is_better is False
+    assert [r.label for r in board.rows] == ["fast", "base"]
+
+
 def test_system_bench_headline_vs_baseline() -> None:
     runs, scores = bench_runs()
     board = build_leaderboard("toy", "sb", KINDS, runs, scores)
@@ -593,24 +613,26 @@ def test_reruns_of_a_seed_are_one_sample() -> None:
     runs = [drun(f"s1r{i}", GitInfo(commit="c1"), seed=1, minute=i) for i in range(3)]
     runs += [drun("s2", GitInfo(commit="c1"), seed=2, minute=3)]
     runs += [drun(f"x{i}", GitInfo(commit="c1"), seed=7, config_hash="sha256:x") for i in (0, 1)]
-    scores = {"s1r0": acc(0.8), "s1r1": acc(0.9), "s1r2": acc(0.7), "s2": acc(0.6)}
-    scores |= {"x0": acc(0.5), "x1": acc(0.5)}
+    # each score is the mean of its run's per-example field, as an evaluation writes it
+    scores = {"s1r0": acc(0.75), "s1r1": acc(0.5), "s1r2": acc(0.5), "s2": acc(0.0)}
+    scores |= {"x0": acc(0.0), "x1": acc(0.0)}
     per_example = {
-        "s1r0": binary(4, {0, 1}),
+        "s1r0": binary(4, {0, 1, 2}),
         "s1r1": binary(4, {0, 1}),
         "s1r2": binary(4, {0, 1}),
         "s2": binary(4, set()),
-        "x0": binary(4, {0}),
-        "x1": binary(4, {0}),
+        "x0": binary(4, set()),
+        "x1": binary(4, set()),
     }
     board = build_leaderboard("toy", "t", CFG, runs, scores, per_example=per_example)
     row, single = board.rows
     assert row.run_ids == ["s1r0", "s1r1", "s1r2", "s2"]  # every run stays a member
     assert row.n == 2 and not row.single_seed
-    assert row.seed_values == {"acc/value": [pytest.approx(0.8), 0.6]}
+    assert row.seed_values == {"acc/value": [pytest.approx(0.5 + 0.25 / 3), 0.0]}
     assert row.primary is not None and row.primary.n == 2
-    assert row.primary.mean == pytest.approx(0.7)
-    # pooled per seed first: e0, e1 = 1/2, so 1 of 4 (pooling runs gives 3/4 each, 2 of 4)
+    assert row.primary.mean == pytest.approx((0.5 + 0.25 / 3) / 2)
+    # pooled per seed first: e0, e1 = 1/2, e2 = 1/6, so 1 of 4
+    # (pooling runs gives 3/4, 3/4, 1/4, 0: 2 of 4)
     assert row.test_interval is not None
     assert (row.test_interval.lo, row.test_interval.hi) == stats.wilson_interval(1, 4)
     # the same seed twice is one seed: single-seed badge, no t-interval
@@ -651,13 +673,12 @@ def test_example_seed_pool_does_not_overflow_when_the_mean_is_finite(
 
 
 def test_within_noise_follows_the_paired_test_not_seed_intervals() -> None:
-    # wide seed intervals overlap, but the paired test on 40 examples is clear
+    # wide seed intervals overlap, but the paired test on 60 examples is clear
     runs = [krun(f"a{i}", "a", minute=i) for i in range(3)]
     runs += [krun(f"b{i}", "b", minute=i) for i in range(3)]
-    scores = {"a0": acc(0.5), "a1": acc(1.0), "a2": acc(0.9), "b0": acc(0.4)}
-    scores |= {"b1": acc(0.9), "b2": acc(0.5)}
-    per_example = {f"a{i}": binary(40, set(range(30))) for i in range(3)}
-    per_example |= {f"b{i}": binary(40, set(range(10))) for i in range(3)}
+    solved = {"a0": 30, "a1": 60, "a2": 54, "b0": 24, "b1": 54, "b2": 30}
+    scores = {rid: acc(n / 60) for rid, n in solved.items()}  # a: .5 1 .9, b: .4 .9 .5
+    per_example = {rid: binary(60, set(range(n))) for rid, n in solved.items()}
     board = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
     vs = board.rows[1].vs_best
     assert vs is not None and vs.p is not None and vs.p < 1e-5
@@ -805,6 +826,8 @@ def test_a_rebuilt_board_reuses_bootstraps_and_equals_a_cold_build(
     assert warm == cold
     # one group's examples change: only its interval and its p-value are recomputed
     per_example["g1s0"] = {k: {"score": v["score"] / 2} for k, v in per_example["g1s0"].items()}
+    halved = [v["score"] for v in per_example["g1s0"].values()]
+    scores["g1s0"] = acc(sum(halved) / len(halved))  # the score is its examples' mean
     changed = build_leaderboard("toy", "t", KINDS, runs, scores, per_example=per_example)
     assert sorted(calls) == ["interval", "paired"]
     clear_caches()
@@ -927,3 +950,58 @@ def test_group_label_keeps_the_whole_clause_without_a_limit() -> None:
     assert group_label(hypothesis, [], "g", limit=None) == (
         "40k steps with heavier augmentation lifts top-1"
     )
+
+
+# test-set interval on the primary key's own field (UI v5 spec section 8) -----------------
+def mismatch_score(value: float) -> list[ScoreRecord]:
+    """A lower-is-better ``loss`` score, standing in for a ``mismatches/value`` metric."""
+    return [score("loss", value, version="v1")]
+
+
+def test_the_interval_uses_the_primary_key_field_not_a_status_flag() -> None:
+    # every example carries ok: true and its own value; ok used to win (Wilson near 1.0)
+    runs = [krun("a0", "a", task="tl"), krun("b0", "b", task="tl")]
+    scores = {"a0": mismatch_score(0.0), "b0": mismatch_score(0.5)}
+    per_example = {
+        "a0": {f"e{i}": {"ok": True, "value": 0.0} for i in range(8)},
+        "b0": {f"e{i}": {"ok": True, "value": float(i % 2)} for i in range(8)},
+    }
+    board = build_leaderboard("toy", "tl", CFG, runs, scores, per_example=per_example)
+    best, other = board.rows
+    assert best.run_ids == ["a0"]
+    ti = best.test_interval
+    assert ti is not None and (ti.method, ti.n, ti.lo, ti.hi) == ("bootstrap", 8, 0.0, 0.0)
+    assert other.vs_best is not None and other.vs_best.test == "paired_bootstrap"
+
+
+def test_no_interval_when_no_field_holds_the_primary_key() -> None:
+    runs = [krun("a0", "a", task="tl")]
+    per_example = {"a0": {f"e{i}": {"ok": True} for i in range(8)}}
+    board = build_leaderboard(
+        "toy", "tl", CFG, runs, {"a0": mismatch_score(0.0)}, per_example=per_example
+    )
+    assert board.rows[0].test_interval is None
+
+
+def test_a_correct_field_that_does_not_average_to_the_score_is_not_used() -> None:
+    # correct is the complement of a mismatch rate of 0.0: never its interval
+    runs = [krun("a0", "a", task="tl")]
+    per_example = {"a0": {f"e{i}": {"correct": True} for i in range(8)}}
+    board = build_leaderboard(
+        "toy", "tl", CFG, runs, {"a0": mismatch_score(0.0)}, per_example=per_example
+    )
+    assert board.rows[0].test_interval is None
+
+
+def test_primary_field_rules() -> None:
+    both = {"r": {"e1": {"ok": True, "value": 0.0}}}
+    assert primary_field(both, "value", {"r": 0.0}) == ("value", False)
+    ints = {"r": {"e1": {"value": 1}, "e2": {"value": 0}}}
+    assert primary_field(ints, "value", {"r": 0.5}) == ("value", True)
+    rate = {"r": {"e1": {"solved": 1}, "e2": {"solved": 0}}}
+    assert primary_field(rate, "value", {"r": 0.5}) == ("solved", True)
+    other = {"r": {"e1": {"score": 0.25}, "e2": {"score": 0.75}}}
+    assert primary_field(other, "value", {"r": 0.5}) == ("score", False)
+    assert primary_field(other, "value", {"r": 0.9}) is None  # does not average to it
+    assert primary_field(other, "f1", {"r": 0.5}) is None  # only `value` borrows a field
+    assert primary_field({}, "value", {}) is None

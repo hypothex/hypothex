@@ -84,7 +84,7 @@ def test_count_runs_matches_list_runs_without_parsing_records(
     idx = Index(tmp_path / "i.db")
     idx.upsert_run(make_record("r1", task="a", tags=["x"]))
     idx.upsert_run(make_record("r2", task="b", archived=True, tags=["x"]))
-    idx.upsert_run(make_record("r3", status=RunStatus.FINISHED, environment_id="e2"))
+    idx.upsert_run(make_record("r3", status=RunStatus.FINISHED, environment_id="e2", name="Wide"))
     cases: list[dict] = [
         {},
         {"include_archived": True},
@@ -94,6 +94,8 @@ def test_count_runs_matches_list_runs_without_parsing_records(
         {"status": RunStatus.FINISHED},
         {"environment_id": "e2"},
         {"project": "nope"},
+        {"search": "wide"},
+        {"search": "r", "include_archived": True},
     ]
     want = [len(idx.list_runs(limit=None, **c)) for c in cases]
 
@@ -101,7 +103,7 @@ def test_count_runs_matches_list_runs_without_parsing_records(
         raise AssertionError("count_runs parsed a record")
 
     monkeypatch.setattr(RunRecord, "model_validate_json", no_parse)
-    assert [idx.count_runs(**c) for c in cases] == want == [2, 3, 1, 1, 2, 1, 1, 0]
+    assert [idx.count_runs(**c) for c in cases] == want == [2, 3, 1, 1, 2, 1, 1, 0, 1, 3]
 
 
 def test_upsert_run_replaces_tags(tmp_path: Path) -> None:
@@ -389,3 +391,36 @@ def test_pending_live_metric_read_keeps_a_newer_terminal_index(
     assert idx.metric_points("r1") == expected
     assert idx.generation() == published_generations[0] + int(rebuild_after_publish)
     assert idx.get_run("r1") == store.read_record("toy", "r1")
+
+
+def test_search_matches_run_names_and_ids_ignoring_case(tmp_path: Path) -> None:
+    idx = Index(tmp_path / "i.db")
+    idx.upsert_run(make_record("r1-aaaa", name="Wide Beam"))
+    idx.upsert_run(make_record("r2-bbbb", name="100% recall"))
+    idx.upsert_run(make_record("r3-cccc"))
+    assert [r.run_id for r in idx.list_runs(search="wide")] == ["r1-aaaa"]
+    assert [r.run_id for r in idx.list_runs(search="CCCC")] == ["r3-cccc"]
+    assert [r.run_id for r in idx.list_runs(search="0%")] == ["r2-bbbb"]  # % is literal
+    assert idx.list_runs(search="w_de") == []  # _ is literal too
+    assert len(idx.list_runs(search="")) == 3
+
+
+def test_a_rebuild_keeps_run_names_searchable(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+    record = store.read_record("toy", "r1")
+    store.write_record(record.model_copy(update={"name": "wide beam"}))
+    rebuilt = Index(tmp_path / "rebuilt.db", store=store)
+    assert rebuild_index(rebuilt, store) == 2
+    got = rebuilt.get_run("r1")
+    assert got is not None and got.name == "wide beam"
+    assert [r.run_id for r in rebuilt.list_runs(search="beam")] == ["r1"]
+
+
+def test_metric_names_for_lists_distinct_names_of_many_runs(tmp_path: Path) -> None:
+    idx = Index(tmp_path / "i.db")
+    ids = [f"r{i}" for i in range(1000)]  # more than one IN chunk
+    for rid in ids:
+        idx.replace_metric_points(rid, [MetricPoint(name="loss", step=0, value=1.0)])
+    idx.replace_metric_points("r999", [MetricPoint(name="val/acc", step=0, value=0.5)])
+    assert idx.metric_names_for(ids) == ["loss", "val/acc"]
+    assert idx.metric_names_for([]) == []

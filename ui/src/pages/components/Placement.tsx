@@ -1,8 +1,7 @@
 /**
- * Run panel "Placement" (spec 8A.5, 8A.7; mockups shot-run-*): host, SLURM job and node,
- * GPUs as `CUDA_VISIBLE_DEVICES`, pid, queue place, and cost. Copy buttons copy the value.
+ * Where a remote run is placed (spec 8A.5, 8A.7): host, SLURM job and node, GPUs as
+ * `CUDA_VISIBLE_DEVICES`, pid, queue place, and cost, as rows for the run page's sidebar.
  */
-import { CopyButton } from "./CopyButton";
 import { fmtClock } from "./format";
 import { costShown, gpuLabel, hostLabel, type RunPhase, visibleDevices } from "./remote";
 import type { HostRow, RunRecord } from "./types";
@@ -54,21 +53,4 @@ export function placementRows(record: RunRecord, phase: RunPhase, host: HostRow 
   const cost = costShown(record.cost, host);
   if (cost) rows.push({ key: "Cost", value: cost.value, note: cost.note });
   return rows;
-}
-
-export function Placement({ rows }: { rows: PlaceRow[] }) {
-  return (
-    <div className="place">
-      {rows.map((row) => (
-        <div key={row.key} className="place-row">
-          <span className="k">{row.key}</span>
-          <span>
-            <span className={row.mono ? "v mono" : "v"}>{row.value}</span>
-            {row.note ? <small>{row.note}</small> : null}
-          </span>
-          {row.copy ? <CopyButton text={row.copy} label={`${row.key} ${row.copy}`} /> : <span />}
-        </div>
-      ))}
-    </div>
-  );
 }

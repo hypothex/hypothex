@@ -4,10 +4,10 @@ import type { Leaderboard, RunDetail, RunRecord, TraceSummary, ViewQueryResult }
 import { demoTask, expect, expectTheme, getJson, postJson, test } from "./fixtures";
 import { checkLayout } from "./layout-geometry";
 
-const kinds = ["training", "agent_eval", "agent_iteration", "system_bench"] as const;
+type Kind = "training" | "agent_eval" | "agent_iteration" | "system_bench";
 const enc = encodeURIComponent;
 test.setTimeout(60_000);
-async function taskData(request: APIRequestContext, kind: typeof kinds[number]) {
+async function taskData(request: APIRequestContext, kind: Kind) {
   const { project, task } = demoTask(kind);
   const path = `${enc(project)}/${enc(task)}`;
   const api = `/api/v1/tasks/${path}`;
@@ -15,7 +15,8 @@ async function taskData(request: APIRequestContext, kind: typeof kinds[number]) 
   return { project, task, path, api, board };
 }
 async function screenshots(page: Page, info: TestInfo, name: string): Promise<void> {
-  for (const width of [1600, 800]) {
+  // v5 layout widths (spec section 9).
+  for (const width of [1280, 2000]) {
     await checkLayout(page, info, name, width, ['main', 'section[aria-label="Selected run"]', '[aria-label="Key"]', '.hx-chart']);
     const geometry = await page.evaluate(() => {
       const box = (node: Element) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; };
@@ -34,74 +35,42 @@ async function screenshots(page: Page, info: TestInfo, name: string): Promise<vo
     }
   }
 }
-for (const kind of kinds) {
-  test(`${kind}: metric, seed visibility, inline selection and full route`, async ({ page, request, theme, authToken }, info) => {
-    const { path, api, board } = await taskData(request, kind);
-    await page.goto(`/t/${path}`);
-    await expectTheme(page, theme);
-    const metric = page.getByRole("combobox", { name: "Metric", exact: true });
-    await expect(metric).toHaveValue(board.primary);
-    const options = await metric.locator("option").evaluateAll(nodes => nodes.map(node => (node as HTMLOptionElement).value));
-    const alternate = options.find(option => option !== board.primary);
-    if (alternate) {
-      const expected = await getJson<Leaderboard>(request, `${api}/leaderboard?primary=${enc(alternate)}`);
-      await metric.selectOption(alternate);
-      await expect(metric).toHaveValue(alternate);
-      await expect(page.getByText(expected.headline, { exact: true }).first()).toBeVisible();
-    } else info.annotations.push({ type: "coverage", description: `${kind} demo exposes only ${board.primary}; no alternate metric invented.` });
-    const toggle = page.getByRole("checkbox", { name: kind === "system_bench" ? "Repeats" : "Seeds", exact: true });
-    await expect(toggle).toBeChecked();
-    const seedMarks = page.locator('.lb svg .seeds, .lb svg .identical');
-    await expect(seedMarks.first()).toBeVisible();
-    await toggle.uncheck();
-    await expect(toggle).not.toBeChecked();
-    await expect(seedMarks).toHaveCount(0);
-    await toggle.check();
-    await expect(toggle).toBeChecked();
-    await expect(seedMarks.first()).toBeVisible();
-    if (alternate) await metric.selectOption(board.primary);
-    const runId = board.rows[0]!.latest_run_id;
-    const detail = await getJson<RunDetail>(request, `/api/v1/runs/${enc(runId)}`);
-    await page.locator(`a[href="/r/${enc(runId)}"]`).first().click();
-    await expect(page).toHaveURL(new RegExp(`/t/${path}$`));
-    const selected = page.getByRole("region", { name: "Selected run", exact: true });
-    await expect(selected.getByRole("heading", { name: `Selected run · ${runId}` })).toBeVisible();
-    await expect(selected.getByRole("heading", { name: `Selected run · ${runId}` })).toBeFocused();
-    await expect(selected.getByRole("heading", { name: `Selected run · ${runId}` })).toBeInViewport();
-    if (kind === "training") {
-      await info.attach("training-selection-click-geometry", { body: JSON.stringify(await page.evaluate(() => {
-        const pane = document.querySelector('section[aria-label="Selected run"]')!.getBoundingClientRect();
-        return { pane: { top: pane.top, bottom: pane.bottom, height: pane.height }, viewportHeight: innerHeight, scrollY, activeElement: { tag: document.activeElement?.tagName, text: document.activeElement?.textContent, href: document.activeElement?.getAttribute("href") } };
-      }), null, 2), contentType: "application/json" });
-      // Keep the click-time measurements; let the compositor paint the long scroll
-      // before capture without changing scroll, viewport, focus, or page data.
-      await page.evaluate(() => new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("Selection did not reach two animation frames within 2 seconds")), 2_000);
-        requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(timeout); resolve(); }));
-      }));
-      await page.screenshot({ path: info.outputPath("training-selection-immediately-after-click.png") });
-    }
-    await expect(selected.getByText(detail.record.hypothesis || "No hypothesis recorded.", { exact: true })).toBeVisible();
-    for (const name of ["Parameters", "Where", "Evaluated scores"]) await expect(selected.getByRole("heading", { name, exact: true })).toBeVisible();
-    await screenshots(page, info, `${kind}-selected`);
-    const open = selected.getByRole("link", { name: "Open run ↗", exact: true });
-    await expect(open).toHaveAttribute("href", `/r/${enc(runId)}`);
-    const opened = page.waitForEvent("popup");
-    await open.click();
-    const popup = await opened;
-    try {
-      await expect(popup).toHaveURL(new RegExp(`/r/${enc(runId)}$`));
-      // noopener opens an independent sessionStorage; authenticate that tab normally.
-      await popup.getByLabel("Token", { exact: true }).fill(authToken);
-      await popup.getByRole("button", { name: "Unlock", exact: true }).click();
-      await expect(popup.getByText(detail.record.hypothesis || runId).first()).toBeVisible();
-    }
-    finally { await popup.close(); }
-    await selected.getByRole("button", { name: "Close selected run", exact: true }).click();
-    await expect(selected).toHaveCount(0);
-    await expect(page).toHaveURL(new RegExp(`/t/${path}$`));
-  });
-}
+test("training: inline run selection opens the full run in a new tab", async ({ page, request, theme, authToken }, info) => {
+  const { project, task, path } = await taskData(request, "training");
+  const runs = await getJson<RunRecord[]>(request, `/api/v1/runs?project=${enc(project)}&task=${enc(task)}&limit=1`);
+  const runId = runs[0]?.run_id;
+  if (!runId) throw new Error("training demo has no run");
+  const detail = await getJson<RunDetail>(request, `/api/v1/runs/${enc(runId)}`);
+  await page.goto(`/t/${path}`);
+  await expectTheme(page, theme);
+  const table = page.getByRole("table", { name: "Training runs", exact: true });
+  await table.locator(`a[href="/r/${enc(runId)}"]`).first().click();
+  await expect(page).toHaveURL(new RegExp(`/t/${path}$`));
+  const selected = page.getByRole("region", { name: "Selected run", exact: true });
+  const heading = selected.getByRole("heading", { name: `Selected run · ${runId}` });
+  await expect(heading).toBeVisible();
+  await expect(heading).toBeFocused();
+  await expect(heading).toBeInViewport();
+  await expect(selected.getByText(detail.record.hypothesis || "No hypothesis recorded.", { exact: true })).toBeVisible();
+  for (const name of ["Parameters", "Where", "Evaluated scores"]) await expect(selected.getByRole("heading", { name, exact: true })).toBeVisible();
+  await screenshots(page, info, "training-selected");
+  const open = selected.getByRole("link", { name: "Open run ↗", exact: true });
+  await expect(open).toHaveAttribute("href", `/r/${enc(runId)}`);
+  const opened = page.waitForEvent("popup");
+  await open.click();
+  const popup = await opened;
+  try {
+    await expect(popup).toHaveURL(new RegExp(`/r/${enc(runId)}$`));
+    // noopener opens an independent sessionStorage; authenticate that tab normally.
+    await popup.getByLabel("Token", { exact: true }).fill(authToken);
+    await popup.getByRole("button", { name: "Unlock", exact: true }).click();
+    await expect(popup.getByRole("heading", { level: 1 })).toBeVisible();
+  }
+  finally { await popup.close(); }
+  await selected.getByRole("button", { name: "Close selected run", exact: true }).click();
+  await expect(selected).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`/t/${path}$`));
+});
 
 test("training: checkpoint metrics and evaluated scores preserve recorded provenance", async ({ page, request }, info) => {
   const { project, task, path } = await taskData(request, "training");
@@ -192,23 +161,16 @@ test("iteration: selectors show measured outcomes or explicit missing fingerprin
   await screenshots(page, info, "iteration-comparison");
 });
 
-test("system: raw sample rows follow selected-run scope", async ({ page, request }, info) => {
-  const { api, path, board } = await taskData(request, "system_bench");
-  await page.goto(`/t/${path}`);
-  const section = page.getByRole("region", { name: "Raw benchmark samples" });
-  await expect(section.getByText("All task runs", { exact: true })).toBeVisible();
-  const runId = board.rows[0]!.latest_run_id;
-  const query = await postJson<ViewQueryResult>(request, `${api}/views/query`, { panel: { type: "table", title: "Raw samples", data: { source: "samples", fields: ["name", "value"], filter: { run_id: runId } } } });
+test("system: raw samples list the samples of every task run", async ({ page, request }, info) => {
+  const { api, path } = await taskData(request, "system_bench");
+  const query = await postJson<ViewQueryResult>(request, `${api}/views/query`, { panel: { type: "table", title: "Raw samples", data: { source: "samples", fields: ["name", "value"] } } });
   const rows = query.panels[0]!.rows.slice(0, 100);
   expect(rows.length).toBeGreaterThan(0);
-  expect(rows.every(row => row.run_id === runId)).toBe(true);
-  await page.locator(`a[href="/r/${enc(runId)}"]`).first().click();
-  await expect(section.getByText(`Run ${runId}`, { exact: true })).toBeVisible();
+  await page.goto(`/t/${path}`);
+  const section = page.getByRole("region", { name: "Raw benchmark samples", exact: true });
+  await expect(section.getByText("All task runs", { exact: true })).toBeVisible();
   const table = section.getByRole("table", { name: "Raw samples", exact: true });
   await expect(table.locator("tbody tr")).toHaveCount(rows.length);
   await expect(table.locator("tbody tr").first().locator("td")).toHaveText(["run_id", "seed", "name", "value"].map(key => String(rows[0]![key] ?? "unknown")));
-  expect(await table.locator("tbody tr td:first-child").allTextContents()).toEqual(rows.map(row => String(row.run_id)));
-  await screenshots(page, info, "system-selected-samples");
-  await page.getByRole("button", { name: "Close selected run", exact: true }).click();
-  await expect(section.getByText("All task runs", { exact: true })).toBeVisible();
+  await screenshots(page, info, "system-samples");
 });

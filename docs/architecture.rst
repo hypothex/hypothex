@@ -100,7 +100,7 @@ a monotonically increasing ``sequence``. Current event types include:
   ``run.slurm_state``.
 - Scores and annotations: ``run.score_added``, ``run.eval_skipped``,
   ``run.warning``, ``run.note_added``, ``run.tagged``, ``run.starred``,
-  ``run.archived``.
+  ``run.archived``, ``run.renamed``.
 - Remote state: ``host.state``, ``mirror.run_updated``.
 - Durable sweep issuance: ``sweep.issuance``, including progress before any member
   run exists. The issuance state and its accepted receipt commit atomically with
@@ -212,7 +212,12 @@ Repeated runs of one seed are averaged before computing seed statistics and
 paired-test pools. Per-seed and per-example averaging keeps finite means
 representable when their intermediate sums exceed floating-point range.
 Runs without a seed remain separate samples. Costs and run
-membership still include every run. ``metric_drift`` lists selected metric versions
+membership still include every run. Test-set intervals and paired tests use the
+primary key's own per-example field: the field named like the key, or, for the
+default ``value`` key, ``correct``, ``solved`` or another field whose mean over each
+run's examples equals that run's score. Without one, a group has no test-set
+interval and is compared with a Welch test over seeds.
+``metric_drift`` lists selected metric versions
 whose stored scores contain differing source hashes; reading a leaderboard does
 not execute repository code. ``within_noise_of_best`` is determined by
 the comparison p-value (``p >= 0.05``), or is unknown when no p-value is available.

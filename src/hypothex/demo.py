@@ -1,4 +1,4 @@
-"""Seed a Hypothex home with demo projects, one per task kind.
+"""Seed a Hypothex home with demo projects, one per task kind, plus ``DEMO_EXTRAS``.
 
 The demo mirrors the approved mockups in ``docs/mockups/kinds/*/data.js`` (and
 ``docs/mockups/ui-v4/data.js`` for the generic kind): the same seeded generators,
@@ -18,7 +18,7 @@ Examples
 --------
 >>> import pathlib, tempfile
 >>> from hypothex.demo import seed_demo
->>> seed_demo(pathlib.Path(tempfile.mkdtemp()), kinds=["generic"])
+>>> seed_demo(pathlib.Path(tempfile.mkdtemp()), kinds=["generic"], extras={})
 {'generic': 'toy-classifier/toy-test'}
 """
 
@@ -34,7 +34,7 @@ import struct
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -90,6 +90,8 @@ DEMO_TASKS: dict[str, tuple[str, str]] = {
     "agent_iteration": ("retro-agent", "retro-bench-200"),
     "system_bench": ("route-search", "route-api-latency"),
 }
+DEMO_EXTRAS: dict[str, tuple[str, str]] = {"eval_matrix": ("eval-matrix", "multi-dataset")}
+"""Demo projects that are not one of the five task kinds (seeded by a plain ``hx demo``)."""
 
 _M32 = 0xFFFFFFFF
 
@@ -712,6 +714,85 @@ def _seed_generic(sd: _Seeder) -> None:
             sd.ctx.store.append_note(project, final.run_id, _GEN_NOTE, "agent:acceptance")
 
 
+# --------------------------------------------------------------------- eval_matrix
+_EVAL_DATASETS = ("test-a", "test-b", "holdout")
+_EVAL_MODELS = ("model-x", "model-y")
+# db version -> (top10 base, tags, archived); later versions are better, "b" re-runs supersede.
+_EVAL_DBS: tuple[tuple[str, float, tuple[str, ...], bool], ...] = (
+    ("v1", 1.06, ("rescore",), False),
+    ("v2", 1.40, ("rescore", "superseded"), False),
+    ("v2b", 1.40, ("rescore",), False),
+    ("v3", 1.52, ("rescore", "superseded"), False),
+    ("v3b", 1.53, ("rescore", "final"), False),
+    ("v4", 1.57, ("rescore", "final"), False),
+    ("v0", 0.91, ("rescore",), True),
+)
+
+
+def _seed_eval_matrix(sd: _Seeder) -> None:
+    """
+    Seed ``eval-matrix/multi-dataset``: one eval per database version.
+
+    Every run reports ``reported/<dataset>.<model>.<metric>`` for three datasets, two
+    models and three metrics (``top10``, ``max``, ``n``), the shape the v5 Compare
+    panel and score-key sections are built for.
+
+    Parameters
+    ----------
+    sd : _Seeder
+        Target home.
+    """
+    project, task = DEMO_EXTRAS["eval_matrix"]
+    dataset = {"version": "v1", "path": "data/items.jsonl", "splits": {"test": "data/items.jsonl"}}
+    repo = sd.project(
+        _task_config(
+            project,
+            task,
+            kind="generic",
+            dataset=dataset,
+            metrics={"reported": {"version": "v1", "fn": "demo_metrics:accuracy"}},
+            primary="reported/test-a.model-x.top10",
+            description="Re-score saved predictions against each database version.",
+            score_keys="{dataset}.{model}.{metric}",
+        ),
+        {"data/items.jsonl": _jsonl({"id": f"item-{i}"} for i in range(40))},
+    )
+    draw = _mulberry32(11)
+    for i, (db, base, tags, archived) in enumerate(_EVAL_DBS):
+        record, _ = sd.start(
+            _RunSpec(
+                project=project,
+                task=task,
+                repo=repo,
+                hypothesis=f"Re-score the test sets with database {db}.",
+                command_template=["python", "rescore.py", "--db", db],
+                params={"db": db},
+                seed=None,
+                created_at=sd.at(f"2026-09-27T0{i}:10:00Z"),
+                created_by="agent:rescorer",
+                host="laptop",
+                commit=_GEN_NEW,
+                key=f"eval-{db}",
+                tags=list(tags),
+                archived=archived,
+            )
+        )
+        scores: list[tuple[str, str, str, float]] = []
+        for d_i, ds in enumerate(_EVAL_DATASETS):
+            for m_i, model in enumerate(_EVAL_MODELS):
+                top10 = _fixed(base - 0.18 * d_i - 0.07 * m_i + 0.02 * _gauss(draw), 4)
+                scores.append(("reported", "v1", f"{ds}.{model}.top10", top10))
+                scores.append(("reported", "v1", f"{ds}.{model}.max", _fixed(top10 * 2.6, 3)))
+                scores.append(("reported", "v1", f"{ds}.{model}.n", float(124 + 3 * d_i)))
+        sd.finish(
+            record,
+            status=RunStatus.FINISHED,
+            ended_at=record.created_at + timedelta(minutes=4),
+            exit_code=0,
+            scores=scores,
+        )
+
+
 # --------------------------------------------------------------------- training
 @dataclass(frozen=True)
 class _TrainConfig:
@@ -734,7 +815,7 @@ class _TrainConfig:
 
 _TRAIN_CONFIGS = (
     _TrainConfig(
-        "base", "base", "base recipe", 3e-4, 0.94, "shreyas",
+        "base", "base", "base recipe", 3e-4, 0.94, "sam",
         (0.8958, 0.62, 2500, 0.0060), (0.140, 0.46, 2300, 0.020), (0.074, 0.58, 2600),
         95, 61.4, "gpu-a01", "3d9e1a7",
     ),
@@ -940,7 +1021,7 @@ def _seed_training(sd: _Seeder) -> None:
             run.log({"lr": value}, step=s)
         for s, util, mem in curves.sys:
             run.log({"sys/gpu_util": util, "sys/gpu_mem_gb": mem}, step=s)
-        ckpt_dir = f"/scratch/shreyas/hx/{project}/runs/{record.run_id}/ckpt"
+        ckpt_dir = f"/scratch/sam/hx/{project}/runs/{record.run_id}/ckpt"
         for s, top1, loss in curves.ckpts:
             run.log_checkpoint(
                 f"{ckpt_dir}/step_{s:06d}.pt",
@@ -1327,10 +1408,10 @@ class _IterRun:
 
 
 _ITER_VERSIONS = (
-    _Version("v1", "2026-09-13T10:12:00Z", "human:shreyas", "baseline",
+    _Version("v1", "2026-09-13T10:12:00Z", "human:sam", "baseline",
              "a031a64b9cbd2a8e81ebf150c9ab0804a710a6a6", "react-1", "gpt-4.1-mini", 0, 4, 40, 1,
              "template_search,route_score,smiles_validate"),
-    _Version("v2", "2026-09-14T16:40:00Z", "human:shreyas", "retries 3",
+    _Version("v2", "2026-09-14T16:40:00Z", "human:sam", "retries 3",
              "6fa2cfdf2f93d4bd34398d373139b5abcfc9acc8", "react-1", "gpt-4.1-mini", 0, 4, 40, 3,
              "template_search,route_score,smiles_validate"),
     _Version("v3", "2026-09-16T11:05:00Z", "agent:iterate", "+stock_check",
@@ -1339,13 +1420,13 @@ _ITER_VERSIONS = (
     _Version("v4", "2026-09-17T19:22:00Z", "agent:iterate", "depth 6",
              "50cc29f312390a273e41162f8591d2d98004702a", "react-1", "gpt-4.1-mini", 0.6, 6, 40, 3,
              "template_search,route_score,smiles_validate,stock_check"),
-    _Version("v5", "2026-09-19T09:48:00Z", "human:shreyas", "gpt-4.1",
+    _Version("v5", "2026-09-19T09:48:00Z", "human:sam", "gpt-4.1",
              "356483f8954521d87436e67efa04c7e31fc6cc58", "react-1", "gpt-4.1", 0.6, 6, 40, 3,
              "template_search,route_score,smiles_validate,stock_check"),
     _Version("v6", "2026-09-21T14:15:00Z", "agent:iterate", "prompt rewrite",
              "e058f3e5a888d5352ee90a3b16e8c5980450b9b9", "concise-2", "gpt-4.1", 0.6, 6, 40, 3,
              "template_search,route_score,smiles_validate,stock_check"),
-    _Version("v7", "2026-09-22T10:31:00Z", "human:shreyas", "revert prompt",
+    _Version("v7", "2026-09-22T10:31:00Z", "human:sam", "revert prompt",
              "8c02d161c42ce427c0eeb79c9a3956fae5a037f3", "react-1", "gpt-4.1", 0.6, 6, 40, 3,
              "template_search,route_score,smiles_validate,stock_check"),
     _Version("v8", "2026-09-24T15:02:00Z", "agent:iterate", "+conditions",
@@ -1863,7 +1944,11 @@ def _seed_system_bench(sd: _Seeder) -> None:
             metrics={
                 "latency": lower,
                 "errors": lower,
-                "throughput": {"version": "v1", "fn": "demo_metrics:harness"},
+                "throughput": {
+                    "higher_is_better": True,
+                    "version": "v1",
+                    "fn": "demo_metrics:harness",
+                },
             },
             primary="latency/p95",
             description="POST /v2/route, 5,000 requests after 200 warm-up, concurrency 16.",
@@ -1946,9 +2031,15 @@ _SEEDERS: dict[str, Callable[[_Seeder], None]] = {
     "agent_iteration": _seed_agent_iteration,
     "system_bench": _seed_system_bench,
 }
+_EXTRA_SEEDERS: dict[str, Callable[[_Seeder], None]] = {"eval_matrix": _seed_eval_matrix}
 
 
-def _seed_demo(home: Path, kinds: Iterable[str], anchor: datetime) -> dict[str, str]:
+def _seed_demo(
+    home: Path,
+    kinds: Iterable[str],
+    anchor: datetime,
+    extras: Mapping[str, tuple[str, str]] = DEMO_EXTRAS,
+) -> dict[str, str]:
     """
     Seed the demo with every timestamp placed relative to ``anchor``.
 
@@ -1960,16 +2051,18 @@ def _seed_demo(home: Path, kinds: Iterable[str], anchor: datetime) -> dict[str, 
         Task kinds to seed.
     anchor : datetime
         Where ``DEMO_EPOCH`` lands. The same anchor gives the same run ids and data.
+    extras : mapping of str to (str, str)
+        Extra demo projects to seed after the kinds (keys of ``DEMO_EXTRAS``).
 
     Returns
     -------
     dict of str to str
-        ``{kind: "project/task"}`` in the order given.
+        ``{kind: "project/task"}`` in the order given, then ``{extra: "project/task"}``.
 
     Raises
     ------
     ValueError
-        For an unknown kind.
+        For an unknown kind or extra.
     StoreError
         If a demo project already exists in ``home`` (nothing is written).
     """
@@ -1977,23 +2070,30 @@ def _seed_demo(home: Path, kinds: Iterable[str], anchor: datetime) -> dict[str, 
     unknown = [k for k in wanted if k not in _SEEDERS]
     if unknown:
         raise ValueError(f"unknown demo kinds {unknown}; choose from {list(KINDS)}")
+    unknown = [e for e in extras if e not in _EXTRA_SEEDERS]
+    if unknown:
+        raise ValueError(f"unknown demo extras {unknown}; choose from {list(DEMO_EXTRAS)}")
+    refs = {kind: DEMO_TASKS[kind] for kind in wanted} | {e: DEMO_EXTRAS[e] for e in extras}
     ctx = Context.open(home)
-    for kind in wanted:
-        project = DEMO_TASKS[kind][0]
+    for project, _ in refs.values():
         if ctx.layout.project_dir(project).exists():
             raise StoreError(
                 f"demo project {project!r} already exists in {ctx.layout.home}; "
                 "seed the demo into an empty HYPOTHEX_HOME"
             )
     seeder = _Seeder(ctx, anchor)
-    for kind in wanted:
-        _SEEDERS[kind](seeder)
-    return {kind: "/".join(DEMO_TASKS[kind]) for kind in wanted}
+    for name in refs:
+        (_SEEDERS.get(name) or _EXTRA_SEEDERS[name])(seeder)
+    return {name: "/".join(ref) for name, ref in refs.items()}
 
 
-def seed_demo(home: Path, kinds: Iterable[TaskKind] = KINDS) -> dict[str, str]:
+def seed_demo(
+    home: Path,
+    kinds: Iterable[TaskKind] = KINDS,
+    extras: Mapping[str, tuple[str, str]] = DEMO_EXTRAS,
+) -> dict[str, str]:
     """
-    Write demo projects and runs for the given task kinds into ``home``.
+    Write demo projects and runs for the given task kinds and extras into ``home``.
 
     Timestamps keep the mockups' distance to ``DEMO_EPOCH`` but are moved so
     that ``DEMO_EPOCH`` falls on the current hour; the Overview's default 24-hour
@@ -2006,27 +2106,32 @@ def seed_demo(home: Path, kinds: Iterable[TaskKind] = KINDS) -> dict[str, str]:
         Hypothex home (created if missing). Demo repos go to ``<home>/demo-repos/``.
     kinds : iterable of TaskKind
         Which kinds to seed; default all five.
+    extras : mapping of str to (str, str)
+        Demo projects that are not a task kind, keyed like ``DEMO_EXTRAS`` (the
+        default, all of them); ``{}`` seeds none.
 
     Returns
     -------
     dict of str to str
-        ``{kind: "project/task"}``.
+        ``{kind: "project/task"}``, then ``{extra: "project/task"}``.
 
     Raises
     ------
     ValueError
-        For an unknown kind.
+        For an unknown kind or extra.
     StoreError
         If a demo project already exists in ``home``.
 
     Examples
     --------
     >>> import pathlib, tempfile
-    >>> seed_demo(pathlib.Path(tempfile.mkdtemp()), kinds=["generic"])
+    >>> seed_demo(pathlib.Path(tempfile.mkdtemp()), kinds=["generic"], extras={})
     {'generic': 'toy-classifier/toy-test'}
+    >>> seed_demo(pathlib.Path(tempfile.mkdtemp()), kinds=[])
+    {'eval_matrix': 'eval-matrix/multi-dataset'}
     """
     anchor = utcnow().replace(minute=0, second=0, microsecond=0)
-    return _seed_demo(home, kinds, anchor)
+    return _seed_demo(home, kinds, anchor, extras)
 
 
 # --------------------------------------------------------------------- fake hosts
@@ -2321,7 +2426,7 @@ def _seed_cluster_runs(ctx: Context, repo: Path, anchor: datetime) -> list[str]:
         "command_template": _LONG_COMMAND,
         "params": {},
         "hypothesis": "40k steps lifts +aug past 0.915 top-1",
-        "created_by": "human:shreyas",
+        "created_by": "human:sam",
         "rate": _DEMO_SLURM_RATE,
     }
     done = _host_run(

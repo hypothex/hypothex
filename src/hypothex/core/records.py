@@ -189,6 +189,8 @@ class RunRecord(BaseModel):
     tags: list[str] = Field(default_factory=list)
     starred: bool = False
     archived: bool = False
+    name: str | None = None
+    """A name a person or agent gave the run (``queries.rename_run``); None: derived."""
     created_by: str = "human"
     usage: UsageTotals | None = None
     cost: CostTotals | None = None

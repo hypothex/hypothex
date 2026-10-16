@@ -1,18 +1,99 @@
 /**
- * Hover tooltips for SVG marks.
+ * The one chart tooltip (spec section 6, mockup `showTip`): a header, then one row per
+ * series with its line key, the value first, then the name. Text only (React text nodes),
+ * never HTML. Charts call `showTip`/`hideTip`; `TooltipHost` (mounted once by the shell)
+ * draws it next to the pointer and keeps it inside the window.
  *
- * Page copy stays terse; explanations and exact numbers live in these tooltips.
- * Text may contain newlines, which render as line breaks.
+ * `useTooltip` is the v4 per-chart hook still used by panels/Curves and panels/Leaderboard;
+ * it keeps its signature and takes the v5 look.
  */
-import { useCallback, useMemo, useState, type FocusEvent, type MouseEvent, type ReactNode } from "react";
+import {
+  type FocusEvent,
+  type MouseEvent,
+  type ReactElement,
+  type ReactNode,
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import "./charts.css";
 
-/** Where and what the tooltip shows. */
-export interface TipState {
-  text: string;
-  x: number;
-  y: number;
+/** Pixel offset from the pointer. */
+export const TIP_OFFSET = 14;
+
+/** One tooltip row: line key colour (none = no key), value, name. */
+export interface TipRow {
+  color?: string;
+  value: string;
+  name: string;
 }
 
+export interface TipState {
+  x: number;
+  y: number;
+  head: string;
+  rows: readonly TipRow[];
+}
+
+let current: TipState | null = null;
+const subscribers = new Set<() => void>();
+const notify = (): void => {
+  for (const fn of subscribers) fn();
+};
+const subscribe = (fn: () => void): (() => void) => {
+  subscribers.add(fn);
+  return () => subscribers.delete(fn);
+};
+
+/** Show the tooltip at viewport position (`x`, `y`). */
+export function showTip(x: number, y: number, head: string, rows: readonly TipRow[]): void {
+  current = { x, y, head, rows };
+  notify();
+}
+
+/** Hide the tooltip. */
+export function hideTip(): void {
+  if (current === null) return;
+  current = null;
+  notify();
+}
+
+/** The tooltip state, or null when hidden. */
+export function useTipState(): TipState | null {
+  return useSyncExternalStore(subscribe, () => current, () => null);
+}
+
+/** Draws the tooltip; mount once (the shell does). */
+export function TooltipHost(): ReactElement | null {
+  const tip = useTipState();
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !tip) return;
+    const left = Math.min(window.innerWidth - el.offsetWidth - 8, tip.x + TIP_OFFSET);
+    const top = Math.min(window.innerHeight - el.offsetHeight - 8, tip.y + TIP_OFFSET);
+    el.style.left = `${Math.max(8, left)}px`;
+    el.style.top = `${Math.max(8, top)}px`;
+  }, [tip]);
+  if (!tip) return null;
+  return (
+    <div ref={ref} className="tip" role="tooltip">
+      <div className="h">{tip.head}</div>
+      {tip.rows.map((row, i) => (
+        <div className="r" key={`${i}-${row.name}`}>
+          <i className="k" style={{ background: row.color ?? "transparent" }} />
+          <b>{row.value}</b>
+          <span>{row.name}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- legacy per-chart hook
 /** Event handlers that show a tooltip for one mark. */
 export interface TipHandlers {
   onMouseEnter: (e: MouseEvent<Element>) => void;
@@ -31,16 +112,13 @@ export interface Tooltip {
   /** Hide the tooltip. */
   hide: () => void;
   /** Current state, `null` when hidden. */
-  state: TipState | null;
+  state: { text: string; x: number; y: number } | null;
   /** The tooltip element; render it once inside the chart. */
   node: ReactNode;
 }
 
-/** Pixel offset from the pointer. */
-export const TIP_OFFSET = 12;
-
 /**
- * Tooltip state for one chart.
+ * Tooltip state for one v4 chart. Text may contain newlines, which render as line breaks.
  *
  * Returns
  * -------
@@ -48,7 +126,7 @@ export const TIP_OFFSET = 12;
  *     `bind(text)` handlers for marks and the `node` to render.
  */
 export function useTooltip(): Tooltip {
-  const [state, setState] = useState<TipState | null>(null);
+  const [state, setState] = useState<{ text: string; x: number; y: number } | null>(null);
   const show = useCallback((text: string, x: number, y: number) => setState({ text, x, y }), []);
   const hide = useCallback(() => setState(null), []);
   const bind = useCallback(
@@ -67,11 +145,7 @@ export function useTooltip(): Tooltip {
   const node = useMemo(
     () =>
       state ? (
-        <div
-          role="tooltip"
-          className="hx-tip"
-          style={{ left: state.x + TIP_OFFSET, top: state.y + TIP_OFFSET }}
-        >
+        <div role="tooltip" className="hx-tip" style={{ left: state.x + TIP_OFFSET, top: state.y + TIP_OFFSET }}>
           {state.text}
         </div>
       ) : null,

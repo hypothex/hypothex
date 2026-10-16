@@ -32,13 +32,16 @@ const LAST = Number.MAX_SAFE_INTEGER;
  * The queued runs of one host, in queue order. A host serves one environment, so runs are
  * kept by `environment_id` (never `executor.host`, the machine's hostname), also when the
  * hub already filtered them. `current` (the page's own run) is kept when it is queued on
- * this host but missing from `runs`, which were read before it was indexed.
+ * this host but missing from `runs`, which were read before it was indexed. A run is
+ * labelled by its hub run name (`OverviewSummary.names`, as on Home), else its own name,
+ * else `queueLabel`.
  */
 export function queueRows(
   runs: readonly RunRecord[],
   environmentId: string,
   now: number = Date.now(),
   current?: RunRecord,
+  names?: Readonly<Record<string, string>>,
 ): QueueRow[] {
   const mine = (r: RunRecord): boolean => r.status === "queued" && r.environment_id === environmentId;
   const listed = runs.filter(mine);
@@ -51,7 +54,7 @@ export function queueRows(
       return {
         position: r.executor.queue_position ?? null,
         runId: r.run_id,
-        label: queueLabel(r),
+        label: names?.[r.run_id] ?? r.name ?? queueLabel(r),
         createdBy: r.created_by,
         gpus: r.gpus_requested ?? 0,
         waiting: waited === null ? DASH : fmtWait(waited),
@@ -110,7 +113,7 @@ export function QueuePanel({ host, hostName, runId, rows }: QueuePanelProps) {
             <tr>
               <th>pos</th>
               <th>run</th>
-              <th>config</th>
+              <th>name</th>
               <th>by</th>
               <th className="r">GPUs</th>
               <th className="r">waiting</th>

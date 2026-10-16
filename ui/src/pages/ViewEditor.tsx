@@ -217,13 +217,6 @@ export function ViewEditor({ project, task, view, onSaved, renderPanel = registr
   const heading = isNew ? "New view" : `Edit ${good?.title ?? view}`;
   return (
     <div className="hx-ed">
-      <p className="crumb">
-        {project}
-        <span className="sep">/</span>
-        {task}
-        <span className="sep">/</span>
-        {isNew ? "new" : view}
-      </p>
       <div className="hx-ed-top">
         <h1>
           {heading}

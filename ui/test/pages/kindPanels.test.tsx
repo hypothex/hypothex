@@ -1,8 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
+import { describe, expect, test } from "bun:test";
 import {
-  KindPanels,
-  kindPanelCount,
   pickExample,
   readsTraces,
   runViewPanels,
@@ -10,39 +7,12 @@ import {
   sentenceCase,
   withoutSweeps,
 } from "../../src/pages/components/KindPanels";
-import { LogView } from "../../src/pages/components/LogView";
 import type { PanelSpec } from "../../src/pages/components/types";
-import { fakeRegistry, mockApi, renderWithClient, restoreFetch } from "./helpers";
-
-afterEach(() => {
-  cleanup();
-  restoreFetch();
-});
 
 const TRACES = [
   { example_id: "T-001", turns: 3, failed: false },
   { example_id: "T-014", turns: 13, failed: true },
 ];
-
-const SPECS: PanelSpec[] = [
-  { type: "curves", title: "Curves", data: { metrics: ["loss"] }, layout: { span: 12, row: null } },
-  { type: "trace", title: "Trajectory", data: {}, layout: { span: 12, row: null } },
-];
-
-function traceRoutes(example: string): Record<string, unknown> {
-  return {
-    "POST /api/v1/tasks/p/t/views/query": {
-      panels: [{ type: "curves", title: "Curves", rows: [{}, {}, {}], meta: {} }],
-    },
-    "GET /api/v1/runs/R/traces": TRACES,
-    [`GET /api/v1/runs/R/traces/${example}`]: {
-      type: "trace",
-      title: "",
-      rows: Array.from({ length: example === "T-014" ? 13 : 3 }, (_, i) => ({ turn: i + 1 })),
-      meta: { run_id: "R", example_id: example },
-    },
-  };
-}
 
 describe("helpers", () => {
   test("scopeToRun adds the run filter and keeps the rest", () => {
@@ -62,11 +32,10 @@ describe("helpers", () => {
     expect(scopeToRun(grid, "R")).toBe(grid);
   });
 
-  test("pickExample prefers a failed trace; kindPanelCount counts one trace section", () => {
+  test("pickExample prefers a failed trace", () => {
     expect(pickExample(TRACES)).toBe("T-014");
     expect(pickExample([{ example_id: "a", turns: 1, failed: false }])).toBe("a");
     expect(pickExample([])).toBeNull();
-    expect(kindPanelCount([...SPECS, { type: "trace", title: "again" }])).toBe(2);
   });
 });
 
@@ -89,55 +58,6 @@ test("runViewPanels: sentence-case titles; no trace panels for a run without tra
   expect(runViewPanels(agent)).toHaveLength(3);
 });
 
-test("KindPanels queries scoped panels and shows the failed trace first", async () => {
-  const calls = mockApi(traceRoutes("T-014"));
-  renderWithClient(
-    <KindPanels project="p" task="t" runId="R" specs={SPECS} startIndex={1} />,
-    { registry: fakeRegistry(["curves", "trace"]) },
-  );
-  const curves = await screen.findByRole("region", { name: "b Curves" });
-  expect(within(curves).getByTestId("panel-curves").textContent).toBe("Curves:3");
-  const trace = await screen.findByRole("region", { name: "c Trajectory · T-014" });
-  expect((await within(trace).findByTestId("panel-trace")).textContent).toBe(":13");
-  const picker = within(trace).getByRole("navigation", { name: "Traced examples" });
-  expect(within(picker).getByRole("link", { name: "T-001" }).getAttribute("href")).toBe("/r/R?example=T-001");
-  const failed = within(picker).getByRole("link", { name: "T-014" });
-  expect(failed.getAttribute("aria-current")).toBe("true");
-  expect(failed.className).toBe("failed");
-  const body = calls.find((c) => c.method === "POST")?.body as {
-    view: { title: string; panels: PanelSpec[] };
-  };
-  expect(body.view.title).toBe("run");
-  expect(body.view.panels).toHaveLength(1);
-  expect(body.view.panels[0]?.data?.filter).toEqual({ run_id: "R" });
-});
-
-test("KindPanels scopes the table to the run but not the grid", async () => {
-  const calls = mockApi({
-    "POST /api/v1/tasks/p/t/views/query": {
-      panels: [
-        { type: "grid", title: "same item across configs", rows: [{}, {}, {}, {}], meta: {} },
-        { type: "table", title: "tokens per turn", rows: [{}], meta: {} },
-      ],
-    },
-  });
-  const agentSpecs: PanelSpec[] = [
-    { type: "grid", title: "same item across configs" },
-    { type: "table", title: "tokens per turn", data: { source: "traces" } },
-  ];
-  renderWithClient(
-    <KindPanels project="p" task="t" runId="R" specs={agentSpecs} startIndex={0} />,
-    { registry: fakeRegistry(["grid", "table"]) },
-  );
-  const grid = await screen.findByRole("region", { name: "a same item across configs" });
-  expect(within(grid).getByTestId("panel-grid").textContent).toBe("same item across configs:4");
-  const body = calls.find((c) => c.method === "POST")?.body as {
-    view: { title: string; panels: PanelSpec[] };
-  };
-  expect(body.view.panels[0]).toEqual({ type: "grid", title: "same item across configs" });
-  expect(body.view.panels[1]?.data).toEqual({ source: "traces", filter: { run_id: "R" } });
-});
-
 describe("sweep metrics stay out of the run's over-time curves (UI-F10b)", () => {
   const point = (name: string, step: number) => ({ run_id: "R", group_id: "g", seed: 1, name, step, value: 1 });
   const rows = [point("cpu_pct", 0), point("cpu_pct", 33), point("sweep/rps", 1), point("sweep/rps", 128)];
@@ -154,39 +74,6 @@ describe("sweep metrics stay out of the run's over-time curves (UI-F10b)", () =>
     const table = { type: "table" as const, title: "t", rows, meta: {} };
     expect(withoutSweeps(table, { type: "table" })).toBe(table);
   });
-
-  test("KindPanels draws the over-time panel without the sweep", async () => {
-    mockApi({
-      "POST /api/v1/tasks/p/t/views/query": { panels: [{ type: "curves", title: "over time", rows, meta: {} }] },
-    });
-    renderWithClient(<KindPanels project="p" task="t" runId="R" specs={[overTime]} startIndex={0} />, {
-      registry: fakeRegistry(["curves"]),
-    });
-    const panel = await screen.findByRole("region", { name: "a over time" });
-    expect(within(panel).getByTestId("panel-curves").textContent).toBe("over time:2");
-  });
-});
-
-test("an explicit ?example= wins over the failed one", async () => {
-  const calls = mockApi(traceRoutes("T-001"));
-  renderWithClient(
-    <KindPanels project="p" task="t" runId="R" specs={SPECS} example="T-001" startIndex={0} />,
-    { registry: fakeRegistry(["curves", "trace"]) },
-  );
-  await screen.findByRole("region", { name: "b Trajectory · T-001" });
-  expect(calls.some((c) => c.url === "/api/v1/runs/R/traces/T-001")).toBe(true);
-  expect(calls.some((c) => c.url === "/api/v1/runs/R/traces/T-014")).toBe(false);
-});
-
-test("LogView shows the tail, its size, and a close link", async () => {
-  mockApi({
-    "GET /api/v1/runs/R/logs?stream=stderr": { stream: "stderr", text: "Traceback: boom\n", offset: 1500, size: 1500 },
-  });
-  renderWithClient(<LogView runId="R" stream="stderr" letter="a" />);
-  const region = screen.getByRole("region", { name: "a stderr" });
-  expect((await within(region).findByText("Traceback: boom")).tagName).toBe("PRE");
-  expect(region.querySelector(".aside")?.textContent).toBe("1.5 KB");
-  expect(within(region).getByRole("link", { name: "close" }).getAttribute("href")).toBe("/r/R");
 });
 
 describe("bounded visible run curve requests (PERF-F9c)", () => {
@@ -213,76 +100,11 @@ describe("bounded visible run curve requests (PERF-F9c)", () => {
     });
   });
 
-  test("more than 100 displayed names split without truncation or an unfiltered request", async () => {
+  test("more than 100 displayed names split without truncation", () => {
     const names = Array.from({ length: 205 }, (_, i) => `metric_${i}`);
     const specs = runViewPanels([{ type: "curves", title: "metrics" }], undefined, names);
     expect(specs.map((p) => p.data?.metrics?.length)).toEqual([100, 100, 5]);
     expect(specs.flatMap((p) => p.data?.metrics ?? [])).toEqual(names);
     expect(specs.map((p) => p.title)).toEqual(["Metrics · 1–100", "Metrics · 101–200", "Metrics · 201–205"]);
-    expect(kindPanelCount(specs)).toBe(3);
-    const calls = mockApi({
-      "POST /api/v1/tasks/p/t/views/query": {
-        panels: specs.map((p) => ({ type: "curves", title: p.title, rows: p.data?.metrics?.map((name) => ({ name })), meta: {} })),
-      },
-    });
-    renderWithClient(<KindPanels project="p" task="t" runId="R" specs={specs} startIndex={0} />, {
-      registry: fakeRegistry(["curves"]),
-    });
-    await screen.findByRole("region", { name: "c Metrics · 201–205" });
-    const body = calls.find((c) => c.method === "POST")?.body as { view: { panels: PanelSpec[] } };
-    expect(body.view.panels.flatMap((p) => p.data?.metrics ?? [])).toEqual(names);
-    expect(body.view.panels.every((p) => p.data?.max_points === 500 && p.data.filter?.run_id === "R")).toBe(true);
-    expect(screen.getAllByTestId("panel-curves").map((p) => p.textContent)).toEqual([
-      "Metrics · 1–100:100", "Metrics · 101–200:100", "Metrics · 201–205:5",
-    ]);
   });
-});
-
-test("trace-first run views keep the trajectory first and compare its selected example", async () => {
-  mockApi({ ...traceRoutes("T-014"), "POST /api/v1/tasks/p/t/views/query": { panels: [
-    { type: "grid", title: "Comparison", rows: [], meta: {} },
-  ] } });
-  renderWithClient(<KindPanels project="p" task="t" runId="R" currentGroupId="config-R"
-    specs={[{ type: "trace", title: "Trajectory" }, { type: "grid", title: "Comparison" }]} startIndex={2} />, {
-    registry: { ...fakeRegistry(["trace"]),
-      grid: ({ selectedItemId, currentGroupId }: { selectedItemId?: string; currentGroupId?: string }) =>
-        <p>{`${selectedItemId ?? "none"}/${currentGroupId ?? "none"}`}</p>,
-    },
-  });
-  await screen.findByText("T-014/config-R");
-  expect(screen.getAllByRole("region").map((r) => r.getAttribute("aria-label"))).toEqual([
-    "c Trajectory · T-014", "d Comparison",
-  ]);
-});
-
-
-test("trace selection loading and no traces never fall back to all grid targets", async () => {
-  let release!: (traces: typeof TRACES) => void;
-  const pending = new Promise<typeof TRACES>((resolve) => { release = resolve; });
-  mockApi({
-    "GET /api/v1/runs/R/traces": () => pending,
-    "POST /api/v1/tasks/p/t/views/query": { panels: [{ type: "grid", title: "Comparison", rows: [{ item_id: "other" }], meta: {} }] },
-  });
-  const { client } = renderWithClient(<KindPanels project="p" task="t" runId="R"
-    specs={[{ type: "trace", title: "Trajectory" }, { type: "grid", title: "Comparison" }]} startIndex={0} />,
-    { registry: fakeRegistry(["grid", "trace"]) });
-  await waitFor(() => expect(client.getQueryCache().getAll().some((q) => q.state.status === "success")).toBe(true));
-  expect(screen.queryByTestId("panel-grid")).toBeNull();
-  await act(async () => { release([]); });
-  expect(await screen.findByText("No traced example available for comparison")).toBeTruthy();
-  expect(screen.queryByTestId("panel-grid")).toBeNull();
-});
-
-test("the URL-selected example also controls the current-target comparison", async () => {
-  mockApi({ ...traceRoutes("T-001"), "POST /api/v1/tasks/p/t/views/query": { panels: [
-    { type: "grid", title: "Comparison", rows: [], meta: {} },
-  ] } });
-  renderWithClient(<KindPanels project="p" task="t" runId="R" example="T-001" currentGroupId="g"
-    specs={[{ type: "trace", title: "Trajectory" }, { type: "grid", title: "Comparison" }]} startIndex={0} />, {
-    registry: { ...fakeRegistry(["trace"]),
-      grid: ({ selectedItemId }: { selectedItemId?: string }) => <p>{`compare ${selectedItemId}`}</p>,
-    },
-  });
-  expect(await screen.findByText("compare T-001")).toBeTruthy();
-  expect(await screen.findByRole("region", { name: "a Trajectory · T-001" })).toBeTruthy();
 });

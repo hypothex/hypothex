@@ -3,8 +3,8 @@ Web UI
 
 ``hx serve`` serves the web UI and the API on the same port (default
 ``http://127.0.0.1:7777``). The UI reads everything through ``/api/v1`` and stays live
-over the ``/api/v1/ws`` event stream: a new run, score, note or status change refreshes
-the page you are looking at, without a reload.
+over the ``/api/v1/ws`` event stream: a new run, score, note, rename or status change
+refreshes the page you are looking at, without a reload.
 
 A new tab starts its event stream after the hub's newest event, then refreshes its
 page reads once. This covers changes made while the page was opening without
@@ -23,30 +23,266 @@ loopback ``--no-auth`` servers open without a token.
 Replacing the credential stops pending action retries and remaining seed launches;
 newly selected credentials apply only to new actions. Already accepted runs continue.
 
+Try it on demo data (a fresh home in ``/tmp``, fake hosts on this machine):
+
+.. code-block:: bash
+
+   uv run hx --home /tmp/hx-demo demo --with-hosts
+   uv run hx --home /tmp/hx-demo serve
+
+Shell
+-----
+
+Every page has the same frame. The left nav (216 px) lists **Home**, **Hosts** and
+**Queue** with counts, then each project with its tasks, their run counts and a spinner on
+tasks with running runs; ``⌘.`` (``Ctrl .``) hides or shows it. The top bar has the
+breadcrumb (project / task / run), the search field (``⌘K``), the ``live`` indicator and
+``New run`` (the Launch dialog). The colour-mode button at the foot of the nav switches
+light and dark mode; both are equal.
+
+Pages show numbers, not prose: tooltips explain a value, a glyph or a disabled button.
+
+Colour rule
+~~~~~~~~~~~
+
+On a task page, one run identity has one colour in the run list, every chart, the Runs
+table and the run page header. An identity is a config (``By config``, the default) or a
+run (``Each run``). The visible identities take the 8 palette colours in list order; the
+9th and later are neutral grey, and a hidden one shows an empty swatch. Hiding, filtering
+or sorting the list therefore changes the colours, and every panel follows at once. Other chrome is grey;
+colour also marks status (always with an icon) and best (green). Home tables show no
+identity colour: colour belongs to one task.
+
+Run names
+~~~~~~~~~
+
+A run is named by the params that differ inside its task (``lr 3e-4 · beam 10``,
+``db v3``), computed on the hub so the UI, CLI and MCP agree; a run view adds its seed
+(``· seed 2``). Two configs with the same visible params get the commit as well
+(``lr 1e-4 · beam 10 · @b82f04c``). When nothing differs, the name is the first clause of the
+hypothesis, then the first tag, then the short run id.
+
+Rename a run in place: click the name on the run page, or the pencil (or a double click)
+on a run list row. Enter saves, Escape cancels; a name is 1–80 characters on one line.
+``Reset name`` (or saving the derived name or an empty name) drops the name. An invalid
+name stays in the field with the error beside it; a name the hub refuses (for example,
+its host is down) goes back to the old one and the error stays beside it. Renaming a
+config renames each of its runs; a config shows the name of its most recently renamed run. A run on a host is
+renamed on that host, through the hub. The same rename is ``hx rename`` (see
+:doc:`cli`), the MCP tool ``rename_run`` (see :doc:`mcp`) and
+``POST /api/v1/runs/{run_id}/name`` (see :doc:`http_api`).
+
 Screens
 -------
 
-- **Overview** (``/``): one-line status, hosts, runs by launcher, ideas, running runs,
-  recent failures (with ``Open stderr``), and projects. Ideas are grouped by task, and
-  each task has its own x axis, because tasks use different metrics. With hosts in
-  ``environments.yaml`` (see :doc:`remote`), the headline counts running and waiting runs
-  and names stale hosts, for example ``12 running, 11 waiting. dgx stale 4m``. A host
-  unreachable for longer than ``stale_banner_hours`` (top level in ``environments.yaml``,
-  default 24) gets a banner (``dgx unreachable 1d``); its runs stay ``stale``, never
-  ``lost``. Cost today counts every run, the hub's own too.
-- **Hosts** (Overview panel a): the hub itself (``local``, chip ``hub``), then one row per
-  host with its state, its hx version (``≠`` when it differs from the hub's), one cell per
-  GPU (agent run, human run, free, not hx), SLURM running and pending jobs, queue length,
-  ``$/GPU-h`` and cost today. GPU use refreshes every 10 s. The hub reports GPUs only for a
-  connected host; when a host goes stale the page keeps the cells it last saw, greyed, with
-  ``as of HH:MM`` (a page opened after the host went stale has none to show).
-- **Task** (``/t/<project>/<task>?view=<name>``): the task's views as tabs. ``overview``
-  is the preset for the task kind; every other tab is a saved view (see :doc:`views`).
-  ``+ view`` opens the view editor; ``New run`` opens the Launch dialog. The project's
-  sweeps are listed under the tabs, each with its run count and best config, linking its
-  Sweep page. Each leaderboard group shows its cost: dollars, GPU-h and agent time
-  (``$6.51 · 11 GPU-h · 4m 10s``), with GPU and API dollars in the tooltip.
-- **Launch dialog** (``New run`` on a Task page, ``Rerun sweep`` on a Sweep page): pick a
+Home
+~~~~
+
+.. image:: _static/ui/home-light.png
+   :alt: Home with the status strip, Running now, Hosts, Tasks and Recent runs
+
+**Home** (``/``): a status strip (projects with live runs, running, queued, failed today,
+lost, GPUs busy, spent today), then **Running now** (run, task, elapsed time, latest step,
+latest primary value, host, launcher; the ``queued`` count links the Queue), **Hosts** (one
+row per host with a GPU cell per device and cost today), **Tasks** (task, project, kind,
+primary metric with direction, best, 7-day Δ, best over time, runs, now) and **Recent
+runs** (time, run, task, status with the reason, score, Δ best, launcher, hypothesis;
+failures have ``Open stderr`` and a copy button for the stderr path). Rows link to their
+task or run. With hosts in ``environments.yaml`` (see :doc:`remote`), a host unreachable
+for longer than ``stale_banner_hours`` (top level in ``environments.yaml``, default 24)
+gets a banner (``dgx unreachable 1d``); its runs stay ``stale``, never ``lost``. Runs report
+no total step count, so Running now has no progress bar or ETA.
+
+Before the first run, Home shows ``No runs yet`` with three commands (``hx init``,
+``hx run``, ``hx demo --with-hosts``) and links to the docs, the agent skill and adding a host.
+
+Task
+~~~~
+
+**Task** (``/t/<project>/<task>?tab=<tab>``): a header with the task name, its kind and one
+facts line (primary metric and direction, the best config's value and name, run and config
+counts, running and queued runs, dataset; the Primary tooltip lists the metric versions)
+and ``Re-evaluate all``. The tabs are ``charts`` (the default, no ``tab=``), ``runs``,
+``sweeps``, ``examples``, then one tab per saved view (``view:<name>``, see :doc:`views`)
+and ``+ View`` (the view editor). An old ``?view=<name>`` link opens that view's tab. On a
+task page ``New run`` starts from the best config's latest run with the next unused seeds.
+
+.. image:: _static/ui/task-light.png
+   :alt: Task Charts tab with the runs sidebar, Scores and score vs GPU-hours
+
+**Charts** has two columns: the runs sidebar and the panels.
+
+The *runs sidebar* (340 px) is the one place that chooses runs; every panel on the page
+follows it. It has the filter field, Group (``By config`` | ``Each run``), Sort and
+Columns (the score each row shows), a ``N superseded hidden`` chip when runs carry the
+``superseded`` tag (hidden by default; press it to show them) and ``N/M shown``. A row has
+the colour swatch, the name, a sub-line (launcher, seed count or start time,
+running/queued/failed counts, ``final`` in green) and the value (± sd for a config). The
+eye hides the identity in every panel (an empty swatch, muted text). Hovering or focusing
+a row highlights its lines in every chart. Click a row or press Enter on it to open its
+run (a config opens its latest run); a modified or middle click opens a new tab.
+
+Filter syntax (tokens split on spaces; all must hold; case-insensitive; spaces around
+``=``, ``!=`` and ``:`` are ignored, so ``lr = 3e-4`` is ``lr=3e-4``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Token
+     - Keeps runs
+   * - ``tag:final``
+     - with that tag
+   * - ``status:running``
+     - with that status (``finished``, ``running``, ``queued``, ``failed``, ``killed``,
+       ``lost``)
+   * - ``by:agent``
+     - by that launcher (``agent``, ``tuner`` and ``agent:tuner`` all match
+       ``agent:tuner``)
+   * - ``name:db*``
+     - whose display name matches
+   * - ``lr=3e-4`` or ``lr:3e-4``
+     - whose param has that value; numbers compare by value, so ``lr=3e-4`` matches
+       ``0.0003``
+   * - ``model!=resnet*``
+     - where that test fails; ``!=`` negates any form above (``tag!=final``)
+   * - ``*``
+     - matches any run of characters inside a value (``model:resnet*``)
+   * - ``beam``
+     - (a bare word) whose display or derived name contains it, or whose run id starts
+       with it
+
+The run list is in the URL, so a link shares it: ``filter=`` (the filter text),
+``group=run`` (Each run), ``sort=<key>:<asc|desc>``, ``hide=<id>,<id>`` (hidden
+identities), ``sup=1`` (show superseded runs) and ``col=<key>`` (the sidebar's value
+column). Defaults stay out of the URL.
+
+The *panel toolbar* has panel search (by title) and, when runs log step metrics,
+Smoothing (EMA, value shown; raw lines stay faint), X (``step``, ``wall time``,
+``relative time``) and Seeds (``mean``, ``mean + band``, ``each seed``; Repeats on system
+benchmarks), then ``+ Panel`` and ``Save as view``. Panels sit in collapsible sections
+(open state kept per task); a panel's tools show on hover: Full screen (Escape leaves
+it), Edit and More.
+
+- **Scores**: the primary metric as a dot with its 95% interval and the seed dots, one
+  row per visible identity on one axis, the best interval as a green band; training tasks
+  add score vs GPU-hours with the Pareto front. Single-seed runs without per-example
+  scores show no interval; the tooltip says so.
+- **Step metrics**: one line panel per logged metric, sectioned by the prefix before the
+  first ``/`` (``train/``, ``val/``, ``sys/``). The crosshair is shared in a section; the
+  tooltip lists every run at that step, sorted by value (at most 8).
+- **Score keys** (more than one score key): keys split as ``<prefix>/<A>.<B>.<metric>``;
+  one section per metric (the primary's first and open, the others closed), one bar panel
+  per ``<A>.<B>`` (bars from zero in run colours, the value at the bar end, the best in
+  green). Keys without dots form one section with a panel per key.
+- **Compare** (eval tasks whose keys name two or more datasets; shown first): datasets
+  side by side. Inside the panel pick Datasets (default the first four), Model (default
+  the primary's; absent for ``<dataset>.<metric>`` keys) and Metrics (default the
+  primary's); a chip group always keeps one value. ``Table | Bars`` switches between a
+  table (one row per dataset, grouped under a metric row when several metrics are
+  chosen; one column per visible run; the best value per row in green) and grouped bars
+  (one facet per metric, zero-based, with a legend). ``+ Panel`` → Compare adds another
+  one. A task can name the key parts in ``hypothex.yaml`` with
+  ``score_keys: "{dataset}.{model}.{metric}"`` (see :doc:`project_file`); the controls
+  then use those names.
+- The task kind's preset panels (training curves, agent evaluation scatter, grid and
+  trace, system benchmark distributions, agent iteration versions) in the same chrome.
+
+``Save as view`` writes the shown panels, Compare panels included (view panel type
+``compare``, see :doc:`views`), as a new view of the task and opens its tab. A view name
+that is already taken is refused.
+
+.. image:: _static/ui/eval-light.png
+   :alt: Eval task with the Compare table and score key bars
+
+**Runs** (``tab=runs``): the full table with the same filter and Group. Columns: select,
+swatch, name, status (counts per state for a config), each param that varies, the primary
+mean ± sd, 95% CI, Δ best (muted inside the best interval), launcher, host, GPU-h,
+started, commit and tags. A config expands to its seeds; headers sort; ``Columns`` hides
+columns (kept per task). Actions on the checked rows: ``Compare`` (show only them on the
+Charts tab), ``Tag``, ``Archive`` and ``Rename`` (one config or run at a time).
+
+.. image:: _static/ui/runs-light.png
+   :alt: Runs tab table grouped by config
+
+**Sweeps** (``tab=sweeps``; ``/s/<project>/<sweep_id>`` opens it with ``sweep=<id>``): the
+task's sweeps, newest first, and the chosen sweep: its id, grid shape, hosts, GPUs,
+launcher, start time and progress; the best cell, its 95% CI, finished, running, queued
+and failed runs, cost and ETA; then **Parallel coordinates** (one line per finished run,
+coloured by the primary metric), the mean per cell (a heat table for two params, a
+sortable table otherwise), **What matters** (share of variance per param), **Best cell**
+against the next one, and the sweep's runs on their hosts. Actions: ``Rerun sweep`` (the
+best cell again, in the Launch dialog), ``Copy as CLI`` (the same ``hx sweep``),
+``Cancel queued``, ``Add seeds`` (new seeds for every cell; after a failed try it proposes
+the same seeds again, not the ones after them, and the hub starts only their missing runs)
+and ``Resume``. Durable issuance state is separate from observed run counts. ``Resume``
+uses the server's reported seeds; ``Cancel queued`` also drains accepted members that are
+not mirrored yet, even after interrupted or incomplete issuance. Resume and Add seeds stay
+disabled while cancellation is pending or settling.
+
+.. image:: _static/ui/sweep-light.png
+   :alt: Sweeps tab with parallel coordinates and the mean per cell
+
+**Examples** (``tab=examples``): two finished configs side by side, as on the Examples
+page.
+
+Run
+~~~
+
+**Run** (``/r/<run_id>?tab=<tab>``): a header with the identity colour (the same as on the
+task page), the name, a status pill, ``Compare`` (the Examples page against the best other
+config), ``Rerun`` and ``⋯`` (``Re-infer``, ``Re-evaluate``, ``Stop``, ``Archive``), then the
+hypothesis. A renamed run shows its derived name in one muted line. Tabs: ``Overview``,
+``Charts`` (every step metric, this run in colour and its seeds grey), ``Logs`` (stdout,
+stderr or the supervisor log), ``Files`` and ``Examples``.
+
+.. image:: _static/ui/run-light.png
+   :alt: Run page Overview with scores, where it ranks, files and the properties sidebar
+
+Overview: **Scores** (one tile per metric version; the primary first, older versions
+marked; Δ against the config mean, muted when under one sd of its seeds), **Where it
+ranks** (this run, its sibling seeds, the other configs and the best config's 95% interval
+on one axis, with a summary such as ``2nd of 3 seeds · config is best of 12``), up to three
+**Curves**, the kind's run panels and **Files** (run folder, logs, predictions,
+checkpoints; Copy on hover). The properties sidebar (300 px) lists status (with exit code
+or reason), launcher, host and GPUs, started, duration, commit, sweep, cost, then
+**Config** (values that vary in the task tinted with the run's colour), **Tags** (Add),
+**Notes** (inline editor), and the run id and folder.
+
+A run on a host also shows where it runs (host, ``CUDA_VISIBLE_DEVICES``, SLURM job and
+node), its place in the host queue while it waits, ``stale`` with the time since the hub
+last heard from the host (never ``lost``: only the host decides that), why it was lost
+(the reason from its ``run.lost`` event when the page saw that event, else what the
+record says: job, node, end time, exit code), and its cost (``—`` when the host has no
+``usd_per_gpu_hour``, so its GPU hours have no price). Times since a moment (waiting,
+wall, unreachable) move on every 10 s while the run is not over, also when the host sends
+nothing new. ``Re-infer`` is enabled only after the task confirms an ``infer`` stage;
+``Re-evaluate`` reports how many runs were re-scored or skipped, with reasons. ``Stop``
+asks for a second click. An old ``?log=stderr`` link opens the Logs tab on that stream;
+``?example=<id>`` picks a traced example on agent tasks. A missing run shows ``Not found``
+with a link to Home. Live SLURM GPU-hours use the requested GPU count when the job reports
+no device indices.
+
+Hosts and Queue
+~~~~~~~~~~~~~~~
+
+**Hosts** (``/hosts``): the hub itself (``local``, tag ``hub``), then one row per host
+with its kind, GPUs, state, its hx version (``≠`` when it differs from the hub's), one cell
+per GPU (agent run, human run, free, not hx), SLURM running and pending jobs, queue length
+(links the Queue), ``$/GPU-h`` and cost today. ``Connect``, ``Reconnect`` and
+``Disconnect`` act on one host; ``Reload`` reads ``environments.yaml`` again (after
+``hx hosts add``, ``map`` or ``rm``). GPU use refreshes every 10 s. The hub reports GPUs only
+for a connected host; when a host goes stale the page keeps the cells it last saw,
+greyed, with ``as of HH:MM``.
+
+**Queue** (``/queue``): every queued run, grouped by host in queue order, with its
+position, task, launcher, GPUs, waiting time and status. ``Stop`` removes a run from the
+queue after a second click.
+
+Other screens
+~~~~~~~~~~~~~
+
+- **Launch dialog** (``New run`` in the top bar, ``Rerun sweep`` on a sweep): pick a
   host (the hub first, then every host with its free GPUs, queue and state; a host that is
   stale, still installing hx, or has no path for the project is disabled and says why),
   GPUs per run and ``wait for GPUs`` (SSH hosts) or partition, time and account (SLURM
@@ -64,33 +300,6 @@ Screens
   ``Rerun sweep`` pins the template run's commit when that run had no uncommitted changes.
   ``New run`` proposes seeds after every seed of the template's config, archived runs
   included.
-- **Sweep** (``/s/<project>/<sweep_id>``): the best cell and its score as the headline,
-  progress, cost and ETA, a params × metric heat table (a sortable table for one param,
-  more than two, or sampled ranges), seed dots with 95% intervals (dots only from the
-  cell's own runs), and the sweep's runs on their hosts. Actions: ``Copy as CLI`` (the
-  same ``hx sweep``), ``Cancel queued``, ``Add seeds`` (new seeds for every cell; after a
-  failed try it proposes the same seeds again, not the ones after them, and the hub starts
-  only their missing runs), and ``Rerun sweep`` (the best cell again, in the Launch
-  dialog). Durable issuance state is separate from observed run counts. ``Resume``
-  uses the server's reported seeds; ``Cancel queued`` also drains accepted members
-  that are not mirrored yet, even after interrupted or incomplete issuance.
-  Resume/Add seeds remain disabled while cancellation is pending or settling.
-- **Run** (``/r/<run_id>``): the hypothesis as title, status, stat strip, the task kind's
-  run panels, where everything is (code, data, run folder, logs, predictions,
-  checkpoints), scores by metric version, notes, and actions. ``?log=stderr`` opens a log
-  tail; ``?example=<id>`` picks a traced example on agent tasks. A run on a host also
-  shows where it runs (host, ``CUDA_VISIBLE_DEVICES``, SLURM job and node), its place in
-  the host queue while it waits, ``stale`` with the time since the hub last heard from the
-  host (never ``lost``: only the host decides that), why it was lost (the reason
-  from its ``run.lost`` event when the page saw that event, else what the record says: job,
-  node, end time, exit code), and its cost (``—`` when the host has no
-  ``usd_per_gpu_hour``, so its GPU hours have no price). Times since a moment (waiting,
-  wall, unreachable) move on every 10 s while the run is not over, also when the host
-  sends nothing new. The Queue panel lists the host's whole queue.
-  ``Re-infer`` is enabled only after the task confirms an ``infer`` stage;
-  ``Re-evaluate`` reports how many runs were re-scored or skipped, with reasons.
-  A missing run shows ``Not found`` with a link back to all projects. Live SLURM
-  GPU-hours use the requested GPU count when the job reports no device indices.
 - **Examples** (``/x/<a>/<b>?metric=<name>``): what run B fixes and breaks against run A,
   with the paired sign test.
 - **View editor** (``/t/<project>/<task>/edit/<view>``, ``new`` for a new view): YAML on
@@ -98,30 +307,50 @@ Screens
   ``.hypothex/views/<task>/<name>.yaml``) or Copy as CLI. A new view cannot take the
   name of a view that is already there: open that view to edit it.
 
-Press ``⌘K`` (``Ctrl K`` on Linux and Windows) to find a run, task or path. The
-colour-mode button in the header switches light and dark mode.
+Keyboard
+--------
 
-Paths wrap after slashes, preserving each segment and the exact copied path. Long
-project and task names wrap in the project table. Error messages omit the API
-transport prefix on screen; the complete message remains in the tooltip.
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
 
-Run charts request only the metric names they display, with at most 500 points per
-run and metric. Implicit over-time charts leave out ``sweep/*`` series and their
-step-axis metric; explicitly named series are preserved. Histories with more than
-100 displayed metrics are divided into labeled panels so no metric is dropped.
-Leaderboard ticks follow the plot width. Crowded scatter labels use a numbered
-key, and bottom or top legends reduce their columns only when they overflow the
-available space.
+   * - Key
+     - Does
+   * - ``⌘K`` (``Ctrl K``)
+     - The command palette: go to Home, Hosts, Queue, a task or a run, copy a path, switch
+       colour mode. Runs are listed by name; two or more typed characters also find renamed
+       runs by their name or run id (``db v3``). Arrow keys move, Enter opens, Escape
+       closes.
+   * - ``⌘.`` (``Ctrl .``)
+     - Hide or show the left nav.
+   * - Tab, Enter
+     - Rows of the runs sidebar are focusable; Enter opens the run. The eye, chips and
+       segments are buttons with ``aria-pressed``.
+   * - Enter, Escape
+     - In a rename field: save, cancel.
+   * - Escape
+     - Clears the filter field; closes a menu; leaves a full-screen panel.
 
-Recorded task details
----------------------
+Paths wrap after slashes, preserving each segment and the exact copied path. Error
+messages omit the API transport prefix on screen; the complete message remains in the
+tooltip.
+
+The task page reads one request, ``GET /api/v1/tasks/{project}/{task}/runs`` (every run
+with its name, params, scores and config group), plus the leaderboard and the views. Run
+charts request only the metric names they display, with at most 500 points per run and
+metric. Implicit over-time charts leave out ``sweep/*`` series and their step-axis
+metric; explicitly named series are preserved. Charts draw at their real pixel width, so
+text stays the same size at every window width; axes use 1, 2, 2.5 or 5 × 10ⁿ ticks.
+
+Kind panels
+-----------
 
 Examples outcome tables wrap long hypothesis labels within their own panel,
 including labels without spaces. Counts and right/wrong labels remain visible
 beside the sign-test chart at narrow widths. The Examples headline and run
 summaries also wrap oversized tokens without shortening the displayed labels.
 
-The task Metric selector requests a new ranking for the selected recorded
+A view tab's Metric selector requests a new ranking for the selected recorded
 ``metric/key``. Direction, units, uncertainty and the headline follow that metric.
 Seeds (Repeats for system benchmarks) toggles the leaderboard seed or repeat
 marks while retaining the authored test-set interval. Selecting a run on training, agent evaluation, agent iteration or system
@@ -225,3 +454,17 @@ leaves its fake hosts and runs behind), never the other demo server's.
 ``bun e2e/shutdown-check.ts`` stops the hosts demo three ways (SIGTERM, as Playwright
 does; the hub killed; the hub stuck past the shutdown wait) and fails if a demo run or
 fake host is left running.
+
+Screenshots
+-----------
+
+The images on this page come from ``ui/scripts/screenshots.ts``: every screen in light and
+dark at 1440×900, written to ``docs/_static/ui/<screen>-<theme>.png``. Run it against a
+fresh demo hub in a ``/tmp`` home, served without a token:
+
+.. code-block:: bash
+
+   export HYPOTHEX_HOME=/tmp/hx-shots HYPOTHEX_SSH=false HYPOTHEX_SCP=false
+   uv run hx demo --with-hosts
+   uv run hx serve --port 7777 --no-auth       # leave running
+   cd ui && HX_URL=http://127.0.0.1:7777 bun scripts/screenshots.ts

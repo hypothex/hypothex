@@ -25,16 +25,20 @@ from hypothex.core.leaderboard import (
     build_leaderboard,
     cached_leaderboard,
     group_id_for,
+    key_higher_is_better,
     pick_field,
     seed_group_label,
     seed_group_labels,
 )
+from hypothex.core.naming import group_names
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus, ScoreRecord
+from hypothex.core.scorekeys import split_score_key
 from hypothex.core.seeds import summarize
 from hypothex.core.sources import group_labels, iter_rows, metric_points, select_fields
 from hypothex.core.stats import ecdf_points, lttb, quantile
 from hypothex.core.store import ProjectEntry
+from hypothex.core.taskruns import derived_names
 from hypothex.core.views import (
     VERSION_REF,
     PanelSpec,
@@ -1038,13 +1042,13 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
             if series:
                 names_seen.setdefault(name)
             xy = [
-                (x, p.value)
+                (x, p.value, p.t)
                 for p in series
                 if (x := p.step if x_of is None else x_of.get(p.step)) is not None
             ]
             if xy:
-                last_x = max([x for x, _ in xy] + ([] if last_x is None else [last_x]))
-            for i in lttb([x for x, _ in xy], [v for _, v in xy], limit):
+                last_x = max([x for x, _, _ in xy] + ([] if last_x is None else [last_x]))
+            for i in lttb([x for x, _, _ in xy], [v for _, v, _ in xy], limit):
                 rows.append(
                     {
                         "run_id": run.run_id,
@@ -1053,6 +1057,7 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
                         "name": name,
                         "step": xy[i][0],
                         "value": xy[i][1],
+                        "t": xy[i][2],
                     }
                 )
             if "loss" in name.lower():
@@ -1184,7 +1189,7 @@ def _solved(scope: _Scope, run: RunRecord) -> int | None:
     Count the examples a run solved on the task's primary metric.
 
     ``None`` when the run has no per-example file or its field (chosen by
-    ``pick_field``, as for test-set noise) is not binary.
+    ``pick_field``) is not binary.
     """
     primary = _primary_rows(scope, run)
     if primary is None:
@@ -1429,8 +1434,8 @@ def _y_higher_is_better(scope: _Scope, y_ref: str) -> bool:
     Direction of a scatter y reference.
 
     ``usage.*`` (cost, tokens, time) is lower-is-better; the task's primary
-    uses the leaderboard's direction; another configured metric uses its
-    ``higher_is_better``; any other name is lower-is-better when it names a
+    uses the leaderboard's direction; another configured metric's key uses
+    ``leaderboard.key_higher_is_better``; any other name is lower-is-better when it names a
     loss or an error.
     """
     if y_ref.startswith("usage."):
@@ -1440,9 +1445,9 @@ def _y_higher_is_better(scope: _Scope, y_ref: str) -> bool:
     name, _ = parse_metric_version(head)
     if f"{name}/{key or 'value'}" == board.primary:
         return board.higher_is_better
-    metrics = scope.entry.config.metrics
-    if name in metrics:
-        return metrics[name].higher_is_better
+    config = scope.entry.config
+    if name in config.metrics:
+        return key_higher_is_better(config, config.tasks[scope.task], f"{name}/{key or 'value'}")
     return not _lower_is_better(y_ref)
 
 
@@ -1725,6 +1730,105 @@ def _solved_column(rows: list[dict[str, Any]], prefix: str) -> str | None:
     return None
 
 
+def _compare(scope: _Scope, panel: PanelSpec) -> PanelResult:
+    """
+    Score means of chosen datasets and metrics (of one model), one row per group and key.
+
+    The values are the leaderboard's group means (``LeaderboardRow.scores``, the
+    task's current metric versions), so they match the Scores panels and the
+    workspace's ``TaskGroup.scores``. Each key is split into dataset, model and
+    metric (``scorekeys.split_score_key`` with the task's ``score_keys`` names).
+    A key is kept when its dataset is in ``data.datasets``, its metric in
+    ``data.metrics`` and, when ``data.model`` is set, its model is that model.
+
+    Parameters
+    ----------
+    scope : _Scope
+        The panel's runs and task-level data.
+    panel : PanelSpec
+        The compare panel.
+
+    Returns
+    -------
+    PanelResult
+        One row ``{dataset, model, metric, key, run_id, group_id, name, value,
+        higher_is_better}`` per kept key and ranked group (``run_id`` is the
+        group's latest run, ``name`` the distinct group name,
+        ``naming.group_names``, ``higher_is_better`` the key's direction,
+        ``leaderboard.key_higher_is_better``), ordered by the selected metrics,
+        then datasets, then rank; at most ``MAX_TABLE_ROWS``. ``meta`` holds the
+        selection, ``render`` (``table`` or ``bars``), ``key_parts``, ``options``
+        (every dataset, model and metric the groups have), ``higher_is_better``
+        (a bool: the kept rows' direction when they all agree, else the task
+        primary's) and ``total``.
+    """
+    config = scope.entry.config
+    spec = config.tasks[scope.task]
+    names = spec.key_parts
+    datasets, metrics = panel.data.datasets or [], panel.data.metrics or []
+    model = panel.data.model
+    board = scope.board()
+    every = scope.ctx.index.list_runs(
+        project=scope.entry.project, task=scope.task, include_archived=True, limit=None
+    )
+    by_id = {r.run_id: r for r in every}
+    derived = derived_names(scope.ctx, scope.entry.project, scope.task)
+    options: dict[str, set[str]] = {"datasets": set(), "models": set(), "metrics": set()}
+    directions: dict[str, bool] = {}
+    kept: list[tuple[int, int, int, dict[str, Any]]] = []
+    members = {row.group_id: [by_id[i] for i in row.run_ids if i in by_id] for row in board.rows}
+    labels = group_names({g: m for g, m in members.items() if m}, derived)
+    for rank, row in enumerate(board.rows):
+        label = labels.get(row.group_id, row.label)
+        for key, stat in row.scores.items():
+            parts = split_score_key(key, names)
+            if parts is None:
+                continue
+            options["datasets"].add(parts.dataset)
+            options["metrics"].add(parts.metric)
+            if parts.model is not None:
+                options["models"].add(parts.model)
+            if parts.dataset not in datasets or parts.metric not in metrics:
+                continue
+            if model is not None and parts.model != model:
+                continue
+            if key not in directions:
+                directions[key] = key_higher_is_better(config, spec, key)
+            item = {
+                "dataset": parts.dataset,
+                "model": parts.model,
+                "metric": parts.metric,
+                "key": key,
+                "run_id": row.latest_run_id,
+                "group_id": row.group_id,
+                "name": label,
+                "value": stat.mean,
+                "higher_is_better": directions[key],
+            }
+            kept.append((metrics.index(parts.metric), datasets.index(parts.dataset), rank, item))
+    kept.sort(key=lambda entry: entry[:3])
+    agreed = set(directions.values())
+    higher = agreed.pop() if len(agreed) == 1 else board.higher_is_better
+    meta: dict[str, Any] = {
+        "datasets": datasets,
+        "model": model,
+        "metrics": metrics,
+        "render": "bars" if panel.render == "bars" else "table",
+        "key_parts": names,
+        "options": {k: sorted(v, key=_natural_key) for k, v in options.items()},
+        "higher_is_better": higher,
+        "total": len(kept),
+    }
+    if len(kept) > MAX_TABLE_ROWS:
+        meta["warnings"] = [f"showing the first {MAX_TABLE_ROWS} of {len(kept)} rows"]
+    return PanelResult(
+        type="compare",
+        title=panel.title,
+        rows=[item for *_, item in kept[:MAX_TABLE_ROWS]],
+        meta=meta,
+    )
+
+
 _HANDLERS = {
     "stat_strip": _stat_strip,
     "leaderboard": _leaderboard,
@@ -1735,4 +1839,5 @@ _HANDLERS = {
     "table": _table,
     "vega_lite": _vega_lite,
     "trace": _trace,
+    "compare": _compare,
 }

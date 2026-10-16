@@ -568,6 +568,7 @@ def test_curves_rows_spikes_kills_and_checkpoints(ctx: Context, toy_repo: Path) 
         "name": "train/loss",
         "step": 22,
         "value": 6.0,
+        "t": None,  # the rows logged no wall time
     }
     # step 22: 6.0 > 5 x median(previous 20 values = 1.0); val/acc jumps are ignored (no "loss")
     assert result.meta["events"] == [
@@ -1094,6 +1095,30 @@ def test_scatter_meta_carries_y_direction_and_best_group(ctx: Context, toy_repo:
     assert meta({"x": "accuracy", "y": "usage.usd"}) == (False, "aaaa@c1")  # $0.1 wins
     assert meta({"x": "usage.usd", "y": "val/loss"}) == (False, "bbbb@c1")  # loss 0.1 wins
     assert meta({"x": "usage.usd", "y": "nothing"}) == (True, None)  # no rows
+
+
+def test_scatter_y_direction_uses_the_one_key_rule(ctx: Context, toy_repo: Path) -> None:
+    cfg_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["metrics"]["latency"] = {"version": "v1", "fn": "toymetrics:accuracy"}  # no direction
+    cfg["tasks"]["toy-acc"].update(
+        kind="system_bench", metrics=["latency", "accuracy"], primary="latency/p95"
+    )
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    rows = [("a1", "aaaa", 0.1, 90.0, 0), ("b1", "bbbb", 0.3, 30.0, 1)]
+    for rid, group, usd, p99, minute in rows:
+        rec = _run(ctx, toy_repo, rid, group, minute=minute, usage=UsageTotals(usd=usd))
+        for key, value in (("p95", p99 / 2), ("p99", p99)):
+            score = ScoreRecord(metric="latency", version="v1", key=key, value=value, created_at=T0)
+            ctx.add_score(rec, score)
+        _score(ctx, rec, 0.5)
+    data = {"x": "usage.usd", "y": "latency/p99"}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("scatter", data=data))
+    # unset latency on system_bench: p99 is lower-is-better, 30 ms wins
+    assert (result.meta["y_higher_is_better"], result.meta["best_group"]) == (False, "bbbb@c1")
+    data = {"x": "usage.usd", "y": "accuracy"}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("scatter", data=data))
+    assert result.meta["y_higher_is_better"] is True  # unset, no percentile: the default
 
 
 def test_scatter_uses_the_test_interval_only_at_the_board_version(
@@ -1741,3 +1766,176 @@ def test_stat_strip_reuses_primary_examples_for_cost_denominators(
     result = query_panel(ctx, "toy", "toy-acc", _panel("stat_strip", data={"metrics": refs}))
     assert len(result.rows) == len(refs)
     assert reads == [path]
+
+
+def _key_score(
+    ctx: Context, rec: RunRecord, key: str, value: float, metric: str = "accuracy"
+) -> None:
+    score = ScoreRecord(metric=metric, version="v1", key=key, value=value, created_at=utcnow())
+    ctx.add_score(rec, score)
+
+
+def test_compare_rows_hold_the_selected_datasets_metrics_and_model(
+    ctx: Context, toy_repo: Path
+) -> None:
+    a = _run(ctx, toy_repo, "a", "aaaa", params={"lr": "1"})
+    b = _run(ctx, toy_repo, "b", "bbbb", minute=1, params={"lr": "2"})
+    for rec, base in ((a, 1.0), (b, 2.0)):
+        _key_score(ctx, rec, "value", base / 10)  # the primary ranks b first
+        for dataset in ("set-1", "set-0", "set-2"):
+            _key_score(ctx, rec, f"{dataset}.m-a.top10", base)
+            _key_score(ctx, rec, f"{dataset}.m-b.top10", base + 10)
+        _key_score(ctx, rec, "set-1.m-a.max", base + 20)
+    q.rename_run(ctx, "b", "wide")
+    data = {"datasets": ["set-2", "set-1"], "model": "m-a", "metrics": ["top10"]}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("compare", data=data))
+    assert [(r["dataset"], r["group_id"], r["value"]) for r in result.rows] == [
+        ("set-2", "bbbb@c1", 2.0),
+        ("set-2", "aaaa@c1", 1.0),
+        ("set-1", "bbbb@c1", 2.0),
+        ("set-1", "aaaa@c1", 1.0),
+    ]
+    assert result.rows[1] == {
+        "dataset": "set-2",
+        "model": "m-a",
+        "metric": "top10",
+        "key": "accuracy/set-2.m-a.top10",
+        "run_id": "a",
+        "group_id": "aaaa@c1",
+        "name": "lr 1",
+        "value": 1.0,
+        "higher_is_better": True,
+    }
+    assert result.rows[0]["name"] == "wide"
+    assert (result.meta["render"], result.meta["higher_is_better"]) == ("table", True)
+    assert result.meta["options"] == {
+        "datasets": ["set-0", "set-1", "set-2"],
+        "models": ["m-a", "m-b"],
+        "metrics": ["max", "top10"],
+    }
+
+
+def test_compare_rows_of_two_configs_with_the_same_params_have_distinct_names(
+    ctx: Context, toy_repo: Path
+) -> None:
+    a = _run(ctx, toy_repo, "a", "aaaa", params={"lr": "3e-4"}, git=GitInfo(commit="aaaaaaa11"))
+    b = _run(
+        ctx, toy_repo, "b", "aaaa", minute=1, params={"lr": "3e-4"}, git=GitInfo(commit="bbbbbbb22")
+    )
+    c = _run(ctx, toy_repo, "c", "cccc", minute=2, params={"lr": "1e-3"})
+    for rec, value in ((a, 1.0), (b, 2.0), (c, 3.0)):
+        _key_score(ctx, rec, "value", value / 10)
+        _key_score(ctx, rec, "set-1.m.top10", value)
+    data = {"datasets": ["set-1"], "metrics": ["top10"]}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("compare", data=data))
+    assert [(r["group_id"], r["name"]) for r in result.rows] == [
+        ("cccc@c1", "lr 1e-3"),
+        ("aaaa@bbbbbbb", "lr 3e-4 · @bbbbbbb"),
+        ("aaaa@aaaaaaa", "lr 3e-4 · @aaaaaaa"),
+    ]
+
+
+def test_compare_is_one_row_per_group_with_its_seed_mean(ctx: Context, toy_repo: Path) -> None:
+    for rid, seed, value in (("s1", 1, 0.2), ("s2", 2, 0.4)):
+        _key_score(ctx, _run(ctx, toy_repo, rid, "aaaa", seed=seed), "set-1.m.top10", value)
+    data = {"datasets": ["set-1"], "metrics": ["top10"]}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("compare", data=data))
+    assert [(r["group_id"], r["run_id"]) for r in result.rows] == [("aaaa@c1", "s2")]
+    assert result.rows[0]["value"] == pytest.approx(0.3)
+
+
+def test_compare_without_a_model_keeps_every_model_and_renders_bars(
+    ctx: Context, toy_repo: Path
+) -> None:
+    rec = _run(ctx, toy_repo, "a", "aaaa")
+    _key_score(ctx, rec, "set-1.m-a.top10", 1.0)
+    _key_score(ctx, rec, "set-1.m-b.top10", 2.0)
+    _key_score(ctx, rec, "value", 0.5)  # a key without parts is never compared
+    data = {"datasets": ["set-1"], "model": None, "metrics": ["top10"]}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("compare", data=data, render="bars"))
+    assert sorted(r["model"] for r in result.rows) == ["m-a", "m-b"]
+    assert result.meta["render"] == "bars"
+
+
+def test_compare_direction_follows_the_compared_metric(ctx: Context, toy_repo: Path) -> None:
+    cfg_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    # the primary (accuracy) stays higher-is-better; both compared metrics are lower
+    cfg["metrics"]["broken"]["higher_is_better"] = False
+    cfg["metrics"]["latency"] = {
+        "version": "v1",
+        "fn": "toymetrics:accuracy",
+        "higher_is_better": False,
+    }
+    cfg["tasks"]["toy-broken"]["metrics"].append("latency")
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    rec = _run(ctx, toy_repo, "a", "aaaa", task="toy-broken")
+    _key_score(ctx, rec, "set-1.m.err", 0.1, metric="broken")
+    _key_score(ctx, rec, "set-1.m.p50", 3.0, metric="latency")
+    one = {"datasets": ["set-1"], "metrics": ["err"]}
+    result = query_panel(ctx, "toy", "toy-broken", _panel("compare", data=one))
+    assert [r["key"] for r in result.rows] == ["broken/set-1.m.err"]
+    assert result.meta["higher_is_better"] is False  # the compared metric's direction
+    two = {"datasets": ["set-1"], "metrics": ["err", "p50"]}
+    result = query_panel(ctx, "toy", "toy-broken", _panel("compare", data=two))
+    assert [r["key"] for r in result.rows] == ["broken/set-1.m.err", "latency/set-1.m.p50"]
+    assert [r["higher_is_better"] for r in result.rows] == [False, False]  # each row's key
+    assert result.meta["higher_is_better"] is False  # the rows agree
+    cfg["metrics"]["latency"]["higher_is_better"] = True
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    result = query_panel(ctx, "toy", "toy-broken", _panel("compare", data=two))
+    assert [r["higher_is_better"] for r in result.rows] == [False, True]
+    assert result.meta["higher_is_better"] is True  # rows differ: the task primary's direction
+
+
+def test_compare_rows_of_a_system_bench_percentile_are_lower_is_better(
+    ctx: Context, toy_repo: Path
+) -> None:
+    cfg_path = toy_repo / "hypothex.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["metrics"]["lat"] = {"version": "v1", "fn": "toymetrics:accuracy"}  # no direction set
+    cfg["tasks"]["toy-acc"].update(
+        kind="system_bench",
+        metrics=["lat"],
+        primary="lat/us-east.p95",
+        score_keys="{dataset}.{metric}",
+    )
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    for rid, value in (("a", 40.0), ("b", 60.0)):
+        rec = _run(ctx, toy_repo, rid, rid * 4, minute=len(rid))
+        for region in ("us-east", "us-west"):
+            _key_score(ctx, rec, f"{region}.p95", value, metric="lat")
+    data = {"datasets": ["us-east", "us-west"], "metrics": ["p95"]}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("compare", data=data))
+    assert {r["key"]: r["higher_is_better"] for r in result.rows} == {
+        "lat/us-east.p95": False,
+        "lat/us-west.p95": False,
+    }
+    assert result.meta["higher_is_better"] is False
+
+
+def test_compare_caps_rows_and_warns(
+    ctx: Context, toy_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec = _run(ctx, toy_repo, "a", "aaaa")
+    _key_score(ctx, rec, "set-1.m.top10", 1.0)
+    _key_score(ctx, rec, "set-2.m.top10", 2.0)
+    monkeypatch.setattr(panels, "MAX_TABLE_ROWS", 1)
+    data = {"datasets": ["set-2", "set-1"], "metrics": ["top10"]}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("compare", data=data))
+    assert [r["dataset"] for r in result.rows] == ["set-2"]
+    assert (result.meta["total"], result.meta["warnings"]) == (2, ["showing the first 1 of 2 rows"])
+
+
+def test_curves_rows_carry_the_wall_time_of_each_point(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "c1", seed=1)
+    rows = [
+        {"name": "train/loss", "step": s, "value": 1.0, "t": 1760000000.0 + s} for s in range(3)
+    ]
+    _metrics(ctx, rec, rows)
+    result = query_panel(ctx, "toy", "toy-acc", _panel("curves", data={"metrics": ["train/loss"]}))
+    assert [(r["step"], r["t"]) for r in result.rows] == [
+        (0, 1760000000.0),
+        (1, 1760000001.0),
+        (2, 1760000002.0),
+    ]

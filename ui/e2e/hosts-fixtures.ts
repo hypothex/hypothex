@@ -38,10 +38,9 @@ export interface SweepItemLite {
   n_runs: number;
 }
 export interface SweepLite {
-  headline: string;
   /** The sweep's runs, derived by the hub from the runs tagged `tag` (not in the spec). */
   run_ids: string[];
-  spec: { id: string; project: string };
+  spec: { id: string; project: string; task: string | null };
 }
 
 /** `/api/v1/hosts` once every host is connected (the hub connects to them at start). */

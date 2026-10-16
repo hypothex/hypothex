@@ -139,7 +139,7 @@ function defaultStorage(): Pick<Storage, "getItem" | "setItem"> | null {
 }
 
 /** Run families whose next key segment is the project. */
-const BY_PROJECT = new Set(["task", "leaderboard", "views/query", "sweeps"]);
+const BY_PROJECT = new Set(["task", "leaderboard", "views/query", "sweeps", "taskRuns"]);
 
 /** Event type the hub emits after mirroring a remote run's event (phase 2 contract 1.5). */
 export const MIRROR_RUN_UPDATED = "mirror.run_updated";
@@ -182,7 +182,7 @@ export function keysForEvent(event: HxEvent): QueryKey[] {
 /**
  * Narrow key families to one run event where the key allows: `["run", runId]` (prefix
  * match, so it covers the run's metrics, logs, predictions and traces), and
- * `["task" | "leaderboard" | "sweeps", project]`, `["views", "query", project]`.
+ * `["task" | "leaderboard" | "sweeps" | "taskRuns", project]`, `["views", "query", project]`.
  */
 function narrow(families: readonly QueryKey[], event: HxEvent): QueryKey[] {
   const keys: QueryKey[] = [];

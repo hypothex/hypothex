@@ -1,0 +1,35 @@
+/* ui/src/hosts/hosts.css — GPU cells (Home, Hosts, Queue) and the Hosts/Queue pages. */
+.gpus { display: flex; gap: 3px; flex-wrap: wrap; }
+.gpus.stale { opacity: .45; filter: grayscale(1); }
+.gpu { width: 22px; height: 22px; border-radius: 4px; border: 1px solid var(--line-2); position: relative; overflow: hidden; background: var(--panel-2); display: inline-block; }
+.gpu i { position: absolute; left: 0; right: 0; bottom: 0; opacity: .85; }
+.gpu.run i { background: var(--run); }
+.gpu.ext { background: repeating-linear-gradient(135deg, transparent 0 3px, var(--grid) 3px 4px); }
+.gpu.ext i { background: var(--ink-3); }
+.gpu.free { border-style: dashed; }
+
+/* Hosts and Queue pages */
+.hosts-page { padding: 20px; display: grid; gap: 16px; max-width: 1480px; align-content: start; }
+.hosts-page .ph { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+.hosts-page .ph h1 { margin: 0; font-size: 18px; font-weight: 600; }
+.hosts-page .facts { display: flex; gap: 14px; color: var(--ink-3); font-size: 12.5px; }
+.hosts-page .ph .btn { margin-left: auto; }
+.hosts-page h2 { font-size: 14px; margin: 0 0 8px; font-weight: 600; display: flex; gap: 8px; align-items: baseline; }
+.hosts-page h2 .n { color: var(--ink-3); font-weight: 400; font-size: 12px; }
+.hosts-page .qgroup { display: grid; gap: 8px; }
+.hosts-page .tblwrap { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-panel); overflow-x: auto; }
+.hosts-page table.t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.hosts-page table.t th, .hosts-page table.t td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+.hosts-page table.t thead th { color: var(--ink-3); font-weight: 500; border-bottom-color: var(--line); white-space: nowrap; }
+.hosts-page table.t tr:last-child td, .hosts-page table.t tr:last-child th { border-bottom: 0; }
+.hosts-page table.t .num { text-align: right; font-variant-numeric: tabular-nums; }
+.hosts-page tbody th { font-weight: 400; }
+.hosts-page tbody th b { font-weight: 600; margin-right: 6px; }
+.hosts-page tr.stale th b { color: var(--ink-2); }
+.hosts-page .hst { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.hosts-page .ver { display: inline-flex; gap: 5px; align-items: center; cursor: help; }
+.hosts-page .ver .ne { color: var(--fail); font-weight: 600; }
+.hosts-page .act { white-space: nowrap; text-align: right; }
+.hosts-page .nm { font-weight: 500; }
+.hosts-page .hosts-banner { margin: 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--panel-2); color: var(--ink-2); }
+.hosts-page .hosts-banner b { color: var(--ink); font-weight: 600; }

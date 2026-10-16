@@ -25,16 +25,20 @@ import {
   useHosts,
   useLeaderboard,
   useProjectSweeps,
+  useRenameRun,
+  useRunMetrics,
   useRunPredictions,
+  useRunsMetrics,
   useSaveView,
   useSweep,
   useTask,
   useTaskKind,
+  useTaskRuns,
   useView,
   useViewQuery,
 } from "../../src/api/queries";
 import { mockApi } from "../pages/helpers";
-import { mockRoutes } from "./fetch-mock";
+import { mockFetch, mockRoutes } from "./fetch-mock";
 import { HOSTS, SWEEP, SWEEP_LIST } from "./phase2-fixtures";
 
 /** `n` minimal run rows; `fetchAllRuns` only counts them. */
@@ -87,6 +91,7 @@ describe("queryKeys", () => {
       queryKeys.compareExamples("r1", "r2", "accuracy"),
       queryKeys.sweep("toy", "s-7f3a"),
       queryKeys.projectSweeps("toy"),
+      queryKeys.taskRuns("toy", "acc"),
     ];
     const miss = [
       queryKeys.views("toy", "acc"),
@@ -534,4 +539,80 @@ test("bound example comparisons cannot reuse unverified legacy cache entries", (
   const strict = queryKeys.compareExamples("a", "b", "accuracy@v1", "correct", true);
   expect(legacy).toEqual(["compareExamples", "a", "b", "accuracy@v1", "correct"]);
   expect(strict).not.toEqual(legacy);
+});
+
+describe("v5 task runs and rename", () => {
+  test("useTaskRuns reads the task's runs; archived runs only on request", async () => {
+    const calls = mockFetch({ project: "toy", task: "a b", runs: [], groups: [] });
+    const { wrapper } = setup();
+    const plain = renderHook(() => useTaskRuns("toy", "a b"), { wrapper });
+    await waitFor(() => expect(plain.result.current.data?.project).toBe("toy"));
+    const archived = renderHook(() => useTaskRuns("toy", "a b", { archived: true }), { wrapper });
+    await waitFor(() => expect(archived.result.current.isSuccess).toBe(true));
+    expect(calls.map((c) => c.url)).toEqual([
+      "/api/v1/tasks/toy/a%20b/runs",
+      "/api/v1/tasks/toy/a%20b/runs?archived=true",
+    ]);
+    expect(queryKeys.taskRuns("toy", "acc")).toEqual(["taskRuns", "toy", "acc", false]);
+  });
+
+  test("useRenameRun posts the name and refreshes the task's runs, the run and the overview", async () => {
+    const calls = mockFetch({ run_id: "r1", project: "toy", task: "acc", name: "warm restart" });
+    const { qc, wrapper } = setup();
+    const hit = [
+      queryKeys.taskRuns("toy", "acc"),
+      queryKeys.taskRuns("toy", "acc", true),
+      queryKeys.run("r1"),
+      queryKeys.runLogs("r1", "stdout"),
+      queryKeys.overview(),
+    ];
+    const miss = [queryKeys.taskRuns("toy", "other"), queryKeys.run("r2"), queryKeys.leaderboard("toy", "acc")];
+    for (const key of [...hit, ...miss]) qc.setQueryData(key, { seeded: true });
+    const { result } = renderHook(() => useRenameRun(), { wrapper });
+    act(() => result.current.mutate({ runId: "r1", name: "warm restart" }));
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(calls).toEqual([
+      {
+        url: "/api/v1/runs/r1/name",
+        method: "POST",
+        body: { command_id: expect.any(String), created_by: "human", name: "warm restart" },
+      },
+    ]);
+    expect(hit.map((k) => invalidated(qc, k))).toEqual(hit.map(() => true));
+    expect(miss.map((k) => invalidated(qc, k))).toEqual(miss.map(() => false));
+  });
+
+  test("a null name asks the server to reset to the derived name", async () => {
+    const calls = mockFetch({ run_id: "r1", project: "toy", task: "acc", name: null });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useRenameRun(), { wrapper });
+    act(() => result.current.mutate({ runId: "r1", name: null }));
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect((calls[0]?.body as { name: unknown }).name).toBeNull();
+  });
+});
+
+describe("run metrics", () => {
+  const point = (name: string, value: number) => ({ name, step: 0, value, t: null });
+
+  test("useRunMetrics reads the named series at a point cap; with no names it stays idle", async () => {
+    const calls = mockApi({ "GET /api/v1/runs/r1/metrics?names=loss&names=lr&max_points=300": [point("loss", 1)] });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useRunMetrics("r1", ["loss", "lr"]), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual([point("loss", 1)]);
+    const idle = renderHook(() => useRunMetrics("r1", []), { wrapper });
+    expect(idle.result.current.fetchStatus).toBe("idle");
+    expect(calls.map((c) => c.url)).toEqual(["/api/v1/runs/r1/metrics?names=loss&names=lr&max_points=300"]);
+  });
+
+  test("useRunsMetrics: one request per run, points by run id, and any run's error", async () => {
+    mockApi({ "GET /api/v1/runs/a/metrics?names=loss&max_points=50": [point("loss", 2)] });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useRunsMetrics(["a", "b"], ["loss"], 50), { wrapper });
+    expect(result.current.pending).toBe(true);
+    await waitFor(() => expect(result.current.error).toBeInstanceOf(ApiError));
+    await waitFor(() => expect(result.current.pending).toBe(false));
+    expect([...result.current.byRun]).toEqual([["a", [point("loss", 2)]]]);
+  });
 });

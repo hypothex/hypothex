@@ -17,7 +17,14 @@ from threading import Lock
 from typing import Any, NamedTuple, TypeVar
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 
 from hypothex.core.config import ProjectConfig
 from hypothex.core.errors import RunNotFoundError, StoreError
@@ -229,12 +236,22 @@ def sum_usage(rows: Iterable[UsageRow]) -> UsageTotals | None:
     )
 
 
+CONFIG_FORMAT = 2
+"""Format of a stored config snapshot: 2 keeps an unset ``higher_is_better`` unset."""
+
+
 class ProjectEntry(BaseModel):
     """
     A registered project: its repo path and a snapshot of its config.
 
     ``previous_repos`` lists earlier repo paths (most recent first), so runs
     recorded before the repo moved can be mapped onto the new location.
+    ``config_format`` is the snapshot's format (``CONFIG_FORMAT``). Snapshots
+    written before format 2 hold ``higher_is_better: true`` for every metric that
+    set none; reading one turns every ``true`` into not set (an explicit ``true``
+    cannot be told apart), so a ``system_bench`` percentile stays lower-is-better.
+    Serialized entries leave an unset ``higher_is_better`` out, so older readers
+    use their own default.
     """
 
     project: str
@@ -244,6 +261,34 @@ class ProjectEntry(BaseModel):
     previous_repos: list[str] = Field(default_factory=list)
     remote_host: str | None = None
     """Set when the hub copied this entry from a host (the repo path is on that host)."""
+    config_format: int = CONFIG_FORMAT
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_snapshot(cls, data: Any) -> Any:
+        """Read a stored snapshot of format 1 (no ``config_format``) as format 2."""
+        if not isinstance(data, dict) or data.get("config_format", 1) >= CONFIG_FORMAT:
+            return data
+        config = data.get("config")
+        if isinstance(config, dict) and isinstance(config.get("metrics"), dict):
+            metrics = {
+                name: {**m, "higher_is_better": None}
+                if isinstance(m, dict) and m.get("higher_is_better") is True
+                else m
+                for name, m in config["metrics"].items()
+            }
+            data = {**data, "config": {**config, "metrics": metrics}}
+        return {**data, "config_format": CONFIG_FORMAT}
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_directions(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Leave each metric's unset ``higher_is_better`` out of the dump."""
+        out = handler(self)
+        metrics = out.get("config", {}).get("metrics", {})
+        for metric in metrics.values():
+            if isinstance(metric, dict) and metric.get("higher_is_better", False) is None:
+                del metric["higher_is_better"]
+        return out
 
 
 @contextmanager
@@ -355,6 +400,7 @@ class RunStore:
             config=config,
             registered_at=utcnow(),
             previous_repos=previous,
+            config_format=CONFIG_FORMAT,
         )
         atomic_write_text(self._project_file(config.project), entry.model_dump_json(indent=2))
         return entry

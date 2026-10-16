@@ -69,11 +69,11 @@ test("a view saved in the editor is written to disk and shows as a tab", async (
     expect(readFileSync(file, "utf8")).toBe(text);
 
     await page.goto(`/t/${project}/${task}`);
-    const tab = page.getByRole("navigation", { name: "Views" }).getByRole("link", { name: title });
+    const tab = page.getByRole("tablist", { name: "Task" }).getByRole("tab", { name: title });
     await expect(tab).toBeVisible();
     await tab.click();
-    await expect(tab).toHaveAttribute("aria-current", "page");
-    await expect(page).toHaveURL(new RegExp(`[?&]view=${name}(&|$)`));
+    await expect(tab).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(new RegExp(`[?&]tab=view(%3A|:)${name}(&|$)`));
     await expect(page.getByText(`round trip ${title}`)).toBeVisible();
   } finally {
     await request.delete(api);

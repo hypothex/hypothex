@@ -106,3 +106,24 @@ test("locking cancels an in-flight query even when its fetch ignores AbortSignal
   expect(qc.getQueryCache().getAll()).toEqual([]);
   expect(screen.queryByText("private query page")).toBeNull();
 });
+
+test("a stored credential is validated once, so a cancelled duplicate cannot lock it (StrictMode)", async () => {
+  const { StrictMode } = await import("react");
+  sessionStorage.setItem(TOKEN_KEY, "stored-synthetic");
+  const store = new AuthStore(sessionStorage);
+  auth.select(store.capture().token);
+  let calls = 0;
+  // The first validation succeeds; any later one fails like a fetch cut off by a page navigation.
+  globalThis.fetch = (async () => {
+    calls += 1;
+    if (calls > 1) throw new TypeError("Failed to fetch");
+    return response();
+  }) as unknown as typeof fetch;
+  const qc = createQueryClient();
+  render(<StrictMode><QueryClientProvider client={qc}><AuthGate><div>strict page</div></AuthGate></QueryClientProvider></StrictMode>);
+  await waitFor(() => expect(screen.getByText("strict page")).toBeTruthy());
+  await act(async () => { await Promise.resolve(); });
+  expect(calls).toBe(1);
+  expect(auth.snapshot().status).toBe("unlocked");
+  expect(sessionStorage.getItem(TOKEN_KEY)).toBe("stored-synthetic");
+});

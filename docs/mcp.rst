@@ -98,6 +98,9 @@ Run:
      - Append a Markdown note.
    * - ``tag_run(run_id, add=None, remove=None, agent=None)``
      - Add or remove tags.
+   * - ``rename_run(run_id, name, agent=None)``
+     - Name a run by what it changes (1–80 characters, one line); ``name=None``
+       resets it to the derived name.
 
 Hosts and sweeps:
 

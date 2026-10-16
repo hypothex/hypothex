@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import type { PredictionPage, TaskDetail } from "../../src/pages/components/types";
-import { ExamplesPage, pickExampleField } from "../../src/pages/Examples";
+import { ExamplesPage, hasExampleScores, pickExampleField } from "../../src/pages/Examples";
 import { RUN_RF, RUN_SVM, makeDetail, makeDiff } from "./fixtures";
 import { HttpReply, mockApi, renderWithClient, restoreFetch } from "./helpers";
 
@@ -12,6 +12,7 @@ afterEach(() => {
 
 const PRED = `/api/v1/runs/${RUN_SVM}/predictions?metric=accuracy%40v1&failures_only=true&field=correct`;
 const PROBE = `/api/v1/runs/${RUN_SVM}/predictions?metric=accuracy&limit=1`;
+const PROBE_A = `/api/v1/runs/${RUN_RF}/predictions?metric=accuracy&limit=1`;
 const COMPARE = `/api/v1/compare/examples?a=${RUN_RF}&b=${RUN_SVM}&metric=accuracy&field=correct`;
 
 /** One predictions row whose per-example scores are `scores`. */
@@ -49,6 +50,7 @@ function routes(extra: Record<string, unknown> = {}): Record<string, unknown> {
     ),
     [`GET /api/v1/runs/${RUN_SVM}`]: makeDetail(),
     [`GET ${PROBE}`]: probe({ "accuracy@v1": { correct: true } }),
+    [`GET ${PROBE_A}`]: probe({ "accuracy@v1": { correct: false } }),
     [`GET ${COMPARE}`]: makeDiff(),
     [`GET ${PRED}&limit=8`]: page([
       ["test-7", 2, 1],
@@ -66,17 +68,18 @@ function routes(extra: Record<string, unknown> = {}): Record<string, unknown> {
 test("compares two runs example by example", async () => {
   mockApi(routes());
   renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
-  await screen.findByRole("heading", {
-    level: 1,
-    name: "RBF-kernel SVM fixes 9, breaks 3 vs baseline rf, p = 0.15",
-  });
-  for (const text of ["n = 180", "net +6", "Δ +0.0333", "baseline rf, seed 3", "RBF-kernel SVM, seed 3", "0.8889", "0.9222"]) {
+  await screen.findByRole("heading", { level: 1, name: "RBF-kernel SVM vs baseline rf" });
+  // The counts and p are plain facts under the heading (the sign-test panel repeats p).
+  const facts = screen.getByText("fixes 9").parentElement as HTMLElement;
+  expect([...facts.children].map((c) => c.textContent)).toEqual([
+    "toy-classifier / toy-test", "fixes 9", "breaks 3", "p = 0.15", "n = 180", "net +6", "Δ +0.0333",
+  ]);
+  for (const text of ["baseline rf · seed 3", "RBF-kernel SVM · seed 3", "0.8889", "0.9222"]) {
     expect(screen.getByText(text)).toBeTruthy();
   }
-  const names = screen.getAllByRole("region").map((r) => r.getAttribute("aria-label"));
-  expect(names).toEqual(["a Outcomes", "b Sign test", "c Per example", "d RBF-kernel SVM errors"]);
-
-  const errors = screen.getByRole("region", { name: "d RBF-kernel SVM errors" });
+  const titles = ["Outcomes", "Sign test", "Per example", "RBF-kernel SVM errors"];
+  for (const t of titles) expect(screen.getByText(t).closest("[data-panel]")).toBeTruthy();
+  const errors = screen.getByText("RBF-kernel SVM errors").closest("[data-panel]") as HTMLElement;
   const rows = await within(errors).findAllByRole("row");
   expect(rows.map((r) => [...r.querySelectorAll("td")].map((c) => c.textContent))).toEqual([
     [],
@@ -111,23 +114,22 @@ test("uses the task's primary metric when ?metric= is absent", async () => {
   };
   const calls = mockApi(routes({ "GET /api/v1/tasks/toy-classifier/toy-test": task }));
   renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} />);
-  await screen.findByRole("heading", { level: 1, name: /fixes 9, breaks 3/ });
+  await screen.findByText("fixes 9");
   expect(calls.some((c) => c.url === COMPARE)).toBe(true);
 });
 
-test("shows the server error when a run has no per-example scores", async () => {
-  mockApi(
-    routes({
-      [`GET ${COMPARE}`]: new HttpReply(400, {
-        error: `run ${RUN_RF} has no per-example scores for accuracy@v1`,
-        type: "EvalError",
-      }),
-    }),
-  );
+test("run A without per-example scores is the calm empty state too, and compare is not asked", async () => {
+  const calls = mockApi(routes({ [`GET ${PROBE_A}`]: { run_id: RUN_RF, total: 0, offset: 0, limit: 1, rows: [] } }));
   renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
-  expect((await screen.findByRole("alert")).textContent).toBe(
-    `run ${RUN_RF} has no per-example scores for accuracy@v1`,
-  );
+  expect(await screen.findByText("No per-example scores for this task")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(calls.some((c) => c.url.startsWith("/api/v1/compare/examples"))).toBe(false);
+});
+
+test("other compare errors still show the server's message", async () => {
+  mockApi(routes({ [`GET ${COMPARE}`]: new HttpReply(400, { error: "metric accuracy@v9 is unknown", type: "ConfigError" }) }));
+  renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
+  expect((await screen.findByRole("alert")).textContent).toBe("metric accuracy@v9 is unknown");
 });
 
 test("asks for ?metric= when run A has no task", async () => {
@@ -157,8 +159,8 @@ test("sends the solved field to compare and to the errors query", async () => {
     }),
   );
   renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="solved" />);
-  await screen.findByRole("heading", { level: 1, name: /fixes 9, breaks 3/ });
-  const errors = screen.getByRole("region", { name: "d RBF-kernel SVM errors" });
+  await screen.findByText("fixes 9");
+  const errors = screen.getByText("RBF-kernel SVM errors").closest("[data-panel]") as HTMLElement;
   expect(await within(errors).findByText("task-17")).toBeTruthy();
   const urls = calls.map((c) => c.url);
   expect(urls).toContain(solvedCompare);
@@ -183,7 +185,7 @@ test("example comparison summary does not present a prior score after failed ree
   detail.scores.push({ metric: "accuracy", version: "v1", key: "*", value: null, error: "latest evaluation failed", source_hash: null, created_at: "2026-09-27T00:00:00Z" });
   mockApi(routes({ [`GET /api/v1/runs/${RUN_SVM}`]: detail }));
   renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
-  await screen.findByRole("heading", { level: 1, name: /fixes 9/ });
+  await screen.findByText("fixes 9");
   expect(screen.getByText("0.8889")).toBeTruthy();
   expect(screen.queryByText("0.9222") === null).toBe(true);
 });
@@ -193,7 +195,35 @@ test("bare metric request uses the API-resolved version in comparison summaries"
   detail.scores.push({ metric: "accuracy", version: "v2", key: "value", value: 0.98, error: null, source_hash: null, created_at: "2026-09-27T00:00:00Z" });
   mockApi(routes({ [`GET /api/v1/runs/${RUN_SVM}`]: detail }));
   renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
-  await screen.findByRole("heading", { level: 1, name: /fixes 9/ });
+  await screen.findByText("fixes 9");
   expect(screen.getByText("0.9222")).toBeTruthy();
   expect(screen.queryByText("0.9800") === null).toBe(true);
+});
+
+test("the cards and heading use the task's run names when the task's runs load", async () => {
+  const runs = {
+    project: "toy-classifier", task: "toy-test",
+    runs: [{ run_id: RUN_RF, name: "rf · depth 8" }, { run_id: RUN_SVM, name: "svm · C 10" }],
+  };
+  mockApi(routes({ "GET /api/v1/tasks/toy-classifier/toy-test/runs": runs }));
+  renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
+  await screen.findByRole("heading", { level: 1, name: "svm · C 10 vs rf · depth 8" });
+  expect(screen.getByText("rf · depth 8 · seed 3")).toBeTruthy();
+  expect(screen.getByText("svm · C 10 · seed 3")).toBeTruthy();
+});
+
+test("a metric without per-example scores is a calm empty state, not a red error", async () => {
+  const calls = mockApi(routes({ [`GET ${PROBE}`]: { run_id: RUN_SVM, total: 0, offset: 0, limit: 1, rows: [] } }));
+  renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
+  expect(await screen.findByText("No per-example scores for this task")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(calls.some((c) => c.url.startsWith("/api/v1/compare/examples"))).toBe(false);
+});
+
+test("hasExampleScores matches the exact ref when the metric names a version", () => {
+  const page = probe({ "accuracy@v1": { correct: true } });
+  expect(hasExampleScores(page, "accuracy")).toBe(true);
+  expect(hasExampleScores(page, "accuracy@v1")).toBe(true);
+  expect(hasExampleScores(page, "accuracy@v2")).toBe(false);
+  expect(hasExampleScores(probe({ "accuracy@v1": {} }), "accuracy")).toBe(false);
 });

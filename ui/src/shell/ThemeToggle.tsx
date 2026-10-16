@@ -45,7 +45,7 @@ export function useTheme(): Theme {
 export function ThemeToggle() {
   const theme = useTheme();
   return (
-    <button className="theme" type="button" aria-label="Switch colour mode" onClick={toggleTheme}>
+    <button className="btn sm ghost theme" type="button" aria-label="Switch colour mode" onClick={toggleTheme}>
       <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
         <circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" strokeWidth="1.3" />
         <path d="M7 1a6 6 0 0 1 0 12z" fill="currentColor" />

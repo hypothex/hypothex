@@ -84,7 +84,7 @@ describe("buildWhere", () => {
 });
 
 test("a long artifact path outside the run folder shows its tail, full path as tooltip and copy", () => {
-  const long = "/scratch/shreyas/hx/rxn-forward/runs/20260925-131516-uspto-forward-to-5a7a/ckpt/step_002000.pt";
+  const long = "/scratch/sam/hx/rxn-forward/runs/20260925-131516-uspto-forward-to-5a7a/ckpt/step_002000.pt";
   const detail = makeDetail(
     {
       artifacts: [{ kind: "checkpoint", path: long, host: "gpu-a03", size: null, step: 2000, metrics: {} }],

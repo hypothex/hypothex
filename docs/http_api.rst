@@ -99,7 +99,8 @@ Runs
      - Body and answer
    * - ``GET /api/v1/runs``
      - Query: ``project``, ``task``, ``status``, ``tag``, ``environment_id``,
-       ``archived``, ``limit`` (default 200), and the keyset cursor
+       ``archived``, ``q`` (only runs whose ``name`` or ``run_id`` contains it,
+       ignoring case), ``limit`` (default 200), and the keyset cursor
        ``before_created_at`` + ``before_run_id`` (both or neither: the ``created_at``
        and ``run_id`` of the last row of the previous page). Answers run records,
        newest first, each with ``host_state`` as in ``GET /api/v1/runs/{id}``.
@@ -134,8 +135,11 @@ Runs
        started remain running; the result reports cancellations and failures.
    * - ``POST /api/v1/runs/{id}/rerun``, ``/reinfer``, ``/reeval``
      - Rerun, re-infer (``{checkpoint?, vars?}``), re-evaluate (``{metric?, force?}``).
-   * - ``POST /api/v1/runs/{id}/tags``, ``/star``, ``/archive``, ``/notes``
-     - ``{add, remove}``, ``{on}``, ``{on}``, ``{text, author}``.
+   * - ``POST /api/v1/runs/{id}/tags``, ``/star``, ``/archive``, ``/notes``, ``/name``
+     - ``{add, remove}``, ``{on}``, ``{on}``, ``{text, author}``, ``{name}``. A name is
+       trimmed, 1–80 characters and one line (else ``422``); ``null`` or a blank
+       name resets it to the derived name. Answers the run record and emits
+       ``run.renamed`` (payload ``{status, name}``).
    * - ``POST /api/v1/runs/{id}/pull``
      - ``{artifact}`` (default ``checkpoint``): an artifact kind, an artifact path, or
        a run-folder path. Copies the file from the run's host and answers
@@ -229,11 +233,34 @@ Other routes
 ------------
 
 - ``GET /api/v1/overview`` (``since``): the Overview, with ``cost_usd`` and
-  ``cost_today_usd``.
+  ``cost_today_usd``. ``recent`` lists the 12 newest unarchived, non-queued runs of
+  any age (name, status, ``end_reason``, ``exit_code``, ``primary`` at the current
+  metric version, ``delta_best`` to the task's best config); ``names`` maps every
+  run in ``running``, ``failures`` and ``recent`` to its run view name (a rename,
+  else the derived name with ``· seed N``); ``progress`` maps each running run (at
+  most 50) to the newest point of its task's primary metric read from the end of
+  its ``metrics.jsonl`` (``metric``, ``step``, ``value``; ``progress`` and
+  ``eta_seconds`` are ``null``). Each task row also has ``primary``,
+  ``higher_is_better``, ``best_history`` (the best so far after each scored config,
+  the last 24), ``best_7d_ago``, ``running`` and ``queued``.
 - ``GET /api/v1/projects``, ``GET /api/v1/tasks``, ``GET /api/v1/tasks/{project}/{task}``,
   ``GET /api/v1/tasks/{project}/{task}/leaderboard`` (optional ``primary=metric/key``),
   ``POST /api/v1/tasks/{project}/{task}/reeval``, ``GET .../kind``, and the views
   routes under ``/api/v1/tasks/{project}/{task}/views``.
+- ``GET /api/v1/tasks/{project}/{task}/runs`` (``archived``, default false): the task
+  workspace. Every run with its display ``name``, ``derived_name``, ``renamed``,
+  ``group_id``, status, times, host, ``commit`` (full sha), ``params`` (params and
+  template vars),
+  ``scores`` (``metric/key`` at the current metric versions), ``primary``,
+  ``gpu_hours`` and ``cost_usd`` (``progress`` is always ``null``); every seed group
+  with ``name``, ``run_ids``, ``n`` and the leaderboard's ``primary``,
+  ``test_interval``, ``scores``, ``seed_values``, ``vs_best``,
+  ``within_noise_of_best`` and ``is_best`` (unranked groups have none); and the
+  task's ``primary``, ``higher_is_better``, ``unit``, ``value_format``,
+  ``metric_versions``, ``varying_keys``, ``metric_names``, ``score_keys``,
+  ``key_higher_is_better`` (the direction of each score key: a ``system_bench``
+  percentile is lower-is-better, any other key takes its metric's) and
+  ``key_parts``.
 - Leaderboard ``primary`` recomputes ranking, direction, units, intervals and
   headline from a configured task metric and recorded output key. Version pins
   remain independent; omitting ``primary`` preserves the configured selection.

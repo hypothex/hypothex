@@ -73,7 +73,8 @@ Rules:
   started by agents (`--hypothesis`); for humans, the CLI prompts if missing and a TTY
   is attached, else stores `""` and flags it in the UI.
 - A run without a task is **exploratory**. It appears in project views but on no leaderboard.
-- Runs are immutable after they end, except: tags, star, archive, notes, and added scores.
+- Runs are immutable after they end, except: tags, star, archive, notes, added scores,
+  and name (a short label a person or agent gives the run; UI v5 spec §5).
 
 ## 3. Source of truth: files first
 
@@ -457,6 +458,7 @@ Every command supports `--json` (stable schema, documented) for agents.
 | `hx run / launch / rerun / reinfer / reeval / stop` | Execution (section 5). |
 | `hx compare <id> <id> ...` | Config diff + score diff. |
 | `hx tag / star / archive / note` | Curation. |
+| `hx rename <id> "<name>"` / `hx rename <id> --reset` | Name a run by what it changes, or go back to the derived name. |
 | `hx datasets register/check/overlap` | Datasets (section 4.1). |
 | `hx hosts list/add/setup/status` | Hosts (phase 2 for remote). |
 | `hx sweep` | Phase 2. |
@@ -468,9 +470,11 @@ Every command supports `--json` (stable schema, documented) for agents.
 ### 7.3 HTTP API
 
 FastAPI under `/api/v1`, OpenAPI docs at `/api/docs`. The UI uses only this API.
-Resources mirror the CLI: projects, tasks, leaderboards, runs, scores, metric points,
+Resources mirror the CLI: projects, tasks, leaderboards, runs (`GET /runs?q=` searches
+names and ids), task runs (`GET /tasks/{p}/{t}/runs`: every run and seed group of a
+task, named and scored, for the UI v5 workspace), scores, metric points,
 predictions (paged), datasets, environments, queue, sweeps, notes. Actions: `POST
-/runs/{id}/rerun|reinfer|reeval|stop`, `POST /tasks/{t}/reeval`; all actions accept a
+/runs/{id}/rerun|reinfer|reeval|stop|tags|star|archive|notes|name`, `POST /tasks/{t}/reeval`; all actions accept a
 `command_id` for idempotency (5.3). Live updates (run events, logs, metrics) go over the
 WebSocket with `after_sequence` replay (5.3), not SSE. The same API is served by the hub
 and by env servers; the hub proxies env-specific calls to the owning environment.
@@ -491,7 +495,7 @@ single-token guard when enabled rather than requiring both guards.
 `hx mcp` (stdio) and `/mcp` on the server (streamable HTTP). Tools map 1:1 to core
 actions: `list_projects, list_tasks, get_task, get_leaderboard, list_runs, get_run,
 compare_runs, launch_run, rerun, reinfer, reevaluate, stop_run, add_note, tag_run,
-get_predictions`. Built with the official `mcp` Python SDK.
+get_predictions, rename_run`. Built with the official `mcp` Python SDK.
 
 ### 7.5 Agent skill
 
@@ -507,12 +511,17 @@ Teaches the loop:
 
 ## 8. UI, task kinds, and views (phase 1b)
 
+**UI v5 (2026-10-16):** `docs/superpowers/specs/2026-10-16-hypothex-ui-v5-design.md`
+replaces 8.1 (principles), 8.3 (screens) and the `ui-v4` visual reference, and adds
+run names (its §5) and the `compare` view panel. The rest of this section (task kinds,
+statistics, views YAML, panel data API) stays.
+
 Approved mockups (2026-09-27): `docs/mockups/ui-v4/` (base design system and the
 Overview, Leaderboard, Run, Examples screens) and `docs/mockups/kinds/{training,
 agent_eval, agent_iteration, system_bench, custom_view}/`. The mockups are the visual
 reference; where this section and a mockup disagree, this section wins.
 
-### 8.1 Principles
+### 8.1 Principles (replaced by the UI v5 spec §2)
 
 - **Terse.** Numbers, glyphs, short labels. No explanatory sentences on the page;
   explanations live in hover tooltips. Each page's headline is one line with the finding
@@ -536,7 +545,7 @@ Charts are React SVG components using `d3-scale`/`d3-shape`/`d3-array` for math 
 `src/hypothex/ui_dist/`; `hx serve` serves them. Live updates come from the WebSocket
 event stream (section 5.3).
 
-### 8.3 Screens
+### 8.3 Screens (replaced by the UI v5 spec §4)
 
 1. **Overview** — headline status line; runs-by-launcher timeline (agent vs human,
    failed, archived, current best); recent ideas (one line per seed group, one mark per
@@ -571,10 +580,15 @@ selector in the task spec).
 
 ### 8.5 Statistics (`hypothex.core.stats`)
 
-- **Test-set interval** per seed group: if the metric's per-example field is binary
-  (`correct`/`solved`/any bool), the Wilson 95% interval with `n` = examples scored;
-  otherwise a percentile bootstrap over examples (1,000 resamples, fixed seed 0). Seeds are
-  pooled by averaging per example first (the runs of one seed are averaged first).
+- **Test-set interval** per seed group, on the primary key's own per-example field:
+  the field named like the key (`value`, `p95`); for the default key `value` also
+  `correct`, `solved` or another field, but only one whose mean over each run's
+  examples equals that run's score (UI v5 spec §8: a status flag such as `ok: true`
+  next to `mismatches/value = 0` gave a Wilson interval near 1.0). No such field: no
+  interval. A binary field (bools or 0/1) gets the Wilson 95% interval with `n` =
+  examples scored; otherwise a percentile bootstrap over examples (1,000 resamples,
+  fixed seed 0).
+  Seeds are pooled by averaging per example first (the runs of one seed are averaged first).
 - **Paired comparison vs best**: binary → exact two-sided sign test on discordant examples
   (fixed vs broken); continuous → paired bootstrap of the mean difference. Reported as `p`.
 - **Examples needed**: the smallest `n` at which the observed discordant rate would give

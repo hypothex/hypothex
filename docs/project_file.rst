@@ -22,7 +22,7 @@ score it), stage command templates, and the Python command used for scoring.
      topk:
        version: v2
        fn: deepretro.eval.metrics:topk_accuracy   # module:function in this repo
-       higher_is_better: true
+       higher_is_better: true                      # optional; see ``metrics`` below
        unit: ""                                    # optional display unit: ms, $, tokens
        params: {k: [1, 5, 10]}
        changelog:
@@ -59,9 +59,31 @@ Sections
    ``$0.55``); without it the unit comes from the name (``latency``, ``_ms`` → ``ms``;
    ``usd``, ``cost`` → ``$``; ``token`` → ``tokens``; ``seconds`` → ``s``).
 
+   ``higher_is_better`` is optional. One rule gives the direction of every score key,
+   for the leaderboard (also when re-ranked by another key), the task workspace and
+   saved ``compare`` panels: a metric that sets ``higher_is_better`` wins for all its
+   keys; else, on a ``system_bench`` task, a percentile key (``p50``, ``p95``, ...)
+   is lower-is-better; else higher is better (the default). A task's direction is
+   that of its ``primary``. Set it to ``true`` to keep a metric's percentiles
+   higher-is-better on a ``system_bench`` task, and to ``false`` for any other
+   lower-is-better metric. Project snapshots stored by older versions wrote
+   ``higher_is_better: true`` for every metric; Hypothex reads those as not set
+   until the project's ``hypothex.yaml`` is read again.
+
+   .. code-block:: yaml
+
+      metrics:
+        latency: {version: v1, fn: bench:harness}          # p95, p99: lower is better
+        errors: {version: v1, fn: bench:harness, higher_is_better: false}
+        throughput: {version: v1, fn: bench:harness, higher_is_better: true}
+
 ``tasks``
    A task pairs a ``dataset`` (and optional ``split``) with one or more ``metrics``,
-   and names the ``primary`` metric/key that the leaderboard sorts by.
+   and names the ``primary`` metric/key that the leaderboard sorts by. An eval task
+   whose score keys have dotted parts (``reported/set-1.m-a.top10``) may name
+   them with ``score_keys: "{dataset}.{model}.{metric}"``: two or three ``{name}``
+   parts joined by ``.``, one of them ``{metric}``. The UI labels its dataset, model
+   and metric controls with these names.
 
 ``stages``
    Named command templates (``train``, ``infer``, ...) that ``hx run`` and

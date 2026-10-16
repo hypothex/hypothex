@@ -208,6 +208,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/{project}/{task}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Task Run List */
+        get: operations["task_run_list_api_v1_tasks__project___task__runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{project}/{task}/reeval": {
         parameters: {
             query?: never;
@@ -528,6 +545,23 @@ export interface paths {
         put?: never;
         /** Run Tags */
         post: operations["run_tags_api_v1_runs__run_id__tags_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runs/{run_id}/name": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run Name */
+        post: operations["run_name_api_v1_runs__run_id__name_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -995,6 +1029,21 @@ export interface components {
             sweep_id?: string | null;
             /** Repo */
             repo: string;
+        };
+        /**
+         * NameBody
+         * @description Body of ``POST /api/v1/runs/{id}/name``: a new name, or null to reset it.
+         */
+        NameBody: {
+            /** Command Id */
+            command_id?: string | null;
+            /**
+             * Created By
+             * @default api
+             */
+            created_by: string;
+            /** Name */
+            name?: string | null;
         };
         /**
          * NoteBody
@@ -1814,6 +1863,42 @@ export interface operations {
             };
         };
     };
+    task_run_list_api_v1_tasks__project___task__runs_get: {
+        parameters: {
+            query?: {
+                archived?: boolean;
+            };
+            header?: never;
+            path: {
+                project: string;
+                task: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     task_reeval_api_v1_tasks__project___task__reeval_post: {
         parameters: {
             query?: never;
@@ -2117,6 +2202,7 @@ export interface operations {
                 limit?: number;
                 before_created_at?: string | null;
                 before_run_id?: string | null;
+                q?: string | null;
             };
             header?: never;
             path?: never;
@@ -2587,6 +2673,43 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["TagBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_name_api_v1_runs__run_id__name_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NameBody"];
             };
         };
         responses: {

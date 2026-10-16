@@ -10,15 +10,6 @@ function rule(css: string, selector: string): string {
   return css.slice(css.indexOf("{", at) + 1, css.indexOf("}", at)).trim();
 }
 
-describe("run-top action error (UI-F2)", () => {
-  test("the error adds no width to the actions column, so the headline keeps its width", () => {
-    const err = rule(PAGES_CSS, ".page .run-top .err");
-    expect(err).toContain("width: 0;");
-    expect(err).toContain("min-width: 100%;");
-    expect(err).toContain("overflow-wrap: anywhere;");
-  });
-});
-
 describe("leaderboard rows (UI-F4)", () => {
   test("name and plot tracks both flex, the name has a floor", async () => {
     const frow = rule(await read("../../src/panels/panels.css"), ".frow");
@@ -49,7 +40,7 @@ describe("leaderboard rows (UI-F4)", () => {
 
 describe("command palette rows (UI-F8)", () => {
   test("the title keeps one line; the subtitle takes the rest and ends in an ellipsis", async () => {
-    const css = await read("../../src/styles/base.css");
+    const css = await read("../../src/shell/kept.css");
     expect(rule(css, ".pal-list li.it")).toContain("grid-template-columns: max-content minmax(0, 1fr);");
     const small = rule(css, ".pal-list li.it small");
     for (const d of ["white-space: nowrap;", "overflow: hidden;", "text-overflow: ellipsis;", "text-align: right;"]) {
@@ -65,11 +56,10 @@ describe("curves value strip", () => {
   });
 });
 
-test("overview and run/sweep columns stack before text tracks collapse", () => {
-  expect(PAGES_CSS).toContain("@media (max-width: 1100px)");
-  expect(PAGES_CSS).toContain(".page .run-top, .page .run-grid, .page .ov-grid { grid-template-columns: minmax(0, 1fr);");
+test("Home columns stack before text tracks collapse", async () => {
+  const css = await read("../../src/home/home.css");
+  expect(css).toContain("@media (max-width: 1360px) { .home .two { grid-template-columns: minmax(0, 1fr); } }");
   expect(rule(PAGES_CSS, ".page .actions")).toContain("flex-wrap: wrap;");
-  expect(rule(PAGES_CSS, ".page .idea")).toContain("minmax(140px, 1fr)");
 });
 test("editor stacks and preview unsticks at narrow viewport", async () => {
   const css = await read("../../src/editor/editor.css");
@@ -78,10 +68,23 @@ test("editor stacks and preview unsticks at narrow viewport", async () => {
   expect(rule(css, ".hx-ed-split")).toContain("grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);");
 });
 
-test("host GPU strips move to their own row and keep readable cells in a narrow container", async () => {
-  const css = await read("../../src/pages/components/HostsPanel.tsx");
-  expect(css).toContain("container-type: inline-size;");
-  expect(css).toContain("@container (max-width: 1050px)");
-  expect(css).toContain(".hrow > :nth-child(3) { grid-column: 1 / -1; grid-row: 2;");
-  expect(css).toContain(".page .hosts .gc { flex: 1 1 80px;");
+test("Hosts and Queue tables scroll inside their frame and GPU cells wrap in a narrow viewport", async () => {
+  const css = await read("../../src/hosts/hosts.css");
+  expect(rule(css, ".hosts-page .tblwrap")).toContain("overflow-x: auto;");
+  expect(rule(css, ".gpus")).toContain("flex-wrap: wrap;");
+});
+
+describe("runs sidebar pencil (spec 4.2)", () => {
+  test("the pencil shows on row hover or row focus, not only on name hover", async () => {
+    const pen = rule(
+      await read("../../src/task/task.css"),
+      ".runs .rrow:hover .run-name .pen, .runs .rrow:focus-within .run-name .pen",
+    );
+    expect(pen).toContain("opacity: 1;");
+  });
+});
+
+test("an empty run list takes no height, so its empty state sits under the list header", async () => {
+  const css = await read("../../src/task/task.css");
+  expect(rule(css, ".runs .runs-list:empty")).toContain("flex: 0;");
 });

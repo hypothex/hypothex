@@ -51,6 +51,7 @@ export function panelSnippet(type: PanelType, metric: string): string[] {
       "      x: {field: status, type: nominal}",
       "      y: {aggregate: count, type: quantitative}",
     ],
+    compare: [`  data: {datasets: [], metrics: [${metric}]}`, "  render: table"],
   };
   return [`- type: ${type}`, `  title: New ${label}`, ...body[type], "  layout: {span: 12}"];
 }

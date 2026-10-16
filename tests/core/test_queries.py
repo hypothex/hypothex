@@ -9,7 +9,7 @@ import yaml
 from hypothex.core import queries as q
 from hypothex.core.context import Context
 from hypothex.core.datasets import FingerprintCache
-from hypothex.core.errors import ConfigError, EvalError, RemoteProjectError, RunError
+from hypothex.core.errors import ConfigError, EvalError, RemoteProjectError, RunError, RunNameError
 from hypothex.core.evaluation import evaluate_run
 from hypothex.core.ids import utcnow
 from hypothex.core.index import store_fingerprint
@@ -345,24 +345,26 @@ def test_show_run_finds_children_without_listing_the_project(
     assert q.show_run(ctx, "other").children == []
 
 
-def test_list_tasks_counts_finished_runs_and_follows_new_scores(
+def test_list_tasks_counts_runs_and_finished_runs_and_follows_new_scores(
     ctx: Context, toy_repo: Path
 ) -> None:
-    # PERF-F7: n_runs is a COUNT; the ranking is reused only while the index is unchanged
+    # PERF-F7: the counts are COUNTs; the ranking is reused only while the index is unchanged
+    # n_runs: every unarchived run (the queued one too); n_finished: the finished ones
     seed_finished_run(ctx, toy_repo, "a", predictions=PREDS_075)
     evaluate_run(ctx, "a")
     ctx.create_run(make_record("queued", task="toy-acc", status=RunStatus.QUEUED))
     seed_finished_run(ctx, toy_repo, "hidden", predictions=ALL_RIGHT)
     q.archive_run(ctx, "hidden")
     first = {t.name: t for t in q.list_tasks(ctx)}["toy-acc"]
-    assert (first.n_runs, first.best) == (1, 0.75)
+    assert (first.n_runs, first.n_finished, first.best) == (2, 1, 0.75)
     seed_finished_run(ctx, toy_repo, "b", predictions=ALL_RIGHT, config_hash="sha256:bbbb")
     evaluate_run(ctx, "b")
     second = {t.name: t for t in q.list_tasks(ctx)}["toy-acc"]
-    assert (second.n_runs, second.best) == (2, 1.0)
+    assert (second.n_runs, second.n_finished, second.best) == (3, 2, 1.0)
     write_toy_project(toy_repo, accuracy_version="v2")
     bumped = {t.name: t for t in q.list_tasks(ctx)}["toy-acc"]
-    assert (bumped.n_runs, bumped.best, bumped.metrics) == (2, None, {"accuracy": "v2"})
+    assert (bumped.n_runs, bumped.n_finished, bumped.best) == (3, 2, None)
+    assert bumped.metrics == {"accuracy": "v2"}
 
 
 def test_list_tasks_reads_runs_once_per_task_and_not_again_when_unchanged(
@@ -700,3 +702,30 @@ def test_show_terminal_run_keeps_exact_index_names_without_scanning(
     monkeypatch.setattr(ctx.store, "read_metric_points", no_file_scan)
     monkeypatch.setattr(ctx.store, "read_metric_points_bounded", no_file_scan)
     assert q.show_run(ctx, "r1").metric_names == names
+
+
+def test_rename_run_sets_trims_resets_and_emits(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    assert q.rename_run(ctx, "r1", "  wide beam ").name == "wide beam"
+    assert ctx.find_record("r1").name == "wide beam"
+    indexed = ctx.index.get_run("r1")
+    assert indexed is not None and indexed.name == "wide beam"
+    event = ctx.events.since(0)[-1]
+    assert (event.type, event.payload) == (
+        "run.renamed",
+        {"status": "finished", "name": "wide beam"},
+    )
+    assert q.rename_run(ctx, "r1", None).name is None
+    assert q.rename_run(ctx, "r1", "x").name == "x"
+    assert q.rename_run(ctx, "r1", "   ").name is None  # blank resets
+    assert ctx.events.since(0)[-1].payload["name"] is None
+
+
+def test_rename_run_refuses_long_or_multiline_names(ctx: Context, toy_repo: Path) -> None:
+    seed_finished_run(ctx, toy_repo, "r1")
+    q.rename_run(ctx, "r1", "keep")
+    with pytest.raises(RunNameError, match="at most 80"):
+        q.rename_run(ctx, "r1", "x" * 81)
+    with pytest.raises(RunNameError, match="one line"):
+        q.rename_run(ctx, "r1", "a\nb")
+    assert ctx.find_record("r1").name == "keep"

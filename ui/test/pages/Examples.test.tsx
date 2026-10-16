@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import type { PredictionPage, TaskDetail } from "../../src/pages/components/types";
-import { ExamplesPage, pickExampleField } from "../../src/pages/Examples";
+import { ExamplesPage, hasExampleScores, pickExampleField } from "../../src/pages/Examples";
 import { RUN_RF, RUN_SVM, makeDetail, makeDiff } from "./fixtures";
 import { HttpReply, mockApi, renderWithClient, restoreFetch } from "./helpers";
 
@@ -12,6 +12,7 @@ afterEach(() => {
 
 const PRED = `/api/v1/runs/${RUN_SVM}/predictions?metric=accuracy%40v1&failures_only=true&field=correct`;
 const PROBE = `/api/v1/runs/${RUN_SVM}/predictions?metric=accuracy&limit=1`;
+const PROBE_A = `/api/v1/runs/${RUN_RF}/predictions?metric=accuracy&limit=1`;
 const COMPARE = `/api/v1/compare/examples?a=${RUN_RF}&b=${RUN_SVM}&metric=accuracy&field=correct`;
 
 /** One predictions row whose per-example scores are `scores`. */
@@ -49,6 +50,7 @@ function routes(extra: Record<string, unknown> = {}): Record<string, unknown> {
     ),
     [`GET /api/v1/runs/${RUN_SVM}`]: makeDetail(),
     [`GET ${PROBE}`]: probe({ "accuracy@v1": { correct: true } }),
+    [`GET ${PROBE_A}`]: probe({ "accuracy@v1": { correct: false } }),
     [`GET ${COMPARE}`]: makeDiff(),
     [`GET ${PRED}&limit=8`]: page([
       ["test-7", 2, 1],
@@ -116,19 +118,18 @@ test("uses the task's primary metric when ?metric= is absent", async () => {
   expect(calls.some((c) => c.url === COMPARE)).toBe(true);
 });
 
-test("shows the server error when a run has no per-example scores", async () => {
-  mockApi(
-    routes({
-      [`GET ${COMPARE}`]: new HttpReply(400, {
-        error: `run ${RUN_RF} has no per-example scores for accuracy@v1`,
-        type: "EvalError",
-      }),
-    }),
-  );
+test("run A without per-example scores is the calm empty state too, and compare is not asked", async () => {
+  const calls = mockApi(routes({ [`GET ${PROBE_A}`]: { run_id: RUN_RF, total: 0, offset: 0, limit: 1, rows: [] } }));
   renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
-  expect((await screen.findByRole("alert")).textContent).toBe(
-    `run ${RUN_RF} has no per-example scores for accuracy@v1`,
-  );
+  expect(await screen.findByText("No per-example scores for this task")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(calls.some((c) => c.url.startsWith("/api/v1/compare/examples"))).toBe(false);
+});
+
+test("other compare errors still show the server's message", async () => {
+  mockApi(routes({ [`GET ${COMPARE}`]: new HttpReply(400, { error: "metric accuracy@v9 is unknown", type: "ConfigError" }) }));
+  renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
+  expect((await screen.findByRole("alert")).textContent).toBe("metric accuracy@v9 is unknown");
 });
 
 test("asks for ?metric= when run A has no task", async () => {
@@ -217,4 +218,12 @@ test("a metric without per-example scores is a calm empty state, not a red error
   expect(await screen.findByText("No per-example scores for this task")).toBeTruthy();
   expect(screen.queryByRole("alert")).toBeNull();
   expect(calls.some((c) => c.url.startsWith("/api/v1/compare/examples"))).toBe(false);
+});
+
+test("hasExampleScores matches the exact ref when the metric names a version", () => {
+  const page = probe({ "accuracy@v1": { correct: true } });
+  expect(hasExampleScores(page, "accuracy")).toBe(true);
+  expect(hasExampleScores(page, "accuracy@v1")).toBe(true);
+  expect(hasExampleScores(page, "accuracy@v2")).toBe(false);
+  expect(hasExampleScores(probe({ "accuracy@v1": {} }), "accuracy")).toBe(false);
 });

@@ -49,10 +49,14 @@ export function pickExampleField(page: PredictionPage, metric: string): string |
     .find((name) => typeof fields[name] === "boolean");
 }
 
-/** Whether a predictions page carries per-example scores for `metric` (`name` or `name@version`). */
+/**
+ * Whether a predictions page carries per-example scores for `metric`: `name@version` must
+ * match exactly, a bare `name` matches any of its versions.
+ */
 export function hasExampleScores(page: PredictionPage, metric: string): boolean {
   const scores = page.rows[0]?.scores ?? {};
-  return Object.entries(scores).some(([ref, fields]) => (ref === metric || ref.split("@")[0] === metric.split("@")[0]) && Object.keys(fields).length > 0);
+  const matches = (ref: string): boolean => (metric.includes("@") ? ref === metric : ref.split("@")[0] === metric);
+  return Object.entries(scores).some(([ref, fields]) => matches(ref) && Object.keys(fields).length > 0);
 }
 
 interface SideProps {
@@ -107,11 +111,15 @@ export function ExamplesPage({ a, b, metric }: ExamplesPageProps) {
   // If this read fails, compare still runs without a field and shows the server's own error.
   const probe = { metric: metricRef ?? "", limit: 1 };
   const fieldQ = useRunPredictions(b, probe, { enabled: metricRef !== null });
+  const probeA = useRunPredictions(a, probe, { enabled: metricRef !== null });
   const field = fieldQ.data && metricRef ? pickExampleField(fieldQ.data, metricRef) : undefined;
-  // B logged no per-example scores for the metric (e.g. a training task): nothing to compare
-  const noScores = fieldQ.data !== undefined && metricRef !== null && !hasExampleScores(fieldQ.data, metricRef);
+  // A or B logged no per-example scores for the metric (e.g. a training task): nothing to
+  // compare. A probe that fails says nothing; compare then runs and shows its own error.
+  const lacks = (page: PredictionPage | undefined): boolean =>
+    page !== undefined && metricRef !== null && !hasExampleScores(page, metricRef);
+  const noScores = lacks(fieldQ.data) || lacks(probeA.data);
   const diffQ = useCompareExamples(a, b, metricRef ?? "", field, {
-    enabled: metricRef !== null && !fieldQ.isPending && !noScores,
+    enabled: metricRef !== null && !fieldQ.isPending && !probeA.isPending && !noScores,
   });
   const diff = diffQ.data;
   const [limit, setLimit] = useState(FIRST_PAGE);

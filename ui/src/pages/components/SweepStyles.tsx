@@ -12,7 +12,7 @@ export const SWEEP_CSS = `
 .page .prog i.k { background: var(--ink-3); opacity: .3; }
 .page .prog i.n { box-shadow: inset 0 0 0 1px var(--rule-2); }
 .page .sw-grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 72px; margin-top: 64px; align-items: start; }
-.page .sw-grid .fig { margin-top: 0; min-width: 0; }
+.page .sw-grid .panel { min-width: 0; }
 .page .sw-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
 .page .add-seeds { display: flex; gap: 10px; align-items: center; font-size: 13.5px; color: var(--ink-2); }
 .page .add-seeds label { display: inline-flex; gap: 8px; align-items: center; }

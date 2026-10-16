@@ -11,21 +11,18 @@ export const PAGES_CSS = `
 .page .err { color: var(--fail); font-size: 14px; margin: 12px 0; }
 .page .stats { margin: 36px 0 0; }
 .page .stats > div:not([title]) { cursor: default; }
-.page .fig { min-width: 0; }
-.page .fig-h .t { margin: 0; }
-.page .panel-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 56px 48px; margin-top: 64px; }
-.page .panel-grid > .fig { margin-top: 0; }
 .page .btn { display: inline-flex; align-items: center; text-decoration: none; }
 .page .btn:disabled { background: transparent; }
 .page .btn.link { text-decoration: underline; }
 .page .copy { line-height: 0; }
 .page .copy[data-state="failed"] { color: var(--fail); }
 .page .row { display: flex; gap: 8px; align-items: center; }
+.page .panel:not(.full), .page .pgrid { margin-top: 24px; }
+.page .pgrid > .panel, .page .two-x > .panel, .page .sw-grid > .panel, .page .ov-grid .panel, .page .run-grid .panel { margin-top: 0; }
+.page .side > .panel + .panel:not(.full), .page .run-grid > div > .panel + .panel:not(.full) { margin-top: 16px; }
 .page .plain { list-style: none; margin: 0; padding: 0; }
 .page .plain li { padding: 6px 0; }
 .page .ov-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 72px; margin-top: 64px; }
-.page .ov-grid .fig { margin-top: 0; }
-.page .side .fig + .fig { margin-top: 48px; }
 .page .timeline svg { display: block; overflow: visible; }
 .page .timeline .ln { font: 600 13px var(--sans); fill: var(--ink); }
 .page .timeline .lc { font: 400 12px var(--sans); fill: var(--ink-3); }
@@ -79,8 +76,6 @@ export const PAGES_CSS = `
 .page .st.running i { background: var(--agent); }
 .page .run-grid { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 72px; margin-top: 64px; }
 .page .run-grid > div, .page .run-top > div { min-width: 0; }
-.page .run-grid .fig { margin-top: 0; }
-.page .run-grid .side .fig + .fig { margin-top: 56px; }
 .page .tree { font-size: 14px; }
 .page .tree .cmdrow { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 0 16px; align-items: start; padding: 0 0 18px; }
 .page .tree .root { display: grid; grid-template-columns: 116px minmax(0, 1fr) auto auto; gap: 0 16px; align-items: baseline; padding: 14px 0 10px; border-top: 1px solid var(--rule); }
@@ -119,7 +114,6 @@ export const PAGES_CSS = `
 .page .ab .acc { font: 300 38px/1 var(--sans); letter-spacing: -.02em; text-align: right; }
 .page .ab .acc small { display: block; font-size: 12.5px; color: var(--ink-3); font-weight: 400; letter-spacing: 0; margin-top: 4px; }
 .page .two-x { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 64px; align-items: start; margin-top: 64px; }
-.page .two-x .fig { margin-top: 0; }
 .page .ot { border-collapse: collapse; width: 100%; table-layout: fixed; }
 .page .ot th { font: 500 13px/1.3 var(--sans); color: var(--ink-3); padding: 0 12px 10px; text-align: center; overflow-wrap: anywhere; }
 .page .ot th.rh { text-align: right; padding: 0 16px 0 0; vertical-align: middle; }

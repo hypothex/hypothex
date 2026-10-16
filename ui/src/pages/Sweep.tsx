@@ -9,7 +9,7 @@ import { type ReactElement, useState } from "react";
 import { api } from "../api/client";
 import type { HostRow, Leaderboard, RunRecord, RunStatus, RunsQuery, SweepSummary } from "../api/models";
 import { queryKeys, useAllRuns, useHosts, useSweep } from "../api/queries";
-import { Figure } from "./components/Figure";
+import { Panel } from "../chrome/Panel";
 import { fmtClock, isAgent, primaryMetricName } from "./components/format";
 import { Unbroken } from "./components/Headline";
 import { useNow } from "./components/HostsPanel";
@@ -205,8 +205,7 @@ function SweepBody({ project, sweepId, summary, runs, runsError, onRefresh, host
         <SweepProgress counts={counts} />
       </div>
       <div className="sw-grid">
-        <Figure
-          letter="a"
+        <Panel
           title={`${metric} by ${(axes ? [axes.row, axes.col] : names).join(" × ")}`}
           aside="mean over seeds"
         >
@@ -232,8 +231,8 @@ function SweepBody({ project, sweepId, summary, runs, runsError, onRefresh, host
               stateOf={stateOf}
             />
           )}
-        </Figure>
-        <Figure letter="b" title="Seeds, 95% CI" aside={metric}>
+        </Panel>
+        <Panel title="Seeds, 95% CI" aside={metric}>
           <SweepForest
             cells={cells}
             best={best}
@@ -244,11 +243,11 @@ function SweepBody({ project, sweepId, summary, runs, runsError, onRefresh, host
             maxSeeds={maxSeeds}
             seedsOf={seedsOf}
           />
-        </Figure>
+        </Panel>
       </div>
-      <Figure letter="c" title="Runs on hosts" aside={runs === undefined ? "" : `${running} running, ${queued} queued`}>
+      <Panel title="Runs on hosts" aside={runs === undefined ? "" : `${running} running, ${queued} queued`}>
         {runs === undefined ? runsError ? <ErrorBox error={runsError} /> : <Loading /> : <SweepRuns runs={ordered} names={names} stale={stale} hosts={hosts} now={now} />}
-      </Figure>
+      </Panel>
       {rerun ? (
         <SweepRerun
           project={project}

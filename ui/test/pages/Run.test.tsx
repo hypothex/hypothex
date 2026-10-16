@@ -47,13 +47,13 @@ describe("RunPage", () => {
     const h1 = await screen.findByRole("heading", { level: 1 });
     expect(h1.textContent).toBe(SVM_HYPOTHESIS);
     expect(h1.className).toBe("headline long");
-    await screen.findByRole("region", { name: "a Metrics" });
+    await screen.findByRole("region", { name: "Metrics" });
     await waitFor(() =>
       expect(document.querySelector(".crumb")?.textContent).toBe(
         `toy-classifier/toy-test/RBF-kernel SVM/${RUN_SVM}generic`,
       ),
     );
-    expect(regionNames()).toEqual(["a Metrics", "b Where", "c Scores", "d Notes"]);
+    expect(regionNames()).toEqual(["Metrics", "Where", "Scores", "Notes"]);
     // the leaderboard loads in parallel; the strip fills in once it arrives
     await waitFor(() => expect(statValues()).toEqual(["0.9222", "0.874–0.953", "◇×3", "0.8 s"]));
     expect(screen.getByRole("link", { name: "toy-test" }).getAttribute("href")).toBe("/t/toy-classifier/toy-test");
@@ -75,16 +75,16 @@ describe("RunPage", () => {
       }),
     );
     renderWithClient(<RunPage runId={RUN_SVM} log="stderr" />, { registry });
-    await screen.findByRole("region", { name: "b Metrics" });
-    expect(regionNames()).toEqual(["a stderr", "b Metrics", "c Where", "d Scores", "e Notes"]);
+    await screen.findByRole("region", { name: "Metrics" });
+    expect(regionNames()).toEqual(["stderr", "Metrics", "Where", "Scores", "Notes"]);
     expect(await screen.findByText("Traceback: boom")).toBeTruthy();
   });
 
   test("renders a run that has no task", async () => {
     const calls = mockApi({ [`GET /api/v1/runs/${RUN_SVM}`]: makeDetail({ task: null }) });
     renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
-    await screen.findByRole("region", { name: "a Where" });
-    expect(regionNames()).toEqual(["a Where", "b Scores", "c Notes"]);
+    await screen.findByRole("region", { name: "Where" });
+    expect(regionNames()).toEqual(["Where", "Scores", "Notes"]);
     expect(calls.map((c) => c.url)).toEqual([`/api/v1/runs/${RUN_SVM}`]);
     expect(document.querySelector(".crumb")?.textContent).toBe(
       `toy-classifier/RBF-kernel SVM/${RUN_SVM}`,
@@ -132,7 +132,7 @@ test("run history metadata narrows the active views query before reading curves"
   const detail = { ...makeDetail(), metric_names: ["loss", "sweep/rps", "step", "lr"] };
   const calls = mockApi(routes({ [`GET /api/v1/runs/${RUN_SVM}`]: detail, [`GET ${TASK}`]: { stages: {} } }));
   renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
-  await screen.findByRole("region", { name: "a Metrics" });
+  await screen.findByRole("region", { name: "Metrics" });
   const body = calls.find((c) => c.method === "POST")?.body as {
     view: { panels: { data: { metrics: string[]; max_points: number } }[] };
   };
@@ -170,7 +170,7 @@ test("training run checkpoints keep validation metrics separate from absent eval
   expect(checkpoints.textContent).toContain("val/top1");
   expect(checkpoints.textContent).toContain("0.75");
   expect(screen.getByText("no scores")).toBeTruthy();
-  expect(regionNames()).toEqual(["a Where", "b Checkpoints", "c Scores", "d Notes"]);
+  expect(regionNames()).toEqual(["Where", "Checkpoints", "Scores", "Notes"]);
 });
 
 test("run kind panels receive status and authoritative leaderboard group membership", async () => {

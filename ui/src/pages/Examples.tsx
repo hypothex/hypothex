@@ -6,7 +6,7 @@ import { useState } from "react";
 import { useCompareExamples, useRun, useRunPredictions, useTask } from "../api/queries";
 import { ErrorsTable, ExampleStrip, OutcomeTable, SignTestChart } from "./components/ExampleCharts";
 import { examplesHeadline, examplesMeta, exampleTotal, pairLabels } from "./components/examples";
-import { Figure } from "./components/Figure";
+import { Panel } from "../chrome/Panel";
 import { fmtScore, isAgent, primaryMetricName } from "./components/format";
 import { AppLink, hrefs } from "./components/links";
 import { ErrorBox, Loading } from "./components/QueryState";
@@ -149,18 +149,17 @@ export function ExamplesPage({ a, b, metric }: ExamplesPageProps) {
       {diff ? (
         <>
           <div className="two-x">
-            <Figure letter="a" title="Outcomes">
+            <Panel title="Outcomes">
               <OutcomeTable labelA={labelA} labelB={labelB} diff={diff} />
-            </Figure>
-            <Figure letter="b" title="Sign test" aside={`${changed} changed`}>
+            </Panel>
+            <Panel title="Sign test" aside={`${changed} changed`}>
               <SignTestChart fixed={diff.fixed.length} broken={diff.broken.length} />
-            </Figure>
+            </Panel>
           </div>
-          <Figure letter="c" title="Per example" aside={String(exampleTotal(diff))}>
+          <Panel title="Per example" aside={String(exampleTotal(diff))}>
             <ExampleStrip diff={diff} />
-          </Figure>
-          <Figure
-            letter="d"
+          </Panel>
+          <Panel
             title={`${labelB} errors`}
             aside={errors.data ? `${errors.data.rows.length} of ${errors.data.total}` : undefined}
           >
@@ -178,7 +177,7 @@ export function ExamplesPage({ a, b, metric }: ExamplesPageProps) {
             ) : (
               <Loading />
             )}
-          </Figure>
+          </Panel>
         </>
       ) : !error && !noMetric ? (
         <Loading />

@@ -6,7 +6,7 @@ import { useMemo } from "react";
 
 import type { RunStatus } from "../../api/models";
 import { useRunTrace, useRunTraces, useViewQuery } from "../../api/queries";
-import { Figure, panelLetter } from "./Figure";
+import { Panel } from "../../chrome/Panel";
 import { AppLink, hrefs } from "./links";
 import { PanelBody, PanelGrid } from "./PanelGrid";
 import { ErrorBox, Loading } from "./QueryState";
@@ -101,12 +101,6 @@ export function runViewPanels(
   });
 }
 
-/** How many lettered panels `KindPanels` draws for these specs. */
-export function kindPanelCount(specs: PanelSpec[]): number {
-  const { regular, trace } = splitRunView(specs);
-  return regular.length + (trace ? 1 : 0);
-}
-
 /** The example to show first: the first failed trace, else the first trace. */
 export function pickExample(traces: TraceSummary[]): string | null {
   return (traces.find((t) => t.failed) ?? traces[0])?.example_id ?? null;
@@ -115,21 +109,16 @@ export function pickExample(traces: TraceSummary[]): string | null {
 export interface TraceSectionProps {
   runId: string;
   example?: string;
-  letter: string;
   title: string;
 }
 
-export function TraceSection({ runId, example, letter, title }: TraceSectionProps) {
+export function TraceSection({ runId, example, title }: TraceSectionProps) {
   const list = useRunTraces(runId);
   const traces = list.data ?? [];
   const chosen = example ? String(example) : pickExample(traces);
   const trace = useRunTrace(runId, chosen);
   return (
-    <Figure
-      letter={letter}
-      title={chosen ? `${title} · ${chosen}` : title}
-      aside={list.data ? `${traces.length} traced` : undefined}
-    >
+    <Panel title={chosen ? `${title} · ${chosen}` : title} aside={list.data ? `${traces.length} traced` : undefined}>
       {list.error ? <ErrorBox error={list.error} /> : null}
       {traces.length > 0 ? (
         <nav className="trace-pick" aria-label="Traced examples">
@@ -155,7 +144,7 @@ export function TraceSection({ runId, example, letter, title }: TraceSectionProp
       ) : chosen ? (
         <Loading />
       ) : null}
-    </Figure>
+    </Panel>
   );
 }
 
@@ -165,12 +154,11 @@ export interface KindPanelsProps {
   runId: string;
   specs: PanelSpec[];
   example?: string;
-  startIndex: number;
   currentGroupId?: string;
   runStatus?: RunStatus;
 }
 
-export function KindPanels({ project, task, runId, specs, example, startIndex, currentGroupId, runStatus }: KindPanelsProps) {
+export function KindPanels({ project, task, runId, specs, example, currentGroupId, runStatus }: KindPanelsProps) {
   // `specs` is memoized by the caller, so `regular` and `results` keep their identity across renders
   const { regular, trace } = useMemo(() => splitRunView(specs), [specs]);
   const traceList = useRunTraces(runId, trace !== null);
@@ -178,11 +166,7 @@ export function KindPanels({ project, task, runId, specs, example, startIndex, c
   const traceFirst = specs[0]?.type === "trace";
   // A current-target grid must never briefly render every target while selection loads.
   const waitingForTarget = trace !== null && regular.some((p) => p.type === "grid") && chosen === null;
-  const trajectory = trace ? (
-    <TraceSection runId={runId} example={chosen ?? undefined}
-      letter={panelLetter(startIndex + (traceFirst ? 0 : regular.length))}
-      title={trace.title || "Trajectory"} />
-  ) : null;
+  const trajectory = trace ? <TraceSection runId={runId} example={chosen ?? undefined} title={trace.title || "Trajectory"} /> : null;
   const panels = useViewQuery(
     project,
     task,
@@ -198,8 +182,7 @@ export function KindPanels({ project, task, runId, specs, example, startIndex, c
       {traceFirst ? trajectory : null}
       {panels.error ? <ErrorBox error={panels.error} /> : null}
       {regular.length > 0 && results && !waitingForTarget ? (
-        <PanelGrid results={results} specs={regular} startIndex={startIndex + (traceFirst ? 1 : 0)}
-          selectedItemId={chosen ?? undefined} currentGroupId={currentGroupId} runStatus={runStatus} />
+        <PanelGrid results={results} specs={regular} selectedItemId={chosen ?? undefined} currentGroupId={currentGroupId} runStatus={runStatus} />
       ) : waitingForTarget && traceList.data ? (
         <p className="small">No traced example available for comparison</p>
       ) : regular.length > 0 && !panels.error && !traceList.error ? (

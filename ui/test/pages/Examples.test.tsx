@@ -74,9 +74,9 @@ test("compares two runs example by example", async () => {
     expect(screen.getByText(text)).toBeTruthy();
   }
   const names = screen.getAllByRole("region").map((r) => r.getAttribute("aria-label"));
-  expect(names).toEqual(["a Outcomes", "b Sign test", "c Per example", "d RBF-kernel SVM errors"]);
+  expect(names).toEqual(["Outcomes", "Sign test", "Per example", "RBF-kernel SVM errors"]);
 
-  const errors = screen.getByRole("region", { name: "d RBF-kernel SVM errors" });
+  const errors = screen.getByRole("region", { name: "RBF-kernel SVM errors" });
   const rows = await within(errors).findAllByRole("row");
   expect(rows.map((r) => [...r.querySelectorAll("td")].map((c) => c.textContent))).toEqual([
     [],
@@ -158,7 +158,7 @@ test("sends the solved field to compare and to the errors query", async () => {
   );
   renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="solved" />);
   await screen.findByRole("heading", { level: 1, name: /fixes 9, breaks 3/ });
-  const errors = screen.getByRole("region", { name: "d RBF-kernel SVM errors" });
+  const errors = screen.getByRole("region", { name: "RBF-kernel SVM errors" });
   expect(await within(errors).findByText("task-17")).toBeTruthy();
   const urls = calls.map((c) => c.url);
   expect(urls).toContain(solvedCompare);

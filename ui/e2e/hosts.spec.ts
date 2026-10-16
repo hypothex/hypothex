@@ -17,7 +17,7 @@ test("the Overview Hosts panel lists every fake host", async ({ page, request, t
 
   await page.goto("/");
   await expectTheme(page, theme);
-  const panel = page.getByRole("region", { name: "a Hosts" });
+  const panel = page.getByRole("region", { name: "Hosts" });
   await expect(panel).toBeVisible();
   for (const host of hosts) {
     await expect(panel.getByText(host.name, { exact: true }).first()).toBeVisible();
@@ -57,7 +57,7 @@ test("a queued remote run shows its place in the host queue", async ({ page, req
   await expect(page.getByRole("heading", { level: 1 })).toContainText(
     new RegExp(`queued \\d+(st|nd|rd|th) on ${host}$`),
   );
-  const queue = page.getByRole("region", { name: "a Queue" });
+  const queue = page.getByRole("region", { name: "Queue" });
   await expect(queue).toBeVisible();
   await expect(queue.locator('tr[aria-current="true"]')).toContainText(run.run_id.split("-").pop() ?? "");
   await expect(page.getByRole("region", { name: /Placement$/ })).toContainText(host);

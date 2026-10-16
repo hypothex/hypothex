@@ -12,7 +12,7 @@
  */
 import { Fragment } from "react";
 import { useHosts, useHubEnvironment, useOverview } from "../api/queries";
-import { Figure } from "./components/Figure";
+import { Panel } from "../chrome/Panel";
 import { Unbroken } from "./components/Headline";
 import {
   HostsPanel,
@@ -82,8 +82,7 @@ function OverviewBody({ summary }: { summary: OverviewSummary }) {
           ))}
         </p>
       ) : null}
-      <Figure
-        letter="a"
+      <Panel
         title="Hosts"
         aside={totals.usdToday > 0 ? `${fmtMoney(totals.usdToday)} today` : undefined}
       >
@@ -94,26 +93,26 @@ function OverviewBody({ summary }: { summary: OverviewSummary }) {
         ) : (
           <Loading />
         )}
-      </Figure>
-      <Figure letter="b" title="Runs by launcher">
+      </Panel>
+      <Panel title="Runs by launcher">
         <RunTimeline items={summary.timeline} />
-      </Figure>
+      </Panel>
       <div className="ov-grid">
         <div>
-          <Figure letter="c" title="Ideas">
+          <Panel title="Ideas">
             <IdeaList ideas={summary.ideas} />
-          </Figure>
+          </Panel>
         </div>
         <div className="side">
-          <Figure letter="d" title="Running">
+          <Panel title="Running">
             <RunningList runs={summary.running} />
-          </Figure>
-          <Figure letter="e" title="Failures">
+          </Panel>
+          <Panel title="Failures">
             <FailureList failures={summary.failures} />
-          </Figure>
-          <Figure letter="f" title="Projects">
+          </Panel>
+          <Panel title="Projects">
             <ProjectsTable projects={summary.projects} />
-          </Figure>
+          </Panel>
         </div>
       </div>
     </>

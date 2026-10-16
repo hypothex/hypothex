@@ -28,7 +28,7 @@ for (const [shape, labels] of Object.entries(LABELS)) {
       await page.setViewportSize({ width, height: 1200 });
       await page.goto(`/x/${a}/${b}?metric=${encodeURIComponent(metric)}`);
       await expectTheme(page, theme);
-      const outcomes = page.getByRole("region", { name: "a Outcomes", exact: true });
+      const outcomes = page.getByRole("region", { name: "Outcomes", exact: true });
       const table = outcomes.locator("table.ot");
       await expect(table.locator("td.fx .n")).toHaveText(String(diff.fixed.length));
       await expect(table.locator("td.bk .n")).toHaveText(String(diff.broken.length));

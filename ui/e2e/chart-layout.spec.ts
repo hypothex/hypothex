@@ -86,9 +86,9 @@ for (const span of [5, 7, 12]) {
     await expectTheme(page, theme);
     await page.evaluate(() => document.fonts.ready);
 
-    const board = page.getByRole("region", { name: "a Leaderboard geometry", exact: true });
-    const scatter = page.getByRole("region", { name: "b Cost vs solved geometry", exact: true });
-    const failures = page.getByRole("region", { name: "c Failures geometry", exact: true });
+    const board = page.getByRole("region", { name: "Leaderboard geometry", exact: true });
+    const scatter = page.getByRole("region", { name: "Cost vs solved geometry", exact: true });
+    const failures = page.getByRole("region", { name: "Failures geometry", exact: true });
     const widths: number[] = [];
     const tickCounts: number[] = [];
     for (const width of [1600, 1120, 1600]) {

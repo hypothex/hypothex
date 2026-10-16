@@ -49,7 +49,7 @@ describe("SweepPage", () => {
     mockApi(routes(makeSummary(), new HttpReply(400, { error: "runs unavailable", type: "IndexError" })));
     renderPage();
     await screen.findByText("runs unavailable");
-    const panel = screen.getByRole("region", { name: "c Runs on hosts" });
+    const panel = screen.getByRole("region", { name: "Runs on hosts" });
     expect(within(panel).getByRole("alert").textContent).toBe("runs unavailable");
     expect(within(panel).queryByText("loading…") === null).toBe(true);
     expect(statValue("cost, — GPU-h")).toBe("$12.50");
@@ -60,7 +60,7 @@ describe("SweepPage", () => {
     mockApi(routes(makeSummary(), () => pending));
     renderPage();
     await screen.findByRole("heading", { level: 1, name: HEADLINE });
-    const panel = screen.getByRole("region", { name: "c Runs on hosts" });
+    const panel = screen.getByRole("region", { name: "Runs on hosts" });
     expect(within(panel).queryByText("No runs indexed yet") === null).toBe(true);
     expect(within(panel).getByText("loading…")).toBeTruthy();
     expect(screen.queryByText("cost, 0.0 GPU-h") === null).toBe(true);
@@ -102,11 +102,11 @@ describe("SweepPage", () => {
     }
     expect(screen.getByRole("img", { name: "5 finished, 1 running, 1 queued, 1 failed" })).toBeTruthy();
 
-    const a = screen.getByRole("region", { name: "a top1 by lr × beam" });
+    const a = screen.getByRole("region", { name: "top1 by lr × beam" });
     expect(within(a).getByRole("table", { name: "Mean top1 by lr and beam" })).toBeTruthy();
     expect(within(a).getByRole("link", { name: "d1" }).getAttribute("href")).toBe(`/r/${rid("d1")}`);
-    expect(screen.getByRole("region", { name: "b Seeds, 95% CI" })).toBeTruthy();
-    const c = screen.getByRole("region", { name: "c Runs on hosts" });
+    expect(screen.getByRole("region", { name: "Seeds, 95% CI" })).toBeTruthy();
+    const c = screen.getByRole("region", { name: "Runs on hosts" });
     expect(await within(c).findByText("stale 4m")).toBeTruthy();
     expect(within(c).getByText("1 running, 1 queued")).toBeTruthy();
   });
@@ -141,7 +141,7 @@ describe("SweepPage", () => {
     const calls = mockApi(routes(summary, []));
     renderPage();
     expect(await screen.findByRole("heading", { level: 1, name: "No scored runs yet" })).toBeTruthy();
-    expect(screen.getByRole("region", { name: "a score by lr" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "score by lr" })).toBeTruthy();
     expect(screen.getByRole("table", { name: "Mean score by lr" })).toBeTruthy();
     expect(screen.queryByRole("link", { name: TASK })).toBeNull();
     expect(screen.getByText("No scored runs yet", { selector: "p" })).toBeTruthy();
@@ -251,7 +251,7 @@ describe("SweepPage", () => {
     try {
       mockApi(routes());
       renderWithClient(<SweepPage project={PROJECT} sweepId={SWEEP_ID} />);
-      const c = await screen.findByRole("region", { name: "c Runs on hosts" });
+      const c = await screen.findByRole("region", { name: "Runs on hosts" });
       expect(await within(c).findByText("stale 4m")).toBeTruthy();
       setSystemTime(new Date(NOW + 10 * 60_000));
       act(() => {

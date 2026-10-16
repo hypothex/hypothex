@@ -1,11 +1,20 @@
 import type { ReactNode } from "react";
 import type { PanelResult } from "../api/models";
-import { panelLetter } from "../pages/components/Figure";
 import { clampSpan } from "../pages/components/PanelGrid";
 
-/** One computed panel from `POST views/query` (contract 1.6), and the journal-style letter. */
+/** One computed panel from `POST views/query` (contract 1.6). */
 export type { PanelResult };
-export { panelLetter };
+
+/** 0 -> "a", 25 -> "z", 26 -> "aa": the editor's names for panels on the layout ruler. */
+export function panelLetter(index: number): string {
+  let n = index;
+  let out = "";
+  do {
+    out = String.fromCharCode(97 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return out;
+}
 
 /** A panel's `layout:` block; missing values take the contract defaults. */
 export interface LayoutHint {

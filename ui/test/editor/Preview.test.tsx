@@ -57,8 +57,8 @@ describe("placePanels", () => {
   });
 });
 
-test("panelLetter counts a, b, c", () => {
-  expect([0, 1, 2, 25].map(panelLetter)).toEqual(["a", "b", "c", "z"]);
+test("panelLetter counts a..z, then aa, ab", () => {
+  expect([0, 1, 2, 25, 26, 27, 51, 52].map(panelLetter)).toEqual(["a", "b", "c", "z", "aa", "ab", "az", "ba"]);
 });
 
 describe("LayoutRuler", () => {

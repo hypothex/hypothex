@@ -57,7 +57,7 @@ test("a queued run: title with its place, the host queue, placement", async () =
   await waitFor(() => expect(h1.textContent).toBe("lr 1e-3 with beam 1 · seed 3: queued 2nd on gpu1"));
   await waitFor(() => expect(statValues()).toEqual(["2 / 3", "2 GPU", "1 / 3", "12m"]));
   await waitFor(() => expect(document.querySelectorAll(".queue-t tbody tr").length).toBe(2));
-  expect(regionNames()).toEqual(["a Queue", "b Where", "c Placement", "d Scores", "e Notes"]);
+  expect(regionNames()).toEqual(["Queue", "Where", "Placement", "Scores", "Notes"]);
   expect(document.querySelector('.queue-t tr[aria-current="true"] b')?.textContent).toBe("f2c8");
   expect(document.querySelector(".status")?.textContent).toContain("2 of 3 on gpu1");
   expect(screen.getAllByRole("button").map((b) => b.textContent)).toContain("Cancel");
@@ -102,8 +102,8 @@ test("a running remote run: host, pid, GPU use, CUDA_VISIBLE_DEVICES", async () 
   renderWithClient(<RunPage runId={RUNNING_ID} />, { registry });
   expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("aug long run seed 1");
   await waitFor(() => expect(statValues()).toEqual(["1h 52m", "92 %", "57 GB", "1.87"]));
-  expect(regionNames()).toEqual(["a Where", "b Placement", "c Scores", "d Notes"]);
-  expect(screen.getByRole("region", { name: "b Placement" }).textContent).toContain("CUDA_VISIBLE_DEVICES=0");
+  expect(regionNames()).toEqual(["Where", "Placement", "Scores", "Notes"]);
+  expect(screen.getByRole("region", { name: "Placement" }).textContent).toContain("CUDA_VISIBLE_DEVICES=0");
   expect(document.querySelector(".status")?.textContent).toContain("gpu1, pid 2291045");
 });
 
@@ -184,12 +184,12 @@ test("a lost SLURM run: reason bar, cost, sweep link, Rerun first", async () => 
   expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("aug long run seed 2: lost at 02:14");
   expect(screen.getByRole("status").querySelector("b")?.textContent).toBe("SLURM job 4471023 lost");
   expect(statValues()).toEqual(["52m 27s", "$2.17"]);
-  expect(regionNames()).toEqual(["a Where", "b Placement", "c Scores", "d Notes"]);
+  expect(regionNames()).toEqual(["Where", "Placement", "Scores", "Notes"]);
   const link = await screen.findByRole("link", { name: "sweep s-7f3a" });
   expect(link.getAttribute("href")).toBe("/s/toy-classifier/s-7f3a");
   expect(screen.getByRole("button", { name: "Rerun" }).className).toBe("btn primary");
   await waitFor(() =>
-    expect(screen.getByRole("region", { name: "b Placement" }).textContent).toContain("r814u05n01"),
+    expect(screen.getByRole("region", { name: "Placement" }).textContent).toContain("r814u05n01"),
   );
 });
 

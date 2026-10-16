@@ -19,7 +19,7 @@ test("only the hub's own row: backend headline and counts, panels a-f", async ()
   mockApi({ "GET /api/v1/overview": { ...makeOverview(), cost_today_usd: 0 }, "GET /api/v1/hosts": [localRow()], [ENV]: { hx_version: "0.5.0" } });
   renderWithClient(<OverviewPage />);
   const h1 = await screen.findByRole("heading", { level: 1 });
-  const hostsPanel = screen.getByRole("region", { name: "a Hosts" });
+  const hostsPanel = screen.getByRole("region", { name: "Hosts" });
   const hub = await within(hostsPanel).findByRole("group", { name: "local" });
   expect(hub.querySelector(".kind")?.textContent).toBe("hub");
   expect(h1.textContent).toBe("Idle. SVM leads toy-test by 0.037, p = 0.15");
@@ -28,9 +28,9 @@ test("only the hub's own row: backend headline and counts, panels a-f", async ()
   expect(hostsPanel.querySelector(".aside")).toBeNull();
   expect(document.querySelector(".hosts-banner")).toBeNull();
   const names = screen.getAllByRole("region").map((r) => r.getAttribute("aria-label"));
-  expect(names).toEqual(["a Hosts", "b Runs by launcher", "c Ideas", "d Running", "e Failures", "f Projects"]);
-  expect(within(screen.getByRole("region", { name: "d Running" })).getByText("none")).toBeTruthy();
-  expect(within(screen.getByRole("region", { name: "f Projects" })).getByText("0.9222")).toBeTruthy();
+  expect(names).toEqual(["Hosts", "Runs by launcher", "Ideas", "Running", "Failures", "Projects"]);
+  expect(within(screen.getByRole("region", { name: "Running" })).getByText("none")).toBeTruthy();
+  expect(within(screen.getByRole("region", { name: "Projects" })).getByText("0.9222")).toBeTruthy();
 });
 
 test("backend headline and counts remain visible while hosts are pending", async () => {
@@ -43,7 +43,7 @@ test("backend headline and counts remain visible while hosts are pending", async
   });
   renderWithClient(<OverviewPage />);
   expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Idle. SVM leads toy-test by 0.037, p = 0.15");
-  const hostsPanel = screen.getByRole("region", { name: "a Hosts" });
+  const hostsPanel = screen.getByRole("region", { name: "Hosts" });
   expect(within(hostsPanel).getByText("loading…").getAttribute("aria-busy")).toBe("true");
   expect(within(hostsPanel).queryByRole("group", { name: "local" })).toBeNull();
   expect([...document.querySelectorAll(".metaline span")].map(span => span.textContent)).toEqual(["19 runs today", "3 failed", "1 task"]);
@@ -65,7 +65,7 @@ test("with hosts: running/waiting from the backend, stale from hosts; metaline a
   const meta = [...document.querySelectorAll(".metaline span")].map((s) => s.textContent);
   // 5 hosts: one per row of the Hosts table, the hub's own row too
   expect(meta).toEqual(["1 GPU free", "$332 today", "hub hx 0.5.0", "5 hosts"]);
-  const panel = screen.getByRole("region", { name: "a Hosts" });
+  const panel = screen.getByRole("region", { name: "Hosts" });
   expect(panel.querySelector(".aside")?.textContent).toBe("$332 today");
   expect(within(panel).getAllByRole("group").map((g) => g.getAttribute("aria-label"))).toEqual([
     "local",
@@ -149,7 +149,7 @@ test("cost today comes from the overview when it sends it; the hub-only metaline
       "5 hosts",
     ]),
   );
-  expect(screen.getByRole("region", { name: "a Hosts" }).querySelector(".aside")?.textContent).toBe("$403 today");
+  expect(screen.getByRole("region", { name: "Hosts" }).querySelector(".aside")?.textContent).toBe("$403 today");
   cleanup();
   restoreFetch();
   mockApi({
@@ -173,10 +173,10 @@ test("hosts endpoint fails: error inside the Hosts panel, the rest of the page s
     [ENV]: { hx_version: "0.5.0" },
   });
   renderWithClient(<OverviewPage />);
-  const panel = await screen.findByRole("region", { name: "a Hosts" });
+  const panel = await screen.findByRole("region", { name: "Hosts" });
   expect((await within(panel).findByRole("alert")).textContent).toBe("hub offline");
   expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Idle. SVM leads toy-test by 0.037, p = 0.15");
-  expect(screen.getByRole("region", { name: "c Ideas" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Ideas" })).toBeTruthy();
 });
 
 test("hosts refetch fails after a good load: old rows do not drive the headline or metaline", async () => {
@@ -194,7 +194,7 @@ test("hosts refetch fails after a good load: old rows do not drive the headline 
   await waitFor(() => expect(h1.textContent).toBe("12 running, 11 waiting. dgx stale 4m"));
   fail = true;
   await client.refetchQueries({ queryKey: queryKeys.hosts() });
-  const panel = screen.getByRole("region", { name: "a Hosts" });
+  const panel = screen.getByRole("region", { name: "Hosts" });
   expect((await within(panel).findByRole("alert")).textContent).toBe("hub offline");
   expect(client.getQueryData(queryKeys.hosts())).toBeTruthy();
   expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Idle. SVM leads toy-test by 0.037, p = 0.15");

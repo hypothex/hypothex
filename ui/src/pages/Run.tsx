@@ -18,11 +18,11 @@ import {
   useTaskKind,
   useTask,
 } from "../api/queries";
-import { Figure, panelLetter } from "./components/Figure";
+import { Panel } from "../chrome/Panel";
 import { useNow } from "./components/HostsPanel";
 import { firstClause, shortId, queueLabel } from "./components/format";
 import { Unbroken } from "./components/Headline";
-import { KindPanels, kindPanelCount, readsTraces, runViewPanels } from "./components/KindPanels";
+import { KindPanels, readsTraces, runViewPanels } from "./components/KindPanels";
 import { AppLink, hrefs } from "./components/links";
 import { LogView } from "./components/LogView";
 import { Notes } from "./components/Notes";
@@ -132,17 +132,6 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
   const showKind = hasTask && !waiting;
   const sweep = sweepCrumb(record, typeof hubEnvId === "string" ? hubEnvId : null);
 
-  let next = 0;
-  const logLetter = stream ? panelLetter(next++) : "";
-  const queueLetter = phase === "queued" ? panelLetter(next++) : "";
-  const kindStart = next;
-  if (showKind) next += kindPanelCount(specs);
-  const whereLetter = panelLetter(next++);
-  const checkpointLetter = kind.data?.kind === "training" ? panelLetter(next++) : "";
-  const placeLetter = remote ? panelLetter(next++) : "";
-  const scoresLetter = panelLetter(next++);
-  const notesLetter = panelLetter(next++);
-
   return (
     <div className="page">
       <PageStyles />
@@ -199,9 +188,9 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
       />
       <StatStrip items={stats} />
       {kind.error ? <ErrorBox error={kind.error} /> : null}
-      {stream ? <LogView runId={runId} stream={stream} letter={logLetter} /> : null}
+      {stream ? <LogView runId={runId} stream={stream} /> : null}
       {phase === "queued" ? (
-        <Figure letter={queueLetter} title="Queue" aside={host ? `${host.name}, ${host.queue} waiting` : where}>
+        <Panel title="Queue" aside={host ? `${host.name}, ${host.queue} waiting` : where}>
           {queued.error ? (
             <ErrorBox error={queued.error} />
           ) : queued.data ? (
@@ -219,7 +208,7 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
           ) : (
             <Loading />
           )}
-        </Figure>
+        </Panel>
       ) : null}
       {showKind ? (
         <KindPanels
@@ -228,34 +217,33 @@ export function RunPage({ runId, log, example, clockMs = RUN_CLOCK_MS }: RunPage
           runId={runId}
           specs={specs}
           example={example}
-          startIndex={kindStart}
           currentGroupId={row?.group_id}
           runStatus={record.status}
         />
       ) : null}
       <div className="run-grid">
         <div>
-          <Figure letter={whereLetter} title="Where" aside={<span title="host the run executed on">{record.host}</span>}>
+          <Panel title="Where" aside={<span title="host the run executed on">{record.host}</span>}>
             <WhereList detail={detail} />
-          </Figure>
+          </Panel>
           {kind.data?.kind === "training" ? (
-            <Figure letter={checkpointLetter} title="Checkpoints">
+            <Panel title="Checkpoints">
               <CheckpointTable artifacts={record.artifacts} />
-            </Figure>
+            </Panel>
           ) : null}
         </div>
         <div className="side">
           {remote ? (
-            <Figure letter={placeLetter} title="Placement" aside={host?.kind ?? null}>
+            <Panel title="Placement" aside={host?.kind ?? null}>
               <Placement rows={placementRows(record, phase, host)} />
-            </Figure>
+            </Panel>
           ) : null}
-          <Figure letter={scoresLetter} title="Scores">
+          <Panel title="Scores">
             <ScoresList scores={detail.scores} metricNames={detail.metric_names} primary={primary} />
-          </Figure>
-          <Figure letter={notesLetter} title="Notes">
+          </Panel>
+          <Panel title="Notes">
             <Notes runId={runId} notes={detail.notes} />
-          </Figure>
+          </Panel>
         </div>
       </div>
     </div>

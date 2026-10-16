@@ -1,15 +1,15 @@
 /** A run log tail (opened from failures and the Where list via `?log=<stream>`). */
 import { useRunLogs } from "../../api/queries";
-import { Figure } from "./Figure";
+import { Panel } from "../../chrome/Panel";
 import { fmtBytes } from "./format";
 import { AppLink, hrefs } from "./links";
 import { ErrorBox, Loading } from "./QueryState";
 import type { LogStream } from "./types";
 
-export function LogView({ runId, stream, letter }: { runId: string; stream: LogStream; letter: string }) {
+export function LogView({ runId, stream }: { runId: string; stream: LogStream }) {
   const log = useRunLogs(runId, stream);
   return (
-    <Figure letter={letter} title={stream} aside={log.data ? fmtBytes(log.data.size) : undefined}>
+    <Panel title={stream} aside={log.data ? fmtBytes(log.data.size) : undefined}>
       {log.error ? (
         <ErrorBox error={log.error} />
       ) : log.data ? (
@@ -20,6 +20,6 @@ export function LogView({ runId, stream, letter }: { runId: string; stream: LogS
       <AppLink className="btn link" href={hrefs.run(runId)}>
         close
       </AppLink>
-    </Figure>
+    </Panel>
   );
 }

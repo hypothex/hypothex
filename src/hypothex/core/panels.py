@@ -1040,13 +1040,13 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
             if series:
                 names_seen.setdefault(name)
             xy = [
-                (x, p.value)
+                (x, p.value, p.t)
                 for p in series
                 if (x := p.step if x_of is None else x_of.get(p.step)) is not None
             ]
             if xy:
-                last_x = max([x for x, _ in xy] + ([] if last_x is None else [last_x]))
-            for i in lttb([x for x, _ in xy], [v for _, v in xy], limit):
+                last_x = max([x for x, _, _ in xy] + ([] if last_x is None else [last_x]))
+            for i in lttb([x for x, _, _ in xy], [v for _, v, _ in xy], limit):
                 rows.append(
                     {
                         "run_id": run.run_id,
@@ -1055,6 +1055,7 @@ def _curves(scope: _Scope, panel: PanelSpec) -> PanelResult:
                         "name": name,
                         "step": xy[i][0],
                         "value": xy[i][1],
+                        "t": xy[i][2],
                     }
                 )
             if "loss" in name.lower():

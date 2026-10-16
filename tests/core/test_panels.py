@@ -568,6 +568,7 @@ def test_curves_rows_spikes_kills_and_checkpoints(ctx: Context, toy_repo: Path) 
         "name": "train/loss",
         "step": 22,
         "value": 6.0,
+        "t": None,  # the rows logged no wall time
     }
     # step 22: 6.0 > 5 x median(previous 20 values = 1.0); val/acc jumps are ignored (no "loss")
     assert result.meta["events"] == [
@@ -1867,3 +1868,17 @@ def test_compare_caps_rows_and_warns(
     result = query_panel(ctx, "toy", "toy-acc", _panel("compare", data=data))
     assert [r["dataset"] for r in result.rows] == ["set-2"]
     assert (result.meta["total"], result.meta["warnings"]) == (2, ["showing the first 1 of 2 rows"])
+
+
+def test_curves_rows_carry_the_wall_time_of_each_point(ctx: Context, toy_repo: Path) -> None:
+    rec = _run(ctx, toy_repo, "c1", seed=1)
+    rows = [
+        {"name": "train/loss", "step": s, "value": 1.0, "t": 1760000000.0 + s} for s in range(3)
+    ]
+    _metrics(ctx, rec, rows)
+    result = query_panel(ctx, "toy", "toy-acc", _panel("curves", data={"metrics": ["train/loss"]}))
+    assert [(r["step"], r["t"]) for r in result.rows] == [
+        (0, 1760000000.0),
+        (1, 1760000001.0),
+        (2, 1760000002.0),
+    ]

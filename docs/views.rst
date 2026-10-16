@@ -94,6 +94,8 @@ curves         Metric history by step; seeds faint, mean bold, checkpoints and s
                labelled with its step (``spike 9k``); so is a kill (``killed 14k``).
                A ``NaN`` or infinite value the run logged is marked too (``NaN 9k``).
                ``group_by: run`` draws one column per run, named ``baseline r1``.
+               Rows carry ``t``, the point's wall time in Unix epoch seconds
+               (``null`` when the SDK row had none), for wall-time x axes.
 scatter        One metric against another per group, with an optional Pareto front. A
                non-numeric ``params.``/``vars.`` x (e.g. ``v9``) is an ordinal axis in
                natural order; rows worse than the version just before them by more than

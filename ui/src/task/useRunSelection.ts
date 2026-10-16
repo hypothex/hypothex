@@ -9,7 +9,7 @@
  */
 import { useCallback, useMemo } from "react";
 import type { TaskGroup, TaskRun, TaskRuns } from "../api/models";
-import { parseFilter } from "../lib/runFilter";
+import { MAX_FILTER, parseFilter } from "../lib/runFilter";
 import { type SearchPatch, useSearchState } from "./useSearchState";
 
 export type SortDir = "asc" | "desc";
@@ -183,7 +183,7 @@ export function parseSelection(params: URLSearchParams, defaults: SelectionDefau
   const key = cut > 0 ? sort.slice(0, cut) : "";
   const dir = sort.slice(cut + 1);
   return {
-    filter: params.get("filter") ?? "",
+    filter: (params.get("filter") ?? "").slice(0, MAX_FILTER),
     group: params.get("group") === "run" ? "run" : "config",
     sort: key !== "" && (dir === "asc" || dir === "desc") ? { key, dir } : { key: SORT_PRIMARY, dir: defaults.sortDir },
     hidden: (params.get("hide") ?? "").split(",").filter(Boolean),

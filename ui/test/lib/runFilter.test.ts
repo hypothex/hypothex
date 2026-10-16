@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { TaskRun } from "../../src/api/models";
-import { compileGlob, globMatch, parseFilter, tokenize } from "../../src/lib/runFilter";
+import { parseSelection } from "../../src/task/useRunSelection";
+import { MAX_FILTER, compileGlob, globMatch, parseFilter, tokenize } from "../../src/lib/runFilter";
 
 function run(over: Partial<TaskRun> = {}): TaskRun {
   return {
@@ -114,4 +115,36 @@ describe("compileGlob", () => {
     }
     expect(built).toBe(0);
   });
+});
+
+describe("tokenize stays linear", () => {
+  test("100k spaces then x tokenizes and parses in < 50 ms", () => {
+    const text = `${" ".repeat(100_000)}x`;
+    const t0 = performance.now();
+    expect(tokenize(text)).toEqual(["x"]);
+    parseFilter(text);
+    expect(performance.now() - t0).toBeLessThan(50);
+  });
+
+  test("operators glue to their neighbours across any whitespace, as before", () => {
+    expect(tokenize("lr   =   3e-4")).toEqual(["lr=3e-4"]);
+    expect(tokenize("lr= 3e-4 tag :final a : b : c")).toEqual(["lr=3e-4", "tag:final", "a:b:c"]);
+    expect(tokenize("status !=  queued")).toEqual(["status!=queued"]);
+    expect(tokenize("= x")).toEqual(["=x"]);
+    expect(tokenize("lr =")).toEqual(["lr="]);
+    expect(tokenize("a ! = b")).toEqual(["a", "!=b"]);
+    expect(tokenize("\tlr\n=\n1  beam")).toEqual(["lr=1", "beam"]);
+  });
+
+  test(`a filter longer than ${MAX_FILTER} characters is cut`, () => {
+    expect(MAX_FILTER).toBe(512);
+    const long = `${"a".repeat(MAX_FILTER)} tag:never`;
+    // the cut drops the tag token, so every run passes the remaining word test only
+    expect(parseFilter(long)(run({ name: "a".repeat(MAX_FILTER) }))).toBe(true);
+  });
+});
+
+test("a shared ?filter= link is cut to MAX_FILTER characters", () => {
+  const sel = parseSelection(new URLSearchParams({ filter: " ".repeat(200_000) }), { sortDir: "desc" });
+  expect(sel.filter.length).toBe(MAX_FILTER);
 });

@@ -77,8 +77,17 @@ function launcherMatcher(pattern: string): GlobMatcher {
   return (who) => glob(who) || who.split(":").some(glob);
 }
 
+/** Longest filter text read (a shared `?filter=` link is cut to this). */
+export const MAX_FILTER = 512;
+
+const OPS = ["!=", "=", ":"] as const;
+const startsWithOp = (t: string): boolean => OPS.some((op) => t.startsWith(op));
+const endsWithOp = (t: string): boolean => t.endsWith("=") || t.endsWith(":");
+
 /**
- * Tokens of a filter, with spaces around `=`, `!=` and `:` removed.
+ * Tokens of a filter, with spaces around `=`, `!=` and `:` removed. Linear time: split on
+ * whitespace once, then glue a token that starts with an operator to the one before it and
+ * the token after one that ends with an operator to it.
  *
  * Examples
  * --------
@@ -86,7 +95,16 @@ function launcherMatcher(pattern: string): GlobMatcher {
  * ["lr=3e-4", "tag:final"]
  */
 export function tokenize(text: string): string[] {
-  return text.replace(/\s*(!=|=|:)\s*/g, "$1").split(/\s+/).filter(Boolean);
+  const out: string[] = [];
+  let glueNext = false;
+  for (const part of text.split(/\s+/)) {
+    if (part === "") continue;
+    const last = out.length - 1;
+    if (last >= 0 && (glueNext || startsWithOp(part))) out[last] += part;
+    else out.push(part);
+    glueNext = endsWithOp(out[out.length - 1] ?? "");
+  }
+  return out;
 }
 
 function tokenPredicate(token: string): RunPredicate {
@@ -137,6 +155,6 @@ function tokenPredicate(token: string): RunPredicate {
  * >>> runs.filter(parseFilter("lr=3e-4 tag:final"))
  */
 export function parseFilter(text: string): RunPredicate {
-  const preds = tokenize(text).map(tokenPredicate);
+  const preds = tokenize(text.slice(0, MAX_FILTER)).map(tokenPredicate);
   return (run) => preds.every((p) => p(run));
 }

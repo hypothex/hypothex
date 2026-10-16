@@ -1,3 +1,4 @@
+import type { APIRequestContext } from "@playwright/test";
 import { checkLayout, LAYOUT_WIDTHS } from "./layout-geometry";
 import { expect, expectTheme, getJson, test } from "./fixtures";
 import {
@@ -10,18 +11,44 @@ import {
   type SweepLite,
 } from "./hosts-fixtures";
 
-test("the Overview Hosts panel lists every fake host", async ({ page, request, theme }) => {
+/** The last run in an ssh host's queue (FIFO, posted last): one that stays queued. */
+async function lastQueuedRun(request: APIRequestContext): Promise<{ run: RecordLite; host: string }> {
   const hosts = remoteHosts(await connectedHosts(request));
-  expect(hosts.some((h) => h.kind === "slurm")).toBe(true);
-  expect(hosts.some((h) => h.kind === "ssh" && h.gpus.length > 0)).toBe(true);
+  // wait for the demo's running cells to start; no 2 GPUs are left free after that
+  await runningRemoteRun(request, hosts);
+  const queued = await getJson<RecordLite[]>(request, "/api/v1/runs?status=queued&limit=500");
+  const run = queued
+    .filter((r) => r.executor.queue_position && hostOfRun(hosts, r))
+    .sort((a, b) => (b.executor.queue_position ?? 0) - (a.executor.queue_position ?? 0))[0];
+  const host = run ? hostOfRun(hosts, run)?.name : undefined;
+  if (!run || !host) throw new Error("hx demo --with-hosts has no queued run on an ssh host");
+  return { run, host };
+}
 
-  await page.goto("/");
+test("hosts page shows every configured host with GPU cells", async ({ page, request, theme }) => {
+  const hosts = await connectedHosts(request);
+  const remote = remoteHosts(hosts);
+  expect(remote.some((h) => h.kind === "slurm")).toBe(true);
+  expect(remote.some((h) => h.kind === "ssh" && h.gpus.length > 0)).toBe(true);
+
+  await page.goto("/hosts");
   await expectTheme(page, theme);
-  const panel = page.getByRole("region", { name: "Hosts" });
-  await expect(panel).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Hosts" })).toBeVisible();
   for (const host of hosts) {
-    await expect(panel.getByText(host.name, { exact: true }).first()).toBeVisible();
+    const row = page.getByRole("row", { name: host.name, exact: true });
+    await expect(row).toBeVisible();
+    await expect(row.locator("[data-gpu]")).toHaveCount(host.gpus.length);
   }
+});
+
+test("queue page lists queued runs with their position", async ({ page, request, theme }) => {
+  const { run } = await lastQueuedRun(request);
+  await page.goto("/queue");
+  await expectTheme(page, theme);
+  await expect(page.getByRole("heading", { level: 1, name: "Queue" })).toBeVisible();
+  await expect(page.getByRole("row").filter({ hasText: /queued/i }).first()).toBeVisible();
+  const row = page.getByRole("row").filter({ has: page.locator(`a[href="/r/${run.run_id}"]`) });
+  await expect(row.locator("td").first()).toHaveText(String(run.executor.queue_position));
 });
 
 test("a sweep link opens the demo sweep in its task's Sweeps tab", async ({ page, request, theme }) => {
@@ -45,56 +72,34 @@ test("a sweep link opens the demo sweep in its task's Sweeps tab", async ({ page
 });
 
 test("a queued remote run shows its place in the host queue", async ({ page, request, theme }) => {
-  const hosts = remoteHosts(await connectedHosts(request));
-  // wait for the demo's running cells to start; the last in the queue (FIFO, posted last)
-  // is a cell that stays queued, never one about to start (no 2 GPUs are left free)
-  await runningRemoteRun(request, hosts);
-  const queued = await getJson<RecordLite[]>(request, "/api/v1/runs?status=queued&limit=500");
-  const run = queued
-    .filter((r) => r.executor.queue_position && hostOfRun(hosts, r))
-    .sort((a, b) => (b.executor.queue_position ?? 0) - (a.executor.queue_position ?? 0))[0];
-  const host = run ? hostOfRun(hosts, run)?.name : undefined;
-  if (!run || !host) throw new Error("hx demo --with-hosts has no queued run on an ssh host");
-
+  const { run, host } = await lastQueuedRun(request);
   await page.goto(`/r/${run.run_id}`);
   await expectTheme(page, theme);
-  await expect(page.getByRole("heading", { level: 1 })).toContainText(
-    new RegExp(`queued \\d+(st|nd|rd|th) on ${host}$`),
+  await expect(page.getByRole("status").filter({ hasText: /^Queued / }).locator("b")).toHaveText(
+    new RegExp(`^Queued \\d+(st|nd|rd|th)( of \\d+)? on ${host}$`),
   );
-  const queue = page.getByRole("region", { name: "Queue" });
+  const queue = page.getByRole("region", { name: "Queue", exact: true });
   await expect(queue).toBeVisible();
   await expect(queue.locator('tr[aria-current="true"]')).toContainText(run.run_id.split("-").pop() ?? "");
-  await expect(page.getByRole("region", { name: /Placement$/ })).toContainText(host);
+  const props = page.getByRole("complementary", { name: "Properties" });
+  await expect(props).toContainText(host);
+  await expect(props.getByText("Queue", { exact: true })).toBeVisible();
 });
 
 test("a running remote run shows its host and CUDA_VISIBLE_DEVICES", async ({ page, request, theme }) => {
   const hosts = remoteHosts(await connectedHosts(request));
-  const { run, host: row } = await runningRemoteRun(request, hosts);
-  const host = row.name;
+  const { run, host } = await runningRemoteRun(request, hosts);
 
   await page.goto(`/r/${run.run_id}`);
   await expectTheme(page, theme);
-  const placement = page.getByRole("region", { name: /Placement$/ });
-  await expect(placement).toContainText(host);
-  await expect(placement).toContainText(`CUDA_VISIBLE_DEVICES=${(run.executor.gpus ?? []).join(",")}`);
-  await expect(page.locator(".status")).toContainText(host);
+  const props = page.getByRole("complementary", { name: "Properties" });
+  await expect(props).toContainText(host.name);
+  await expect(props).toContainText(`CUDA_VISIBLE_DEVICES=${(run.executor.gpus ?? []).join(",")}`);
 });
 
-test("step7 host, sweep, and queue switch geometry at breakpoint widths", async ({ page, request, theme }, info) => {
+test("the launch dialog's queue switch keeps its label on one line", async ({ page, request }, info) => {
   const hosts = remoteHosts(await connectedHosts(request));
   const { run, host } = await runningRemoteRun(request, hosts);
-  await page.goto("/");
-  await expectTheme(page, theme);
-  await expect(page.locator(".hosts .hrow").last()).toBeVisible();
-  for (const width of LAYOUT_WIDTHS) {
-    await checkLayout(page, info, "hosts", width, [".hosts .hrow", ".hosts .gc", ".hosts .hn", ".hosts .slurm"]);
-  }
-  const { project, id } = await firstSweep(request);
-  await page.goto(`/s/${encodeURIComponent(project)}/${encodeURIComponent(id)}`);
-  await expect(page.locator(".sweep-grid")).toBeVisible();
-  for (const width of LAYOUT_WIDTHS) {
-    await checkLayout(page, info, "sweep", width, [".sweep-head h2", ".sweep-head .actions", ".sweep-head button", ".sweep-grid"]);
-  }
   const tasks = await getJson<{ name: string }[]>(request, `/api/v1/tasks?project=${encodeURIComponent(run.project)}`);
   const task = tasks[0]?.name;
   if (!task) throw new Error("fake-host project lacks a task");

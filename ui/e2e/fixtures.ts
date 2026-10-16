@@ -26,10 +26,10 @@ export interface ThemeOptions {
   unlock: boolean;
 }
 
-/** `--paper` from docs/mockups/ui-v4/index.html: #F6F7F3 (light), #12161C (dark). */
+/** v5 page colour `--bg` (spec section 7, `styles/tokens.css`): #f7f7f8 (light), #111113 (dark). */
 export const PAPER: Record<Theme, string> = {
-  light: "rgb(246, 247, 243)",
-  dark: "rgb(18, 22, 28)",
+  light: "rgb(247, 247, 248)",
+  dark: "rgb(17, 17, 19)",
 };
 
 export interface RunLite {
@@ -49,7 +49,6 @@ export interface PanelLite {
   data?: { source?: string | null } | null;
 }
 export interface BoardLite {
-  headline: string;
   kind: string;
   primary: string;
   rows: { group_id: string; latest_run_id: string }[];
@@ -65,8 +64,15 @@ export interface ProjectLite {
   repo: string;
 }
 export interface OverviewLite {
-  headline: string;
   projects: { project: string; task: string }[];
+}
+/** The fields of `GET /api/v1/tasks/{project}/{task}/runs` (B5 `TaskRuns`) the specs read. */
+export interface TaskRunsLite {
+  primary: string;
+  runs: { run_id: string; name: string; tags: string[]; archived: boolean; primary: number | null }[];
+  groups: { group_id: string; name: string; run_ids: string[] }[];
+  score_keys: string[];
+  metric_names: string[];
 }
 
 interface Fixtures {

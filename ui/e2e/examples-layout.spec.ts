@@ -36,13 +36,20 @@ for (const [shape, labels] of Object.entries(LABELS)) {
       await expect(table.locator("thead th")).toHaveText(["", `${labels[1]} right`, `${labels[1]} wrong`]);
       await expect(table.locator("tbody th")).toHaveText([`${labels[0]} right`, `${labels[0]} wrong`]);
       await page.evaluate(() => document.fonts.ready);
+      const title = page.locator(".examples-page .ph h1");
+      await expect(title).toContainText(labels[1]!);
       if (shape === "words") {
-        const token = page.locator(".headline .nb").filter({ hasText: /^1e-4$/ });
-        await expect(token).toHaveCount(1);
-        expect(await token.evaluate(element => {
-          const range = document.createRange();
-          range.selectNodeContents(element);
-          return range.getClientRects().length;
+        expect(await title.evaluate(element => {
+          const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const at = node.textContent?.indexOf("1e-4") ?? -1;
+            if (at < 0) continue;
+            const range = document.createRange();
+            range.setStart(node, at);
+            range.setEnd(node, at + "1e-4".length);
+            return range.getClientRects().length;
+          }
+          return 0;
         }), "a fitting scientific token stays on one line").toBe(1);
       }
       await page.screenshot({ path: info.outputPath(`examples-${theme}-${width}.png`), fullPage: true });
@@ -82,9 +89,9 @@ for (const [shape, labels] of Object.entries(LABELS)) {
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
         "Examples content must stay within the viewport").toBeLessThanOrEqual(0);
-      const summaryText = await page.locator(".ab .nm, .ab .acc, .headline .nb").evaluateAll(elements =>
+      const summaryText = await page.locator(".ab .nm, .ab .acc, .examples-page .ph h1, .examples-page .ph .facts span").evaluateAll(elements =>
         elements.flatMap(element => {
-          const container = element.closest(".ab > div") ?? element.closest(".headline")!;
+          const container = element.closest(".ab > div") ?? element.closest(".ph")!;
           const { left, right } = container.getBoundingClientRect();
           const range = document.createRange();
           range.selectNodeContents(element);

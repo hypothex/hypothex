@@ -84,7 +84,7 @@ test("the launch dialog queues a run on a fake host", async ({ page, request, th
   await page.goto(`/r/${made.run_id}`);
   await expectTheme(page, theme);
   await expect(page.getByRole("heading", { level: 1 })).toContainText(made.hypothesis);
-  await expect(page.getByRole("region", { name: /Placement$/ })).toContainText(target.host.name);
+  await expect(page.getByRole("complementary", { name: "Properties" })).toContainText(target.host.name);
 
   // leave the fake host's queue as it was
   const stopped = await request.post(`/api/v1/runs/${made.run_id}/stop`, { data: {} });

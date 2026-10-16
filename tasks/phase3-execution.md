@@ -47,7 +47,7 @@ assembled, installed-package and Docker acceptance remains required below.
 | Backend 8 | parent | 20 notebook tests pass, including concurrent writes/conflicts; docs complete |
 | Backend 9–12 | papers/export worker | 114 focused + 262 regression tests pass; five golden outputs |
 | Backend 13–19, 30 providers | notifications worker | 257 scoped tests pass; final notification suite 115 pass after independently verified partial-recipient fix |
-| Backend 20–22 | storage worker | 111 affected tests pass after independently verified pulled-copy ownership fix; local non-root descriptor checks |
+| Backend 20–22 | storage worker | Final 273 affected tests and 27 independent probes pass; excluded overlaps, shared ownership, alias races and exact remote confirmation corrected |
 | Backend 23–31 | API worker | 385 API/core tests pass; final 138 affected receipt tests pass; independent actual launch retry executes once |
 | Backend 32–33, MCP 41 | MCP worker | 197 MCP tests pass; new tools and existing regressions |
 | Backend 34–36 | Postgres worker | 13 actual PostgreSQL Docker tests, 305 core/remote and 252 evaluator tests pass |
@@ -94,6 +94,34 @@ Implementation evidence is under the durable sibling `implementation/` directory
   supported workflows, expected results and material remaining limitations.
 
 ## Final integration status (2026-10-17)
+
+PR27 opened at `96ffd74932038e5ad0ce0789673436911026c0a9`. Its automated
+review identified two additional storage defects: excluded overlapping artifacts
+could be deleted, and shared-path deduplication omitted other runs' cleanup
+bookkeeping. Both were independently reproduced and corrected. Cleanup now
+preserves all selected associations, refuses excluded or newly added overlapping
+bindings, and counts physical deletion roots once. The focused review additionally
+found alias-retarget bookkeeping and remote byte-confirmation defects. Grouped
+deletion revalidates member identity; remote preflight refuses mismatched lexical
+and physical groups or removal roots. All 27 independent probes pass on storage
+source SHA256 `c282d9969fb93667c7f43af42c3f0c27448cbd16cd1056154b33fb928adc1a0f`.
+The final affected suite passed 273 tests, including seven real HTTP cases.
+The focused independent review is **LGTM**, with all seven reviewed source hashes
+and 22 evidence hashes verified by the parent. Its verbatim receipt is
+`2026-10-17-hypothex-phase3-storage-review.md`, SHA256
+`3419a0c1ad2fbeba4ce3108c30b084450db82283d4cc73eb7e7fa50b2d84b1ad`.
+The shared-owner UI regression is included in 23 passing affected UI tests;
+TypeScript, production build, Ruff, formatting, ty and Sphinx all pass.
+The rebuilt final candidate passed all five installed checks in 181.40 seconds,
+including 20 browser executions. Parent verified 108 source/resource hashes,
+79 harness hashes, 104 wheel members, the forced skill and both archives.
+Its wheel SHA256 is
+`152593c58c0c52459e86a16f73ef8508c645b6428360990a34fc65a25140e3c7`.
+All 12 owned servers and two tracked descendants were stopped; zero remained.
+This candidate records the reviewed dirty source tree above the original PR27
+head. It supersedes both older package candidates below. The previous
+implementation LGTM below is historical evidence; merge remains pending
+new-head CI, followed by the clean merged-main handoff.
 
 All 13 scope items are implemented. The independent whole-source review has no
 remaining runtime findings after fixing duplicate execution on completed legacy

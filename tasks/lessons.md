@@ -13,3 +13,11 @@
 - Trace environment identity through report → plan → delete → cleaned manifest → UI. A run record's source environment is not necessarily the environment holding a local pulled copy. Local storage rows must use `ctx.descriptor.environment_id`; delete must reject a different target environment. Source artifacts must belong to the local environment, while local pulled copies may belong to mirrored run records. Test this distinction with equal paths in different environments and preserve host-response identity during hub merging.
 - Adding an identity field at the final manifest is insufficient if the producer stamps the wrong identity. Review each constructor and forwarding/merge step before claiming the end-to-end contract holds.
 - Derive installed-browser heading expectations from the current UI's computed `runTitle`. Use `toContainText` when the heading also includes a rename button; do not reuse old literal run IDs or exact heading text assertions without inspecting the rendered component. Keep this assertion aligned between the frontend plan and Task49.
+
+## 2026-10-17 — cleanup selection and shared ownership
+
+- Check cleanup selection for every overlapping artifact binding, including other kinds on the same run. Run eligibility alone does not authorize deleting an excluded artifact. Repeat the complete selection check on the owning environment at apply time.
+- Deduplicate physical deletion and confirmed byte totals without dropping run associations. Verify cleaned markers and events for every affected run, including mirrored hub records, equal paths, nested paths and aliases.
+- Grouped deletion needs checks for every member's filesystem identity. A successful deletion of one representative path does not prove that another alias still points to the deleted object.
+- Remote confirmation must match the owning filesystem's deletion roots and group membership in both directions. Aliases can merge lexical groups, split one lexical group, or reverse its ancestor root; checking only one form can understate confirmed bytes.
+- Use a real HTTP client for tests aimed at a separate live environment server. An absolute URL passed to an in-process ASGI TestClient still exercises its attached application.

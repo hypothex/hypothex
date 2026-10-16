@@ -48,8 +48,10 @@ def apply(ctx: Context, proposed: storage.CleanPlan) -> storage.CleanResult:
     )
 
 
-def assert_refused(ctx: Context, done: storage.CleanResult, run_id: str = "owner") -> None:
-    assert done.deleted == [] and done.freed_bytes == 0 and len(done.skipped) == 1
+def assert_refused(
+    ctx: Context, done: storage.CleanResult, run_id: str = "owner", *, n_items: int = 1
+) -> None:
+    assert done.deleted == [] and done.freed_bytes == 0 and len(done.skipped) == n_items
     assert storage.cleaned_artifacts(ctx, ctx.find_record(run_id)) == []
 
 
@@ -309,15 +311,11 @@ def test_current_file_flags_override_stale_index_for_other_owner(
     ended_run(toy, "owner", artifacts=[("checkpoint", path)])
     other = ended_run(toy, "other", artifacts=[("checkpoint", path)])
     proposed = plan(toy)
-    assert proposed.items[0].run_id == "other"
-    proposed.items[0] = proposed.items[0].model_copy(update={"run_id": "owner"})
-    storage.plans_dir(toy.layout).joinpath(f"{proposed.plan_id}.json").write_text(
-        proposed.model_dump_json()
-    )
+    assert {item.run_id for item in proposed.items} == {"other", "owner"}
     toy.store.write_record(other.model_copy(update={"starred": True}))
     done = apply(toy, proposed)
-    assert_refused(toy, done)
-    assert path.exists() and done.skipped[0]["reason"] == "used by other"
+    assert_refused(toy, done, n_items=2)
+    assert path.exists() and done.skipped[0]["reason"] in {"starred", "used by other"}
 
 
 def test_remote_host_artifact_label_cannot_authorize_local_delete(
@@ -516,8 +514,8 @@ def test_apply_rechecks_local_pulled_ownership_of_mirrored_run(
     candidate = toy.run_dir(mirror) / "pulled" / "checkpoint"
     target = write(candidate / "weights.pt" if directory else candidate)
     owner = ended_run(toy, "a-owner", artifacts=[("checkpoint", candidate)])
-    proposed = plan(toy, include_pulled=False)
-    assert len(proposed.items) == 1 and proposed.items[0].run_id == owner.run_id
+    proposed = plan(toy, include_pulled=True)
+    assert len(proposed.items) == 2 and proposed.items[0].run_id == owner.run_id
     changes: dict[str, Any] = {
         "starred": {"starred": True},
         "running": {"status": RunStatus.RUNNING, "ended_at": None},
@@ -531,7 +529,7 @@ def test_apply_rechecks_local_pulled_ownership_of_mirrored_run(
     assert checked and checked[0]["reason"] == "used by b-mirror"
     before = toy.events.last_sequence()
     done = apply(toy, proposed)
-    assert_refused(toy, done, owner.run_id)
+    assert_refused(toy, done, owner.run_id, n_items=2)
     assert done.skipped[0]["reason"] == "used by b-mirror" and target.exists()
     assert storage.cleaned_artifacts(toy, mirror) == []
     assert not any(event.type == "run.artifacts_cleaned" for event in toy.events.since(before))

@@ -17,6 +17,7 @@ import shutil
 import stat
 from collections import defaultdict
 from contextlib import AbstractContextManager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -84,7 +85,7 @@ class CleanPolicy(BaseModel, extra="forbid"):
 
 
 class CleanItem(BaseModel):
-    """One path a plan would delete."""
+    """One selected run/path/kind association; shared physical paths retain every owner."""
 
     project: str
     run_id: str
@@ -112,7 +113,7 @@ class CleanPlan(BaseModel):
 
 
 class CleanResult(BaseModel):
-    """What an apply deleted, skipped, and could not reach."""
+    """Deleted associations and refusals, with physical freed bytes counted once."""
 
     plan_id: str
     deleted: list[CleanItem]
@@ -347,8 +348,8 @@ def local_usage(ctx: Context, *, project: str | None = None) -> list[StorageItem
         size, files, mtime = _run_folder_bytes(run_dir)
         items.append(_item(ctx, record, "run", run_dir, bytes=size, files=files, mtime=mtime))
         if record.environment_id == own:
-            kinds = {a.path: a.kind for a in record.artifacts if a.host in labels}
-            for path, kind in kinds.items():
+            bindings = dict.fromkeys((a.path, a.kind) for a in record.artifacts if a.host in labels)
+            for path, kind in bindings:
                 items.append(_item(ctx, record, "artifact", path, artifact_kind=kind))
         for entry in _local_pulled_paths(ctx, record):
             items.append(_item(ctx, record, "pulled", entry))
@@ -513,6 +514,57 @@ def overlaps(a: str, b: str, *, local: bool = False) -> bool:
     return any(x == y or x in y.parents or y in x.parents for x in left for y in right)
 
 
+SelectionKey = tuple[str, str, str, str, str | None, str]
+
+
+def _selection_key(item: CleanItem | StorageItem) -> SelectionKey:
+    return (
+        item.environment_id,
+        item.project,
+        item.run_id,
+        item.kind,
+        item.artifact_kind if item.kind == "artifact" else None,
+        item.path,
+    )
+
+
+def _physical_path(path: str, *, local: bool) -> Path:
+    """Canonicalize only a local parent, preserving the final deletion leaf."""
+    literal = Path(os.path.normpath(path))
+    if local:
+        literal = Path(os.path.abspath(literal))
+        with contextlib.suppress(OSError, RuntimeError):
+            return literal.parent.resolve() / literal.name
+    return literal
+
+
+def _deletion_groups(
+    items: list[CleanItem], *, local: bool
+) -> list[tuple[CleanItem, list[CleanItem]]]:
+    """Associate selected bindings with disjoint physical removal roots."""
+    paths = {id(item): _physical_path(item.path, local=local) for item in items}
+    groups: list[tuple[CleanItem, list[CleanItem]]] = []
+    for item in sorted(items, key=lambda row: len(paths[id(row)].parts)):
+        for root, members in groups:
+            if root.environment_id == item.environment_id and paths[id(item)].is_relative_to(
+                paths[id(root)]
+            ):
+                members.append(item)
+                break
+        else:
+            groups.append((item, [item]))
+    return groups
+
+
+def _physical_total(ctx: Context, items: list[CleanItem]) -> int:
+    """Count each root once; resolve aliases only in this filesystem."""
+    own = [item for item in items if item.environment_id == ctx.descriptor.environment_id]
+    remote = [item for item in items if item.environment_id != ctx.descriptor.environment_id]
+    return sum(root.bytes for root, _ in _deletion_groups(own, local=True)) + sum(
+        root.bytes for root, _ in _deletion_groups(remote, local=False)
+    )
+
+
 def _settled_by(record: RunRecord, cutoff: datetime) -> bool:
     return (
         record.archived
@@ -637,18 +689,19 @@ def plan_clean(
     readers = _input_readers(ctx, hosts)
     items: list[CleanItem] = []
     refused: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[SelectionKey] = set()
     for item in report.items:
         if not _wanted(item, policy) or not eligible(item, cutoff):
             continue
-        key = (item.host, item.path)
-        blockers = [
-            o.run_id
-            for o in users[item.host]
-            if o.run_id != item.run_id
-            and overlaps(o.path, item.path, local=item.host == LOCAL_HOST)
-            and not eligible(o, cutoff)
+        key = _selection_key(item)
+        overlapping = [
+            other
+            for other in users[item.host]
+            if other.environment_id == item.environment_id
+            and overlaps(other.path, item.path, local=item.host == LOCAL_HOST)
         ]
+        blockers = [other.run_id for other in overlapping if not eligible(other, cutoff)]
+        excluded = [other.run_id for other in overlapping if not _wanted(other, policy)]
         blockers += [
             r.run_id
             for path, r in [*readers.get(item.host, []), *readers.get("*", [])]
@@ -660,8 +713,8 @@ def plan_clean(
             )
             and not _settled_by(r, cutoff)
         ]
-        if blockers:
-            reason = f"used by {blockers[0]}"
+        if blockers or excluded:
+            reason = f"used by {blockers[0]}" if blockers else f"not selected: {excluded[0]}"
             refused.append({"path": item.path, "run_id": item.run_id, "reason": reason})
             continue
         if item.host == LOCAL_HOST:
@@ -722,12 +775,36 @@ def plan_clean(
                 refused.append(
                     {"path": candidate.path, "run_id": candidate.run_id, "reason": reason}
                 )
+    # Refusing one selected association must not leave an overlapping owner
+    # apparently deletable. Propagate removals until every retained binding is
+    # represented, including refusals from authoritative remote preflight.
+    while items:
+        selected = {_selection_key(item) for item in items}
+        rejected: list[tuple[CleanItem, str]] = []
+        for item in items:
+            missing = next(
+                (
+                    other
+                    for other in users[item.host]
+                    if other.environment_id == item.environment_id
+                    and overlaps(other.path, item.path, local=item.host == LOCAL_HOST)
+                    and _selection_key(other) not in selected
+                ),
+                None,
+            )
+            if missing is not None:
+                rejected.append((item, f"not selected: {missing.run_id}"))
+        if not rejected:
+            break
+        for item, reason in rejected:
+            items.remove(item)
+            refused.append({"path": item.path, "run_id": item.run_id, "reason": reason})
     result = CleanPlan(
         plan_id=f"cp-{secrets.token_hex(4)}",
         policy=policy,
         items=items,
         refused=refused,
-        total_bytes=sum(i.bytes for i in items),
+        total_bytes=_physical_total(ctx, items),
         created_at=moment,
         expires_at=moment + timedelta(minutes=settings.plan_ttl_minutes),
         created_by=created_by,
@@ -803,6 +880,7 @@ def record_cleaned(
     plan_id : str
     """
     record = ctx.find_record(run_id)
+    items = list({(item.environment_id, item.path): item for item in items}.values())
     now = utcnow()
     with run_lock(ctx.run_dir(record)):
         done = cleaned_artifacts(ctx, record)
@@ -821,16 +899,32 @@ def record_cleaned(
         atomic_write_text(_cleaned_path(ctx, record), text)
     payload = {
         "paths": [i.path for i in items],
-        "freed_bytes": sum(i.bytes for i in items),
+        "freed_bytes": _physical_total(ctx, items),
         "plan_id": plan_id,
     }
     ctx.emit("run.artifacts_cleaned", record, payload)
 
 
+@dataclass
+class _GroupMember:
+    item: CleanItem
+    physical: Path
+    parent: os.stat_result
+    node: os.stat_result
+
+
+@dataclass
+class _CleanupState:
+    users: list[tuple[str, RunRecord]]
+    bindings: list[tuple[str, RunRecord, SelectionKey]]
+    selected: set[SelectionKey]
+    group: list[_GroupMember] = field(default_factory=list)
+
+
 def _recheck(
     ctx: Context,
     item: CleanItem,
-    users: list[tuple[str, RunRecord]],
+    users: _CleanupState,
     cutoff: datetime,
 ) -> str | None:
     if item.environment_id != ctx.descriptor.environment_id:
@@ -869,13 +963,16 @@ def _recheck(
             form.is_relative_to(base) for form in _forms(item.path) for base in _base_forms(pulled)
         ):
             return "not in pulled/"
-    for path, other in users:  # owners and readers; a folder holding the path counts too
+    for path, other in users.users:  # owners and readers; a folder holding the path counts too
         if (
             other.run_id != record.run_id
             and overlaps(path, item.path, local=True)
             and not _settled_by(other, cutoff)
         ):
             return f"used by {other.run_id}"
+    for path, other, key in users.bindings:
+        if overlaps(path, item.path, local=True) and key not in users.selected:
+            return f"not selected: {other.run_id}"
     why = protected_reason(ctx, item.path)
     if why is not None:
         return why
@@ -887,22 +984,50 @@ def _recheck(
     return None
 
 
-def _local_users(ctx: Context) -> list[tuple[str, RunRecord]]:
-    """Read current owner/input records on this filesystem under cleanup_lock."""
+def _local_users(ctx: Context, selected: list[CleanItem]) -> _CleanupState:
+    """Read all local owners and the exact selected bindings under cleanup_lock."""
     users: list[tuple[str, RunRecord]] = []
+    bindings: list[tuple[str, RunRecord, SelectionKey]] = []
+    own = ctx.descriptor.environment_id
     for record in _records(ctx):
-        # Mirrored runs can own local pulled copies. These protect overlapping
-        # candidates even when include_pulled=False or their source is remote.
-        users.extend((str(path), record) for path in _local_pulled_paths(ctx, record))
-        if record.environment_id != ctx.descriptor.environment_id:
+        for path in _local_pulled_paths(ctx, record):
+            users.append((str(path), record))
+            bindings.append(
+                (
+                    str(path),
+                    record,
+                    (
+                        own,
+                        record.project,
+                        record.run_id,
+                        "pulled",
+                        None,
+                        str(path),
+                    ),
+                )
+            )
+        if record.environment_id != own:
             continue  # never interpret a mirrored source artifact/input locally
-        users.extend(
-            (artifact.path, record)
-            for artifact in record.artifacts
-            if artifact.host in {LOCAL_HOST, ctx.descriptor.label}
-        )
+        for artifact in record.artifacts:
+            if artifact.host not in {LOCAL_HOST, ctx.descriptor.label}:
+                continue
+            users.append((artifact.path, record))
+            bindings.append(
+                (
+                    artifact.path,
+                    record,
+                    (
+                        own,
+                        record.project,
+                        record.run_id,
+                        "artifact",
+                        artifact.kind,
+                        artifact.path,
+                    ),
+                )
+            )
         users.extend((path, record) for path in input_paths(record, local=True))
-    return users
+    return _CleanupState(users, bindings, {_selection_key(item) for item in selected})
 
 
 def check_artifacts(
@@ -926,7 +1051,7 @@ def check_artifacts(
     refused: list[dict[str, str]] = []
     with cleanup_lock(ctx.layout):
         try:
-            users = _local_users(ctx)
+            users = _local_users(ctx, items)
         except (StoreError, OSError):
             return [
                 {
@@ -937,11 +1062,31 @@ def check_artifacts(
                 }
                 for i in items
             ]
-        for item in items:
-            why = _recheck(ctx, item, users, cutoff)
+        lexical = {
+            id(item): (id(root), frozenset(id(member) for member in members))
+            for root, members in _deletion_groups(items, local=False)
+            for item in members
+        }
+        for root, members in _deletion_groups(items, local=True):
+            physical = (id(root), frozenset(id(member) for member in members))
+            reasons = [_recheck(ctx, item, users, cutoff) for item in members]
+            why = next((reason for reason in reasons if reason is not None), None)
+            # The hub cannot resolve this filesystem's parent aliases. Its
+            # lexical groups and their removal roots must agree with the
+            # owner's physical groups to present an exact confirmation total
+            # without a new wire protocol. Compare the full batch in both
+            # directions: an interior symlink can split a lexical group or
+            # reverse its root even when the membership stays the same.
+            if (
+                why is None
+                and any(item.host != LOCAL_HOST for item in members)
+                and any(lexical[id(item)] != physical for item in members)
+            ):
+                why = "filesystem aliases require a local cleanup plan"
             if why is not None:
-                refused.append(
+                refused.extend(
                     {"path": item.path, "run_id": item.run_id, "host": item.host, "reason": why}
+                    for item in members
                 )
     return refused
 
@@ -1007,23 +1152,56 @@ def _measure_at(parent_fd: int, name: str) -> tuple[int, int, float]:
         os.close(fd)
 
 
-def _remove(
-    ctx: Context, item: CleanItem, users: list[tuple[str, RunRecord]], cutoff: datetime
-) -> str | None:
+def _inspect_member(item: CleanItem) -> _GroupMember:
+    """Inspect an association through its own pinned, no-follow parent."""
+    fd, parent = _open_cleanup_parent(item.path)
+    try:
+        name = Path(item.path).name
+        return _GroupMember(
+            item,
+            parent / name,
+            os.fstat(fd),
+            os.stat(name, dir_fd=fd, follow_symlinks=False),
+        )
+    finally:
+        os.close(fd)
+
+
+def _group_unchanged(members: list[_GroupMember]) -> bool:
+    """Verify aliases and nodes still refer to the captured removal subtree."""
+    for before in members:
+        after = _inspect_member(before.item)
+        if (
+            before.physical != after.physical
+            or not _same_node(before.parent, after.parent)
+            or not _same_node(before.node, after.node)
+            or (before.node.st_size, before.node.st_mtime_ns, before.node.st_ctime_ns)
+            != (after.node.st_size, after.node.st_mtime_ns, after.node.st_ctime_ns)
+        ):
+            return False
+    return True
+
+
+def _safe_removal_available() -> bool:
+    """Require descriptor-relative, no-follow removal without a pathname fallback."""
+    return (
+        hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and os.open in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+        and bool(getattr(shutil.rmtree, "avoids_symlink_attacks", False))
+    )
+
+
+def _remove(ctx: Context, item: CleanItem, users: _CleanupState, cutoff: datetime) -> str | None:
     """Recheck and remove a candidate through a pinned, no-follow parent.
 
     Never fall back to path-based deletion. The cleanup lock coordinates
     Hypothex writers; these descriptors prevent an unrelated filesystem writer
     from redirecting unlink/rmtree through a replaced parent symlink.
     """
-    if (
-        not hasattr(os, "O_NOFOLLOW")
-        or not hasattr(os, "O_DIRECTORY")
-        or os.open not in os.supports_dir_fd
-        or os.stat not in os.supports_dir_fd
-        or os.unlink not in os.supports_dir_fd
-        or not getattr(shutil.rmtree, "avoids_symlink_attacks", False)
-    ):
+    if not _safe_removal_available():
         return "safe removal unavailable"
     fd: int | None = None
     try:
@@ -1059,6 +1237,8 @@ def _remove(
             os.close(live_fd)
         if protected_reason(ctx, item.path) is not None:
             return "protected"
+        if not _group_unchanged(users.group):
+            return "changed since plan"
         final = os.stat(literal.name, dir_fd=fd, follow_symlinks=False)
         if not _same_node(original, final) or (original.st_mtime_ns, original.st_ctime_ns) != (
             final.st_mtime_ns,
@@ -1105,23 +1285,69 @@ def delete_artifacts(
     cutoff = utcnow() - timedelta(days=older_than_days)
     deleted: list[CleanItem] = []
     skipped: list[dict[str, Any]] = []
+    freed_bytes = 0
     with cleanup_lock(ctx.layout):
         # read under the lock: a run created, starred, or unarchived later waits for us
         # (path, run) for every artifact a run records and every input it reads
         metadata_error = None
         try:
-            users = _local_users(ctx)
+            users = _local_users(ctx, items)
         except (StoreError, OSError):
-            users = []
+            users = _CleanupState([], [], set())
             metadata_error = "run metadata unavailable"
-        for item in items:
-            why = metadata_error or _remove(ctx, item, users, cutoff)
+        for root, members in _deletion_groups(items, local=True):
+            why = metadata_error
+            users.group = []
+            if why is None and not _safe_removal_available():
+                why = "safe removal unavailable"
+            if why is None and len(members) > 1:
+                try:
+                    users.group = [_inspect_member(item) for item in members]
+                    base = users.group[0].physical
+                    if any(not member.physical.is_relative_to(base) for member in users.group):
+                        why = "changed since plan"
+                except (OSError, RuntimeError):
+                    why = "changed or inaccessible since plan"
+            if why is None and len(members) > 1:
+                why = _recheck(ctx, root, users, cutoff)
+            if why is None:
+                reasons = [
+                    _recheck(ctx, item, users, cutoff) for item in members if item is not root
+                ]
+                why = next((reason for reason in reasons if reason is not None), None)
+            if why is None:
+                why = _remove(ctx, root, users, cutoff)
             if why is not None:
-                skipped.append(
+                skipped.extend(
                     {"path": item.path, "run_id": item.run_id, "host": item.host, "reason": why}
+                    for item in members
                 )
             else:
-                deleted.append(item)
+                freed_bytes += root.bytes
+                captured = {id(member.item): member for member in users.group}
+                for item in members:
+                    # A writer may retarget a non-root alias at the syscall
+                    # boundary. Its current artifact then survived untouched:
+                    # report the real root removal, but do not mark that owner.
+                    before = captured.get(id(item))
+                    if (
+                        item is not root
+                        and before is not None
+                        and (
+                            _physical_path(item.path, local=True) != before.physical
+                            or os.path.lexists(item.path)
+                        )
+                    ):
+                        skipped.append(
+                            {
+                                "path": item.path,
+                                "run_id": item.run_id,
+                                "host": item.host,
+                                "reason": "changed since plan",
+                            }
+                        )
+                    else:
+                        deleted.append(item)
         by_run: dict[str, list[CleanItem]] = defaultdict(list)
         for item in deleted:
             by_run[item.run_id].append(item)
@@ -1131,7 +1357,7 @@ def delete_artifacts(
         plan_id=plan_id,
         deleted=deleted,
         skipped=skipped,
-        freed_bytes=sum(i.bytes for i in deleted),
+        freed_bytes=freed_bytes,
         errors=[],
     )
 
@@ -1192,6 +1418,7 @@ def apply_clean(
     days = plan.policy.older_than_days  # the plan's age rule holds at delete, here and on hosts
     result = delete_artifacts(ctx, local, actor=actor, plan_id=plan_id, older_than_days=days)
     deleted, skipped, errors = list(result.deleted), list(result.skipped), list(result.errors)
+    freed = result.freed_bytes
     remote: dict[str, list[CleanItem]] = defaultdict(list)
     for item in plan.items:
         if item.host != LOCAL_HOST:
@@ -1225,7 +1452,7 @@ def apply_clean(
         deleted += done
         skipped += answer.skipped
         errors += answer.errors
-    freed = sum(i.bytes for i in deleted)
+        freed += answer.freed_bytes
     ctx.events.append(
         "storage.cleaned",
         payload={

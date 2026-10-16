@@ -97,3 +97,34 @@ can include refusals. ``freed_bytes`` covers only successfully removed items.
 .. automodule:: hypothex.core.storage
    :members: measure_path, local_usage, storage_report, plan_clean, apply_clean,
              check_artifacts, delete_artifacts, cleaned_artifacts, cleanup_lock
+
+Overlapping artifacts and shared ownership
+------------------------------------------
+
+A selected path is refused if any overlapping recorded artifact or pulled copy
+is excluded by the policy, even when both belong to the same eligible run.
+Kinds, project filters and ``include_pulled`` all apply to these ownership
+bindings. Owner-side preflight and apply require every current overlapping
+binding to appear in the selected batch. A new owner or newly recorded kind
+therefore requires a fresh plan; old plans never silently acquire extra owners.
+
+The plan retains each selected run/path/kind association. Shared and nested paths
+are grouped for one physical deletion, and ``total_bytes`` and ``freed_bytes``
+count each physical root once. Consequently, summing the bytes of association
+rows can exceed those totals. Successful removal writes a cleaned marker for
+every affected run and raw path, once per target environment and path, and emits
+one event per affected run. Failed groups write no cleaned markers. If a
+non-root alias changes at the destructive syscall boundary, its surviving
+artifact is skipped and receives no marker; the actual root removal is still
+reported.
+
+An owning environment resolves its own parent aliases when grouping paths. A
+hub never resolves another environment's paths. When remote preflight discovers
+that lexical and physical deletion groups differ through filesystem aliases,
+it refuses every affected group with
+``filesystem aliases require a local cleanup plan``. This includes aliases
+that merge separate lexical paths, split a lexical parent/child group, or change
+which selected path is the physical removal root.
+Create and confirm that plan on the owning environment to obtain its exact
+physical byte total. Ordinary shared paths and nested remote paths retain all
+owner associations through host deletion and hub mirroring.

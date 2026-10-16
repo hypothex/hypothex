@@ -1,13 +1,16 @@
 /**
- * Run actions (spec 8.3.3, 8A.8): rerun, re-infer, re-evaluate, stop; each with a
- * command_id. A run waiting in a queue can only be cancelled; a run on an unreachable host
- * offers Reconnect; a lost run makes Rerun the main action.
+ * Run actions (spec 4.3, 8A.8): Compare and Rerun in the run header; Re-infer,
+ * Re-evaluate, Stop (two clicks within 3 s) and Archive in a ⋯ menu. Each sends a
+ * command_id. A run waiting in a queue can only be cancelled; a run on an unreachable
+ * host offers Reconnect; a lost run makes Rerun the main action.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import type { EvalReport } from "../../api/models";
 import { HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "../../api/queries";
-import { hrefs, useNavigateHref } from "./links";
+import { Icon } from "../../chrome/Icon";
+import { useArmed } from "../../run/useArmed";
+import { AppLink, hrefs, useNavigateHref } from "./links";
 import { ErrorBox } from "./QueryState";
 import { ReevalSummary } from "./ReevalSummary";
 import type { RunPhase } from "./remote";
@@ -22,12 +25,32 @@ export interface RunActionsProps {
   hostsLoaded?: boolean;
   /**
    * The hub's name for the run's host (`runHostRow(...)?.name`); null for a hub run or while
-   * the hosts list is not loaded. Never `executor.host`: that is the machine's hostname, and
-   * `POST /api/v1/hosts/<hostname>/connect` names no configured host.
+   * the hosts list is not loaded. Never `executor.host` (the machine's hostname).
    */
   hostName?: string | null;
   /** Only a successfully loaded task with an infer stage enables Re-infer. */
   inferStage?: boolean;
+  /** Examples page link; null: no other config (disabled); undefined: no Compare button. */
+  compareHref?: string | null;
+}
+
+/** Close a popover on Escape or a press outside `ref`. */
+function useDismiss(open: boolean, close: () => void, ref: { current: HTMLElement | null }): void {
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, close, ref]);
 }
 
 export function RunActions({
@@ -37,17 +60,14 @@ export function RunActions({
   served,
   hostsLoaded = false,
   inferStage,
+  compareHref,
 }: RunActionsProps) {
   const navigate = useNavigateHref();
   const id = record.run_id;
   const label = hostName ?? record.host;
   const refresh = phase === "local" ? RUN_EVENT_INVALIDATES : REMOTE_RUN_INVALIDATES;
   const openNew = (made: RunRef) => navigate(hrefs.run(made.run_id));
-  const rerun = useAction<RunRef>({
-    send: (_: void, opts) => api.rerun(id, opts),
-    invalidate: refresh,
-    onSuccess: openNew,
-  });
+  const rerun = useAction<RunRef>({ send: (_: void, opts) => api.rerun(id, opts), invalidate: refresh, onSuccess: openNew });
   const reinfer = useAction<RunRef>({
     send: (_: void, opts) => api.reinfer(id, undefined, opts),
     invalidate: refresh,
@@ -63,31 +83,31 @@ export function RunActions({
     onSuccess: setReport,
   });
   const stop = useAction({
-    send: (onlyQueued: boolean, opts) => onlyQueued ? api.cancelQueuedRun(id, opts) : api.stop(id, opts),
+    send: (onlyQueued: boolean, opts) => (onlyQueued ? api.cancelQueuedRun(id, opts) : api.stop(id, opts)),
     invalidate: refresh,
   });
   const reconnect = useAction<HostState>({
     send: (_: void, opts) => api.connectHost(hostName ?? "", opts),
     invalidate: HOST_EVENT_INVALIDATES,
   });
+  const archive = useAction({
+    send: (on: boolean, opts) => api.archiveRun(id, on, opts),
+    invalidate: [...refresh, ["taskRuns"]],
+  });
   const active = ACTIVE_STATUSES.has(record.status);
-  const [armed, setArmed] = useState(false);
-  useEffect(() => {
-    setArmed(false);
-  }, [id, record.status, served, phase]);
-  useEffect(() => {
-    if (!armed) return;
-    const timer = setTimeout(() => setArmed(false), 3000);
-    return () => clearTimeout(timer);
-  }, [armed]);
+  const { armed, arm, disarm } = useArmed([id, record.status, served, phase]);
+  const [menu, setMenu] = useState(false);
+  const wrap = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setMenu(false), []);
+  useDismiss(menu, close, wrap);
   const unavailable = hostsLoaded
     ? "No configured host serves this run's environment"
     : "The hosts list is not loaded; this run's serving host is unknown";
-  const error = rerun.error ?? reinfer.error ?? reeval.error ?? stop.error ?? reconnect.error;
+  const error = rerun.error ?? reinfer.error ?? reeval.error ?? stop.error ?? reconnect.error ?? archive.error;
   const waiting = phase === "queued" || phase === "pending";
   const lost = phase === "lost";
   return (
-    <div>
+    <div className="run-actions">
       <div className="actions">
         {waiting ? (
           <button
@@ -126,6 +146,15 @@ export function RunActions({
           </>
         ) : (
           <>
+            {compareHref === undefined ? null : compareHref ? (
+              <AppLink className="btn" href={compareHref} title="Compare examples with the best other config">
+                Compare
+              </AppLink>
+            ) : (
+              <button type="button" className="btn" disabled title="No other scored config in this task">
+                Compare
+              </button>
+            )}
             <button
               type="button"
               className={lost ? "btn primary" : "btn"}
@@ -135,52 +164,86 @@ export function RunActions({
             >
               Rerun
             </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={!served || reinfer.pending || inferStage !== true}
-              onClick={() => reinfer.run()}
-              title={
-                !served ? unavailable : inferStage === true
-                  ? "Run the infer stage again on this run's checkpoint"
-                  : inferStage === false ? "Task has no infer stage" : "Infer stage not loaded"
-              }
-            >
-              Re-infer
-            </button>
-            <button
-              type="button"
-              className={lost ? "btn" : "btn primary"}
-              disabled={!served || reeval.pending}
-              onClick={() => {
-                setReport(null);
-                reeval.run();
-              }}
-              title={!served ? unavailable : "Re-score saved predictions with the current metric versions"}
-            >
-              Re-evaluate
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={!served || !active || stop.pending}
-              onClick={() => {
-                if (!served || !active || stop.pending) return;
-                if (armed) {
-                  setArmed(false);
-                  stop.run(false);
-                } else {
-                  setArmed(true);
-                }
-              }}
-              onBlur={() => setArmed(false)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") setArmed(false);
-              }}
-              title={!served ? unavailable : active ? (armed ? "Click again to stop this run" : "Stop this run") : "The run is not active"}
-            >
-              {armed ? "Stop ✓?" : "Stop"}
-            </button>
+            <div className="menu-wrap" ref={wrap}>
+              <button
+                type="button"
+                className="btn icon"
+                aria-label="More actions"
+                aria-haspopup="menu"
+                aria-expanded={menu}
+                title="Re-infer, re-evaluate, stop, archive"
+                onClick={() => setMenu((open) => !open)}
+              >
+                <Icon name="more" />
+              </button>
+              {menu ? (
+                <div className="menu" role="menu" aria-label="Run actions">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!served || reinfer.pending || inferStage !== true}
+                    onClick={() => {
+                      close();
+                      reinfer.run();
+                    }}
+                    title={
+                      !served ? unavailable : inferStage === true
+                        ? "Run the infer stage again on this run's checkpoint"
+                        : inferStage === false ? "Task has no infer stage" : "Infer stage not loaded"
+                    }
+                  >
+                    Re-infer
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!served || reeval.pending}
+                    onClick={() => {
+                      close();
+                      setReport(null);
+                      reeval.run();
+                    }}
+                    title={!served ? unavailable : "Re-score saved predictions with the current metric versions"}
+                  >
+                    Re-evaluate
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!served || !active || stop.pending}
+                    onClick={() => {
+                      if (!served || !active || stop.pending) return;
+                      if (armed) {
+                        disarm();
+                        close();
+                        stop.run(false);
+                      } else {
+                        arm();
+                      }
+                    }}
+                    onBlur={disarm}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") disarm();
+                    }}
+                    title={!served ? unavailable : active ? (armed ? "Click again to stop this run" : "Stop this run") : "The run is not active"}
+                  >
+                    {armed ? "Stop ✓?" : "Stop"}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!served || archive.pending}
+                    onClick={() => {
+                      close();
+                      archive.run(!record.archived);
+                    }}
+                    title={!served ? unavailable : record.archived ? "Show this run in lists again" : "Hide this run from lists; nothing is deleted"}
+                  >
+                    {record.archived ? "Unarchive" : "Archive"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </>
         )}
       </div>

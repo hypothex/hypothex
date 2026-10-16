@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { RunPage, asLogStream } from "../../src/pages/Run";
 import { RUN_SVM, SVM_HYPOTHESIS, makeBoard, makeDetail } from "./fixtures";
 import { HttpReply, fakeRegistry, mockApi, renderWithClient, restoreFetch } from "./helpers";
@@ -10,6 +10,12 @@ afterEach(() => {
 });
 
 const TASK = "/api/v1/tasks/toy-classifier/toy-test";
+
+/** Open the ⋯ actions menu (if closed) and return one of its items. */
+async function openItem(name: string): Promise<HTMLElement> {
+  if (!screen.queryByRole("menu")) fireEvent.click(await screen.findByRole("button", { name: "More actions" }));
+  return screen.getByRole("menuitem", { name });
+}
 
 function routes(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -118,12 +124,12 @@ test("a run service failure is not presented as not found", async () => {
 test("the run page reads task stages before enabling Re-infer (UI-F7)", async () => {
   mockApi(routes({ [`GET ${TASK}`]: { stages: { infer: { command: ["python", "infer.py"] } } } }));
   renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
-  const button = await screen.findByRole("button", { name: "Re-infer" });
+  const button = await openItem("Re-infer");
   await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
   cleanup();
   mockApi(routes({ [`GET ${TASK}`]: { stages: {} } }));
   renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
-  const missing = await screen.findByRole("button", { name: "Re-infer" });
+  const missing = await openItem("Re-infer");
   await waitFor(() => expect(missing.title).toBe("Task has no infer stage"));
   expect(missing.hasAttribute("disabled")).toBe(true);
 });
@@ -144,7 +150,7 @@ test("run history metadata narrows the active views query before reading curves"
 test("an unreadable task never grants infer capability", async () => {
   mockApi(routes({ [`GET ${TASK}`]: new HttpReply(500, { error: "task unavailable", type: "StoreError" }) }));
   renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
-  const button = await screen.findByRole("button", { name: "Re-infer" });
+  const button = await openItem("Re-infer");
   expect(button.hasAttribute("disabled")).toBe(true);
   expect(button.title).toBe("Infer stage not loaded");
 });
@@ -152,7 +158,7 @@ test("an unreadable task never grants infer capability", async () => {
 test("a failed task refresh revokes previously cached infer capability", async () => {
   mockApi(routes({ [`GET ${TASK}`]: { stages: { infer: { command: ["infer"] } } } }));
   const view = renderWithClient(<RunPage runId={RUN_SVM} />, { registry });
-  const button = await screen.findByRole("button", { name: "Re-infer" });
+  const button = await openItem("Re-infer");
   await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
   mockApi(routes({ [`GET ${TASK}`]: new HttpReply(500, { error: "task unavailable", type: "StoreError" }) }));
   await view.client.refetchQueries({ queryKey: ["task", "toy-classifier", "toy-test"] });

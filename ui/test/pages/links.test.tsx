@@ -20,6 +20,8 @@ describe("hrefs", () => {
     expect(hrefs.edit("p", "t", "new")).toBe("/t/p/t/edit/new");
     expect(hrefs.run("r1", { log: "stderr" })).toBe("/r/r1?log=stderr");
     expect(hrefs.run("r1", { example: "T-014" })).toBe("/r/r1?example=T-014");
+    expect(hrefs.run("r1", { tab: "logs", log: "stderr" })).toBe("/r/r1?tab=logs&log=stderr");
+    expect(hrefs.run("r1", { tab: "overview" })).toBe("/r/r1");
     expect(hrefs.examples("A", "B")).toBe("/x/A/B");
     expect(hrefs.examples("A", "B", "accuracy@v1")).toBe("/x/A/B?metric=accuracy%40v1");
   });

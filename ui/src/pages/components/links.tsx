@@ -32,8 +32,8 @@ export const hrefs = {
     }),
   edit: (project: string, task: string, view: string): string =>
     `/t/${enc(project)}/${enc(task)}/edit/${enc(view)}`,
-  run: (runId: string, search: { log?: string; example?: string } = {}): string =>
-    withSearch(`/r/${enc(runId)}`, search),
+  run: (runId: string, search: { tab?: string; log?: string; example?: string } = {}): string =>
+    withSearch(`/r/${enc(runId)}`, { ...search, tab: search.tab === "overview" ? undefined : search.tab }),
   examples: (a: string, b: string, metric?: string): string =>
     withSearch(`/x/${enc(a)}/${enc(b)}`, { metric }),
 };

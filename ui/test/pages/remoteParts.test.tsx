@@ -276,6 +276,25 @@ describe("status line and state bar", () => {
     expect(bar.querySelector("b")?.getAttribute("title")).toBe("Reason from the run's run.lost event.");
   });
 
+  test("StateBanner of a queued run: place, need and wait", () => {
+    render(<StateBanner record={queuedRecord()} phase="queued" host={GPU1} conn="connected" now={NOW} />);
+    const bar = screen.getByRole("status");
+    expect(bar.className).toBe("state-bar queued");
+    expect([...bar.children].map((c) => c.textContent)).toEqual(["Queued 2nd of 3 on gpu1", "needs 2 GPU, 1 free", "waiting 12m"]);
+  });
+
+  test("StateBanner of a queued run without the hosts list, and of a pending SLURM job", () => {
+    const { unmount } = render(<StateBanner record={queuedRecord()} phase="queued" host={null} conn="connected" now={NOW} />);
+    expect(screen.getByRole("status").firstElementChild?.textContent).toBe("Queued 2nd on sv-a100-01");
+    unmount();
+    render(<StateBanner record={pendingRecord()} phase="pending" host={MCCLEARY} conn="connected" now={NOW} />);
+    expect([...screen.getByRole("status").children].map((c) => c.textContent)).toEqual([
+      "Pending on mccleary",
+      "SLURM job 4471031",
+      "waiting 4m",
+    ]);
+  });
+
   test("StateBanner draws nothing for a running run", () => {
     const { container } = render(
       <StateBanner record={runningRecord()} phase="running" host={GPU1} conn="connected" now={NOW} />,

@@ -18,7 +18,7 @@ afterEach(() => {
   restoreFetch();
 });
 
-const names = () => screen.getAllByRole("button").map((b) => b.textContent);
+const names = () => screen.getAllByRole("button").map((b) => b.getAttribute("aria-label") ?? b.textContent);
 
 test("a queued run has one action: Cancel, which stops it", async () => {
   const calls = mockApi({ [`POST /api/v1/runs/${QUEUED_ID}/stop`]: { run_id: QUEUED_ID, status: "killed" } });
@@ -80,8 +80,9 @@ test("without the hub's host name, Reconnect is disabled and posts nothing", () 
 test("a lost run makes Rerun the main action", () => {
   mockApi({ [`POST /api/v1/runs/${LOST_ID}/rerun`]: { run_id: "NEW" } });
   renderWithClient(<RunActions served record={lostRecord()} phase="lost" hostName="mccleary" />);
-  expect(names()).toEqual(["Rerun", "Re-infer", "Re-evaluate", "Stop"]);
+  expect(names()).toEqual(["Rerun", "More actions"]);
   expect(screen.getByRole("button", { name: "Rerun" }).className).toBe("btn primary");
-  expect(screen.getByRole("button", { name: "Re-evaluate" }).className).toBe("btn");
-  expect(screen.getByRole("button", { name: "Stop" }).hasAttribute("disabled")).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+  expect(screen.getAllByRole("menuitem").map((b) => b.textContent)).toEqual(["Re-infer", "Re-evaluate", "Stop", "Archive"]);
+  expect(screen.getByRole("menuitem", { name: "Stop" }).hasAttribute("disabled")).toBe(true);
 });

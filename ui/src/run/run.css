@@ -8,3 +8,36 @@
 .run-name.editing { flex-wrap: wrap; }
 .run-name .rename { font: inherit; height: 32px; width: min(46ch, 100%); padding: 0 8px; border: 1px solid var(--focus); border-radius: var(--r-ctl); background: var(--panel); color: var(--ink); }
 .run-name .rename-err { color: var(--fail); font-size: 12px; font-weight: 400; }
+.run-page { background: var(--panel); min-height: 100%; }
+.run-page .rhead { padding: 20px 28px 0; border-bottom: 1px solid var(--line); }
+.run-page .rhead-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.run-page .rhead h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.015em; min-width: 0; }
+.run-page .rhead-top .sp { flex: 1; }
+.run-page .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; flex: none; }
+.run-page .sw.lg { width: 16px; height: 16px; border-radius: 4px; }
+.run-page .pill { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 11px; background: var(--panel-2); border: 1px solid var(--line); font-size: 12px; font-weight: 500; }
+.run-page .pill.finished { color: var(--ok); background: var(--ok-wash); border-color: transparent; }
+.run-page .pill.failed, .run-page .pill.killed { color: var(--fail); }
+.run-page .pill.lost, .run-page .pill.stale { color: var(--warn); }
+.run-page .pill.running { color: var(--run); }
+.run-page .rhyp { margin: 6px 0 0 26px; color: var(--ink-2); font-size: 14px; max-width: 80ch; }
+.run-page .rderived { margin: 2px 0 0 26px; color: var(--ink-3); font-size: 12px; }
+.run-page .rhead .tabs { display: flex; gap: 2px; margin: 14px 0 0 18px; }
+.run-page .rhead .tabs a { padding: 8px 10px; color: var(--ink-3); border-bottom: 2px solid transparent; margin-bottom: -1px; text-decoration: none; }
+.run-page .rhead .tabs a:hover { color: var(--ink); }
+.run-page .rhead .tabs a.on { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
+.run-page .state-bar { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline; margin: 12px 0 0 26px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--panel-2); font-size: 12.5px; color: var(--ink-2); }
+.run-page .state-bar b { color: var(--ink); font-weight: 600; }
+.run-page .state-bar.lost b { color: var(--fail); }
+.run-page .state-bar .r { margin-left: auto; color: var(--ink-3); }
+.run-page .run-actions { display: grid; justify-items: end; gap: 6px; }
+.run-page .run-actions .actions { display: flex; gap: 6px; align-items: center; }
+.run-page .run-actions .err { max-width: 420px; overflow-wrap: anywhere; color: var(--fail); font-size: 12px; margin: 0; }
+.run-page .menu-wrap { position: relative; }
+.run-page .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 180px; padding: 4px; display: grid; background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--r-ctl); box-shadow: 0 8px 24px rgba(0, 0, 0, .12); }
+.run-page .menu [role="menuitem"] { text-align: left; padding: 6px 10px; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
+.run-page .menu [role="menuitem"]:hover:not(:disabled) { background: var(--hover); }
+.run-page .menu [role="menuitem"]:disabled { color: var(--ink-3); cursor: default; }
+.run-page .rbody { display: grid; grid-template-columns: minmax(0, 1fr) 300px; min-height: 0; }
+.run-page .rmain { padding: 22px 28px 40px; display: grid; gap: 30px; align-content: start; min-width: 0; }
+@media (max-width: 1100px) { .run-page .rbody { grid-template-columns: minmax(0, 1fr); } }

@@ -135,6 +135,6 @@ export function makeHosts(now: number = NOW): HostRow[] {
 export function makeHostRuns(): RunRecord[] {
   return [
     makeRecord({ run_id: RUN_AGENT, created_by: "agent:tuner", hypothesis: "lr 3e-4, beam 10", status: "running" }),
-    makeRecord({ run_id: RUN_HUMAN, created_by: "human:shreyas", hypothesis: "+aug long, 40k steps", status: "running" }),
+    makeRecord({ run_id: RUN_HUMAN, created_by: "human:sam", hypothesis: "+aug long, 40k steps", status: "running" }),
   ];
 }

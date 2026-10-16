@@ -815,7 +815,7 @@ class _TrainConfig:
 
 _TRAIN_CONFIGS = (
     _TrainConfig(
-        "base", "base", "base recipe", 3e-4, 0.94, "shreyas",
+        "base", "base", "base recipe", 3e-4, 0.94, "sam",
         (0.8958, 0.62, 2500, 0.0060), (0.140, 0.46, 2300, 0.020), (0.074, 0.58, 2600),
         95, 61.4, "gpu-a01", "3d9e1a7",
     ),
@@ -1021,7 +1021,7 @@ def _seed_training(sd: _Seeder) -> None:
             run.log({"lr": value}, step=s)
         for s, util, mem in curves.sys:
             run.log({"sys/gpu_util": util, "sys/gpu_mem_gb": mem}, step=s)
-        ckpt_dir = f"/scratch/shreyas/hx/{project}/runs/{record.run_id}/ckpt"
+        ckpt_dir = f"/scratch/sam/hx/{project}/runs/{record.run_id}/ckpt"
         for s, top1, loss in curves.ckpts:
             run.log_checkpoint(
                 f"{ckpt_dir}/step_{s:06d}.pt",
@@ -1408,10 +1408,10 @@ class _IterRun:
 
 
 _ITER_VERSIONS = (
-    _Version("v1", "2026-09-13T10:12:00Z", "human:shreyas", "baseline",
+    _Version("v1", "2026-09-13T10:12:00Z", "human:sam", "baseline",
              "a031a64b9cbd2a8e81ebf150c9ab0804a710a6a6", "react-1", "gpt-4.1-mini", 0, 4, 40, 1,
              "template_search,route_score,smiles_validate"),
-    _Version("v2", "2026-09-14T16:40:00Z", "human:shreyas", "retries 3",
+    _Version("v2", "2026-09-14T16:40:00Z", "human:sam", "retries 3",
              "6fa2cfdf2f93d4bd34398d373139b5abcfc9acc8", "react-1", "gpt-4.1-mini", 0, 4, 40, 3,
              "template_search,route_score,smiles_validate"),
     _Version("v3", "2026-09-16T11:05:00Z", "agent:iterate", "+stock_check",
@@ -1420,13 +1420,13 @@ _ITER_VERSIONS = (
     _Version("v4", "2026-09-17T19:22:00Z", "agent:iterate", "depth 6",
              "50cc29f312390a273e41162f8591d2d98004702a", "react-1", "gpt-4.1-mini", 0.6, 6, 40, 3,
              "template_search,route_score,smiles_validate,stock_check"),
-    _Version("v5", "2026-09-19T09:48:00Z", "human:shreyas", "gpt-4.1",
+    _Version("v5", "2026-09-19T09:48:00Z", "human:sam", "gpt-4.1",
              "356483f8954521d87436e67efa04c7e31fc6cc58", "react-1", "gpt-4.1", 0.6, 6, 40, 3,
              "template_search,route_score,smiles_validate,stock_check"),
     _Version("v6", "2026-09-21T14:15:00Z", "agent:iterate", "prompt rewrite",
              "e058f3e5a888d5352ee90a3b16e8c5980450b9b9", "concise-2", "gpt-4.1", 0.6, 6, 40, 3,
              "template_search,route_score,smiles_validate,stock_check"),
-    _Version("v7", "2026-09-22T10:31:00Z", "human:shreyas", "revert prompt",
+    _Version("v7", "2026-09-22T10:31:00Z", "human:sam", "revert prompt",
              "8c02d161c42ce427c0eeb79c9a3956fae5a037f3", "react-1", "gpt-4.1", 0.6, 6, 40, 3,
              "template_search,route_score,smiles_validate,stock_check"),
     _Version("v8", "2026-09-24T15:02:00Z", "agent:iterate", "+conditions",
@@ -2422,7 +2422,7 @@ def _seed_cluster_runs(ctx: Context, repo: Path, anchor: datetime) -> list[str]:
         "command_template": _LONG_COMMAND,
         "params": {},
         "hypothesis": "40k steps lifts +aug past 0.915 top-1",
-        "created_by": "human:shreyas",
+        "created_by": "human:sam",
         "rate": _DEMO_SLURM_RATE,
     }
     done = _host_run(

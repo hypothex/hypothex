@@ -100,7 +100,7 @@ describe("queue", () => {
     queuedRecord({
       run_id: "20261003-142000-toy-test-b7e0",
       hypothesis: "aug plus seed 5",
-      created_by: "human:shreyas",
+      created_by: "human:sam",
       created_at: "2026-10-03T14:20:00Z",
       executor: { ...queuedRecord().executor, queue_position: 1 },
     }),
@@ -119,7 +119,7 @@ describe("queue", () => {
         position: 1,
         runId: "20261003-142000-toy-test-b7e0",
         label: "aug plus seed 5 · seed 3",
-        createdBy: "human:shreyas",
+        createdBy: "human:sam",
         gpus: 2,
         waiting: "14m",
       },

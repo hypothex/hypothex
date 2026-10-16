@@ -123,6 +123,17 @@ head. It supersedes both older package candidates below. The previous
 implementation LGTM below is historical evidence; merge remains pending
 new-head CI, followed by the clean merged-main handoff.
 
+The old `96ffd749` UI CI run exposed an intermittent delayed-chart test cleanup
+race (`route.fulfill: Route is already handled!`). A staggered two-request probe
+reproduced the failure and verified the correction: drain each callback promise
+before unregistering interception. The selected-run assertions, retries, worker
+count and timeouts are unchanged. The corrected test passed 20 focused executions,
+then all 124 browser tests passed with CI's two workers and zero retries.
+Application typecheck and diff checks passed. Parent inspected the fix and raw
+receipts in `implementation/ci-ui-selected-run/`; all 108 package inputs and
+79 package-test inputs still match the accepted candidate, so package validation
+is reused. Hosted CI on the next pushed head remains required.
+
 All 13 scope items are implemented. The independent whole-source review has no
 remaining runtime findings after fixing duplicate execution on completed legacy
 receipts and the browser device-name length mismatch. The final independent

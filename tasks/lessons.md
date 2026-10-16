@@ -21,3 +21,8 @@
 - Grouped deletion needs checks for every member's filesystem identity. A successful deletion of one representative path does not prove that another alias still points to the deleted object.
 - Remote confirmation must match the owning filesystem's deletion roots and group membership in both directions. Aliases can merge lexical groups, split one lexical group, or reverse its ancestor root; checking only one form can understate confirmed bytes.
 - Use a real HTTP client for tests aimed at a separate live environment server. An absolute URL passed to an in-process ASGI TestClient still exercises its attached application.
+
+## 2026-10-17 — delayed browser routes
+
+- Drain promises owned by delayed route callbacks before unregistering interception. In the installed Playwright version, `unrouteAll({ behavior: "wait" })` clears the handler list first; completion of one callback can auto-continue another held request before its later `fulfill`.
+- Use a staggered two-request reproducer to establish the lifecycle race. Preserve callback failures and the original layout assertions; passing repetitions alone do not establish that an intermittent failure is fixed.

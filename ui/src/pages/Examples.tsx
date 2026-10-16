@@ -4,7 +4,9 @@
  * heading names the pair; the counts and p-value are plain facts under it.
  */
 import { useState } from "react";
-import { useCompareExamples, useRun, useRunPredictions, useTask } from "../api/queries";
+import { useCompareExamples, useRun, useRunPredictions, useTask, useTaskRuns } from "../api/queries";
+import { EmptyState } from "../chrome/EmptyState";
+import { withSeed } from "../run/RunName";
 import { ErrorsTable, ExampleStrip, OutcomeTable, SignTestChart } from "./components/ExampleCharts";
 import { examplesMeta, exampleTotal, pairLabels, signTestP } from "./components/examples";
 import { Panel } from "../chrome/Panel";
@@ -47,6 +49,12 @@ export function pickExampleField(page: PredictionPage, metric: string): string |
     .find((name) => typeof fields[name] === "boolean");
 }
 
+/** Whether a predictions page carries per-example scores for `metric` (`name` or `name@version`). */
+export function hasExampleScores(page: PredictionPage, metric: string): boolean {
+  const scores = page.rows[0]?.scores ?? {};
+  return Object.entries(scores).some(([ref, fields]) => (ref === metric || ref.split("@")[0] === metric.split("@")[0]) && Object.keys(fields).length > 0);
+}
+
 interface SideProps {
   tag: "A" | "B";
   detail: RunDetail;
@@ -62,7 +70,7 @@ function Side({ tag, detail, label, metric }: SideProps) {
       <div className="lbl">{tag}</div>
       <div className="row">
         <div>
-          <div className="nm">{record.seed !== null ? `${label}, seed ${record.seed}` : label}</div>
+          <div className="nm">{withSeed(label, record.seed)}</div>
           <div className="meta">
             <span className={`who ${isAgent(record.created_by) ? "agent" : "human"}`}>
               <i />
@@ -100,15 +108,20 @@ export function ExamplesPage({ a, b, metric }: ExamplesPageProps) {
   const probe = { metric: metricRef ?? "", limit: 1 };
   const fieldQ = useRunPredictions(b, probe, { enabled: metricRef !== null });
   const field = fieldQ.data && metricRef ? pickExampleField(fieldQ.data, metricRef) : undefined;
+  // B logged no per-example scores for the metric (e.g. a training task): nothing to compare
+  const noScores = fieldQ.data !== undefined && metricRef !== null && !hasExampleScores(fieldQ.data, metricRef);
   const diffQ = useCompareExamples(a, b, metricRef ?? "", field, {
-    enabled: metricRef !== null && !fieldQ.isPending,
+    enabled: metricRef !== null && !fieldQ.isPending && !noScores,
   });
   const diff = diffQ.data;
   const [limit, setLimit] = useState(FIRST_PAGE);
   const failing = { metric: diff?.metric, failures_only: true, field: diff?.field, limit };
   const errors = useRunPredictions(b, failing, { enabled: diff !== undefined, keepPrevious: true });
 
-  const labels = recA && recB ? pairLabels(recA, recB) : null;
+  // the task's run names (as in its run list); without them, the records' own names
+  const taskRuns = useTaskRuns(project, task, { enabled: task !== "" });
+  const names = taskRuns.data ? new Map(taskRuns.data.runs.map((r) => [r.run_id, r.name])) : undefined;
+  const labels = recA && recB ? pairLabels(recA, recB, names) : null;
   const [labelA, labelB] = labels ?? ["A", "B"];
   const noMetric = explicit === null && recA !== undefined && task === "";
   const error = runA.error ?? runB.error ?? taskQ.error ?? diffQ.error;
@@ -135,7 +148,9 @@ export function ExamplesPage({ a, b, metric }: ExamplesPageProps) {
       ) : null}
       {error ? <ErrorBox error={error} /> : null}
       {noMetric ? <ErrorBox error={new Error("no task: add ?metric=<name> to the URL")} /> : null}
-      {diff ? (
+      {noScores && !error ? (
+        <EmptyState title="No per-example scores for this task" />
+      ) : diff ? (
         <>
           <div className="two-x">
             <Panel title="Outcomes">
@@ -168,7 +183,7 @@ export function ExamplesPage({ a, b, metric }: ExamplesPageProps) {
             )}
           </Panel>
         </>
-      ) : !error && !noMetric ? (
+      ) : !error && !noMetric && !noScores ? (
         <Loading />
       ) : null}
     </div>

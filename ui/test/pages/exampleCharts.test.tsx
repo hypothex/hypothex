@@ -63,6 +63,14 @@ describe("labels and summaries", () => {
     expect(pairLabels(rf, rf2)).toEqual(["baseline rf ef4f", "baseline rf 6f71"]);
   });
 
+  test("pairLabels prefers the task's run names, then the records' own names", () => {
+    const rf = makeRecord({ run_id: RUN_RF, hypothesis: "lr x beam: sweep", name: null });
+    const svm = makeRecord({ hypothesis: "lr x beam: sweep", name: "tuned svm" });
+    expect(pairLabels(rf, svm)).toEqual(["lr x beam", "tuned svm"]);
+    const names = new Map([[RUN_RF, "lr 1e-3 · beam 1"], [RUN_SVM, "lr 3e-4 · beam 10"]]);
+    expect(pairLabels(rf, svm, names)).toEqual(["lr 1e-3 · beam 1", "lr 3e-4 · beam 10"]);
+  });
+
   test("meta line", () => {
     expect(examplesMeta(makeDiff())).toEqual(["n = 180", "net +6", "Δ +0.0333"]);
     const none = { ...makeDiff(), fixed: [], broken: [], both_pass: 0, both_fail: 0 };

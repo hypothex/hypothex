@@ -72,7 +72,7 @@ test("compares two runs example by example", async () => {
   expect([...facts.children].map((c) => c.textContent)).toEqual([
     "toy-classifier / toy-test", "fixes 9", "breaks 3", "p = 0.15", "n = 180", "net +6", "Δ +0.0333",
   ]);
-  for (const text of ["baseline rf, seed 3", "RBF-kernel SVM, seed 3", "0.8889", "0.9222"]) {
+  for (const text of ["baseline rf · seed 3", "RBF-kernel SVM · seed 3", "0.8889", "0.9222"]) {
     expect(screen.getByText(text)).toBeTruthy();
   }
   const titles = ["Outcomes", "Sign test", "Per example", "RBF-kernel SVM errors"];
@@ -197,4 +197,24 @@ test("bare metric request uses the API-resolved version in comparison summaries"
   await screen.findByText("fixes 9");
   expect(screen.getByText("0.9222")).toBeTruthy();
   expect(screen.queryByText("0.9800") === null).toBe(true);
+});
+
+test("the cards and heading use the task's run names when the task's runs load", async () => {
+  const runs = {
+    project: "toy-classifier", task: "toy-test",
+    runs: [{ run_id: RUN_RF, name: "rf · depth 8" }, { run_id: RUN_SVM, name: "svm · C 10" }],
+  };
+  mockApi(routes({ "GET /api/v1/tasks/toy-classifier/toy-test/runs": runs }));
+  renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
+  await screen.findByRole("heading", { level: 1, name: "svm · C 10 vs rf · depth 8" });
+  expect(screen.getByText("rf · depth 8 · seed 3")).toBeTruthy();
+  expect(screen.getByText("svm · C 10 · seed 3")).toBeTruthy();
+});
+
+test("a metric without per-example scores is a calm empty state, not a red error", async () => {
+  const calls = mockApi(routes({ [`GET ${PROBE}`]: { run_id: RUN_SVM, total: 0, offset: 0, limit: 1, rows: [] } }));
+  renderWithClient(<ExamplesPage a={RUN_RF} b={RUN_SVM} metric="accuracy" />);
+  expect(await screen.findByText("No per-example scores for this task")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(calls.some((c) => c.url.startsWith("/api/v1/compare/examples"))).toBe(false);
 });

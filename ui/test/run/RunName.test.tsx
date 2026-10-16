@@ -165,4 +165,10 @@ describe("RunName", () => {
     fireEvent.doubleClick(screen.getByText("model svm · seed 3"));
     expect(screen.getByRole("textbox", { name: "Run name" })).toBeTruthy();
   });
+
+  test("label names the pencil (list rows: Rename <name>)", () => {
+    renderWithClient(<RunName {...PROPS} label="Rename model svm · seed 3" />);
+    fireEvent.click(screen.getByRole("button", { name: "Rename model svm · seed 3" }));
+    expect(screen.getByRole("textbox", { name: "Run name" })).toBeTruthy();
+  });
 });

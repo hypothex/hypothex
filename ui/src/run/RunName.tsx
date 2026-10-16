@@ -67,6 +67,8 @@ export interface RunNameProps {
   renamed: boolean;
   /** What on the text starts editing: "click" (run header) or "dblclick" (list rows). The pencil always does. */
   editOn?: "click" | "dblclick";
+  /** Accessible name of the pencil (default "Rename"); list rows add the name, `Rename <name>`. */
+  label?: string;
   className?: string;
 }
 
@@ -75,7 +77,16 @@ interface Shown {
   renamed: boolean;
 }
 
-export function RunName({ runId, runIds, display, derived, renamed, editOn = "click", className }: RunNameProps): ReactElement {
+export function RunName({
+  runId,
+  runIds,
+  display,
+  derived,
+  renamed,
+  editOn = "click",
+  label = "Rename",
+  className,
+}: RunNameProps): ReactElement {
   const rename = useRenameRun();
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(display);
@@ -174,7 +185,7 @@ export function RunName({ runId, runIds, display, derived, renamed, editOn = "cl
       <span className="rn-t" {...open}>
         {current.display}
       </span>
-      <button type="button" className="pen" aria-label="Rename" title="Rename" onClick={start}>
+      <button type="button" className="pen" aria-label={label} title="Rename" onClick={start}>
         <Icon name="edit" />
       </button>
       {error ? (

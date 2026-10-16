@@ -33,6 +33,7 @@ describe("URL state", () => {
       sort: { key: "primary", dir: "desc" },
       hidden: [],
       showSuperseded: false,
+      column: "primary",
     });
   });
 
@@ -41,14 +42,15 @@ describe("URL state", () => {
     expect(defaultSelection(false)).toEqual({ ...base(), sort: { key: "primary", dir: "asc" } });
   });
 
-  test("reads filter, group, sort, hide and sup", () => {
-    const params = new URLSearchParams("filter=lr%3D3e-4&group=run&sort=created:asc&hide=g-a,g-b&sup=1");
+  test("reads filter, group, sort, hide, sup and col", () => {
+    const params = new URLSearchParams("filter=lr%3D3e-4&group=run&sort=created:asc&hide=g-a,g-b&sup=1&col=top1/final");
     expect(parseSelection(params, DEFAULTS)).toEqual({
       filter: "lr=3e-4",
       group: "run",
       sort: { key: "created", dir: "asc" },
       hidden: ["g-a", "g-b"],
       showSuperseded: true,
+      column: "top1/final",
     });
   });
 
@@ -66,16 +68,16 @@ describe("URL state", () => {
   test("defaults are written as removals, duplicates in hide collapse", () => {
     expect(
       selectionSearch(
-        { filter: "  ", group: "config", sort: { key: "primary", dir: "desc" }, hidden: [], showSuperseded: false },
+        { filter: "  ", group: "config", sort: { key: "primary", dir: "desc" }, hidden: [], showSuperseded: false, column: "primary" },
         DEFAULTS,
       ),
-    ).toEqual({ filter: null, group: null, sort: null, hide: null, sup: null });
+    ).toEqual({ filter: null, group: null, sort: null, hide: null, sup: null, col: null });
     expect(
       selectionSearch(
-        { group: "run", hidden: ["g-a", "g-a", "g-b"], showSuperseded: true, sort: { key: "primary", dir: "asc" } },
+        { group: "run", hidden: ["g-a", "g-a", "g-b"], showSuperseded: true, sort: { key: "primary", dir: "asc" }, column: "top1/final" },
         DEFAULTS,
       ),
-    ).toEqual({ group: "run", hide: "g-a,g-b", sup: "1", sort: "primary:asc" });
+    ).toEqual({ group: "run", hide: "g-a,g-b", sup: "1", sort: "primary:asc", col: "top1/final" });
   });
 
   test("applySearch patches one key and keeps the others", () => {

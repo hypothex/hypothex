@@ -78,7 +78,7 @@ describe("routes", () => {
 
   test("/t/:project/:task keeps the v5 workspace keys, all as strings", async () => {
     const { router } = renderApp(
-      "/t/toy/acc?tab=charts&filter=lr%3D3e-4&group=run&sort=top1%3Adesc&hide=g1%2Cg2&sup=0&sweep=s-7f3a",
+      "/t/toy/acc?tab=charts&filter=lr%3D3e-4&group=run&sort=top1%3Adesc&hide=g1%2Cg2&sup=0&col=top1%2Ffinal&sweep=s-7f3a",
     );
     await settled(router, "/t/$project/$task");
     expect(leaf(router)?.search).toEqual({
@@ -88,13 +88,14 @@ describe("routes", () => {
       sort: "top1:desc",
       hide: "g1,g2",
       sup: "0",
+      col: "top1/final",
       sweep: "s-7f3a",
     });
   });
 
   test("validateSearch drops empty v5 keys on the task and run routes", async () => {
     const { cleanup } = await import("@testing-library/react");
-    const task = renderApp("/t/toy/acc?tab=&filter=&group=&sort=&hide=&sup=&sweep=&view=");
+    const task = renderApp("/t/toy/acc?tab=&filter=&group=&sort=&hide=&sup=&col=&sweep=&view=");
     await settled(task.router, "/t/$project/$task");
     expect(Object.values(leaf(task.router)?.search ?? {}).filter((v) => v !== undefined)).toEqual([]);
     cleanup();

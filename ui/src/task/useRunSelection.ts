@@ -1,8 +1,8 @@
 /**
  * Run-list state for one task, in the URL so a view is shareable (spec 4.2, §6):
  * `?filter=` filter text, `?group=run` (each run instead of by config), `?sort=<key>:<dir>`,
- * `?hide=<id>,<id>` hidden identities, `?sup=1` (show runs tagged `superseded`). Defaults
- * stay out of the URL.
+ * `?hide=<id>,<id>` hidden identities, `?sup=1` (show runs tagged `superseded`), `?col=<key>`
+ * the score key each sidebar row shows (default the primary). Defaults stay out of the URL.
  *
  * An identity is a config group (By config) or a run (Each run). It gets one colour in
  * every panel: `colorFor(id, visibleIdentities(selection, data))`.
@@ -21,6 +21,8 @@ export interface Selection {
   sort: { key: string; dir: SortDir };
   hidden: string[];
   showSuperseded: boolean;
+  /** Score key of the sidebar's value column; `SORT_PRIMARY` is the primary metric. */
+  column: string;
 }
 
 export interface SelectionDefaults {
@@ -186,6 +188,7 @@ export function parseSelection(params: URLSearchParams, defaults: SelectionDefau
     sort: key !== "" && (dir === "asc" || dir === "desc") ? { key, dir } : { key: SORT_PRIMARY, dir: defaults.sortDir },
     hidden: (params.get("hide") ?? "").split(",").filter(Boolean),
     showSuperseded: params.get("sup") === "1",
+    column: params.get("col") || SORT_PRIMARY,
   };
 }
 
@@ -208,6 +211,7 @@ export function selectionSearch(patch: Partial<Selection>, defaults: SelectionDe
   }
   if (patch.hidden !== undefined) out.hide = patch.hidden.length ? [...new Set(patch.hidden)].join(",") : null;
   if (patch.showSuperseded !== undefined) out.sup = patch.showSuperseded ? "1" : null;
+  if (patch.column !== undefined) out.col = patch.column === SORT_PRIMARY ? null : patch.column;
   return out;
 }
 

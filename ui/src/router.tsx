@@ -37,6 +37,7 @@ export interface TaskSearch {
   sort?: string;
   hide?: string;
   sup?: string;
+  col?: string;
 }
 
 /** The view the old Task page shows: `?view=`, else `?tab=view:<name>`. */
@@ -163,6 +164,7 @@ export const taskRoute = createRoute({
     sort: str(search.sort),
     hide: str(search.hide),
     sup: str(search.sup),
+    col: str(search.col),
   }),
   component: TaskScreen,
 });

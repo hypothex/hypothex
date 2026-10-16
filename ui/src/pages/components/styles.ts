@@ -4,7 +4,7 @@ import { createElement } from "react";
 export const PAGES_CSS = `
 .page { max-width: 1280px; margin: 0 auto; }
 .page .crumb .tag { margin-left: 10px; }
-.page h1.headline { margin: 0; max-width: 26em; font: 500 46px/1.06 var(--serif); letter-spacing: -.018em; text-wrap: balance; }
+.page h1.headline { margin: 0; max-width: 26em; font: 500 46px/1.06 var(--font); letter-spacing: -.018em; text-wrap: balance; }
 .page h1.headline { hyphens: manual; overflow-wrap: normal; word-break: normal; }
 .page h1.headline .nb { white-space: nowrap; }
 .page h1.headline.long { font-size: 27px; line-height: 1.25; font-weight: 450; max-width: 40em; text-wrap: pretty; }
@@ -59,7 +59,7 @@ export const PAGES_CSS = `
 .page .projects th + th, .page .projects td + td { padding-left: 14px; }
 .page .projects td { white-space: nowrap; }
 .page .projects td.nm { white-space: normal; overflow-wrap: anywhere; }
-.page .fail-b { font: 400 15.5px/1.5 var(--serif); color: var(--ink-2); margin: 0 0 16px; }
+.page .fail-b { font: 400 15.5px/1.5 var(--font); color: var(--ink-2); margin: 0 0 16px; }
 .page .fail-b b { color: var(--ink); font-weight: 650; }
 .page .fail-b .x { color: var(--fail); font-family: var(--sans); font-weight: 600; margin-right: 6px; }
 .page .fail-b .row { margin-top: 8px; }
@@ -98,7 +98,7 @@ export const PAGES_CSS = `
 .page .scores tr:first-child td { border-top: 0; }
 .page .scores .v { font: 400 30px/1 var(--sans); letter-spacing: -.015em; text-align: right; }
 .page .scores small { display: block; color: var(--ink-3); font-size: 12.5px; margin-top: 4px; letter-spacing: 0; }
-.page .notes { font: 400 15.5px/1.55 var(--serif); color: var(--ink-2); margin: 0 0 12px; }
+.page .notes { font: 400 15.5px/1.55 var(--font); color: var(--ink-2); margin: 0 0 12px; }
 .page .notes .by { font: 400 12.5px/1.4 var(--sans); color: var(--ink-3); margin-bottom: 6px; display: flex; gap: 10px; }
 .page .notes p { margin: 0; white-space: pre-wrap; }
 .page .notes p.clip { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }

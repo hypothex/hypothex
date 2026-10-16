@@ -6,7 +6,7 @@ export const LAUNCH_CSS = `
 [data-theme="dark"] .hx-launch { background: rgba(0, 0, 0, .55); }
 .hx-launch .dlg { width: 840px; max-width: 100%; background: var(--paper); border: 1px solid var(--rule); border-radius: 10px; box-shadow: 0 24px 60px -20px rgba(10, 14, 20, .35); margin-bottom: 60px; }
 .hx-launch .dlg-h { display: flex; align-items: baseline; gap: 14px; padding: 18px 24px 14px; border-bottom: 1px solid var(--rule); }
-.hx-launch .dlg-h h2 { margin: 0; font: 500 24px/1.1 var(--serif); letter-spacing: -.01em; }
+.hx-launch .dlg-h h2 { margin: 0; font: 500 24px/1.1 var(--font); letter-spacing: -.01em; }
 .hx-launch .dlg-h .x { margin-left: auto; border: 0; background: transparent; color: var(--ink-3); font-size: 20px; line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 4px; }
 .hx-launch .dlg-h .x:hover { color: var(--ink); background: var(--paper-2); }
 .hx-launch .dlg-b { padding: 8px 24px 4px; margin: 0; border: 0; min-width: 0; }

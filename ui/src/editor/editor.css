@@ -1,7 +1,7 @@
 /* View editor (docs/mockups/kinds/custom_view, #edit). Tokens come from styles/tokens.css;
    .crumb and .btn come from styles/base.css. */
 .hx-ed-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; align-items: end; }
-.hx-ed-top h1 { font: 500 34px/1.1 var(--serif); letter-spacing: -.014em; margin: 0; display: flex; align-items: baseline; gap: 16px; }
+.hx-ed-top h1 { font: 500 34px/1.1 var(--font); letter-spacing: -.014em; margin: 0; display: flex; align-items: baseline; gap: 16px; }
 .hx-ed-top h1 small { font: 400 13.5px/1 var(--sans); color: var(--ink-3); letter-spacing: 0; }
 .hx-ed-act { display: flex; gap: 8px; align-items: center; }
 .hx-ed-act label { font-size: 12.5px; color: var(--ink-3); display: inline-flex; gap: 8px; align-items: center; }

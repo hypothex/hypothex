@@ -258,8 +258,9 @@ Other routes
   ``within_noise_of_best`` and ``is_best`` (unranked groups have none); and the
   task's ``primary``, ``higher_is_better``, ``unit``, ``value_format``,
   ``metric_versions``, ``varying_keys``, ``metric_names``, ``score_keys``,
-  ``key_higher_is_better`` (the direction of each score key: the primary's is
-  ``higher_is_better``, any other key its metric's) and ``key_parts``.
+  ``key_higher_is_better`` (the direction of each score key: a ``system_bench``
+  percentile is lower-is-better, any other key takes its metric's) and
+  ``key_parts``.
 - Leaderboard ``primary`` recomputes ranking, direction, units, intervals and
   headline from a configured task metric and recorded output key. Version pins
   remain independent; omitting ``primary`` preserves the configured selection.

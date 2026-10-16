@@ -183,12 +183,17 @@ def test_each_score_key_carries_its_own_direction(ctx: Context, toy_repo: Path) 
     )
     cfg_path.write_text(yaml.safe_dump(cfg))
     rec = _run(ctx, toy_repo, "r1", "aaaa")
-    for metric, key, value in [("latency", "p95", 41.0), ("throughput", "rps", 900.0)]:
+    scored = [("latency", "p95", 41.0), ("throughput", "rps", 900.0), ("throughput", "p99", 7.0)]
+    for metric, key, value in scored:
         score = ScoreRecord(metric=metric, version="v1", key=key, value=value, created_at=T0)
         ctx.add_score(rec, score)
     out = task_runs(ctx, "toy-acc")
     assert out.higher_is_better is False
-    assert out.key_higher_is_better == {"latency/p95": False, "throughput/rps": True}
+    assert out.key_higher_is_better == {
+        "latency/p95": False,
+        "throughput/p99": False,
+        "throughput/rps": True,
+    }
 
 
 def test_key_direction_follows_the_leaderboard_rule(ctx: Context, toy_repo: Path) -> None:
@@ -201,10 +206,11 @@ def test_key_direction_follows_the_leaderboard_rule(ctx: Context, toy_repo: Path
     entry, _ = q.resolve_task(ctx, "toy-acc")
     config = entry.config
     spec = config.tasks["toy-acc"]
-    # the primary of a system_bench task: a percentile is lower-is-better
+    # a system_bench percentile is lower-is-better, the primary's and every other one
     assert key_higher_is_better(config, spec, "speed/p95") is False
+    assert key_higher_is_better(config, spec, "speed/p50") is False
+    assert key_higher_is_better(config, spec, "speed/p99") is False
     # any other key: its metric's own direction
-    assert key_higher_is_better(config, spec, "speed/p50") is True
     assert key_higher_is_better(config, spec, "speed/rps") is True
 
 

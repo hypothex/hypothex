@@ -17,6 +17,7 @@ from hypothex.core.leaderboard import (
     clear_caches,
     distinct_labels,
     group_label,
+    key_higher_is_better,
     pick_field,
     primary_field,
     seed_group_labels,
@@ -433,6 +434,14 @@ def test_board_headline_and_stat_strip_generic() -> None:
         "—",
     ]
     assert build_leaderboard("toy", "t", KINDS, [], {}).headline == "No scored runs yet"
+
+
+def test_every_system_bench_percentile_key_is_lower_is_better() -> None:
+    spec = KINDS.tasks["sb"]  # lat sets no direction (default higher)
+    assert key_higher_is_better(KINDS, spec, "lat/p95") is False  # the primary
+    assert key_higher_is_better(KINDS, spec, "lat/p50") is False
+    assert key_higher_is_better(KINDS, spec, "lat/p99") is False
+    assert key_higher_is_better(KINDS, KINDS.tasks["t"], "acc/value") is True
 
 
 def test_system_bench_headline_vs_baseline() -> None:

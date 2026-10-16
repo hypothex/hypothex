@@ -121,6 +121,8 @@ export interface RunRecord {
   cost?: CostTotals | null;
   sweep_id?: string | null;
   gpus_requested?: number;
+  /** v5: a name a person or agent gave the run (1-80 chars); null or absent = use the derived name. */
+  name?: string | null;
 }
 
 export interface ScoreRecord {
@@ -852,4 +854,75 @@ export interface QueueEntry {
   /** 1-based. */
   position: number;
   gpus_requested: number;
+}
+
+// v5 task workspace: GET /api/v1/tasks/{project}/{task}/runs (ui-v5 contract) --------------
+/** One run of a task, as the v5 sidebar, charts and tables show it. */
+export interface TaskRun {
+  run_id: string;
+  /** Display name: the explicit rename if any, else the derived name (the backend resolves it). */
+  name: string;
+  /** The server-side derived name (`lr 3e-4 · beam 10`, no seed). */
+  derived_name: string;
+  /** True when `name` is an explicit rename. */
+  renamed: boolean;
+  group_id: string;
+  seed: number | null;
+  status: RunStatus;
+  end_reason: string | null;
+  exit_code: number | null;
+  created_by: string;
+  created_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  host: string;
+  /** Git commit of the run's code, if known. */
+  commit: string | null;
+  params: Record<string, string>;
+  tags: string[];
+  archived: boolean;
+  starred: boolean;
+  sweep_id: string | null;
+  /** Latest value per score key (`metric/key` of the latest version). */
+  scores: Record<string, number>;
+  primary: number | null;
+  progress: number | null;
+  gpu_hours: number | null;
+  cost_usd: number | null;
+}
+
+/** One config group (seeds of one config). */
+export interface TaskGroup {
+  group_id: string;
+  /** Display name: the latest renamed run's name, else the derived group name. */
+  name: string;
+  run_ids: string[];
+  n: number;
+  primary: Stats | null;
+  test_interval: NoiseInterval | null;
+  scores: Record<string, number | null>;
+  seed_values: number[];
+  within_noise_of_best: boolean;
+  vs_best: VersusBest | null;
+  is_best: boolean;
+}
+
+/** Everything the v5 task workspace needs in one read. */
+export interface TaskRuns {
+  project: string;
+  task: string;
+  kind: TaskKind;
+  primary: string;
+  higher_is_better: boolean;
+  unit: string;
+  value_format: string | null;
+  varying_keys: string[];
+  metric_names: string[];
+  score_keys: string[];
+  /** The task's current version per metric (`{"accuracy": "v1"}`), the versions `scores` are read at. */
+  metric_versions: Record<string, string>;
+  /** Part names from `hypothex.yaml` `score_keys`, e.g. ["dataset", "model", "metric"]. */
+  key_parts: string[] | null;
+  runs: TaskRun[];
+  groups: TaskGroup[];
 }

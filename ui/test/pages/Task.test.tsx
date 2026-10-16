@@ -589,6 +589,11 @@ test("training task mounts run and checkpoint sections; iteration task mounts fl
   mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: selectableBoard("training"), "GET /api/v1/runs?project=toy-classifier&task=toy-test&limit=21": [], [`GET ${BASE}`]: { summary: { metrics: {} } } });
   renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });
   expect(await screen.findByRole("heading", { name: "Training runs" })).toBeTruthy(); expect(screen.getByRole("heading", { name: "Checkpoints" })).toBeTruthy();
+  for (const name of ["Training runs", "Checkpoints"]) {
+    const region = screen.getByRole("region", { name });
+    expect(region.classList.contains("panel")).toBe(true);
+    expect(region.classList.contains("fig")).toBe(false);
+  }
   cleanup(); const board = selectableBoard("agent_iteration"); board.rows = [];
   mockApi({ ...routes("overview"), [`GET ${BASE}/leaderboard`]: board });
   renderWithClient(<TaskPage project="toy-classifier" task="toy-test" />, { registry });

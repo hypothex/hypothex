@@ -4,7 +4,7 @@
  * the v4 lettered `Figure`; the section is a region named by the title and carries
  * `data-panel` so tests and pages can find the enclosing panel.
  */
-import { type CSSProperties, type ReactElement, type ReactNode, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type ReactElement, type ReactNode, type Ref, useEffect, useRef, useState } from "react";
 import { cx } from "../lib/cx";
 import { Icon } from "./Icon";
 import "./chrome.css";
@@ -16,6 +16,10 @@ export interface PanelMenuItem {
 
 export interface PanelProps {
   title: string;
+  /** Accessible name of the region when it must differ from the title (default: the title). */
+  label?: string;
+  /** Ref to the title heading; the heading then takes programmatic focus (`tabIndex -1`). */
+  headingRef?: Ref<HTMLHeadingElement>;
   unit?: ReactNode;
   aside?: ReactNode;
   /** Controls that stay visible (e.g. a `Table | Bars` switch). */
@@ -27,7 +31,7 @@ export interface PanelProps {
   children?: ReactNode;
 }
 
-export function Panel({ title, unit, aside, tools, onEdit, menu, className, style, children }: PanelProps): ReactElement {
+export function Panel({ title, label, headingRef, unit, aside, tools, onEdit, menu, className, style, children }: PanelProps): ReactElement {
   const [full, setFull] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLSpanElement>(null);
@@ -53,9 +57,9 @@ export function Panel({ title, unit, aside, tools, onEdit, menu, className, styl
 
   const hasAside = aside !== undefined && aside !== null && aside !== false && aside !== "";
   return (
-    <section className={cx("panel", full && "full", className)} style={style} aria-label={title} data-panel="">
+    <section className={cx("panel", full && "full", className)} style={style} aria-label={label ?? title} data-panel="">
       <header className="panel-h">
-        <h3 className="t" title={title}>
+        <h3 ref={headingRef} tabIndex={headingRef ? -1 : undefined} className="t" title={title}>
           {title}
         </h3>
         {unit ? <span className="u">{unit}</span> : null}

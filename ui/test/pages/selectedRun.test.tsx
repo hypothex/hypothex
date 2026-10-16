@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { SelectedRun } from "../../src/pages/components/SelectedRun";
 import { makeDetail, RUN_SVM } from "./fixtures";
 import { HttpReply, mockApi, renderWithClient, restoreFetch } from "./helpers";
@@ -74,4 +74,20 @@ test("explicit selection focuses its heading and closing restores the selecting 
   view.unmount();
   expect(document.activeElement === trigger).toBe(true);
   trigger.remove();
+});
+
+test("selected run renders in v5 panel chrome with its actions in the panel header", async () => {
+  mockApi({ "GET /api/v1/runs/chrome": makeDetail({ run_id: "chrome", task: null }) });
+  let closed = 0;
+  renderWithClient(<SelectedRun runId="chrome" onClose={() => { closed++; }} />);
+  const region = screen.getByRole("region", { name: "Selected run" });
+  expect(region.classList.contains("panel")).toBe(true);
+  expect(region.classList.contains("fig")).toBe(false);
+  const header = region.querySelector(".panel-h")!;
+  expect(header.querySelector("h3")?.textContent).toBe("Selected run · chrome");
+  const close = within(region).getByRole("button", { name: "Close selected run" });
+  expect(header.contains(close)).toBe(true);
+  expect(header.contains(within(region).getByRole("link", { name: /Open run/ }))).toBe(true);
+  fireEvent.click(close);
+  expect(closed).toBe(1);
 });

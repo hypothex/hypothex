@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { createRef } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { Panel } from "../../src/chrome/Panel";
 import { PanelSection } from "../../src/chrome/PanelSection";
@@ -17,6 +18,21 @@ describe("Panel", () => {
     expect(region.querySelector(".aside")?.textContent).toBe("12 configs");
     expect(screen.getByRole("button", { name: "Bars" })).not.toBeNull();
     expect(region.textContent).toContain("body");
+  });
+
+  test("label names the region apart from the title; headingRef gives a focus target", () => {
+    const ref = createRef<HTMLHeadingElement>();
+    render(<Panel title="Selected run · r1" label="Selected run" headingRef={ref}>x</Panel>);
+    const region = screen.getByRole("region", { name: "Selected run" });
+    const heading = screen.getByRole("heading", { name: "Selected run · r1" });
+    expect(ref.current === heading).toBe(true);
+    expect(heading.getAttribute("tabindex")).toBe("-1");
+    expect(region.contains(heading)).toBe(true);
+  });
+
+  test("without headingRef the title heading is not focusable", () => {
+    render(<Panel title="val/loss">x</Panel>);
+    expect(screen.getByRole("heading", { name: "val/loss" }).hasAttribute("tabindex")).toBe(false);
   });
 
   test("no aside, no edit, no menu: only Full screen is offered", () => {

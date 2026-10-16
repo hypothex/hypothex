@@ -22,6 +22,7 @@ import {
 } from "../api/queries";
 import { type LaunchDefaults, launchDefaults } from "../launch/draft";
 import { LaunchDialog } from "../launch/LaunchDialog";
+import { Panel } from "../chrome/Panel";
 import { fmtScore, shortId } from "./components/format";
 import { AppLink, hrefs, NavigateContext, useNavigateHref } from "./components/links";
 import { PanelGrid } from "./components/PanelGrid";
@@ -368,8 +369,8 @@ function TaskPageScope({ project, task, view }: TaskPageProps) {
       )}
 
       {kind === "training" ? <>
-        <section className="fig" aria-label="Training run records"><h2>Training runs</h2><TrainingRuns project={project} task={task} onSelectRun={setSelectedRun} /></section>
-        <section className="fig" aria-label="Training checkpoints"><h2>Checkpoints</h2><TrainingCheckpoints project={project} task={task} onSelectRun={setSelectedRun} /></section>
+        <Panel title="Training runs"><TrainingRuns project={project} task={task} onSelectRun={setSelectedRun} /></Panel>
+        <Panel title="Checkpoints"><TrainingCheckpoints project={project} task={task} onSelectRun={setSelectedRun} /></Panel>
       </> : null}
       {kind === "agent_iteration" && board.data ? <AgentIterationFlips project={project} task={task} board={board.data} /> : null}
       {kind === "system_bench" ? <SystemRawSamples project={project} task={task} selectedRunId={selectedRun ?? undefined} /> : null}

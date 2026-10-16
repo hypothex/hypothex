@@ -1,4 +1,5 @@
 import json
+import socket
 import stat
 from collections.abc import Iterator
 from pathlib import Path
@@ -143,7 +144,12 @@ def test_owner_me_needs_a_hub(tmp_path: Path) -> None:
     assert "hub" in fails(tmp_path / "solo", "runs", "--owner", "me")
 
 
-def test_hosts_pair_and_add_with_a_token_env(tmp_path: Path) -> None:
+@pytest.mark.parametrize("hostname", ["lab", "h" * 60, "h" * 61, "h" * 64, "h" * 200])
+def test_hosts_pair_and_add_with_a_token_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hostname: str
+) -> None:
+    """Generated host labels fit the pairing API, including their hub prefix."""
+    monkeypatch.setattr(socket, "gethostname", lambda: hostname)
     lab = create_app(tmp_path / "lab", background_repair=False, kind="ssh", auth=True)
     lab_store: AuthStore = lab.state.auth
     lab_store.ensure_owner("sv")
@@ -172,6 +178,10 @@ def test_hosts_pair_and_add_with_a_token_env(tmp_path: Path) -> None:
             "--pair",
             pairing_url(lab_url, offer2.id, secret2),
         )
+        sessions = lab_store.sessions()
+        assert len(sessions) == 2
+        assert all(session.client == "host" for session in sessions)
+        assert {session.device for session in sessions} == {f"hub:{hostname}"[:64]}
     layout = Context.open(hub_home).layout
     assert set(load_host_tokens(layout)) == {"lab", "lab3"}
     assert load_hosts(layout).environments["lab2"].token_env == "LAB_TOKEN"

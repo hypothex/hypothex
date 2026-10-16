@@ -34,6 +34,8 @@ pair their own devices, up to their own scope and role. Offers expire after at
 most 300 seconds, can be redeemed once, and are burned after five incorrect
 secrets. A host session requires an admin offer. Pairing secrets are placed in the
 URL fragment; browsers do not send fragments in the HTTP request target.
+Automatically generated host session labels retain the ``hub:`` prefix and
+shorten the hostname so the complete label fits the 64-character device limit.
 
 Session tokens are returned once. Valid authentication extends the sliding
 session lifetime at most once per minute. Revoked, expired, or disabled-user

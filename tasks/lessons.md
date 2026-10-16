@@ -26,3 +26,9 @@
 
 - Drain promises owned by delayed route callbacks before unregistering interception. In the installed Playwright version, `unrouteAll({ behavior: "wait" })` clears the handler list first; completion of one callback can auto-continue another held request before its later `fulfill`.
 - Use a staggered two-request reproducer to establish the lifecycle race. Preserve callback failures and the original layout assertions; passing repetitions alone do not establish that an intermittent failure is fixed.
+
+## 2026-10-17 — machine-dependent startup and labels
+
+- Apply label length limits after adding every prefix. Test generated host labels at the prefix-adjusted boundary through the actual pairing endpoint and inspect the stored session.
+- A loopback bind address does not prevent reverse DNS for a server's greeting or identity. Give local demo/test servers explicit identities and verify startup with the resolver forbidden.
+- A context manager whose entry fails never runs its exit method. Failed server startup must release any listener, thread and event loop it already created; test failures before and after binding.

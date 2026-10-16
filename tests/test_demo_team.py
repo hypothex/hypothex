@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import socket
 import stat
 from pathlib import Path
 
@@ -274,3 +275,28 @@ def test_configured_demo_host_token_cannot_fall_back_to_no_auth(tmp_path: Path) 
     )
     with pytest.raises(StoreError, match="token is unavailable"):
         _start_demo_host(host, Layout(tmp_path / "hub"))
+
+
+def test_webhook_serves_without_reverse_dns_and_closes_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loopback demo sink starts even when hostname resolution is unavailable."""
+    from hypothex.demo_team import _Webhook
+
+    def forbidden(name: str = "") -> str:
+        raise AssertionError(f"loopback webhook must not resolve {name!r}")
+
+    monkeypatch.setattr(socket, "getfqdn", forbidden)
+    webhook = _Webhook()
+    address = webhook.server.server_address
+    try:
+        response = httpx.post(webhook.url, json={"text": "demo probe"}, timeout=2, trust_env=False)
+        assert response.status_code == 200 and response.text == "ok"
+        assert webhook.server.server_name == "localhost"
+        assert webhook.server.server_port == address[1]
+    finally:
+        webhook.stop()
+    assert webhook.server.socket.fileno() == -1
+    with socket.socket() as connection:
+        connection.settimeout(1)
+        assert connection.connect_ex(address) != 0

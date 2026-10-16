@@ -134,6 +134,31 @@ receipts in `implementation/ci-ui-selected-run/`; all 108 package inputs and
 79 package-test inputs still match the accepted candidate, so package validation
 is reused. Hosted CI on the next pushed head remains required.
 
+The old macOS Python 3.13 CI run exposed three further failure paths. Generated
+host labels exceeded the API limit after adding their prefix; the complete label
+now fits 64 characters. The demo webhook and SMTP test fixture implicitly called
+reverse DNS during startup; both now use explicit local server identities.
+Blocked-resolver probes reproduce the historical timeout mechanisms, though the
+old runner did not capture resolver stacks. Failed SMTP fixture startup now also
+releases its listener, thread and loop. The Python 3.11 matrix job was cancelled
+by fail-fast after the 3.13 failure, as confirmed by its check annotation.
+The affected CLI/demo subset passed 81 tests on isolated macOS Python 3.13;
+notification/acceptance/secret-leak coverage passed 123 tests on each of Python
+3.11 and 3.13. Seven independent guarded probes passed and the focused review is
+**LGTM**. Parent verified eight reviewed file hashes and 13 evidence hashes;
+the verbatim receipt is `2026-10-17-hypothex-phase3-macos-review.md`, SHA256
+`821e8e976fbf3c1bc33f170750b13cc2c8e1124fc77aac228d6a067849897d49`.
+Ruff, formatting, ty, Sphinx and the dedicated browser-test typecheck pass.
+The fresh installed candidate passed all five checks in 180.85 seconds, including
+20 browser executions. Parent verified all 108 build-input and 79 harness hashes,
+104 source/resource members in both archives, and the force-included skill.
+All 12 owned servers and two tracked descendants were stopped; zero remained.
+The wheel SHA256 is
+`2ca0042858da4e365e2331e7f2f78bee70f015559e3319cb7683363904e90e24`.
+Evidence is `implementation/package/pr27-macos-final/`; the prior storage candidate
+is historical evidence for its earlier source. Current-head CI and the clean
+merged-main handoff remain required.
+
 All 13 scope items are implemented. The independent whole-source review has no
 remaining runtime findings after fixing duplicate execution on completed legacy
 receipts and the browser device-name length mismatch. The final independent

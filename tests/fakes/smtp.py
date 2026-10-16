@@ -4,6 +4,7 @@ A fake SMTP server on 127.0.0.1 built on aiosmtpd, with a trustme CA for TLS.
 ``mode`` picks plain SMTP, STARTTLS, or implicit TLS; ``user``/``password`` turn
 on AUTH PLAIN/LOGIN; ``fail`` scripts a failure. ``connect_421`` and ``stall``
 use a raw socket server instead of aiosmtpd.
+The greeting hostname is explicit so startup never needs machine-name DNS.
 """
 
 from __future__ import annotations
@@ -172,19 +173,32 @@ class FakeSmtp:
         self._controller = Controller(
             _Handler(self),
             hostname="127.0.0.1",
+            server_hostname="localhost",
             port=self.port,
             ssl_context=self.server_context if self.mode == "ssl" else None,
             **options,
         )
-        self._controller.start()
+        try:
+            self._controller.start()
+        except BaseException:
+            # __enter__ failures never call __exit__. aiosmtpd may already
+            # have a listener and thread even though its startup probe failed.
+            self.stop()
+            raise
         return self
 
     def stop(self) -> None:
         """Stop serving."""
         if self._controller is not None:
-            self._controller.stop()
+            self._controller.stop(no_assert=True)
+            # On a bind failure aiosmtpd's thread returns before its normal
+            # loop-close path. stop() joins that thread but leaves the loop open.
+            if not self._controller.loop.is_closed():
+                self._controller.loop.close()
+            self._controller = None
         if self._raw is not None:
             self._raw.stop()
+            self._raw = None
 
     def __enter__(self) -> FakeSmtp:
         return self.start()

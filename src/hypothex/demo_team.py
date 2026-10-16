@@ -381,6 +381,16 @@ def seed_demo_team(home: Path) -> dict[str, Any]:
     return made
 
 
+class _LoopbackHTTPServer(ThreadingHTTPServer):
+    """Bind a demo webhook with a fixed local identity and no reverse DNS."""
+
+    def server_bind(self) -> None:
+        """Bind the socket and record its explicit local server identity."""
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "localhost"
+        self.server_port = self.server_address[1]
+
+
 class _Webhook:
     """A loopback Slack-like webhook that answers 200."""
 
@@ -396,7 +406,7 @@ class _Webhook:
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
                 return
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = _LoopbackHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 

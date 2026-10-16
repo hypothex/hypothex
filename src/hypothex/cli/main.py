@@ -3023,7 +3023,7 @@ def _pair_host(c: Context, name: str, host_url: str, link: str) -> dict[str, Any
     if not same_origin(base, host_url):
         # never redeem (or later send) one server's token for another host name
         raise ConfigError(f"the link is for {base}, but {name} is {host_url}")
-    _, data = _redeem(link, "host", f"hub:{_device()}")
+    _, data = _redeem(link, "host", f"hub:{_device()}"[:64])
     save_host_token(c.layout, name, base, data["token"])
     return {"user": data["user"], "scope": data["scope"], "session_id": data["session_id"]}
 

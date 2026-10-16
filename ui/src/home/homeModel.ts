@@ -44,7 +44,12 @@ export function statusStrip(summary: OverviewSummary, hosts: readonly HostRow[],
     { label: "projects with live runs", value: String(new Set(running.map((r) => r.project)).size) },
     { label: "running", value: String(count("running", running.length)), status: "running" },
     { label: "queued", value: String(count("queued", summary.running.length - running.length)), status: "queued" },
-    { label: "failed today", value: String(summary.failures.filter((f) => parseTime(f.created_at) >= today).length), status: "failed" },
+    // `failures` also holds lost and archived runs; the timeline carries each run's status
+    {
+      label: "failed today",
+      value: String(summary.timeline.filter((t) => t.status === "failed" && !t.archived && parseTime(t.created_at) >= today).length),
+      status: "failed",
+    },
     { label: "lost", value: String(count("lost", 0)), status: "lost", title: "lost in the last 24 h" },
     { label: "GPUs busy", value: gpus.total > 0 ? `${gpus.busy} / ${gpus.total}` : "—" },
     { label: "spent today", value: fmtMoney(usd) },
@@ -172,7 +177,9 @@ function fromTimeline(summary: OverviewSummary): RecentRun[] {
 
 /**
  * Recent runs, newest first: the hub's `recent` (else the timeline), each failure with its
- * stderr path, plus the failure groups none of those rows covers (archived failures).
+ * stderr path, plus the failure groups none of those rows covers. `failures` holds failed and
+ * lost runs, archived too: the timeline gives each its status, and archived ones are left out
+ * when the hub sends `recent` (an older hub's timeline fallback has no other way to show them).
  */
 export function recentRows(summary: OverviewSummary, max = 12): RecentRow[] {
   const failures = new Map(summary.failures.map((f) => [f.run_id, f]));
@@ -197,25 +204,31 @@ export function recentRows(summary: OverviewSummary, max = 12): RecentRow[] {
     };
   });
   const shown = new Set(rows.map((r) => r.runId));
-  for (const group of groupFailures(summary.failures)) {
-    const f = group[0];
-    if (!f || group.some((g) => shown.has(g.run_id))) continue;
-    rows.push({
-      runId: f.run_id,
-      at: f.created_at,
-      name: names[f.run_id] ?? f.label,
-      project: "",
-      task: null,
-      status: "failed",
-      reason: reasonText("failed", f.exit_code, null),
-      score: null,
-      deltaBest: null,
-      by: "",
-      hypothesis: "",
-      stderr: f.stderr_path,
-      retried: group.every((g) => g.retried_ok),
-      count: group.length,
-    });
+  const items = new Map(summary.timeline.map((t) => [t.run_id, t]));
+  const statusOf = (f: FailureRow): RunStatus => (items.get(f.run_id)?.status === "lost" ? "lost" : "failed");
+  const extra = summary.failures.filter((f) => !(summary.recent && items.get(f.run_id)?.archived));
+  for (const status of ["failed", "lost"] as const) {
+    for (const group of groupFailures(extra.filter((f) => statusOf(f) === status))) {
+      const f = group[0];
+      if (!f || group.some((g) => shown.has(g.run_id))) continue;
+      const item = items.get(f.run_id);
+      rows.push({
+        runId: f.run_id,
+        at: f.created_at,
+        name: names[f.run_id] ?? f.label,
+        project: item?.project ?? "",
+        task: item?.task ?? null,
+        status,
+        reason: reasonText(status, f.exit_code, null),
+        score: null,
+        deltaBest: null,
+        by: item?.created_by ?? "",
+        hypothesis: "",
+        stderr: f.stderr_path,
+        retried: group.every((g) => g.retried_ok),
+        count: group.length,
+      });
+    }
   }
   return rows.sort((a, b) => parseTime(b.at) - parseTime(a.at));
 }

@@ -22,6 +22,8 @@ export function makeHomeSummary(over: Partial<OverviewSummary> = {}): OverviewSu
   return {
     ...base,
     counts: { ...base.counts, running: 1, queued: 0, lost: 0 },
+    // a v5 hub's `recent` holds unarchived runs only, so the failure in it is unarchived too
+    timeline: base.timeline.map((t) => (t.run_id === RUN_FAILED ? { ...t, archived: false } : t)),
     running: [runningRecord()],
     projects: [{ ...base.projects[0]!, primary: "accuracy/value", higher_is_better: true, best_7d_ago: 0.8852, best_history: [0.85, 0.8852, 0.9222], running: 1, queued: 0 }],
     recent: [

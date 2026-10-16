@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { groupFailures, isEmptyHome, reasonText, recentRows, runLabel, statusStrip, taskRows, utcDayStart } from "../../src/home/homeModel";
-import type { FailureRow } from "../../src/api/models";
+import type { FailureRow, OverviewSummary, RunStatus, TimelineItem } from "../../src/api/models";
 import { RUN_FAILED, RUN_RF, RUN_SVM, makeOverview } from "../pages/fixtures";
 import { makeHosts } from "../pages/hostFixtures";
 import { makeHomeSummary, runningRecord } from "./homeFixtures";
@@ -62,6 +62,61 @@ test("recentRows: newest first, failures carry their stderr; an old backend fall
     [RUN_SVM, "RBF-kernel SVM", "finished"],
     [RUN_FAILED, "SVM", "failed · exit 2"],
     [RUN_RF, "Baseline rf", "finished"],
+  ]);
+});
+
+/** A summary whose hub `failures` hold failed and lost runs (archived too), as the hub sends them. */
+function withFailures(over: Partial<OverviewSummary> = {}): OverviewSummary {
+  const base = makeHomeSummary(over);
+  const item = (run_id: string, status: RunStatus, archived: boolean, created_at: string): TimelineItem => ({
+    run_id,
+    project: "toy-classifier",
+    task: "toy-test",
+    created_at,
+    created_by: "agent:tuner",
+    status,
+    archived,
+    group_id: null,
+    is_best: false,
+    label: "wider net",
+  });
+  const fail = (run_id: string, created_at: string): FailureRow => ({ run_id, label: "wider net", exit_code: null, created_at, stderr_path: `/s/${run_id}`, retried_ok: false });
+  return {
+    ...base,
+    counts: { ...base.counts, lost: 2 },
+    timeline: [
+      ...base.timeline,
+      item("lost-today", "lost", false, "2026-09-26T20:00:00Z"),
+      item("lost-archived", "lost", true, "2026-09-26T19:00:00Z"),
+      item("failed-archived", "failed", true, "2026-09-26T18:00:00Z"),
+    ],
+    failures: [
+      ...base.failures,
+      fail("lost-today", "2026-09-26T20:00:00Z"),
+      fail("lost-archived", "2026-09-26T19:00:00Z"),
+      fail("failed-archived", "2026-09-26T18:00:00Z"),
+    ],
+  };
+}
+
+test("statusStrip: failed today counts unarchived failed runs only, not lost or archived ones", () => {
+  const strip = statusStrip(withFailures(), [], NOW);
+  expect(strip.find((k) => k.label === "failed today")?.value).toBe("1");
+  expect(strip.find((k) => k.label === "lost")?.value).toBe("2");
+});
+
+test("recentRows: a lost run in `failures` reads lost; archived failures stay out when the hub sends `recent`", () => {
+  const rows = recentRows(withFailures());
+  const lost = rows.find((r) => r.runId === "lost-today");
+  expect(lost).toMatchObject({ status: "lost", reason: "lost", count: 1, project: "toy-classifier", task: "toy-test", by: "agent:tuner" });
+  expect(rows.some((r) => r.runId === "lost-archived" || r.runId === "failed-archived")).toBe(false);
+  expect(rows.filter((r) => r.status === "failed").map((r) => r.runId)).toEqual([RUN_FAILED]);
+  // an old hub (no `recent`): archived failures still show, each with its own status
+  const old = recentRows(withFailures({ recent: undefined }));
+  expect(old.filter((r) => r.runId !== RUN_SVM && r.runId !== RUN_RF).map((r) => [r.runId, r.reason])).toEqual([
+    [RUN_FAILED, "failed · exit 2"],
+    ["lost-today", "lost"],
+    ["failed-archived", "failed"],
   ]);
 });
 

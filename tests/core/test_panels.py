@@ -1789,6 +1789,26 @@ def test_compare_rows_hold_the_selected_datasets_metrics_and_model(
     }
 
 
+def test_compare_rows_of_two_configs_with_the_same_params_have_distinct_names(
+    ctx: Context, toy_repo: Path
+) -> None:
+    a = _run(ctx, toy_repo, "a", "aaaa", params={"lr": "3e-4"}, git=GitInfo(commit="aaaaaaa11"))
+    b = _run(
+        ctx, toy_repo, "b", "aaaa", minute=1, params={"lr": "3e-4"}, git=GitInfo(commit="bbbbbbb22")
+    )
+    c = _run(ctx, toy_repo, "c", "cccc", minute=2, params={"lr": "1e-3"})
+    for rec, value in ((a, 1.0), (b, 2.0), (c, 3.0)):
+        _key_score(ctx, rec, "value", value / 10)
+        _key_score(ctx, rec, "set-1.m.top10", value)
+    data = {"datasets": ["set-1"], "metrics": ["top10"]}
+    result = query_panel(ctx, "toy", "toy-acc", _panel("compare", data=data))
+    assert [(r["group_id"], r["name"]) for r in result.rows] == [
+        ("cccc@c1", "lr 1e-3"),
+        ("aaaa@bbbbbbb", "lr 3e-4 · @bbbbbbb"),
+        ("aaaa@aaaaaaa", "lr 3e-4 · @aaaaaaa"),
+    ]
+
+
 def test_compare_is_one_row_per_group_with_its_seed_mean(ctx: Context, toy_repo: Path) -> None:
     for rid, seed, value in (("s1", 1, 0.2), ("s2", 2, 0.4)):
         _key_score(ctx, _run(ctx, toy_repo, rid, "aaaa", seed=seed), "set-1.m.top10", value)

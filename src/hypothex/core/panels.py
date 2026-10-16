@@ -29,7 +29,7 @@ from hypothex.core.leaderboard import (
     seed_group_label,
     seed_group_labels,
 )
-from hypothex.core.naming import derive_names, group_display_name
+from hypothex.core.naming import derive_names, group_names
 from hypothex.core.queries import primary_examples, refresh_project
 from hypothex.core.records import Artifact, MetricPoint, RunRecord, RunStatus, ScoreRecord
 from hypothex.core.scorekeys import split_score_key
@@ -1750,7 +1750,7 @@ def _compare(scope: _Scope, panel: PanelSpec) -> PanelResult:
     PanelResult
         One row ``{dataset, model, metric, key, run_id, group_id, name, value}``
         per kept key and ranked group (``run_id`` is the group's latest run,
-        ``name`` the group name, ``naming.group_display_name``), ordered by the
+        ``name`` the distinct group name, ``naming.group_names``), ordered by the
         selected metrics, then datasets, then rank; at most ``MAX_TABLE_ROWS``.
         ``meta`` holds the selection, ``render`` (``table`` or ``bars``),
         ``key_parts``, ``options`` (every dataset, model and metric the groups
@@ -1770,9 +1770,10 @@ def _compare(scope: _Scope, panel: PanelSpec) -> PanelResult:
     options: dict[str, set[str]] = {"datasets": set(), "models": set(), "metrics": set()}
     prefixes: set[str] = set()
     kept: list[tuple[int, int, int, dict[str, Any]]] = []
+    members = {row.group_id: [by_id[i] for i in row.run_ids if i in by_id] for row in board.rows}
+    labels = group_names({g: m for g, m in members.items() if m}, derived)
     for rank, row in enumerate(board.rows):
-        members = [by_id[i] for i in row.run_ids if i in by_id]
-        label = group_display_name(members, derived) if members else row.label
+        label = labels.get(row.group_id, row.label)
         for key, stat in row.scores.items():
             parts = split_score_key(key, names)
             if parts is None:

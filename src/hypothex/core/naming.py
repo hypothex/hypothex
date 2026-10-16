@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 from hypothex.core.errors import RunNameError
@@ -271,6 +271,103 @@ def group_display_name(runs: Sequence[RunRecord], derived: Mapping[str, str]) ->
         return str(named[-1].name)
     latest = ordered[-1]
     return derived.get(latest.run_id) or short_run_id(latest.run_id)
+
+
+def _group_tag(group_id: str) -> str:
+    """
+    The part of a group id that tells two groups on one commit apart.
+
+    Examples
+    --------
+    >>> _group_tag("0123abcd@c1+9f8e7d6c"), _group_tag("0123abcd@c1")
+    ('9f8e7d6c', '0123abcd')
+    """
+    diff = group_id.partition("+")[2]
+    return diff or group_id.partition("@")[0]
+
+
+def disambiguate(
+    names: Mapping[str, str], commits: Mapping[str, str | None], fixed: Collection[str]
+) -> dict[str, str]:
+    """
+    Make group names unique by adding the short commit, then a group tag.
+
+    Two seed groups can derive the same name: the same visible params on another
+    commit, or with another uncommitted diff. Only names that collide change:
+    first ``" · @<commit[:7]>"``, then, if they still collide, ``" · #<tag>"``
+    (the diff hash, else the config hash part of the group id). Groups in
+    ``fixed`` (renamed by a person or agent) always keep their name.
+
+    Parameters
+    ----------
+    names : mapping of str to str
+        Name per group id.
+    commits : mapping of str to str or None
+        Git commit per group id.
+    fixed : collection of str
+        Group ids whose name must not change.
+
+    Returns
+    -------
+    dict of str to str
+        Name per group id, in the order of ``names``.
+
+    Examples
+    --------
+    >>> disambiguate({"a@1": "x", "b@2": "x"}, {"a@1": "1234567aa", "b@2": "7654321bb"}, ())
+    {'a@1': 'x · @1234567', 'b@2': 'x · @7654321'}
+    """
+    out = dict(names)
+    for step in ("commit", "tag"):
+        seen: dict[str, list[str]] = {}
+        for gid, name in out.items():
+            seen.setdefault(name, []).append(gid)
+        clashing = [gid for gids in seen.values() if len(gids) > 1 for gid in gids]
+        for gid in clashing:
+            if gid in fixed:
+                continue
+            commit = commits.get(gid)
+            if step == "commit" and commit:
+                out[gid] = f"{out[gid]}{SEPARATOR}@{commit[:7]}"
+            elif step == "tag":
+                out[gid] = f"{out[gid]}{SEPARATOR}#{_group_tag(gid)}"
+    return out
+
+
+def group_names(
+    members: Mapping[str, Sequence[RunRecord]], derived: Mapping[str, str]
+) -> dict[str, str]:
+    """
+    Return a distinct name per seed group: the display name, then ``disambiguate``.
+
+    Each group's name is ``group_display_name``; the commit that tells clashing
+    groups apart is that of the group's most recently created run. Groups with
+    a renamed run keep their name exactly.
+
+    Parameters
+    ----------
+    members : mapping of str to sequence of RunRecord
+        The runs of each group id (any order); at least one per group.
+    derived : mapping of str to str
+        Derived names per run id (``derive_names``).
+
+    Returns
+    -------
+    dict of str to str
+        Name per group id, in the order of ``members``.
+
+    Examples
+    --------
+    >>> group_names({"a@1": [run_a], "b@2": [run_b]}, {"a": "x", "b": "x"})  # doctest: +SKIP
+    {'a@1': 'x · @1111111', 'b@2': 'x · @2222222'}
+    """
+    names = {g: group_display_name(runs, derived) for g, runs in members.items()}
+    commits = {
+        g: max(runs, key=lambda r: (r.created_at, r.run_id)).git.commit
+        for g, runs in members.items()
+    }
+    fixed = {g for g, runs in members.items() if any(r.name for r in runs)}
+    return disambiguate(names, commits, fixed)
 
 
 def clean_run_name(name: str | None) -> str | None:

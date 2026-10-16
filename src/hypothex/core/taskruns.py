@@ -22,7 +22,7 @@ from hypothex.core.leaderboard import (
 from hypothex.core.naming import (
     derive_names,
     display_name,
-    group_display_name,
+    group_names,
     run_settings,
     varying_keys,
 )
@@ -100,7 +100,8 @@ class TaskRuns(BaseModel):
     A task's runs and seed groups with what the workspace needs to draw them.
 
     ``groups`` lists ranked groups in leaderboard order, then the unranked ones,
-    newest first. ``metric_versions`` holds the task's current version per metric
+    newest first; group names are unique unless renamed (``naming.disambiguate``).
+    ``metric_versions`` holds the task's current version per metric
     (``Leaderboard.metric_versions``), the versions ``scores`` are read at.
     ``key_parts`` are the task's ``score_keys`` part names.
     """
@@ -183,15 +184,15 @@ def _group(
     group_id: str,
     members: list[RunRecord],
     row: LeaderboardRow | None,
-    derived: Mapping[str, str],
+    name: str,
     primary: str,
     best: str | None,
 ) -> TaskGroup:
-    """One ``TaskGroup``: the board row's statistics when the group is ranked."""
+    """One ``TaskGroup`` named ``name``: the board row's statistics when ranked."""
     ordered = sorted(members, key=lambda r: (r.created_at, r.run_id))
     return TaskGroup(
         group_id=group_id,
-        name=group_display_name(ordered, derived),
+        name=name,
         run_ids=[r.run_id for r in ordered],
         n=row.n if row is not None else len(seed_buckets(ordered)),
         primary=row.primary if row is not None else None,
@@ -316,8 +317,10 @@ def task_runs(
         key=lambda g: max((r.created_at, r.run_id) for r in members[g]),
         reverse=True,
     )
+    names = group_names(members, derived)
     groups = [
-        _group(g, members[g], rows.get(g), derived, board.primary, best) for g in [*rows, *unranked]
+        _group(g, members[g], rows.get(g), names[g], board.primary, best)
+        for g in [*rows, *unranked]
     ]
     return TaskRuns(
         project=entry.project,

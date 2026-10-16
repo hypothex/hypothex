@@ -20,7 +20,8 @@ export type PanelType =
   | "table"
   | "trace"
   | "markdown"
-  | "vega_lite";
+  | "vega_lite"
+  | "compare";
 export type Source = "runs" | "scores" | "metrics" | "predictions" | "samples" | "usage" | "traces";
 /** Log streams `GET /runs/{id}/logs` serves. */
 export type LogStream = "stdout" | "stderr" | "supervisor";
@@ -434,6 +435,9 @@ export interface PanelData {
   run_id?: string | null;
   example_id?: string | null;
   step_metric?: string | null;
+  /** Compare panels: the datasets, the model (null: keys have no model part) and metrics shown. */
+  datasets?: string[] | null;
+  model?: string | null;
 }
 
 export interface PanelSpec {
@@ -446,7 +450,7 @@ export interface PanelSpec {
   spec?: Record<string, unknown> | null;
   text?: string | null;
   scale?: "linear" | "log";
-  render?: "chart" | "table";
+  render?: "chart" | "table" | "bars";
 }
 
 export interface ViewSpec {

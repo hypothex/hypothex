@@ -6,6 +6,7 @@
  */
 import { Component, createElement, type ComponentType, type ReactElement, type ReactNode } from "react";
 import type { PanelResult as ApiPanelResult, PanelType } from "../api/models";
+import { ComparePanelResult } from "./Compare";
 import { Curves } from "./Curves";
 import { DistributionPanel } from "./Distribution";
 import { GridPanel } from "./Grid";
@@ -47,6 +48,7 @@ export const PANELS: Partial<Record<PanelType, ComponentType<PanelProps>>> = {
   trace: TracePanel,
   markdown: MarkdownPanel,
   vega_lite: VegaLitePanel,
+  compare: ComparePanelResult,
 };
 
 /** Return the component for `type`, or `null` if none is registered. */

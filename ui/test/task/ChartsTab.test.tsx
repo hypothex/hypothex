@@ -4,7 +4,7 @@ import type { ViewQueryBody } from "../../src/api/models";
 import { ChartsTab, type ChartsTabProps } from "../../src/task/ChartsTab";
 import { parseSelection } from "../../src/task/useRunSelection";
 import { type Call, fakeRegistry, mockApi, renderWithClient, restoreFetch } from "../pages/helpers";
-import { BASE, PROJECT, TASK, makeTaskRuns, presetDoc } from "./fixtures";
+import { BASE, PROJECT, TASK, makeEvalTaskRuns, makeTaskRuns, presetDoc } from "./fixtures";
 
 afterEach(restoreFetch);
 
@@ -180,5 +180,60 @@ describe("ChartsTab", () => {
     fireEvent.click(button);
     fireEvent.mouseDown(document.body);
     expect(screen.queryByRole("menu", { name: "Add panel" })).toBeNull();
+  });
+});
+
+describe("Compare in the Charts tab", () => {
+  const EVAL_ROUTES = { [`GET ${BASE}/views/overview`]: presetDoc("generic"), [`POST ${BASE}/views/query`]: query };
+
+  test("eval tasks show Compare first; + Panel → Compare adds one; Save as view stores them", async () => {
+    const calls = mockApi({
+      ...EVAL_ROUTES,
+      [`PUT ${BASE}/views/cmp`]: { info: { name: "cmp", title: "cmp", origin: "file", path: null, kind: null }, view: { title: "cmp", panels: [] } },
+    });
+    renderWithClient(charts({ data: makeEvalTaskRuns() }), { registry: fakeRegistry(["stat_strip"]) });
+    expect(document.querySelector(".panels > section")?.getAttribute("aria-label")).toBe("Compare");
+    expect(screen.getAllByRole("region", { name: /^Compare datasets/ })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "+ Panel" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Compare" }));
+    expect(screen.getAllByRole("region", { name: /^Compare datasets/ })).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Remove compare panel" }));
+    expect(screen.getAllByRole("region", { name: /^Compare datasets/ })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Save as view" }));
+    const form = screen.getByRole("form", { name: "Save as view" });
+    fireEvent.change(within(form).getByRole("textbox", { name: "View name" }), { target: { value: "cmp" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    expect((calls.find((c) => c.method === "PUT")?.body as { text: string }).text).toBe(
+      [
+        "title: cmp",
+        "panels:",
+        "  - type: compare",
+        '    title: "Compare datasets · model-x"',
+        "    data:",
+        "      datasets: [test-a, test-b, test-c, test-d]",
+        "      model: model-x",
+        "      metrics: [top10]",
+        "    render: table",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  test("the panel search hides Compare panels, and Save as view leaves hidden ones out", () => {
+    mockApi(EVAL_ROUTES);
+    renderWithClient(charts({ data: makeEvalTaskRuns() }), { registry: fakeRegistry(["stat_strip"]) });
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search panels" }), { target: { value: "model-y" } });
+    expect(screen.queryByRole("region", { name: "Compare" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save as view" }));
+    expect(within(screen.getByRole("form", { name: "Save as view" })).getByText("0 panels")).toBeTruthy();
+  });
+
+  test("a task without dataset keys has no Compare and + Panel → Compare is disabled", () => {
+    mockApi(ROUTES);
+    renderWithClient(charts(), { registry });
+    expect(screen.queryByRole("region", { name: "Compare" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "+ Panel" }));
+    expect((screen.getByRole("menuitem", { name: "Compare" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

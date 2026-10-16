@@ -1,19 +1,22 @@
 /**
  * Charts tab (spec 4.2): the runs sidebar and the panel area. Toolbar: panel search,
  * smoothing (EMA, value shown), x axis, seeds, `+ Panel`, `Save as view`. Sections:
- * Scores, Step metrics (one per prefix), Score keys (more than one key), then the kind's
- * preset panels. Every panel draws the visible identities in their colours and follows
- * the sidebar's hover.
+ * Compare (keys with two or more datasets), Scores, Step metrics (one per prefix), Score
+ * keys (more than one key), then the kind's preset panels. Every panel draws the visible
+ * identities in their colours and follows the sidebar's hover.
  */
-import { type ReactElement, useEffect, useRef, useState } from "react";
+import { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 import type { Leaderboard, PanelSpec, TaskRuns } from "../api/models";
 import { useSaveView } from "../api/queries";
 import { EmptyState } from "../chrome/EmptyState";
 import { FilterField } from "../chrome/FilterField";
+import { PanelSection } from "../chrome/PanelSection";
 import { colorFor } from "../lib/color";
 import { hrefs, useNavigateHref } from "../pages/components/links";
 import { ErrorBox } from "../pages/components/QueryState";
 import { isViewName } from "../pages/ViewEditor";
+import { ComparePanel } from "./ComparePanel";
+import { type CompareColumn, type CompareState, compareModel, comparePanelSpec, compareTitle, defaultCompare } from "./compareModel";
 import { useHighlight } from "./highlight";
 import { KindSection } from "./KindSection";
 import { RunsSidebar } from "./RunsSidebar";
@@ -21,7 +24,7 @@ import { stepMetricPanels, viewYaml } from "./saveView";
 import { ScoreKeySections } from "./ScoreKeySections";
 import { ScoresSection } from "./ScoresSection";
 import { StepMetricsSection, useStepCurves } from "./StepMetricsSection";
-import { type SeedsMode, type XMode, hasTime, metricSections, stepMetrics } from "./stepMetrics";
+import { type SeedsMode, type XMode, hasTime, matchesSearch, metricSections, stepMetrics } from "./stepMetrics";
 import { type Selection, listIdentities } from "./useRunSelection";
 
 export interface ChartsTabProps {
@@ -56,13 +59,31 @@ export function ChartsTab(props: ChartsTabProps): ReactElement {
   const items = listIdentities(selection, data).filter((i) => !i.hidden);
   const order = items.map((i) => i.id);
   const colorOf = (id: string): string => colorFor(id, order);
+  const cmp = useMemo(() => compareModel(data.score_keys, data.primary, data.key_parts), [data.score_keys, data.primary, data.key_parts]);
+  const [compares, setCompares] = useState<CompareState[] | null>(null);
+  const compareList = cmp ? (compares ?? [defaultCompare(cmp, data.primary, data.key_parts)]) : [];
+  const addCompare = (): void => {
+    if (cmp) setCompares([...compareList, defaultCompare(cmp, data.primary, data.key_parts)]);
+  };
+  const columns: CompareColumn[] = items.map((i) => ({
+    id: i.id,
+    name: i.name,
+    color: colorOf(i.id),
+    scores: i.kind === "group" && i.group ? i.group.scores : (i.runs[0]?.scores ?? {}),
+  }));
+  const shownCompares = compareList
+    .map((state, index) => ({ state, index }))
+    .filter(({ state }) => cmp !== null && matchesSearch(compareTitle(state, cmp.labels), query));
   const names = stepMetrics(data.metric_names);
   const sections = metricSections(names);
   const curves = useStepCurves(project, task, names, items);
   const timed = hasTime(curves.points);
   const seedWord = data.kind === "system_bench" ? "Repeats" : "Seeds";
   const addView = (): void => navigate(hrefs.edit(project, task, "new"));
-  const savedPanels: PanelSpec[] = stepMetricPanels(sections, query);
+  const savedPanels: PanelSpec[] = [
+    ...(cmp ? shownCompares.map(({ state }) => comparePanelSpec(state, cmp.labels)) : []),
+    ...stepMetricPanels(sections, query),
+  ];
   return (
     <div className="ws">
       <RunsSidebar data={data} selection={selection} onChange={onSelection} onOpen={onOpenRun} />
@@ -108,7 +129,12 @@ export function ChartsTab(props: ChartsTabProps): ReactElement {
             </>
           ) : null}
           <span className="sp" />
-          <AddPanelMenu items={[{ label: "Custom view…", onPick: addView }]} />
+          <AddPanelMenu
+            items={[
+              { label: "Compare", onPick: addCompare, disabled: cmp === null },
+              { label: "Custom view…", onPick: addView },
+            ]}
+          />
           <button type="button" className="btn sm" aria-expanded={saving} onClick={() => setSaving((s) => !s)}>
             Save as view
           </button>
@@ -130,6 +156,21 @@ export function ChartsTab(props: ChartsTabProps): ReactElement {
           <EmptyState title={data.runs.length === 0 ? "No runs yet" : "No runs shown"} />
         ) : (
           <>
+            {cmp && shownCompares.length > 0 ? (
+              <PanelSection title="Compare" count={shownCompares.length} storageKey={`${project}/${task}`} grid="wide">
+                {shownCompares.map(({ state, index }) => (
+                  <ComparePanel
+                    key={index}
+                    model={cmp}
+                    state={state}
+                    columns={columns}
+                    higherIsBetter={data.higher_is_better}
+                    onState={(next) => setCompares(compareList.map((s, j) => (j === index ? next : s)))}
+                    onRemove={index > 0 ? () => setCompares(compareList.filter((_, j) => j !== index)) : undefined}
+                  />
+                ))}
+              </PanelSection>
+            ) : null}
             <ScoresSection data={data} items={items} colorOf={colorOf} highlight={highlight} query={query} />
             <StepMetricsSection
               curves={curves}

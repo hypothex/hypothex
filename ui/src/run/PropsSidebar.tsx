@@ -35,7 +35,7 @@ export function TagEditor({ runId, tags, served }: { runId: string; tags: string
   };
   const change = useAction<unknown, { add?: string[]; remove?: string[] }>({
     send: (body, opts) => api.tagRun(runId, body, opts),
-    invalidate: [...RUN_EVENT_INVALIDATES, ["taskRuns"]],
+    invalidate: RUN_EVENT_INVALIDATES,
     onSuccess: close,
   });
   const submit = () => {

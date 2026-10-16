@@ -73,3 +73,26 @@ test("bar rows: each key is marked in its own direction, the task's only when th
   expect(bestOf("throughput/rps")).toEqual(["g-wide"]);
   expect(bestOf("throughput/peak")).toEqual(["g-fast"]);
 });
+
+test("sections follow the task's key parts: {metric}.{dataset} and {model}.{dataset}.{metric}", () => {
+  const base = makeEvalTaskRuns();
+  const metricFirst = {
+    ...base,
+    primary: "reported/top1.test-a",
+    score_keys: ["reported/top1.test-a", "reported/top1.test-b", "reported/top10.test-a"],
+    key_parts: ["metric", "dataset"],
+  };
+  expect(visibleKeySections(metricFirst, "").map((s) => [s.metric, s.panels.map((p) => p.title)])).toEqual([
+    ["top1", ["test-a", "test-b"]],
+    ["top10", ["test-a"]],
+  ]);
+  const modelFirst = {
+    ...base,
+    primary: "reported/model-x.test-a.top1",
+    score_keys: ["reported/model-x.test-a.top1", "reported/model-x.test-b.top1"],
+    key_parts: ["model", "dataset", "metric"],
+  };
+  expect(visibleKeySections(modelFirst, "").map((s) => [s.metric, s.panels.map((p) => p.title)])).toEqual([
+    ["top1", ["test-a · model-x", "test-b · model-x"]],
+  ]);
+});

@@ -1,9 +1,9 @@
 /**
  * Score keys (spec 4.2, eval tasks): keys split as `<prefix>/<A>.<B>.<metric>` into one
- * section per metric (`sectionsFromKeys`; the primary's section first and open, others
- * closed, so 50+ keys stay fast) and one horizontal bar panel per key: bars from zero in
- * run colours, the best value of that key green (`rowBest`), CI whiskers on the primary
- * key. Panel search matches titles and keys.
+ * section per metric (`sectionsFromKeys` with the task's `key_parts`; the primary's section
+ * first and open, others closed, so 50+ keys stay fast) and one horizontal bar panel per
+ * key: bars from zero in run colours, the best value of that key green (`rowBest`, in the
+ * key's own direction), CI whiskers on the primary key. Panel search matches titles and keys.
  */
 import type { ReactElement } from "react";
 import type { TaskRuns } from "../api/models";
@@ -18,7 +18,7 @@ import { type Identity, keyHigherIsBetter, scoreOf } from "./useRunSelection";
 
 /** Key sections with the panels the search shows (the primary panel first); empty sections dropped. */
 export function visibleKeySections(data: TaskRuns, query: string): KeySection[] {
-  return sectionsFromKeys(data.score_keys, data.primary)
+  return sectionsFromKeys(data.score_keys, data.primary, data.key_parts)
     .map((s) => ({
       metric: s.metric,
       panels: s.panels
@@ -56,7 +56,7 @@ export interface ScoreKeySectionsProps {
 }
 
 export function ScoreKeySections({ data, items, colorOf, highlight, query }: ScoreKeySectionsProps): ReactElement {
-  const primaryMetric = sectionsFromKeys(data.score_keys, data.primary)[0]?.metric;
+  const primaryMetric = sectionsFromKeys(data.score_keys, data.primary, data.key_parts)[0]?.metric;
   return (
     <>
       {visibleKeySections(data, query).map((s) => (

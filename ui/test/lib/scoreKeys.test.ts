@@ -72,3 +72,23 @@ describe("sectionsFromKeys", () => {
     expect(sectionsFromKeys([], "a/x")).toEqual([]);
   });
 });
+
+describe("sectionsFromKeys with part names", () => {
+  test("{metric}.{dataset}: the section is the metric part, the title the dataset", () => {
+    const keys = ["r/top1.test-a", "r/top10.test-a", "r/top1.test-b"];
+    expect(sectionsFromKeys(keys, "r/top10.test-a", ["metric", "dataset"])).toEqual([
+      { metric: "top10", panels: [{ key: "r/top10.test-a", title: "test-a" }] },
+      { metric: "top1", panels: [{ key: "r/top1.test-a", title: "test-a" }, { key: "r/top1.test-b", title: "test-b" }] },
+    ]);
+  });
+
+  test("{model}.{dataset}.{metric}: titles are dataset · model, as splitKey reads them", () => {
+    expect(sectionsFromKeys(["r/gpt4.test-b.top1", "r/gpt4.test-a.top1"], "r/gpt4.test-b.top1", ["model", "dataset", "metric"])).toEqual([
+      { metric: "top1", panels: [{ key: "r/gpt4.test-b.top1", title: "test-b · gpt4" }, { key: "r/gpt4.test-a.top1", title: "test-a · gpt4" }] },
+    ]);
+  });
+
+  test("a key the names do not split forms a section of its prefix", () => {
+    expect(sectionsFromKeys(["acc/value"], "acc/value", ["dataset", "metric"])).toEqual([{ metric: "acc", panels: [{ key: "acc/value", title: "value" }] }]);
+  });
+});

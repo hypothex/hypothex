@@ -58,44 +58,6 @@ export const PAGES_CSS = `
 .page .trace-pick a { color: var(--ink-3); text-decoration: none; }
 .page .trace-pick a.failed { color: var(--fail); }
 .page .trace-pick a[aria-current="true"] { color: var(--ink); text-decoration: underline; }
-.page.examples-page h1.headline .nb { display: inline-block; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
-.page .ab { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 56px; margin-top: 36px; padding: 18px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
-.page .ab .lbl { font-size: 12.5px; color: var(--ink-3); }
-.page .ab .nm { font-weight: 600; font-size: 16px; margin-top: 2px; }
-.page .ab code { overflow-wrap: anywhere; word-break: break-word; }
-.page .ab .meta { font-size: 13px; color: var(--ink-3); margin-top: 3px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-.page .ab .row { justify-content: space-between; align-items: end; gap: 20px; }
-.page .ab .row > :first-child { min-width: 0; overflow-wrap: anywhere; }
-.page .ab .acc { font: 300 38px/1 var(--sans); letter-spacing: -.02em; text-align: right; }
-.page .ab .acc small { display: block; font-size: 12.5px; color: var(--ink-3); font-weight: 400; letter-spacing: 0; margin-top: 4px; }
-.page .two-x { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 64px; align-items: start; margin-top: 64px; }
-.page .ot { border-collapse: collapse; width: 100%; table-layout: fixed; }
-.page .ot th { font: 500 13px/1.3 var(--sans); color: var(--ink-3); padding: 0 12px 10px; text-align: center; overflow-wrap: anywhere; }
-.page .ot th.rh { text-align: right; padding: 0 16px 0 0; vertical-align: middle; }
-.page .ot td { height: 124px; text-align: center; vertical-align: middle; border: 1px solid var(--rule); }
-.page .ot .n { font: 300 50px/1 var(--sans); letter-spacing: -.02em; display: block; }
-.page .ot .w { font-size: 13px; color: var(--ink-2); display: inline-flex; gap: 7px; align-items: center; margin-top: 6px; }
-.page .ot td.fx { background: var(--best-wash); }
-.page .ot td.bk { background: color-mix(in srgb, var(--fail) 10%, transparent); }
-.page .ot td.same .n { color: var(--ink-2); }
-.page .sw { width: 9px; height: 9px; display: inline-block; border-radius: 2px; }
-.page .sw.fixed { background: var(--best); }
-.page .sw.broken { background: var(--fail); }
-.page .sw.both_fail { background: var(--ink-2); }
-.page .sw.both_pass { background: var(--rule); }
-.page .strip svg { width: 100%; height: auto; overflow: visible; }
-.page .signtest svg { display: block; overflow: visible; }
-.page .strip rect.fixed { fill: var(--best); }
-.page .strip rect.broken { fill: var(--fail); }
-.page .strip rect.both_fail { fill: var(--ink-2); }
-.page .strip rect.both_pass { fill: var(--rule); }
-.page .strip-key { list-style: none; display: flex; gap: 22px; margin: 10px 0 0; padding: 0; font-size: 13px; color: var(--ink-2); }
-.page .strip-key li { display: inline-flex; gap: 7px; align-items: center; }
-.page .signtest rect { fill: var(--rule); }
-.page .signtest rect[data-tail="true"] { fill: var(--ink); }
-.page .signtest text { font: 400 11px var(--sans); fill: var(--ink-3); }
-.page .signtest .obs { stroke: var(--ink-3); }
-.page .signtest text.obs-l { fill: var(--ink); font-weight: 600; }
 .page .sweep-issuance { overflow-wrap: anywhere; font-size: 14px; color: var(--ink-2); }
 `;
 

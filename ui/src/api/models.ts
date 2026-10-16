@@ -238,6 +238,8 @@ export interface RunsQuery {
   tag?: string;
   archived?: boolean;
   limit?: number;
+  /** Runs whose stored name or run id contains this text (case-insensitive), for ⌘K. */
+  q?: string;
   /** Phase 2: runs of one environment (one host), e.g. a host's queue (Task 27). */
   environment_id?: string;
 }

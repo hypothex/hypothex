@@ -159,21 +159,3 @@ svg .hit { fill: transparent; cursor: default; }
 .host { font-family: var(--font); font-size: 11.5px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 4px; padding: 0 5px; margin-right: 8px; vertical-align: 1px; }
 .copy { border: 0; background: transparent; color: var(--ink-3); font-size: 12px; cursor: pointer; padding: 4px; border-radius: 4px; align-self: center; }
 .copy:hover { color: var(--ink); background: var(--paper-2); }
-
-/* command palette and toast (shell/CommandPalette.tsx, kept) */
-.pal { position: fixed; inset: 0; z-index: 50; display: none; background: color-mix(in srgb, var(--ink) 22%, transparent); }
-.pal.on { display: block; }
-.pal-box {
-  width: 600px; margin: 110px auto 0; background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--r-panel);
-  box-shadow: 0 24px 60px -20px rgba(10, 14, 20, .35); overflow: hidden;
-}
-.pal-in { width: 100%; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); font: 400 16px/1 var(--font); padding: 18px 18px; outline: none; }
-.pal-list { list-style: none; margin: 0; padding: 8px; max-height: 420px; overflow: auto; }
-.pal-list .grp { font-size: 12px; color: var(--ink-3); padding: 10px 12px 4px; }
-.pal-list li.it { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px; padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; align-items: baseline; }
-.pal-list li.it small { color: var(--ink-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
-.pal-list li.it[aria-selected="true"] { background: var(--hover); }
-.pal-foot { border-top: 1px solid var(--line); padding: 10px 18px; font-size: 12px; color: var(--ink-3); display: flex; gap: 18px; }
-.pal-foot kbd { font-family: var(--font); font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--ink-2); }
-.toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px); opacity: 0; background: var(--ink); color: var(--panel); padding: 9px 14px; border-radius: var(--r-ctl); font-size: 13px; transition: all .18s ease; pointer-events: none; z-index: 60; }
-.toast.on { opacity: 1; transform: translate(-50%, 0); }

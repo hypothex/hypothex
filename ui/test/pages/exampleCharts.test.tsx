@@ -8,7 +8,6 @@ import {
 } from "../../src/pages/components/ExampleCharts";
 import {
   binomPmf,
-  examplesHeadline,
   examplesMeta,
   exampleTotal,
   pairLabels,
@@ -64,13 +63,9 @@ describe("labels and summaries", () => {
     expect(pairLabels(rf, rf2)).toEqual(["baseline rf ef4f", "baseline rf 6f71"]);
   });
 
-  test("headline and meta line", () => {
-    expect(examplesHeadline("baseline rf", "RBF-kernel SVM", makeDiff())).toBe(
-      "RBF-kernel SVM fixes 9, breaks 3 vs baseline rf, p = 0.15",
-    );
+  test("meta line", () => {
     expect(examplesMeta(makeDiff())).toEqual(["n = 180", "net +6", "Δ +0.0333"]);
     const none = { ...makeDiff(), fixed: [], broken: [], both_pass: 0, both_fail: 0 };
-    expect(examplesHeadline("A", "B", none)).toBe("B fixes 0, breaks 0 vs A, p = 1.00");
     expect(examplesMeta(none)).toEqual(["n = 0"]);
   });
 });

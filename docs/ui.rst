@@ -98,7 +98,9 @@ Screens
   ``.hypothex/views/<task>/<name>.yaml``) or Copy as CLI. A new view cannot take the
   name of a view that is already there: open that view to edit it.
 
-Press ``⌘K`` (``Ctrl K`` on Linux and Windows) to find a run, task or path. The
+Press ``⌘K`` (``Ctrl K`` on Linux and Windows) to go to Home, Hosts or Queue, or to
+find a task, a path or a run. Runs are listed by name; typing two or more characters
+also finds renamed runs by their name or run id, for example ``db v3``. The
 colour-mode button in the header switches light and dark mode.
 
 Paths wrap after slashes, preserving each segment and the exact copied path. Long

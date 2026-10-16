@@ -196,7 +196,7 @@ describe("ViewEditor", () => {
     expect(button("Save").disabled).toBe(true);
     expect(button("Discard").disabled).toBe(true);
     fireEvent.click(board);
-    await waitFor(() => expect(screen.getByTestId("ruler-label").textContent).toBe("a: span 12, row 1"));
+    await waitFor(() => expect(screen.getByTestId("ruler-label").textContent).toBe("board: span 12, row 1"));
   });
 
   test("palette inserts at the cursor, validation is debounced, Save PUTs the text", async () => {

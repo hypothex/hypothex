@@ -132,7 +132,7 @@ export interface PreviewProps {
 export function Preview({ results, layouts, selected, problems, stale, renderPanel, onSelect }: PreviewProps) {
   const places = placePanels(results.map((_, i) => layouts[i] ?? {}));
   const sel = selected !== null && selected < results.length ? selected : null;
-  const label = sel === null ? "" : `${panelLetter(sel)}: span ${places[sel].span}, row ${places[sel].row}`;
+  const label = sel === null ? "" : `${results[sel]?.title ?? ""}: span ${places[sel].span}, row ${places[sel].row}`;
   return (
     <div className={stale ? "hx-ed-pv stale" : "hx-ed-pv"} title={stale ? "Last valid view" : undefined}>
       <LayoutRuler placement={sel === null ? null : places[sel]} label={label} />
@@ -162,7 +162,6 @@ export function Preview({ results, layouts, selected, problems, stale, renderPan
                     onSelect?.(i);
                   }}
                 >
-                  <span className="pl">{panelLetter(i)}</span>
                   <span className="t">{r.title}</span>
                   <span className="aside" title={`span ${p.span} of 12, row ${p.row}`}>
                     {p.overflow ? "over 12 columns" : `${p.span}/12`}

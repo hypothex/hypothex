@@ -40,7 +40,7 @@ describe("leaderboard rows (UI-F4)", () => {
 
 describe("command palette rows (UI-F8)", () => {
   test("the title keeps one line; the subtitle takes the rest and ends in an ellipsis", async () => {
-    const css = await read("../../src/styles/base.css");
+    const css = await read("../../src/shell/kept.css");
     expect(rule(css, ".pal-list li.it")).toContain("grid-template-columns: max-content minmax(0, 1fr);");
     const small = rule(css, ".pal-list li.it small");
     for (const d of ["white-space: nowrap;", "overflow: hidden;", "text-overflow: ellipsis;", "text-align: right;"]) {

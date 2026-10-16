@@ -1,0 +1,44 @@
+/* ui/src/pages/examples.css — Examples page (spec 4.2 "existing behaviour, restyled"). */
+.examples-page { padding: 16px 20px 40px; display: grid; gap: 16px; max-width: 1480px; }
+.examples-page .ph h1 { margin: 0; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+.examples-page .facts { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; color: var(--ink-3); font-size: 12.5px; }
+.examples-page .err { color: var(--fail); font-size: 13px; margin: 0; }
+.examples-page .ab { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-panel); }
+.examples-page .ab .lbl { font-size: 12px; color: var(--ink-3); }
+.examples-page .ab .nm { font-weight: 600; font-size: 14px; margin-top: 2px; }
+.examples-page .ab code { overflow-wrap: anywhere; word-break: break-word; font-family: var(--mono); font-size: 12px; }
+.examples-page .ab .meta { font-size: 12px; color: var(--ink-3); margin-top: 3px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.examples-page .ab .row { display: flex; justify-content: space-between; align-items: end; gap: 20px; }
+.examples-page .ab .row > :first-child { min-width: 0; overflow-wrap: anywhere; }
+.examples-page .ab .acc { font-size: 26px; font-weight: 500; letter-spacing: -0.02em; text-align: right; font-variant-numeric: tabular-nums; }
+.examples-page .ab .acc small { display: block; font-size: 12px; color: var(--ink-3); font-weight: 400; letter-spacing: 0; margin-top: 4px; }
+.examples-page .two-x { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.examples-page .ot { border-collapse: collapse; width: 100%; table-layout: fixed; }
+.examples-page .ot th { font: 500 12px/1.3 var(--font); color: var(--ink-3); padding: 0 12px 10px; text-align: center; overflow-wrap: anywhere; }
+.examples-page .ot th.rh { text-align: right; padding: 0 16px 0 0; vertical-align: middle; }
+.examples-page .ot td { height: 104px; text-align: center; vertical-align: middle; border: 1px solid var(--line); }
+.examples-page .ot .n { font-size: 36px; font-weight: 500; letter-spacing: -0.02em; display: block; font-variant-numeric: tabular-nums; }
+.examples-page .ot .w { font-size: 12px; color: var(--ink-2); display: inline-flex; gap: 7px; align-items: center; margin-top: 6px; }
+.examples-page .ot td.fx { background: var(--ok-wash); }
+.examples-page .ot td.bk { background: color-mix(in srgb, var(--fail) 10%, transparent); }
+.examples-page .ot td.same .n { color: var(--ink-2); }
+.examples-page .sw { width: 9px; height: 9px; display: inline-block; border-radius: 2px; }
+.examples-page .sw.fixed { background: var(--ok); }
+.examples-page .sw.broken { background: var(--fail); }
+.examples-page .sw.both_fail { background: var(--ink-2); }
+.examples-page .sw.both_pass { background: var(--line-2); }
+.examples-page .strip svg { width: 100%; height: auto; overflow: visible; }
+.examples-page .strip rect.fixed { fill: var(--ok); }
+.examples-page .strip rect.broken { fill: var(--fail); }
+.examples-page .strip rect.both_fail { fill: var(--ink-2); }
+.examples-page .strip rect.both_pass { fill: var(--line-2); }
+.examples-page .strip-key { list-style: none; display: flex; gap: 18px; margin: 10px 0 0; padding: 0; font-size: 12px; color: var(--ink-2); }
+.examples-page .strip-key li { display: inline-flex; gap: 7px; align-items: center; }
+.examples-page .signtest svg { display: block; overflow: visible; }
+.examples-page .signtest rect { fill: var(--line-2); }
+.examples-page .signtest rect[data-tail="true"] { fill: var(--ink); }
+.examples-page .signtest text { font: 400 11px var(--font); fill: var(--ink-3); }
+.examples-page .signtest .obs { stroke: var(--ink-3); }
+.examples-page .signtest text.obs-l { fill: var(--ink); font-weight: 600; }
+.examples-page .who { display: inline-flex; align-items: center; gap: 5px; }
+@media (max-width: 1100px) { .examples-page .ab, .examples-page .two-x { grid-template-columns: minmax(0, 1fr); } }

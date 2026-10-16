@@ -1,0 +1,22 @@
+/* ui/src/shell/kept.css — command palette, toast and token gate in v5 chrome. */
+.pal { position: fixed; inset: 0; z-index: 50; display: none; background: color-mix(in srgb, var(--ink) 22%, transparent); }
+.pal.on { display: block; }
+.pal-box { width: min(640px, calc(100vw - 32px)); margin: 12vh auto 0; background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--r-panel); box-shadow: 0 24px 60px -20px rgba(0, 0, 0, .35); overflow: hidden; }
+.pal-in { width: 100%; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); font: 400 15px/1 var(--font); padding: 14px 16px; outline: none; }
+.pal-list { list-style: none; margin: 0; padding: 6px; max-height: 420px; overflow: auto; }
+.pal-list .grp { font-size: 11.5px; color: var(--ink-3); padding: 8px 10px 4px; }
+.pal-list li.it { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px; padding: 7px 10px; border-radius: var(--r-ctl); cursor: pointer; font-size: 13px; align-items: baseline; }
+.pal-list li.it small { color: var(--ink-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
+.pal-list li.it[aria-selected="true"] { background: var(--select); }
+.pal-foot { border-top: 1px solid var(--line); padding: 8px 16px; font-size: 12px; color: var(--ink-3); display: flex; gap: 18px; }
+.pal-foot kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--ink-2); }
+.toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px); opacity: 0; background: var(--ink); color: var(--panel); padding: 8px 14px; border-radius: var(--r-ctl); font-size: 12.5px; transition: all .18s ease; pointer-events: none; z-index: 60; }
+.toast.on { opacity: 1; transform: translate(-50%, 0); }
+.auth-gate { min-height: 100vh; display: grid; place-items: center; background: var(--bg); }
+.auth-box { width: 320px; padding: 24px; display: grid; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-panel); }
+.auth-box h1 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+.auth-box label { font-size: 12px; color: var(--ink-2); }
+.auth-in { height: 32px; padding: 0 10px; border: 1px solid var(--line-2); border-radius: var(--r-ctl); background: var(--panel); color: var(--ink); font: 13px var(--mono); }
+.auth-in:focus { outline: 2px solid var(--focus); outline-offset: 0; }
+.auth-box [role="alert"] { color: var(--fail); font-size: 12.5px; margin: 0; }
+.auth-box [role="status"] { color: var(--ink-3); font-size: 12.5px; margin: 0; }

@@ -15,6 +15,7 @@ import { Chip } from "../chrome/Chip";
 import { EmptyState } from "../chrome/EmptyState";
 import { FilterField } from "../chrome/FilterField";
 import { Icon } from "../chrome/Icon";
+import { menuArrowKeys, useMenuFocus } from "../chrome/menuFocus";
 import { Launcher } from "../chrome/Launcher";
 import { Segmented } from "../chrome/Segmented";
 import { StatusIcon } from "../chrome/StatusIcon";
@@ -180,6 +181,8 @@ function ChipMenu({ name, value, menuLabel, items, onPick }: ChipMenuProps): Rea
   const [open, setOpen] = useState(false);
   const anchor = useRef<HTMLSpanElement>(null);
   const button = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  useMenuFocus(open, menu, button);
   useEffect(() => {
     if (!open) return;
     const away = (e: globalThis.MouseEvent): void => {
@@ -206,10 +209,12 @@ function ChipMenu({ name, value, menuLabel, items, onPick }: ChipMenuProps): Rea
       </button>
       {open ? (
         <div
+          ref={menu}
           className="popover"
           role="menu"
           aria-label={menuLabel}
           onKeyDown={(e) => {
+            menuArrowKeys(e);
             if (e.key !== "Escape") return;
             e.stopPropagation();
             setOpen(false);

@@ -220,6 +220,23 @@ describe("RunsSidebar", () => {
     expect(patches.at(-1)).toEqual({ sort: { key: "created", dir: "asc" } });
   });
 
+  test("a menu takes focus: first item on open, arrows move, Escape returns to the chip", () => {
+    setup();
+    const chip = screen.getByRole("button", { name: "Sort top1 ↓" });
+    chip.focus();
+    fireEvent.click(chip);
+    const items = within(screen.getByRole("menu", { name: "Sort by" })).getAllByRole("menuitemradio");
+    expect(document.activeElement === (items[0])).toBe(true);
+    fireEvent.keyDown(items[0]!, { key: "ArrowDown" });
+    expect(document.activeElement === (items[1])).toBe(true);
+    fireEvent.keyDown(items[1]!, { key: "ArrowUp" });
+    fireEvent.keyDown(items[0]!, { key: "ArrowUp" });
+    expect(document.activeElement === (items[items.length - 1])).toBe(true);
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement === (chip)).toBe(true);
+  });
+
   test("a menu closes on Escape and on a press outside it", () => {
     setup();
     const chip = screen.getByRole("button", { name: "Sort top1 ↓" });

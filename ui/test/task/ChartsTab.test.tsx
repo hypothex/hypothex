@@ -170,6 +170,19 @@ describe("ChartsTab", () => {
     expect(navigated).toEqual([`/t/${PROJECT}/${TASK}/edit/new`]);
   });
 
+  test("+ Panel takes focus: first enabled item on open, Escape returns to the button", () => {
+    mockApi(ROUTES);
+    renderWithClient(charts(), { registry });
+    const button = screen.getByRole("button", { name: "+ Panel" });
+    button.focus();
+    fireEvent.click(button);
+    const menu = screen.getByRole("menu", { name: "Add panel" });
+    const first = within(menu).getAllByRole("menuitem").find((b) => !(b as HTMLButtonElement).disabled);
+    expect(document.activeElement === (first ?? null)).toBe(true);
+    fireEvent.keyDown(first!, { key: "Escape" });
+    expect(document.activeElement === (button)).toBe(true);
+  });
+
   test("+ Panel closes on Escape and on a press outside", () => {
     mockApi(ROUTES);
     renderWithClient(charts(), { registry });

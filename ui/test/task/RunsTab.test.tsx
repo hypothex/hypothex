@@ -205,6 +205,17 @@ describe("RunsTab", () => {
     expect(calls).toHaveLength(1);
   });
 
+  test("the column chooser takes focus: first checkbox on open, Escape returns to the chip", () => {
+    setup();
+    const chip = screen.getByRole("button", { name: "Columns 12" });
+    chip.focus();
+    fireEvent.click(chip);
+    const boxes = within(screen.getByRole("group", { name: "Columns" })).getAllByRole("checkbox");
+    expect(document.activeElement === (boxes[0])).toBe(true);
+    fireEvent.keyDown(boxes[0]!, { key: "Escape" });
+    expect(document.activeElement === (chip)).toBe(true);
+  });
+
   test("Escape or a press outside closes the column chooser", () => {
     setup();
     fireEvent.click(screen.getByRole("button", { name: "Columns 12" }));

@@ -9,6 +9,7 @@ import { api } from "../../api/client";
 import type { EvalReport } from "../../api/models";
 import { HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "../../api/queries";
 import { Icon } from "../../chrome/Icon";
+import { menuArrowKeys, useMenuFocus } from "../../chrome/menuFocus";
 import { useArmed } from "../../run/useArmed";
 import { AppLink, hrefs, useNavigateHref } from "./links";
 import { ErrorBox } from "./QueryState";
@@ -98,8 +99,11 @@ export function RunActions({
   const { armed, arm, disarm } = useArmed([id, record.status, served, phase]);
   const [menu, setMenu] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const close = useCallback(() => setMenu(false), []);
   useDismiss(menu, close, wrap);
+  useMenuFocus(menu, menuRef, moreButton);
   const unavailable = hostsLoaded
     ? "No configured host serves this run's environment"
     : "The hosts list is not loaded; this run's serving host is unknown";
@@ -166,6 +170,7 @@ export function RunActions({
             </button>
             <div className="menu-wrap" ref={wrap}>
               <button
+                ref={moreButton}
                 type="button"
                 className="btn icon"
                 aria-label="More actions"
@@ -177,7 +182,7 @@ export function RunActions({
                 <Icon name="more" />
               </button>
               {menu ? (
-                <div className="menu" role="menu" aria-label="Run actions">
+                <div ref={menuRef} className="menu" role="menu" aria-label="Run actions" onKeyDown={menuArrowKeys}>
                   <button
                     type="button"
                     role="menuitem"

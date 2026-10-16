@@ -13,6 +13,7 @@ import { RUN_EVENT_INVALIDATES, useRenameRun } from "../api/queries";
 import { EmptyState } from "../chrome/EmptyState";
 import { FilterField } from "../chrome/FilterField";
 import { Icon } from "../chrome/Icon";
+import { menuArrowKeys, useMenuFocus } from "../chrome/menuFocus";
 import { Launcher } from "../chrome/Launcher";
 import { Segmented } from "../chrome/Segmented";
 import { StatusIcon } from "../chrome/StatusIcon";
@@ -424,6 +425,8 @@ function ColumnChooser({ columns, hidden, onChange }: { columns: readonly RunsCo
   const [open, setOpen] = useState(false);
   const anchor = useRef<HTMLSpanElement>(null);
   const button = useRef<HTMLButtonElement>(null);
+  const group = useRef<HTMLDivElement>(null);
+  useMenuFocus(open, group, button);
   useEffect(() => {
     if (!open) return;
     const away = (e: globalThis.MouseEvent): void => {
@@ -443,10 +446,12 @@ function ColumnChooser({ columns, hidden, onChange }: { columns: readonly RunsCo
       </button>
       {open ? (
         <div
+          ref={group}
           className="popover"
           role="group"
           aria-label="Columns"
           onKeyDown={(e) => {
+            menuArrowKeys(e);
             if (e.key !== "Escape") return;
             e.stopPropagation();
             setOpen(false);

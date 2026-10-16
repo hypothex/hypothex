@@ -255,3 +255,23 @@ test("the menu closes on Escape", () => {
   fireEvent.keyDown(document, { key: "Escape" });
   expect(screen.queryByRole("menu")).toBeNull();
 });
+
+test("the ⋯ menu takes focus and moves with the arrow keys, skipping disabled items", () => {
+  mockApi({});
+  renderWithClient(<RunActions served record={makeRecord()} />);
+  const more = screen.getByRole("button", { name: "More actions" });
+  more.focus();
+  fireEvent.click(more);
+  const enabled = screen.getAllByRole("menuitem").filter((b) => !(b as HTMLButtonElement).disabled);
+  expect(enabled.length).toBeGreaterThan(1);
+  expect(document.activeElement === (enabled[0])).toBe(true);
+  fireEvent.keyDown(enabled[0]!, { key: "ArrowDown" });
+  expect(document.activeElement === (enabled[1])).toBe(true);
+  fireEvent.keyDown(enabled[1]!, { key: "End" });
+  expect(document.activeElement === (enabled[enabled.length - 1])).toBe(true);
+  fireEvent.keyDown(document.activeElement!, { key: "Home" });
+  expect(document.activeElement === (enabled[0])).toBe(true);
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(document.activeElement === (more)).toBe(true);
+});

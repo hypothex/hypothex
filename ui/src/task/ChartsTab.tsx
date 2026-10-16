@@ -10,6 +10,7 @@ import type { Leaderboard, PanelSpec, TaskRuns } from "../api/models";
 import { useSaveView } from "../api/queries";
 import { EmptyState } from "../chrome/EmptyState";
 import { FilterField } from "../chrome/FilterField";
+import { menuArrowKeys, useMenuFocus } from "../chrome/menuFocus";
 import { PanelSection } from "../chrome/PanelSection";
 import { colorFor } from "../lib/color";
 import { hrefs, useNavigateHref } from "../pages/components/links";
@@ -204,6 +205,8 @@ export function AddPanelMenu({ items }: { items: readonly AddPanelItem[] }): Rea
   const [open, setOpen] = useState(false);
   const anchor = useRef<HTMLSpanElement>(null);
   const button = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  useMenuFocus(open, menu, button);
   useEffect(() => {
     if (!open) return;
     const away = (e: globalThis.MouseEvent): void => {
@@ -219,10 +222,12 @@ export function AddPanelMenu({ items }: { items: readonly AddPanelItem[] }): Rea
       </button>
       {open ? (
         <div
+          ref={menu}
           className="popover"
           role="menu"
           aria-label="Add panel"
           onKeyDown={(e) => {
+            menuArrowKeys(e);
             if (e.key !== "Escape") return;
             e.stopPropagation();
             setOpen(false);

@@ -1,12 +1,22 @@
 import logging
+import smtplib
+import socket
 from email.message import EmailMessage
+from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from pydantic import SecretStr
 
 from hypothex.core.settings import EmailSettings
-from hypothex.notify.channels import ChannelError, redact, send_email, send_slack
-from tests.fakes.smtp import FakeSmtp
+from hypothex.notify.channels import (
+    ChannelError,
+    _smtp_address_literal,
+    redact,
+    send_email,
+    send_slack,
+)
+from tests.fakes.smtp import Failure, FakeSmtp, Mode
 from tests.fakes.webhook import FakeWebhook, Reply
 
 
@@ -82,9 +92,9 @@ def test_plain_http_off_loopback_is_refused_without_a_request() -> None:
 
 
 @pytest.mark.parametrize("mode", ["plain", "starttls", "ssl"])
-def test_email_ok_in_every_mode(mode: str) -> None:
+def test_email_ok_in_every_mode(mode: Mode) -> None:
     security = {"plain": "none", "starttls": "starttls", "ssl": "ssl"}[mode]
-    with FakeSmtp(mode=mode, user="sv", password="pw") as smtp:  # type: ignore[arg-type]
+    with FakeSmtp(mode=mode, user="sv", password="pw") as smtp:
         settings = email(smtp, security=security, username="sv")
         send_email(settings, SecretStr("pw"), message(), ssl_context=smtp.client_context)
         assert smtp.received[0].message["Subject"] == "✓ toy r1"
@@ -99,8 +109,8 @@ def test_email_ok_in_every_mode(mode: str) -> None:
         ("connect_421", "smtp_421", False),
     ],
 )
-def test_email_errors(fail: str, error_class: str, permanent: bool) -> None:
-    with FakeSmtp(user="sv", password="pw", fail=fail) as smtp:  # type: ignore[arg-type]
+def test_email_errors(fail: Failure, error_class: str, permanent: bool) -> None:
+    with FakeSmtp(user="sv", password="pw", fail=fail) as smtp:
         with pytest.raises(ChannelError) as info:
             send_email(email(smtp, username="sv"), SecretStr("pw"), message())
         assert (info.value.error_class, info.value.permanent) == (error_class, permanent)
@@ -189,3 +199,79 @@ def test_smtp_recipient_refusals_never_report_full_success(
         assert len(smtp.received) == int(accepted)
         if accepted:
             assert smtp.received[0].rcpt_tos == ["accepted@lab.invalid"]
+
+
+@pytest.mark.parametrize("mode", ["plain", "starttls", "ssl"])
+def test_smtp_delivery_never_resolves_the_local_hostname(
+    mode: Mode, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Local DNS cannot stall a connected SMTP client or its notifier queue."""
+    greetings: list[str] = []
+    original_ehlo = smtplib.SMTP.ehlo
+
+    def forbidden(*args: object, **kwargs: object) -> str:
+        raise AssertionError("SMTP must not resolve the local machine name")
+
+    def record_ehlo(client: smtplib.SMTP, name: str = "") -> tuple[int, bytes]:
+        greetings.append(name or client.local_hostname)
+        return original_ehlo(client, name)
+
+    monkeypatch.setattr(socket, "getfqdn", forbidden)
+    monkeypatch.setattr(socket, "gethostbyname", forbidden)
+    monkeypatch.setattr(socket, "gethostbyaddr", forbidden)
+    monkeypatch.setattr(smtplib.SMTP, "ehlo", record_ehlo)
+    security = {"plain": "none", "starttls": "starttls", "ssl": "ssl"}[mode]
+    with FakeSmtp(mode=mode, user="sv", password="pw") as smtp:
+        send_email(
+            email(smtp, security=security, username="sv"),
+            SecretStr("pw"),
+            message(),
+            ssl_context=smtp.client_context,
+        )
+        assert len(smtp.received) == 1
+        assert smtp.received[0].message["Subject"] == "✓ toy r1"
+    assert greetings == ["[127.0.0.1]"] * (2 if mode == "starttls" else 1)
+
+
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("127.0.0.1", "[127.0.0.1]"),
+        ("192.0.2.18", "[192.0.2.18]"),
+        ("::1", "[IPv6:::1]"),
+        ("2001:0db8:0000:0000:0000:0000:0000:0001", "[IPv6:2001:db8::1]"),
+        ("fe80::1%en0", "[IPv6:fe80::1]"),
+    ],
+)
+def test_smtp_greeting_address_literals(address: str, expected: str) -> None:
+    """RFC address literals use numeric IPv4/IPv6 without local scope IDs."""
+    assert _smtp_address_literal(address) == expected
+
+
+@pytest.mark.parametrize("failure", ["lookup", "malformed"])
+def test_smtp_identity_failure_closes_connected_client(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A socket identity failure releases the connection and is retryable."""
+    original_smtp = smtplib.SMTP
+    connected: list[socket.socket] = []
+
+    def broken_identity(*args: Any, **kwargs: Any) -> smtplib.SMTP:
+        client = original_smtp(*args, **kwargs)
+        assert client.sock is not None
+        connected.append(client.sock)
+        proxy = Mock(wraps=client.sock)
+        if failure == "lookup":
+            proxy.getsockname.side_effect = OSError("synthetic private socket failure")
+        else:
+            proxy.getsockname.return_value = ("synthetic-private-invalid-address", 1234)
+        client.sock = proxy
+        return client
+
+    with FakeSmtp() as smtp:
+        monkeypatch.setattr(smtplib, "SMTP", broken_identity)
+        with pytest.raises(ChannelError) as info:
+            send_email(email(smtp), None, message())
+        assert (info.value.error_class, info.value.permanent) == ("connection", False)
+        assert len(smtp.received) == 0
+    assert len(connected) == 1 and connected[0].fileno() == -1

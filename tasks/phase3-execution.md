@@ -95,6 +95,44 @@ Implementation evidence is under the durable sibling `implementation/` directory
 
 ## Final integration status (2026-10-17)
 
+The `1e474e6` CI run passed both Linux jobs, UI, Docker and installed
+package acceptance. macOS Python 3.11 failed seven cleanup permission cases and
+the live notifier's first-delivery wait; Python 3.13 was cancelled by matrix
+fail-fast, as confirmed by the check annotation. The earlier label and server
+startup failures no longer appear.
+
+The cleanup correction changes tests and documentation only. Native and forced
+missing-capability cases now cover planning and apply separately, requiring
+supported traversal to succeed and unsupported traversal to preserve payloads,
+report zero freed bytes, write no cleaned markers and leak no descriptors.
+All 159 storage/API tests and all 54 safety tests with search flags unavailable
+pass. Removing those flags reproduces exactly the seven CI failures; the runner
+did not record its flags, so this remains an inferred environment difference.
+
+The SMTP client now uses its connected socket's numeric local address for EHLO,
+avoiding implicit local machine-name DNS outside the socket timeout. A controlled
+resolver stall reproduced the exact live notification wait; the correction passes
+that full acceptance test without increasing timeouts. Remote hostname resolution
+and TLS hostname verification still use the configured server. Independent probes
+cover IPv4, IPv6, all three security modes, TLS identity rejection and cleanup
+capability mutation tests. All 133 notification, live acceptance and secret-leak
+regressions pass on each of Python 3.11 and 3.13. Ruff, formatting, source ty and
+Sphinx pass. Independent review is **LGTM** with 11 fresh probes. Parent verified
+eight source hashes, 16 supporting evidence hashes, 10 review artifacts and the
+exact reviewed diff. The verbatim receipt is
+`2026-10-17-hypothex-phase3-macos-followup-review.md`, SHA256
+`c987ade73121ab206fd0a7430af0bba21d0e90dcac3c546e58c216a72a11614e`.
+The fresh SMTP candidate passed all five installed-package checks in 180.47s,
+including 20 browser executions. Parent verified 108 build-input hashes,
+79 unchanged harness inputs, 104 source/resource members in both archives and
+the forced skill. Cleanup stopped all 12 owned servers and two descendants,
+with no remaining processes or failures. Evidence is
+`implementation/package/pr27-smtp-final/`; wheel SHA256 is
+`6feeac984a9275ef9f5fd59a8f5be3db092be554152dd404cd1a8b2921d8f22c`.
+This supersedes earlier candidates for the changed SMTP source. Merge remains
+blocked until the corrected head passes CI, followed by clean merged-main
+acceptance and the final testing handoff.
+
 PR27 opened at `96ffd74932038e5ad0ce0789673436911026c0a9`. Its automated
 review identified two additional storage defects: excluded overlapping artifacts
 could be deleted, and shared-path deduplication omitted other runs' cleanup

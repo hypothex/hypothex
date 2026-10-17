@@ -225,7 +225,7 @@ class ReadOnlyTraversal:
 
 @pytest.mark.parametrize("mode", [0o100, 0o300, 0o700])
 @pytest.mark.parametrize("directory", [False, True])
-@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("fallback_phase", ["native", "before-plan", "after-plan"])
 def test_search_only_ancestors(
     toy: Context,
     tmp_path: Path,
@@ -233,24 +233,37 @@ def test_search_only_ancestors(
     tracked_fds: set[int],
     mode: int,
     directory: bool,
-    fallback: bool,
+    fallback_phase: str,
 ) -> None:
     if os.geteuid() == 0:
         pytest.skip("permission acceptance requires a non-root process")
     ancestor = tmp_path / "search-only"
     candidate = ancestor / "writable" / "candidate"
-    write(candidate / "data" if directory else candidate)
+    payload = write(candidate / "data" if directory else candidate)
+    before = payload.read_bytes()
     ended_run(toy, "owner", artifacts=[("checkpoint", candidate)])
     ancestor.chmod(mode)
     try:
-        proposed = plan(toy)
-        assert len(proposed.items) == 1 and proposed.total_bytes > 0
-        if fallback:
+        if fallback_phase == "before-plan":
             monkeypatch.setattr(storage, "os", ReadOnlyTraversal())
+        search_open = hasattr(storage.os, "O_PATH") or hasattr(storage.os, "O_SEARCH")
+        proposed = plan(toy)
+        assert len(proposed.items) == 1
+        if directory and mode != 0o700 and not search_open:
+            # Reporting also pins ancestors. Missing search-open support must
+            # remain an unavailable measurement, not an unsafe pathname walk.
+            assert storage.measure_path(candidate) == (0, 0, None)
+            assert proposed.total_bytes == 0 and proposed.items[0].mtime is None
+        else:
+            assert proposed.total_bytes > 0 and proposed.items[0].mtime is not None
+        if fallback_phase == "after-plan":
+            monkeypatch.setattr(storage, "os", ReadOnlyTraversal())
+            search_open = False
         done = apply(toy, proposed)
-        if fallback and mode != 0o700:
+        if mode != 0o700 and not search_open:
             assert_refused(toy, done)
-            assert candidate.exists()
+            assert done.skipped[0]["reason"] == "changed or inaccessible since plan"
+            assert candidate.exists() and payload.read_bytes() == before
         else:
             assert len(done.deleted) == 1 and not candidate.exists()
             assert done.freed_bytes == proposed.total_bytes
@@ -258,19 +271,34 @@ def test_search_only_ancestors(
         ancestor.chmod(0o700)
 
 
-def test_search_only_writable_immediate_parent_allows_unlink(
-    toy: Context, tmp_path: Path, tracked_fds: set[int]
+@pytest.mark.parametrize("fallback", [False, True])
+def test_search_only_writable_immediate_parent(
+    toy: Context,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracked_fds: set[int],
+    fallback: bool,
 ) -> None:
     if os.geteuid() == 0:
         pytest.skip("permission acceptance requires a non-root process")
     candidate = write(tmp_path / "search-only" / "candidate")
+    before = candidate.read_bytes()
     ended_run(toy, "owner", artifacts=[("checkpoint", candidate)])
     candidate.parent.chmod(0o300)
     try:
+        if fallback:
+            monkeypatch.setattr(storage, "os", ReadOnlyTraversal())
+        search_open = hasattr(storage.os, "O_PATH") or hasattr(storage.os, "O_SEARCH")
         proposed = plan(toy)
+        assert len(proposed.items) == 1 and proposed.total_bytes > 0
         done = apply(toy, proposed)
-        assert len(done.deleted) == 1 and not candidate.exists()
-        assert done.freed_bytes == proposed.total_bytes
+        if search_open:
+            assert len(done.deleted) == 1 and not candidate.exists()
+            assert done.freed_bytes == proposed.total_bytes
+        else:
+            assert_refused(toy, done)
+            assert done.skipped[0]["reason"] == "changed or inaccessible since plan"
+            assert candidate.exists() and candidate.read_bytes() == before
     finally:
         candidate.parent.chmod(0o700)
 

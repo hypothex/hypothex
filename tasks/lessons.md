@@ -32,3 +32,8 @@
 - Apply label length limits after adding every prefix. Test generated host labels at the prefix-adjusted boundary through the actual pairing endpoint and inspect the stored session.
 - A loopback bind address does not prevent reverse DNS for a server's greeting or identity. Give local demo/test servers explicit identities and verify startup with the resolver forbidden.
 - A context manager whose entry fails never runs its exit method. Failed server startup must release any listener, thread and event loop it already created; test failures before and after binding.
+
+## 2026-10-17 — runtime capabilities and client-side DNS
+
+- Permission tests must cover the capabilities of the actual Python build, not assume that every build on an operating system exposes the same flags. Exercise missing search-only flags before planning as well as before apply, and assert conservative refusal, preserved artifacts and absent cleaned markers.
+- Check both ends of a protocol for implicit hostname lookups. Removing reverse DNS from a test server does not remove SMTP client greeting resolution, which can block outside its configured socket timeout. Use a controlled resolver stall to distinguish that path from general runner slowness.

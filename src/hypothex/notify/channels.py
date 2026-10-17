@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import math
 import smtplib
@@ -186,6 +187,16 @@ def send_slack(
     raise ChannelError(error, permanent=True) from None
 
 
+def _smtp_address_literal(address: str) -> str:
+    """Render a numeric local address for EHLO without machine-name DNS."""
+    try:
+        parsed = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        raise OSError("invalid SMTP socket address") from None
+    prefix = "IPv6:" if parsed.version == 6 else ""
+    return f"[{prefix}{parsed.compressed}]"
+
+
 def send_email(
     settings: EmailSettings,
     password: SecretStr | None,
@@ -195,6 +206,10 @@ def send_email(
 ) -> None:
     """
     Send one email over SMTP (STARTTLS, implicit TLS, or plain on loopback).
+
+    The EHLO identity uses the connected socket's numeric local address, so
+    discovering the machine's hostname cannot block outside the socket timeout.
+    Remote hostname resolution and TLS verification still use ``settings.host``.
 
     Parameters
     ----------
@@ -221,11 +236,26 @@ def send_email(
     try:
         if settings.security == "ssl":
             client: smtplib.SMTP = smtplib.SMTP_SSL(
-                settings.host, settings.port, timeout=settings.timeout, context=context
+                settings.host,
+                settings.port,
+                local_hostname="[127.0.0.1]",
+                timeout=settings.timeout,
+                context=context,
             )
         else:
-            client = smtplib.SMTP(settings.host, settings.port, timeout=settings.timeout)
+            client = smtplib.SMTP(
+                settings.host,
+                settings.port,
+                local_hostname="[127.0.0.1]",
+                timeout=settings.timeout,
+            )
         with client:
+            # smtplib otherwise calls getfqdn/gethostbyname outside its socket
+            # timeout. Replace the constructor placeholder before any greeting
+            # with the connected socket's RFC 5321 address literal.
+            if client.sock is None:
+                raise OSError("SMTP socket is closed")
+            client.local_hostname = _smtp_address_literal(client.sock.getsockname()[0])
             if settings.security == "starttls":
                 client.starttls(context=context)
             if settings.username:

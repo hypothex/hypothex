@@ -57,7 +57,10 @@ A project without a rule receives no terminal-run notices unless ``notify.defaul
 is configured. ``min_seconds`` filters successful short runs; failures still
 notify. A channel without configuration is omitted at enqueue time. Slack
 requires HTTPS except on loopback; SMTP supports verified STARTTLS or implicit
-TLS, with plaintext permitted only on loopback.
+TLS, with plaintext permitted only on loopback. The SMTP greeting identifies
+this client using its connected socket's numeric local address (IPv4 or IPv6),
+avoiding an unbounded local machine-name DNS lookup for every message. Remote
+server resolution and TLS hostname verification still use the configured host.
 
 Use ``hx notify status`` to inspect configuration and recent delivery outcomes,
 and ``hx notify test slack`` for an immediate test. Status reports

@@ -55,9 +55,13 @@ are skipped without reporting freed bytes or writing cleaned markers.
 
 On Linux, ancestor traversal uses ``O_PATH``; on macOS/BSD it uses ``O_SEARCH``
 where available. The conservative ``O_RDONLY`` fallback can refuse ancestors
-that permit traversal but cannot be listed. Directories being measured or removed
-must still be readable. A final symlink artifact is unlinked without deleting its
-target.
+that permit traversal but cannot be listed. Availability depends on the Python
+build exposing these flags, as well as the operating system. This also affects
+directory measurement during reporting and planning: an inaccessible traversal
+returns zero bytes/files and no modification time. That result does not establish
+that the directory is empty; apply refuses it without deletion or cleaned markers.
+Directories being measured or removed must still be readable. A final symlink
+artifact is unlinked without deleting its target.
 
 Deletion records
 ----------------
